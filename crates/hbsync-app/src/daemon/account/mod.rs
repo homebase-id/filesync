@@ -247,17 +247,21 @@ impl Account {
 
     /// Pauses (`Some`) or resumes its folders, also before they run.
     pub(super) fn pause(&self, pause: Option<Pause>) {
+        self.set_pause(pause, Command::pausing(pause));
+    }
+
+    /// Its timed pause ran out: its folders sync again (no resume asked by the user).
+    pub(super) fn pause_ended(&self) {
+        self.set_pause(None, Command::PauseEnded);
+    }
+
+    /// Holds `pause`, and tells its folders with `command`.
+    fn set_pause(&self, pause: Option<Pause>, command: Command) {
         {
             let mut shown = lock(&self.shown);
             shown.paused = pause;
             // Before they run, they start as `paused` says.
-            let _ = shown.send(
-                &self.identity,
-                &match pause {
-                    Some(pause) => Command::Pause(pause),
-                    None => Command::Resume,
-                },
-            );
+            let _ = shown.send(&self.identity, &command);
         }
         self.wake();
         self.changed.raise();

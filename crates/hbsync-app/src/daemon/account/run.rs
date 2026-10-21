@@ -12,7 +12,6 @@ use hbsync_engine::root::SyncRoot;
 use hbsync_homebase::Client;
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_remote::ErrorClass;
-use hbsync_types::unix_now;
 
 use super::parts::AccountParts;
 use super::runners::{Life, Running};
@@ -166,17 +165,8 @@ impl Account {
         let keep_days = config.keep_deleted_days.days();
         let mut next_purge = Instant::now();
         loop {
-            let (ran_out, paused) = {
-                let mut shown = lock(&self.shown);
-                (
-                    pause_ran_out(&mut shown.paused, unix_now()),
-                    shown.paused.is_some(),
-                )
-            };
-            if ran_out {
-                tracing::info!("the pause is over");
-                self.changed.raise();
-            }
+            // Set and ended by the daemon ([`Account::pause`]), which wakes this thread.
+            let paused = lock(&self.shown).paused.is_some();
             let mut changed = false;
             for msg in msgs.drain(..) {
                 match msg {
@@ -277,10 +267,19 @@ impl Account {
                 let restarted: Vec<_> = due.iter().map(start).collect();
                 let started: Vec<_> = ready.iter().map(start).collect();
                 let mut shown = lock(&self.shown);
+                // The pause changed while they started: they were told nothing of it (a resume:
+                // as the user's, which also asks again what the drive refused).
+                let missed = (shown.paused != paused).then(|| Command::pausing(shown.paused));
+                let tell = |r: &Running| {
+                    if let Some(command) = &missed {
+                        r.handle.send(command.clone());
+                    }
+                };
                 let restarting = shown.runners.iter_mut().filter(|r| r.due(now));
                 for (r, again) in restarting.zip(restarted) {
                     match again {
                         Some(Ok(new)) => {
+                            tell(&new);
                             *r = Running {
                                 backoff: r.backoff,
                                 ..new
@@ -292,7 +291,10 @@ impl Account {
                 }
                 for (root, new) in ready.into_iter().zip(started) {
                     match new {
-                        Some(Ok(r)) => shown.runners.push(r),
+                        Some(Ok(r)) => {
+                            tell(&r);
+                            shown.runners.push(r);
+                        }
                         Some(Err(e)) => result = Err(e.into()),
                         None => {
                             adding.push(root);
@@ -306,7 +308,7 @@ impl Account {
                 self.changed.raise();
             }
             // Until a message, or the next thing that is due.
-            let (pause, restart) = {
+            let (paused, restart) = {
                 let shown = lock(&self.shown);
                 if shown.runners.is_empty() {
                     drop(shown);
@@ -315,14 +317,12 @@ impl Account {
                     return result;
                 }
                 let restart = shown.runners.iter().filter_map(Running::restart_at).min();
-                (shown.paused, restart)
+                (shown.paused.is_some(), restart)
             };
             let now = Instant::now();
-            let paused = pause.is_some();
             let deadlines = [
                 notifications.deadline(now, paused),
                 (!paused).then_some(next_purge),
-                pause.and_then(|p| p.end_at(now, unix_now())),
                 config_again,
                 restart,
             ];
@@ -455,30 +455,5 @@ impl Account {
                 }
             }
         }
-    }
-}
-
-/// Whether the account's timed pause ran out at `unix` (Unix seconds), as each folder's does
-/// ([`Pause::ran_out`]): then it is over.
-fn pause_ran_out(pause: &mut Option<Pause>, unix: u64) -> bool {
-    pause.take_if(|p| p.ran_out(unix)).is_some()
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The account's timed pause runs out as each folder's does; one until resumed doesn't.
-    #[test]
-    fn the_accounts_timed_pause_runs_out() {
-        let mut timed = Some(Pause::ending_at(100));
-        assert!(!pause_ran_out(&mut timed, 99));
-        assert_eq!(timed, Some(Pause::ending_at(100)));
-        assert!(pause_ran_out(&mut timed, 100));
-        assert_eq!(timed, None);
-        let mut for_good = Some(Pause::UNTIL_RESUMED);
-        assert!(!pause_ran_out(&mut for_good, u64::MAX));
-        assert_eq!(for_good, Some(Pause::UNTIL_RESUMED));
-        assert!(!pause_ran_out(&mut None, 100));
     }
 }

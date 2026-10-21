@@ -73,7 +73,7 @@ tray's Recently deleted page shows the file's `keep_deleted_days` at once):
 |---|---|
 | `keep_deleted_days` | when the account starts: the daemon's next start, or a login |
 | `device_name`, `mass_delete`, a root's `role` | when the folder's sync (re)starts: the daemon's next start, a login, or a restart after a failure |
-| `paused`, `paused_until` | at the daemon's next start or a login; while it runs, `hbsync pause`/`resume` and the tray set them |
+| `paused`, `paused_until` | at the daemon's next start (it holds the pause meanwhile); while it runs, `hbsync pause`/`resume` and the tray set them |
 | `[[roots]]` added or removed | at the daemon's next start; while it runs, `hbsync add`/`remove` and the tray do it |
 
 While the file doesn't read (being written, a typo), a folder's sync waits to (re)start, and the
@@ -306,7 +306,10 @@ included (service managers restart it then).
 - **Progress** while a sync runs: its files (transfers, moves and deletes) and the bytes of its
   transfers, done and to do.
 - **Pause for a while:** a pause can carry its end (Unix seconds), kept in the config with the
-  pause; the runner resumes by itself then, also after a restart.
+  pause. The daemon holds the pause and its one timer: at the end every account and folder
+  syncs again (also one still connecting, and after a restart), as before the pause (unlike
+  `hbsync resume`, what the identity refused isn't asked again); the accounts and folders hold
+  it without a timer of their own.
 - **Recently synced:** each upload, download, move and delete, with its path, size and time;
   more than 10 of one kind in one folder in one sync become one entry for the folder. The
   newest 500 are kept in the folder's state DB (table `synced`), so the list survives a restart.

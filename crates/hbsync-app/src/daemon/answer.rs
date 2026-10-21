@@ -9,13 +9,13 @@ use hbsync_types::NodeId;
 
 use super::Daemon;
 use super::account::Account;
+use crate::Root;
 use crate::protocol::{
     Ask, Control, DaemonControl, DaemonStatus, DeletedItem, DeletedList, FolderControl, Reply,
     Request,
 };
 use crate::runner::Command;
 use crate::words;
-use crate::{Config, Root};
 
 pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
     let accounts = &daemon.accounts();
@@ -174,13 +174,10 @@ fn control(control: Control, accounts: &[Arc<Account>], daemon: &Daemon) -> Repl
                 _ => None,
             };
             // Pausing survives a restart, and is kept until the sync starts.
-            if let Err(e) = Config::update(&daemon.paths.config_file(), |c| c.set_pause(pause)) {
-                return Reply::Refused(format!("couldn't save the pause in the config: {e}"));
+            match daemon.set_pause(pause) {
+                Ok(()) => Reply::Done,
+                Err(e) => Reply::Refused(format!("couldn't save the pause in the config: {e}")),
             }
-            for a in accounts {
-                a.pause(pause);
-            }
-            Reply::Done
         }
         Control::Daemon(DaemonControl::SyncNow) => {
             let mut not_running = Vec::new();

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use hbsync_engine::policy::{Shown, policy};
 use hbsync_remote::ErrorClass;
 
-use crate::protocol::{Pause, State};
+use crate::protocol::State;
 
 /// After a failure: wait this long, doubling up to [`MAX_BACKOFF`].
 const FIRST_BACKOFF: Duration = Duration::from_secs(5);
@@ -78,8 +78,8 @@ pub(crate) struct Schedule {
     read: bool,
     /// No sync before then (a failure's backoff, a folder that is gone).
     not_before: Instant,
-    /// Paused, while it is.
-    pause: Option<Pause>,
+    /// Paused, until a resume (a timed pause too: the daemon's timer sends it).
+    paused: bool,
     backoff: Backoff,
     /// Work a sync left unfinished: tried again then. A timer of its own, with its own
     /// backoff, so a change meanwhile still syncs at once.
@@ -88,15 +88,15 @@ pub(crate) struct Schedule {
 }
 
 impl Schedule {
-    /// A folder starting (paused, with `pause`): it syncs at once unless paused.
-    pub(crate) fn new(now: Instant, look: Duration, pause: Option<Pause>) -> Schedule {
+    /// A folder starting (paused or not): it syncs at once unless paused.
+    pub(crate) fn new(now: Instant, look: Duration, paused: bool) -> Schedule {
         Schedule {
             look,
             next_look: now + look,
             wanted: true,
             read: false,
             not_before: now,
-            pause,
+            paused,
             backoff: Backoff::new(),
             retry: None,
             retry_backoff: Backoff::new(),
@@ -138,23 +138,18 @@ impl Schedule {
         }
     }
 
-    pub(crate) fn pause(&mut self, pause: Pause) {
-        self.pause = Some(pause);
+    pub(crate) fn pause(&mut self) {
+        self.paused = true;
     }
 
-    pub(crate) fn paused(&self) -> Option<Pause> {
-        self.pause
+    pub(crate) fn paused(&self) -> bool {
+        self.paused
     }
 
     /// Syncing goes on, at once. Whether it was paused.
     pub(crate) fn resume(&mut self, now: Instant) -> bool {
         self.asked(now);
-        self.pause.take().is_some()
-    }
-
-    /// A pause that ran out at `unix` (Unix seconds) ends. Whether it did.
-    pub(crate) fn pause_over(&mut self, now: Instant, unix: u64) -> bool {
-        self.pause.is_some_and(|p| p.ran_out(unix)) && self.resume(now)
+        std::mem::take(&mut self.paused)
     }
 
     /// Whether it is time to look at what is local again; the next look is a look later. It
@@ -171,7 +166,7 @@ impl Schedule {
     /// backing off.
     pub(crate) fn due(&self, now: Instant) -> bool {
         let retry = self.retry.is_some_and(|at| now >= at);
-        self.pause.is_none() && (self.wanted || retry) && now >= self.not_before
+        !self.paused && (self.wanted || retry) && now >= self.not_before
     }
 
     /// Not now: tried again at the next look (the folder gone, rules that don't parse: both
@@ -204,20 +199,19 @@ impl Schedule {
         }
     }
 
-    /// When time alone next changes what [`Schedule::due`], [`Schedule::look_due`] (when
-    /// `looking`) or [`Schedule::pause_over`] say, `unix` being the Unix time at `now`: the
-    /// runner waits for an event until then. `None`: only an event can.
-    pub(crate) fn next_wake(&self, now: Instant, unix: u64, looking: bool) -> Option<Instant> {
+    /// When time alone next changes what [`Schedule::due`] or [`Schedule::look_due`] (when
+    /// `looking`) say: the runner waits for an event until then. `None`: only an event can.
+    pub(crate) fn next_wake(&self, now: Instant, looking: bool) -> Option<Instant> {
         let look = looking.then_some(self.next_look);
-        let (pause_end, sync) = match self.pause {
-            Some(pause) => (pause.end_at(now, unix), None),
-            None => {
+        let sync = match self.paused {
+            true => None,
+            false => {
                 let wanted = self.wanted.then_some(now);
                 let earliest = wanted.into_iter().chain(self.retry).min();
-                (None, earliest.map(|at| at.max(self.not_before)))
+                earliest.map(|at| at.max(self.not_before))
             }
         };
-        [look, pause_end, sync].into_iter().flatten().min()
+        [look, sync].into_iter().flatten().min()
     }
 
     /// A sync failed with an error of `class`: tried again after a backoff, and not before the
@@ -247,7 +241,7 @@ mod tests {
     #[test]
     fn it_syncs_at_start_then_when_something_changes() {
         let t0 = Instant::now();
-        let mut s = Schedule::new(t0, LOOK, None);
+        let mut s = Schedule::new(t0, LOOK, false);
         assert!(s.due(t0));
         s.synced(t0, Synced::Done);
         assert!(!s.due(t0 + ms(10)));
@@ -259,7 +253,7 @@ mod tests {
     #[test]
     fn nothing_syncs_without_a_reason() {
         let t0 = Instant::now();
-        let mut s = Schedule::new(t0, LOOK, None);
+        let mut s = Schedule::new(t0, LOOK, false);
         s.synced(t0, Synced::Done);
         assert!(!s.look_due(t0 + LOOK - ms(1)));
         assert!(s.look_due(t0 + LOOK));
@@ -277,7 +271,7 @@ mod tests {
         let t0 = Instant::now();
         let s5 = Duration::from_secs(5);
         let stuck = Synced::Unfinished { progressed: false };
-        let mut s = Schedule::new(t0, LOOK, None);
+        let mut s = Schedule::new(t0, LOOK, false);
         s.synced(t0, stuck);
         assert!(!s.due(t0 + s5 - ms(1)));
         assert!(s.due(t0 + s5));
@@ -301,7 +295,7 @@ mod tests {
     #[test]
     fn online_lets_waiting_work_go() {
         let t0 = Instant::now();
-        let mut s = Schedule::new(t0, LOOK, None);
+        let mut s = Schedule::new(t0, LOOK, false);
         s.synced(t0, Synced::Done);
         s.online(t0);
         assert!(!s.due(t0), "nothing waits");
@@ -318,7 +312,7 @@ mod tests {
     #[test]
     fn later_is_the_next_look() {
         let t0 = Instant::now();
-        let mut s = Schedule::new(t0, LOOK, None);
+        let mut s = Schedule::new(t0, LOOK, false);
         assert_eq!(s.later(t0 + ms(10)), LOOK - ms(10));
         assert!(!s.due(t0 + LOOK - ms(1)));
         assert!(s.due(t0 + LOOK));
@@ -327,7 +321,7 @@ mod tests {
     #[test]
     fn failures_back_off_doubling_and_waking_forgets_it() {
         let t0 = Instant::now();
-        let mut s = Schedule::new(t0, LOOK, None);
+        let mut s = Schedule::new(t0, LOOK, false);
         assert_eq!(
             s.failed(t0, ErrorClass::Transient, None),
             Duration::from_secs(5)
@@ -352,21 +346,21 @@ mod tests {
         assert_eq!(s.failed(t0, ErrorClass::Bug, None), Duration::from_secs(10));
     }
 
+    /// A pause holds syncs until resumed (a timed one's end is the daemon's to tell).
     #[test]
-    fn a_pause_holds_syncs_until_resumed_or_over() {
+    fn a_pause_holds_syncs_until_resumed() {
         let t0 = Instant::now();
-        let mut s = Schedule::new(t0, LOOK, Some(Pause::UNTIL_RESUMED));
+        let mut s = Schedule::new(t0, LOOK, true);
         assert!(!s.due(t0), "started paused");
         s.want();
+        assert!(!s.due(t0 + Duration::from_secs(3600)));
+        assert!(s.resume(t0));
+        assert!(!s.paused());
+        assert!(s.due(t0));
+        s.pause();
         assert!(!s.due(t0));
         assert!(s.resume(t0));
-        assert!(s.due(t0));
-        s.pause(Pause::ending_at(1_000));
-        assert!(!s.pause_over(t0, 999));
-        assert!(!s.due(t0));
-        assert!(s.pause_over(t0, 1_000));
-        assert_eq!(s.paused(), None);
-        assert!(s.due(t0));
+        assert!(!s.resume(t0), "resumed once");
     }
 
     /// Idle, nothing wakes the runner but the look, and that only while it looks; whatever
@@ -375,54 +369,39 @@ mod tests {
     fn the_next_wake_is_the_first_thing_time_changes() {
         let t0 = Instant::now();
         let s5 = Duration::from_secs(5);
-        let mut s = Schedule::new(t0, LOOK, None);
-        assert_eq!(s.next_wake(t0, 0, true), Some(t0), "starting: at once");
+        let mut s = Schedule::new(t0, LOOK, false);
+        assert_eq!(s.next_wake(t0, true), Some(t0), "starting: at once");
         s.synced(t0, Synced::Done);
-        assert_eq!(s.next_wake(t0, 0, true), Some(t0 + LOOK));
-        assert_eq!(
-            s.next_wake(t0, 0, false),
-            None,
-            "idle with a watcher: never"
-        );
+        assert_eq!(s.next_wake(t0, true), Some(t0 + LOOK));
+        assert_eq!(s.next_wake(t0, false), None, "idle with a watcher: never");
         for at in [t0 + ms(1), t0 + LOOK - ms(1)] {
             assert!(!s.due(at));
         }
 
         // A failure's backoff: a change waits for its end.
         let wait = s.failed(t0, ErrorClass::Transient, None);
-        assert_eq!(s.next_wake(t0, 0, false), None, "nothing wanted");
+        assert_eq!(s.next_wake(t0, false), None, "nothing wanted");
         s.want();
-        assert_eq!(s.next_wake(t0, 0, false), Some(t0 + wait));
+        assert_eq!(s.next_wake(t0, false), Some(t0 + wait));
         assert!(!s.due(t0 + wait - ms(1)));
         assert!(s.due(t0 + wait));
 
         // Unfinished work: its retry.
         s.synced(t0, Synced::Unfinished { progressed: false });
-        assert_eq!(s.next_wake(t0, 0, false), Some(t0 + s5));
+        assert_eq!(s.next_wake(t0, false), Some(t0 + s5));
         assert!(s.due(t0 + s5));
 
-        // A timed pause: its end, and no sync before.
-        s.pause(Pause::ending_at(1_000));
-        assert_eq!(
-            s.next_wake(t0, 990, false),
-            Some(t0 + Duration::from_secs(10))
-        );
-        assert!(!s.pause_over(t0 + Duration::from_secs(9), 999));
-        assert!(s.pause_over(t0 + Duration::from_secs(10), 1_000));
-        // So far ahead it has no instant: as if until resumed.
-        s.pause(Pause::ending_at(u64::MAX));
-        assert_eq!(s.next_wake(t0, 0, false), None);
-        // Paused until resumed: only the look.
-        s.pause(Pause::UNTIL_RESUMED);
+        // Paused (a timed pause too: the daemon ends it): no sync, only the look.
+        s.pause();
         s.want();
-        assert_eq!(s.next_wake(t0, 0, false), None);
-        assert_eq!(s.next_wake(t0, 0, true), Some(t0 + LOOK));
+        assert_eq!(s.next_wake(t0, false), None);
+        assert_eq!(s.next_wake(t0, true), Some(t0 + LOOK));
     }
 
     #[test]
     fn a_sync_stopped_by_a_pause_is_still_wanted() {
         let t0 = Instant::now();
-        let mut s = Schedule::new(t0, LOOK, None);
+        let mut s = Schedule::new(t0, LOOK, false);
         s.synced(t0, Synced::Stopped);
         assert!(s.due(t0));
     }
@@ -432,7 +411,7 @@ mod tests {
     #[test]
     fn a_failure_waits_for_the_servers_retry_after() {
         let t0 = Instant::now();
-        let mut s = Schedule::new(t0, LOOK, None);
+        let mut s = Schedule::new(t0, LOOK, false);
         let asked = Duration::from_secs(600);
         assert_eq!(s.failed(t0, ErrorClass::RateLimited, Some(asked)), asked);
         assert!(!s.due(t0 + asked - ms(1)));
@@ -474,7 +453,7 @@ mod tests {
     #[test]
     fn an_asked_read_outlives_a_failed_sync() {
         let t0 = Instant::now();
-        let mut s = Schedule::new(t0, LOOK, None);
+        let mut s = Schedule::new(t0, LOOK, false);
         assert!(!s.read(), "a start reads anyway");
         s.asked(t0);
         assert!(s.read());
