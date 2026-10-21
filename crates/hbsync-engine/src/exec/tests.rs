@@ -516,11 +516,11 @@ fn a_folder_made_from_recently_deleted_keeps_its_record_through_a_crash() -> R {
         in_rd.remote_ref(),
         "settled where it was made from"
     );
-    assert_eq!(
-        base.state.tags,
-        Tags::default(),
-        "what the folder and that version hold"
-    );
+    // What the folder and that version both hold: none; where the volume keeps no tags, the
+    // folder reads as the drive's.
+    if tags_kept(&h.folder.root) {
+        assert_eq!(base.state.tags, Tags::default(), "the folder holds none");
+    }
     // Another device restores it, with Work.
     let restored = row(RemoteRef {
         file_id: synced.file_id,
