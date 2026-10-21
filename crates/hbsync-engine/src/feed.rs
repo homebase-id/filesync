@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::ops::DerefMut;
 
 use hbsync_remote::{
-    ChangeRef, ChangesPage, ErrorClass, RefsPage, Remote, RemoteError, RemoteHeader,
+    ChangeRef, ChangesPage, ErrorClass, RefsPage, Remote, RemoteError, RemoteHeader, Skipped,
 };
 use hbsync_state::{AccountTx, ReadTx, StateDb, StateError, keys};
 use hbsync_types::{RemoteFileId, RemoteRef};
@@ -42,7 +42,7 @@ pub struct FeedReport {
     pub live: usize,
     pub deleted: usize,
     /// Rows the client can't read (not encrypted, another key, not a sync node), with why.
-    pub skipped: Vec<String>,
+    pub skipped: Vec<Skipped>,
     /// The server's clock at the last page read, Unix ms.
     pub server_time: Option<i64>,
 }
@@ -330,7 +330,7 @@ fn settle<G: DerefMut<Target = StateDb>>(
     db: &impl Fn() -> G,
     reread: &mut Option<Reread>,
     mut asked: Asked,
-) -> Result<(usize, Vec<String>), FeedError> {
+) -> Result<(usize, Vec<Skipped>), FeedError> {
     let (confirmed, refused) = db().write(|s| {
         let mut confirmed = Vec::new();
         for &file_id in &asked.not_there {
@@ -344,7 +344,7 @@ fn settle<G: DerefMut<Target = StateDb>>(
         let mut refused = Vec::new();
         for header in &asked.found {
             if let Applied::Refused(why) = apply(s.account(), header)? {
-                refused.push(why);
+                refused.push(refused_row(header.at(), why));
             }
         }
         if answers_all(reread, asked.answered.iter().chain(&confirmed)) {
@@ -416,7 +416,7 @@ fn apply_slim<G: DerefMut<Target = StateDb>>(
             return Ok(Slim::NewAt(i));
         }
         for r in &page.refs {
-            report.count(apply_ref(s.account(), r)?);
+            report.count(r.at(), apply_ref(s.account(), r)?);
         }
         save_cursor(s.account(), cursor, !page.refs.is_empty(), &page.cursor)?;
         Ok(Slim::Applied(page.has_more))
@@ -430,9 +430,6 @@ fn apply_whole<G: DerefMut<Target = StateDb>>(
     cursor: Option<&str>,
     report: &mut FeedReport,
 ) -> Result<(bool, bool), FeedError> {
-    report
-        .skipped
-        .extend(page.skipped.iter().map(|r| r.why.clone()));
     let nothing_new = db().write(|s| {
         let refs: Vec<ChangeRef> = page.entries.iter().map(ChangeRef::of).collect();
         let nothing_new = known(s, &refs)?;
@@ -443,21 +440,31 @@ fn apply_whole<G: DerefMut<Target = StateDb>>(
             }
         }
         for header in &page.entries {
-            report.count(apply(s.account(), header)?);
+            report.count(header.at(), apply(s.account(), header)?);
         }
         save_cursor(s.account(), cursor, !page.entries.is_empty(), &page.cursor)?;
         Ok(nothing_new)
     })?;
+    report.skipped.extend(page.skipped);
     Ok((page.has_more, nothing_new))
 }
 
 impl FeedReport {
-    fn count(&mut self, applied: Applied) {
+    /// What applying the row of the file at `at` did.
+    fn count(&mut self, at: RemoteRef, applied: Applied) {
         match applied {
             Applied::Live => self.live += 1,
             Applied::Left => self.deleted += 1,
-            Applied::Refused(why) => self.skipped.push(why),
+            Applied::Refused(why) => self.skipped.push(refused_row(at, why)),
         }
+    }
+}
+
+/// The row of the file at `at` that applying refused, for `why`.
+fn refused_row(at: RemoteRef, why: String) -> Skipped {
+    Skipped {
+        at: Some(at),
+        ..Skipped::why(why)
     }
 }
 

@@ -299,8 +299,11 @@ included (service managers restart it then).
   it isn't synced), a name Homebase can't hold, a link, a device or socket; one note a reason
   with a few of its paths, each item once (again once a whole scan found it fixed). A
   sync that stops (refused, the drive out of reach) still tells the conflicts and failures it
-  had come to. A restore or an emptying of Recently deleted that fails is noted on the main
-  folder (it was answered before it ran), with what to do. An operation the
+  had come to. What is the account's is noted on the account (its status's `recent`), not on a
+  folder: a restore or an emptying of Recently deleted that fails (it was answered before it
+  ran), with what to do; a file on the drive this client can't read (another key, not a sync
+  node), each version once while the daemon runs (a row that doesn't name its file, once a
+  reason), and more than three new at once as one note. An operation the
   drive refused for good is noted once, and not sent again while it is the same (sync semantics
   §8a, refused): a change of the item, Sync now, or an hour sends it once more.
 - **Progress** while a sync runs: its files (transfers, moves and deletes) and the bytes of its
@@ -345,21 +348,21 @@ wire types are `hbsync-app/src/protocol.rs`. A control goes to the daemon (every
 account (its Recently deleted) or to one folder (its held deletes):
 
 ```json
-{"protocol":8,"ask":"status"}
-{"protocol":8,"ask":"watch"}                                        // a status line now, then one per change
-{"protocol":8,"ask":"stop"}                                         // taken whatever the protocol
-{"protocol":8,"ask":{"control":{"daemon":"sync_now"}}}            // resume
-{"protocol":8,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}   // "until":null: until resumed
-{"protocol":8,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}}}
-{"protocol":8,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"restore":{"nodes":["<node id>"]}}}}}}
-{"protocol":8,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted":{"nodes":["<node id>"],"db":"<db id>","seq":4711}}}}}}  // the items as listed
-{"protocol":8,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_listed":{"db":"<db id>","seq":4711}}}}}}  // all it held when listed
-{"protocol":8,"ask":{"recent":{"limit":10}}}
-{"protocol":8,"ask":{"deleted":{"limit":100}}}                    // the newest 100 deletes
-{"protocol":8,"ask":{"find_deleted":{"items":["Photos/2024","<node id>"]}}}
-{"protocol":8,"ask":{"add_folder":{"identity":"anna.example.com","path":"/home/anna/Homebase","role":null}}}
-{"protocol":8,"ask":{"remove_folder":{"path":"/home/anna/Homebase"}}}
-{"protocol":8,"ask":{"start_over":{"identity":"anna.example.com"}}}  // new credentials
+{"protocol":9,"ask":"status"}
+{"protocol":9,"ask":"watch"}                                        // a status line now, then one per change
+{"protocol":9,"ask":"stop"}                                         // taken whatever the protocol
+{"protocol":9,"ask":{"control":{"daemon":"sync_now"}}}            // resume
+{"protocol":9,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}   // "until":null: until resumed
+{"protocol":9,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}}}
+{"protocol":9,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"restore":{"nodes":["<node id>"]}}}}}}
+{"protocol":9,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted":{"nodes":["<node id>"],"db":"<db id>","seq":4711}}}}}}  // the items as listed
+{"protocol":9,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_listed":{"db":"<db id>","seq":4711}}}}}}  // all it held when listed
+{"protocol":9,"ask":{"recent":{"limit":10}}}
+{"protocol":9,"ask":{"deleted":{"limit":100}}}                    // the newest 100 deletes
+{"protocol":9,"ask":{"find_deleted":{"items":["Photos/2024","<node id>"]}}}
+{"protocol":9,"ask":{"add_folder":{"identity":"anna.example.com","path":"/home/anna/Homebase","role":null}}}
+{"protocol":9,"ask":{"remove_folder":{"path":"/home/anna/Homebase"}}}
+{"protocol":9,"ask":{"start_over":{"identity":"anna.example.com"}}}  // new credentials
 ```
 
 A request of another protocol is refused (`this daemon speaks protocol N, …`), except `stop`,
@@ -374,7 +377,8 @@ identity not synced yet), without a restart: `hbsync setup` checks what the user
 
 Replies:
 - `{"status":{"version":…,"accounts":[…],"folders":[…]}}`. An account has its `identity`, the
-  notification connection (`hints`) and a `credentials_warning`. A folder has its `identity`,
+  notification connection (`hints`), a `credentials_warning`, and its own notes (`recent`, with
+  `notes_added`, as a folder's). A folder has its `identity`,
   `path`, `role` (`null` for the main folder), `state`, `progress` (while `starting` or
   `syncing`, once the sync has a plan; its totals grow as each batch of up to 20,000 items is
   planned), `paused_until`, `held_deletes`, and the counts `notes_added` and `synced_added`
@@ -442,7 +446,7 @@ isn't running looks every second (every ten while nothing is set up).
   starting included), Open Homebase folder, Browse files online (chat's web app on the
   identity, opened on its Filesync mini-app: `https://<identity>/apps/chat/#filesync`),
   Recently synced (the last 10; clicking one shows it
-  in the file manager), Problems (the status notes), Review N deletions…, Recently deleted…, Folders…, Log
+  in the file manager), Problems (the main folder's notes and its account's, newest first), Review N deletions…, Recently deleted…, Folders…, Log
   in again… (refused), Pause syncing (1 h, 8 h, 24 h, until resumed) or Resume, Sync now, Start
   at login, Open logs, Log out, Quit.
 - **Pages:** logging in (the Homebase address, the folder, `~/Homebase` unless chosen with the

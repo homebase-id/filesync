@@ -13,6 +13,8 @@
 //! `hbsync-sync`; `feed.rs` the notifications and the puller that bring the drive's changes;
 //! `runners.rs` its folders' runners and their restarts.
 
+use std::collections::HashSet;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -21,15 +23,16 @@ use std::sync::{Arc, Mutex};
 use hbsync_engine::deleted::Listed;
 use hbsync_engine::root::{AccountReader, RootError};
 use hbsync_homebase::notify::Event;
+use hbsync_remote::Skipped;
 use hbsync_state::StateError;
-use hbsync_types::NodeId;
 use hbsync_types::activity::Deleted;
+use hbsync_types::{NodeId, unix_now};
 
 use crate::protocol::{
     AccountControl, AccountStatus, DeletedAccount, DeletedItem, FolderStatus, Pause, RecentItem,
     State,
 };
-use crate::runner::{Command, Handle};
+use crate::runner::{Command, Handle, add_notes};
 use crate::sync::{Wakeup, lock};
 use crate::words;
 use crate::{Identity, Paths, Root};
@@ -40,6 +43,11 @@ mod run;
 mod runners;
 
 use runners::Running;
+
+/// Unreadable rows remembered as told, at most ([`Account::note_unreadable`]).
+const ROWS_TOLD: usize = 10_000;
+/// New unreadable rows noted one by one, at most: more are one note.
+const ROWS_NOTED: usize = 3;
 
 pub use feed::{Notifications, Puller, UNANNOUNCED_READ};
 pub use parts::AccountParts;
@@ -68,6 +76,9 @@ pub(crate) struct Account {
 /// The account's status, its pause and its folders.
 struct Shown {
     status: AccountStatus,
+    /// The drive's rows it can't read that were told (a hash of each row's version and why:
+    /// 8 bytes a row), each once while the daemon runs.
+    rows_told: HashSet<u64>,
     /// Paused (kept in the config too): a runner starts paused.
     paused: Option<Pause>,
     /// Waiting for the credentials or the identity; `None` once its runners run (taken as
@@ -92,17 +103,6 @@ impl Shown {
         self.runners.iter().filter(|r| r.shows())
     }
 
-    /// Passes `command` to the main folder's runner (else another), one that runs: what
-    /// concerns the account, told once.
-    fn send_one(&self, command: Command) {
-        let mut running = self.runners.iter().filter(|r| r.syncing());
-        let main = running.clone().find(|r| r.root.role.is_none());
-        match main.or_else(|| running.next()) {
-            Some(r) => drop(r.handle.send(command)),
-            None => tracing::warn!("no folder runs to tell: {command:?}"),
-        }
-    }
-
     /// Passes `command` to every runner shown; refused, saying why, while it isn't running
     /// yet.
     fn send(&self, identity: &Identity, command: &Command) -> Result<(), String> {
@@ -123,8 +123,6 @@ pub(crate) enum Msg {
     Hint(Event),
     /// The machine woke up.
     Woke,
-    /// Tell the user this (the account's work: Recently deleted's requests).
-    Note(String),
     /// Look again: it is to end, the daemon stops, its pause changed, or a runner is ending.
     Wake,
 }
@@ -154,6 +152,7 @@ impl Account {
             db: paths.account_db(identity),
             shown: Mutex::new(Shown {
                 status: AccountStatus::new(identity),
+                rows_told: HashSet::new(),
                 paused,
                 waiting: Some(Waiting {
                     roots: vec![root.clone()],
@@ -324,6 +323,68 @@ impl Account {
     /// The machine woke up: its notifications reconnect, its folders sync.
     pub(super) fn woke(&self) {
         self.tell(Msg::Woke);
+    }
+
+    /// Tells the user `notes`, the account's (its folders' are theirs).
+    pub(super) fn note(&self, notes: Vec<String>) {
+        for note in &notes {
+            tracing::warn!("{}: {note}", self.identity);
+        }
+        self.push_notes(notes);
+    }
+
+    /// Adds `notes` to its status (logged by the caller).
+    fn push_notes(&self, notes: Vec<String>) {
+        if notes.is_empty() {
+            return;
+        }
+        let mut shown = lock(&self.shown);
+        let status = &mut shown.status;
+        add_notes(
+            &mut status.recent,
+            &mut status.notes_added,
+            notes,
+            unix_now(),
+        );
+        drop(shown);
+        self.changed.raise();
+    }
+
+    /// Tells the user the drive's `rows` it can't read, each version once while the daemon
+    /// runs (a row without its file, once a reason); more than a few new at once, as one note.
+    pub(super) fn note_unreadable(&self, rows: Vec<Skipped>) {
+        let mut notes: Vec<String> = {
+            let mut shown = lock(&self.shown);
+            // Bounded: forgotten (told again) past this many, their room given back.
+            if shown.rows_told.len() > ROWS_TOLD {
+                shown.rows_told = HashSet::new();
+            }
+            let told = &mut shown.rows_told;
+            rows.into_iter()
+                .filter(|row| {
+                    let mut key = DefaultHasher::new();
+                    (row.at, &row.why).hash(&mut key);
+                    told.insert(key.finish())
+                })
+                .map(|row| row.why)
+                .collect()
+        };
+        // A drive of another app's files may have thousands: one note (and log line) for them.
+        if notes.len() > ROWS_NOTED {
+            for why in &notes {
+                tracing::debug!("{}: a row of the drive can't be read: {why}", self.identity);
+            }
+            let more = notes.len() - 1;
+            notes = vec![format!("{} and {more} more", notes[0])];
+        }
+        for why in &notes {
+            tracing::warn!("{}: a row of the drive can't be read: {why}", self.identity);
+        }
+        let notes = notes
+            .into_iter()
+            .map(|why| format!("a file on Homebase can't be synced: {why}"))
+            .collect();
+        self.push_notes(notes);
     }
 
     /// Tells its thread `msg`; lost only once the thread has ended.
@@ -553,6 +614,51 @@ mod tests {
         assert!(items[0].place().starts_with("(on the drive) "), "{items:?}");
         assert_eq!((items.len(), summary.deletes, summary.items), (1, 1, 0));
         Ok(())
+    }
+
+    /// The account's notes are on its status, its folders' untouched: a row of the drive that
+    /// doesn't read is told once a version (again for a new one), a failed request each time;
+    /// many rows at once are one note.
+    #[test]
+    fn the_accounts_notes_are_its_own() {
+        use hbsync_types::{RemoteFileId, RemoteRef, Uuid, VersionTag};
+        let paths = Paths::under(Path::new("/h"));
+        let main = Root::main(&"a.example".into(), Path::new("/h/Homebase"));
+        let (account, _requests) = Account::new(&paths, &main, None, Arc::default());
+        let file = RemoteFileId(Uuid::new_v4());
+        let row = |version: VersionTag| Skipped {
+            at: Some(RemoteRef {
+                file_id: file,
+                version,
+            }),
+            ..Skipped::why("another key")
+        };
+        let (v1, v2) = (VersionTag(Uuid::new_v4()), VersionTag(Uuid::new_v4()));
+        account.note_unreadable(vec![row(v1), row(v1)]);
+        account.note_unreadable(vec![row(v1)]);
+        account.note(vec!["Restoring failed".into()]);
+        account.note_unreadable(vec![row(v2)]);
+        let (status, folders) = account.status();
+        let texts: Vec<_> = status.recent.iter().map(|n| n.text.as_str()).collect();
+        assert_eq!(
+            texts,
+            [
+                "a file on Homebase can't be synced: another key",
+                "Restoring failed",
+                "a file on Homebase can't be synced: another key"
+            ]
+        );
+        assert_eq!(status.notes_added, 3);
+        assert!(folders.iter().all(|f| f.recent.is_empty()));
+        // Many new at once: one note.
+        let many = (0..5).map(|_| row(VersionTag(Uuid::new_v4()))).collect();
+        account.note_unreadable(many);
+        let (status, _) = account.status();
+        assert_eq!(status.notes_added, 4);
+        assert_eq!(
+            status.recent.last().map(|n| n.text.as_str()),
+            Some("a file on Homebase can't be synced: another key and 4 more")
+        );
     }
 
     /// While it waits for the identity, a role folder shows as that role's (not as a main
