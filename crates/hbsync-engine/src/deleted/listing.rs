@@ -292,18 +292,18 @@ impl<'a, 's> RemovedRows<'a, 's> {
     }
 }
 
-/// The items of Recently deleted whose deletes took `nodes` along ([`deleted_by_item`]), each
-/// once, in the order first met.
-pub(crate) fn items_of(s: &ReadTx<'_>, nodes: &[NodeId]) -> Result<Vec<NodeId>, StateError> {
-    let mut rows = RemovedRows::new(s, Vec::new());
-    let (mut items, mut known, mut met) = (Vec::new(), HashMap::new(), HashSet::new());
-    for &node in nodes {
-        let item = deleted_by_item(&mut rows, node, &mut known)?;
-        if met.insert(item) {
-            items.push(item);
-        }
-    }
-    Ok(items)
+/// The items of Recently deleted whose deletes took `removed` (rows of it) along
+/// ([`deleted_by_item`]).
+pub(crate) fn items_of(
+    s: &ReadTx<'_>,
+    removed: Vec<RemovedRow>,
+) -> Result<HashSet<NodeId>, StateError> {
+    let nodes: Vec<NodeId> = removed.iter().map(|r| r.row.node).collect();
+    let (mut rows, mut known) = (RemovedRows::new(s, removed), HashMap::new());
+    nodes
+        .into_iter()
+        .map(|n| deleted_by_item(&mut rows, n, &mut known))
+        .collect()
 }
 
 /// The item of Recently deleted whose delete took `node` along: up through the folders it was

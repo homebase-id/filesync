@@ -26,7 +26,6 @@ use crate::refused::FolderRefusals;
 use crate::root::{RootError, SyncRoot};
 use crate::scope::Scope;
 use crate::view;
-use crate::walk;
 
 /// Start-up's pull is the first sync's if the local catch-up ended within this of it.
 const FRESH_PULL: Duration = Duration::from_secs(2);
@@ -291,6 +290,7 @@ impl Engine {
         let mut tops: Vec<(usize, NodeId)> = Vec::new();
         // Each once: a folder's held with what is in it.
         let mut seen = std::collections::HashSet::new();
+        let mut restored = 0;
         self.db.read(|s| {
             let here = |n: NodeId| s.local_by_node(n);
             let live = |n: NodeId| Ok::<_, StateError>(s.get_mirror(n)?.is_some());
@@ -325,10 +325,9 @@ impl Engine {
                                 continue;
                             }
                             if base(row.node)?.is_some() && !live(row.node)? {
-                                if s.removed_by_node(row.node)?.is_some() {
-                                    restore.push(row.node);
-                                } else {
-                                    forget.push(row.node);
+                                match s.removed_by_node(row.node)? {
+                                    Some(r) => restore.push(r),
+                                    None => forget.push(row.node),
                                 }
                             }
                             if row.kind == NodeKind::Folder {
@@ -341,11 +340,12 @@ impl Engine {
                 }
             }
             // Up through the folders each was deleted with, as Recently deleted lists it.
-            for top in crate::deleted::items_of(s, &restore)? {
-                let depth = walk::up::<_, StateError>(top, |at| {
+            restored = restore.len();
+            for top in crate::deleted::items_of(s, std::mem::take(&mut restore))? {
+                let up = crate::walk::up::<_, StateError>(top, |at| {
                     Ok(base(at)?.map(|b| ((), b.state.parent)))
                 })?;
-                tops.push((depth.items.len(), top));
+                tops.push((up.items.len(), top));
             }
             Ok(())
         })?;
@@ -361,7 +361,7 @@ impl Engine {
         if !tops.is_empty() {
             self.drive.restore_read(&tops)?;
         }
-        Ok(forget.len() + restore.len())
+        Ok(forget.len() + restored)
     }
 
     /// Waits up to `timeout` for the live changes `observer`'s watcher reports, and records
