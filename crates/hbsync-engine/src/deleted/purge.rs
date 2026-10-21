@@ -53,7 +53,7 @@ impl AccountOps<'_> {
         let tombstones = self.delete_tombstones(traced);
         let pruned = self
             .db()
-            .write(|s| mirror::prune(s.account(), traced, now_ms))
+            .write(|s| s.account().prune_gone(traced, now_ms))
             .map(drop)
             .map_err(EngineError::from);
         let trash = match &expired {
@@ -470,7 +470,7 @@ impl AccountOps<'_> {
                 }
                 gone_now
                     .iter()
-                    .try_for_each(|(r, at)| mirror::forget(s.account(), r.row.file_id, *at))?;
+                    .try_for_each(|(r, at)| s.account().forget_file(r.row.file_id, *at))?;
                 Ok(confirmed)
             })?;
             gone += confirmed + gone_now.len();
@@ -493,7 +493,7 @@ impl AccountOps<'_> {
                 .iter()
                 .zip(answers)
                 .filter(|(_, answer)| matches!(answer, Answer::Deleted(_) | Answer::Missing))
-                .try_for_each(|(t, _)| mirror::tombstone_deleted(s.account(), t.at()))
+                .try_for_each(|(t, _)| s.account().delete_tombstone_at(t.at()).map(drop))
         })?;
         match failed {
             Some(e) => Err(EngineError::Remote(e)),

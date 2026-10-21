@@ -240,10 +240,12 @@ fn shared(key: Option<&Path>) -> Arc<Shared> {
     }))
 }
 
-/// Watching commits, for tests that crash a client at one (feature `testkit`).
+/// Watching commits, for tests that crash a client at one, and the picture's raw writes for
+/// tests that set up a store ([`testkit::RawPicture`]) (feature `testkit`).
 #[cfg(feature = "testkit")]
 pub mod testkit {
     use super::*;
+    use hbsync_types::{NodeId, RemoteFileId, RemoteRef};
 
     /// Called around each commit to a DB file, in its turn (no other connection of this process
     /// writes meanwhile).
@@ -262,6 +264,47 @@ pub mod testkit {
     impl std::fmt::Debug for Hook {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.write_str("Hook")
+        }
+    }
+
+    /// The picture's raw writes, which only this crate makes outside a test: a test sets up a
+    /// store the named operations wouldn't leave (or leave only with more marked dirty). In
+    /// scope, `s.account().put_mirror(..)` reads as in the crate.
+    pub trait RawPicture {
+        fn put_mirror(&self, row: &MirrorRow) -> Result<()>;
+        fn delete_mirror(&self, file_id: RemoteFileId) -> Result<Option<MirrorRow>>;
+        fn put_removed(&self, removed: &RemovedRow) -> Result<()>;
+        fn delete_removed(&self, node: NodeId) -> Result<bool>;
+        fn delete_removed_file(&self, file_id: RemoteFileId) -> Result<bool>;
+        fn mark_file_gone(&self, file_id: RemoteFileId) -> Result<()>;
+        fn mark_file_gone_at(&self, file_id: RemoteFileId, at: i64) -> Result<()>;
+        fn put_tombstone(&self, tombstone: RemoteRef, at: i64) -> Result<()>;
+    }
+
+    impl RawPicture for AccountTx<'_> {
+        fn put_mirror(&self, row: &MirrorRow) -> Result<()> {
+            AccountTx::put_mirror(self, row)
+        }
+        fn delete_mirror(&self, file_id: RemoteFileId) -> Result<Option<MirrorRow>> {
+            AccountTx::delete_mirror(self, file_id)
+        }
+        fn put_removed(&self, removed: &RemovedRow) -> Result<()> {
+            AccountTx::put_removed(self, removed)
+        }
+        fn delete_removed(&self, node: NodeId) -> Result<bool> {
+            AccountTx::delete_removed(self, node)
+        }
+        fn delete_removed_file(&self, file_id: RemoteFileId) -> Result<bool> {
+            AccountTx::delete_removed_file(self, file_id)
+        }
+        fn mark_file_gone(&self, file_id: RemoteFileId) -> Result<()> {
+            AccountTx::mark_file_gone(self, file_id)
+        }
+        fn mark_file_gone_at(&self, file_id: RemoteFileId, at: i64) -> Result<()> {
+            AccountTx::mark_file_gone_at(self, file_id, at)
+        }
+        fn put_tombstone(&self, tombstone: RemoteRef, at: i64) -> Result<()> {
+            AccountTx::put_tombstone(self, tombstone, at)
         }
     }
 

@@ -1,16 +1,14 @@
-//! The drive's picture: what this device knows the drive holds, recorded from the feed, from the
-//! answers to its own writes, and from Recently deleted's operations. The one writer of the
-//! mirror (`remote`), Recently deleted (`removed`), the files deleted for good and their
-//! tombstones, mostly on the store's named operations, which keep a node live, in Recently
-//! deleted, or its file gone, never two of them ([`AccountTx::put_live`],
-//! [`AccountTx::move_to_removed`], [`AccountTx::forget_file`]), and the answers to this device's
-//! own writes ([`AccountTx::answered`]): a pull may have recorded a newer state of the node
-//! since the write landed, which they must not undo.
+//! The drive's picture: what the feed's rows make of it ([`apply`]), the rows and nodes this
+//! device's own writes leave and send ([`written`], [`meta`], [`answered`]), and asking the
+//! drive whether a file is gone. Every write of the picture goes through the store's named
+//! operations, which keep a node live, in Recently deleted, or its file gone, never two of
+//! them ([`AccountTx::put_live`], [`AccountTx::move_to_removed`], [`AccountTx::forget_file`],
+//! [`AccountTx::answered`]); the raw writes are the store's own.
 
 use hbsync_remote::{ChangeRef, NodeMeta, Remote, RemoteBody, RemoteError, RemoteHeader};
 use hbsync_state::{AccountTx, Answer, Answered, MirrorRow, RemovedRow, StateError};
 use hbsync_types::Role;
-use hbsync_types::{ContentHash, FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef, Written};
+use hbsync_types::{ContentHash, FileToken, NodeId, NodeKind, RemoteFileId, Written};
 
 // ---- facts the feed brings ----
 
@@ -29,7 +27,7 @@ pub enum Applied {
 /// Applies one header to the mirror ([`Applied`]).
 pub fn apply(s: AccountTx<'_>, header: &RemoteHeader) -> Result<Applied, StateError> {
     if header.is_deleted() {
-        tombstone(s, header.at(), header.changed_at)?;
+        s.tombstone(header.at(), header.changed_at)?;
         return Ok(Applied::Left);
     }
     if let Some(why) = misplaced(header) {
@@ -151,35 +149,6 @@ fn mirror_row(header: &RemoteHeader) -> Option<MirrorRow> {
     Some(row)
 }
 
-/// A tombstone in the feed, written at `at` (the server's time): the file is deleted for good,
-/// and the tombstone itself goes hard once old enough ([`crate::deleted::AccountOps::purge`]).
-pub(crate) fn tombstone(
-    s: AccountTx<'_>,
-    tombstone: RemoteRef,
-    at: Option<i64>,
-) -> Result<(), StateError> {
-    s.tombstone(tombstone, at)
-}
-
-/// A file deleted for good with nothing left (a hard delete, announced): a tombstone this device
-/// holds at that version has nothing left to delete, and the file is forgotten ([`forget`]).
-pub(crate) fn hard_deleted(s: AccountTx<'_>, at: RemoteRef) -> Result<(), StateError> {
-    s.delete_tombstone_at(at)?;
-    forget(s, at.file_id, None)
-}
-
-/// File `file_id` deleted for good (a tombstone, its header not found, this device's delete):
-/// out of Recently deleted and the mirror, and never back in them ([`AccountTx::forget_file`]);
-/// gone since `at` (the server's: the tombstone a delete of this device left, by its answer;
-/// the tombstone itself, at its version, comes with the feed's row), if known.
-pub(crate) fn forget(
-    s: AccountTx<'_>,
-    file_id: RemoteFileId,
-    at: Option<i64>,
-) -> Result<(), StateError> {
-    s.forget_file(file_id, at)
-}
-
 // ---- this device's own writes, from their answers ----
 
 /// Records the answers to this device's writes made outside a folder's run (a restore, the
@@ -213,23 +182,6 @@ pub(crate) fn meta_at(row: &MirrorRow, parent: NodeId, name: &str, removed: bool
 /// [`meta_at`] where and as the row has it.
 pub(crate) fn meta(row: &MirrorRow, removed: bool) -> NodeMeta {
     meta_at(row, row.parent, &row.name, removed)
-}
-
-// ---- Recently deleted's upkeep and the login ----
-
-/// A tombstone at `at` (its version) deleted hard by this device's purge: nothing left of it.
-pub(crate) fn tombstone_deleted(s: AccountTx<'_>, at: RemoteRef) -> Result<(), StateError> {
-    s.delete_tombstone_at(at).map(drop)
-}
-
-/// Forgets the files known gone since before `before_ms` ([`AccountTx::prune_gone`]); how many.
-pub(crate) fn prune(s: AccountTx<'_>, before_ms: i64, now_ms: i64) -> Result<usize, StateError> {
-    s.prune_gone(before_ms, now_ms)
-}
-
-/// Forgets the file tokens stored: another login seals them from now on.
-pub(crate) fn clear_tokens(s: AccountTx<'_>) -> Result<(), StateError> {
-    s.clear_tokens()
 }
 
 // ---- asking the drive ----
@@ -320,7 +272,7 @@ pub(crate) fn heard(
 ) -> Result<bool, StateError> {
     let gone = judged(s, file_id, said)?;
     if gone {
-        forget(s, file_id, None)?;
+        s.forget_file(file_id, None)?;
     }
     Ok(gone)
 }

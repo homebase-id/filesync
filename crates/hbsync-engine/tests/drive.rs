@@ -85,7 +85,6 @@ fn pulls_asked_at_once_are_merged() -> R {
 fn announced_changes_are_taken_without_reading_what_is_known() -> R {
     use hbsync_remote::ChangeRef;
     use hbsync_remote::contract::removed;
-    use hbsync_state::RemovedRow;
 
     let dir = tempfile::tempdir()?;
     let (drive, remote) = drive(dir.path())?;
@@ -103,9 +102,8 @@ fn announced_changes_are_taken_without_reading_what_is_known() -> R {
     let gone_at = remote.update(&made.target, &removed(&docs), None)?;
     db.write(|s| {
         let mut row = s.mirror_by_file(made.at().file_id)?.expect("in the mirror");
-        s.account().delete_mirror(made.at().file_id)?;
         row.version = gone_at.at().version;
-        s.account().put_removed(&RemovedRow {
+        s.account().move_to_removed(&hbsync_state::RemovedRow {
             row,
             removed_at: None,
         })

@@ -171,7 +171,7 @@ impl Sim {
                 };
                 let mut row = mirror_row(node, state, at);
                 row.changed_at = input.changed_at.get(&node).copied();
-                s.account().put_mirror(&row)?;
+                s.account().put_live(&row)?;
             }
             // What the drive holds in a version no client reads.
             for node in &input.unreadable {
@@ -186,7 +186,7 @@ impl Sim {
                     continue;
                 };
                 let row = mirror_row(*folder, &removed.state, r.remote);
-                s.account().put_removed(&RemovedRow {
+                s.account().move_to_removed(&RemovedRow {
                     row,
                     removed_at: Some(removed.at),
                 })?;

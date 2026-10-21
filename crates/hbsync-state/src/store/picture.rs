@@ -1,7 +1,9 @@
 //! The drive's picture as named operations: a node is live (the mirror), in Recently deleted,
 //! or its file deleted for good, never two of them. The facts a feed page, a restore or a
 //! delete for good brings are recorded through these (the engine's `mirror` module), and the
-//! answers to this device's own writes ([`AccountTx::answered`]).
+//! answers to this device's own writes ([`AccountTx::answered`]). They are the only writes of
+//! the picture outside this crate: the raw ones they are made of are the crate's (and a
+//! test's, through `testkit::RawPicture`), so the rule holds by type.
 
 use super::*;
 
@@ -88,7 +90,7 @@ impl AccountTx<'_> {
     // ---- the drive's picture ----
 
     /// A live version of a node: out of Recently deleted (whatever the mirror then takes), into
-    /// the mirror ([`AccountTx::put_mirror`]: a version it has, or a file deleted for good, changes
+    /// the mirror (`put_mirror`: a version it has, or a file deleted for good, changes
     /// nothing there).
     pub fn put_live(&self, row: &MirrorRow) -> Result<()> {
         self.delete_removed(row.node)?;
@@ -97,7 +99,7 @@ impl AccountTx<'_> {
 
     /// A node's file moved to Recently deleted, as the feed says: out of the mirror (its node
     /// planned again where it was held, also where the mirror had no row of it), into Recently
-    /// deleted ([`AccountTx::put_removed`]).
+    /// deleted (`put_removed`).
     pub fn move_to_removed(&self, removed: &RemovedRow) -> Result<()> {
         self.leave_tree(removed.row.file_id)?;
         self.put_removed(removed)
@@ -152,7 +154,7 @@ impl AccountTx<'_> {
         Ok(answered)
     }
 
-    /// A tombstone the feed brought ([`AccountTx::put_tombstone`], if it says when it was written):
+    /// A tombstone the feed brought (`put_tombstone`, if it says when it was written):
     /// its file is deleted for good ([`AccountTx::forget_file`]).
     pub fn tombstone(&self, tombstone: RemoteRef, at: Option<i64>) -> Result<()> {
         if let Some(at) = at {
@@ -161,8 +163,16 @@ impl AccountTx<'_> {
         self.forget_file(tombstone.file_id, None)
     }
 
+    /// A file deleted for good with nothing left (a hard delete, announced): a tombstone this
+    /// device holds at that version has nothing left to delete, and the file is forgotten
+    /// ([`AccountTx::forget_file`]).
+    pub fn hard_deleted(&self, at: RemoteRef) -> Result<()> {
+        self.delete_tombstone_at(at)?;
+        self.forget_file(at.file_id, None)
+    }
+
     /// The mirror without file `file_id`, its node marked to plan again where it was held: by
-    /// its row ([`AccountTx::delete_mirror`]), or, where the mirror has none, where a base holds the
+    /// its row (`delete_mirror`), or, where the mirror has none, where a base holds the
     /// file (a tombstone has no node id: the node is found by file id).
     fn leave_tree(&self, file_id: RemoteFileId) -> Result<()> {
         if self.delete_mirror(file_id)?.is_none()

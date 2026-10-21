@@ -384,6 +384,7 @@ mod tests {
     use super::*;
     use hbsync_fileio::HashAlgorithm;
     use hbsync_platform::{FileId, Fingerprint};
+    use hbsync_state::testkit::RawPicture;
     use hbsync_state::{LocalRow, MirrorFile, StateDb, Store};
     use hbsync_types::Tags;
     use hbsync_types::{FileContent, RemoteFileId, RemoteRef, Uuid, VersionTag};

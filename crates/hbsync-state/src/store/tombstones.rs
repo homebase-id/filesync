@@ -45,8 +45,8 @@ impl AccountTx<'_> {
     /// Records file `file_id` gone since `at` (Unix ms, the server's): the time of the tombstone
     /// a delete of this device left, from the delete's answer ([`AccountTx::prune_gone`] counts
     /// from it). The tombstone itself, at its version, comes with the feed's row
-    /// ([`AccountTx::put_tombstone`]). A file already known gone stays as it is.
-    pub fn mark_file_gone_at(&self, file_id: RemoteFileId, at: i64) -> Result<()> {
+    /// (`put_tombstone`). A file already known gone stays as it is.
+    pub(crate) fn mark_file_gone_at(&self, file_id: RemoteFileId, at: i64) -> Result<()> {
         self.prep(
             "INSERT INTO gone_files (file_id, gone_at) VALUES (?1, ?2)
              ON CONFLICT (file_id) DO NOTHING",
@@ -56,9 +56,9 @@ impl AccountTx<'_> {
     }
 
     /// Records a tombstone the feed brought, written at `at` (Unix ms, the server's): its file
-    /// is gone ([`AccountTx::mark_file_gone`]), and the tombstone is still on the drive, at that
+    /// is gone (`mark_file_gone`), and the tombstone is still on the drive, at that
     /// version, until deleted hard.
-    pub fn put_tombstone(&self, tombstone: RemoteRef, at: i64) -> Result<()> {
+    pub(crate) fn put_tombstone(&self, tombstone: RemoteRef, at: i64) -> Result<()> {
         self.prep(
             "INSERT INTO gone_files (file_id, version_tag, at) VALUES (?1, ?2, ?3)
              ON CONFLICT (file_id) DO UPDATE SET version_tag = excluded.version_tag,

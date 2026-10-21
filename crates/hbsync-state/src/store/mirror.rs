@@ -117,7 +117,7 @@ impl ReadTx<'_> {
         Ok(None)
     }
 
-    /// Whether file `file_id` was deleted for good ([`AccountTx::mark_file_gone`]).
+    /// Whether file `file_id` was deleted for good (`mark_file_gone`).
     pub fn file_gone(&self, file_id: RemoteFileId) -> Result<bool> {
         Ok(self
             .prep("SELECT 1 FROM gone_files WHERE file_id = ?1")?
@@ -232,7 +232,7 @@ impl AccountTx<'_> {
     /// write coming back through the feed, or a page applied again) changes nothing, and so does
     /// a file id deleted for good ([`ReadTx::file_gone`]: a page fetched before, or a write
     /// committed after, can't bring it back).
-    pub fn put_mirror(&self, row: &MirrorRow) -> Result<()> {
+    pub(crate) fn put_mirror(&self, row: &MirrorRow) -> Result<()> {
         if self.has_version(row.remote_ref(), false)? || self.file_gone(row.file_id)? {
             return Ok(());
         }
@@ -276,7 +276,7 @@ impl AccountTx<'_> {
 
     /// Removes the mirror row of a deleted file, marks its node dirty where that concerns
     /// (`fan_out`), and returns the row.
-    pub fn delete_mirror(&self, file_id: RemoteFileId) -> Result<Option<MirrorRow>> {
+    pub(crate) fn delete_mirror(&self, file_id: RemoteFileId) -> Result<Option<MirrorRow>> {
         let Some(row) = self.one(
             &format!("{MIRROR_SELECT} WHERE m.file_id = ?1"),
             file_id.0.as_bytes(),
@@ -320,7 +320,7 @@ impl AccountTx<'_> {
     }
 
     /// Records file `file_id` as deleted for good: Homebase never gives a file id back.
-    pub fn mark_file_gone(&self, file_id: RemoteFileId) -> Result<()> {
+    pub(crate) fn mark_file_gone(&self, file_id: RemoteFileId) -> Result<()> {
         self.prep("INSERT OR IGNORE INTO gone_files (file_id) VALUES (?1)")?
             .execute([file_id.0.as_bytes()])?;
         self.clear_file_marks(file_id)

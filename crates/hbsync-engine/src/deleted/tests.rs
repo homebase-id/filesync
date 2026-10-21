@@ -3,6 +3,7 @@ use std::sync::Mutex;
 
 use hbsync_platform::name::name_key;
 use hbsync_remote::{NodeMeta, Remote};
+use hbsync_state::testkit::RawPicture;
 use hbsync_state::{MirrorRow, ReadTx, RemovedRow, StateDb, StateError, Store};
 use hbsync_types::activity::Deleted;
 use hbsync_types::{NodeId, NodeKind, RemoteFileId, Uuid, VersionTag};
