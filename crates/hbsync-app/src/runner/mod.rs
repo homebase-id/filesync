@@ -250,6 +250,8 @@ pub struct Runner {
     woken: crate::TestCount,
     /// The nodes of the deletes held in the last sync (what the status shows).
     held: Vec<NodeId>,
+    /// Their token ([`report::held_token`]).
+    held_token: String,
     /// The conflicts and failures of the last sync, to tell each one only once.
     told: report::Told,
     /// Stale skips sync after sync: one that keeps coming back is told after all.
@@ -336,6 +338,7 @@ impl Runner {
             progress,
             woken,
             held: Vec::new(),
+            held_token: String::new(),
             told: Default::default(),
             stalled: Default::default(),
             scan_told: Default::default(),
@@ -578,6 +581,11 @@ impl Runner {
                         tracing::warn!("{GONE}: waiting for it to come back");
                     }
                     parts = None;
+                    // Nothing is held, sent or put back there meanwhile: an answer is refused.
+                    self.held.clear();
+                    self.held_token.clear();
+                    confirmed.take();
+                    self.set(|s| s.held_deletes = None);
                     self.failing(State::Failing, GONE.into(), schedule.later(Instant::now()));
                     continue;
                 }
@@ -588,6 +596,8 @@ impl Runner {
             if parts.as_ref().is_some_and(|p| p.marker != marker) {
                 tracing::info!("the folder was set up again: starting over");
                 parts = None;
+                // An answer was about the old one's nodes.
+                confirmed.take();
             }
             let p = match &mut parts {
                 Some(p) => p,
@@ -728,7 +738,7 @@ impl Runner {
                 }
             }
             Command::ConfirmDeletes { token } => {
-                if token != report::held_token(&self.held) {
+                if self.held.is_empty() || token != self.held_token {
                     tracing::warn!("a confirmation of deletes that changed since: ignored");
                     return;
                 }
@@ -737,7 +747,7 @@ impl Runner {
                 schedule.asked(Instant::now());
             }
             Command::PutBack { token } => {
-                if token != report::held_token(&self.held) {
+                if self.held.is_empty() || token != self.held_token {
                     tracing::warn!("a put-back of deletes that changed since: ignored");
                     return;
                 }
@@ -827,7 +837,8 @@ impl Runner {
         let notes = self.notes_of(engine, report)?;
         let notes = self.told.fresh(notes);
         self.held = report.held.iter().map(|op| op.node()).collect();
-        let held = report::held(engine, report, &self.held)?;
+        self.held_token = report::held_token(&report.held);
+        let held = report::held(engine, report, &self.held_token)?;
         if report.ops_done > 0 || !notes.is_empty() {
             tracing::info!(
                 "synced in {took:.1?}: {} done, {} remote changes, {} adopted, {} pending",

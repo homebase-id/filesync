@@ -201,14 +201,19 @@ impl Server {
         let (Some(token), Some(path)) = (form.get("token"), path) else {
             return "Nothing was confirmed.".into();
         };
-        if form.get("answer").map(String::as_str) == Some("put_back") {
-            return match control::put_back(&self.paths, &path, token.clone()) {
-                Ok(()) => {
-                    (self.send)(Event::Wake);
-                    "They are being put back.".into()
-                }
-                Err(e) => format!("Not put back: {e}"),
-            };
+        // Each answer by name: a form without one (a page from an older build) does nothing.
+        match form.get("answer").map(String::as_str) {
+            Some("put_back") => {
+                return match control::put_back(&self.paths, &path, token.clone()) {
+                    Ok(()) => {
+                        (self.send)(Event::Wake);
+                        "They are being put back.".into()
+                    }
+                    Err(e) => format!("Not put back: {e}"),
+                };
+            }
+            Some("delete") => {}
+            _ => return "Nothing was done: answer again from the page.".into(),
         }
         match control::confirm_deletes(&self.paths, &path, token.clone()) {
             Ok(()) => {

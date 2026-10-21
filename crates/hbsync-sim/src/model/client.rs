@@ -59,6 +59,9 @@ pub(crate) struct Client {
     pub(crate) last_plan: Vec<Op>,
     /// The nodes whose deletes the user confirmed, until no delete is pending for them.
     pub(crate) confirmed: HashSet<NodeId>,
+    /// The nodes whose removal elsewhere the guard held as every synced file: held until
+    /// answered, as the engine's `guard.wiped` (sync semantics §7).
+    pub(crate) wiped: HashSet<NodeId>,
     /// How the client holds tags.
     pub(crate) os: Os,
     /// How the client's folder sees the drive: the main folder sees it as it is, a role
@@ -136,6 +139,7 @@ impl Client {
             held_back: Vec::new(),
             last_plan: Vec::new(),
             confirmed: HashSet::new(),
+            wiped: HashSet::new(),
             os,
             coords,
             fetched: BTreeMap::new(),

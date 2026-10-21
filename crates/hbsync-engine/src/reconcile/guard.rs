@@ -45,11 +45,10 @@ impl Reconciler<'_> {
                 {
                     remote_files += 1
                 }
-                _ => {
-                    if let Some(node) = op.trashes() {
-                        local_files += files_under(&i.local, node);
-                    }
-                }
+                // A removal elsewhere: a move out of view (`Forget`) keeps the files live on
+                // the drive, so it isn't one.
+                Op::LocalTrash { node, .. } => local_files += files_under(&i.local, *node),
+                _ => {}
             }
         }
         let synced = self.opts.synced_files;
@@ -68,7 +67,13 @@ impl Reconciler<'_> {
         let (gone_locally, gone_remotely) = self.opts.pending_deletes;
         let hold_local = every(local_files) || every(gone_remotely);
         let hold_remote = trips(remote_files) || trips(gone_locally);
-        if !hold_local && !hold_remote {
+        // Once held so, a removal elsewhere stays held until the user answers, whatever the
+        // count says since (one file of it back on the drive, a put back half done).
+        let wiped = &self.opts.wiped;
+        let was_wiped = |node: NodeId| {
+            wiped.contains(&node) || i.base.ancestors(node).iter().any(|a| wiped.contains(a))
+        };
+        if !hold_local && !hold_remote && wiped.is_empty() {
             return;
         }
         let ops = std::mem::take(&mut self.plan.ops);
@@ -76,7 +81,8 @@ impl Reconciler<'_> {
             let held = !confirmed(&op)
                 && match op {
                     Op::RemoteDelete { .. } => hold_remote,
-                    _ => op.trashes().is_some() && hold_local,
+                    Op::LocalTrash { node, .. } => hold_local || was_wiped(node),
+                    _ => false,
                 };
             if held {
                 self.plan.held.push(op);

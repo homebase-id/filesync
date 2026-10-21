@@ -62,6 +62,35 @@ enum Origin {
     Base,
 }
 
+/// The drive's names `plan`'s held removals keep ([`Holds::kept`]), by folder, where
+/// something else here has one of them: none, most of the time.
+fn kept_names(view: &Input, plan: &Plan) -> HashMap<NodeId, HashSet<String>> {
+    let held: HashSet<NodeId> = plan
+        .held
+        .iter()
+        .filter_map(|op| match op {
+            Op::RemoteDelete { node, .. } => Some(*node),
+            _ => None,
+        })
+        .collect();
+    let mut kept: HashMap<NodeId, HashSet<String>> = HashMap::new();
+    for node in &held {
+        if let Some(r) = view.remote.get(*node) {
+            kept.entry(r.parent).or_default().insert(name_key(&r.name));
+        }
+    }
+    kept.retain(|parent, keys| {
+        view.local.children(*parent).any(|c| {
+            !held.contains(&c)
+                && view
+                    .local
+                    .get(c)
+                    .is_some_and(|l| keys.contains(&name_key(&l.name)))
+        })
+    });
+    kept
+}
+
 pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
     let masks = Masks::of(input, masking, &opts.computer, &opts.taken);
     let view = masks.input.as_ref().unwrap_or(input);
@@ -70,6 +99,10 @@ pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
     // Ends: each plan again holds at least one node more.
     let taken = merge::taken_along(view);
     let mut holds = Holds::of(view);
+    // And this device's removals from the drive held for the user (§7): their names there
+    // stay taken meanwhile, so what would take one here gets a numbered name: planned again
+    // once, only when something here has such a name (hardly ever).
+    let mut kept_judged = false;
     let mut plan = loop {
         let r = Reconciler::new(view, opts, masking, &masks, &holds, taken.clone());
         let (plan, waiters, named) = r.run();
@@ -79,7 +112,15 @@ pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
             .filter(|n| !holds.waits.contains(n))
             .collect();
         if new.is_empty() {
-            break plan;
+            if kept_judged {
+                break plan;
+            }
+            kept_judged = true;
+            holds.kept = kept_names(view, &plan);
+            if holds.kept.is_empty() {
+                break plan;
+            }
+            continue;
         }
         for node in new {
             holds.held.extend(held_from(view, node));
@@ -87,25 +128,6 @@ pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
             holds.waits.insert(node);
         }
     };
-    // This device's removals from the drive held for the user (§7): their names there stay
-    // taken meanwhile, and what would take one here gets a numbered name (planned again, once).
-    if holds.kept.is_empty() {
-        for op in &plan.held {
-            if let Op::RemoteDelete { node, .. } = op
-                && let Some(r) = view.remote.get(*node)
-            {
-                holds
-                    .kept
-                    .entry(r.parent)
-                    .or_default()
-                    .insert(name_key(&r.name));
-            }
-        }
-        if !holds.kept.is_empty() {
-            let r = Reconciler::new(view, opts, masking, &masks, &holds, taken.clone());
-            plan = r.run().0;
-        }
-    }
     // What a masked node does to its folder (keeps it, takes its name, leaves with it) is
     // judged with all of the folder's children.
     if let Some(coverage) = &input.coverage {

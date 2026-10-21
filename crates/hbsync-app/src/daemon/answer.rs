@@ -214,8 +214,8 @@ fn control(control: Control, accounts: &[Arc<Account>], daemon: &Daemon) -> Repl
             };
             if runner.status().held_deletes.map(|held| held.token) != Some(token) {
                 return Reply::Refused(
-                    "the held deletes changed since you looked: check them again with \
-                     `hbsync confirm-deletes`"
+                    "the held deletes changed since you looked (or the folder is gone): look \
+                     at them again"
                         .into(),
                 );
             }

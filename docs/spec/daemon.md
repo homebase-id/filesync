@@ -269,14 +269,15 @@ included (service managers restart it then).
   syncs, the status says why, and the loop waits for it to come back. It never creates a
   marker: only `hbsync setup` does.
 - **Held deletes:** the status shows how many (deleted here, to go from the drive; removed
-  elsewhere, every synced file), some paths, and a token naming exactly these deletes, until
-  they are answered (nothing expires). An answer carries the token back: `confirm_deletes`
-  lets exactly them through, `put_back` puts exactly them back (sync semantics §7); when the
-  held deletes changed since, it is refused. The tray asks "You deleted 812 files in Homebase
-  on this computer. Delete them from Homebase and your other devices too?" with **Delete** and
-  **Put them back** (or, every file removed elsewhere, "Another device removed every file
-  here. Remove them here too?" with **Delete here too** and **Put them back**, which restores
-  them on Homebase).
+  elsewhere, every synced file), some paths, and a token naming exactly these deletes and
+  which way each goes, until they are answered (nothing expires; a held removal of every file
+  lasts across restarts). An answer carries the token back: `confirm_deletes` lets exactly
+  them through, `put_back` puts exactly them back (sync semantics §7); when the held deletes
+  changed since, or the folder is gone (nothing is held there meanwhile), it is refused. The
+  tray asks "812 items in Homebase were deleted on this computer (or are newly ignored).
+  Delete them from Homebase and your other devices too?" (or, everything removed elsewhere,
+  "Another device removed everything here. Remove them here too?"), with **Delete** and
+  **Put them back**; each button names its answer, and a form without one does nothing.
 - **Notes:** each conflict and failure is noted once; one that comes back sync after sync (a
   file that can't be read) isn't noted again until it has gone away. An operation left for the
   next plan is noted only when this device can't do it (a name or path it can't hold, access

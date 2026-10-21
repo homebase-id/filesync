@@ -36,5 +36,8 @@ pub const JOURNAL_CURSOR: FolderKey = FolderKey("local.journal_cursor");
 pub const FILTER: FolderKey = FolderKey("filter.fingerprint");
 /// What the last run left out of the drive (sync semantics §12).
 pub const SCOPE: FolderKey = FolderKey("scope.fingerprint");
+/// Nodes whose removal elsewhere the mass-delete guard held as every synced file, until the
+/// user answers (sync semantics §7): their ids, comma-separated.
+pub const WIPED: FolderKey = FolderKey("guard.wiped");
 /// When the purge started emptying the folder's trash (Unix s).
 pub const TRASH_PURGED_SINCE: FolderKey = FolderKey("trash.purged_since");

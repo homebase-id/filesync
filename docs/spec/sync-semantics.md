@@ -254,8 +254,11 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   - **Delete**: they go to the drive's Recently deleted, as any delete does.
   - **Put them back**: the delete here is undone, as the drive has them now: each node's base
     goes (with what is below it in the base), so the drive's live node comes down again
-    (downloads look in `.hbsync/trash` first). What the drive removed or changed since wins: it
-    is never brought back. A newly ignored item stays here and on the drive, masked here.
+    (downloads look in `.hbsync/trash` first); what below it was moved elsewhere here keeps
+    its base, and the move goes on. What the drive removed or changed since wins: it is never
+    brought back. A newly ignored item stays on the drive and is synced here again where the
+    drive has it (masking goes by the drive's path), beside the ignored copy, which stays as
+    it is: that folder's disk use twice, until the user removes one.
   While they are held, their names on the drive stay taken: a new item here of such a name
   syncs under a numbered one (`Projects (conflict 1)`, the dialog says so). Nothing held
   expires: the status and the tray show it until answered.
@@ -263,10 +266,14 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   Removals made elsewhere (another computer, the phone, the file browser, another app) are
   followed here without asking: into `.hbsync/trash`, and the drive keeps them in Recently
   deleted for `keep_deleted_days`. One exception: removals that would take every synced file
-  here at once, and more than the same `max(50, …)` (a broken device, a wiped drive), are held:
-  **Delete here too**, or **Put them back**: kept here and restored on the drive from Recently
-  deleted (one write each), or, gone for good there, uploaded again from here as they are.
-  Every device then has them back.
+  here at once, and more than the same `max(50, …)` (a broken device, a wiped drive), are held
+  (a move elsewhere out of this device's view isn't a removal: the drive keeps it live). Once
+  held so, they stay held until answered, whatever the count says since (one of them back on
+  the drive, a put back half done), across restarts (`guard.wiped`): **Delete**, or **Put
+  them back**: kept here and restored on the drive from Recently deleted, with what in them
+  was removed apart before (a feed read, then a restore per item), or, gone for good there,
+  uploaded again from here as they are. Every device then has them back. What a failure
+  leaves is still held, and shown again.
 
   A confirmation lasts while its removal is pending, or waits for a file in it not hashed yet
   (§6.3: what was in such a folder, sent apart meanwhile, goes with it); done or undone, it is
@@ -544,8 +551,8 @@ An item inside a filtered folder is filtered too.
 1. **Local.** The walk neither reports nor enters filtered entries (nothing is hashed), and the
    watcher drops their events. A synced item that becomes filtered (a rule was added, or it was
    moved into an ignored folder) looks deleted: it leaves the drive and the other devices
-   (their trash), and stays here. The mass-delete guard applies (§7): held over its limit,
-   put back it stays here and on the drive, masked here.
+   (their trash), and stays here. The mass-delete guard applies (§7): held over its limit;
+   put back, it stays on the drive and is synced here again where the drive has it.
 2. **Remote.** A remote node whose path is filtered on this device is masked with its subtree:
    never downloaded, and never deleted by this device, with one exception: a node this device
    synced at a place it now filters (a rule was added) is leaving per rule 1, and is deleted
