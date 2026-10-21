@@ -303,9 +303,11 @@ impl Reconciler<'_> {
             .iter()
             .filter_map(|n| self.merged.get(*n).map(|s| s.parent))
             .collect();
-        // The drive's names of what waits for a hash elsewhere here (`held`): held for it.
+        // The drive's names of what waits for a hash elsewhere here (`held`, and this plan's
+        // waiters): held for it.
         let mut drive_held: HashMap<(NodeId, String), Vec<NodeId>> = HashMap::new();
-        for &n in self.held {
+        let holding: Vec<NodeId> = self.held.iter().chain(&self.waiters).copied().collect();
+        for n in holding {
             let Some(r) = self
                 .input
                 .remote
@@ -356,35 +358,66 @@ impl Reconciler<'_> {
                 };
                 // A name what waits for a hash holds, here or on the drive: what would take it
                 // waits too, renamed never (§6.3).
-                let on_drive = drive_held.get(&(parent, key.clone()));
-                let holders: Vec<NodeId> = on_drive
+                // Held for its drive name by another than the group's own (a held folder whose
+                // name differs from the drive's in case only holds no name against itself).
+                let on_drive: Vec<NodeId> = drive_held
+                    .get(&(parent, key.clone()))
                     .into_iter()
                     .flatten()
+                    .copied()
+                    .filter(|n| !group.contains(n))
+                    .collect();
+                let holders: Vec<NodeId> = on_drive
+                    .iter()
                     .copied()
                     .chain(group.iter().copied().filter(|n| self.holds_name(*n)))
                     .collect();
                 // A clash with what waits for a hash: everything planned in it waits, held
-                // or not (a held folder made or tagged too: never onto a name taken).
-                if !holders.is_empty() && (group.len() > 1 || on_drive.is_some()) {
+                // or not (a held folder made or tagged too: never onto a name taken); what
+                // isn't planned stays as it is, and what is in it with it.
+                if !holders.is_empty() && (group.len() > 1 || !on_drive.is_empty()) {
                     // What waits for the name: this plan's, or an earlier one's (`waits`).
                     let mut waited = group.iter().any(|n| self.waits.contains(n));
-                    for n in group {
+                    let planned: Vec<NodeId> = group
+                        .into_iter()
+                        .filter(|n| self.scope.contains(n))
+                        .collect();
+                    for n in planned {
                         if !self.wait_for_name(n) {
                             continue;
                         }
                         waited = true;
-                        // Held where it is: in this folder, under another name, it holds that.
-                        let Some(held) = self.merged.get(n).filter(|h| h.parent == parent) else {
-                            continue;
-                        };
-                        let to = name_key(&held.name);
-                        if to != key {
-                            if let Some(g) = by_key.get_mut(&key) {
-                                g.retain(|m| *m != n);
+                        // Held where it is: under another name in this folder, it holds that
+                        // (and its drive name, if another).
+                        let remote = self
+                            .input
+                            .remote
+                            .get(n)
+                            .filter(|_| !self.taken.contains(&n));
+                        let mut names = Vec::new();
+                        if let Some(held) = self.merged.get(n) {
+                            if remote.is_some_and(|r| !r.same_place(held)) {
+                                let r = remote.unwrap_or(held);
+                                drive_held
+                                    .entry((r.parent, name_key(&r.name)))
+                                    .or_default()
+                                    .push(n);
+                                if r.parent == parent {
+                                    names.push(name_key(&r.name));
+                                }
                             }
-                            by_key.entry(to.clone()).or_default().push(n);
-                            queue.push_back(to);
+                            if held.parent == parent {
+                                let to = name_key(&held.name);
+                                if to != key {
+                                    if let Some(g) = by_key.get_mut(&key) {
+                                        g.retain(|m| *m != n);
+                                    }
+                                    by_key.entry(to.clone()).or_default().push(n);
+                                    names.push(to);
+                                }
+                            }
                         }
+                        queue.extend(names.into_iter().filter(|k| *k != key));
                     }
                     if waited {
                         self.name_waits.extend(holders);
@@ -405,7 +438,8 @@ impl Reconciler<'_> {
                     (!self.deferred.contains(n), arriving, *n)
                 });
                 for loser in group.into_iter().skip(keep) {
-                    if self.deferred.contains(&loser) {
+                    // Never what waits for a hash, or for a name (§6.3).
+                    if self.deferred.contains(&loser) || self.holds_name(loser) {
                         continue;
                     }
                     let Some(mut state) = self.merged.get(loser).cloned() else {

@@ -181,6 +181,13 @@ impl Reconciler<'_> {
     pub(super) fn merge_node(&mut self, node: NodeId) {
         let i = self.input;
         if self.held_as_is(node) {
+            // Edited on both sides, held for its copy's name: its conflict copy waits, told so.
+            if self.waits.contains(&node)
+                && content_changed(self.local_change(node))
+                && content_changed(self.remote_change(node))
+            {
+                self.plan.conflicts.push(Conflict::CopyWaits { node });
+            }
             self.hold(node);
             return;
         }

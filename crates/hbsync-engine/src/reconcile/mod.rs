@@ -286,7 +286,8 @@ impl<'a> Reconciler<'a> {
         is_unhashed_file(self.input, node) || self.waits.contains(&node)
     }
 
-    /// The files here not hashed yet that something else waits for ([`Plan::waiting`]).
+    /// The files here not hashed yet that something else waits for ([`Plan::waiting`]), by
+    /// their ids in the store.
     fn waiting(&self) -> Vec<NodeId> {
         let waits = |n: &NodeId| self.deferred.contains(n) || self.name_waits.contains(n);
         self.held_by
@@ -296,7 +297,11 @@ impl<'a> Reconciler<'a> {
                     || self.name_waits.contains(node)
                     || on_paths.iter().any(waits)
             })
-            .map(|(node, _)| *node)
+            // As the store knows it: a detached item's old id (§10).
+            .map(|(node, _)| {
+                let old = self.masks.detached.iter().find(|(_, new)| **new == *node);
+                old.map_or(*node, |(old, _)| *old)
+            })
             .collect()
     }
 }

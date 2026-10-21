@@ -200,6 +200,56 @@ impl Sim {
                 self.ledger.narrow_differs(|| what);
             }
         }
+        // What waits for a hash, checked independently (sync semantics §6.3): no plan touches a
+        // file here not hashed yet, or moves, renames or deletes a folder it is in, on any side.
+        self.ledger.moved_what_waits(|| {
+            let mut held: HashSet<NodeId> = HashSet::new();
+            let mut queue: Vec<NodeId> = input
+                .local_unhashed
+                .iter()
+                .copied()
+                .filter(|n| input.local.contains(*n))
+                .collect();
+            while let Some(n) = queue.pop() {
+                for tree in [&input.local, &remote, &input.base] {
+                    if let Some(s) = tree.get(n)
+                        && !s.parent.is_root()
+                        && held.insert(s.parent)
+                    {
+                        queue.push(s.parent);
+                    }
+                }
+            }
+            let unhashed: HashSet<NodeId> = input
+                .local_unhashed
+                .iter()
+                .copied()
+                .filter(|n| input.local.contains(*n))
+                .collect();
+            plan.ops
+                .iter()
+                .find(|op| {
+                    let node = op.node();
+                    let moved = |t: &Tree, parent: &NodeId, name: &str| {
+                        t.get(node)
+                            .is_some_and(|s| s.parent != *parent || s.name != name)
+                    };
+                    // A detach only gives the item here another id (§10): it stays as it is.
+                    (unhashed.contains(&node) && !matches!(op, Op::LocalDetach { .. }))
+                        || (held.contains(&node)
+                            && match op {
+                                Op::LocalTrash { .. } | Op::RemoteDelete { .. } => true,
+                                Op::LocalMove { parent, name, .. } => {
+                                    moved(&input.local, parent, name)
+                                }
+                                Op::RemoteUpdate { parent, name, .. } => {
+                                    moved(&remote, parent, name)
+                                }
+                                _ => false,
+                            })
+                })
+                .map(|op| format!("{}: {op:?} moves what waits for a hash", client.name))
+        });
         // The guard's rule, checked independently: no plan deletes more files on a side than
         // the limit (or every file) without the user's confirmation.
         if let Some(min) = self.guard {
@@ -213,12 +263,25 @@ impl Sim {
                         .count()
                 };
                 let (mut deleted, mut trashed) = (0, 0);
-                // What was in a confirmed folder whose delete waits for a hash is confirmed.
-                let waits: HashSet<NodeId> = plan
-                    .delete_waits
+                // What was in a confirmed folder whose delete waits for a hash is confirmed:
+                // one synced, gone on a side, holding a file here not hashed yet.
+                let unhashed: Vec<NodeId> = input
+                    .local_unhashed
                     .iter()
                     .copied()
-                    .filter(|n| confirmed.contains(n))
+                    .filter(|n| input.local.contains(*n))
+                    .collect();
+                let waits: HashSet<NodeId> = confirmed
+                    .iter()
+                    .copied()
+                    .filter(|f| {
+                        input.base.contains(*f)
+                            && !(input.local.contains(*f) && remote.contains(*f))
+                            && unhashed.iter().any(|u| {
+                                input.local.ancestors(*u).contains(f)
+                                    || input.base.ancestors(*u).contains(f)
+                            })
+                    })
                     .collect();
                 let unconfirmed = |op: &&Op| {
                     let node = op.node();
