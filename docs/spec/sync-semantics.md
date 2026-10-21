@@ -124,9 +124,10 @@ When both sides edited a file to different content:
   computer, it is the same copy. Each computer makes its own copy: two computers with the same
   bytes against the same version give two copies, each uploaded (rare, and accepted). A state
   DB copied to a second computer (a backup restored there) gives both the same id: accepted.
-- A copy that can't be placed yet (its folder waits for its own parent, §6.3) isn't made: the
-  node waits with it, its conflicts (the edits, a move) aren't reported yet, and the folder's
-  notes say that a conflict copy is waiting for its folder.
+- A copy that can't be placed yet (its folder waits for its own parent, or the node, or a
+  folder it or its copy is in, waits for a name what waits for a hash holds, §6.3) isn't made:
+  the node waits with it, its conflicts (the edits, a move) aren't reported yet, and the
+  folder's notes say that a conflict copy is waiting.
 
 ## 6. Invariants on the merged tree
 

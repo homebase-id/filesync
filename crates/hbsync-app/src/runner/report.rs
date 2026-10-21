@@ -289,7 +289,7 @@ fn describe_conflict(engine: &mut Engine, c: &Conflict) -> Result<String, StateE
             path(*node)?
         ),
         Conflict::CopyWaits { node } => format!(
-            "{}: edited on two devices; a conflict copy is waiting for its folder",
+            "{}: edited on two devices; a conflict copy is waiting to be made",
             path(*node)?
         ),
     })

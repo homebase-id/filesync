@@ -231,7 +231,7 @@ impl Sim {
                 true => &[(&input.local, false), (&remote, true), (&input.base, false)],
                 false => &[(&input.local, false)],
             };
-            for (tree, on_drive) in sides {
+            for (i, (tree, on_drive)) in sides.iter().enumerate() {
                 if *on_drive && out_of_view.contains(&n) {
                     continue;
                 }
@@ -240,14 +240,21 @@ impl Sim {
                     && !(*on_drive && out_of_view.contains(&s.parent))
                     && held.insert(s.parent)
                 {
-                    queue.push((s.parent, !detached.contains_key(&s.parent)));
+                    // Reached here, a detached folder is its new item, here only; reached
+                    // through the drive or the base, its old node, on every side.
+                    let here = i == 0;
+                    queue.push((s.parent, !(here && detached.contains_key(&s.parent))));
                 }
             }
         }
+        // A detached folder held under both its ids.
         let held: HashSet<NodeId> = held
-            .into_iter()
-            .map(|n| detached.get(&n).copied().unwrap_or(n))
+            .iter()
+            .filter_map(|n| detached.get(n).copied())
+            .chain(held.iter().copied())
             .collect();
+        let old_of: HashMap<NodeId, NodeId> =
+            detached.iter().map(|(old, new)| (*new, *old)).collect();
         // No plan touches a file here not hashed yet, or moves, renames or deletes what holds
         // it, on any side.
         self.ledger.moved_what_waits(|| {
@@ -259,8 +266,10 @@ impl Sim {
                 .iter()
                 .find(|op| {
                     let node = op.node();
+                    // A detached item's place here is its old node's.
+                    let at = old_of.get(&node).copied().unwrap_or(node);
                     let moved = |t: &Tree, parent: &NodeId, name: &str| {
-                        t.get(node)
+                        t.get(at)
                             .is_some_and(|s| s.parent != *parent || s.name != name)
                     };
                     // A detach only gives the item here another id (§10): it stays as it is.

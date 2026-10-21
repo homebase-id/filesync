@@ -86,19 +86,20 @@ impl Reconciler<'_> {
     }
 
     /// Whether `node`'s merge would make a conflict copy: a file edited on both sides, not
-    /// alike ([`Reconciler::merge_both`]).
+    /// alike, as [`Reconciler::merge_both`] decides.
     fn would_fork(&self, node: NodeId) -> bool {
         let (Some(l), Some(r)) = (self.local_state(node), self.input.remote.get(node)) else {
             return false;
         };
-        let same = match (&l.content, &r.content) {
-            (Some(lc), Some(rc)) => lc.hash == rc.hash && lc.executable == rc.executable,
+        let edited = |c: Change| match c {
+            Change::Changed { edited, .. } => edited,
+            Change::Created => true,
             _ => false,
         };
         l.kind == NodeKind::File
-            && content_changed(self.local_change(node))
-            && content_changed(self.remote_change(node))
-            && !same
+            && edited(self.local_change(node))
+            && edited(self.remote_change(node))
+            && !same_edit(&l, r)
     }
 
     /// Whether held folder `node` may go to `target` ([`super::held`]): it stays where it is
@@ -322,10 +323,7 @@ impl Reconciler<'_> {
         }
         let mut origin = Origin::Remote;
         if l.kind == NodeKind::File {
-            let same_edit = match (&l.content, &r.content) {
-                (Some(lc), Some(rc)) => lc.hash == rc.hash && lc.executable == rc.executable,
-                _ => false,
-            };
+            let same_edit = same_edit(l, r);
             if l_edited && r_edited && !same_edit {
                 // Keep both: the remote version keeps the node, the local bytes become a copy.
                 let base_version = self.input.base_extra.get(&node).and_then(|e| e.version);
@@ -350,5 +348,14 @@ impl Reconciler<'_> {
             }
         }
         (Some(target), origin)
+    }
+}
+
+/// Whether both sides hold the same bytes, executable alike: an edit on both sides that isn't a
+/// conflict.
+fn same_edit(l: &NodeState, r: &NodeState) -> bool {
+    match (&l.content, &r.content) {
+        (Some(lc), Some(rc)) => lc.hash == rc.hash && lc.executable == rc.executable,
+        _ => false,
     }
 }
