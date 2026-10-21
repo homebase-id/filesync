@@ -203,6 +203,14 @@ impl Command {
             None => Command::Resume,
         }
     }
+
+    /// The pause it sets: `Some` for a pause, `None` for anything else.
+    pub(crate) fn paused(&self) -> Option<Pause> {
+        match self {
+            Command::Pause(pause) => Some(*pause),
+            _ => None,
+        }
+    }
 }
 
 impl Handle {

@@ -79,8 +79,10 @@ struct Shown {
     /// The drive's rows it can't read that were told (a hash of each row's version and why:
     /// 8 bytes a row), each once while the daemon runs.
     rows_told: HashSet<u64>,
-    /// Paused (kept in the config too): a runner starts paused.
-    paused: Option<Pause>,
+    /// The last pause command its runners were told (the pause is kept in the config too): a
+    /// runner starts paused while it pauses, and one started meanwhile is told it
+    /// ([`Shown::missed`]).
+    pausing: Command,
     /// Waiting for the credentials or the identity; `None` once its runners run (taken as
     /// they start: there are none before).
     waiting: Option<Waiting>,
@@ -113,6 +115,18 @@ impl Shown {
             r.handle.send(command.clone());
         }
         Ok(())
+    }
+
+    /// Its pause.
+    fn paused(&self) -> Option<Pause> {
+        self.pausing.paused()
+    }
+
+    /// What a runner started `paused` missed: the pause command sent since, if it changed the
+    /// pause. A timed pause that ran out stays [`Command::PauseEnded`]: not the user's Resume,
+    /// which also asks again what the drive refused.
+    fn missed(&self, paused: Option<Pause>) -> Option<Command> {
+        (self.paused() != paused).then(|| self.pausing.clone())
     }
 }
 
@@ -153,7 +167,7 @@ impl Account {
             shown: Mutex::new(Shown {
                 status: AccountStatus::new(identity),
                 rows_told: HashSet::new(),
-                paused,
+                pausing: Command::pausing(paused),
                 waiting: Some(Waiting {
                     roots: vec![root.clone()],
                     state: State::Starting,
@@ -221,7 +235,7 @@ impl Account {
             Some(waiting) => waiting
                 .roots
                 .iter()
-                .map(|root| waiting.status(root, shown.paused))
+                .map(|root| waiting.status(root, shown.paused()))
                 .collect(),
         };
         (shown.status.clone(), folders)
@@ -246,21 +260,21 @@ impl Account {
 
     /// Pauses (`Some`) or resumes its folders, also before they run.
     pub(super) fn pause(&self, pause: Option<Pause>) {
-        self.set_pause(pause, Command::pausing(pause));
+        self.set_pause(Command::pausing(pause));
     }
 
     /// Its timed pause ran out: its folders sync again (no resume asked by the user).
     pub(super) fn pause_ended(&self) {
-        self.set_pause(None, Command::PauseEnded);
+        self.set_pause(Command::PauseEnded);
     }
 
-    /// Holds `pause`, and tells its folders with `command`.
-    fn set_pause(&self, pause: Option<Pause>, command: Command) {
+    /// Holds the pause `command` sets, and tells its folders.
+    fn set_pause(&self, command: Command) {
         {
             let mut shown = lock(&self.shown);
-            shown.paused = pause;
-            // Before they run, they start as `paused` says.
-            let _ = shown.send(&self.identity, &command);
+            shown.pausing = command;
+            // Before they run, they start as it says.
+            let _ = shown.send(&self.identity, &shown.pausing);
         }
         self.wake();
         self.changed.raise();
@@ -539,6 +553,29 @@ mod tests {
     use super::*;
     use hbsync_engine::Drive;
     use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
+
+    /// A runner started while the pause changed is told the command that changed it: a timed
+    /// pause that ran out as its end, not as the user's Resume (which would also ask a refusing
+    /// identity again).
+    #[test]
+    fn a_runner_started_meanwhile_is_told_the_pause_command_sent() {
+        let home = tempfile::tempdir().expect("a temporary folder");
+        let paths = Paths::under(home.path());
+        let root = Root::main(&"a.example".into(), &home.path().join("Homebase"));
+        let timed = Pause::ending_at(hbsync_types::unix_now() + 60);
+        let (account, _requests) = Account::new(&paths, &root, Some(timed), Arc::default());
+        let missed = |started| lock(&account.shown).missed(started);
+        assert_eq!(missed(Some(timed)), None, "nothing changed");
+
+        account.pause_ended();
+        assert_eq!(missed(Some(timed)), Some(Command::PauseEnded));
+        assert_eq!(missed(None), None);
+
+        account.pause(Some(Pause::UNTIL_RESUMED));
+        assert_eq!(missed(None), Some(Command::Pause(Pause::UNTIL_RESUMED)));
+        account.pause(None);
+        assert_eq!(missed(Some(timed)), Some(Command::Resume));
+    }
 
     /// Emptying Recently deleted as listed is refused in the answer for a listing of another DB
     /// (the identity's, made again) or one this DB never gave; one it gave is taken.
