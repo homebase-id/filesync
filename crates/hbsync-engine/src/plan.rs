@@ -508,9 +508,9 @@ pub struct Plan {
     pub ops: Vec<Op>,
     /// Deletes held by the mass-delete guard.
     pub held: Vec<Op>,
-    /// The files each of `held` takes, by its node, as the guard counted them: a file removed
-    /// from the drive, the files in what is trashed here.
-    pub held_takes: BTreeMap<NodeId, usize>,
+    /// The files each of `held` takes, by its node, as the guard counted them: (removed from
+    /// the drive, trashed here).
+    pub held_takes: BTreeMap<NodeId, (usize, usize)>,
     pub conflicts: Vec<Conflict>,
     /// Dirty nodes that need nothing (both sides and the base agree): the dirty flag can go.
     pub clean: Vec<NodeId>,

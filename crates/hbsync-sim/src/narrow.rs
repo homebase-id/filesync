@@ -7,7 +7,7 @@
 //!
 //! [`Sim::with_narrow_check`]: crate::Sim::with_narrow_check
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use hbsync_engine::FolderCtx;
@@ -116,11 +116,10 @@ impl Sim {
                 }
             };
             let all = view::plan_narrow(&mut db, &dirty, folder, with(opts))?;
-            let (out, nodes) = held::parked(&all, &dirty);
+            let (out, nodes) = held::out_of_dirty(&all, &dirty);
             if out.is_empty() {
                 return Ok(None);
             }
-            let nodes: HashSet<NodeId> = nodes.into_iter().collect();
             let rest: Vec<NodeId> = dirty
                 .iter()
                 .copied()

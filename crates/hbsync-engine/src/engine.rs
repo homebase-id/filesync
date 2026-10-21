@@ -581,7 +581,7 @@ impl Engine {
         // Once more only if a plan reached the held deletes out of the dirty set: then none
         // are held out for the rest of the sync.
         let mut holding = true;
-        let after = loop {
+        let (swept, after) = loop {
             match self.sweep(date, report, holding)? {
                 Some(after) => break after,
                 None => holding = false,
@@ -589,7 +589,6 @@ impl Engine {
         };
         // A sync cut short by the round limit leaves the rest of the sweep to the next one (the
         // node it stopped at may have gone clean meanwhile; the page query doesn't need it).
-        let (swept, after) = after;
         self.sweep_after = after;
         report.pending = self.db.read(|s| s.pending_count())?;
         report.unfinished = !swept
@@ -782,6 +781,7 @@ impl Engine {
     /// Puts the held deletes out of the dirty set back into it ([`crate::held`]): planned
     /// again, all of them.
     fn plan_held_again(&mut self) -> Result<(), StateError> {
+        // Should the write fail: at the next sync.
         self.held.plan_again = true;
         self.db.write(|s| s.folder().unhold_deletes().map(drop))?;
         self.held = HeldOut::default();
@@ -980,10 +980,9 @@ impl Engine {
         // Held till answered: out of the dirty set meanwhile, not planned again.
         let clean: std::collections::HashSet<NodeId> = plan.clean.iter().copied().collect();
         let (out, held_out) = match holding {
-            true => crate::held::parked(&plan, &dirty),
+            true => crate::held::out_of_dirty(&plan, &dirty),
             false => Default::default(),
         };
-        let held_out: std::collections::HashSet<NodeId> = held_out.into_iter().collect();
         self.db.write(|s| {
             for m in marks {
                 if clean.contains(&m.node) {
@@ -994,14 +993,14 @@ impl Engine {
             }
             Ok(())
         })?;
-        let (here, there) = crate::held::files(&plan, out.iter().copied());
-        self.held.files.0 += here;
-        self.held.files.1 += there;
-        self.held.ops.extend(out.into_iter().cloned());
-        if !held_out.is_empty() {
+        if !out.is_empty() {
+            let (here, there) = crate::held::files(&plan, out.iter().copied());
+            self.held.files.0 += here;
+            self.held.files.1 += there;
+            self.held.ops.extend(out.into_iter().cloned());
             self.held.pending = None;
+            self.held.nodes.extend(held_out);
         }
-        self.held.nodes.extend(held_out);
         report.conflicts.extend(plan.conflicts);
         let mut ops = plan.ops;
         let case_insensitive = self.cfg.folder.case_insensitive;

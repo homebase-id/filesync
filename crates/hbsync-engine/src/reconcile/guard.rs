@@ -89,8 +89,8 @@ impl Reconciler<'_> {
                     _ => false,
                 };
             if held {
-                if let Some((here, there)) = takes(&op) {
-                    self.plan.held_takes.insert(op.node(), here + there);
+                if let Some(takes) = takes(&op) {
+                    self.plan.held_takes.insert(op.node(), takes);
                 }
                 self.plan.held.push(op);
             } else {
