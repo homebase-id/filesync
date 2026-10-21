@@ -279,6 +279,38 @@ fn a_new_file_id_at_a_path_is_an_edit_unless_a_synced_file_was_moved_onto_it() -
     Ok(())
 }
 
+/// A synced file moved over another, a folder then made where it was: it left its path (a
+/// folder is no file there), so it keeps its node at the new name, and the file that was there
+/// is gone. Read as an edit there, its bytes went up twice: as the node the other device moved
+/// elsewhere meanwhile, and as this device's edit of the file it replaced (a milestone seed's
+/// copies, `randomized_wrong_not_theres`, seed 6526174988904104872).
+#[test]
+fn a_file_moved_over_another_keeps_its_node_when_a_folder_takes_its_place() -> R {
+    let mut f = Fixture::new()?;
+    if !f.opts.fs_family.has_stable_file_ids() {
+        return Ok(());
+    }
+    f.write("b", b"b")?;
+    f.write("c", b"c")?;
+    f.scan()?;
+    f.synced()?;
+    let (b, c) = (f.node("b")?, f.node("c")?);
+    let root = f.root().to_path_buf();
+    // Held open: no file made after it gets the id it frees.
+    #[cfg(unix)]
+    let held = fs::File::open(root.join("c"))?;
+    fs::rename(root.join("b"), root.join("c"))?;
+    fs::create_dir(root.join("b"))?;
+    let (report, _) = f.scan()?;
+    #[cfg(unix)]
+    drop(held);
+    assert_eq!(f.node("c")?, b, "c holds b");
+    assert!(f.db.read(|s| s.local_by_node(c))?.is_none(), "c is gone");
+    assert_ne!(f.node("b")?, b, "the folder is new");
+    assert_eq!((report.moved, report.removed), (1, 1), "{report:?}");
+    Ok(())
+}
+
 #[test]
 fn folder_rename_dirties_only_the_folder() -> R {
     let mut f = Fixture::new()?;

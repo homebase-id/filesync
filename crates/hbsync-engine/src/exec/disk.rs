@@ -196,19 +196,36 @@ impl<'a> Disk<'a> {
         node: NodeId,
     ) -> Result<io::Result<PathBuf>, StateError> {
         let trash_dir = layout::trash_dir(self.root);
-        // Its own entry folder, named by when and by the node (one name: a native path).
-        let dir = trash_dir.join(layout::trash_entry(hbsync_types::unix_now(), node));
         // The trash folder too, made with the first item in it.
         db.changed(&trash_dir);
-        if let Err(e) = put_ordered(db, &dir, |dir| fs::create_dir_all(dir))? {
-            return Ok(Err(e));
-        }
+        // Its own entry folder, named by when and by the node (one name: a native path). The
+        // node trashed again within that second (the old version a download kept, then the
+        // file itself, deleted) finds its entry taken: it takes the next second's, so the
+        // newer stays the newer. Only the entry itself taken counts (`Ok(false)`).
+        let mut at = hbsync_types::unix_now();
+        let dir = loop {
+            let dir = trash_dir.join(layout::trash_entry(at, node));
+            let made = put_ordered(db, &dir, |dir| match fs::create_dir(dir) {
+                Ok(()) => Ok(true),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    fs::create_dir_all(dir).map(|()| true)
+                }
+                Err(e) => Err(e),
+            })?;
+            match made {
+                Ok(true) => break dir,
+                Ok(false) => at += 1,
+                Err(e) => return Ok(Err(e)),
+            }
+        };
         let to = dir.join(path.name().unwrap_or("item"));
         let moved = rename_ordered(db, &self.abs(path), &to)?.map(|()| to);
-        if moved.is_ok()
-            && let Some(trash) = &mut self.trash
-        {
-            trash.add(node, dir);
+        match (&moved, &mut self.trash) {
+            (Ok(_), Some(trash)) => trash.add(node, dir),
+            (Ok(_), None) => {}
+            // Its entry, empty, goes (best effort: the purge takes one left).
+            (Err(_), _) => drop(fs::remove_dir(&dir)),
         }
         Ok(moved)
     }
