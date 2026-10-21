@@ -123,6 +123,9 @@ const SCHEMA: &str = r#"
     CREATE TABLE dirty (
         folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
         id     INTEGER NOT NULL,
+        seq    INTEGER NOT NULL DEFAULT 0,            -- its mark's version, moved on by a change
+                                                      -- of the drive's picture: a round clears
+                                                      -- only the one it read
         PRIMARY KEY (id, folder)
     ) WITHOUT ROWID;
 
@@ -342,6 +345,8 @@ const MIGRATIONS: &[&str] = &[
         node        BLOB,                             -- its uniqueId and groupId, where they read
         parent      BLOB
     ) WITHOUT ROWID;",
+    // 18: each dirty mark's version: a plan clears only the marks it read.
+    "ALTER TABLE dirty ADD COLUMN seq INTEGER NOT NULL DEFAULT 0;",
 ];
 
 /// The version this client makes and reads.

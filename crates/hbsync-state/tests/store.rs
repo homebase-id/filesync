@@ -205,6 +205,44 @@ fn dirty_and_kv() -> R {
     Ok(())
 }
 
+/// A round clears only the dirty marks it read: a node whose drive state changes after the
+/// round read its mark (another engine's pull) stays dirty, though it was dirty already; one
+/// the folder marked itself, or not marked since, is cleared.
+#[test]
+fn a_clear_keeps_a_mark_a_change_moved_on() -> R {
+    use hbsync_state::MirrorRow;
+    let mut db = StateDb::open_in_memory()?;
+    let (a, b) = (NodeId::new(), NodeId::new());
+    let file_id = RemoteFileId(Uuid::new_v4());
+    let at = |v: u128| MirrorRow {
+        file_id,
+        version: VersionTag(Uuid::from_u128(v)),
+        node: a,
+        parent: NodeId::ROOT,
+        name: "a".into(),
+        kind: NodeKind::Folder,
+        file: None,
+        content_extra: None,
+        token: None,
+        changed_at: None,
+    };
+    db.write(|s| {
+        s.account().put_live(&at(1))?;
+        s.folder().mark_dirty(b)
+    })?;
+    let (read, _) = db.read(|s| s.dirty_marks(None, 10))?;
+    db.write(|s| {
+        s.account().put_live(&at(2))?;
+        s.folder().mark_dirty(b)
+    })?;
+    db.write(|s| read.iter().try_for_each(|m| s.folder().clear_mark(*m)))?;
+    assert_eq!(db.read(|s| s.dirty_nodes(10))?, vec![a], "a changed since");
+    let (read, _) = db.read(|s| s.dirty_marks(None, 10))?;
+    db.write(|s| read.iter().try_for_each(|m| s.folder().clear_mark(*m)))?;
+    assert_eq!(db.read(|s| s.dirty_count())?, 0);
+    Ok(())
+}
+
 #[test]
 fn dirty_pages_visit_every_node_once() -> R {
     let mut db = StateDb::open_in_memory()?;
@@ -213,8 +251,8 @@ fn dirty_pages_visit_every_node_once() -> R {
     let mut seen: Vec<NodeId> = Vec::new();
     let mut after = None;
     loop {
-        let (page, next) = db.read(|s| s.dirty_page(after, 5))?;
-        seen.extend(&page);
+        let (page, next) = db.read(|s| s.dirty_marks(after, 5))?;
+        seen.extend(page.iter().map(|m| m.node));
         after = next;
         if page.len() < 5 {
             break;
@@ -223,12 +261,14 @@ fn dirty_pages_visit_every_node_once() -> R {
     // Id order: the order the nodes were first seen.
     assert_eq!(seen, nodes);
     // A cursor whose node went clean, and was forgotten entirely, still works.
-    let (_, at_10) = db.read(|s| s.dirty_page(None, 11))?;
+    let (_, at_10) = db.read(|s| s.dirty_marks(None, 11))?;
     db.write(|s| {
         s.folder().clear_dirty(nodes[10])?;
         s.account().collect_nodes()
     })?;
-    assert_eq!(db.read(|s| s.dirty_page(at_10, 2))?.0, nodes[11..13]);
+    let (page, _) = db.read(|s| s.dirty_marks(at_10, 2))?;
+    let page: Vec<NodeId> = page.iter().map(|m| m.node).collect();
+    assert_eq!(page, nodes[11..13]);
     Ok(())
 }
 
@@ -243,7 +283,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 17);
+    assert_eq!(db.schema_version()?, 18);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -1113,7 +1153,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 17);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 18);
     Ok(())
 }
 

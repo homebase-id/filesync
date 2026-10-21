@@ -327,7 +327,10 @@ expected fingerprint is treated as done.
   failure, and the rest run again after the pause.
 - **No starvation.** The dirty set is planned in pages, in node id order, swept round after
   round and across syncs, so nodes that stay dirty (held, deferred, failing) can't keep the
-  rest waiting. A sync ends after a full sweep in which nothing was done.
+  rest waiting. A sync ends after a full sweep in which nothing was done. A round clears only
+  the marks it read with its page (a change of the drive's picture moves a mark's version on):
+  a node another engine's pull or an announcement marks again meanwhile stays dirty, though it
+  was dirty already, and the change it brought is planned at the next sweep.
 - **Names that can't be spelled** locally (a Windows device name at the length limit) are
   skipped and reported, not retried; conflict names are shortened to fit 255 bytes.
 - **Conflict copies are write-ahead.** The fork is recorded before the rename and the record

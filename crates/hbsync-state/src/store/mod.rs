@@ -25,6 +25,7 @@ use crate::{Result, StateError};
 
 mod base;
 mod dirty;
+pub use dirty::Mark;
 mod folders;
 mod kv;
 mod local;
@@ -181,7 +182,7 @@ pub struct MirrorFile {
     pub executable: bool,
 }
 
-/// Where a sweep over the dirty set stopped (see [`ReadTx::dirty_page`]).
+/// Where a sweep over the dirty set stopped (see [`ReadTx::dirty_marks`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DirtyCursor(i64);
 

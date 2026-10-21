@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use hbsync_local::{CatchUp, Debounce, LocalObserver, ScanOptions, ScanReport, rescan_dirs, scan};
 use hbsync_remote::Remote;
-use hbsync_state::{DirtyCursor, ReadTx, StateDb, StateError, keys};
+use hbsync_state::{DirtyCursor, Mark, ReadTx, StateDb, StateError, keys};
 use hbsync_types::activity::Synced;
 use hbsync_types::{NodeId, unix_now_ms};
 
@@ -45,6 +45,9 @@ pub struct EngineConfig {
     /// from whole folders ([`view::build_input`]).
     #[cfg(feature = "testkit")]
     pub check_narrow: bool,
+    /// Tests: called between a round's plan and its clearing of the dirty marks.
+    #[cfg(feature = "testkit")]
+    pub after_plan: Option<crate::testkit::AfterPlan>,
 }
 
 impl EngineConfig {
@@ -60,6 +63,8 @@ impl EngineConfig {
             allow_mass_delete: false,
             #[cfg(feature = "testkit")]
             check_narrow: false,
+            #[cfg(feature = "testkit")]
+            after_plan: None,
         }
     }
 }
@@ -454,7 +459,7 @@ impl Engine {
                 report.stopped = true;
                 break;
             }
-            let (dirty, next) = self.db.read(|s| s.dirty_page(after, self.cfg.batch))?;
+            let (dirty, next) = self.db.read(|s| s.dirty_marks(after, self.cfg.batch))?;
             if !dirty.is_empty() {
                 report.rounds += 1;
                 let done_before = report.ops_done;
@@ -613,28 +618,37 @@ impl Engine {
     /// leave this device's own writes out. Returns the deletes the mass-delete guard held.
     fn plan_and_execute(
         &mut self,
-        dirty: &[NodeId],
+        marks: &[Mark],
         opts: &Options,
         report: &mut SyncReport,
     ) -> Result<Vec<Op>, EngineError> {
+        let dirty: Vec<NodeId> = marks.iter().map(|m| m.node).collect();
         // What an earlier round left placed (its operation failed after), as at the start of a
         // sync: no round places over a record it didn't write. One query when there is none.
         self.rescan_records()?;
         recover_placements(&mut self.db, &self.cfg.folder)?;
-        let plan = self.plan(dirty, opts)?;
+        let plan = self.plan(&dirty, opts)?;
+        #[cfg(feature = "testkit")]
+        if let Some(after) = &self.cfg.after_plan {
+            (after.0)();
+        }
         // A confirmation lasts while its node's plan deletes it: one whose delete was undone
         // (the file back) is forgotten, so a later delete is judged anew.
         let deleting: std::collections::HashSet<NodeId> =
             plan.ops.iter().filter_map(Op::deletes).collect();
-        for node in dirty {
+        for node in &dirty {
             if !deleting.contains(node) {
                 self.confirmed.remove(node);
             }
         }
+        // Each mark as the page read it: one made since (another engine's pull, an
+        // announcement) may be of a change the plan didn't see, and stays.
+        let clean: std::collections::HashSet<NodeId> = plan.clean.iter().copied().collect();
         self.db.write(|s| {
-            plan.clean
+            marks
                 .iter()
-                .try_for_each(|n| s.folder().clear_dirty(*n))
+                .filter(|m| clean.contains(&m.node))
+                .try_for_each(|m| s.folder().clear_mark(*m))
         })?;
         report.conflicts.extend(plan.conflicts);
         let refusals = self.refusals()?;

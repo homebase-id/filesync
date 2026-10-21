@@ -17,6 +17,18 @@ const IDENTITY: &str = "test.example";
 
 pub type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
+/// Called by the engine between a round's plan and its clearing of the dirty marks the plan
+/// found clean ([`EngineConfig::after_plan`]): what another engine or an announcement may do
+/// then.
+#[derive(Clone)]
+pub struct AfterPlan(pub Arc<dyn Fn() + Send + Sync>);
+
+impl std::fmt::Debug for AfterPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AfterPlan")
+    }
+}
+
 /// Sets up a client's engine config; run again on every [`TestClient::restart`].
 type Configure = Box<dyn Fn(&mut EngineConfig) -> Res<()>>;
 
