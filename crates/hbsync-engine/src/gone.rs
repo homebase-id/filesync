@@ -18,6 +18,11 @@ use hbsync_types::{RemoteFileId, VersionTag};
 /// How long after the first "not there" a second one confirms it (Unix ms): the next sync.
 pub const CONFIRM_AFTER_MS: i64 = 60_000;
 
+/// When a first "not there" is asked again, after it: a second past [`CONFIRM_AFTER_MS`], by
+/// this device's clock (the purge's, [`crate::Drive::ask_again`]; a put back's).
+pub const ASK_AGAIN: std::time::Duration =
+    std::time::Duration::from_millis(CONFIRM_AFTER_MS as u64 + 1_000);
+
 /// How long a first "not there" waits for its second (Unix ms): one older (the file never
 /// asked about since) is a first again, so two wrong 404s far apart never make a file gone.
 pub const CONFIRM_WITHIN_MS: i64 = 3_600_000;
@@ -38,9 +43,7 @@ pub fn judge(prior: Option<GoneSuspect>, version: Option<VersionTag>, now_ms: i6
         .filter(|p| p.version == version)
         .map(|p| (p, now_ms - p.at));
     match since {
-        Some((_, since)) if (CONFIRM_AFTER_MS..=CONFIRM_WITHIN_MS).contains(&since) => {
-            NotThere::Gone
-        }
+        Some((p, _)) if confirms(&p, now_ms) => NotThere::Gone,
         // Said again too soon: the first stands, its time with it.
         Some((p, since)) if (0..CONFIRM_AFTER_MS).contains(&since) => NotThere::Suspect(p),
         // The first, at another version, long after the first, or the clock went back: it
@@ -50,6 +53,12 @@ pub fn judge(prior: Option<GoneSuspect>, version: Option<VersionTag>, now_ms: i6
             at: now_ms,
         }),
     }
+}
+
+/// Whether a "not there" at `now_ms` comes a minute to an hour after `first`: the second, at
+/// the same version, confirms it ([`judge`]).
+pub fn confirms(first: &GoneSuspect, now_ms: i64) -> bool {
+    (CONFIRM_AFTER_MS..=CONFIRM_WITHIN_MS).contains(&(now_ms - first.at))
 }
 
 // ---- asking the drive ----
@@ -100,6 +109,22 @@ pub(crate) fn read(
     }
 }
 
+/// [`look`] for each of `files`, in turn: what the drive said of each asked, and the error of
+/// a request that failed (it stops the asking: the rest aren't asked).
+pub(crate) fn look_all(
+    remote: &dyn Remote,
+    files: impl IntoIterator<Item = RemoteFileId>,
+) -> (Vec<(RemoteFileId, Said)>, Option<RemoteError>) {
+    let mut heard = Vec::new();
+    for f in files {
+        match look(remote, f) {
+            Ok(said) => heard.push((f, said)),
+            Err(e) => return (heard, Some(e)),
+        }
+    }
+    (heard, None)
+}
+
 // ---- taking what it said ----
 
 /// The identity said file `file_id` isn't there (its own 404), now: whether that makes it
@@ -136,6 +161,16 @@ pub(crate) fn judged(
         Said::NotThere => not_there(s, file_id),
         Said::There => s.clear_gone_suspect(file_id).map(|()| false),
     }
+}
+
+/// [`heard`] for each of `heard` ([`look_all`]): how many went for good.
+pub(crate) fn heard_all(
+    s: AccountTx<'_>,
+    heard: &[(RemoteFileId, Said)],
+) -> Result<usize, StateError> {
+    heard.iter().try_fold(0, |n, &(f, said)| {
+        Ok(n + usize::from(self::heard(s, f, said)?))
+    })
 }
 
 /// [`judged`], and a file deleted for good is forgotten. Whether it was.

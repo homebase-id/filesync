@@ -2,11 +2,13 @@
 //! emptying as asked. The account's loop only asks: it never waits for the state DB or the
 //! drive meanwhile (a purge waits on the DB while the folders' first syncs hold it, and deletes
 //! many files), so the notifications, folders added or removed and pauses are taken at once.
+//! What a purge found not there once is asked again a minute on ([`Drive::ask_again`]).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Sender, channel};
+use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 use hbsync_engine::deleted::Listed;
 use hbsync_engine::{Drive, EngineError};
@@ -37,13 +39,20 @@ pub(crate) struct Keeper {
     /// again after the pause).
     paused: Arc<AtomicBool>,
     ending: Arc<AtomicBool>,
-    /// Jobs done, for tests.
+    /// How long after a purge what it found not there once is asked again.
+    ask_after: Duration,
+    /// Jobs done (and asks again), for tests.
     done: crate::TestCount,
 }
 
 impl Keeper {
     /// The keeper of `drive`'s Recently deleted; a request that fails is told with `tell`.
     pub(super) fn spawn(drive: Arc<Drive>, tell: Tell) -> Keeper {
+        Self::spawn_with(drive, tell, hbsync_engine::gone::ASK_AGAIN)
+    }
+
+    /// [`Keeper::spawn`], asking again `ask_after` after a purge.
+    fn spawn_with(drive: Arc<Drive>, tell: Tell, ask_after: Duration) -> Keeper {
         let mut keeper = Keeper {
             drive,
             tell,
@@ -51,6 +60,7 @@ impl Keeper {
             purging: Arc::default(),
             paused: Arc::default(),
             ending: Arc::default(),
+            ask_after,
             done: crate::TestCount::default(),
         };
         keeper.start();
@@ -61,26 +71,52 @@ impl Keeper {
         let (tx, rx) = channel::<Job>();
         let drive = Arc::clone(&self.drive);
         let tell = Arc::clone(&self.tell);
-        let (purging, paused, ending, done) = (
+        let (purging, paused, ending, done, ask_after) = (
             Arc::clone(&self.purging),
             Arc::clone(&self.paused),
             Arc::clone(&self.ending),
             self.done.clone(),
+            self.ask_after,
         );
         let thread = std::thread::Builder::new()
             .name("hbsync-deleted".into())
             .spawn(move || {
-                for job in rx {
+                // When to ask again what the last purge found not there once (a delete for
+                // good this device missed): once, a minute on, not paused.
+                let mut again: Option<Instant> = None;
+                let held = || paused.load(Ordering::SeqCst) || ending.load(Ordering::SeqCst);
+                loop {
+                    let got = match again {
+                        Some(at) => rx.recv_timeout(at.saturating_duration_since(Instant::now())),
+                        None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+                    };
+                    let job = match got {
+                        Ok(job) => Some(job),
+                        Err(RecvTimeoutError::Timeout) => None,
+                        Err(RecvTimeoutError::Disconnected) => break,
+                    };
                     match job {
-                        Job::Purge(keep_days) => {
+                        Some(Job::Purge(keep_days)) => {
                             purging.store(false, Ordering::SeqCst);
-                            let held =
-                                paused.load(Ordering::SeqCst) || ending.load(Ordering::SeqCst);
-                            if !held {
-                                purge_now(&drive, keep_days);
+                            if !held()
+                                && purge_now(&drive, keep_days)
+                                && drive.doubted().unwrap_or(true)
+                            {
+                                again = Some(Instant::now() + ask_after);
                             }
                         }
-                        Job::Control(control) => run_request(&drive, control, &*tell),
+                        Some(Job::Control(control)) => run_request(&drive, control, &*tell),
+                        // Paused: again a minute on, while what it would ask can still be
+                        // confirmed (within the hour); ending: not again.
+                        None if held() => {
+                            again = (!ending.load(Ordering::SeqCst)
+                                && drive.doubted().unwrap_or(true))
+                            .then(|| Instant::now() + ask_after);
+                        }
+                        None => {
+                            again = None;
+                            ask_again(&drive);
+                        }
                     }
                     done.add();
                 }
@@ -149,15 +185,36 @@ impl Keeper {
     }
 }
 
-fn purge_now(drive: &Drive, keep_days: u32) {
+/// The purge, if due: whether it ran (what it found not there once is to be asked again).
+fn purge_now(drive: &Drive, keep_days: u32) -> bool {
     // Refused: asked again once the identity lets this computer in.
+    if drive.is_denied() {
+        return false;
+    }
+    match drive.purge_when_due(keep_days) {
+        Ok(Some(n)) => {
+            if n > 0 {
+                tracing::info!("{n} items deleted for good after {keep_days} days");
+            }
+            true
+        }
+        Ok(None) => false,
+        Err(e) => {
+            tracing::warn!("purging Recently deleted failed: {e}");
+            true
+        }
+    }
+}
+
+/// Asks again what the purge found not there once ([`Drive::ask_again`]).
+fn ask_again(drive: &Drive) {
     if drive.is_denied() {
         return;
     }
-    match drive.purge_when_due(keep_days) {
-        Ok(Some(n)) if n > 0 => tracing::info!("{n} items deleted for good after {keep_days} days"),
+    match drive.ask_again() {
+        Ok(n) if n > 0 => tracing::info!("{n} items in Recently deleted were deleted for good"),
         Ok(_) => {}
-        Err(e) => tracing::warn!("purging Recently deleted failed: {e}"),
+        Err(e) => tracing::warn!("asking again about Recently deleted failed: {e}"),
     }
 }
 
@@ -301,6 +358,53 @@ mod tests {
             "{told:?}"
         );
         assert!(told[0].ends_with("log in again"), "{told:?}");
+        Ok(())
+    }
+
+    /// The purge finds a file of Recently deleted not there (deleted for good elsewhere, a
+    /// delete this device didn't hear of): once, a suspicion. A minute on (here less), the
+    /// keeper asks again, and the row goes. Before, it waited for the next day's purge, a first
+    /// again, and stayed for good (review 14 R2).
+    #[test]
+    fn a_purge_asks_again_a_minute_on_what_it_found_not_there() -> R {
+        use hbsync_remote::Remote;
+        let home = tempfile::tempdir()?;
+        let db = home.path().join("state.db");
+        let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
+        let drive = Drive::open(&db, "a.example", remote.clone())?;
+        let algorithm = hbsync_fileio::HashAlgorithm::Blake3;
+        let (_, at) =
+            remote
+                .server()
+                .seed_file(hbsync_types::NodeId::ROOT, "x.txt", b"x", algorithm)?;
+        let target = |at| hbsync_types::Target {
+            at,
+            token: Some(hbsync_remote::fake::token_of(at.file_id)),
+        };
+        let (answers, _) = remote.set_removed(&[target(at)], true)?.padded(1);
+        let removed = answers.into_iter().next().ok_or("an answer")??;
+        drive.pull(None)?;
+        {
+            let mut server = remote.server();
+            server.advance(40 * 86_400_000);
+            server.hard_delete(at.file_id, removed.at().version)?;
+        }
+        let sql = rusqlite::Connection::open(&db)?;
+        let count = |table: &str| -> Result<i64, rusqlite::Error> {
+            sql.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+        };
+        assert_eq!(count("removed")?, 1);
+        let ask_after = Duration::from_secs(2);
+        let mut keeper = Keeper::spawn_with(Arc::clone(&drive), Arc::new(|_| {}), ask_after);
+        keeper.purge(30);
+        wait_for("the purge", || keeper.done() == 1)?;
+        assert_eq!(count("removed")?, 1, "not there once: kept");
+        assert_eq!(count("gone_suspects")?, 1);
+        // As if a minute had passed since.
+        sql.execute("UPDATE gone_suspects SET at = at - 60000", [])?;
+        wait_for("asked again", || keeper.done() == 2)?;
+        assert_eq!(count("removed")?, 0, "gone for good");
+        keeper.finish();
         Ok(())
     }
 

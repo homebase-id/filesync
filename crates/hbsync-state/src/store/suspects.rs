@@ -18,14 +18,22 @@ impl ReadTx<'_> {
         self.one(
             "SELECT version_tag, at FROM gone_suspects WHERE file_id = ?1",
             file_id.0.as_bytes(),
+            |r| suspect_at(r, 0),
+        )
+    }
+
+    /// The first "not there" of each file in Recently deleted not cleared since: what a purge,
+    /// an emptying or a restore found not there once. Few rows, if any: one query.
+    pub fn removed_suspects(&self) -> Result<Vec<(RemoteFileId, GoneSuspect)>> {
+        self.many(
+            "SELECT g.file_id, g.version_tag, g.at FROM gone_suspects g \
+             JOIN removed r ON r.file_id = g.file_id",
+            [],
             |r| {
-                Ok(GoneSuspect {
-                    version: r
-                        .get::<_, Option<Vec<u8>>>(0)?
-                        .map(|v| codec::version(&v))
-                        .transpose()?,
-                    at: r.get(1)?,
-                })
+                Ok((
+                    codec::remote_file(&r.get::<_, Vec<u8>>(0)?)?,
+                    suspect_at(r, 1)?,
+                ))
             },
         )
     }
@@ -39,6 +47,17 @@ impl ReadTx<'_> {
             |r| codec::version(&r.get::<_, Vec<u8>>(0)?),
         )
     }
+}
+
+/// The suspicion in `r`'s columns `first` (its version) and the one after (its time).
+fn suspect_at(r: &Row<'_>, first: usize) -> Result<GoneSuspect> {
+    Ok(GoneSuspect {
+        version: r
+            .get::<_, Option<Vec<u8>>>(first)?
+            .map(|v| codec::version(&v))
+            .transpose()?,
+        at: r.get(first + 1)?,
+    })
 }
 
 impl AccountTx<'_> {

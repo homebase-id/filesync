@@ -1536,3 +1536,71 @@ fn a_refused_sync_latches_the_drive() -> common::Res<()> {
     assert!(drive.is_denied(), "latched by the engine: {refused:?}");
     Ok(())
 }
+
+/// b missed a's purge (a delete for good leaves nothing in the feed, and b heard no
+/// notification): its own purge finds the rows not there, once, and asks again a minute on
+/// (`Drive::ask_again`): gone for good, forgotten. Before, the next purge was a day later, a
+/// first "not there" again, so b kept the rows, and asked each one again every day (review 14
+/// R2).
+#[test]
+fn a_missed_delete_for_good_is_asked_again_a_minute_on() -> common::Res<()> {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("d/x.txt", "x")?;
+    a.write("y.txt", "y")?;
+    a.sync()?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.recently_deleted(10)?.len(), 2, "b saw the delete");
+
+    server.lock().map_err(|_| "poisoned")?.advance(LATER);
+    assert_eq!(a.engine.drive().purge(0)?, 2);
+    b.engine.drive().purge(TRACE_MS)?;
+    assert!(!b.recently_deleted(10)?.is_empty(), "not there once: kept");
+    assert_eq!(b.engine.drive().ask_again()?, 0, "too soon");
+    b.a_minute_on()?;
+    assert!(b.engine.drive().ask_again()? > 0);
+    assert!(b.recently_deleted(10)?.is_empty(), "b forgot them");
+    assert_eq!(live(&server), ["y.txt"]);
+    Ok(())
+}
+
+/// Every file held on b (another device removed them); the purge deletes them for good 40 days
+/// on, and b doesn't hear of it. b's put back finds them not there, once: it fails. Asked once
+/// more a minute on (the runner does), they are gone for good, and go up again from b (sync
+/// semantics §7, "Put them back"; review 14 R2).
+#[test]
+fn a_put_back_asked_again_a_minute_on_uploads_what_went_for_good() -> common::Res<()> {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |cfg| cfg.guard.min = 2)?;
+    for i in 0..4 {
+        a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
+        a.write(&format!("d/e/g{i}.txt"), format!("g{i}"))?;
+    }
+    a.sync()?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.sync()?;
+    assert!(!b.sync()?.held.is_empty());
+    server
+        .lock()
+        .map_err(|_| "poisoned")?
+        .advance(40 * 86_400_000);
+    a.engine.drive().purge(30 * 86_400_000)?;
+    let held: Vec<NodeId> = b.sync()?.held.iter().map(|op| op.node()).collect();
+    assert!(!held.is_empty());
+    assert!(b.engine.put_back(&held).is_err(), "not there once");
+    b.a_minute_on()?;
+    b.engine.put_back(&held)?;
+    let report = b.sync()?;
+    assert!(report.held.is_empty(), "{report:?}");
+    a.sync()?;
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    assert_eq!(a.read_text("d/f2.txt")?, "2");
+    assert_eq!(a.read_text("d/e/g3.txt")?, "g3");
+    Ok(())
+}

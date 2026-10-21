@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use hbsync_platform::name::name_key;
 use hbsync_remote::{Answers, NodeMeta, Remote, RemoteError};
 use hbsync_state::{Answer, MirrorRow, ReadTx, RemovedRow, StateError};
-use hbsync_types::{NodeId, Target, Written};
+use hbsync_types::{NodeId, RemoteFileId, Target, Written};
 
 use crate::error::EngineError;
 use crate::gone::{self, Said, gone_after};
@@ -102,20 +102,52 @@ impl AccountOps<'_> {
             // Gone: what was to come back into it comes back as into any folder gone for good.
             // Said not there once only: it stays in Recently deleted, and the restore fails, to
             // try again (a minute on, it is gone).
+            let mut doubted: HashSet<NodeId> = HashSet::new();
             for ((f, node, said), gone) in heard.into_iter().zip(gone) {
                 if gone {
                     r.in_plan.remove(&node);
                 } else if said == Said::NotThere {
+                    doubted.insert(node);
                     r.failed.get_or_insert(RemoteError::Transient(format!(
                         "{f:?}: the identity says it isn't there; asked again later"
                     )));
                 }
             }
+            // What was to come back into a folder said not there once is asked about too (a
+            // header read each): asked again a minute on, all of it is gone at once (or there),
+            // not a level of folders a minute.
+            doubt_below(self.remote, self.account, &left, doubted);
         }
         match r.failed {
             Some(e) => Err(EngineError::Remote(e)),
             None => Ok(restored),
         }
+    }
+}
+
+/// Asks the drive about the rows of `left` (in order, each after its folder) in the folders
+/// `doubted` (said not there once) or below them, and takes what it says ([`gone::heard`]): not
+/// there, a first "not there" each. A request that fails stops the asking, and a write that
+/// fails is only logged: the restore fails anyway, and its error is the one told. Costs a
+/// header read per row, once (else a folder level a minute).
+fn doubt_below(
+    remote: &dyn Remote,
+    account: &std::sync::Mutex<hbsync_state::StateDb>,
+    left: &[&MirrorRow],
+    mut doubted: HashSet<NodeId>,
+) {
+    let below: Vec<RemoteFileId> = left
+        .iter()
+        .filter(|row| doubted.contains(&row.parent) && doubted.insert(row.node))
+        .map(|row| row.file_id)
+        .collect();
+    if below.is_empty() {
+        return;
+    }
+    let (heard, _) = gone::look_all(remote, below);
+    // Only more suspicions: the restore's own error is the one to tell.
+    if let Err(e) = lock(account).write(|s| gone::heard_all(s.account(), &heard)) {
+        tracing::warn!("can't record what isn't there below a folder that isn't: {e}");
     }
 }
 

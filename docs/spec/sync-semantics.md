@@ -499,8 +499,11 @@ here (or put up anew, if edited). That takes proof (`hbsync-engine/src/gone.rs`)
   (this device's clock). The file counts as gone only once the identity says so again, a minute
   to an hour on, at that version; one later than that, or one by a clock set back, is a first
   again. Meanwhile the operation is skipped (stale) and the file stays; a restore of it fails,
-  to try again, and emptying Recently deleted leaves it listed until emptied again a minute on
-  (or the next purge). A new row of the file (the feed, a write's answer) or a header that says
+  to try again (what was to come back into such a folder is asked about too, a header read
+  each, so that a minute on all of it is gone at once); a put back (§7) that fails is run once
+  more a minute on; emptying Recently deleted leaves it listed until emptied again a minute on;
+  and what the purge finds so is asked again a minute on, a header read each (a delete for good
+  this device missed: it leaves nothing in the feed). A new row of the file (the feed, a write's answer) or a header that says
   it is there clears the suspicion. One wrong 404 for a moment (a server's hiccup) then never
   deletes a live file here, nor hides it for 30 days. Costs, per file deleted for good without
   a trace that this device finds by a request: a header read more, a minute's delay, and the

@@ -41,10 +41,20 @@ impl Device {
         server: &Arc<Mutex<FakeServer>>,
         name: &str,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::start_with(server, name, |_| {})
+    }
+
+    /// [`Device::start`], its config as `tweak` adjusts it.
+    fn start_with(
+        server: &Arc<Mutex<FakeServer>>,
+        name: &str,
+        tweak: impl FnOnce(&mut RunnerConfig),
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
         let root = set_up(&dir.path().canonicalize()?.join("sync"))?;
         let mut cfg = RunnerConfig::new(&root, &db_of(&root), &"test.example".into(), name);
         cfg.tweak = Some(|c| c.exec.retry_pause = Duration::from_millis(1));
+        tweak(&mut cfg);
         let remote = FakeRemote::new(server.clone());
         let drive = Drive::open(&cfg.db, &cfg.identity, Arc::new(remote.clone()))?;
         let (handle, thread) = Runner::spawn(cfg, Arc::clone(&drive))?;
@@ -552,6 +562,61 @@ fn held_deletes_put_back_come_back() -> R {
     wait_until("nothing is held", || a.status().held_deletes.is_none())?;
     assert_eq!(live_names(&server).len(), 60, "nothing was deleted");
     assert_eq!(std::fs::read_to_string(a.root.join("f07.txt"))?, "7");
+    Ok(())
+}
+
+/// Every file held on b (a removed them); the purge deletes them for good 40 days on, and b
+/// doesn't hear of it. b's put back finds them not there once, and fails; the runner runs it
+/// once more (a minute on; here a moment, the identity's first "not there" made a minute
+/// older meanwhile): gone for good, they go up again from b, and a gets them back. Before, the
+/// put back stayed failed until the user answered again a minute to an hour later (review 14
+/// R2).
+#[test]
+fn a_put_back_that_failed_runs_once_more() -> R {
+    let server = server();
+    // a's own delete of every file goes through, as answered.
+    let a = Device::start_with(&server, "a", |cfg| {
+        cfg.tweak = Some(|c| {
+            c.exec.retry_pause = Duration::from_millis(1);
+            c.guard.allow = true;
+        });
+    })?;
+    let b = Device::start_with(&server, "b", |cfg| {
+        cfg.put_back_again = Duration::from_secs(3);
+    })?;
+    let (_a, _b) = (a.listen(), b.listen());
+    for i in 0..60 {
+        a.write(&format!("d/f{i:02}.txt"), &i.to_string())?;
+    }
+    wait_until("b has all 60", || b.has("d/f59.txt"))?;
+    a.wait_idle()?;
+    b.wait_idle()?;
+    std::fs::remove_dir_all(a.root.join("d"))?;
+    wait_until("b holds them", || {
+        b.status().held_deletes.is_some_and(|h| h.remotely > 0)
+    })?;
+    {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        srv.advance(40 * 86_400_000);
+    }
+    a.drive.purge(30 * 86_400_000)?;
+    let held = b.status().held_deletes.ok_or("held")?;
+    let db = rusqlite::Connection::open(db_of(&b.root))?;
+    b.handle.answer(HeldAnswer::PutBack, &held.token)?;
+    // Not there, said once: as if a minute had passed since, before the put back runs again.
+    wait_until("the first put back failed", || {
+        db.query_row("SELECT count(*) FROM gone_suspects", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .is_ok_and(|n| n == 61)
+    })?;
+    db.execute("UPDATE gone_suspects SET at = at - 60000", [])?;
+    wait_until("they are up again", || {
+        on_server(&server, "f59.txt") && b.status().held_deletes.is_none()
+    })
+    .map_err(|e| format!("{e}: {:?} {:?}", b.status(), live_names(&server)))?;
+    wait_until("a has them back", || a.has("d/f07.txt"))?;
+    assert_eq!(std::fs::read_to_string(a.root.join("d/f07.txt"))?, "7");
     Ok(())
 }
 
