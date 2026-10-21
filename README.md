@@ -101,6 +101,17 @@ Your Homebase needs odin-core v0.1.962 or newer.
   default, encrypts files once they reach its servers, with keys Dropbox holds. With Filesync,
   the files are encrypted before they leave your computer, and the keys stay with your own
   Homebase, not with a company. More: [docs/spec/encryption.md](docs/spec/encryption.md).
+
+  Privacy, from each vendor's own terms (October 2026):
+
+  | | Homebase Filesync | Dropbox | Google Drive | OneDrive |
+  |---|---|---|---|---|
+  | Encrypted before it leaves your computer | ✅ Yes | ❌ No[^e2e] | ❌ No[^e2e] | ❌ No |
+  | Vendor holds the key to your files | ✅ No[^key] | ❌ Yes | ❌ Yes | ❌ Yes |
+  | Vendor's terms say it scans your content | ✅ No | ❌ Yes[^dropbox] | ❌ Yes[^google] | ❌ Yes[^microsoft] |
+  | Vendor's terms let it modify your content | ✅ No | ✅ No | ❌ Yes[^google] | ✅ No[^xbox] |
+  | Vendor's terms let it remove your content | ✅ No | ❌ Yes[^dropbox] | ❌ Yes[^google] | ❌ Yes[^microsoft] |
+  | Vendor's terms let it remove content it judges misleading | ✅ No | ✅ No[^dropbox-misleading] | ❌ Yes[^google-misleading] | ⚠️ If intentionally deceptive[^microsoft-misleading] |
 - **Fast,** even on a six-year-old desktop (Intel i7-8700K). With a test server on the same
   machine, it uploads 1 GiB at about 220 MB/s and downloads it at about 600 MB/s. An edit
   shows up on your other computer in about half a second. Big files are streamed in both
@@ -145,3 +156,29 @@ open-source projects.
 
 The [Homebase.id License](LICENSE): the GNU Affero General Public License v3
 ([LICENSE-GPL](LICENSE-GPL)), the same as the other Homebase apps.
+
+[^e2e]: Only on business tiers: Dropbox's encrypted team folders (Business Plus and up,
+    [help](https://help.dropbox.com/files-folders/sort-preview/dropbox-vault)) and Google's
+    client-side encryption (Workspace Enterprise Plus and Education,
+    [help](https://support.google.com/a/answer/10745596)).
+[^key]: Your Homebase unlocks a file's key in memory only while serving a request from one of
+    your devices; at rest, the server and its backups hold ciphertext only
+    ([docs/spec/encryption.md](docs/spec/encryption.md)).
+[^dropbox]: [Dropbox Terms](https://www.dropbox.com/terms): "Dropbox accesses, stores, and scans
+    Your Stuff"; "We reserve the right to delete or disable content alleged to be infringing".
+[^google]: [Google Terms](https://policies.google.com/terms): "automated systems and algorithms
+    to analyze your content"; the license lets Google "modify your content, such as reformatting
+    or translating it"; "we reserve the right to take down some or all of that content".
+[^microsoft]: [Microsoft Services Agreement](https://www.microsoft.com/en-us/servicesagreement):
+    "automated systems and humans to review content"; "we reserve the right to delete or disable
+    access to Your Content".
+[^xbox]: Except content on Xbox services, which the agreement lets Microsoft modify.
+[^dropbox-misleading]: [Dropbox Acceptable Use Policy](https://www.dropbox.com/acceptable_use):
+    misleading content only where it breaks the law.
+[^google-misleading]: [Google Drive program policies](https://support.google.com/docs/answer/148505),
+    "Misleading Content": "Do not distribute content that deceives, misleads, or confuses users",
+    covering civic processes, harmful conspiracy theories, harmful health practices and
+    manipulated media; Google may restrict access to such content or remove it. (Restrict or
+    remove: the policies don't say Google edits it.)
+[^microsoft-misleading]: Microsoft's Code of Conduct forbids "generating or sharing content that
+    is intentionally deceptive"; content that breaks it may be blocked or removed.
