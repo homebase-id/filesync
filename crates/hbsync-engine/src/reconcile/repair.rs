@@ -122,6 +122,8 @@ impl Reconciler<'_> {
                 // There, in a version this device can't read (a folder it doesn't read, a file
                 // that is a folder now, maybe): what is in it stays in it.
                 _ if self.input.unreadable.contains(&parent) => Parent::Wait,
+                // Left as it is till an item here is hashed: never an orphan to adopt.
+                _ if self.holding.contains(&node) => Parent::Wait,
                 // A file: another writer put the node in it (§6.3).
                 Some(_) => self.recover_or_wait(node),
                 None if withdrawn.contains(&parent) => Parent::Wait,
@@ -209,7 +211,15 @@ impl Reconciler<'_> {
                             .zip(self.merged.get(*m))
                             .is_some_and(|(r, t)| !r.same_place(t))
                 });
-                let victim = local_moved.unwrap_or_else(|| *members.iter().min().unwrap_or(&node));
+                // What waits for a hash stays as it is (`held`).
+                let local_moved = local_moved.filter(|m| !self.holding.contains(m));
+                let victim = local_moved.unwrap_or_else(|| {
+                    *members
+                        .iter()
+                        .filter(|m| !self.holding.contains(m))
+                        .min()
+                        .unwrap_or(&node)
+                });
                 let fallback = self
                     .input
                     .remote
@@ -244,11 +254,54 @@ impl Reconciler<'_> {
             .unwrap_or(folder)
     }
 
+    /// Scoped `node` and what is below it wait for a hash ([`super::held`]): it would take a
+    /// name what waits holds. Nothing is done to them; a fork's copy waits with its original.
+    /// Whether any did.
+    fn wait_for_hash(&mut self, node: NodeId) -> bool {
+        let mut any = false;
+        for n in self.merged.subtree(node) {
+            if !self.scope.remove(&n) {
+                continue;
+            }
+            any = true;
+            self.origin.remove(&n);
+            self.adopted.remove(&n);
+            self.plan.conflicts.retain(|c| c.node() != n);
+            if let Some(copy) = self.forks.remove(&n) {
+                self.scope.remove(&copy);
+                self.origin.remove(&copy);
+                self.merged.remove(copy);
+            }
+            if let Some(original) = self.forked_into(n) {
+                self.fork_waits(original);
+            }
+            if self.input.dirty.contains(&n) {
+                self.deferred.insert(n);
+            }
+        }
+        any
+    }
+
     pub(super) fn fix_names(&mut self) {
         let parents: BTreeSet<NodeId> = self
             .scope
             .iter()
             .filter_map(|n| self.merged.get(*n).map(|s| s.parent))
+            .collect();
+        // The drive's names of what waits for a hash elsewhere here (`held`): held for it.
+        let drive_held: HashMap<(NodeId, String), NodeId> = self
+            .holding
+            .iter()
+            .filter_map(|n| {
+                let r = self
+                    .input
+                    .remote
+                    .get(*n)
+                    .filter(|_| !self.taken.contains(n))?;
+                let here = self.merged.get(*n);
+                let elsewhere = here.is_none_or(|h| !h.same_place(r));
+                elsewhere.then(|| ((r.parent, name_key(&r.name)), *n))
+            })
             .collect();
         for parent in parents {
             let mut by_key: BTreeMap<String, Vec<NodeId>> = BTreeMap::new();
@@ -279,6 +332,24 @@ impl Reconciler<'_> {
             let masked = self.masks.names.get(&parent);
             let taken = |key: &str| masked.is_some_and(|m| m.contains(key));
             for (key, mut group) in by_key {
+                // A name what waits for a hash holds, here or on the drive: what would take it
+                // waits too, renamed never (§6.3).
+                let holders: Vec<NodeId> = drive_held
+                    .get(&(parent, key.clone()))
+                    .into_iter()
+                    .copied()
+                    .chain(group.iter().copied().filter(|n| self.holding.contains(n)))
+                    .collect();
+                if !holders.is_empty() {
+                    let mut waited = false;
+                    for n in group {
+                        waited |= self.wait_for_hash(n);
+                    }
+                    if waited {
+                        self.name_waits.extend(holders);
+                    }
+                    continue;
+                }
                 let keep = usize::from(!taken(&key));
                 if group.len() <= keep {
                     continue;

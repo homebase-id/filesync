@@ -484,6 +484,10 @@ pub struct Plan {
     pub clean: Vec<NodeId>,
     /// Dirty nodes that can't be decided yet (unhashed, unknown parent): keep them dirty.
     pub deferred: Vec<NodeId>,
+    /// Files here not hashed yet that something else waits for (a change the drive has of
+    /// them, or a folder they are in, or their name; sync semantics §6.3): read them, and plan
+    /// again.
+    pub waiting: Vec<NodeId>,
     /// Folders whose names the plan judged without all their children in the input
     /// ([`Input::coverage`]): plan again with them covered in full.
     pub uncovered: BTreeSet<NodeId>,

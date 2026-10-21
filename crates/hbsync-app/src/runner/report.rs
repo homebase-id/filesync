@@ -43,6 +43,12 @@ pub(super) fn notes(
         let path = engine.path_of(op.node())?.unwrap_or_else(|| "?".into());
         notes.push(format!("{path}: {} ({why})", op.kind()));
     }
+    // A file that can't be read yet, which other changes wait for (sync semantics §6.3).
+    for (path, why) in &report.waiting {
+        notes.push(format!(
+            "{path}: can't be read yet ({why}), so changes around it wait till it can"
+        ));
+    }
     if report.full {
         notes.push(
             "Homebase is out of storage: new and changed files wait until there is room".into(),

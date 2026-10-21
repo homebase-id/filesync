@@ -106,7 +106,40 @@ struct Reconciler<'a> {
     adopted: HashSet<NodeId>,
     /// Remote nodes a folder's removal takes along ([`merge::taken_along`]).
     taken: HashSet<NodeId>,
+    /// What waits for files here not hashed yet ([`held`]).
+    held: HashSet<NodeId>,
+    /// Each such file, with the folders on its paths.
+    held_by: Vec<(NodeId, Vec<NodeId>)>,
+    /// Held nodes whose names something else waits for ([`Reconciler::fix_names`]).
+    name_waits: HashSet<NodeId>,
+    /// Of `held`, those left as they are on both sides ([`Reconciler::hold`]).
+    holding: HashSet<NodeId>,
     plan: Plan,
+}
+
+/// What waits for files here not hashed yet (being written, locked, unreadable, a placement a
+/// crash left unread; sync semantics §6.3): each such file, and every folder on its path here,
+/// on the drive and in the base. Nothing is done to such a file till it is hashed, nor to such
+/// a folder that its plan would delete, restore or move on either side (deferred, not undone);
+/// a node that would take a name one of them holds waits too, and the file is never an orphan
+/// to adopt.
+fn held(input: &Input) -> Vec<(NodeId, Vec<NodeId>)> {
+    let mut held: Vec<(NodeId, Vec<NodeId>)> = input
+        .local_unhashed
+        .iter()
+        .map(|&node| {
+            let mut on_paths = Vec::new();
+            for tree in [&input.local, &input.remote, &input.base] {
+                let Ok(up) = crate::walk::up::<_, std::convert::Infallible>(node, |at| {
+                    Ok(tree.get(at).map(|s| (s.parent, s.parent)))
+                });
+                on_paths.extend(up.items.into_iter().filter(|p| !p.is_root() && *p != node));
+            }
+            (node, on_paths)
+        })
+        .collect();
+    held.sort();
+    held
 }
 
 impl<'a> Reconciler<'a> {
@@ -123,11 +156,19 @@ impl<'a> Reconciler<'a> {
             deferred: BTreeSet::new(),
             adopted: HashSet::new(),
             taken: merge::taken_along(input),
+            held: HashSet::new(),
+            held_by: held(input),
+            name_waits: HashSet::new(),
+            holding: HashSet::new(),
             plan: Plan::default(),
         }
     }
 
     fn run(mut self) -> Plan {
+        for (node, on_paths) in &self.held_by {
+            self.held.insert(*node);
+            self.held.extend(on_paths.iter().copied());
+        }
         self.build_context();
         let dirty: Vec<NodeId> = self.input.dirty.iter().copied().collect();
         for node in dirty {
@@ -156,8 +197,23 @@ impl<'a> Reconciler<'a> {
         self.fix_names();
         self.emit();
         self.guard_mass_delete();
+        self.plan.waiting = self.waiting();
         self.plan.deferred = self.deferred.into_iter().collect();
         self.plan
+    }
+
+    /// The files here not hashed yet that something else waits for ([`Plan::waiting`]).
+    fn waiting(&self) -> Vec<NodeId> {
+        let waits = |n: &NodeId| self.deferred.contains(n) || self.name_waits.contains(n);
+        self.held_by
+            .iter()
+            .filter(|(node, on_paths)| {
+                self.remote_change(*node).is_change()
+                    || self.name_waits.contains(node)
+                    || on_paths.iter().any(waits)
+            })
+            .map(|(node, _)| *node)
+            .collect()
     }
 }
 

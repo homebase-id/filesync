@@ -50,9 +50,13 @@ impl Reconciler<'_> {
             .ids()
             .chain(i.local.ids())
             .chain(i.remote.ids())
-            .filter(|n| !i.dirty.contains(n) && !self.taken.contains(n))
+            .filter(|n| !i.dirty.contains(n) && (!self.taken.contains(n) || self.held.contains(n)))
             .collect();
         for node in ids {
+            if self.held.contains(&node) {
+                self.hold(node);
+                continue;
+            }
             if let Some(state) = i
                 .remote
                 .get(node)
@@ -62,6 +66,39 @@ impl Reconciler<'_> {
                 self.merged.insert(node, state.clone());
             }
         }
+    }
+
+    /// Leaves held `node` ([`super::held`]) as it is on both sides: out of the plan's scope
+    /// (nothing done to it, dirty still), where it is here (else as the base has it, else the
+    /// drive), so that its folder here stays and its name is taken.
+    pub(super) fn hold(&mut self, node: NodeId) {
+        let i = self.input;
+        if i.dirty.contains(&node) {
+            self.deferred.insert(node);
+        }
+        self.holding.insert(node);
+        let state = self
+            .local_state(node)
+            .or_else(|| i.base.get(node).cloned())
+            .or_else(|| i.remote.get(node).cloned());
+        if let Some(state) = state {
+            self.merged.insert(node, state);
+        }
+    }
+
+    /// Whether held folder `node` may go to `target` ([`super::held`]): it stays where it is
+    /// on each side it is on, and isn't gone from one it was on (a delete, or its undoing).
+    /// Making it where it isn't yet, and its tags, may go.
+    fn stays_put(&self, node: NodeId, target: Option<&NodeState>) -> bool {
+        let i = self.input;
+        let Some(t) = target else {
+            return false;
+        };
+        let remote = i.remote.get(node).filter(|_| !self.taken.contains(&node));
+        let gone = i.base.contains(node) || i.removed.contains_key(&node);
+        [self.local_state(node).as_ref(), remote]
+            .into_iter()
+            .all(|side| side.map_or(!gone, |s| s.same_place(t)))
     }
 
     pub(super) fn content_state(&self, node: NodeId) -> ContentState {
@@ -145,7 +182,7 @@ impl Reconciler<'_> {
     pub(super) fn merge_node(&mut self, node: NodeId) {
         let i = self.input;
         if i.local_unhashed.contains(&node) {
-            self.defer(node);
+            self.hold(node);
             return;
         }
         let (lc, rc) = (self.local_change(node), self.remote_change(node));
@@ -212,6 +249,16 @@ impl Reconciler<'_> {
             } else {
                 r.tags.clone()
             };
+        }
+        if self.held.contains(&node) && !self.stays_put(node, target.as_ref()) {
+            self.plan.conflicts.retain(|c| c.node() != node);
+            if let Some(copy) = self.forks.remove(&node) {
+                self.scope.remove(&copy);
+                self.origin.remove(&copy);
+                self.merged.remove(copy);
+            }
+            self.hold(node);
+            return;
         }
         self.scope.insert(node);
         self.origin.insert(node, origin);

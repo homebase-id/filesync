@@ -5,7 +5,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use hbsync_local::{CatchUp, Debounce, LocalObserver, ScanOptions, ScanReport, rescan_dirs, scan};
+use hbsync_local::{
+    CatchUp, Debounce, LocalObserver, ScanOptions, ScanReport, rescan_dirs, rescan_entries, scan,
+};
 use hbsync_remote::Remote;
 use hbsync_state::{DirtyCursor, Mark, StateDb, StateError, keys};
 use hbsync_types::NodeId;
@@ -100,6 +102,9 @@ pub struct SyncReport {
     /// Operations not sent because the drive refused them as they are ([`crate::refused`]),
     /// with why: they wait for a change, an hour, or Sync now.
     pub refused: Vec<(Op, String)>,
+    /// Files here not hashed yet (locked, being written, unreadable) that other changes wait
+    /// for (sync semantics §6.3), as paths, with why they couldn't be read.
+    pub waiting: Vec<(String, String)>,
     /// Work is left that another try may do: the sweep was cut short by the round limit, or
     /// operations were skipped or failed with nodes still pending. Deletes held for a
     /// confirmation never count: another try doesn't let them through.
@@ -127,6 +132,7 @@ impl SyncReport {
         self.synced.extend(later.synced);
         self.full = later.full;
         self.refused.extend(later.refused);
+        self.waiting.extend(later.waiting);
         self.unfinished = later.unfinished;
     }
 }
@@ -565,7 +571,40 @@ impl Engine {
         // sync: no round places over a record it didn't write. One query when there is none.
         self.rescan_records()?;
         recover_placements(&mut self.db, &self.cfg.folder)?;
-        let plan = self.plan(&dirty, opts)?;
+        let mut plan = self.plan(&dirty, opts)?;
+        // Something waits for files here not hashed yet (sync semantics §6.3): read them now,
+        // and plan again if that hashed any. What still can't be read is told.
+        if !plan.waiting.is_empty() {
+            let paths: Vec<(NodeId, hbsync_platform::RelPath)> = self.db.read(|s| {
+                let mut paths = Vec::new();
+                for &node in &plan.waiting {
+                    paths.extend(s.local_by_node(node)?.map(|r| (node, r.path)));
+                }
+                Ok(paths)
+            })?;
+            let entries: Vec<_> = paths.iter().map(|(_, p)| p.clone()).collect();
+            let scan = rescan_entries(
+                &mut self.db,
+                &self.cfg.folder.root,
+                &[],
+                &entries,
+                &self.scan_opts,
+            )?;
+            if scan.hashed > 0 {
+                plan = self.plan(&dirty, opts)?;
+            }
+            let still: std::collections::HashSet<NodeId> = plan.waiting.iter().copied().collect();
+            report.waiting.extend(
+                paths
+                    .into_iter()
+                    .filter(|(node, _)| still.contains(node))
+                    .map(|(_, path)| {
+                        let why = scan.unhashed.iter().find(|(p, _)| *p == path);
+                        let why = why.map_or_else(|| "not read yet".to_owned(), |(_, w)| w.clone());
+                        (path.to_string(), why)
+                    }),
+            );
+        }
         #[cfg(feature = "testkit")]
         if let Some(after) = &self.cfg.after_plan {
             (after.0)();

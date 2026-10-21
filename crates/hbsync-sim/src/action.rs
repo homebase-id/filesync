@@ -16,6 +16,16 @@ pub enum Action {
     Edit {
         file: usize,
     },
+    /// The user edits a file and is still writing it at the next plan: not hashed yet there
+    /// (its merge deferred), hashed at the one after.
+    EditWriting {
+        file: usize,
+    },
+    /// Another app holds a file locked: no plan finds it hashed (its merge deferred, and what
+    /// waits for it waits) till the clients settle, when it lets go.
+    Lock {
+        file: usize,
+    },
     Move {
         node: usize,
         parent: usize,

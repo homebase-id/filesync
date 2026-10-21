@@ -874,6 +874,9 @@ fn a_deleted_or_filtered_recovered_files_and_a_new_orphan() {
     );
 }
 
+/// A file being written in a folder the drive deleted: the folder's delete waits for its hash,
+/// neither done here nor undone on the drive (§6.3); once hashed, the new file keeps the
+/// folder alive and it comes back.
 #[test]
 fn a_file_still_being_written_keeps_its_remotely_deleted_folder() {
     let [d, new] = ids(2)[..] else { unreachable!() };
@@ -897,13 +900,20 @@ fn a_file_still_being_written_keeps_its_remotely_deleted_folder() {
             .any(|op| matches!(op, Op::LocalTrash { .. })),
         "{plan:#?}"
     );
+    assert!(plan.ops.is_empty(), "the delete waits: {plan:#?}");
+    let mut deferred = plan.deferred.clone();
+    deferred.sort();
+    assert_eq!(deferred, [d, new]);
+    // Hashed.
+    w.input.local_unhashed.remove(&new);
+    w.local(new, Some(file(d, "new", "!")));
+    let plan = w.plan();
     assert!(
         plan.ops
             .iter()
             .any(|op| matches!(op, Op::RemoteCreate { node, .. } if *node == d)),
         "{plan:#?}"
     );
-    assert_eq!(plan.deferred, [new]);
 }
 
 #[test]
@@ -922,16 +932,26 @@ fn a_file_still_being_written_keeps_its_name() {
     );
     w.input.local_unhashed.insert(writing);
     let plan = w.plan();
-    // The remote file comes down under another name; the local one isn't touched.
-    assert!(plan.ops.iter().all(|op| op.node() != writing), "{plan:#?}");
+    // The remote file waits for the name; the local one isn't touched (§6.3).
+    assert!(plan.ops.is_empty(), "{plan:#?}");
+    assert!(plan.deferred.contains(&first), "{plan:#?}");
+    // Hashed: a name clash as any, both kept (the lower id keeps the name).
+    w.input.local_unhashed.remove(&writing);
+    w.local(writing, Some(file(ROOT, "report.txt", "mine")));
+    let plan = w.plan();
     assert!(without_drive(&plan.ops).contains(&Op::LocalDownload {
         node: first,
         parent: ROOT,
-        name: "Report (conflict 1).txt".into(),
+        name: "Report.txt".into(),
         replace: false,
         tags: Tags::default(),
         drive: None,
     }));
+    assert!(
+        plan.conflicts
+            .contains(&Conflict::NameClash { node: writing }),
+        "{plan:#?}"
+    );
 }
 
 #[test]
@@ -1298,4 +1318,433 @@ fn a_waiting_fork_keeps_its_name_and_a_new_file_yields() {
             assert!(plan.ops.iter().any(renamed), "{plan:?}");
         }
     }
+}
+
+/// An item placed but not hashed yet (a download a crash left unsettled, here with no base),
+/// tagged Red by the user, whose node another writer put in a file: its merge is deferred, and
+/// the orphan repair leaves it be. It adopted it from the drive's state, writing the drive's
+/// tags over the item and sending them up as decided: Red was lost (seed d856d284). The rest
+/// of the folder plans as ever: another orphan in the file goes into Recovered files, a new
+/// file comes down. Once hashed, the node is adopted with its tags.
+#[test]
+fn an_unhashed_orphan_waits_and_keeps_its_tags() {
+    let [f, item, other, new] = ids(4)[..] else {
+        unreachable!()
+    };
+    let red = hbsync_types::Tags::new([hbsync_types::Tag::new("Red", 6)]);
+    let tagged = |state: NodeState| NodeState {
+        tags: red.clone(),
+        ..state
+    };
+    let mut w = World::default();
+    w.synced(f, file(ROOT, "f", "x"));
+    w.synced(other, file(ROOT, "o", "o"));
+    w.remote(other, Some(file(f, "o", "o")));
+    w.remote(new, Some(file(ROOT, "n", "n")));
+    w.remote(item, Some(file(f, "b", "b")));
+    w.local(
+        item,
+        Some(tagged(NodeState {
+            content: None,
+            ..file(ROOT, "b", "b")
+        })),
+    );
+    w.input.local_unhashed.insert(item);
+    let plan = w.plan();
+    assert!(
+        !plan.ops.iter().any(|op| op.node() == item),
+        "nothing done to the item till it is hashed: {:#?}",
+        plan.ops
+    );
+    assert!(plan.deferred.contains(&item), "{:?}", plan.deferred);
+    assert!(
+        plan.ops.iter().any(|op| matches!(op, Op::RemoteUpdate { node, parent, .. } if *node == other && *parent == NodeId::RECOVERED)),
+        "the other orphan is recovered: {:#?}",
+        plan.ops
+    );
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalDownload { node, .. } if *node == new)),
+        "the new file comes down: {:#?}",
+        plan.ops
+    );
+
+    // Hashed: adopted into Recovered files, with Red, on the drive too.
+    w.input.local_unhashed.remove(&item);
+    w.local(item, Some(tagged(file(ROOT, "b", "b"))));
+    let plan = w.plan();
+    assert!(
+        plan.ops.iter().any(
+            |op| matches!(op, Op::RemoteUpdate { node, parent, tags, .. }
+            if *node == item && *parent == NodeId::RECOVERED && *tags == red)
+        ),
+        "{:#?}",
+        plan.ops
+    );
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalTags { node, .. } if *node == item)),
+        "{:#?}",
+        plan.ops
+    );
+}
+
+/// A file being written here (not hashed yet: its merge deferred) in a folder the drive
+/// deleted: the folder's delete waits for its hash (neither done here nor undone), and once
+/// hashed its edit keeps the folder alive, which comes back on the drive.
+#[test]
+fn a_file_not_hashed_yet_keeps_its_deleted_folder() {
+    let [p, d] = ids(2)[..] else { unreachable!() };
+    let mut w = World::default();
+    w.synced(p, folder(ROOT, "p"));
+    w.synced(d, file(p, "d", "1"));
+    w.remote(p, None).remote(d, None);
+    w.local(
+        d,
+        Some(NodeState {
+            content: None,
+            ..file(p, "d", "2")
+        }),
+    );
+    w.input.local_unhashed.insert(d);
+    let plan = w.plan();
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalTrash { .. })),
+        "nothing trashed: {:#?}",
+        plan.ops
+    );
+    assert!(plan.ops.is_empty(), "the delete waits: {:#?}", plan.ops);
+    assert!(plan.deferred.contains(&d), "{:?}", plan.deferred);
+    // Hashed: the edit wins, and the folder comes back.
+    w.input.local_unhashed.remove(&d);
+    w.local(d, Some(file(p, "d", "2")));
+    let plan = w.plan();
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, Op::RemoteCreate { node, .. } if *node == p)),
+        "the folder comes back: {:#?}",
+        plan.ops
+    );
+}
+
+/// A file not hashed yet keeps its name here: a new file the drive has under that name, in
+/// that folder, waits for its hash (it was planned onto the name, and refused there every
+/// round while the file stayed unhashed).
+#[test]
+fn a_file_not_hashed_yet_keeps_its_name() {
+    let [f, d, new] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(f, file(ROOT, "f", "x"));
+    w.synced(d, file(ROOT, "b", "1"));
+    w.remote(d, Some(file(f, "b", "1"))); // another writer put it in a file
+    w.local(
+        d,
+        Some(NodeState {
+            content: None,
+            ..file(ROOT, "b", "2")
+        }),
+    );
+    w.input.local_unhashed.insert(d);
+    w.remote(new, Some(file(ROOT, "b", "n")));
+    let plan = w.plan();
+    assert!(
+        !plan.ops.iter().any(|op| op.node() == new || op.node() == d),
+        "the new file waits for the name: {:#?}",
+        plan.ops
+    );
+    assert!(plan.deferred.contains(&new), "{:?}", plan.deferred);
+    assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+}
+
+/// What another writer put into a file not hashed yet here (a file: no folder) is an orphan
+/// for Recovered files, as in any file; the file itself waits.
+#[test]
+fn what_is_in_a_file_not_hashed_yet_is_recovered() {
+    let [d, y] = ids(2)[..] else { unreachable!() };
+    let mut w = World::default();
+    w.synced(d, file(ROOT, "d", "1"));
+    w.local(
+        d,
+        Some(NodeState {
+            content: None,
+            ..file(ROOT, "d", "2")
+        }),
+    );
+    w.input.local_unhashed.insert(d);
+    w.remote(y, Some(file(d, "y", "y")));
+    let plan = w.plan();
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, Op::RemoteUpdate { node, parent, .. }
+            if *node == y && *parent == NodeId::RECOVERED)),
+        "{:#?}",
+        plan.ops
+    );
+    assert!(!plan.ops.iter().any(|op| op.node() == d), "{:#?}", plan.ops);
+}
+
+/// The drive renames and moves a file while it is being written here: nothing is done to it
+/// till it is hashed, then the move comes down and the edit goes up, never lost.
+#[test]
+fn a_move_on_the_drive_waits_for_a_file_not_hashed_yet() {
+    let [p, q, d] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(p, folder(ROOT, "p"));
+    w.synced(q, folder(ROOT, "q"));
+    w.synced(d, file(p, "d", "1"));
+    w.remote(d, Some(file(q, "e", "1")));
+    w.local(
+        d,
+        Some(NodeState {
+            content: None,
+            ..file(p, "d", "2")
+        }),
+    );
+    w.input.local_unhashed.insert(d);
+    let plan = w.plan();
+    assert!(!plan.ops.iter().any(|op| op.node() == d), "{:#?}", plan.ops);
+    // Hashed.
+    w.input.local_unhashed.remove(&d);
+    w.local(d, Some(file(p, "d", "2")));
+    let plan = w.plan();
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalMove { node, parent, name, .. }
+            if *node == d && *parent == q && name == "e")),
+        "{:#?}",
+        plan.ops
+    );
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, Op::RemoteUpdate { node, upload: true, .. } if *node == d)),
+        "{:#?}",
+        plan.ops
+    );
+}
+
+/// A file being written here at the top, unhashed: another device moves it into folder z and
+/// edits it, and this device's user deletes z. The delete of z waits (it took the drive's
+/// node along, and the other device's edit was lost once hashed); hashed, the edits fork and z
+/// stays.
+#[test]
+fn a_folder_deleted_here_waits_for_a_file_moved_into_it_on_the_drive() {
+    let [z, d] = ids(2)[..] else { unreachable!() };
+    let mut w = World::default();
+    w.synced(z, folder(ROOT, "z"));
+    w.synced(d, file(ROOT, "d", "1"));
+    w.remote(d, Some(file(z, "d", "theirs")));
+    w.local(z, None);
+    let writing = NodeState {
+        content: None,
+        ..file(ROOT, "d", "mine")
+    };
+    w.local(d, Some(writing));
+    w.input.local_unhashed.insert(d);
+    let plan = w.plan();
+    assert!(plan.ops.is_empty(), "{:#?}", plan.ops);
+    assert!(plan.deferred.contains(&z), "{:?}", plan.deferred);
+
+    w.input.local_unhashed.remove(&d);
+    w.local(d, Some(file(ROOT, "d", "mine")));
+    let plan = w.plan();
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::RemoteDelete { .. })),
+        "{:#?}",
+        plan.ops
+    );
+    assert!(
+        plan.conflicts
+            .iter()
+            .any(|c| matches!(c, Conflict::EditEdit { node, .. } if *node == d)),
+        "{:?}",
+        plan.conflicts
+    );
+}
+
+/// Another device moves a file from p to q and deletes p, while it is being written here in
+/// p: p's delete waits, and isn't undone on the drive (it was made again, empty, for good);
+/// hashed, the file follows its move and p goes.
+#[test]
+fn a_folder_deleted_on_the_drive_isnt_restored_for_a_file_not_hashed_yet() {
+    let [p, q, d] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(p, folder(ROOT, "p"));
+    w.synced(q, folder(ROOT, "q"));
+    w.synced(d, file(p, "d", "1"));
+    w.remote(p, None);
+    w.remote(d, Some(file(q, "d", "1")));
+    w.local(
+        d,
+        Some(NodeState {
+            content: None,
+            ..file(p, "d", "1")
+        }),
+    );
+    w.input.local_unhashed.insert(d);
+    let plan = w.plan();
+    assert!(plan.ops.is_empty(), "{:#?}", plan.ops);
+
+    w.input.local_unhashed.remove(&d);
+    w.local(d, Some(file(p, "d", "1")));
+    let plan = w.plan();
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::RemoteCreate { .. })),
+        "{:#?}",
+        plan.ops
+    );
+    assert!(
+        plan.ops.iter().any(
+            |op| matches!(op, Op::LocalMove { node, parent, .. } if *node == d && *parent == q)
+        ),
+        "{:#?}",
+        plan.ops
+    );
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalTrash { node, .. } if *node == p)),
+        "{:#?}",
+        plan.ops
+    );
+}
+
+/// Another device swaps two names in a folder (b to c, x to b) while b is being written here:
+/// x waits for the name (it was renamed for good, "b (conflict 1)"), and once b is hashed both
+/// follow the drive, with no conflict.
+#[test]
+fn a_rename_onto_the_name_of_a_file_not_hashed_yet_waits() {
+    let [d, m] = ids(2)[..] else { unreachable!() };
+    let mut w = World::default();
+    w.synced(d, file(ROOT, "b", "1"));
+    w.synced(m, file(ROOT, "x", "2"));
+    w.remote(d, Some(file(ROOT, "c", "1")));
+    w.remote(m, Some(file(ROOT, "b", "2")));
+    w.local(
+        d,
+        Some(NodeState {
+            content: None,
+            ..file(ROOT, "b", "1")
+        }),
+    );
+    w.input.local_unhashed.insert(d);
+    let plan = w.plan();
+    assert!(plan.ops.is_empty(), "{:#?}", plan.ops);
+    assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+    assert!(plan.deferred.contains(&m), "{:?}", plan.deferred);
+
+    w.input.local_unhashed.remove(&d);
+    w.local(d, Some(file(ROOT, "b", "1")));
+    let plan = w.plan();
+    assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+    for (node, to) in [(d, "c"), (m, "b")] {
+        assert!(
+            plan.ops.iter().any(
+                |op| matches!(op, Op::LocalMove { node: n, name, .. } if *n == node && name == to)
+            ),
+            "{:#?}",
+            plan.ops
+        );
+    }
+}
+
+/// A file being written here, renamed on the drive (b to c): its drive name is held for it
+/// too. A file this device's user renames to c meanwhile waits (it went up as a second c).
+#[test]
+fn the_drive_name_of_a_file_not_hashed_yet_is_held() {
+    let [d, x] = ids(2)[..] else { unreachable!() };
+    let mut w = World::default();
+    w.synced(d, file(ROOT, "b", "1"));
+    w.synced(x, file(ROOT, "x", "2"));
+    w.remote(d, Some(file(ROOT, "c", "1")));
+    w.local(x, Some(file(ROOT, "c", "2")));
+    w.local(
+        d,
+        Some(NodeState {
+            content: None,
+            ..file(ROOT, "b", "1")
+        }),
+    );
+    w.input.local_unhashed.insert(d);
+    let plan = w.plan();
+    assert!(plan.ops.is_empty(), "{:#?}", plan.ops);
+    assert!(plan.deferred.contains(&x), "{:?}", plan.deferred);
+}
+
+/// Not in the page planned (context), a file being written still holds what it is in: the
+/// drive deleted its folder (dirty), which isn't trashed with it; and one whose node another
+/// writer put in a file isn't adopted from the drive's state.
+#[test]
+fn a_file_not_hashed_yet_holds_as_context_too() {
+    let [p, d, f, e] = ids(4)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(p, folder(ROOT, "p"));
+    w.synced(d, file(p, "d", "1"));
+    w.synced(f, file(ROOT, "f", "f"));
+    w.synced(e, file(ROOT, "e", "1"));
+    w.remote(p, None).remote(d, None);
+    w.remote(e, Some(file(f, "e", "1")));
+    for node in [d, e] {
+        let state = w
+            .input
+            .local
+            .get(node)
+            .cloned()
+            .map(|s| NodeState { content: None, ..s });
+        w.local(node, state);
+        w.input.local_unhashed.insert(node);
+        w.input.dirty.remove(&node);
+    }
+    let plan = w.plan();
+    assert!(plan.ops.is_empty(), "{:#?}", plan.ops);
+    assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+}
+
+/// A new folder with a file being written in it still goes up: what waits is only a delete,
+/// a restore or a move.
+#[test]
+fn a_new_folder_goes_up_while_a_file_in_it_is_written() {
+    let [n, d] = ids(2)[..] else { unreachable!() };
+    let mut w = World::default();
+    w.local(n, Some(folder(ROOT, "n")));
+    w.local(
+        d,
+        Some(NodeState {
+            content: None,
+            ..file(n, "d", "1")
+        }),
+    );
+    w.input.local_unhashed.insert(d);
+    let plan = w.plan();
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, Op::RemoteCreate { node, .. } if *node == n)),
+        "{:#?}",
+        plan.ops
+    );
+    assert_eq!(plan.deferred, [d]);
 }

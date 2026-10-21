@@ -136,7 +136,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    node with the lower node id (byte order) keeps the name; each other node is renamed to
    `<stem> (conflict <n>)<ext>` with the smallest `n ≥ 1` that is free. Applies equally to
    files and folders. Recovered files, and an orphan moving into it, lose a clash whatever the
-   ids (rule 3).
+   ids (rule 3). A name held by what waits for a hash (rule 3) isn't renamed or taken: the
+   other node waits.
 2. **No cycles.** If merged moves form a cycle, revert the local moves taking part in it (the
    remote side has already published its moves). Revert one at a time until no cycle remains.
 3. **No orphans.** A live node whose merged parent is deleted resurrects the parent chain:
@@ -154,6 +155,19 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    stays removed). A removed folder outside this
    folder's part of the drive, or one it filters (§10), isn't its to bring back: a node written
    into it waits for the folder that syncs that part, or, filtered, goes where an orphan does.
+   A file not hashed yet keeps its folders as they are, neither deleted nor restored, till it
+   is hashed (below); then it keeps a folder alive as any live child does.
+
+   **What waits for a hash.** A file here not hashed yet (being written, locked, unreadable, a
+   placement a crash left unread) can't be judged: until it is hashed it, and every folder on
+   its path here, on the drive and in the base, stay as they are on both sides, whatever the
+   drive did meanwhile. Nothing is done to the file; such a folder is not deleted, restored
+   or moved on either side (made where it isn't yet, and its tags, may go): the delete or
+   move waits, it isn't undone. A node that would take the file's name or such a folder's,
+   here or on the drive, waits too, never renamed. Once hashed, all of it merges as ever (an
+   edit keeps a deleted folder alive as above, an unchanged file follows the drive). The
+   round that finds something waiting reads those files first and plans again; one that
+   still can't be read is told, by name.
 
    **Orphans go into Recovered files.** A live node whose folder is nowhere on the drive
    (deleted for good: a stale plan's create racing a delete and an emptied Recently deleted,
@@ -167,7 +181,9 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    stays there, an item of its own; only what is live, or brought back, moves. A live node
    whose folder is a file (another writer set its `groupId` to a file's node id) is moved the
    same way, whether the picture is whole or not; a folder this device can't read, or a file
-   whose newer version it can't read, is no such place: what is in it waits.
+   whose newer version it can't read, is no such place: what is in it waits. A file here not
+   hashed yet is never an orphan to adopt (it waits for its hash, above): adopted from the
+   drive's state, its item took the drive's tags over its own.
    - The main folder adopts: a node whose place isn't known is never a role folder's (§12).
      A folder in Recently deleted has a place where its own folder is: a live one, or one in
      Recently deleted in turn, up to the top; what is in it is neither an orphan nor the main

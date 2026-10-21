@@ -83,6 +83,17 @@ pub(crate) struct Client {
     pub(crate) run_settled: HashMap<NodeId, VersionTag>,
     /// Files the last recovery found unhashed (their record kept): the plan defers them.
     pub(crate) unhashed: HashSet<NodeId>,
+    /// Files the user is still writing ([`Action::EditWriting`]): the next plan finds them
+    /// not hashed yet, as it does the `unhashed`.
+    ///
+    /// [`Action::EditWriting`]: crate::Action::EditWriting
+    pub(crate) writing: HashSet<NodeId>,
+    /// Files another app holds locked ([`crate::Action::Lock`]): not hashed at any plan till
+    /// let go.
+    pub(crate) locked: HashSet<NodeId>,
+    /// The last plan found files still being written: the scan hashes them once written, and
+    /// that asks for a sync (the engine keeps their nodes dirty).
+    pub(crate) hashing: bool,
     /// The identity's "not there" heard once, per file ([`crate::gone`]), the files taken as
     /// gone for good (`gone_files`: never seen again), and the client's syncs, its clock.
     pub(crate) suspects: BTreeMap<crate::gone::File, hbsync_state::GoneSuspect>,
@@ -124,6 +135,9 @@ impl Client {
             planned_changed: HashMap::new(),
             run_settled: HashMap::new(),
             unhashed: HashSet::new(),
+            writing: HashSet::new(),
+            locked: HashSet::new(),
+            hashing: false,
             suspects: BTreeMap::new(),
             gone: BTreeSet::new(),
             syncs: 0,
