@@ -36,10 +36,10 @@ use hbsync_types::{NodeId, NodeKind, RemoteRef, Tags, Target, Written};
 
 use crate::activity::{self, Counters};
 use crate::folder::FolderCtx;
-use crate::plan::{DriveVersion, TagWrite, not_reached};
 use crate::policy::{InRun, policy};
 use crate::reconcile::{Op, Requirement};
 use crate::refused::Refusals;
+use crate::settle::rules::{DriveVersion, TagWrite, not_reached};
 use crate::settle::{
     Placed, Settle, mark_children, settle, settle_placement, settle_with, spell, tags_recorded,
 };

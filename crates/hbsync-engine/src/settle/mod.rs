@@ -7,10 +7,11 @@ use hbsync_platform::{Os, RelPath};
 use hbsync_state::{BaseRow, FolderTx, MirrorRow, Placing, PlannedBase, ReadTx, StateError};
 use hbsync_types::{ContentState, NodeId, NodeKind, NodeState, RemoteRef};
 
+pub(crate) mod rules;
+
 use crate::folder::FolderCtx;
-use crate::plan::{Against, DriveVersion, TagWrite, tags_written};
-use crate::reconcile::Agreement;
 use crate::view;
+use rules::{Against, Agreement, DriveVersion, TagWrite, tags_written};
 
 /// A node to settle after an operation, and what against.
 #[derive(Debug, Clone, Copy)]
