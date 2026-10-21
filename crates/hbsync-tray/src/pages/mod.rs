@@ -334,7 +334,7 @@ mod tests {
         assert!(page.contains("Log in to Homebase first"), "{page}");
 
         std::fs::create_dir_all(&paths.config)?;
-        Config::update(&paths.config_file(), |c| {
+        Config::update_for_test(&paths.config_file(), |c| {
             c.roots.push(hbsync_app::Root::main(
                 &"anna.example.com".into(),
                 &dir.path().join("Homebase"),

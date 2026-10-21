@@ -20,6 +20,8 @@ pub use client::Client;
 pub use problem::ApiError;
 pub use youauth::{Credentials, Pending};
 
+/// Its class and `Retry-After` (`impl HomebaseError` in [`drive`]) sit next to the mapping onto
+/// the trait's errors that they follow.
 #[derive(Debug, thiserror::Error)]
 pub enum HomebaseError {
     /// The request didn't get an answer: no connection, a timeout, a dropped stream. Worth

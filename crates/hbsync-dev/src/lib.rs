@@ -4,7 +4,8 @@
 //! - `hbsync-clean <identity> --tombstones [--yes]`: counts the drive's tombstones, and with
 //!   `--yes` deletes them for good (a test identity's, between runs).
 //!
-//! Not the product: the daemon, its configuration and the keychain are roadmap Layer 6.
+//! Not the product: that is the daemon `hbsyncd` (`hbsync-app`), with its config and the OS
+//! keychain.
 
 use std::path::PathBuf;
 use std::sync::Mutex;

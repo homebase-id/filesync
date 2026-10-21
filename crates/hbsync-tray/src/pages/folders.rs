@@ -118,7 +118,7 @@ impl Server {
         let Some(role) = form.get("role").and_then(|r| r.parse::<Role>().ok()) else {
             return "Nothing changed.".into();
         };
-        let result = (|| -> control::Result<String> {
+        let result = (|| -> hbsync_app::Result<String> {
             let config = Config::load(&self.paths.config_file())?.unwrap_or_default();
             let identity = config.root()?.ok_or("not logged in")?.identity.clone();
             if add {
