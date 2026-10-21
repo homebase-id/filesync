@@ -17,6 +17,7 @@ use hbsync_engine::tree::{Tree, first_free, numbered_names};
 use hbsync_local::Verdict;
 use hbsync_local::layout::parked_name;
 use hbsync_platform::Os;
+use hbsync_state::{Answer, RemovedRow, StateDb, StateError};
 use hbsync_types::{
     ContentState, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, Role, Tags, VersionTag,
 };
@@ -367,8 +368,14 @@ impl Sim {
         let held_before = self.clients[c].local.get(node).cloned();
         let before_tags = held_before.as_ref().map(|l| l.tags.clone());
         let fresh = held_before.is_none();
+        // The version of its file a remote write replaces (none: a file it makes).
+        let replaced = match self.clients[c].meanwhile {
+            Some(_) => self.server.node(node).map(|(n, r)| (n.clone(), r)),
+            None => None,
+        };
         let outcome = self.execute(c, &op);
         let landed = outcome == Outcome::Landed;
+        let remote_write = outcome == Outcome::Done && writes_drive(&op);
         let outcome = if landed { Outcome::Done } else { outcome };
         if outcome == Outcome::Done {
             self.clients[c].refused.remove(&(node, op.kind()));
@@ -645,7 +652,113 @@ impl Sim {
                 }
             }
         }
+        if remote_write && let Some(pick) = self.clients[c].meanwhile.take() {
+            self.meanwhile(c, node, replaced, pick);
+        }
         true
+    }
+
+    /// Another device changes `node`, which client `c`'s remote write over `replaced` (the
+    /// node as the drive had it, removed or not; `None`: a node it made) just left on the
+    /// drive, and the account pulls that change before the write's answer is recorded
+    /// ([`Action::Meanwhile`], `pick`). The node has settled against the answer already (as the
+    /// executor's settle does where a pull superseded it: as if the pull came after). The
+    /// store's record of the answer ([`AccountTx::answered`]) is checked on a store holding the
+    /// node as before the write: alone, the answer goes in; after the pull's change, that
+    /// stays.
+    ///
+    /// [`Action::Meanwhile`]: crate::Action::Meanwhile
+    /// [`AccountTx::answered`]: hbsync_state::AccountTx::answered
+    fn meanwhile(
+        &mut self,
+        c: usize,
+        node: NodeId,
+        replaced: Option<(ServerNode, bool)>,
+        pick: usize,
+    ) {
+        if node == NodeId::RECOVERED || Role::of(node).is_some() {
+            return;
+        }
+        let Some(answer) = self.server.node(node).map(|(n, r)| (n.clone(), r)) else {
+            return;
+        };
+        let alone = self.answer_lands(node, replaced.as_ref(), &answer, None);
+        if answer.1 {
+            self.restore_with(node);
+        } else if pick % 2 == 1 && answer.0.state.kind == NodeKind::File {
+            let version = VersionTag(self.server.uuid());
+            self.edit_on_drive(node, version);
+        } else {
+            self.remove_live([node], true);
+        }
+        self.note(|_| format!("  meanwhile {node}: removed {}, pick {pick}", answer.1));
+        // What the pull recorded: the drive's node now.
+        let Some(now) = self.server.node(node).map(|(n, r)| (n.clone(), r)) else {
+            return;
+        };
+        let raced = self.answer_lands(node, replaced.as_ref(), &answer, Some(&now));
+        let name = &self.clients[c].name;
+        let held = |n: &(ServerNode, bool)| match n.1 {
+            true => (None, Some(n.0.remote.version)),
+            false => (Some(n.0.remote.version), None),
+        };
+        let (want_alone, want_raced) = (held(&answer), held(&now));
+        self.ledger.answer_undid(|| match (alone, raced) {
+            (Ok(alone), Ok(raced)) if alone == want_alone && raced == want_raced => None,
+            got => Some(format!(
+                "{name} {node}: the store holds {got:?} (alone, after the pull; live, removed), \
+                 the drive {want_alone:?} then {want_raced:?}"
+            )),
+        });
+    }
+
+    /// Where a store holding `node` as `replaced` (live or removed; `None`: not at all), then as
+    /// `pulled` (if a pull recorded that), has the node once the answer `answer` (the node as
+    /// written, live or removed) is recorded over `replaced`: (its live version, its removed
+    /// one). The store is left empty for the next.
+    fn answer_lands(
+        &mut self,
+        node: NodeId,
+        replaced: Option<&(ServerNode, bool)>,
+        answer: &(ServerNode, bool),
+        pulled: Option<&(ServerNode, bool)>,
+    ) -> Result<(Option<VersionTag>, Option<VersionTag>), StateError> {
+        let removed_at = |n: &ServerNode| Some(time(n.remote.version));
+        let row = |n: &ServerNode| crate::narrow::mirror_row(node, &n.state, n.remote);
+        let record =
+            |s: hbsync_state::AccountTx<'_>, (n, removed): &(ServerNode, bool)| match removed {
+                true => s.move_to_removed(&RemovedRow {
+                    row: row(n),
+                    removed_at: removed_at(n),
+                }),
+                false => s.put_live(&row(n)),
+            };
+        let expected = replaced.map(|(n, _)| n.remote.version);
+        let answered = match answer.1 {
+            true => Answer::removal(expected, row(&answer.0)),
+            false => Answer::live(expected, row(&answer.0)),
+        };
+        let db = match &mut self.answers_db {
+            Some(db) => db,
+            empty => empty.insert(StateDb::open_in_memory()?),
+        };
+        db.write(|s| {
+            let s = s.account();
+            replaced
+                .into_iter()
+                .chain(pulled)
+                .try_for_each(|n| record(s, n))?;
+            s.answered(&answered).map(drop)
+        })?;
+        db.write(|s| {
+            let picture = (
+                s.get_mirror(node)?.map(|m| m.version),
+                s.removed_by_node(node)?.map(|r| r.row.version),
+            );
+            s.account().delete_mirror(answer.0.remote.file_id)?;
+            s.account().delete_removed(node)?;
+            Ok(picture)
+        })
     }
 
     /// Whether `op` of client `c` would write outside its folder's part of the drive: not a copy
@@ -1635,16 +1748,20 @@ impl Sim {
     /// ([`Sim::with_refusals`]): written out by the simulator itself, not with the client's key
     /// (`hbsync_engine::refused::key`), so a key that leaves out an input is caught.
     fn request(&self, c: usize, op: &Op) -> Option<String> {
-        let sends = matches!(
-            op,
-            Op::RemoteCreate { .. }
-                | Op::RemoteUpdate { .. }
-                | Op::RemoteTags { .. }
-                | Op::RemoteDelete { .. }
-                | Op::LocalDownload { .. }
-        );
+        let sends = writes_drive(op) || matches!(op, Op::LocalDownload { .. });
         (self.refusing && sends).then(|| format!("{op:?} {:?}", uploaded(&self.clients[c], op)))
     }
+}
+
+/// Whether `op` writes to the drive.
+fn writes_drive(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::RemoteCreate { .. }
+            | Op::RemoteUpdate { .. }
+            | Op::RemoteTags { .. }
+            | Op::RemoteDelete { .. }
+    )
 }
 
 /// The base's extra the executor records for `local` at `version`.

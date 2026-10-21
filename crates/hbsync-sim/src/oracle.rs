@@ -57,6 +57,9 @@ pub(crate) struct Ledger {
     wrongly_removed: Option<String>,
     /// What users did to tags, and what became of it.
     pub(crate) tags: TagBook,
+    /// The first answer of a client's write the store recorded wrongly: left out alone, or
+    /// over a newer state of its node a pull recorded meanwhile ([`crate::Action::Meanwhile`]).
+    answer_undid: Option<String>,
     /// The first plan the engine's own planning path made otherwise ([`Sim::with_narrow_check`]).
     narrow_differs: Option<String>,
 }
@@ -138,6 +141,12 @@ impl Ledger {
     /// (through live folders) each at its version: what its removal took along, as it happened.
     pub(crate) fn folder_removed(&mut self, folder: NodeId, below: BTreeMap<NodeId, VersionTag>) {
         self.took.insert(folder, below);
+    }
+
+    /// A client's write's answer was recorded wrongly, if `what` says how
+    /// ([`crate::Action::Meanwhile`]).
+    pub(crate) fn answer_undid(&mut self, what: impl FnOnce() -> Option<String>) {
+        first(&mut self.answer_undid, what);
     }
 
     /// Whether the engine's planning path was found planning otherwise than the sim.
@@ -261,6 +270,9 @@ impl Sim {
         }
         if let Some(what) = &ledger.narrow_differs {
             return Err(what.clone());
+        }
+        if let Some(what) = &ledger.answer_undid {
+            return Err(format!("a write's answer was recorded wrongly: {what}"));
         }
         if let Some(plan) = &ledger.unguarded {
             return Err(format!("a mass delete went through unconfirmed: {plan}"));

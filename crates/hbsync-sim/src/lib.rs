@@ -80,6 +80,8 @@ pub struct Sim {
     fail_commit_next: bool,
     /// For scripted tests: the next tag write fails.
     fail_tags_next: bool,
+    /// A store [`Action::Meanwhile`] records answers in, opened at its first, left empty.
+    answers_db: Option<hbsync_state::StateDb>,
     /// Record every plan and skipped operation in `trace` (debugging).
     pub verbose: bool,
     pub trace: Vec<String>,
@@ -133,6 +135,7 @@ impl Sim {
             writes: 0,
             fail_commit_next: false,
             fail_tags_next: false,
+            answers_db: None,
             verbose: false,
             trace: Vec::new(),
             guard: None,

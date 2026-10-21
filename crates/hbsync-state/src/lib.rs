@@ -57,8 +57,9 @@ use rusqlite::{Connection, TransactionBehavior};
 pub use coords::Coords;
 pub use reader::Reader;
 pub use store::{
-    AccountTx, BaseRow, DirtyCursor, FolderRow, FolderTx, GoneSuspect, LocalRow, MAX_DEPTH,
-    MirrorFile, MirrorRow, Placing, PlannedBase, ReadTx, Recorded, Refused, RemovedRow, Store,
+    AccountTx, Answer, Answered, BaseRow, DirtyCursor, FolderRow, FolderTx, GoneSuspect, Left,
+    LocalRow, MAX_DEPTH, MirrorFile, MirrorRow, Placing, PlannedBase, ReadTx, Recorded, Refused,
+    RemovedRow, Store,
 };
 
 #[derive(Debug, thiserror::Error)]

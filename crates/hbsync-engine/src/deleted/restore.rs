@@ -5,7 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use hbsync_platform::name::name_key;
 use hbsync_remote::{Answers, NodeMeta, Remote, RemoteError};
-use hbsync_state::{MirrorRow, ReadTx, RemovedRow, StateError};
+use hbsync_state::{Answer, MirrorRow, ReadTx, RemovedRow, StateError};
 use hbsync_types::{NodeId, Target, Written};
 
 use crate::error::EngineError;
@@ -88,14 +88,15 @@ impl AccountOps<'_> {
             // only the second time: sync semantics §8b), in one write. The mirror's write marks
             // each dirty in the folders it comes back to.
             let (back, heard) = (std::mem::take(&mut r.back), std::mem::take(&mut r.heard));
-            let gone = locked(self.account).write(|s| {
+            let (gone, superseded) = locked(self.account).write(|s| {
                 let gone = heard
                     .iter()
                     .map(|&(f, _, said)| mirror::heard(s.account(), f, said))
                     .collect::<Result<Vec<bool>, _>>()?;
-                back.iter().try_for_each(|m| mirror::live(s.account(), m))?;
-                Ok(gone)
+                let superseded = mirror::answered(s.account(), &back)?;
+                Ok((gone, superseded))
             })?;
+            *r.behind |= superseded;
             restored += back.len();
             // Gone: what was to come back into it comes back as into any folder gone for good.
             // Said not there once only: it stays in Recently deleted, and the restore fails, to
@@ -125,7 +126,7 @@ struct Restoring<'a> {
     taken: HashMap<NodeId, HashSet<String>>,
     behind: &'a mut bool,
     /// Written back, to record.
-    back: Vec<MirrorRow>,
+    back: Vec<Answer>,
     /// What the drive said of files not found, to take ([`mirror::heard`]).
     heard: Vec<(hbsync_types::RemoteFileId, NodeId, Said)>,
     /// What stops the restore.
@@ -139,7 +140,10 @@ impl Restoring<'_> {
             Ok(w) => {
                 let hash = row.file.map(|f| f.hash);
                 self.live.insert(row.node);
-                self.back.push(mirror::written(meta, hash, w));
+                self.back.push(Answer::live(
+                    Some(row.version),
+                    mirror::written(meta, hash, w),
+                ));
                 return;
             }
             Err(e) => e,

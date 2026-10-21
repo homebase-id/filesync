@@ -166,8 +166,22 @@ pub(crate) fn settle(
     how: Settle<'_>,
     os: Os,
 ) -> Result<Option<RemoteRef>, StateError> {
+    let mirror = s.get_mirror(how.node)?;
+    settle_with(s, how, mirror, os)
+}
+
+/// [`settle`] against `mirror`, the drive's row of the node (`None`: none): the mirror's, or
+/// the row this device's remote write left as its answer says (a removal: none). The two are
+/// the same where the answer is in the mirror; where a pull recorded a newer state after the
+/// write landed ([`hbsync_state::Answered::Superseded`]), the node settles as if that pull came
+/// after the answer's commit.
+pub(crate) fn settle_with(
+    s: FolderTx<'_>,
+    how: Settle<'_>,
+    mirror: Option<MirrorRow>,
+    os: Os,
+) -> Result<Option<RemoteRef>, StateError> {
     let node = how.node;
-    let mirror = s.get_mirror(node)?;
     let base = s.get_base(node)?;
     let at = base.as_ref().map(|b| b.remote);
     let ours = how.ours.filter(|o| at == Some(*o));

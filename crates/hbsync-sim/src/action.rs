@@ -132,6 +132,15 @@ pub enum Action {
     MoveAcross {
         file: usize,
     },
+    /// Another device changes the node of this client's next remote write once it landed,
+    /// before its answer is recorded, and the account pulls that change meanwhile (another
+    /// folder's engine, or an announcement): it removes the node the write left live (or, `op`
+    /// odd, edits it where it is a file), or restores one the write removed. The answer is then
+    /// recorded as the engine's store records it (`AccountTx::answered`), which must keep the
+    /// newer state, and the node settles against the answer, as if the pull came after it.
+    Meanwhile {
+        op: usize,
+    },
 }
 
 /// Tags the users pick from: one no Linux client can hold, one with a newline no macOS client

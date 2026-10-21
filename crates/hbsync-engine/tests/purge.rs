@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use common::{Client, server};
+use common::{Client, header_named, server};
 use hbsync_engine::deleted;
 use hbsync_engine::feed;
 use hbsync_engine::time::TRACE_MS;
@@ -149,20 +149,6 @@ fn a_device_away_longer_than_the_trace_reads_the_feed_again() -> common::Res<()>
     a.sync()?;
     assert_eq!(a.tree_text(""), b.tree_text(""));
     Ok(())
-}
-
-/// The header of the file named `name` on the server, live or removed.
-fn header_named(server: &Arc<Mutex<FakeServer>>, name: &str) -> hbsync_remote::RemoteHeader {
-    let server = server.lock().expect("server");
-    server
-        .live()
-        .chain(server.removed())
-        .find(|h| match &h.body {
-            hbsync_remote::RemoteBody::Live { content, .. } => content.name == name,
-            hbsync_remote::RemoteBody::Deleted => false,
-        })
-        .cloned()
-        .expect("on the server")
 }
 
 /// The feed leaves out some rows the server has (one changed in its last moment, one the

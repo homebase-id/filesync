@@ -27,7 +27,8 @@ use hbsync_platform::name::name_key;
 use hbsync_platform::{EntryKind, Os, RelPath, ops, tags};
 use hbsync_remote::{ErrorClass, NodeMeta, Remote, RemoteError};
 use hbsync_state::{
-    BaseRow, FolderTx, LocalRow, MirrorRow, Placing, ReadTx, Refused, StateDb, StateError, Store,
+    Answer, Answered, BaseRow, FolderTx, LocalRow, MirrorRow, Placing, ReadTx, Refused, StateDb,
+    StateError, Store,
 };
 use hbsync_types::activity::Synced;
 use hbsync_types::schema::NodeContent;
@@ -40,7 +41,7 @@ use crate::policy::{InRun, policy};
 use crate::reconcile::{Op, Requirement};
 use crate::refused::Refusals;
 use crate::settle::{
-    Placed, Settle, mark_children, settle, settle_placement, spell, tags_recorded,
+    Placed, Settle, mark_children, settle, settle_placement, settle_with, spell, tags_recorded,
 };
 use crate::transfer::{Download, Job, JobError, JobResult, TransferConfig, run_jobs_while};
 use crate::view;
@@ -603,6 +604,42 @@ impl<'a> Executor<'a> {
         Ok(Outcome::Settled)
     }
 
+    /// Records this device's remote writes' answers ([`AccountTx::answered`]), each settling its
+    /// node as `how` against the row the answer left, in one transaction: no pull commits
+    /// between an answer's check and its write, nor before the settle (writes to the state DB
+    /// take turns: [`StateDb::write`]). An answer a pull superseded since its write landed
+    /// settles its node as if that pull came after ([`settle_with`]), and plans it again; the
+    /// run reads the feed again then (what superseded it may be a page fetched before the
+    /// write landed). A removal plans its node again too (what was in it).
+    ///
+    /// [`AccountTx::answered`]: hbsync_state::AccountTx::answered
+    fn finish_answered(&mut self, answers: &[(Settle<'_>, Answer)]) -> Step {
+        let os = self.folder.os;
+        let answers: Vec<(Settle<'_>, &Answer)> = answers
+            .iter()
+            .map(|(how, a)| (self.ours(*how), a))
+            .collect();
+        let (settled, superseded) = self.db.write(|s| {
+            let mut superseded = false;
+            let mut settled = Vec::with_capacity(answers.len());
+            for (how, answer) in &answers {
+                let newer = s.account().answered(answer)? == Answered::Superseded;
+                superseded |= newer;
+                if newer || answer.live_row().is_none() {
+                    s.folder().mark_dirty(how.node)?;
+                }
+                let row = answer.live_row().cloned();
+                settled.push((how.node, settle_with(s.folder(), *how, row, os)?));
+            }
+            Ok((settled, superseded))
+        })?;
+        if superseded {
+            self.report.drive_moved = true;
+        }
+        self.note(settled);
+        Ok(Outcome::Settled)
+    }
+
     /// Whether a placement record this operation didn't write waits for `node` (one recovery
     /// keeps until its item can be read, or one an earlier operation left with its item in
     /// place): no placement runs over it; the node stays dirty, and the next round's recovery
@@ -1079,19 +1116,14 @@ impl<'a> Executor<'a> {
                 (
                     Ctx::Meta {
                         hash,
-                        after: remote::After::Removed { file_id },
+                        after: remote::After::Removed { .. },
                         ..
                     },
-                    Job::Meta { meta, .. },
+                    Job::Meta { meta, target },
                     JobResult::Written(written),
                 ) => {
                     ops.push((p.op, p.attempts, p.gone));
-                    landed.push(remote::Landed {
-                        meta,
-                        hash,
-                        file_id,
-                        written,
-                    });
+                    landed.push(remote::answer(&meta, hash, target.as_ref(), written, true));
                 }
                 (ctx, job, result) => rest.push((p.op, p.attempts, p.gone, ctx, job, result)),
             }

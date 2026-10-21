@@ -91,7 +91,7 @@ impl Sim {
     /// Moves `nodes`, in order, from the tree to Recently deleted, on the server at once;
     /// `rightly`: as a user deleted them ([`Sim::remove_on_drive`]). A tag change loses to a
     /// delete (§11).
-    fn remove_live(&mut self, nodes: impl IntoIterator<Item = NodeId>, rightly: bool) {
+    pub(crate) fn remove_live(&mut self, nodes: impl IntoIterator<Item = NodeId>, rightly: bool) {
         for node in nodes {
             if let Some(n) = self.server.live.remove(&node) {
                 self.remove_on_drive(node, n, rightly);
@@ -271,15 +271,7 @@ impl Sim {
                     self.server.put(self.ids.fresh(), state);
                 }
             }
-            (1, Some(file)) => {
-                let content = self.new_blob();
-                let old = self.server.live.get(&file).and_then(|n| n.state.content);
-                self.ledger.blob_superseded(old);
-                if let Some(n) = self.server.live.get_mut(&file) {
-                    n.state.content = Some(content);
-                    n.remote.version = version;
-                }
-            }
+            (1, Some(file)) => self.edit_on_drive(file, version),
             (2, Some(file)) => {
                 if let Some(n) = self.server.live.remove(&file) {
                     self.remove_on_drive(file, n, true);
@@ -295,6 +287,17 @@ impl Sim {
                     n.remote.version = version;
                 }
             }
+        }
+    }
+
+    /// Another device writes new bytes into live file `file`, at `version`.
+    pub(crate) fn edit_on_drive(&mut self, file: NodeId, version: VersionTag) {
+        let content = self.new_blob();
+        let old = self.server.live.get(&file).and_then(|n| n.state.content);
+        self.ledger.blob_superseded(old);
+        if let Some(n) = self.server.live.get_mut(&file) {
+            n.state.content = Some(content);
+            n.remote.version = version;
         }
     }
 
@@ -393,6 +396,7 @@ impl Sim {
             }
             Action::Restore { node } => self.restore(node),
             Action::Phone { op, pick } => self.phone(op, pick),
+            Action::Meanwhile { op } => self.clients[c].meanwhile = Some(op),
             Action::DeleteRoleFolder => self.delete_role_folder(),
             Action::DeleteStopped { pick, done } => self.delete_stopped(pick, done),
             Action::DeleteOutright { pick } => self.delete_outright(pick),

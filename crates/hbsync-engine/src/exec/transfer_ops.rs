@@ -325,8 +325,8 @@ impl Executor<'_> {
             self.report.drive_moved = true;
         }
         match (ctx, job, result) {
-            (Ctx::Meta { hash, after, .. }, Job::Meta { meta, .. }, JobResult::Written(w)) => {
-                self.commit_meta(meta, hash, after, Some(w))
+            (Ctx::Meta { hash, after, .. }, Job::Meta { meta, target }, JobResult::Written(w)) => {
+                self.commit_meta(meta, hash, after, target.as_ref(), w)
             }
             // An earlier try landed, with whatever the file held then: the bytes count as
             // agreed only where the drive's hash is the local one (an edit since goes up).
@@ -369,8 +369,19 @@ impl Executor<'_> {
                     false => mirror::heard(s.account(), file_id, said),
                 })?;
                 match (ctx, job) {
-                    (Ctx::Meta { hash, after, .. }, Job::Meta { meta, .. }) if gone && removal => {
-                        self.commit_meta(meta, hash, after, None)
+                    (
+                        Ctx::Meta {
+                            after: remote::After::Removed { file_id },
+                            ..
+                        },
+                        Job::Meta { meta, .. },
+                    ) if gone => {
+                        // Out of the tree all the same, the drive no longer having it.
+                        let node = meta.node;
+                        self.finish(&[Settle::node(node)], |s| {
+                            s.account().delete_mirror(file_id)?;
+                            s.folder().mark_dirty(node)
+                        })
                     }
                     _ if gone => Ok(Outcome::stale("deleted for good remotely")),
                     _ if said == mirror::Said::There => Ok(Outcome::stale("not found, but there")),
@@ -392,15 +403,18 @@ impl Executor<'_> {
             (Ctx::Download(d), _, JobResult::Downloaded { file, local_hash }) => {
                 self.place_download(*d, file, local_hash)
             }
-            (Ctx::Upload { hash, .. }, Job::Upload { meta, .. }, JobResult::Written(written)) => {
-                let node = meta.node;
-                let row = mirror::written(&meta, Some(hash), written);
+            (
+                Ctx::Upload { hash, .. },
+                Job::Upload { meta, target, .. },
+                JobResult::Written(written),
+            ) => {
+                let answer = remote::answer(&meta, Some(hash), target.as_ref(), written, false);
                 // The bytes were just sent: equal even if the hashes use other algorithms.
                 let how = Settle {
                     same_bytes: true,
-                    ..Settle::node(node)
+                    ..Settle::node(meta.node)
                 };
-                self.finish(&[how], |s| mirror::live(s.account(), &row))
+                self.finish_answered(&[(how, answer)])
             }
             _ => Ok(Outcome::unsyncable(
                 "a transfer result for another operation (a fault of this client)",

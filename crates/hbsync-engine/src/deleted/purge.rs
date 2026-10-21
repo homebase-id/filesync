@@ -248,7 +248,10 @@ impl AccountOps<'_> {
                 let mut done = Vec::new();
                 for (m, answer) in part.iter().zip(answers) {
                     match answer {
-                        Ok(w) => done.push(m.rewritten(w)),
+                        Ok(w) => done.push(hbsync_state::Answer::removal(
+                            Some(m.version),
+                            m.rewritten(w),
+                        )),
                         // Written since, or gone; or unanswered, so it may have landed: the feed
                         // tells what it is now.
                         Err(_) if stop.is_some() => self.behind = true,
@@ -263,16 +266,13 @@ impl AccountOps<'_> {
                     }
                 }
                 count += done.len();
-                removed.extend(done.iter().map(|m| m.node));
+                removed.extend(done.iter().map(|a| a.row().node));
                 made.extend(
                     done.iter()
-                        .filter(|m| m.kind == NodeKind::Folder)
-                        .map(|m| (m.clone(), depth)),
+                        .filter(|a| a.row().kind == NodeKind::Folder)
+                        .map(|a| (a.row().clone(), depth)),
                 );
-                self.db().write(|s| {
-                    done.into_iter()
-                        .try_for_each(|m| mirror::removed(s.account(), m.file_id, Some(m)))
-                })?;
+                self.behind |= self.db().write(|s| mirror::answered(s.account(), &done))?;
                 if stop.is_some() {
                     stopped = stop;
                     break 'levels;
@@ -330,11 +330,11 @@ impl AccountOps<'_> {
                 .set_removed(&targets, false)
                 .unwrap_or_else(Answers::stopped)
                 .padded(targets.len());
-            let rows: Vec<MirrorRow> = level
+            let rows: Vec<hbsync_state::Answer> = level
                 .iter()
                 .zip(answers)
                 .filter_map(|((m, _), answer)| match answer {
-                    Ok(w) => Some(m.rewritten(w)),
+                    Ok(w) => Some(hbsync_state::Answer::live(Some(m.version), m.rewritten(w))),
                     Err(_) => {
                         self.behind = true;
                         None
@@ -342,8 +342,7 @@ impl AccountOps<'_> {
                 })
                 .collect();
             came += rows.len();
-            self.db()
-                .write(|s| rows.iter().try_for_each(|m| mirror::live(s.account(), m)))?;
+            self.behind |= self.db().write(|s| mirror::answered(s.account(), &rows))?;
             if let Some(e) = stopped {
                 return Err(EngineError::Remote(e));
             }

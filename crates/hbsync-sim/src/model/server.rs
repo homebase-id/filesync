@@ -185,6 +185,14 @@ impl Server {
         item
     }
 
+    /// `node` on the drive, live or in Recently deleted, and whether it is there.
+    pub(crate) fn node(&self, node: NodeId) -> Option<(&ServerNode, bool)> {
+        match self.live.get(&node) {
+            Some(n) => Some((n, false)),
+            None => self.removed.get(&node).map(|n| (n, true)),
+        }
+    }
+
     pub(crate) fn tree(&self) -> Tree {
         let mut t = Tree::new();
         for (id, n) in &self.live {

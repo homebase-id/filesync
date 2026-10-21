@@ -88,6 +88,9 @@ pub(crate) struct Client {
     pub(crate) suspects: BTreeMap<crate::gone::File, hbsync_state::GoneSuspect>,
     pub(crate) gone: BTreeSet<hbsync_types::RemoteFileId>,
     pub(crate) syncs: i64,
+    /// Another device changes the node of the next remote write once it landed
+    /// ([`crate::Action::Meanwhile`], its `op`).
+    pub(crate) meanwhile: Option<usize>,
 }
 
 impl Client {
@@ -124,6 +127,7 @@ impl Client {
             suspects: BTreeMap::new(),
             gone: BTreeSet::new(),
             syncs: 0,
+            meanwhile: None,
         }
     }
 

@@ -1494,3 +1494,102 @@ fn a_rewrite_keeps_what_another_writer_wrote() -> R {
     );
     Ok(())
 }
+
+/// An answer to this device's write goes into the picture while it holds the version the write
+/// replaced, or the answer's own (its echo first); over a newer state a pull recorded since,
+/// it stays out.
+#[test]
+fn an_answer_records_only_over_what_its_write_replaced() -> R {
+    use hbsync_state::{Answer, Answered, MirrorRow, RemovedRow};
+    let mut db = StateDb::open_in_memory()?;
+    let node = NodeId::new();
+    let file_id = RemoteFileId(Uuid::new_v4());
+    let at = |v: u128, name: &str| MirrorRow {
+        file_id,
+        version: VersionTag(Uuid::from_u128(v)),
+        node,
+        parent: NodeId::ROOT,
+        name: name.into(),
+        kind: NodeKind::Folder,
+        file: None,
+        content_extra: None,
+        token: None,
+        changed_at: Some(v as i64),
+    };
+    let answer = |expected: Option<u128>, row: MirrorRow, removed| {
+        let expected = expected.map(|v| VersionTag(Uuid::from_u128(v)));
+        match removed {
+            true => Answer::removal(expected, row),
+            false => Answer::live(expected, row),
+        }
+    };
+    let picture = |db: &mut StateDb| -> Result<_, StateError> {
+        db.read(|s| {
+            let live = s.get_mirror(node)?.map(|m| m.version.0.as_u128());
+            let removed = s.removed_by_node(node)?.map(|r| r.row.version.0.as_u128());
+            Ok((live, removed))
+        })
+    };
+    // Made: over nothing.
+    let made = db.write(|s| s.account().answered(&answer(None, at(1, "d"), false)))?;
+    assert_eq!(
+        (made, picture(&mut db)?),
+        (Answered::Recorded, (Some(1), None))
+    );
+    // Renamed over 1; removed by another device meanwhile (3): that stays.
+    db.write(|s| {
+        s.account().move_to_removed(&RemovedRow {
+            row: at(3, "d"),
+            removed_at: Some(3),
+        })
+    })?;
+    let renamed = db.write(|s| s.account().answered(&answer(Some(1), at(2, "e"), false)))?;
+    assert_eq!(
+        (renamed, picture(&mut db)?),
+        (Answered::Superseded, (None, Some(3)))
+    );
+    // Restored over 3, its echo first: as it is.
+    db.write(|s| s.account().put_live(&at(4, "d")))?;
+    let back = db.write(|s| s.account().answered(&answer(Some(3), at(4, "d"), false)))?;
+    assert_eq!(
+        (back, picture(&mut db)?),
+        (Answered::Recorded, (Some(4), None))
+    );
+    // Removed over 4: out of the tree.
+    let gone = db.write(|s| s.account().answered(&answer(Some(4), at(5, "d"), true)))?;
+    assert_eq!(
+        (gone, picture(&mut db)?),
+        (Answered::Recorded, (None, Some(5)))
+    );
+    // Restored over 5; a version since this client can't read (6): held as it was.
+    db.write(|s| {
+        let at = RemoteRef {
+            file_id,
+            version: VersionTag(Uuid::from_u128(6)),
+        };
+        s.account()
+            .put_unreadable(at, Some(node), Some(NodeId::ROOT))
+    })?;
+    let back = db.write(|s| s.account().answered(&answer(Some(5), at(7, "d"), false)))?;
+    assert_eq!(
+        (back, picture(&mut db)?),
+        (Answered::Superseded, (None, Some(5)))
+    );
+    assert!(db.read(|s| s.held_files())?.contains(&file_id));
+    // Deleted for good since: never back.
+    db.write(|s| s.account().forget_file(file_id, None))?;
+    let back = db.write(|s| s.account().answered(&answer(Some(5), at(8, "d"), false)))?;
+    assert_eq!(
+        (back, picture(&mut db)?),
+        (Answered::Superseded, (None, None))
+    );
+    // A file the write made, deleted for good before its answer: gone.
+    let made = MirrorRow {
+        file_id: RemoteFileId(Uuid::new_v4()),
+        ..at(9, "n")
+    };
+    db.write(|s| s.account().forget_file(made.file_id, None))?;
+    let lost = db.write(|s| s.account().answered(&answer(None, made, false)))?;
+    assert_eq!(lost, Answered::Superseded);
+    Ok(())
+}

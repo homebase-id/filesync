@@ -3,12 +3,12 @@
 //! mirror (`remote`), Recently deleted (`removed`), the files deleted for good and their
 //! tombstones, mostly on the store's named operations, which keep a node live, in Recently
 //! deleted, or its file gone, never two of them ([`AccountTx::put_live`],
-//! [`AccountTx::move_to_removed`], [`AccountTx::forget_file`]). The answers to this device's own
-//! renames and removals are recorded as they always were ([`updated`], [`removed`]): a pull
-//! may have recorded a newer state of the node meanwhile, which they must not undo.
+//! [`AccountTx::move_to_removed`], [`AccountTx::forget_file`]), and the answers to this device's
+//! own writes ([`AccountTx::answered`]): a pull may have recorded a newer state of the node
+//! since the write landed, which they must not undo.
 
 use hbsync_remote::{ChangeRef, NodeMeta, Remote, RemoteBody, RemoteError, RemoteHeader};
-use hbsync_state::{AccountTx, MirrorRow, RemovedRow, StateError};
+use hbsync_state::{AccountTx, Answer, Answered, MirrorRow, RemovedRow, StateError};
 use hbsync_types::Role;
 use hbsync_types::{ContentHash, FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef, Written};
 
@@ -182,35 +182,16 @@ pub(crate) fn forget(
 
 // ---- this device's own writes, from their answers ----
 
-/// A live version this device wrote (or put back), as the drive answered: out of Recently
-/// deleted, into the mirror ([`AccountTx::put_live`]).
-pub(crate) fn live(s: AccountTx<'_>, row: &MirrorRow) -> Result<(), StateError> {
-    s.put_live(row)
-}
-
-/// A removal written (`row`, its answer; `None`: the drive no longer had the file): out of the
-/// mirror, into Recently deleted at the answer's time (open if it gave none, until the feed
-/// brings it).
-pub(crate) fn removed(
-    s: AccountTx<'_>,
-    file_id: RemoteFileId,
-    row: Option<MirrorRow>,
-) -> Result<(), StateError> {
-    s.delete_mirror(file_id)?;
-    match row {
-        Some(row) => s.put_removed(&RemovedRow {
-            removed_at: row.changed_at,
-            row,
-        }),
-        None => Ok(()),
+/// Records the answers to this device's writes made outside a folder's run (a restore, the
+/// purge's, the role folder), each as [`AccountTx::answered`] does (the executor's settle
+/// theirs too); whether a pull superseded one since its write landed: the account reads the
+/// feed again then.
+pub(crate) fn answered(s: AccountTx<'_>, answers: &[Answer]) -> Result<bool, StateError> {
+    let mut superseded = false;
+    for answer in answers {
+        superseded |= s.answered(answer)? == Answered::Superseded;
     }
-}
-
-/// A rename, move or tag write this device made, as the drive answered: into the mirror. Unlike
-/// [`live`] it leaves Recently deleted as it is: a newer removal of the node, which another
-/// pull may have recorded since the write landed, must not go.
-pub(crate) fn updated(s: AccountTx<'_>, row: &MirrorRow) -> Result<(), StateError> {
-    s.put_mirror(row)
+    Ok(superseded)
 }
 
 /// The mirror's row of `meta` as written (`w`, the drive's answer).

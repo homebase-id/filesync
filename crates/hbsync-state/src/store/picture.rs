@@ -1,8 +1,88 @@
 //! The drive's picture as named operations: a node is live (the mirror), in Recently deleted,
 //! or its file deleted for good, never two of them. The facts a feed page, a restore or a
-//! delete for good brings are recorded through these (the engine's `mirror` module).
+//! delete for good brings are recorded through these (the engine's `mirror` module), and the
+//! answers to this device's own writes ([`AccountTx::answered`]).
 
 use super::*;
+
+/// The drive's answer to a write of this device: what it left (`left`), written over the
+/// version of its file the picture held when the write was made (`expected`; `None`: a file the
+/// write made).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answer {
+    pub expected: Option<VersionTag>,
+    pub left: Left,
+}
+
+/// What a write left of its node on the drive ([`Answer`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Left {
+    Live(MirrorRow),
+    Removed(RemovedRow),
+}
+
+impl Answer {
+    /// A write over `expected` that left `row` live.
+    pub fn live(expected: Option<VersionTag>, row: MirrorRow) -> Answer {
+        Answer {
+            expected,
+            left: Left::Live(row),
+        }
+    }
+
+    /// A removal over `expected` that left `row` in Recently deleted, at the answer's time (open
+    /// if it gave none, until the feed brings it).
+    pub fn removal(expected: Option<VersionTag>, row: MirrorRow) -> Answer {
+        let removed_at = row.changed_at;
+        Answer {
+            expected,
+            left: Left::Removed(RemovedRow { row, removed_at }),
+        }
+    }
+
+    /// The row the write left, live or removed.
+    pub fn row(&self) -> &MirrorRow {
+        match &self.left {
+            Left::Live(row) => row,
+            Left::Removed(r) => &r.row,
+        }
+    }
+
+    /// The row the write left live (`None`: a removal).
+    pub fn live_row(&self) -> Option<&MirrorRow> {
+        match &self.left {
+            Left::Live(row) => Some(row),
+            Left::Removed(_) => None,
+        }
+    }
+}
+
+/// What [`AccountTx::answered`] made of an answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Answered {
+    /// In the picture.
+    Recorded,
+    /// Left out: a pull recorded a newer state of the file after the write landed, which the
+    /// picture keeps.
+    Superseded,
+}
+
+impl Answered {
+    /// What an answer at `answer` to a write over `expected` makes of the picture holding the
+    /// file at `held` (`None`: not at all): recorded while it still holds the version the write
+    /// replaced, or the answer itself (its echo came first). Any other version came after the
+    /// write: a file's versions follow each other, and the write was checked against
+    /// `expected` (verified in odin-core: a header's write is one statement conditional on its
+    /// version tag, `TableDriveMainIndex`). Or before it, from a page fetched before the write
+    /// landed: the account reads the feed again, which brings the answer or what followed it.
+    pub fn of(held: Option<VersionTag>, expected: Option<VersionTag>, answer: VersionTag) -> Self {
+        if held == expected || held == Some(answer) {
+            Answered::Recorded
+        } else {
+            Answered::Superseded
+        }
+    }
+}
 
 impl AccountTx<'_> {
     // ---- the drive's picture ----
@@ -34,6 +114,42 @@ impl AccountTx<'_> {
         }
         self.delete_removed_file(file_id)?;
         self.leave_tree(file_id)
+    }
+
+    /// This device's write's answer (`answer`), into the picture as a live version
+    /// ([`AccountTx::put_live`]) or a removal ([`AccountTx::move_to_removed`]), unless a pull
+    /// recorded a newer state of the file since the write landed ([`Answered::of`]; a delete
+    /// for good, or a version this client can't read, are newer too): that stays.
+    /// Its echo first changes nothing. Checked and written in the caller's transaction, which no
+    /// pull's commit comes into (writes to a state DB take turns: its process's gate, and
+    /// SQLite's write lock across processes).
+    pub fn answered(&self, answer: &Answer) -> Result<Answered> {
+        let row = answer.row();
+        let held = self.known_file(row.file_id)?;
+        let echo = held.is_some_and(|(v, _, removed)| {
+            v == row.version && removed == matches!(answer.left, Left::Removed(_))
+        });
+        let answered = match held {
+            // Deleted for good since.
+            None if self.file_gone(row.file_id)? => Answered::Superseded,
+            // A version since that this client can't read (held: the picture keeps the one
+            // before it, and the mark).
+            _ if self
+                .unreadable_version(row.file_id)?
+                .is_some_and(|v| v != row.version) =>
+            {
+                Answered::Superseded
+            }
+            _ => Answered::of(held.map(|(v, ..)| v), answer.expected, row.version),
+        };
+        if answered == Answered::Superseded || echo {
+            return Ok(answered);
+        }
+        match &answer.left {
+            Left::Live(row) => self.put_live(row)?,
+            Left::Removed(removed) => self.move_to_removed(removed)?,
+        }
+        Ok(answered)
     }
 
     /// A tombstone the feed brought ([`AccountTx::put_tombstone`], if it says when it was written):
