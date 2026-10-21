@@ -379,7 +379,18 @@ impl Sim {
                             .get(node)
                             .is_some_and(|b| b.tags.get(name).is_some());
                         let now = synced.then(|| self.server.now());
-                        self.ledger.tags.remove(c, node, name, now);
+                        // The client's own plan still writes the tag (planned before).
+                        let carries = |t: &Tags| t.get(name).is_some();
+                        let in_flight = self.clients[c].plan.iter().any(|(op, _)| match op {
+                            Op::LocalTags { node: n, tags, .. }
+                            | Op::RemoteTags { node: n, tags, .. }
+                            | Op::RemoteUpdate { node: n, tags, .. }
+                            | Op::RemoteCreate { node: n, tags, .. }
+                            | Op::LocalDownload { node: n, tags, .. }
+                            | Op::LocalMkdir { node: n, tags, .. } => *n == node && carries(tags),
+                            _ => false,
+                        });
+                        self.ledger.tags.remove(c, node, name, now, in_flight);
                     }
                     (Action::Tag { .. }, None) => {
                         let Some(tag) = express(&Tag::new(name, colour), os) else {
@@ -736,7 +747,13 @@ impl Sim {
                 .or(server.removed.get(&node))
                 .map(|n| &n.state),
         );
-        let own = (synced && planned(client)).then_some(Limit::OwnRemovalInFlight);
+        // The add restores what the base holds: nothing to send (`Limit::AddBackToBase`),
+        // unless its own removal is still to land (`Limit::OwnRemovalInFlight`).
+        let own = match (synced, planned(client)) {
+            (true, true) => Some(Limit::OwnRemovalInFlight),
+            (true, false) => Some(Limit::AddBackToBase),
+            _ => None,
+        };
         (pending || (synced && stale), own)
     }
 

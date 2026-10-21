@@ -25,6 +25,25 @@ pub(crate) enum Limit {
     /// tag neither side holds any more reads as that client's removal, and is sent over a later
     /// add (sync semantics §1; branch r6-fresh-tags, seed 0a9df7c6).
     NewItemKeepsBaseTag,
+    /// A removal made while the remover's own plan still writes the tag (onto the item, or up
+    /// with a remote write): the write, planned before, lands over it, and the tag comes back
+    /// (sync semantics §1; the in-flight undo design, seed f9ca4128).
+    OwnTagWriteInFlight,
+    /// A file here not hashed yet (its merge deferred), whose node the drive put in a file or
+    /// a folder gone for good, is adopted as an orphan from the drive's state: the plan writes
+    /// the drive's tags over the item, and the user's add goes (seeds d856d284, fc58ff8f; the
+    /// fix waits on the user's call on design A+).
+    UnhashedOrphanAdopted,
+    /// A client adds back a tag its base holds (after removing it here): the item is as the
+    /// base has it, so nothing goes up, and where the drive dropped the tag meanwhile (another
+    /// device's delete, the node made again without it) the drive's state comes down over the
+    /// add (the revert-to-base family; seed 353c4a5d).
+    AddBackToBase,
+    /// A client's remote write carrying its add landed, but another device changed the node
+    /// before the answer was recorded ([`crate::Action::Meanwhile`]): its base never recorded
+    /// the add as on the drive, so the add goes up again, over another client's later removal
+    /// (the in-flight family; seed bf84d30f).
+    AnswerSuperseded,
 }
 
 /// When an add was made, among the users' tag changes, and whether a removal of the tag was
@@ -55,6 +74,13 @@ pub(crate) struct TagBook {
     /// wasn't on the drive yet (a merge keeps either side's add; a removal made after the add
     /// was sent up goes up after it, and wins).
     cleared: BTreeMap<Add, i64>,
+    /// Tags of a client's items a plan wrote the drive's tags over while the item wasn't hashed
+    /// yet ([`Limit::UnhashedOrphanAdopted`]), with when: they excuse that client's adds
+    /// made before.
+    adopted_over: BTreeMap<Add, u64>,
+    /// Of `cleared`, the removals made while the remover's own plan still wrote the tag
+    /// ([`Limit::OwnTagWriteInFlight`]).
+    cleared_in_flight: BTreeSet<Add>,
     /// Tags a client had added to an item it forked off as a conflict copy: the merge may give
     /// them to the original too, as that client's add.
     forked: BTreeSet<Add>,
@@ -81,6 +107,9 @@ pub(crate) struct TagBook {
     /// hold them ([`Limit::NewItemKeepsBaseTag`]), with when, among the users' tag changes: it
     /// excuses only adds made before (one made after meets it as a removal under way).
     kept_on_new_item: BTreeMap<Add, u64>,
+    /// Nodes a client's remote write landed on whose answer another device's change superseded
+    /// ([`Limit::AnswerSuperseded`]).
+    superseded: BTreeSet<Add>,
     /// The adds the last check found lost to a known limit (for scripted tests).
     excused: std::cell::RefCell<Vec<(Limit, Add)>>,
 }
@@ -118,11 +147,24 @@ impl TagBook {
 
     /// The user of client `c` removed tag `name` from `node`; `synced`: the server's time,
     /// where the client's base had it.
-    pub(crate) fn remove(&mut self, c: usize, node: NodeId, name: &str, synced: Option<i64>) {
+    /// `in_flight`: the client's own plan still writes the tag ([`Limit::OwnTagWriteInFlight`]).
+    pub(crate) fn remove(
+        &mut self,
+        c: usize,
+        node: NodeId,
+        name: &str,
+        synced: Option<i64>,
+        in_flight: bool,
+    ) {
         let at = self.next();
-        self.removed.insert((c, node, name.to_owned()), at);
+        let add = (c, node, name.to_owned());
+        self.removed.insert(add.clone(), at);
         if let Some(now) = synced {
-            self.cleared.insert((c, node, name.to_owned()), now);
+            self.cleared.insert(add.clone(), now);
+            match in_flight {
+                true => self.cleared_in_flight.insert(add),
+                false => self.cleared_in_flight.remove(&add),
+            };
         }
     }
 
@@ -228,7 +270,13 @@ impl TagBook {
         }
         for add in mine(&self.cleared, c, node) {
             // The item's removal is the new id's now: the old node no longer has it.
+            if self.cleared_in_flight.remove(&add) {
+                self.cleared_in_flight.insert((c, new, add.2.clone()));
+            }
             move_key(&mut self.cleared, &add, (c, new, add.2.clone()));
+        }
+        for add in mine(&self.adopted_over, c, node) {
+            move_key(&mut self.adopted_over, &add, (c, new, add.2.clone()));
         }
         // Any client's removal on the node counts for the item after (it may have been merged
         // into it before the new id).
@@ -279,6 +327,22 @@ impl TagBook {
             .insert((c, node, name.to_owned()), self.seq);
     }
 
+    /// Client `c`'s plan writes the drive's tags over its item `node`, not hashed yet, without
+    /// tag `name` it holds ([`Limit::UnhashedOrphanAdopted`]).
+    pub(crate) fn adopted_over(&mut self, c: usize, node: NodeId, name: &str) {
+        self.adopted_over
+            .insert((c, node, name.to_owned()), self.seq);
+    }
+
+    /// Client `c`'s remote write landed on `node`, and another device changed it before the
+    /// answer was recorded ([`Limit::AnswerSuperseded`]).
+    /// `tags`: the tags the write carried.
+    pub(crate) fn answer_superseded(&mut self, c: usize, node: NodeId, tags: &hbsync_types::Tags) {
+        for tag in tags.iter() {
+            self.superseded.insert((c, node, tag.name.clone()));
+        }
+    }
+
     /// A download wrote tag `name` on client `c`'s item `node`, which its record recovery
     /// dropped ([`TagBook::unproven`]).
     pub(crate) fn unproven(&mut self, c: usize, node: NodeId, name: &str) {
@@ -314,9 +378,14 @@ impl TagBook {
                     .kept_on_new_item
                     .iter()
                     .any(|((by, n, t), at)| by != c && n == node && t == name && made.at <= *at);
+                let adopted = self
+                    .adopted_over
+                    .get(&(*c, *node, name.clone()))
+                    .is_some_and(|at| made.at <= *at);
                 let limit = made
                     .limit
-                    .or(new_item.then_some(Limit::NewItemKeepsBaseTag));
+                    .or(new_item.then_some(Limit::NewItemKeepsBaseTag))
+                    .or(adopted.then_some(Limit::UnhashedOrphanAdopted));
                 lost.push(((*c, *node, name.clone()), limit));
             }
         }
@@ -357,7 +426,8 @@ impl TagBook {
             return Err(format!("lost tag {name:?} of {node:?}: {held:?}"));
         }
         let adds: Vec<_> = self.adds().collect();
-        for ((by, node, name), removed) in &self.cleared {
+        for (cleared, removed) in &self.cleared {
+            let (by, node, name) = cleared;
             let elsewhere = |(c, n, t): &Add| c != by && n == node && t == name;
             let added_elsewhere = adds
                 .iter()
@@ -368,6 +438,21 @@ impl TagBook {
                 && !refused.contains(node)
                 && s.tags.get(name).is_some()
             {
+                if self.cleared_in_flight.contains(cleared) {
+                    let limit = (Limit::OwnTagWriteInFlight, cleared.clone());
+                    self.excused.borrow_mut().push(limit);
+                    continue;
+                }
+                // Another client's add, its landing unrecorded, went up again.
+                let resent = self
+                    .superseded
+                    .iter()
+                    .any(|(c, n, t)| c != by && n == node && t == name);
+                if resent {
+                    let limit = (Limit::AnswerSuperseded, cleared.clone());
+                    self.excused.borrow_mut().push(limit);
+                    continue;
+                }
                 return Err(format!(
                     "removed tag {name:?} of {node:?} came back: {:?}",
                     s.tags
@@ -442,11 +527,11 @@ mod tests {
         let node = NodeId(hbsync_types::Uuid::from_u128(1));
         let mut book = TagBook::default();
         book.add(0, node, "Work", false, None);
-        book.remove(0, node, "Work", Some(1));
+        book.remove(0, node, "Work", Some(1), false);
         book.add(1, node, "Work", false, None);
         assert!(check(&book, &drive(node, &[])).is_err(), "c1's add lost");
         assert!(check(&book, &drive(node, &["Work"])).is_ok());
-        book.remove(0, node, "Work", None);
+        book.remove(0, node, "Work", None, false);
         assert!(check(&book, &drive(node, &[])).is_ok(), "removed after");
     }
 
@@ -455,7 +540,7 @@ mod tests {
     fn an_add_racing_a_removal_may_lose() {
         let node = NodeId(hbsync_types::Uuid::from_u128(1));
         let mut book = TagBook::default();
-        book.remove(1, node, "Work", Some(1));
+        book.remove(1, node, "Work", Some(1), false);
         book.add(0, node, "Work", true, None);
         assert!(check(&book, &drive(node, &[])).is_ok());
     }
@@ -468,7 +553,7 @@ mod tests {
         let mut book = TagBook::default();
         book.add(0, node, "Red", false, None);
         book.detach((0, node, "Red".into())); // a download refused it: not sent
-        book.remove(0, node, "Red", Some(5));
+        book.remove(0, node, "Red", Some(5), false);
         assert!(
             check(&book, &drive(node, &["Red"])).is_err(),
             "c0's removal came back"
