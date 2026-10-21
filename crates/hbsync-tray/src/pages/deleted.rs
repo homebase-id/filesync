@@ -32,14 +32,15 @@ impl Server {
         };
         format!(
             "<h1>{} deletions are waiting</h1>\
-             <p>Filesync holds back deletions this large until you confirm them. In \
+             <p>Filesync holds back deletions this large until you answer. In \
              <code>{folder}</code>:</p>{what}\
              <ul>{examples}{more}</ul>\
              <form method=post action=\"{url}\">\
              <input type=hidden name=token value=\"{token}\">\
-             <button>Delete them</button></form>\
+             <button name=answer value=delete>Delete</button> \
+             <button name=answer value=put_back>Put them back</button></form>\
              <p class=small>Not sure? Leave this page: nothing is deleted, and the files stay \
-             as they are on every device until you confirm.</p>",
+             as they are on Homebase until you answer. Filesync reminds you while they wait.</p>",
             held.total(),
             folder = escape(&status.path.display().to_string()),
             url = self.pages.url("deletions"),
@@ -200,6 +201,15 @@ impl Server {
         let (Some(token), Some(path)) = (form.get("token"), path) else {
             return "Nothing was confirmed.".into();
         };
+        if form.get("answer").map(String::as_str) == Some("put_back") {
+            return match control::put_back(&self.paths, &path, token.clone()) {
+                Ok(()) => {
+                    (self.send)(Event::Wake);
+                    "They are being put back.".into()
+                }
+                Err(e) => format!("Not put back: {e}"),
+            };
+        }
         match control::confirm_deletes(&self.paths, &path, token.clone()) {
             Ok(()) => {
                 (self.send)(Event::Wake);

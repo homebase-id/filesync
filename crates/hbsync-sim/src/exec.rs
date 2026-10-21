@@ -331,7 +331,22 @@ impl Sim {
                         _ => trashed += op.trashes().map_or(0, |n| files_under(&input.local, n)),
                     }
                 }
-                (trips(deleted) || trips(trashed)).then(|| {
+                // Removals from elsewhere are followed, but every synced file over the limit.
+                let every = |n: usize| synced_files > 0 && n >= synced_files && n > min;
+                let held_trashed: usize = plan
+                    .held
+                    .iter()
+                    .map(|op| op.trashes().map_or(0, |n| files_under(&input.local, n)))
+                    .sum();
+                let held_elsewhere = held_trashed > 0 && !every(held_trashed + trashed);
+                if held_elsewhere {
+                    return Some(format!(
+                        "{} held {held_trashed} removals from elsewhere, short of every synced \
+                         file ({synced_files}): {:?}",
+                        client.name, plan.held
+                    ));
+                }
+                (trips(deleted) || every(trashed)).then(|| {
                     format!(
                         "{} deletes {deleted} remote and trashes {trashed} local files \
                          unconfirmed (limit {min}, {synced_files} synced): {:?}",

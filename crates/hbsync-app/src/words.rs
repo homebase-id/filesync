@@ -175,15 +175,16 @@ pub fn held_deletes(held: &HeldDeletes) -> Vec<String> {
     let mut out = Vec::new();
     if held.here > 0 {
         out.push(format!(
-            "{} items deleted on this computer will be deleted from your other devices (and kept \
-             in Recently deleted).",
+            "You deleted {} items in Homebase on this computer. Delete them from Homebase and \
+             your other devices too (kept in Recently deleted)? Put them back brings them back \
+             here. Meanwhile a new item named like one of them syncs under a numbered name.",
             held.here
         ));
     }
     if held.remotely > 0 {
         out.push(format!(
-            "{} items deleted on another device will be deleted here too (and kept in Recently \
-             deleted).",
+            "Another device removed every file here ({} items). Remove them here too? Put them \
+             back restores them on Homebase, for every device.",
             held.remotely
         ));
     }

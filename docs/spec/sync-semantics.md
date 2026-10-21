@@ -245,17 +245,38 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   remote state. Homebase's delete takes the VersionTag too (odin-core PR #1931, verified in
   `V2DriveControllerBase.PerformFileDelete`); a delete refused because the file is already
   deleted is a retry, and done.
-- **Mass-delete guard.** If one plan deletes more than `max(50, 25 % of synced files)` files on
-  either side, or every file on a side, the deletes are held and the user must confirm. The
-  rest of the plan proceeds. A confirmation names the held deletes the user was shown, node
-  by node: those go through, and are neither counted nor held again; it lasts while a delete
-  is pending for the node, or its delete waits for a file in it not hashed yet (§6.3; done or
-  undone, it is forgotten). Any other delete is judged as if the confirmed ones weren't there
-  (a confirmed trash of a folder with every file under it), except that of what was in a
-  confirmed folder whose delete waits so (planned apart meanwhile: the user saw it with the
-  folder): one the user didn't see is never let through by a confirmation. Simulator:
-  `guarded_clients_delete_only_what_was_confirmed`; the guard's count across planning batches
-  is the engine's (`a_confirmed_folder_trash_does_not_hold_other_deletes`).
+- **Mass-delete guard.** It holds this device's own removals from the drive: when one sync
+  would remove from the drive more than `max(50, 25 % of synced files)` files deleted here (by
+  the user, or newly ignored, §10 rule 1), or every synced file, those removals are held, sent
+  nowhere: the drive and every other device keep them. The rest of the plan proceeds. The user
+  answers, about exactly what was shown (a token names the held items; an answer to a set that
+  changed since is refused, the new one shown):
+  - **Delete**: they go to the drive's Recently deleted, as any delete does.
+  - **Put them back**: the delete here is undone, as the drive has them now: each node's base
+    goes (with what is below it in the base), so the drive's live node comes down again
+    (downloads look in `.hbsync/trash` first). What the drive removed or changed since wins: it
+    is never brought back. A newly ignored item stays here and on the drive, masked here.
+  While they are held, their names on the drive stay taken: a new item here of such a name
+  syncs under a numbered one (`Projects (conflict 1)`, the dialog says so). Nothing held
+  expires: the status and the tray show it until answered.
+
+  Removals made elsewhere (another computer, the phone, the file browser, another app) are
+  followed here without asking: into `.hbsync/trash`, and the drive keeps them in Recently
+  deleted for `keep_deleted_days`. One exception: removals that would take every synced file
+  here at once, and more than the same `max(50, …)` (a broken device, a wiped drive), are held:
+  **Delete here too**, or **Put them back**: kept here and restored on the drive from Recently
+  deleted (one write each), or, gone for good there, uploaded again from here as they are.
+  Every device then has them back.
+
+  A confirmation lasts while its removal is pending, or waits for a file in it not hashed yet
+  (§6.3: what was in such a folder, sent apart meanwhile, goes with it); done or undone, it is
+  forgotten. A removal the user didn't see is never let through by a confirmation. A folder
+  without its marker (moved, deleted, a disk not mounted) syncs nothing, so nothing is held,
+  sent or put back there: an answer then is refused. Simulator:
+  `guarded_clients_delete_only_what_was_confirmed` (with `Event::PutBack`); engine:
+  `a_delete_here_is_held_and_put_back_brings_it_back`,
+  `every_file_removed_elsewhere_is_held_and_put_back_restores_it`,
+  `a_confirmed_folder_trash_does_not_hold_other_deletes`.
 - **Online-only files** are never deleted remotely just because they have no local bytes.
 
 ## 8. Operations
@@ -523,7 +544,8 @@ An item inside a filtered folder is filtered too.
 1. **Local.** The walk neither reports nor enters filtered entries (nothing is hashed), and the
    watcher drops their events. A synced item that becomes filtered (a rule was added, or it was
    moved into an ignored folder) looks deleted: it leaves the drive and the other devices
-   (their trash), and stays here. The mass-delete guard applies.
+   (their trash), and stays here. The mass-delete guard applies (§7): held over its limit,
+   put back it stays here and on the drive, masked here.
 2. **Remote.** A remote node whose path is filtered on this device is masked with its subtree:
    never downloaded, and never deleted by this device, with one exception: a node this device
    synced at a place it now filters (a rule was added) is leaving per rule 1, and is deleted

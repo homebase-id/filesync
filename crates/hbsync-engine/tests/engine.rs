@@ -2348,11 +2348,11 @@ fn a_parked_file_whose_name_became_ignored_and_taken_moves_to_a_numbered_one() -
     Ok(())
 }
 
-/// Another device moves a folder into a name this one ignores: trashing it here is held (more
-/// than the guard allows), and the confirmation has to last until the trash ran, although the
-/// drive keeps the folder.
+/// Another device moves a folder into a name this one ignores: it leaves this device (its
+/// trash), followed without asking (§7: another device's removals aren't held, short of every
+/// synced file), and the drive keeps the folder.
 #[test]
-fn a_confirmed_trash_of_a_folder_moved_into_an_ignored_name_goes_through() -> R {
+fn a_folder_moved_elsewhere_into_an_ignored_name_leaves_unasked() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
     let mut b = Client::with_config(&server, "b", |cfg| {
@@ -2368,16 +2368,6 @@ fn a_confirmed_trash_of_a_folder_moved_into_an_ignored_name_goes_through() -> R 
     fs::rename(a.root.join("src"), a.root.join("build"))?;
     a.sync()?;
     let report = b.sync()?;
-    assert!(!report.held.is_empty(), "{report:?}");
-    assert!(b.root.join("src/f0.txt").exists(), "held");
-    assert!(
-        !report.unfinished,
-        "held deletes aren't retried: {report:?}"
-    );
-
-    b.engine
-        .confirm_deletes(report.held.iter().map(|op| op.node()));
-    let report = b.sync()?;
     assert!(report.held.is_empty(), "{report:?}");
     assert_eq!(b.tree_text(""), ["keep.txt = k"]);
     assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 6);
@@ -2389,19 +2379,16 @@ fn a_confirmed_trash_of_a_folder_moved_into_an_ignored_name_goes_through() -> R 
 #[test]
 fn held_deletes_leave_no_unfinished_work() -> R {
     let server = server();
-    let mut a = Client::new(&server, "a")?;
-    let mut b = Client::with_config(&server, "b", |cfg| cfg.guard.min = 2)?;
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.min = 2)?;
     for i in 0..4 {
         a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
     }
     a.write("keep.txt", "k")?;
     a.sync()?;
-    b.sync()?;
     fs::remove_dir_all(a.root.join("d"))?;
-    a.sync()?;
-    let report = b.sync()?;
+    let report = a.sync()?;
     assert!(!report.held.is_empty(), "{report:?}");
-    assert!(report.pending > report.held.len() as u64, "{report:?}");
+    assert!(report.pending >= report.held.len() as u64, "{report:?}");
     assert!(
         !report.unfinished,
         "held deletes aren't retried: {report:?}"
@@ -2658,10 +2645,7 @@ fn a_restored_item_is_guarded_again() -> R {
         .confirm_deletes(report.held.iter().map(|op| op.node()));
     b.sync()?;
     let report = a.sync()?;
-    assert!(!report.held.is_empty(), "a holds b's delete: {report:?}");
-    a.engine
-        .confirm_deletes(report.held.iter().map(|op| op.node()));
-    a.sync()?;
+    assert!(report.held.is_empty(), "a follows b's delete: {report:?}");
     assert!(!a.root.join("d").exists());
 
     let d = a
@@ -2681,11 +2665,9 @@ fn a_restored_item_is_guarded_again() -> R {
         !report.held.is_empty(),
         "a holds the second delete: {report:?}"
     );
-    a.engine
-        .confirm_deletes(report.held.iter().map(|op| op.node()));
-    a.sync()?;
-    let report = b.sync()?;
-    assert!(!report.held.is_empty(), "b holds it too: {report:?}");
+    assert!(a.root.join("d/f3.txt").exists() || !a.root.join("d").exists());
+    // Unconfirmed, nothing went: b still has it.
+    b.sync()?;
     assert!(b.root.join("d/f3.txt").exists());
     Ok(())
 }
@@ -4323,21 +4305,21 @@ fn a_restore_numbers_around_the_state_folder_name_at_a_sync_roots_top() -> R {
     Ok(())
 }
 
-/// A confirmed delete of a folder that holds a file this device can't read yet: the folder's
-/// delete waits for it (sync semantics §6.3), and the confirmation lasts while it does, so
-/// once the file is read the delete goes through without asking again.
+/// Another device removed every synced file (held here, §7), and the user confirmed; a folder
+/// holds a file this device can't read yet: the folder's delete waits for it (§6.3), and the
+/// confirmation lasts while it does, so once the file is read the delete goes through without
+/// asking again.
 #[cfg(unix)]
 #[test]
 fn a_confirmation_lasts_while_its_delete_waits_for_a_file() -> R {
     use std::os::unix::fs::PermissionsExt;
 
     let server = server();
-    let mut a = Client::new(&server, "a")?;
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
     let mut b = Client::with_config(&server, "b", |cfg| cfg.guard.min = 2)?;
     for i in 0..6 {
         a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
     }
-    a.write("keep.txt", "k")?;
     a.sync()?;
     b.sync()?;
     fs::remove_dir_all(a.root.join("d"))?;
@@ -4364,6 +4346,118 @@ fn a_confirmation_lasts_while_its_delete_waits_for_a_file() -> R {
     }
     let report = b.sync()?;
     assert!(report.held.is_empty(), "not asked again: {report:?}");
+    assert!(b.tree_text("").is_empty(), "{:?}", b.tree_text(""));
+    Ok(())
+}
+
+/// This device deletes a folder over the guard's limit: held here (§7), nothing sent, so the
+/// drive and the other devices keep it. A new folder of its name made meanwhile syncs under a
+/// numbered one (the drive still has the old). "Put them back": the folder comes down again,
+/// beside the new one.
+#[test]
+fn a_delete_here_is_held_and_put_back_brings_it_back() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.min = 2)?;
+    let mut b = Client::new(&server, "b")?;
+    for i in 0..4 {
+        a.write(&format!("Projects/f{i}.txt"), format!("{i}"))?;
+    }
+    a.write("keep.txt", "k")?;
+    a.sync()?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("Projects"))?;
+    let report = a.sync()?;
+    assert_eq!(report.held.len(), 5, "{report:?}");
+    b.sync()?;
+    assert_eq!(b.read_text("Projects/f3.txt")?, "3", "nothing sent");
+    // A new Projects meanwhile: numbered, the old one's name still taken on the drive.
+    a.write("Projects/new.txt", "n")?;
+    let report = a.sync()?;
+    assert_eq!(report.held.len(), 5, "{report:?}");
+    b.sync()?;
+    assert_eq!(b.read_text("Projects (conflict 1)/new.txt")?, "n");
+    assert_eq!(a.read_text("Projects (conflict 1)/new.txt")?, "n");
+    // Put them back.
+    let held: Vec<NodeId> = report.held.iter().map(|op| op.node()).collect();
+    assert_eq!(a.engine.put_back(&held)?, 5);
+    let report = a.sync()?;
+    assert!(report.held.is_empty(), "{report:?}");
+    assert_eq!(a.read_text("Projects/f0.txt")?, "0");
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    Ok(())
+}
+
+/// A held delete here, then another device removes the folder too: "Put them back" doesn't
+/// bring back what the drive removed since (its state wins).
+#[test]
+fn put_back_never_undoes_a_removal_on_the_drive_since() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.min = 2)?;
+    let mut b = Client::with_config(&server, "b", |cfg| cfg.guard.allow = true)?;
+    for i in 0..4 {
+        a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
+    }
+    a.write("keep.txt", "k")?;
+    a.sync()?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("d"))?;
+    let report = a.sync()?;
+    assert!(!report.held.is_empty(), "{report:?}");
+    fs::remove_dir_all(b.root.join("d"))?;
+    b.sync()?;
+    let held: Vec<NodeId> = report.held.iter().map(|op| op.node()).collect();
+    a.engine.put_back(&held)?;
+    a.sync()?;
+    assert!(!a.root.join("d").exists(), "{:?}", a.tree_text(""));
+    assert_eq!(a.tree_text(""), ["keep.txt = k"]);
+    Ok(())
+}
+
+/// Another device removes every synced file (over the limit): held here (a broken device, a
+/// wiped drive, §7). "Put them back" keeps them here and restores them on the drive, for every
+/// device.
+#[test]
+fn every_file_removed_elsewhere_is_held_and_put_back_restores_it() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |cfg| cfg.guard.min = 2)?;
+    for i in 0..4 {
+        a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
+    }
+    a.sync()?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.sync()?;
+    let report = b.sync()?;
+    assert!(!report.held.is_empty(), "{report:?}");
+    assert_eq!(b.read_text("d/f2.txt")?, "2", "held");
+    let held: Vec<NodeId> = report.held.iter().map(|op| op.node()).collect();
+    assert!(b.engine.put_back(&held)? > 0);
+    let report = b.sync()?;
+    assert!(report.held.is_empty(), "{report:?}");
+    a.sync()?;
+    assert_eq!(a.read_text("d/f2.txt")?, "2", "back for every device");
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    Ok(())
+}
+
+/// Removals elsewhere short of every synced file are followed unasked, however many (§7):
+/// the drive keeps them in Recently deleted.
+#[test]
+fn removals_elsewhere_are_followed_unasked() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |cfg| cfg.guard.min = 2)?;
+    for i in 0..6 {
+        a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
+    }
+    a.write("keep.txt", "k")?;
+    a.sync()?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.sync()?;
+    let report = b.sync()?;
+    assert!(report.held.is_empty(), "{report:?}");
     assert_eq!(b.tree_text(""), ["keep.txt = k"]);
     Ok(())
 }
@@ -4432,5 +4526,59 @@ fn an_orphan_goes_to_the_top_when_recovered_files_id_is_taken() -> R {
     let again = a.engine.sync("2026-10-08", true)?;
     assert_eq!(again.ops_done, 0, "{again:?}");
     assert!(again.failed.is_empty(), "{:?}", again.failed);
+    Ok(())
+}
+
+/// A synced folder moved here into an ignored name leaves the drive (§10, rule 1): held as any
+/// removal from here over the limit. "Put them back" keeps it on the drive and here: the
+/// drive's copy is masked here (never downloaded, never deleted), and nothing more is asked.
+#[test]
+fn a_newly_ignored_folder_put_back_stays_on_the_drive() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| {
+        ignoring("build/\n")(cfg);
+        cfg.guard.min = 2;
+    })?;
+    let mut b = Client::new(&server, "b")?;
+    for i in 0..4 {
+        a.write(&format!("src/f{i}.txt"), format!("{i}"))?;
+    }
+    a.write("keep.txt", "k")?;
+    a.sync()?;
+    b.sync()?;
+    fs::rename(a.root.join("src"), a.root.join("build"))?;
+    let report = a.sync()?;
+    assert!(!report.held.is_empty(), "{report:?}");
+    let held: Vec<NodeId> = report.held.iter().map(|op| op.node()).collect();
+    a.engine.put_back(&held)?;
+    let report = a.sync()?;
+    assert!(report.held.is_empty(), "{report:?}");
+    let again = a.sync()?;
+    assert_eq!(again.ops_done, 0, "{again:?}");
+    assert_eq!(a.read_text("build/f0.txt")?, "0", "kept here");
+    b.sync()?;
+    assert_eq!(b.read_text("src/f0.txt")?, "0", "kept on the drive");
+    Ok(())
+}
+
+/// Every synced file removed elsewhere, but few (under the guard's floor: a small folder
+/// emptied from the phone): followed unasked.
+#[test]
+fn a_few_files_all_removed_elsewhere_are_followed_unasked() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    let mut b = Client::new(&server, "b")?;
+    for i in 0..3 {
+        a.write(&format!("f{i}.txt"), format!("{i}"))?;
+    }
+    a.sync()?;
+    b.sync()?;
+    for i in 0..3 {
+        fs::remove_file(a.root.join(format!("f{i}.txt")))?;
+    }
+    a.sync()?;
+    let report = b.sync()?;
+    assert!(report.held.is_empty(), "{report:?}");
+    assert!(b.tree_text("").is_empty(), "{:?}", b.tree_text(""));
     Ok(())
 }

@@ -70,6 +70,7 @@ fn guarded_event(clients: usize) -> impl Strategy<Value = Event> {
     prop_oneof![
         8 => event(clients),
         1 => (0..clients).prop_map(|client| Event::Confirm { client }),
+        1 => (0..clients).prop_map(|client| Event::PutBack { client }),
     ]
 }
 
@@ -195,9 +196,10 @@ proptest! {
         run_settled(3, Some(min), |sim| sim, |sim| sim.quiesce_announced(300), &events)?;
     }
 
-    /// With the mass-delete guard on (a low limit, so it trips often), no plan deletes more
-    /// than it allows unless the user confirmed those very deletes, and once the user confirms
-    /// what is held, the clients still converge without loss.
+    /// With the mass-delete guard on (a low limit, so it trips often), no plan removes more from
+    /// the drive than it allows unless the user confirmed those very removals, none holds a
+    /// removal from elsewhere short of every synced file, and whether the user confirms what is
+    /// held or puts it back (sync semantics §7), the clients still converge without loss.
     #[test]
     fn guarded_clients_delete_only_what_was_confirmed(
         events in proptest::collection::vec(guarded_event(2), 0..80),

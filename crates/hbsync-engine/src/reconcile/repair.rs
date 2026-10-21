@@ -346,8 +346,12 @@ impl Reconciler<'_> {
             });
             // Names held remotely by nodes this device doesn't sync (§10) are taken: their
             // holders keep them, and every node here loses.
+            // And names this device's held removals keep there (§7): the same.
             let masked = self.masks.names.get(&parent);
-            let taken = |key: &str| masked.is_some_and(|m| m.contains(key));
+            let kept = self.kept.get(&parent);
+            let taken = |key: &str| {
+                masked.is_some_and(|m| m.contains(key)) || kept.is_some_and(|k| k.contains(key))
+            };
             // Each name once, and again when a node held where it is for a name comes to it
             // (a chain of name waits in one folder, judged in one pass).
             let mut queue: std::collections::VecDeque<String> = by_key.keys().cloned().collect();

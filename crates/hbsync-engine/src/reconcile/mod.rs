@@ -87,6 +87,25 @@ pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
             holds.waits.insert(node);
         }
     };
+    // This device's removals from the drive held for the user (§7): their names there stay
+    // taken meanwhile, and what would take one here gets a numbered name (planned again, once).
+    if holds.kept.is_empty() {
+        for op in &plan.held {
+            if let Op::RemoteDelete { node, .. } = op
+                && let Some(r) = view.remote.get(*node)
+            {
+                holds
+                    .kept
+                    .entry(r.parent)
+                    .or_default()
+                    .insert(name_key(&r.name));
+            }
+        }
+        if !holds.kept.is_empty() {
+            let r = Reconciler::new(view, opts, masking, &masks, &holds, taken.clone());
+            plan = r.run().0;
+        }
+    }
     // What a masked node does to its folder (keeps it, takes its name, leaves with it) is
     // judged with all of the folder's children.
     if let Some(coverage) = &input.coverage {
@@ -140,6 +159,8 @@ struct Reconciler<'a> {
     held: &'a HashSet<NodeId>,
     /// Each file not hashed yet, with the folders it holds.
     held_by: &'a [(NodeId, Vec<NodeId>)],
+    /// Names the held removals keep on the drive ([`Holds::kept`]).
+    kept: &'a HashMap<NodeId, HashSet<String>>,
     /// What waited for a name this plan, with what is below it ([`Reconciler::fix_names`]).
     waiters: BTreeSet<NodeId>,
     /// Held nodes whose names something else waits for ([`Reconciler::fix_names`]).
@@ -183,6 +204,8 @@ struct Holds {
     held: HashSet<NodeId>,
     /// What holds the names waited for.
     named: HashSet<NodeId>,
+    /// The drive's names of what this device's held removals keep there (§7), by folder.
+    kept: HashMap<NodeId, HashSet<String>>,
 }
 
 impl Holds {
@@ -203,6 +226,7 @@ impl Holds {
             waits: BTreeSet::new(),
             held,
             named: HashSet::new(),
+            kept: HashMap::new(),
         }
     }
 }
@@ -231,6 +255,7 @@ impl<'a> Reconciler<'a> {
             waits: &holds.waits,
             held: &holds.held,
             held_by: &holds.by_file,
+            kept: &holds.kept,
             waiters: BTreeSet::new(),
             name_waits: holds.named.clone(),
             plan: Plan::default(),

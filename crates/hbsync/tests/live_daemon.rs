@@ -181,6 +181,19 @@ fn two_computers_sync_through_the_daemon() -> Res<()> {
         a.path(&rel("many/f00.txt")).exists(),
         "held: a still has them"
     );
+    // Put back: they come down to b again.
+    let out = b.ok(&["put-back", "--yes"])?;
+    assert!(out.contains("Putting them back"), "{out}");
+    b.wait("many/ is back on b", |b| {
+        Ok(std::fs::read_dir(b.path(&rel("many")))
+            .map(|d| d.count() == 60)
+            .unwrap_or(false))
+    })?;
+    b.wait("b settled", |b| b.settled())?;
+    std::fs::remove_dir_all(b.path(&rel("many")))?;
+    b.wait("b holds the deletes again", |b| {
+        Ok(b.status()?["held_deletes"]["here"] == 61)
+    })?;
     let out = b.ok(&["confirm-deletes", "--yes"])?;
     assert!(out.contains("Confirmed"), "{out}");
     // a guards its own files too: when the deletes reach it all at once, it holds them.

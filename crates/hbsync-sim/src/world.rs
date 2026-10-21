@@ -587,6 +587,30 @@ impl Sim {
         self.restore_with(node);
     }
 
+    /// The user puts back the deletes the guard held in client `c`'s last plan (sync semantics
+    /// §7), as the drive has them now, as `Engine::put_back` does: deleted here and live on the
+    /// drive, its base goes (with what is below it), so it comes down again; removed elsewhere
+    /// and still here, it is restored on the drive, or, gone for good there, its base goes, so
+    /// it goes up again. What the drive changed since wins.
+    pub(crate) fn put_back(&mut self, c: usize) {
+        let held = std::mem::take(&mut self.clients[c].held);
+        for node in held {
+            let here = self.clients[c].local.contains(node);
+            let live = self.server.live.contains_key(&node);
+            match (here, live) {
+                (true, false) if self.server.removed.contains_key(&node) => self.restore_with(node),
+                (false, true) | (true, false) => {
+                    let client = &mut self.clients[c];
+                    for n in client.base.subtree(node) {
+                        client.base.remove(n);
+                        client.extra.remove(&n);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
     /// Brings `node` back from Recently deleted with what was deleted with it, and the folders
     /// above it in Recently deleted first (just those, outermost first), as the engine's restore
     /// does: in waves, each after the folders it comes back into, by the engine's own rule

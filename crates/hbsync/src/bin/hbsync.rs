@@ -121,6 +121,13 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
+    /// Puts the deletes held for confirmation back: what was deleted here comes back, what
+    /// another device removed is restored on Homebase.
+    PutBack {
+        /// Don't ask.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Starts the daemon.
     Start,
     /// Stops the daemon.
@@ -320,7 +327,8 @@ fn run(command: Command) -> Res<ExitCode> {
             daemon::empty_listed(&paths, &list.accounts)?;
             println!("{}", emptied(list.staying()));
         }
-        Command::ConfirmDeletes { yes } => confirm_deletes(&paths, yes)?,
+        Command::ConfirmDeletes { yes } => answer_held(&paths, yes, Held::Delete)?,
+        Command::PutBack { yes } => answer_held(&paths, yes, Held::PutBack)?,
         Command::Start => {
             if running(&paths)? {
                 println!("The daemon is already running.");
@@ -468,7 +476,14 @@ fn ask_yes(question: &str) -> Res<bool> {
     Ok(matches!(answer.trim(), "y" | "Y" | "yes"))
 }
 
-fn confirm_deletes(paths: &Paths, yes: bool) -> Res<()> {
+/// An answer to held deletes.
+#[derive(Clone, Copy, PartialEq)]
+enum Held {
+    Delete,
+    PutBack,
+}
+
+fn answer_held(paths: &Paths, yes: bool, answer: Held) -> Res<()> {
     let Some(status) = daemon::status(paths)? else {
         return Err("the daemon isn't running (`hbsync start` starts it)".into());
     };
@@ -492,13 +507,25 @@ fn confirm_deletes(paths: &Paths, yes: bool) -> Res<()> {
         if held.more_than_shown() {
             println!("  ...");
         }
-        if !yes && !ask_yes("Go ahead?")? {
-            println!("Nothing deleted; they stay held.");
+        let question = match answer {
+            Held::Delete => "Delete them?",
+            Held::PutBack => "Put them back?",
+        };
+        if !yes && !ask_yes(question)? {
+            println!("Nothing done; they stay held.");
             continue;
         }
         // Exactly these: any delete since is held again, for another look.
-        daemon::confirm_deletes(paths, &path, held.token)?;
-        println!("Confirmed.");
+        match answer {
+            Held::Delete => {
+                daemon::confirm_deletes(paths, &path, held.token)?;
+                println!("Confirmed.");
+            }
+            Held::PutBack => {
+                daemon::put_back(paths, &path, held.token)?;
+                println!("Putting them back.");
+            }
+        }
     }
     Ok(())
 }
@@ -562,7 +589,8 @@ fn print_folder(s: &FolderStatus) {
     }
     if let Some(h) = &s.held_deletes {
         println!(
-            "  deletes held: {} here, {} elsewhere; `hbsync confirm-deletes` lets them through",
+            "  deletes held: {} here, {} elsewhere; `hbsync confirm-deletes` lets them through, \
+             `hbsync put-back` puts them back",
             h.here, h.remotely
         );
     }

@@ -183,6 +183,12 @@ pub enum Event {
     Confirm {
         client: usize,
     },
+    /// The user puts back the deletes the guard held in the client's last plan (sync semantics
+    /// §7): deleted here, they come down again; removed elsewhere, they are restored on the
+    /// drive (or go up again, gone for good there).
+    PutBack {
+        client: usize,
+    },
     /// The client's process dies during its next step: a download's commit is lost after its
     /// file is in place ([`Sim::with_split_downloads`]), and the rest of its plan with it. Its
     /// next plan recovers first, as the engine's start of a sync does.

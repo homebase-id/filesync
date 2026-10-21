@@ -148,6 +148,17 @@ pub fn confirm_deletes(paths: &Paths, path: &std::path::Path, token: String) -> 
     )
 }
 
+/// Puts the held deletes of the folder at `path` back: `token` names those the user saw.
+pub fn put_back(paths: &Paths, path: &std::path::Path, token: String) -> Result<()> {
+    self::control(
+        paths,
+        Control::Folder {
+            path: path.to_path_buf(),
+            control: FolderControl::PutBack { token },
+        },
+    )
+}
+
 /// Restores `items` (each with what its delete took along), in their accounts.
 pub fn restore(paths: &Paths, items: &[DeletedItem]) -> Result<()> {
     // A restore takes the items as they are now: one request per account, whatever listed them.

@@ -287,6 +287,7 @@ impl Sim {
                     let held = std::mem::take(&mut client.held);
                     client.confirmed.extend(held);
                 }
+                Event::PutBack { client } => self.put_back(client % self.clients.len()),
                 Event::Crash { client } => self.crash(client % self.clients.len()),
             }
         }

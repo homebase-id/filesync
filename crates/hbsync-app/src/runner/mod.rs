@@ -126,6 +126,14 @@ impl RunnerConfig {
     }
 }
 
+/// The user's answer to held deletes, for the next sync.
+pub(crate) enum Answer {
+    /// Let them through.
+    Delete(Vec<NodeId>),
+    /// Put them back (sync semantics §7).
+    PutBack(Vec<NodeId>),
+}
+
 /// Requests to the runner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -143,6 +151,9 @@ pub enum Command {
     /// Let the held deletes the user was shown through: `token` is
     /// [`crate::protocol::HeldDeletes::token`] as they saw it. Ignored when the held deletes changed since.
     ConfirmDeletes { token: String },
+    /// Put the held deletes the user was shown back (sync semantics §7): `token` as for
+    /// `ConfirmDeletes`.
+    PutBack { token: String },
     /// The machine woke up: sync now, the backoff forgotten.
     Woke,
     /// Stop the runner (between operations).
@@ -598,8 +609,14 @@ impl Runner {
                     Err(e) => return Err(e),
                 },
             };
-            if let Some(seen) = confirmed.take() {
-                p.engine.confirm_deletes(seen);
+            match confirmed.take() {
+                Some(Answer::Delete(seen)) => p.engine.confirm_deletes(seen),
+                Some(Answer::PutBack(seen)) => {
+                    if let Err(e) = p.engine.put_back(&seen) {
+                        tracing::warn!("can't put the held deletes back: {e}");
+                    }
+                }
+                None => {}
             }
             if std::mem::take(&mut self.retry_refused)
                 && let Err(e) = p.engine.clear_refused()
@@ -669,7 +686,7 @@ impl Runner {
         &mut self,
         command: Command,
         schedule: &mut Schedule,
-        confirmed: &mut Option<Vec<NodeId>>,
+        confirmed: &mut Option<Answer>,
         check_rules: &mut bool,
     ) {
         match command {
@@ -716,7 +733,16 @@ impl Runner {
                     return;
                 }
                 tracing::info!("{} held deletes confirmed", self.held.len());
-                *confirmed = Some(self.held.clone());
+                *confirmed = Some(Answer::Delete(self.held.clone()));
+                schedule.asked(Instant::now());
+            }
+            Command::PutBack { token } => {
+                if token != report::held_token(&self.held) {
+                    tracing::warn!("a put-back of deletes that changed since: ignored");
+                    return;
+                }
+                tracing::info!("{} held deletes put back", self.held.len());
+                *confirmed = Some(Answer::PutBack(self.held.clone()));
                 schedule.asked(Instant::now());
             }
             Command::Stop => {}

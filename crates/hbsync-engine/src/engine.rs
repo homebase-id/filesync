@@ -265,6 +265,51 @@ impl Engine {
         self.confirmed.extend(nodes);
     }
 
+    /// Puts back the held removals of `nodes` the user was shown (sync semantics §7, "Put them
+    /// back"), as the drive has them now (what it removed or changed since wins):
+    /// - deleted here, live on the drive: its base goes, with what is below it in the base, so
+    ///   it comes down again (a newly ignored item stays here, and on the drive, masked);
+    /// - removed elsewhere, still here: restored on the drive from Recently deleted, or, gone
+    ///   for good there, its base goes, so it goes up again from here.
+    ///
+    /// The next sync does the rest. Returns how many it put back.
+    pub fn put_back(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
+        let (mut forget, mut restore) = (Vec::new(), Vec::new());
+        self.db.read(|s| {
+            for &node in nodes {
+                let here = s.local_by_node(node)?.is_some();
+                let live = s.get_mirror(node)?.is_some();
+                match (here, live) {
+                    (false, true) => forget.push(node),
+                    (true, false) => match s.removed_by_node(node)? {
+                        Some(_) => restore.push(node),
+                        None => forget.push(node),
+                    },
+                    // The drive changed it meanwhile (removed it too, or brought it back): its
+                    // state wins.
+                    _ => {}
+                }
+            }
+            Ok(())
+        })?;
+        self.db.write(|s| {
+            for &node in &forget {
+                let mut below = vec![node];
+                while let Some(n) = below.pop() {
+                    below.extend(s.base_children(n)?.into_iter().map(|b| b.node));
+                    s.folder().delete_base(n)?;
+                    s.folder().mark_dirty(n)?;
+                }
+            }
+            Ok(())
+        })?;
+        let restored = match restore.is_empty() {
+            true => 0,
+            false => self.drive.restore(&restore)?,
+        };
+        Ok(forget.len() + restored)
+    }
+
     /// Waits up to `timeout` for the live changes `observer`'s watcher reports, and records
     /// them ([`LocalObserver::poll`]). `None` if nothing happened.
     pub fn observe(

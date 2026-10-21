@@ -206,15 +206,20 @@ fn control(control: Control, accounts: &[Arc<Account>], daemon: &Daemon) -> Repl
                 Some(Err(why)) => return Reply::Refused(why),
                 Some(Ok(runner)) => runner,
             };
-            let FolderControl::ConfirmDeletes { token } = control;
-            if runner.status().held_deletes.map(|held| held.token) != Some(token.clone()) {
+            let (token, command) = match control {
+                FolderControl::ConfirmDeletes { token } => {
+                    (token.clone(), Command::ConfirmDeletes { token })
+                }
+                FolderControl::PutBack { token } => (token.clone(), Command::PutBack { token }),
+            };
+            if runner.status().held_deletes.map(|held| held.token) != Some(token) {
                 return Reply::Refused(
                     "the held deletes changed since you looked: check them again with \
                      `hbsync confirm-deletes`"
                         .into(),
                 );
             }
-            match runner.send(Command::ConfirmDeletes { token }) {
+            match runner.send(command) {
                 true => Reply::Done,
                 false => Reply::Refused("the sync has stopped".into()),
             }
