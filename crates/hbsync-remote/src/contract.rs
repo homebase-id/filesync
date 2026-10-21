@@ -96,7 +96,7 @@ impl<'a> Bench<'a> {
             remote,
             scratch: scratch.node,
             settle,
-            created: Mutex::new(vec![written.at.file_id]),
+            created: Mutex::new(vec![written.at().file_id]),
             tokens: Mutex::default(),
             end: Mutex::new(start.clone()),
             start,
@@ -160,8 +160,8 @@ impl<'a> Bench<'a> {
     /// A create, remembered for cleanup.
     pub fn create(&self, meta: &NodeMeta, data: Option<&[u8]>) -> Result<RemoteRef, RemoteError> {
         let written = with_upload(data, |upload| self.remote.create(meta, upload))?;
-        self.track(written.at.file_id);
-        Ok(self.keep(written))
+        self.track(written.at().file_id);
+        Ok(self.keep(written.target))
     }
 
     /// Keeps a write's token for the next update of its file.
@@ -185,7 +185,6 @@ impl<'a> Bench<'a> {
         Target {
             at,
             token: self.token(at.file_id),
-            changed_at: None,
         }
     }
 
@@ -219,7 +218,7 @@ impl<'a> Bench<'a> {
     ) -> Result<RemoteRef, RemoteError> {
         let target = self.target(at);
         let written = with_upload(data, |upload| self.remote.update(&target, meta, upload))?;
-        Ok(self.keep(written))
+        Ok(self.keep(written.target))
     }
 
     /// Deletes one file at `at` ([`Remote::delete`]): its answer, the tombstone's time.
@@ -745,12 +744,15 @@ fn removal_keeps_the_bytes_and_restores(b: &Bench) -> Outcome {
     let gone = b.update(w, &removed(&f), None)?;
     let header = b.remote.header(w.file_id)?;
     ensure!(
-        header.removed_at.is_some() && header.state().is_none(),
+        header.removed && header.state().is_none(),
         "not removed: {header:?}"
     );
     // The time is the server's, of the write: one removed later is no earlier.
     b.update(v, &removed(&g), None)?;
-    let (first, then) = (header.removed_at, b.remote.header(v.file_id)?.removed_at);
+    let (first, then) = (
+        header.removed_at(),
+        b.remote.header(v.file_id)?.removed_at(),
+    );
     ensure!(
         first.zip(then).is_some_and(|(f, t)| f <= t),
         "removal times out of order: {first:?}, {then:?}"
@@ -761,22 +763,19 @@ fn removal_keeps_the_bytes_and_restores(b: &Bench) -> Outcome {
     let feed = b.changes_to(&cursor, &[w.file_id])?;
     ensure!(
         feed.last()
-            .is_some_and(|h| h.node() == Some(f.node) && h.removed_at.is_some()),
+            .is_some_and(|h| h.node() == Some(f.node) && h.removed),
         "the feed shows no removal: {feed:?}"
     );
     // A write that keeps the removal keeps it (every write sends the status).
     let renamed = removed(&with(&f, NodeContent::file("f2", 1, 4, false)));
     let gone = b.update(gone, &renamed, None)?;
-    ensure!(
-        b.remote.header(w.file_id)?.removed_at.is_some(),
-        "a rewrite restored it"
-    );
+    ensure!(b.remote.header(w.file_id)?.removed, "a rewrite restored it");
     // Restore: the update back, here with new bytes (an edit that wins over the delete).
     let edited = with(&f, NodeContent::file("f", 1_700_000_000_124, 6, false));
     b.update(gone, &edited, Some(b"edited"))?;
     let back = b.remote.header(w.file_id)?;
     ensure!(
-        back.removed_at.is_none() && back.state().is_some(),
+        !back.removed && back.state().is_some(),
         "not restored: {back:?}"
     );
     ensure!(b.read(w.file_id, None)? == b"edited", "the restore's bytes");
@@ -815,13 +814,13 @@ fn removals_in_one_request(b: &Bench) -> Outcome {
     for (gone, at) in [(gone_f, w), (gone_x, x)] {
         let header = b.remote.header(at.file_id)?;
         ensure!(
-            gone.at.file_id == at.file_id && gone.at.version != at.version,
+            gone.at().file_id == at.file_id && gone.at().version != at.version,
             "{gone:?} for {at:?}"
         );
         ensure!(
-            header.version == gone.at.version
-                && header.removed_at.is_some()
-                && header.removed_at == gone.changed_at,
+            header.version == gone.at().version
+                && header.removed_at().is_some()
+                && header.removed_at() == gone.changed_at,
             "the answer isn't the header: {gone:?}, {header:?}"
         );
     }
@@ -839,32 +838,32 @@ fn removals_in_one_request(b: &Bench) -> Outcome {
     ensure!(b.read(w.file_id, None)? == b"kept", "the bytes went");
     let header = b.remote.header(v.file_id)?;
     ensure!(
-        header.version == v2.version && header.removed_at.is_none(),
+        header.version == v2.version && !header.removed,
         "the file written since was removed: {header:?}"
     );
     let feed = b.changes_to(&cursor, &[w.file_id, x.file_id])?;
     ensure!(
-        feed.iter().filter(|h| h.removed_at.is_some()).count() == 2,
+        feed.iter().filter(|h| h.removed).count() == 2,
         "the feed shows no removals: {feed:?}"
     );
     // Again at its new version: already removed, left alone.
     let again = b
         .remote
-        .set_removed(std::slice::from_ref(gone_f), true)?
+        .set_removed(std::slice::from_ref(&gone_f.target), true)?
         .into_answers()?;
     ensure!(
-        matches!(&again[0], Ok(t) if t.at == gone_f.at && t.changed_at == gone_f.changed_at),
+        matches!(&again[0], Ok(t) if t.at() == gone_f.at() && t.changed_at == gone_f.changed_at),
         "an unchanged removal moved: {again:?}"
     );
     // Restored: live again, as it was.
     let back = b
         .remote
-        .set_removed(&[gone_f.clone(), gone_x.clone()], false)?
+        .set_removed(&[gone_f.target.clone(), gone_x.target.clone()], false)?
         .into_answers()?;
     ensure!(back.iter().all(Result::is_ok), "{back:?}");
     let header = b.remote.header(w.file_id)?;
     ensure!(
-        header.removed_at.is_none() && header.state().is_some(),
+        !header.removed && header.state().is_some(),
         "not restored: {header:?}"
     );
     ensure!(b.read(w.file_id, None)? == b"kept", "the restore's bytes");
@@ -943,15 +942,8 @@ fn hash_mismatch_stores_nothing(b: &Bench) -> Outcome {
         ..upload(&mut reader)
     };
     ensure_err!(
-        b.remote.update(
-            &Target {
-                at,
-                token: None,
-                changed_at: None,
-            },
-            &f,
-            Some(lying),
-        ),
+        b.remote
+            .update(&Target { at, token: None }, &f, Some(lying)),
         RemoteError::HashMismatch
     );
     ensure!(b.read(at.file_id, None)? == b"real", "the old bytes stay");

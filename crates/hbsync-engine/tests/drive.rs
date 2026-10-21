@@ -69,11 +69,11 @@ fn pulls_asked_at_once_are_merged() -> R {
     };
     assert!((1..=2).contains(&reads), "{reads} feed reads for 8 asks");
     let mut db = StateDb::open_account(&dir.path().join("state.db"))?;
-    assert!(db.read(|s| s.mirror_by_file(made.at.file_id))?.is_some());
+    assert!(db.read(|s| s.mirror_by_file(made.at().file_id))?.is_some());
     // An ask after a pull finished pulls again: the drive may have changed since.
     let later = remote.create(&folder("Later"), None)?;
     drive.pull(None)?;
-    assert!(db.read(|s| s.mirror_by_file(later.at.file_id))?.is_some());
+    assert!(db.read(|s| s.mirror_by_file(later.at().file_id))?.is_some());
     Ok(())
 }
 
@@ -93,24 +93,24 @@ fn announced_changes_are_taken_without_reading_what_is_known() -> R {
     let made = remote.create(&docs, None)?;
     drive.pull(None)?;
     let mut db = StateDb::open_account(&dir.path().join("state.db"))?;
-    let known = ChangeRef::of(&remote.header(made.at.file_id)?);
+    let known = ChangeRef::of(&remote.header(made.at().file_id)?);
     assert!(
         drive.announced(&[known])?,
         "an own write coming back: no read"
     );
 
     // This device removed it: its row in Recently deleted, the time open until the server's.
-    let gone_at = remote.update(&made, &removed(&docs), None)?;
+    let gone_at = remote.update(&made.target, &removed(&docs), None)?;
     db.write(|s| {
-        let mut row = s.mirror_by_file(made.at.file_id)?.expect("in the mirror");
-        s.account().delete_mirror(made.at.file_id)?;
-        row.version = gone_at.at.version;
+        let mut row = s.mirror_by_file(made.at().file_id)?.expect("in the mirror");
+        s.account().delete_mirror(made.at().file_id)?;
+        row.version = gone_at.at().version;
         s.account().put_removed(&RemovedRow {
             row,
             removed_at: None,
         })
     })?;
-    let echo = ChangeRef::of(&remote.header(made.at.file_id)?);
+    let echo = ChangeRef::of(&remote.header(made.at().file_id)?);
     assert!(
         drive.announced(&[echo])?,
         "an own removal coming back: no read"
@@ -119,12 +119,13 @@ fn announced_changes_are_taken_without_reading_what_is_known() -> R {
         .read(|s| s.removed_by_node(docs.node))?
         .expect("in Recently deleted");
     assert_eq!(
-        row.removed_at, echo.removed_at,
+        row.removed_at,
+        echo.removed_at(),
         "the server's time, confirmed"
     );
 
     let other = remote.create(&folder("Other"), None)?;
-    let unknown = ChangeRef::of(&remote.header(other.at.file_id)?);
+    let unknown = ChangeRef::of(&remote.header(other.at().file_id)?);
     assert!(
         !drive.announced(&[echo, unknown])?,
         "a version not known: read the feed"
@@ -134,7 +135,7 @@ fn announced_changes_are_taken_without_reading_what_is_known() -> R {
     let hard = echo.tombstone();
     assert!(drive.announced(&[hard])?);
     assert!(db.read(|s| s.removed_by_node(docs.node))?.is_none());
-    assert!(db.read(|s| s.mirror_by_file(made.at.file_id))?.is_none());
+    assert!(db.read(|s| s.mirror_by_file(made.at().file_id))?.is_none());
     Ok(())
 }
 
@@ -151,9 +152,9 @@ fn late_announcements_dont_move_the_mirror_back() -> R {
     let mut db = StateDb::open_account(&dir.path().join("state.db"))?;
     let docs = folder("Docs");
     let v1 = remote.create(&docs, None)?;
-    let file = v1.at.file_id;
+    let file = v1.at().file_id;
     let stale = ChangeRef::of(&remote.header(file)?);
-    let v2 = remote.update(&v1, &docs, None)?;
+    let v2 = remote.update(&v1.target, &docs, None)?;
     drive.pull(None)?;
     let version = |db: &mut StateDb| -> Result<_, Box<dyn std::error::Error>> {
         Ok(db.read(|s| s.mirror_by_file(file))?.map(|r| r.version))
@@ -161,14 +162,14 @@ fn late_announcements_dont_move_the_mirror_back() -> R {
     assert!(!drive.announced(&[stale])?, "v1 after v2: not known");
     assert_eq!(
         version(&mut db)?,
-        Some(v2.at.version),
+        Some(v2.at().version),
         "the mirror stays at v2"
     );
 
     // Removed, then restored: the removal's announcement comes late.
-    let gone = remote.update(&v2, &removed(&docs), None)?;
+    let gone = remote.update(&v2.target, &removed(&docs), None)?;
     let late_removal = ChangeRef::of(&remote.header(file)?);
-    let back = remote.update(&gone, &docs, None)?;
+    let back = remote.update(&gone.target, &docs, None)?;
     drive.pull(None)?;
     assert!(
         !drive.announced(&[late_removal])?,
@@ -176,22 +177,22 @@ fn late_announcements_dont_move_the_mirror_back() -> R {
     );
     assert_eq!(
         version(&mut db)?,
-        Some(back.at.version),
+        Some(back.at().version),
         "live, as restored"
     );
     assert!(db.read(|s| s.removed_by_node(docs.node))?.is_none());
 
     // Deleted for good, the node made again (a new file id), then the delete is announced.
     let late_delete = ChangeRef::of(&remote.header(file)?).tombstone();
-    remote.delete(&doomed(&[back.at]))?.single()?;
+    remote.delete(&doomed(&[back.at()]))?.single()?;
     let again = remote.create(&docs, None)?;
-    assert_ne!(again.at.file_id, file, "a new file id");
+    assert_ne!(again.at().file_id, file, "a new file id");
     drive.pull(None)?;
     assert!(drive.announced(&[late_delete])?);
     let row = db
-        .read(|s| s.mirror_by_file(again.at.file_id))?
+        .read(|s| s.mirror_by_file(again.at().file_id))?
         .expect("the node made again stays");
-    assert_eq!(row.version, again.at.version);
+    assert_eq!(row.version, again.at().version);
     Ok(())
 }
 
@@ -259,14 +260,14 @@ impl Remote for HeldPage {
         &self,
         files: &[hbsync_types::Target],
         removed: bool,
-    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Target>> {
+    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Written>> {
         self.inner.set_removed(files, removed)
     }
     fn create(
         &self,
         node: &NodeMeta,
         payload: Option<hbsync_remote::Upload<'_>>,
-    ) -> hbsync_remote::Result<hbsync_types::Target> {
+    ) -> hbsync_remote::Result<hbsync_types::Written> {
         self.inner.create(node, payload)
     }
     fn update(
@@ -274,7 +275,7 @@ impl Remote for HeldPage {
         target: &hbsync_types::Target,
         meta: &NodeMeta,
         payload: Option<hbsync_remote::Upload<'_>>,
-    ) -> hbsync_remote::Result<hbsync_types::Target> {
+    ) -> hbsync_remote::Result<hbsync_types::Written> {
         self.inner.update(target, meta, payload)
     }
     fn delete(
@@ -319,7 +320,7 @@ fn a_page_fetched_before_a_hard_delete_doesnt_bring_it_back() -> R {
     let v1 = inner.create(&docs, None)?;
     drive.pull(None)?;
     // A change the next pull reads whole; its page waits once fetched.
-    let v2 = inner.update(&v1, &docs, None)?;
+    let v2 = inner.update(&v1.target, &docs, None)?;
     remote.hold.store(true, Ordering::SeqCst);
     let pulling = {
         let drive = Arc::clone(&drive);
@@ -327,8 +328,10 @@ fn a_page_fetched_before_a_hard_delete_doesnt_bring_it_back() -> R {
     };
     fetched.recv_timeout(Duration::from_secs(10))?;
     // Deleted for good meanwhile: no feed row; the notification says so.
-    let gone = ChangeRef::of(&inner.header(v2.at.file_id)?).tombstone();
-    inner.server().hard_delete(v2.at.file_id, v2.at.version)?;
+    let gone = ChangeRef::of(&inner.header(v2.at().file_id)?).tombstone();
+    inner
+        .server()
+        .hard_delete(v2.at().file_id, v2.at().version)?;
     let taking = {
         let drive = Arc::clone(&drive);
         std::thread::spawn(move || drive.announced(&[gone]).map_err(|e| e.to_string()))
@@ -343,7 +346,7 @@ fn a_page_fetched_before_a_hard_delete_doesnt_bring_it_back() -> R {
     taking.join().map_err(|_| "the take panicked")??;
     let mut db = StateDb::open_account(&dir.path().join("state.db"))?;
     assert!(
-        db.read(|s| s.mirror_by_file(v2.at.file_id))?.is_none(),
+        db.read(|s| s.mirror_by_file(v2.at().file_id))?.is_none(),
         "the page fetched before the delete brought it back"
     );
     Ok(())
@@ -376,7 +379,7 @@ fn a_reread_answer_doesnt_write_over_a_later_removal() -> R {
     drive.pull(None)?;
     // Away a month: the next pull reads the whole feed again, which leaves Docs out; it asks
     // about it, and its answer (Docs live) waits.
-    inner.server().unlist(docs.at.file_id);
+    inner.server().unlist(docs.at().file_id);
     inner
         .server()
         .advance(hbsync_engine::time::TRACE_MS + 24 * 60 * 60 * 1000);
@@ -391,8 +394,8 @@ fn a_reread_answer_doesnt_write_over_a_later_removal() -> R {
         removed: true,
         ..meta
     };
-    inner.update(&docs, &removed, None)?;
-    inner.server().relist(docs.at.file_id);
+    inner.update(&docs.target, &removed, None)?;
+    inner.server().relist(docs.at().file_id);
     let pulling = {
         let drive = Arc::clone(&drive);
         std::thread::spawn(move || drive.pull(None).map(drop).map_err(|e| e.to_string()))
@@ -410,7 +413,7 @@ fn a_reread_answer_doesnt_write_over_a_later_removal() -> R {
         .into_iter()
         .map(|r| r.row.file_id)
         .collect();
-    assert_eq!(removed, [docs.at.file_id], "the removal stands");
+    assert_eq!(removed, [docs.at().file_id], "the removal stands");
     Ok(())
 }
 
@@ -425,12 +428,14 @@ fn a_row_fetched_before_a_hard_delete_is_refused_after_it() -> R {
     let (drive, remote) = drive(dir.path())?;
     let v1 = remote.create(&folder("Docs"), None)?;
     drive.pull(None)?;
-    let fetched = remote.header(v1.at.file_id)?;
-    remote.server().hard_delete(v1.at.file_id, v1.at.version)?;
+    let fetched = remote.header(v1.at().file_id)?;
+    remote
+        .server()
+        .hard_delete(v1.at().file_id, v1.at().version)?;
     drive.announced(&[ChangeRef::of(&fetched).tombstone()])?;
     let mut db = StateDb::open_account(&dir.path().join("state.db"))?;
     db.write(|s| hbsync_engine::mirror::apply(s.account(), &fetched).map(drop))?;
-    assert!(db.read(|s| s.mirror_by_file(v1.at.file_id))?.is_none());
+    assert!(db.read(|s| s.mirror_by_file(v1.at().file_id))?.is_none());
     Ok(())
 }
 
@@ -496,14 +501,14 @@ impl Remote for FailsAfterAPage {
         &self,
         files: &[hbsync_types::Target],
         removed: bool,
-    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Target>> {
+    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Written>> {
         self.inner.set_removed(files, removed)
     }
     fn create(
         &self,
         node: &NodeMeta,
         payload: Option<hbsync_remote::Upload<'_>>,
-    ) -> hbsync_remote::Result<hbsync_types::Target> {
+    ) -> hbsync_remote::Result<hbsync_types::Written> {
         self.inner.create(node, payload)
     }
     fn update(
@@ -511,7 +516,7 @@ impl Remote for FailsAfterAPage {
         target: &hbsync_types::Target,
         meta: &NodeMeta,
         payload: Option<hbsync_remote::Upload<'_>>,
-    ) -> hbsync_remote::Result<hbsync_types::Target> {
+    ) -> hbsync_remote::Result<hbsync_types::Written> {
         self.inner.update(target, meta, payload)
     }
     fn delete(
@@ -574,7 +579,7 @@ fn many_announced_versions_are_asked_in_parts() -> R {
             version: VersionTag(uuid::Uuid::new_v4()),
             deleted: false,
             parent: None,
-            removed_at: None,
+            removed: false,
             changed_at: Some(1),
         })
         .collect();
@@ -592,9 +597,9 @@ fn an_own_double_write_or_write_then_delete_needs_no_read() -> R {
     let (drive, remote) = drive(dir.path())?;
     let docs = folder("Docs");
     let v1 = remote.create(&docs, None)?;
-    let first = ChangeRef::of(&remote.header(v1.at.file_id)?);
-    let v2 = remote.update(&v1, &docs, None)?;
-    let second = ChangeRef::of(&remote.header(v1.at.file_id)?);
+    let first = ChangeRef::of(&remote.header(v1.at().file_id)?);
+    let v2 = remote.update(&v1.target, &docs, None)?;
+    let second = ChangeRef::of(&remote.header(v1.at().file_id)?);
     drive.pull(None)?;
     assert!(
         drive.announced(&[first, second])?,
@@ -603,8 +608,10 @@ fn an_own_double_write_or_write_then_delete_needs_no_read() -> R {
 
     let notes = folder("Notes");
     let n1 = remote.create(&notes, None)?;
-    let written = ChangeRef::of(&remote.header(n1.at.file_id)?);
-    remote.server().hard_delete(n1.at.file_id, n1.at.version)?;
+    let written = ChangeRef::of(&remote.header(n1.at().file_id)?);
+    remote
+        .server()
+        .hard_delete(n1.at().file_id, n1.at().version)?;
     assert!(
         drive.announced(&[written, written.tombstone()])?,
         "written, then deleted for good: nothing left to read"
@@ -684,11 +691,11 @@ fn mirror_follows_the_drive(steps: Vec<Step>) -> Result<(), proptest::test_runne
                     Some(at) => remote.update(at, &metas[i], None),
                 };
                 if let Ok(at) = done {
-                    queued.push(announce(&remote, &at)?);
-                    if !ever[i].contains(&at.at.file_id) {
-                        ever[i].push(at.at.file_id);
+                    queued.push(announce(&remote, &at.target)?);
+                    if !ever[i].contains(&at.at().file_id) {
+                        ever[i].push(at.at().file_id);
                     }
-                    files[i] = Some(at);
+                    files[i] = Some(at.target);
                 }
             }
             Step::Remove(i) | Step::Restore(i) => {
@@ -699,8 +706,8 @@ fn mirror_follows_the_drive(steps: Vec<Step>) -> Result<(), proptest::test_runne
                 if let Some(at) = &files[i]
                     && let Ok(now) = remote.update(at, &meta, None)
                 {
-                    queued.push(announce(&remote, &now)?);
-                    files[i] = Some(now);
+                    queued.push(announce(&remote, &now.target)?);
+                    files[i] = Some(now.target);
                 }
             }
             Step::HardDelete(i) => {
@@ -751,7 +758,7 @@ fn mirror_follows_the_drive(steps: Vec<Step>) -> Result<(), proptest::test_runne
         };
         let h = ok(remote.header(at.at.file_id))?;
         let mirror = ok(db.read(|s| s.mirror_by_file(at.at.file_id)))?;
-        if h.removed_at.is_some() {
+        if h.removed {
             proptest::prop_assert!(mirror.is_none());
             proptest::prop_assert_eq!(removed.map(|r| r.row.version), Some(h.version));
         } else {
@@ -843,13 +850,13 @@ fn a_new_login_forgets_the_tokens() -> R {
     drive.pull(None)?;
     let mut db = StateDb::open_account(&dir.path().join("state.db"))?;
     let mut token = || -> Result<_, hbsync_state::StateError> {
-        db.read(|s| s.mirror_by_file(made.at.file_id))
+        db.read(|s| s.mirror_by_file(made.at().file_id))
             .map(|r| r.and_then(|r| r.token))
     };
     assert!(token()?.is_some(), "the feed's");
     assert!(drive.tokens_sealed_by("one")?, "none recorded: forgotten");
     assert_eq!(token()?, None);
-    let header = remote.header(made.at.file_id)?;
+    let header = remote.header(made.at().file_id)?;
     let mut db2 = StateDb::open_account(&dir.path().join("state.db"))?;
     db2.write(|s| hbsync_engine::mirror::apply(s.account(), &header).map(drop))?;
     assert!(token()?.is_some());
@@ -877,12 +884,12 @@ fn a_role_folder_made_leaves_recently_deleted() -> R {
         removed: false,
     };
     let made = remote.create(&meta, None)?;
-    let gone = remote.update(&made, &removed(&meta), None)?;
+    let gone = remote.update(&made.target, &removed(&meta), None)?;
     drive.pull(None)?;
     let mut db = StateDb::open_account(&dir.path().join("state.db"))?;
     assert!(db.read(|s| s.removed_by_node(top))?.is_some());
     // Deleted for good, not yet read: the restore finds nothing, and the folder is made anew.
-    remote.delete(&doomed(&[gone.at]))?.single()?;
+    remote.delete(&doomed(&[gone.at()]))?.single()?;
     drive.announcing_from(drive.connection());
     drive.ensure_role(Role::Documents)?;
     assert!(db.read(|s| s.get_mirror(top))?.is_some(), "made");
@@ -924,7 +931,7 @@ fn a_restore_reads_first_and_a_lost_answer_is_behind() -> R {
     let (drive, remote) = drive(dir.path())?;
     let docs = folder("Docs");
     let made = remote.create(&docs, None)?;
-    remote.update(&made, &removed(&docs), None)?;
+    remote.update(&made.target, &removed(&docs), None)?;
     drive.pull(None)?;
     drive.announcing_from(drive.connection());
     let pages = || {
@@ -946,13 +953,13 @@ fn a_restore_of_more_than_a_request_takes() -> R {
     let dir = tempfile::tempdir()?;
     let (drive, remote) = drive(dir.path())?;
     let top = folder("Big");
-    let mut made = vec![remote.create(&top, None)?];
+    let mut made = vec![remote.create(&top, None)?.target];
     for i in 0..1001 {
         let child = NodeMeta {
             parent: top.node,
             ..folder(&format!("f{i}"))
         };
-        made.push(remote.create(&child, None)?);
+        made.push(remote.create(&child, None)?.target);
     }
     // Removed, the folder first.
     for part in made.chunks(1000) {

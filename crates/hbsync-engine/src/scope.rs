@@ -175,7 +175,11 @@ impl Remote for ScopedRemote {
     fn hold_back(&self) -> std::time::Duration {
         self.inner.hold_back()
     }
-    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> RemoteResult<Target> {
+    fn create(
+        &self,
+        node: &NodeMeta,
+        payload: Option<Upload<'_>>,
+    ) -> RemoteResult<hbsync_types::Written> {
         self.inner.create(&self.on_drive(node)?, payload)
     }
     fn update(
@@ -183,7 +187,7 @@ impl Remote for ScopedRemote {
         target: &Target,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
-    ) -> RemoteResult<Target> {
+    ) -> RemoteResult<hbsync_types::Written> {
         self.inner.update(target, &self.on_drive(meta)?, payload)
     }
     fn delete(&self, files: &[Doomed]) -> RemoteResult<hbsync_remote::Deletes> {
@@ -196,7 +200,7 @@ impl Remote for ScopedRemote {
         &self,
         files: &[hbsync_types::Target],
         removed: bool,
-    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Target>> {
+    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Written>> {
         self.inner.set_removed(files, removed)
     }
     fn read(

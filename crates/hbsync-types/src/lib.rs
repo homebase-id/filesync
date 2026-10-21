@@ -155,14 +155,26 @@ impl fmt::Debug for FileToken {
 }
 
 /// A file to write: where it is, the version a guarded write names, and its token if known.
-/// A create or update returns the file as written: the target of the next write.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Target {
     pub at: RemoteRef,
     pub token: Option<FileToken>,
-    /// The server's time of this version (Unix ms, Homebase's `updated`, what the feed shows for
-    /// it), when the write's answer gave it; not known in a target the client makes to write to.
+}
+
+/// A write's answer: the file as written (the target of its next write), and the server's
+/// time of that version (Unix ms, Homebase's `updated`, what the feed shows for it), if the
+/// answer gave it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Written {
+    pub target: Target,
     pub changed_at: Option<i64>,
+}
+
+impl Written {
+    /// The file at the version written.
+    pub fn at(&self) -> RemoteRef {
+        self.target.at
+    }
 }
 
 /// The last 8 hex digits: UUIDv7 ids share their leading timestamp digits.

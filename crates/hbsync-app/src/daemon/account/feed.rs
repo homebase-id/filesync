@@ -551,7 +551,7 @@ mod tests {
             version: VersionTag(uuid::Uuid::new_v4()),
             deleted: false,
             parent: None,
-            removed_at: None,
+            removed: false,
             changed_at: Some(1),
         };
         if deleted { live.tombstone() } else { live }
@@ -577,7 +577,7 @@ mod tests {
             None,
         )?;
         drive.pull(None)?;
-        let on_drive = ChangeRef::of(&remote.header(made.at.file_id)?);
+        let on_drive = ChangeRef::of(&remote.header(made.at().file_id)?);
         let puller = Puller::spawn(Arc::clone(&drive));
         let n = Notifications::new(puller.clone(), Instant::now());
         Ok((n, puller, drive, on_drive))
@@ -738,7 +738,7 @@ mod tests {
         wait_for("a round", || puller.rounds() > 0)?;
         let mut db = hbsync_state::StateDb::open_account(&home.path().join("state.db"))?;
         assert!(
-            db.read(|s| s.mirror_by_file(made.at.file_id))?.is_some(),
+            db.read(|s| s.mirror_by_file(made.at().file_id))?.is_some(),
             "in the mirror"
         );
         Ok(())
@@ -765,7 +765,7 @@ mod tests {
         )?);
         wait_for("read", || {
             lock(&db)
-                .read(|s| s.mirror_by_file(made.at.file_id))
+                .read(|s| s.mirror_by_file(made.at().file_id))
                 .is_ok_and(|m| m.is_some())
         })?;
         Ok(())

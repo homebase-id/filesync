@@ -9,8 +9,8 @@
 
 use hbsync_remote::{ChangeRef, NodeMeta, Remote, RemoteBody, RemoteError, RemoteHeader};
 use hbsync_state::{AccountTx, MirrorRow, RemovedRow, StateError};
-use hbsync_types::{ContentHash, FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef, Target};
-use hbsync_types::{Role, removal_time};
+use hbsync_types::Role;
+use hbsync_types::{ContentHash, FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef, Written};
 
 // ---- facts the feed brings ----
 
@@ -42,9 +42,8 @@ pub fn apply(s: AccountTx<'_>, header: &RemoteHeader) -> Result<Applied, StateEr
         return Ok(Applied::Live);
     };
     // The store marks the nodes that changed dirty where that concerns.
-    let removed_at = header.removed_at;
     let known = s.known_file(row.file_id)?;
-    if known.is_some_and(|(v, _, removed)| v == row.version && removed == removed_at.is_some()) {
+    if known.is_some_and(|(v, _, removed)| v == row.version && removed == header.removed) {
         return apply_known(s, &ChangeRef::of(header), header.token.as_ref());
     }
     // A node is one folder or one file for its life (node schema, Identity and tombstones).
@@ -60,11 +59,12 @@ pub fn apply(s: AccountTx<'_>, header: &RemoteHeader) -> Result<Applied, StateEr
             row.file_id, row.node, row.kind
         )));
     }
-    if let Some(removed_at) = removed_at {
-        // Out of the tree for the reconciler, as a tombstone is; restorable meanwhile.
+    if header.removed {
+        // Out of the tree for the reconciler, as a tombstone is; restorable meanwhile; its time
+        // open in the store until a version that says.
         let removed = RemovedRow {
             row,
-            removed_at: known_time(removed_at),
+            removed_at: header.removed_at(),
         };
         s.move_to_removed(&removed)?;
         return Ok(Applied::Left);
@@ -107,10 +107,10 @@ pub(crate) fn apply_known(
     token: Option<&FileToken>,
 ) -> Result<Applied, StateError> {
     if let Some(token) = token {
-        s.set_token(r.file_id, r.removed_at.is_some(), token)?;
+        s.set_token(r.file_id, r.removed, token)?;
     }
-    if let Some(removed_at) = r.removed_at {
-        if let Some(at) = known_time(removed_at) {
+    if r.removed {
+        if let Some(at) = r.removed_at() {
             s.confirm_removed(r.at(), at)?;
         }
         return Ok(Applied::Left);
@@ -149,12 +149,6 @@ fn mirror_row(header: &RemoteHeader) -> Option<MirrorRow> {
         file.size = p.bytes;
     }
     Some(row)
-}
-
-/// A removal's time, unless the remote didn't say ([`removal_time`]`(None)`: the newest, open
-/// in the store until a version that says).
-fn known_time(removed_at: i64) -> Option<i64> {
-    (removed_at != removal_time(None)).then_some(removed_at)
 }
 
 /// A tombstone in the feed, written at `at` (the server's time): the file is deleted for good,
@@ -220,7 +214,7 @@ pub(crate) fn updated(s: AccountTx<'_>, row: &MirrorRow) -> Result<(), StateErro
 }
 
 /// The mirror's row of `meta` as written (`w`, the drive's answer).
-pub(crate) fn written(meta: &NodeMeta, hash: Option<ContentHash>, w: Target) -> MirrorRow {
+pub(crate) fn written(meta: &NodeMeta, hash: Option<ContentHash>, w: Written) -> MirrorRow {
     MirrorRow::written(w, meta.node, meta.parent, meta.kind, &meta.content, hash)
 }
 
@@ -376,7 +370,7 @@ mod tests {
                     bytes: 1,
                 }),
             },
-            removed_at: None,
+            removed: false,
             changed_at: None,
             token: None,
         };
@@ -411,7 +405,7 @@ mod tests {
                     bytes: 3,
                 }),
             },
-            removed_at: None,
+            removed: false,
             changed_at: None,
             token: None,
         };
@@ -425,7 +419,8 @@ mod tests {
         let mut db = StateDb::open_in_memory()?;
         let node = NodeId::new();
         let header = |version: u128, removed_at: Option<i64>| RemoteHeader {
-            removed_at,
+            removed: removed_at.is_some(),
+            changed_at: removed_at,
             ..folder(1, version, node, NodeId::ROOT)
         };
         let dirty_after = |db: &mut StateDb, h: &RemoteHeader| {
@@ -453,7 +448,8 @@ mod tests {
         let node = NodeId::new();
         let live = |removed_at: Option<i64>| RemoteHeader {
             version: VersionTag(Uuid::new_v4()),
-            removed_at,
+            removed: removed_at.is_some(),
+            changed_at: removed_at,
             ..folder(1, 0, node, NodeId::ROOT)
         };
         assert_eq!(
@@ -509,7 +505,8 @@ mod tests {
         // In Recently deleted, the same; its time stays the one it has.
         let removed = RemoteHeader {
             version: VersionTag(Uuid::from_u128(2)),
-            removed_at: Some(5),
+            removed: true,
+            changed_at: Some(5),
             ..without.clone()
         };
         db.write(|s| {
@@ -517,7 +514,8 @@ mod tests {
             s.folder().clear_dirty(node)
         })?;
         let again = RemoteHeader {
-            removed_at: Some(9),
+            removed: true,
+            changed_at: Some(9),
             token: token(0xAA),
             ..removed
         };
@@ -553,7 +551,8 @@ mod tests {
         assert_eq!(time(&mut db)?, None, "nothing it decides");
         let removed = RemoteHeader {
             version: VersionTag(Uuid::from_u128(4)),
-            removed_at: Some(5),
+            removed: true,
+            changed_at: Some(5),
             ..top
         };
         db.write(|s| apply(s.account(), &removed))?;
@@ -634,7 +633,8 @@ mod tests {
         );
         assert!(db.read(|s| s.unreadable_nodes())?.contains(&node));
         let removed = RemoteHeader {
-            removed_at: Some(5),
+            removed: true,
+            changed_at: Some(5),
             ..file(8, 10, node)
         };
         db.write(|s| apply(s.account(), &removed).map(drop))?;
@@ -644,7 +644,8 @@ mod tests {
             "read again"
         );
         let back = RemoteHeader {
-            removed_at: Some(5),
+            removed: true,
+            changed_at: Some(5),
             ..folder(8, 11, node, NodeId::ROOT)
         };
         assert!(matches!(
@@ -666,7 +667,7 @@ mod tests {
                 content: NodeContent::folder("d"),
                 payload: None,
             },
-            removed_at: None,
+            removed: false,
             changed_at: None,
             token: None,
         }

@@ -5,7 +5,7 @@ use hbsync_platform::name::name_key;
 use hbsync_remote::{NodeMeta, Remote};
 use hbsync_state::{MirrorRow, ReadTx, RemovedRow, StateDb, StateError, Store};
 use hbsync_types::activity::Deleted;
-use hbsync_types::{NodeId, NodeKind, RemoteFileId, Target, Uuid, VersionTag};
+use hbsync_types::{NodeId, NodeKind, RemoteFileId, Uuid, VersionTag};
 
 use super::listing::{RemovedRows, all, deleted_by_item, find, named};
 use super::restore::plan_restore;
@@ -280,7 +280,7 @@ fn a_folder_stays_when_a_delete_in_it_fails() -> Result<(), Box<dyn std::error::
         },
         None,
     )?;
-    row.row.file_id = target.at.file_id;
+    row.row.file_id = target.at().file_id;
     db.write(|s| {
         s.account().put_removed(&removed(f, NodeId::ROOT, 10))?;
         s.account().put_removed(&row)
@@ -511,7 +511,7 @@ fn the_purge_removes_only_what_a_delete_took_along() -> Result<(), Box<dyn std::
     let [f, a, b, stale, in_stale, late, unknown] = [(); 7].map(|_| NodeId::new());
     let [back, in_back, young, in_young] = [(); 4].map(|_| NodeId::new());
     let mut rows: HashMap<NodeId, MirrorRow> = HashMap::new();
-    let row = |node, parent, w: Target| {
+    let row = |node, parent, w: hbsync_types::Written| {
         let m = meta(node, parent);
         MirrorRow::written(w, node, parent, m.kind, &m.content, None)
     };
@@ -533,13 +533,14 @@ fn the_purge_removes_only_what_a_delete_took_along() -> Result<(), Box<dyn std::
             row(node, parent, remote.create(&meta(node, parent), None)?),
         );
     }
-    let set_removed =
-        |row: &MirrorRow, removed: bool| -> Result<Target, Box<dyn std::error::Error>> {
-            let answers = remote
-                .set_removed(&[row.target()], removed)?
-                .into_answers()?;
-            Ok(answers.into_iter().next().ok_or("no answer")??)
-        };
+    let set_removed = |row: &MirrorRow,
+                       removed: bool|
+     -> Result<hbsync_types::Written, Box<dyn std::error::Error>> {
+        let answers = remote
+            .set_removed(&[row.target()], removed)?
+            .into_answers()?;
+        Ok(answers.into_iter().next().ok_or("no answer")??)
+    };
     // The deletes: the folders alone (each stopped there); young's not kept long enough.
     for node in [f, back] {
         rows.insert(
@@ -691,7 +692,7 @@ fn a_folder_holding_what_this_device_didnt_know_is_put_back()
     rows.insert(
         f,
         MirrorRow {
-            version: w.at.version,
+            version: w.at().version,
             changed_at: w.changed_at,
             ..rows[&f].clone()
         },

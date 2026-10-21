@@ -473,7 +473,7 @@ fn first_unknown(s: &ReadTx<'_>, refs: &[ChangeRef]) -> Result<Option<usize>, St
         .iter()
         .enumerate()
         .filter(|(_, r)| !r.deleted)
-        .map(|(i, r)| (i, (r.at(), r.removed_at.is_some())))
+        .map(|(i, r)| (i, (r.at(), r.removed)))
         .unzip();
     Ok(s.first_unknown(&versions)?.map(|i| at[i]))
 }
@@ -518,25 +518,18 @@ pub(crate) fn announced(s: AccountTx<'_>, refs: &[ChangeRef]) -> Result<bool, St
 /// `homebase-api-notes.md`); of the others the newest by the server's time, the later
 /// announced on a tie. An own write made twice, or made then deleted, needs no read. Whether
 /// that is sure: two writes of a file, one of them without a time (a removal whose row didn't
-/// say when, `i64::MAX`), can't be told apart: in doubt, the feed tells.
+/// say when), can't be told apart: in doubt, the feed tells.
 fn latest(refs: &[ChangeRef]) -> (Vec<ChangeRef>, bool) {
-    let time = |r: &ChangeRef| {
-        [r.changed_at, r.removed_at]
-            .into_iter()
-            .flatten()
-            .filter(|t| *t != i64::MAX)
-            .max()
-    };
     let mut sure = true;
     let mut last: HashMap<RemoteFileId, ChangeRef> = HashMap::new();
     for r in refs {
         match last.get(&r.file_id) {
             Some(had) if had.deleted => {}
-            Some(had) if !r.deleted && (time(had).is_none() || time(r).is_none()) => {
+            Some(had) if !r.deleted && (had.changed_at.is_none() || r.changed_at.is_none()) => {
                 sure = false;
                 last.insert(r.file_id, *r);
             }
-            Some(had) if !r.deleted && time(had) > time(r) => {}
+            Some(had) if !r.deleted && had.changed_at > r.changed_at => {}
             _ => {
                 last.insert(r.file_id, *r);
             }
@@ -601,7 +594,7 @@ mod tests {
             version: at.version,
             deleted: true,
             parent: None,
-            removed_at: None,
+            removed: false,
             changed_at,
         };
         db.write(|s| announced(s.account(), &[deleted(Some(7))]).map(drop))?;
@@ -622,7 +615,7 @@ mod tests {
         Ok(())
     }
 
-    /// A write of a file the store has, then its removal without a time (`i64::MAX`), announced
+    /// A write of a file the store has, then its removal without a time, announced
     /// together: which came last can't be told, so the feed is read (the removal isn't lost to
     /// the write the store already has).
     #[test]
@@ -638,7 +631,7 @@ mod tests {
                 content: NodeContent::folder("d"),
                 payload: None,
             },
-            removed_at: None,
+            removed: false,
             changed_at: Some(5),
             token: None,
         };
@@ -646,7 +639,7 @@ mod tests {
         let write = ChangeRef::of(&header);
         let removal = ChangeRef {
             version: VersionTag(Uuid::new_v4()),
-            removed_at: Some(i64::MAX),
+            removed: true,
             changed_at: None,
             ..write
         };

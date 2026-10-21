@@ -649,7 +649,7 @@ fn deleted_file(data: &str) -> Option<ChangeRef> {
         version: hbsync_types::VersionTag(id("versionTag").unwrap_or_default()),
         deleted: true,
         parent: None,
-        removed_at: None,
+        removed: false,
         changed_at: None,
     })
 }
@@ -871,13 +871,13 @@ mod tests {
             json!({"fileId": file, "versionTag": version, "fileState": state,
                 "archivalStatus": archival, "groupId": parent, "updated": 7, "fileType": 7101})
         };
-        let changed = |deleted, removed_at, changed_at, parent| {
+        let changed = |deleted, removed, changed_at, parent| {
             Notification::Changed(Some(ChangeRef {
                 file_id: RemoteFileId(file),
                 version: VersionTag(version),
                 deleted,
                 parent,
-                removed_at,
+                removed,
                 changed_at,
             }))
         };
@@ -886,7 +886,7 @@ mod tests {
                 "fileModified",
                 json!({"targetDrive": {}, "fileRef": row("active", 2)})
             ),
-            changed(false, Some(7), Some(7), Some(NodeId(parent)))
+            changed(false, true, Some(7), Some(NodeId(parent)))
         );
         // A tombstone (with its time: when it may go hard), and a hard delete (only the file as
         // it was): deleted either way.
@@ -895,14 +895,14 @@ mod tests {
                 "fileDeleted",
                 json!({"fileRef": row("deleted", 0), "previousFileRef": row("active", 2)})
             ),
-            changed(true, None, Some(7), None)
+            changed(true, false, Some(7), None)
         );
         assert_eq!(
             event(
                 "fileDeleted",
                 json!({"targetDrive": {}, "previousFileRef": row("active", 2)})
             ),
-            changed(true, None, None, None)
+            changed(true, false, None, None)
         );
         // An event that doesn't say (full headers, or no row): the feed is read.
         assert_eq!(

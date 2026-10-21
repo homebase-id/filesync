@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use hbsync_platform::name::name_key;
 use hbsync_remote::{Answers, NodeMeta, Remote, RemoteError};
 use hbsync_state::{MirrorRow, ReadTx, RemovedRow, StateError};
-use hbsync_types::{NodeId, Target};
+use hbsync_types::{NodeId, Target, Written};
 
 use crate::error::EngineError;
 use crate::mirror::{self, Said, gone_after, meta_at};
@@ -134,7 +134,7 @@ struct Restoring<'a> {
 
 impl Restoring<'_> {
     /// Takes the drive's answer to `row`'s restore as `meta`.
-    fn settle(&mut self, row: &MirrorRow, meta: &NodeMeta, answer: Result<Target, RemoteError>) {
+    fn settle(&mut self, row: &MirrorRow, meta: &NodeMeta, answer: Result<Written, RemoteError>) {
         let e = match answer {
             Ok(w) => {
                 let hash = row.file.map(|f| f.hash);

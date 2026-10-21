@@ -164,7 +164,7 @@ fn interrupted_download_resumes_without_refetching() -> R {
     )?;
     let job = Job::Download(Download {
         node,
-        file_id: written.at.file_id,
+        file_id: written.at().file_id,
         expected: hash,
         size: data.len() as u64,
         mtime_ms: Some(1_700_000_000_000),

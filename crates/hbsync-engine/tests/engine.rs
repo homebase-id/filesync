@@ -102,7 +102,7 @@ fn edits_moves_and_deletes_propagate() -> R {
         .lock()
         .map_err(|_| "poisoned")?
         .removed()
-        .filter_map(|h| h.removed_at.map(|at| (h.node(), at)))
+        .filter_map(|h| h.removed_at().map(|at| (h.node(), at)))
         .collect();
     assert_eq!(removed.len(), 1, "{removed:?}");
     // And here, the local copy went to the trash (emptied by the purge).
@@ -338,7 +338,11 @@ impl Remote for StopAfterCreates {
     ) -> RemoteResult<std::collections::HashSet<hbsync_types::NodeId>> {
         self.inner.holding(folders, holds)
     }
-    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> RemoteResult<Target> {
+    fn create(
+        &self,
+        node: &NodeMeta,
+        payload: Option<Upload<'_>>,
+    ) -> RemoteResult<hbsync_types::Written> {
         let made = self.inner.create(node, payload);
         if self.creates.fetch_add(1, Ordering::SeqCst) + 1 == self.after {
             self.stop.store(true, Ordering::SeqCst);
@@ -350,7 +354,7 @@ impl Remote for StopAfterCreates {
         target: &Target,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
-    ) -> RemoteResult<Target> {
+    ) -> RemoteResult<hbsync_types::Written> {
         self.inner.update(target, meta, payload)
     }
     fn delete(&self, files: &[hbsync_types::Doomed]) -> RemoteResult<hbsync_remote::Deletes> {
@@ -366,7 +370,7 @@ impl Remote for StopAfterCreates {
         &self,
         files: &[hbsync_types::Target],
         removed: bool,
-    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Target>> {
+    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Written>> {
         self.inner.set_removed(files, removed)
     }
     fn cursor_time(&self, cursor: &str) -> Option<i64> {
@@ -466,7 +470,11 @@ impl Remote for SlowWrites {
     ) -> RemoteResult<std::collections::HashSet<hbsync_types::NodeId>> {
         self.inner.holding(folders, holds)
     }
-    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> RemoteResult<Target> {
+    fn create(
+        &self,
+        node: &NodeMeta,
+        payload: Option<Upload<'_>>,
+    ) -> RemoteResult<hbsync_types::Written> {
         self.write(|| self.unless_down(|| self.inner.create(node, payload)))
     }
     fn update(
@@ -474,7 +482,7 @@ impl Remote for SlowWrites {
         target: &Target,
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
-    ) -> RemoteResult<Target> {
+    ) -> RemoteResult<hbsync_types::Written> {
         self.write(|| self.unless_down(|| self.inner.update(target, meta, payload)))
     }
     fn delete(&self, files: &[hbsync_types::Doomed]) -> RemoteResult<hbsync_remote::Deletes> {
@@ -490,7 +498,7 @@ impl Remote for SlowWrites {
         &self,
         files: &[hbsync_types::Target],
         removed: bool,
-    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Target>> {
+    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Written>> {
         self.removals.fetch_add(1, Ordering::SeqCst);
         self.write(|| self.unless_down(|| self.inner.set_removed(files, removed)))
     }
@@ -3566,7 +3574,7 @@ fn own_writes_come_back_slim() -> R {
         .lock()
         .map_err(|_| "poisoned")?
         .removed()
-        .filter_map(|h| h.removed_at)
+        .filter_map(|h| h.removed_at())
         .collect();
     assert!(
         listed
@@ -3635,7 +3643,7 @@ fn own_writes_are_recorded_from_their_answers() -> R {
     assert_eq!(feed_reads(&a), before, "a's own removals read the feed");
     let on_server: HashMap<RemoteFileId, Option<i64>> = {
         let s = server.lock().map_err(|_| "poisoned")?;
-        s.removed().map(|h| (h.file_id, h.removed_at)).collect()
+        s.removed().map(|h| (h.file_id, h.removed_at())).collect()
     };
     assert_eq!(on_server.len(), 3);
     let deleted = a.recently_deleted(10)?;
@@ -3856,7 +3864,6 @@ fn another_device_finishes_a_folders_delete_left_half_done() -> R {
                 version: h.version,
             },
             token: Some(hbsync_remote::fake::token_of(h.file_id)),
-            changed_at: None,
         }
     };
     a.remote.set_removed(&[f], true)?.into_answers()?;

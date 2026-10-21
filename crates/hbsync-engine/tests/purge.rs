@@ -300,10 +300,10 @@ fn a_purge_removes_what_a_stopped_delete_left_and_a_restore_brings_it_back() -> 
         let server = server.lock().map_err(|_| "poisoned")?;
         for held in [&d, &e, &x] {
             let now = server.header(held.file_id)?;
-            assert!(now.removed_at.is_some(), "removed: {now:?}");
+            assert!(now.removed, "removed: {now:?}");
         }
         // A folder before what is in it.
-        let at = |h: &hbsync_remote::RemoteHeader| server.header(h.file_id).map(|h| h.removed_at);
+        let at = |h: &hbsync_remote::RemoteHeader| server.header(h.file_id).map(|h| h.removed_at());
         assert!(at(&e)? < at(&x)?, "e first");
         assert_eq!(server.payload(x.file_id)?.as_slice(), b"x");
     }
@@ -339,8 +339,8 @@ fn a_member_removed_later_keeps_its_own_time() -> common::Res<()> {
     assert_eq!(a.engine.drive().purge(TRACE_MS)?, 0, "f has its own time");
     {
         let server = server.lock().map_err(|_| "poisoned")?;
-        assert!(server.header(m.file_id)?.removed_at.is_some(), "m");
-        assert!(server.header(f.file_id)?.removed_at.is_some(), "f");
+        assert!(server.header(m.file_id)?.removed, "m");
+        assert!(server.header(f.file_id)?.removed, "f");
         assert_eq!(server.payload(f.file_id)?.as_slice(), b"f");
     }
     server.lock().map_err(|_| "poisoned")?.advance(LATER);
@@ -378,7 +378,7 @@ fn a_folder_holding_what_this_device_doesnt_read_stays() -> common::Res<()> {
     assert_eq!(a.engine.drive().purge(0)?, 0);
     let server = server.lock().map_err(|_| "poisoned")?;
     let d = server.header(d.file_id)?;
-    assert!(d.removed_at.is_some(), "d stays: {d:?}");
+    assert!(d.removed, "d stays: {d:?}");
     assert!(server.header(z.file_id)?.state().is_some(), "z is live");
     assert!(matches!(
         server.header(x.file_id),
@@ -513,7 +513,7 @@ fn a_node_written_into_a_removed_folder_later_holds_it() -> common::Res<()> {
     assert_eq!(a.engine.drive().purge(0)?, 1, "x went, d stays");
     let server = server.lock().map_err(|_| "poisoned")?;
     let d = server.header(d.file_id)?;
-    assert!(d.removed_at.is_some(), "d stays: {d:?}");
+    assert!(d.removed, "d stays: {d:?}");
     assert_eq!(server.live_names(), ["z.txt"]);
     Ok(())
 }
@@ -857,12 +857,11 @@ fn a_removal_the_header_denies_is_sent_again() -> common::Res<()> {
     fs::remove_file(a.root.join("x.txt"))?;
     let _ = a.sync();
     assert!(
-        server
+        !server
             .lock()
             .map_err(|_| "poisoned")?
             .header(x.file_id)?
-            .removed_at
-            .is_none(),
+            .removed,
         "not removed yet"
     );
     a.remote.faults().not_found_writes = false;
@@ -878,7 +877,7 @@ fn a_removal_the_header_denies_is_sent_again() -> common::Res<()> {
 }
 
 fn removed_on_server(server: &Arc<Mutex<FakeServer>>, name: &str) -> bool {
-    header_named(server, name).removed_at.is_some()
+    header_named(server, name).removed
 }
 
 /// A remote that watches the purge: whether the account was free at each request, and how
@@ -979,7 +978,7 @@ impl hbsync_remote::Remote for Watched {
         &self,
         node: &hbsync_remote::NodeMeta,
         payload: Option<hbsync_remote::Upload<'_>>,
-    ) -> hbsync_remote::Result<hbsync_types::Target> {
+    ) -> hbsync_remote::Result<hbsync_types::Written> {
         self.request();
         self.inner.create(node, payload)
     }
@@ -988,7 +987,7 @@ impl hbsync_remote::Remote for Watched {
         target: &hbsync_types::Target,
         meta: &hbsync_remote::NodeMeta,
         payload: Option<hbsync_remote::Upload<'_>>,
-    ) -> hbsync_remote::Result<hbsync_types::Target> {
+    ) -> hbsync_remote::Result<hbsync_types::Written> {
         self.request();
         self.inner.update(target, meta, payload)
     }
@@ -1028,7 +1027,7 @@ impl hbsync_remote::Remote for Watched {
         &self,
         files: &[hbsync_types::Target],
         removed: bool,
-    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Target>> {
+    ) -> hbsync_remote::Result<hbsync_remote::Answers<hbsync_types::Written>> {
         self.request();
         self.inner.set_removed(files, removed)
     }
