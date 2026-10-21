@@ -119,7 +119,7 @@ impl AccountOps<'_> {
                     let rows = inside(
                         top,
                         |r| (r.removed.row.node, r.removed.row.kind == NodeKind::Folder),
-                        |n| s.recorded_children(n),
+                        |r| s.recorded_children(r.removed.row.node),
                     )?;
                     chosen.extend(
                         rows.into_iter()
@@ -238,7 +238,7 @@ impl AccountOps<'_> {
                 .map(|n| &live[n])
                 .filter(|m| removed.contains(&m.parent))
                 .collect();
-            for part in going.chunks(crate::transfer::REMOVALS_AT_ONCE) {
+            for part in going.chunks(hbsync_remote::BATCH_FILES) {
                 let targets: Vec<Target> = part.iter().map(|m| m.target()).collect();
                 let (answers, stop) = self
                     .remote

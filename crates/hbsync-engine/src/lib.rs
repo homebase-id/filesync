@@ -36,8 +36,15 @@ pub use engine::{Engine, EngineConfig, StartupReport, SyncReport};
 pub use error::EngineError;
 pub use folder::FolderCtx;
 pub use plan::{
-    Against, Agreement, BaseExtra, Conflict, Coverage, DriveVersion, Input, Masking, Op, Options,
-    Plan, Requirement,
+    Against, Agreement, BaseExtra, Conflict, Coverage, DeleteGuard, DriveVersion, Input, Masking,
+    Op, Options, Plan, Requirement,
 };
 pub use reconcile::reconcile;
 pub use tree::{Tree, Violation, conflict_copy_name, numbered_conflict_name};
+
+/// `m`, locked: a lock a panic left poisoned is taken all the same (what it guards holds no
+/// half-done state a later holder would trip on: the state DB rolls back, the rest are plain
+/// values).
+pub(crate) fn lock<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|e| e.into_inner())
+}

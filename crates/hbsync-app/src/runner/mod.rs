@@ -372,8 +372,8 @@ impl Runner {
     fn open(&self, marker: String) -> Result<Parts, RunnerError> {
         let root = &self.cfg.folder;
         let mut cfg = EngineConfig::new(root, &self.cfg.device);
-        cfg.mass_delete_min = self.cfg.mass_delete.min_files;
-        cfg.mass_delete_fraction = self.cfg.mass_delete.fraction;
+        cfg.guard.min = self.cfg.mass_delete.min_files;
+        cfg.guard.fraction = self.cfg.mass_delete.fraction;
         cfg.folder.filter = Arc::new(Filter::load(root, cfg.folder.case_insensitive)?);
         if let Some(tweak) = self.cfg.tweak {
             tweak(&mut cfg);

@@ -834,7 +834,7 @@ impl Sim {
                     server
                         .removed
                         .iter()
-                        .filter(|(_, r)| r.state.parent == f)
+                        .filter(|(_, r)| r.state.parent == *f)
                         .map(|(n, _)| *n)
                         .collect(),
                 )

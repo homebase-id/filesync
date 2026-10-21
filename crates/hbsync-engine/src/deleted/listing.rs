@@ -393,23 +393,14 @@ fn join(folder: &str, name: &str) -> String {
 /// deleted with their folder ([`deleted_with`]). What was deleted from it before stays out, and
 /// so do the live nodes its delete took along ([`crate::along`]): what restoring it restores.
 pub(super) fn group(s: &ReadTx<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateError> {
-    // Each node once: removed rows may form a cycle (left by a remote one).
-    let mut seen = HashSet::from([top.row.node]);
-    let mut rows = vec![top];
-    let mut next = 0;
-    while next < rows.len() {
-        if rows[next].row.kind == NodeKind::Folder {
-            let folder = &rows[next];
-            let with: Vec<RemovedRow> = s
-                .removed_children(folder.row.node)?
-                .into_iter()
-                .filter(|r| deleted_with(r.time(), folder) && seen.insert(r.row.node))
-                .collect();
-            rows.extend(with);
-        }
-        next += 1;
-    }
-    Ok(rows)
+    inside(
+        top,
+        |r| (r.row.node, r.row.kind == NodeKind::Folder),
+        |folder| {
+            let with = s.removed_children(folder.row.node)?.into_iter();
+            Ok(with.filter(|r| deleted_with(r.time(), folder)).collect())
+        },
+    )
 }
 
 /// [`inside`] `top`, from the store.
@@ -417,7 +408,7 @@ fn inside_of(s: &ReadTx<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateEr
     inside(
         top,
         |r| (r.row.node, r.row.kind == NodeKind::Folder),
-        |n| s.removed_children(n),
+        |r| s.removed_children(r.row.node),
     )
 }
 

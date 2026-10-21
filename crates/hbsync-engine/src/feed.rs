@@ -89,7 +89,7 @@ pub fn pull<G: DerefMut<Target = StateDb>>(
     let mut report = read_pages(&db, remote, pages.into(), reread)?;
     // A re-read open: what is left of it asked about (once nothing is, it ends).
     if let Some(asking) = reread.as_ref().map(Reread::to_ask) {
-        let (gone, mut skipped) = settle(&db, reread, ask(remote, &asking))?;
+        let (gone, mut skipped) = record_answers(&db, reread, ask(remote, &asking))?;
         report.deleted += gone;
         report.skipped.append(&mut skipped);
     }
@@ -115,8 +115,8 @@ impl From<usize> for Pages {
 }
 
 /// The pages of [`pull`], without the re-read's questions ([`Reread::to_ask`], [`ask`],
-/// [`settle`]), which come after them, in the same pull: a header read and its write in one
-/// pull, so no other pull or announcement comes between them.
+/// [`record_answers`]), which come after them, in the same pull: a header read and its write
+/// in one pull, so no other pull or announcement comes between them.
 fn read_pages<G: DerefMut<Target = StateDb>>(
     db: impl Fn() -> G,
     remote: &dyn Remote,
@@ -295,14 +295,15 @@ struct Asked {
 /// Asks the server about `files`, which the feed didn't show (it leaves out rows it has: one
 /// changed in its last second, homebase-api-notes): gone if it says it is a tombstone, or not
 /// found (for this app, the file isn't there) a second time a minute on (sync semantics §8b;
-/// till then it is asked again at each pull); one it has is applied as it is ([`settle`]). One
-/// it can't tell about now (a broken connection) stops the asking: it and the rest are asked
-/// again later. What it found is written by [`settle`], in the same pull.
+/// till then it is asked again at each pull); one it has is applied as it is
+/// ([`record_answers`]). One it can't tell about now (a broken connection) stops the asking: it
+/// and the rest are asked again later. What it found is written by [`record_answers`], in the
+/// same pull.
 fn ask(remote: &dyn Remote, files: &[RemoteFileId]) -> Asked {
     let mut asked = Asked::default();
     for &file_id in files {
         match gone::read(remote, file_id) {
-            // Not answered yet: judged in [`settle`].
+            // Not answered yet: judged in [`record_answers`].
             Ok((Said::NotThere, _)) => {
                 asked.not_there.push(file_id);
                 continue;
@@ -330,7 +331,7 @@ fn ask(remote: &dyn Remote, files: &[RemoteFileId]) -> Asked {
 /// gone, `mark_file_gone`). Each file answered is the re-read's no more once that is
 /// written (a write that fails leaves them to ask again): once none is left, it ends. Returns
 /// how many went, and why each it left out was ([`Applied::Refused`]).
-fn settle<G: DerefMut<Target = StateDb>>(
+fn record_answers<G: DerefMut<Target = StateDb>>(
     db: &impl Fn() -> G,
     reread: &mut Option<Reread>,
     mut asked: Asked,
@@ -685,7 +686,7 @@ mod tests {
             remote.create(&folder(format!("a{i}")), None)?;
         }
         let db = std::sync::Mutex::new(StateDb::open_in_memory()?);
-        let lock = || db.lock().unwrap_or_else(|e| e.into_inner());
+        let lock = || crate::lock(&db);
         let reads = |r: &FakeRemote| {
             let f = r.faults();
             (f.ref_pages, f.full_pages)

@@ -32,10 +32,7 @@ pub use rules::{
     take_restored_name, taken_in,
 };
 
-/// The account's DB, held only while it is read or written: never while the server answers.
-fn locked(account: &Mutex<StateDb>) -> MutexGuard<'_, StateDb> {
-    account.lock().unwrap_or_else(|e| e.into_inner())
-}
+use crate::lock;
 
 /// Recently deleted's operations on the account's drive: restoring, emptying, the purge. The
 /// account's DB is held only while it is read or written, never while the server answers.
@@ -85,8 +82,9 @@ impl<'a> AccountOps<'a> {
         }
     }
 
-    /// The account's DB ([`locked`]).
+    /// The account's DB, locked: held only while it is read or written, never while the server
+    /// answers.
     fn db(&self) -> MutexGuard<'a, StateDb> {
-        locked(self.account)
+        lock(self.account)
     }
 }

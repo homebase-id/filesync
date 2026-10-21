@@ -1437,7 +1437,7 @@ fn temp_files_no_download_wants_are_swept() -> R {
 #[test]
 fn a_folder_that_isnt_removed_keeps_what_is_in_it() -> R {
     let server = server();
-    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
     a.write("Photos/x.jpg", "x")?;
     a.write("Photos/2024/y.jpg", "y")?;
     a.sync()?;
@@ -1523,7 +1523,7 @@ fn a_rename_doesnt_write_over_a_version_taken_along() -> R {
 #[test]
 fn the_purge_finishes_a_delete_that_stopped_half_way() -> R {
     let server = server();
-    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
     a.write("Photos/x.txt", "x")?;
     a.write("Photos/2024/y.txt", "y")?;
     a.write("keep.txt", "k")?;
@@ -1568,7 +1568,7 @@ fn the_purge_finishes_a_delete_that_stopped_half_way() -> R {
 #[test]
 fn emptying_a_folder_never_deletes_what_is_live_in_it() -> R {
     let server = server();
-    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
     a.write("Photos/x.txt", "x")?;
     a.write("Photos/2024/y.txt", "y")?;
     a.sync()?;
@@ -1622,7 +1622,7 @@ fn emptying_a_folder_never_deletes_what_is_live_in_it() -> R {
 #[test]
 fn emptying_an_item_takes_only_what_was_listed() -> R {
     let server = server();
-    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
     a.write("Photos/a.txt", "a")?;
     a.write("Photos/x.txt", "x")?;
     a.sync()?;
@@ -1679,7 +1679,7 @@ fn emptying_an_item_takes_only_what_was_listed() -> R {
 #[test]
 fn emptying_a_folder_takes_what_was_deleted_from_it_before() -> R {
     let server = server();
-    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
     a.write("other.txt", "o")?;
     a.write("run/keep.txt", "k")?;
     a.write("run/data/x.txt", "x")?;
@@ -1854,7 +1854,7 @@ fn a_folder_goes_first_and_a_child_that_failed_follows() -> R {
 #[test]
 fn deletes_and_restores_go_a_level_at_a_time() -> R {
     let server = server();
-    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
     for i in 0..20 {
         a.write(&format!("d/f{i:02}.txt"), format!("{i}"))?;
     }
@@ -1889,7 +1889,7 @@ fn deletes_and_restores_go_a_level_at_a_time() -> R {
 #[test]
 fn a_removal_request_whose_answer_is_lost_is_not_sent_again() -> R {
     let server = server();
-    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
     let mut b = Client::new(&server, "b")?;
     for i in 0..5 {
         a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
@@ -2357,7 +2357,7 @@ fn a_confirmed_trash_of_a_folder_moved_into_an_ignored_name_goes_through() -> R 
     let mut a = Client::new(&server, "a")?;
     let mut b = Client::with_config(&server, "b", |cfg| {
         ignoring("build/\n")(cfg);
-        cfg.mass_delete_min = 2;
+        cfg.guard.min = 2;
     })?;
     for i in 0..4 {
         a.write(&format!("src/f{i}.txt"), format!("{i}"))?;
@@ -2390,7 +2390,7 @@ fn a_confirmed_trash_of_a_folder_moved_into_an_ignored_name_goes_through() -> R 
 fn held_deletes_leave_no_unfinished_work() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
-    let mut b = Client::with_config(&server, "b", |cfg| cfg.mass_delete_min = 2)?;
+    let mut b = Client::with_config(&server, "b", |cfg| cfg.guard.min = 2)?;
     for i in 0..4 {
         a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
     }
@@ -2492,7 +2492,7 @@ fn what_was_synced_is_listed_and_kept() -> R {
 #[test]
 fn recently_deleted_lists_deletes_with_counts_and_finds_items() -> R {
     let server = server();
-    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
     for i in 0..30 {
         a.write(&format!("d/f{i}.txt"), "x")?;
     }
@@ -2642,7 +2642,7 @@ fn an_edit_keeps_a_deleted_version_it_never_had() -> R {
 #[test]
 fn a_restored_item_is_guarded_again() -> R {
     let server = server();
-    let guard = |cfg: &mut hbsync_engine::EngineConfig| cfg.mass_delete_min = 2;
+    let guard = |cfg: &mut hbsync_engine::EngineConfig| cfg.guard.min = 2;
     let mut a = Client::with_config(&server, "a", guard)?;
     let mut b = Client::with_config(&server, "b", guard)?;
     for i in 0..4 {
@@ -3545,7 +3545,7 @@ fn a_power_cut_after_a_folder_came_back_keeps_one() -> R {
 #[test]
 fn own_writes_come_back_slim() -> R {
     let server = server();
-    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
     for i in 0..20 {
         a.write(&format!("Photos/{i}.jpg"), format!("{i}"))?;
     }
@@ -3609,7 +3609,7 @@ fn folder_meta(name: &str) -> NodeMeta {
 #[test]
 fn own_writes_are_recorded_from_their_answers() -> R {
     let server = server();
-    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
     a.sync()?; // start: reads the feed, as at every start
     a.announced();
     let heard = a.remote.subscribe(true);
@@ -3804,7 +3804,7 @@ fn a_crash_at_any_commit_of_a_folders_delete_finishes_it() -> R {
         for before in [true, false] {
             for kept in [common::Kept::All, common::Kept::Durable(None)] {
                 let server = server();
-                let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+                let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
                 a.write("keep.txt", "k")?;
                 for i in 0..5 {
                     a.write(&format!("F/f{i}.txt"), format!("{i}"))?;
@@ -3848,7 +3848,7 @@ fn another_device_finishes_a_folders_delete_left_half_done() -> R {
         a.write(&format!("F/f{i}.txt"), format!("{i}"))?;
     }
     a.sync()?;
-    let mut b = Client::with_config(&server, "b", |c| c.allow_mass_delete = true)?;
+    let mut b = Client::with_config(&server, "b", |c| c.guard.allow = true)?;
     b.sync()?;
     // a removes the folder alone, and is never seen again.
     let f = {
@@ -3947,13 +3947,13 @@ fn a_removal_answered_gone_for_good_keeps_the_file_gone() -> R {
 #[test]
 fn a_restore_takes_the_bytes_from_the_trash() -> R {
     let server = server();
-    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
     let (x, y, z) = ("x".repeat(1000), "y".repeat(2000), "z".repeat(3000));
     a.write("run/x.txt", &x)?;
     a.write("run/sub/y.txt", &y)?;
     a.write("run/z.txt", &z)?;
     a.sync()?;
-    let mut b = Client::with_config(&server, "b", |c| c.allow_mass_delete = true)?;
+    let mut b = Client::with_config(&server, "b", |c| c.guard.allow = true)?;
     b.sync()?;
     fs::remove_dir_all(a.root.join("run"))?;
     a.sync()?;
@@ -3996,13 +3996,13 @@ fn a_crash_while_taking_from_the_trash_loses_nothing() -> R {
             for kept in [common::Kept::All, common::Kept::Durable(None)] {
                 let case = format!("at {at}, before {before}, {kept:?}");
                 let server = server();
-                let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+                let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
                 for i in 0..4 {
                     a.write(&format!("F/f{i}.txt"), format!("{i}").repeat(100))?;
                 }
                 a.write("F/G/g.txt", "g".repeat(100))?;
                 a.sync()?;
-                let mut b = Client::with_config(&server, "b", |c| c.allow_mass_delete = true)?;
+                let mut b = Client::with_config(&server, "b", |c| c.guard.allow = true)?;
                 b.sync()?;
                 fs::remove_dir_all(a.root.join("F"))?;
                 a.sync()?;
@@ -4041,9 +4041,9 @@ fn crash_after_a_trash(
     restored: bool,
 ) -> Result<(Vec<String>, Vec<String>), Box<dyn std::error::Error>> {
     let server = server();
-    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
     let mut b = Client::with_config(&server, "b", |c| {
-        c.allow_mass_delete = true;
+        c.guard.allow = true;
         c.exec.hooks.crash_at = Some(CrashPoint::AfterTrash)
     })?;
     a.write("x", "x")?;
@@ -4098,8 +4098,8 @@ fn crash_right_after_a_trash_keeps_a_restore() -> R {
 #[test]
 fn a_trashed_file_moved_back_by_hand_is_a_new_file() -> R {
     let server = server();
-    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
-    let mut b = Client::with_config(&server, "b", |c| c.allow_mass_delete = true)?;
+    let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |c| c.guard.allow = true)?;
     a.write("x", "x")?;
     a.sync()?;
     b.sync()?;
@@ -4140,10 +4140,10 @@ fn trash_entry(c: &Client) -> Result<std::path::PathBuf, Box<dyn std::error::Err
 fn a_trash_that_stops_half_way_drops_the_bases_of_what_went() -> R {
     use std::os::unix::fs::PermissionsExt;
     let server = server();
-    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
     let mut b = Client::with_config(&server, "b", |c| {
         ignoring("*.log\n")(c);
-        c.allow_mass_delete = true;
+        c.guard.allow = true;
     })?;
     a.write("proj/0.txt", "0")?;
     a.write("proj/sub/b.txt", "b")?;

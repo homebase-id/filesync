@@ -11,7 +11,8 @@ use hbsync_engine::Against;
 use hbsync_engine::mask::masked;
 use hbsync_engine::plan::{Acts, Met, TagWrite, not_reached, tags_written};
 use hbsync_engine::reconcile::{
-    Agreement, BaseExtra, DriveVersion, Input, Masking, Op, Options, Removed, reconcile_with_known,
+    Agreement, BaseExtra, DeleteGuard, DriveVersion, Input, Masking, Op, Options, Removed,
+    reconcile_with_known,
 };
 use hbsync_engine::tree::{Tree, first_free, numbered_names};
 use hbsync_local::Verdict;
@@ -172,9 +173,11 @@ impl Sim {
             device: client.name.clone(),
             computer: client.computer.clone(),
             date: "2026-10-08".into(),
-            allow_mass_delete: self.guard.is_none(),
-            mass_delete_min: self.guard.unwrap_or_default(),
-            mass_delete_fraction: 0.0,
+            guard: DeleteGuard {
+                min: self.guard.unwrap_or_default(),
+                fraction: 0.0,
+                allow: self.guard.is_none(),
+            },
             synced_files,
             confirmed: Arc::clone(&confirmed),
             ..Options::default()

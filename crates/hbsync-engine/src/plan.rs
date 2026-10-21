@@ -49,13 +49,10 @@ pub struct Options {
     pub computer: String,
     /// Today's date (`YYYY-MM-DD`) for conflict-copy names. Passed in to keep this pure.
     pub date: String,
-    /// Deletes above `max(mass_delete_min, mass_delete_fraction × synced files)` are held.
-    pub mass_delete_min: usize,
-    pub mass_delete_fraction: f64,
+    /// The mass-delete guard's settings.
+    pub guard: DeleteGuard,
     /// Number of synced files (the base's file count), the guard's denominator.
     pub synced_files: usize,
-    /// Let every delete through (the user turned the guard off).
-    pub allow_mass_delete: bool,
     /// Nodes whose deletes the user confirmed: neither counted by the guard nor held.
     pub confirmed: Arc<HashSet<NodeId>>,
     /// Files pending deletion across the whole dirty set, not just this plan's batch:
@@ -66,16 +63,33 @@ pub struct Options {
     pub taken: Arc<HashSet<NodeId>>,
 }
 
+/// The mass-delete guard's settings: deletes above `max(min, fraction × synced files)` are
+/// held for the user to confirm, unless the user turned the guard off (`allow`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DeleteGuard {
+    pub min: usize,
+    pub fraction: f64,
+    pub allow: bool,
+}
+
+impl Default for DeleteGuard {
+    fn default() -> Self {
+        DeleteGuard {
+            min: 50,
+            fraction: 0.25,
+            allow: false,
+        }
+    }
+}
+
 impl Default for Options {
     fn default() -> Self {
         Options {
             device: "device".into(),
             computer: String::new(),
             date: "1970-01-01".into(),
-            mass_delete_min: 50,
-            mass_delete_fraction: 0.25,
+            guard: DeleteGuard::default(),
             synced_files: 0,
-            allow_mass_delete: false,
             confirmed: Arc::default(),
             pending_deletes: (0, 0),
             taken: Arc::default(),

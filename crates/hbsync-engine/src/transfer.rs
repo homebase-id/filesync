@@ -4,7 +4,7 @@
 //! places files in the sync root happens on the caller's thread, before ([`Job`] preparation)
 //! and after (the `commit` callback), so the DB keeps a single writer.
 //!
-//! Order: removals first (they move no bytes; a request takes a thousand), then smallest
+//! Order: removals first (they move no bytes; a request takes [`BATCH_FILES`]), then smallest
 //! first, so many small files aren't stuck behind one large one.
 //!
 //! Small files wait on round trips, so many run at once. Large ones wait on bandwidth, so only
@@ -20,7 +20,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use hbsync_fileio::{CompletedFile, FileIoError, HashAlgorithm, PartialFile, hash_file};
-use hbsync_remote::{Answers, ErrorClass, NodeMeta, Pace, Remote, RemoteError, Upload};
+use hbsync_remote::{
+    Answers, BATCH_FILES, ErrorClass, NodeMeta, Pace, Remote, RemoteError, Upload,
+};
 use hbsync_types::{ContentHash, NodeId, RemoteFileId, Target, Written};
 
 use crate::policy::{InRun, policy};
@@ -213,10 +215,6 @@ impl Job {
     }
 }
 
-/// Removals sent in one request: as many as Homebase takes in one. A level of more goes in
-/// requests that run at once, on the workers.
-pub(crate) const REMOVALS_AT_ONCE: usize = 1000;
-
 /// What a worker takes on: a job, or removals sent together.
 enum Task {
     One(Box<Job>),
@@ -292,11 +290,12 @@ pub(crate) fn run_jobs_while(
     let (removals, mut jobs): (Vec<Job>, Vec<Job>) =
         jobs.into_iter().partition(|j| j.removal().is_some());
     jobs.sort_by_key(Job::size);
-    // Removals first, a request for each thousand: they move no bytes.
+    // Removals first, a request for each batch Homebase takes ([`BATCH_FILES`]): they move
+    // no bytes; a level of more goes in requests that run at once, on the workers.
     let mut tasks = VecDeque::new();
     let mut removals = removals.into_iter();
     loop {
-        let batch: Vec<Job> = removals.by_ref().take(REMOVALS_AT_ONCE).collect();
+        let batch: Vec<Job> = removals.by_ref().take(BATCH_FILES).collect();
         if batch.is_empty() {
             break;
         }

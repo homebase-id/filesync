@@ -57,7 +57,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut cfg = RunnerConfig::new(&root, &db, identity, &device);
     cfg.once = args.iter().any(|a| a == "--once");
     if args.iter().any(|a| a == "--allow-mass-delete") {
-        cfg.tweak = Some(|c| c.allow_mass_delete = true);
+        cfg.tweak = Some(|c| c.guard.allow = true);
     }
     println!(
         "Syncing {} with {identity} (drive {}); built-in junk filter, rules in {STATE_DIR}/{IGNORE_FILE}",

@@ -46,7 +46,7 @@ impl Client {
         )?)?);
         let rules = only(run);
         let configure = move |cfg: &mut EngineConfig| -> Res<()> {
-            cfg.allow_mass_delete = true; // the test deletes its whole folder at the end
+            cfg.guard.allow = true; // the test deletes its whole folder at the end
             // Before the first start; a restart keeps the rules a scenario set.
             let ignore = hbsync_local::layout::ignore_file(&cfg.folder.root);
             if !ignore.exists() {

@@ -596,7 +596,7 @@ fn echo_run(
     let run = run_name("echoes");
     let _guard = RunFolder::new(&run)?;
     let mut a = TestClient::new(remote.clone(), "a", |cfg: &mut EngineConfig| {
-        cfg.allow_mass_delete = true;
+        cfg.guard.allow = true;
         cfg.folder.filter = Arc::new(Filter::load(&cfg.folder.root, cfg.folder.case_insensitive)?);
         Ok(())
     })?;

@@ -15,7 +15,7 @@ use crate::walk::End;
 
 use super::listing::group;
 use super::rules::{RestoreWave, restore_wave, take_restored_name, taken_in};
-use super::{AccountOps, locked};
+use super::{AccountOps, lock};
 
 impl AccountOps<'_> {
     /// Restores `node` with what was deleted with it, and the folders it was in that are in
@@ -24,7 +24,7 @@ impl AccountOps<'_> {
     /// Leaves the account behind ([`AccountOps::run`]) when the drive refused a write for its
     /// state (changed or deleted for good meanwhile), or a write may have landed unanswered.
     pub fn restore(&mut self, node: NodeId) -> Result<usize, EngineError> {
-        let Some(plan) = locked(self.account).read(|s| plan_restore(s, node))? else {
+        let Some(plan) = lock(self.account).read(|s| plan_restore(s, node))? else {
             return Ok(0);
         };
         let RestorePlan { rows, live, taken } = plan;
@@ -56,7 +56,7 @@ impl AccountOps<'_> {
             // The rows under their own names first, only their removals undone, as many a request
             // as the drive takes; the rest once those answered (a name one didn't take is free
             // again), a rewrite each.
-            for part in asked.chunks(crate::transfer::REMOVALS_AT_ONCE) {
+            for part in asked.chunks(hbsync_remote::BATCH_FILES) {
                 let targets: Vec<Target> = part.iter().map(|row| row.target()).collect();
                 let (answers, stopped) = self
                     .remote
@@ -89,7 +89,7 @@ impl AccountOps<'_> {
             // only the second time: sync semantics §8b), in one write. The mirror's write marks
             // each dirty in the folders it comes back to.
             let (back, heard) = (std::mem::take(&mut r.back), std::mem::take(&mut r.heard));
-            let (gone, superseded) = locked(self.account).write(|s| {
+            let (gone, superseded) = lock(self.account).write(|s| {
                 let gone = heard
                     .iter()
                     .map(|&(f, _, said)| gone::heard(s.account(), f, said))

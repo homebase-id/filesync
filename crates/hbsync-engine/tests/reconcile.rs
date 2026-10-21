@@ -611,7 +611,7 @@ fn mass_delete_is_held() {
         "the rest of the plan proceeds"
     );
 
-    w.opts.allow_mass_delete = true;
+    w.opts.guard.allow = true;
     assert_eq!(w.plan().ops.iter().filter(|op| op.is_delete()).count(), 80);
 }
 
