@@ -114,12 +114,33 @@ fn name_free(root: &Path, dir: &Path, name: &str) -> bool {
     occupant(root, dir, name).is_none()
 }
 
-/// How many seeds the randomized tests run (`MILESTONE_SEEDS`).
-fn seeds() -> u64 {
-    std::env::var("MILESTONE_SEEDS")
+/// The seeds the randomized tests run: `MILESTONE_SEEDS` of them (12 by default). The first half
+/// are fixed (`0..`), the same every run; the rest are new every run, from a random base printed
+/// once (`MILESTONE_SEED_BASE` replays a run: a failure names its seed).
+fn seeds() -> Vec<u64> {
+    let n: u64 = std::env::var("MILESTONE_SEEDS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(12)
+        .unwrap_or(12);
+    let fixed = n / 2;
+    let base = std::env::var("MILESTONE_SEED_BASE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or_else(random_base);
+    eprintln!(
+        "milestone: {fixed} fixed seeds, {} from base {base}",
+        n - fixed
+    );
+    (0..fixed).chain(base..base + (n - fixed)).collect()
+}
+
+/// A base for this run's new seeds, above the fixed ones (`RandomState` is keyed afresh per
+/// process).
+fn random_base() -> u64 {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u64(0);
+    (h.finish() >> 1) | (1 << 32)
 }
 
 /// Two clients of `server` that may delete everything.
@@ -188,7 +209,7 @@ fn act(root: &Path, rng: &mut Rng, ledger: &mut Ledger) -> std::io::Result<()> {
 #[test]
 fn randomized_two_client_convergence() -> R {
     let seeds = seeds();
-    for seed in 0..seeds {
+    for &seed in &seeds {
         let server = server();
         let [mut a, mut b] = pair(&server)?;
         let mut rng = Rng(seed);
@@ -218,7 +239,7 @@ fn randomized_two_client_convergence() -> R {
 fn randomized_wrong_not_theres() -> R {
     let seeds = seeds();
     let mut heard = 0;
-    for seed in 0..seeds {
+    for &seed in &seeds {
         let server = server();
         let mut clients = pair(&server)?;
         let mut rng = Rng(seed);
@@ -246,7 +267,10 @@ fn randomized_wrong_not_theres() -> R {
         let [mut a, mut b] = clients;
         converged(seed, &mut a, &mut b, &ledger, &server)?;
     }
-    assert!(heard > 0 || seeds < 4, "no wrong \"not there\" was heard");
+    assert!(
+        heard > 0 || seeds.len() < 4,
+        "no wrong \"not there\" was heard"
+    );
     Ok(())
 }
 
@@ -311,10 +335,10 @@ fn crash_at(c: &mut Client, at: usize, before: bool, kept: Kept) -> Res<bool> {
 fn randomized_crashes() -> R {
     let seeds = seeds();
     let mut crashes = 0;
-    for seed in 0..seeds {
+    for &seed in &seeds {
         crashes += crashes_of(seed)?;
     }
-    assert!(crashes as u64 >= seeds, "only {crashes} crashes");
+    assert!(crashes >= seeds.len(), "only {crashes} crashes");
     Ok(())
 }
 
