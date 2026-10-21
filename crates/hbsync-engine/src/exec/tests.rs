@@ -3792,3 +3792,150 @@ fn a_restore_while_the_trash_runs_stands() -> R {
     );
     Ok(())
 }
+
+/// Where the live folder a removed folder is in sits, for [`removed_in_a_live_folder`].
+#[derive(Clone, Copy, PartialEq)]
+enum Under {
+    /// At the top.
+    Top,
+    /// In a folder at the top, synced here.
+    Folder,
+    /// In a folder at the top in Recently deleted, which took it along: written after, the
+    /// new node keeps both.
+    Removed,
+    /// In the role folder, which the main folder leaves out.
+    Role,
+}
+
+/// A folder written into a folder another device removed (the folder in Recently deleted, in a
+/// live one `under` where it says), the new node alone dirty: the plan from narrow views and
+/// from whole folders. Returns the narrow one, and the ids of the live folder, the removed one
+/// and the new one.
+fn removed_in_a_live_folder(
+    under: Under,
+) -> Result<(crate::plan::Plan, [NodeId; 3]), Box<dyn std::error::Error>> {
+    let mut h = Harness::new()?;
+    let (top, live, removed, new) = (NodeId::new(), NodeId::new(), NodeId::new(), NodeId::new());
+    let folder_row = |node, parent, name: &str, at| {
+        MirrorRow::from_content(
+            at,
+            node,
+            parent,
+            NodeKind::Folder,
+            &NodeContent::folder(name),
+            None,
+        )
+    };
+    let top = match under {
+        Under::Top => NodeId::ROOT,
+        Under::Role => hbsync_types::Role::Documents.node(),
+        Under::Folder | Under::Removed => top,
+    };
+    let (at_top, at_live) = (some_version(), some_version());
+    if under == Under::Folder {
+        h.local_folder("x", top)?;
+        h.local_folder("x/a", live)?;
+    } else if under == Under::Top {
+        h.local_folder("a", live)?;
+    }
+    h.db.write(|s| {
+        let synced =
+            |parent, name: &str, node, at| BaseRow::new(node, NodeState::folder(parent, name), at);
+        match under {
+            Under::Top => s.folder().put_base(&synced(top, "a", live, at_live))?,
+            Under::Folder => {
+                s.folder()
+                    .put_base(&synced(NodeId::ROOT, "x", top, at_top))?;
+                s.folder().put_base(&synced(top, "a", live, at_live))?;
+            }
+            Under::Removed | Under::Role => {}
+        }
+        if !top.is_root() {
+            let row = folder_row(top, NodeId::ROOT, "x", at_top);
+            match under {
+                Under::Removed => s.account().put_removed(&RemovedRow {
+                    row,
+                    removed_at: Some(50),
+                })?,
+                _ => s.account().put_mirror(&row)?,
+            }
+        }
+        let mut row = folder_row(live, top, "a", at_live);
+        row.changed_at = Some(10);
+        s.account().put_mirror(&row)?;
+        s.account().put_removed(&RemovedRow {
+            row: folder_row(removed, live, "b", some_version()),
+            removed_at: Some(100),
+        })?;
+        let mut row = folder_row(new, removed, "c", some_version());
+        row.changed_at = Some(200); // written after the removal: it keeps its folder
+        s.account().put_mirror(&row)?;
+        s.folder().mark_dirty(new)
+    })?;
+    let ctx = FolderCtx {
+        scope: Arc::new(Scope::of(NodeId::ROOT)),
+        ..h.folder.clone()
+    };
+    let opts = crate::plan::Options::default();
+    let reconcile = |input: &crate::reconcile::Input, _: &mut StateDb| {
+        crate::reconcile::reconcile(input, &opts, ctx.masking())
+    };
+    let narrow = view::plan_narrow(&mut h.db, &[new], &ctx, reconcile)?;
+    let whole = h.db.read(|s| view::build_input(s, &[new], &ctx))?;
+    let whole = crate::reconcile::reconcile(&whole, &opts, ctx.masking());
+    assert_eq!(narrow, whole, "the narrow view plans as whole folders");
+    assert!(
+        !narrow
+            .conflicts
+            .iter()
+            .any(|c| matches!(c, crate::plan::Conflict::Orphan { .. })),
+        "nothing orphaned: {:?}",
+        narrow.ops
+    );
+    Ok((narrow, [live, removed, new]))
+}
+
+/// The removed folder comes back where it was, in its live folder: not read as gone for good,
+/// what was written into it since put into Recovered files.
+#[test]
+fn a_narrow_view_holds_the_live_folder_a_removed_one_is_in() -> R {
+    for under in [Under::Top, Under::Folder] {
+        let (plan, [live, removed, _]) = removed_in_a_live_folder(under)?;
+        assert!(
+            plan.ops.iter().any(|op| matches!(op,
+                Op::RemoteCreate { node, parent, .. } if *node == removed && *parent == live)),
+            "{:?}",
+            plan.ops
+        );
+    }
+    Ok(())
+}
+
+/// The live folder in a folder in Recently deleted: that one is looked up too, and the new
+/// node keeps them all (written after their removals).
+#[test]
+fn a_narrow_view_follows_removed_folders_above_the_live_one() -> R {
+    let (plan, [live, removed, _]) = removed_in_a_live_folder(Under::Removed)?;
+    assert!(
+        plan.ops.iter().any(|op| matches!(op,
+            Op::RemoteCreate { node, parent, .. } if *node == removed && *parent == live)),
+        "{:?}",
+        plan.ops
+    );
+    Ok(())
+}
+
+/// In the role folder, which the main folder leaves out: neither view brings it in.
+#[test]
+fn a_narrow_view_leaves_a_removed_folder_in_the_role_folder_alone() -> R {
+    let (plan, [_, removed, new]) = removed_in_a_live_folder(Under::Role)?;
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| op.node() == removed || op.node() == new),
+        "{:?}",
+        plan.ops
+    );
+    Ok(())
+}

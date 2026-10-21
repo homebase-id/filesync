@@ -169,6 +169,9 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    same way, whether the picture is whole or not; a folder this device can't read, or a file
    whose newer version it can't read, is no such place: what is in it waits.
    - The main folder adopts: a node whose place isn't known is never a role folder's (§12).
+     A folder in Recently deleted has a place where its own folder is: a live one, or one in
+     Recently deleted in turn, up to the top; what is in it is neither an orphan nor the main
+     folder's when that chain reaches a role folder.
    - Recovered files is made when an orphan first needs it, with its fixed id, so devices
      adopting at once make one folder (a create that finds it made joins it). One in Recently
      deleted comes back, alone, as any folder a live node keeps; one synced here before and

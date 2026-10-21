@@ -119,8 +119,14 @@ impl Sim {
         // them, and the server's time of each live node's version, as the engine's view has them.
         let outside = client.scope().outside;
         for mut folder in hbsync_engine::view::looked_up_removed(&remote, client.coords.top) {
+            // Not one in a version no client reads: the feed records no row of it (only that
+            // it is there, unread), in Recently deleted or not.
             while !input.removed.contains_key(&folder)
                 && !outside.contains(&folder)
+                && !self
+                    .server
+                    .unreadable
+                    .contains_key(&client.coords.to_drive(folder))
                 && let Some(n) = self.server.removed.get(&client.coords.to_drive(folder))
             {
                 let state = NodeState {
@@ -171,9 +177,20 @@ impl Sim {
             scope: &scope,
         };
         // Ids the client or the server knows are taken, as in the executor's state DB.
-        let plan = reconcile_with_known(&input, &opts, masking, |id| {
+        let known = |id: NodeId| {
             client.local.contains(id) || client.base.contains(id) || self.server.ever.contains(&id)
-        });
+        };
+        let plan = reconcile_with_known(&input, &opts, masking, known);
+        // Every fourth plan (each costs a state DB and three more plans), until a difference
+        // is found (it is reported).
+        if self.narrow_check && !self.ledger.found_narrow_differs() {
+            self.narrow_rounds += 1;
+            if self.narrow_rounds.is_multiple_of(4) {
+                let round = self.narrow_rounds / 4;
+                let what = self.check_narrow(c, &input, &opts, &known, &plan, round);
+                self.ledger.narrow_differs(|| what);
+            }
+        }
         // The guard's rule, checked independently: no plan deletes more files on a side than
         // the limit (or every file) without the user's confirmation.
         if let Some(min) = self.guard {
