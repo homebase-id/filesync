@@ -20,7 +20,7 @@ use hbsync_types::{
 
 use crate::Sim;
 use crate::action::{Action, JUNK, NAMES, TAGS};
-use crate::model::client::ignoring_d;
+use crate::model::client::{Client, ignoring_d};
 use crate::model::server::{Server, ServerNode};
 use crate::oracle::Seen;
 
@@ -700,14 +700,24 @@ impl Sim {
     /// once it lands (the base kept the tag), and is taken off the item.
     fn removal_unseen(&self, c: usize, node: NodeId, name: &str) -> bool {
         let has = |s: Option<&NodeState>| s.is_some_and(|s| s.tags.get(name).is_some());
+        let lacks = |s: Option<&NodeState>| s.is_some_and(|s| s.tags.get(name).is_none());
+        // A plan of a client's made from the removal, still to write the node.
+        let planned = |client: &Client| {
+            lacks(client.planned_local.get(node))
+                && client.plan.iter().any(|(op, _)| op.node() == node)
+        };
+        // Of another client whose items can hold the tag at all: an item that lacks it, or a
+        // plan sending its removal (the item gone since).
         let pending = self.clients.iter().enumerate().any(|(d, client)| {
-            d != c && has(client.base.get(node)) && !has(client.local.get(node))
+            d != c
+                && express(&Tag::new(name, 0), client.os).is_some()
+                && has(client.base.get(node))
+                && (lacks(client.local.get(node)) || planned(client))
         });
         let client = &self.clients[c];
-        let stale =
-            has(client.base.get(node)) && !has(self.server.live.get(&node).map(|n| &n.state));
-        let own = has(client.base.get(node)) && !has(client.planned_local.get(node));
-        pending || stale || own
+        let synced = has(client.base.get(node));
+        let stale = lacks(self.server.live.get(&node).map(|n| &n.state));
+        pending || (synced && (stale || planned(client)))
     }
 
     /// `node` is back on the drive (from Recently deleted, or made again after the purge).
@@ -972,9 +982,7 @@ mod tests {
         assert!(sim.ledger.tags.has_cleared(&(1, file, "Red".into())));
         assert!(sim.ledger.tags.has_added(&(1, file, "Work".into())));
         assert!(
-            sim.ledger
-                .tags
-                .has_added(&(crate::tagbook::DETACHED, file, "Red".into())),
+            sim.ledger.tags.has_detached(&(0, file, "Red".into())),
             "sent up, it stays with the node"
         );
         sim.check().unwrap_or_else(|e| panic!("{e}"));

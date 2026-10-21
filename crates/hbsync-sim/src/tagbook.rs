@@ -9,10 +9,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use hbsync_engine::tree::Tree;
 use hbsync_types::NodeId;
 
-/// The client a tag add belongs to once no item holds it ([`TagBook::detach`]): it stays with
-/// its node.
-pub(crate) const DETACHED: usize = usize::MAX;
-
 /// A tag add: the client, the node, the tag's name.
 pub(crate) type Add = (usize, NodeId, String);
 
@@ -58,8 +54,10 @@ pub(crate) struct TagBook {
     /// holds: read against the old base, they are that client's adds, and a removal made
     /// elsewhere meanwhile may come back (sync semantics §8, §11: the known limit).
     unproven: BTreeSet<Add>,
-    /// The clients each detached add came from: it is no other client's add to them.
-    detached_from: BTreeMap<(NodeId, String), BTreeSet<usize>>,
+    /// Adds no item of their client's holds any more ([`TagBook::detach`]): they stay with
+    /// the node, still that client's (no other client's to its removals), with when they were
+    /// sent, if they were.
+    detached: BTreeMap<Add, (Made, Option<i64>)>,
     /// Nodes some user deleted (until they are back).
     deleted: BTreeSet<NodeId>,
 }
@@ -144,36 +142,22 @@ impl TagBook {
 
     /// Client `c`'s add `add` no longer belongs to an item of its: it stays with the node (on the
     /// drive, or nowhere), so an item made of the node later doesn't take it along. Its send
-    /// time goes along: merged with a detached add of the tag there, the last one, but not sent
-    /// where either isn't (one not sent excuses every removal); and so does when it was made,
-    /// the later of the two.
+    /// time goes along: merged with an add of the client's detached there before, the later
+    /// add, sent at the last time, but not sent where either isn't (one not sent excuses every
+    /// removal of another client).
     pub(crate) fn detach(&mut self, add: Add) {
         let Some(made) = self.added.remove(&add) else {
             return;
         };
         let sent = self.sent.remove(&add);
-        let (c, node, name) = add;
-        self.detached_from
-            .entry((node, name.clone()))
-            .or_default()
-            .insert(c);
-        let detached = (DETACHED, node, name);
-        let (made, sent) = match self.added.get(&detached) {
+        let merged = match self.detached.get(&add) {
             None => (made, sent),
-            Some(other) => (
-                Made {
-                    at: made.at.max(other.at),
-                    concurrent: made.concurrent || other.concurrent,
-                },
-                sent.zip(self.sent.get(&detached).copied())
-                    .map(|(a, b)| a.max(b)),
+            Some((other, other_sent)) => (
+                if made.at >= other.at { made } else { *other },
+                sent.zip(*other_sent).map(|(a, b)| a.max(b)),
             ),
         };
-        match sent {
-            Some(t) => self.sent.insert(detached.clone(), t),
-            None => self.sent.remove(&detached),
-        };
-        self.added.insert(detached, made);
+        self.detached.insert(add, merged);
     }
 
     /// `node` is back where a user deleted it (on the drive, or here where the delete lost)
@@ -193,12 +177,12 @@ impl TagBook {
             return;
         }
         self.cleared.retain(|(_, n, _), _| *n != node);
+        self.detached
+            .retain(|(_, n, name), _| *n != node || held.contains(name));
         let sent = &self.sent;
         self.added.retain(|add, _| {
-            let (c, n, name) = add;
-            *n != node
-                || held.contains(name)
-                || (*c != DETACHED && !sent.contains_key(add) && pending(add))
+            let (_, n, name) = add;
+            *n != node || held.contains(name) || (!sent.contains_key(add) && pending(add))
         });
     }
 
@@ -292,7 +276,16 @@ impl TagBook {
     ) -> Result<(), String> {
         // A tag change loses to a delete (§11), unless the removed version held the tag: then
         // what brings it back keeps it.
-        for ((_, node, name), made) in &self.added {
+        let adds = self
+            .added
+            .iter()
+            .map(|(add, made)| (add, made, self.sent.get(add)));
+        let detached = self
+            .detached
+            .iter()
+            .map(|(add, (made, sent))| (add, made, sent.as_ref()));
+        let adds: Vec<_> = adds.chain(detached).collect();
+        for ((_, node, name), made, _) in &adds {
             let removed_since = self
                 .removed
                 .get(&(*node, name.clone()))
@@ -308,22 +301,11 @@ impl TagBook {
             }
         }
         for ((by, node, name), removed) in &self.cleared {
-            let elsewhere = |(c, n, t): &Add| {
-                n == node
-                    && t == name
-                    && match *c {
-                        // A detached add is another client's only if one made it.
-                        DETACHED => self
-                            .detached_from
-                            .get(&(*n, t.clone()))
-                            .is_some_and(|from| from.iter().any(|f| f != by)),
-                        c => c != *by,
-                    }
-            };
-            let added_elsewhere =
-                self.added.keys().any(|add| {
-                    elsewhere(add) && self.sent.get(add).is_none_or(|sent| sent > removed)
-                }) || self.forked.iter().chain(&self.unproven).any(elsewhere);
+            let elsewhere = |(c, n, t): &Add| c != by && n == node && t == name;
+            let added_elsewhere = adds
+                .iter()
+                .any(|(add, _, sent)| elsewhere(add) && sent.is_none_or(|sent| sent > removed))
+                || self.forked.iter().chain(&self.unproven).any(elsewhere);
             if let Some(s) = server.get(*node)
                 && !added_elsewhere
                 && !refused.contains(node)
@@ -341,6 +323,11 @@ impl TagBook {
     #[cfg(test)]
     pub(crate) fn has_added(&self, add: &Add) -> bool {
         self.added.contains_key(add)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_detached(&self, add: &Add) -> bool {
+        self.detached.contains_key(add)
     }
 
     #[cfg(test)]
