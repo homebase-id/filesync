@@ -143,11 +143,18 @@ pub(crate) fn ignoring_d() -> Filter {
     Filter::from_rules("d\n", false).unwrap_or_default()
 }
 
-/// What the filter of the client's run says about its local item `node`.
+/// What the filter of the client's run says about its local item `node`, at its place: a
+/// parked item at its original name, as the scan records it.
 pub(crate) fn verdict(client: &Client, node: NodeId) -> Verdict {
-    let Some(path) = client.local.path(node) else {
+    let Some(mut path) = client.local.path(node) else {
         return Verdict::Sync;
     };
+    let temporary = hbsync_local::layout::parked_name(node);
+    if let (Some((_, original)), Some(last)) = (client.parked.get(&node), path.last_mut())
+        && *last == temporary
+    {
+        *last = original;
+    }
     let is_dir = client
         .local
         .get(node)

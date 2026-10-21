@@ -224,7 +224,9 @@ impl Sim {
 
     /// The record `p` of the node's own item on client `c` dropped (the item changed since): the
     /// tags its download wrote, changing what the item held before, that the item still holds
-    /// are [`Sim::tags_unproven`].
+    /// are unproven ([`TagBook::unproven`]).
+    ///
+    /// [`TagBook::unproven`]: crate::tagbook::TagBook::unproven
     fn unproven_tags(&mut self, c: usize, node: NodeId, p: &Placement) {
         let (Some(written), Some(before)) = (&p.tags, &p.prior) else {
             return;
@@ -234,7 +236,7 @@ impl Sim {
         };
         for tag in written.iter() {
             if before.get(&tag.name) != Some(tag) && item.tags.get(&tag.name) == Some(tag) {
-                self.tags_unproven.insert((c, node, tag.name.clone()));
+                self.ledger.tags.unproven(c, node, &tag.name);
             }
         }
     }
@@ -337,7 +339,7 @@ mod tests {
         let mut sim = Sim::new(1);
         let node = sim.ids.fresh();
         sim.server.put(node, NodeState::folder(NodeId::ROOT, "d"));
-        sim.deleted.insert(node);
+        sim.ledger.tags.deleted(node);
         sim.clients[0].plan.push_back((
             Op::LocalMkdir {
                 node,
@@ -350,7 +352,7 @@ mod tests {
         ));
         sim.crash(0);
         assert!(sim.clients[0].local.contains(node));
-        assert!(!sim.deleted.contains(&node));
+        assert!(!sim.ledger.tags.is_deleted(node));
     }
 
     /// A folder synced before, made again: the engine records it for the version it acts on,

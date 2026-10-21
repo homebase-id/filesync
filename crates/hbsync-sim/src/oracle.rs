@@ -9,6 +9,7 @@ use hbsync_platform::name::check_remote_name;
 use hbsync_types::{ContentHash, FileContent, NodeId, NodeKind, NodeState, Role, Tags, VersionTag};
 
 use crate::Sim;
+use crate::tagbook::TagBook;
 
 /// The oracle's bookkeeping: every blob written and the ones no longer owed, the last listing
 /// of Recently deleted, and the first breach of each rule the model saw happen (each kept
@@ -54,6 +55,8 @@ pub(crate) struct Ledger {
     plan_taken: BTreeMap<usize, BTreeSet<(NodeId, VersionTag)>>,
     /// The first node that went to Recently deleted though no one deleted it.
     wrongly_removed: Option<String>,
+    /// What users did to tags, and what became of it.
+    pub(crate) tags: TagBook,
     /// The first plan the engine's own planning path made otherwise ([`Sim::with_narrow_check`]).
     narrow_differs: Option<String>,
 }
@@ -466,49 +469,15 @@ impl Sim {
         if !lost.is_empty() {
             return Err(format!("lost blobs {lost:?}; present {present:?}"));
         }
-        // A tag change loses to a delete (§11), unless the removed version held the tag: then
-        // what brings it back keeps it.
-        let held_at_removal = |node: &NodeId, name: &String| {
+        let held_at_removal = |node: NodeId, name: &str| {
             self.server
                 .tags_at_removal
-                .get(node)
+                .get(&node)
                 .is_some_and(|t| t.contains(name))
         };
-        for (_, node, name) in &self.tags_added {
-            if let Some(s) = server.get(*node)
-                && !refused_here.contains(node)
-                && !self.tags_removed.contains(&(*node, name.clone()))
-                && (!self.deleted.contains(node) || held_at_removal(node, name))
-                && s.tags.get(name).is_none()
-            {
-                return Err(format!("lost tag {name:?} of {node:?}: {:?}", s.tags));
-            }
-        }
-        // A synced tag a client removed stays removed (§11), unless another client added it
-        // and the add wasn't on the drive yet when it was removed (not sent up then: the
-        // removal, sent up after an add on the drive, wins), or holds it from a download whose
-        // record recovery dropped (`tags_unproven`, the known limit). One removed before a
-        // delete was settled by it (`deleted_now`, `restored_on_drive`).
-        for ((by, node, name), removed) in &self.tags_cleared {
-            let elsewhere = |(c, n, t): &(usize, NodeId, String)| c != by && n == node && t == name;
-            let added_elsewhere = self.tags_added.iter().any(|add| {
-                elsewhere(add) && self.tags_sent.get(add).is_none_or(|sent| sent > removed)
-            }) || self
-                .tags_forked
-                .iter()
-                .chain(&self.tags_unproven)
-                .any(elsewhere);
-            if let Some(s) = server.get(*node)
-                && !added_elsewhere
-                && !refused_here.contains(node)
-                && s.tags.get(name).is_some()
-            {
-                return Err(format!(
-                    "removed tag {name:?} of {node:?} came back: {:?}",
-                    s.tags
-                ));
-            }
-        }
+        self.ledger
+            .tags
+            .check(&server, &refused_here, held_at_removal)?;
         Ok(())
     }
 }
@@ -833,24 +802,33 @@ mod tests {
         // part of the drive and what a filter leaves out are the oracle's own walks. (What it
         // reads of the model, through `Sim`, is the model's state, and `drive_refused`, the
         // drive's own judgement; it calls no engine rule through them.)
-        const ALLOWED: &[&str] = &[
-            "use hbsync_engine::tree::{Tree, Violation};",
-            "use crate::Sim;",
-        ];
-        // Up to this module (`lines` reads a Windows checkout's line ends too).
-        let source = include_str!("oracle.rs").lines();
-        let paths: Vec<&str> = source
-            .take_while(|l| *l != "mod tests {")
-            .map(str::trim)
-            .filter(|l| !l.starts_with("//"))
-            .filter(|l| {
-                ["hbsync_engine", "crate::", "super::"]
-                    .iter()
-                    .any(|p| l.contains(p))
-            })
-            .collect();
+        let paths = |source: &str| -> Vec<String> {
+            // Up to a test module (`lines` reads a Windows checkout's line ends too).
+            source
+                .lines()
+                .take_while(|l| *l != "mod tests {")
+                .map(str::trim)
+                .filter(|l| !l.starts_with("//"))
+                .filter(|l| {
+                    ["hbsync_engine", "crate::", "super::"]
+                        .iter()
+                        .any(|p| l.contains(p))
+                })
+                .map(str::to_owned)
+                .collect()
+        };
         assert_eq!(
-            paths, ALLOWED,
+            paths(include_str!("tagbook.rs")),
+            ["use hbsync_engine::tree::Tree;"],
+            "the tag bookkeeping's paths into the engine and the crate"
+        );
+        assert_eq!(
+            paths(include_str!("oracle.rs")),
+            [
+                "use hbsync_engine::tree::{Tree, Violation};",
+                "use crate::Sim;",
+                "use crate::tagbook::TagBook;",
+            ],
             "the oracle's paths into the engine and the crate"
         );
     }
