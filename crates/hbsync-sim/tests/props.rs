@@ -4513,3 +4513,151 @@ fn regression_an_unhashed_orphan_adopted_from_the_drives_tags_is_a_known_limit()
         );
     }
 }
+
+/// Seed 353c4a5d, a known limit (the revert-to-base family, the user's call: not now): c1's
+/// tag write lands, another device removes the folder meanwhile, and the folder is made again
+/// without the tag; c1's user had removed Red and added it back, to what its base holds, so
+/// nothing went up, and the drive's state comes down over it. The oracle names it.
+#[test]
+fn regression_a_tag_added_back_to_the_base_is_a_known_limit() {
+    use Action::*;
+    use Event::*;
+    let limits = known_limits_of(
+        2,
+        &[
+            Act {
+                client: 1,
+                action: CreateFolder { parent: 0, name: 0 },
+            },
+            Plan { client: 1 },
+            Step { client: 1 },
+            Act {
+                client: 1,
+                action: Meanwhile { op: 0 },
+            },
+            Act {
+                client: 1,
+                action: Tag { node: 0, tag: 4 },
+            },
+            Plan { client: 1 },
+            Plan { client: 0 },
+            Step { client: 1 },
+            Act {
+                client: 0,
+                action: ListDeleted,
+            },
+            Act {
+                client: 0,
+                action: EmptyListed,
+            },
+            Act {
+                client: 1,
+                action: Tag { node: 0, tag: 4 },
+            },
+            Step { client: 0 },
+            Act {
+                client: 1,
+                action: Tag { node: 0, tag: 12 },
+            },
+            Act {
+                client: 0,
+                action: CreateFolder { parent: 2, name: 0 },
+            },
+        ],
+    );
+    // That case alone.
+    assert_eq!(limits.len(), 1, "{limits:?}");
+    assert!(
+        limits[0].starts_with("AddBackToBase") && limits[0].ends_with(" Red"),
+        "{limits:?}"
+    );
+}
+
+/// Seed bf84d30f, a known limit (the in-flight family, the user's call: not now): c0's write
+/// carrying its Red lands, and another device removes the folder before the answer is
+/// recorded; c0's base never takes Red as on the drive, so once the folder is back c0 sends
+/// Red up again, over c1's later removal. The oracle names it.
+#[test]
+fn regression_an_add_whose_answer_was_superseded_is_a_known_limit() {
+    use Action::*;
+    use Event::*;
+    let limits = known_limits_of(
+        3,
+        &[
+            Act {
+                client: 1,
+                action: CreateJunk { parent: 0 },
+            },
+            Act {
+                client: 1,
+                action: CreateFolder {
+                    parent: 0,
+                    name: 11,
+                },
+            },
+            Act {
+                client: 1,
+                action: CreateFile { parent: 0, name: 1 },
+            },
+            Act {
+                client: 0,
+                action: CreateFolder { parent: 0, name: 3 },
+            },
+            Plan { client: 1 },
+            Act {
+                client: 0,
+                action: CreateFile { parent: 0, name: 0 },
+            },
+            Step { client: 1 },
+            Act {
+                client: 0,
+                action: Meanwhile { op: 0 },
+            },
+            Act {
+                client: 0,
+                action: Tag { node: 2, tag: 0 },
+            },
+            Plan { client: 0 },
+            Step { client: 0 },
+            Step { client: 0 },
+            Act {
+                client: 0,
+                action: ListDeleted,
+            },
+            Act {
+                client: 0,
+                action: EmptyListed,
+            },
+            Plan { client: 0 },
+            Step { client: 0 },
+            Plan { client: 1 },
+            Act {
+                client: 0,
+                action: CreateFile { parent: 0, name: 0 },
+            },
+            Act {
+                client: 0,
+                action: CreateFile { parent: 0, name: 0 },
+            },
+            Act {
+                client: 1,
+                action: CreateFile { parent: 0, name: 2 },
+            },
+            Act {
+                client: 0,
+                action: CreateFile { parent: 0, name: 0 },
+            },
+            Step { client: 1 },
+            Act {
+                client: 1,
+                action: Tag { node: 13, tag: 12 },
+            },
+        ],
+    );
+    // That case alone.
+    assert_eq!(limits.len(), 1, "{limits:?}");
+    assert!(
+        limits[0].starts_with("AnswerSuperseded") && limits[0].ends_with(" Red"),
+        "{limits:?}"
+    );
+}

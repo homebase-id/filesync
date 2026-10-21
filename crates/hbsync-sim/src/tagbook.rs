@@ -34,6 +34,16 @@ pub(crate) enum Limit {
     /// the drive's tags over the item, and the user's add goes (seeds d856d284, fc58ff8f; the
     /// fix waits on the user's call on design A+).
     UnhashedOrphanAdopted,
+    /// A client adds back a tag its base holds (after removing it here): the item is as the
+    /// base has it, so nothing goes up, and where the drive dropped the tag meanwhile (another
+    /// device's delete, the node made again without it) the drive's state comes down over the
+    /// add (the revert-to-base family; seed 353c4a5d).
+    AddBackToBase,
+    /// A client's remote write carrying its add landed, but another device changed the node
+    /// before the answer was recorded ([`crate::Action::Meanwhile`]): its base never recorded
+    /// the add as on the drive, so the add goes up again, over another client's later removal
+    /// (the in-flight family; seed bf84d30f).
+    AnswerSuperseded,
 }
 
 /// When an add was made, among the users' tag changes, and whether a removal of the tag was
@@ -97,6 +107,9 @@ pub(crate) struct TagBook {
     /// hold them ([`Limit::NewItemKeepsBaseTag`]), with when, among the users' tag changes: it
     /// excuses only adds made before (one made after meets it as a removal under way).
     kept_on_new_item: BTreeMap<Add, u64>,
+    /// Nodes a client's remote write landed on whose answer another device's change superseded
+    /// ([`Limit::AnswerSuperseded`]).
+    superseded: BTreeSet<Add>,
     /// The adds the last check found lost to a known limit (for scripted tests).
     excused: std::cell::RefCell<Vec<(Limit, Add)>>,
 }
@@ -321,6 +334,15 @@ impl TagBook {
             .insert((c, node, name.to_owned()), self.seq);
     }
 
+    /// Client `c`'s remote write landed on `node`, and another device changed it before the
+    /// answer was recorded ([`Limit::AnswerSuperseded`]).
+    /// `tags`: the tags the write carried.
+    pub(crate) fn answer_superseded(&mut self, c: usize, node: NodeId, tags: &hbsync_types::Tags) {
+        for tag in tags.iter() {
+            self.superseded.insert((c, node, tag.name.clone()));
+        }
+    }
+
     /// A download wrote tag `name` on client `c`'s item `node`, which its record recovery
     /// dropped ([`TagBook::unproven`]).
     pub(crate) fn unproven(&mut self, c: usize, node: NodeId, name: &str) {
@@ -418,6 +440,16 @@ impl TagBook {
             {
                 if self.cleared_in_flight.contains(cleared) {
                     let limit = (Limit::OwnTagWriteInFlight, cleared.clone());
+                    self.excused.borrow_mut().push(limit);
+                    continue;
+                }
+                // Another client's add, its landing unrecorded, went up again.
+                let resent = self
+                    .superseded
+                    .iter()
+                    .any(|(c, n, t)| c != by && n == node && t == name);
+                if resent {
+                    let limit = (Limit::AnswerSuperseded, cleared.clone());
                     self.excused.borrow_mut().push(limit);
                     continue;
                 }

@@ -747,7 +747,13 @@ impl Sim {
                 .or(server.removed.get(&node))
                 .map(|n| &n.state),
         );
-        let own = (synced && planned(client)).then_some(Limit::OwnRemovalInFlight);
+        // The add restores what the base holds: nothing to send (`Limit::AddBackToBase`),
+        // unless its own removal is still to land (`Limit::OwnRemovalInFlight`).
+        let own = match (synced, planned(client)) {
+            (true, true) => Some(Limit::OwnRemovalInFlight),
+            (true, false) => Some(Limit::AddBackToBase),
+            _ => None,
+        };
         (pending || (synced && stale), own)
     }
 

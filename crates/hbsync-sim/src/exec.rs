@@ -677,6 +677,12 @@ impl Sim {
         }
         if remote_write && let Some(pick) = self.clients[c].meanwhile.take() {
             self.meanwhile(c, node, replaced, pick);
+            if let Op::RemoteTags { tags, .. }
+            | Op::RemoteUpdate { tags, .. }
+            | Op::RemoteCreate { tags, .. } = &op
+            {
+                self.ledger.tags.answer_superseded(c, node, tags);
+            }
         }
         true
     }
