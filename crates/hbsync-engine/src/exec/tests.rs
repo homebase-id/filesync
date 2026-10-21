@@ -2998,38 +2998,68 @@ fn a_restored_folder_made_here_keeps_a_removal_from_the_drive() -> R {
     Ok(())
 }
 
-/// The same, restored elsewhere (work removed) before the folder is made here, under another
-/// name (a file of this device's holds "a"): the version it was to be made of is gone, so it
-/// waits for the next plan, which makes it from the drive as it is now. Made with work and
-/// settled against the drive's version (no base, the names differ), work read as added here,
-/// and went back up over the removal.
-#[test]
-fn a_folder_to_make_from_recently_deleted_restored_since_waits() -> R {
+/// A folder in Recently deleted, tagged work, to be made here as its restore begins, under
+/// another name (a file of this device's holds "a"). Another device restores it first, removes
+/// work, and maybe deletes it again (`again`): the version there no longer holds work, so the
+/// folder waits for the next plan, which makes it from the drive as it is now. Made with work
+/// and settled against the drive's version without it, work read as added here, and went back
+/// up over the removal. Still there as planned (`as_planned`), it is made.
+fn a_folder_to_make_from_recently_deleted(again: bool, as_planned: bool) -> R {
     let mut h = Harness::new()?;
     if !tags_kept(&h.folder.root) {
         return Ok(()); // nothing to tag with here
     }
     let node = NodeId::new();
-    let mirror = MirrorRow::from_content(
+    let work = Tags::new(vec![Tag::new("Work", 0)]);
+    let mut tagged = NodeContent::folder("a");
+    tagged.set_tags(&work);
+    let content = if as_planned {
+        tagged
+    } else {
+        NodeContent::folder("a")
+    };
+    let row = MirrorRow::from_content(
         some_version(),
         node,
         NodeId::ROOT,
         NodeKind::Folder,
-        &NodeContent::folder("a"),
+        &content,
         None,
     );
-    h.db.write(|s| s.account().put_mirror(&mirror))?;
+    h.db.write(|s| match again || as_planned {
+        true => s.account().put_removed(&RemovedRow {
+            row,
+            removed_at: Some(1),
+        }),
+        false => s.account().put_mirror(&row),
+    })?;
     let report = h.run(vec![Op::LocalMkdir {
         node,
         parent: NodeId::ROOT,
         name: "a (conflict 1)".into(),
-        tags: Tags::new(vec![Tag::new("Work", 0)]),
+        tags: work,
         drive: None,
     }])?;
-    assert_eq!(report.skipped.len(), 1, "{report:?}");
-    assert!(!h.folder.root.join("a (conflict 1)").exists());
-    assert_eq!(h.base(node)?, None);
+    let made = h.folder.root.join("a (conflict 1)").exists();
+    assert_eq!(made, as_planned, "{report:?}");
+    assert_eq!(report.skipped.len(), usize::from(!as_planned), "{report:?}");
+    assert_eq!(h.base(node)?.is_some(), as_planned);
     Ok(())
+}
+
+#[test]
+fn a_folder_to_make_from_recently_deleted_restored_since_waits() -> R {
+    a_folder_to_make_from_recently_deleted(false, false)
+}
+
+#[test]
+fn a_folder_to_make_from_recently_deleted_changed_there_since_waits() -> R {
+    a_folder_to_make_from_recently_deleted(true, false)
+}
+
+#[test]
+fn a_folder_to_make_from_recently_deleted_as_planned_is_made() -> R {
+    a_folder_to_make_from_recently_deleted(true, true)
 }
 
 /// A folder synced here tagged Work, deleted here and on the drive (its last version there

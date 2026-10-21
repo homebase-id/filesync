@@ -750,7 +750,8 @@ impl Sim {
                 self.clients[c].run_settled.insert(node, at);
             }
             if fresh && matches!(op, Op::LocalDownload { .. } | Op::LocalMkdir { .. }) {
-                self.new_item_settled(c, node, op.drive().map(|d| &d.state));
+                let from = restored.as_ref().or(op.drive());
+                self.new_item_settled(c, node, from.map(|d| &d.state));
             }
         }
         if remote_write && let Some(pick) = self.clients[c].meanwhile.take() {
@@ -1021,12 +1022,15 @@ impl Sim {
                     return Retry;
                 }
                 let tags = tags.held_by(client.os);
-                // Made from Recently deleted, never synced here, with tags to write: restored or
-                // purged since the plan, the version it is made of is gone (the executor's).
+                // Made from Recently deleted, never synced here, with tags to write: restored,
+                // changed or purged since the plan, the version there may no longer hold them
+                // (the executor's).
+                let holds =
+                    |r: &ServerNode| tags.iter().all(|t| r.state.tags.get(&t.name) == Some(t));
                 if drive.is_none()
                     && !client.base.contains(node)
                     && !tags.is_empty()
-                    && !self.server.removed.contains_key(&node)
+                    && !self.server.removed.get(&node).is_some_and(holds)
                 {
                     return Skip;
                 }

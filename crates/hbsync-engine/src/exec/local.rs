@@ -72,7 +72,7 @@ impl Executor<'_> {
         let target = self.target_path(parent, name)?;
         let abs = self.disk.abs(&target);
         // Never synced here and no version of the drive live when planned: made from Recently
-        // deleted (its folder restored, its RemoteCreate to follow), of the version there.
+        // deleted (its folder restored, its RemoteCreate to follow).
         let (mirror, base_at, removed) = self.db.read(|s| {
             let base_at = s.get_base(node)?.map(|b| b.remote.version);
             let removed = match drive.is_none() && base_at.is_none() {
@@ -115,15 +115,21 @@ impl Executor<'_> {
         // it claims none, as a download does.
         let kept_tags = self.disk.tags_kept();
         let none = tags.held_by(self.folder.os).is_empty();
-        // Made from Recently deleted, it settles against the version there, whatever the mirror
-        // holds by its commit. Restored or purged since the plan, that version is gone: one with
-        // tags to write waits for the next plan, which decides on the drive as it is now.
-        // Settled against the drive's newer version, the tags it wrote (the old version's) read
-        // as this device adding them, and a tag removed on the drive since came back. One with
-        // none to write (Recovered files, made here) settles against the drive as it is.
-        let restored = removed.and_then(|r| DriveVersion::of(&r.row, None));
-        if acted.is_none() && !synced_before && restored.is_none() && kept_tags && !none {
-            return Ok(Outcome::stale("no longer in Recently deleted"));
+        // Made from Recently deleted, it settles against the version there (the commit's), what
+        // the tags it writes come from. Restored, changed or purged since the plan, that version
+        // may no longer hold them: it waits for the next plan, which decides on the drive as it
+        // is now. Settled against a version without a tag it wrote, the tag read as this device
+        // adding it, and a tag removed on the drive since came back. One with none to write
+        // (Recovered files, made here), or a folder left by an interrupted run (taken over as
+        // before), goes ahead.
+        if acted.is_none() && !synced_before && !adopt && kept_tags && !none {
+            let version = removed.and_then(|r| r.row.state());
+            let held = tags.held_by(self.folder.os);
+            let holds =
+                |v: &hbsync_types::NodeState| held.iter().all(|t| v.tags.get(&t.name) == Some(t));
+            if !version.as_ref().is_some_and(holds) {
+                return Ok(Outcome::stale("not as planned in Recently deleted"));
+            }
         }
         let mut record = acted.as_ref().map(|a| Placing {
             base: BaseRow::new(node, a.state.clone(), a.at),
@@ -200,20 +206,28 @@ impl Executor<'_> {
             match &record {
                 Some(r) => settle_placement(s.folder(), r, folder).map(Placed::at),
                 None => {
-                    // Made from Recently deleted: it settles against `restored`, the base
-                    // until the restore settles.
+                    // Made from Recently deleted (its folder restored, its RemoteCreate to
+                    // follow): it settles against the version there, what it was made of, as
+                    // any placement does: the base until the restore settles. Without one, a
+                    // tag removed on the drive meanwhile read as this device adding it, and
+                    // came back.
                     //
                     // One synced here before keeps its base, but for a tag its failed write
                     // didn't put on it that the drive's last version holds: kept, the folder
                     // without it read as the user removing it, and the plan removed it on the
                     // drive.
+                    let base = s.get_base(node)?;
+                    let synced = base.is_some();
+                    let removed = match !synced || unknown {
+                        true => s
+                            .removed_by_node(node)?
+                            .and_then(|r| DriveVersion::of(&r.row, None)),
+                        false => None,
+                    };
                     if unknown
-                        && let Some(mut b) = s.get_base(node)?
+                        && let Some(mut b) = base
                         && let Some(held) = &row.tags
                     {
-                        let removed = s
-                            .removed_by_node(node)?
-                            .and_then(|r| DriveVersion::of(&r.row, None));
                         let last = removed.as_ref().map_or(&b.state.tags, |d| &d.state.tags);
                         let tags = not_reached(&b.state.tags, held, last);
                         if tags != b.state.tags {
@@ -221,9 +235,10 @@ impl Executor<'_> {
                             s.folder().put_base(&b)?;
                         }
                     }
+                    let removed = removed.filter(|_| !synced);
                     let at = settle(
                         s.folder(),
-                        Settle::placed(node, restored.as_ref(), TagWrite::Agreed),
+                        Settle::placed(node, removed.as_ref(), TagWrite::Agreed),
                         os,
                     )?;
                     mark_children(s.folder(), node)?;
