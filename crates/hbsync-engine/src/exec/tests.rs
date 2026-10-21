@@ -3062,6 +3062,73 @@ fn a_folder_to_make_from_recently_deleted_as_planned_is_made() -> R {
     a_folder_to_make_from_recently_deleted(true, true)
 }
 
+/// A folder in Recently deleted, tagged Work, made here as its restore begins: the check finds
+/// Work there and the folder is made with it. Before its commit, another device's restore
+/// without Work is pulled (another thread). The commit settles against the version the check
+/// accepted (its base holds Work), so the next plan reads Work as removed on the drive and
+/// removes it here. Settled against the restored version, Work read as this device adding it,
+/// and went back up over the removal (review 15 K1).
+#[test]
+fn a_folder_made_from_recently_deleted_settles_against_the_version_it_checked() -> R {
+    let mut h = Harness::new()?;
+    if !tags_kept(&h.folder.root) {
+        return Ok(()); // nothing to tag with here
+    }
+    let node = NodeId::new();
+    let work = Tags::new(vec![Tag::new("Work", 0)]);
+    let mut tagged = NodeContent::folder("a");
+    tagged.set_tags(&work);
+    let removed_at = some_version();
+    let row = |at, content: &NodeContent| {
+        MirrorRow::from_content(at, node, NodeId::ROOT, NodeKind::Folder, content, None)
+    };
+    let in_rd = row(removed_at, &tagged);
+    h.db.write(|s| {
+        s.account().put_removed(&RemovedRow {
+            row: in_rd.clone(),
+            removed_at: Some(1),
+        })
+    })?;
+    let restored = row(
+        RemoteRef {
+            version: some_version().version,
+            ..removed_at
+        },
+        &NodeContent::folder("a"),
+    );
+    h.cfg.hooks.before_commit = Some(Meanwhile(std::sync::Arc::new(move |db| {
+        db.write(|s| {
+            s.account().delete_removed(node)?;
+            s.account().put_mirror(&restored)
+        })
+        .expect("the pull meanwhile");
+    })));
+    let report = h.run(vec![Op::LocalMkdir {
+        node,
+        parent: NodeId::ROOT,
+        name: "a".into(),
+        tags: work,
+        drive: None,
+    }])?;
+    assert!(h.folder.root.join("a").is_dir(), "{report:?}");
+    let base = h.base(node)?.ok_or("no base")?;
+    assert_eq!(
+        base.remote, removed_at,
+        "settled against what it was made of"
+    );
+    assert!(base.state.tags.get("Work").is_some(), "{base:?}");
+    // The next plan removes Work here, as removed on the drive; it never sends it up.
+    let plan = plan_of(&mut h, &[node])?;
+    let tags_of = |op: &Op| match op {
+        Op::LocalTags { node: n, tags, .. } if *n == node => Some(tags.clone()),
+        Op::RemoteTags { node: n, .. } if *n == node => panic!("sent up: {op:?}"),
+        _ => None,
+    };
+    let local: Vec<Tags> = plan.ops.iter().filter_map(tags_of).collect();
+    assert_eq!(local, [Tags::default()], "{plan:?}");
+    Ok(())
+}
+
 /// A folder synced here tagged Work, deleted here and on the drive (its last version there
 /// tagged `last`), made again here as it comes back for a child another device wrote into it
 /// (its RemoteCreate to follow), whose tag write fails: it holds none. Returns its base after,

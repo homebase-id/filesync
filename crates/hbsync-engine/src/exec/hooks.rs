@@ -11,6 +11,10 @@ pub struct Hooks {
     /// The steps that fail, and how often.
     #[cfg(feature = "testkit")]
     pub faults: std::sync::Arc<Faults>,
+    /// What lands between a folder's checks and its commit (a pull on another thread): run
+    /// with the run's state DB before each folder's commit.
+    #[cfg(feature = "testkit")]
+    pub before_commit: Option<Meanwhile>,
 }
 
 impl Hooks {
@@ -34,6 +38,29 @@ impl Hooks {
     #[cfg(not(feature = "testkit"))]
     pub(crate) fn crashes_at(&self, _: CrashPoint) -> bool {
         false
+    }
+
+    /// Does what a test lands between a check and its commit ([`Hooks::before_commit`]).
+    #[cfg(feature = "testkit")]
+    pub(crate) fn before_commit(&self, db: &mut hbsync_state::StateDb) {
+        if let Some(Meanwhile(f)) = &self.before_commit {
+            f(db);
+        }
+    }
+
+    #[cfg(not(feature = "testkit"))]
+    pub(crate) fn before_commit(&self, _: &mut hbsync_state::StateDb) {}
+}
+
+/// Tests only: a write another thread makes meanwhile, with the run's state DB.
+#[cfg(feature = "testkit")]
+#[derive(Clone)]
+pub struct Meanwhile(pub std::sync::Arc<dyn Fn(&mut hbsync_state::StateDb) + Send + Sync>);
+
+#[cfg(feature = "testkit")]
+impl std::fmt::Debug for Meanwhile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Meanwhile")
     }
 }
 
