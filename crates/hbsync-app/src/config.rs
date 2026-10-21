@@ -112,10 +112,12 @@ pub struct MassDelete {
 }
 
 impl Default for MassDelete {
+    /// The engine's ([`hbsync_engine::DeleteGuard`]).
     fn default() -> Self {
+        let guard = hbsync_engine::DeleteGuard::default();
         MassDelete {
-            min_files: 50,
-            fraction: 0.25,
+            min_files: guard.min,
+            fraction: guard.fraction,
         }
     }
 }

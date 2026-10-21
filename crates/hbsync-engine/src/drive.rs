@@ -17,6 +17,7 @@ use hbsync_types::{NodeId, NodeKind, Role};
 use crate::deleted;
 use crate::error::EngineError;
 use crate::feed::{self, FeedError, FeedReport};
+use crate::lock;
 use crate::mirror;
 use crate::root::{RootError, SyncRoot};
 
@@ -148,10 +149,6 @@ impl Freshness {
         self.announcing.load(Ordering::SeqCst)
             && self.answered_doubts.load(Ordering::SeqCst) >= self.doubts.load(Ordering::SeqCst)
     }
-}
-
-fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
-    m.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 impl std::fmt::Debug for Drive {

@@ -18,7 +18,7 @@ use crate::error::EngineError;
 use crate::exec::{ExecConfig, Executor, Stopped, record_dirs, recover, recover_placements};
 use crate::feed::FeedReport;
 use crate::folder::FolderCtx;
-use crate::reconcile::{Conflict, Op, Options, Plan, reconcile_with_known};
+use crate::reconcile::{Conflict, DeleteGuard, Op, Options, Plan, reconcile_with_known};
 use crate::refused::FolderRefusals;
 use crate::root::{RootError, SyncRoot};
 use crate::scope::Scope;
@@ -38,9 +38,8 @@ pub struct EngineConfig {
     pub max_rounds: usize,
     /// Dirty nodes planned per round.
     pub batch: usize,
-    pub mass_delete_min: usize,
-    pub mass_delete_fraction: f64,
-    pub allow_mass_delete: bool,
+    /// The mass-delete guard's settings, as each plan takes them.
+    pub guard: DeleteGuard,
     /// Tests: every plan from a narrow view ([`view::build_narrow`]) is checked against one
     /// from whole folders ([`view::build_input`]).
     #[cfg(feature = "testkit")]
@@ -58,9 +57,7 @@ impl EngineConfig {
             device: device.to_owned(),
             max_rounds: 8,
             batch: 20_000,
-            mass_delete_min: 50,
-            mass_delete_fraction: 0.25,
-            allow_mass_delete: false,
+            guard: DeleteGuard::default(),
             #[cfg(feature = "testkit")]
             check_narrow: false,
             #[cfg(feature = "testkit")]
@@ -439,10 +436,8 @@ impl Engine {
             device: self.cfg.device.clone(),
             computer,
             date: date.to_owned(),
-            mass_delete_min: self.cfg.mass_delete_min,
-            mass_delete_fraction: self.cfg.mass_delete_fraction,
+            guard: self.cfg.guard,
             synced_files: synced_files as usize,
-            allow_mass_delete: self.cfg.allow_mass_delete,
             confirmed: Arc::new(self.confirmed.clone()),
             pending_deletes: (pending_deletes.0 as usize, pending_deletes.1 as usize),
             taken: Arc::default(),

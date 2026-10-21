@@ -108,20 +108,21 @@ pub fn take_restored_name(
 /// `top` and every removed node below it, through the removed folders, whenever each was
 /// removed (one deleted from a folder before the folder is in it too): what emptying `top`
 /// deletes for good with it, as far as it may (node schema, The purge). Each node once: removed
-/// rows may form a cycle. `at` gives a row's node and whether it is a folder, `children` a
-/// folder's removed children.
+/// rows may form a cycle. `at` gives a row's node and whether it is a folder, `children` the
+/// removed children a folder's row takes in (all of them, or with a filter of its own: those
+/// deleted with it, say).
 pub fn inside<T, E>(
     top: T,
     at: impl Fn(&T) -> (NodeId, bool),
-    mut children: impl FnMut(NodeId) -> Result<Vec<T>, E>,
+    mut children: impl FnMut(&T) -> Result<Vec<T>, E>,
 ) -> Result<Vec<T>, E> {
     let mut seen = HashSet::from([at(&top).0]);
     let mut rows = vec![top];
     let mut next = 0;
     while next < rows.len() {
-        let (node, folder) = at(&rows[next]);
+        let folder = at(&rows[next]).1;
         if folder {
-            let below: Vec<T> = children(node)?
+            let below: Vec<T> = children(&rows[next])?
                 .into_iter()
                 .filter(|r| seen.insert(at(r).0))
                 .collect();
@@ -185,7 +186,7 @@ pub(super) fn held_below(rows: &[Chosen], live: &HashSet<NodeId>) -> HashMap<Nod
             let Ok(reach) = inside(
                 r.node,
                 |n| (*n, true),
-                |n| Ok::<_, std::convert::Infallible>(below(&n).clone()),
+                |n| Ok::<_, std::convert::Infallible>(below(n).clone()),
             );
             let stays = reach.iter().any(|n| live.contains(n));
             held.insert(

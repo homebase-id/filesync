@@ -25,14 +25,14 @@ impl Db {
         &self,
         f: impl FnOnce(&ReadTx<'_>) -> Result<T, StateError>,
     ) -> Result<T, StateError> {
-        locked(&self.0).read(f)
+        lock(&self.0).read(f)
     }
 
     fn write<T>(
         &self,
         f: impl FnOnce(&Store<'_>) -> Result<T, StateError>,
     ) -> Result<T, StateError> {
-        locked(&self.0).write(f)
+        lock(&self.0).write(f)
     }
 }
 
@@ -118,7 +118,7 @@ fn twice(
     mut empty: impl FnMut() -> Result<usize, EngineError>,
 ) -> Result<usize, Box<dyn std::error::Error>> {
     assert_eq!(empty()?, 0, "once is a suspicion");
-    crate::testkit::a_minute_on(&mut locked(db))?;
+    crate::testkit::a_minute_on(&mut lock(db))?;
     Ok(empty()?)
 }
 
@@ -131,7 +131,7 @@ fn until_done(
     let mut took = 0;
     for _ in 0..8 {
         took += empty()?;
-        if crate::testkit::a_minute_on(&mut locked(db))? == 0 {
+        if crate::testkit::a_minute_on(&mut lock(db))? == 0 {
             return Ok(took);
         }
     }

@@ -6,7 +6,7 @@ impl Reconciler<'_> {
     // ---- 5: mass-delete guard ----
 
     pub(super) fn guard_mass_delete(&mut self) {
-        if self.opts.allow_mass_delete {
+        if self.opts.guard.allow {
             return;
         }
         let i = self.input;
@@ -38,8 +38,9 @@ impl Reconciler<'_> {
         let synced = self.opts.synced_files;
         let limit = self
             .opts
-            .mass_delete_min
-            .max((synced as f64 * self.opts.mass_delete_fraction) as usize);
+            .guard
+            .min
+            .max((synced as f64 * self.opts.guard.fraction) as usize);
         let trips = |n: usize| n > limit || (synced > 0 && n >= synced && n > 1);
         let (gone_locally, gone_remotely) = self.opts.pending_deletes;
         // Trashing locally follows remote deletes; remote deletes follow local ones.

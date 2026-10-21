@@ -68,15 +68,12 @@ pub struct Faults(std::sync::Mutex<std::collections::HashMap<FailPoint, usize>>)
 impl Faults {
     /// Makes `point` fail its next `n` times.
     pub fn fail(&self, point: FailPoint, n: usize) {
-        self.0
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(point, n);
+        crate::lock(&self.0).insert(point, n);
     }
 
     /// Whether `point` fails now (one of its failures taken).
     pub(crate) fn fails(&self, point: FailPoint) -> bool {
-        let mut left = self.0.lock().unwrap_or_else(|p| p.into_inner());
+        let mut left = crate::lock(&self.0);
         match left.get_mut(&point) {
             Some(n) if *n > 0 => {
                 *n -= 1;

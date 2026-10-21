@@ -145,7 +145,7 @@ fn random_base() -> u64 {
 
 /// Two clients of `server` that may delete everything.
 fn pair(server: &Arc<Mutex<FakeServer>>) -> Res<[Client; 2]> {
-    let allow = |c: &mut EngineConfig| c.allow_mass_delete = true;
+    let allow = |c: &mut EngineConfig| c.guard.allow = true;
     Ok([
         Client::with_config(server, "a", allow)?,
         Client::with_config(server, "b", allow)?,
@@ -781,7 +781,7 @@ fn a_confirmation_lets_through_exactly_the_deletes_the_user_saw() -> R {
 #[test]
 fn a_confirmed_delete_that_was_undone_is_forgotten() -> R {
     let server = server();
-    let mut a = Client::with_config(&server, "a", |c| c.mass_delete_min = 2)?;
+    let mut a = Client::with_config(&server, "a", |c| c.guard.min = 2)?;
     for i in 0..4 {
         a.write(&format!("f{i}"), format!("{i}").as_bytes())?;
     }
@@ -814,7 +814,7 @@ fn a_confirmed_delete_that_was_undone_is_forgotten() -> R {
 #[test]
 fn a_confirmed_folder_trash_does_not_hold_other_deletes() -> R {
     let server = server();
-    let mut a = Client::with_config(&server, "a", |c| c.allow_mass_delete = true)?;
+    let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
     for i in 0..60 {
         a.write(&format!("dir/f{i:02}"), format!("{i}").as_bytes())?;
         a.write(&format!("g{i:02}"), format!("{i}").as_bytes())?;
@@ -883,7 +883,7 @@ fn a_mass_delete_split_over_batches_is_still_held() -> R {
     let server = server();
     let small_batches = |c: &mut EngineConfig| {
         c.batch = 10;
-        c.mass_delete_min = 20;
+        c.guard.min = 20;
     };
     let mut a = Client::with_config(&server, "a", small_batches)?;
     for i in 0..30 {
