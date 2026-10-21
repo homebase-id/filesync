@@ -3913,6 +3913,34 @@ fn a_removal_answered_as_a_tombstone_reads_no_header() -> R {
     Ok(())
 }
 
+/// A file removed here that the drive answers is deleted for good (a tombstone the feed doesn't
+/// show): it is known gone here, as any file deleted for good, so no page read before brings
+/// it back.
+#[test]
+fn a_removal_answered_gone_for_good_keeps_the_file_gone() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("keep.txt", "k")?;
+    a.write("x.txt", "x")?;
+    a.sync()?;
+    let x = {
+        let mut s = server.lock().map_err(|_| "poisoned")?;
+        let h = s
+            .live()
+            .find(|h| h.state().is_some_and(|st| st.name == "x.txt"))
+            .ok_or("no x")?
+            .clone();
+        s.delete(h.file_id, h.version)?;
+        s.unlist(h.file_id);
+        h.file_id
+    };
+    fs::remove_file(a.root.join("x.txt"))?;
+    a.sync_unasked()?;
+    assert!(a.engine.db().read(|s| s.file_gone(x))?, "known gone");
+    assert_eq!(a.tree_text(""), ["keep.txt = k"]);
+    Ok(())
+}
+
 /// A delete taken back: the files the other device set aside in its trash when the delete
 /// came are taken from there, not over the network, each only once its bytes read as the
 /// drive's. A trash file with other bytes (changed there) stays, and its file is downloaded.

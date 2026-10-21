@@ -7,6 +7,7 @@ use crate::scope::Scope;
 use hbsync_fileio::hash_bytes;
 use hbsync_platform::tags;
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
+use hbsync_state::testkit::RawPicture;
 use hbsync_state::{MirrorFile, PlannedBase, RemovedRow};
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{FileContent, NodeState, RemoteRef, Tag};

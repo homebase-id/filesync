@@ -470,7 +470,7 @@ impl Drive {
         self.account().write(|s| {
             let changed = s.account_kv(keys::TOKENS_SEALED_BY)?.as_deref() != Some(by);
             if changed {
-                mirror::clear_tokens(s.account())?;
+                s.account().clear_tokens()?;
                 s.account().set_account_kv(keys::TOKENS_SEALED_BY, by)?;
             }
             Ok(changed)

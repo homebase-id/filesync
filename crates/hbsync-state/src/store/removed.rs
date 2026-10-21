@@ -285,7 +285,7 @@ impl AccountTx<'_> {
     /// [`Recorded::seq`], and so does a file id deleted for good ([`ReadTx::file_gone`]).
     /// Another version is another removal (a restore, an edit, then a delete again, perhaps
     /// elsewhere): it gets the next.
-    pub fn put_removed(&self, removed: &RemovedRow) -> Result<()> {
+    pub(crate) fn put_removed(&self, removed: &RemovedRow) -> Result<()> {
         if self.has_version(removed.row.remote_ref(), true)?
             || self.file_gone(removed.row.file_id)?
         {
@@ -349,12 +349,12 @@ impl AccountTx<'_> {
     }
 
     /// Forgets a node's removal (it was restored, or deleted for good); whether it had one.
-    pub fn delete_removed(&self, node: NodeId) -> Result<bool> {
+    pub(crate) fn delete_removed(&self, node: NodeId) -> Result<bool> {
         self.change("DELETE FROM removed WHERE node = ?1", node.0.as_bytes())
     }
 
-    /// [`AccountTx::delete_removed`] by file id (a tombstone carries no node id).
-    pub fn delete_removed_file(&self, file_id: RemoteFileId) -> Result<bool> {
+    /// `delete_removed` by file id (a tombstone carries no node id).
+    pub(crate) fn delete_removed_file(&self, file_id: RemoteFileId) -> Result<bool> {
         self.change(
             "DELETE FROM removed WHERE file_id = ?1",
             file_id.0.as_bytes(),

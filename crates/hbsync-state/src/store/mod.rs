@@ -150,7 +150,7 @@ pub struct RemovedRow {
 }
 
 /// A row of Recently deleted as this device recorded it: with its place in this device's order
-/// of recording removals (the account's counter when [`AccountTx::put_removed`] first recorded that
+/// of recording removals (the account's counter when `put_removed` first recorded that
 /// version; [`ReadTx::removed_seq`]). What a listing saw is what has a `seq` up to the counter it
 /// read.
 #[derive(Debug, Clone, PartialEq, Eq)]

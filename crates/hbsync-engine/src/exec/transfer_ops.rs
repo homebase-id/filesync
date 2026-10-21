@@ -379,7 +379,7 @@ impl Executor<'_> {
                         // Out of the tree all the same, the drive no longer having it.
                         let node = meta.node;
                         self.finish(&[Settle::node(node)], |s| {
-                            s.account().delete_mirror(file_id)?;
+                            s.account().forget_file(file_id, None)?;
                             s.folder().mark_dirty(node)
                         })
                     }

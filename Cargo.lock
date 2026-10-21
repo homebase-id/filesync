@@ -1731,6 +1731,7 @@ dependencies = [
  "hbsync-fileio",
  "hbsync-namemap",
  "hbsync-platform",
+ "hbsync-state",
  "hbsync-types",
  "rusqlite",
  "tempfile",

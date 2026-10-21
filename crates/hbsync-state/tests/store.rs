@@ -1,4 +1,5 @@
 use hbsync_platform::{FileId, Fingerprint, RelPath};
+use hbsync_state::testkit::RawPicture;
 use hbsync_state::{BaseRow, LocalRow, StateDb, StateError, keys};
 use hbsync_types::{
     ContentState, FileContent, FileToken, HashAlgorithm, NodeId, NodeKind, NodeState, RemoteFileId,

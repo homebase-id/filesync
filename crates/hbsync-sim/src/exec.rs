@@ -784,8 +784,10 @@ impl Sim {
                 s.get_mirror(node)?.map(|m| m.version),
                 s.removed_by_node(node)?.map(|r| r.row.version),
             );
-            s.account().delete_mirror(answer.0.remote.file_id)?;
-            s.account().delete_removed(node)?;
+            // Gone for good long ago, then forgotten: nothing of it left.
+            let s = s.account();
+            s.forget_file(answer.0.remote.file_id, Some(0))?;
+            s.prune_gone(1, 1)?;
             Ok(picture)
         })
     }

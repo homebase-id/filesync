@@ -20,6 +20,8 @@ testkit = []
 
 [dev-dependencies]
 hbsync-fileio.workspace = true
+# The raw picture writes for the store's own tests (`testkit`).
+hbsync-state = { path = ".", features = ["testkit"] }
 tempfile.workspace = true
 
 [lints]

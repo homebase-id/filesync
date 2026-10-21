@@ -323,7 +323,7 @@ fn ask(remote: &dyn Remote, files: &[RemoteFileId]) -> Asked {
 
 /// Writes what [`ask`] found: a file gone is gone here too, one there is applied as it is
 /// (one that isn't a node this client reads stays as it is; one deleted for good since stays
-/// gone, [`AccountTx::mark_file_gone`]). Each file answered is the re-read's no more once that is
+/// gone, `mark_file_gone`). Each file answered is the re-read's no more once that is
 /// written (a write that fails leaves them to ask again): once none is left, it ends. Returns
 /// how many went, and why each it left out was ([`Applied::Refused`]).
 fn settle<G: DerefMut<Target = StateDb>>(
@@ -339,7 +339,7 @@ fn settle<G: DerefMut<Target = StateDb>>(
             }
         }
         for &file_id in &asked.gone {
-            mirror::forget(s.account(), file_id, None)?;
+            s.account().forget_file(file_id, None)?;
         }
         let mut refused = Vec::new();
         for header in &asked.found {
@@ -507,9 +507,9 @@ pub(crate) fn announced(s: AccountTx<'_>, refs: &[ChangeRef]) -> Result<bool, St
     for r in refs.iter().filter(|r| r.deleted) {
         match r.changed_at {
             // A tombstone on the drive (a soft delete), recorded as the feed's would be.
-            Some(at) => mirror::tombstone(s, r.at(), Some(at))?,
+            Some(at) => s.tombstone(r.at(), Some(at))?,
             // Deleted for good, nothing left (a hard delete names only the file as it was).
-            None => mirror::hard_deleted(s, r.at())?,
+            None => s.hard_deleted(r.at())?,
         }
     }
     if !sure || !known(&s, &refs)? {
@@ -549,7 +549,7 @@ fn latest(refs: &[ChangeRef]) -> (Vec<ChangeRef>, bool) {
 /// better, its times.
 fn apply_ref(s: AccountTx<'_>, r: &ChangeRef) -> Result<Applied, StateError> {
     if r.deleted {
-        mirror::tombstone(s, r.at(), r.changed_at)?;
+        s.tombstone(r.at(), r.changed_at)?;
         return Ok(Applied::Left);
     }
     // Known as a row it can't read: nothing of it is the mirror's (its time is no older
