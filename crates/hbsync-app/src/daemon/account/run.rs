@@ -161,7 +161,7 @@ impl Account {
             let mut shown = lock(&self.shown);
             let roots = shown.waiting.take().map(|w| w.roots).unwrap_or_default();
             for root in roots {
-                match self.start(&drive, config, &root, shown.paused) {
+                match self.start(&drive, config, &root, shown.paused()) {
                     Ok(r) => shown.runners.push(r),
                     Err(e) => {
                         result = Err(e.into());
@@ -178,7 +178,7 @@ impl Account {
         let mut next_purge = Instant::now();
         loop {
             // Set and ended by the daemon ([`Account::pause`]), which wakes this thread.
-            let paused = lock(&self.shown).paused.is_some();
+            let paused = lock(&self.shown).paused().is_some();
             let mut changed = false;
             for msg in msgs.drain(..) {
                 match msg {
@@ -270,7 +270,7 @@ impl Account {
                 // config as it is now (its settings may have changed meanwhile); while it
                 // can't be read, restarts wait a while and new folders wait a moment.
                 let config = Self::config(paths);
-                let paused = lock(&self.shown).paused;
+                let paused = lock(&self.shown).paused();
                 let start = |root: &Root| {
                     let config = config.as_ref()?;
                     Some(self.start(&drive, config, root, paused))
@@ -278,9 +278,8 @@ impl Account {
                 let restarted: Vec<_> = due.iter().map(start).collect();
                 let started: Vec<_> = ready.iter().map(start).collect();
                 let mut shown = lock(&self.shown);
-                // The pause changed while they started: they were told nothing of it (a resume:
-                // as the user's, which also asks again what the drive refused).
-                let missed = (shown.paused != paused).then(|| Command::pausing(shown.paused));
+                // The pause changed while they started: they were told nothing of it.
+                let missed = shown.missed(paused);
                 let tell = |r: &Running| {
                     if let Some(command) = &missed {
                         r.handle.send(command.clone());
@@ -328,7 +327,7 @@ impl Account {
                     return result;
                 }
                 let restart = shown.runners.iter().filter_map(Running::restart_at).min();
-                (shown.paused.is_some(), restart)
+                (shown.paused().is_some(), restart)
             };
             let now = Instant::now();
             let deadlines = [
