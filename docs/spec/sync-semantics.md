@@ -263,14 +263,17 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   While they are held, their names on the drive stay taken: a new item here of such a name
   syncs under a numbered one (`Projects (conflict 1)`, the dialog says so). Nothing held
   expires: the status and the tray show it until answered. Meanwhile what is held isn't planned
-  again at every sync: a sync that ends with nothing dirty but held deletes takes their nodes
-  out of the dirty set (the state DB's `held_deletes`), and the guard still counts their files
+  again at every sync: a sync whose last sweep did nothing takes their nodes out of the dirty
+  set (the state DB's `held_deletes`), and the guard still counts their files
   with every plan, so a later delete is judged with them. They are planned again, all of them,
   when a plan's view reaches one of them (a change in, above or beside them), on an answer, at
   each start, and once the guard would let this device's own removals through (more files
-  synced since). While something else stays dirty (refused, failing, waiting for a hash) they
-  stay dirty too, planned every sync as before. Cost: taking them out writes a row and clears a
-  mark per node, putting them back writes a mark and deletes a row per node; a sync with
+  synced since). What else stays dirty (refused, failing, waiting for a hash) is planned alone
+  once more at the end of that sync: if its view reaches them, or it is more than 1,000
+  nodes, they stay dirty, planned every sync as before. Cost: taking them out writes a row and clears a
+  mark per node, putting them back writes a mark and deletes a row per node (a change that
+  keeps reaching them, a file of their name saved again and again, pays both each time, on top
+  of planning them, as before); a sync with
   nothing new while they are out reads the dirty set, the base's file count and the held count
   (5,051 held: about 1 ms, against 80 ms when they were planned each time). Simulator:
   `held_deletes_out_of_the_dirty_set_plan_alike` (a plan without them plans as one with them,

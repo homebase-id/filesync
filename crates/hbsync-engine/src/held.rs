@@ -74,7 +74,8 @@ pub fn touches(input: &Input, out: &HashSet<NodeId>) -> bool {
             || input.removed.contains_key(n)
     };
     // Whichever is fewer: the nodes out, or the view's (a page's is up to thousands).
-    match out.len() < input.dirty.len() {
+    let view = input.dirty.len() + input.base.len() + input.local.len() + input.remote.len();
+    match out.len() < view {
         true => out.iter().any(has),
         false => input
             .dirty

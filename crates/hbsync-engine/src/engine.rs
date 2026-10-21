@@ -185,6 +185,24 @@ struct HoldOut {
     files: (usize, usize),
 }
 
+impl HoldOut {
+    fn add(&mut self, ops: impl IntoIterator<Item = Op>, (here, there): (usize, usize)) {
+        self.ops.extend(ops);
+        self.files = (self.files.0 + here, self.files.1 + there);
+    }
+}
+
+impl HeldOut {
+    fn add(&mut self, ops: impl IntoIterator<Item = Op>, (here, there): (usize, usize)) {
+        self.ops.extend(ops);
+        self.files = (self.files.0 + here, self.files.1 + there);
+    }
+}
+
+/// What else may stay dirty, at most, for held deletes to leave the dirty set: it is planned
+/// alone once more at the end of the sync, to see that its view doesn't reach them.
+const LEFTOVERS_MAX: usize = 1_000;
+
 pub struct Engine {
     db: StateDb,
     drive: Arc<Drive>,
@@ -739,6 +757,9 @@ impl Engine {
         let mut held: Vec<Op> = Vec::new();
         // What this sweep's pages hold, and of the last sweep, which ended with nothing done.
         let (mut hold_out, mut settled) = (HoldOut::default(), None);
+        // Whether the sweep under way started at the first page (not the rest of the last
+        // sync's): only such a one settles what is held.
+        let mut whole = after.is_none();
         let mut swept = false;
         for _ in 0..self.cfg.max_rounds {
             if report.stopped || self.stop.load(Ordering::Relaxed) {
@@ -764,10 +785,11 @@ impl Engine {
                 after = None;
                 let page = std::mem::take(&mut hold_out);
                 if !progress {
-                    settled = Some(page);
+                    settled = whole.then_some(page);
                     break;
                 }
                 progress = false;
+                whole = true;
             }
         }
         if !swept {
@@ -777,34 +799,65 @@ impl Engine {
         if let Some(page) = settled
             && !report.stopped
         {
-            self.hold_out(page)?;
+            self.hold_out(page, &opts)?;
         }
         Ok(Some((swept, after)))
     }
 
-    /// Takes the held deletes of a sweep that did nothing out of the dirty set, if they are all
-    /// that is dirty: what is left dirty for another reason (refused, failing, waiting for a
-    /// hash) is planned again every sync anyway, and they with it, as before.
-    fn hold_out(&mut self, page: HoldOut) -> Result<(), StateError> {
-        if page.marks.is_empty() || self.db.read(|s| s.dirty_count())? != page.marks.len() as u64 {
+    /// Takes the held deletes of a sweep that did nothing out of the dirty set: unless what
+    /// else stays dirty (refused, failing, waiting for a hash) is more than
+    /// [`LEFTOVERS_MAX`], or its view, planned alone with them out, reaches them (then they
+    /// are planned with it every sync, as before). Checked and written against the same dirty
+    /// set: a mark that came meanwhile leaves them dirty.
+    fn hold_out(&mut self, page: HoldOut, opts: &Options) -> Result<(), EngineError> {
+        if page.marks.is_empty() {
             return Ok(());
         }
-        self.db.write(|s| {
+        let out: std::collections::HashSet<NodeId> = page.marks.iter().map(|m| m.node).collect();
+        let limit = out.len() + LEFTOVERS_MAX;
+        let (dirty, _) = self.db.read(|s| s.dirty_marks(None, limit + 1))?;
+        if dirty.len() > limit {
+            return Ok(());
+        }
+        let rest: Vec<NodeId> = dirty
+            .iter()
+            .map(|m| m.node)
+            .filter(|n| !out.contains(n))
+            .collect();
+        if !rest.is_empty() {
+            let before = self.held.nodes.clone();
+            self.held.nodes.extend(&out);
+            let planned = self.plan(&rest, opts);
+            self.held.nodes = before;
+            planned?;
+            if std::mem::take(&mut self.held.reached) {
+                return Ok(());
+            }
+        }
+        let dirty = dirty.len() as u64;
+        let held = self.db.write(|s| {
+            if s.dirty_count()? != dirty {
+                return Ok(false);
+            }
             page.marks
                 .iter()
-                .try_for_each(|m| s.folder().hold_delete(*m))
+                .try_for_each(|m| s.folder().hold_delete(*m))?;
+            Ok(true)
         })?;
-        self.held.files.0 += page.files.0;
-        self.held.files.1 += page.files.1;
-        self.held.ops.extend(page.ops);
-        self.held.nodes.extend(page.marks.iter().map(|m| m.node));
-        self.held.pending = None;
+        if held {
+            self.held.add(page.ops, page.files);
+            self.held.nodes.extend(out);
+            self.held.pending = None;
+        }
         Ok(())
     }
 
     /// `held`, the deletes a sweep held, with those held out of the dirty set
     /// ([`crate::held`]): what the user is shown.
     fn with_held_out(&self, mut held: Vec<Op>) -> Vec<Op> {
+        if self.held.ops.is_empty() {
+            return held;
+        }
         let mut nodes: std::collections::HashSet<NodeId> = held.iter().map(Op::node).collect();
         held.extend(
             self.held
@@ -963,9 +1016,10 @@ impl Engine {
 
     /// Plans one page of dirty nodes and executes the plan. No feed read after it: each write
     /// is recorded from its answer (version, token, the server's time), and the notifications
-    /// leave this device's own writes out. Returns the deletes the mass-delete guard held, and
-    /// those of them (`holding`) out of the dirty set until answered ([`crate::held`]). `None`
-    /// when the plan reached the held deletes out of it: they are dirty again, nothing ran.
+    /// leave this device's own writes out. Returns the deletes the mass-delete guard held (into
+    /// `hold_out`, those that may leave the dirty set at the end of the sync: [`crate::held`]).
+    /// `None` when the plan reached the held deletes out of it: they are dirty again, nothing
+    /// ran.
     fn plan_and_execute(
         &mut self,
         marks: &[Mark],
@@ -1024,10 +1078,8 @@ impl Engine {
         })?;
         // Held till answered: out of the dirty set at the end of the sync, if that is all.
         let (out, nodes) = crate::held::out_of_dirty(&plan, &dirty);
-        let (here, there) = crate::held::files(&plan, out.iter().copied());
-        hold_out.files.0 += here;
-        hold_out.files.1 += there;
-        hold_out.ops.extend(out.into_iter().cloned());
+        let files = crate::held::files(&plan, out.iter().copied());
+        hold_out.add(out.into_iter().cloned(), files);
         hold_out
             .marks
             .extend(marks.iter().filter(|m| nodes.contains(&m.node)));

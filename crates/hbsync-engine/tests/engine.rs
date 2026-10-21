@@ -5031,3 +5031,32 @@ fn a_held_delete_over_several_pages_stays_out() -> R {
     assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 5);
     Ok(())
 }
+
+/// Something else left dirty (a file that can't be read yet) keeps held deletes in the dirty
+/// set only if its view reaches them: planned alone at the end of the sync, this one doesn't,
+/// so they leave it, and it stays dirty, planned every sync.
+#[cfg(unix)]
+#[test]
+fn held_deletes_leave_the_dirty_set_beside_a_file_that_waits() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.min = 2)?;
+    for i in 0..4 {
+        a.write(&format!("Projects/f{i}.txt"), format!("{i}"))?;
+    }
+    a.write("other/locked.txt", "l")?;
+    a.sync()?;
+    let locked = a.root.join("other/locked.txt");
+    a.write("other/locked.txt", "changed")?;
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o000))?;
+    fs::remove_dir_all(a.root.join("Projects"))?;
+    let report = a.sync()?;
+    assert_eq!(report.held.len(), 5, "{report:?}");
+    let counts = a
+        .engine
+        .db()
+        .read(|s| Ok((s.held_delete_count()?, s.dirty_count()?)))?;
+    fs::set_permissions(&locked, fs::Permissions::from_mode(0o644))?;
+    assert_eq!(counts, (5, 1), "the held ones out, the locked file dirty");
+    Ok(())
+}
