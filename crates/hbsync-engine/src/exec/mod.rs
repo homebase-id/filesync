@@ -1102,9 +1102,9 @@ mod transfer_ops;
 mod tests;
 
 use disk::Disk;
-#[cfg(feature = "testkit")]
-pub use hooks::Faults;
 pub use hooks::{CrashPoint, FailPoint, Hooks};
+#[cfg(feature = "testkit")]
+pub use hooks::{Faults, Meanwhile};
 pub(crate) use outcome::ExecReport;
 use outcome::{Outcome, Step, io_outcome, remote_outcome, rescan};
 pub use outcome::{Skip, Stopped};

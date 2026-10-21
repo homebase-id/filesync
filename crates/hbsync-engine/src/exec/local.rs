@@ -71,14 +71,17 @@ impl Executor<'_> {
         }
         let target = self.target_path(parent, name)?;
         let abs = self.disk.abs(&target);
-        // Never synced here and no version of the drive live when planned: made from Recently
-        // deleted (its folder restored, its RemoteCreate to follow).
+        // No version of the drive live when planned: its version in Recently deleted, if any
+        // (never synced here: made from there, its folder restored, its RemoteCreate to follow).
+        // Read once, before the write: what the check and the commit go by.
         let (mirror, base_at, removed) = self.db.read(|s| {
-            let base_at = s.get_base(node)?.map(|b| b.remote.version);
-            let removed = match drive.is_none() && base_at.is_none() {
-                true => s.removed_by_node(node)?,
-                false => None,
+            let removed = match drive {
+                None => s
+                    .removed_by_node(node)?
+                    .and_then(|r| DriveVersion::of(&r.row, None)),
+                Some(_) => None,
             };
+            let base_at = s.get_base(node)?.map(|b| b.remote.version);
             Ok((s.get_mirror(node)?, base_at, removed))
         })?;
         let synced_before = base_at.is_some();
@@ -115,19 +118,19 @@ impl Executor<'_> {
         // it claims none, as a download does.
         let kept_tags = self.disk.tags_kept();
         let none = tags.held_by(self.folder.os).is_empty();
-        // Made from Recently deleted, it settles against the version there (the commit's), what
-        // the tags it writes come from. Restored, changed or purged since the plan, that version
+        // Made from Recently deleted, it settles against the version there (as read before the
+        // write: a pull landing before the commit reads as one landing after it), what the tags
+        // it writes come from. Restored, changed or purged since the plan, that version
         // may no longer hold them: it waits for the next plan, which decides on the drive as it
         // is now. Settled against a version without a tag it wrote, the tag read as this device
         // adding it, and a tag removed on the drive since came back. One with none to write
         // (Recovered files, made here), or a folder left by an interrupted run (taken over as
         // before), goes ahead.
         if acted.is_none() && !synced_before && !adopt && kept_tags && !none {
-            let version = removed.and_then(|r| r.row.state());
             let held = tags.held_by(self.folder.os);
             let holds =
                 |v: &hbsync_types::NodeState| held.iter().all(|t| v.tags.get(&t.name) == Some(t));
-            if !version.as_ref().is_some_and(holds) {
+            if !removed.as_ref().is_some_and(|d| holds(&d.state)) {
                 return Ok(Outcome::stale("not as planned in Recently deleted"));
             }
         }
@@ -197,6 +200,7 @@ impl Executor<'_> {
             tags: self.disk.held_after(left, held_before),
         };
         let (os, folder) = (self.folder.os, self.folder);
+        self.cfg.hooks.before_commit(self.db);
         let fails = self.fails(FailPoint::Commit);
         let committed = self.db.write(|s| {
             if fails {
@@ -210,7 +214,9 @@ impl Executor<'_> {
                     // follow): it settles against the version there, what it was made of, as
                     // any placement does: the base until the restore settles. Without one, a
                     // tag removed on the drive meanwhile read as this device adding it, and
-                    // came back.
+                    // came back. That is the version the check above accepted, read before the
+                    // write, not again here: a pull since (another device restored it without a
+                    // tag) would settle it against a version it wasn't made of, the same way.
                     //
                     // One synced here before keeps its base, but for a tag its failed write
                     // didn't put on it that the drive's last version holds: kept, the folder
@@ -218,12 +224,6 @@ impl Executor<'_> {
                     // drive.
                     let base = s.get_base(node)?;
                     let synced = base.is_some();
-                    let removed = match !synced || unknown {
-                        true => s
-                            .removed_by_node(node)?
-                            .and_then(|r| DriveVersion::of(&r.row, None)),
-                        false => None,
-                    };
                     if unknown
                         && let Some(mut b) = base
                         && let Some(held) = &row.tags
@@ -235,10 +235,10 @@ impl Executor<'_> {
                             s.folder().put_base(&b)?;
                         }
                     }
-                    let removed = removed.filter(|_| !synced);
+                    let removed = removed.as_ref().filter(|_| !synced);
                     let at = settle(
                         s.folder(),
-                        Settle::placed(node, removed.as_ref(), TagWrite::Agreed),
+                        Settle::placed(node, removed, TagWrite::Agreed),
                         os,
                     )?;
                     mark_children(s.folder(), node)?;
