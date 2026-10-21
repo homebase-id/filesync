@@ -31,8 +31,11 @@ pub fn apply(s: AccountTx<'_>, header: &RemoteHeader) -> Result<Applied, StateEr
         return Ok(Applied::Left);
     }
     if let Some(why) = misplaced(header) {
-        // There all the same; its ids are none this device takes.
-        s.put_unreadable(header.at(), None, None)?;
+        // There all the same; its ids are none this device takes. Recovered files' id is kept
+        // with it: taken so, no device can make Recovered files on the drive (§6.3, orphans go
+        // to the top instead).
+        let taken = header.node().filter(|n| *n == NodeId::RECOVERED);
+        s.put_unreadable(header.at(), taken, None)?;
         return Ok(Applied::Refused(why));
     }
     // A live file without its payload changes nothing: it must never read as a delete.
@@ -433,10 +436,20 @@ mod tests {
             folder(2, 2, NodeId::OUTSIDE, NodeId::ROOT),
             folder(3, 3, NodeId::new(), NodeId::OUTSIDE),
             file(4, 4, docs),
-            file(5, 5, NodeId::RECOVERED),
         ] {
             assert!(refused(&mut db, &header)?, "{header:?}");
         }
+        // Recovered files' id on a file: refused, the id kept as taken (orphans go to the
+        // top: no device can make Recovered files on the drive).
+        let taken = file(5, 5, NodeId::RECOVERED);
+        assert!(matches!(
+            db.write(|s| apply(s.account(), &taken))?,
+            Applied::Refused(_)
+        ));
+        assert!(
+            db.read(|s| s.unreadable_nodes())?
+                .contains(&NodeId::RECOVERED)
+        );
         assert_eq!(db.read(|s| s.mirror_count())?, 0);
         // As folders, at the top or anywhere, they are nodes.
         for header in [

@@ -4367,3 +4367,70 @@ fn a_confirmation_lasts_while_its_delete_waits_for_a_file() -> R {
     assert_eq!(b.tree_text(""), ["keep.txt = k"]);
     Ok(())
 }
+
+/// Another writer gave Recovered files' id to a file (a row no device reads, #170): no device
+/// can make Recovered files on the drive. An orphan (a file another writer put in a file) goes
+/// to the top instead, at once; it waited for good, its move tried again at every sync, and
+/// the sync left unfinished, a retry every few minutes for ever.
+#[test]
+fn an_orphan_goes_to_the_top_when_recovered_files_id_is_taken() -> R {
+    use hbsync_remote::{NodeMeta, RemoteBody, Upload};
+    use hbsync_types::NodeKind;
+    use hbsync_types::schema::NodeContent;
+
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("x", "x1")?;
+    a.write("keep", "keep")?;
+    a.sync()?;
+    {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        let bytes = b"rf".to_vec();
+        let hash = hbsync_fileio::hash_bytes(&bytes, hbsync_fileio::HashAlgorithm::Blake3);
+        let taken = NodeMeta {
+            node: NodeId::RECOVERED,
+            parent: NodeId::ROOT,
+            kind: NodeKind::File,
+            content: NodeContent::file("fixed", 1, 2, false),
+            removed: false,
+        };
+        let mut reader: &[u8] = &bytes;
+        let upload = Upload {
+            hash,
+            size: 2,
+            reader: &mut reader,
+            pace: None,
+        };
+        srv.create(&taken, Some(upload))?;
+        let headers: Vec<_> = srv.live().cloned().collect();
+        let of = |name: &str| {
+            headers.iter().find_map(|h| match &h.body {
+                RemoteBody::Live { node, content, .. } if content.name == name => {
+                    Some((*node, h.clone()))
+                }
+                _ => None,
+            })
+        };
+        let (keep, _) = of("keep").ok_or("keep")?;
+        let (x, h) = of("x").ok_or("x")?;
+        let RemoteBody::Live { content, .. } = &h.body else {
+            return Err("x".into());
+        };
+        let into_file = NodeMeta {
+            node: x,
+            parent: keep,
+            kind: NodeKind::File,
+            content: content.clone(),
+            removed: false,
+        };
+        srv.update(h.file_id, h.version, &into_file, None)?;
+    }
+    let report = a.sync()?;
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    assert!(!report.unfinished, "{report:?}");
+    assert_eq!(a.read_text("x")?, "x1", "{:?}", a.tree_text(""));
+    let again = a.engine.sync("2026-10-08", true)?;
+    assert_eq!(again.ops_done, 0, "{again:?}");
+    assert!(again.failed.is_empty(), "{:?}", again.failed);
+    Ok(())
+}

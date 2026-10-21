@@ -204,7 +204,10 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
      folder itself loses a clash at the top too, so a plain folder of the same name keeps its
      name.
    - A device that filters Recovered files (§10), and a role folder (a node written into a
-     removed folder it filters), puts the orphan at its top instead.
+     removed folder it filters), puts the orphan at its top instead; so does every device where
+     another writer gave Recovered files' id to a file (a row no device reads, §11 of the
+     schema's checks): no device can make it on the drive, and a move into it would wait for
+     good, tried again at every sync.
 4. **Folder delete propagation** removes the folder on the drive first, then its descendants,
    top-down; here it trashes the topmost folder, its bases and its children's in one step.
 

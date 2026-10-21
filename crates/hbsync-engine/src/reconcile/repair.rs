@@ -68,6 +68,10 @@ impl Reconciler<'_> {
         if node == NodeId::RECOVERED
             || !self.masking.scope.top.is_root()
             || self.masks.masked.contains(&NodeId::RECOVERED)
+            // Its id taken on the drive by a row this client can't read (a file another writer
+            // gave it, #170): no device can make it there, and a move into it would wait for
+            // good, tried again at every sync.
+            || self.input.unreadable.contains(&NodeId::RECOVERED)
             || inside(NodeId::RECOVERED)
             || self
                 .known_state(NodeId::RECOVERED)
