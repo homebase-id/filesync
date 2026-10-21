@@ -4099,10 +4099,10 @@ fn regression_an_add_while_its_own_removal_lands_is_a_known_limit() {
         Event::Step { client: 0 },
     ];
     let limits = known_limits_of(3, &events);
+    // That case alone.
+    assert_eq!(limits.len(), 1, "{limits:?}");
     assert!(
-        limits
-            .iter()
-            .any(|l| l.starts_with("OwnRemovalInFlight") && l.ends_with(" Red")),
+        limits[0].starts_with("OwnRemovalInFlight") && limits[0].ends_with(" Red"),
         "{limits:?}"
     );
 }
@@ -4157,10 +4157,10 @@ fn regression_a_new_item_keeping_a_base_tag_is_a_known_limit() {
         act(1, Tag { node: 0, tag: 12 }),
     ];
     let limits = known_limits_of(2, &events);
+    // That case alone.
+    assert_eq!(limits.len(), 1, "{limits:?}");
     assert!(
-        limits
-            .iter()
-            .any(|l| l.starts_with("NewItemKeepsBaseTag") && l.ends_with(" Red")),
+        limits[0].starts_with("NewItemKeepsBaseTag") && limits[0].ends_with(" Red"),
         "{limits:?}"
     );
 }

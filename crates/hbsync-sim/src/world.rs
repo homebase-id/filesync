@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use hbsync_engine::deleted;
 use hbsync_engine::mask::masked;
+use hbsync_engine::reconcile::Op;
 use hbsync_engine::tree::Tree;
 use hbsync_engine::walk::End;
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
@@ -701,10 +702,16 @@ impl Sim {
     fn removal_unseen(&self, c: usize, node: NodeId, name: &str) -> (bool, Option<Limit>) {
         let has = |s: Option<&NodeState>| s.is_some_and(|s| s.tags.get(name).is_some());
         let lacks = |s: Option<&NodeState>| s.is_some_and(|s| s.tags.get(name).is_none());
-        // A plan of a client's made from the removal, still to write the node.
+        // A plan of a client's made from the removal, still to write it to the node.
         let planned = |client: &Client| {
             lacks(client.planned_local.get(node))
-                && client.plan.iter().any(|(op, _)| op.node() == node)
+                && client.plan.iter().any(|(op, _)| match op {
+                    Op::RemoteTags { node: n, tags, .. }
+                    | Op::RemoteUpdate { node: n, tags, .. } => {
+                        *n == node && tags.get(name).is_none()
+                    }
+                    _ => false,
+                })
         };
         // Of another client whose items can hold the tag at all: an item that lacks it, or a
         // plan sending its removal (the item gone since).

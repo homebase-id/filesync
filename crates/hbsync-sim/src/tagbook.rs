@@ -78,8 +78,9 @@ pub(crate) struct TagBook {
     /// Nodes some user deleted (until they are back).
     deleted: BTreeSet<NodeId>,
     /// Tags of nodes whose base keeps them on a client that put a new item there that doesn't
-    /// hold them ([`Limit::NewItemKeepsBaseTag`]).
-    kept_on_new_item: BTreeSet<Add>,
+    /// hold them ([`Limit::NewItemKeepsBaseTag`]), with when, among the users' tag changes: it
+    /// excuses only adds made before (one made after meets it as a removal under way).
+    kept_on_new_item: BTreeMap<Add, u64>,
     /// The adds the last check found lost to a known limit (for scripted tests).
     excused: std::cell::RefCell<Vec<(Limit, Add)>>,
 }
@@ -274,7 +275,8 @@ impl TagBook {
     /// Client `c` put a new item where `node` had none, and its base keeps tag `name`, which
     /// neither the item nor the version it came from holds ([`Limit::NewItemKeepsBaseTag`]).
     pub(crate) fn kept_on_new_item(&mut self, c: usize, node: NodeId, name: &str) {
-        self.kept_on_new_item.insert((c, node, name.to_owned()));
+        self.kept_on_new_item
+            .insert((c, node, name.to_owned()), self.seq);
     }
 
     /// A download wrote tag `name` on client `c`'s item `node`, which its record recovery
@@ -311,7 +313,7 @@ impl TagBook {
                 let new_item = self
                     .kept_on_new_item
                     .iter()
-                    .any(|(by, n, t)| by != c && n == node && t == name);
+                    .any(|((by, n, t), at)| by != c && n == node && t == name && made.at <= *at);
                 let limit = made
                     .limit
                     .or(new_item.then_some(Limit::NewItemKeepsBaseTag));
@@ -375,7 +377,8 @@ impl TagBook {
         Ok(())
     }
 
-    /// The adds the last [`TagBook::check`] found lost to a known limit, each with its limit.
+    /// The adds the last [`TagBook::check`] found lost to a known limit, each with its limit
+    /// (none before a check, nor after one that failed before it got to the tags).
     pub(crate) fn excused(&self) -> Vec<(Limit, Add)> {
         self.excused.borrow().clone()
     }

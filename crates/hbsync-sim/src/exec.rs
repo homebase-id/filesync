@@ -334,6 +334,8 @@ impl Sim {
             let new = self.ids.fresh();
             let client = &mut self.clients[c];
             client.parked.remove(&n);
+            // Its row goes from the scan, and with it the mark of a hash still to read.
+            client.unhashed.remove(&n);
             rekey_client(client, n, new);
             self.retrack(c, n, new);
             // The user's rule took it out of what this client syncs: its removal from the
