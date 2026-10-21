@@ -587,6 +587,109 @@ impl FakeServer {
         Ok((node, self.create(&new, Some(upload))?))
     }
 
+    /// Another writer's write as it sent it, its content unchecked (for tests: a buggy or
+    /// hostile writer; Homebase stores the header a writer sends **[inferred]**): `meta`, with
+    /// `payload`'s bytes stored under its descriptor whatever they are. Over live file `over` (a
+    /// full update: the node id and kind change as the header says; without an upload the
+    /// payload stays, as [`FakeServer::update`] keeps it), or a new file. Refused as this fake
+    /// models Homebase (`update_by`, `receive`): a file deleted answers so first
+    /// (`AssertActiveForUpdate`), then a node id another live file has (`AlreadyExists`), and a
+    /// new file without a payload where hashes are required (`HashRequired`).
+    pub fn write_unchecked(
+        &mut self,
+        over: Option<RemoteFileId>,
+        meta: &NodeMeta,
+        payload: Option<(Vec<u8>, PayloadInfo)>,
+    ) -> Result<RemoteRef> {
+        if let Some(file_id) = over {
+            match self.files.get(&file_id).map(|f| f.header.is_deleted()) {
+                None => return Err(RemoteError::NotFound),
+                Some(true) => return Err(RemoteError::Deleted),
+                Some(false) => {}
+            }
+        }
+        if self
+            .by_node
+            .get(&meta.node)
+            .is_some_and(|f| Some(*f) != over)
+        {
+            return Err(RemoteError::AlreadyExists);
+        }
+        if over.is_none()
+            && meta.kind == NodeKind::File
+            && payload.is_none()
+            && self.config.require_hashes
+        {
+            return Err(RemoteError::HashRequired);
+        }
+        let version = VersionTag(self.fresh_uuid());
+        // Without an upload the payload stays (a file made a folder keeps its bytes).
+        let kept = over
+            .and_then(|f| self.files.get(&f))
+            .and_then(|f| match &f.header.body {
+                RemoteBody::Live { payload, .. } => payload.map(|info| (f.bytes.clone(), info)),
+                RemoteBody::Deleted => None,
+            });
+        let (bytes, info) = match (payload, kept) {
+            (Some((bytes, info)), _) => (Some(Arc::new(bytes)), Some(info)),
+            (None, Some((bytes, info))) => (bytes, Some(info)),
+            (None, None) => (None, None),
+        };
+        let header = RemoteHeader {
+            file_id: RemoteFileId(Uuid::nil()),
+            version,
+            parent: meta.parent,
+            kind: meta.kind,
+            body: RemoteBody::Live {
+                node: meta.node,
+                content: meta.content.clone(),
+                payload: info,
+            },
+            removed: meta.removed,
+            changed_at: Some(self.clock_ms),
+            token: None,
+        };
+        let file_id = match over {
+            Some(file_id) => {
+                let f = self.files.get_mut(&file_id).ok_or(RemoteError::NotFound)?;
+                if let Some(old) = f.header.node() {
+                    self.by_node.remove(&old);
+                }
+                f.header = RemoteHeader {
+                    file_id,
+                    token: Some(token_of(file_id)),
+                    ..header
+                };
+                f.bytes = bytes;
+                file_id
+            }
+            None => {
+                let file_id = RemoteFileId(self.fresh_uuid());
+                let row = self.next_row;
+                self.next_row += 1;
+                let header = RemoteHeader {
+                    file_id,
+                    token: Some(token_of(file_id)),
+                    ..header
+                };
+                self.files.insert(
+                    file_id,
+                    StoredFile {
+                        header,
+                        bytes,
+                        modified: 0,
+                        row,
+                    },
+                );
+                self.feed.insert((0, row), file_id);
+                file_id
+            }
+        };
+        self.by_node.insert(meta.node, file_id);
+        self.touch(file_id, None);
+        Ok(RemoteRef { file_id, version })
+    }
+
     /// The content names of the files in the tree, straight from their headers, for test
     /// assertions.
     pub fn live_names(&self) -> Vec<String> {
