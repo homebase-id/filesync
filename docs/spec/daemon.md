@@ -128,7 +128,9 @@ says so when it couldn't reach the keychain to remove the credentials there.
       notifications on to every folder's loop, reconnects the socket after a sleep, and has
       Recently deleted's requests and its daily purge (not while paused) run on a thread of
       their own, one at a time: the account's loop never waits for them (a purge waits on the
-      state DB while the folders' first syncs hold it).
+      state DB while the folders' first syncs hold it). What a purge found not there once (a
+      delete for good this device missed) that thread asks again a minute on, once (sync
+      semantics §8b).
 
    One folder's loop failing is started again after a pause (from 5 s, doubling up to 5 min,
    reset after an hour without failing), the folder showing `failing` with its error
@@ -279,7 +281,9 @@ included (service managers restart it then).
   sync shows them again. A taken answer goes with the next sync (after one in progress;
   while paused, once syncing resumes), for the deletes it named: any held since stay held,
   shown again. One dropped after it was taken (the folder went, or was set up again) is told
-  in a note. The tray says "812 items in Homebase were deleted on this computer (or newly
+  in a note. A put back that fails runs once more a minute on, while the same deletes are held
+  and nothing else answered them (what the identity said once isn't there is gone for good
+  then, sync semantics §8b); the note says so. The tray says "812 items in Homebase were deleted on this computer (or newly
   ignored). Delete removes them from Homebase and your other devices too: Recently deleted
   keeps them. Put them back keeps them on Homebase and brings them back here. …" (or,
   everything removed elsewhere, "Everything here was removed on another device: 1,200 items.

@@ -108,6 +108,10 @@ pub struct RunnerConfig {
     pub look: Duration,
     /// Catch up, sync once, and stop (development).
     pub once: bool,
+    /// How long after a put back that failed it runs once more (the same answer), while the
+    /// same deletes are held: what the identity said once wasn't there is gone for good when
+    /// it says so again a minute on (sync semantics §8b).
+    pub put_back_again: Duration,
     /// Tests: adjusts the engine's config.
     pub tweak: Option<fn(&mut EngineConfig)>,
     /// Raised when its status may have changed (the daemon pushes it to the tray).
@@ -126,6 +130,7 @@ impl RunnerConfig {
             paused: None,
             look: Duration::from_secs(60),
             once: false,
+            put_back_again: hbsync_engine::gone::ASK_AGAIN,
             tweak: None,
             changed: Arc::default(),
         }
@@ -144,6 +149,8 @@ struct Held {
     answer: Option<(HeldAnswer, Arc<[NodeId]>)>,
     /// They were answered: another answer is refused until a sync shows them again.
     answered: bool,
+    /// The answer is a put back that failed, run once more ([`RunnerConfig::put_back_again`]).
+    again: bool,
 }
 
 impl Held {
@@ -491,6 +498,8 @@ impl Runner {
         let mut rules_at: Option<Instant> = None;
         // After taking local changes failed: not again before then.
         let mut observe_after: Option<Instant> = None;
+        // A put back that failed: when it runs once more, and the nodes it was answered for.
+        let mut put_back_again: Option<(Instant, Arc<[NodeId]>)> = None;
         tracing::info!(
             "syncing {} with {}{}",
             self.cfg.folder.display(),
@@ -507,9 +516,14 @@ impl Runner {
             };
             let wait = wait_for(
                 now,
-                [schedule.next_wake(now, looking), observer, rules_at]
-                    .into_iter()
-                    .flatten(),
+                [
+                    schedule.next_wake(now, looking),
+                    observer,
+                    rules_at,
+                    put_back_again.as_ref().map(|(at, _)| *at),
+                ]
+                .into_iter()
+                .flatten(),
             );
             let mut first = self.control.recv_timeout(wait).ok();
             self.woken.add();
@@ -574,6 +588,26 @@ impl Runner {
             }
 
             let now = Instant::now();
+            // Once more, for what of it is still held (what the user saw: one held since isn't
+            // covered), unless the user answered meanwhile.
+            if put_back_again.as_ref().is_some_and(|(at, _)| now >= *at)
+                && let Some((_, seen)) = put_back_again.take()
+            {
+                let mut held = lock(&self.held);
+                let still: Arc<[NodeId]> = held
+                    .nodes
+                    .iter()
+                    .filter(|n| seen.contains(n))
+                    .copied()
+                    .collect();
+                if held.answer.is_none() && !held.answered && !still.is_empty() {
+                    tracing::info!("putting {} held deletes back once more", still.len());
+                    held.answer = Some((HeldAnswer::PutBack, still));
+                    held.answered = true;
+                    held.again = true;
+                    schedule.asked(now);
+                }
+            }
             if rules_at.is_some_and(|at| now >= at) {
                 rules_at = None;
                 check_rules = true;
@@ -675,15 +709,27 @@ impl Runner {
                     Err(e) => return Err(e),
                 },
             };
-            let answer = lock(&self.held).answer.take();
+            let (answer, once_more) = {
+                let mut held = lock(&self.held);
+                let again = std::mem::take(&mut held.again);
+                (held.answer.take(), again)
+            };
             match answer {
                 Some((HeldAnswer::Delete, seen)) => p.engine.confirm_deletes(seen.iter().copied()),
                 Some((HeldAnswer::PutBack, seen)) => {
                     if let Err(e) = p.engine.put_back(&seen) {
-                        // What it didn't put back is still held, and shown again.
+                        // What it didn't put back is still held, and shown again; the first
+                        // time, it runs once more a minute on (a file the identity said once
+                        // isn't there is gone for good then, and goes up again from here).
+                        let then = if once_more {
+                            "what is still held is shown again, to answer again"
+                        } else {
+                            let at = Instant::now() + self.cfg.put_back_again;
+                            put_back_again = Some((at, Arc::clone(&seen)));
+                            "tried again in a minute; what is still held is shown again"
+                        };
                         self.tell(vec![format!(
-                            "The held deletes couldn't all be put back ({e}): what is still \
-                             held is shown again, to answer again"
+                            "The held deletes couldn't all be put back ({e}): {then}"
                         )]);
                     }
                 }

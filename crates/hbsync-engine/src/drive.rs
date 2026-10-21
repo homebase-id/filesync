@@ -532,6 +532,25 @@ impl Drive {
         self.with_ops(|ops| ops.purge(keep_ms, now))
     }
 
+    /// Asks again about the files of Recently deleted the identity said once weren't there, a
+    /// minute to an hour ago ([`deleted::AccountOps::ask_again`]): a missed delete for good (a
+    /// hard delete leaves no trace in the feed) is confirmed so, its row forgotten, without
+    /// waiting for the next day's purge. Returns how many went for good.
+    pub fn ask_again(&self) -> Result<usize, EngineError> {
+        let now = hbsync_types::unix_now_ms();
+        self.with_ops(|ops| ops.ask_again(now))
+    }
+
+    /// Whether Recently deleted holds a file the identity said once wasn't there, within the
+    /// hour (one [`Drive::ask_again`] would ask about, now or later). One query.
+    pub fn doubted(&self) -> Result<bool, EngineError> {
+        let now = hbsync_types::unix_now_ms();
+        let suspects = self.account().read(|s| s.removed_suspects())?;
+        Ok(suspects
+            .iter()
+            .any(|(_, first)| now - first.at <= crate::gone::CONFIRM_WITHIN_MS))
+    }
+
     /// Once a day: deletes for good what Recently deleted has kept `keep_days`, never less
     /// than [`crate::time::MIN_KEEP_DAYS`] (and the trash of the same age). A failure waits for the
     /// next day's try... or the next call: it is only recorded as done when it worked.

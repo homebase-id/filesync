@@ -7,10 +7,10 @@ use std::time::Instant;
 
 use hbsync_remote::{Answers, Holds, Remote, RemoteError};
 use hbsync_state::{MirrorRow, ReadTx, RemovedRow, StateError, keys};
-use hbsync_types::{Doomed, NodeId, NodeKind, RemoteRef, Role, Target};
+use hbsync_types::{Doomed, NodeId, NodeKind, RemoteFileId, RemoteRef, Role, Target};
 
 use crate::error::EngineError;
-use crate::gone::{self, look};
+use crate::gone;
 use crate::mirror;
 use crate::time::TRACE_MS;
 use crate::trash::empty_trash;
@@ -453,22 +453,12 @@ impl AccountOps<'_> {
             // there" only the second time, a minute on, sync semantics §8b).
             let mut heard = Vec::new();
             if failed.is_none() {
-                for r in not_found {
-                    match look(self.remote, r.row.file_id) {
-                        Ok(said) => heard.push((r.row.file_id, said)),
-                        Err(e) => {
-                            failed = Some(e);
-                            break;
-                        }
-                    }
-                }
+                (heard, failed) =
+                    gone::look_all(self.remote, not_found.iter().map(|r| r.row.file_id));
             }
             // Its id never comes back, nor its row from a page read before.
             let confirmed = self.db().write(|s| {
-                let mut confirmed = 0;
-                for &(f, said) in &heard {
-                    confirmed += usize::from(gone::heard(s.account(), f, said)?);
-                }
+                let confirmed = gone::heard_all(s.account(), &heard)?;
                 gone_now
                     .iter()
                     .try_for_each(|(r, at)| s.account().forget_file(r.row.file_id, *at))?;
@@ -480,6 +470,31 @@ impl AccountOps<'_> {
             }
         }
         Ok(gone)
+    }
+
+    /// Asks again about the files of Recently deleted the identity said once weren't there,
+    /// whose second asking is due by `now_ms` (this device's clock): said a minute to an hour
+    /// before ([`gone::CONFIRM_AFTER_MS`]). A header read each, taken as the purge takes it
+    /// ([`gone::heard`]): not there again, gone for good and forgotten; there, the doubt goes.
+    /// Nothing else is asked or written. Returns how many went for good. A request that fails
+    /// stops the asking: the rest wait for the next purge.
+    pub fn ask_again(&mut self, now_ms: i64) -> Result<usize, EngineError> {
+        let due: Vec<RemoteFileId> = self
+            .db()
+            .read(|s| s.removed_suspects())?
+            .into_iter()
+            .filter(|(_, first)| gone::confirms(first, now_ms))
+            .map(|(f, _)| f)
+            .collect();
+        if due.is_empty() {
+            return Ok(0);
+        }
+        let (heard, failed) = gone::look_all(self.remote, due);
+        let gone = self.db().write(|s| gone::heard_all(s.account(), &heard))?;
+        match failed {
+            Some(e) => Err(EngineError::Remote(e)),
+            None => Ok(gone),
+        }
     }
 
     /// Deletes hard the tombstones the feed brought that were written before `before_ms` (Unix ms,
