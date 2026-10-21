@@ -196,14 +196,25 @@ impl<'a> Disk<'a> {
         node: NodeId,
     ) -> Result<io::Result<PathBuf>, StateError> {
         let trash_dir = layout::trash_dir(self.root);
-        // Its own entry folder, named by when and by the node (one name: a native path).
-        let dir = trash_dir.join(layout::trash_entry(hbsync_types::unix_now(), node));
+        let name = path.name().unwrap_or("item");
+        // Its own entry folder, named by when and by the node (one name: a native path). The
+        // node trashed again within that second (the old version a download kept, then the
+        // file itself, deleted) finds its entry taken: it takes the next second's, so the
+        // newer stays the newer.
+        let mut at = hbsync_types::unix_now();
+        let dir = loop {
+            let dir = trash_dir.join(layout::trash_entry(at, node));
+            if fs::symlink_metadata(dir.join(name)).is_err() {
+                break dir;
+            }
+            at += 1;
+        };
         // The trash folder too, made with the first item in it.
         db.changed(&trash_dir);
         if let Err(e) = put_ordered(db, &dir, |dir| fs::create_dir_all(dir))? {
             return Ok(Err(e));
         }
-        let to = dir.join(path.name().unwrap_or("item"));
+        let to = dir.join(name);
         let moved = rename_ordered(db, &self.abs(path), &to)?.map(|()| to);
         if moved.is_ok()
             && let Some(trash) = &mut self.trash
