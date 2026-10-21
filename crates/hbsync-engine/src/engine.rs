@@ -673,12 +673,7 @@ impl Engine {
         let none_before = std::mem::replace(&mut self.no_refusals, false);
         let exec = exec.run(ops)?;
         self.no_refusals = none_before && !exec.refused;
-        if let Some(hold) = exec.full {
-            self.drive.set_full(hold);
-        }
-        if exec.drive_moved {
-            self.drive.set_behind();
-        }
+        self.drive.absorb(exec.news);
         // What was done counts, and the folders it asks to look at are looked at, however
         // the run ended.
         report.ops_done += exec.done;
@@ -706,7 +701,7 @@ impl Engine {
         }
         // A write the drive refused for its state: the next round plans from the feed read
         // now (the drive being behind, it is read whether the notifications run or not).
-        if exec.drive_moved {
+        if exec.news.behind {
             report.feed += self.drive.catch_up(Some(self.db.folder()))?;
         }
         Ok(plan.held)

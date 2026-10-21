@@ -12,10 +12,12 @@
 
 use std::sync::{Mutex, MutexGuard};
 
-use hbsync_remote::Remote;
+use hbsync_remote::{Remote, RemoteError};
 use hbsync_state::StateDb;
 
+use crate::drive::DriveNews;
 use crate::error::EngineError;
+use crate::policy::{InRun, policy};
 
 mod listing;
 mod purge;
@@ -55,18 +57,24 @@ impl std::fmt::Debug for AccountOps<'_> {
 }
 
 impl<'a> AccountOps<'a> {
-    /// Runs `op`, operations on the account's DB and `remote`: its result, and whether the
-    /// account is behind after it (the drive refused a write for its state, or an answer was
-    /// lost), which the caller must take in.
-    #[must_use = "whether the account fell behind must be taken in"]
+    /// Runs `op`, operations on the account's DB and `remote`: its result, and what it learned
+    /// of the drive ([`DriveNews`]), which the caller must take in: behind if the drive refused
+    /// a write for its state, an answer was lost, or a request failed on the way (it may have
+    /// landed).
+    #[must_use = "what the drive said must be taken in"]
     pub fn run<T>(
         account: &'a Mutex<StateDb>,
         remote: &'a dyn Remote,
         op: impl FnOnce(&mut AccountOps<'a>) -> Result<T, EngineError>,
-    ) -> (Result<T, EngineError>, bool) {
+    ) -> (Result<T, EngineError>, DriveNews) {
         let mut ops = AccountOps::new(account, remote);
         let done = op(&mut ops);
-        (done, ops.behind)
+        let failed = |e: &RemoteError| policy(e.class()).in_run == InRun::Backoff;
+        let news = DriveNews {
+            behind: ops.behind || matches!(&done, Err(EngineError::Remote(e)) if failed(e)),
+            full: None,
+        };
+        (done, news)
     }
 
     fn new(account: &'a Mutex<StateDb>, remote: &'a dyn Remote) -> AccountOps<'a> {

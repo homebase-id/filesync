@@ -322,7 +322,7 @@ impl Executor<'_> {
             | RemoteError::StaleRange(_),
         )) = &result
         {
-            self.report.drive_moved = true;
+            self.report.news.behind = true;
         }
         match (ctx, job, result) {
             (Ctx::Meta { hash, after, .. }, Job::Meta { meta, target }, JobResult::Written(w)) => {

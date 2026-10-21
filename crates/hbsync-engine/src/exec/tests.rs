@@ -3587,7 +3587,7 @@ fn removals_go_in_one_request_and_a_changed_file_stays() -> R {
     let before = h.remote.faults().requests;
     let report = h.run(vec![delete(a, at_a), delete(b, at_b), delete(c, at_c)])?;
     assert_eq!(h.remote.faults().requests - before, 1, "one request");
-    assert!(report.drive_moved, "{report:?}");
+    assert!(report.news.behind, "{report:?}");
     let server = h.remote.server();
     let removed: Vec<_> = server.removed().map(|r| r.file_id).collect();
     assert_eq!(removed.len(), 2, "{removed:?}");
