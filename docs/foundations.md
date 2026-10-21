@@ -27,7 +27,7 @@ Explored 2026-10-08: `../odin-core` server model and `../chat-kmp` `HomebaseFile
   - They keep fileId, GroupId, FileType and GlobalTransitId.
   - They **null the UniqueId** and clear Content and Payloads.
   - [inferred] User-delete tombstones are never reaped.
-- **Large-file limits** (odin-core #1892, #1893; reads stream and ranges are 64-bit since PR #1921, the rest of this list is as read before it):
+- **Large-file limits** (odin-core #1892, #1893; reads stream and ranges are 64-bit since PR #1921, the upload byte count since PR #1932; the rest of this list is as read before them):
   - **Uploads stream; downloads do not** [read]. `GetPayloadStreamAsync` loads the payload or range into a `MemoryStream` (`LongTermStorageManager.cs:308,312`). A streaming `OpenReadAsync` exists but only payload move uses it.
   - **32-bit sizes** [read]:
     - `FileChunk.Start` / `Length` are `int`, parsed with `Convert.ToInt32`.
@@ -162,7 +162,7 @@ the first three; the payload descriptor gives the hash.
 | # | Work | Status |
 |---|---|---|
 | 1 | Streamed payload and thumbnail reads via the existing `OpenReadAsync`, plus a ranged variant | odin-core **#1892**, done (PR #1921) |
-| 2 | `long` for payload sizes and ranges throughout (`FileChunk`, `Convert.ToInt32`, `(uint)` byte count) | odin-core **#1893**: ranges done (PR #1921), the upload byte count open |
+| 2 | `long` for payload sizes and ranges throughout (`FileChunk`, `Convert.ToInt32`, `(uint)` byte count) | odin-core **#1893**, done (ranges PR #1921, the upload byte count PR #1932) |
 | 3 | Payload hashes per section 1: descriptor fields, both-or-none, stored-hash check while streaming (also on peer incoming), equality check when unencrypted, per-drive "hashes required" setting, BLAKE3 package, spec + golden vectors | odin-core **#1895** |
 | 4 | Resumable / chunked payload upload; the hash check runs once, when the staged file is finalized | *not filed yet* |
 | 5 | "Files" drive type + reserved `SyncFile` / `SyncFolder` file types | *not filed yet*; can wait until the Homebase adapter (roadmap Layer 5) |
@@ -173,6 +173,6 @@ design work is on the client.
 ## Decisions (2026-10-08)
 - **Hashes:** client-computed stored + content hash; SHA-256 or BLAKE3; optional on the server but required by the sync client; both or none; the server (and a receiving peer server) checks the stored hash; the content hash is encrypted on encrypted payloads with IV = payloadIv XOR 0xAA…AA; base64 on `PayloadDescriptor` (#1895), or deferred to a `payloadHash` part after the payload (#1935, how this client sends them). The sync client writes BLAKE3.
 - **Folders:** id tree (`UniqueId` = node id, `GroupId` = parent id).
-- **Large files:** fix the server first (#1892, #1893; resumable upload still to file).
+- **Large files:** fix the server first (#1892, #1893, both done; resumable upload still to file). Until then the client caps one file at 50 GiB, as a failed upload is sent again from the start.
 - **Linux offline:** selective sync in v1, FUSE later.
 
