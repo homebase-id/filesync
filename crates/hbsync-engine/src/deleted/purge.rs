@@ -10,7 +10,8 @@ use hbsync_state::{MirrorRow, ReadTx, RemovedRow, StateError, keys};
 use hbsync_types::{Doomed, NodeId, NodeKind, RemoteRef, Role, Target};
 
 use crate::error::EngineError;
-use crate::mirror::{self, look};
+use crate::gone::{self, look};
+use crate::mirror;
 use crate::time::TRACE_MS;
 use crate::trash::empty_trash;
 use hbsync_local::layout;
@@ -448,7 +449,7 @@ impl AccountOps<'_> {
             if !not_found.is_empty() {
                 self.behind = true;
             }
-            // What its header says, taken in the write ([`mirror::heard`]: the identity's "not
+            // What its header says, taken in the write ([`gone::heard`]: the identity's "not
             // there" only the second time, a minute on, sync semantics §8b).
             let mut heard = Vec::new();
             if failed.is_none() {
@@ -466,7 +467,7 @@ impl AccountOps<'_> {
             let confirmed = self.db().write(|s| {
                 let mut confirmed = 0;
                 for &(f, said) in &heard {
-                    confirmed += usize::from(mirror::heard(s.account(), f, said)?);
+                    confirmed += usize::from(gone::heard(s.account(), f, said)?);
                 }
                 gone_now
                     .iter()

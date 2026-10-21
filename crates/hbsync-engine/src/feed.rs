@@ -15,7 +15,8 @@ use hbsync_remote::{
 use hbsync_state::{AccountTx, ReadTx, StateDb, StateError, keys};
 use hbsync_types::{RemoteFileId, RemoteRef};
 
-use crate::mirror::{self, Applied, Said, apply};
+use crate::gone::{self, Said};
+use crate::mirror::{self, Applied, apply};
 use crate::time::{DAY_MS, REREAD_MS};
 
 #[derive(Debug, thiserror::Error)]
@@ -284,7 +285,7 @@ impl Reread {
 #[derive(Debug, Default)]
 struct Asked {
     gone: Vec<RemoteFileId>,
-    /// The identity said aren't there: gone only the second time ([`mirror::not_there`]), till
+    /// The identity said aren't there: gone only the second time ([`gone::not_there`]), till
     /// then asked again at the next pull.
     not_there: Vec<RemoteFileId>,
     found: Vec<RemoteHeader>,
@@ -300,14 +301,17 @@ struct Asked {
 fn ask(remote: &dyn Remote, files: &[RemoteFileId]) -> Asked {
     let mut asked = Asked::default();
     for &file_id in files {
-        match remote.header(file_id) {
-            Err(RemoteError::Deleted) => asked.gone.push(file_id),
+        match gone::read(remote, file_id) {
             // Not answered yet: judged in [`settle`].
-            Err(RemoteError::NotFound) => {
+            Ok((Said::NotThere, _)) => {
                 asked.not_there.push(file_id);
                 continue;
             }
-            Ok(header) => asked.found.push(header),
+            // There, or a tombstone: its header applied as the feed's row would be (a
+            // tombstone's time kept).
+            Ok((_, Some(header))) => asked.found.push(header),
+            // A tombstone, said without a header.
+            Ok((_, None)) => asked.gone.push(file_id),
             Err(e) if e.class() == ErrorClass::Refused => {
                 tracing::warn!("{file_id:?} isn't in the feed and doesn't read: {e}");
             }
@@ -334,7 +338,7 @@ fn settle<G: DerefMut<Target = StateDb>>(
     let (confirmed, refused) = db().write(|s| {
         let mut confirmed = Vec::new();
         for &file_id in &asked.not_there {
-            if mirror::heard(s.account(), file_id, Said::NotThere)? {
+            if gone::heard(s.account(), file_id, Said::NotThere)? {
                 confirmed.push(file_id);
             }
         }
