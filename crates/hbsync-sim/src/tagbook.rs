@@ -31,8 +31,8 @@ pub(crate) struct TagBook {
     /// its node in the end, unless the node was deleted or a removal made after the add (or
     /// under way then) won.
     added: BTreeMap<Add, Made>,
-    /// The last removal of each tag of each node, by any client: when.
-    removed: BTreeMap<(NodeId, String), u64>,
+    /// Each client's last removal of each tag of each node: when.
+    removed: BTreeMap<Add, u64>,
     /// Tags a client removed from a node its base had them on, and not added again since, with
     /// the server's time then: they stay removed, unless another client added them and the add
     /// wasn't on the drive yet (a merge keeps either side's add; a removal made after the add
@@ -83,28 +83,19 @@ impl TagBook {
     /// where the client's base had it.
     pub(crate) fn remove(&mut self, c: usize, node: NodeId, name: &str, synced: Option<i64>) {
         let at = self.next();
-        self.removed.insert((node, name.to_owned()), at);
+        self.removed.insert((c, node, name.to_owned()), at);
         if let Some(now) = synced {
             self.cleared.insert((c, node, name.to_owned()), now);
         }
     }
 
     /// Client `c`'s adds to `node` are client `to`'s now (the item moved to another folder of
-    /// the computer), sent or not.
+    /// the computer, a new id there that its own create sends up).
     pub(crate) fn moved(&mut self, c: usize, to: usize, node: NodeId) {
-        let adds: Vec<Add> = self.of(c, node).cloned().collect();
-        for from in adds {
+        for from in mine(&self.added, c, node) {
             let into = (to, from.1, from.2.clone());
-            move_key(&mut self.added, &from, into.clone());
-            move_key(&mut self.sent, &from, into);
+            move_key(&mut self.added, &from, into);
         }
-    }
-
-    /// Client `c`'s adds to `node`, as they stand.
-    fn of(&self, c: usize, node: NodeId) -> impl Iterator<Item = &Add> + use<'_> {
-        self.added
-            .keys()
-            .filter(move |(at, n, _)| (*at, *n) == (c, node))
     }
 
     /// `node` left the drive (a delete won): it settles the tag removals made before it.
@@ -130,8 +121,7 @@ impl TagBook {
     /// here again later is not the one the user tagged, and doesn't take it along.
     pub(crate) fn left(&mut self, c: usize, node: NodeId) {
         self.cleared.retain(|(by, n, _), _| (*by, *n) != (c, node));
-        let adds: Vec<Add> = self.of(c, node).cloned().collect();
-        for add in adds {
+        for add in mine(&self.added, c, node) {
             if self.sent.contains_key(&add) {
                 self.detach(add);
             } else if let Some(made) = self.added.remove(&add) {
@@ -192,37 +182,27 @@ impl TagBook {
         self.deleted.remove(&node);
     }
 
-    /// Item `node` of client `c` is `new` from now on: the tags added to it there go along,
-    /// with when they were sent; a removal on the item before counts for it after.
+    /// Item `node` of client `c` is `new` from now on: the tags added to it there go along (not
+    /// sent under the new id: its own create sends them); removals there count for it after
+    /// too.
     pub(crate) fn retrack(&mut self, c: usize, node: NodeId, new: NodeId) {
-        fn mine<V>(m: &BTreeMap<Add, V>, c: usize, node: NodeId) -> Vec<Add> {
-            m.keys()
-                .filter(|(at, n, _)| (*at, *n) == (c, node))
-                .cloned()
-                .collect()
-        }
         for add in mine(&self.added, c, node) {
-            let into = (c, new, add.2.clone());
-            move_key(&mut self.added, &add, into.clone());
-            move_key(&mut self.sent, &add, into);
+            move_key(&mut self.added, &add, (c, new, add.2.clone()));
         }
         for add in mine(&self.cleared, c, node) {
             // The item's removal is the new id's now: the old node no longer has it.
             move_key(&mut self.cleared, &add, (c, new, add.2.clone()));
         }
-        for add in mine(&self.unsent, c, node) {
-            move_key(&mut self.unsent, &add, (c, new, add.2.clone()));
-        }
-        let removed: Vec<(String, u64)> = self
+        // Any client's removal on the node counts for the item after (it may have been merged
+        // into it before the new id).
+        let removed: Vec<(Add, u64)> = self
             .removed
             .iter()
-            .filter(|((n, _), _)| *n == node)
-            .map(|((_, name), at)| (name.clone(), *at))
+            .filter(|((_, n, _), _)| *n == node)
+            .map(|(add, at)| (add.clone(), *at))
             .collect();
-        for (name, at) in removed {
-            let key = (new, name);
-            let at = self.removed.get(&key).map_or(at, |a| at.max(*a));
-            self.removed.insert(key, at);
+        for ((by, _, name), at) in removed {
+            self.removed.insert((by, new, name), at);
         }
     }
 
@@ -251,7 +231,7 @@ impl TagBook {
     /// Client `c` forked a conflict copy off its item `node`: the tags it added there may go to
     /// the original too.
     pub(crate) fn forked(&mut self, c: usize, node: NodeId) {
-        let forked: Vec<Add> = self.of(c, node).cloned().collect();
+        let forked = mine(&self.added, c, node);
         self.forked.extend(forked);
     }
 
@@ -288,8 +268,8 @@ impl TagBook {
         for ((_, node, name), made, _) in &adds {
             let removed_since = self
                 .removed
-                .get(&(*node, name.clone()))
-                .is_some_and(|at| *at > made.at);
+                .iter()
+                .any(|((_, n, t), at)| n == node && t == name && *at > made.at);
             if let Some(s) = server.get(*node)
                 && !refused.contains(node)
                 && !made.concurrent
@@ -334,6 +314,14 @@ impl TagBook {
     pub(crate) fn has_cleared(&self, add: &Add) -> bool {
         self.cleared.contains_key(add)
     }
+}
+
+/// The keys of `map` of client `c`'s item `node`.
+fn mine<V>(map: &BTreeMap<Add, V>, c: usize, node: NodeId) -> Vec<Add> {
+    map.keys()
+        .filter(|(at, n, _)| (*at, *n) == (c, node))
+        .cloned()
+        .collect()
 }
 
 /// Moves `from`'s entry in `map`, if it has one, to `into`.
@@ -405,24 +393,5 @@ mod tests {
         book.add(1, node, "Red", false);
         book.detach((1, node, "Red".into()));
         assert!(check(&book, &drive(node, &["Red"])).is_ok(), "c1 added it");
-    }
-
-    /// An item with a new id takes its adds' send times along: a removal made after the send
-    /// still wins.
-    #[test]
-    fn a_retracked_add_keeps_its_send_time() {
-        let (node, new) = (
-            NodeId(hbsync_types::Uuid::from_u128(1)),
-            NodeId(hbsync_types::Uuid::from_u128(2)),
-        );
-        let mut book = TagBook::default();
-        book.add(0, node, "Red", false);
-        book.sent(0, node, "Red", 1);
-        book.retrack(0, node, new);
-        book.remove(1, new, "Red", Some(5));
-        assert!(
-            check(&book, &drive(new, &["Red"])).is_err(),
-            "c1's removal, made after c0's add was on the drive, came back"
-        );
     }
 }

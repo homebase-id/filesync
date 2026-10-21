@@ -716,7 +716,15 @@ impl Sim {
         });
         let client = &self.clients[c];
         let synced = has(client.base.get(node));
-        let stale = lacks(self.server.live.get(&node).map(|n| &n.state));
+        // On the drive, live or in Recently deleted (a restore brings that version back).
+        let server = &self.server;
+        let stale = lacks(
+            server
+                .live
+                .get(&node)
+                .or(server.removed.get(&node))
+                .map(|n| &n.state),
+        );
         pending || (synced && (stale || planned(client)))
     }
 
