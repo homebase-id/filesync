@@ -503,11 +503,12 @@ fn merge(
 
 /// The known paths another synced file now stands at (§3 rule 1): a file at a known path
 /// whose new file id is that of a synced file which left its own path (gone from it, a folder
-/// there now, moved onto yet another name, or swapped with this one) was moved onto this name. Where file ids
-/// are recycled, only with the bytes it had. Anything else at the same path is the node that
+/// there now, moved onto yet another name, or swapped with this one) was moved onto this
+/// name. Where file ids are recycled, only with the bytes it had. Anything else at the same path is the node that
 /// was there: an editor's save through a temp file brings a new id (and the temp file, if a
 /// scan saw it, was never synced), one keeping a backup by renaming leaves the path. `hash`
-/// hashes what is at a path now.
+/// hashes what is at a path now; `changed` are the rows changed in place that kept their kind
+/// (`removed` holds the others).
 fn moved_onto(
     db: &mut StateDb,
     removed: &[LocalRow],
@@ -516,12 +517,9 @@ fn moved_onto(
     hash: &mut dyn FnMut(&RelPath, &LocalMeta) -> Option<ContentHash>,
 ) -> Result<HashSet<RelPath>, StateError> {
     let mut onto = HashSet::new();
-    let is_file = |m: &LocalMeta| kind_of(m) == NodeKind::File;
     let switched: Vec<&(LocalRow, LocalMeta)> = changed
         .iter()
-        .filter(|(r, m)| {
-            r.kind == NodeKind::File && is_file(m) && m.file_id != r.fingerprint.file_id
-        })
+        .filter(|(r, m)| r.kind == NodeKind::File && m.file_id != r.fingerprint.file_id)
         .collect();
     if switched.is_empty() || !opts.fs_family.has_stable_file_ids() {
         return Ok(onto);
@@ -529,7 +527,6 @@ fn moved_onto(
     // Files that left their path, by the id they had there.
     let mut left: HashMap<FileId, &LocalRow> = removed
         .iter()
-        .chain(changed.iter().filter(|(_, m)| !is_file(m)).map(|(r, _)| r))
         .filter(|r| r.kind == NodeKind::File)
         .map(|r| (r.fingerprint.file_id, r))
         .collect();
@@ -719,9 +716,17 @@ fn resolve(
     // known path another synced file was moved onto (§3 rule 1, see `moved_onto`).
     let mut removed = diff.removed;
     let mut added = diff.added;
+    let (changed, other_kind): (Vec<_>, Vec<_>) = diff
+        .changed
+        .into_iter()
+        .partition(|(row, meta)| kind_of(meta) == row.kind);
+    for (row, meta) in other_kind {
+        added.push((row.path.clone(), meta));
+        removed.push(row);
+    }
     // Hashes taken to tell, used again below.
     let mut hashed = HashMap::new();
-    let onto = moved_onto(db, &removed, &diff.changed, opts, &mut |p, m| {
+    let onto = moved_onto(db, &removed, &changed, opts, &mut |p, m| {
         *hashed
             .entry(p.clone())
             .or_insert_with(|| hash_now(p, m, report))
@@ -729,8 +734,8 @@ fn resolve(
     let mut hash_of = |p: &RelPath, m: &LocalMeta, report: &mut ScanReport| {
         hashed.remove(p).unwrap_or_else(|| hash_now(p, m, report))
     };
-    for (row, meta) in diff.changed {
-        if kind_of(&meta) != row.kind || onto.contains(&row.path) {
+    for (row, meta) in changed {
+        if onto.contains(&row.path) {
             added.push((row.path.clone(), meta));
             removed.push(row);
             continue;

@@ -65,7 +65,7 @@ struct Ledger {
     /// The places files were moved away from since their client's last scan (folder and name
     /// key), with their bytes.
     vacated: HashMap<(PathBuf, String), Vec<u8>>,
-    /// Bytes that may be there twice: a file moved away from a place another file took before
+    /// Bytes that may be there twice (not more): a file moved away from a place another file took before
     /// the scan reads as the file there edited and a new one with its bytes (sync semantics
     /// §3 rule 1: an editor keeping a backup by renaming), a copy.
     copied: HashSet<Vec<u8>>,
@@ -88,22 +88,17 @@ impl Ledger {
 
     /// `item` (under `root`) is about to move to `to`: every file in it leaves its place.
     fn moving(&mut self, root: &Path, item: &Path, to: &Path) -> std::io::Result<()> {
-        let files: Vec<(PathBuf, PathBuf)> = match root.join(item).is_dir() {
-            true => entries(&root.join(item))
-                .1
-                .into_iter()
-                .map(|f| (item.join(&f), to.join(f)))
-                .collect(),
-            false => vec![(item.to_owned(), to.to_owned())],
+        let files: Vec<(PathBuf, PathBuf)> = if root.join(item).is_dir() {
+            let files = entries(&root.join(item)).1.into_iter();
+            files.map(|f| (item.join(&f), to.join(f))).collect()
+        } else {
+            vec![(item.to_owned(), to.to_owned())]
         };
-        let mut moved = Vec::new();
+        // No file goes where another one of the move was.
         for (from, to) in files {
             let bytes = fs::read(root.join(&from))?;
-            self.vacated.insert(Self::place(root, &from), bytes.clone());
-            moved.push((to, bytes));
-        }
-        for (to, bytes) in moved {
             self.filled(root, &to, &bytes);
+            self.vacated.insert(Self::place(root, &from), bytes);
         }
         Ok(())
     }
@@ -111,11 +106,10 @@ impl Ledger {
     /// A file with `bytes` is at `rel` now: another one moved away from there before is a copy,
     /// if the scan hasn't seen it go.
     fn filled(&mut self, root: &Path, rel: &Path, bytes: &[u8]) {
-        match self.vacated.remove(&Self::place(root, rel)) {
-            Some(left) if left != bytes => {
-                self.copied.insert(left);
-            }
-            _ => {}
+        if let Some(left) = self.vacated.remove(&Self::place(root, rel))
+            && left != bytes
+        {
+            self.copied.insert(left);
         }
     }
 
@@ -203,9 +197,12 @@ fn random_base() -> u64 {
     (h.finish() >> 1) | (1 << 32)
 }
 
-/// Runs `one` on each of this run's [`seeds`], every failure naming its seed: an error, a failed
-/// assertion or another panic. What each seed returned.
-fn each_seed<T>(mut one: impl FnMut(u64) -> Res<T>) -> Res<Vec<T>> {
+/// Runs `one` on each of `seeds`, every failure naming its seed: an error, a failed assertion or
+/// another panic. What each seed returned.
+fn each_seed<T>(
+    seeds: impl IntoIterator<Item = u64>,
+    mut one: impl FnMut(u64) -> Res<T>,
+) -> Res<Vec<T>> {
     /// Names its seed if dropped by a panic.
     struct Naming(u64);
     impl Drop for Naming {
@@ -219,7 +216,7 @@ fn each_seed<T>(mut one: impl FnMut(u64) -> Res<T>) -> Res<Vec<T>> {
             }
         }
     }
-    seeds()
+    seeds
         .into_iter()
         .map(|seed| {
             let _naming = Naming(seed);
@@ -300,7 +297,7 @@ fn act(root: &Path, rng: &mut Rng, ledger: &mut Ledger) -> std::io::Result<()> {
 
 #[test]
 fn randomized_two_client_convergence() -> R {
-    each_seed(|seed| {
+    each_seed(seeds(), |seed| {
         let server = server();
         let [mut a, mut b] = pair(&server)?;
         let mut rng = Rng(seed);
@@ -313,7 +310,7 @@ fn randomized_two_client_convergence() -> R {
                 _ => sync(&mut b, &mut ledger)?,
             }
         }
-        converged(seed, &mut a, &mut b, &ledger, &server)
+        converged(&mut a, &mut b, &ledger, &server)
     })?;
     Ok(())
 }
@@ -324,7 +321,7 @@ fn randomized_two_client_convergence() -> R {
 /// once but is live is never forgotten nor deleted here, and the clients converge without loss.
 #[test]
 fn randomized_wrong_not_theres() -> R {
-    let heard = each_seed(wrong_not_theres_of)?;
+    let heard = each_seed(seeds(), wrong_not_theres_of)?;
     assert!(
         heard.iter().sum::<usize>() > 0 || heard.len() < 4,
         "no wrong \"not there\" was heard"
@@ -338,19 +335,17 @@ fn randomized_wrong_not_theres() -> R {
 ///   taken, the file stayed (the clients diverged).
 /// - 6526174988904104872: a file moved over another, a folder made where it was: the scan read
 ///   the file as the one it replaced, edited, and its bytes went up twice.
-/// - 2476141012248678664: a file moved away and a new one made in its place, read as an edit
-///   there and a copy (§3 rule 1), while the other client moved the file: its bytes twice,
-///   which the ledger didn't allow.
+/// - 2476141012248678664: both clients moved a file away and made a new one in its place
+///   before a scan, each read as an edit there and a copy (§3 rule 1): its bytes twice, which
+///   the ledger didn't allow.
 #[test]
 fn regression_wrong_not_theres_seeds() -> R {
-    for seed in [
+    let seeds = [
         8_474_444_713_664_359_667,
         6_526_174_988_904_104_872,
         2_476_141_012_248_678_664,
-    ] {
-        wrong_not_theres_of(seed).map_err(|e| format!("seed {seed}: {e}"))?;
-    }
-    Ok(())
+    ];
+    each_seed(seeds, wrong_not_theres_of).map(drop)
 }
 
 /// One seed of [`randomized_wrong_not_theres`]: how many headers the identity said weren't
@@ -382,7 +377,7 @@ fn wrong_not_theres_of(seed: u64) -> Res<usize> {
         }
     }
     let [mut a, mut b] = clients;
-    converged(seed, &mut a, &mut b, &ledger, &server)?;
+    converged(&mut a, &mut b, &ledger, &server)?;
     Ok(heard)
 }
 
@@ -396,7 +391,6 @@ fn set_not_there(client: &Client, on: bool) {
 /// Settles both clients, then checks that they and the server hold the same tree, that no
 /// content was lost that a user didn't replace or delete, and none is there twice.
 fn converged(
-    seed: u64,
     a: &mut Client,
     b: &mut Client,
     ledger: &Ledger,
@@ -404,7 +398,7 @@ fn converged(
 ) -> Res<()> {
     settle_all(a, b)?;
     let (ta, tb) = (a.entries(""), b.entries(""));
-    assert_eq!(ta, tb, "seed {seed}: clients diverged");
+    assert_eq!(ta, tb, "clients diverged");
     let present: HashSet<&Vec<u8>> = ta.iter().map(|(_, c)| c).collect();
     let lost: Vec<String> = ledger
         .written
@@ -412,22 +406,24 @@ fn converged(
         .filter(|c| !ledger.superseded.contains(*c) && !present.contains(c))
         .map(|c| String::from_utf8_lossy(c).into_owned())
         .collect();
-    assert!(lost.is_empty(), "seed {seed}: lost {lost:?}\ntree: {ta:?}");
+    assert!(lost.is_empty(), "lost {lost:?}\ntree: {ta:?}");
     // Every write has bytes of its own, and nothing copies a file but a scan reading a move
     // as one: bytes twice are an item taken for another one.
-    let mut seen = HashSet::new();
+    let mut seen: HashMap<&Vec<u8>, usize> = HashMap::new();
     let twice: Vec<&String> = ta
         .iter()
-        .filter(|(path, c)| !path.ends_with('/') && !seen.insert(c) && !ledger.copied.contains(c))
+        .filter(|(path, _)| !path.ends_with('/'))
+        .filter(|(_, c)| {
+            let n = seen.entry(c).or_default();
+            *n += 1;
+            *n > 1 + usize::from(ledger.copied.contains(c))
+        })
         .map(|(path, _)| path)
         .collect();
-    assert!(
-        twice.is_empty(),
-        "seed {seed}: copies {twice:?}\ntree: {ta:?}"
-    );
+    assert!(twice.is_empty(), "copies {twice:?}\ntree: {ta:?}");
     // The server holds the same tree.
     let live = server.lock().map_err(|_| "poisoned")?.live().count();
-    assert_eq!(live, ta.len(), "seed {seed}: server differs");
+    assert_eq!(live, ta.len(), "server differs");
     Ok(())
 }
 
@@ -445,7 +441,7 @@ fn crash_at(c: &mut Client, at: usize, before: bool, kept: Kept) -> Res<bool> {
 /// the clients still converge, with nothing lost and nothing twice.
 #[test]
 fn randomized_crashes() -> R {
-    let crashes = each_seed(crashes_of)?;
+    let crashes = each_seed(seeds(), crashes_of)?;
     let total: usize = crashes.iter().sum();
     assert!(total >= crashes.len(), "only {total} crashes");
     Ok(())
@@ -456,7 +452,7 @@ fn randomized_crashes() -> R {
 /// The item was then moved, again and again, to where it already was: no convergence.
 #[test]
 fn regression_crash_seed_291() -> R {
-    crashes_of(291).map(drop)
+    each_seed([291], crashes_of).map(drop)
 }
 
 /// One seed of [`randomized_crashes`]: how many crashes it had.
@@ -501,7 +497,7 @@ fn crashes_of(seed: u64) -> Res<usize> {
         }
     }
     let [mut a, mut b] = clients;
-    converged(seed, &mut a, &mut b, &ledger, &server)?;
+    converged(&mut a, &mut b, &ledger, &server)?;
     Ok(crashes)
 }
 
