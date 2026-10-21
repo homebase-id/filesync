@@ -111,6 +111,25 @@ impl Executor<'_> {
         // it claims none, as a download does.
         let kept_tags = self.disk.tags_kept();
         let none = tags.held_by(self.folder.os).is_empty();
+        // Made from Recently deleted (its folder restored, its RemoteCreate to follow), never
+        // synced here, with tags to write: it is made of the version there, and settles against
+        // it, whatever the mirror holds by its commit. Restored or purged since the plan, that
+        // version is gone, and the next plan decides on the drive as it is now. Settled against
+        // the drive's newer version, the tags it wrote (the old version's) read as this device
+        // adding them, and a tag removed on the drive since came back. One with none to write
+        // (Recovered files, made here) settles against the drive as it is.
+        let restored = match acted.is_none() && !synced_before {
+            true => {
+                let removed = self.db.read(|s| s.removed_by_node(node))?;
+                match removed.and_then(|r| DriveVersion::of(&r.row, None)) {
+                    None if kept_tags && !none => {
+                        return Ok(Outcome::stale("no longer in Recently deleted"));
+                    }
+                    removed => removed,
+                }
+            }
+            false => None,
+        };
         let mut record = acted.as_ref().map(|a| Placing {
             base: BaseRow::new(node, a.state.clone(), a.at),
             target: target.clone(),
@@ -186,28 +205,22 @@ impl Executor<'_> {
             match &record {
                 Some(r) => settle_placement(s.folder(), r, folder).map(Placed::at),
                 None => {
-                    // Made from Recently deleted (its folder restored, its RemoteCreate to
-                    // follow): it settles against the version there, what it was made of, as
-                    // any placement does: the base until the restore settles. Without one, a
-                    // tag removed on the drive meanwhile read as this device adding it, and
-                    // came back.
+                    // Made from Recently deleted: it settles against the version there, what
+                    // it was made of, as any placement does: the base until the restore
+                    // settles. Without one, a tag removed on the drive meanwhile read as this
+                    // device adding it, and came back.
                     //
                     // One synced here before keeps its base, but for a tag its failed write
                     // didn't put on it that the drive's last version holds: kept, the folder
                     // without it read as the user removing it, and the plan removed it on the
                     // drive.
-                    let base = s.get_base(node)?;
-                    let synced = base.is_some();
-                    let removed = match !synced || unknown {
-                        true => s
-                            .removed_by_node(node)?
-                            .and_then(|r| DriveVersion::of(&r.row, None)),
-                        false => None,
-                    };
                     if unknown
-                        && let Some(mut b) = base
+                        && let Some(mut b) = s.get_base(node)?
                         && let Some(held) = &row.tags
                     {
+                        let removed = s
+                            .removed_by_node(node)?
+                            .and_then(|r| DriveVersion::of(&r.row, None));
                         let last = removed.as_ref().map_or(&b.state.tags, |d| &d.state.tags);
                         let tags = not_reached(&b.state.tags, held, last);
                         if tags != b.state.tags {
@@ -215,10 +228,9 @@ impl Executor<'_> {
                             s.folder().put_base(&b)?;
                         }
                     }
-                    let removed = removed.filter(|_| !synced);
                     let at = settle(
                         s.folder(),
-                        Settle::placed(node, removed.as_ref(), TagWrite::Agreed),
+                        Settle::placed(node, restored.as_ref(), TagWrite::Agreed),
                         os,
                     )?;
                     mark_children(s.folder(), node)?;

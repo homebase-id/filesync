@@ -272,6 +272,9 @@ impl Sim {
             _ => TagWrite::Unknown,
         };
         self.settle_against(c, node, how, true, tags, None);
+        if p.fresh {
+            self.new_item_settled(c, node, Some(&p.record.state));
+        }
         true
     }
 

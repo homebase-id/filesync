@@ -619,7 +619,9 @@ again later). A tag write needs a base to record what it wrote: the item's own, 
 founds (place and content agree with the drive's version it acted on). Without one it waits,
 the node left for the next plan: the drive's tags it wrote would read as this device adding
 them, and a tag removed on the drive meanwhile came back. The plan's move or remote write
-founds the base; where it runs first, the tags come down in the same run.
+founds the base; where it runs first, the tags come down in the same run. A folder made here
+from Recently deleted (never synced here, its restore to follow) founds its base on the version
+there; restored or purged since the plan, that version is gone, and it waits for the next plan.
 
 **Limits.** Tag changes are seen through the change time: on a volume that keeps attributes
 elsewhere (exFAT's `._` files) or with one-second times (HFS+), a change can go unnoticed until

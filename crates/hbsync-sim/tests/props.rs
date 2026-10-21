@@ -4729,3 +4729,117 @@ fn regression_a_file_being_written_keeps_its_folder() {
         panic!("{e}");
     }
 }
+
+/// Seed dc9776d2: client 0 makes folder `c.txt`, tagged Red, with a folder in it, and another
+/// device deletes `c.txt` as soon as it is up. Client 1 plans to make it back from Recently
+/// deleted (for the folder in it), under a conflict name (its own file holds `c.txt`); client 0
+/// restores it first and then removes Red. Client 1's folder, made with the Red of the version
+/// in Recently deleted, settled against the drive's newer one: no base (the names differ), so
+/// its next plan read Red as its own add and sent it back over the removal. The version it is
+/// made of gone, the folder now waits for the next plan.
+#[test]
+fn regression_a_folder_made_from_recently_deleted_after_its_restore_waits() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(
+            1,
+            CreateFile {
+                parent: 15,
+                name: 9,
+            },
+        ),
+        act(
+            0,
+            CreateFolder {
+                parent: 15,
+                name: 11,
+            },
+        ),
+        act(
+            1,
+            CreateFile {
+                parent: 6,
+                name: 13,
+            },
+        ),
+        act(0, Tag { node: 10, tag: 0 }),
+        act(1, Delete { node: 13 }),
+        act(0, Meanwhile { op: 0 }),
+        act(
+            0,
+            CreateFolder {
+                parent: 10,
+                name: 11,
+            },
+        ),
+        Event::Plan { client: 0 },
+        act(
+            1,
+            Move {
+                node: 7,
+                parent: 3,
+                name: 11,
+            },
+        ),
+        Event::Step { client: 0 },
+        Event::Step { client: 0 },
+        Event::Plan { client: 1 },
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        Event::Step { client: 1 },
+        act(0, Tag { node: 4, tag: 0 }),
+    ];
+    let limits = known_limits_of(2, &events);
+    assert!(limits.is_empty(), "{limits:?}");
+}
+
+/// Seed 4c8098b5, the known limit of seed 0a9df7c6 (the user's call: not now) met through a
+/// lost commit: client 1 forks its edited `a` into a conflict copy and downloads the drive's
+/// version (Red removed) as a new item, and the download's commit fails: recovery settles its
+/// record, and the base keeps Red, which neither the new item nor the drive holds. Client 0's
+/// add of Red, made before, then reads on client 1 as its removal, and goes. The oracle names
+/// the limit on recovery's path too, as on the commit's.
+#[test]
+fn regression_a_new_item_keeping_a_base_tag_through_recovery_is_a_known_limit() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(
+            1,
+            CreateFile {
+                parent: 12,
+                name: 9,
+            },
+        ),
+        act(0, Meanwhile { op: 11 }),
+        act(1, Tag { node: 13, tag: 12 }),
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        act(0, Tag { node: 7, tag: 0 }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        act(1, Edit { file: 14 }),
+        Event::Plan { client: 0 },
+        Event::Plan { client: 2 },
+        Event::Step { client: 0 },
+        Event::Plan { client: 1 },
+        act(0, Tag { node: 9, tag: 4 }),
+        Event::Step { client: 1 },
+        Event::Plan { client: 1 },
+        Event::Step { client: 2 },
+        Event::Step { client: 1 },
+        Event::Plan { client: 2 },
+        Event::Step { client: 2 },
+        Event::Step { client: 1 },
+    ];
+    let limits = known_limits_of(3, &events);
+    // That case alone.
+    assert_eq!(limits.len(), 1, "{limits:?}");
+    assert!(
+        limits[0].starts_with("NewItemKeepsBaseTag") && limits[0].ends_with(" Red"),
+        "{limits:?}"
+    );
+}

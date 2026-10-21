@@ -2998,6 +2998,40 @@ fn a_restored_folder_made_here_keeps_a_removal_from_the_drive() -> R {
     Ok(())
 }
 
+/// The same, restored elsewhere (work removed) before the folder is made here, under another
+/// name (a file of this device's holds "a"): the version it was to be made of is gone, so it
+/// waits for the next plan, which makes it from the drive as it is now. Made with work and
+/// settled against the drive's version (no base, the names differ), work read as added here,
+/// and went back up over the removal.
+#[test]
+fn a_folder_to_make_from_recently_deleted_restored_since_waits() -> R {
+    let mut h = Harness::new()?;
+    if !tags_kept(&h.folder.root) {
+        return Ok(()); // nothing to tag with here
+    }
+    let node = NodeId::new();
+    let mirror = MirrorRow::from_content(
+        some_version(),
+        node,
+        NodeId::ROOT,
+        NodeKind::Folder,
+        &NodeContent::folder("a"),
+        None,
+    );
+    h.db.write(|s| s.account().put_mirror(&mirror))?;
+    let report = h.run(vec![Op::LocalMkdir {
+        node,
+        parent: NodeId::ROOT,
+        name: "a (conflict 1)".into(),
+        tags: Tags::new(vec![Tag::new("Work", 0)]),
+        drive: None,
+    }])?;
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert!(!h.folder.root.join("a (conflict 1)").exists());
+    assert_eq!(h.base(node)?, None);
+    Ok(())
+}
+
 /// A folder synced here tagged Work, deleted here and on the drive (its last version there
 /// tagged `last`), made again here as it comes back for a child another device wrote into it
 /// (its RemoteCreate to follow), whose tag write fails: it holds none. Returns its base after,
@@ -3304,9 +3338,9 @@ fn a_failed_tag_write_left_unread_keeps_what_the_scan_read() -> R {
     a_failed_tag_write_keeps_what_the_item_holds(true)
 }
 
-/// A folder made whose tag write fails, and what it holds can't be read either: made here, it
-/// holds none (a failed write changes nothing), and its row says so: never not known, which
-/// reads as the drive's tags.
+/// A folder made whose tag write fails, and what it holds can't be read either: made here (from
+/// Recently deleted), it holds none (a failed write changes nothing), and its row says so: never
+/// not known, which reads as the drive's tags.
 #[test]
 fn a_folder_made_whose_tags_cant_be_read_back_holds_none() -> R {
     let mut h = Harness::new()?;
@@ -3314,6 +3348,22 @@ fn a_folder_made_whose_tags_cant_be_read_back_holds_none() -> R {
         return Ok(()); // nothing to tag with here
     }
     let node = NodeId::new();
+    let mut tagged = NodeContent::folder("d");
+    tagged.set_tags(&Tags::new(vec![Tag::new("Work", 0)]));
+    let row = MirrorRow::from_content(
+        some_version(),
+        node,
+        NodeId::ROOT,
+        NodeKind::Folder,
+        &tagged,
+        None,
+    );
+    h.db.write(|s| {
+        s.account().put_removed(&RemovedRow {
+            row,
+            removed_at: Some(1),
+        })
+    })?;
     h.cfg.hooks.faults.fail(FailPoint::TagWrite, 1);
     h.cfg.hooks.faults.fail(FailPoint::TagRead, 1);
     let report = h.run(vec![Op::LocalMkdir {
