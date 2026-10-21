@@ -1,25 +1,47 @@
 //! The sync root's one writer: every change the executor (and recovery) makes to a folder's
 //! entries goes through [`Disk`], in the order the state DB needs with its durable commits (its
-//! docs on durability). Tags and times written on an item aren't ordered: one lost reads as a
-//! change of those only. It also owns the run's durable commits, which order the DB against the
-//! disk and the drive: write-ahead records before what they record, and the scan's new ids
-//! before anything goes to the drive.
+//! docs on durability), and so do the tags and creation times it writes on items (a
+//! download's in its [`Disk::put`]). Those aren't
+//! ordered: one lost reads as a change of those only. It also owns the run's durable commits,
+//! which order the DB against the disk and the drive: write-ahead records before what they
+//! record, and the scan's new ids before anything goes to the drive.
 
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use hbsync_local::layout;
-use hbsync_platform::{RelPath, ops};
+use hbsync_platform::{RelPath, ops, tags};
 use hbsync_state::{FolderTx, StateDb, StateError};
-use hbsync_types::NodeId;
+use hbsync_types::{NodeId, Tags};
 
+use super::{FailPoint, Hooks};
+use crate::folder::FolderCtx;
 use crate::trash::Trash;
+
+/// What a tag write left on an item ([`Disk::write_tags`]).
+#[derive(Debug, Clone)]
+pub(super) struct TagsLeft {
+    /// What read back, for a placement's record to claim (`None`: not known: the write failed,
+    /// read back as nothing to go by, or the volume keeps none).
+    pub(super) claimed: Option<Tags>,
+    /// What the item holds: what read back, or where the write failed, what it holds as read
+    /// (`None` where that can't be read either: its row takes what it held before then,
+    /// [`Disk::held_after`]). Taken for not known while it can be read, the item read as
+    /// holding the drive's tags, and the next scan took their absence for the user removing
+    /// them.
+    pub(super) held: Option<Tags>,
+    pub(super) failed: bool,
+}
 
 /// The disk of one sync root, as a run (or recovery) writes it.
 #[derive(Debug)]
 pub(super) struct Disk<'a> {
     root: &'a Path,
+    /// The folder (its root, whether its volume keeps tags, once a tag write found out).
+    folder: &'a FolderCtx,
+    /// Test faults.
+    hooks: &'a Hooks,
     /// The ids the scan gave new items are durable: before anything goes to the drive, they
     /// are (a power cut must not make the scan give others to what went out).
     ids_durable: bool,
@@ -28,12 +50,19 @@ pub(super) struct Disk<'a> {
 }
 
 impl<'a> Disk<'a> {
-    pub(super) fn new(root: &'a Path) -> Self {
+    pub(super) fn new(folder: &'a FolderCtx, hooks: &'a Hooks) -> Self {
         Disk {
-            root,
+            root: &folder.root,
+            folder,
+            hooks,
             ids_durable: false,
             trash: None,
         }
+    }
+
+    /// Whether test fault `point` fails now.
+    fn fails(&self, point: FailPoint) -> bool {
+        self.hooks.fails(point)
     }
 
     pub(super) fn root(&self) -> &'a Path {
@@ -89,6 +118,72 @@ impl<'a> Disk<'a> {
         to: &RelPath,
     ) -> Result<io::Result<()>, StateError> {
         rename_ordered(db, &self.abs(from), &self.abs(to))
+    }
+
+    // ---- what is written on items: tags, creation times ----
+
+    /// Whether the root's volume keeps tags, as far as known (this OS keeps some, and no tag
+    /// write found it doesn't).
+    pub(super) fn tags_kept(&self) -> bool {
+        tags::CAN_TAG && self.folder.tags_kept.get() != Some(&false)
+    }
+
+    /// Writes `tags` on the item at `path` ([`tags::write_on`]), noting whether the volume
+    /// keeps tags, and says what that left ([`TagsLeft`]).
+    pub(super) fn write_tags(&self, path: &Path, tags: &Tags) -> TagsLeft {
+        let written = match self.fails(FailPoint::TagWrite) {
+            true => Err(io::Error::other("its tag write failed (a test)")),
+            false => tags::write_on(path, tags),
+        };
+        match written {
+            Ok(tags::Written::Unsupported) => {
+                let _ = self.folder.tags_kept.set(false);
+                TagsLeft {
+                    claimed: None,
+                    held: None,
+                    failed: false,
+                }
+            }
+            Ok(tags::Written::Done(read)) => {
+                let _ = self.folder.tags_kept.set(true);
+                TagsLeft {
+                    claimed: read.clone(),
+                    held: read,
+                    failed: false,
+                }
+            }
+            Err(_) => TagsLeft {
+                claimed: None,
+                held: (self.tags_kept() && !self.fails(FailPoint::TagRead))
+                    .then(|| tags::read(path))
+                    .flatten(),
+                failed: true,
+            },
+        }
+    }
+
+    /// Whether a tag write failed and what it left couldn't be read back, on a volume that
+    /// keeps tags.
+    pub(super) fn unread(&self, left: &TagsLeft) -> bool {
+        left.failed && left.held.is_none() && self.tags_kept()
+    }
+
+    /// What a tag write left on an item that held `before`, for its row: what read back, or
+    /// where the write failed and that read failed too, `before`, as a failed write changes
+    /// nothing. Not known read as the drive's tags: a commit settled its base on them, and the
+    /// scan that then read the item without them sent their removal up.
+    pub(super) fn held_after(&self, left: TagsLeft, before: Tags) -> Option<Tags> {
+        if self.unread(&left) {
+            Some(before)
+        } else {
+            left.held
+        }
+    }
+
+    /// Sets the creation time of the item at `path` (Unix ms), where the system lets it: only
+    /// shown, never synced on, so a file system that won't take it is no failure.
+    pub(super) fn set_created(&self, path: &Path, created_ms: i64) {
+        let _ = ops::set_created(path, created_ms);
     }
 
     // ---- the folder's trash ----

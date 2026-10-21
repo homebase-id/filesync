@@ -109,7 +109,7 @@ impl Executor<'_> {
         let held_before = prior.clone().unwrap_or_default();
         // Where the volume keeps no tags (this OS none), what it holds of them is never known:
         // it claims none, as a download does.
-        let kept_tags = self.tags_kept();
+        let kept_tags = self.disk.tags_kept();
         let none = tags.held_by(self.folder.os).is_empty();
         let mut record = acted.as_ref().map(|a| Placing {
             base: BaseRow::new(node, a.state.clone(), a.at),
@@ -136,7 +136,7 @@ impl Executor<'_> {
         if !adopt && self.crash_here(CrashPoint::AfterPlaced) {
             return Ok(Outcome::Retry("crash point reached".into()));
         }
-        let left = self.write_tags(&abs, tags);
+        let left = self.disk.write_tags(&abs, tags);
         let tags = left.claimed.clone();
         // Tags written: the record claims what the folder holds now, before its commit. A
         // folder taken over held its own: a failed write left those, not known (none claimed).
@@ -149,9 +149,8 @@ impl Executor<'_> {
                 self.disk.write_durable(self.db, |s| s.put_placing(r))?;
             }
         }
-        // Only shown, never synced on: a file system that won't take it is no failure.
         if let Some(ct) = created_ms {
-            let _ = ops::set_created(&abs, ct);
+            self.disk.set_created(&abs, ct);
         }
         let stat = match self.fails(FailPoint::PlacedRead) {
             true => Err(io::Error::other("its read failed (a test)")),
@@ -175,7 +174,7 @@ impl Executor<'_> {
             fingerprint: meta.fingerprint(),
             executable: None,
             hash: None,
-            tags: self.held_after(left, held_before),
+            tags: self.disk.held_after(left, held_before),
         };
         let (os, folder) = (self.folder.os, self.folder);
         let fails = self.fails(FailPoint::Commit);
@@ -266,8 +265,8 @@ impl Executor<'_> {
         }
         // A failed write leaves the item what it held: read so, not as not known (which reads
         // as the drive's tags, and a tag only the item has would never go up).
-        let left = self.write_tags(&abs, tags);
-        let unread = self.unread(&left);
+        let left = self.disk.write_tags(&abs, tags);
+        let unread = self.disk.unread(&left);
         // Writing tags moves the change time only (a folder's mtime moves with its children).
         // If anything else moved, the item changed meanwhile: the old row stays, and the
         // rescan looks at it.

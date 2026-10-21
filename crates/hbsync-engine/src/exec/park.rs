@@ -99,7 +99,8 @@ pub(super) fn restore_parked(
 /// An original name this device now filters (§10) may be held by an item it doesn't track, which
 /// would keep the parked item away for good: it takes the first free numbered name instead.
 pub(super) fn unpark(db: &mut StateDb, folder: &FolderCtx) -> Result<(), StateError> {
-    let disk = Disk::new(&folder.root);
+    let hooks = Hooks::default();
+    let disk = Disk::new(folder, &hooks);
     for node in db.read(|s| s.all_parked())? {
         let place = db.read(|s| {
             let Some(row) = s.local_by_node(node)? else {
