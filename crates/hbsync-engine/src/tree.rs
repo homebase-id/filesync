@@ -85,14 +85,6 @@ impl Tree {
         self.children.get(&parent).into_iter().flatten().copied()
     }
 
-    /// The folders nodes are in that aren't in the tree themselves (the root aside).
-    pub(crate) fn missing_parents(&self) -> HashSet<NodeId> {
-        self.iter()
-            .map(|(_, state)| state.parent)
-            .filter(|p| !p.is_root() && !self.contains(*p))
-            .collect()
-    }
-
     /// The child of `parent` whose name has the same key as `name`, other than `except`.
     pub fn child_named(
         &self,

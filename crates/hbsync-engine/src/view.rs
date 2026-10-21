@@ -332,7 +332,7 @@ fn build(
             }
         }
     }
-    // A remote node whose folder isn't in the mirror may be an orphan, which the main folder
+    // A remote node whose folder isn't in the mirror, or is a file, may be an orphan, which the main folder
     // puts into Recovered files: where that is (live, removed or synced here before; loaded
     // after the role folders held nothing of are dropped: one holding it masks it), and what
     // may clash with the names coming, in it and, for its own, at the top (the plan asks for
@@ -346,7 +346,7 @@ fn build(
                 let remote = &b.input.remote;
                 let coming: BTreeSet<i32> = remote
                     .iter()
-                    .filter(|(_, st)| missing.contains(&st.parent))
+                    .filter(|(_, st)| missing.contains(&st.parent) || in_a_file(remote, st))
                     .map(|(_, st)| hbsync_namemap::sibling_hash(&st.name))
                     .collect();
                 let own = BTreeSet::from([hbsync_namemap::sibling_hash(RECOVERED_NAME)]);
@@ -474,13 +474,32 @@ fn reach(s: &ReadTx<'_>, folder: NodeId, scope: &Scope) -> Result<Reach, StateEr
 
 /// The folders whose rows in Recently deleted a plan of `remote` looks up, in the folder whose
 /// top is `top`: those remote nodes are in that aren't in it, and Recovered files where one may
-/// be an orphan the main folder adopts (sync semantics §6.3).
+/// be an orphan the main folder adopts (sync semantics §6.3): one whose folder is missing, or
+/// is a file (another writer's doing). One pass.
 pub fn looked_up_removed(remote: &crate::tree::Tree, top: NodeId) -> HashSet<NodeId> {
-    let mut missing = remote.missing_parents();
-    if top.is_root() && !missing.is_empty() {
+    let mut missing = HashSet::new();
+    let mut orphans = false;
+    for (_, state) in remote.iter() {
+        match remote.get(state.parent) {
+            None if !state.parent.is_root() => {
+                missing.insert(state.parent);
+                orphans = true;
+            }
+            Some(p) if p.kind == NodeKind::File => orphans = true,
+            _ => {}
+        }
+    }
+    if top.is_root() && orphans {
         missing.insert(NodeId::RECOVERED);
     }
     missing
+}
+
+/// Whether `state`'s folder in `remote` is a file (another writer's doing): an orphan.
+fn in_a_file(remote: &crate::tree::Tree, state: &NodeState) -> bool {
+    remote
+        .get(state.parent)
+        .is_some_and(|p| p.kind == NodeKind::File)
 }
 
 /// Whether the mirror no longer has `node` as the plan reads it: not there, or taken along by

@@ -3939,3 +3939,72 @@ fn a_narrow_view_leaves_a_removed_folder_in_the_role_folder_alone() -> R {
     );
     Ok(())
 }
+
+/// A node another writer put in a file is an orphan for Recovered files (§6.3), where a synced
+/// item already holds its name: both views look up what is in Recovered files by that name
+/// from the first (the whole view missed it and planned the clash; the narrow one took a
+/// second round, listing the top and Recovered files whole), and give the node another name.
+#[test]
+fn a_node_in_a_file_meets_what_is_in_recovered_files() -> R {
+    let mut h = Harness::new()?;
+    let (file, kept, new) = (NodeId::new(), NodeId::new(), NodeId::new());
+    let recovered = hbsync_types::RECOVERED_NAME;
+    h.local_folder(recovered, NodeId::RECOVERED)?;
+    h.local_file(&format!("{recovered}/c"), kept, b"kept")?;
+    h.local_file("f", file, b"f")?;
+    let (kept_c, file_c) = (h.content(b"kept"), h.content(b"f"));
+    let synced = [
+        (
+            NodeId::RECOVERED,
+            NodeState::folder(NodeId::ROOT, recovered),
+        ),
+        (kept, NodeState::file(NodeId::RECOVERED, "c", kept_c)),
+        (file, NodeState::file(NodeId::ROOT, "f", file_c)),
+    ];
+    h.db.write(|s| {
+        for (node, state) in &synced {
+            let at = some_version();
+            s.folder()
+                .put_base(&BaseRow::new(*node, state.clone(), at))?;
+            let content = match state.content {
+                Some(c) => NodeContent::file(&state.name, 0, c.size, false),
+                None => NodeContent::folder(&state.name),
+            };
+            let hash = state.content.map(|c| c.hash);
+            let row = MirrorRow::from_content(at, *node, state.parent, state.kind, &content, hash);
+            s.account().put_mirror(&row)?;
+        }
+        let row = MirrorRow::from_content(
+            some_version(),
+            new,
+            file,
+            NodeKind::File,
+            &NodeContent::file("c", 0, 3, false),
+            Some(hash_bytes(b"new", h.folder.algorithm)),
+        );
+        s.account().put_mirror(&row)?;
+        s.folder().mark_dirty(new)
+    })?;
+    let ctx = FolderCtx {
+        scope: Arc::new(Scope::of(NodeId::ROOT)),
+        ..h.folder.clone()
+    };
+    let opts = crate::plan::Options::default();
+    let reconcile = |input: &crate::reconcile::Input, _: &mut StateDb| {
+        crate::reconcile::reconcile(input, &opts, ctx.masking())
+    };
+    let whole = h.db.read(|s| view::build_input(s, &[new], &ctx))?;
+    let whole = crate::reconcile::reconcile(&whole, &opts, ctx.masking());
+    let narrow = view::plan_narrow(&mut h.db, &[new], &ctx, reconcile)?;
+    assert_eq!(narrow, whole, "the narrow view plans as the whole one");
+    let placed = whole.ops.iter().find_map(|op| match op {
+        Op::LocalDownload {
+            node, parent, name, ..
+        } if *node == new => Some((*parent, name)),
+        _ => None,
+    });
+    let (parent, name) = placed.ok_or_else(|| format!("{:?}", whole.ops))?;
+    assert_eq!(parent, NodeId::RECOVERED);
+    assert_ne!(name, "c", "not over what Recovered files holds");
+    Ok(())
+}
