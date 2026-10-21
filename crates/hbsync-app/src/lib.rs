@@ -31,7 +31,7 @@ pub use config::{Config, ConfigError, MassDelete, Root};
 pub use hbsync_homebase::app::{APP_NAME, files_online};
 pub use identity::Identity;
 pub use paths::{NoHome, Paths};
-pub use protocol::{Control, DaemonStatus, FolderStatus, State};
+pub use protocol::{Control, DaemonStatus, FolderStatus, HeldAnswer, State};
 pub use runner::{Command, Handle, Runner, RunnerConfig};
 pub use secrets::CredentialError;
 pub(crate) use secrets::{CredentialStore, Location};

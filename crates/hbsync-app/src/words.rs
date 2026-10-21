@@ -5,7 +5,7 @@ use std::path::Path;
 use hbsync_types::NodeKind;
 use hbsync_types::activity::{Deleted, Progress, Synced, SyncedKind};
 
-use crate::protocol::{DeletedItem, FolderStatus, HeldDeletes, State};
+use crate::protocol::{DeletedItem, FolderStatus, HeldAnswer, HeldDeletes, State};
 
 /// Now, in Unix seconds.
 pub use hbsync_types::unix_now as now;
@@ -109,8 +109,6 @@ pub fn synced(s: &Synced) -> String {
     format!("{place}: {}{size}", what(s))
 }
 
-/// What held deletes would do, a sentence for each side: "100 items deleted on this computer
-/// will be deleted from your Homebase and your other devices."
 /// An item of Recently deleted, for a list: "photos/a.jpg (2.1 MB), deleted 3 h ago".
 pub fn deleted(item: &DeletedItem, now: u64) -> String {
     let d = &item.deleted;
@@ -171,25 +169,49 @@ pub fn last_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-pub fn held_deletes(held: &HeldDeletes) -> Vec<String> {
+/// What the held deletes `held` are and what each answer does, a paragraph for each way:
+/// `delete` and `put_back` name the answers as the user gives them (the tray's buttons, the
+/// CLI's commands).
+pub fn held_deletes(held: &HeldDeletes, delete: &str, put_back: &str) -> Vec<String> {
     let mut out = Vec::new();
     if held.here > 0 {
+        let were = if held.here == 1 { "was" } else { "were" };
         out.push(format!(
-            "{} items in Homebase were deleted on this computer (or are newly ignored). Delete \
-             them from Homebase and your other devices too (kept in Recently deleted)? Put them \
-             back keeps them on Homebase and syncs them here again. Meanwhile a new item named \
-             like one of them syncs under a numbered name.",
-            held.here
+            "{} in Homebase {were} deleted on this computer (or newly ignored). {delete} \
+             removes them from Homebase and your other devices too: Recently deleted keeps \
+             them. {put_back} keeps them on Homebase and brings them back here. Until you \
+             answer, a new item with one of their names syncs under a numbered name.",
+            items(held.here)
         ));
     }
     if held.remotely > 0 {
-        out.push(
-            "Everything here was removed on another device. Remove it here too? Put them back \
-             keeps it here and restores it on Homebase, for every device."
-                .to_owned(),
-        );
+        out.push(format!(
+            "Everything here was removed on another device: {}. {delete} removes them \
+             here too. {put_back} keeps them here and restores them on Homebase, for every \
+             device.",
+            items(held.remotely)
+        ));
     }
     out
+}
+
+/// "1 item", "1,200 items".
+fn items(n: u64) -> String {
+    match n {
+        1 => "1 item".into(),
+        n => format!("{} items", count(n)),
+    }
+}
+
+/// The reply to an answer to held deletes the runner took: it goes with the next sync, or,
+/// `paused`, once syncing resumes.
+pub fn held_answered(answer: HeldAnswer, paused: bool) -> &'static str {
+    match (answer, paused) {
+        (HeldAnswer::Delete, false) => "Confirmed. They are deleted with the next sync.",
+        (HeldAnswer::Delete, true) => "Confirmed. They are deleted once you resume syncing.",
+        (HeldAnswer::PutBack, false) => "They are put back with the next sync.",
+        (HeldAnswer::PutBack, true) => "They are put back once you resume syncing.",
+    }
 }
 
 /// A sync in progress: "12 of 40 files, 3.1 MB of 40 MB".
@@ -273,6 +295,48 @@ mod tests {
         assert_eq!(
             deleted_place(&item(None), main),
             "(on the drive) Work/cv.txt"
+        );
+    }
+
+    /// Held deletes in the words of each client's answers, one paragraph a way, no question
+    /// in them (each client asks its own); the reply says when they go, and paused, that they
+    /// wait for the resume.
+    #[test]
+    fn held_deletes_and_answers() {
+        let held = HeldDeletes {
+            here: 812,
+            remotely: 0,
+            examples: Vec::new(),
+            token: "t".into(),
+        };
+        let cli = held_deletes(&held, "`hbsync confirm-deletes`", "`hbsync put-back`");
+        assert_eq!(cli.len(), 1);
+        assert!(cli[0].starts_with("812 items in Homebase were deleted on this computer"));
+        assert!(cli[0].contains(" `hbsync confirm-deletes` removes them from Homebase"));
+        assert!(cli[0].contains(" `hbsync put-back` keeps them on Homebase"));
+        let elsewhere = HeldDeletes {
+            here: 0,
+            remotely: 1200,
+            ..held
+        };
+        let tray = held_deletes(&elsewhere, "Delete", "Put them back");
+        assert_eq!(
+            tray,
+            [
+                "Everything here was removed on another device: 1,200 items. Delete removes them \
+              here too. Put them back keeps them here and restores them on Homebase, for every \
+              device."
+            ]
+        );
+        assert!(tray.iter().chain(&cli).all(|p| !p.contains('?')));
+
+        assert_eq!(
+            held_answered(HeldAnswer::Delete, false),
+            "Confirmed. They are deleted with the next sync."
+        );
+        assert_eq!(
+            held_answered(HeldAnswer::PutBack, true),
+            "They are put back once you resume syncing."
         );
     }
 

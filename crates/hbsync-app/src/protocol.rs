@@ -176,6 +176,16 @@ pub enum AccountControl {
     EmptyListed { db: String, seq: u64 },
 }
 
+/// The user's answer to held deletes (sync semantics §7): [`FolderControl::ConfirmDeletes`]
+/// or [`FolderControl::PutBack`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeldAnswer {
+    /// Let them through.
+    Delete,
+    /// Put them back.
+    PutBack,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FolderControl {

@@ -217,7 +217,7 @@ included (service managers restart it then).
     write for its state (a version moved on, a node id taken, a file gone: a change it
     wasn't told of, or an earlier try of its own write that landed unanswered). After a lost
     answer or such a refused write the sync reads at once; a read that works ends it;
-  - by a sync the user asked for (sync now, a resume, confirming held deletes) or the
+  - by a sync the user asked for (sync now, a resume, answering held deletes) or the
     machine waking up; asked until a sync ended, so a failed one asks again;
   - before Recently deleted's restore, emptying and the daily purge, while not current;
   - when this device makes a role folder that another device made meanwhile.
@@ -272,12 +272,22 @@ included (service managers restart it then).
   elsewhere, every synced file), some paths, and a token naming exactly these deletes and
   which way each goes, until they are answered (nothing expires; a held removal of every file
   lasts across restarts). An answer carries the token back: `confirm_deletes` lets exactly
-  them through, `put_back` puts exactly them back (sync semantics §7); when the held deletes
-  changed since, or the folder is gone (nothing is held there meanwhile), it is refused. The
-  tray asks "812 items in Homebase were deleted on this computer (or are newly ignored).
-  Delete them from Homebase and your other devices too?" (or, everything removed elsewhere,
-  "Another device removed everything here. Remove them here too?"), with **Delete** and
-  **Put them back**; each button names its answer, and a form without one does nothing.
+  them through, `put_back` puts exactly them back (sync semantics §7). The folder's runner
+  checks it when it comes, against what it holds: when the held deletes changed since, or the
+  folder is gone (nothing is held there meanwhile), it is refused; otherwise it is taken, and
+  only then is the reply Done. One answer each time they are shown: another is refused until a
+  sync shows them again. A taken answer goes with the next sync (after one in progress;
+  while paused, once syncing resumes), for the deletes it named: any held since stay held,
+  shown again. One dropped after it was taken (the folder went, or was set up again) is told
+  in a note. The tray says "812 items in Homebase were deleted on this computer (or newly
+  ignored). Delete removes them from Homebase and your other devices too: Recently deleted
+  keeps them. Put them back keeps them on Homebase and brings them back here. …" (or,
+  everything removed elsewhere, "Everything here was removed on another device: 1,200 items.
+  Delete removes them here too. Put them back keeps them here and restores them on Homebase,
+  for every device."), with **Delete** and **Put them back**; each button names its answer,
+  and a form without one does nothing. The CLI says the same with its commands in place of
+  the buttons, and asks one question. The reply says when they go: "with the next sync", or
+  "once you resume syncing".
 - **Notes:** each conflict and failure is noted once; one that comes back sync after sync (a
   file that can't be read) isn't noted again until it has gone away. An operation left for the
   next plan is noted only when this device can't do it (a name or path it can't hold, access

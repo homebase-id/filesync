@@ -183,7 +183,7 @@ fn two_computers_sync_through_the_daemon() -> Res<()> {
     );
     // Put back: they come down to b again.
     let out = b.ok(&["put-back", "--yes"])?;
-    assert!(out.contains("Putting them back"), "{out}");
+    assert!(out.contains("put back with the next sync"), "{out}");
     b.wait("many/ is back on b", |b| {
         Ok(std::fs::read_dir(b.path(&rel("many")))
             .map(|d| d.count() == 60)
