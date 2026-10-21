@@ -36,6 +36,7 @@ mod ids;
 mod model;
 mod narrow;
 mod oracle;
+mod tagbook;
 mod trace;
 mod world;
 
@@ -57,10 +58,6 @@ use crate::ids::Ids;
 use crate::model::client::{Client, ignoring_d};
 use crate::model::server::Server;
 use crate::oracle::{Ledger, tag_names, view_with};
-
-/// The client a tag add belongs to once no item holds it ([`Sim::tags_added`]): it stays with
-/// its node.
-const DETACHED: usize = usize::MAX;
 
 /// The simulation.
 #[derive(Debug)]
@@ -89,33 +86,6 @@ pub struct Sim {
     /// The mass-delete guard, on with this minimum (the fraction 0), else off. With it on,
     /// [`Sim::quiesce`] confirms what is held, as a user eventually does.
     pub guard: Option<usize>,
-    /// Tags users added (on which client, to which node), and removed, per node; and nodes
-    /// some user deleted. A tag added and never removed must be on its node in the end, unless
-    /// the node was deleted. An item that gets a new id on its client takes its tags along.
-    tags_added: BTreeSet<(usize, NodeId, String)>,
-    tags_removed: BTreeSet<(NodeId, String)>,
-    /// Tags a client removed from a node its base had them on, and not added again since, with
-    /// the server's time then: they stay removed, unless another client added them and the add
-    /// wasn't on the drive yet (a merge keeps either side's add; a removal made after the add
-    /// was sent up goes up after it, and wins).
-    tags_cleared: BTreeMap<(usize, NodeId, String), i64>,
-    /// Tags a client had added to an item it forked off as a conflict copy: the merge may give
-    /// them to the original too, as that client's add.
-    tags_forked: BTreeSet<(usize, NodeId, String)>,
-    /// Tag adds a client's remote write sent up (until the client adds the tag again), with the
-    /// server's time of the last such write: they stand once the item goes from it; a restore
-    /// keeps an add only if it holds it, or the add is still to go up ([`Sim::restored`]).
-    tags_sent: BTreeMap<(usize, NodeId, String), i64>,
-    /// Tag adds a client's user made to an item they then deleted there before the add was
-    /// sent up, while the pending plan may still send it: one that goes up stands with the node,
-    /// as any add sent up does ([`Sim::detach_add`]).
-    tags_unsent: BTreeSet<(usize, NodeId, String)>,
-    /// Tags a download wrote on a client's item whose record recovery dropped (the item
-    /// changed since: it can't be told from the file there before), that the item still
-    /// holds: read against the old base, they are that client's adds, and a removal made
-    /// elsewhere meanwhile may come back (sync semantics §8, §11: the known limit).
-    tags_unproven: BTreeSet<(usize, NodeId, String)>,
-    deleted: BTreeSet<NodeId>,
     /// Clients that are two folders of one computer (the main folder, a role folder).
     computers: Vec<(usize, usize)>,
     /// A download takes two steps: fetching, then putting in place and committing; anything
@@ -166,14 +136,6 @@ impl Sim {
             verbose: false,
             trace: Vec::new(),
             guard: None,
-            tags_added: BTreeSet::new(),
-            tags_forked: BTreeSet::new(),
-            tags_sent: BTreeMap::new(),
-            tags_unsent: BTreeSet::new(),
-            tags_removed: BTreeSet::new(),
-            tags_unproven: BTreeSet::new(),
-            tags_cleared: BTreeMap::new(),
-            deleted: BTreeSet::new(),
             computers: Vec::new(),
             split_downloads: false,
             refusing: false,
@@ -203,6 +165,17 @@ impl Sim {
     pub fn with_narrow_check(mut self) -> Self {
         self.narrow_check = true;
         self
+    }
+
+    /// For scripted tests: the tag adds [`Sim::check`] found lost to a known limit of the
+    /// engine, as `"Limit node tag"`.
+    pub fn tags_lost_to_known_limits(&self) -> Vec<String> {
+        self.ledger
+            .tags
+            .excused()
+            .into_iter()
+            .map(|(limit, (_, node, name))| format!("{limit:?} {node:?} {name}"))
+            .collect()
     }
 
     /// The drive refuses some requests as they are, for good, as Homebase refuses one it won't

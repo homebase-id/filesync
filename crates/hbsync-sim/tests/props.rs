@@ -4069,3 +4069,98 @@ fn regression_a_folder_moved_after_a_lost_commit_leaves_as_the_users() {
         panic!("{e}");
     }
 }
+
+/// Runs scripted `events` on `clients` clients, settles them and checks the outcome: the tag
+/// adds lost to a known limit of the engine, as [`Sim::tags_lost_to_known_limits`] names them.
+fn known_limits_of(clients: usize, events: &[Event]) -> Vec<String> {
+    let mut sim = Sim::new(clients);
+    sim.run(events);
+    assert!(sim.quiesce(30), "no convergence");
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    sim.tags_lost_to_known_limits()
+}
+
+/// A known limit (the user's call: not now): c0 removes Red, its plan sends the removal, and
+/// the user adds Red back before the write lands. The base settles on what both sides hold
+/// after the write (Red kept), so the next plan reads the drive's lack of Red as a removal
+/// there, and takes Red off the item. The oracle names it rather than passing it silently.
+#[test]
+fn regression_an_add_while_its_own_removal_lands_is_a_known_limit() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(0, Tag { node: 0, tag: 0 }), // Red added
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        act(0, Tag { node: 0, tag: 0 }), // Red removed
+        Event::Plan { client: 0 },
+        act(0, Tag { node: 0, tag: 0 }), // Red added again, the removal still to land
+        Event::Step { client: 0 },
+    ];
+    let limits = known_limits_of(3, &events);
+    // That case alone.
+    assert_eq!(limits.len(), 1, "{limits:?}");
+    assert!(
+        limits[0].starts_with("OwnRemovalInFlight") && limits[0].ends_with(" Red"),
+        "{limits:?}"
+    );
+}
+
+/// Seed 0a9df7c6, a known limit (the user's call: not now): c0's edit loses to c1's, which
+/// also removed Red, so c0 forks its item into a conflict copy and downloads c1's version as
+/// a new item. Its base keeps Red, which neither the new item nor the drive holds, and when c1
+/// adds Red again, c0 reads the item's lack of it as its own removal and sends it over the
+/// add. The oracle names it rather than passing it silently.
+#[test]
+fn regression_a_new_item_keeping_a_base_tag_is_a_known_limit() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(0, CreateFile { parent: 0, name: 6 }),
+        act(0, Tag { node: 0, tag: 12 }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        act(1, CreateFolder { parent: 0, name: 0 }),
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        Event::Step { client: 1 },
+        act(1, Edit { file: 0 }),
+        act(
+            1,
+            CreateFile {
+                parent: 1,
+                name: 11,
+            },
+        ),
+        act(0, CreateFile { parent: 0, name: 8 }),
+        act(1, Delete { node: 4 }),
+        act(0, Edit { file: 8 }),
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        act(
+            0,
+            Move {
+                node: 5,
+                parent: 0,
+                name: 3,
+            },
+        ),
+        act(1, Tag { node: 2, tag: 0 }),
+        act(0, CreateFile { parent: 0, name: 8 }),
+        Event::Plan { client: 1 },
+        act(0, Delete { node: 5 }),
+        Event::Step { client: 1 },
+        Event::Plan { client: 0 },
+        Event::Step { client: 1 },
+        Event::Step { client: 0 },
+        act(1, Tag { node: 0, tag: 12 }),
+    ];
+    let limits = known_limits_of(2, &events);
+    // That case alone.
+    assert_eq!(limits.len(), 1, "{limits:?}");
+    assert!(
+        limits[0].starts_with("NewItemKeepsBaseTag") && limits[0].ends_with(" Red"),
+        "{limits:?}"
+    );
+}

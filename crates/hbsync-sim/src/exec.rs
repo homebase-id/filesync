@@ -97,7 +97,13 @@ impl Sim {
             remote: remote.clone(),
             base_extra: client.extra.clone(),
             remote_complete: true,
-            local_unhashed: client.unhashed.iter().copied().collect(),
+            // Of the items it holds (as the engine's view marks its rows).
+            local_unhashed: client
+                .unhashed
+                .iter()
+                .copied()
+                .filter(|n| client.local.contains(*n))
+                .collect(),
             ..Default::default()
         };
         // On the drive, in a version no client reads ([`Action::NewerFolder`]).
@@ -296,7 +302,7 @@ impl Sim {
         client.removed_by_plan.clear();
         client.unremoved.clear();
         // A plan made since sends what the user does from now on.
-        self.tags_unsent.retain(|(at, _, _)| *at != c);
+        self.ledger.tags.planned(c);
         client.planned_local = client.local.clone();
         client.planned_remote = remote;
         client.planned_refs = std::mem::take(&mut input.remote_refs).into_iter().collect();
@@ -328,6 +334,8 @@ impl Sim {
             let new = self.ids.fresh();
             let client = &mut self.clients[c];
             client.parked.remove(&n);
+            // Its row goes from the scan, and with it the mark of a hash still to read.
+            client.unhashed.remove(&n);
             rekey_client(client, n, new);
             self.retrack(c, n, new);
             // The user's rule took it out of what this client syncs: its removal from the
@@ -446,11 +454,10 @@ impl Sim {
             if let Op::LocalDownload { tags, .. } | Op::LocalMkdir { tags, .. } = &op {
                 let refused = before_tags.iter().flat_map(Tags::iter).chain(tags.iter());
                 for tag in refused {
-                    let name = tag.name.clone();
                     // The item no longer holds what this client's user added to it: the add
                     // stays with the node (on the drive, or nowhere), not with the item (a
                     // conflict copy made of it later doesn't take it along).
-                    self.detach_add((c, node, name));
+                    self.ledger.tags.detach((c, node, tag.name.clone()));
                 }
             }
         }
@@ -501,20 +508,9 @@ impl Sim {
             | Op::RemoteCreate { tags, .. } = &op
                 && !landed
             {
+                let now = self.server.now();
                 for tag in tags.iter() {
-                    let add = (c, node, tag.name.clone());
-                    let now = self.server.now();
-                    if self.tags_added.contains(&add) {
-                        // The last write carrying it: one after a removal sends it again, as
-                        // this client's add (a node with no base here yet merges both sides').
-                        self.tags_sent.insert(add, now);
-                    } else if self.tags_unsent.remove(&add) {
-                        // Its item deleted here since, the plan sent it all the same: it stands
-                        // with the node.
-                        self.tags_added.insert(add.clone());
-                        self.tags_sent.insert(add.clone(), now);
-                        self.detach_add(add);
-                    }
+                    self.ledger.tags.sent(c, node, &tag.name, now);
                 }
             }
             if matches!(
@@ -627,6 +623,26 @@ impl Sim {
             let at = self.settle_against(c, node, against, op.is_transfer() && !landed, tags, ours);
             if let Some(at) = at {
                 self.clients[c].run_settled.insert(node, at);
+            }
+            // A new item (none was there) whose base keeps a tag neither it nor the version it
+            // came from holds: the known limit (`Limit::NewItemKeepsBaseTag`).
+            if fresh && matches!(op, Op::LocalDownload { .. } | Op::LocalMkdir { .. }) {
+                let client = &self.clients[c];
+                let lacks = |s: Option<&NodeState>, name: &str| {
+                    s.is_none_or(|s| s.tags.get(name).is_none())
+                };
+                let (item, drive) = (client.local.get(node), op.drive().map(|d| &d.state));
+                let kept: Vec<String> = client
+                    .base
+                    .get(node)
+                    .iter()
+                    .flat_map(|b| b.tags.iter())
+                    .map(|t| t.name.clone())
+                    .filter(|name| lacks(item, name) && lacks(drive, name))
+                    .collect();
+                for name in kept {
+                    self.ledger.tags.kept_on_new_item(c, node, &name);
+                }
             }
         }
         true
@@ -743,12 +759,7 @@ impl Sim {
                 }
                 client.local.remove(node);
                 client.local.insert(new_node, NodeState { name, ..state });
-                let added = self
-                    .tags_added
-                    .iter()
-                    .filter(|(at, n, _)| (*at, *n) == (c, node));
-                let forked: Vec<_> = added.cloned().collect();
-                self.tags_forked.extend(forked);
+                self.ledger.tags.forked(c, node);
                 self.retrack(c, node, new_node);
                 Done
             }
@@ -1454,10 +1465,10 @@ fn park_occupant(client: &mut Client, parent: NodeId, name: &str, except: Option
     if !leaving || client.local.get(occupant) != client.planned_local.get(occupant) {
         return false;
     }
+    // A record of an earlier parking is replaced, as the executor's (`put_parked`).
     client
         .parked
-        .entry(occupant)
-        .or_insert((state.parent, state.name.clone()));
+        .insert(occupant, (state.parent, state.name.clone()));
     let parked = NodeState {
         name: parked_name(occupant),
         ..state

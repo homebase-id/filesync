@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use hbsync_engine::deleted;
 use hbsync_engine::mask::masked;
+use hbsync_engine::reconcile::Op;
 use hbsync_engine::tree::Tree;
 use hbsync_engine::walk::End;
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
@@ -18,11 +19,12 @@ use hbsync_types::{
     FileContent, NodeId, NodeKind, NodeState, RemoteRef, Role, Tag, Tags, VersionTag,
 };
 
+use crate::Sim;
 use crate::action::{Action, JUNK, NAMES, TAGS};
-use crate::model::client::ignoring_d;
+use crate::model::client::{Client, ignoring_d};
 use crate::model::server::{Server, ServerNode};
 use crate::oracle::Seen;
-use crate::{DETACHED, Sim};
+use crate::tagbook::Limit;
 
 impl Sim {
     /// The server as client `c`'s folder sees it ([`Coords`]).
@@ -369,25 +371,20 @@ impl Sim {
                     }
                     (Action::Tag { .. }, Some(i)) => {
                         tags.remove(i);
-                        self.tags_removed.insert((node, name.to_owned()));
                         let synced = self.clients[c]
                             .base
                             .get(node)
                             .is_some_and(|b| b.tags.get(name).is_some());
-                        if synced {
-                            let now = self.server.now();
-                            self.tags_cleared.insert((c, node, name.to_owned()), now);
-                        }
+                        let now = synced.then(|| self.server.now());
+                        self.ledger.tags.remove(c, node, name, now);
                     }
                     (Action::Tag { .. }, None) => {
                         let Some(tag) = express(&Tag::new(name, colour), os) else {
                             return; // this OS can't hold it
                         };
                         tags.push(tag);
-                        self.tags_added.insert((c, node, name.to_owned()));
-                        self.tags_cleared.remove(&(c, node, name.to_owned()));
-                        // Added again: not sent up yet.
-                        self.tags_sent.remove(&(c, node, name.to_owned()));
+                        let (concurrent, limit) = self.removal_unseen(c, node, name);
+                        self.ledger.tags.add(c, node, name, concurrent, limit);
                     }
                     _ => return,
                 }
@@ -433,16 +430,7 @@ impl Sim {
                     },
                 );
                 self.retrack(c, node, new);
-                let moved: Vec<_> = self
-                    .tags_added
-                    .iter()
-                    .filter(|(at, n, _)| *at == c && *n == new)
-                    .cloned()
-                    .collect();
-                for (_, n, name) in moved {
-                    self.tags_added.remove(&(c, n, name.clone()));
-                    self.tags_added.insert((to, n, name));
-                }
+                self.ledger.tags.moved(c, to, new);
             }
             Action::ListDeleted => {
                 let rows = self.server.removed.iter().map(Server::at).collect();
@@ -687,62 +675,65 @@ impl Sim {
 
     /// `node` left the drive (a delete won): it settles the tag removals made before it.
     pub(crate) fn deleted_now(&mut self, node: NodeId) {
-        self.deleted.insert(node);
-        self.tags_cleared.retain(|(_, n, _), _| *n != node);
+        self.ledger.tags.deleted_now(node);
     }
 
     /// The user of client `c` deleted `node` there: what they did to its tags there went with
     /// it, won or lost, but for an add sent up ([`Sim::tag_changes_left`]); other clients' tag
     /// changes stand until the delete wins.
     fn deleted_here(&mut self, c: usize, node: NodeId) {
-        self.deleted.insert(node);
+        self.ledger.tags.deleted(node);
         self.user_removed(c, node);
         self.tag_changes_left(c, node);
     }
 
-    /// Client `c`'s item `node` left it (deleted or trashed there): the tag changes made there
-    /// went with it, but for an add sent up, which stands with the node ([`Sim::detach_add`]:
-    /// where a delete loses, the drive's version comes back with it). An item made of the node
-    /// here again later is not the one the user tagged, and doesn't take it along.
+    /// Client `c`'s item `node` left it (deleted or trashed there): [`TagBook::left`].
+    ///
+    /// [`TagBook::left`]: crate::tagbook::TagBook::left
     pub(crate) fn tag_changes_left(&mut self, c: usize, node: NodeId) {
-        self.tags_cleared
-            .retain(|(by, n, _), _| (*by, *n) != (c, node));
-        let adds: Vec<_> = self
-            .tags_added
-            .iter()
-            .filter(|(at, n, _)| (*at, *n) == (c, node))
-            .cloned()
-            .collect();
-        for add in adds {
-            if self.tags_sent.contains_key(&add) {
-                self.detach_add(add);
-            } else {
-                self.tags_added.remove(&add);
-                self.tags_unsent.insert(add);
-            }
-        }
+        self.ledger.tags.left(c, node);
     }
 
-    /// Client `c`'s add `add` no longer belongs to an item of its: it stays with the node (on the
-    /// drive, or nowhere), so an item made of the node later doesn't take it along. Its send
-    /// time goes along: merged with a detached add of the tag there, the last one, but not sent
-    /// where either isn't (one not sent excuses every removal).
-    pub(crate) fn detach_add(&mut self, add: (usize, NodeId, String)) {
-        if !self.tags_added.remove(&add) {
-            return;
-        }
-        let sent = self.tags_sent.remove(&add);
-        let detached = (DETACHED, add.1, add.2);
-        let merged = match self.tags_added.insert(detached.clone()) {
-            true => sent,
-            false => sent
-                .zip(self.tags_sent.get(&detached).copied())
-                .map(|(a, b)| a.max(b)),
+    /// Whether a removal of tag `name` from `node` is under way that client `c`'s add may lose
+    /// to: on another client, not sent up yet (its base has the tag, its item doesn't, or a
+    /// plan of its still sends the removal), or on the drive while `c`'s base still has it;
+    /// and the known limit it meets where the removal is `c`'s own, planned and still to
+    /// write the node ([`Limit::OwnRemovalInFlight`]).
+    fn removal_unseen(&self, c: usize, node: NodeId, name: &str) -> (bool, Option<Limit>) {
+        let has = |s: Option<&NodeState>| s.is_some_and(|s| s.tags.get(name).is_some());
+        let lacks = |s: Option<&NodeState>| s.is_some_and(|s| s.tags.get(name).is_none());
+        // A plan of a client's made from the removal, still to write it to the node.
+        let planned = |client: &Client| {
+            lacks(client.planned_local.get(node))
+                && client.plan.iter().any(|(op, _)| match op {
+                    Op::RemoteTags { node: n, tags, .. }
+                    | Op::RemoteUpdate { node: n, tags, .. } => {
+                        *n == node && tags.get(name).is_none()
+                    }
+                    _ => false,
+                })
         };
-        match merged {
-            Some(t) => self.tags_sent.insert(detached, t),
-            None => self.tags_sent.remove(&detached),
-        };
+        // Of another client whose items can hold the tag at all: an item that lacks it, or a
+        // plan sending its removal (the item gone since).
+        let pending = self.clients.iter().enumerate().any(|(d, client)| {
+            d != c
+                && express(&Tag::new(name, 0), client.os).is_some()
+                && has(client.base.get(node))
+                && (lacks(client.local.get(node)) || planned(client))
+        });
+        let client = &self.clients[c];
+        let synced = has(client.base.get(node));
+        // On the drive, live or in Recently deleted (a restore brings that version back).
+        let server = &self.server;
+        let stale = lacks(
+            server
+                .live
+                .get(&node)
+                .or(server.removed.get(&node))
+                .map(|n| &n.state),
+        );
+        let own = (synced && planned(client)).then_some(Limit::OwnRemovalInFlight);
+        (pending || (synced && stale), own)
     }
 
     /// `node` is back on the drive (from Recently deleted, or made again after the purge).
@@ -764,25 +755,15 @@ impl Sim {
     /// the delete (one that did lost the item, and the add with it), and sends the add up
     /// against the version back, as any add.
     fn restored(&mut self, node: NodeId, held: &BTreeSet<String>) {
-        if !self.deleted.remove(&node) {
-            return;
-        }
-        self.tags_cleared.retain(|(_, n, _), _| *n != node);
-        let (sent, clients) = (&self.tags_sent, &self.clients);
-        self.tags_added.retain(|add| {
-            let (c, n, name) = add;
-            let pending = || {
-                *c != DETACHED
-                    && !sent.contains_key(add)
-                    && clients.get(*c).is_some_and(|client| {
-                        client
-                            .local
-                            .get(node)
-                            .is_some_and(|item| item.tags.get(name).is_some())
-                            && !masked(&client.local, &client.filter).contains(&node)
-                    })
-            };
-            *n != node || held.contains(name) || pending()
+        let clients = &self.clients;
+        self.ledger.tags.restored(node, held, |(c, _, name)| {
+            clients.get(*c).is_some_and(|client| {
+                client
+                    .local
+                    .get(node)
+                    .is_some_and(|item| item.tags.get(name).is_some())
+                    && !masked(&client.local, &client.filter).contains(&node)
+            })
         });
     }
 
@@ -794,7 +775,7 @@ impl Sim {
     pub(crate) fn placed_back(&mut self, c: usize, node: NodeId) {
         self.ledger.back(c, node);
         if self.server.live.contains_key(&node) {
-            self.deleted.remove(&node);
+            self.ledger.tags.back(node);
         }
     }
 
@@ -945,37 +926,7 @@ impl Sim {
 
     /// Item `node` of client `c` is `new` from now on: the tags added to it there go along.
     pub(crate) fn retrack(&mut self, c: usize, node: NodeId, new: NodeId) {
-        let moved: Vec<String> = self
-            .tags_added
-            .iter()
-            .filter(|(at, n, _)| *at == c && *n == node)
-            .map(|(_, _, name)| name.clone())
-            .collect();
-        for name in moved {
-            self.tags_added.remove(&(c, node, name.clone()));
-            self.tags_added.insert((c, new, name));
-        }
-        // A removal on the item before counts for it after.
-        let removed: Vec<String> = self
-            .tags_removed
-            .iter()
-            .filter(|(n, _)| *n == node)
-            .map(|(_, name)| name.clone())
-            .collect();
-        for name in removed {
-            self.tags_removed.insert((new, name));
-        }
-        let cleared: Vec<(String, i64)> = self
-            .tags_cleared
-            .iter()
-            .filter(|((at, n, _), _)| *at == c && *n == node)
-            .map(|((_, _, name), when)| (name.clone(), *when))
-            .collect();
-        // The item's removal is the new id's now: the old node no longer has it.
-        for (name, when) in cleared {
-            self.tags_cleared.remove(&(c, node, name.clone()));
-            self.tags_cleared.insert((c, new, name), when);
-        }
+        self.ledger.tags.retrack(c, node, new);
     }
 }
 
@@ -1044,10 +995,10 @@ mod tests {
         ]);
         assert!(sim.quiesce(10));
         assert!(sim.item(0, "a").is_some(), "the delete lost");
-        assert!(sim.tags_cleared.contains_key(&(1, file, "Red".into())));
-        assert!(sim.tags_added.contains(&(1, file, "Work".into())));
+        assert!(sim.ledger.tags.has_cleared(&(1, file, "Red".into())));
+        assert!(sim.ledger.tags.has_added(&(1, file, "Work".into())));
         assert!(
-            sim.tags_added.contains(&(DETACHED, file, "Red".into())),
+            sim.ledger.tags.has_detached(&(0, file, "Red".into())),
             "sent up, it stays with the node"
         );
         sim.check().unwrap_or_else(|e| panic!("{e}"));
