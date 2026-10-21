@@ -210,10 +210,10 @@ impl Sim {
         let plan = reconcile_with_known(&input, &opts, masking, known);
         // Every fourth plan (each costs a state DB and three more plans), until a difference
         // is found (it is reported).
-        if self.narrow_check && !self.ledger.found_narrow_differs() {
-            self.narrow_rounds += 1;
-            if self.narrow_rounds.is_multiple_of(4) {
-                let round = self.narrow_rounds / 4;
+        if self.faults.narrow_check && !self.ledger.found_narrow_differs() {
+            self.faults.narrow_rounds += 1;
+            if self.faults.narrow_rounds.is_multiple_of(4) {
+                let round = self.faults.narrow_rounds / 4;
                 let what = self.check_narrow(c, &input, &opts, &known, &plan, round);
                 self.ledger.narrow_differs(|| what);
             }
@@ -414,7 +414,7 @@ impl Sim {
             .collect();
         self.ledger.planned_with(c, taken);
         // What the drive refused as it is isn't sent again (as `Engine::refused_out`).
-        let (ops, refused) = if !self.refusing {
+        let (ops, refused) = if !self.faults.refusing {
             (plan.ops.clone(), Vec::new())
         } else {
             let client = &self.clients[c];
@@ -440,7 +440,7 @@ impl Sim {
             let Ok(held) = held;
             held
         };
-        let waiting: Vec<Op> = match self.refusing {
+        let waiting: Vec<Op> = match self.faults.refusing {
             true => plan
                 .ops
                 .iter()
@@ -471,7 +471,7 @@ impl Sim {
                 Op::LocalTrash { node, .. } => Some(*node),
                 _ => None,
             }));
-        if self.refusing {
+        if self.faults.refusing {
             client.last_plan = ops.clone();
         }
         client.plan = ops.into_iter().map(|op| (op, 0)).collect();
@@ -590,18 +590,20 @@ impl Sim {
         let (mut tag_failed, mut commit_failed) = (false, false);
         let writes_tags = placement || matches!(op, Op::LocalTags { .. });
         if outcome == Outcome::Done && writes_tags && !landed {
-            self.writes += 1;
+            self.faults.writes += 1;
             let os = self.clients[c].os;
             // A folder made with none to write holds none, the write failing or not (the
             // executor's: it claims none).
             let nothing = matches!(&op, Op::LocalMkdir { tags, .. } if tags.held_by(os).is_empty());
             tag_failed = os != Os::Windows
                 && !nothing
-                && (std::mem::take(&mut self.fail_tags_next) || self.writes % 13 == 7);
+                && (std::mem::take(&mut self.faults.fail_tags_next)
+                    || self.faults.writes % 13 == 7);
             let recorded = matches!(op, Op::LocalDownload { .. })
                 || matches!(op, Op::LocalMkdir { drive: Some(_), .. }) && synced_before;
-            commit_failed =
-                recorded && (std::mem::take(&mut self.fail_commit_next) || self.writes % 11 == 5);
+            commit_failed = recorded
+                && (std::mem::take(&mut self.faults.fail_commit_next)
+                    || self.faults.writes % 11 == 5);
         }
         // A tag write that fails leaves the item as it was (a tag write: nothing recorded), or a
         // placed item with none (what it holds, as read, is what settles: the executor's; where
@@ -1185,7 +1187,7 @@ impl Sim {
                             },
                             Acts::Stale => return Skip,
                         };
-                        if self.split_downloads {
+                        if self.faults.split_downloads {
                             self.clients[c].fetched.insert(node, record);
                             return Outcome::Fetched;
                         }
@@ -1940,14 +1942,14 @@ impl Sim {
         let Some(what) = self.request(c, op) else {
             return false;
         };
-        let seen = self.judged.len();
-        *self.judged.entry(what).or_insert(seen % 4 == 3)
+        let seen = self.faults.judged.len();
+        *self.faults.judged.entry(what).or_insert(seen % 4 == 3)
     }
 
     /// Whether the drive refused `op` of client `c` as it is now, when it was sent.
     pub(crate) fn drive_refused(&self, c: usize, op: &Op) -> bool {
         self.request(c, op)
-            .is_some_and(|what| self.judged.get(&what) == Some(&true))
+            .is_some_and(|what| self.faults.judged.get(&what) == Some(&true))
     }
 
     /// What `op` of client `c` sends the drive or fetches from it, if it does
@@ -1955,7 +1957,8 @@ impl Sim {
     /// (`hbsync_engine::refused::key`), so a key that leaves out an input is caught.
     fn request(&self, c: usize, op: &Op) -> Option<String> {
         let sends = writes_drive(op) || matches!(op, Op::LocalDownload { .. });
-        (self.refusing && sends).then(|| format!("{op:?} {:?}", uploaded(&self.clients[c], op)))
+        (self.faults.refusing && sends)
+            .then(|| format!("{op:?} {:?}", uploaded(&self.clients[c], op)))
     }
 }
 

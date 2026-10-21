@@ -26,7 +26,7 @@ impl Sim {
     /// Client `c` syncs: it asks again about what it suspects (the drive answers truly), and,
     /// now and then, the drive says a live file it holds isn't there.
     pub(crate) fn hear_not_theres(&mut self, c: usize) {
-        if !self.lying {
+        if !self.faults.lying {
             return;
         }
         let now = {
@@ -36,15 +36,15 @@ impl Sim {
         };
         let suspects: Vec<_> = self.clients[c].suspects.clone().into_iter().collect();
         for (file, prior) in suspects {
-            if self.holds(file) {
+            if self.server.holds(file) {
                 // There: the suspicion goes.
                 self.clients[c].suspects.remove(&file);
             } else {
                 self.not_there(c, file, prior.version, now);
             }
         }
-        self.plans_heard += 1;
-        if !self.plans_heard.is_multiple_of(LIE_EVERY) {
+        self.faults.plans_heard += 1;
+        if !self.faults.plans_heard.is_multiple_of(LIE_EVERY) {
             return;
         }
         // A live file the client holds, said of once only (picked in id order: the base's
@@ -55,7 +55,7 @@ impl Sim {
             .filter(|(n, s)| {
                 s.kind == NodeKind::File
                     && self.server.live.contains_key(n)
-                    && !self.lied.contains(n)
+                    && !self.faults.lied.contains(n)
             })
             .map(|(n, _)| n)
             .collect();
@@ -63,18 +63,11 @@ impl Sim {
         if held.is_empty() {
             return;
         }
-        let node = held[(self.plans_heard / LIE_EVERY) as usize % held.len()];
-        self.lied.insert(node);
+        let node = held[(self.faults.plans_heard / LIE_EVERY) as usize % held.len()];
+        self.faults.lied.insert(node);
         let at = self.server.live[&node].remote;
         self.note(|_| format!("c{c}: the drive says {node:?} isn't there (wrongly)"));
         self.not_there(c, (node, at.file_id), Some(at.version), now);
-    }
-
-    /// Whether the drive holds `file`, live or in Recently deleted.
-    fn holds(&self, (node, file): File) -> bool {
-        [&self.server.live, &self.server.removed]
-            .iter()
-            .any(|m| m.get(&node).is_some_and(|n| n.remote.file_id == file))
     }
 
     /// Client `c` hears the identity's "not there" of `file`, known at `version`, at `now`.
@@ -84,12 +77,15 @@ impl Sim {
             NotThere::Gone => {
                 self.clients[c].suspects.remove(&file);
                 self.clients[c].gone.insert(file.1);
-                if self.holds(file) && self.gone_while_there.is_none() {
-                    self.gone_while_there = Some(format!(
-                        "c{c} took {:?} as gone for good, which the drive holds",
-                        file.0
-                    ));
-                }
+                let server = &self.server;
+                self.ledger.took_as_gone(|| {
+                    server.holds(file).then(|| {
+                        format!(
+                            "c{c} took {:?} as gone for good, which the drive holds",
+                            file.0
+                        )
+                    })
+                });
             }
             NotThere::Suspect(s) => {
                 self.clients[c].suspects.insert(file, s);
@@ -100,7 +96,7 @@ impl Sim {
     /// Whether a client took a file the drive holds as gone for good ([`Sim::check`] says
     /// which).
     pub fn took_a_live_file_as_gone(&self) -> bool {
-        self.gone_while_there.is_some()
+        self.ledger.took_a_live_file_as_gone()
     }
 
     /// The drive as client `c`'s plan sees it: without what it took as gone for good.
@@ -113,5 +109,32 @@ impl Sim {
             }
         }
         view
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{Action, Event, Sim};
+
+    /// A client that takes a file the drive holds as gone for good (the drive's "not there"
+    /// heard twice, a confirmation apart) is a breach [`Sim::check`] reports, once.
+    #[test]
+    fn a_live_file_taken_as_gone_is_reported() {
+        let mut sim = Sim::new(1);
+        sim.run(&[Event::Act {
+            client: 0,
+            action: Action::CreateFile { parent: 0, name: 0 },
+        }]);
+        assert!(sim.quiesce(10));
+        sim.check().unwrap_or_else(|e| panic!("{e}"));
+        let (&node, n) = sim.server.live.iter().next().expect("a live file");
+        let file = (node, n.remote.file_id);
+        let version = Some(n.remote.version);
+        sim.not_there(0, file, version, 0);
+        assert!(!sim.took_a_live_file_as_gone(), "a suspect only");
+        sim.not_there(0, file, version, super::CONFIRM_AFTER_MS);
+        assert!(sim.took_a_live_file_as_gone());
+        let e = sim.check().expect_err("reported");
+        assert!(e.contains("as gone for good"), "{e}");
     }
 }

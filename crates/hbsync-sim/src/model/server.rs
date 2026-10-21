@@ -51,6 +51,13 @@ impl Server {
     /// The folders no client reads ([`Server::unreadable`]) still on the drive, live or in
     /// Recently deleted: one deleted for good is known gone (its tombstone, a delete for good
     /// announced, or asked about).
+    /// Whether the drive holds file `file` of `node`, live or in Recently deleted.
+    pub(crate) fn holds(&self, (node, file): (NodeId, RemoteFileId)) -> bool {
+        [&self.live, &self.removed]
+            .iter()
+            .any(|m| m.get(&node).is_some_and(|n| n.remote.file_id == file))
+    }
+
     pub(crate) fn unreadable_on_drive(&self) -> impl Iterator<Item = (&NodeId, &BTreeSet<NodeId>)> {
         self.unreadable
             .iter()

@@ -26,11 +26,14 @@
 //! The modules: `action` (what happens), `model` (the server and the clients), `world` (what
 //! users, other devices and the server do), `exec` (what mirrors the engine), `crash` (a lost
 //! commit and its recovery), `gone` (the identity's "not there"), `oracle` (the ledger and the
-//! check), `ids` (counted node ids: a run replays the same from its events) and `trace`.
+//! check), `tagbook` (the tags the oracle owes), `narrow` (the engine's own planning path, for
+//! the narrow check), `faults` (the faults the simulation plays, and what they keep), `ids`
+//! (counted node ids: a run replays the same from its events) and `trace`.
 
 mod action;
 mod crash;
 mod exec;
+mod faults;
 mod gone;
 mod ids;
 mod model;
@@ -43,9 +46,6 @@ mod world;
 pub use action::{Action, Event};
 pub use model::server::{PURGE_EVERY, TRACE};
 
-use std::collections::{BTreeMap, BTreeSet};
-
-use hbsync_engine::reconcile::DriveVersion;
 use hbsync_engine::tree::Tree;
 use hbsync_local::Filter;
 use hbsync_platform::Os;
@@ -54,10 +54,12 @@ use hbsync_types::{NodeId, NodeKind, NodeState, Role, Uuid};
 
 use crate::action::NAMES;
 use crate::exec::extra;
+use crate::faults::Faults;
 use crate::ids::Ids;
 use crate::model::client::{Client, ignoring_d};
 use crate::model::server::Server;
 use crate::oracle::{Ledger, tag_names, view_with};
+use hbsync_engine::reconcile::DriveVersion;
 
 /// The simulation.
 #[derive(Debug)]
@@ -71,15 +73,6 @@ pub struct Sim {
     pub conflicts: usize,
     /// Where new items' ids come from.
     ids: Ids,
-    /// Crashes so far ([`Event::Crash`]).
-    crashes: u64,
-    /// Local placements and tag writes so far: now and then a tag write fails (a volume
-    /// refusing it), or a placement's commit (a commit write or a folder's stat failing).
-    writes: u64,
-    /// For scripted tests: the next placement with a record fails its commit.
-    fail_commit_next: bool,
-    /// For scripted tests: the next tag write fails.
-    fail_tags_next: bool,
     /// A store [`Action::Meanwhile`] records answers in, opened at its first, left empty.
     answers_db: Option<hbsync_state::StateDb>,
     /// Record every plan and skipped operation in `trace` (debugging).
@@ -90,26 +83,10 @@ pub struct Sim {
     pub guard: Option<usize>,
     /// Clients that are two folders of one computer (the main folder, a role folder).
     computers: Vec<(usize, usize)>,
-    /// A download takes two steps: fetching, then putting in place and committing; anything
-    /// may happen between them ([`Sim::with_split_downloads`]).
-    split_downloads: bool,
     /// The version the download just put in place acted on, for its commit.
     placed_from: Option<DriveVersion>,
-    /// The drive refuses some requests as they are ([`Sim::with_refusals`]): what it judged
-    /// each request it was sent, by everything the request sends.
-    refusing: bool,
-    judged: BTreeMap<String, bool>,
-    /// Every plan is checked against the engine's own planning path ([`Sim::with_narrow_check`]),
-    /// in rounds counted here.
-    narrow_check: bool,
-    narrow_rounds: usize,
-    /// The drive answers a wrong "not there" now and then ([`Sim::with_wrong_not_theres`]):
-    /// the plans heard so far, the files it said it of, and a client that took one as gone
-    /// for good while the drive held it.
-    lying: bool,
-    plans_heard: u64,
-    lied: BTreeSet<NodeId>,
-    gone_while_there: Option<String>,
+    /// The faults it plays, and what they keep ([`Faults`]).
+    faults: Faults,
 }
 
 impl Sim {
@@ -131,24 +108,12 @@ impl Sim {
             ops_executed: 0,
             conflicts: 0,
             ids: Ids::default(),
-            crashes: 0,
-            writes: 0,
-            fail_commit_next: false,
-            fail_tags_next: false,
             answers_db: None,
             verbose: false,
             trace: Vec::new(),
             guard: None,
             computers: Vec::new(),
-            split_downloads: false,
-            refusing: false,
-            judged: BTreeMap::new(),
-            narrow_check: false,
-            narrow_rounds: 0,
-            lying: false,
-            plans_heard: 0,
-            lied: BTreeSet::new(),
-            gone_while_there: None,
+            faults: Faults::default(),
             placed_from: None,
         }
     }
@@ -157,7 +122,7 @@ impl Sim {
     /// move on, or remove the node, between them, and a crash ([`Event::Crash`]) can lose the
     /// commit of a file already in place, for recovery to settle.
     pub fn with_split_downloads(mut self) -> Self {
-        self.split_downloads = true;
+        self.faults.split_downloads = true;
         self
     }
 
@@ -166,7 +131,7 @@ impl Sim {
     /// narrow views as the engine does (`view::plan_narrow`), against whole folders for the
     /// same dirty nodes, and the whole one against the sim's plan.
     pub fn with_narrow_check(mut self) -> Self {
-        self.narrow_check = true;
+        self.faults.narrow_check = true;
         self
     }
 
@@ -188,7 +153,7 @@ impl Sim {
     /// the drive) is judged anew. The clients record each refusal and don't send the same operation again
     /// (`hbsync_engine::refused`; a download once it didn't match twice).
     pub fn with_refusals(mut self) -> Self {
-        self.refusing = true;
+        self.faults.refusing = true;
         self
     }
 
@@ -197,7 +162,7 @@ impl Sim {
     /// clients judge it as the engine does (sync semantics §8b), and none may take the file as
     /// gone for good ([`crate::gone`]).
     pub fn with_wrong_not_theres(mut self) -> Self {
-        self.lying = true;
+        self.faults.lying = true;
         self
     }
 
@@ -325,12 +290,12 @@ impl Sim {
     /// For scripted tests: the next placement with a record fails its commit once its item is
     /// in place.
     pub fn fail_next_commit(&mut self) {
-        self.fail_commit_next = true;
+        self.faults.fail_commit_next = true;
     }
 
     /// For scripted tests: the next tag write fails (where the OS keeps tags).
     pub fn fail_next_tag_write(&mut self) {
-        self.fail_tags_next = true;
+        self.faults.fail_tags_next = true;
     }
 
     /// For scripted tests: the item at `path` on client `c`.
