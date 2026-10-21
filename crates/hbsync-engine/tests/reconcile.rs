@@ -1949,8 +1949,8 @@ fn a_chain_of_name_waits_holds_its_last_folder() {
 }
 
 /// A folder holding a file being written, planned all the same (the drive tagged it: it stays
-/// put), keeps its name: a new file here whose name clashes with it waits, never the folder
-/// renamed on both sides with the file in it.
+/// put), keeps its name: a new file here whose name clashes with it waits, and so does the
+/// folder's tag, never the folder renamed on both sides with the file in it.
 #[test]
 fn a_held_folder_planned_keeps_its_name() {
     let [x, g, wf] = ids(3)[..] else {
@@ -1984,10 +1984,93 @@ fn a_held_folder_planned_keeps_its_name() {
     );
     assert!(plan.deferred.contains(&x), "{:?}", plan.deferred);
     assert!(
-        plan.ops
-            .iter()
-            .any(|op| matches!(op, Op::LocalTags { node, .. } if *node == g)),
-        "the tag comes down: {:#?}",
+        plan.ops.is_empty(),
+        "the clash waits whole: {:#?}",
         plan.ops
     );
+}
+
+/// A new folder here holding a file being written, and a new folder of the same name on the
+/// drive: neither goes, never a second "Photos" on the drive (nor the drive's renamed for
+/// good); once the file is hashed, a name clash as any.
+#[test]
+fn a_new_held_folder_and_a_new_drive_folder_of_its_name_wait() {
+    let [mine, theirs, wf] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.local(mine, Some(folder(ROOT, "Photos")));
+    w.local(
+        wf,
+        Some(NodeState {
+            content: None,
+            ..file(mine, "w", "1")
+        }),
+    );
+    w.input.local_unhashed.insert(wf);
+    w.remote(theirs, Some(folder(ROOT, "Photos")));
+    let plan = w.plan();
+    assert!(plan.ops.is_empty(), "{:#?}", plan.ops);
+    assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+}
+
+/// A file edited on both sides, and a file being written here under the name its conflict
+/// copy would take: the fork waits (its copy would land on the held name), and isn't made
+/// on a later plan either.
+#[test]
+fn a_fork_onto_the_name_of_a_file_not_hashed_yet_waits() {
+    let [x, u] = ids(2)[..] else { unreachable!() };
+    let mut w = World::default();
+    w.synced(x, file(ROOT, "x.txt", "1"));
+    w.remote(x, Some(file(ROOT, "x.txt", "theirs")));
+    w.local(x, Some(file(ROOT, "x.txt", "mine")));
+    let copy = hbsync_engine::tree::conflict_copy_name("x.txt", &w.opts.device, &w.opts.date);
+    w.local(
+        u,
+        Some(NodeState {
+            content: None,
+            ..file(ROOT, &copy, "u")
+        }),
+    );
+    w.input.local_unhashed.insert(u);
+    let plan = w.plan();
+    assert!(plan.ops.is_empty(), "{:#?}", plan.ops);
+    assert!(plan.deferred.contains(&x), "{:?}", plan.deferred);
+}
+
+/// A confirmed folder that holds a file being written, and isn't deleted (its delete undone:
+/// the drive has it), confirms nothing in it: the drive's deletes of what is in it are held
+/// for the user, as any. Only what was in a confirmed folder whose own delete waits goes.
+#[test]
+fn a_confirmed_folder_that_stays_confirms_nothing_in_it() {
+    let v = ids(8);
+    let (f, wf, files) = (v[0], v[1], &v[2..]);
+    let mut w = World::default();
+    w.opts.mass_delete_min = 2;
+    w.synced(f, folder(ROOT, "f"));
+    for (i, n) in files.iter().enumerate() {
+        w.synced(*n, file(f, &format!("x{i}"), "1"));
+    }
+    w.synced(wf, file(f, "w", "w"));
+    for n in files {
+        w.remote(*n, None);
+    }
+    w.local(
+        wf,
+        Some(NodeState {
+            content: None,
+            ..file(f, "w", "w2")
+        }),
+    );
+    w.input.local_unhashed.insert(wf);
+    w.opts.confirmed = std::sync::Arc::new(std::collections::HashSet::from([f]));
+    let plan = w.plan();
+    assert_eq!(plan.held.len(), files.len(), "{plan:#?}");
+    assert!(plan.delete_waits.is_empty(), "{:?}", plan.delete_waits);
+
+    // The drive deletes the folder too: its delete waits, confirmed, and what was in it goes.
+    w.remote(f, None);
+    let plan = w.plan();
+    assert!(plan.held.is_empty(), "{plan:#?}");
+    assert_eq!(plan.delete_waits, [f]);
 }

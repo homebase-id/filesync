@@ -245,9 +245,11 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   either side, or every file on a side, the deletes are held and the user must confirm. The
   rest of the plan proceeds. A confirmation names the held deletes the user was shown, node
   by node: those go through, and are neither counted nor held again; it lasts while a delete
-  is pending for the node (done or undone, it is forgotten). Any other delete is judged as if
-  the confirmed ones weren't there (a confirmed trash of a folder with every file under it):
-  one the user didn't see is never let through by a confirmation. Simulator:
+  is pending for the node, or its delete waits for a file in it not hashed yet (§6.3; done or
+  undone, it is forgotten). Any other delete is judged as if the confirmed ones weren't there
+  (a confirmed trash of a folder with every file under it), except that of what was in a
+  confirmed folder whose delete waits so (planned apart meanwhile: the user saw it with the
+  folder): one the user didn't see is never let through by a confirmation. Simulator:
   `guarded_clients_delete_only_what_was_confirmed`; the guard's count across planning batches
   is the engine's (`a_confirmed_folder_trash_does_not_hold_other_deletes`).
 - **Online-only files** are never deleted remotely just because they have no local bytes.

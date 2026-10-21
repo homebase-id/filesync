@@ -213,7 +213,19 @@ impl Sim {
                         .count()
                 };
                 let (mut deleted, mut trashed) = (0, 0);
-                for op in plan.ops.iter().filter(|op| !confirmed.contains(&op.node())) {
+                // What was in a confirmed folder whose delete waits for a hash is confirmed.
+                let waits: HashSet<NodeId> = plan
+                    .delete_waits
+                    .iter()
+                    .copied()
+                    .filter(|n| confirmed.contains(n))
+                    .collect();
+                let unconfirmed = |op: &&Op| {
+                    let node = op.node();
+                    !confirmed.contains(&node)
+                        && !input.base.ancestors(node).iter().any(|a| waits.contains(a))
+                };
+                for op in plan.ops.iter().filter(unconfirmed) {
                     match op {
                         Op::RemoteDelete { node, .. }
                             if remote.get(*node).is_some_and(|s| s.kind == NodeKind::File) =>
@@ -294,8 +306,13 @@ impl Sim {
             .map(|op| (op, true))
             .chain(waiting.into_iter().map(|op| (op, false)))
             .collect();
-        // A confirmation lasts while the plan deletes its node.
-        let deleting: HashSet<NodeId> = plan.ops.iter().filter_map(Op::deletes).collect();
+        // A confirmation lasts while the plan deletes its node, or its delete waits for a hash.
+        let deleting: HashSet<NodeId> = plan
+            .ops
+            .iter()
+            .filter_map(Op::deletes)
+            .chain(plan.delete_waits.iter().copied())
+            .collect();
         client.confirmed = confirmed.intersection(&deleting).copied().collect();
         client.held = plan.held.iter().map(Op::node).collect();
         if self.refusing {

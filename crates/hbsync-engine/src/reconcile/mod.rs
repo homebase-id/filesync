@@ -102,6 +102,13 @@ pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
     plan
 }
 
+/// Whether `node` is a file here not hashed yet (§6.3), which every view loads
+/// (`ReadTx::unhashed_files`). A row the scan has no state for yet (its folder unrecorded, a
+/// name the drive can't hold) is only deferred: it holds nothing.
+fn is_unhashed_file(input: &Input, node: NodeId) -> bool {
+    input.local_unhashed.contains(&node) && input.local.contains(node)
+}
+
 /// Rounds of orphan and cycle repair at most (each round ends at least one cycle; a real tree
 /// needs one or two).
 const MAX_REPAIRS: usize = 64;
@@ -134,7 +141,7 @@ struct Reconciler<'a> {
     /// Each file not hashed yet, with the folders it holds.
     held_by: &'a [(NodeId, Vec<NodeId>)],
     /// What waited for a name this plan, with what is below it ([`Reconciler::fix_names`]).
-    waiters: Vec<NodeId>,
+    waiters: BTreeSet<NodeId>,
     /// Held nodes whose names something else waits for ([`Reconciler::fix_names`]).
     name_waits: HashSet<NodeId>,
     plan: Plan,
@@ -183,6 +190,7 @@ impl Holds {
         let mut by_file: Vec<(NodeId, Vec<NodeId>)> = input
             .local_unhashed
             .iter()
+            .filter(|n| is_unhashed_file(input, **n))
             .map(|&node| (node, held_from(input, node)))
             .collect();
         by_file.sort();
@@ -223,14 +231,14 @@ impl<'a> Reconciler<'a> {
             waits: &holds.waits,
             held: &holds.held,
             held_by: &holds.by_file,
-            waiters: Vec::new(),
+            waiters: BTreeSet::new(),
             name_waits: holds.named.clone(),
             plan: Plan::default(),
         }
     }
 
     /// The plan, what waited for a name in it, and what held the names (with an earlier plan's).
-    fn run(mut self) -> (Plan, Vec<NodeId>, HashSet<NodeId>) {
+    fn run(mut self) -> (Plan, BTreeSet<NodeId>, HashSet<NodeId>) {
         self.build_context();
         let dirty: Vec<NodeId> = self.input.dirty.iter().copied().collect();
         for node in dirty {
@@ -256,7 +264,15 @@ impl<'a> Reconciler<'a> {
             }),
             "the repairs left a cycle or an orphan"
         );
-        self.fix_names();
+        // A node held where it is for a name may hold the name another would take: again,
+        // till none more waits (each pass holds at least one node more).
+        loop {
+            let waited = self.waiters.len();
+            self.fix_names();
+            if self.waiters.len() == waited {
+                break;
+            }
+        }
         self.emit();
         self.guard_mass_delete();
         self.plan.waiting = self.waiting();
@@ -267,7 +283,7 @@ impl<'a> Reconciler<'a> {
     /// Whether `node` waits for a hash as it is, whatever its plan: a file not hashed yet, or
     /// what would take a name one holds.
     fn held_as_is(&self, node: NodeId) -> bool {
-        self.input.local_unhashed.contains(&node) || self.waits.contains(&node)
+        is_unhashed_file(self.input, node) || self.waits.contains(&node)
     }
 
     /// The files here not hashed yet that something else waits for ([`Plan::waiting`]).

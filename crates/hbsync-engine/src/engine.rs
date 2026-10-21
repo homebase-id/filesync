@@ -175,6 +175,9 @@ pub struct Engine {
     /// The files the current sweep found something waiting for, that couldn't be read
     /// ([`SyncReport::waiting`]).
     waiting: Vec<(String, String)>,
+    /// The files waited for that this sync pass read already, and why those it couldn't read
+    /// couldn't: each read once a pass.
+    read_once: std::collections::HashMap<NodeId, Option<String>>,
     /// What a sync that failed had done before ([`Engine::take_unreported`]).
     unreported: Option<SyncReport>,
     /// The folder's refusals ([`crate::refused`]).
@@ -232,6 +235,7 @@ impl Engine {
             rescanned: Default::default(),
             refusals: FolderRefusals::default(),
             waiting: Vec::new(),
+            read_once: Default::default(),
             unreported: None,
         })
     }
@@ -253,8 +257,10 @@ impl Engine {
     }
 
     /// Lets the held deletes of `nodes` (those of [`SyncReport::held`] the user was shown)
-    /// through, until they are done or undone. Deletes of other nodes are judged as before:
-    /// one the user didn't see is never let through by a confirmation.
+    /// through, until they are done or undone (a delete waiting for a file not hashed yet
+    /// lasts, and what was in such a folder goes with it: [`Plan::delete_waits`]). Deletes of
+    /// other nodes are judged as before: one the user didn't see is never let through by a
+    /// confirmation.
     pub fn confirm_deletes(&mut self, nodes: impl IntoIterator<Item = NodeId>) {
         self.confirmed.extend(nodes);
     }
@@ -388,6 +394,7 @@ impl Engine {
         self.progress.reset();
         self.rescanned.clear();
         self.waiting.clear();
+        self.read_once.clear();
         self.unreported = None;
         match self.sync_into(date, pulled, &mut report) {
             Ok(()) => Ok(report),
@@ -549,8 +556,8 @@ impl Engine {
 
     /// Something in `plan` waits for files here not hashed yet (sync semantics §6.3): those
     /// unchanged since the scan that couldn't read them (locked, unreadable: one still changing
-    /// is read by the scan its change brings) are read now, and `dirty` planned again if that
-    /// recorded anything. What still waits is told, by name (`waiting`). Costs nothing unless
+    /// is read by the scan its change brings) are read now, each once a sync pass, and `dirty`
+    /// planned again if that hashed one or found another change. What still waits is told, by name (`waiting`). Costs nothing unless
     /// something waits; then a row and a stat a file, an open (or a read) and a small write of
     /// each unchanged one, and, if that hashed or found a change, one more plan.
     fn read_waiting(
@@ -563,31 +570,45 @@ impl Engine {
             return Ok(plan);
         }
         let root = &self.cfg.folder.root;
-        let rows = self.db.read(|s| waiting_rows(s, &plan.waiting))?;
-        let unchanged: Vec<RelPath> = rows
+        let fresh: Vec<NodeId> = plan
+            .waiting
             .iter()
+            .copied()
+            .filter(|n| !self.read_once.contains_key(n))
+            .collect();
+        let rows = self.db.read(|s| waiting_rows(s, &fresh))?;
+        let unchanged: Vec<(NodeId, RelPath)> = rows
+            .into_iter()
             .filter(|(row, _)| {
                 // Its bytes as the scan saw them: size and mtime (a lock, or a mode change,
                 // moves ctime at most).
                 hbsync_platform::meta::stat(&row.path.to_native(root))
                     .is_ok_and(|m| row.fingerprint.same_after_rename(&m))
             })
-            .map(|(row, _)| row.path.clone())
+            .map(|(row, _)| (row.node, row.path))
             .collect();
+        for node in fresh {
+            self.read_once.insert(node, None);
+        }
         let mut plan = plan;
-        let mut why = std::collections::HashMap::new();
         if !unchanged.is_empty() {
-            let scan = rescan_entries(&mut self.db, root, &[], &unchanged, &self.scan_opts)?;
-            // A read that failed again records nothing new: no plan again for that.
-            if scan.hashed + scan.moved + scan.added + scan.removed > 0 {
+            let paths: Vec<RelPath> = unchanged.iter().map(|(_, p)| p.clone()).collect();
+            let scan = rescan_entries(&mut self.db, root, &[], &paths, &self.scan_opts)?;
+            // A read that failed again marks its node dirty again and records nothing new:
+            // planned again only for a hash or another change found.
+            if scan.hashed > 0 || scan.dirty > scan.unhashed.len() {
                 plan = self.plan(dirty, opts)?;
             }
-            why.extend(scan.unhashed);
+            for (path, why) in scan.unhashed {
+                if let Some((node, _)) = unchanged.iter().find(|(_, p)| *p == path) {
+                    self.read_once.insert(*node, Some(why));
+                }
+            }
         }
         if !plan.waiting.is_empty() {
             let rows = self.db.read(|s| waiting_rows(s, &plan.waiting))?;
             for (row, shown) in rows {
-                let why = why.remove(&row.path);
+                let why = self.read_once.get(&row.node).cloned().flatten();
                 let told = (
                     shown.to_string(),
                     why.unwrap_or_else(|| "being written".into()),
@@ -655,13 +676,13 @@ impl Engine {
             (after.0)();
         }
         // A confirmation lasts while its node's plan deletes it, or its delete waits for a
-        // file not hashed yet (§6.3): one whose delete was undone (the file back) is forgotten,
-        // so a later delete is judged anew.
+        // file in it not hashed yet (§6.3): one whose delete was undone (the file back) is
+        // forgotten, so a later delete is judged anew.
         let deleting: std::collections::HashSet<NodeId> = plan
             .ops
             .iter()
             .filter_map(Op::deletes)
-            .chain(plan.deferred.iter().copied())
+            .chain(plan.delete_waits.iter().copied())
             .collect();
         for node in &dirty {
             if !deleting.contains(node) {

@@ -23,7 +23,9 @@ const BASE: u32 = 13;
 /// `removed`, `kv`) is the account's; each synced folder has its rows in the other tables,
 /// with `folder` last in every key and index: a node's rows are found by id, a folder's listings
 /// by parent or file id, and a folder alone matches no index, so the planner (which has no
-/// statistics) never scans a whole folder for a lookup.
+/// statistics) never scans a whole folder for a lookup. The one exception is partial:
+/// `local_unhashed` holds a folder's files not hashed yet alone, and only a query with its
+/// condition reads it.
 const SCHEMA: &str = r#"
     -- Every node gets a small integer id once; every other table is keyed by it, so the
     -- 16-byte UUID is stored a single time. AUTOINCREMENT: an id is never handed out again,
@@ -559,8 +561,11 @@ mod tests {
                 ));
             }
         }
-        // Without comments or layout.
-        for sql in names("SELECT sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name")? {
+        // Without comments or layout; a partial index's condition too.
+        let partial = "SELECT sql FROM sqlite_master WHERE type = 'index' AND sql LIKE '%WHERE%' \
+             ORDER BY name";
+        let triggers = "SELECT sql FROM sqlite_master WHERE type = 'trigger' ORDER BY name";
+        for sql in names(partial)?.into_iter().chain(names(triggers)?) {
             let code = sql
                 .lines()
                 .map(|l| l.split("--").next().unwrap_or_default());

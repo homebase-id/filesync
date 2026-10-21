@@ -184,6 +184,10 @@ impl Reconciler<'_> {
             self.hold(node);
             return;
         }
+        if i.local_unhashed.contains(&node) {
+            self.defer(node);
+            return;
+        }
         let (lc, rc) = (self.local_change(node), self.remote_change(node));
         // One a folder's removal took along isn't in the tree.
         let r = i.remote.get(node).filter(|_| !self.taken.contains(&node));
@@ -250,6 +254,9 @@ impl Reconciler<'_> {
             };
         }
         if self.held.contains(&node) && !self.stays_put(node, target.as_ref()) {
+            if target.is_none() {
+                self.plan.delete_waits.push(node);
+            }
             self.plan.conflicts.retain(|c| c.node() != node);
             self.drop_fork(node);
             self.hold(node);
