@@ -4498,18 +4498,36 @@ fn put_back_ends_at_a_cycle_of_removed_folders() -> R {
         }
         Ok(())
     })?;
-    // A walk round the cycle never returns: the test process ends instead.
-    let done = Arc::new(AtomicBool::new(false));
-    let watched = done.clone();
+    let cycle = b.engine.db().read(|s| {
+        let parent =
+            |n| Ok::<_, hbsync_state::StateError>(s.removed_by_node(n)?.map(|r| r.row.parent));
+        Ok((parent(d.node)?, parent(q)?))
+    })?;
+    assert_eq!(
+        cycle,
+        (Some(q), Some(d.node)),
+        "a cycle in Recently deleted"
+    );
+    // A walk round the cycle never returns: the test process ends instead. Set however
+    // put_back ends.
+    struct Done(Arc<AtomicBool>);
+    impl Drop for Done {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::SeqCst);
+        }
+    }
+    let done = Done(Arc::new(AtomicBool::new(false)));
+    let watched = done.0.clone();
     std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(60));
+        std::thread::sleep(std::time::Duration::from_secs(300));
         if !watched.load(Ordering::SeqCst) {
             eprintln!("put back walked round the cycle");
             std::process::exit(1);
         }
     });
-    b.engine.put_back(&held)?;
-    done.store(true, Ordering::SeqCst);
+    let put = b.engine.put_back(&held);
+    drop(done);
+    assert!(put? > 0);
     Ok(())
 }
 

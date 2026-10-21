@@ -283,15 +283,16 @@ impl Engine {
     /// Returns how many it put back.
     pub fn put_back(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
         self.drive.pull(None)?;
-        // What loses its base, and what to restore from Recently deleted.
-        let (mut forget, mut restore) = (Vec::new(), Vec::new());
+        // What loses its base.
+        let mut forget = Vec::new();
         // One restore per item of Recently deleted, the outermost first: what was removed with
         // its folder comes back with it.
         let mut tops: Vec<(usize, NodeId)> = Vec::new();
         // Each once: a folder's held with what is in it.
         let mut seen = std::collections::HashSet::new();
-        let mut restored = 0;
-        self.db.read(|s| {
+        let restored = self.db.read(|s| {
+            // What to restore from Recently deleted, each with its folder here.
+            let mut restore = Vec::new();
             let here = |n: NodeId| s.local_by_node(n);
             let live = |n: NodeId| Ok::<_, StateError>(s.get_mirror(n)?.is_some());
             let base = |n: NodeId| s.get_base(n);
@@ -324,9 +325,11 @@ impl Engine {
                             if !seen.insert(row.node) {
                                 continue;
                             }
-                            if base(row.node)?.is_some() && !live(row.node)? {
+                            if let Some(b) = base(row.node)?
+                                && !live(row.node)?
+                            {
                                 match s.removed_by_node(row.node)? {
-                                    Some(r) => restore.push(r),
+                                    Some(r) => restore.push((r, b.state.parent)),
                                     None => forget.push(row.node),
                                 }
                             }
@@ -339,15 +342,15 @@ impl Engine {
                     (None, false) => {}
                 }
             }
-            // Up through the folders each was deleted with, as Recently deleted lists it.
-            restored = restore.len();
-            for top in crate::deleted::items_of(s, std::mem::take(&mut restore))? {
+            // Up through the folders each was deleted with, from its folder here.
+            let restored = restore.len();
+            for top in crate::deleted::items_of(s, restore)? {
                 let up = crate::walk::up::<_, StateError>(top, |at| {
                     Ok(base(at)?.map(|b| ((), b.state.parent)))
                 })?;
                 tops.push((up.items.len(), top));
             }
-            Ok(())
+            Ok(restored)
         })?;
         self.db.write(|s| {
             for &node in &forget {

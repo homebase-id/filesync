@@ -292,18 +292,28 @@ impl<'a, 's> RemovedRows<'a, 's> {
     }
 }
 
-/// The items of Recently deleted whose deletes took `removed` (rows of it) along
-/// ([`deleted_by_item`]).
+/// The items of Recently deleted whose deletes took `removed` along, each row of it with the
+/// folder it is in here: up from that folder, if it was deleted with it, as far as
+/// [`deleted_by_item`] goes; else the row's node, deleted on its own.
 pub(crate) fn items_of(
     s: &ReadTx<'_>,
-    removed: Vec<RemovedRow>,
+    removed: Vec<(RemovedRow, NodeId)>,
 ) -> Result<HashSet<NodeId>, StateError> {
-    let nodes: Vec<NodeId> = removed.iter().map(|r| r.row.node).collect();
-    let (mut rows, mut known) = (RemovedRows::new(s, removed), HashMap::new());
-    nodes
-        .into_iter()
-        .map(|n| deleted_by_item(&mut rows, n, &mut known))
-        .collect()
+    let starts: Vec<(NodeId, i64, NodeId)> = removed
+        .iter()
+        .map(|(r, folder)| (r.row.node, r.time(), *folder))
+        .collect();
+    let rows = removed.into_iter().map(|(r, _)| r).collect();
+    let (mut rows, mut known) = (RemovedRows::new(s, rows), HashMap::new());
+    let mut items = HashSet::new();
+    for (node, at, folder) in starts {
+        let with_folder = rows.get(folder)?.is_some_and(|f| deleted_with(at, f));
+        items.insert(match with_folder {
+            true => deleted_by_item(&mut rows, folder, &mut known)?,
+            false => node,
+        });
+    }
+    Ok(items)
 }
 
 /// The item of Recently deleted whose delete took `node` along: up through the folders it was
