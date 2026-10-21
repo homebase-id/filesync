@@ -621,7 +621,8 @@ the node left for the next plan: the drive's tags it wrote would read as this de
 them, and a tag removed on the drive meanwhile came back. The plan's move or remote write
 founds the base; where it runs first, the tags come down in the same run. A folder made here
 from Recently deleted (never synced here, its restore to follow) founds its base on the version
-there; restored or purged since the plan, that version is gone, and it waits for the next plan.
+there; where that no longer holds the tags it is to write (restored, changed or purged since the
+plan), it waits for the next plan.
 
 **Limits.** Tag changes are seen through the change time: on a volume that keeps attributes
 elsewhere (exFAT's `._` files) or with one-second times (HFS+), a change can go unnoticed until
