@@ -1952,3 +1952,162 @@ fn a_page_without_the_unread_file_holds_its_folder_too() -> R {
     assert_eq!(b.read("q/w")?, b"w2");
     Ok(())
 }
+
+/// A writer makes a synced file a folder (held here as the file it was, #175) and puts a role
+/// folder in it (a role's fixed id, as a file, then made a folder: masked for the main
+/// folder); another device edits its file in it, and this device's user deletes the file. The
+/// narrow view plans as the whole one (the testkit checks every plan): the masked folder in it
+/// keeps it, so the file is planned back down (and waits, the drive's version unreadable
+/// here). The narrow view read only part of what is in a node held so, and planned the
+/// drive's node deleted, with the role folder and the other device's file. Hostile writer
+/// seed 22000000438.
+#[test]
+fn a_held_file_holding_a_masked_folder_plans_alike_narrow_and_whole() -> R {
+    use hbsync_remote::{NodeMeta, PayloadInfo, RemoteBody};
+    use hbsync_types::schema::NodeContent;
+    use hbsync_types::{NodeKind, Role};
+
+    let server = server();
+    let [mut a, mut b] = pair(&server)?;
+    fs::write(b.root.join("C.TXT"), b"content #2")?;
+    b.sync()?;
+    // a sees only the folder.
+    {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        let h = srv
+            .live()
+            .find(
+                |h| matches!(&h.body, RemoteBody::Live { content, .. } if content.name == "C.TXT"),
+            )
+            .cloned()
+            .ok_or("C.TXT")?;
+        let node = h.node().ok_or("node")?;
+        let folder = |node, parent, name: &str| NodeMeta {
+            node,
+            parent,
+            kind: NodeKind::Folder,
+            content: NodeContent::folder(name),
+            removed: false,
+        };
+        srv.write_unchecked(Some(h.file_id), &folder(node, h.parent, "C.TXT"), None)?;
+        // A role's id on a file in it, then made a folder.
+        let role = Role::ALL[1].node();
+        let bytes = b"hostile".to_vec();
+        let info = PayloadInfo {
+            hash: hbsync_fileio::hash_bytes(&bytes, hbsync_fileio::HashAlgorithm::Blake3),
+            bytes: bytes.len() as u64,
+        };
+        let file = NodeMeta {
+            kind: NodeKind::File,
+            content: NodeContent::file("fixed", 1, bytes.len() as u64, false),
+            ..folder(role, node, "fixed")
+        };
+        let at = srv.write_unchecked(None, &file, Some((bytes, info)))?;
+        srv.write_unchecked(Some(at.file_id), &folder(role, node, "fixed"), None)?;
+    }
+    a.sync()?;
+    b.sync()?;
+    assert!(b.root.join("C.TXT").is_file(), "b holds the file it had");
+    // a puts a file in the folder, and edits it in the sync b's user deletes the file: b's
+    // plan then reads part of what is in the drive's node (that file's name).
+    fs::write(a.root.join("C.TXT/a"), b"content #3")?;
+    a.sync()?;
+    b.sync()?;
+    fs::write(a.root.join("C.TXT/a"), b"content #4")?;
+    a.sync()?;
+    fs::remove_file(b.root.join("C.TXT"))?;
+    // Both views plan the file back down; the drive's version can't be read here, so that
+    // waits (refused, #175), and nothing goes from the drive.
+    b.sync()?;
+    let report = b.sync()?;
+    assert!(
+        matches!(&report.refused[..], [(hbsync_engine::Op::LocalDownload { name, .. }, _)] if name == "C.TXT"),
+        "the file planned back down: {report:?}"
+    );
+    assert_eq!(report.ops_done, 0, "{report:?}");
+    let srv = server.lock().map_err(|_| "poisoned")?;
+    let names: Vec<_> = srv
+        .live()
+        .filter_map(|h| match &h.body {
+            RemoteBody::Live { content, .. } => Some(content.name.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(names.contains(&"C.TXT".to_string()), "{names:?}");
+    assert!(names.contains(&"fixed".to_string()), "{names:?}");
+    assert!(
+        names.contains(&"a".to_string()),
+        "a keeps its file: {names:?}"
+    );
+    Ok(())
+}
+
+/// The same with a file this device can read: a writer puts a role folder in a synced file
+/// (masked for the main folder), then a file in it as this device's user deletes the file. The
+/// narrow view read only the new file's name in it and planned the drive's file deleted (it
+/// ran, leaving the role folder under a deleted node); the masked folder keeps it: it comes
+/// back down.
+#[test]
+fn a_file_holding_a_masked_folder_comes_back_when_deleted() -> R {
+    use hbsync_remote::{NodeMeta, PayloadInfo, RemoteBody};
+    use hbsync_types::schema::NodeContent;
+    use hbsync_types::{NodeId, NodeKind, Role};
+
+    let server = server();
+    let [mut a, mut b] = pair(&server)?;
+    fs::write(b.root.join("C.TXT"), b"content #2")?;
+    b.sync()?;
+    a.sync()?;
+    let file_meta = |node, parent, name: &str, bytes: &[u8]| NodeMeta {
+        node,
+        parent,
+        kind: NodeKind::File,
+        content: NodeContent::file(name, 1, bytes.len() as u64, false),
+        removed: false,
+    };
+    let payload = |bytes: &[u8]| {
+        let info = PayloadInfo {
+            hash: hbsync_fileio::hash_bytes(bytes, hbsync_fileio::HashAlgorithm::Blake3),
+            bytes: bytes.len() as u64,
+        };
+        Some((bytes.to_vec(), info))
+    };
+    let c = {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        let c = srv
+            .live()
+            .find(
+                |h| matches!(&h.body, RemoteBody::Live { content, .. } if content.name == "C.TXT"),
+            )
+            .and_then(|h| h.node())
+            .ok_or("C.TXT")?;
+        let role = Role::ALL[1].node();
+        let at = srv.write_unchecked(None, &file_meta(role, c, "fixed", b"h"), payload(b"h"))?;
+        let folder = NodeMeta {
+            kind: NodeKind::Folder,
+            content: NodeContent::folder("fixed"),
+            ..file_meta(role, c, "fixed", b"")
+        };
+        srv.write_unchecked(Some(at.file_id), &folder, None)?;
+        c
+    };
+    b.sync()?;
+    assert_eq!(b.read("C.TXT")?, b"content #2");
+    {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        srv.write_unchecked(None, &file_meta(NodeId::new(), c, "x", b"x"), payload(b"x"))?;
+    }
+    fs::remove_file(b.root.join("C.TXT"))?;
+    b.sync()?;
+    assert_eq!(
+        b.read("C.TXT")?,
+        b"content #2",
+        "kept by the folder in it: back"
+    );
+    let srv = server.lock().map_err(|_| "poisoned")?;
+    assert!(
+        srv.live().any(|h| h.node() == Some(c)),
+        "the drive keeps it"
+    );
+    Ok(())
+}
