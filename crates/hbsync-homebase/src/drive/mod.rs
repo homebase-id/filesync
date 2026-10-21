@@ -25,7 +25,7 @@ use uuid::Uuid;
 
 use crate::client::{Client, Fetched, UploadMethod};
 use crate::drive::sealed::{
-    CipherRange, Decrypting, Encrypting, KeyHeader, SealedKeyHeader, checked_sealed_len, sealed_len,
+    CipherRange, Decrypting, Encrypting, KeyHeader, SealedKeyHeader, sealed_len,
 };
 use crate::multipart::{Multipart, Part, SourceEnded};
 use crate::{ApiError, HomebaseError, app};
@@ -33,8 +33,11 @@ use crate::{ApiError, HomebaseError, app};
 pub mod sealed;
 pub mod wire;
 
-/// The server counts the bytes of an upload in 32 bits: a larger one fails (#1893).
-const MAX_PAYLOAD: u64 = u32::MAX as u64;
+/// The largest file uploaded: 50 GiB. Not the server's limit (odin-core counts an upload's
+/// bytes in 64 bits since PR #1932, #1893, **[verified]**), a sanity cap for one upload: it has no resume, so
+/// one that fails is sent again from the start (resumable upload is a tabled odin-core ask). A
+/// larger file is refused ([`check_size`]).
+const MAX_FILE: u64 = 50 << 30;
 /// Content updates at least this large read the file's header first, token or not: one small
 /// request, against sending all of it for a refusal (the file changed or went meanwhile).
 const LOOK_FIRST: u64 = 8 << 20;
@@ -210,6 +213,10 @@ impl HomebaseRemote {
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
     ) -> Result<Written> {
+        // Before any request: a file too large costs nothing.
+        if let Some(p) = &payload {
+            check_size(p.size)?;
+        }
         let at = target.map(|t| t.at);
         let look_first = payload.as_ref().is_some_and(|p| p.size >= LOOK_FIRST);
         let key = match target {
@@ -223,13 +230,6 @@ impl HomebaseRemote {
         let mut sending = match payload {
             None => None,
             Some(p) => {
-                let size = checked_sealed_len(p.size).unwrap_or(u64::MAX);
-                if size > MAX_PAYLOAD {
-                    return Err(RemoteError::Fatal(format!(
-                        "{} bytes is too large for this server (odin-core #1893)",
-                        p.size
-                    )));
-                }
                 let iv = sealed::strong().map_err(remote_error)?;
                 let (plain, sent) = (tally(p.hash.algorithm), tally(p.hash.algorithm));
                 let reader = Paced {
@@ -412,6 +412,21 @@ impl Sending<'_> {
             wire::payload_hash(key, &iv, &content, &finish(&sent).0)
         }
     }
+}
+
+/// Refuses a file of `size` bytes larger than [`MAX_FILE`]: [`RemoteError::Fatal`], so the
+/// engine records it as refused and doesn't send it again while it is the same (sync semantics
+/// §8a); the note names the file and says this.
+fn check_size(size: u64) -> Result<()> {
+    if size <= MAX_FILE {
+        return Ok(());
+    }
+    // Rounded up to a tenth: a file just over the limit doesn't read as at it.
+    let gib = (size as f64 / (1u64 << 30) as f64 * 10.0).ceil() / 10.0;
+    Err(RemoteError::Fatal(format!(
+        "too large to sync: {gib:.1} GiB, over the {} GiB limit for one file",
+        MAX_FILE >> 30
+    )))
 }
 
 /// The hash and length of what passed through a [`Tap`], shared: the body still holds the
@@ -1082,5 +1097,81 @@ mod tests {
         for (mapped, expected) in cases {
             assert!(mapped.starts_with(expected), "{mapped} isn't {expected}");
         }
+    }
+
+    /// Files up to 50 GiB go up, past 4 GiB too (odin-core counts their bytes in 64 bits);
+    /// one byte more is refused for good, saying the limit.
+    #[test]
+    fn files_up_to_50_gib_go_up() {
+        const GIB: u64 = 1 << 30;
+        for size in [0, 4 * GIB - 1, 4 * GIB, 4 * GIB + 1, 50 * GIB] {
+            assert!(check_size(size).is_ok(), "{size}");
+        }
+        for size in [50 * GIB + 1, 1 << 62, u64::MAX] {
+            let Err(refused) = check_size(size) else {
+                panic!("{size} bytes go up");
+            };
+            assert_eq!(refused.class(), ErrorClass::Refused);
+            assert!(refused.to_string().contains("50 GiB limit"), "{refused}");
+        }
+        let Err(RemoteError::Fatal(why)) = check_size(50 * GIB + 1) else {
+            panic!("not refused");
+        };
+        assert_eq!(
+            why,
+            "too large to sync: 50.1 GiB, over the 50 GiB limit for one file"
+        );
+    }
+
+    /// A file over the limit is refused before any request, a create or an update: here the
+    /// identity can't be reached, and nothing of the file is read.
+    #[test]
+    fn a_file_over_the_limit_costs_no_request() -> Result<(), HomebaseError> {
+        struct Unread;
+        impl Read for Unread {
+            fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                panic!("a refused file is read");
+            }
+        }
+        let credentials = crate::youauth::Credentials {
+            identity: "unreachable.invalid".into(),
+            client_auth_token: "AAAA".into(),
+            shared_secret: "AAAAAAAAAAAAAAAAAAAAAA==".into(),
+        };
+        let remote = HomebaseRemote {
+            client: Client::new(&credentials)?,
+            drive: TargetDrive {
+                alias: Uuid::nil(),
+                drive_type: Uuid::nil(),
+            },
+        };
+        let size = MAX_FILE + 1;
+        let meta = NodeMeta {
+            node: hbsync_types::NodeId::new(),
+            parent: hbsync_types::NodeId::ROOT,
+            kind: hbsync_types::NodeKind::File,
+            content: NodeContent::file("big.pst", 0, size, false),
+            removed: false,
+        };
+        let target = Target {
+            at: hbsync_types::RemoteRef {
+                file_id: RemoteFileId(Uuid::new_v4()),
+                version: VersionTag(Uuid::new_v4()),
+            },
+            token: None,
+        };
+        for target in [None, Some(&target)] {
+            let upload = Upload {
+                hash: hbsync_fileio::hash_bytes(b"", HashAlgorithm::Blake3),
+                size,
+                reader: &mut Unread,
+                pace: None,
+            };
+            let Err(refused) = remote.write(target, &meta, Some(upload)) else {
+                panic!("a file over the limit went up");
+            };
+            assert!(refused.to_string().contains("50 GiB limit"), "{refused}");
+        }
+        Ok(())
     }
 }

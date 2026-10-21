@@ -56,7 +56,7 @@ fn agent_on(
         .http_status_as_error(false)
         .timeout_connect(Some(Duration::from_secs(30)))
         .timeout_send_request(Some(Duration::from_secs(60)))
-        .timeout_recv_response(Some(Duration::from_secs(300)))
+        .timeout_recv_response(Some(ANSWER))
         // Bodies get an overall timeout no transfer reaches, so that their reads and writes
         // carry it (not `Global`) and `IdleTimeout` caps them.
         .timeout_send_body(Some(BODY))
@@ -74,6 +74,19 @@ fn agent_on(
         connector.chain(IdleTimeout(idle)),
         DefaultResolver::default(),
     )
+}
+
+/// The longest a request's answer may take once it is sent ([`answer_within`] for an upload).
+const ANSWER: Duration = Duration::from_secs(300);
+
+/// How long the answer to an upload of `body` bytes may take once they are sent: the server
+/// stores them before it answers (**[verified]** odin-core: a copy on disk, 11 s per GiB on
+/// frodo; to S3 in 16 MB parts one at a time, 22-43 MB/s by its own comment), so [`ANSWER`] and
+/// a second more per 8 MiB, under 2 hours at 50 GiB. A wait too short would end a large upload
+/// that went well, and a create would be sent again from the start (an update reads the header
+/// first and stops); one too long only keeps a worker waiting on a server that died.
+fn answer_within(body: u64) -> Duration {
+    ANSWER + Duration::from_secs(body >> 23)
 }
 
 /// Longer than any body takes: a week.
@@ -259,11 +272,14 @@ impl Client {
     ) -> Result<T, HomebaseError> {
         let url = self.url(path);
         let call = self.connections.call();
+        let (content_type, len) = (form.content_type(), form.content_length());
         let request = match method {
             UploadMethod::Post => call.post(&url),
             UploadMethod::Patch => call.patch(&url),
-        };
-        let (content_type, len) = (form.content_type(), form.content_length());
+        }
+        .config()
+        .timeout_recv_response(Some(answer_within(len)))
+        .build();
         let mut body = Recording {
             inner: form.into_reader(),
             failed: None,
@@ -539,7 +555,9 @@ mod tests {
     use std::net::TcpListener;
     use std::time::{Duration, Instant};
 
-    use super::{Fetched, REUSED_WITHIN, agent_with, connections, content_range};
+    use super::{
+        ANSWER, Fetched, REUSED_WITHIN, agent_with, answer_within, connections, content_range,
+    };
     use crate::HomebaseError;
     use crate::connections::Connections;
 
@@ -761,5 +779,13 @@ mod tests {
         ] {
             assert_eq!(content_range(bad), None, "{bad}");
         }
+    }
+
+    /// An upload's answer may take longer the larger it is: 6400 s more at 50 GiB.
+    #[test]
+    fn a_large_uploads_answer_may_take_longer() {
+        assert_eq!(answer_within(1000), ANSWER);
+        assert_eq!(answer_within(4 << 30), ANSWER + Duration::from_secs(512));
+        assert_eq!(answer_within(50 << 30), ANSWER + Duration::from_secs(6400));
     }
 }

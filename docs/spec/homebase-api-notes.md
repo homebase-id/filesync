@@ -239,8 +239,17 @@ Encrypted files **[verified]** on odin-core `main` @ 07657309e (the format: `enc
 missing `accessControlList` resets to owner. Every update resends the whole `appData`.
 
 Limits **[verified]**: `content` at most 10,240 UTF-16 code units (4167); file types in
-`2100000000..` are reserved (4120); one upload payload at most 4 GiB (`uint` byte count); out
-of quota → 507 with `Retry-After`. App callers get `serverMetadata: null` in headers.
+`2100000000..` are reserved (4120); out of quota → 507 with `Retry-After`. No payload size
+limit since odin-core PR #1932 (#1893, v0.1.960) **[verified]**: the byte count is 64-bit
+through the write chain (before it, `uint`: an upload over 4 GiB failed), Kestrel has
+`MaxRequestBodySize = null`, and the quota guard looks only at the identity's status. Uploads
+stage on disk, then go to long-term storage: on disk a copy, on S3 `TransferUtility` in 16 MB
+parts, so not bound by S3's 5 GB single PUT (**[verified]** `S3AwsStorage.UploadFileAsync`).
+The server answers once that is done: 45 s after the body for 4 GiB on frodo (**[verified,
+tried]**: a file of 4 GiB + 1 MiB went up and down, `live_big`). The client caps one file at
+50 GiB itself (`MAX_FILE`: no resumable upload), and waits for an upload's answer a second
+longer per 8 MiB: S3 takes the parts one at a time, 60 MB in 1.4-2.7 s by odin-core's own
+comment (**[verified]** `UploadConcurrencyLimit`). App callers get `serverMetadata: null` in headers.
 
 ## Change feed
 **[verified]** `QueryBatch.cs`, `KMP/sync/DriveSync.kt:173-295`:
@@ -456,8 +465,9 @@ there is gone for good only once it is not there again a minute on (sync semanti
   uses neither: `soft-delete-batch` (#1977, above) answers per file.
 - Payload reads were buffered whole in server memory (#1892) and ranges were `int` (#1893)
   until odin-core PR #1921 (merged 2026-10-11). The client is written for #1921: a read is one streamed
-  request, whatever its size. Uploads over 4 GiB still fail (the `uint` byte count, the half of
-  #1893 the PR leaves open), so the client refuses payloads that large.
+  request, whatever its size. Uploads over 4 GiB failed (the `uint` byte count, the other half
+  of #1893) until odin-core PR #1932 (merged 2026-10-14, v0.1.960); the client now takes files
+  up to 50 GiB (`MAX_FILE`, its own cap for an upload with no resume).
 - App clients can't read the drive's `requirePayloadHashes` **[verified]** (`ClientDriveData`
   has no such field); the client always sends hashes.
 - **The feed could hide a write until the next one** (fixed in odin-core #1906, 2026-10-09)

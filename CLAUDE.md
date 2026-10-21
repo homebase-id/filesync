@@ -13,7 +13,9 @@ sync on real folders, green on all three OSes in CI). Layer 5 syncs with Homebas
 WebSocket; two folders converge through a live identity. Facts and server bugs:
 `docs/spec/homebase-api-notes.md`. Large files need odin-core with PR #1921 (merged 2026-10-11: streamed,
 64-bit payload ranges): a server without it holds each read in memory and can't read past 2 GiB
-(**[verified]**, odin-core #1892, #1893). Uploads need odin-core v0.1.954 or newer (PR #1936, the deferred
+(**[verified]**, odin-core #1892, #1893). Files over 4 GiB need odin-core with PR #1932 (merged
+2026-10-14, v0.1.960; #1893), as the server counted upload bytes in 32 bits (**[verified]**); the client caps one
+file at 50 GiB itself (`MAX_FILE`: an upload has no resume). Uploads need odin-core v0.1.954 or newer (PR #1936, the deferred
 payload hash, #1935): the client sends a payload's hashes after it, reading the source once. Deletes
 are guarded by their version from odin-core v0.1.960 (PR #1931, #1903; **[verified]**). The feed
 needs odin-core v0.1.962 or newer (PRs #1967, minimal `query-batch`, and #1968, `hard-delete-batch`); the notification socket's
@@ -88,6 +90,8 @@ MILESTONE_SEEDS=3000 cargo test --release -p hbsync-engine --test milestone rand
 HBSYNC_LIVE=frodo.dotyou.cloud cargo test -p hbsync-dev --test live -- --ignored
 HBSYNC_LIVE=frodo.dotyou.cloud cargo test --release -p hbsync-dev --test live_e2e -- --ignored
 HBSYNC_LIVE=frodo.dotyou.cloud cargo test -p hbsync --test live_daemon -- --ignored
+# A file over 4 GiB up and down (4 GiB each way; run it when large-file handling changes):
+HBSYNC_LIVE=frodo.dotyou.cloud cargo test --release -p hbsync-dev --test live_big -- --ignored
 ```
 
 Every `Remote` must pass `hbsync_remote::contract` (the fake in CI, Homebase live).
