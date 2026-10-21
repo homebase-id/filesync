@@ -139,6 +139,17 @@ pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
                 .map(|s| s.parent)
                 .filter(|p| !coverage.full.contains(p)),
         );
+        // And so is what another writer put in a file on the drive (§6.3: a node in a file;
+        // a file this device holds for a version it can't read, #175): any of it may keep it
+        // (a masked one), so all of it is read. Hardly ever any.
+        plan.uncovered
+            .extend(input.remote.iter().map(|(_, s)| s.parent).filter(|p| {
+                input
+                    .remote
+                    .get(*p)
+                    .is_some_and(|f| f.kind != NodeKind::Folder)
+                    && !coverage.full.contains(p)
+            }));
     }
     plan
 }
