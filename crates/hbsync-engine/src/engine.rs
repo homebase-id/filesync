@@ -26,6 +26,7 @@ use crate::refused::FolderRefusals;
 use crate::root::{RootError, SyncRoot};
 use crate::scope::Scope;
 use crate::view;
+use crate::walk;
 
 /// Start-up's pull is the first sync's if the local catch-up ended within this of it.
 const FRESH_PULL: Duration = Duration::from_secs(2);
@@ -283,10 +284,10 @@ impl Engine {
     /// Returns how many it put back.
     pub fn put_back(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
         self.drive.pull(None)?;
-        // Each to restore, with its folder and its row of Recently deleted.
+        // What loses its base, and what to restore from Recently deleted.
         let (mut forget, mut restore) = (Vec::new(), Vec::new());
-        // One restore per removal, the outermost first: what was removed with its folder comes
-        // back with it.
+        // One restore per item of Recently deleted, the outermost first: what was removed with
+        // its folder comes back with it.
         let mut tops: Vec<(usize, NodeId)> = Vec::new();
         // Each once: a folder's held with what is in it.
         let mut seen = std::collections::HashSet::new();
@@ -323,12 +324,11 @@ impl Engine {
                             if !seen.insert(row.node) {
                                 continue;
                             }
-                            if let Some(b) = base(row.node)?
-                                && !live(row.node)?
-                            {
-                                match s.removed_by_node(row.node)? {
-                                    Some(r) => restore.push((row.node, b.state.parent, r)),
-                                    None => forget.push(row.node),
+                            if base(row.node)?.is_some() && !live(row.node)? {
+                                if s.removed_by_node(row.node)?.is_some() {
+                                    restore.push(row.node);
+                                } else {
+                                    forget.push(row.node);
                                 }
                             }
                             if row.kind == NodeKind::Folder {
@@ -340,25 +340,12 @@ impl Engine {
                     (None, false) => {}
                 }
             }
-            let mut topped = std::collections::HashSet::new();
-            for (node, parent, removed) in &restore {
-                // Up through the folders it was deleted with (Recently deleted's own rule).
-                let (mut top, mut parent, mut at) = (*node, *parent, removed.time());
-                while let Some(folder) = s.removed_by_node(parent)?
-                    && crate::deleted::deleted_with(at, &folder)
-                {
-                    top = parent;
-                    at = folder.time();
-                    parent = folder.row.parent;
-                }
-                if topped.insert(top) {
-                    let (mut depth, mut up) = (0, top);
-                    while let Some(b) = base(up)? {
-                        depth += 1;
-                        up = b.state.parent;
-                    }
-                    tops.push((depth, top));
-                }
+            // Up through the folders each was deleted with, as Recently deleted lists it.
+            for top in crate::deleted::items_of(s, &restore)? {
+                let depth = walk::up::<_, StateError>(top, |at| {
+                    Ok(base(at)?.map(|b| ((), b.state.parent)))
+                })?;
+                tops.push((depth.items.len(), top));
             }
             Ok(())
         })?;
