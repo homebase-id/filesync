@@ -71,21 +71,6 @@ impl Default for ExecConfig {
     }
 }
 
-/// What a tag write left on an item ([`Executor::write_tags`]).
-#[derive(Debug, Clone)]
-struct TagsLeft {
-    /// What read back, for a placement's record to claim (`None`: not known: the write failed,
-    /// read back as nothing to go by, or the volume keeps none).
-    claimed: Option<Tags>,
-    /// What the item holds: what read back, or where the write failed, what it holds as read
-    /// (`None` where that can't be read either: its row takes what it held before then,
-    /// [`Executor::held_after`]). Taken for not known while it can be read, the item read as
-    /// holding the drive's tags, and the next scan took their absence for the user removing
-    /// them.
-    held: Option<Tags>,
-    failed: bool,
-}
-
 /// What a run did.
 #[derive(Debug, Default)]
 pub(crate) struct ExecReport {
@@ -411,7 +396,7 @@ impl<'a> Executor<'a> {
             counted: HashSet::new(),
             full: false,
             refusals: Refusals::default(),
-            disk: Disk::new(&folder.root),
+            disk: Disk::new(folder, &cfg.hooks),
         }
     }
 
@@ -704,64 +689,6 @@ impl<'a> Executor<'a> {
     /// Whether test fault `point` fails now ([`ExecConfig::hooks`]).
     fn fails(&self, point: FailPoint) -> bool {
         self.cfg.hooks.fails(point)
-    }
-
-    /// Whether the root's volume keeps tags, as far as known (this OS keeps some, and no tag
-    /// write found it doesn't).
-    fn tags_kept(&self) -> bool {
-        tags::CAN_TAG && self.folder.tags_kept.get() != Some(&false)
-    }
-
-    /// Writes `tags` on the item at `path` ([`tags::write_on`]), noting whether the volume
-    /// keeps tags, and says what that left ([`TagsLeft`]).
-    fn write_tags(&self, path: &Path, tags: &Tags) -> TagsLeft {
-        let written = match self.fails(FailPoint::TagWrite) {
-            true => Err(io::Error::other("its tag write failed (a test)")),
-            false => tags::write_on(path, tags),
-        };
-        match written {
-            Ok(tags::Written::Unsupported) => {
-                let _ = self.folder.tags_kept.set(false);
-                TagsLeft {
-                    claimed: None,
-                    held: None,
-                    failed: false,
-                }
-            }
-            Ok(tags::Written::Done(read)) => {
-                let _ = self.folder.tags_kept.set(true);
-                TagsLeft {
-                    claimed: read.clone(),
-                    held: read,
-                    failed: false,
-                }
-            }
-            Err(_) => TagsLeft {
-                claimed: None,
-                held: (self.tags_kept() && !self.fails(FailPoint::TagRead))
-                    .then(|| tags::read(path))
-                    .flatten(),
-                failed: true,
-            },
-        }
-    }
-
-    /// Whether a tag write failed and what it left couldn't be read back, on a volume that
-    /// keeps tags.
-    fn unread(&self, left: &TagsLeft) -> bool {
-        left.failed && left.held.is_none() && self.tags_kept()
-    }
-
-    /// What a tag write left on an item that held `before`, for its row: what read back, or
-    /// where the write failed and that read failed too, `before`, as a failed write changes
-    /// nothing. Not known read as the drive's tags: a commit settled its base on them, and the
-    /// scan that then read the item without them sent their removal up.
-    fn held_after(&self, left: TagsLeft, before: Tags) -> Option<Tags> {
-        if self.unread(&left) {
-            Some(before)
-        } else {
-            left.held
-        }
     }
 
     /// Whether the test crash point `at` is reached; the run then stops.

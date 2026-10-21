@@ -166,7 +166,7 @@ impl Executor<'_> {
         };
         // It claims the tags it is to write (the empty set too), as they read back once
         // written: where the volume keeps none, not known.
-        let kept = self.tags_kept();
+        let kept = self.disk.tags_kept();
         let record = Placing {
             base: BaseRow::new(node, acted.state, acted.at),
             target,
@@ -468,7 +468,7 @@ impl Executor<'_> {
         // file can be seen there: only that costs a commit.
         // Only a volume that keeps no tags says so for the rest: a set that fails or reads
         // back as nothing to go by doesn't.
-        let left = self.write_tags(done.path(), &to_write);
+        let left = self.disk.write_tags(done.path(), &to_write);
         // Failed, it would lose a tag the item there holds and the drive doesn't (the user's,
         // not sent up yet): not put in place then, for a retry, the plan sending it up
         // meanwhile; unless the drive refused it for good this run (then as ever: placed).
@@ -494,7 +494,7 @@ impl Executor<'_> {
         // The record claims only what read back; the row holds what the file holds: where the
         // write failed and that can't be read, none, as a temp file made here holds (one an
         // earlier try left holds what it wrote then: claiming less only sends that up).
-        let tags = self.held_after(left, Tags::default());
+        let tags = self.disk.held_after(left, Tags::default());
         let placed = match &current {
             Some(row) if &row.path == target => self.disk.put(self.db, target, |at| {
                 done.persist_over(at, &row.fingerprint, created_ms)
