@@ -1020,11 +1020,12 @@ impl Sim {
                 if !client.local.exists(parent) {
                     return Retry;
                 }
+                let tags = tags.held_by(client.os);
                 // Made from Recently deleted, never synced here, with tags to write: restored or
                 // purged since the plan, the version it is made of is gone (the executor's).
                 if drive.is_none()
                     && !client.base.contains(node)
-                    && !tags.held_by(client.os).is_empty()
+                    && !tags.is_empty()
                     && !self.server.removed.contains_key(&node)
                 {
                     return Skip;
@@ -1032,7 +1033,6 @@ impl Sim {
                 if !park_occupant(client, parent, &name, None) {
                     return Retry;
                 }
-                let tags = tags.held_by(client.os);
                 client.local.insert(
                     node,
                     NodeState {

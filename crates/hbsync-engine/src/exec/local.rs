@@ -71,11 +71,15 @@ impl Executor<'_> {
         }
         let target = self.target_path(parent, name)?;
         let abs = self.disk.abs(&target);
-        let (mirror, base_at) = self.db.read(|s| {
-            Ok((
-                s.get_mirror(node)?,
-                s.get_base(node)?.map(|b| b.remote.version),
-            ))
+        // Never synced here and no version of the drive live when planned: made from Recently
+        // deleted (its folder restored, its RemoteCreate to follow), of the version there.
+        let (mirror, base_at, removed) = self.db.read(|s| {
+            let base_at = s.get_base(node)?.map(|b| b.remote.version);
+            let removed = match drive.is_none() && base_at.is_none() {
+                true => s.removed_by_node(node)?,
+                false => None,
+            };
+            Ok((s.get_mirror(node)?, base_at, removed))
         })?;
         let synced_before = base_at.is_some();
         let created_ms = if ops::CAN_SET_CREATED {
@@ -111,25 +115,16 @@ impl Executor<'_> {
         // it claims none, as a download does.
         let kept_tags = self.disk.tags_kept();
         let none = tags.held_by(self.folder.os).is_empty();
-        // Made from Recently deleted (its folder restored, its RemoteCreate to follow), never
-        // synced here, with tags to write: it is made of the version there, and settles against
-        // it, whatever the mirror holds by its commit. Restored or purged since the plan, that
-        // version is gone, and the next plan decides on the drive as it is now. Settled against
-        // the drive's newer version, the tags it wrote (the old version's) read as this device
-        // adding them, and a tag removed on the drive since came back. One with none to write
-        // (Recovered files, made here) settles against the drive as it is.
-        let restored = match acted.is_none() && !synced_before {
-            true => {
-                let removed = self.db.read(|s| s.removed_by_node(node))?;
-                match removed.and_then(|r| DriveVersion::of(&r.row, None)) {
-                    None if kept_tags && !none => {
-                        return Ok(Outcome::stale("no longer in Recently deleted"));
-                    }
-                    removed => removed,
-                }
-            }
-            false => None,
-        };
+        // Made from Recently deleted, it settles against the version there, whatever the mirror
+        // holds by its commit. Restored or purged since the plan, that version is gone: one with
+        // tags to write waits for the next plan, which decides on the drive as it is now.
+        // Settled against the drive's newer version, the tags it wrote (the old version's) read
+        // as this device adding them, and a tag removed on the drive since came back. One with
+        // none to write (Recovered files, made here) settles against the drive as it is.
+        let restored = removed.and_then(|r| DriveVersion::of(&r.row, None));
+        if acted.is_none() && !synced_before && restored.is_none() && kept_tags && !none {
+            return Ok(Outcome::stale("no longer in Recently deleted"));
+        }
         let mut record = acted.as_ref().map(|a| Placing {
             base: BaseRow::new(node, a.state.clone(), a.at),
             target: target.clone(),
@@ -205,10 +200,8 @@ impl Executor<'_> {
             match &record {
                 Some(r) => settle_placement(s.folder(), r, folder).map(Placed::at),
                 None => {
-                    // Made from Recently deleted: it settles against the version there, what
-                    // it was made of, as any placement does: the base until the restore
-                    // settles. Without one, a tag removed on the drive meanwhile read as this
-                    // device adding it, and came back.
+                    // Made from Recently deleted: it settles against `restored`, the base
+                    // until the restore settles.
                     //
                     // One synced here before keeps its base, but for a tag its failed write
                     // didn't put on it that the drive's last version holds: kept, the folder
