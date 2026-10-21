@@ -128,17 +128,35 @@ impl Reconciler<'_> {
     }
 
     /// Leaves `node` for a later plan, keeping it in the merged tree where it is now, so that
-    /// a new local file still being written keeps its folder alive (§6.3) and its name.
+    /// a new local file still being written keeps its folder alive (§6.3) and its name. An
+    /// item here not hashed yet is where it is here, whatever the drive did with its node
+    /// meanwhile (a move, a delete of its folder, into a file): it keeps its local folder
+    /// alive (its edits win, §6.3) and its local name, and is never an orphan adopted from the
+    /// drive's state (which wrote the drive's tags over it). It holds the drive's tags there;
+    /// out of the plan's scope, nothing is done to it till it is hashed and merged.
     pub(super) fn defer(&mut self, node: NodeId) {
         self.deferred.insert(node);
         let i = self.input;
-        if let Some(state) = i
-            .remote
+        let here = i
+            .local
             .get(node)
-            .or(i.base.get(node))
-            .or(i.local.get(node))
-        {
-            self.merged.insert(node, state.clone());
+            .filter(|_| i.local_unhashed.contains(&node))
+            .map(|l| NodeState {
+                tags: i
+                    .remote
+                    .get(node)
+                    .or(i.base.get(node))
+                    .map_or_else(|| l.tags.clone(), |s| s.tags.clone()),
+                ..l.clone()
+            });
+        if let Some(state) = here.or_else(|| {
+            i.remote
+                .get(node)
+                .or(i.base.get(node))
+                .or(i.local.get(node))
+                .cloned()
+        }) {
+            self.merged.insert(node, state);
         }
     }
 

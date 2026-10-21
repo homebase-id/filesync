@@ -78,7 +78,7 @@ impl Sim {
             local_view.remove(n);
         }
         // A file not hashed yet is reported without content: the plan defers it.
-        for n in &client.unhashed {
+        for n in client.unhashed.iter().chain(&client.writing) {
             if let Some(state) = local_view.get(*n).cloned() {
                 local_view.insert(
                     *n,
@@ -101,6 +101,7 @@ impl Sim {
             local_unhashed: client
                 .unhashed
                 .iter()
+                .chain(&client.writing)
                 .copied()
                 .filter(|n| client.local.contains(*n))
                 .collect(),
@@ -299,6 +300,9 @@ impl Sim {
             client.last_plan = ops.clone();
         }
         client.plan = ops.into_iter().map(|op| (op, 0)).collect();
+        // Written by the next plan (hashed then): the scan asks for it.
+        client.hashing = !client.writing.is_empty();
+        client.writing.clear();
         client.removed_by_plan.clear();
         client.unremoved.clear();
         // A plan made since sends what the user does from now on.

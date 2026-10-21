@@ -154,6 +154,12 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    stays removed). A removed folder outside this
    folder's part of the drive, or one it filters (§10), isn't its to bring back: a node written
    into it waits for the folder that syncs that part, or, filtered, goes where an orphan does.
+   A file here not hashed yet (being written, locked, a placement a crash left unread) is
+   where it is here, whatever the drive did with its node meanwhile (moved it, deleted its
+   folder, put it in a file): until it is hashed nothing is done to it, it keeps its folder
+   here alive (a delete of the folder elsewhere loses to it, its edits win: restored) and
+   its name (a node coming down under that name takes another), and holds the drive's tags.
+   Once hashed it merges as any node does.
 
    **Orphans go into Recovered files.** A live node whose folder is nowhere on the drive
    (deleted for good: a stale plan's create racing a delete and an emptied Recently deleted,
@@ -167,7 +173,9 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    stays there, an item of its own; only what is live, or brought back, moves. A live node
    whose folder is a file (another writer set its `groupId` to a file's node id) is moved the
    same way, whether the picture is whole or not; a folder this device can't read, or a file
-   whose newer version it can't read, is no such place: what is in it waits.
+   whose newer version it can't read, is no such place: what is in it waits. A file here not
+   hashed yet is never an orphan to adopt (it is where it is here, above): adopted from the
+   drive's state, its item took the drive's tags over its own.
    - The main folder adopts: a node whose place isn't known is never a role folder's (§12).
      A folder in Recently deleted has a place where its own folder is: a live one, or one in
      Recently deleted in turn, up to the top; what is in it is neither an orphan nor the main

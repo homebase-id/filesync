@@ -397,7 +397,8 @@ impl Sim {
                 let client = &self.clients[c];
                 any_planned |= !client.plan.is_empty()
                     || !client.held.is_empty()
-                    || !client.placing.is_empty();
+                    || !client.placing.is_empty()
+                    || client.hashing;
                 while self.step(c) {}
             }
             let unchanged = !self.server.changed_since(&server);
@@ -462,7 +463,7 @@ impl Sim {
                 }
             }
             // The scan, once it hashed the file of a record recovery kept, asks for a sync.
-            asked[c] |= !self.clients[c].placing.is_empty();
+            asked[c] |= !self.clients[c].placing.is_empty() || self.clients[c].hashing;
         }
         false
     }

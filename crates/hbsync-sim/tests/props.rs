@@ -333,6 +333,32 @@ fn any_event(clients: usize) -> impl Strategy<Value = Event> {
     ]
 }
 
+/// Events with files still being written at a plan ([`Action::EditWriting`]), and folders
+/// deleted on other devices, outright and by delete.
+fn writing_event(clients: usize) -> impl Strategy<Value = Event> {
+    let i = || 0usize..16;
+    let actions = prop_oneof![
+        4 => action(),
+        2 => i().prop_map(|file| Action::EditWriting { file }),
+        1 => i().prop_map(|pick| Action::DeleteOutright { pick }),
+        1 => (i(), i()).prop_map(|(pick, file)| Action::IntoFile { pick, file }),
+    ];
+    events_of(clients, actions)
+}
+
+proptest! {
+    /// A file still being written when its device plans (not hashed yet, its merge left for
+    /// later) is where it is there, whatever the drive did with its node meanwhile: it keeps
+    /// its folder alive against another device's delete of it, outright or not (its edits
+    /// win), and keeps its name and tags; once hashed it syncs. Nothing is lost.
+    #[test]
+    fn a_file_being_written_keeps_its_folder(
+        events in proptest::collection::vec(writing_event(3), 0..80),
+    ) {
+        run(3, &events)?;
+    }
+}
+
 proptest! {
     // A twentieth of the cases, at least one: each runs twice with the trace on.
     #![proptest_config(ProptestConfig {
@@ -4163,4 +4189,25 @@ fn regression_a_new_item_keeping_a_base_tag_is_a_known_limit() {
         limits[0].starts_with("NewItemKeepsBaseTag") && limits[0].ends_with(" Red"),
         "{limits:?}"
     );
+}
+
+/// A file being written (not hashed at the next plan) in a folder another app deletes
+/// outright: the folder isn't trashed with it, the file's edit comes up, and the folder comes
+/// back with it (its edits win). It was trashed here, and the edit lost.
+#[test]
+fn regression_a_file_being_written_keeps_its_folder() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(2, CreateFolder { parent: 0, name: 0 }),
+        act(2, CreateFile { parent: 6, name: 0 }),
+        Event::Plan { client: 2 },
+        Event::Step { client: 2 },
+        Event::Step { client: 2 },
+        act(2, EditWriting { file: 0 }),
+        act(0, DeleteOutright { pick: 0 }),
+    ];
+    if let Err(e) = run(3, &events) {
+        panic!("{e}");
+    }
 }

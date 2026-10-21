@@ -16,6 +16,11 @@ pub enum Action {
     Edit {
         file: usize,
     },
+    /// The user edits a file and is still writing it at the next plan: not hashed yet there
+    /// (its merge deferred), hashed at the one after.
+    EditWriting {
+        file: usize,
+    },
     Move {
         node: usize,
         parent: usize,
