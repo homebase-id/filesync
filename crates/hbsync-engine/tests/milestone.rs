@@ -1006,3 +1006,88 @@ fn executable_bit_syncs() -> R {
     );
     Ok(())
 }
+
+/// A file this device can't read (no permission: never hashed, its merge deferred every round)
+/// whose node another writer puts into a file: it waits in place, and the rest of the folder
+/// plans and converges around it (a new file comes down, another orphan goes into Recovered
+/// files). Readable again, it is adopted into Recovered files with what it holds.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_file_moved_into_a_file_waits_and_the_rest_converges() -> R {
+    use hbsync_remote::{NodeMeta, RemoteBody};
+    use std::os::unix::fs::PermissionsExt;
+
+    let server = server();
+    let [mut a, mut b] = pair(&server)?;
+    fs::write(a.root.join("x"), b"x1")?;
+    fs::write(a.root.join("o"), b"o1")?;
+    fs::write(a.root.join("keep"), b"keep")?;
+    settle_all(&mut a, &mut b)?;
+    // a's x changes, and can't be read: a has nothing to hash it with.
+    fs::write(a.root.join("x"), b"x2")?;
+    fs::set_permissions(a.root.join("x"), fs::Permissions::from_mode(0o000))?;
+    if fs::read(a.root.join("x")).is_ok() {
+        fs::set_permissions(a.root.join("x"), fs::Permissions::from_mode(0o644))?;
+        return Ok(()); // root reads anything: nothing to test
+    }
+    // Another writer moves x and o into the file `keep`.
+    {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        let headers: Vec<_> = srv.live().cloned().collect();
+        let node_of = |name: &str| {
+            headers.iter().find_map(|h| match &h.body {
+                RemoteBody::Live { node, content, .. } if content.name == name => {
+                    Some((*node, h.clone()))
+                }
+                _ => None,
+            })
+        };
+        let (keep, _) = node_of("keep").ok_or("no keep")?;
+        for name in ["x", "o"] {
+            let (node, h) = node_of(name).ok_or("no file")?;
+            let RemoteBody::Live { content, .. } = &h.body else {
+                continue;
+            };
+            let meta = NodeMeta {
+                node,
+                parent: keep,
+                kind: h.kind,
+                content: content.clone(),
+                removed: false,
+            };
+            srv.update(h.file_id, h.version, &meta, None)?;
+        }
+    }
+    fs::write(b.root.join("n"), b"n1")?;
+    for _ in 0..3 {
+        a.sync()?;
+        b.sync()?;
+    }
+    let names = |c: &Client| -> Vec<String> { c.entries("").into_iter().map(|(p, _)| p).collect() };
+    let (ta, tb) = (names(&a), names(&b));
+    assert!(
+        ta.contains(&"x".to_owned()),
+        "x waits in place on a: {ta:?}"
+    );
+    assert!(
+        ta.contains(&"n".to_owned()),
+        "the new file came down: {ta:?}"
+    );
+    for t in [&ta, &tb] {
+        assert!(
+            t.contains(&"Recovered files/o".to_owned()),
+            "o is recovered: {t:?}"
+        );
+    }
+    // Readable again: adopted, with what it holds, everywhere.
+    fs::set_permissions(a.root.join("x"), fs::Permissions::from_mode(0o644))?;
+    settle_all(&mut a, &mut b)?;
+    let (ea, eb) = (a.entries(""), b.entries(""));
+    assert_eq!(ea, eb, "converged");
+    assert!(
+        ea.iter()
+            .any(|(p, c)| p == "Recovered files/x" && c == b"x2"),
+        "{ea:?}"
+    );
+    Ok(())
+}

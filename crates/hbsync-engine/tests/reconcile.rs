@@ -1299,3 +1299,75 @@ fn a_waiting_fork_keeps_its_name_and_a_new_file_yields() {
         }
     }
 }
+
+/// An item placed but not hashed yet (a download a crash left unsettled, here with no base),
+/// tagged Red by the user, whose node another writer put in a file: its merge is deferred, and
+/// the orphan repair leaves it be. It adopted it from the drive's state, writing the drive's
+/// tags over the item and sending them up as decided: Red was lost (seed d856d284). The rest
+/// of the folder plans as ever: another orphan in the file goes into Recovered files, a new
+/// file comes down. Once hashed, the node is adopted with its tags.
+#[test]
+fn an_unhashed_orphan_waits_and_keeps_its_tags() {
+    let [f, item, other, new] = ids(4)[..] else {
+        unreachable!()
+    };
+    let red = hbsync_types::Tags::new([hbsync_types::Tag::new("Red", 6)]);
+    let tagged = |state: NodeState| NodeState {
+        tags: red.clone(),
+        ..state
+    };
+    let mut w = World::default();
+    w.synced(f, file(ROOT, "f", "x"));
+    w.synced(other, file(ROOT, "o", "o"));
+    w.remote(other, Some(file(f, "o", "o")));
+    w.remote(new, Some(file(ROOT, "n", "n")));
+    w.remote(item, Some(file(f, "b", "b")));
+    w.local(
+        item,
+        Some(tagged(NodeState {
+            content: None,
+            ..file(ROOT, "b", "b")
+        })),
+    );
+    w.input.local_unhashed.insert(item);
+    let plan = w.plan();
+    assert!(
+        !plan.ops.iter().any(|op| op.node() == item),
+        "nothing done to the item till it is hashed: {:#?}",
+        plan.ops
+    );
+    assert!(plan.deferred.contains(&item), "{:?}", plan.deferred);
+    assert!(
+        plan.ops.iter().any(|op| matches!(op, Op::RemoteUpdate { node, parent, .. } if *node == other && *parent == NodeId::RECOVERED)),
+        "the other orphan is recovered: {:#?}",
+        plan.ops
+    );
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalDownload { node, .. } if *node == new)),
+        "the new file comes down: {:#?}",
+        plan.ops
+    );
+
+    // Hashed: adopted into Recovered files, with Red, on the drive too.
+    w.input.local_unhashed.remove(&item);
+    w.local(item, Some(tagged(file(ROOT, "b", "b"))));
+    let plan = w.plan();
+    assert!(
+        plan.ops.iter().any(
+            |op| matches!(op, Op::RemoteUpdate { node, parent, tags, .. }
+            if *node == item && *parent == NodeId::RECOVERED && *tags == red)
+        ),
+        "{:#?}",
+        plan.ops
+    );
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalTags { node, .. } if *node == item)),
+        "{:#?}",
+        plan.ops
+    );
+}

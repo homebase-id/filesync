@@ -95,9 +95,14 @@ impl Reconciler<'_> {
 
     /// A node whose folder is nowhere, or a file: moved into Recovered files if it is on the
     /// drive (live, or a folder in Recently deleted that a node brings back), to keep it
-    /// visible; else it waits.
+    /// visible; else it waits. One deferred waits too: its merge is decided later (its item
+    /// not hashed yet), and the state it holds till then is the drive's, which adopting would
+    /// write over the item (its tags) and send up as decided.
     fn recover_or_wait(&self, node: NodeId) -> Parent {
         let i = self.input;
+        if self.deferred.contains(&node) {
+            return Parent::Wait;
+        }
         let on_drive = i.remote.contains(node)
             || (self.masking.scope.top.is_root() && i.removed.contains_key(&node));
         if on_drive {

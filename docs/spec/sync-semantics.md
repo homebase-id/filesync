@@ -167,7 +167,9 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    stays there, an item of its own; only what is live, or brought back, moves. A live node
    whose folder is a file (another writer set its `groupId` to a file's node id) is moved the
    same way, whether the picture is whole or not; a folder this device can't read, or a file
-   whose newer version it can't read, is no such place: what is in it waits.
+   whose newer version it can't read, is no such place: what is in it waits. An orphan whose item here
+   isn't hashed yet waits too (its merge is decided later, §8): adopted from the drive's state,
+   its item would take the drive's tags over its own.
    - The main folder adopts: a node whose place isn't known is never a role folder's (§12).
      A folder in Recently deleted has a place where its own folder is: a live one, or one in
      Recently deleted in turn, up to the top; what is in it is neither an orphan nor the main
