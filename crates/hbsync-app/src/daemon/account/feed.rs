@@ -383,6 +383,7 @@ fn start(
                         }
                         match mine.pull(None) {
                             Ok(_) => Ok(true),
+                            // Refused (the pull latched it).
                             Err(e) if e.class() == ErrorClass::Denied => Ok(false),
                             Err(e) => Err(e.to_string()),
                         }

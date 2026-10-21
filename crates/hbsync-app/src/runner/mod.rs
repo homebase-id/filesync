@@ -649,10 +649,6 @@ impl Runner {
                     }
                 }
                 Err(e) => {
-                    // Refused: the account asks nothing more until a login or the user acts.
-                    if e.class() == ErrorClass::Denied {
-                        self.drive.deny(&e.to_string());
-                    }
                     // What it did before is told all the same (a conflict copy made).
                     if let Some(partial) = p.engine.take_unreported()
                         && let Err(e) = self.tell_unreported(&mut p.engine, &partial)

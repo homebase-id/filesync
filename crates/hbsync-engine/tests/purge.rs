@@ -1504,3 +1504,44 @@ fn a_file_written_since_stays_and_the_rest_of_its_batch_go() -> common::Res<()> 
     assert_eq!(left, [files[1]], "y stays in Recently deleted");
     Ok(())
 }
+
+/// A Recently deleted operation the identity refuses (its pull read, its write refused) latches
+/// the drive itself, as a refused pull does: nothing of the account asks again until the user
+/// acts.
+#[test]
+fn a_refused_restore_latches_the_drive() -> common::Res<()> {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("d/x.txt", "x")?;
+    a.sync()?;
+    let d = header_named(&server, "d");
+    remove_on_server(&server, &d);
+    a.sync()?;
+    a.remote.faults().deny_writes = true;
+    let drive = a.engine.drive();
+    assert!(!drive.is_denied());
+    let refused = drive.restore(&[node_of(&d)]).expect_err("refused");
+    assert_eq!(
+        refused.class(),
+        hbsync_remote::ErrorClass::Denied,
+        "{refused}"
+    );
+    assert!(drive.is_denied(), "latched by the drive");
+    Ok(())
+}
+
+/// A sync whose write the identity refuses (its pull read fine) latches the drive: the engine
+/// itself, whoever runs it, so the account's other folders ask nothing more either.
+#[test]
+fn a_refused_sync_latches_the_drive() -> common::Res<()> {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.sync()?;
+    a.write("new.txt", "new")?;
+    a.engine.scan_local()?;
+    a.remote.faults().deny_writes = true;
+    let refused = a.engine.sync_once("2026-10-21");
+    let drive = a.engine.drive();
+    assert!(drive.is_denied(), "latched by the engine: {refused:?}");
+    Ok(())
+}

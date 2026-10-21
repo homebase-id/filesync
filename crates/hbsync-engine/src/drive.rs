@@ -249,6 +249,16 @@ impl Drive {
         denied.replace(why.to_owned()).is_none()
     }
 
+    /// A failure of the account's work on the drive, of `class` (why: `e`): one the identity
+    /// refused latches the account ([`Drive::deny`]). Every pull, every operation of Recently
+    /// deleted ([`Drive::with_ops`]) and every folder's sync ([`crate::Engine`]) comes here as
+    /// it fails.
+    pub(crate) fn latch(&self, class: ErrorClass, e: &dyn std::fmt::Display) {
+        if class == ErrorClass::Denied {
+            self.deny(&e.to_string());
+        }
+    }
+
     /// Why the identity refused this computer, while that holds ([`Drive::deny`]).
     pub fn denied(&self) -> Option<String> {
         lock(&self.denied).clone()
@@ -295,6 +305,9 @@ impl Drive {
     ) -> Result<T, EngineError> {
         let (done, behind) = deleted::AccountOps::run(&self.account, self.remote(), op);
         self.behind_if(behind, &done);
+        if let Err(e) = &done {
+            self.latch(e.class(), e);
+        }
         done
     }
 
@@ -327,9 +340,7 @@ impl Drive {
             }
             Err(e) => {
                 self.set_behind();
-                if e.class() == ErrorClass::Denied {
-                    self.deny(&e.to_string());
-                }
+                self.latch(e.class(), e);
             }
         }
         // Still one at a time: what it touched is its to wake, the pages it committed before a
