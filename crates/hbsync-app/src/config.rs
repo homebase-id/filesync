@@ -156,8 +156,20 @@ impl Config {
     /// Changes the config at `path` (an empty one when there is none) with `f`, and saves it
     /// when `f` changed it. One change at a time, in any process or thread
     /// ([`ConfigLock`]): none undoes another's.
-    pub fn update<T>(path: &Path, f: impl FnOnce(&mut Config) -> T) -> Result<T, ConfigError> {
+    pub(crate) fn update<T>(
+        path: &Path,
+        f: impl FnOnce(&mut Config) -> T,
+    ) -> Result<T, ConfigError> {
         ConfigLock::take(path)?.update(f)
+    }
+
+    /// [`Config::update`], for other crates' tests (feature `testkit`).
+    #[cfg(feature = "testkit")]
+    pub fn update_for_test<T>(
+        path: &Path,
+        f: impl FnOnce(&mut Config) -> T,
+    ) -> Result<T, ConfigError> {
+        Self::update(path, f)
     }
 
     /// The folder `identity` syncs as `role` (`None`: its main folder), if it does.

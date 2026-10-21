@@ -32,6 +32,7 @@ tao = "0.37"
 tray-icon = "0.26"
 
 [dev-dependencies]
+hbsync-app = { workspace = true, features = ["testkit"] }
 tempfile.workspace = true
 
 [lints]

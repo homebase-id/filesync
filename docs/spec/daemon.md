@@ -66,6 +66,19 @@ daemon running keeps that lock from looking until it has written, and a daemon s
 before its own lock, and reads the config and binds its socket under it: it starts after such a
 change and reads it, and a program that finds it running can ask it.
 
+A hand edit while the daemon runs isn't watched for; each setting takes effect as follows (the
+tray's Recently deleted page shows the file's `keep_deleted_days` at once):
+
+| Setting | Takes effect |
+|---|---|
+| `keep_deleted_days` | when the account starts: the daemon's next start, or a login |
+| `device_name`, `mass_delete`, a root's `role` | when the folder's sync (re)starts: the daemon's next start, a login, or a restart after a failure |
+| `paused`, `paused_until` | at the daemon's next start or a login; while it runs, `hbsync pause`/`resume` and the tray set them |
+| `[[roots]]` added or removed | at the daemon's next start; while it runs, `hbsync add`/`remove` and the tray do it |
+
+While the file doesn't read (being written, a typo), a folder's sync waits to (re)start, and the
+daemon's own writes (a pause, a folder) are refused.
+
 ## Credentials
 
 In the OS keychain, service `Homebase Filesync`, account = identity, value = the credentials

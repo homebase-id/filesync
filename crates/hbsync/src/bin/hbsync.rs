@@ -13,7 +13,7 @@ use hbsync_app::{Config, Paths, State, autostart, control as daemon, setup, word
 use hbsync_local::STATE_DIR;
 use hbsync_types::Role;
 
-type Res<T> = hbsync_app::control::Result<T>;
+type Res<T> = hbsync_app::Result<T>;
 
 #[derive(Parser)]
 #[command(

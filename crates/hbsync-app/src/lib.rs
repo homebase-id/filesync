@@ -38,6 +38,10 @@ pub(crate) use secrets::{CredentialStore, Location};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// An error worded for people: the CLI prints it, the tray shows it.
+pub type Error = Box<dyn std::error::Error + Send + Sync>;
+pub type Result<T> = std::result::Result<T, Error>;
+
 /// A count tests wait on (feature `testkit`), shared by its clones; nothing without it.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct TestCount(

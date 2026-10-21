@@ -104,14 +104,14 @@ pub fn open_browser(
 }
 
 /// The folder synced when none is chosen: `Homebase` in the home folder.
-pub fn default_folder() -> control::Result<PathBuf> {
+pub fn default_folder() -> crate::Result<PathBuf> {
     home()
         .map(|home| home.join("Homebase"))
         .ok_or_else(|| "no home folder (HOME unset): choose a folder".into())
 }
 
 /// Where this computer keeps `role`'s folder (resolved): what `hbsync add <role>` syncs.
-pub fn role_folder(role: Role) -> control::Result<PathBuf> {
+pub fn role_folder(role: Role) -> crate::Result<PathBuf> {
     hbsync_platform::user_dirs::user_dir(role.user_dir())
         .map(|p| resolve(&p))
         .ok_or_else(|| format!("this computer has no {} folder", role.name()).into())
@@ -242,7 +242,7 @@ pub fn set_up(
     request: &SetUp,
     authorize: &mut dyn FnMut(&str, &str) -> Result<Credentials, HomebaseError>,
     say: &mut dyn FnMut(&str),
-) -> control::Result<()> {
+) -> crate::Result<()> {
     let config_path = paths.config_file();
     let config = Config::load(&config_path)?.unwrap_or_default();
     // Checked again: the config may have changed since the request was planned.
@@ -263,7 +263,7 @@ pub fn set_up(
     let device = config.device_name();
     // New credentials reach a running daemon's account only when it starts over.
     let mut authorized = false;
-    let mut authorize = || -> control::Result<Credentials> {
+    let mut authorize = || -> crate::Result<Credentials> {
         let creds = authorize(identity, &device)?;
         store.save(&creds)?;
         authorized = true;
@@ -388,10 +388,10 @@ mod tests {
         );
     }
 
-    type R = control::Result<()>;
+    type R = crate::Result<()>;
 
     #[test]
-    fn folders_are_resolved_before_they_are_judged() -> control::Result<()> {
+    fn folders_are_resolved_before_they_are_judged() -> R {
         let dir = tempfile::tempdir()?;
         let home = canonical(dir.path())?.join("anna");
         std::fs::create_dir_all(home.join("Docs"))?;

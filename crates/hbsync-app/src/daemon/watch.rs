@@ -178,7 +178,7 @@ mod tests {
     }
 
     /// A client watching through the control socket: what it receives, as it comes.
-    fn watching(paths: &Paths) -> crate::control::Result<Receiver<DaemonStatus>> {
+    fn watching(paths: &Paths) -> crate::Result<Receiver<DaemonStatus>> {
         let mut watch = crate::control::watch(paths)?.ok_or("not running")?;
         let (tx, rx) = channel();
         std::thread::spawn(move || {
@@ -194,7 +194,7 @@ mod tests {
     /// A watcher gets the status at once, then only when it changed: nothing while it doesn't,
     /// raised or not. One that went away is dropped.
     #[test]
-    fn the_status_is_sent_when_it_changes_and_only_then() -> crate::control::Result<()> {
+    fn the_status_is_sent_when_it_changes_and_only_then() -> crate::Result<()> {
         let dir = tempfile::tempdir()?;
         let paths = Paths::under(dir.path());
         let listener = ipc::listen(&paths)?;

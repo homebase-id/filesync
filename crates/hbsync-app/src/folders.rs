@@ -9,9 +9,7 @@ use hbsync_local::STATE_DIR;
 use hbsync_types::{NodeId, Role};
 
 use crate::config::ConfigLock;
-use crate::{Config, Identity, Paths, Root};
-
-pub use crate::control::Error;
+use crate::{Config, Error, Identity, Paths, Root};
 
 /// Whether the folder at `path` (resolved: [`crate::setup::resolve`]) can be set up for
 /// `identity` as `role` (`None`: its main folder), `home` being the home folder (resolved:
