@@ -2618,8 +2618,11 @@ fn a_node_trashed_twice_in_a_second_goes_both_times() -> R {
     }])?;
     assert!(report.failed.is_empty(), "{:?}", report.failed);
     assert!(!h.at("p2/f")?.exists());
-    let newest = trash.join(hbsync_local::layout::trash_entry(at + 2, node));
-    assert_eq!(fs::read(newest.join("f"))?, b"B");
+    // Three entries, the newest the file (at `at + 2`, or later on a slow run).
+    let mut entries = trash_entries(&h);
+    entries.sort_by_key(|e| hbsync_local::layout::trashed_at(e));
+    assert_eq!(entries.len(), 3, "{entries:?}");
+    assert_eq!(fs::read(trash.join(&entries[2]).join("f"))?, b"B");
     assert_eq!(fs::read(trash.join(first).join("f"))?, b"A");
     Ok(())
 }

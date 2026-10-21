@@ -33,7 +33,7 @@ pub fn trash_dir(root: &Path) -> PathBuf {
 }
 
 /// The name of `node`'s entry in the [`trash_dir`]: `<Unix s>-<node>`, by when it went there
-/// (`at`, Unix s).
+/// (`at`, Unix s; a second or so later where the node's entry of that second was taken).
 pub fn trash_entry(at: u64, node: NodeId) -> String {
     format!("{at}-{}", node.0.simple())
 }

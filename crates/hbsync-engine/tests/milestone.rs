@@ -65,10 +65,11 @@ struct Ledger {
     /// The places files were moved away from since their client's last scan (folder and name
     /// key), with their bytes.
     vacated: HashMap<(PathBuf, String), Vec<u8>>,
-    /// Bytes that may be there twice (not more): a file moved away from a place another file took before
-    /// the scan reads as the file there edited and a new one with its bytes (sync semantics
-    /// §3 rule 1: an editor keeping a backup by renaming), a copy.
-    copied: HashSet<Vec<u8>>,
+    /// Bytes that may be there once more for each time they were copied: a file moved away
+    /// from a place another file took before the scan reads as the file there edited and a
+    /// new one with its bytes (sync semantics §3 rule 1: an editor keeping a backup by
+    /// renaming), a copy.
+    copied: HashMap<Vec<u8>, usize>,
 }
 
 impl Ledger {
@@ -109,7 +110,7 @@ impl Ledger {
         if let Some(left) = self.vacated.remove(&Self::place(root, rel))
             && left != bytes
         {
-            self.copied.insert(left);
+            *self.copied.entry(left).or_default() += 1;
         }
     }
 
@@ -203,16 +204,15 @@ fn each_seed<T>(
     seeds: impl IntoIterator<Item = u64>,
     mut one: impl FnMut(u64) -> Res<T>,
 ) -> Res<Vec<T>> {
+    fn failed(seed: u64) -> String {
+        format!("seed {seed} failed (MILESTONE_SEEDS=1 MILESTONE_SEED_BASE={seed} replays it)")
+    }
     /// Names its seed if dropped by a panic.
     struct Naming(u64);
     impl Drop for Naming {
         fn drop(&mut self) {
             if std::thread::panicking() {
-                let seed = self.0;
-                eprintln!(
-                    "milestone: seed {seed} failed (MILESTONE_SEEDS=2 MILESTONE_SEED_BASE={seed} \
-                     replays it)"
-                );
+                eprintln!("milestone: {}", failed(self.0));
             }
         }
     }
@@ -220,7 +220,7 @@ fn each_seed<T>(
         .into_iter()
         .map(|seed| {
             let _naming = Naming(seed);
-            one(seed).map_err(|e| format!("seed {seed}: {e}").into())
+            one(seed).map_err(|e| format!("{}: {e}", failed(seed)).into())
         })
         .collect()
 }
@@ -416,7 +416,7 @@ fn converged(
         .filter(|(_, c)| {
             let n = seen.entry(c).or_default();
             *n += 1;
-            *n > 1 + usize::from(ledger.copied.contains(c))
+            *n > 1 + ledger.copied.get(c).copied().unwrap_or(0)
         })
         .map(|(path, _)| path)
         .collect();

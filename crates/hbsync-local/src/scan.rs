@@ -504,11 +504,11 @@ fn merge(
 /// The known paths another synced file now stands at (§3 rule 1): a file at a known path
 /// whose new file id is that of a synced file which left its own path (gone from it, a folder
 /// there now, moved onto yet another name, or swapped with this one) was moved onto this
-/// name. Where file ids are recycled, only with the bytes it had. Anything else at the same path is the node that
-/// was there: an editor's save through a temp file brings a new id (and the temp file, if a
-/// scan saw it, was never synced), one keeping a backup by renaming leaves the path. `hash`
-/// hashes what is at a path now; `changed` are the rows changed in place that kept their kind
-/// (`removed` holds the others).
+/// name. Where file ids are recycled, only with the bytes it had. Anything else at the same
+/// path is the node that was there: an editor's save through a temp file brings a new id (and
+/// the temp file, if a scan saw it, was never synced), one keeping a backup by renaming leaves
+/// the path. `hash` hashes what is at a path now; `changed` are the rows changed in place that
+/// kept their kind (`removed` holds the others).
 fn moved_onto(
     db: &mut StateDb,
     removed: &[LocalRow],
@@ -516,6 +516,7 @@ fn moved_onto(
     opts: &ScanOptions,
     hash: &mut dyn FnMut(&RelPath, &LocalMeta) -> Option<ContentHash>,
 ) -> Result<HashSet<RelPath>, StateError> {
+    debug_assert!(changed.iter().all(|(r, m)| kind_of(m) == r.kind));
     let mut onto = HashSet::new();
     let switched: Vec<&(LocalRow, LocalMeta)> = changed
         .iter()
@@ -716,11 +717,8 @@ fn resolve(
     // known path another synced file was moved onto (§3 rule 1, see `moved_onto`).
     let mut removed = diff.removed;
     let mut added = diff.added;
-    let (changed, other_kind): (Vec<_>, Vec<_>) = diff
-        .changed
-        .into_iter()
-        .partition(|(row, meta)| kind_of(meta) == row.kind);
-    for (row, meta) in other_kind {
+    let mut changed = diff.changed;
+    for (row, meta) in changed.extract_if(.., |(row, meta)| kind_of(meta) != row.kind) {
         added.push((row.path.clone(), meta));
         removed.push(row);
     }
