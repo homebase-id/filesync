@@ -502,8 +502,8 @@ fn merge(
 }
 
 /// The known paths another synced file now stands at (§3 rule 1): a file at a known path
-/// whose new file id is that of a synced file which left its own path (gone from it, moved
-/// onto yet another name, or swapped with this one) was moved onto this name. Where file ids
+/// whose new file id is that of a synced file which left its own path (gone from it, a folder
+/// there now, moved onto yet another name, or swapped with this one) was moved onto this name. Where file ids
 /// are recycled, only with the bytes it had. Anything else at the same path is the node that
 /// was there: an editor's save through a temp file brings a new id (and the temp file, if a
 /// scan saw it, was never synced), one keeping a backup by renaming leaves the path. `hash`
@@ -529,6 +529,7 @@ fn moved_onto(
     // Files that left their path, by the id they had there.
     let mut left: HashMap<FileId, &LocalRow> = removed
         .iter()
+        .chain(changed.iter().filter(|(_, m)| !is_file(m)).map(|(r, _)| r))
         .filter(|r| r.kind == NodeKind::File)
         .map(|r| (r.fingerprint.file_id, r))
         .collect();

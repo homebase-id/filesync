@@ -83,10 +83,10 @@ in this order, and the first rule that matches wins:
    path is an edit (editors that save through a temp file and a rename do this, even when a
    scan saw the temp file; one that keeps a backup by renaming leaves the path to the
    document), unless the new file id is that of a base file that left its path (no longer
-   present, itself moved onto another name, or swapped with this one): that file was moved
-   onto this name (`mv c d` over `d`) and keeps its node, and the node that was here is gone,
-   or moved on by its own file id (rule 2). Where file ids are recycled, only with the bytes
-   it had. Files only.
+   present, a folder in its place, itself moved onto another name, or swapped with this
+   one): that file was moved onto this name (`mv c d` over `d`) and keeps its node, and the
+   node that was here is gone, or moved on by its own file id (rule 2). Where file ids are
+   recycled, only with the bytes it had. Files only.
 2. **Same file id** as a base node whose path is no longer present → that node, moved.
 3. **Same content hash and size** as exactly one base file that is missing locally → that node,
    moved. Ambiguous candidates → no match.
