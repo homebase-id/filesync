@@ -55,11 +55,12 @@ impl Sim {
             let reconcile =
                 |i: &Input, _: &mut StateDb| reconcile_with_known(i, opts, folder.masking(), known);
             let all: Vec<NodeId> = input.dirty.iter().copied().collect();
-            let whole = db.read(|s| view::build_input(s, &all, &folder))?;
-            let whole = reconcile(&whole, &mut db);
+            let viewed = db.read(|s| view::build_input(s, &all, &folder))?;
+            let whole = reconcile(&viewed, &mut db);
             if whole != *plan {
+                let differ = input_differences(input, &viewed);
                 return Ok(Some(format!(
-                    "c{c}: the engine's view plans otherwise than the sim's input:\n  engine: {whole:?}\n  sim:    {plan:?}"
+                    "c{c}: the engine's view plans otherwise than the sim's input:\n  engine: {whole:?}\n  sim:    {plan:?}\n  inputs (sim, then engine): {differ}"
                 )));
             }
             // The nodes whose sides differ dirty, as the engine keeps them (its scan and feed
@@ -205,6 +206,36 @@ impl Sim {
             .or(server.removed.get(&node))
             .map_or(RemoteFileId(node.0), |n| n.remote.file_id)
     }
+}
+
+/// Where the sim's input `sim` and the engine's view `engine` differ, field by field (sorted:
+/// the trees iterate in no set order).
+fn input_differences(sim: &Input, engine: &Input) -> String {
+    fn sorted<T: std::fmt::Debug>(items: impl Iterator<Item = T>) -> Vec<String> {
+        let mut v: Vec<String> = items.map(|i| format!("{i:?}")).collect();
+        v.sort();
+        v
+    }
+    let fields = |i: &Input| {
+        [
+            ("local", sorted(i.local.iter())),
+            ("base", sorted(i.base.iter())),
+            ("remote", sorted(i.remote.iter())),
+            ("base_extra", sorted(i.base_extra.iter())),
+            ("remote_refs", sorted(i.remote_refs.iter())),
+            ("local_unhashed", sorted(i.local_unhashed.iter())),
+            ("dirty", sorted(i.dirty.iter())),
+            ("unreadable", sorted(i.unreadable.iter())),
+            ("removed", sorted(i.removed.iter())),
+            ("changed_at", sorted(i.changed_at.iter())),
+        ]
+    };
+    fields(sim)
+        .into_iter()
+        .zip(fields(engine))
+        .filter(|((_, a), (_, b))| a != b)
+        .map(|((name, a), (_, b))| format!("\n    {name}: {a:?}\n    {name}: {b:?}"))
+        .collect()
 }
 
 /// `path` (names, outermost first) as a relative path, if each name is one.

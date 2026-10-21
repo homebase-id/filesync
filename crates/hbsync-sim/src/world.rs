@@ -23,6 +23,7 @@ use crate::action::{Action, JUNK, NAMES, TAGS};
 use crate::model::client::{Client, ignoring_d};
 use crate::model::server::{Server, ServerNode};
 use crate::oracle::Seen;
+use crate::tagbook::Limit;
 
 impl Sim {
     /// The server as client `c`'s folder sees it ([`Coords`]).
@@ -381,8 +382,8 @@ impl Sim {
                             return; // this OS can't hold it
                         };
                         tags.push(tag);
-                        let concurrent = self.removal_unseen(c, node, name);
-                        self.ledger.tags.add(c, node, name, concurrent);
+                        let (concurrent, limit) = self.removal_unseen(c, node, name);
+                        self.ledger.tags.add(c, node, name, concurrent, limit);
                     }
                     _ => return,
                 }
@@ -693,12 +694,11 @@ impl Sim {
     }
 
     /// Whether a removal of tag `name` from `node` is under way that client `c`'s add may lose
-    /// to: on another client, not sent up yet (its base has the tag, its item doesn't); on the
-    /// drive while `c`'s base still has it; or `c`'s own, planned and not settled yet. That last
-    /// is a known limit: a remote write settles the base on what both sides hold after it, so
-    /// an add made while the write of the removal is under way reads as the drive's removal
-    /// once it lands (the base kept the tag), and is taken off the item.
-    fn removal_unseen(&self, c: usize, node: NodeId, name: &str) -> bool {
+    /// to: on another client, not sent up yet (its base has the tag, its item doesn't, or a
+    /// plan of its still sends the removal), or on the drive while `c`'s base still has it;
+    /// and the known limit it meets where the removal is `c`'s own, planned and still to
+    /// write the node ([`Limit::OwnRemovalInFlight`]).
+    fn removal_unseen(&self, c: usize, node: NodeId, name: &str) -> (bool, Option<Limit>) {
         let has = |s: Option<&NodeState>| s.is_some_and(|s| s.tags.get(name).is_some());
         let lacks = |s: Option<&NodeState>| s.is_some_and(|s| s.tags.get(name).is_none());
         // A plan of a client's made from the removal, still to write the node.
@@ -725,7 +725,8 @@ impl Sim {
                 .or(server.removed.get(&node))
                 .map(|n| &n.state),
         );
-        pending || (synced && (stale || planned(client)))
+        let own = (synced && planned(client)).then_some(Limit::OwnRemovalInFlight);
+        (pending || (synced && stale), own)
     }
 
     /// `node` is back on the drive (from Recently deleted, or made again after the purge).

@@ -167,6 +167,17 @@ impl Sim {
         self
     }
 
+    /// For scripted tests: the tag adds [`Sim::check`] found lost to a known limit of the
+    /// engine, as `"Limit node tag"`.
+    pub fn tags_lost_to_known_limits(&self) -> Vec<String> {
+        self.ledger
+            .tags
+            .excused()
+            .into_iter()
+            .map(|(limit, (_, node, name))| format!("{limit:?} {node:?} {name}"))
+            .collect()
+    }
+
     /// The drive refuses some requests as they are, for good, as Homebase refuses one it won't
     /// take (a write), or gives other bytes than it says (a download, at a version): every
     /// fourth request it hasn't seen before ([`Sim::drive_refuses`]), and the same request

@@ -12,13 +12,30 @@ use hbsync_types::NodeId;
 /// A tag add: the client, the node, the tag's name.
 pub(crate) type Add = (usize, NodeId, String);
 
+/// A known limit of the engine's tag sync that loses an add: named, so each case stays
+/// visible (the user's call, 2026-10-21: not now). Each excuses only its own case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Limit {
+    /// An add made while the adding client's own removal of the tag is still to land: a remote
+    /// write settles the base on what both sides hold after it, so once it lands the add reads
+    /// as the drive's removal, and goes (sync semantics §1; the in-flight undo design).
+    OwnRemovalInFlight,
+    /// Another client put a new item where its node had none (a download after its item went
+    /// into a conflict copy): the base keeps the old item's tags the write didn't touch, so a
+    /// tag neither side holds any more reads as that client's removal, and is sent over a later
+    /// add (sync semantics §1; branch r6-fresh-tags, seed 0a9df7c6).
+    NewItemKeepsBaseTag,
+}
+
 /// When an add was made, among the users' tag changes, and whether a removal of the tag was
 /// under way then that the adding client hadn't seen (another client's not sent up yet, or one
-/// on the drive the adding client hadn't pulled): such a removal may win over the add.
+/// on the drive the adding client hadn't pulled): such a removal may win over the add; or a
+/// known limit the add met.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Made {
     at: u64,
     concurrent: bool,
+    limit: Option<Limit>,
 }
 
 /// What users did to tags, and what became of it. An item that gets a new id on its client
@@ -60,6 +77,11 @@ pub(crate) struct TagBook {
     detached: BTreeMap<Add, (Made, Option<i64>)>,
     /// Nodes some user deleted (until they are back).
     deleted: BTreeSet<NodeId>,
+    /// Tags of nodes whose base keeps them on a client that put a new item there that doesn't
+    /// hold them ([`Limit::NewItemKeepsBaseTag`]).
+    kept_on_new_item: BTreeSet<Add>,
+    /// The adds the last check found lost to a known limit (for scripted tests).
+    excused: std::cell::RefCell<Vec<(Limit, Add)>>,
 }
 
 impl TagBook {
@@ -69,14 +91,28 @@ impl TagBook {
     }
 
     /// The user of client `c` added tag `name` to `node`; `concurrent`: a removal of it was
-    /// under way that the client hadn't seen ([`Made`]).
-    pub(crate) fn add(&mut self, c: usize, node: NodeId, name: &str, concurrent: bool) {
+    /// under way that the client hadn't seen; `limit`: a known limit it met ([`Made`]).
+    pub(crate) fn add(
+        &mut self,
+        c: usize,
+        node: NodeId,
+        name: &str,
+        concurrent: bool,
+        limit: Option<Limit>,
+    ) {
         let at = self.next();
         let add = (c, node, name.to_owned());
         self.cleared.remove(&add);
         // Added again: not sent up yet.
         self.sent.remove(&add);
-        self.added.insert(add, Made { at, concurrent });
+        self.added.insert(
+            add,
+            Made {
+                at,
+                concurrent,
+                limit,
+            },
+        );
     }
 
     /// The user of client `c` removed tag `name` from `node`; `synced`: the server's time,
@@ -235,37 +271,32 @@ impl TagBook {
         self.forked.extend(forked);
     }
 
+    /// Client `c` put a new item where `node` had none, and its base keeps tag `name`, which
+    /// neither the item nor the version it came from holds ([`Limit::NewItemKeepsBaseTag`]).
+    pub(crate) fn kept_on_new_item(&mut self, c: usize, node: NodeId, name: &str) {
+        self.kept_on_new_item.insert((c, node, name.to_owned()));
+    }
+
     /// A download wrote tag `name` on client `c`'s item `node`, which its record recovery
     /// dropped ([`TagBook::unproven`]).
     pub(crate) fn unproven(&mut self, c: usize, node: NodeId, name: &str) {
         self.unproven.insert((c, node, name.to_owned()));
     }
 
-    /// The drive's tags (`server`) against what users did: an add stands unless the node was
-    /// deleted (and the removed version didn't hold the tag: `held_at_removal`), or a removal
-    /// made after it, or under way then, won; a synced tag a client removed stays removed,
-    /// unless another client added it and the add wasn't on the drive yet when it was removed
-    /// (not sent up then: the removal, sent up after an add on the drive, wins), or holds it
-    /// from a download whose record recovery dropped (the known limit). One removed before a
-    /// delete was settled by it. Nodes in `refused` are left as they are.
-    pub(crate) fn check(
+    /// The adds the drive (`server`) lost, each with the known limit that excuses it, if one
+    /// does: an add stands unless the node was deleted (and the removed version didn't hold
+    /// the tag: `held_at_removal`), or a removal made after it, or under way then, won. Nodes
+    /// in `refused` are left as they are.
+    pub(crate) fn lost(
         &self,
         server: &Tree,
         refused: &BTreeSet<NodeId>,
         held_at_removal: impl Fn(NodeId, &str) -> bool,
-    ) -> Result<(), String> {
+    ) -> Vec<(Add, Option<Limit>)> {
+        let mut lost = Vec::new();
         // A tag change loses to a delete (§11), unless the removed version held the tag: then
         // what brings it back keeps it.
-        let adds = self
-            .added
-            .iter()
-            .map(|(add, made)| (add, made, self.sent.get(add)));
-        let detached = self
-            .detached
-            .iter()
-            .map(|(add, (made, sent))| (add, made, sent.as_ref()));
-        let adds: Vec<_> = adds.chain(detached).collect();
-        for ((_, node, name), made, _) in &adds {
+        for ((c, node, name), made, _) in self.adds() {
             let removed_since = self
                 .removed
                 .iter()
@@ -277,9 +308,53 @@ impl TagBook {
                 && (!self.deleted.contains(node) || held_at_removal(*node, name))
                 && s.tags.get(name).is_none()
             {
-                return Err(format!("lost tag {name:?} of {node:?}: {:?}", s.tags));
+                let new_item = self
+                    .kept_on_new_item
+                    .iter()
+                    .any(|(by, n, t)| by != c && n == node && t == name);
+                let limit = made
+                    .limit
+                    .or(new_item.then_some(Limit::NewItemKeepsBaseTag));
+                lost.push(((*c, *node, name.clone()), limit));
             }
         }
+        lost
+    }
+
+    /// Every add, detached or not, with when it was made and sent.
+    fn adds(&self) -> impl Iterator<Item = (&Add, &Made, Option<&i64>)> {
+        let adds = self
+            .added
+            .iter()
+            .map(|(add, made)| (add, made, self.sent.get(add)));
+        let detached = self
+            .detached
+            .iter()
+            .map(|(add, (made, sent))| (add, made, sent.as_ref()));
+        adds.chain(detached)
+    }
+
+    /// The drive's tags (`server`) against what users did: no add lost ([`TagBook::lost`]) but
+    /// for a known limit; a synced tag a client removed stays removed, unless another client
+    /// added it and the add wasn't on the drive yet when it was removed (not sent up then: the
+    /// removal, sent up after an add on the drive, wins), or holds it from a download whose
+    /// record recovery dropped (the known limit). One removed before a delete was settled by it.
+    pub(crate) fn check(
+        &self,
+        server: &Tree,
+        refused: &BTreeSet<NodeId>,
+        held_at_removal: impl Fn(NodeId, &str) -> bool,
+    ) -> Result<(), String> {
+        let lost = self.lost(server, refused, held_at_removal);
+        *self.excused.borrow_mut() = lost
+            .iter()
+            .filter_map(|(add, limit)| limit.map(|l| (l, add.clone())))
+            .collect();
+        if let Some(((_, node, name), _)) = lost.into_iter().find(|(_, limit)| limit.is_none()) {
+            let held = server.get(node).map(|s| s.tags.clone()).unwrap_or_default();
+            return Err(format!("lost tag {name:?} of {node:?}: {held:?}"));
+        }
+        let adds: Vec<_> = self.adds().collect();
         for ((by, node, name), removed) in &self.cleared {
             let elsewhere = |(c, n, t): &Add| c != by && n == node && t == name;
             let added_elsewhere = adds
@@ -298,6 +373,11 @@ impl TagBook {
             }
         }
         Ok(())
+    }
+
+    /// The adds the last [`TagBook::check`] found lost to a known limit, each with its limit.
+    pub(crate) fn excused(&self) -> Vec<(Limit, Add)> {
+        self.excused.borrow().clone()
     }
 
     #[cfg(test)]
@@ -358,9 +438,9 @@ mod tests {
     fn only_a_later_removal_excuses_a_lost_add() {
         let node = NodeId(hbsync_types::Uuid::from_u128(1));
         let mut book = TagBook::default();
-        book.add(0, node, "Work", false);
+        book.add(0, node, "Work", false, None);
         book.remove(0, node, "Work", Some(1));
-        book.add(1, node, "Work", false);
+        book.add(1, node, "Work", false, None);
         assert!(check(&book, &drive(node, &[])).is_err(), "c1's add lost");
         assert!(check(&book, &drive(node, &["Work"])).is_ok());
         book.remove(0, node, "Work", None);
@@ -373,7 +453,7 @@ mod tests {
         let node = NodeId(hbsync_types::Uuid::from_u128(1));
         let mut book = TagBook::default();
         book.remove(1, node, "Work", Some(1));
-        book.add(0, node, "Work", true);
+        book.add(0, node, "Work", true, None);
         assert!(check(&book, &drive(node, &[])).is_ok());
     }
 
@@ -383,14 +463,14 @@ mod tests {
     fn a_detached_add_is_not_another_clients() {
         let node = NodeId(hbsync_types::Uuid::from_u128(1));
         let mut book = TagBook::default();
-        book.add(0, node, "Red", false);
+        book.add(0, node, "Red", false, None);
         book.detach((0, node, "Red".into())); // a download refused it: not sent
         book.remove(0, node, "Red", Some(5));
         assert!(
             check(&book, &drive(node, &["Red"])).is_err(),
             "c0's removal came back"
         );
-        book.add(1, node, "Red", false);
+        book.add(1, node, "Red", false, None);
         book.detach((1, node, "Red".into()));
         assert!(check(&book, &drive(node, &["Red"])).is_ok(), "c1 added it");
     }

@@ -97,7 +97,13 @@ impl Sim {
             remote: remote.clone(),
             base_extra: client.extra.clone(),
             remote_complete: true,
-            local_unhashed: client.unhashed.iter().copied().collect(),
+            // Of the items it holds (as the engine's view marks its rows).
+            local_unhashed: client
+                .unhashed
+                .iter()
+                .copied()
+                .filter(|n| client.local.contains(*n))
+                .collect(),
             ..Default::default()
         };
         // On the drive, in a version no client reads ([`Action::NewerFolder`]).
@@ -615,6 +621,26 @@ impl Sim {
             let at = self.settle_against(c, node, against, op.is_transfer() && !landed, tags, ours);
             if let Some(at) = at {
                 self.clients[c].run_settled.insert(node, at);
+            }
+            // A new item (none was there) whose base keeps a tag neither it nor the version it
+            // came from holds: the known limit (`Limit::NewItemKeepsBaseTag`).
+            if fresh && matches!(op, Op::LocalDownload { .. } | Op::LocalMkdir { .. }) {
+                let client = &self.clients[c];
+                let lacks = |s: Option<&NodeState>, name: &str| {
+                    s.is_none_or(|s| s.tags.get(name).is_none())
+                };
+                let (item, drive) = (client.local.get(node), op.drive().map(|d| &d.state));
+                let kept: Vec<String> = client
+                    .base
+                    .get(node)
+                    .iter()
+                    .flat_map(|b| b.tags.iter())
+                    .map(|t| t.name.clone())
+                    .filter(|name| lacks(item, name) && lacks(drive, name))
+                    .collect();
+                for name in kept {
+                    self.ledger.tags.kept_on_new_item(c, node, &name);
+                }
             }
         }
         true
