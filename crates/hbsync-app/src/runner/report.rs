@@ -136,12 +136,12 @@ impl Stalled {
     }
 }
 
-/// The deletes the guard held in `report` (of `nodes`), as the status shows them; `None` when
-/// none were.
+/// The deletes the guard held in `report` (named by `token`), as the status shows them; `None`
+/// when none were.
 pub(super) fn held(
     engine: &mut Engine,
     report: &SyncReport,
-    nodes: &[NodeId],
+    token: &str,
 ) -> Result<Option<HeldDeletes>, StateError> {
     if report.held.is_empty() {
         return Ok(None);
@@ -159,15 +159,18 @@ pub(super) fn held(
         here,
         remotely: report.held.len() as u64 - here,
         examples,
-        token: held_token(nodes),
+        token: token.to_owned(),
     }))
 }
 
-/// The token of the held deletes of `nodes`, a hash of their sorted ids (made and checked by
-/// one daemon process).
-pub(super) fn held_token(nodes: &[NodeId]) -> String {
+/// The token of the held deletes `held`, a hash of their sorted ids, each with its way (from
+/// the drive, or from here): made and checked by one daemon process.
+pub(super) fn held_token(held: &[Op]) -> String {
     use std::hash::{DefaultHasher, Hash, Hasher};
-    let mut sorted = nodes.to_vec();
+    let mut sorted: Vec<(NodeId, bool)> = held
+        .iter()
+        .map(|op| (op.node(), matches!(op, Op::RemoteDelete { .. })))
+        .collect();
     sorted.sort();
     let mut hasher = DefaultHasher::new();
     sorted.hash(&mut hasher);
@@ -431,7 +434,25 @@ mod tests {
     #[test]
     fn a_token_names_exactly_its_deletes() {
         let (a, b) = (NodeId::new(), NodeId::new());
-        assert_eq!(held_token(&[a, b]), held_token(&[b, a]));
-        assert_ne!(held_token(&[a, b]), held_token(&[a]));
+        let trash = |node| Op::LocalTrash {
+            node,
+            subtree: vec![node],
+        };
+        let delete = |node| Op::RemoteDelete {
+            node,
+            parent: NodeId::ROOT,
+            file_id: hbsync_types::RemoteFileId(hbsync_types::Uuid::nil()),
+            expected: hbsync_types::VersionTag(hbsync_types::Uuid::nil()),
+        };
+        assert_eq!(
+            held_token(&[trash(a), trash(b)]),
+            held_token(&[trash(b), trash(a)])
+        );
+        assert_ne!(held_token(&[trash(a), trash(b)]), held_token(&[trash(a)]));
+        assert_ne!(
+            held_token(&[trash(a)]),
+            held_token(&[delete(a)]),
+            "its way counts"
+        );
     }
 }

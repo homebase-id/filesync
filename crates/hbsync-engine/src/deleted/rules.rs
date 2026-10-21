@@ -14,7 +14,7 @@ use crate::tree::restored_names;
 
 /// Whether a node removed at `removed_at` was deleted with `folder`, the folder it is in, in
 /// Recently deleted too: removed no earlier than the folder (node schema, Recently deleted).
-pub(super) fn deleted_with(removed_at: i64, folder: &RemovedRow) -> bool {
+pub(crate) fn deleted_with(removed_at: i64, folder: &RemovedRow) -> bool {
     folder.time() <= removed_at
 }
 

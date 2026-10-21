@@ -268,10 +268,16 @@ included (service managers restart it then).
 - **The folder gone** (moved, deleted, a disk not mounted: its marker missing): nothing
   syncs, the status says why, and the loop waits for it to come back. It never creates a
   marker: only `hbsync setup` does.
-- **Held deletes:** the status shows how many (deleted here; deleted elsewhere), some paths,
-  and a token naming exactly these deletes. A confirmation carries the token back and lets
-  exactly them through; when the held deletes changed since, it is refused (sync semantics,
-  the mass-delete guard).
+- **Held deletes:** the status shows how many (deleted here, to go from the drive; removed
+  elsewhere, every synced file), some paths, and a token naming exactly these deletes and
+  which way each goes, until they are answered (nothing expires; a held removal of every file
+  lasts across restarts). An answer carries the token back: `confirm_deletes` lets exactly
+  them through, `put_back` puts exactly them back (sync semantics §7); when the held deletes
+  changed since, or the folder is gone (nothing is held there meanwhile), it is refused. The
+  tray asks "812 items in Homebase were deleted on this computer (or are newly ignored).
+  Delete them from Homebase and your other devices too?" (or, everything removed elsewhere,
+  "Another device removed everything here. Remove them here too?"), with **Delete** and
+  **Put them back**; each button names its answer, and a form without one does nothing.
 - **Notes:** each conflict and failure is noted once; one that comes back sync after sync (a
   file that can't be read) isn't noted again until it has gone away. An operation left for the
   next plan is noted only when this device can't do it (a name or path it can't hold, access
@@ -348,21 +354,22 @@ wire types are `hbsync-app/src/protocol.rs`. A control goes to the daemon (every
 account (its Recently deleted) or to one folder (its held deletes):
 
 ```json
-{"protocol":9,"ask":"status"}
-{"protocol":9,"ask":"watch"}                                        // a status line now, then one per change
-{"protocol":9,"ask":"stop"}                                         // taken whatever the protocol
-{"protocol":9,"ask":{"control":{"daemon":"sync_now"}}}            // resume
-{"protocol":9,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}   // "until":null: until resumed
-{"protocol":9,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}}}
-{"protocol":9,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"restore":{"nodes":["<node id>"]}}}}}}
-{"protocol":9,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted":{"nodes":["<node id>"],"db":"<db id>","seq":4711}}}}}}  // the items as listed
-{"protocol":9,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_listed":{"db":"<db id>","seq":4711}}}}}}  // all it held when listed
-{"protocol":9,"ask":{"recent":{"limit":10}}}
-{"protocol":9,"ask":{"deleted":{"limit":100}}}                    // the newest 100 deletes
-{"protocol":9,"ask":{"find_deleted":{"items":["Photos/2024","<node id>"]}}}
-{"protocol":9,"ask":{"add_folder":{"identity":"anna.example.com","path":"/home/anna/Homebase","role":null}}}
-{"protocol":9,"ask":{"remove_folder":{"path":"/home/anna/Homebase"}}}
-{"protocol":9,"ask":{"start_over":{"identity":"anna.example.com"}}}  // new credentials
+{"protocol":10,"ask":"status"}
+{"protocol":10,"ask":"watch"}                                        // a status line now, then one per change
+{"protocol":10,"ask":"stop"}                                         // taken whatever the protocol
+{"protocol":10,"ask":{"control":{"daemon":"sync_now"}}}            // resume
+{"protocol":10,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}   // "until":null: until resumed
+{"protocol":10,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}}}
+{"protocol":10,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"put_back":{"token":"<held_deletes.token>"}}}}}}
+{"protocol":10,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"restore":{"nodes":["<node id>"]}}}}}}
+{"protocol":10,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted":{"nodes":["<node id>"],"db":"<db id>","seq":4711}}}}}}  // the items as listed
+{"protocol":10,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_listed":{"db":"<db id>","seq":4711}}}}}}  // all it held when listed
+{"protocol":10,"ask":{"recent":{"limit":10}}}
+{"protocol":10,"ask":{"deleted":{"limit":100}}}                    // the newest 100 deletes
+{"protocol":10,"ask":{"find_deleted":{"items":["Photos/2024","<node id>"]}}}
+{"protocol":10,"ask":{"add_folder":{"identity":"anna.example.com","path":"/home/anna/Homebase","role":null}}}
+{"protocol":10,"ask":{"remove_folder":{"path":"/home/anna/Homebase"}}}
+{"protocol":10,"ask":{"start_over":{"identity":"anna.example.com"}}}  // new credentials
 ```
 
 A request of another protocol is refused (`this daemon speaks protocol N, …`), except `stop`,
@@ -542,6 +549,7 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 | `hbsync sync`, `pause [--for 1h]`, `resume` | a pause with `--for` ends by itself |
 | `hbsync recent [-n N]` | what was synced lately, newest first |
 | `hbsync confirm-deletes [--yes]` | shows the held deletes and lets them through |
+| `hbsync put-back [--yes]` | shows the held deletes and puts them back (sync semantics §7) |
 | `hbsync start`, `stop` | |
 | `hbsync autostart [on\|off]` | |
 | `hbsync logout` | stops the daemon, forgets the credentials, autostart off; the folder stays |

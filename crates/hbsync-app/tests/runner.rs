@@ -526,6 +526,32 @@ fn held_deletes_go_through_once_confirmed_as_shown() -> R {
     Ok(())
 }
 
+/// Held deletes put back as shown (sync semantics §7): the files come down again, nothing on
+/// the drive changed.
+#[test]
+fn held_deletes_put_back_come_back() -> R {
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    for i in 0..60 {
+        a.write(&format!("f{i:02}.txt"), &i.to_string())?;
+    }
+    wait_until("all 60 are up", || live_names(&server).len() == 60)?;
+    a.wait_idle()?;
+    for i in 0..60 {
+        std::fs::remove_file(a.root.join(format!("f{i:02}.txt")))?;
+    }
+    wait_until("the deletes are held", || {
+        a.status().held_deletes.is_some_and(|h| h.here == 60)
+    })?;
+    let held = a.status().held_deletes.ok_or("held")?;
+    a.handle.send(Command::PutBack { token: held.token });
+    wait_until("they are back", || a.root.join("f59.txt").exists())?;
+    wait_until("nothing is held", || a.status().held_deletes.is_none())?;
+    assert_eq!(live_names(&server).len(), 60, "nothing was deleted");
+    assert_eq!(std::fs::read_to_string(a.root.join("f07.txt"))?, "7");
+    Ok(())
+}
+
 #[test]
 fn an_edited_ignore_file_applies_without_a_restart() -> R {
     let server = server();

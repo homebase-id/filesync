@@ -11,8 +11,8 @@ use hbsync_local::{
 use hbsync_platform::RelPath;
 use hbsync_remote::Remote;
 use hbsync_state::{DirtyCursor, Mark, ReadTx, StateDb, StateError, keys};
-use hbsync_types::NodeId;
 use hbsync_types::activity::Synced;
+use hbsync_types::{NodeId, NodeKind};
 
 use crate::activity::{self, Counters};
 use crate::adopt::adopt;
@@ -167,6 +167,9 @@ pub struct Engine {
     stop: Arc<AtomicBool>,
     /// Nodes whose held deletes the user confirmed, until they are done (or undone).
     confirmed: std::collections::HashSet<NodeId>,
+    /// Nodes whose removal elsewhere the guard held as every synced file, till answered
+    /// ([`keys::WIPED`]).
+    wiped: std::collections::HashSet<NodeId>,
     /// How far the current sync is.
     progress: Arc<Counters>,
     /// Nodes whose placement records the current sync pass rescanned for: each once (a file
@@ -231,6 +234,7 @@ impl Engine {
             sweep_after: None,
             stop: Arc::default(),
             confirmed: Default::default(),
+            wiped: Default::default(),
             progress: Arc::default(),
             rescanned: Default::default(),
             refusals: FolderRefusals::default(),
@@ -263,6 +267,114 @@ impl Engine {
     /// confirmation.
     pub fn confirm_deletes(&mut self, nodes: impl IntoIterator<Item = NodeId>) {
         self.confirmed.extend(nodes);
+    }
+
+    /// Puts back the held removals of `nodes` the user was shown (sync semantics §7, "Put them
+    /// back"), as the drive has them now (read first: what it removed or changed since wins):
+    /// - deleted here, live on the drive: its base goes, with what below it is gone here too,
+    ///   so it comes down again (a newly ignored item: synced again where the drive has it).
+    ///   What below it was moved elsewhere here keeps its base: the move goes on;
+    /// - removed elsewhere, still here: restored on the drive from Recently deleted, and so is
+    ///   what in it was removed apart before; what is gone for good there loses its base, so
+    ///   it goes up again from here.
+    ///
+    /// The next sync does the rest; what a failure leaves is still held, and shown again.
+    /// Costs a feed read, and a restore (a read and a write or more) per item restored.
+    /// Returns how many it put back.
+    pub fn put_back(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
+        self.drive.pull(None)?;
+        // Each to restore, with its folder and its row of Recently deleted.
+        let (mut forget, mut restore) = (Vec::new(), Vec::new());
+        // One restore per removal, the outermost first: what was removed with its folder comes
+        // back with it.
+        let mut tops: Vec<(usize, NodeId)> = Vec::new();
+        // Each once: a folder's held with what is in it.
+        let mut seen = std::collections::HashSet::new();
+        self.db.read(|s| {
+            let here = |n: NodeId| s.local_by_node(n);
+            let live = |n: NodeId| Ok::<_, StateError>(s.get_mirror(n)?.is_some());
+            let base = |n: NodeId| s.get_base(n);
+            for &node in nodes {
+                if base(node)?.is_none() {
+                    continue;
+                }
+                match (here(node)?, live(node)?) {
+                    (None, true) => {
+                        // Below it in the base, gone here and live there.
+                        let mut below = vec![node];
+                        while let Some(n) = below.pop() {
+                            if !seen.insert(n) {
+                                continue;
+                            }
+                            forget.push(n);
+                            for b in s.base_children(n)? {
+                                if here(b.node)?.is_none() && live(b.node)? {
+                                    below.push(b.node);
+                                }
+                            }
+                        }
+                    }
+                    (Some(row), _) => {
+                        // Here, parents first: each synced and gone there restored, or gone for
+                        // good (never one made here since); a folder already back (a put back
+                        // half done) has what is in it looked at.
+                        let mut below = vec![row];
+                        while let Some(row) = below.pop() {
+                            if !seen.insert(row.node) {
+                                continue;
+                            }
+                            if let Some(b) = base(row.node)?
+                                && !live(row.node)?
+                            {
+                                match s.removed_by_node(row.node)? {
+                                    Some(r) => restore.push((row.node, b.state.parent, r)),
+                                    None => forget.push(row.node),
+                                }
+                            }
+                            if row.kind == NodeKind::Folder {
+                                below.extend(s.local_children_of(&row)?);
+                            }
+                        }
+                    }
+                    // The drive removed it too meanwhile: its state wins.
+                    (None, false) => {}
+                }
+            }
+            let mut topped = std::collections::HashSet::new();
+            for (node, parent, removed) in &restore {
+                // Up through the folders it was deleted with (Recently deleted's own rule).
+                let (mut top, mut parent, mut at) = (*node, *parent, removed.time());
+                while let Some(folder) = s.removed_by_node(parent)?
+                    && crate::deleted::deleted_with(at, &folder)
+                {
+                    top = parent;
+                    at = folder.time();
+                    parent = folder.row.parent;
+                }
+                if topped.insert(top) {
+                    let (mut depth, mut up) = (0, top);
+                    while let Some(b) = base(up)? {
+                        depth += 1;
+                        up = b.state.parent;
+                    }
+                    tops.push((depth, top));
+                }
+            }
+            Ok(())
+        })?;
+        self.db.write(|s| {
+            for &node in &forget {
+                s.folder().delete_base(node)?;
+                s.folder().mark_dirty(node)?;
+            }
+            Ok(())
+        })?;
+        tops.sort();
+        let tops: Vec<NodeId> = tops.into_iter().map(|(_, n)| n).collect();
+        if !tops.is_empty() {
+            self.drive.restore_read(&tops)?;
+        }
+        Ok(forget.len() + restore.len())
     }
 
     /// Waits up to `timeout` for the live changes `observer`'s watcher reports, and records
@@ -437,8 +549,13 @@ impl Engine {
         // confirmed deletes don't count. Confirmations of nodes with nothing left to do are
         // dropped (those whose plan no longer deletes them, in plan_and_execute).
         let confirmed = std::mem::take(&mut self.confirmed);
-        let (pending_deletes, synced_files, confirmed, computer) = self.db.read(|s| {
+        let (pending_deletes, synced_files, confirmed, computer, saved) = self.db.read(|s| {
             let (here, there) = s.pending_file_deletes()?;
+            // Held as every synced file: until answered, each while its removal is pending.
+            let saved: std::collections::HashSet<NodeId> =
+                read_wiped(s.get_kv(keys::WIPED)?.as_deref())
+                    .into_iter()
+                    .collect();
             let mut still = std::collections::HashSet::new();
             // Each file once, however many confirmed trashes it is under.
             let (mut confirmed_here, mut confirmed_there) = (0, std::collections::HashSet::new());
@@ -464,9 +581,31 @@ impl Engine {
             if computer.is_empty() {
                 return Err(StateError::Corrupt("it has no id (db.id)".into()));
             }
-            Ok((pending, synced, still, computer))
+            Ok((pending, synced, still, computer, saved))
         })?;
         self.confirmed = confirmed;
+        // Held as every synced file: until answered (Delete, or put back), each while a
+        // removal elsewhere is still to be followed in it: it, or (back on the drive) what is
+        // below it. A row lookup or two each; a subtree walk only for one back on the drive.
+        let mut wiped = std::collections::HashSet::new();
+        self.db.read(|s| {
+            for &node in &saved {
+                let keep = !self.confirmed.contains(&node)
+                    && s.get_base(node)?.is_some()
+                    && match s.get_mirror(node)?.is_some() {
+                        false => s.local_by_node(node)?.is_some(),
+                        true => s.removal_pending_under(node)?,
+                    };
+                if keep {
+                    wiped.insert(node);
+                }
+            }
+            Ok(())
+        })?;
+        if wiped != saved {
+            save_wiped(&mut self.db, &wiped)?;
+        }
+        self.wiped = wiped.clone();
         let opts = Options {
             device: self.cfg.device.clone(),
             computer,
@@ -474,6 +613,7 @@ impl Engine {
             guard: self.cfg.guard,
             synced_files: synced_files as usize,
             confirmed: Arc::new(self.confirmed.clone()),
+            wiped: Arc::new(wiped.clone()),
             pending_deletes: (pending_deletes.0 as usize, pending_deletes.1 as usize),
             taken: Arc::default(),
         };
@@ -671,6 +811,17 @@ impl Engine {
         recover_placements(&mut self.db, &self.cfg.folder)?;
         let plan = self.plan(&dirty, opts)?;
         let plan = self.read_waiting(plan, &dirty, opts)?;
+        // What the guard holds of removals elsewhere stays held till answered (§7): only the
+        // every-file rule holds those. Kept before anything of this page runs or goes clean.
+        let before = self.wiped.len();
+        self.wiped
+            .extend(plan.held.iter().filter_map(|op| match op {
+                Op::LocalTrash { node, .. } => Some(*node),
+                _ => None,
+            }));
+        if self.wiped.len() != before {
+            save_wiped(&mut self.db, &self.wiped)?;
+        }
         #[cfg(feature = "testkit")]
         if let Some(after) = &self.cfg.after_plan {
             (after.0)();
@@ -763,4 +914,24 @@ enum Pull {
     Now,
     /// Only if the account's picture isn't [`Drive::current`].
     IfBehind,
+}
+
+/// The nodes [`keys::WIPED`] holds; an id that doesn't parse is left out.
+fn read_wiped(value: Option<&str>) -> Vec<NodeId> {
+    crate::scope::Scope::outside_of(value.unwrap_or_default())
+        .into_iter()
+        .collect()
+}
+
+/// Keeps `wiped` as [`keys::WIPED`] (in [`crate::scope::Scope`]'s id list).
+fn save_wiped(
+    db: &mut StateDb,
+    wiped: &std::collections::HashSet<NodeId>,
+) -> Result<(), StateError> {
+    let mut ids: Vec<String> = wiped.iter().map(|n| n.0.to_string()).collect();
+    ids.sort();
+    db.write(|s| match ids.is_empty() {
+        true => s.folder().delete_kv(keys::WIPED),
+        false => s.folder().set_kv(keys::WIPED, &ids.join(",")),
+    })
 }

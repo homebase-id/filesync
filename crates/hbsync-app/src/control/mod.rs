@@ -10,7 +10,7 @@ mod process;
 pub(crate) use client::remove_folder;
 pub use client::{
     NotRunning, OlderDaemon, Watch, account, add_folder, confirm_deletes, daemon, deleted, empty,
-    empty_listed, find_deleted, recent, restore, start_over, status, watch,
+    empty_listed, find_deleted, put_back, recent, restore, start_over, status, watch,
 };
 pub use leave::{LoggedOut, Unlinked, log_out, unlink};
 pub use process::{dev_home, running, start, stop};

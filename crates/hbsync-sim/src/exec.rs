@@ -162,6 +162,23 @@ impl Sim {
             .chain(remote.ids())
             .collect();
         let confirmed = Arc::new(client.confirmed.clone());
+        // Held as every synced file: until answered, each while a removal elsewhere is still
+        // to be followed in it: it, or (back on the drive) what is below it in the base. As
+        // the engine keeps `guard.wiped`.
+        let pending = |n: NodeId| client.local.contains(n) && remote.path(n).is_none();
+        let wiped: HashSet<NodeId> = client
+            .wiped
+            .iter()
+            .copied()
+            .filter(|n| {
+                !confirmed.contains(n)
+                    && client.base.contains(*n)
+                    && match remote.path(*n).is_some() {
+                        false => client.local.contains(*n),
+                        true => client.base.subtree(*n).into_iter().any(pending),
+                    }
+            })
+            .collect();
         let synced_files = client
             .base
             .iter()
@@ -179,6 +196,7 @@ impl Sim {
             },
             synced_files,
             confirmed: Arc::clone(&confirmed),
+            wiped: Arc::new(wiped.clone()),
             ..Options::default()
         };
         let masking = Masking {
@@ -328,10 +346,45 @@ impl Sim {
                         {
                             deleted += 1;
                         }
-                        _ => trashed += op.trashes().map_or(0, |n| files_under(&input.local, n)),
+                        Op::LocalTrash { node, .. } => trashed += files_under(&input.local, *node),
+                        _ => {}
                     }
                 }
-                (trips(deleted) || trips(trashed)).then(|| {
+                // Removals from elsewhere are followed, but every synced file over the limit.
+                let every = |n: usize| synced_files > 0 && n >= synced_files && n > min;
+                // Held before (sticky till answered) isn't judged again.
+                let was_wiped = |n: NodeId| {
+                    wiped.contains(&n) || input.base.ancestors(n).iter().any(|a| wiped.contains(a))
+                };
+                let held_trashed: usize = plan
+                    .held
+                    .iter()
+                    .map(|op| match op {
+                        Op::LocalTrash { node, .. } if !was_wiped(*node) => {
+                            files_under(&input.local, *node)
+                        }
+                        _ => 0,
+                    })
+                    .sum();
+                // And what was held so stays held till answered.
+                if let Some(op) = plan.ops.iter().filter(unconfirmed).find(|op| {
+                    matches!(op, Op::LocalTrash { node, subtree }
+                            if was_wiped(*node) || subtree.iter().any(|n| wiped.contains(n)))
+                }) {
+                    return Some(format!(
+                        "{} trashes what was held as every synced file, unanswered: {op:?}",
+                        client.name
+                    ));
+                }
+                let held_elsewhere = held_trashed > 0 && !every(held_trashed + trashed);
+                if held_elsewhere {
+                    return Some(format!(
+                        "{} held {held_trashed} removals from elsewhere, short of every synced \
+                         file ({synced_files}): {:?}",
+                        client.name, plan.held
+                    ));
+                }
+                (trips(deleted) || every(trashed)).then(|| {
                     format!(
                         "{} deletes {deleted} remote and trashes {trashed} local files \
                          unconfirmed (limit {min}, {synced_files} synced): {:?}",
@@ -411,6 +464,13 @@ impl Sim {
             .collect();
         client.confirmed = confirmed.intersection(&deleting).copied().collect();
         client.held = plan.held.iter().map(Op::node).collect();
+        client.wiped = wiped;
+        client
+            .wiped
+            .extend(plan.held.iter().filter_map(|op| match op {
+                Op::LocalTrash { node, .. } => Some(*node),
+                _ => None,
+            }));
         if self.refusing {
             client.last_plan = ops.clone();
         }

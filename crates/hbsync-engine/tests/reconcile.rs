@@ -2038,9 +2038,9 @@ fn a_fork_onto_the_name_of_a_file_not_hashed_yet_waits() {
     assert!(plan.deferred.contains(&x), "{:?}", plan.deferred);
 }
 
-/// A confirmed folder that holds a file being written, and isn't deleted (its delete undone:
-/// the drive has it), confirms nothing in it: the drive's deletes of what is in it are held
-/// for the user, as any. Only what was in a confirmed folder whose own delete waits goes.
+/// A confirmed folder that holds a file being written, and isn't deleted (its delete undone),
+/// confirms nothing in it: deletes here of what is in it are held for the user, as any. Only
+/// what was in a confirmed folder whose own delete waits goes.
 #[test]
 fn a_confirmed_folder_that_stays_confirms_nothing_in_it() {
     let v = ids(8);
@@ -2053,7 +2053,7 @@ fn a_confirmed_folder_that_stays_confirms_nothing_in_it() {
     }
     w.synced(wf, file(f, "w", "w"));
     for n in files {
-        w.remote(*n, None);
+        w.local(*n, None);
     }
     w.local(
         wf,
@@ -2068,8 +2068,8 @@ fn a_confirmed_folder_that_stays_confirms_nothing_in_it() {
     assert_eq!(plan.held.len(), files.len(), "{plan:#?}");
     assert!(plan.delete_waits.is_empty(), "{:?}", plan.delete_waits);
 
-    // The drive deletes the folder too: its delete waits, confirmed, and what was in it goes.
-    w.remote(f, None);
+    // The folder deleted here too: its delete waits, confirmed, and what was in it goes.
+    w.local(f, None);
     let plan = w.plan();
     assert!(plan.held.is_empty(), "{plan:#?}");
     assert_eq!(plan.delete_waits, [f]);

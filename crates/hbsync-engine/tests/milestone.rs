@@ -906,12 +906,10 @@ fn a_confirmed_delete_that_was_undone_is_forgotten() -> R {
     let report = a.sync()?;
     assert_eq!(report.held.len(), 4);
     let seen: Vec<_> = report.held.iter().map(|op| op.node()).collect();
-    // The user brings the files back (the deletes undone) before the next sync, then
-    // confirms what they were shown.
-    for i in 0..4 {
-        a.write(&format!("f{i}"), format!("{i}").as_bytes())?;
-    }
+    // The user puts them back (the deletes undone), then confirms what they were shown.
+    a.engine.put_back(&seen)?;
     a.sync()?;
+    assert_eq!(a.read("f3")?, b"3");
     a.engine.confirm_deletes(seen);
     a.sync()?;
     // The same files deleted again later: a new delete, held again.
@@ -938,24 +936,25 @@ fn a_confirmed_folder_trash_does_not_hold_other_deletes() -> R {
     b.sync()?;
     assert_eq!(b.entries("").len(), 121);
 
-    // Deleted elsewhere: trashing it here is held (60 of 120 files, over the limit of 50).
-    fs::remove_dir_all(a.root.join("dir"))?;
-    a.sync()?;
+    // Deleted here: removing it from the drive is held (60 of 120 files, over the limit of
+    // 50).
+    fs::remove_dir_all(b.root.join("dir"))?;
     let report = b.sync()?;
     assert!(!report.held.is_empty());
-    assert!(b.root.join("dir").exists());
+    a.sync()?;
+    assert!(a.root.join("dir").exists());
     let seen: Vec<_> = report.held.iter().map(|op| op.node()).collect();
 
-    // The user confirms; meanwhile one more file is deleted elsewhere, well under the limit.
-    // One sync (as the daemon runs it) does both.
-    fs::remove_file(a.root.join("g00"))?;
-    a.sync()?;
+    // The user confirms; meanwhile one more file is deleted here, well under the limit. One
+    // sync (as the daemon runs it) does both.
+    fs::remove_file(b.root.join("g00"))?;
     b.engine.confirm_deletes(seen);
     b.engine.scan_local()?;
     let report = b.engine.sync_once("2026-10-08")?;
     assert!(report.held.is_empty(), "{:?}", report.held);
-    assert!(!b.root.join("dir").exists());
-    assert!(!b.root.join("g00").exists());
+    a.sync()?;
+    assert!(!a.root.join("dir").exists());
+    assert!(!a.root.join("g00").exists());
     Ok(())
 }
 

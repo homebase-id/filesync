@@ -587,6 +587,64 @@ impl Sim {
         self.restore_with(node);
     }
 
+    /// The user puts back the deletes the guard held in client `c`'s last plan (sync semantics
+    /// §7), as the drive has them now, as `Engine::put_back` does: deleted here and live on the
+    /// drive, its base goes (with what below it is gone here and live there), so it comes down
+    /// again; still here, each synced item in it gone there is restored on the drive, or, gone
+    /// for good there, loses its base, so it goes up again. What the drive changed since wins.
+    pub(crate) fn put_back(&mut self, c: usize) {
+        let held = std::mem::take(&mut self.clients[c].held);
+        let (mut forget, mut restore) = (Vec::new(), Vec::new());
+        let mut seen = HashSet::new();
+        {
+            let client = &self.clients[c];
+            let live = |n: NodeId| self.server.live.contains_key(&n);
+            let here = |n: NodeId| client.local.contains(n);
+            for node in held {
+                if !client.base.contains(node) {
+                    continue;
+                }
+                match (here(node), live(node)) {
+                    // Below it in the base, gone here and live there.
+                    (false, true) => {
+                        let mut below = vec![node];
+                        while let Some(n) = below.pop() {
+                            if !seen.insert(n) {
+                                continue;
+                            }
+                            forget.push(n);
+                            below.extend(client.base.children(n).filter(|b| !here(*b) && live(*b)));
+                        }
+                    }
+                    // Here, parents first: each synced and gone there restored, or gone for
+                    // good.
+                    (true, _) => {
+                        for n in client.local.subtree(node) {
+                            if seen.insert(n) && client.base.contains(n) && !live(n) {
+                                match self.server.removed.contains_key(&n) {
+                                    true => restore.push(n),
+                                    false => forget.push(n),
+                                }
+                            }
+                        }
+                    }
+                    (false, false) => {}
+                }
+            }
+        }
+        let client = &mut self.clients[c];
+        for n in forget {
+            client.base.remove(n);
+            client.extra.remove(&n);
+        }
+        // One at a time (the engine groups them by removal: the same in the end).
+        for n in restore {
+            if !self.server.live.contains_key(&n) {
+                self.restore_with(n);
+            }
+        }
+    }
+
     /// Brings `node` back from Recently deleted with what was deleted with it, and the folders
     /// above it in Recently deleted first (just those, outermost first), as the engine's restore
     /// does: in waves, each after the folders it comes back into, by the engine's own rule

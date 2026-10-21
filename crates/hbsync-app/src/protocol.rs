@@ -20,7 +20,7 @@ pub use hbsync_types::activity::Progress;
 
 /// The protocol version this build speaks: a daemon refuses a request in another (after an
 /// update, until it restarts).
-pub(crate) const PROTOCOL: u32 = 9;
+pub(crate) const PROTOCOL: u32 = 10;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
@@ -182,6 +182,10 @@ pub enum FolderControl {
     /// Let the held deletes the user was shown through: `token` is [`HeldDeletes::token`] as
     /// they saw it. Refused when the held deletes changed since.
     ConfirmDeletes { token: String },
+    /// Put the held deletes the user was shown back, as the drive has them now (sync
+    /// semantics §7): what was deleted here comes down again, what was removed elsewhere is
+    /// restored on the drive. `token` as for [`FolderControl::ConfirmDeletes`].
+    PutBack { token: String },
 }
 
 /// An entry of a folder's recently synced list.

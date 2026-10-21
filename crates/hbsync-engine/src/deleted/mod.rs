@@ -27,6 +27,7 @@ mod rules;
 mod tests;
 
 pub use listing::{DeletedSummary, Listed, deletes, listed_here, listed_now};
+pub(crate) use rules::deleted_with;
 pub use rules::{
     Chosen, Holdings, RestoreWave, before_folders_go, inside, passes, restore_wave,
     take_restored_name, taken_in,

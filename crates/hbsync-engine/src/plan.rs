@@ -55,6 +55,9 @@ pub struct Options {
     pub synced_files: usize,
     /// Nodes whose deletes the user confirmed: neither counted by the guard nor held.
     pub confirmed: Arc<HashSet<NodeId>>,
+    /// Nodes whose removal elsewhere the guard held as every synced file (§7): held, with what
+    /// is under them, until the user answers, whatever the count since.
+    pub wiped: Arc<HashSet<NodeId>>,
     /// Files pending deletion across the whole dirty set, not just this plan's batch:
     /// (gone locally → remote deletes, gone remotely → local trash). The guard trips on these
     /// totals too, so a large delete split over several batches is still held.
@@ -91,6 +94,7 @@ impl Default for Options {
             guard: DeleteGuard::default(),
             synced_files: 0,
             confirmed: Arc::default(),
+            wiped: Arc::default(),
             pending_deletes: (0, 0),
             taken: Arc::default(),
         }

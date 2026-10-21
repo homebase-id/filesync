@@ -38,6 +38,23 @@ impl ReadTx<'_> {
         Ok(())
     }
 
+    /// Whether a removal elsewhere is still to be followed at `node` or below it in the base:
+    /// a synced item still here (in the base and the local table) that the drive no longer
+    /// has. Walks `node`'s base subtree: for the mass-delete guard's held removals, which the
+    /// engine checks this way only while the drive has `node` again.
+    pub fn removal_pending_under(&self, node: NodeId) -> Result<bool> {
+        Ok(self
+            .prep(&format!(
+                "WITH RECURSIVE sub(id) AS (SELECT id FROM base WHERE folder = $F AND id = {ID_OF} \
+                   UNION SELECT b.id FROM base b JOIN sub ON b.parent = sub.id AND b.folder = $F) \
+                 SELECT 1 FROM sub JOIN local l ON l.folder = $F AND l.id = sub.id \
+                 WHERE NOT EXISTS (SELECT 1 FROM remote m WHERE m.id = sub.id) LIMIT 1"
+            ))?
+            .query_row([node.0.as_bytes()], |_| Ok(()))
+            .optional()?
+            .is_some())
+    }
+
     pub fn is_dirty(&self, node: NodeId) -> Result<bool> {
         Ok(self
             .prep(&format!(
