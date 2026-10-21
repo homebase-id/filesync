@@ -421,7 +421,9 @@ expected fingerprint is treated as done.
   feed, and parked items come back from their records. A download (or a folder synced before,
   made again) placed but not recorded (a crash just before its commit) is found again: each
   batch of downloads is recorded before it runs, with the base each commit writes (the node as
-  the drive has it at that version), its target, what the item holds of tags and what the item
+  the drive has it at that version: for a folder, the version its plan saw, else the mirror's;
+  one nowhere live, made again from Recently deleted, records the version there for recovery
+  only, its commit keeping its base), its target, what the item holds of tags and what the item
   there held before (none: not known), and the base's version its plan saw (recovery checks it as the commit does; a record
   from before records said so is settled against the base as it is). A download claims the tags it writes on the file before moving it into place, the
   empty set too, as they read back (not known where the volume keeps none, learned when a tag

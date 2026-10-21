@@ -41,17 +41,11 @@ impl Sim {
             }
             // A folder is made in place, then the crash, before its tags are written. Only one
             // synced before has the engine's write-ahead record, for the version it acts on: the
-            // plan's, else the mirror's as the executor reads it then.
+            // plan's, else the mirror's as the executor reads it then, else the one in Recently
+            // deleted.
             Some(op @ Op::LocalMkdir { node, .. }) => {
+                let record = self.mkdir_acts_on(c, node, &op);
                 let client = &self.clients[c];
-                let base_at = client.extra.get(&node).and_then(|e| e.version);
-                let record = op.drive().cloned().or_else(|| {
-                    Some(DriveVersion {
-                        state: client.planned_remote.get(node)?.clone(),
-                        at: *client.planned_refs.get(&node)?,
-                        base_at,
-                    })
-                });
                 let synced_before = client.base.contains(node);
                 let fresh = !client.local.contains(node);
                 if self.execute(c, &op) == Outcome::Done {
