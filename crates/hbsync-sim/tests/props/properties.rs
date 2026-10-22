@@ -244,8 +244,9 @@ proptest! {
                 return Err(TestCaseError::fail(format!("in pages: {paged}: {e}")));
             }
             // How many folders and files are there, whatever their names (a clash's numbered
-            // name may go to the other node), and how many files Recently deleted lists apart
-            // from their folders.
+            // name may go to the other node), and how many files were removed apart from their
+            // folders, listed so in Recently deleted or purged since (the purge's pick depends
+            // on how many writes came after a removal, which pages change).
             let (folders, files) = sim.server_counts();
             Ok((folders, files, sim.removed_files_apart()))
         };
