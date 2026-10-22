@@ -124,6 +124,9 @@ pub(crate) struct Client {
     /// Another device changes the node of the next remote write once it landed
     /// ([`crate::Action::Meanwhile`], its `op`).
     pub(crate) meanwhile: Option<usize>,
+    /// Another device changes the node of the next local operation of a kind between its
+    /// check and its commit ([`crate::Action::PullMidLocal`]: `on`, `change`).
+    pub(crate) pull_mid_local: Option<(usize, usize)>,
 }
 
 impl Client {
@@ -177,6 +180,7 @@ impl Client {
             gone: BTreeSet::new(),
             syncs: 0,
             meanwhile: None,
+            pull_mid_local: None,
         }
     }
 

@@ -504,6 +504,15 @@ impl Sim {
             None => None,
         };
         let outcome = self.execute(c, &op);
+        // Checked and done here, not committed yet: another device's change of the node may
+        // be pulled now ([`Action::PullMidLocal`]).
+        if outcome == Outcome::Done
+            && let Some((on, change)) = self.clients[c].pull_mid_local
+            && pulled_on(&op, on)
+        {
+            self.clients[c].pull_mid_local = None;
+            self.pull_mid_local(c, node, change);
+        }
         let landed = outcome == Outcome::Landed;
         let remote_write = outcome == Outcome::Done && writes_drive(&op);
         let outcome = if landed { Outcome::Done } else { outcome };
@@ -802,6 +811,45 @@ impl Sim {
         }
     }
 
+    /// Another device changes `node` between client `c`'s local operation's check and its
+    /// commit, and the account pulls it ([`Action::PullMidLocal`], `change`): edits it where
+    /// it is a file (`change` not 2), else removes it, or restores it from Recently deleted.
+    ///
+    /// [`Action::PullMidLocal`]: crate::Action::PullMidLocal
+    fn pull_mid_local(&mut self, c: usize, node: NodeId, change: usize) {
+        if node == NodeId::RECOVERED || Role::of(node).is_some() {
+            return;
+        }
+        if let Some(what) = self.drive_change(node, change % 3 != 2) {
+            self.note(|_| format!("  pulled mid-commit of c{c} {node}: {what}"));
+        }
+    }
+
+    /// Another device changes `node` on the drive: restores it where it is removed, else edits
+    /// it where it is a file and `edit` says so, else removes it. What it did; `None` where the
+    /// drive never had it.
+    fn drive_change(&mut self, node: NodeId, edit: bool) -> Option<&'static str> {
+        let (kind, removed) = self
+            .server
+            .node(node)
+            .map(|(n, removed)| (n.state.kind, removed))?;
+        Some(match (kind, removed) {
+            (_, true) => {
+                self.restore_with(node);
+                "restored"
+            }
+            (NodeKind::File, false) if edit => {
+                let version = VersionTag(self.server.uuid());
+                self.edit_on_drive(node, version);
+                "edited"
+            }
+            _ => {
+                self.remove_live([node], true);
+                "removed"
+            }
+        })
+    }
+
     /// Another device changes `node`, which client `c`'s remote write over `replaced` (the
     /// node as the drive had it, removed or not; `None`: a node it made) just left on the
     /// drive, and the account pulls that change before the write's answer is recorded
@@ -827,14 +875,7 @@ impl Sim {
             return;
         };
         let alone = self.answer_lands(node, replaced.as_ref(), &answer, None);
-        if answer.1 {
-            self.restore_with(node);
-        } else if pick % 2 == 1 && answer.0.state.kind == NodeKind::File {
-            let version = VersionTag(self.server.uuid());
-            self.edit_on_drive(node, version);
-        } else {
-            self.remove_live([node], true);
-        }
+        self.drive_change(node, pick % 2 == 1);
         self.note(|_| format!("  meanwhile {node}: removed {}, pick {pick}", answer.1));
         // What the pull recorded: the drive's node now.
         let Some(now) = self.server.node(node).map(|(n, r)| (n.clone(), r)) else {
@@ -2277,6 +2318,30 @@ fn planned(ops: &[Op]) -> Vec<Planned<'_>> {
             }
         })
         .collect()
+}
+
+/// Whether a pull between a local operation's check and its commit ([`Action::PullMidLocal`],
+/// `on`) lands on `op`: any local operation the executor checks, does, then commits; or a tag
+/// write, a download, a move, a trash.
+///
+/// [`Action::PullMidLocal`]: crate::Action::PullMidLocal
+fn pulled_on(op: &Op, on: usize) -> bool {
+    match on % 5 {
+        1 => matches!(op, Op::LocalTags { .. }),
+        2 => matches!(op, Op::LocalDownload { .. }),
+        3 => matches!(op, Op::LocalMove { .. }),
+        4 => matches!(op, Op::LocalTrash { .. }),
+        _ => matches!(
+            op,
+            Op::LocalMkdir { .. }
+                | Op::LocalMove { .. }
+                | Op::LocalDownload { .. }
+                | Op::LocalTags { .. }
+                | Op::LocalTrash { .. }
+                | Op::LocalFork { .. }
+                | Op::LocalDetach { .. }
+        ),
+    }
 }
 
 #[cfg(test)]
