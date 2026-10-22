@@ -1437,3 +1437,48 @@ fn an_edit_aside_beside_an_ignored_item_is_kept() {
     );
     assert!(sim.item(1, "b/d").is_some(), "kept");
 }
+
+/// Another device removes `b` and stops: what is in it is taken along, live. c1 edited
+/// `b/c.txt` meanwhile, which keeps `b`: restored, and restoring a folder restores what was
+/// deleted with it (node schema, Recently deleted), so `b/a` and `b/a/c.txt`, unchanged, come
+/// back with it, planned with it (every node dirty) or not (in pages, as the engine marks
+/// them). Before, planned with it, they were deleted while `b` came back; out of the plan,
+/// they stayed.
+#[test]
+fn regression_a_folder_an_edit_restores_keeps_what_its_delete_took_along() {
+    use Action::*;
+    for pages in [None, Some(1)] {
+        let (mut sim, [b, _, c, _]) = stopped_delete_setup();
+        if let Some(size) = pages {
+            sim = sim.with_small_pages(size);
+        }
+        let file = sim.file_pick(1, c).expect("b/c.txt on 1");
+        sim.run(&[Event::Act {
+            client: 1,
+            action: Edit { file },
+        }]);
+        let pick = sim.stopped_pick(b).expect("b");
+        sim.run(&[Event::Act {
+            client: 0,
+            action: DeleteStopped { pick, done: 0 },
+        }]);
+        // c1 first, before c0 (unchanged there) finishes the delete: then `b` comes back
+        // alone (a restore by a write brings back the folder only).
+        // In pages, a page at a time.
+        let mut first = Vec::new();
+        for _ in 0..6 {
+            first.push(Event::Plan { client: 1 });
+            first.extend([Event::Step { client: 1 }; 6]);
+        }
+        sim.run(&first);
+        assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
+        if let Err(e) = sim.check() {
+            panic!("pages {pages:?}: {e}");
+        }
+        assert_eq!(
+            sim.server_paths(),
+            ["b", "b/a", "b/a/c.txt", "b/c.txt"],
+            "pages: {pages:?}"
+        );
+    }
+}

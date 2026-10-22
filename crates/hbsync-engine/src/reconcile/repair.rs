@@ -111,6 +111,52 @@ impl Reconciler<'_> {
         }
     }
 
+    /// What the removals of folders this plan keeps (restored by a live child, or by their own
+    /// change) took along, still live on the drive below them there, and isn't changed here:
+    /// merged as if no removal had, as restoring a folder restores what was deleted with it
+    /// (node schema, Recently deleted), whether the plan holds those nodes or not. One changed
+    /// here stays taken: the drive's version, which this device never had, stays with the
+    /// removal, and this device's goes up as a new item (§4). A dirty one is merged again, what
+    /// it said as taken undone; the rest is context. Whether any was.
+    pub(super) fn untake_kept(&mut self) -> bool {
+        if self.taken.is_empty() {
+            return false;
+        }
+        let kept: Vec<NodeId> = self
+            .input
+            .removed
+            .keys()
+            .copied()
+            // Kept by this plan: planned (in its scope), and in the merged tree.
+            .filter(|f| self.scope.contains(f) && self.merged.get(*f).is_some())
+            .collect();
+        let mut any = false;
+        for folder in kept {
+            let below: Vec<NodeId> = self
+                .input
+                .remote
+                .subtree(folder)
+                .into_iter()
+                .filter(|n| {
+                    *n != folder && self.taken.contains(n) && !self.local_change(*n).is_change()
+                })
+                .collect();
+            for node in below {
+                any = true;
+                self.taken.remove(&node);
+                if self.input.dirty.contains(&node) {
+                    self.plan.conflicts.retain(|c| c.node() != node);
+                    self.plan.delete_waits.retain(|n| *n != node);
+                    self.deferred.remove(&node);
+                    self.merge_node(node);
+                } else {
+                    self.context(node);
+                }
+            }
+        }
+        any
+    }
+
     pub(super) fn fix_orphans(&mut self) {
         let mut queue: Vec<NodeId> = self.merged.ids().collect();
         queue.sort();

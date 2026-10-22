@@ -53,18 +53,25 @@ impl Reconciler<'_> {
             .filter(|n| !i.dirty.contains(n) && (!self.taken.contains(n) || self.held.contains(n)))
             .collect();
         for node in ids {
-            if self.held.contains(&node) {
-                self.hold(node);
-                continue;
-            }
-            if let Some(state) = i
-                .remote
-                .get(node)
-                .or(i.local.get(node))
-                .or(i.base.get(node))
-            {
-                self.merged.insert(node, state.clone());
-            }
+            self.context(node);
+        }
+    }
+
+    /// Puts `node`, not in the plan, in the merged tree as context: as it is, held (a folder
+    /// above a file not hashed yet, say), else as the drive has it, else here, else the base.
+    pub(super) fn context(&mut self, node: NodeId) {
+        let i = self.input;
+        if self.held.contains(&node) {
+            self.hold(node);
+            return;
+        }
+        if let Some(state) = i
+            .remote
+            .get(node)
+            .or(i.local.get(node))
+            .or(i.base.get(node))
+        {
+            self.merged.insert(node, state.clone());
         }
     }
 
