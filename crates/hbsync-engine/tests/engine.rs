@@ -1806,6 +1806,160 @@ fn files_whose_folder_is_gone_for_good_are_recovered() -> R {
     Ok(())
 }
 
+/// Another app deletes folders `names` for good (a hard delete), leaving what is in them live,
+/// and `c` hears it from the notification, as the daemon does: gone from its mirror at once.
+fn deleted_for_good_announced(
+    server: &Arc<Mutex<hbsync_remote::fake::FakeServer>>,
+    c: &Client,
+    names: &[&str],
+) -> R {
+    let mut refs = Vec::new();
+    for name in names {
+        let at = {
+            let s = server.lock().map_err(|_| "poisoned")?;
+            s.live()
+                .find(|h| h.state().is_some_and(|st| st.name == *name))
+                .map(|h| h.at())
+                .ok_or("no such folder")?
+        };
+        let header = c.remote.header(at.file_id)?;
+        let mut s = server.lock().map_err(|_| "poisoned")?;
+        s.hard_delete(at.file_id, at.version)?;
+        refs.push(hbsync_remote::ChangeRef::of(&header).tombstone());
+    }
+    c.engine.drive().announced(&refs)?;
+    Ok(())
+}
+
+/// The names of what is live on the server, sorted; and whether anything is in Recently
+/// deleted.
+fn server_names(
+    server: &Arc<Mutex<hbsync_remote::fake::FakeServer>>,
+) -> Result<(Vec<String>, bool), Box<dyn std::error::Error>> {
+    let s = server.lock().map_err(|_| "poisoned")?;
+    let mut live: Vec<String> = s
+        .live()
+        .filter_map(|h| h.state().map(|st| st.name.clone()))
+        .collect();
+    live.sort();
+    Ok((live, s.removed().next().is_some()))
+}
+
+/// a syncs only its run folder (`/*` but `!/run/`), as the live tests do; b's folders x/d/f0..f3
+/// are on the drive. Another app deletes x and d for good, and b, not hearing of it, makes
+/// x/d/f9. What was in d is an orphan with nowhere a can put it: Recovered files and the top
+/// are places it doesn't sync (§10). It leaves them to the devices that do, and plans alike in
+/// its narrow view and the whole one. Brought in at the top, they read as items a stopped
+/// syncing, and f9 left the drive (b's, in Recently deleted).
+#[test]
+fn an_orphan_where_a_device_syncs_nothing_stays_on_the_drive() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", ignoring("/*\n!/run/\n"))?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("run/readme.txt", "r")?;
+    a.sync()?;
+    for i in 0..4 {
+        b.write(&format!("x/d/f{i}/keep.txt"), "k")?;
+    }
+    b.sync()?;
+    a.sync()?;
+    deleted_for_good_announced(&server, &a, &["x", "d"])?;
+    fs::create_dir_all(b.root.join("x/d/f9"))?;
+    b.sync()?;
+    let report = a.sync()?;
+    assert_eq!(report.ops_done, 0, "{report:?}");
+    a.sync()?;
+    assert_eq!(a.tree_text(""), ["run/", "run/readme.txt = r"]);
+    let (live, removed) = server_names(&server)?;
+    let mut expected = vec!["f0", "f1", "f2", "f3", "f9", "readme.txt", "run"];
+    expected.extend(["keep.txt"; 4]);
+    expected.sort();
+    assert_eq!(live, expected);
+    assert!(!removed, "nothing in Recently deleted");
+    Ok(())
+}
+
+/// As above, with a syncing the top (it ignores x/ only): every folder of d is an orphan when
+/// d goes for good, dirty or not, and a recovers them all into Recovered files, but for what it
+/// ignores in them (`*.log`, edited meanwhile: planned with them), which stays on the drive,
+/// untouched. Before, a recovered none until one changed: only the folder that went was
+/// planned again.
+#[test]
+fn every_orphan_of_a_folder_deleted_for_good_is_recovered() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", ignoring("x/\n*.log\n"))?;
+    let mut b = Client::new(&server, "b")?;
+    for i in 0..3 {
+        fs::create_dir_all(b.root.join(format!("x/d/f{i}")))?;
+    }
+    b.write("x/d/f0/a.txt", "t")?;
+    b.write("x/d/f0/a.log", "l")?;
+    b.sync()?;
+    a.sync()?;
+    assert!(a.tree_text("").is_empty());
+    deleted_for_good_announced(&server, &a, &["x", "d"])?;
+    // b, not hearing of it, edits a.log: planned in the same plan as its folder's recovery.
+    b.write("x/d/f0/a.log", "l2")?;
+    b.sync()?;
+    let report = a.sync()?;
+    assert_eq!(report.conflicts.len(), 3, "f0, f1, f2: {report:?}");
+    assert_eq!(
+        a.tree_text(""),
+        [
+            "Recovered files/",
+            "Recovered files/f0/",
+            "Recovered files/f0/a.txt = t",
+            "Recovered files/f1/",
+            "Recovered files/f2/",
+        ]
+    );
+    a.sync()?;
+    let (live, removed) = server_names(&server)?;
+    assert_eq!(
+        live,
+        ["Recovered files", "a.log", "a.txt", "f0", "f1", "f2"],
+        "a.log stays"
+    );
+    assert!(!removed, "nothing in Recently deleted");
+    Ok(())
+}
+
+/// As above, with Recovered files in Recently deleted (b made it, then deleted it): it comes
+/// back for the orphans, and what a ignores in them (`*.log`) still stays on the drive,
+/// untouched, though Recovered files' place is known only once it is back.
+#[test]
+fn an_orphan_into_recovered_files_coming_back_leaves_what_is_ignored() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", ignoring("x/\n*.log\n"))?;
+    let mut b = Client::new(&server, "b")?;
+    b.write("Recovered files/old.txt", "o")?;
+    b.write("x/d/f0/a.txt", "t")?;
+    b.write("x/d/f0/a.log", "l")?;
+    b.sync()?;
+    fs::remove_dir_all(b.root.join("Recovered files"))?;
+    b.sync()?;
+    a.sync()?;
+    assert!(a.tree_text("").is_empty());
+    deleted_for_good_announced(&server, &a, &["x", "d"])?;
+    a.sync()?;
+    a.sync()?;
+    assert_eq!(
+        a.tree_text(""),
+        [
+            "Recovered files/",
+            "Recovered files/f0/",
+            "Recovered files/f0/a.txt = t"
+        ]
+    );
+    let (live, _) = server_names(&server)?;
+    assert_eq!(
+        live,
+        ["Recovered files", "a.log", "a.txt", "f0"],
+        "a.log stays"
+    );
+    Ok(())
+}
+
 /// A folder's delete removes the folder first, then what is in it (node schema, Recently
 /// deleted). A child whose removal failed follows later; meanwhile another client doesn't bring
 /// the folder back for it (§6.3), and the folder's restore brings both back.

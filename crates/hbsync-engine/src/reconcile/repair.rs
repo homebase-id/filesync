@@ -12,6 +12,10 @@ enum Parent {
     Recover,
     /// It waits for more information.
     Wait,
+    /// It isn't this device's: the place it would take is one this device doesn't sync (§10).
+    /// Left as it is, for a device that syncs that place: brought in, it would read as an item
+    /// this device stopped syncing, and leave the drive.
+    Leave,
 }
 
 impl Reconciler<'_> {
@@ -63,6 +67,22 @@ impl Reconciler<'_> {
     /// meets one but through a folder it filters, and puts that at its top, as does the main
     /// folder where Recovered files isn't synced here (filtered) or is the orphan itself.
     fn recovered_files(&mut self, node: NodeId) -> NodeId {
+        let place = self.recovery_place(node);
+        if place == NodeId::RECOVERED
+            && !self.merged.exists(NodeId::RECOVERED)
+            && self.known_state(NodeId::RECOVERED).is_none()
+        {
+            // Made here.
+            self.retarget(
+                NodeId::RECOVERED,
+                NodeState::folder(NodeId::ROOT, RECOVERED_NAME),
+            );
+        }
+        place
+    }
+
+    /// Where the orphan `node` goes ([`Self::recovered_files`]), nothing made yet.
+    fn recovery_place(&self, node: NodeId) -> NodeId {
         // Never into itself: Recovered files moved by the user into what is now the orphan.
         let inside = |at: NodeId| at == node || self.merged.ancestors(at).contains(&node);
         if node == NodeId::RECOVERED
@@ -79,20 +99,16 @@ impl Reconciler<'_> {
         {
             return NodeId::ROOT;
         }
-        if !self.merged.exists(NodeId::RECOVERED) && self.known_state(NodeId::RECOVERED).is_none() {
-            // Made here: under the name it gets, if this device syncs that.
-            if !self
+        // Made here: under the name it gets, if this device syncs that.
+        if !self.merged.exists(NodeId::RECOVERED)
+            && self.known_state(NodeId::RECOVERED).is_none()
+            && !self
                 .masking
                 .filter
                 .in_folder("", RECOVERED_NAME, true)
                 .is_sync()
-            {
-                return NodeId::ROOT;
-            }
-            self.retarget(
-                NodeId::RECOVERED,
-                NodeState::folder(NodeId::ROOT, RECOVERED_NAME),
-            );
+        {
+            return NodeId::ROOT;
         }
         NodeId::RECOVERED
     }
@@ -108,6 +124,88 @@ impl Reconciler<'_> {
             Parent::Recover
         } else {
             Parent::Wait
+        }
+    }
+
+    /// The names down to where the orphan `node` would go ([`Self::recovered_files`]), if this
+    /// device syncs that place and `node` there (§10): an orphan isn't connected to the top, so
+    /// the filter never masked it. `None` also where Recovered files' place isn't known yet (a
+    /// folder of it not in this plan): judged once it is. Only for an orphan this device holds
+    /// nothing of: one it holds is synced here, and goes as before.
+    fn recovered_path(&self, node: NodeId) -> Option<Vec<String>> {
+        let state = self.merged.get(node)?;
+        let mut path: Vec<String> = Vec::new();
+        if self.recovery_place(node) == NodeId::RECOVERED {
+            let at = |n: NodeId| -> Option<Vec<String>> {
+                Some(
+                    self.merged
+                        .path(n)?
+                        .into_iter()
+                        .map(str::to_owned)
+                        .collect(),
+                )
+            };
+            path = match (at(NodeId::RECOVERED), self.known_state(NodeId::RECOVERED)) {
+                (Some(path), _) => path,
+                // Coming back (from Recently deleted, say): where its folder is.
+                (None, Some(known)) => {
+                    let mut path = at(known.parent)?;
+                    path.push(known.name);
+                    path
+                }
+                // Made here, at the top.
+                (None, None) => vec![RECOVERED_NAME.to_owned()],
+            };
+        }
+        path.push(state.name.clone());
+        let is_dir = state.kind == NodeKind::Folder;
+        let filter = self.masking.filter;
+        filter
+            .names(path.iter().map(String::as_str), is_dir)
+            .is_sync()
+            .then_some(path)
+    }
+
+    /// Whether this device holds anything of `node` or below it here (a local item, a base).
+    fn holds_any(&self, node: NodeId) -> bool {
+        let i = self.input;
+        self.merged
+            .subtree(node)
+            .iter()
+            .any(|n| i.local.contains(*n) || i.base.contains(*n))
+    }
+
+    /// What is below the orphan `node`, recovered to `path`, at a place this device doesn't
+    /// sync (§10), with what is below that: out of the plan, left to the devices that sync it,
+    /// as the filter masks such a node once its folder is connected again. Brought in, it would
+    /// read as an item this device stopped syncing, and leave the drive. Hardly ever any.
+    fn leave_unsynced_below(&mut self, node: NodeId, mut path: Vec<String>) {
+        let filter = self.masking.filter;
+        let depth = path.len();
+        let mut stack: Vec<(NodeId, usize)> =
+            self.merged.children(node).map(|c| (c, depth)).collect();
+        let mut gone = Vec::new();
+        while let Some((at, depth)) = stack.pop() {
+            let Some(state) = self.merged.get(at) else {
+                continue;
+            };
+            path.truncate(depth);
+            path.push(state.name.clone());
+            let is_dir = state.kind == NodeKind::Folder;
+            if !filter
+                .names(path.iter().map(String::as_str), is_dir)
+                .is_sync()
+            {
+                if !self.holds_any(at) {
+                    gone.extend(self.merged.subtree(at));
+                }
+                continue;
+            }
+            stack.extend(self.merged.children(at).map(|c| (c, depth + 1)));
+        }
+        for at in gone {
+            self.merged.remove(at);
+            self.scope.remove(&at);
         }
     }
 
@@ -162,6 +260,8 @@ impl Reconciler<'_> {
         queue.sort();
         // Nodes taken out below; their children follow them.
         let mut withdrawn: HashSet<NodeId> = HashSet::new();
+        // Nodes left to the devices that sync where they would go; their children too.
+        let mut left: HashSet<NodeId> = HashSet::new();
         while let Some(node) = queue.pop() {
             let Some(parent) = self.merged.get(node).map(|s| s.parent) else {
                 continue;
@@ -174,6 +274,7 @@ impl Reconciler<'_> {
                 _ if self.input.unreadable.contains(&parent) => Parent::Wait,
                 // A file: another writer put the node in it (§6.3).
                 Some(_) => self.recover_or_wait(node),
+                None if left.contains(&parent) => Parent::Leave,
                 None if withdrawn.contains(&parent) => Parent::Wait,
                 None => match self.known_state(parent) {
                     Some(state) if state.kind == NodeKind::Folder => Parent::Folder(state),
@@ -202,6 +303,9 @@ impl Reconciler<'_> {
                     self.wait_together(vec![node, parent]);
                     Parent::Wait
                 }
+                Parent::Recover if !self.holds_any(node) && self.recovered_path(node).is_none() => {
+                    Parent::Leave
+                }
                 decided => decided,
             };
             match decided {
@@ -221,12 +325,29 @@ impl Reconciler<'_> {
                 }
                 Parent::Recover => {
                     if let Some(mut state) = self.merged.get(node).cloned() {
+                        let path = self.recovered_path(node);
                         state.parent = self.recovered_files(node);
                         self.retarget(node, state);
+                        if let Some(path) = path {
+                            self.leave_unsynced_below(node, path);
+                        }
                         self.adopted.insert(node);
                         self.plan.conflicts.push(Conflict::Orphan { node });
                         // Its new folder may have to come back first.
                         queue.push(node);
+                    }
+                }
+                Parent::Leave => {
+                    // Out of this plan, and nothing to retry: its dirty mark goes. Its children
+                    // follow it (Recovered files left, what moved into it too).
+                    queue.extend(self.merged.children(node).collect::<Vec<_>>());
+                    self.merged.remove(node);
+                    self.scope.remove(&node);
+                    left.insert(node);
+                    if self.adopted.remove(&node) {
+                        self.plan
+                            .conflicts
+                            .retain(|c| *c != Conflict::Orphan { node });
                     }
                 }
                 Parent::Wait => {

@@ -1092,3 +1092,64 @@ fn regression_an_add_whose_answer_was_superseded_is_a_known_limit() {
         "{limits:?}"
     );
 }
+
+/// c2 makes b/d/c.txt; another app deletes folder b for good, its folder d left live: an
+/// orphan. c1 ignores everything named d (§10), so Recovered files/d is no place it syncs: it
+/// leaves the orphan to the computers that do. Brought in, d would have read as an item c1
+/// stopped syncing and left the drive, another device's file with it. The others recover it;
+/// nothing goes to Recently deleted.
+#[test]
+fn regression_an_orphan_at_a_place_a_computer_ignores_stays_on_the_drive() {
+    use Action::*;
+    let mut sim = Sim::new(3).with_narrow_check();
+    let act = |client, action| Event::Act { client, action };
+    let (b, c, d) = (1, 3, 5); // NAMES: "b", "c.txt", "d"
+    // c1, an odd one, ignores everything named d.
+    let root = sim.pick(2, NodeId::ROOT, true).expect("root");
+    sim.run(&[act(
+        2,
+        CreateFolder {
+            parent: root,
+            name: b,
+        },
+    )]);
+    let folder = sim.item(2, "b").expect("b");
+    let parent = sim.pick(2, folder, true).expect("b");
+    sim.run(&[act(2, CreateFolder { parent, name: d })]);
+    let inner = sim.item(2, "b/d").expect("b/d");
+    let parent = sim.pick(2, inner, true).expect("b/d");
+    sim.run(&[
+        act(2, CreateFile { parent, name: c }),
+        Event::Plan { client: 2 },
+        Event::Step { client: 2 },
+        Event::Step { client: 2 },
+        Event::Step { client: 2 },
+        Event::Step { client: 2 },
+    ]);
+    let pick = sim.stopped_pick(folder).expect("b on the drive");
+    sim.run(&[act(0, DeleteOutright { pick })]);
+    // c1 plans first, alone.
+    sim.run(&[Event::Plan { client: 1 }]);
+    for _ in 0..4 {
+        sim.run(&[Event::Step { client: 1 }]);
+    }
+    assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+    assert_eq!(
+        sim.server_paths(),
+        [
+            "Recovered files",
+            "Recovered files/d",
+            "Recovered files/d/c.txt"
+        ],
+    );
+    assert!(sim.item(1, "Recovered files/d").is_none(), "c1 ignores d");
+    for client in [0, 2] {
+        assert!(
+            sim.item(client, "Recovered files/d/c.txt").is_some(),
+            "c{client}"
+        );
+    }
+}
