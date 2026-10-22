@@ -495,9 +495,9 @@ impl Sim {
         let placement = matches!(op, Op::LocalDownload { .. } | Op::LocalMkdir { .. });
         let synced_before = self.clients[c].base.contains(node);
         // What the item held of tags before the operation (nothing where there was none).
-        let held_before = self.clients[c].local.get(node).cloned();
-        let before_tags = held_before.as_ref().map(|l| l.tags.clone());
-        let fresh = held_before.is_none();
+        let local_before = self.clients[c].local.get(node).cloned();
+        let before_tags = local_before.as_ref().map(|l| l.tags.clone());
+        let fresh = local_before.is_none();
         // The version of its file a remote write replaces (none: a file it makes).
         let replaced = match self.clients[c].meanwhile {
             Some(_) => self.server.node(node).map(|(n, r)| (n.clone(), r)),
@@ -582,7 +582,7 @@ impl Sim {
             {
                 self.placed_from = None;
                 let client = &mut self.clients[c];
-                match held_before {
+                match local_before {
                     Some(state) => client.local.insert(node, state),
                     None => client.local.remove(node),
                 };

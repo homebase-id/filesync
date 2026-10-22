@@ -1738,7 +1738,7 @@ fn an_answer_records_only_over_what_its_write_replaced() -> R {
         (back, picture(&mut db)?),
         (Answered::Superseded, (None, Some(5)))
     );
-    assert!(db.read(|s| s.held_files())?.contains(&file_id));
+    assert!(db.read(|s| s.unreadable_files())?.contains(&file_id));
     // Deleted for good since: never back.
     db.write(|s| s.account().forget_file(file_id, None))?;
     let back = db.write(|s| s.account().answered(&answer(Some(5), at(8, "d"), false)))?;

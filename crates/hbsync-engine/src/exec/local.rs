@@ -116,7 +116,7 @@ impl Executor<'_> {
         };
         // What it holds before the write, for a write that fails unread: none where that can't
         // be read either (claiming less than it holds only sends what it holds up).
-        let held_before = prior.clone().unwrap_or_default();
+        let on_item_before = prior.clone().unwrap_or_default();
         // Where the volume keeps no tags (this OS none), what it holds of them is never known:
         // it claims none, as a download does.
         let kept_tags = self.disk.tags_kept();
@@ -158,7 +158,7 @@ impl Executor<'_> {
             }
             if kept && let Some(r) = &record {
                 self.disk.write_durable(self.db, |s| s.put_placing(r))?;
-                self.records.insert(node);
+                self.settling.placing.insert(node);
             }
             if let Err(e) = self.disk.put(self.db, &target, |at| fs::create_dir(at))? {
                 return Ok(io_outcome(e));
@@ -209,7 +209,7 @@ impl Executor<'_> {
             fingerprint: meta.fingerprint(),
             executable: None,
             hash: None,
-            tags: self.disk.held_after(left, held_before),
+            tags: self.disk.on_item_after(left, on_item_before),
         };
         let (os, folder) = (self.folder.os, self.folder);
         self.cfg.hooks.before_commit(self.db);
@@ -243,10 +243,10 @@ impl Executor<'_> {
                     let synced = base.is_some();
                     if unknown
                         && let Some(mut b) = base
-                        && let Some(held) = &row.tags
+                        && let Some(on_item) = &row.tags
                     {
                         let last = removed.as_ref().map_or(&b.state.tags, |d| &d.state.tags);
-                        let tags = not_reached(&b.state.tags, held, last);
+                        let tags = not_reached(&b.state.tags, on_item, last);
                         if tags != b.state.tags {
                             b.state.tags = tags;
                             s.folder().put_base(&b)?;
@@ -325,7 +325,7 @@ impl Executor<'_> {
         let before = row.tags.clone();
         let row = LocalRow {
             fingerprint: meta.fingerprint(),
-            tags: left.held,
+            tags: left.on_item,
             ..row
         };
         // What it changed, where both are known; nothing claimed otherwise.
@@ -391,7 +391,7 @@ impl Executor<'_> {
     pub(super) fn trash(&mut self, node: NodeId, expected: &[NodeId], forget: bool) -> Step {
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
             if forget {
-                return self.forget_base(node);
+                return self.drop_unsynced_base(node);
             }
             // Already gone: a delete earlier in this run took it along with its folder (and its
             // base, [`trashed`]); the executor holds the DB while it runs, so no scan did.
@@ -541,8 +541,7 @@ impl Executor<'_> {
             s.rekey_local(node, new_node)?;
             // The old node isn't synced here any more; a base left behind would read as a
             // local delete once it is back in view.
-            s.delete_base(node)?;
-            s.mark_dirty(node)?;
+            s.forget_base(node)?;
             s.mark_dirty(new_node)?;
             below
                 .iter()
@@ -553,7 +552,7 @@ impl Executor<'_> {
     }
 
     /// Drops the base of a node this device no longer syncs and holds nothing of (§10).
-    pub(super) fn forget_base(&mut self, node: NodeId) -> Step {
+    pub(super) fn drop_unsynced_base(&mut self, node: NodeId) -> Step {
         if self.db.read(|s| s.local_by_node(node))?.is_some() {
             return Ok(Outcome::waiting("its local item goes first"));
         }

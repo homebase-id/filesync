@@ -81,30 +81,53 @@ pub(crate) struct Executor<'a> {
     report: ExecReport,
     /// Set when a test's crash point was reached: the run stops.
     crashed: bool,
-    /// Nodes whose operation wrote a placement record and hasn't put its item in place yet: only
-    /// such a record its failure removes. Once in place, a record is recovery's to settle; and
-    /// no operation places over one it didn't write.
-    records: HashSet<NodeId>,
-    /// Nodes whose tags the drive refused this run for good (access, a drive that won't take
-    /// it): a tag only the item here has can't go up now, so a download no longer waits for it.
-    tags_refused: HashSet<NodeId>,
-    /// The files the drive has in a version this device can't read ([`ReadTx::held_files`]),
-    /// read at the run's first write to an existing file.
-    held: Option<HashSet<hbsync_types::RemoteFileId>>,
-    /// Where this run's operations settled each node's base: a later operation's compare and
-    /// set takes the base there as the one its plan saw.
-    settled: HashMap<NodeId, RemoteRef>,
+    /// Where this run settled bases, and the placement records it wrote ([`Settling`]).
+    settling: Settling,
+    /// What the run goes by of the drive ([`Heard`]).
+    heard: Heard,
     /// Set by the caller to stop the run between operations.
     stop: Option<Arc<AtomicBool>>,
     progress: Arc<Counters>,
     /// The transfers already in `progress`'s total.
     counted: HashSet<NodeId>,
-    /// The drive is full: uploads are held (from the start, when it was lately).
-    full: bool,
     /// The folder's refusals of the operations planned ([`crate::refused`]).
     refusals: Refusals,
     /// The sync root, written only through it.
     disk: Disk<'a>,
+}
+
+/// What a run goes by of the drive: what its operations' answers said, and what it read of it
+/// (the files in versions it can't read, read once a run; full since an earlier run).
+#[derive(Default)]
+struct Heard {
+    /// The drive is full: uploads wait (from the start, when it was lately).
+    full: bool,
+    /// Nodes whose tags the drive refused this run for good (access, a drive that won't take
+    /// it): a tag only the item here has can't go up now, so a download no longer waits for it.
+    tags_refused: HashSet<NodeId>,
+    /// The files the drive has in a version this device can't read
+    /// ([`ReadTx::unreadable_files`]), read at the run's first write to an existing file.
+    unreadable: Option<HashSet<hbsync_types::RemoteFileId>>,
+}
+
+impl Heard {
+    /// Notes what `op`'s `outcome` told of the drive: it is full, or tags it won't take for
+    /// good (a write of them refused, unsyncable, or denied).
+    fn ended(&mut self, op: &Op, outcome: &Outcome) {
+        if matches!(outcome, Outcome::Full(_)) {
+            self.full = true;
+        }
+        if matches!(
+            op,
+            Op::RemoteTags { .. } | Op::RemoteUpdate { .. } | Op::RemoteCreate { .. }
+        ) && matches!(
+            outcome,
+            Outcome::Skip(Skip::Unsyncable(_) | Skip::Refused(_))
+                | Outcome::Stop(Stopped::Denied(_))
+        ) {
+            self.tags_refused.insert(op.node());
+        }
+    }
 }
 
 /// An operation whose guards passed, its job waiting for a worker.
@@ -114,71 +137,6 @@ struct Prepared {
     ctx: Ctx,
     /// The path of what it removes, taken before it ran.
     gone: Option<String>,
-}
-
-/// Operations collected for the worker pool, which runs them in any order.
-#[derive(Default)]
-struct Batch {
-    jobs: Vec<(Job, Prepared)>,
-    /// Their nodes.
-    nodes: HashSet<NodeId>,
-    /// The folders they create (or restore).
-    created: HashSet<NodeId>,
-    /// The folders on the drive they put a node into or take one from.
-    folders: HashSet<NodeId>,
-    /// The nodes they move to another folder, and the folders those go into with every folder
-    /// above them.
-    moved: HashSet<NodeId>,
-    under: HashSet<NodeId>,
-}
-
-impl Batch {
-    /// Adds `job`; `target`: where it moves its node to, if it does
-    /// ([`Executor::move_target`]).
-    fn push(&mut self, job: Job, p: Prepared, target: Option<Vec<NodeId>>) {
-        let node = job.node();
-        self.nodes.insert(node);
-        if let Job::Upload { meta, .. } | Job::Meta { meta, .. } = &job {
-            self.folders.insert(meta.parent);
-        }
-        match &p.ctx {
-            Ctx::Upload { from, .. } => self.folders.extend(*from),
-            Ctx::Meta { from, after, .. } => {
-                self.folders.extend(*from);
-                if matches!(after, remote::After::Created) {
-                    self.created.insert(node);
-                }
-            }
-            Ctx::Download(_) => {}
-        }
-        if let Some(target) = target {
-            self.moved.insert(node);
-            self.under.extend(target);
-        }
-        self.jobs.push((job, p));
-    }
-
-    /// Whether moving `node` to `target` (the folder and every one above it) could make a
-    /// cycle on the drive with a move in the batch, landing in either order: one of them
-    /// takes along a folder the other goes into. Moves that don't can't, together in any
-    /// number: each one's target keeps the folders above it.
-    fn crosses(&self, node: NodeId, target: &[NodeId]) -> bool {
-        self.under.contains(&node) || target.iter().any(|n| self.moved.contains(n))
-    }
-
-    /// Whether `op` must wait until the batch ran: it is about a node in it, its server-side
-    /// order guard ([`Op::requires`]) waits on one (a folder created in it, or the removal of
-    /// the folder a removal is in), or it removes a folder the batch puts a node into or takes
-    /// one from.
-    fn holds_up(&self, op: &Op) -> bool {
-        self.nodes.contains(&op.node())
-            || matches!(op, Op::RemoteDelete { .. }) && self.folders.contains(&op.node())
-            || match op.requires() {
-                Some(Requirement::RemoteFolder(folder)) => self.created.contains(&folder),
-                Some(Requirement::FolderFirst(folder)) => self.nodes.contains(&folder),
-                None => false,
-            }
-    }
 }
 
 /// What a download's commit needs to know.
@@ -232,14 +190,11 @@ impl<'a> Executor<'a> {
             schedule: Schedule::new(cfg.attempts, cfg.retry_pause),
             report: ExecReport::default(),
             crashed: false,
-            records: HashSet::new(),
-            tags_refused: HashSet::new(),
-            held: None,
-            settled: HashMap::new(),
+            settling: Settling::default(),
+            heard: Heard::default(),
             stop: None,
             progress: Arc::default(),
             counted: HashSet::new(),
-            full: false,
             refusals: Refusals::default(),
             disk: Disk::new(folder, &cfg.hooks),
         }
@@ -274,7 +229,7 @@ impl<'a> Executor<'a> {
     /// Holds every upload: the drive was full lately (an earlier run's
     /// [`DriveNews::full`](crate::news::DriveNews::full)).
     pub(crate) fn with_full(mut self, full: bool) -> Self {
-        self.full = full;
+        self.heard.full = full;
         self
     }
 
@@ -392,146 +347,6 @@ impl<'a> Executor<'a> {
         })
     }
 
-    /// Settles `first` and the run of `Settle` ops after it (the plan puts them last) in one
-    /// transaction: they change nothing on disk or remotely, so a crash only loses settling
-    /// the next plan asks for again.
-    fn settle_run(&mut self, first: NodeId) -> Result<(), StateError> {
-        const CHUNK: usize = 1000;
-        let mut nodes = vec![first];
-        while nodes.len() < CHUNK
-            && let Some(node) = self.schedule.next_settle()
-        {
-            nodes.push(node);
-        }
-        let os = self.folder.os;
-        let settled = self.db.write(|s| {
-            nodes
-                .iter()
-                .map(|n| Ok((*n, settle(s.folder(), Settle::node(*n), os)?)))
-                .collect::<Result<Vec<_>, StateError>>()
-        })?;
-        self.note(settled);
-        self.report.done += nodes.len();
-        Ok(())
-    }
-
-    /// Writes an operation's DB changes and settles `nodes` in the same transaction: the base
-    /// can't fall behind what was done, and it costs one commit.
-    fn finish(
-        &mut self,
-        nodes: &[Settle<'_>],
-        f: impl FnOnce(&Store<'_>) -> Result<(), StateError>,
-    ) -> Step {
-        let os = self.folder.os;
-        let nodes: Vec<Settle<'_>> = nodes.iter().map(|how| self.ours(*how)).collect();
-        let settled = self.db.write(|s| {
-            f(s)?;
-            nodes
-                .iter()
-                .map(|how| Ok((how.node, settle(s.folder(), *how, os)?)))
-                .collect::<Result<Vec<_>, StateError>>()
-        })?;
-        self.note(settled);
-        Ok(Outcome::Settled)
-    }
-
-    /// Records this device's remote writes' answers ([`AccountTx::answered`]), each settling its
-    /// node as `how` against the row the answer left, in one transaction: no pull commits
-    /// between an answer's check and its write, nor before the settle (writes to the state DB
-    /// take turns: [`StateDb::write`]). An answer a pull superseded since its write landed
-    /// settles its node as if that pull came after ([`settle_with`]), and plans it again; the
-    /// run reads the feed again then (what superseded it may be a page fetched before the
-    /// write landed). A removal plans its node again too (what was in it).
-    ///
-    /// [`AccountTx::answered`]: hbsync_state::AccountTx::answered
-    fn finish_answered(&mut self, answers: &[(Settle<'_>, Answer)]) -> Step {
-        let os = self.folder.os;
-        let answers: Vec<(Settle<'_>, &Answer)> = answers
-            .iter()
-            .map(|(how, a)| (self.ours(*how), a))
-            .collect();
-        let (settled, superseded) = self.db.write(|s| {
-            let mut superseded = false;
-            let mut settled = Vec::with_capacity(answers.len());
-            for (how, answer) in &answers {
-                let newer = s.account().answered(answer)? == Answered::Superseded;
-                superseded |= newer;
-                if newer || answer.live_row().is_none() {
-                    s.folder().mark_dirty(how.node)?;
-                }
-                let row = answer.live_row().cloned();
-                settled.push((how.node, settle_with(s.folder(), *how, row, os)?));
-            }
-            Ok((settled, superseded))
-        })?;
-        if superseded {
-            self.report.news.behind = true;
-        }
-        self.note(settled);
-        Ok(Outcome::Settled)
-    }
-
-    /// Whether a placement record this operation didn't write waits for `node` (one recovery
-    /// keeps until its item can be read, or one an earlier operation left with its item in
-    /// place): no placement runs over it; the node stays dirty, and the next round's recovery
-    /// settles it.
-    fn placing_earlier(&mut self, node: NodeId) -> Result<bool, StateError> {
-        Ok(!self.records.contains(&node) && self.db.read(|s| s.is_placing(node))?)
-    }
-
-    /// Notes that `node`'s placement put its item in place: its record is recovery's now.
-    fn placed(&mut self, node: NodeId) {
-        self.records.remove(&node);
-    }
-
-    /// A placement whose item is in place and whose commit failed ends here: recovery settles
-    /// it right away (the one way an item put in place settles then), judging its record by its
-    /// item alone, read off the disk: no other item is read, nor its row touched. One it can't
-    /// settle yet (a file not hashed yet) stays, for a later recovery.
-    fn placed_not_committed(&mut self, node: NodeId) -> Step {
-        let Some(record) = self.db.read(|s| s.get_placing(node))? else {
-            return Ok(Outcome::stale("put in place, its record gone"));
-        };
-        let (root, now) = (&self.folder.root, hbsync_types::unix_now_ms());
-        let judged = match look(root, &record.target) {
-            OnDisk::Absent => Judged::Drop,
-            OnDisk::Unreadable => Judged::Keep,
-            OnDisk::There(meta) => {
-                let row = read_row(root, &record.target, node, &meta, self.folder.algorithm);
-                judge(root, &record, Some(row))
-            }
-        };
-        let folder = self.folder;
-        match self
-            .db
-            .write(|s| apply(s.folder(), &record, judged, folder, now))?
-        {
-            Applied::Settled(at) => {
-                self.note([(node, at)]);
-                Ok(Outcome::Settled)
-            }
-            Applied::Kept => Ok(Outcome::stale("put in place: recovery settles it later")),
-            Applied::Dropped => Ok(Outcome::stale("put in place, not there since")),
-        }
-    }
-
-    /// `how`, with where this run's operations settled its node's base.
-    fn ours<'s>(&self, how: Settle<'s>) -> Settle<'s> {
-        Settle {
-            ours: self.settled.get(&how.node).copied(),
-            ..how
-        }
-    }
-
-    /// Notes where this run's operations settled bases.
-    fn note(&mut self, settled: impl IntoIterator<Item = (NodeId, Option<RemoteRef>)>) {
-        for (node, at) in settled {
-            if let Some(at) = at {
-                self.settled.insert(node, at);
-            }
-        }
-    }
-
     /// Whether test fault `point` fails now ([`ExecConfig::hooks`]).
     fn fails(&self, point: FailPoint) -> bool {
         self.cfg.hooks.fails(point)
@@ -559,63 +374,15 @@ impl<'a> Executor<'a> {
         outcome: Outcome,
         gone: Option<String>,
     ) -> Result<(), StateError> {
-        // A download whose bytes didn't match: its strike, or a second time at one version,
-        // refused. (The record either way: one refused carries the strike's key.)
-        let (outcome, mut record) = match outcome {
-            Outcome::Mismatch(why) => {
-                let strike = self.refusal(&op, &why, false)?;
-                match self.refusals.twice(&op, &strike) {
-                    true => {
-                        let why = format!("{why}, twice: the drive holds other bytes than it says");
-                        let refused = Refused {
-                            refused: true,
-                            why: why.clone(),
-                            ..strike
-                        };
-                        (Outcome::Skip(Skip::Refused(why)), Some(refused))
-                    }
-                    false => (Outcome::Mismatch(why), Some(strike)),
-                }
-            }
-            outcome => (outcome, None),
-        };
-        // Done: a refusal of it is over.
-        if matches!(outcome, Outcome::Done | Outcome::Settled) && self.refusals.done(&op) {
-            let (node, kind) = (op.node(), op.kind());
-            self.db.write(|s| s.folder().delete_refused(node, kind))?;
-        }
-        // A placement that failed before its item was in place leaves no record: recovery
-        // never takes an item the user puts at that place for it (a retry writes its own).
-        if matches!(op, Op::LocalDownload { .. } | Op::LocalMkdir { .. })
-            && self.records.remove(&op.node())
-            && !matches!(outcome, Outcome::Done | Outcome::Settled)
-            && !self.crashed
-        {
-            let node = op.node();
-            self.db.write(|s| s.folder().delete_placing(node))?;
-        }
+        let (outcome, mut record) = self.refusals_after(&op, outcome)?;
+        self.placement_ended(&op, &outcome)?;
         self.schedule.ended(&op, &outcome);
-        if matches!(
-            op,
-            Op::RemoteTags { .. } | Op::RemoteUpdate { .. } | Op::RemoteCreate { .. }
-        ) && matches!(
-            outcome,
-            Outcome::Skip(Skip::Unsyncable(_) | Skip::Refused(_))
-                | Outcome::Stop(Stopped::Denied(_))
-        ) {
-            self.tags_refused.insert(op.node());
-        }
+        self.heard.ended(&op, &outcome);
         match outcome {
             Outcome::Done => {
                 self.record(&op, gone)?;
                 self.report.done += 1;
-                let os = self.folder.os;
-                let how = self.ours(Settle {
-                    same_bytes: op.is_transfer(),
-                    ..Settle::node(op.node())
-                });
-                let at = self.db.write(|s| settle(s.folder(), how, os))?;
-                self.note([(how.node, at)]);
+                self.settle_done(&op)?;
             }
             Outcome::Settled => {
                 self.record(&op, gone)?;
@@ -625,11 +392,7 @@ impl<'a> Executor<'a> {
             Outcome::Retry(why) => self.retried(op, attempts, false, why)?,
             Outcome::Skip(why) => {
                 let node = op.node();
-                let refused = match (&why, record.take()) {
-                    (Skip::Refused(_), Some(refused)) => Some(refused),
-                    (Skip::Refused(why), None) => Some(self.refusal(&op, why, true)?),
-                    _ => None,
-                };
+                let refused = record.take().filter(|_| matches!(why, Skip::Refused(_)));
                 self.db.write(|s| {
                     s.folder().mark_dirty(node)?;
                     refused
@@ -667,18 +430,11 @@ impl<'a> Executor<'a> {
             Outcome::Full(after) => {
                 let node = op.node();
                 self.db.write(|s| s.folder().mark_dirty(node))?;
-                self.full = true;
                 self.report.news.full = Some(crate::time::full_hold(after));
             }
             Outcome::Fatal(e) => return Err(e),
         }
         Ok(())
-    }
-
-    /// The record of `op`'s refusal (`refused`; else its first strike), with `why`, now.
-    fn refusal(&mut self, op: &Op, why: &str, refused: bool) -> Result<Refused, StateError> {
-        self.db
-            .read(|s| crate::refused::record(s, op, why, refused))
     }
 
     /// Takes `op`, which failed for now ([`Schedule::retry`]), with `why`.
@@ -790,7 +546,9 @@ impl<'a> Executor<'a> {
             self.disk.write_durable(self.db, |s| {
                 records.iter().try_for_each(|r| s.put_placing(r))
             })?;
-            self.records.extend(records.iter().map(|r| r.base.node));
+            self.settling
+                .placing
+                .extend(records.iter().map(|r| r.base.node));
         } else {
             self.disk.flush_ids(self.db)?;
         }
@@ -830,19 +588,7 @@ impl<'a> Executor<'a> {
         );
         // What never started leaves no record (one that runs later writes its own).
         if !self.crashed && !pending.is_empty() {
-            let unstarted: Vec<NodeId> = pending
-                .keys()
-                .filter(|n| self.records.contains(*n))
-                .copied()
-                .collect();
-            for n in &unstarted {
-                self.records.remove(n);
-            }
-            let gone = self.db.write(|s| {
-                unstarted
-                    .iter()
-                    .try_for_each(|n| s.folder().delete_placing(*n))
-            });
+            let gone = self.drop_unplaced(pending.keys().copied());
             if first_error.is_none() {
                 gone?;
             }
@@ -962,7 +708,7 @@ impl<'a> Executor<'a> {
             }
             Op::Settle { .. } => Ok(Outcome::Done),
             Op::LocalDetach { node, new_node } => self.detach(*node, *new_node),
-            Op::Forget { node, subtree } if subtree.is_empty() => self.forget_base(*node),
+            Op::Forget { node, subtree } if subtree.is_empty() => self.drop_unsynced_base(*node),
             Op::Forget { node, subtree } => self.trash(*node, subtree, true),
         };
         result.unwrap_or_else(|o| o)
@@ -1038,6 +784,7 @@ impl<'a> Executor<'a> {
     }
 }
 
+mod batch;
 mod delete;
 mod disk;
 mod hooks;
@@ -1045,9 +792,14 @@ mod local;
 mod outcome;
 mod park;
 mod recover;
+mod refusing;
 mod remote;
 mod schedule;
+mod settling;
 mod transfer_ops;
+
+use batch::Batch;
+use settling::Settling;
 
 #[cfg(test)]
 mod tests;
