@@ -3,7 +3,7 @@
 //! A remote node whose path the device's filter matches is **masked**, with its subtree: for
 //! this device it isn't there. What the device still holds of such a node is settled before
 //! the merge:
-//! - an unchanged local copy is trashed (the node moved away, to where this device doesn't
+//! - an unchanged local copy is deleted (the node moved away, to where this device doesn't
 //!   follow), and its base is forgotten in the same step: a base left behind would read as a
 //!   local delete once the node is back in view;
 //! - a local copy with changes the remote doesn't have (edited bytes, or never synced) is

@@ -4,7 +4,8 @@
 //! - a local item is only touched if it still matches its `local` row (the fingerprint
 //!   guard); folders are compared by kind and file id;
 //! - nothing local is ever overwritten by surprise: new names use no-replace renames, content
-//!   swaps check the fingerprint first, and deletes move items to `.hbsync/trash`;
+//!   swaps check the fingerprint first, and deletes move items aside, check them there, then
+//!   unlink them (sync semantics §7);
 //! - a remote write carries the version the plan saw;
 //! - a target name held by a node that is about to leave is freed by **parking** that node
 //!   under a temporary name, recorded in the DB until it is moved on or back;
@@ -989,57 +990,6 @@ impl<'a> Executor<'a> {
         hbsync_platform::stat(&self.disk.abs(&row.path)).is_ok_and(|meta| matches_row(row, &meta))
     }
 
-    /// Whether everything on disk at `top` is what `rows` recorded (its subtree in the DB, `top`
-    /// included), unchanged, apart from filtered items (§10): junk may go along, ignored items
-    /// must stay, and the folders they are in are returned. `None` if anything else is there or
-    /// changed. One walk, compared with the metadata the listing returns.
-    fn subtree_check(&self, top: &LocalRow, rows: &[LocalRow]) -> Option<Vec<RelPath>> {
-        if !self.on_disk_unchanged(top) {
-            return None;
-        }
-        let mut expected: HashMap<&RelPath, &LocalRow> = rows
-            .iter()
-            .filter(|r| r.path != top.path)
-            .map(|r| (&r.path, r))
-            .collect();
-        let mut holding = Vec::new();
-        if top.kind == NodeKind::Folder {
-            let walk = hbsync_local::Walker::at(
-                &self.folder.root,
-                top.path.clone(),
-                &self.folder.filter,
-                None,
-            );
-            for event in walk {
-                match event {
-                    hbsync_local::WalkEvent::Entry { path, meta } => {
-                        if !expected
-                            .remove(&path)
-                            .is_some_and(|r| matches_row(r, &meta))
-                        {
-                            return None;
-                        }
-                    }
-                    hbsync_local::WalkEvent::Skipped {
-                        reason: hbsync_local::SkipReason::Junk,
-                        ..
-                    } => {}
-                    hbsync_local::WalkEvent::Skipped {
-                        path,
-                        reason: hbsync_local::SkipReason::Ignored,
-                    } => {
-                        // Its own name may be one we can't sync; its folder's we walked.
-                        let folder = path.parent()?;
-                        holding.push(hbsync_local::journal::relpath_prefix(folder));
-                    }
-                    // Anything else we never sync (a link, a bad name) would be trashed silently.
-                    _ => return None,
-                }
-            }
-        }
-        expected.is_empty().then_some(holding)
-    }
-
     /// See [`occupant`].
     fn occupant(&mut self, target: &RelPath) -> Result<Option<LocalRow>, StateError> {
         occupant(self.db, self.folder.case_insensitive, target)
@@ -1088,6 +1038,7 @@ impl<'a> Executor<'a> {
     }
 }
 
+mod delete;
 mod disk;
 mod hooks;
 mod local;
@@ -1101,16 +1052,17 @@ mod transfer_ops;
 #[cfg(test)]
 mod tests;
 
+use delete::Deleted;
 use disk::Disk;
-pub use hooks::{CrashPoint, FailPoint, Hooks};
 #[cfg(feature = "testkit")]
-pub use hooks::{Faults, Meanwhile};
+pub use hooks::{Aside, Faults, Meanwhile};
+pub use hooks::{CrashPoint, FailPoint, Hooks};
 pub(crate) use outcome::ExecReport;
 use outcome::{Outcome, Step, io_outcome, remote_outcome, rescan};
 pub use outcome::{Skip, Stopped};
-use park::{numbered_place, occupant, release_place, restore_parked};
+use park::{numbered_place, occupant, release_place, release_place_for, restore_parked};
 use recover::{Applied, Judged, OnDisk, apply, judge, look, read_row};
-pub use recover::{UNHASHED_HOLD, record_dirs, recover, recover_placements};
+pub use recover::{UNHASHED_HOLD, record_dirs, recover, recover_aside, recover_placements};
 use recover::{complete_fork, download_key};
 use schedule::{Retried, Schedule};
 pub use transfer_ops::tags_lost;

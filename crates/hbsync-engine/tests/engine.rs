@@ -105,9 +105,15 @@ fn edits_moves_and_deletes_propagate() -> R {
         .filter_map(|h| h.removed_at().map(|at| (h.node(), at)))
         .collect();
     assert_eq!(removed.len(), 1, "{removed:?}");
-    // And here, the local copy went to the trash (emptied by the purge).
-    assert!(fs::read_dir(a.root.join(".hbsync/trash"))?.count() >= 1);
+    // And here, the local copy was deleted outright: nothing is kept (sync semantics §7).
+    assert!(nothing_kept(&a), "kept");
     Ok(())
+}
+
+/// Whether nothing of what `c` deleted is kept in its `.hbsync`: no trash, nothing aside.
+fn nothing_kept(c: &Client) -> bool {
+    let empty = |dir: &str| fs::read_dir(c.root.join(dir)).map_or(true, |mut d| d.next().is_none());
+    empty(".hbsync/trash") && empty(".hbsync/aside")
 }
 
 #[test]
@@ -1999,7 +2005,7 @@ fn ignoring(rules: &'static str) -> impl Fn(&mut hbsync_engine::EngineConfig) {
 }
 
 #[test]
-fn junk_never_syncs_and_goes_to_the_trash_with_its_folder() -> R {
+fn junk_never_syncs_and_goes_with_its_folder() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
     let mut b = Client::new(&server, "b")?;
@@ -2019,6 +2025,33 @@ fn junk_never_syncs_and_goes_to_the_trash_with_its_folder() -> R {
     assert!(report.skipped.is_empty(), "{:?}", report.skipped);
     assert!(b.tree_text("").is_empty(), "{:?}", b.tree_text(""));
     assert_eq!(a.tree_text(""), ["~$doc.docx = lock"]);
+    Ok(())
+}
+
+/// A folder on the junk list (`.dropbox.cache`, `$RECYCLE.BIN`, a folder named `*.part`) may
+/// hold what was never synced: it stays, with the folder it is in, when that folder is deleted
+/// elsewhere, as ignored items do (§10); a junk file directly in that folder stays with it.
+#[test]
+fn a_junk_folder_stays_with_its_folder() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("proj/doc.txt", "v1")?;
+    a.write("readme.txt", "r")?; // so deleting proj isn't deleting everything
+    a.sync()?;
+    b.sync()?;
+    b.write("proj/Chapter.part/only copy.txt", "never synced")?;
+    b.write("proj/Thumbs.db", "thumbs")?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("proj"))?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(
+        b.read_text("proj/Chapter.part/only copy.txt")?,
+        "never synced"
+    );
+    assert!(b.read_text("proj/doc.txt").is_err(), "the synced file went");
+    assert_eq!(b.read_text("proj/Thumbs.db")?, "thumbs");
     Ok(())
 }
 
@@ -3924,11 +3957,10 @@ fn a_removal_answered_gone_for_good_keeps_the_file_gone() -> R {
     Ok(())
 }
 
-/// A delete taken back: the files the other device set aside in its trash when the delete
-/// came are taken from there, not over the network, each only once its bytes read as the
-/// drive's. A trash file with other bytes (changed there) stays, and its file is downloaded.
+/// A delete taken back comes down again: the other device kept nothing of what it deleted
+/// (sync semantics §7), so every file of it is downloaded.
 #[test]
-fn a_restore_takes_the_bytes_from_the_trash() -> R {
+fn a_restore_downloads_again() -> R {
     let server = server();
     let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
     let (x, y, z) = ("x".repeat(1000), "y".repeat(2000), "z".repeat(3000));
@@ -3942,10 +3974,7 @@ fn a_restore_takes_the_bytes_from_the_trash() -> R {
     a.sync()?;
     b.sync()?;
     assert!(b.read_text("run/x.txt").is_err(), "deleted on b");
-    let entry = trash_entry(&b)?;
-    // Changed in the trash, its size kept: not the drive's bytes.
-    let changed = "Z".repeat(3000);
-    fs::write(entry.join("run/z.txt"), &changed)?;
+    assert!(nothing_kept(&b), "kept");
     let run = a
         .recently_deleted(10)?
         .into_iter()
@@ -3954,26 +3983,20 @@ fn a_restore_takes_the_bytes_from_the_trash() -> R {
     assert_eq!(a.engine.drive().restore(&[run.node])?, 5);
     let served = b.remote.faults().served;
     b.sync()?;
-    assert_eq!(
-        b.remote.faults().served - served,
-        3000,
-        "only z.txt over the network"
-    );
+    assert_eq!(b.remote.faults().served - served, 6000, "all of it again");
     assert_eq!(b.read_text("run/x.txt")?, x);
     assert_eq!(b.read_text("run/sub/y.txt")?, y);
     assert_eq!(b.read_text("run/z.txt")?, z);
-    assert!(!entry.join("run/x.txt").exists(), "taken from the trash");
-    assert_eq!(fs::read_to_string(entry.join("run/z.txt"))?, changed);
     b.sync()?;
     a.sync()?;
     assert_eq!(a.tree_text(""), b.tree_text(""));
     Ok(())
 }
 
-/// A restore taken from the trash, with a crash or a power cut at any of the sync's commits:
-/// the next sync finishes it, every file whole and in place, from the trash or the drive.
+/// A restore coming down, with a crash or a power cut at any of the sync's commits: the next
+/// sync finishes it, every file whole and in place.
 #[test]
-fn a_crash_while_taking_from_the_trash_loses_nothing() -> R {
+fn a_crash_while_a_restore_comes_down_loses_nothing() -> R {
     for at in 0..8 {
         for before in [true, false] {
             for kept in [common::Kept::All, common::Kept::Durable(None)] {
@@ -4016,26 +4039,28 @@ fn a_crash_while_taking_from_the_trash_loses_nothing() -> R {
     Ok(())
 }
 
-/// b's trash of a file a deleted is cut short by a crash after the move to the trash, before
-/// its commit; with `restored`, a restores the file before b runs again. Returns b's tree and
-/// the drive's live names once both synced.
+/// b's delete of a file a deleted is cut short by a crash at `at`: right after the file went
+/// aside (before it was checked), or after it was unlinked (before the commit); with
+/// `restored`, a restores the file before b runs again. Returns b's tree and the drive's live
+/// names once both synced, and checks that b keeps nothing of it.
 #[allow(clippy::type_complexity)]
-fn crash_after_a_trash(
+fn crash_in_a_delete(
+    at: CrashPoint,
     restored: bool,
 ) -> Result<(Vec<String>, Vec<String>), Box<dyn std::error::Error>> {
     let server = server();
     let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
-    let mut b = Client::with_config(&server, "b", |c| {
+    let mut b = Client::with_config(&server, "b", move |c| {
         c.guard.allow = true;
-        c.exec.hooks.crash_at = Some(CrashPoint::AfterTrash)
+        c.exec.hooks.crash_at = Some(at);
     })?;
     a.write("x", "x")?;
     a.sync()?;
     b.sync()?;
     fs::remove_file(a.root.join("x"))?;
     a.sync()?;
-    assert!(b.sync().is_err(), "b stops right after the trash move");
-    assert!(!b.root.join("x").exists(), "in the trash");
+    assert!(b.sync().is_err(), "b stops in the delete");
+    assert!(!b.root.join("x").exists(), "aside, or gone");
     if restored {
         let x = a
             .recently_deleted(10)?
@@ -4049,70 +4074,238 @@ fn crash_after_a_trash(
     b.sync()?;
     a.sync()?;
     assert_eq!(a.tree_text(""), b.tree_text(""));
+    assert!(nothing_kept(&b), "kept");
     let mut names = server.lock().map_err(|_| "poisoned")?.live_names();
     names.sort();
     Ok((b.tree_text(""), names))
 }
 
-/// A crash between a trash's move and its commit loses no delete: the file stays deleted.
+/// A crash anywhere in a delete loses it not: what is aside goes back at the next sync and is
+/// deleted again; what was unlinked stays so.
 #[test]
-fn crash_right_after_a_trash_keeps_the_delete() -> R {
-    let (tree, names) = crash_after_a_trash(false)?;
-    assert!(tree.is_empty() && names.is_empty(), "{tree:?} {names:?}");
+fn a_crash_in_a_delete_keeps_the_delete() -> R {
+    for at in [CrashPoint::AfterAside, CrashPoint::AfterUnlink] {
+        let (tree, names) = crash_in_a_delete(at, false)?;
+        assert!(
+            tree.is_empty() && names.is_empty(),
+            "{at:?}: {tree:?} {names:?}"
+        );
+    }
     Ok(())
 }
 
-/// Nor should a restore made before the next run: the file should come back. It doesn't yet:
-/// the scan reads the missing item against the base the lost commit would have dropped, as a
-/// local delete, and the plan removes the file again. Follow-up (C1): a write-ahead record of
-/// the run's trashes, finished at the next start.
+/// Nor a restore made before the next run, where the crash left the file aside: recovery finds
+/// it the synced version and deletes it (the delete the run was making), its base with it; the
+/// restore stands, and the file comes down again.
 #[test]
-#[ignore = "follow-up C1: a trash's lost commit undoes a restore made before the next run"]
-fn crash_right_after_a_trash_keeps_a_restore() -> R {
-    let (tree, names) = crash_after_a_trash(true)?;
+fn a_crash_with_a_delete_aside_keeps_a_restore() -> R {
+    let (tree, names) = crash_in_a_delete(CrashPoint::AfterAside, true)?;
     assert_eq!(tree, ["x = x"]);
     assert_eq!(names, ["x"]);
     Ok(())
 }
 
-/// A file b trashed because a deleted it, which the user moves back out of b's trash by hand:
-/// no base holds it (the trash dropped it), so it is a new file here, sent up as one. The
-/// deleted node stays deleted; nothing fights over it.
+/// Where the crash came after the unlink, it doesn't yet: the scan reads the missing item
+/// against the base the lost commit would have dropped, as a local delete, and the plan removes
+/// the file again, back to Recently deleted (nothing lost). Accepted for now (#171, Q4): a
+/// write-ahead record of the run's deletes would close it.
 #[test]
-fn a_trashed_file_moved_back_by_hand_is_a_new_file() -> R {
-    let server = server();
-    let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
-    let mut b = Client::with_config(&server, "b", |c| c.guard.allow = true)?;
-    a.write("x", "x")?;
-    a.sync()?;
-    b.sync()?;
-    let x = hbsync_platform::RelPath::new("x")?;
-    let node = |a: &mut Client| -> Result<_, Box<dyn std::error::Error>> {
-        Ok(a.engine.db().read(|s| s.get_local(&x))?.ok_or("x")?.node)
-    };
-    let old = node(&mut a)?;
-    fs::remove_file(a.root.join("x"))?;
-    a.sync()?;
-    b.sync()?;
-    fs::rename(trash_entry(&b)?.join("x"), b.root.join("x"))?;
-    b.sync()?;
-    a.sync()?;
-    assert_eq!(a.tree_text(""), ["x = x"]);
-    assert_eq!(a.tree_text(""), b.tree_text(""));
-    assert_ne!(node(&mut a)?, old, "a new node");
-    assert!(
-        a.recently_deleted(10)?.iter().any(|i| i.node == old),
-        "the deleted one stays deleted"
-    );
+#[ignore = "known limit: a delete's lost commit undoes a restore made before the next run"]
+fn a_crash_after_an_unlink_keeps_a_restore() -> R {
+    let (tree, names) = crash_in_a_delete(CrashPoint::AfterUnlink, true)?;
+    assert_eq!(tree, ["x = x"]);
+    assert_eq!(names, ["x"]);
     Ok(())
 }
 
-/// The first entry of `c`'s trash.
-fn trash_entry(c: &Client) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
-    Ok(fs::read_dir(c.root.join(".hbsync/trash"))?
-        .next()
-        .ok_or("no trash entry")??
-        .path())
+/// An app that had x open writes to it after b moved it aside to delete it (a deleted it): the
+/// check finds it changed and puts it back, and the edit wins: x comes back on the drive with
+/// its new bytes. Unlinked, the edit was lost.
+#[test]
+fn an_edit_while_a_delete_is_aside_is_kept() -> R {
+    use hbsync_engine::exec::Aside;
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |c| {
+        c.guard.allow = true;
+        c.exec.hooks.aside = Some(Aside(Arc::new(|at| {
+            if at.is_file() {
+                let _ = fs::write(at, "edited aside, longer");
+            }
+        })));
+    })?;
+    a.write("x", "x")?;
+    a.sync()?;
+    b.sync()?;
+    fs::remove_file(a.root.join("x"))?;
+    a.sync()?;
+    b.sync()?;
+    let remote = Box::new(b.remote.clone());
+    b.restart_with(remote, |c| c.exec.hooks.aside = None)?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(b.tree_text(""), ["x = edited aside, longer"]);
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    assert!(nothing_kept(&b), "kept");
+    Ok(())
+}
+
+/// On a volume whose mtimes can't prove the bytes (FAT, HFS+, ext3: a tick of a second or
+/// more), an edit of the same size that keeps the mtime is caught by the hash: put back, the
+/// edit wins.
+#[test]
+fn a_same_size_edit_aside_is_caught_by_the_hash_on_a_coarse_volume() -> R {
+    use hbsync_engine::exec::Aside;
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |c| {
+        c.guard.allow = true;
+        let _ = c.folder.mtime_proves_bytes.set(false);
+        c.exec.hooks.aside = Some(Aside(Arc::new(|at| {
+            let Ok(meta) = hbsync_platform::stat(at) else {
+                return;
+            };
+            let _ = fs::write(at, "X");
+            let _ = hbsync_platform::ops::set_mtime(at, meta.mtime_ns);
+        })));
+    })?;
+    a.write("x", "x")?;
+    a.sync()?;
+    b.sync()?;
+    fs::remove_file(a.root.join("x"))?;
+    a.sync()?;
+    b.sync()?;
+    let remote = Box::new(b.remote.clone());
+    b.restart_with(remote, |c| c.exec.hooks.aside = None)?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(b.tree_text(""), ["x = X"]);
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    Ok(())
+}
+
+/// A crash leaves b's delete of d/x aside, and the user then deletes folder d on b. The next
+/// sync decides what is aside by what it is: still the synced x, it goes (the drive's delete
+/// stands) though its folder is gone; it isn't brought back at the top.
+#[test]
+fn what_is_aside_as_synced_goes_though_its_folder_went() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |c| {
+        c.guard.allow = true;
+        c.exec.hooks.crash_at = Some(CrashPoint::AfterAside);
+    })?;
+    a.write("d/x", "x")?;
+    a.write("d/y", "y")?;
+    a.sync()?;
+    b.sync()?;
+    fs::remove_file(a.root.join("d/x"))?;
+    a.sync()?;
+    assert!(b.sync().is_err(), "b stops with x aside");
+    fs::remove_dir_all(b.root.join("d"))?;
+    let remote = Box::new(b.remote.clone());
+    b.restart_with(remote, |c| c.exec.hooks.crash_at = None)?;
+    b.sync()?;
+    a.sync()?;
+    assert!(b.tree_text("").is_empty(), "{:?}", b.tree_text(""));
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    assert!(nothing_kept(&b), "kept");
+    Ok(())
+}
+
+/// b parks its old b (the drive deleted it) for the new b a made in its place, then moves it
+/// aside to delete it; an app writes to it there. Put back, it takes a real name, never the
+/// temporary one: the edit wins, and both go up.
+#[test]
+fn a_parked_item_put_back_takes_a_real_name() -> R {
+    use hbsync_engine::exec::Aside;
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |c| {
+        c.guard.allow = true;
+        c.exec.hooks.aside = Some(Aside(Arc::new(|at| {
+            if at.is_file() {
+                let _ = fs::write(at, "edited aside");
+            }
+        })));
+    })?;
+    a.write("b", "old")?;
+    a.sync()?;
+    b.sync()?;
+    fs::remove_file(a.root.join("b"))?;
+    a.sync()?;
+    a.write("b", "new")?;
+    a.sync()?;
+    b.sync()?;
+    let remote = Box::new(b.remote.clone());
+    b.restart_with(remote, |c| c.exec.hooks.aside = None)?;
+    b.sync()?;
+    a.sync()?;
+    b.sync()?;
+    let tree = b.tree_text("");
+    assert!(!tree.iter().any(|t| t.contains(".hbsync-move")), "{tree:?}");
+    // Both kept: the new b and the edit, one of them renamed for the clash (§6.1).
+    assert!(tree.iter().any(|t| t.ends_with("= new")), "{tree:?}");
+    assert!(
+        tree.iter().any(|t| t.ends_with("= edited aside")),
+        "{tree:?}"
+    );
+    assert_eq!(a.tree_text(""), tree);
+    assert!(nothing_kept(&b), "kept");
+    Ok(())
+}
+
+/// Something in `.hbsync/aside` that no synced item here is (its state DB lost since, say) is
+/// left there, never deleted, and the sync goes on.
+#[test]
+fn an_unknown_item_aside_is_left() -> R {
+    let server = server();
+    let mut b = Client::with_config(&server, "b", |c| c.guard.allow = true)?;
+    b.write("y", "y")?;
+    b.sync()?;
+    let aside = b.root.join(".hbsync/aside");
+    fs::create_dir_all(&aside)?;
+    let stranger = aside.join(format!("{}", hbsync_types::NodeId::new().0.simple()));
+    fs::write(&stranger, "only copy")?;
+    fs::write(aside.join("not an entry"), "nor this")?;
+    b.sync()?;
+    assert_eq!(fs::read_to_string(&stranger)?, "only copy");
+    assert_eq!(fs::read_to_string(aside.join("not an entry"))?, "nor this");
+    assert_eq!(b.tree_text(""), ["y = y"]);
+    Ok(())
+}
+
+/// An app saves a file into folder run while b has it aside to delete it (a deleted it): the
+/// check finds it there and puts the folder back; the new file keeps the folder alive,
+/// restored on the drive, and what was synced in it goes.
+#[test]
+fn a_file_saved_into_a_folder_aside_is_kept() -> R {
+    use hbsync_engine::exec::Aside;
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |c| {
+        c.guard.allow = true;
+        c.exec.hooks.aside = Some(Aside(Arc::new(|at| {
+            if at.is_dir() {
+                let _ = fs::write(at.join("new.txt"), "new");
+            }
+        })));
+    })?;
+    a.write("run/old.txt", "old")?;
+    a.sync()?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("run"))?;
+    a.sync()?;
+    b.sync()?;
+    let remote = Box::new(b.remote.clone());
+    b.restart_with(remote, |c| c.exec.hooks.aside = None)?;
+    b.sync()?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["run/", "run/new.txt = new"]);
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    assert!(nothing_kept(&b), "kept");
+    Ok(())
 }
 
 /// b keeps what it ignores in a folder a deleted, so its trash moves the rest one item at a
@@ -4146,7 +4339,7 @@ fn a_trash_that_stops_half_way_drops_the_bases_of_what_went() -> R {
     fs::set_permissions(&sub, fs::Permissions::from_mode(0o555))?;
     let _ = b.sync();
     fs::set_permissions(&sub, fs::Permissions::from_mode(0o755))?;
-    assert!(!b.root.join("proj/0.txt").exists(), "moved to the trash");
+    assert!(!b.root.join("proj/0.txt").exists(), "deleted");
     assert!(b.root.join("proj/sub/b.txt").exists(), "couldn't move");
     assert!(
         b.engine.db().read(|s| s.get_base(moved))?.is_none(),

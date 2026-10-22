@@ -126,8 +126,8 @@ Everything comes from the node's HomebaseFile; nothing is stored beside it.
   rewriting the content: up to 1,000 files a request, each with its `versionTag`, answered per
   file (`versionTagMismatch`: changed since, leave it). The folder in one request, then what is
   in it.
-  Desktop clients move local copies they lose to `.hbsync/trash/`, so a deletion from the phone
-  can be recovered there.
+  Desktop clients delete their local copies of what the phone deletes, and keep nothing:
+  Recently deleted on the drive is the only copy, for 30 days.
 - A retry keeps the node id, including one the user asks for after a failure, so a retry that gets 4105
   (`ExistingFileWithUniqueId`) means an earlier attempt already succeeded.
 

@@ -28,8 +28,9 @@ case, a port's `:` as `_`), for every folder it syncs on this computer: the driv
 mirror, Recently deleted) once, each folder's own rows (what it has, what was agreed) keyed by
 the folder. It records its identity (`account.identity`).
 
-A sync folder keeps the rest in `<folder>/.hbsync` (temp files and trash, on the folder's
-disk for atomic renames; the ignore rules), hidden on Windows too (the hidden attribute, set
+A sync folder keeps the rest in `<folder>/.hbsync` (temp files, an item being deleted for the
+moment it is checked, and old versions, on the folder's disk for atomic renames; the ignore
+rules), hidden on Windows too (the hidden attribute, set
 at every start), and its marker `.hbsync/folder`: the identity and the folder's id in that DB.
 A folder is synced only through its marker: without one it is gone (or not mounted), with
 another identity's it is refused, and one the DB doesn't know is set up again. An account's DB

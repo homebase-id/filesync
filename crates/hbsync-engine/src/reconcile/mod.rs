@@ -294,7 +294,7 @@ impl Holds {
         // page's nodes and planned in another page, waits for it, held as it is with the
         // folders above it and everything of the page below it, as a file not hashed yet
         // holds its folders: alive as context, what is below unmerged kept a deleted folder
-        // alive (review 14 R1), the folder's trash took along what changed there, or its
+        // alive (review 14 R1), the folder's delete took along what changed there, or its
         // items went one by one before it. The engine plans it with its whole dirty subtree
         // as a page of its own next (`pages::OwnPages`). (What is dirty in another page is
         // never moved by this plan's repairs: `Reconciler::elsewhere`.)

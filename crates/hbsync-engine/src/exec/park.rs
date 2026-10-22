@@ -31,8 +31,19 @@ pub(super) fn is_free(
     folder: &FolderCtx,
     path: &RelPath,
 ) -> Result<bool, StateError> {
+    free_for(db, folder, path, None)
+}
+
+/// Whether nothing holds `path` on disk, nor in the DB but `own`'s row (an item out of its place
+/// for a moment: the DB still has it there).
+fn free_for(
+    db: &mut StateDb,
+    folder: &FolderCtx,
+    path: &RelPath,
+    own: Option<NodeId>,
+) -> Result<bool, StateError> {
     Ok(fs::symlink_metadata(path.to_native(&folder.root)).is_err()
-        && occupant(db, folder.case_insensitive, path)?.is_none())
+        && occupant(db, folder.case_insensitive, path)?.is_none_or(|o| Some(o.node) == own))
 }
 
 /// The first free numbered variant of `target`, one this device syncs if any is (§10). `None`
@@ -63,7 +74,18 @@ pub(super) fn release_place(
     original: &RelPath,
     is_dir: bool,
 ) -> Result<Option<RelPath>, StateError> {
-    if is_free(db, folder, original)? {
+    release_place_for(db, folder, original, None, is_dir)
+}
+
+/// [`release_place`] for `own`'s item, its row still in the DB at `original` ([`free_for`]).
+pub(super) fn release_place_for(
+    db: &mut StateDb,
+    folder: &FolderCtx,
+    original: &RelPath,
+    own: Option<NodeId>,
+    is_dir: bool,
+) -> Result<Option<RelPath>, StateError> {
+    if free_for(db, folder, original, own)? {
         return Ok(Some(original.clone()));
     }
     numbered_place(db, folder, original, is_dir)

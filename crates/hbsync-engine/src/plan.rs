@@ -104,7 +104,7 @@ impl DeleteGuard {
     }
 
     /// Whether removals elsewhere of `n` files are held: what another device removed is
-    /// followed here (into `.hbsync/trash`, and Recently deleted on the drive keeps it), but
+    /// followed here (deleted here, and Recently deleted on the drive keeps it), but
     /// every synced file at once over the limit: a broken device or a wiped drive.
     pub fn every(&self, n: usize, synced: usize) -> bool {
         synced > 0 && n >= synced && n > self.limit(synced)
@@ -175,8 +175,8 @@ pub struct Input {
     /// plan below them, on any side, in another page: they wait for it, with everything of
     /// the page below them, held as they are, and are planned with their whole dirty subtree
     /// as a page of their own next (§6.5). Planned apart, what is below read alive as context
-    /// and kept a deleted folder alive (review 14 R1), or the folder's trash took along what
-    /// changed there (an edit lost to `.hbsync/trash`).
+    /// and kept a deleted folder alive (review 14 R1), or the folder's delete took along what
+    /// changed there (an edit lost).
     pub going: HashSet<NodeId>,
     /// The folders above the page's nodes, on any side, synced before, that may go and that
     /// another page plans: what of the page is below them waits for them the same way, so a
@@ -258,9 +258,9 @@ pub enum Op {
         tags: Tags,
         drive: Option<Box<DriveVersion>>,
     },
-    /// Move the local item and everything below it to the sync root's trash, with their bases.
-    /// `subtree` is every node the plan expects there (sorted, `node` included): if the folder
-    /// holds anything else by the time this runs, it is not trashed.
+    /// Delete the local item and everything below it (sync semantics §7: aside, checked,
+    /// unlinked), with their bases. `subtree` is every node the plan expects there (sorted,
+    /// `node` included): if the folder holds anything else by the time this runs, it stays.
     LocalTrash { node: NodeId, subtree: Vec<NodeId> },
     /// Create the node remotely; files upload the local bytes.
     RemoteCreate {
@@ -302,7 +302,7 @@ pub enum Op {
     /// below it): `node` moved remotely to where this device doesn't sync, and the item holds
     /// what must stay here (§10). A later op creates it remotely.
     LocalDetach { node: NodeId, new_node: NodeId },
-    /// This device no longer syncs `node` (§10): its local item goes to the trash, as with
+    /// This device no longer syncs `node` (§10): its local item is deleted, as with
     /// [`Op::LocalTrash`] with `subtree` (empty if nothing of it is here), with its bases; where
     /// nothing of it is here, `node`'s base goes all the same. A base left behind would read as
     /// a local delete once the node is back in view.
@@ -387,7 +387,7 @@ impl Op {
         }
     }
 
-    /// The node whose local item (with everything below it) this op moves to the trash.
+    /// The node whose local item (with everything below it) this op deletes here.
     pub fn trashes(&self) -> Option<NodeId> {
         match self {
             Op::LocalTrash { node, .. } => Some(*node),

@@ -7,7 +7,7 @@ use std::sync::{Arc, OnceLock};
 
 use hbsync_fileio::HashAlgorithm;
 use hbsync_local::{Filter, ScanOptions};
-use hbsync_platform::Os;
+use hbsync_platform::{FsFamily, Os};
 
 use crate::plan::Masking;
 use crate::scope::Scope;
@@ -28,6 +28,12 @@ pub struct FolderCtx {
     /// Whether the root's volume keeps tags, learned at the first tag write on it: a
     /// download's record claims the tags it is to write only where it does.
     pub tags_kept: Arc<OnceLock<bool>>,
+    /// Whether a file's id, size and mtime prove its bytes here (the volume keeps mtimes to the
+    /// microsecond and stable ids), learned at the first delete that checks a file: elsewhere
+    /// the check hashes it (sync semantics §7).
+    pub mtime_proves_bytes: Arc<OnceLock<bool>>,
+    /// The file system family of the root's volume, learned when first asked.
+    pub family: Arc<OnceLock<FsFamily>>,
 }
 
 impl FolderCtx {
@@ -42,6 +48,8 @@ impl FolderCtx {
             filter: Arc::default(),
             scope: Arc::new(Scope::main()),
             tags_kept: Arc::default(),
+            mtime_proves_bytes: Arc::default(),
+            family: Arc::default(),
         }
     }
 
@@ -62,6 +70,33 @@ impl FolderCtx {
             exact_names: cfg!(target_os = "linux") && !self.case_insensitive,
             ..ScanOptions::for_root(&self.root, self.algorithm)
         }
+    }
+}
+
+impl FolderCtx {
+    /// Whether a file's id, size and mtime prove its bytes on the folder's volume
+    /// ([`FolderCtx::mtime_proves_bytes`]): its family keeps fine mtimes and stable ids, and a
+    /// probe in the client's state folder reads a sub-second mtime back. Asked once.
+    pub(crate) fn mtime_proves_bytes(&self) -> bool {
+        *self.mtime_proves_bytes.get_or_init(|| {
+            let family = self.family();
+            family.has_fine_mtime()
+                && family.has_stable_file_ids()
+                && hbsync_platform::fskind::probe_fine_mtime(&ensure_state_dir(&self.root))
+                    .unwrap_or(false)
+        })
+    }
+
+    /// Whether an item keeps its file id on this volume when renamed (not FAT, exFAT, a network
+    /// or FUSE volume): only then does an id tell an item.
+    pub(crate) fn ids_stable(&self) -> bool {
+        self.family().has_stable_file_ids()
+    }
+
+    fn family(&self) -> FsFamily {
+        *self
+            .family
+            .get_or_init(|| hbsync_platform::fskind::detect(&self.root).unwrap_or(FsFamily::Other))
     }
 }
 

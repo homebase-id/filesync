@@ -27,6 +27,7 @@ use hbsync_state::{LocalRow, StateDb, StateError};
 use hbsync_types::{ContentHash, NodeId, NodeKind, Tags};
 
 use crate::filter::Filter;
+use crate::layout;
 use crate::walk::{SkipReason, WalkEvent, Walker};
 
 #[derive(Debug, Clone)]
@@ -791,6 +792,29 @@ fn resolve(
     // Changed in place. A kind change (file ↔ folder) is a delete plus a create, and so is a
     // known path another synced file was moved onto (§3 rule 1, see `moved_onto`).
     let mut removed = diff.removed;
+    // What a delete moved aside (sync semantics §7) isn't gone yet: the check after the move,
+    // or the next sync's recovery after a crash, may put it back where it was. Its rows stay as
+    // they are, for it to come back to, till the delete's commit takes them.
+    let aside = match removed.is_empty() {
+        true => HashSet::new(),
+        false => aside_nodes(root),
+    };
+    if !aside.is_empty() {
+        // Where the DB has them (a rescan below one sees only what is below).
+        let mut tops = Vec::new();
+        for node in aside {
+            if let Some(row) = db.read(|s| s.local_by_node(node))? {
+                tops.push(row.path);
+            }
+        }
+        // With what is below, and the folders it is in (gone too, say): a row isn't let go above
+        // one kept.
+        removed.retain(|r| {
+            !tops
+                .iter()
+                .any(|t| r.path.starts_with(t) || t.starts_with(&r.path))
+        });
+    }
     let mut added = diff.added;
     let mut changed = diff.changed;
     for (row, meta) in changed.extract_if(.., |(row, meta)| kind_of(meta) != row.kind) {
@@ -1007,6 +1031,13 @@ fn resolve(
         }
     }
     Ok(plan)
+}
+
+/// The nodes whose items a delete has aside in the folder at `root` ([`layout::aside_dir`]).
+fn aside_nodes(root: &Path) -> HashSet<NodeId> {
+    layout::aside_entries(root)
+        .filter_map(|(_, e)| Some(e?.node()))
+        .collect()
 }
 
 /// The node of `path`'s parent folder, preferring this scan's view over the DB's.

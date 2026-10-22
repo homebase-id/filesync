@@ -431,7 +431,7 @@ pub struct LastSync {
 pub struct HeldDeletes {
     /// Items deleted here, to be deleted on the drive.
     pub here: u64,
-    /// Items deleted elsewhere, to be moved to the trash here.
+    /// Items deleted elsewhere, to be deleted here.
     pub remotely: u64,
     /// Some of them.
     pub examples: Vec<String>,
