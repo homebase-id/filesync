@@ -44,4 +44,7 @@ pub(crate) struct Faults {
     pub(crate) lying: bool,
     pub(crate) plans_heard: u64,
     pub(crate) lied: BTreeSet<NodeId>,
+    /// Each client plans its nodes in pages of this many, as the engine plans its dirty set
+    /// ([`crate::Sim::with_small_pages`]).
+    pub(crate) page_size: Option<usize>,
 }

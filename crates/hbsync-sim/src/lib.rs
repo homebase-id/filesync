@@ -126,6 +126,25 @@ impl Sim {
         self
     }
 
+    /// Each client plans its nodes in pages of `size`, in node id order, as the engine plans
+    /// its dirty set (`EngineConfig::batch`): a node in another page is held as it is, one in
+    /// a page's folder that may go holds that folder too (`Input::dirty_elsewhere`), and what
+    /// a page held so, or whose names or places clash across pages, is planned as a page of
+    /// its own next (`pages::OwnPages`). A plan's operations run before the next page is
+    /// planned (a step that finds none plans it).
+    pub fn with_small_pages(mut self, size: usize) -> Self {
+        self.faults.page_size = Some(size.max(1));
+        self
+    }
+
+    /// No client ignores anything by rule (the odd ones ignore `d` otherwise).
+    pub fn without_ignore_rules(mut self) -> Self {
+        for client in &mut self.clients {
+            client.filter = std::sync::Arc::new(Filter::default());
+        }
+        self
+    }
+
     /// Every fourth plan a main folder makes is checked against the engine's own planning path: its
     /// planning input filled into a state DB as the engine's store holds it, planned from
     /// narrow views as the engine does (`view::plan_narrow`), against whole folders for the
@@ -340,6 +359,36 @@ impl Sim {
         self.server.removed.keys().position(|n| *n == node)
     }
 
+    /// How many folders and files the drive holds live.
+    pub fn server_counts(&self) -> (usize, usize) {
+        let live = &self.server.live;
+        let folders = live
+            .values()
+            .filter(|s| s.state.kind == NodeKind::Folder)
+            .count();
+        (folders, live.len() - folders)
+    }
+
+    /// How many files in a folder in Recently deleted it lists as items of their own: removed
+    /// before their folder (`deleted_with`, node schema "Recently deleted"), one by one.
+    pub fn removed_files_apart(&self) -> usize {
+        let s = &self.server;
+        s.removed
+            .iter()
+            .filter(|(n, node)| {
+                node.state.kind == NodeKind::File && {
+                    let at = s.removed_at.get(n);
+                    let folder = node.state.parent;
+                    s.removed.contains_key(&folder)
+                        && s.removed_at
+                            .get(&folder)
+                            .zip(at)
+                            .is_some_and(|(f, a)| a < f)
+                }
+            })
+            .count()
+    }
+
     /// The paths of the server's live nodes, sorted.
     pub fn server_paths(&self) -> Vec<String> {
         let tree = self.server.tree();
@@ -385,10 +434,16 @@ impl Sim {
                     || !client.held.is_empty()
                     || !client.placing.is_empty()
                     || client.hashing;
-                while self.step(c) {}
+                // In pages, the sync goes on with the next pages (`next_page_planned`), as the
+                // engine's rounds, a sync's at most.
+                let mut rounds = 0;
+                while self.step(c) || (rounds < 64 && self.next_page_planned(c)) {
+                    rounds += 1;
+                }
             }
             let unchanged = !self.server.changed_since(&server);
-            if unchanged && (!any_planned || (self.ops_executed == before && self.all_settled())) {
+            // In pages, a step plans the next page (its sweep's): what ran counts too.
+            if unchanged && self.ops_executed == before && (!any_planned || self.all_settled()) {
                 return true;
             }
         }

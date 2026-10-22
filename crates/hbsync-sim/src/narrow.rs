@@ -349,15 +349,30 @@ pub(crate) fn mirror_row(node: NodeId, state: &NodeState, at: RemoteRef) -> Mirr
     )
 }
 
-/// The nodes of `input` dirty as the engine keeps them, `plan` made from it: those whose sides
-/// differ (its scan and feed mark every change; what a delete took along reads as gone), and
-/// those the plan has work for (a node a plan didn't settle stays dirty).
-fn engine_dirty(input: &Input, plan: &Plan) -> BTreeSet<NodeId> {
+/// The nodes of `input` whose sides differ, as the engine's scan and feed mark every change
+/// dirty (what a delete took along reads as gone).
+pub(crate) fn sides_differ(input: &Input) -> BTreeSet<NodeId> {
     let taken = hbsync_engine::along::taken_along(
         input.remote.iter().map(|(n, s)| (n, s.parent)),
         |f| input.removed.get(&f).map(|r| r.at),
         |n| input.changed_at.get(&n).copied(),
     );
+    input
+        .dirty
+        .iter()
+        .copied()
+        .filter(|n| {
+            let base = input.base.get(*n);
+            let remote = input.remote.get(*n).filter(|_| !taken.contains(n));
+            base != input.local.get(*n) || base != remote
+        })
+        .collect()
+}
+
+/// The nodes of `input` dirty as the engine keeps them, `plan` made from it: those whose sides
+/// differ ([`sides_differ`]), and those the plan has work for (a node a plan didn't settle
+/// stays dirty).
+fn engine_dirty(input: &Input, plan: &Plan) -> BTreeSet<NodeId> {
     let work: BTreeSet<NodeId> = plan
         .ops
         .iter()
@@ -366,14 +381,7 @@ fn engine_dirty(input: &Input, plan: &Plan) -> BTreeSet<NodeId> {
         .chain(plan.deferred.iter().copied())
         .chain(plan.held.iter().map(|op| op.node()))
         .collect();
-    input
-        .dirty
-        .iter()
-        .copied()
-        .filter(|n| {
-            let base = input.base.get(*n);
-            let remote = input.remote.get(*n).filter(|_| !taken.contains(n));
-            base != input.local.get(*n) || base != remote || work.contains(n)
-        })
-        .collect()
+    let mut dirty = sides_differ(input);
+    dirty.extend(input.dirty.iter().filter(|n| work.contains(n)));
+    dirty
 }

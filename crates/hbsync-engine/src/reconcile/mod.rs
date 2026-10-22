@@ -27,7 +27,7 @@ use crate::tree::{Tree, conflict_copy_name, numbered_conflict_name};
 
 mod emit;
 mod guard;
-mod merge;
+pub(crate) mod merge;
 mod repair;
 
 pub use crate::plan::{
@@ -98,14 +98,17 @@ pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
     // with its folders: planned again holding it, till no more come.
     // Ends: each plan again holds at least one node more.
     let taken = merge::taken_along(view);
-    let mut holds = Holds::of(view);
+    let mut holds = Holds::of(view, opts.own_page);
     // And this device's removals from the drive held for the user (§7): their names there
     // stay taken meanwhile, so what would take one here gets a numbered name: planned again
     // once, only when something here has such a name (hardly ever).
     let mut kept_judged = false;
+    // What waits to be planned with another page's nodes, judged before it waited.
+    let mut together: Vec<Vec<NodeId>> = Vec::new();
     let mut plan = loop {
         let r = Reconciler::new(view, opts, masking, &masks, &holds, taken.clone());
-        let (plan, waiters, named) = r.run();
+        let (mut plan, waiters, named) = r.run();
+        together.append(&mut plan.waits_together);
         holds.named = named;
         let new: Vec<NodeId> = waiters
             .into_iter()
@@ -128,6 +131,9 @@ pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
             holds.waits.insert(node);
         }
     };
+    together.sort();
+    together.dedup();
+    plan.waits_together = together;
     // What a masked node does to its folder (keeps it, takes its name, leaves with it) is
     // judged with all of the folder's children.
     if let Some(coverage) = &input.coverage {
@@ -190,6 +196,14 @@ struct Reconciler<'a> {
     waits: &'a BTreeSet<NodeId>,
     /// What waits for files here not hashed yet, or for `waits` ([`Holds::held`]).
     held: &'a HashSet<NodeId>,
+    /// The folders this page waits for ([`Holds::going`]).
+    going: &'a [NodeId],
+    /// Of `held`, what waits for them ([`Holds::paged`]).
+    paged: &'a HashSet<NodeId>,
+    /// What is dirty in another page (`Input::dirty_elsewhere`): context as it is, its change
+    /// unmerged here, so no repair of this plan moves it, renames it or adopts it (it keeps
+    /// its name against this page's nodes); its own page decides it.
+    elsewhere: &'a HashSet<NodeId>,
     /// Each file not hashed yet, with the folders it holds.
     held_by: &'a [(NodeId, Vec<NodeId>)],
     /// Names the held removals keep on the drive ([`Holds::kept`]).
@@ -207,7 +221,7 @@ struct Reconciler<'a> {
 /// file till it is hashed, nor to such a folder that its plan would delete, restore or move on
 /// either side (deferred, not undone); a node that would take a name one of them holds waits
 /// too, and the file is never an orphan to adopt.
-fn held_from(input: &Input, seed: NodeId) -> Vec<NodeId> {
+pub(crate) fn held_from(input: &Input, seed: NodeId) -> Vec<NodeId> {
     let mut held = Vec::new();
     let mut seen = HashSet::from([seed]);
     let mut queue = vec![seed];
@@ -239,10 +253,16 @@ struct Holds {
     named: HashSet<NodeId>,
     /// The drive's names of what this device's held removals keep there (§7), by folder.
     kept: HashMap<NodeId, HashSet<String>>,
+    /// The folders that wait for other pages, planned with their subtrees as pages of their
+    /// own (`Plan::waits_for_pages`).
+    going: Vec<NodeId>,
+    /// Of `held`, what waits for `going`: those, the folders above them and what of the page
+    /// is below them.
+    paged: HashSet<NodeId>,
 }
 
 impl Holds {
-    fn of(input: &Input) -> Self {
+    fn of(input: &Input, own_page: bool) -> Self {
         let mut by_file: Vec<(NodeId, Vec<NodeId>)> = input
             .local_unhashed
             .iter()
@@ -250,16 +270,45 @@ impl Holds {
             .map(|&node| (node, held_from(input, node)))
             .collect();
         by_file.sort();
-        let held = by_file
+        let mut held: HashSet<NodeId> = by_file
             .iter()
             .flat_map(|(node, on_paths)| on_paths.iter().copied().chain([*node]))
             .collect();
+        // A folder that may go with something to plan below it in another page, or above the
+        // page's nodes and planned in another page, waits for it, held as it is with the
+        // folders above it and everything of the page below it, as a file not hashed yet
+        // holds its folders: alive as context, what is below unmerged kept a deleted folder
+        // alive (review 14 R1), the folder's trash took along what changed there, or its
+        // items went one by one before it. The engine plans it with its whole dirty subtree
+        // as a page of its own next (`pages::OwnPages`). (What is dirty in another page is
+        // never moved by this plan's repairs: `Reconciler::elsewhere`.)
+        let mut going: Vec<NodeId> = input.going.iter().copied().collect();
+        if !own_page {
+            going.extend(&input.going_above);
+        }
+        going.sort();
+        going.dedup();
+        let mut paged = HashSet::new();
+        for &folder in &going {
+            paged.insert(folder);
+            paged.extend(held_from(input, folder));
+            for tree in [&input.base, &input.local, &input.remote] {
+                paged.extend(
+                    tree.subtree(folder)
+                        .into_iter()
+                        .filter(|n| input.dirty.contains(n)),
+                );
+            }
+        }
+        held.extend(&paged);
         Holds {
             by_file,
             waits: BTreeSet::new(),
             held,
             named: HashSet::new(),
             kept: HashMap::new(),
+            going,
+            paged,
         }
     }
 }
@@ -287,6 +336,9 @@ impl<'a> Reconciler<'a> {
             taken,
             waits: &holds.waits,
             held: &holds.held,
+            going: &holds.going,
+            paged: &holds.paged,
+            elsewhere: &input.dirty_elsewhere,
             held_by: &holds.by_file,
             kept: &holds.kept,
             waiters: BTreeSet::new(),
@@ -333,10 +385,79 @@ impl<'a> Reconciler<'a> {
             }
         }
         self.emit();
+        self.places_held_elsewhere();
         self.guard_mass_delete();
         self.plan.waiting = self.waiting();
+        // The folders this page waits for, with everything of it below them.
+        self.plan.waits_for_pages = self.going.to_vec();
         self.plan.deferred = self.deferred.into_iter().collect();
         (self.plan, self.waiters, self.name_waits)
+    }
+
+    /// Where this plan puts a node into a folder another page plans that isn't on that side
+    /// yet, or onto a name such a node's item holds there now (it moves away in its own
+    /// page): the two wait to be planned together, as a page of their own next
+    /// (`Plan::waits_together`), each alone failing for the other (a swap of places).
+    fn places_held_elsewhere(&mut self) {
+        if self.elsewhere.is_empty() {
+            return;
+        }
+        let i = self.input;
+        let mut together = Vec::new();
+        for op in &self.plan.ops {
+            let (node, parent, name, side) = match op {
+                Op::LocalMkdir {
+                    node, parent, name, ..
+                }
+                | Op::LocalMove {
+                    node, parent, name, ..
+                }
+                | Op::LocalDownload {
+                    node, parent, name, ..
+                } => (*node, *parent, name, &i.local),
+                Op::RemoteCreate {
+                    node, parent, name, ..
+                }
+                | Op::RemoteUpdate {
+                    node, parent, name, ..
+                } => (*node, *parent, name, &i.remote),
+                _ => continue,
+            };
+            let mut with: Vec<NodeId> = Vec::new();
+            if self.elsewhere(parent) && !side.contains(parent) {
+                with.push(parent);
+            }
+            if let Some(occupant) = side.child_named(parent, name, Some(node))
+                && self.elsewhere(occupant)
+            {
+                with.push(occupant);
+            }
+            if !with.is_empty() {
+                with.push(node);
+                together.push(with);
+            }
+        }
+        // Planned again with them held as they are: no operation sent to fail meanwhile.
+        for group in together {
+            self.waiters
+                .extend(group.iter().filter(|n| self.scope.contains(n)));
+            self.wait_together(group);
+        }
+    }
+
+    /// Whether `node` is planned in another page, not in this one (`Input::dirty_elsewhere`):
+    /// no fix here moves, renames or adopts it, and what it blocks waits to be planned with it
+    /// ([`Reconciler::wait_together`]).
+    fn elsewhere(&self, node: NodeId) -> bool {
+        self.elsewhere.contains(&node) && !self.scope.contains(&node)
+    }
+
+    /// `nodes` wait to be planned together, as a page of their own next
+    /// (`Plan::waits_together`): one of them is planned in another page.
+    fn wait_together(&mut self, mut nodes: Vec<NodeId>) {
+        nodes.sort();
+        nodes.dedup();
+        self.plan.waits_together.push(nodes);
     }
 
     /// Whether `node` waits for a hash as it is, whatever its plan: a file not hashed yet, or

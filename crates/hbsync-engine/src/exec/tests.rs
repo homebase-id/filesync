@@ -4154,6 +4154,10 @@ fn removed_in_a_live_folder(
         let mut row = folder_row(new, removed, "c", some_version());
         row.changed_at = Some(200); // written after the removal: it keeps its folder
         s.account().put_mirror(&row)?;
+        // The new node alone dirty (the rest planned before: another page's otherwise).
+        for node in [top, live, removed] {
+            s.folder().clear_dirty(node)?;
+        }
         s.folder().mark_dirty(new)
     })?;
     let ctx = FolderCtx {
@@ -4267,6 +4271,10 @@ fn a_node_in_a_file_meets_what_is_in_recovered_files() -> R {
             Some(hash_bytes(b"new", h.folder.algorithm)),
         );
         s.account().put_mirror(&row)?;
+        // Synced: only the new node is dirty.
+        for (node, _) in &synced {
+            s.folder().clear_dirty(*node)?;
+        }
         s.folder().mark_dirty(new)
     })?;
     let ctx = FolderCtx {

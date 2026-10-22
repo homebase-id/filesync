@@ -219,6 +219,44 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
      good, tried again at every sync.
 4. **Folder delete propagation** removes the folder on the drive first, then its descendants,
    top-down; here it trashes the topmost folder, its bases and its children's in one step.
+5. **Planned in pages.** The engine plans its dirty set in pages of 20,000 nodes, in node id
+   order (§8a). A node dirty in another page, or a held delete (§7), is held as it is: its
+   change isn't merged in this plan, and no fix here moves, renames or adopts it.
+
+   A folder's delete is planned as one. A folder that may go (synced before or taken along,
+   and deleted or moved on a side) waits, held as it is with the folders above it and with
+   everything of the page below it, when something below it on any side is still to plan in
+   another page, or when it is itself planned in another page and is above a node of this
+   page. Planned apart, what is below read alive as context and kept a deleted folder alive;
+   or the folder's trash took along what changed there (an edit lost to `.hbsync/trash`); or
+   its items went one by one before it, each an item of its own in Recently deleted. A node
+   held so is never brought back here as an orphan, nor its folder: its own page decides.
+
+   What waits is planned next as a page of its own: the folder with its whole dirty subtree,
+   on every side. A subtree too big for a page goes as its folders' subtrees first (several
+   together while they fit a page), then the folder once more; there they don't wait for the
+   folder above them. What is left then (more than a page directly in the folder) is planned
+   whole, as one larger page. So the drive removes the folder first, then what is in it, and
+   Recently deleted lists it as one item, or as its folders' items and then its own: never a
+   file of it apart. What waits stays queued across sweeps and syncs (a sync that stops at its
+   round limit goes on with it), each tried once a sweep. Cost: a plan takes about 1 KB a
+   node at its peak, so 20 MB for a page; a flat folder of 100,000 items is one page of about
+   100 MB, for that page only. Measured: 20,000 nodes peak at 24 MB (0.3 s), 100,000 at
+   100 MB (2 s), 200,000 at 200 MB (5 s). Where the page isn't all there is to plan (a
+   count), which of the view's nodes outside it are still to plan costs a query per 500 of
+   them (100,000: 90 ms), and a page's topmost folder that may go a walk of its subtree.
+
+   Clashes across pages are planned the same way. A node whose name a node of another page
+   holds, one going into a folder another page makes, or onto a name such a node holds here
+   now (a swap), or one whose folder another page decides, waits, held as it is (nothing sent
+   to fail meanwhile). It is planned with the other node, as a page of its own; one that
+   still waits there is planned again with what it waits for, one larger page. Simulator:
+   `clients_planning_in_small_pages_converge_without_loss` and
+   `planning_in_small_pages_ends_as_planning_whole` (pages of 1 to 4 against one page: the
+   drive's folders and files, and the files Recently deleted lists apart from their folders);
+   engine: `a_delete_here_in_pages_goes_as_one_to_recently_deleted`,
+   `a_change_deep_in_a_folder_removed_elsewhere_keeps_it_in_pages`,
+   `what_was_moved_into_a_deleted_folder_goes_with_it_in_pages`.
 
 ## 7. Delete safety
 
@@ -308,7 +346,12 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   followed here without asking: into `.hbsync/trash`, and the drive keeps them in Recently
   deleted for `keep_deleted_days`. One exception: removals that would take every synced file
   here at once, and more than the same `max(50, …)` (a broken device, a wiped drive), are held
-  (a move elsewhere out of this device's view isn't a removal: the drive keeps it live). Once
+  (a move elsewhere out of this device's view isn't a removal: the drive keeps it live). The
+  count is the whole sync's, not a page's (§6.5): with the page's removals it takes what other
+  pages still have to remove, the dirty ones and the files in folders the drive removed that
+  are still live here (taken along, by §6.3's rule; read while anything is dirty: a walk of
+  Recently deleted's folders, 2 ms for 50,000 items), less those a confirmed trash takes. So a wipe planned in pages
+  is held as a whole (engine: `a_stopped_wipe_planned_in_pages_is_held`). Once
   held so, they stay held until answered, whatever the count says since (one of them back on
   the drive, a put back half done), across restarts (`guard.wiped`, kept as soon as planned):
   a held item stays held while a removal elsewhere is still to be followed in it, or below it
@@ -431,7 +474,9 @@ expected fingerprint is treated as done.
   failure, and the rest run again after the pause.
 - **No starvation.** The dirty set is planned in pages, in node id order, swept round after
   round and across syncs, so nodes that stay dirty (deferred, failing) can't keep the rest
-  waiting; held deletes leave it till answered (§7). A sync ends after a full sweep in which nothing was done. A round clears only
+  waiting; held deletes leave it till answered (§7). What a page holds for another page, a
+  folder that may go with its subtree or a clash, is planned next as a page of its own
+  (§6.5). A sync ends after a full sweep in which nothing was done. A round clears only
   the marks it read with its page (a change of the drive's picture moves a mark's version on):
   a node another engine's pull or an announcement marks again meanwhile stays dirty, though it
   was dirty already, and the change it brought is planned at the next sweep.

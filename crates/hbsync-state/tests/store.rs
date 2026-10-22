@@ -290,6 +290,36 @@ fn a_clear_keeps_a_mark_a_change_moved_on() -> R {
     Ok(())
 }
 
+/// Of the nodes outside a page, those still to plan: dirty, or a held delete; asked in
+/// chunks (more than one here).
+#[test]
+fn pending_among_finds_the_dirty_and_the_held() -> R {
+    let mut db = StateDb::open_in_memory()?;
+    let nodes: Vec<NodeId> = (0..1_200).map(|_| NodeId::new()).collect();
+    let (page, outside) = nodes.split_at(3);
+    let (dirty, held) = (nodes[700], nodes[1_100]);
+    db.write(|s| page.iter().try_for_each(|n| s.folder().mark_dirty(*n)))?;
+    // The page all there is: nothing asked.
+    assert!(db.read(|s| s.pending_among(outside))?.is_empty());
+    db.write(|s| {
+        s.folder().mark_dirty(dirty)?;
+        s.folder().mark_dirty(held)
+    })?;
+    let (marks, _) = db.read(|s| s.dirty_marks(None, 10))?;
+    db.write(|s| {
+        marks
+            .iter()
+            .filter(|m| m.node == held)
+            .try_for_each(|m| s.folder().hold_delete(*m))
+    })?;
+    let mut found: Vec<NodeId> = db.read(|s| s.pending_among(outside))?.into_iter().collect();
+    found.sort();
+    let mut both = vec![dirty, held];
+    both.sort();
+    assert_eq!(found, both);
+    Ok(())
+}
+
 #[test]
 fn dirty_pages_visit_every_node_once() -> R {
     let mut db = StateDb::open_in_memory()?;

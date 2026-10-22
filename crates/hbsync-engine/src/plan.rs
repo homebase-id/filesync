@@ -68,6 +68,10 @@ pub struct Options {
     pub held_files: (usize, usize),
     /// Ids a detach must not give: already known here (an earlier detach of the same node).
     pub taken: Arc<HashSet<NodeId>>,
+    /// The page is one of its own ([`crate::pages::OwnPages`]): a folder's subtree, or one
+    /// piece of a subtree too big for a page, so what is in it doesn't wait for a folder above
+    /// it that another page deletes ([`Input::going_above`]): that one goes after it.
+    pub own_page: bool,
 }
 
 /// The mass-delete guard's settings: deletes above `max(min, fraction × synced files)` are
@@ -122,6 +126,7 @@ impl Default for Options {
             pending_deletes: (0, 0),
             held_files: (0, 0),
             taken: Arc::default(),
+            own_page: false,
         }
     }
 }
@@ -158,6 +163,23 @@ pub struct Input {
     /// Which children the trees hold: `None`, all of every folder's that matters; else as
     /// [`Coverage`] says.
     pub coverage: Option<Coverage>,
+    /// What the view holds that is dirty but planned in another page (the engine plans its
+    /// dirty set in pages), or a held delete out of the dirty set (§7): its change isn't merged
+    /// in this plan, so it is held as it is (§6.5): context as it is, a repair moved it with
+    /// what it was there (a tag added here lost).
+    pub dirty_elsewhere: HashSet<NodeId>,
+    /// The page's topmost dirty folders, synced before, that may go, with something still to
+    /// plan below them, on any side, in another page: they wait for it, with everything of
+    /// the page below them, held as they are, and are planned with their whole dirty subtree
+    /// as a page of their own next (§6.5). Planned apart, what is below read alive as context
+    /// and kept a deleted folder alive (review 14 R1), or the folder's trash took along what
+    /// changed there (an edit lost to `.hbsync/trash`).
+    pub going: HashSet<NodeId>,
+    /// The folders above the page's nodes, on any side, synced before, that may go and that
+    /// another page plans: what of the page is below them waits for them the same way, so a
+    /// folder's delete goes as one, never item by item (but in a page of its own:
+    /// [`Options::own_page`]).
+    pub going_above: HashSet<NodeId>,
 }
 
 /// The children of each folder that an [`Input`] holds, on every side, when it doesn't hold
@@ -529,4 +551,12 @@ pub struct Plan {
     /// Folders whose names the plan judged without all their children in the input
     /// ([`Input::coverage`]): plan again with them covered in full.
     pub uncovered: BTreeSet<NodeId>,
+    /// The folders that may go that this page waits for ([`Input::going`],
+    /// [`Input::going_above`]): the engine plans each one's dirty subtree as a page of its
+    /// own next (§6.5). In id order.
+    pub waits_for_pages: Vec<NodeId>,
+    /// Nodes of this page whose names clash with what another page plans, each group with
+    /// those: planned together as a page of their own next, the clash decided there as in one
+    /// page (§6.5).
+    pub waits_together: Vec<Vec<NodeId>>,
 }

@@ -27,7 +27,7 @@ fn remote_change(i: &Input, node: NodeId) -> Change {
 /// device wrote, whose time it doesn't know, was. A folder's delete removes the folder first,
 /// then what is in it: until it has, they count as gone. One written after the removal is a
 /// change of its own, and keeps the folder alive (§6.3).
-pub(super) fn taken_along(i: &Input) -> HashSet<NodeId> {
+pub(crate) fn taken_along(i: &Input) -> HashSet<NodeId> {
     if i.removed.is_empty() {
         return HashSet::new();
     }

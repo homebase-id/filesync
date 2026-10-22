@@ -5494,3 +5494,351 @@ fn a_file_left_while_it_is_written_ends_its_wait_once_quiet() -> R {
     assert_eq!(a.read_text("p/big")?, "v2, written");
     Ok(())
 }
+
+/// What each device and the drive hold once a delete is followed, as text: b's tree, a's
+/// tree, the drive's live names, and a fresh device's tree.
+type Outcome = (Vec<String>, Vec<String>, Vec<String>, Vec<String>);
+
+/// A delete made on a, on b or on the drive (the server).
+type Delete = dyn Fn(&mut Client, &mut Client, &Arc<Mutex<hbsync_remote::fake::FakeServer>>) -> R;
+
+/// A folder delete that spans planning pages ends as one planned in a page: `delete` deletes
+/// on the drive as a (or another app) does, then b syncs in pages of `batch` dirty nodes
+/// (review 14 R1: a node dirty in a later page read alive as context, and kept its deleted
+/// folder alive, an empty skeleton coming back on every device).
+fn delete_in_pages(
+    batch: usize,
+    write: &dyn Fn(&mut Client) -> R,
+    delete: &Delete,
+) -> Result<Outcome, Box<dyn std::error::Error>> {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", move |cfg| {
+        cfg.guard.allow = true;
+        cfg.batch = batch;
+    })?;
+    write(&mut a)?;
+    a.write("keep.txt", "k")?;
+    a.sync()?;
+    b.sync()?;
+    delete(&mut a, &mut b, &server)?;
+    // In pages, a folder waits for what is in it: a sweep a level (and a sync takes so many
+    // rounds), so b syncs until nothing is left.
+    let settled = |c: &mut Client| -> R {
+        for _ in 0..8 {
+            if c.sync()?.pending == 0 {
+                return Ok(());
+            }
+        }
+        Err("still pending after 8 syncs".into())
+    };
+    settled(&mut b)?;
+    settled(&mut a)?;
+    settled(&mut b)?;
+    let mut c = Client::with_config(&server, "c", |cfg| cfg.guard.allow = true)?;
+    c.sync()?;
+    let live = server.lock().map_err(|_| "poisoned")?.live_names();
+    Ok((b.tree_text(""), a.tree_text(""), live, c.tree_text("")))
+}
+
+/// [`delete_in_pages`] in pages of 1, 2 and 4, against one page.
+fn deletes_in_pages_end_as_in_one(write: &dyn Fn(&mut Client) -> R, delete: &Delete) -> R {
+    let whole = delete_in_pages(20_000, write, delete)?;
+    for batch in [1, 2, 4] {
+        assert_eq!(
+            delete_in_pages(batch, write, delete)?,
+            whole,
+            "in pages of {batch}"
+        );
+    }
+    Ok(())
+}
+
+fn nested(a: &mut Client) -> R {
+    for i in 0..5 {
+        a.write(&format!("d/e/f{i}.txt"), "x")?;
+        a.write(&format!("d/g{i}.txt"), "y")?;
+    }
+    Ok(())
+}
+
+/// `d1`, `d2` and `d3`, each with `a.txt` and `x.txt`.
+fn three_folders(a: &mut Client) -> R {
+    for d in ["d1", "d2", "d3"] {
+        a.write(&format!("{d}/a.txt"), "a")?;
+        a.write(&format!("{d}/x.txt"), "x")?;
+    }
+    Ok(())
+}
+
+/// Another app removes everything on the drive but what `keep` names, folders first, as a
+/// deleting client does: what is in a removed folder of those names is taken along, live.
+fn remove_on_drive_except(
+    server: &Arc<Mutex<hbsync_remote::fake::FakeServer>>,
+    keep: &[&str],
+) -> R {
+    remove_on_drive(server, &|name| !keep.contains(&name))
+}
+
+/// Another app removes what on the drive `doomed` names, folders first: what is in a removed
+/// folder and not named is taken along, live.
+fn remove_on_drive(
+    server: &Arc<Mutex<hbsync_remote::fake::FakeServer>>,
+    doomed: &dyn Fn(&str) -> bool,
+) -> R {
+    let doomed: Vec<_> = {
+        let srv = server.lock().map_err(|_| "poisoned")?;
+        let mut doomed: Vec<_> = srv
+            .live()
+            .filter(|h| h.state().is_some_and(|s| doomed(&s.name)))
+            .map(|h| (h.file_id, h.version, h.parent))
+            .collect();
+        doomed.sort_by_key(|(_, _, parent)| !parent.is_root());
+        doomed
+    };
+    let other = FakeRemote::new(server.clone());
+    for (file_id, version, _) in doomed {
+        let target = Target {
+            at: RemoteRef { file_id, version },
+            token: Some(hbsync_remote::fake::token_of(file_id)),
+        };
+        other.set_removed(&[target], true)?;
+    }
+    server.lock().map_err(|_| "poisoned")?.tick();
+    Ok(())
+}
+
+/// Deleted on another device, all of it: b follows it in pages, and nothing comes back.
+#[test]
+fn a_delete_elsewhere_planned_in_pages_ends_as_in_one() -> R {
+    deletes_in_pages_end_as_in_one(&nested, &|a, _, _| {
+        fs::remove_dir_all(a.root.join("d"))?;
+        a.sync()?;
+        Ok(())
+    })
+}
+
+/// Deleted here, all of it: b sends it in pages, and nothing comes back.
+#[test]
+fn a_delete_here_planned_in_pages_ends_as_in_one() -> R {
+    deletes_in_pages_end_as_in_one(&nested, &|_, b, _| {
+        fs::remove_dir_all(b.root.join("d"))?;
+        Ok(())
+    })
+}
+
+/// Another app removes the top folders and what is in them, and stops before `x.txt` in each
+/// (taken along, §6.3): b finishes the delete in pages as in one, and no `x.txt` comes back.
+#[test]
+fn a_stopped_delete_planned_in_pages_ends_as_in_one() -> R {
+    deletes_in_pages_end_as_in_one(&three_folders, &|_, _, server| {
+        remove_on_drive_except(server, &["x.txt", "keep.txt"])
+    })
+}
+
+/// b deletes `d` (12 items) here while other dirty items come first in id order, so its delete
+/// spans pages. The page holding `d` holds it for what in it is in another page, and the
+/// engine plans its subtree as a page of its own: it goes from the drive top-down, as in one
+/// page, and Recently deleted shows one item, `d`, restoring all of it (sync semantics §6.5).
+/// Too big for a page (4), its folder `e` goes first, as a page of its own, then `d` with what
+/// is directly in it, more than a page: planned whole, one larger page. Two items, never one
+/// per file. Bottom-up, page by page, every file was "removed before" its folder: listed and
+/// restored one by one.
+#[test]
+fn a_delete_here_in_pages_goes_as_one_to_recently_deleted() -> R {
+    let roots = |batch: usize| -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let server = server();
+        let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+        let mut b = Client::with_config(&server, "b", move |cfg| {
+            cfg.guard.allow = true;
+            cfg.batch = batch;
+        })?;
+        for i in 0..10 {
+            a.write(&format!("a{i}.txt"), "a")?;
+        }
+        a.sync()?;
+        nested(&mut a)?;
+        a.sync()?;
+        b.sync()?;
+        for i in 0..10 {
+            b.write(&format!("a{i}.txt"), "edited")?;
+        }
+        fs::remove_dir_all(b.root.join("d"))?;
+        b.sync()?;
+        let deleted = b.recently_deleted(100)?;
+        let mut roots: Vec<String> = deleted
+            .iter()
+            .filter(|d| d.root == d.node)
+            .map(|d| d.path.clone())
+            .collect();
+        roots.sort();
+        assert_eq!(deleted.len(), 12, "{deleted:?}");
+        Ok(roots)
+    };
+    assert_eq!(roots(20_000)?, ["d"]);
+    assert_eq!(roots(12)?, ["d"], "in pages of 12");
+    assert_eq!(roots(4)?, ["d", "d/e"], "in pages of 4");
+    Ok(())
+}
+
+/// Another app removes every top folder and what is in them, and stops before `x.txt` in each
+/// (taken along, §6.3): every synced file goes, so b holds the removal for the user, in pages
+/// as in one. Counted from the dirty set, the taken-along files were still in the mirror, so a
+/// page that trashed its folder alone didn't trip the every-file hold (review 14 R1).
+#[test]
+fn a_stopped_wipe_planned_in_pages_is_held() -> R {
+    for batch in [1, 2, 3, 20_000] {
+        let server = server();
+        let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+        let mut b = Client::with_config(&server, "b", move |cfg| {
+            cfg.guard.min = 2;
+            cfg.batch = batch;
+        })?;
+        three_folders(&mut a)?;
+        a.sync()?;
+        b.sync()?;
+        remove_on_drive_except(&server, &["x.txt"])?;
+        let report = b.sync()?;
+        assert!(!report.held.is_empty(), "pages of {batch}: {report:?}");
+        for d in ["d1", "d2", "d3"] {
+            assert_eq!(b.read_text(&format!("{d}/x.txt"))?, "x", "pages of {batch}");
+        }
+    }
+    Ok(())
+}
+
+/// Another app removes `d` on the drive and stops there: `e` and `f1.txt` in it are taken
+/// along, live, and not marked (the feed marks the folder). b edits `d/e/f1.txt` and makes
+/// `d/e/new.txt` meanwhile, their marks in later pages than `d`'s. The page holding `d` waits
+/// for what is below it in other pages, so `d` is planned with its whole subtree: the edits
+/// keep it, as in one page. Planned apart, its trash took them along into `.hbsync/trash`
+/// (review 15).
+#[test]
+fn a_change_deep_in_a_folder_removed_elsewhere_keeps_it_in_pages() -> R {
+    for batch in [1, 2, 20_000] {
+        let server = server();
+        let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+        let mut b = Client::with_config(&server, "b", move |cfg| {
+            cfg.guard.allow = true;
+            cfg.batch = batch;
+        })?;
+        a.write("d/e/f1.txt", "f")?;
+        a.write("keep.txt", "k")?;
+        a.sync()?;
+        b.sync()?;
+        remove_on_drive(&server, &|name| name == "d")?;
+        b.write("d/e/f1.txt", "edited here")?;
+        b.write("d/e/new.txt", "new")?;
+        for _ in 0..8 {
+            if b.sync()?.pending == 0 {
+                break;
+            }
+        }
+        assert_eq!(
+            b.read_text("d/e/f1.txt")?,
+            "edited here",
+            "pages of {batch}"
+        );
+        assert_eq!(b.read_text("d/e/new.txt")?, "new", "pages of {batch}");
+        let mut c = Client::with_config(&server, "c", |cfg| cfg.guard.allow = true)?;
+        c.sync()?;
+        assert_eq!(
+            c.read_text("d/e/f1.txt")?,
+            "edited here",
+            "pages of {batch}"
+        );
+        assert_eq!(c.read_text("d/e/new.txt")?, "new", "pages of {batch}");
+    }
+    Ok(())
+}
+
+/// Recently deleted's items after b deletes `d` here, in pages of `batch`, its files made
+/// at the top before `d` and moved into it (lower ids, so in earlier pages than `d`).
+fn roots_of_moved_in(batch: usize) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", move |cfg| {
+        cfg.guard.allow = true;
+        cfg.batch = batch;
+    })?;
+    for i in 0..8 {
+        a.write(&format!("m{i}.txt"), "m")?;
+    }
+    a.sync()?;
+    b.sync()?;
+    a.write("d/z.txt", "z")?;
+    for i in 0..8 {
+        fs::rename(
+            a.root.join(format!("m{i}.txt")),
+            a.root.join(format!("d/m{i}.txt")),
+        )?;
+    }
+    a.sync()?;
+    b.sync()?;
+    fs::remove_dir_all(b.root.join("d"))?;
+    for _ in 0..8 {
+        if b.sync()?.pending == 0 {
+            break;
+        }
+    }
+    let deleted = b.recently_deleted(100)?;
+    let mut roots: Vec<String> = deleted
+        .iter()
+        .filter(|d| d.root == d.node)
+        .map(|d| d.path.clone())
+        .collect();
+    roots.sort();
+    Ok(roots)
+}
+
+/// What is in a folder deleted here but in earlier pages than it (moved in, older) waits for
+/// it: the folder goes as one, one item in Recently deleted, as in one page. Planned apart,
+/// each file went alone first, an item of its own, and a restore of `d` brought back an empty
+/// folder (review 15).
+#[test]
+fn what_was_moved_into_a_deleted_folder_goes_with_it_in_pages() -> R {
+    for batch in [2, 4, 20_000] {
+        assert_eq!(roots_of_moved_in(batch)?, ["d"], "pages of {batch}");
+    }
+    Ok(())
+}
+
+/// [`a_delete_here_in_pages_goes_as_one_to_recently_deleted`] in pages of every size from 3
+/// to 13: what of a page is below the folder it waits for waits too, so no file of `d` is
+/// ever an item of its own (`d/e` may be, a piece of `d` too big for a page).
+#[test]
+fn a_delete_in_pages_of_any_size_lists_no_file_apart() -> R {
+    for batch in 3..14 {
+        let server = server();
+        let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+        let mut b = Client::with_config(&server, "b", move |cfg| {
+            cfg.guard.allow = true;
+            cfg.batch = batch;
+        })?;
+        for i in 0..10 {
+            a.write(&format!("a{i}.txt"), "a")?;
+        }
+        a.sync()?;
+        nested(&mut a)?;
+        a.sync()?;
+        b.sync()?;
+        for i in 0..10 {
+            b.write(&format!("a{i}.txt"), "edited")?;
+        }
+        fs::remove_dir_all(b.root.join("d"))?;
+        for _ in 0..8 {
+            if b.sync()?.pending == 0 {
+                break;
+            }
+        }
+        let deleted = b.recently_deleted(100)?;
+        assert_eq!(deleted.len(), 12, "pages of {batch}: {deleted:?}");
+        for d in deleted.iter().filter(|d| d.root == d.node) {
+            assert!(
+                ["d", "d/e"].contains(&d.path.as_str()),
+                "pages of {batch}: {deleted:?}"
+            );
+        }
+    }
+    Ok(())
+}

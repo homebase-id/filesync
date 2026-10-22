@@ -181,19 +181,33 @@ struct HeldOut {
 }
 
 /// The held deletes of a sweep's pages that may leave the dirty set at its end
-/// ([`crate::held::out_of_dirty`]): the deletes, the marks of the nodes they cover as each
-/// page read them, and the files they take.
+/// ([`crate::held::out_of_dirty`]): the deletes, each with the files it takes, and the marks
+/// of the nodes they cover as each page read them. A node planned again (a page of its own
+/// after its sweep page) counts as its last plan says.
 #[derive(Debug, Default)]
 struct HoldOut {
-    ops: Vec<Op>,
+    ops: Vec<(Op, (usize, usize))>,
     marks: Vec<Mark>,
-    files: (usize, usize),
 }
 
 impl HoldOut {
-    fn add(&mut self, ops: impl IntoIterator<Item = Op>, (here, there): (usize, usize)) {
+    /// What page `planned` holds, replacing what earlier pages held of its nodes.
+    fn add(
+        &mut self,
+        planned: &std::collections::HashSet<NodeId>,
+        ops: impl IntoIterator<Item = (Op, (usize, usize))>,
+        marks: impl IntoIterator<Item = Mark>,
+    ) {
+        self.ops.retain(|(op, _)| !planned.contains(&op.node()));
+        self.marks.retain(|m| !planned.contains(&m.node));
         self.ops.extend(ops);
-        self.files = (self.files.0 + here, self.files.1 + there);
+        self.marks.extend(marks);
+    }
+
+    fn files(&self) -> (usize, usize) {
+        self.ops
+            .iter()
+            .fold((0, 0), |(here, there), (_, (h, t))| (here + h, there + t))
     }
 }
 
@@ -208,6 +222,29 @@ impl HeldOut {
 /// alone once more at the end of the sync, to see that its view doesn't reach them.
 const LEFTOVERS_MAX: usize = 1_000;
 
+/// The state DB as [`crate::pages::OwnPages`] reads it: a read transaction a query.
+struct DbPages<'a>(&'a mut StateDb);
+
+impl crate::pages::PageStore for DbPages<'_> {
+    type Mark = Mark;
+    type Error = StateError;
+    fn marks_of(&mut self, nodes: &[NodeId]) -> Result<Vec<Mark>, StateError> {
+        self.0.read(|s| {
+            let mut marks = Vec::new();
+            for &node in nodes {
+                marks.extend(s.dirty_mark(node)?);
+            }
+            Ok(marks)
+        })
+    }
+    fn marks_under(&mut self, folder: NodeId, limit: usize) -> Result<Vec<Mark>, StateError> {
+        self.0.read(|s| s.dirty_marks_under(folder, limit))
+    }
+    fn folders_in(&mut self, folder: NodeId) -> Result<Vec<NodeId>, StateError> {
+        self.0.read(|s| s.base_child_folders(folder))
+    }
+}
+
 pub struct Engine {
     db: StateDb,
     drive: Arc<Drive>,
@@ -217,6 +254,9 @@ pub struct Engine {
     scan_opts: ScanOptions,
     /// Where the sweep over the dirty set stopped when the last sync hit its round limit.
     sweep_after: Option<DirtyCursor>,
+    /// What pages wait for, to plan as pages of their own, each once a sweep
+    /// ([`crate::pages::OwnPages`]).
+    own_pages: crate::pages::OwnPages,
     /// Set by the caller to stop a sync between operations.
     stop: Arc<AtomicBool>,
     /// Nodes whose held deletes the user confirmed, until they are done (or undone).
@@ -288,6 +328,7 @@ impl Engine {
             cfg,
             scan_opts,
             sweep_after: None,
+            own_pages: Default::default(),
             stop: Arc::default(),
             confirmed: Default::default(),
             wiped: Default::default(),
@@ -725,6 +766,7 @@ impl Engine {
             pending_deletes: (pending_deletes.0 as usize, pending_deletes.1 as usize),
             held_files: self.held.files,
             taken: Arc::default(),
+            own_page: false,
         };
         #[cfg(feature = "testkit")]
         if let Some(after) = &self.cfg.after_counts {
@@ -743,25 +785,35 @@ impl Engine {
         // sync's): only such a one settles what is held.
         let mut whole = after.is_none();
         let mut swept = false;
+        self.own_pages.new_sweep();
         for _ in 0..self.cfg.max_rounds {
             if report.stopped || self.stop.load(Ordering::Relaxed) {
                 report.stopped = true;
                 break;
             }
-            // Each page with the guard's counts of what it holds: counted again, in the same
-            // read, when another connection committed since they were (a pull, an
-            // announcement: what it marked counts too; never less than before), or when nothing
-            // dirty had them skip the synced files; with what is held as every synced file so
-            // far this sync.
-            let (dirty, next, fresh) = self.db.read(|s| {
-                let (dirty, next) = s.dirty_marks(after, self.cfg.batch)?;
+            // What a page waits for (a folder it waits for with its dirty subtree; a clash
+            // across pages) comes first: a page of its own, so a folder's delete goes as one
+            // (§6.5). Else the sweep's next page. Each page with the guard's counts of what it
+            // holds: counted again, in the same read, when another connection committed since
+            // they were (a pull, an announcement: what it marked counts too; never less than
+            // before), or when nothing dirty had them skip the synced files; with what is held
+            // as every synced file so far this sync.
+            let own_page = self.next_own_page()?;
+            let (dirty, next, own, fresh) = self.db.read(|s| {
+                let (dirty, next, own) = match own_page {
+                    Some(page) => (page, after, true),
+                    None => {
+                        let (dirty, next) = s.dirty_marks(after, self.cfg.batch)?;
+                        (dirty, next, false)
+                    }
+                };
                 let stale = !dirty.is_empty()
                     && (counts.synced.is_none() || s.data_version()? != counts.version);
                 let fresh = match stale {
                     true => Some(guard_counts(s, &self.confirmed, None, counts.synced, true)?),
                     false => None,
                 };
-                Ok((dirty, next, fresh))
+                Ok((dirty, next, own, fresh))
             })?;
             if let Some(mut fresh) = fresh {
                 // Never less pending than the sweep judged its earlier pages by: what this
@@ -779,11 +831,22 @@ impl Engine {
             if !dirty.is_empty() {
                 report.rounds += 1;
                 let done_before = report.ops_done;
+                // A page of its own isn't held for the folders above it (`Options::own_page`).
+                opts.own_page = own;
                 match self.plan_and_execute(&dirty, &opts, &mut hold_out, report)? {
-                    Some(page) => held.extend(page),
+                    Some(page) => {
+                        // A node planned again counts as its last plan says.
+                        let planned: std::collections::HashSet<NodeId> =
+                            dirty.iter().map(|m| m.node).collect();
+                        held.retain(|op| !planned.contains(&op.node()));
+                        held.extend(page);
+                    }
                     None => return Ok(None),
                 }
                 progress |= report.ops_done > done_before;
+            }
+            if own {
+                continue;
             }
             after = next;
             if dirty.len() < self.cfg.batch {
@@ -792,6 +855,7 @@ impl Engine {
                 report.waiting = std::mem::take(&mut self.waiting);
                 swept = true;
                 after = None;
+                self.own_pages.new_sweep();
                 let page = std::mem::take(&mut hold_out);
                 if !progress {
                     settled = whole.then_some(page);
@@ -811,6 +875,16 @@ impl Engine {
             self.hold_out(page, &opts)?;
         }
         Ok(Some((swept, after)))
+    }
+
+    /// The next page of its own ([`crate::pages::OwnPages::next`]): one planned whole, more
+    /// than a page directly in a folder, costs about 1 KB a node at its peak (measured: a flat
+    /// folder of 100,000 items, 100 MB). A query a folder (two for one too big, three for one
+    /// planned whole), one a node waiting together.
+    fn next_own_page(&mut self) -> Result<Option<Vec<Mark>>, EngineError> {
+        Ok(self
+            .own_pages
+            .next(self.cfg.batch, &mut DbPages(&mut self.db))?)
     }
 
     /// Takes the held deletes of a sweep that did nothing out of the dirty set: unless what
@@ -854,7 +928,8 @@ impl Engine {
             Ok(true)
         })?;
         if held {
-            self.held.add(page.ops, page.files);
+            let files = page.files();
+            self.held.add(page.ops.into_iter().map(|(op, _)| op), files);
             self.held.nodes.extend(out);
             self.held.pending = None;
         }
@@ -1047,6 +1122,8 @@ impl Engine {
             self.plan_held_again()?;
             return Ok(None);
         }
+        self.own_pages
+            .add(&plan.waits_for_pages, &plan.waits_together);
         // What the guard holds of removals elsewhere stays held till answered (§7): only the
         // every-file rule holds those. Kept before anything of this page runs or goes clean.
         let before = self.wiped.len();
@@ -1087,11 +1164,13 @@ impl Engine {
         })?;
         // Held till answered: out of the dirty set at the end of the sync, if that is all.
         let (out, nodes) = crate::held::out_of_dirty(&plan, &dirty);
-        let files = crate::held::files(&plan, out.iter().copied());
-        hold_out.add(out.into_iter().cloned(), files);
-        hold_out
-            .marks
-            .extend(marks.iter().filter(|m| nodes.contains(&m.node)));
+        let planned: std::collections::HashSet<NodeId> = dirty.iter().copied().collect();
+        hold_out.add(
+            &planned,
+            out.into_iter()
+                .map(|op| (op.clone(), crate::held::files(&plan, [op]))),
+            marks.iter().filter(|m| nodes.contains(&m.node)).copied(),
+        );
         report.conflicts.extend(plan.conflicts);
         let mut ops = plan.ops;
         let case_insensitive = self.cfg.folder.case_insensitive;

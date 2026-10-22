@@ -61,6 +61,24 @@ impl Sim {
         })
     }
 
+    /// In pages ([`Sim::with_small_pages`]): client `c`'s plan ran out: its next pages are
+    /// planned, as the engine's next rounds (into the next sweep: a sync goes on till a sweep
+    /// does nothing), till one has work or a whole sweep's worth had none. Whether one had.
+    pub(crate) fn next_page_planned(&mut self, c: usize) -> bool {
+        let Some(size) = self.faults.page_size else {
+            return false;
+        };
+        let client = &self.clients[c];
+        let nodes = client.base.len() + client.local.len() + self.server.live.len();
+        for _ in 0..nodes / size + 2 {
+            self.plan(c);
+            if !self.clients[c].plan.is_empty() {
+                return true;
+            }
+        }
+        false
+    }
+
     /// What client `c`'s executor records after writing `node`: the server's state as its
     /// folder sees it.
     fn record_remote(&mut self, c: usize, node: NodeId) {
@@ -192,6 +210,39 @@ impl Sim {
             .chain(client.local.ids())
             .chain(remote.ids())
             .collect();
+        // In pages, as the engine: the next page of the sweep over what is dirty (what differs
+        // between the base and a side, as the engine's scan and feed mark them), what else is
+        // to plan held as it is.
+        let mut own_page = false;
+        if let Some(size) = self.faults.page_size {
+            // What differs between the base and a side, the drive's as it is: what a folder's
+            // removal took along isn't marked (the feed marks only the folder).
+            let all: BTreeSet<NodeId> = std::mem::take(&mut input.dirty)
+                .into_iter()
+                .filter(|n| {
+                    let base = input.base.get(*n);
+                    base != input.local.get(*n) || base != input.remote.get(*n)
+                })
+                .collect();
+            let page;
+            (page, own_page) = next_page(client, &input, &all, size);
+            input.dirty = page.iter().copied().collect();
+            let scope = client.scope();
+            let mut pending = SimPending {
+                trees: [
+                    input.base.clone(),
+                    input.local.clone(),
+                    input.remote.clone(),
+                ],
+                all: &all,
+            };
+            let Ok(()) = hbsync_engine::pages::dirty_elsewhere(
+                &mut input,
+                &client.filter,
+                &scope,
+                &mut pending,
+            );
+        }
         let confirmed = Arc::new(client.confirmed.clone());
         // Held as every synced file: until answered, each while a removal elsewhere is still
         // to be followed in it: it, or (back on the drive) what is below it in the base. As
@@ -228,6 +279,7 @@ impl Sim {
             synced_files,
             confirmed: Arc::clone(&confirmed),
             wiped: Arc::new(wiped.clone()),
+            own_page,
             ..Options::default()
         };
         let masking = Masking {
@@ -239,6 +291,13 @@ impl Sim {
             client.local.contains(id) || client.base.contains(id) || self.server.ever.contains(&id)
         };
         let plan = reconcile_with_known(&input, &opts, masking, known);
+        if self.faults.page_size.is_some() {
+            client
+                .pages
+                .borrow_mut()
+                .own
+                .add(&plan.waits_for_pages, &plan.waits_together);
+        }
         // Every fourth plan (each costs a state DB and three more plans), until a difference
         // is found (it is reported).
         if self.faults.narrow_check && !self.ledger.found_narrow_differs() {
@@ -2170,6 +2229,99 @@ pub(crate) fn extra(local: &NodeState, version: Option<VersionTag>) -> BaseExtra
         local_hash: local.content.map(|c| c.hash),
         content_state: ContentState::Local,
         version,
+    }
+}
+
+/// The next page of `client`'s sweep over `all` (its nodes) in pages of `size`, as the engine
+/// pages its dirty set: what a page waits for first ([`hbsync_engine::pages::OwnPages`]), else
+/// the next `size` nodes in id order. And whether it is one of its own.
+fn next_page(
+    client: &Client,
+    input: &Input,
+    all: &BTreeSet<NodeId>,
+    size: usize,
+) -> (Vec<NodeId>, bool) {
+    let mut pages = client.pages.borrow_mut();
+    let mut store = SimPages { client, input, all };
+    if let Ok(Some(page)) = pages.own.next(size, &mut store) {
+        return (page, true);
+    }
+    let page: Vec<NodeId> = match pages.after {
+        Some(after) => all
+            .range((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded))
+            .take(size)
+            .copied()
+            .collect(),
+        None => all.iter().take(size).copied().collect(),
+    };
+    if page.len() < size {
+        // The sweep's end: the next starts over, everything to try again.
+        pages.after = None;
+        pages.own.new_sweep();
+    } else {
+        pages.after = page.last().copied();
+    }
+    (page, false)
+}
+
+/// A client's model as [`hbsync_engine::pages::dirty_elsewhere`] asks it: `all` its dirty
+/// nodes, `trees` its whole view's sides.
+struct SimPending<'a> {
+    trees: [hbsync_engine::tree::Tree; 3],
+    all: &'a BTreeSet<NodeId>,
+}
+
+impl hbsync_engine::pages::Pending for SimPending<'_> {
+    type Error = Infallible;
+    fn among(&mut self, nodes: &[NodeId]) -> Result<HashSet<NodeId>, Infallible> {
+        Ok(nodes
+            .iter()
+            .copied()
+            .filter(|n| self.all.contains(n))
+            .collect())
+    }
+    fn below(&mut self, folder: NodeId, page: &BTreeSet<NodeId>) -> Result<bool, Infallible> {
+        Ok(self
+            .trees
+            .iter()
+            .flat_map(|t| t.subtree(folder))
+            .any(|n| n != folder && self.all.contains(&n) && !page.contains(&n)))
+    }
+}
+
+/// A client's model as [`hbsync_engine::pages::OwnPages`] reads it: `all` its dirty nodes.
+struct SimPages<'a> {
+    client: &'a Client,
+    input: &'a Input,
+    all: &'a BTreeSet<NodeId>,
+}
+
+impl hbsync_engine::pages::PageStore for SimPages<'_> {
+    type Mark = NodeId;
+    type Error = Infallible;
+    fn marks_of(&mut self, nodes: &[NodeId]) -> Result<Vec<NodeId>, Infallible> {
+        Ok(nodes
+            .iter()
+            .copied()
+            .filter(|n| self.all.contains(n))
+            .collect())
+    }
+    fn marks_under(&mut self, folder: NodeId, limit: usize) -> Result<Vec<NodeId>, Infallible> {
+        // On any side, as the store's query.
+        let i = self.input;
+        let under: BTreeSet<NodeId> = [&i.base, &i.local, &i.remote]
+            .into_iter()
+            .flat_map(|t| t.subtree(folder))
+            .filter(|n| self.all.contains(n))
+            .collect();
+        Ok(under.into_iter().take(limit).collect())
+    }
+    fn folders_in(&mut self, folder: NodeId) -> Result<Vec<NodeId>, Infallible> {
+        let base = &self.client.base;
+        Ok(base
+            .children(folder)
+            .filter(|n| base.get(*n).is_some_and(|s| s.kind == NodeKind::Folder))
+            .collect())
     }
 }
 
