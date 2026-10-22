@@ -164,6 +164,23 @@ impl Sim {
         self
     }
 
+    /// Put backs go wrong now and then (sync semantics §7, "Put them back"): every other one
+    /// finds a file it restores deleted for good meanwhile (a tombstone the feed hasn't told
+    /// of: the engine's restore hears it from the drive's answer), every third stops half way
+    /// through its items (a request failing; the runner asks again later, here the user). Each
+    /// is followed by its client's next plan, which holds nothing of what it put back again
+    /// but what still waits in Recently deleted (itself, or something below it): what went
+    /// for good goes up again from here.
+    pub fn with_failing_put_backs(mut self) -> Self {
+        self.faults.failing_put_backs = true;
+        self
+    }
+
+    /// For scripted tests: the nodes of the deletes client `c`'s last plan held (§7).
+    pub fn held(&self, c: usize) -> &[NodeId] {
+        &self.clients[c].held
+    }
+
     /// For scripted tests: the tag adds [`Sim::check`] found lost to a known limit of the
     /// engine, as `"Limit node tag"`.
     pub fn tags_lost_to_known_limits(&self) -> Vec<String> {

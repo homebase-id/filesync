@@ -654,6 +654,14 @@ impl Sim {
     /// where one item's restored name is another's own).
     pub(crate) fn put_back(&mut self, c: usize) {
         let held = std::mem::take(&mut self.clients[c].held);
+        // What it puts back, for the check after it.
+        let put: HashSet<NodeId> = match self.faults.failing_put_backs {
+            true => held
+                .iter()
+                .flat_map(|&n| self.clients[c].base.subtree(n))
+                .collect(),
+            false => HashSet::new(),
+        };
         let Ok(plan) = self.with_sides(c, |sides| hbsync_engine::held::put_back_plan(&held, sides));
         self.forget_bases(c, &plan.forget);
         let coords = self.clients[c].coords;
@@ -670,6 +678,46 @@ impl Sim {
                 (item, self.server.group(item))
             })
             .collect();
+        // Going wrong now and then ([`Sim::with_failing_put_backs`]), counting the put backs
+        // that restore something: a file it is to restore deleted for good after it read the
+        // drive (a tombstone the feed hasn't told of: the restore's answer tells it), and the
+        // drive taking one wave of restore only (a request failing after).
+        let faulty = self.faults.failing_put_backs && had_items;
+        if faulty {
+            self.faults.put_backs += 1;
+            let tries = self.faults.put_backs;
+            if tries % 2 == 1 {
+                let file = plan
+                    .restored
+                    .iter()
+                    .filter_map(|n| self.server.removed.get_key_value(&coords.to_drive(*n)))
+                    .find(|(_, r)| r.state.kind == NodeKind::File)
+                    .map(Server::at);
+                if let Some(at) = file {
+                    self.note(|_| format!("  put back: {:?} deleted for good meanwhile", at.0));
+                    let known = self.server.removed.iter().map(Server::at).collect();
+                    self.delete_for_good(&BTreeSet::from([at]), &known);
+                }
+            }
+            // A folder of it deleted for good meanwhile (by another app: what is in it waits in
+            // Recently deleted, to come back as into any folder gone for good).
+            if tries % 4 == 2 {
+                let folder = plan.restored.iter().map(|n| coords.to_drive(*n)).find(|n| {
+                    self.server
+                        .removed
+                        .get(n)
+                        .is_some_and(|r| r.state.kind == NodeKind::Folder)
+                });
+                if let Some(folder) = folder {
+                    self.note(|_| format!("  put back: {folder:?} deleted for good meanwhile"));
+                    self.gone_for_good_now(folder);
+                }
+            }
+            if tries.is_multiple_of(3) {
+                self.note(|_| "  put back: the drive takes one wave only".into());
+                self.faults.waves_left = Some(1);
+            }
+        }
         for (item, group) in items {
             if !self.server.live.contains_key(&item) {
                 self.restore_with(item);
@@ -682,6 +730,7 @@ impl Sim {
                 }
             }
         }
+        self.faults.waves_left = None;
         // By the same rule again, as the restore left the drive: a folder gone for good whose
         // contents waited in Recently deleted goes up again now they are back.
         if had_items {
@@ -689,6 +738,46 @@ impl Sim {
                 self.with_sides(c, |sides| hbsync_engine::held::after_restore(&plan, sides));
             self.forget_bases(c, &after);
         }
+        if self.faults.failing_put_backs {
+            self.check_put_back(c, &put);
+        }
+    }
+
+    /// The plan right after client `c`'s put back of `put` (what was synced of it) trashes
+    /// nothing of it here that the drive doesn't have live, and holds nothing again but what
+    /// still waits in Recently deleted, itself or below it in the base: what went for good goes
+    /// up again (sync semantics §7).
+    fn check_put_back(&mut self, c: usize, put: &HashSet<NodeId>) {
+        self.plan(c);
+        let client = &self.clients[c];
+        // Trashed though the drive doesn't have it (live anywhere: one it moved, or left in a
+        // folder it lost, goes on as the drive has it).
+        let coords = client.coords;
+        let trashed = client.plan.iter().find_map(|(op, _)| match op {
+            Op::LocalTrash { node, .. }
+                if put.contains(node)
+                    && !self.server.live.contains_key(&coords.to_drive(*node)) =>
+            {
+                Some(*node)
+            }
+            _ => None,
+        });
+        self.ledger.held_after_put_back(|| {
+            trashed.map(|n| format!("c{c} trashed {n:?}, not on the drive"))
+        });
+        let client = &self.clients[c];
+        let coords = client.coords;
+        // On the drive: live (moved, or a user's own delete of it, held), or in Recently
+        // deleted (to come back).
+        let waits = |n: NodeId| self.server.node(coords.to_drive(n)).is_some();
+        let stuck = client
+            .held
+            .iter()
+            .copied()
+            .find(|&n| put.contains(&n) && !client.base.subtree(n).into_iter().any(waits));
+        self.ledger.held_after_put_back(|| {
+            stuck.map(|n| format!("c{c} held {n:?} again, nothing of it waiting"))
+        });
     }
 
     /// `f` over client `c`'s sides as its store would have them now, for the engine's rules of
@@ -779,6 +868,12 @@ impl Sim {
         while let Some(wave) =
             deleted::restore_wave(left, |r| (r.parent, &r.name), &live, &seen, &mut taken)
         {
+            // A put back the drive stops ([`Sim::with_failing_put_backs`]).
+            match self.faults.waves_left {
+                Some(0) => return,
+                Some(n) => self.faults.waves_left = Some(n - 1),
+                None => {}
+            }
             left = wave.later;
             for row in wave.asked {
                 self.restore_as(row.node, row.name.clone());
@@ -1088,6 +1183,19 @@ impl Sim {
                         self.ledger.blob_superseded(gone.state.content);
                     }
                 }
+            }
+        }
+    }
+
+    /// Row `n` of Recently deleted deleted for good outright, whatever is in it (another app's
+    /// delete: what is in it stays there).
+    fn gone_for_good_now(&mut self, n: NodeId) {
+        self.server.removed_at.remove(&n);
+        self.server.tags_at_removal.remove(&n);
+        if let Some(gone) = self.server.removed.remove(&n) {
+            self.deleted_now(n);
+            if self.ledger.removed_rightly(&(n, gone.remote.version)) {
+                self.ledger.blob_superseded(gone.state.content);
             }
         }
     }

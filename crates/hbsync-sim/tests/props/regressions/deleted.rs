@@ -1666,3 +1666,38 @@ fn regression_what_a_folder_waiting_for_another_page_deletes_waits_with_it() {
     assert_eq!(whole.1, 0, "{whole:?}");
     assert_eq!(end(Some(1)), whole, "in pages of one");
 }
+
+/// A folder's removal elsewhere held as every synced file, confirmed; its files, held apart
+/// after (one of them still being written), held so too; then the confirmation lost (new
+/// ignore rules make a new engine). The folder's trash takes those held files along, so it is
+/// held with them (§7), though the folder alone is short of every synced file now: the oracle
+/// counted it as a removal held by the count.
+#[test]
+fn a_trash_taking_held_files_along_is_held_with_them() {
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(1, Action::CreateJunk { parent: 0 }),
+        act(1, Action::Meanwhile { op: 0 }),
+        act(
+            1,
+            Action::Move {
+                node: 3,
+                parent: 7,
+                name: 1,
+            },
+        ),
+        act(1, Action::CreateFile { parent: 2, name: 6 }),
+        Event::Confirm { client: 1 },
+        act(1, Action::CreateJunk { parent: 0 }),
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        Event::Confirm { client: 1 },
+        act(1, Action::Delete { node: 10 }),
+        Event::Step { client: 1 },
+        act(1, Action::ToggleIgnore),
+        Event::Confirm { client: 0 },
+    ];
+    if let Err(e) = run_with(2, Some(WIPED_MIN), with_a_folder_wiped, &events) {
+        panic!("{e}");
+    }
+}

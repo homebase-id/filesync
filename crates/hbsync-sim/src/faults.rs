@@ -49,4 +49,10 @@ pub(crate) struct Faults {
     /// Each client plans its nodes in pages of this many, as the engine plans its dirty set
     /// ([`crate::Sim::with_small_pages`]).
     pub(crate) page_size: Option<usize>,
+    /// Put backs go wrong now and then ([`crate::Sim::with_failing_put_backs`]): the put backs
+    /// that restored something so far, and how many more waves of restore the drive takes in
+    /// the one under way (none: all).
+    pub(crate) failing_put_backs: bool,
+    pub(crate) put_backs: u64,
+    pub(crate) waves_left: Option<usize>,
 }
