@@ -122,9 +122,19 @@ impl Verdict {
 pub enum FilterError {
     #[error("can't read {}: {source}", path.display())]
     Read { path: PathBuf, source: io::Error },
-    /// A rule in `.hbsync/ignore` that doesn't parse (line 1-based; 0 for the whole set).
-    #[error(".hbsync/ignore, line {line}: {message}")]
-    Rule { line: usize, message: String },
+    /// The rules as a whole couldn't be built (a line that doesn't parse is skipped instead,
+    /// [`Filter::skipped`]).
+    #[error(".hbsync/ignore: {message}")]
+    Rules { message: String },
+}
+
+/// A line of `.hbsync/ignore` that isn't a valid rule: skipped, matching nothing (as Git does).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SkippedRule {
+    /// 1-based.
+    pub line: usize,
+    /// Why it doesn't parse.
+    pub message: String,
 }
 
 /// The filter of one sync root.
@@ -134,6 +144,8 @@ pub struct Filter {
     /// The rules as written, for the fingerprint.
     text: String,
     case_insensitive: bool,
+    /// Lines that aren't valid rules, in order.
+    skipped: Vec<SkippedRule>,
 }
 
 impl Default for Filter {
@@ -142,14 +154,15 @@ impl Default for Filter {
             rules: Gitignore::empty(),
             text: String::new(),
             case_insensitive: false,
+            skipped: Vec::new(),
         }
     }
 }
 
 impl Filter {
     /// The user's rules from `.hbsync/ignore` under `root`, if the file exists; built-ins only
-    /// otherwise. A rule that doesn't parse is an error: skipping it would sync what the user
-    /// meant to keep here.
+    /// otherwise. A line that isn't a valid rule is skipped ([`Filter::skipped`]); a file that
+    /// can't be read is an error: its rules are unknown, not mistyped.
     pub fn load(root: &Path, case_insensitive: bool) -> Result<Self, FilterError> {
         let path = crate::layout::ignore_file(root);
         let text = match std::fs::read_to_string(&path) {
@@ -160,26 +173,36 @@ impl Filter {
         Self::from_rules(&text, case_insensitive)
     }
 
-    /// The built-ins plus `text` (gitignore syntax, paths relative to the sync root). An error
-    /// names the first bad line.
+    /// The built-ins plus `text` (gitignore syntax, paths relative to the sync root). A line
+    /// that doesn't parse matches nothing, as in Git, and is listed in [`Filter::skipped`].
     pub fn from_rules(text: &str, case_insensitive: bool) -> Result<Self, FilterError> {
-        let bad = |line| {
-            move |e: ignore::Error| FilterError::Rule {
-                line,
-                message: e.to_string(),
-            }
+        let failed = |e: ignore::Error| FilterError::Rules {
+            message: e.to_string(),
         };
         let mut builder = GitignoreBuilder::new("");
-        builder.case_insensitive(case_insensitive).map_err(bad(0))?;
+        // Never fails (its `Result` is a leftover of the `ignore` crate's).
+        let _ = builder.case_insensitive(case_insensitive);
+        let mut skipped = Vec::new();
         for (i, line) in text.lines().enumerate() {
-            builder.add_line(None, line).map_err(bad(i + 1))?;
+            if let Err(e) = builder.add_line(None, line) {
+                skipped.push(SkippedRule {
+                    line: i + 1,
+                    message: e.to_string(),
+                });
+            }
         }
-        let rules = builder.build().map_err(bad(0))?;
+        let rules = builder.build().map_err(failed)?;
         Ok(Filter {
             rules,
             text: text.to_owned(),
             case_insensitive,
+            skipped,
         })
+    }
+
+    /// The lines of the rules that aren't valid rules, skipped.
+    pub fn skipped(&self) -> &[SkippedRule] {
+        &self.skipped
     }
 
     /// The number of user rules (negations included).
@@ -391,12 +414,30 @@ mod tests {
         assert_eq!(f.in_folder("app", "node_modules", true), Verdict::Ignored);
     }
 
+    /// A line that isn't a valid rule is skipped and matches nothing, as in Git; the others
+    /// apply. Each is listed by its line.
     #[test]
-    fn bad_rules_and_fingerprints() {
-        assert!(matches!(
-            Filter::from_rules("ok\n[z-a\n", false),
-            Err(FilterError::Rule { line: 2, .. })
-        ));
+    fn a_bad_line_is_skipped_and_the_others_apply() {
+        let f = rules("*.log\n[z-a\n\n# a comment\nbuild/\nsrc/[z-a]\n");
+        let lines: Vec<usize> = f.skipped().iter().map(|s| s.line).collect();
+        assert_eq!(lines, [2, 6]);
+        assert!(f.skipped().iter().all(|s| !s.message.is_empty()));
+        assert_eq!(f.rule_count(), 2);
+        assert_eq!(f.names(["debug.log"], false), Verdict::Ignored);
+        assert_eq!(f.names(["build"], true), Verdict::Ignored);
+        assert_eq!(f.names(["z"], false), Verdict::Sync);
+        assert_eq!(f.names(["[z-a"], false), Verdict::Sync);
+        assert_eq!(f.names(["src", "x"], false), Verdict::Sync);
+        assert!(rules("*.log\n").skipped().is_empty());
+        // Fixing the line changes the fingerprint: the filter change runs again.
+        assert_ne!(
+            f.fingerprint(),
+            rules("*.log\n[a-z]\n\n# a comment\nbuild/\n").fingerprint()
+        );
+    }
+
+    #[test]
+    fn fingerprints() {
         let a = rules("*.log\n");
         assert_ne!(a.fingerprint(), rules("*.tmp\n").fingerprint());
         assert_ne!(

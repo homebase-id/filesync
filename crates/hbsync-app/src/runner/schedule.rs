@@ -169,7 +169,7 @@ impl Schedule {
         !self.paused && (self.wanted || retry) && now >= self.not_before
     }
 
-    /// Not now: tried again at the next look (the folder gone, rules that don't parse: both
+    /// Not now: tried again at the next look (the folder gone, rules that can't be read: both
     /// are local). Returns the wait.
     pub(crate) fn later(&mut self, now: Instant) -> Duration {
         self.not_before = self.next_look;

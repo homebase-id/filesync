@@ -654,8 +654,14 @@ on its own.
   `.tmp.driveupload`. Junk is disposable.
 - **Ignored**: the user's rules in `.hbsync/ignore` (gitignore syntax, per device, never
   synced), matched case-insensitively on case-insensitive volumes. Ignored items are the user's
-  data, kept on this device only. A rule that doesn't parse stops the client: skipping it would
-  sync what the user meant to keep here.
+  data, kept on this device only. A line that isn't a valid rule (in the glob syntax read here,
+  stricter than Git's in places: an unclosed `{` is no rule) is skipped and matches nothing,
+  as Git skips a bad pattern: the other rules apply and syncing goes on, and the folder's
+  notes say which lines, once a version of the rules, not at every sync (the note goes once
+  they are fixed). What such a line meant to keep here syncs; a working rule edited into a
+  bad one is a rule removed, and its items come into view and sync as new items (rule 4). A
+  rules file that can't be read (not a typo: its rules are unknown) stops the folder's sync
+  till it can.
 
 An item inside a filtered folder is filtered too.
 

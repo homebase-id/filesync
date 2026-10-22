@@ -11,7 +11,7 @@ pub mod scan;
 mod walk;
 mod watch;
 
-pub use filter::{Filter, FilterError, Verdict, state_dir_key};
+pub use filter::{Filter, FilterError, SkippedRule, Verdict, state_dir_key};
 pub use journal::{CatchUp, ChangeJournal, Tier, catch_up, open_journal};
 pub use layout::IGNORE_FILE;
 pub use marker::Marker;

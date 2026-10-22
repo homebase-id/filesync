@@ -710,6 +710,49 @@ fn an_edited_ignore_file_applies_without_a_restart() -> R {
     Ok(())
 }
 
+/// A line of the ignore rules that isn't a valid rule is skipped, as in Git: the folder goes
+/// on syncing with the other rules, and says so once, in one note, till the line is fixed.
+#[test]
+fn a_bad_ignore_line_is_skipped_and_told_once() -> R {
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    let note = ".hbsync/ignore line 2 isn't a valid rule and is skipped";
+    let told = |a: &Device| {
+        a.status()
+            .recent
+            .iter()
+            .filter(|n| n.text.starts_with(note))
+            .count()
+    };
+    a.write(".hbsync/ignore", "*.log\n[z-a\n")?;
+    a.handle.send(Command::SyncNow);
+    // In use before anything it covers is written.
+    wait_until("the valid rule is counted", || a.status().rules == 1)?;
+    a.write("debug.log", "noise")?;
+    a.write("[z-a", "a name the bad line spells")?;
+    a.write("notes.txt", "keep")?;
+    a.handle.send(Command::SyncNow);
+    wait_until("the other files are up", || {
+        on_server(&server, "notes.txt") && on_server(&server, "[z-a")
+    })?;
+    assert!(!on_server(&server, "debug.log"), "the valid rule applies");
+    wait_until("the bad line is told", || told(&a) == 1)?;
+    assert_ne!(a.status().state, State::Failing);
+
+    // More syncs, the rules unchanged: told once.
+    a.write("more.txt", "more")?;
+    a.handle.send(Command::SyncNow);
+    wait_until("more.txt is up", || on_server(&server, "more.txt"))?;
+    a.wait_idle()?;
+    assert_eq!(told(&a), 1);
+
+    // Fixed: the note goes.
+    a.write(".hbsync/ignore", "*.log\n")?;
+    a.handle.send(Command::SyncNow);
+    wait_until("the note went", || told(&a) == 0)?;
+    Ok(())
+}
+
 /// The account DB of a test folder: beside it.
 fn db_of(root: &Path) -> PathBuf {
     root.with_file_name("state.db")
