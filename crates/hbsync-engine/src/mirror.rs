@@ -491,7 +491,7 @@ mod tests {
             .map(|m| (m.kind, m.version));
         assert_eq!(kept, Some((NodeKind::File, VersionTag(Uuid::from_u128(8)))));
         assert!(
-            db.read(|s| s.held_files())?
+            db.read(|s| s.unreadable_files())?
                 .contains(&RemoteFileId(Uuid::from_u128(8)))
         );
         assert!(db.read(|s| s.unreadable_nodes())?.contains(&node));
@@ -502,7 +502,7 @@ mod tests {
         };
         db.write(|s| apply(s.account(), &removed).map(drop))?;
         assert!(
-            !db.read(|s| s.held_files())?
+            !db.read(|s| s.unreadable_files())?
                 .contains(&RemoteFileId(Uuid::from_u128(8))),
             "read again"
         );

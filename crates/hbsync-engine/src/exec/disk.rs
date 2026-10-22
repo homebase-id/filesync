@@ -36,10 +36,10 @@ pub(super) struct TagsLeft {
     pub(super) claimed: Option<Tags>,
     /// What the item holds: what read back, or where the write failed, what it holds as read
     /// (`None` where that can't be read either: its row takes what it held before then,
-    /// [`Disk::held_after`]). Taken for not known while it can be read, the item read as
+    /// [`Disk::on_item_after`]). Taken for not known while it can be read, the item read as
     /// holding the drive's tags, and the next scan took their absence for the user removing
     /// them.
-    pub(super) held: Option<Tags>,
+    pub(super) on_item: Option<Tags>,
     pub(super) failed: bool,
 }
 
@@ -153,7 +153,7 @@ impl<'a> Disk<'a> {
                 let _ = self.folder.tags_kept.set(false);
                 TagsLeft {
                     claimed: None,
-                    held: None,
+                    on_item: None,
                     failed: false,
                 }
             }
@@ -161,13 +161,13 @@ impl<'a> Disk<'a> {
                 let _ = self.folder.tags_kept.set(true);
                 TagsLeft {
                     claimed: read.clone(),
-                    held: read,
+                    on_item: read,
                     failed: false,
                 }
             }
             Err(_) => TagsLeft {
                 claimed: None,
-                held: (self.tags_kept() && !self.fails(FailPoint::TagRead))
+                on_item: (self.tags_kept() && !self.fails(FailPoint::TagRead))
                     .then(|| tags::read(path))
                     .flatten(),
                 failed: true,
@@ -178,18 +178,18 @@ impl<'a> Disk<'a> {
     /// Whether a tag write failed and what it left couldn't be read back, on a volume that
     /// keeps tags.
     pub(super) fn unread(&self, left: &TagsLeft) -> bool {
-        left.failed && left.held.is_none() && self.tags_kept()
+        left.failed && left.on_item.is_none() && self.tags_kept()
     }
 
     /// What a tag write left on an item that held `before`, for its row: what read back, or
     /// where the write failed and that read failed too, `before`, as a failed write changes
     /// nothing. Not known read as the drive's tags: a commit settled its base on them, and the
     /// scan that then read the item without them sent their removal up.
-    pub(super) fn held_after(&self, left: TagsLeft, before: Tags) -> Option<Tags> {
+    pub(super) fn on_item_after(&self, left: TagsLeft, before: Tags) -> Option<Tags> {
         if self.unread(&left) {
             Some(before)
         } else {
-            left.held
+            left.on_item
         }
     }
 

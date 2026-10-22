@@ -1,8 +1,8 @@
 //! Rows of the drive this client can't read as nodes (one that doesn't decrypt, a version that
 //! changes a node's kind, a newer writer's), remembered as there all the same (review 7-F2,
 //! F3): a folder that is one still holds what is in it, so nothing in it is an orphan; and a
-//! node whose newer version is one is held: this device's writes to it would name a version
-//! the drive no longer has.
+//! node whose newer version is one is unreadable, kept as this device had it: its writes to
+//! it would name a version the drive no longer has.
 
 use super::*;
 
@@ -43,9 +43,9 @@ impl ReadTx<'_> {
         )
     }
 
-    /// The files the drive has in a version this client can't read (held, where it knows an
-    /// older one).
-    pub fn held_files(&self) -> Result<std::collections::HashSet<RemoteFileId>> {
+    /// The files the drive has in a version this client can't read (unreadable: kept as it had
+    /// them, where it knows an older version).
+    pub fn unreadable_files(&self) -> Result<std::collections::HashSet<RemoteFileId>> {
         Ok(self
             .many("SELECT file_id FROM unreadable", [], |r| {
                 Ok(RemoteFileId(codec::uuid_from(&r.get::<_, Vec<u8>>(0)?)?))
@@ -89,7 +89,7 @@ impl AccountTx<'_> {
     /// Records file `at` as there at that version but not a node this client reads, with its
     /// node and folder where they read (never the root's id, nor the rest of the drive's), in
     /// place of an earlier unreadable version of it; its node is planned again, where it is
-    /// held now. A file deleted for good (a page fetched before), a version recorded already,
+    /// kept now. A file deleted for good (a page fetched before), a version recorded already,
     /// or the very version this device has read (a client with a stricter reader since: it
     /// isn't behind) changes nothing.
     pub fn put_unreadable(

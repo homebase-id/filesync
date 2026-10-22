@@ -120,8 +120,9 @@ impl FolderTx<'_> {
         )
     }
 
-    /// Forgets `node`'s base outside a run (both sides agreed on it, no more): planned again,
-    /// from what each side has now (Put them back: an item comes down again, or goes up).
+    /// Forgets `node`'s base (both sides agreed on it, no more): planned again, from what each
+    /// side has now (Put them back: an item comes down again, or goes up; a detached node,
+    /// synced here no more).
     pub fn forget_base(&self, node: NodeId) -> Result<()> {
         self.delete_base(node)?;
         self.mark_dirty(node)

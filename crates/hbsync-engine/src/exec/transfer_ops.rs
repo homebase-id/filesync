@@ -9,12 +9,12 @@ impl Executor<'_> {
     // ---- transfers: prepare (guards) and commit (placement, DB) around the worker pool ----
 
     /// A write to a file the drive has in a version this device can't read (a newer writer's,
-    /// one that changed its kind: [`ReadTx::held_files`]) would name the version this device knows,
-    /// which the drive no longer has, again at every sync. New bytes fork: they go up as a new
-    /// node, the drive's version stays as it is. A rename, tags, a removal or a download (of
-    /// bytes that would never match) is refused (recorded, not tried again while it is the
-    /// same): the drive's version stands.
-    fn unless_held(&mut self, op: &Op) -> Step<()> {
+    /// one that changed its kind: [`ReadTx::unreadable_files`]) would name the version this
+    /// device knows, which the drive no longer has, again at every sync. New bytes fork: they
+    /// go up as a new node, the drive's version stays as it is. A rename, tags, a removal or a
+    /// download (of bytes that would never match) is refused (recorded, not tried again while
+    /// it is the same): the drive's version stands.
+    fn unless_unreadable(&mut self, op: &Op) -> Step<()> {
         let file_id = match op {
             Op::RemoteUpdate { file_id, .. }
             | Op::RemoteTags { file_id, .. }
@@ -23,11 +23,14 @@ impl Executor<'_> {
             Op::LocalDownload { drive: Some(d), .. } => d.at.file_id,
             _ => return Ok(()),
         };
-        let held = match &self.held {
-            Some(held) => held,
-            None => self.held.insert(self.db.read(|s| s.held_files())?),
+        let unreadable = match &self.heard.unreadable {
+            Some(unreadable) => unreadable,
+            None => self
+                .heard
+                .unreadable
+                .insert(self.db.read(|s| s.unreadable_files())?),
         };
-        if !held.contains(&file_id) {
+        if !unreadable.contains(&file_id) {
             return Ok(());
         }
         Err(match op {
@@ -41,7 +44,7 @@ impl Executor<'_> {
     }
 
     pub(super) fn prepare(&mut self, op: &Op) -> Step<(Job, Ctx)> {
-        self.unless_held(op)?;
+        self.unless_unreadable(op)?;
         match op {
             Op::LocalDownload {
                 node,
@@ -149,7 +152,7 @@ impl Executor<'_> {
         // write, a move: the base is there). Where the drive moved on otherwise (another
         // folder's engine pulled the next version), the next plan decides on that. Its commit
         // settles against it; kept until then, its tags not known until written.
-        let ours = self.settled.get(&node).copied();
+        let ours = self.settling.settled.get(&node).copied();
         let acts = DriveVersion::acted_by_download(
             drive,
             mirror.remote_ref(),
@@ -211,7 +214,7 @@ impl Executor<'_> {
         tags: &Tags,
     ) -> Step<(Job, Ctx)> {
         // Nothing more goes up once the drive is full; the run's other work goes on.
-        if self.full && kind == NodeKind::File {
+        if self.heard.full && kind == NodeKind::File {
             return Err(Outcome::waiting("the drive is out of storage"));
         }
         let (row, mirror, base) = self.db.read(|s| {
@@ -460,9 +463,9 @@ impl Executor<'_> {
         // not sent up yet): not put in place then, for a retry, the plan sending it up
         // meanwhile; unless the drive refused it for good this run (then as ever: placed).
         if left.failed
-            && !self.tags_refused.contains(&node)
-            && let Some(held) = current.as_ref().and_then(|r| r.tags.as_ref())
-            && tags_lost(held, &to_write, &record.base.state.tags)
+            && !self.heard.tags_refused.contains(&node)
+            && let Some(on_item) = current.as_ref().and_then(|r| r.tags.as_ref())
+            && tags_lost(on_item, &to_write, &record.base.state.tags)
         {
             done.keep_for_retry();
             return Ok(Outcome::Retry("its tags weren't written".into()));
@@ -475,7 +478,7 @@ impl Executor<'_> {
         // The record claims only what read back; the row holds what the file holds: where the
         // write failed and that can't be read, none, as a temp file made here holds (one an
         // earlier try left holds what it wrote then: claiming less only sends that up).
-        let tags = self.disk.held_after(left, Tags::default());
+        let tags = self.disk.on_item_after(left, Tags::default());
         // The old version a download replaces from another folder: aside till the commit.
         let mut old_aside = None;
         let placed = match &current {
@@ -602,9 +605,10 @@ impl Executor<'_> {
     }
 }
 
-/// Whether a download whose tag write failed loses a tag: one the item there holds (`held`) as
+/// Whether a download whose tag write failed loses a tag: one the item there holds (`on_item`) as
 /// the download was to write it, that the drive doesn't hold so (a colour changed here too).
-pub fn tags_lost(held: &Tags, to_write: &Tags, drive: &Tags) -> bool {
-    held.iter()
+pub fn tags_lost(on_item: &Tags, to_write: &Tags, drive: &Tags) -> bool {
+    on_item
+        .iter()
         .any(|t| to_write.get(&t.name) == Some(t) && drive.get(&t.name) != Some(t))
 }
