@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use hbsync_engine::exec::Skip;
 use hbsync_engine::{Conflict, Engine, Op, SyncReport};
-use hbsync_local::{ScanReport, SkipReason};
+use hbsync_local::{IGNORE_FILE, STATE_DIR, ScanReport, SkipReason, SkippedRule};
 use hbsync_state::StateError;
 use hbsync_types::NodeId;
 
@@ -211,6 +211,36 @@ pub(crate) fn add_notes(recent: &mut Vec<Note>, added: &mut u64, notes: Vec<Stri
     recent.drain(..excess);
 }
 
+/// The note for the lines of the ignore rules that aren't valid rules (skipped, matching
+/// nothing, as in Git): one note naming them all (the first few and how many more), with why
+/// the first doesn't parse. `None` if every line is valid.
+pub(super) fn rules_note(skipped: &[SkippedRule]) -> Option<String> {
+    const SHOWN: usize = 5;
+    let first = skipped.first()?;
+    let file = format!("{STATE_DIR}/{IGNORE_FILE}");
+    if let [one] = skipped {
+        return Some(format!(
+            "{file} line {} isn't a valid rule and is skipped: {}",
+            one.line, one.message
+        ));
+    }
+    let mut lines: Vec<String> = skipped
+        .iter()
+        .take(SHOWN)
+        .map(|s| s.line.to_string())
+        .collect();
+    if skipped.len() > SHOWN {
+        lines.push(format!("{} more", skipped.len() - SHOWN));
+    }
+    let (last, rest) = lines.split_last()?;
+    Some(format!(
+        "{file} lines {} and {last} aren't valid rules and are skipped (line {}: {})",
+        rest.join(", "),
+        first.line,
+        first.message
+    ))
+}
+
 /// What `scan` skipped that the user may want to know, each item once (`told`, a hash of its
 /// reason and path: 8 bytes an item), one note a reason with a few of its paths: a folder it
 /// can't read, a name the drive can't hold, a link or a device it doesn't sync. (Junk, ignored
@@ -305,6 +335,36 @@ mod tests {
     use hbsync_platform::RelPath;
 
     use super::*;
+
+    /// One note for the lines that aren't valid rules: by line, why the first doesn't parse;
+    /// none when all are valid.
+    #[test]
+    fn skipped_rules_make_one_note() {
+        let skip = |line| SkippedRule {
+            line,
+            message: format!("bad {line}"),
+        };
+        assert_eq!(rules_note(&[]), None);
+        assert_eq!(
+            rules_note(&[skip(3)]).as_deref(),
+            Some(".hbsync/ignore line 3 isn't a valid rule and is skipped: bad 3")
+        );
+        assert_eq!(
+            rules_note(&[skip(3), skip(5), skip(9)]).as_deref(),
+            Some(
+                ".hbsync/ignore lines 3, 5 and 9 aren't valid rules and are skipped \
+                 (line 3: bad 3)"
+            )
+        );
+        let many: Vec<SkippedRule> = (1..=8).map(skip).collect();
+        assert_eq!(
+            rules_note(&many).as_deref(),
+            Some(
+                ".hbsync/ignore lines 1, 2, 3, 4, 5 and 3 more aren't valid rules and are \
+                 skipped (line 1: bad 1)"
+            )
+        );
+    }
 
     /// What a scan skipped and the user may want to know is told, each once; what is skipped
     /// by design (junk, ignored) isn't.

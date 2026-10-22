@@ -81,7 +81,7 @@ impl RunnerError {
         match self {
             RunnerError::State(e) => e.class(),
             RunnerError::Engine(e) => e.class(),
-            // Rules that don't parse: the user's to fix.
+            // A rules file that can't be read: the user's to fix.
             RunnerError::Filter(_) => ErrorClass::NeedsUser,
             RunnerError::Io(e) => ErrorClass::of_io(e),
             RunnerError::Panicked => ErrorClass::Bug,
@@ -318,6 +318,9 @@ pub struct Runner {
     stalled: report::Stalled,
     /// What scans skipped and told, each once ([`report::scan_notes`]).
     scan_told: std::collections::HashSet<u64>,
+    /// The version of the ignore rules last told about (a hash of their fingerprint), and the
+    /// note told for their lines that aren't valid rules, if any ([`report::rules_note`]).
+    rules_told: Option<(u64, Option<String>)>,
     /// Sync now was asked: the next sync sends what the drive refused once more.
     retry_refused: bool,
     /// Waited out a refusal: the next due sync asks the drive again ([`DENIED_LOOK`]).
@@ -342,7 +345,7 @@ struct Parts {
 }
 
 impl Parts {
-    /// Whether the ignore rules on disk differ from the ones in use (or don't parse): their
+    /// Whether the ignore rules on disk differ from the ones in use (or can't be read): their
     /// fingerprints differ (sync semantics §10).
     fn rules_changed(&self, root: &Path) -> bool {
         let folder = &self.engine.config().folder;
@@ -400,6 +403,7 @@ impl Runner {
             told: Default::default(),
             stalled: Default::default(),
             scan_told: Default::default(),
+            rules_told: None,
             retry_refused: false,
             probing: false,
         };
@@ -692,13 +696,15 @@ impl Runner {
                 Some(p) => p,
                 None => match self.open() {
                     Ok(p) => {
+                        self.tell_rules(Some(&p.engine.config().folder.filter));
                         started = false;
                         opened = Some(marker);
                         parts.insert(p)
                     }
-                    // Rules that don't parse: say so, and look again at the next look.
+                    // Rules that can't be read: say so, and look again at the next look.
                     Err(RunnerError::Filter(e)) if !self.cfg.once => {
                         tracing::warn!("{e}");
+                        self.tell_rules(None);
                         self.failing(
                             State::Failing,
                             e.to_string(),
@@ -879,6 +885,27 @@ impl Runner {
             tracing::warn!("{note}");
         }
         self.set(|s| report::add_notes(&mut s.recent, &mut s.notes_added, notes, unix_now()));
+    }
+
+    /// Tells the lines of the ignore rules in use (`None`: none, they can't be read) that
+    /// aren't valid rules, once a version of the rules; the note told for another version goes
+    /// (fixed, told anew, or no longer what is in use).
+    fn tell_rules(&mut self, filter: Option<&Filter>) {
+        use std::hash::{DefaultHasher, Hash, Hasher};
+        let version = filter.map(|f| {
+            let mut hasher = DefaultHasher::new();
+            f.fingerprint().hash(&mut hasher);
+            hasher.finish()
+        });
+        if version.is_some() && self.rules_told.as_ref().map(|(v, _)| *v) == version {
+            return;
+        }
+        let note = filter.and_then(|f| report::rules_note(f.skipped()));
+        if let Some((_, Some(old))) = self.rules_told.take() {
+            self.set(|s| s.recent.retain(|n| n.text != old));
+        }
+        self.tell(note.clone().into_iter().collect());
+        self.rules_told = version.map(|v| (v, note));
     }
 
     /// Tells what a scan skipped and the user may want to know (a folder it can't read, a

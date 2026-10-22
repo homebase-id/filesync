@@ -266,7 +266,11 @@ included (service managers restart it then).
 - **Network changes:** the reconnect backoff (at most 30 s); no OS hooks yet.
 - **Ignore rules:** `.hbsync/ignore` is read again a second after the watcher saw it change
   (once a minute in a folder without a watcher) and on a sync request; an edit restarts the
-  engine with the new rules (sync semantics §10).
+  engine with the new rules (sync semantics §10). A line that isn't a valid rule is skipped,
+  and the folder's notes say so once a version of the rules: ".hbsync/ignore line 3 isn't a
+  valid rule and is skipped: …" (several: "lines 3, 5 and 9 aren't valid rules and are
+  skipped (line 3: …)"); the note goes once the lines are fixed. A file that can't be read
+  stops the folder's sync, failing, till it can.
 - **The folder gone** (moved, deleted, a disk not mounted: its marker missing): nothing
   syncs, the status says why, and the loop waits for it to come back. It never creates a
   marker: only `hbsync setup` does.
