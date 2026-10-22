@@ -1,12 +1,17 @@
+use std::collections::HashSet;
 use std::fs;
+use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
-use hbsync_engine::transfer::{Download, Job, JobResult, TransferConfig, run_jobs};
+use hbsync_engine::transfer::{Download, Job, JobError, JobResult, TransferConfig, run_jobs};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
-use hbsync_remote::{ErrorClass, NodeMeta, Remote, Upload};
+use hbsync_remote::{
+    Answers, ChangesPage, Deletes, ErrorClass, ForGood, Holds, NodeMeta, RefsPage, Remote,
+    RemoteHeader, Result as RemoteResult, Upload,
+};
 use hbsync_types::schema::NodeContent;
-use hbsync_types::{NodeId, NodeKind};
+use hbsync_types::{Doomed, NodeId, NodeKind, RemoteFileId, Target, Written};
 
 type R = Result<(), Box<dyn std::error::Error>>;
 
@@ -14,6 +19,7 @@ fn upload_job(dir: &std::path::Path, name: &str, size: usize) -> std::io::Result
     let data = vec![b'x'; size];
     let path = dir.join(name);
     fs::write(&path, &data)?;
+    let seen = hbsync_platform::stat(&path)?.fingerprint();
     Ok(Job::Upload {
         meta: NodeMeta {
             node: NodeId::new(),
@@ -26,6 +32,7 @@ fn upload_job(dir: &std::path::Path, name: &str, size: usize) -> std::io::Result
         path,
         hash: hash_bytes(&data, HashAlgorithm::Blake3),
         size: size as u64,
+        seen,
     })
 }
 
@@ -260,5 +267,118 @@ fn results_arrive_while_other_transfers_still_run() -> R {
         small.1 + Duration::from_millis(200) < large.1,
         "{arrivals:?}"
     );
+    Ok(())
+}
+
+/// A remote that appends to `path` once it has read `after` bytes of an upload: the file
+/// changes while it is sent.
+struct ChangesWhileSent {
+    inner: FakeRemote,
+    path: std::path::PathBuf,
+    after: usize,
+}
+
+impl Remote for ChangesWhileSent {
+    fn changes(&self, cursor: Option<&str>, limit: usize) -> RemoteResult<ChangesPage> {
+        self.inner.changes(cursor, limit)
+    }
+    fn change_refs(&self, cursor: Option<&str>, limit: usize) -> RemoteResult<RefsPage> {
+        self.inner.change_refs(cursor, limit)
+    }
+    fn header(&self, file_id: RemoteFileId) -> RemoteResult<RemoteHeader> {
+        self.inner.header(file_id)
+    }
+    fn holding(&self, folders: &[NodeId], holds: Holds<'_>) -> RemoteResult<HashSet<NodeId>> {
+        self.inner.holding(folders, holds)
+    }
+    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> RemoteResult<Written> {
+        let Some(upload) = payload else {
+            return self.inner.create(node, None);
+        };
+        let mut first = vec![0; self.after];
+        upload.reader.read_exact(&mut first)?;
+        fs::OpenOptions::new()
+            .append(true)
+            .open(&self.path)?
+            .write_all(b"more")?;
+        let mut rest = std::io::Cursor::new(first).chain(upload.reader);
+        self.inner.create(
+            node,
+            Some(Upload {
+                reader: &mut rest,
+                ..upload
+            }),
+        )
+    }
+    fn update(
+        &self,
+        target: &Target,
+        meta: &NodeMeta,
+        payload: Option<Upload<'_>>,
+    ) -> RemoteResult<Written> {
+        self.inner.update(target, meta, payload)
+    }
+    fn delete(&self, files: &[Doomed]) -> RemoteResult<Deletes> {
+        self.inner.delete(files)
+    }
+    fn delete_for_good(&self, files: &[Doomed]) -> RemoteResult<ForGood> {
+        self.inner.delete_for_good(files)
+    }
+    fn set_removed(&self, files: &[Target], removed: bool) -> RemoteResult<Answers<Written>> {
+        self.inner.set_removed(files, removed)
+    }
+    fn cursor_time(&self, cursor: &str) -> Option<i64> {
+        self.inner.cursor_time(cursor)
+    }
+    fn read(
+        &self,
+        file_id: RemoteFileId,
+        range: Option<std::ops::Range<u64>>,
+        sink: &mut dyn Write,
+    ) -> RemoteResult<u64> {
+        self.inner.read(file_id, range, sink)
+    }
+}
+
+/// An upload's file that changed since it was hashed (in any way its fingerprint shows) isn't
+/// sent; one that changes while it is sent stops at the next look at it, not at its end. Both
+/// are left for the scan the change brings (stale), not tried again at once.
+#[test]
+fn an_upload_whose_file_changed_stops() -> R {
+    let dir = tempfile::tempdir()?;
+    let server = FakeServer::new(ServerConfig::default());
+    let remote = FakeRemote::new(server.clone());
+    let job = upload_job(dir.path(), "before", 10)?;
+    // The same size, another change time.
+    std::thread::sleep(Duration::from_millis(20));
+    hbsync_platform::ops::set_mtime(&dir.path().join("before"), 1_600_000_000_000_000_000)?;
+    let mut results = Vec::new();
+    run_jobs(&remote, TransferConfig::default(), vec![job], |_, r| {
+        results.push(r)
+    });
+    let [JobResult::Failed(e)] = &results[..] else {
+        return Err(format!("{results:?}").into());
+    };
+    assert!(matches!(e, JobError::Changed), "{e}");
+    assert_eq!(e.class(), ErrorClass::Stale, "{e}");
+    assert_eq!(remote.faults().uploads, 0, "nothing was sent");
+
+    let size = 40 << 20;
+    let job = upload_job(dir.path(), "during", size)?;
+    let midway = ChangesWhileSent {
+        inner: remote.clone(),
+        path: dir.path().join("during"),
+        after: 20 << 20,
+    };
+    let mut results = Vec::new();
+    run_jobs(&midway, TransferConfig::default(), vec![job], |_, r| {
+        results.push(r)
+    });
+    let [JobResult::Failed(e)] = &results[..] else {
+        return Err(format!("{results:?}").into());
+    };
+    // Its own look, not the hash of what was sent.
+    assert!(matches!(e, JobError::Changed), "{e}");
+    assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 0);
     Ok(())
 }

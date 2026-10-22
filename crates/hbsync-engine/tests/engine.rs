@@ -1373,6 +1373,7 @@ fn adopting_a_wide_folder_takes_linear_time() -> R {
         fs_family: hbsync_platform::FsFamily::Other,
         filter: Default::default(),
         exact_names: false,
+        settle: None,
     };
     hbsync_local::scan(&mut db, dir.path(), &opts)?;
     let cell = std::cell::RefCell::new(db);
@@ -5428,5 +5429,68 @@ fn two_items_of_one_name_restored_together_both_come_back() -> R {
     assert_eq!(texts, ["one", "two"], "{tree:?}");
     // The newest first, as listed: it keeps the name.
     assert!(tree.iter().any(|l| l == "x.txt = two"), "{tree:?}");
+    Ok(())
+}
+
+/// A file being written is left unhashed (sync semantics §6.3) and holds a delete of its
+/// folder from the drive. Once it is quiet the observer's own look reads it, with no event to
+/// bring it, and the edit keeps the folder: it comes back on the drive with it.
+#[test]
+fn a_file_left_while_it_is_written_ends_its_wait_once_quiet() -> R {
+    use std::time::{Duration, Instant};
+
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("p/big", "v1")?;
+    a.sync()?;
+    b.sync()?;
+    let mut opts = a.engine.scan_options().clone();
+    opts.settle = Some(hbsync_local::Settle {
+        from_size: 1,
+        quiet: Duration::from_secs(1),
+    });
+    let mut observer = hbsync_local::LocalObserver::start(&a.root, opts);
+    if !observer.has_watcher() {
+        return Ok(());
+    }
+    a.engine.start_up(&mut observer, "2026-10-08")?;
+    fs::remove_dir_all(b.root.join("p"))?;
+    b.sync()?;
+
+    // A batch leaves it unhashed.
+    a.write("p/big", "v2, being written")?;
+    let until = Instant::now() + Duration::from_secs(10);
+    while !a
+        .engine
+        .observe(&mut observer, Duration::from_millis(100))?
+        .is_some_and(|r| !r.young.is_empty())
+    {
+        assert!(Instant::now() < until, "never left");
+    }
+    // Written to again since: the round doesn't read it either, and the delete waits.
+    a.write("p/big", "v2, written")?;
+    let report = a.engine.sync("2026-10-08", true)?;
+    assert!(
+        report.waiting.iter().any(|(p, _)| p == "p/big"),
+        "{report:?}"
+    );
+    assert!(a.root.join("p/big").exists());
+
+    // No more writes: read by the observer once quiet.
+    let mut hashed = 0;
+    while hashed == 0 {
+        assert!(Instant::now() < until, "never read");
+        if let Some(r) = a
+            .engine
+            .observe(&mut observer, Duration::from_millis(100))?
+        {
+            hashed += r.hashed;
+        }
+    }
+    a.engine.sync("2026-10-08", true)?;
+    b.sync()?;
+    assert_eq!(b.read_text("p/big")?, "v2, written");
+    assert_eq!(a.read_text("p/big")?, "v2, written");
     Ok(())
 }

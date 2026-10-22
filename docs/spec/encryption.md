@@ -82,8 +82,10 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
   `DeferredPayloadHashes.cs`; live), and the engine plans again. A source that grew is sent only
   up to its planned size and refused the same way; one that ends early ends the request before
   its hash part: nothing is stored **[verified]** (live contract), and it counts as the same
-  mismatch. A file whose size changed since it was hashed isn't sent at all, and one that can't
-  be read is a local error, not the server's.
+  mismatch. A file whose fingerprint (size, mtime, change time, file id) changed since it was
+  hashed isn't sent at all; one that changes while it is sent is looked at every 16 MiB and
+  stops there, the request ending before its hash part. One that can't be read is a local
+  error, not the server's.
 - **An update** sends the file's own key with a new header IV, and the content encrypted with
   those: the server requires a strong key, keeps the file's key, and takes only the IV. New
   bytes get a new payload IV. The key comes from the file's **token**: its key header as the

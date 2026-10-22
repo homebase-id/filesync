@@ -170,10 +170,19 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    edit keeps a deleted folder alive as above, an unchanged file follows the drive). The
    round that finds something waiting reads those of the files that haven't changed since
    the scan couldn't (locked, unreadable; one still being written is read by the scan its
-   change brings) and plans again; one that still can't be read is told, by name, and read
+   change brings, or, a large one, by the observer's look once it has been quiet a few
+   seconds: below) and plans again; one that still can't be read is told, by name, and read
    again at the next sync (no poll: on Windows an app letting go of a file it didn't change
    tells no one, and the wait lasts till the next sync for another reason). A file that can
-   never be read holds what waits for it for as long.
+   never be read holds what waits for it for as long. A large file being written (8 MiB or
+   more, modified in the last 5 s, or changed while it was read) isn't read at every batch
+   while the live watcher runs: it is left unhashed, and the observer looks again once it may
+   have been quiet 5 s, then 3, 6, 12 … 60 s apart while it is still written to; once quiet it
+   is read and syncs as any edit (one never quiet is read anyway every 10 minutes; the
+   start-up catch-up reads every changed file at once). Only where nothing in that scan depends on its hash: a new
+   file of the size of one that vanished is read at once (a move by hash, §3). At start the
+   observer looks again at every file left unhashed (one being written when the client
+   stopped, a locked one): a journal's catch-up names only what changed since.
 
    **Orphans go into Recovered files.** A live node whose folder is nowhere on the drive
    (deleted for good: a stale plan's create racing a delete and an emptied Recently deleted,

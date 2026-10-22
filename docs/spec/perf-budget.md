@@ -26,6 +26,13 @@ Rules that keep these reachable (from [../foundations.md](../foundations.md) §3
   folder, or a name that may be another spelling of one (case-insensitive volumes), rescans
   its folder. The client's own writes, named again by the watcher, write nothing.
 - Catch-up runs at background I/O and CPU priority.
+- A large file being written (8 MiB or more, modified in the last 5 s) is read once it is
+  quiet, not at every batch: the observer looks again after 5 s, then 3, 6, 12 … 60 s apart
+  while it is still written to (one never quiet is read anyway every 10 minutes). An upload looks at its file before it starts and every 16 MiB
+  while it is sent, and stops at a change. A 480 MiB file written in 60 one-second steps
+  (fake remote, 2026-10-22): 55 hashes, 12.3 GiB hashed, 25.6 GiB read and 55 uploads started
+  before; 1 hash, 0.94 GiB read and 1 upload after, synced 5 s after the last write instead
+  of at once.
 
 ## Measured: sync with a live identity (2026-10-09)
 `hbsync-sync` (release) against frodo.dotyou.cloud: the local dev host on the same machine
