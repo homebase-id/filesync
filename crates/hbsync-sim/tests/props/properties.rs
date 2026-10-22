@@ -314,6 +314,16 @@ proptest! {
     ) {
         run_with(2, Some(min), Sim::with_held_check, &events)?;
     }
+
+    /// The same from a folder's removal elsewhere held as every synced file
+    /// ([`with_a_folder_wiped`]): a held delete out of the dirty set from the first plan, so
+    /// the plans that hold deletes are compared (rarely from an empty start).
+    #[test]
+    fn held_deletes_out_of_the_dirty_set_plan_alike_from_a_wipe(
+        events in proptest::collection::vec(guarded_event(2), 0..80),
+    ) {
+        run_with(2, Some(WIPED_MIN), |sim| with_a_folder_wiped(sim.with_held_check()), &events)?;
+    }
 }
 
 proptest! {
