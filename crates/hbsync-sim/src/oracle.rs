@@ -1,4 +1,5 @@
-//! The oracle: the [`Ledger`] and [`Sim::check`] (convergence, invariants, no loss).
+//! The oracle: the [`Ledger`], its checks of each plan ([`Ledger::plan_made`]), and
+//! [`Sim::check`] (convergence, invariants, no loss). It reads the engine's [`Tree`] only.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt::Debug;
