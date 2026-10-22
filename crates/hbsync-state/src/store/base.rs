@@ -56,11 +56,22 @@ impl ReadTx<'_> {
     }
 
     /// Number of file (not folder) nodes in the base; the mass-delete guard's denominator.
-    /// A full table scan: callers take it once per sync.
+    /// One row: the triggers on `base` keep it (a file's base row in or out costs a row update).
     pub fn base_file_count(&self) -> Result<u64> {
-        // `+folder`: a scan of the table, not of an index holding the folder that looks every
-        // row up again for its kind (five times slower).
-        self.count("SELECT COUNT(*) FROM base WHERE +folder = $F AND kind = 0")
+        let n: i64 = self
+            .prep("SELECT coalesce((SELECT n FROM base_files WHERE folder = $F), 0)")?
+            .query_row([], |r| r.get(0))?;
+        // Below zero would be a count gone wrong: never read as a huge one (no guard at all).
+        let n = u64::try_from(n)
+            .map_err(|_| StateError::Corrupt(format!("base_files counts {n} files")))?;
+        // Debug builds (every test) check it against the rows it stands for.
+        debug_assert_eq!(
+            Some(n),
+            self.count("SELECT COUNT(*) FROM base WHERE +folder = $F AND kind = 0")
+                .ok(),
+            "base_files drifted from the base"
+        );
+        Ok(n)
     }
 }
 

@@ -351,9 +351,10 @@ pub mod testkit {
                     )?
                     .query_map([], |r| r.get(0))?
                     .collect::<rusqlite::Result<_>>()?;
-                // `gone` last: the triggers of the others write to it.
-                let (gone, others): (Vec<String>, Vec<String>) =
-                    tables.into_iter().partition(|t| t == "gone");
+                // Last, what the triggers of the others write to: `gone` and `base_files`.
+                let (gone, others): (Vec<String>, Vec<String>) = tables
+                    .into_iter()
+                    .partition(|t| t == "gone" || t == "base_files");
                 for t in others.into_iter().chain(gone) {
                     tx.execute_batch(&format!(
                         "DELETE FROM main.\"{t}\"; \
