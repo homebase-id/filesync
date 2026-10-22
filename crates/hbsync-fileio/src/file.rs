@@ -180,7 +180,6 @@ impl PartialFile {
             path: self.path,
             hash: actual,
             size: self.written,
-            adopted: false,
             synced: flush,
         })
     }
@@ -216,7 +215,6 @@ pub struct CompletedFile {
     path: PathBuf,
     pub hash: ContentHash,
     pub size: u64,
-    adopted: bool,
     /// Its bytes are durable: only then may it be put in place (a rename that a power cut
     /// keeps, of a file whose bytes it lost, would show garbage under the name).
     synced: bool,
@@ -238,45 +236,6 @@ pub fn sync_completed(files: &mut [&mut CompletedFile]) {
 impl CompletedFile {
     pub fn path(&self) -> &Path {
         &self.path
-    }
-
-    /// The file at `src` (on the volume the download goes to) as a completed download, where
-    /// it is, if it holds exactly the bytes `expected` (`size` of them): hashed now (unchanged
-    /// while read), its bytes synced, as a download's are. `None` where it holds other bytes, or
-    /// where its size or mtime (Unix ms) isn't `size` and `mtime_ms`, if given (nothing read
-    /// then). It
-    /// stays where it is until persisted ([`CompletedFile::adopted`]).
-    pub fn adopt(
-        src: &Path,
-        expected: ContentHash,
-        size: u64,
-        mtime_ms: Option<i64>,
-    ) -> Result<Option<CompletedFile>, FileIoError> {
-        let meta = hbsync_platform::stat(src)?;
-        if meta.kind != hbsync_platform::EntryKind::File
-            || meta.size != size
-            || mtime_ms.is_some_and(|ms| meta.mtime_ns.div_euclid(1_000_000) != ms)
-        {
-            return Ok(None);
-        }
-        if hash_file(src, expected.algorithm)?.hash != expected {
-            return Ok(None);
-        }
-        // Windows flushes a file only through a handle that may write it.
-        OpenOptions::new().write(true).open(src)?.sync_data()?;
-        Ok(Some(CompletedFile {
-            path: src.to_owned(),
-            hash: expected,
-            size,
-            adopted: true,
-            synced: true,
-        }))
-    }
-
-    /// Whether it is a file taken where it was ([`CompletedFile::adopt`]), not a download into
-    /// the temp folder: until it is persisted it stays there, its bytes as they were.
-    pub fn adopted(&self) -> bool {
-        self.adopted
     }
 
     /// Whether its bytes are durable, so it may be put in place ([`sync_completed`]).
@@ -343,8 +302,7 @@ impl CompletedFile {
     }
 
     /// Leaves the verified file in the temp folder: reopening its [`PartialFile`] finds it
-    /// complete, so a retry needs no transfer. The caller cleans up files nobody resumes. One
-    /// [`CompletedFile::adopted`] stays where it was.
+    /// complete, so a retry needs no transfer. The caller cleans up files nobody resumes.
     pub fn keep_for_retry(self) {}
 }
 
@@ -434,30 +392,6 @@ mod tests {
             0,
             "temp dir is empty after persist"
         );
-        Ok(())
-    }
-
-    /// A file with the bytes wanted is taken as the download, where it is, and persisted from
-    /// there; one with other bytes, or of another size or mtime, isn't.
-    #[test]
-    fn adopt_takes_only_the_bytes_wanted() -> Result<(), FileIoError> {
-        let dir = tempfile::tempdir()?;
-        let (same, other) = (dir.path().join("same"), dir.path().join("other"));
-        fs::write(&same, b"wanted")?;
-        fs::write(&other, b"wanteD")?;
-        let expected = hash_bytes(b"wanted", ALG);
-        let mtime = |p: &Path| hbsync_platform::stat(p).map(|m| m.mtime_ns.div_euclid(1_000_000));
-        let (at, other_at) = (mtime(&same)?, mtime(&other)?);
-        assert!(CompletedFile::adopt(&other, expected, 6, Some(other_at))?.is_none());
-        assert!(CompletedFile::adopt(&same, expected, 5, Some(at))?.is_none());
-        assert!(CompletedFile::adopt(&same, expected, 6, Some(at + 1))?.is_none());
-        let done = CompletedFile::adopt(&same, expected, 6, Some(at))?.expect("taken");
-        assert!(done.adopted() && same.exists(), "where it was");
-        let target = dir.path().join("placed");
-        done.persist_new(&target, None)?;
-        assert_eq!(fs::read(&target)?, b"wanted");
-        assert!(!same.exists());
-        assert_eq!(fs::read(&other)?, b"wanteD");
         Ok(())
     }
 

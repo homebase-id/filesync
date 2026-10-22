@@ -27,13 +27,14 @@ pub fn tmp_dir(root: &Path) -> PathBuf {
     state_dir(root).join("tmp")
 }
 
-/// What syncing took from the folder (an entry each, [`trash_entry`]), until the purge.
+/// What syncing took from the folder in versions before verified deletes (an entry each,
+/// [`trash_entry`]), until the purge. Nothing goes there any more.
 pub fn trash_dir(root: &Path) -> PathBuf {
     state_dir(root).join("trash")
 }
 
 /// The name of `node`'s entry in the [`trash_dir`]: `<Unix s>-<node>`, by when it went there
-/// (`at`, Unix s; a second or so later where the node's entry of that second was taken).
+/// (`at`, Unix s). Only read now, for the purge.
 pub fn trash_entry(at: u64, node: NodeId) -> String {
     format!("{at}-{}", node.0.simple())
 }
@@ -43,15 +44,10 @@ pub fn trashed_at(entry: &str) -> Option<u64> {
     entry.split_once('-')?.0.parse().ok()
 }
 
-/// When a trash entry ([`trash_entry`]) went there, Unix s, and whose it is.
-pub fn parse_trash_entry(entry: &str) -> Option<(u64, NodeId)> {
-    let node = Uuid::try_parse(entry.split_once('-')?.1).ok()?;
-    Some((trashed_at(entry)?, NodeId(node)))
-}
-
-/// Where an item being deleted waits, for the moment between its rename out of the folder and
-/// its unlink, once checked to be what was synced: on the folder's volume, so it leaves with one
-/// rename. Nothing stays there once the delete is committed. Its names are fixed by node and
+/// Where an item being deleted, or the old version a download replaces, waits for the moment
+/// between its rename out of the folder and its unlink, once checked: on the folder's volume, so
+/// it leaves with one rename. Nothing stays there once the delete (or the download) is
+/// committed, but what a crash left, for the next sync's recovery. Its names are fixed by node and
 /// bytes: one taken (left by a crash) is a place the next one waits for, never one to rename
 /// over.
 pub fn aside_dir(root: &Path) -> PathBuf {

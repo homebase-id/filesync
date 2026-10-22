@@ -902,7 +902,7 @@ fn a_download_whose_commit_failed_leaves_no_duplicate() -> R {
 }
 
 /// The drive moves a file to another folder and edits it: b's download puts the new version in
-/// place there and the old one in the trash, from the folder it was in. That folder is
+/// place there and moves the old one aside, from the folder it was in. That folder is
 /// rescanned too: the node's row there was stale, and recovery took the new file for another
 /// item's.
 #[test]

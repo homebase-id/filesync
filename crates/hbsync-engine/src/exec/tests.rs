@@ -2589,7 +2589,7 @@ fn a_failed_tag_write_left_unread_on_a_folder_made_removes_nothing() -> R {
 }
 
 /// A file at `p1/f` this device synced, moved to `p2` and edited on the drive: the download
-/// that brings it there puts the old version in the trash. Returns the node and the download.
+/// that brings it there moves the old version aside. Returns the node and the download.
 fn a_download_from_another_folder(
     h: &mut Harness,
 ) -> Result<(NodeId, Op), Box<dyn std::error::Error>> {
@@ -2632,38 +2632,51 @@ fn a_download_from_another_folder(
     Ok((node, op))
 }
 
-/// What the trash holds: its entries' folders.
-fn trash_entries(h: &Harness) -> Vec<String> {
-    fs::read_dir(hbsync_local::layout::trash_dir(&h.folder.root))
-        .map(|dir| {
-            dir.flatten()
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .collect()
-        })
+/// What is aside: its entries' names.
+fn aside_entries(h: &Harness) -> Vec<String> {
+    hbsync_local::layout::aside_entries(&h.folder.root)
+        .map(|(p, _)| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect::<Option<_>>()
         .unwrap_or_default()
 }
 
-/// The roots the trash tests run under: a plain one and, where it differs (Windows: `\\?\`),
-/// the canonical one.
-fn trash_harnesses() -> Result<Vec<Harness>, Box<dyn std::error::Error>> {
+/// The roots the old-version tests run under: a plain one and, where it differs (Windows:
+/// `\\?\`), the canonical one.
+fn canonical_harnesses() -> Result<Vec<Harness>, Box<dyn std::error::Error>> {
     let plain = Harness::new()?;
     let mut canonical = Harness::new()?;
     canonical.folder.root = fs::canonicalize(&canonical.folder.root)?;
     Ok(vec![plain, canonical])
 }
 
-/// The download puts the old version in the trash, then can't put the new one in place: the
-/// old version comes back at once, and its emptied entry in the trash goes. Left in the trash,
-/// the next plan took its absence for the user deleting it (against the drive's edit: a
-/// conflict, and the download again).
+/// The download moves the old version aside, puts the new one in place and, once committed,
+/// unlinks the old one: nothing is kept.
+#[test]
+fn an_old_version_goes_once_the_new_one_is_in() -> R {
+    for mut h in canonical_harnesses()? {
+        let (node, op) = a_download_from_another_folder(&mut h)?;
+        h.run(vec![op])?;
+        assert_eq!(fs::read(h.at("p2/f")?)?, b"B");
+        assert!(!h.at("p1/f")?.exists());
+        assert_eq!(aside_entries(&h), Vec::<String>::new());
+        assert!(!hbsync_local::layout::trash_dir(&h.folder.root).exists());
+        let row = h.db.read(|s| s.local_by_node(node))?;
+        assert_eq!(row.map(|r| r.path.to_string()), Some("p2/f".into()));
+    }
+    Ok(())
+}
+
+/// The download moves the old version aside, then can't put the new one in place: the old
+/// version comes back at once. Gone, the next plan took its absence for the user deleting it
+/// (against the drive's edit: a conflict, and the download again).
 #[test]
 fn an_old_version_comes_back_when_the_new_one_fails() -> R {
-    for mut h in trash_harnesses()? {
+    for mut h in canonical_harnesses()? {
         let (node, op) = a_download_from_another_folder(&mut h)?;
-        h.cfg.hooks.faults.fail(FailPoint::AfterTrash, 1);
+        h.cfg.hooks.faults.fail(FailPoint::PlaceNew, 1);
         h.run(vec![op])?;
         assert_eq!(fs::read(h.at("p1/f")?)?, b"A");
-        assert_eq!(trash_entries(&h), Vec::<String>::new());
+        assert_eq!(aside_entries(&h), Vec::<String>::new());
         assert_eq!(h.records()?, []);
         let row = h.db.read(|s| s.local_by_node(node))?;
         assert_eq!(row.map(|r| r.path.to_string()), Some("p1/f".into()));
@@ -2673,45 +2686,79 @@ fn an_old_version_comes_back_when_the_new_one_fails() -> R {
     Ok(())
 }
 
-/// The same, bringing it back failing too: it stays in the trash, as on main, and nothing holds
-/// the node: the next plan downloads the new version.
+/// The same, putting it back failing too: it stays aside, for the next sync's recovery. That
+/// finds it the synced version (what the drive's newer one replaced) and finishes the delete,
+/// its base with it; the next plan brings the new version.
 #[test]
-fn an_old_version_that_cant_come_back_stays_in_the_trash() -> R {
+fn an_old_version_that_cant_come_back_stays_aside() -> R {
     let mut h = Harness::new()?;
     let (node, op) = a_download_from_another_folder(&mut h)?;
-    h.cfg.hooks.faults.fail(FailPoint::AfterTrash, 1);
-    h.cfg.hooks.faults.fail(FailPoint::Restore, 1);
+    h.cfg.hooks.faults.fail(FailPoint::PlaceNew, 1);
+    h.cfg.hooks.faults.fail(FailPoint::PutBack, 1);
     h.run(vec![op])?;
     assert!(!h.at("p1/f")?.exists());
-    assert_eq!(trash_entries(&h).len(), 1);
+    assert_eq!(aside_entries(&h).len(), 1);
     assert_eq!(h.records()?, []);
-    // The scan finds the old version gone.
-    h.db.write(|s| s.folder().delete_local(node))?;
+    crate::exec::recover_aside(&mut h.db, &h.folder)?;
+    assert_eq!(aside_entries(&h), Vec::<String>::new());
+    assert!(h.db.read(|s| s.get_base(node))?.is_none(), "its base went");
     let plan = plan_of(&mut h, &[node])?;
     h.run(plan.ops)?;
     assert_eq!(fs::read(h.at("p2/f")?)?, b"B");
     Ok(())
 }
 
-/// The download from another folder keeps the old version in the trash; the drive then
-/// deletes the node, and the file is deleted outright (sync semantics §7): aside, checked,
-/// unlinked, nothing kept but that old version. (A node trashed twice within a second once
-/// collided on its entry, seed 8474444713664359667: deletes no longer make one.)
+/// A crash after the new version is in place leaves the old one aside: the next sync's
+/// recovery finds its node holding other bytes now (the new version committed), and unlinks it
+/// once its bytes read as the old version's; one that doesn't (written to aside) goes back beside
+/// the new one, a new item there.
+#[test]
+fn an_old_version_left_aside_by_a_crash_goes() -> R {
+    for written in [false, true] {
+        let mut h = Harness::new()?;
+        let (node, op) = a_download_from_another_folder(&mut h)?;
+        let aside = hbsync_local::layout::aside_dir(&h.folder.root);
+        fs::create_dir_all(&aside)?;
+        // As a crash after the commit left it: the old version aside, the new one in place.
+        let a = h.content(b"A").hash;
+        h.run(vec![op])?;
+        let entry = aside.join(hbsync_local::layout::AsideEntry::File(node, a).name());
+        fs::write(
+            &entry,
+            if written {
+                &b"A, written aside"[..]
+            } else {
+                b"A"
+            },
+        )?;
+        crate::exec::recover_aside(&mut h.db, &h.folder)?;
+        assert!(!entry.exists());
+        assert_eq!(h.at("p2/f (conflict 1)")?.exists(), written, "{written}");
+        assert_eq!(fs::read(h.at("p2/f")?)?, b"B");
+    }
+    Ok(())
+}
+
+/// The download from another folder unlinks the old version; the drive then deletes the node,
+/// and the file is deleted outright (sync semantics §7): aside, checked, unlinked, nothing kept.
+/// (A node trashed twice within a second once collided on its entry, seed
+/// 8474444713664359667: deletes no longer make one.)
 #[test]
 fn a_node_replaced_then_deleted_goes() -> R {
     let mut h = Harness::new()?;
     let (node, op) = a_download_from_another_folder(&mut h)?;
     h.run(vec![op])?;
-    assert_eq!(trash_entries(&h).len(), 1, "the old version");
     let report = h.run(vec![Op::LocalTrash {
         node,
         subtree: vec![node],
     }])?;
     assert!(report.failed.is_empty(), "{:?}", report.failed);
     assert!(!h.at("p2/f")?.exists());
-    assert_eq!(trash_entries(&h).len(), 1, "nothing more kept");
-    let aside = hbsync_local::layout::aside_dir(&h.folder.root);
-    assert!(fs::read_dir(aside)?.next().is_none(), "nothing left aside");
+    assert_eq!(
+        aside_entries(&h),
+        Vec::<String>::new(),
+        "nothing left aside"
+    );
     assert!(h.db.read(|s| s.get_base(node))?.is_none(), "its base went");
     Ok(())
 }
@@ -2719,8 +2766,8 @@ fn a_node_replaced_then_deleted_goes() -> R {
 /// A download replacing a synced file, the run settling the node's base at the drive's version
 /// first (as its own write of a tag would), then crashing once the file is in place; meanwhile
 /// the drive deleted the node. Recovery finds the fetched file there and settles it as the
-/// node with the record's base, so the drive's delete reaches here: the next plan puts it in
-/// the trash. Settled against the base the plan saw, which had moved, the base kept the old
+/// node with the record's base, so the drive's delete reaches here: the next plan deletes
+/// it. Settled against the base the plan saw, which had moved, the base kept the old
 /// bytes, the fetched file read as an edit, and the edit won over the delete: the node was
 /// uploaded again.
 #[test]
@@ -3342,8 +3389,8 @@ fn a_folder_made_back_whose_tag_write_fails_keeps_a_removal_from_the_drive() -> 
 
 /// A folder synced before made again here as the drive had it when the plan was made (`a`),
 /// its base moved since (`b`), and the drive deleted it meanwhile: the commit settles it at
-/// the version it acted on, as recovery does, so the delete reaches it and the next plan puts
-/// it in the trash. Against the base that moved, it read as renamed, an edit winning over the
+/// the version it acted on, as recovery does, so the delete reaches it and the next plan
+/// deletes it. Against the base that moved, it read as renamed, an edit winning over the
 /// delete, and the plan made the node again on the drive.
 #[test]
 fn a_commit_doesnt_bring_back_a_node_the_drive_deleted() -> R {
@@ -3867,57 +3914,6 @@ fn removals_go_in_one_request_and_a_changed_file_stays() -> R {
     drop(server);
     assert!(h.db.read(|s| s.removed_by_node(b))?.is_none());
     assert!(h.db.read(|s| s.removed_by_node(a))?.is_some());
-    Ok(())
-}
-
-/// A download whose bytes the trash holds (its node's entry, under its name) takes them from
-/// there. Where its tags can't be written over the ones the file had there, the file stays in
-/// the trash, untouched, and the download fetches the bytes instead.
-#[test]
-fn a_download_takes_the_bytes_from_the_trash_unless_its_tags_fail() -> R {
-    for tags_fail in [false, true] {
-        let mut h = Harness::new()?;
-        let (node, at) =
-            h.remote
-                .server()
-                .seed_file(NodeId::ROOT, "f", b"data", h.folder.algorithm)?;
-        let content = h.content(b"data");
-        let mtime_ms = 1_700_000_000_000;
-        h.db.write(|s| {
-            s.account().put_mirror(&MirrorRow::from_content(
-                at,
-                node,
-                NodeId::ROOT,
-                NodeKind::File,
-                &NodeContent::file("f", mtime_ms, 4, false),
-                Some(content.hash),
-            ))
-        })?;
-        let entry = hbsync_local::layout::trash_dir(&h.folder.root).join(
-            hbsync_local::layout::trash_entry(hbsync_types::unix_now(), node),
-        );
-        fs::create_dir_all(&entry)?;
-        let trashed = entry.join("f");
-        fs::write(&trashed, b"data")?;
-        ops::set_mtime(&trashed, mtime_ms * 1_000_000)?;
-        if tags_fail {
-            h.cfg.hooks.faults.fail(FailPoint::TagWrite, 1);
-        }
-        let served = h.remote.faults().served;
-        h.run(vec![Op::LocalDownload {
-            node,
-            parent: NodeId::ROOT,
-            name: "f".into(),
-            replace: false,
-            tags: Tags::default(),
-            drive: None,
-        }])?;
-        assert_eq!(fs::read(h.at("f")?)?, b"data", "{tags_fail}");
-        let fetched = h.remote.faults().served - served;
-        assert_eq!(fetched, if tags_fail { 4 } else { 0 }, "{tags_fail}");
-        assert_eq!(trashed.exists(), tags_fail, "{tags_fail}");
-        assert_eq!(h.records()?, []);
-    }
     Ok(())
 }
 
