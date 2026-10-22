@@ -13,6 +13,7 @@ pub mod feed;
 mod folder;
 pub mod gone;
 pub mod held;
+mod holding;
 mod id;
 pub mod mask;
 pub mod mirror;
@@ -38,8 +39,8 @@ pub use engine::{Engine, EngineConfig, StartupReport, SyncReport};
 pub use error::EngineError;
 pub use folder::FolderCtx;
 pub use plan::{
-    Against, Agreement, BaseExtra, Conflict, Coverage, DeleteGuard, DriveVersion, Input, Masking,
-    Op, Options, Plan, Requirement,
+    Against, Agreement, BaseExtra, Conflict, Coverage, DeleteGuard, DriveVersion, Guarding, Input,
+    Masking, Op, Options, Plan, Requirement,
 };
 pub use reconcile::reconcile;
 pub use tree::{Tree, Violation, conflict_copy_name, numbered_conflict_name};

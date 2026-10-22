@@ -69,6 +69,17 @@ proptest! {
         run_with(2, Some(min), |sim| sim, &events)?;
     }
 
+    /// The same with clients that crash now and then: a crash forgets the user's answers and
+    /// what they were shown, as a new engine does; what the guard holds is held and asked
+    /// about again, and nothing goes through unconfirmed.
+    #[test]
+    fn guarded_clients_that_crash_ask_again(
+        events in proptest::collection::vec(with_crashes(2, guarded_event(2)), 0..80),
+        min in 1usize..3,
+    ) {
+        run_with(2, Some(min), |sim| sim, &events)?;
+    }
+
     /// The main folders leave a role folder another device made alone (§12): never synced
     /// here, never changed, whatever the users do around it.
     #[test]

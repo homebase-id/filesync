@@ -378,10 +378,14 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
 
   A confirmation lasts while its removal is pending, or waits for a file in it not hashed yet
   (§6.3: what was in such a folder, sent apart meanwhile, goes with it); done or undone, it is
-  forgotten. A removal the user didn't see is never let through by a confirmation. A folder
-  without its marker (moved, deleted, a disk not mounted) syncs nothing, so nothing is held,
-  sent or put back there: an answer then is refused. Simulator:
-  `guarded_clients_delete_only_what_was_confirmed` (with `Event::PutBack`); engine:
+  forgotten. It is kept in memory only: after a restart, or when the folder's engine is set
+  up again (new ignore rules, the folder set up again), what was confirmed and isn't done yet
+  is judged again by the guard's rules, and asked about again where they hold it. A removal
+  the user didn't see is never let through by a confirmation. A folder without its marker
+  (moved, deleted, a disk not mounted) syncs nothing, so nothing is held, sent or put back
+  there: an answer then is refused. Simulator:
+  `guarded_clients_delete_only_what_was_confirmed` (with `Event::PutBack`; the simulator
+  keeps the hold and puts back by the engine's own rules, `hbsync_engine::held`); engine:
   `a_delete_here_is_held_and_put_back_brings_it_back`,
   `every_file_removed_elsewhere_is_held_and_put_back_restores_it`,
   `a_confirmed_folder_trash_does_not_hold_other_deletes`.

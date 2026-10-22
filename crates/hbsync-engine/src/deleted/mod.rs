@@ -26,12 +26,12 @@ mod rules;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use listing::items_of;
 pub use listing::{DeletedSummary, Listed, deletes, listed_here, listed_now};
 pub use rules::{
     Chosen, Holdings, RestoreWave, before_folders_go, inside, passes, restore_wave,
     take_restored_name, taken_in,
 };
+pub(crate) use rules::{deleted_with_at, item_by};
 
 use crate::lock;
 

@@ -12,8 +12,8 @@ use hbsync_engine::mask::masked;
 use hbsync_engine::pages::subtree_any_side;
 use hbsync_engine::plan::{Acts, Met, TagWrite, not_reached, tags_written};
 use hbsync_engine::reconcile::{
-    Agreement, BaseExtra, DeleteGuard, DriveVersion, Input, Masking, Op, Options, Removed,
-    reconcile_with_known,
+    Agreement, BaseExtra, DeleteGuard, DriveVersion, Guarding, Input, Masking, Op, Options,
+    Removed, reconcile_with_known,
 };
 use hbsync_engine::tree::{Tree, first_free, numbered_names};
 use hbsync_local::Verdict;
@@ -245,21 +245,23 @@ impl Sim {
             );
         }
         let confirmed = Arc::new(client.confirmed.clone());
-        // Held as every synced file: until answered, each while a removal elsewhere is still
-        // to be followed in it: it, or (back on the drive) what is below it in the base. As
-        // the engine keeps `guard.wiped`.
-        let pending = |n: NodeId| client.local.contains(n) && remote.path(n).is_none();
+        // Held as every synced file: until answered, by the engine's rule (it keeps
+        // `guard.wiped` so), over what its store has: the mirror (the plan's view of the drive)
+        // and what the scanner reports here.
+        let sides = crate::world::ModelSides {
+            base: &client.base,
+            local: &input.local,
+            live: &|n| remote.contains(n),
+            server: &self.server,
+            coords: client.coords,
+        };
         let wiped: HashSet<NodeId> = client
             .wiped
             .iter()
             .copied()
             .filter(|n| {
-                !confirmed.contains(n)
-                    && client.base.contains(*n)
-                    && match remote.path(*n).is_some() {
-                        false => client.local.contains(*n),
-                        true => client.base.subtree(*n).into_iter().any(pending),
-                    }
+                let Ok(keep) = hbsync_engine::held::keep_held(*n, confirmed.contains(n), &sides);
+                keep
             })
             .collect();
         let synced_files = client
@@ -272,14 +274,17 @@ impl Sim {
             device: client.name.clone(),
             computer: client.computer.clone(),
             date: "2026-10-08".into(),
-            guard: DeleteGuard {
-                min: self.guard.unwrap_or_default(),
-                fraction: 0.0,
-                allow: self.guard.is_none(),
+            guarding: Guarding {
+                settings: DeleteGuard {
+                    min: self.guard.unwrap_or_default(),
+                    fraction: 0.0,
+                    allow: self.guard.is_none(),
+                },
+                synced: synced_files,
+                confirmed: Arc::clone(&confirmed),
+                wiped: Arc::new(wiped.clone()),
+                ..Guarding::default()
             },
-            synced_files,
-            confirmed: Arc::clone(&confirmed),
-            wiped: Arc::new(wiped.clone()),
             own_page,
             ..Options::default()
         };

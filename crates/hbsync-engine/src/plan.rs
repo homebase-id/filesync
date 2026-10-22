@@ -49,29 +49,37 @@ pub struct Options {
     pub computer: String,
     /// Today's date (`YYYY-MM-DD`) for conflict-copy names. Passed in to keep this pure.
     pub date: String,
-    /// The mass-delete guard's settings.
-    pub guard: DeleteGuard,
-    /// Number of synced files (the base's file count), the guard's denominator.
-    pub synced_files: usize,
-    /// Nodes whose deletes the user confirmed: neither counted by the guard nor held.
-    pub confirmed: Arc<HashSet<NodeId>>,
-    /// Nodes whose removal elsewhere the guard held as every synced file (§7): held, with what
-    /// is under them, until the user answers, whatever the count since.
-    pub wiped: Arc<HashSet<NodeId>>,
-    /// Files pending deletion across the whole dirty set, not just this plan's batch:
-    /// (gone locally → remote deletes, gone remotely → local trash). The guard trips on these
-    /// totals too, so a large delete split over several batches is still held.
-    pub pending_deletes: (usize, usize),
-    /// The files the held deletes out of the dirty set take ([`crate::held`]): (removed from
-    /// the drive, trashed here). The guard counts them with each plan's own, as it would if
-    /// they were planned with it.
-    pub held_files: (usize, usize),
+    /// What the mass-delete guard judges with (§7).
+    pub guarding: Guarding,
     /// Ids a detach must not give: already known here (an earlier detach of the same node).
     pub taken: Arc<HashSet<NodeId>>,
     /// The page is a piece of a folder's subtree too big for a page
     /// ([`crate::pages::OwnPages`]), so what is in it doesn't wait for a folder above it that
     /// another page deletes ([`Input::going_above`]): that one goes after it.
     pub own_page: bool,
+}
+
+/// What the mass-delete guard judges a plan's deletes with (sync semantics §7): its settings,
+/// the counts it weighs them against, and the user's answers so far.
+#[derive(Debug, Clone, Default)]
+pub struct Guarding {
+    pub settings: DeleteGuard,
+    /// Number of synced files (the base's file count), the guard's denominator.
+    pub synced: usize,
+    /// Nodes whose deletes the user confirmed: neither counted by the guard nor held.
+    pub confirmed: Arc<HashSet<NodeId>>,
+    /// Nodes whose removal elsewhere the guard held as every synced file: held, with what is
+    /// under them, until the user answers, whatever the count since.
+    pub wiped: Arc<HashSet<NodeId>>,
+    /// Files pending deletion across the whole dirty set and the held deletes out of it, not
+    /// just this plan's batch: (gone locally → remote deletes, gone remotely → local trash).
+    /// The guard trips on these totals too, so a large delete split over several batches is
+    /// still held.
+    pub pending: (usize, usize),
+    /// The files the held deletes out of the dirty set take ([`crate::held`]): (removed from
+    /// the drive, trashed here). The guard counts them with each plan's own, as it would if
+    /// they were planned with it.
+    pub held: (usize, usize),
 }
 
 /// The mass-delete guard's settings: deletes above `max(min, fraction × synced files)` are
@@ -119,12 +127,7 @@ impl Default for Options {
             device: "device".into(),
             computer: String::new(),
             date: "1970-01-01".into(),
-            guard: DeleteGuard::default(),
-            synced_files: 0,
-            confirmed: Arc::default(),
-            wiped: Arc::default(),
-            pending_deletes: (0, 0),
-            held_files: (0, 0),
+            guarding: Guarding::default(),
             taken: Arc::default(),
             own_page: false,
         }

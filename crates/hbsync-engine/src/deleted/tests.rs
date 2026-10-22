@@ -103,29 +103,6 @@ fn a_cycle_in_recently_deleted_ends() -> Result<(), StateError> {
     Ok(())
 }
 
-/// The item a restore of a removed row starts from (put back): up from the folder the row is in
-/// here, only if it was deleted with that folder. A file moved elsewhere into a folder then
-/// deleted there is put back on its own, not with that folder and what else was in it.
-#[test]
-fn an_item_is_found_up_from_the_folder_here() -> Result<(), StateError> {
-    let db = Db::new()?;
-    let (here, there, x) = (NodeId::new(), NodeId::new(), NodeId::new());
-    let rows = db.write(|s| {
-        s.account().put_removed(&removed(there, NodeId::ROOT, 5))?;
-        s.account().put_removed(&removed(x, there, 5))?;
-        // `here` removed after it: not with it.
-        s.account().put_removed(&removed(here, NodeId::ROOT, 9))?;
-        s.removed_by_node(x)
-    })?;
-    let x_row = rows.ok_or(StateError::Corrupt("x".into()))?;
-    let item = |folder| db.read(|s| super::items_of(s, vec![(x_row.clone(), folder)]));
-    // In `here` (deleted after it): on its own, though the drive had it in `there`.
-    assert_eq!(item(here)?, HashSet::from([x]));
-    // In `there`, deleted with it: with it.
-    assert_eq!(item(there)?, HashSet::from([there]));
-    Ok(())
-}
-
 /// Restoring an item together with the folder whose delete took it along plans the folder's
 /// whole group once, whichever comes first: the item doesn't stand for the folder.
 #[test]

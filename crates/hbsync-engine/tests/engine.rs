@@ -6025,3 +6025,36 @@ fn a_folder_below_a_waiting_one_across_sides_waits_too() -> R {
     }
     Ok(())
 }
+
+/// The user's Delete outlives a sync that fails before it judges anything: the next sync lets
+/// the confirmed deletes through, not held and asked about again.
+#[test]
+fn a_confirmation_outlives_a_sync_that_failed_at_its_start() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.min = 2)?;
+    for i in 0..4 {
+        a.write(&format!("Projects/f{i}.txt"), format!("{i}"))?;
+    }
+    a.write("keep.txt", "k")?;
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("Projects"))?;
+    let report = a.sync()?;
+    assert_eq!(report.held.len(), 5, "{report:?}");
+    a.engine
+        .confirm_deletes(report.held.iter().map(|op| op.node()));
+    // The next sync fails where it judges: the store's id is missing (a damaged DB).
+    let conn = rusqlite::Connection::open(a.db_path())?;
+    let id: String =
+        conn.query_row("SELECT value FROM kv WHERE key = 'db.id'", [], |r| r.get(0))?;
+    conn.execute("UPDATE kv SET value = '' WHERE key = 'db.id'", [])?;
+    assert!(a.engine.sync("2026-10-08", true).is_err());
+    conn.execute("UPDATE kv SET value = ?1 WHERE key = 'db.id'", [&id])?;
+    let report = a.sync()?;
+    assert!(report.held.is_empty(), "{report:?}");
+    assert_eq!(
+        server.lock().map_err(|_| "poisoned")?.live().count(),
+        1,
+        "only keep.txt"
+    );
+    Ok(())
+}
