@@ -303,6 +303,12 @@ impl Sim {
         self.faults.fail_commit_next = true;
     }
 
+    /// For scripted tests: the next crash in a delete's unlinks ([`Event::Crash`]) comes after
+    /// `n` of them.
+    pub fn crash_after_unlinks(&mut self, n: usize) {
+        self.faults.unlinks_before_crash = Some(n);
+    }
+
     /// For scripted tests: the next tag write fails (where the OS keeps tags).
     pub fn fail_next_tag_write(&mut self) {
         self.faults.fail_tags_next = true;

@@ -51,6 +51,19 @@ pub(crate) fn orphaning_action() -> impl Strategy<Value = Action> + Clone {
     ]
 }
 
+/// The users' actions, with deletes, and apps writing to what a client moved aside to delete
+/// (sync semantics §7), more often.
+pub(crate) fn deleting_action() -> impl Strategy<Value = Action> + Clone {
+    let i = || 0usize..16;
+    prop_oneof![
+        6 => action(),
+        2 => i().prop_map(|node| Action::Delete { node }),
+        2 => i().prop_map(|pick| Action::EditAside { pick }),
+        1 => (i(), i()).prop_map(|(pick, name)| Action::CreateInAside { pick, name }),
+        1 => (i(), i()).prop_map(|(pick, done)| Action::DeleteStopped { pick, done }),
+    ]
+}
+
 pub(crate) fn event(clients: usize) -> impl Strategy<Value = Event> {
     events_of(clients, action())
 }
@@ -79,8 +92,16 @@ pub(crate) fn guarded_event(clients: usize) -> impl Strategy<Value = Event> {
 
 /// Events with a client dying now and then ([`Event::Crash`]).
 pub(crate) fn crashing_event(clients: usize) -> impl Strategy<Value = Event> {
+    with_crashes(clients, event(clients))
+}
+
+/// `events`, with a client dying now and then ([`Event::Crash`]).
+pub(crate) fn with_crashes(
+    clients: usize,
+    events: impl Strategy<Value = Event>,
+) -> impl Strategy<Value = Event> {
     prop_oneof![
-        8 => event(clients),
+        8 => events,
         1 => (0..clients).prop_map(|client| Event::Crash { client }),
     ]
 }
@@ -175,6 +196,7 @@ pub(crate) fn any_event(clients: usize) -> impl Strategy<Value = Event> {
     let actions = prop_oneof![
         1 => stopped_delete_action(),
         1 => orphaning_action(),
+        1 => deleting_action(),
     ];
     let c = move || 0..clients;
     prop_oneof![

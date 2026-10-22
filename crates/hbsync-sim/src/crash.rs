@@ -6,6 +6,7 @@ use std::collections::HashSet;
 use hbsync_engine::Against;
 use hbsync_engine::plan::TagWrite;
 use hbsync_engine::reconcile::{DriveVersion, Op};
+use hbsync_engine::tree::Tree;
 use hbsync_platform::Os;
 use hbsync_types::{NodeId, Tags};
 
@@ -17,7 +18,8 @@ use crate::model::server::time;
 impl Sim {
     /// Client `c` dies during its next step ([`Event::Crash`]): a download it fetched, or a
     /// folder synced before (the engine's write-ahead record), is put in place and its commit
-    /// lost; anything else isn't started.
+    /// lost; a delete is moved aside, or, aside already, unlinked part way and its commit lost;
+    /// anything else isn't started.
     ///
     /// [`Event::Crash`]: crate::Event::Crash
     pub(crate) fn crash(&mut self, c: usize) {
@@ -62,6 +64,36 @@ impl Sim {
                     }
                 }
             }
+            // A delete: moved aside, then the crash; or, aside already, checked and unlinked
+            // part way (deepest first, as many as the crashes counted say), the crash before its
+            // commit. What is left aside goes back at the next plan. What went keeps its bases
+            // (the commit lost): the next plan reads it as deleted here, which the drive's
+            // removal settles, or, restored meanwhile, takes back to Recently deleted: the known
+            // limit of a delete without a write-ahead record (sync semantics §8a).
+            Some(
+                ref op @ (Op::LocalTrash {
+                    node, ref subtree, ..
+                }
+                | Op::Forget {
+                    node, ref subtree, ..
+                }),
+            ) if op.trashes().is_some() => match self.clients[c].aside.get(&node).map(Tree::len) {
+                None => drop(self.execute(c, op)),
+                Some(count) => {
+                    if let Some(hidden) = self.aside_check(c, node, subtree) {
+                        let k = self
+                            .faults
+                            .unlinks_before_crash
+                            .take()
+                            .unwrap_or((self.faults.crashes % (count as u64 + 1)) as usize);
+                        for n in self.unlink_aside(c, node, &hidden, k) {
+                            if let Some(seen) = self.base_seen(c, n) {
+                                self.ledger.delete_commit_lost(c, n, seen);
+                            }
+                        }
+                    }
+                }
+            },
             _ => {}
         }
         let client = &mut self.clients[c];
@@ -172,6 +204,11 @@ impl Sim {
     /// settled as the commit would have (the same rule, against the same version, the item
     /// read with the tags it was put in place with).
     pub(crate) fn recover(&mut self, c: usize) {
+        // What a crash left aside goes back, to be planned again (the executor's recovery).
+        let aside: Vec<NodeId> = self.clients[c].aside.keys().copied().collect();
+        for node in aside {
+            self.put_back_aside(c, node);
+        }
         self.clients[c].unhashed.clear();
         for (node, p) in std::mem::take(&mut self.clients[c].placing) {
             let there = self.record_there(c, node, &p);
