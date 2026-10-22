@@ -171,7 +171,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    settles (another device may restore it first, with changes of its own: a tag it removed
    stays removed). A removed folder outside this
    folder's part of the drive, or one it filters (§10), isn't its to bring back: a node written
-   into it waits for the folder that syncs that part, or, filtered, goes where an orphan does.
+   into it waits for the folder that syncs that part, or, filtered, is left as it is for the
+   devices that sync it (one this device holds goes where an orphan does, below).
    A file not hashed yet keeps its folders as they are, neither deleted nor restored, till it
    is hashed (below); then it keeps a folder alive as any live child does.
 
@@ -228,11 +229,11 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    - Names: an orphan moving in loses a clash to what is there (`<stem> (conflict <n>)`); the
      folder itself loses a clash at the top too, so a plain folder of the same name keeps its
      name.
-   - A device that filters Recovered files (§10), and a role folder (a node written into a
-     removed folder it filters), puts the orphan at its top instead; so does every device where
-     another writer gave Recovered files' id to a file (a row no device reads, §11 of the
-     schema's checks): no device can make it on the drive, and a move into it would wait for
-     good, tried again at every sync.
+   - A device that filters Recovered files (§10), and a role folder (a node in a file, or one
+     it holds in a removed folder it filters), puts the orphan at its top instead; so does
+     every device where another writer gave Recovered files' id to a file (a row no device
+     reads, §11 of the schema's checks): no device can make it on the drive, and a move into
+     it would wait for good, tried again at every sync.
    - Only into a place the device syncs: an orphan isn't connected to the top, so the filter
      (§10) never masked it. One whose place (in Recovered files, or at the top) the device
      doesn't sync is left as it is, out of the plan, for a device that syncs it; so is what is
@@ -240,6 +241,12 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
      it once its folder is connected again. Brought in, it would read as an item the device
      stopped syncing, and leave the drive: another device's files, deleted by one that never
      synced them.
+   - Nor is what is in a folder in Recently deleted at a place the device filters (masked,
+     §10) its orphan: something written into it (a live child, which keeps it) that the device
+     holds nothing of is left as it is, the business of the devices that sync that place, which
+     bring the folder back with it. Taken for an orphan, it was moved into Recovered files on
+     the drive, and the folder stayed deleted for the others. One the device holds goes as
+     before.
    - A folder that leaves the picture for good (deleted outright, announced) while nodes are
      live in it plans those again: they are orphans now, whichever of them changed.
 4. **Folder delete propagation** removes the folder on the drive first, then its descendants,
@@ -782,6 +789,11 @@ An item inside a filtered folder is filtered too.
    one (a name clash).
    A masked node that comes into view (a rule was removed, or another device moved it out of
    the ignored place) is downloaded with everything in it.
+   A folder in Recently deleted whose place is filtered is masked; what is live in it (a node
+   written into it after its removal, which keeps it) and this device holds nothing of is left
+   as it is, never an orphan to adopt here (§6.3). Where no device syncs that place, such a
+   node stays inside its removed folder, ignored everywhere and never deleted: the purge
+   deletes removed nodes only, so it keeps the folder, restorable, while it holds a live node.
    A synced node that becomes masked because another device moved it into a path this device
    ignores leaves this device, the remote untouched:
    - an unchanged local copy is deleted (§7), and its base goes in the same step

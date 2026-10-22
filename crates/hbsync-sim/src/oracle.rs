@@ -686,6 +686,15 @@ impl Sim {
             if subtree.iter().any(held) {
                 continue;
             }
+            // In a folder in Recently deleted at a place the client filters (masked): another
+            // device's to bring back with it, no orphan (§6.3, §10).
+            if let Some(parent) = self.server.removed.get(&state.parent)
+                && let Some(path) = self.through_removed(c, state.parent)
+                && !names(&path, parent.state.kind == NodeKind::Folder).is_sync()
+            {
+                left.extend(subtree);
+                continue;
+            }
             let synced = recovered.as_ref().is_some_and(|place| {
                 let mut path = place.clone();
                 path.push(&state.name);
@@ -696,6 +705,27 @@ impl Sim {
             }
         }
         left
+    }
+
+    /// The names from client `c`'s top down to `folder`, through live folders and folders in
+    /// Recently deleted: `None` where the chain doesn't reach the top.
+    fn through_removed(&self, c: usize, folder: NodeId) -> Option<Vec<&str>> {
+        let top = self.clients[c].coords.top;
+        let mut names = Vec::new();
+        let mut at = folder;
+        while at != top {
+            let state = match self.server.removed.get(&at) {
+                Some(r) => &r.state,
+                None => &self.server.live.get(&at)?.state,
+            };
+            names.push(state.name.as_str());
+            at = state.parent;
+            if names.len() > self.server.live.len() + self.server.removed.len() {
+                return None; // a cycle
+            }
+        }
+        names.reverse();
+        Some(names)
     }
 }
 
