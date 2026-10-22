@@ -570,7 +570,9 @@ fn held_deletes_put_back_come_back() -> R {
 /// once more (a minute on; here a moment, the identity's first "not there" made a minute
 /// older meanwhile): gone for good, they go up again from b, and a gets them back. Before, the
 /// put back stayed failed until the user answered again a minute to an hour later (review 14
-/// R2).
+/// R2). Aged once the put back failed, b paused meanwhile: the rows were there before (its own
+/// read of the feed), and aged then they read as a minute on in that same run; aged after the
+/// rerun (a slow runner), they read as too new, and it stayed failed.
 #[test]
 fn a_put_back_that_failed_runs_once_more() -> R {
     let server = server();
@@ -601,16 +603,22 @@ fn a_put_back_that_failed_runs_once_more() -> R {
     }
     a.drive.purge(30 * 86_400_000)?;
     let held = b.status().held_deletes.ok_or("held")?;
-    let db = rusqlite::Connection::open(db_of(&b.root))?;
     b.handle.answer(HeldAnswer::PutBack, &held.token)?;
+    // The put back failed (its note), not before: its own read of the feed asks once mid-run.
+    let failed = |b: &Device| {
+        b.status()
+            .recent
+            .iter()
+            .any(|n| n.text.contains("couldn't all be put back"))
+    };
+    wait_until("the first put back failed", || failed(&b))?;
     // Not there, said once: as if a minute had passed since, before the put back runs again.
-    wait_until("the first put back failed", || {
-        db.query_row("SELECT count(*) FROM gone_suspects", [], |r| {
-            r.get::<_, i64>(0)
-        })
-        .is_ok_and(|n| n == 61)
-    })?;
-    db.execute("UPDATE gone_suspects SET at = at - 60000", [])?;
+    // Paused meanwhile, so it runs again only once that is so, however slow this runner is.
+    b.handle.send(Command::Pause(Pause::UNTIL_RESUMED));
+    let aged =
+        hbsync_engine::testkit::a_minute_on(&mut hbsync_state::StateDb::open(&db_of(&b.root))?)?;
+    assert!(aged > 0, "the first put back's \"not there\"");
+    b.handle.send(Command::Resume);
     wait_until("they are up again", || {
         on_server(&server, "f59.txt") && b.status().held_deletes.is_none()
     })
