@@ -1960,6 +1960,85 @@ fn an_orphan_into_recovered_files_coming_back_leaves_what_is_ignored() -> R {
     Ok(())
 }
 
+/// The server, a, b and P's node id ([`written_into_a_removed_ignored_folder`]).
+type WrittenInto = (
+    Arc<Mutex<hbsync_remote::fake::FakeServer>>,
+    Client,
+    Client,
+    NodeId,
+);
+
+/// a ignores x/; b syncs x/P/f.txt; another app removes P (to Recently deleted, f.txt taken
+/// along, live), then makes x/P/new in it. With P's node id.
+fn written_into_a_removed_ignored_folder() -> Result<WrittenInto, Box<dyn std::error::Error>> {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", ignoring("x/\n"))?;
+    let mut b = Client::new(&server, "b")?;
+    b.write("keep.txt", "k")?;
+    b.write("x/P/f.txt", "f")?;
+    b.sync()?;
+    a.sync()?;
+    remove_on_drive(&server, &|name| name == "P")?;
+    let p = {
+        let s = server.lock().map_err(|_| "poisoned")?;
+        s.removed().find_map(|h| h.node()).ok_or("P removed")?
+    };
+    FakeRemote::new(server.clone()).create(&hbsync_remote::contract::folder("new", p), None)?;
+    server.lock().map_err(|_| "poisoned")?.tick();
+    Ok((server, a, b, p))
+}
+
+/// a ignores x/; b syncs x/P/f.txt. Another app removes P (to Recently deleted, f.txt taken
+/// along, live) and then makes x/P/new in it: a live child, which keeps P (§6.3). For a, new
+/// is in a folder it doesn't sync, not an orphan: it leaves it. It moved new into Recovered
+/// files on the drive, and P stayed deleted for b, f.txt with it. b brings P back with both.
+#[test]
+fn what_is_written_into_a_removed_folder_a_device_ignores_is_left() -> R {
+    let (server, mut a, mut b, _) = written_into_a_removed_ignored_folder()?;
+    let report = a.sync()?;
+    assert_eq!(report.ops_done, 0, "{report:?}");
+    assert_eq!(a.tree_text(""), ["keep.txt = k"]);
+    b.sync()?;
+    assert_eq!(
+        b.tree_text(""),
+        ["keep.txt = k", "x/", "x/P/", "x/P/f.txt = f", "x/P/new/"]
+    );
+    let (_, removed) = server_names(&server)?;
+    assert!(!removed, "nothing in Recently deleted");
+    Ok(())
+}
+
+/// As above, with no computer syncing x/ (b made x/P/f.txt and is gone): new stays in P, which
+/// stays in Recently deleted. The purge (here as a) removes what the delete took along and
+/// deletes it for good, never P: it holds a live node, written after its removal (§10).
+#[test]
+fn what_no_device_syncs_stays_in_its_removed_folder_through_the_purge() -> R {
+    let (server, mut a, _b, p) = written_into_a_removed_ignored_folder()?;
+    a.sync()?;
+    // The purge, twice, a day apart: the first removes what the delete took along, the second
+    // deletes it for good.
+    for _ in 0..2 {
+        a.engine.drive().purge(0)?;
+        a.sync()?;
+        server
+            .lock()
+            .map_err(|_| "poisoned")?
+            .advance(24 * 60 * 60 * 1000);
+    }
+    assert_eq!(a.tree_text(""), ["keep.txt = k"]);
+    let s = server.lock().map_err(|_| "poisoned")?;
+    let mut live = s.live_names();
+    live.sort();
+    assert_eq!(
+        live,
+        ["keep.txt", "new", "x"],
+        "f.txt went for good, new stays"
+    );
+    let removed: Vec<_> = s.removed().filter_map(|h| h.node()).collect();
+    assert_eq!(removed, [p], "P stays in Recently deleted, holding new");
+    Ok(())
+}
+
 /// A folder's delete removes the folder first, then what is in it (node schema, Recently
 /// deleted). A child whose removal failed follows later; meanwhile another client doesn't bring
 /// the folder back for it (§6.3), and the folder's restore brings both back.

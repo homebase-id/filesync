@@ -1754,3 +1754,50 @@ fn regression_what_a_folder_waiting_for_a_folders_page_deletes_waits_with_it() {
     assert_eq!(whole.1, 0, "{whole:?}");
     assert_eq!(end(Some(1)), whole, "in pages of one");
 }
+
+/// c2 makes d/c.txt; the phone deletes d and stops after the folder (c.txt live, taken along),
+/// then edits c.txt there: a live child, which keeps d (§6.3). c1 ignores everything named d
+/// (§10): what is in d isn't its. It planned c.txt as an orphan (d in Recently deleted, at a
+/// place it filters) and moved another device's file into Recovered files on the drive; d
+/// stayed deleted for the others. Now it leaves it, and the computers that sync d bring it
+/// back with the file.
+#[test]
+fn regression_a_computer_leaves_what_is_written_into_a_removed_folder_it_ignores() {
+    use Action::*;
+    let mut sim = Sim::new(3).with_narrow_check();
+    let act = |client, action| Event::Act { client, action };
+    let (c_txt, d) = (3, 5); // NAMES: "c.txt", "d"
+    let root = sim.pick(2, NodeId::ROOT, true).expect("root");
+    sim.run(&[act(
+        2,
+        CreateFolder {
+            parent: root,
+            name: d,
+        },
+    )]);
+    let folder = sim.item(2, "d").expect("d");
+    let parent = sim.pick(2, folder, true).expect("d");
+    sim.run(&[act(
+        2,
+        CreateFile {
+            parent,
+            name: c_txt,
+        },
+    )]);
+    assert!(sim.quiesce(30), "no convergence");
+    let pick = sim.stopped_pick(folder).expect("d on the drive");
+    sim.run(&[
+        act(0, DeleteStopped { pick, done: 0 }),
+        act(0, EditTaken { pick: 0 }),
+    ]);
+    // c1 plans first, alone.
+    sim.run(&[Event::Plan { client: 1 }]);
+    for _ in 0..4 {
+        sim.run(&[Event::Step { client: 1 }]);
+    }
+    assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+    assert_eq!(sim.server_paths(), ["d", "d/c.txt"]);
+}

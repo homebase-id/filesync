@@ -12,9 +12,10 @@ enum Parent {
     Recover,
     /// It waits for more information.
     Wait,
-    /// It isn't this device's: the place it would take is one this device doesn't sync (§10).
-    /// Left as it is, for a device that syncs that place: brought in, it would read as an item
-    /// this device stopped syncing, and leave the drive.
+    /// It isn't this device's: the place it would take is one this device doesn't sync (§10),
+    /// or it is in a folder in Recently deleted at a place it filters. Left as it is, for a
+    /// device that syncs that place: brought in, it would read as an item this device stopped
+    /// syncing, and leave the drive; or another device's folder would stay deleted without it.
     Leave,
 }
 
@@ -63,9 +64,10 @@ impl Reconciler<'_> {
 
     /// Where the orphan `node` goes: Recovered files ([`NodeId::RECOVERED`]), made here if no
     /// side knows it (one in Recently deleted, or synced here before, comes back as any folder
-    /// a live child keeps does). The main folder adopts orphans (§12); a role folder's never
-    /// meets one but through a folder it filters, and puts that at its top, as does the main
-    /// folder where Recovered files isn't synced here (filtered) or is the orphan itself.
+    /// a live child keeps does). The main folder adopts orphans (§12); a role folder's meets
+    /// one only where it holds it (what is in a folder it filters is left, Parent::Leave), or
+    /// in a file, and puts that at its top, as does the main folder where Recovered files isn't
+    /// synced here (filtered) or is the orphan itself.
     fn recovered_files(&mut self, node: NodeId) -> NodeId {
         let place = self.recovery_place(node);
         if place == NodeId::RECOVERED
@@ -164,6 +166,15 @@ impl Reconciler<'_> {
             .names(path.iter().map(String::as_str), is_dir)
             .is_sync()
             .then_some(path)
+    }
+
+    /// Whether `node`'s folder is one this device doesn't sync (masked, §10): a folder in
+    /// Recently deleted at a place it filters, which the merge never holds.
+    fn in_masked(&self, node: NodeId) -> bool {
+        self.merged.get(node).is_some_and(|state| {
+            self.input.removed.contains_key(&state.parent)
+                && self.masks.masked.contains(&state.parent)
+        })
     }
 
     /// Whether this device holds anything of `node` or below it here (a local item, a base).
@@ -303,7 +314,13 @@ impl Reconciler<'_> {
                     self.wait_together(vec![node, parent]);
                     Parent::Wait
                 }
-                Parent::Recover if !self.holds_any(node) && self.recovered_path(node).is_none() => {
+                // Left to the devices that sync where it would go, or where it is: in a folder
+                // in Recently deleted at a place this device filters (masked, §10), it is
+                // another device's to bring back with its folder, no orphan (§6.3).
+                Parent::Recover
+                    if !self.holds_any(node)
+                        && (self.in_masked(node) || self.recovered_path(node).is_none()) =>
+                {
                     Parent::Leave
                 }
                 decided => decided,
