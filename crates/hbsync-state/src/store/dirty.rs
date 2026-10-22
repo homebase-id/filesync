@@ -1,17 +1,71 @@
 //! The dirty set: what each folder plans again.
 
 use super::*;
+use std::collections::HashSet;
 
 /// A dirty node as a round read it with its page ([`ReadTx::dirty_marks`]): its mark's version.
 /// A change of the drive's picture moves the version of a node dirty already
 /// ([`ReadTx::mark_changed_in`]): another engine's pull or an announcement may record one while
 /// a folder's round plans, and the round clears only the mark it read ([`FolderTx::clear_mark`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Mark {
     pub node: NodeId,
     /// `nodes.id`.
     id: i64,
     pub version: u64,
+}
+
+/// Live node `m` was written by the time of removal `r` (`along::taken_along`): its time or the
+/// removal's not known yet (this device's own write, an open removal) counts as written before.
+const WRITTEN_BY_REMOVAL: &str =
+    "(r.removed_at IS NULL OR m.changed_at IS NULL OR m.changed_at <= r.removed_at)";
+/// [`WRITTEN_BY_REMOVAL`] below a node `t` taken along by the removal at `t.at`.
+const WRITTEN_BY_TAKEN: &str = "(t.at IS NULL OR m.changed_at IS NULL OR m.changed_at <= t.at)";
+
+/// A recursive CTE `sub(id)`: the node `?1` and its subtree on any side (the base's, here,
+/// the drive's), across sides (a child here of a folder in the base, say).
+fn subtree_any_side() -> String {
+    format!(
+        "sub(id) AS (SELECT {ID_OF} \
+           UNION SELECT b.id FROM base b JOIN sub ON b.parent = sub.id AND b.folder = $F \
+           UNION SELECT l.id FROM local l JOIN sub ON l.parent = sub.id AND l.folder = $F \
+           UNION SELECT m.id FROM remote m JOIN sub ON m.parent = sub.id)"
+    )
+}
+
+/// A recursive CTE `taken(id, at)`: the live nodes a folder's removal took along
+/// (`along::taken_along`), each with the time of the removal that took it: below the removed
+/// folders `n` that `seeds` lets in.
+fn taken_along(seeds: &str) -> String {
+    format!(
+        "taken(id, at) AS ( \
+           SELECT m.id, r.removed_at FROM removed r JOIN nodes n ON n.uuid = r.node \
+           JOIN remote m ON m.parent = n.id \
+           WHERE r.kind = 1 AND {WRITTEN_BY_REMOVAL} AND {seeds} \
+           UNION SELECT m.id, t.at FROM remote m JOIN taken t ON m.parent = t.id \
+           WHERE {WRITTEN_BY_TAKEN})"
+    )
+}
+
+impl Mark {
+    /// The node's row id in the store (`nodes.id`): 8 bytes, for sets of many.
+    pub fn row(&self) -> i64 {
+        self.id
+    }
+}
+
+/// Nodes a query of [`ReadTx::pending_among`] asks about (SQLite allows only so many
+/// variables in one).
+const PENDING_CHUNK: usize = 500;
+
+/// A dirty mark from a row of `d.id, n.uuid, d.seq`.
+fn mark_row(r: &Row<'_>) -> rusqlite::Result<Result<Mark>> {
+    let (id, uuid, seq) = (r.get(0)?, r.get::<_, Vec<u8>>(1)?, r.get::<_, i64>(2)?);
+    Ok(codec::node(&uuid).map(|node| Mark {
+        node,
+        id,
+        version: seq as u64,
+    }))
 }
 
 impl ReadTx<'_> {
@@ -55,14 +109,51 @@ impl ReadTx<'_> {
             .is_some())
     }
 
+    /// Of `nodes` (a page's view outside it), those whose change is still to be planned: dirty,
+    /// or with a delete held for the user out of the dirty set ([`FolderTx::hold_delete`]).
+    /// A query per [`PENDING_CHUNK`] nodes, the last one padded, so its text is the same
+    /// (cached).
+    pub fn pending_among(&self, nodes: &[NodeId]) -> Result<HashSet<NodeId>> {
+        let mut pending = HashSet::new();
+        if nodes.is_empty() {
+            return Ok(pending);
+        }
+        static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            let rows = vec!["(?)"; PENDING_CHUNK].join(", ");
+            format!(
+                "WITH q(u) AS (VALUES {rows}) SELECT DISTINCT q.u FROM q \
+                 CROSS JOIN nodes n ON n.uuid = q.u \
+                 WHERE EXISTS (SELECT 1 FROM dirty d WHERE d.folder = $F AND d.id = n.id) \
+                 OR EXISTS (SELECT 1 FROM held_deletes h WHERE h.folder = $F AND h.id = n.id)"
+            )
+        });
+        let mut stmt = self.prep(&SQL)?;
+        for chunk in nodes.chunks(PENDING_CHUNK) {
+            let pad = std::iter::repeat_n(&chunk[0], PENDING_CHUNK - chunk.len());
+            let params = chunk.iter().chain(pad).map(|n| n.0.as_bytes().to_vec());
+            let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+                r.get::<_, Vec<u8>>(0)
+            })?;
+            for row in rows {
+                pending.insert(codec::node(&row?)?);
+            }
+        }
+        Ok(pending)
+    }
+
+    /// `node`'s dirty mark, if it is dirty.
+    pub fn dirty_mark(&self, node: NodeId) -> Result<Option<Mark>> {
+        self.prep(&format!(
+            "SELECT d.id, n.uuid, d.seq FROM dirty d JOIN nodes n ON n.id = d.id \
+             WHERE d.folder = $F AND d.id = {ID_OF}"
+        ))?
+        .query_row([node.0.as_bytes()], mark_row)
+        .optional()?
+        .transpose()
+    }
+
     pub fn is_dirty(&self, node: NodeId) -> Result<bool> {
-        Ok(self
-            .prep(&format!(
-                "SELECT 1 FROM dirty WHERE folder = $F AND id = {ID_OF}"
-            ))?
-            .query_row([node.0.as_bytes()], |_| Ok(()))
-            .optional()?
-            .is_some())
+        Ok(self.dirty_mark(node)?.is_some())
     }
 
     /// Up to `limit` dirty nodes in id order, starting after `after`, each with its [`Mark`],
@@ -74,28 +165,61 @@ impl ReadTx<'_> {
         after: Option<DirtyCursor>,
         limit: usize,
     ) -> Result<(Vec<Mark>, Option<DirtyCursor>)> {
-        let mut stmt = self.prep(
+        let marks = self.many(
             "SELECT d.id, n.uuid, d.seq FROM dirty d JOIN nodes n ON n.id = d.id \
              WHERE d.folder = $F AND d.id > ?1 ORDER BY d.id LIMIT ?2",
+            params![after.map_or(0, |c| c.0), limit as i64],
+            |r| mark_row(r)?,
         )?;
-        let rows = stmt.query_map(params![after.map_or(0, |c| c.0), limit as i64], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, Vec<u8>>(1)?,
-                r.get::<_, i64>(2)?,
-            ))
-        })?;
-        let mut marks = Vec::new();
-        for row in rows {
-            let (id, uuid, seq) = row?;
-            marks.push(Mark {
-                node: codec::node(&uuid)?,
-                id,
-                version: seq as u64,
-            });
-        }
         let last = marks.last().map(|m| DirtyCursor(m.id));
         Ok((marks, last))
+    }
+
+    /// The dirty nodes of `node`'s subtree on any side (it too: the base's, here, the drive's),
+    /// each with its [`Mark`], up to `limit` (`usize::MAX`: all), in id order: what a deleted
+    /// folder takes or holds, planned as a page of its own. Walks the subtree: one query.
+    pub fn dirty_marks_under(&self, node: NodeId, limit: usize) -> Result<Vec<Mark>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.many(
+            &format!(
+                "WITH RECURSIVE {} \
+                 SELECT d.id, n.uuid, d.seq FROM sub JOIN dirty d ON d.folder = $F AND d.id = sub.id \
+                 JOIN nodes n ON n.id = d.id ORDER BY d.id LIMIT ?2",
+                subtree_any_side()
+            ),
+            params![node.0.as_bytes(), limit],
+            |r| mark_row(r)?,
+        )
+    }
+
+    /// Up to `limit` dirty nodes in `node`'s subtree on any side, it too, in no order: what a
+    /// page of its own of `node` would plan ([`ReadTx::dirty_marks_under`]; a held delete out
+    /// of the dirty set is planned again only when a view reaches it, as in one page). Walks
+    /// the subtree till it has them: one query.
+    pub fn dirty_under(&self, node: NodeId, limit: usize) -> Result<Vec<NodeId>> {
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        self.many(
+            &format!(
+                "WITH RECURSIVE {} \
+                 SELECT n.uuid FROM sub JOIN dirty d ON d.folder = $F AND d.id = sub.id \
+                 JOIN nodes n ON n.id = d.id LIMIT ?2",
+                subtree_any_side()
+            ),
+            params![node.0.as_bytes(), limit],
+            |r| codec::node(&r.get::<_, Vec<u8>>(0)?),
+        )
+    }
+
+    /// The folders directly in `folder` in the base: where a subtree too big for a page splits.
+    pub fn base_child_folders(&self, folder: NodeId) -> Result<Vec<NodeId>> {
+        self.many(
+            &format!(
+                "SELECT n.uuid FROM base b JOIN nodes n ON n.id = b.id \
+                 WHERE b.folder = $F AND b.parent = {ID_OF} AND b.kind = 1"
+            ),
+            [folder.0.as_bytes()],
+            |r| codec::node(&r.get::<_, Vec<u8>>(0)?),
+        )
     }
 
     /// Local rows of dirty nodes that have neither a base nor a mirror row: what adoption may
@@ -127,7 +251,24 @@ impl ReadTx<'_> {
     /// the whole delete, not one planning batch: with [`ReadTx::held_file_deletes`].
     pub fn pending_file_deletes(&self) -> Result<(u64, u64)> {
         // From the dirty set (CROSS JOIN keeps it outer): not a scan of every base row.
-        self.file_deletes("dirty d WHERE d.folder = $F")
+        let (here, there) = self.file_deletes("dirty d WHERE d.folder = $F")?;
+        Ok((here, there + self.taken_files()?))
+    }
+
+    /// Synced files still live below a folder in Recently deleted that its removal took along
+    /// (a delete stopped half way, §6.3; the rule of `along::taken_along`: written no later
+    /// than the removal of the nearest removed folder above, or at a time not known yet),
+    /// dirty or not (a folder's removal marks only itself), gone remotely as the guard counts,
+    /// also where planned in pages apart from their folder. One query, nothing read while
+    /// nothing is dirty (no plan to judge): the removed folders, and what is live below them
+    /// (hardly ever any).
+    fn taken_files(&self) -> Result<u64> {
+        self.count(&format!(
+            "WITH RECURSIVE {} \
+             SELECT COUNT(DISTINCT t.id) FROM taken t JOIN base b ON b.folder = $F AND b.id = t.id \
+             WHERE b.kind = 0",
+            taken_along("EXISTS (SELECT 1 FROM dirty WHERE folder = $F)")
+        ))
     }
 
     /// [`ReadTx::pending_file_deletes`] of the nodes of held deletes out of the dirty set
@@ -155,18 +296,23 @@ impl ReadTx<'_> {
     /// What a confirmed delete of dirty `node` covers of the
     /// [`pending_file_deletes`](Self::pending_file_deletes): whether `node` is a file gone
     /// locally (deleted remotely, one node at a time), and the files gone remotely in its local
-    /// subtree (a trash takes everything under it along). `None` when `node` isn't dirty.
+    /// subtree (a trash takes everything under it along): the dirty ones gone from the drive,
+    /// and the synced ones a folder's removal took along, still live there (as `taken_files`
+    /// counts them). `None` when `node` isn't dirty.
     pub fn confirmed_file_deletes(&self, node: NodeId) -> Result<Option<(bool, Vec<NodeId>)>> {
         static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             format!(
                 "WITH RECURSIVE top(id) AS (SELECT {ID_OF}), \
                  sub(id) AS (SELECT id FROM top \
                    UNION SELECT l.id FROM local l JOIN sub ON l.parent = sub.id \
-                   WHERE l.folder = $F) \
-                 SELECT n.uuid, d.id = (SELECT id FROM top), \
-                   coalesce({GONE_LOCALLY}, 0), coalesce({GONE_REMOTELY}, 0) \
-                 FROM sub JOIN dirty d ON d.folder = $F AND d.id = sub.id \
-                 JOIN nodes n ON n.id = d.id LEFT JOIN base b ON b.folder = $F AND b.id = d.id"
+                   WHERE l.folder = $F), {} \
+                 SELECT n.uuid, k.id IS NOT NULL AND d.id = (SELECT id FROM top), \
+                   k.id IS NOT NULL AND coalesce({GONE_LOCALLY}, 0), \
+                   coalesce(k.id IS NOT NULL AND {GONE_REMOTELY}, 0) \
+                     OR coalesce(b.kind = 0 AND EXISTS (SELECT 1 FROM taken t WHERE t.id = d.id), 0) \
+                 FROM (SELECT id FROM sub) d LEFT JOIN dirty k ON k.folder = $F AND k.id = d.id \
+                 JOIN nodes n ON n.id = d.id LEFT JOIN base b ON b.folder = $F AND b.id = d.id",
+                taken_along("n.id IN (SELECT id FROM sub)")
             )
         });
         let mut stmt = self.prep(&SQL)?;

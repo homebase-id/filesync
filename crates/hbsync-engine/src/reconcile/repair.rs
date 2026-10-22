@@ -139,9 +139,23 @@ impl Reconciler<'_> {
                     _ => Parent::Wait,
                 },
             };
-            // Left as it is till an item here is hashed: never an orphan to adopt.
+            // Left as it is till an item here is hashed: never an orphan to adopt. What another
+            // page plans, or its folder, waits to be planned with it, as a page of its own next
+            // (`Plan::waits_together`): no folder brought back for it here, none merged (its
+            // change unmerged, it read alive and brought its deleted folder back: review 14 R1).
             let decided = match decided {
                 Parent::Recover if self.held.contains(&node) => Parent::Wait,
+                // Held for another page, with its folders: decided there, never brought back
+                // here (its folder may go with it there).
+                Parent::Recover | Parent::Folder(_) if self.paged.contains(&node) => Parent::Wait,
+                Parent::Recover if self.elsewhere(node) => {
+                    self.wait_together(vec![node]);
+                    Parent::Wait
+                }
+                Parent::Folder(_) if self.elsewhere(node) || self.elsewhere(parent) => {
+                    self.wait_together(vec![node, parent]);
+                    Parent::Wait
+                }
                 decided => decided,
             };
             match decided {
@@ -218,14 +232,11 @@ impl Reconciler<'_> {
                             .zip(self.merged.get(*m))
                             .is_some_and(|(r, t)| !r.same_place(t))
                 });
-                // What waits for a hash stays as it is (`held`).
-                let local_moved = local_moved.filter(|m| !self.held.contains(m));
+                // What waits for a hash stays as it is (`held`), and what another page plans.
+                let stays = |m: &NodeId| self.held.contains(m) || self.elsewhere(*m);
+                let local_moved = local_moved.filter(|m| !stays(m));
                 let victim = local_moved.unwrap_or_else(|| {
-                    *members
-                        .iter()
-                        .filter(|m| !self.held.contains(m))
-                        .min()
-                        .unwrap_or(&node)
+                    *members.iter().filter(|m| !stays(m)).min().unwrap_or(&node)
                 });
                 let fallback = self
                     .input
@@ -370,10 +381,19 @@ impl Reconciler<'_> {
                     .copied()
                     .filter(|n| !group.contains(n))
                     .collect();
+                // What another page plans holds its name too: what of this page would take it
+                // waits, planned with it as a page of its own next (`Plan::waits_together`),
+                // the clash decided there as in one page.
+                let elsewhere: Vec<NodeId> = group
+                    .iter()
+                    .copied()
+                    .filter(|n| self.elsewhere(*n))
+                    .collect();
                 let holders: Vec<NodeId> = on_drive
                     .iter()
                     .copied()
                     .chain(group.iter().copied().filter(|n| self.holds_name(*n)))
+                    .chain(elsewhere.iter().copied())
                     .collect();
                 // A clash with what waits for a hash: everything planned in it waits, held
                 // or not (a held folder made or tagged too: never onto a name taken); what
@@ -385,6 +405,9 @@ impl Reconciler<'_> {
                         .into_iter()
                         .filter(|n| self.scope.contains(n))
                         .collect();
+                    if !elsewhere.is_empty() && !planned.is_empty() {
+                        self.wait_together([&elsewhere[..], &planned[..]].concat());
+                    }
                     for n in planned {
                         if !self.wait_for_name(n) {
                             continue;

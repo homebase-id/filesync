@@ -1,7 +1,7 @@
 //! The properties: random runs of every kind, each judged by the oracle.
 
 use crate::common::*;
-use hbsync_sim::Sim;
+use hbsync_sim::{Event, Sim};
 use proptest::prelude::*;
 
 proptest! {
@@ -149,6 +149,82 @@ proptest! {
         events in proptest::collection::vec(with_crashes(3, events_of(3, deleting_action())), 0..120)
     ) {
         run(3, &events)?;
+    }
+
+    /// Each client plans its nodes in pages of 1 to 4 (`Sim::with_small_pages`), as the engine
+    /// plans a dirty set of more than a page (20,000 nodes), while folders are deleted, stopped
+    /// half way and purged: what a page leaves to another holds its folders, and a folder held
+    /// so goes with its subtree as a page of its own. The clients converge without loss, and no
+    /// deleted folder comes back (a child alive as context kept it alive: review 14 R1).
+    #[test]
+    fn clients_planning_in_small_pages_converge_without_loss(
+        size in 1usize..5,
+        events in proptest::collection::vec(events_of(3, stopped_delete_action()), 0..100),
+    ) {
+        run_with(3, None, |sim| sim.with_small_pages(size), &events)?;
+    }
+
+    /// The users act (folders deleted, stopped half way, purged), the clients syncing all now
+    /// and then: in pages of 1 to 4 they end with as many folders and files on the drive as
+    /// in one page, and as many files in Recently deleted apart from their folders (a name
+    /// clash's numbered name may go to the other node: no-loss checks the bytes). A delete
+    /// spanning pages
+    /// that brought its folders back (a child alive as context kept them alive, review 14 R1)
+    /// converged all the same, on folders no one kept: only the comparison shows it. Without
+    /// what depends on the order of writes: what another device does while a client writes
+    /// (`Meanwhile`), what picks from Recently deleted by its order (removal times), what a
+    /// trash keeps on its device (junk, ignored items: it gets new folders, or keeps its old
+    /// one, as the folders above it go before or after it, and a folder too big for a page
+    /// goes as its folders first), and edits on more than one device (a conflict copy's id
+    /// comes from the version it forked at, which the number of writes before sets, and an
+    /// action picks its node by id order).
+    #[test]
+    fn planning_in_small_pages_ends_as_planning_whole(
+        size in 1usize..5,
+        acts in proptest::collection::vec(
+            (0usize..3, stopped_delete_action(), proptest::bool::weighted(0.25)).prop_map(
+                |(client, action, sync)| {
+                    use hbsync_sim::Action::*;
+                    match action {
+                        // Order-dependent: a purge instead.
+                        Meanwhile { .. }
+                        | Restore { .. }
+                        | EmptyItem { .. }
+                        | EmptyListed
+                        | ListDeleted
+                        | EditTaken { .. }
+                        | ToggleIgnore
+                        | CreateJunk { .. } => (client, Purge, sync),
+                        // Edits on one device.
+                        Edit { .. } | EditWriting { .. } | Lock { .. } => (0, action, sync),
+                        _ => (client, action, sync),
+                    }
+                },
+            ),
+            0..60,
+        ),
+    ) {
+        let end = |paged: bool| -> Result<(usize, usize, usize), TestCaseError> {
+            // The same dirty set as the engine keeps (`with_small_pages`), in one page or many.
+            let pages = if paged { size } else { 1_000_000 };
+            let mut sim = Sim::new(3).without_ignore_rules().with_small_pages(pages);
+            for &(client, action, sync) in &acts {
+                sim.run(&[Event::Act { client, action }]);
+                if sync {
+                    prop_assert!(sim.quiesce(30), "no convergence (in pages: {paged})");
+                }
+            }
+            prop_assert!(sim.quiesce(30), "no convergence (in pages: {paged})");
+            if let Err(e) = sim.check() {
+                return Err(TestCaseError::fail(format!("in pages: {paged}: {e}")));
+            }
+            // How many folders and files are there, whatever their names (a clash's numbered
+            // name may go to the other node), and how many files Recently deleted lists apart
+            // from their folders.
+            let (folders, files) = sim.server_counts();
+            Ok((folders, files, sim.removed_files_apart()))
+        };
+        prop_assert_eq!(end(true)?, end(false)?);
     }
 }
 

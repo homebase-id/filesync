@@ -14,8 +14,24 @@ use hbsync_types::{NodeId, NodeKind, RemoteRef, VersionTag};
 
 use crate::crash::Placement;
 
+/// Where a client's sweep over its nodes in pages is ([`crate::Sim::with_small_pages`]), as the
+/// engine's over its dirty set.
+#[derive(Debug, Default)]
+pub(crate) struct Pages {
+    /// The last node of the last page (`None`: a sweep starts).
+    pub(crate) after: Option<NodeId>,
+    /// What its pages wait for, planned as pages of their own.
+    pub(crate) own: hbsync_engine::pages::OwnPages,
+    /// The sweep ended with the last page: a new one starts at the next.
+    pub(crate) ended: bool,
+    /// What pages of their own planned this sweep: not planned again in its pages.
+    pub(crate) planned_own: BTreeSet<NodeId>,
+}
+
 #[derive(Debug)]
 pub(crate) struct Client {
+    /// Its sweep over its nodes in pages, where it plans so.
+    pub(crate) pages: std::cell::RefCell<Pages>,
     pub(crate) name: String,
     /// Its computer's id for the account (`Options::computer`): the folders of one computer
     /// share it, as they share one state DB.
@@ -135,6 +151,7 @@ impl Client {
             parked: HashMap::new(),
             planned_local: Tree::new(),
             planned_remote: Tree::new(),
+            pages: Default::default(),
             plan_saw: Tree::new(),
             run_filter: Arc::new(filter.clone()),
             filter: Arc::new(filter),

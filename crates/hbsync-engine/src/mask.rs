@@ -223,6 +223,24 @@ impl Masks {
             .iter()
             .map(|n| detached.get(n).copied().unwrap_or(*n))
             .collect();
+        // What another page plans, but what this view plans now (masked, or detached: a new
+        // node in its place).
+        let elsewhere = |nodes: &HashSet<NodeId>| -> HashSet<NodeId> {
+            nodes
+                .iter()
+                .copied()
+                .filter(|n| !dirty.contains(n) && !detached.contains_key(n))
+                .collect()
+        };
+        let (dirty_elsewhere, going_above) = (
+            elsewhere(&input.dirty_elsewhere),
+            elsewhere(&input.going_above),
+        );
+        let going = input
+            .going
+            .iter()
+            .map(|n| detached.get(n).copied().unwrap_or(*n))
+            .collect();
         let view = Input {
             base: input.base.clone(),
             local,
@@ -236,6 +254,9 @@ impl Masks {
             removed: input.removed.clone(),
             changed_at: input.changed_at.clone(),
             coverage: input.coverage.clone(),
+            dirty_elsewhere,
+            going,
+            going_above,
         };
         Masks {
             masked,

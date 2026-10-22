@@ -16,6 +16,7 @@ pub mod held;
 mod id;
 pub mod mask;
 pub mod mirror;
+pub mod pages;
 pub mod plan;
 pub mod policy;
 pub mod reconcile;

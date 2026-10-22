@@ -232,13 +232,7 @@ fn build(
                         folder |= state.kind == NodeKind::Folder;
                     }
                 }
-                let is_folder =
-                    |t: &crate::tree::Tree| t.get(node).is_some_and(|s| s.kind == NodeKind::Folder);
-                let stays = is_folder(&b.input.local)
-                    && is_folder(&b.input.remote)
-                    && b.input.remote.path(node).is_some()
-                    && !hidden.contains(&node);
-                if folder && !stays {
+                if folder && crate::pages::may_go(&b.input, node, &hidden) {
                     coverage.full.insert(node);
                 }
             }
@@ -440,6 +434,11 @@ fn build(
                 b.input.remote.remove(n);
             }
         }
+    }
+    // What the page leaves to other pages (§6.5): nothing where it is all there is to plan
+    // (a count; the page's nodes are dirty marks).
+    if s.pending_count()? > b.input.dirty.len() as u64 {
+        crate::pages::dirty_elsewhere(&mut b.input, filter, scope, &mut StorePending(s))?;
     }
     if full.is_some() {
         b.input.coverage = Some(coverage);
@@ -679,5 +678,20 @@ impl Builder<'_, '_> {
             }
         }
         Ok(())
+    }
+}
+
+/// The state DB as [`crate::pages::dirty_elsewhere`] asks it.
+struct StorePending<'a, 'b>(&'a ReadTx<'b>);
+
+impl crate::pages::Pending for StorePending<'_, '_> {
+    type Error = StateError;
+    fn among(&mut self, nodes: &[NodeId]) -> Result<HashSet<NodeId>, StateError> {
+        self.0.pending_among(nodes)
+    }
+    fn below(&mut self, folder: NodeId, page: &BTreeSet<NodeId>) -> Result<bool, StateError> {
+        // One beyond the page's nodes is enough to tell.
+        let under = self.0.dirty_under(folder, page.len() + 1)?;
+        Ok(under.iter().any(|n| !page.contains(n)))
     }
 }

@@ -116,7 +116,7 @@ pub(crate) fn run(clients: usize, events: &[Event]) -> Result<(), TestCaseError>
 pub(crate) fn run_with(
     clients: usize,
     guard: Option<usize>,
-    setup: fn(Sim) -> Sim,
+    setup: impl Fn(Sim) -> Sim,
     events: &[Event],
 ) -> Result<(), TestCaseError> {
     run_settled(clients, guard, setup, |sim| sim.quiesce(30), events)
@@ -126,7 +126,7 @@ pub(crate) fn run_with(
 pub(crate) fn run_settled(
     clients: usize,
     guard: Option<usize>,
-    setup: fn(Sim) -> Sim,
+    setup: impl Fn(Sim) -> Sim,
     settle: fn(&mut Sim) -> bool,
     events: &[Event],
 ) -> Result<(), TestCaseError> {

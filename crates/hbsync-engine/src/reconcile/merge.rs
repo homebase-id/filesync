@@ -27,7 +27,7 @@ fn remote_change(i: &Input, node: NodeId) -> Change {
 /// device wrote, whose time it doesn't know, was. A folder's delete removes the folder first,
 /// then what is in it: until it has, they count as gone. One written after the removal is a
 /// change of its own, and keeps the folder alive (§6.3).
-pub(super) fn taken_along(i: &Input) -> HashSet<NodeId> {
+pub(crate) fn taken_along(i: &Input) -> HashSet<NodeId> {
     if i.removed.is_empty() {
         return HashSet::new();
     }
@@ -274,7 +274,11 @@ impl Reconciler<'_> {
                 r.tags.clone()
             };
         }
-        if self.held.contains(&node) && !self.stays_put(node, target.as_ref()) {
+        // Held for another page: as it is, nothing done (not even made where it isn't yet,
+        // into a folder that may not be there): its own page decides.
+        if self.held.contains(&node)
+            && (self.paged.contains(&node) || !self.stays_put(node, target.as_ref()))
+        {
             if target.is_none() {
                 self.plan.delete_waits.push(node);
             }
