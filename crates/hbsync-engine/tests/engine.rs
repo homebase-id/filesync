@@ -5984,3 +5984,44 @@ fn a_held_delete_below_a_removed_folder_doesnt_hold_it_for_good() -> R {
     }
     Ok(())
 }
+
+/// On the drive `X/B/g/z.txt` and `A`; b moves `B` into `A` and deletes `A/B/g` here, while
+/// another device edits `z.txt` and deletes `A` on the drive. `A` waits for the page that
+/// plans the edit, with what of the page is below it across sides (`g` is in `A` only here):
+/// the edit keeps `g` and `z.txt`, in pages as in one (review 17: `g` went, and the edit
+/// with it into Recently deleted).
+#[test]
+fn a_folder_below_a_waiting_one_across_sides_waits_too() -> R {
+    let outcome = |batch: usize| -> Result<(Vec<String>, Vec<String>), Box<dyn std::error::Error>> {
+        let server = server();
+        let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+        let mut b = Client::with_config(&server, "b", move |cfg| {
+            cfg.guard.allow = true;
+            cfg.batch = batch;
+        })?;
+        a.write("X/B/g/z.txt", "z")?;
+        a.write("A/k.txt", "k")?;
+        a.write("keep.txt", "k")?;
+        a.sync()?;
+        b.sync()?;
+        fs::rename(b.root.join("X/B"), b.root.join("A/B"))?;
+        fs::remove_dir_all(b.root.join("A/B/g"))?;
+        a.write("X/B/g/z.txt", "edited")?;
+        a.sync()?;
+        fs::remove_dir_all(a.root.join("A"))?;
+        a.sync()?;
+        settle(&mut b)?;
+        let mut c = Client::with_config(&server, "c", |cfg| cfg.guard.allow = true)?;
+        c.sync()?;
+        Ok((b.tree_text(""), c.tree_text("")))
+    };
+    let whole = outcome(20_000)?;
+    assert!(
+        whole.0.iter().any(|l| l.contains("z.txt = edited")),
+        "{whole:?}"
+    );
+    for batch in [1, 2, 3] {
+        assert_eq!(outcome(batch)?, whole, "pages of {batch}");
+    }
+    Ok(())
+}

@@ -786,8 +786,8 @@ impl Engine {
         let mut whole = after.is_none();
         let mut swept = false;
         self.own_pages.new_sweep();
-        // The nodes pages of their own planned this sweep.
-        let mut planned_own: std::collections::HashSet<NodeId> = Default::default();
+        // The nodes pages of their own planned this sweep, by row id (8 bytes a node), sorted.
+        let mut planned_own: Vec<i64> = Vec::new();
         // Rounds that planned something: a page whose nodes a page of their own planned this
         // sweep is passed over without one.
         let mut rounds = 0;
@@ -819,7 +819,7 @@ impl Engine {
                     Some(_) => dirty,
                     None => dirty
                         .into_iter()
-                        .filter(|m| !planned_own.contains(&m.node))
+                        .filter(|m| planned_own.binary_search(&m.row()).is_err())
                         .collect(),
                 };
                 let stale = !dirty.is_empty()
@@ -863,7 +863,9 @@ impl Engine {
                 progress |= report.ops_done > done_before;
             }
             if own.is_some() {
-                planned_own.extend(dirty.iter().map(|m| m.node));
+                planned_own.extend(dirty.iter().map(|m| m.row()));
+                planned_own.sort_unstable();
+                planned_own.dedup();
                 continue;
             }
             after = next;

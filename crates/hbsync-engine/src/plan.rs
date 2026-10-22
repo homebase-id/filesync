@@ -68,9 +68,9 @@ pub struct Options {
     pub held_files: (usize, usize),
     /// Ids a detach must not give: already known here (an earlier detach of the same node).
     pub taken: Arc<HashSet<NodeId>>,
-    /// The page is one of its own ([`crate::pages::OwnPages`]): a folder's subtree, or one
-    /// piece of a subtree too big for a page, so what is in it doesn't wait for a folder above
-    /// it that another page deletes ([`Input::going_above`]): that one goes after it.
+    /// The page is a piece of a folder's subtree too big for a page
+    /// ([`crate::pages::OwnPages`]), so what is in it doesn't wait for a folder above it that
+    /// another page deletes ([`Input::going_above`]): that one goes after it.
     pub own_page: bool,
 }
 

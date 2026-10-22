@@ -22,6 +22,10 @@ pub(crate) struct Pages {
     pub(crate) after: Option<NodeId>,
     /// What its pages wait for, planned as pages of their own.
     pub(crate) own: hbsync_engine::pages::OwnPages,
+    /// The sweep ended with the last page: a new one starts at the next.
+    pub(crate) ended: bool,
+    /// What pages of their own planned this sweep: not planned again in its pages.
+    pub(crate) planned_own: BTreeSet<NodeId>,
 }
 
 #[derive(Debug)]

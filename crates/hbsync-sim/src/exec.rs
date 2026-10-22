@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use hbsync_engine::Against;
 use hbsync_engine::mask::masked;
+use hbsync_engine::pages::subtree_any_side;
 use hbsync_engine::plan::{Acts, Met, TagWrite, not_reached, tags_written};
 use hbsync_engine::reconcile::{
     Agreement, BaseExtra, DeleteGuard, DriveVersion, Input, Masking, Op, Options, Removed,
@@ -2243,26 +2244,41 @@ fn next_page(
     size: usize,
 ) -> (Vec<NodeId>, bool) {
     let mut pages = client.pages.borrow_mut();
+    // A new sweep once the last one's last page was planned (what it waits for queued), as
+    // the engine's.
+    if std::mem::take(&mut pages.ended) {
+        pages.own.new_sweep();
+        pages.planned_own.clear();
+    }
     let mut store = SimPages { client, input, all };
     if let Ok(Some((page, piece))) = pages.own.next(size, &mut store) {
+        pages.planned_own.extend(page.iter().copied());
         return (page, piece);
     }
-    let page: Vec<NodeId> = match pages.after {
-        Some(after) => all
-            .range((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded))
-            .take(size)
-            .copied()
-            .collect(),
-        None => all.iter().take(size).copied().collect(),
-    };
-    if page.len() < size {
-        // The sweep's end: the next starts over, everything to try again.
-        pages.after = None;
-        pages.own.new_sweep();
-    } else {
-        pages.after = page.last().copied();
+    loop {
+        let read: Vec<NodeId> = match pages.after {
+            Some(after) => all
+                .range((std::ops::Bound::Excluded(after), std::ops::Bound::Unbounded))
+                .take(size)
+                .copied()
+                .collect(),
+            None => all.iter().take(size).copied().collect(),
+        };
+        if read.len() < size {
+            pages.after = None;
+            pages.ended = true;
+        } else {
+            pages.after = read.last().copied();
+        }
+        // What a page of its own planned this sweep isn't planned again in it.
+        let page: Vec<NodeId> = read
+            .into_iter()
+            .filter(|n| !pages.planned_own.contains(n))
+            .collect();
+        if !page.is_empty() || pages.ended {
+            return (page, false);
+        }
     }
-    (page, false)
 }
 
 /// A client's model as [`hbsync_engine::pages::dirty_elsewhere`] asks it: `all` its dirty
@@ -2287,23 +2303,6 @@ impl hbsync_engine::pages::Pending for SimPending<'_> {
             .into_iter()
             .any(|n| self.all.contains(&n) && !page.contains(&n)))
     }
-}
-
-/// `folder` and its subtree on any side, across sides (a child here of a folder in the base,
-/// say), in id order: as the store's query walks it.
-fn subtree_any_side(trees: [&hbsync_engine::tree::Tree; 3], folder: NodeId) -> BTreeSet<NodeId> {
-    let mut seen = BTreeSet::from([folder]);
-    let mut queue = vec![folder];
-    while let Some(node) = queue.pop() {
-        for tree in trees {
-            for child in tree.children(node) {
-                if seen.insert(child) {
-                    queue.push(child);
-                }
-            }
-        }
-    }
-    seen
 }
 
 /// A client's model as [`hbsync_engine::pages::OwnPages`] reads it: `all` its dirty nodes.

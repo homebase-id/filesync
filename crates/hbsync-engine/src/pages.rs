@@ -94,7 +94,7 @@ pub(crate) fn may_go(input: &Input, node: NodeId, hidden: &HashSet<NodeId>) -> b
 
 /// What a page waits for to be planned with, as a page of its own: nodes, and folders with
 /// their dirty subtrees.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Default)]
 struct Want {
     nodes: Vec<NodeId>,
     folders: Vec<NodeId>,
@@ -136,7 +136,8 @@ pub trait PageStore {
 pub struct OwnPages {
     /// Each with whether it was split already (too big: its folders first).
     queue: Vec<(Want, bool)>,
-    tried: HashSet<Want>,
+    /// What was tried this sweep, whatever it is a piece of.
+    tried: HashSet<(Vec<NodeId>, Vec<NodeId>)>,
     /// What the page [`OwnPages::next`] gave last was made of.
     current: Option<Want>,
 }
@@ -172,7 +173,10 @@ impl OwnPages {
                 .collect(),
         };
         for want in wants.into_iter().rev() {
-            if self.tried.insert(want.clone()) {
+            if self
+                .tried
+                .insert((want.nodes.clone(), want.folders.clone()))
+            {
                 self.queue.push((want, false));
             }
         }
@@ -182,7 +186,11 @@ impl OwnPages {
     /// too, across syncs (one that stopped at its round limit goes on with it), tried once
     /// more this sweep.
     pub fn new_sweep(&mut self) {
-        self.tried = self.queue.iter().map(|(want, _)| want.clone()).collect();
+        self.tried = self
+            .queue
+            .iter()
+            .map(|(want, _)| (want.nodes.clone(), want.folders.clone()))
+            .collect();
         self.current = None;
     }
 
@@ -273,4 +281,21 @@ impl OwnPages {
         self.current = Some(want);
         Ok(marks)
     }
+}
+
+/// `folder` and its subtree on any side, across sides (a child here of a folder in the base,
+/// say), in id order: as the store walks it.
+pub fn subtree_any_side(trees: [&Tree; 3], folder: NodeId) -> BTreeSet<NodeId> {
+    let mut seen = BTreeSet::from([folder]);
+    let mut queue = vec![folder];
+    while let Some(node) = queue.pop() {
+        for tree in trees {
+            for child in tree.children(node) {
+                if seen.insert(child) {
+                    queue.push(child);
+                }
+            }
+        }
+    }
+    seen
 }

@@ -34,16 +34,24 @@ fn subtree_any_side() -> String {
 }
 
 /// A recursive CTE `taken(id, at)`: the live nodes a folder's removal took along
-/// (`along::taken_along`), each with the time of the removal that took it.
-fn taken_along() -> String {
+/// (`along::taken_along`), each with the time of the removal that took it: below the removed
+/// folders `n` that `seeds` lets in.
+fn taken_along(seeds: &str) -> String {
     format!(
         "taken(id, at) AS ( \
            SELECT m.id, r.removed_at FROM removed r JOIN nodes n ON n.uuid = r.node \
            JOIN remote m ON m.parent = n.id \
-           WHERE r.kind = 1 AND {WRITTEN_BY_REMOVAL} \
+           WHERE r.kind = 1 AND {WRITTEN_BY_REMOVAL} AND {seeds} \
            UNION SELECT m.id, t.at FROM remote m JOIN taken t ON m.parent = t.id \
            WHERE {WRITTEN_BY_TAKEN})"
     )
+}
+
+impl Mark {
+    /// The node's row id in the store (`nodes.id`): 8 bytes, for sets of many.
+    pub fn row(&self) -> i64 {
+        self.id
+    }
 }
 
 /// Nodes a query of [`ReadTx::pending_among`] asks about (SQLite allows only so many
@@ -255,14 +263,11 @@ impl ReadTx<'_> {
     /// nothing is dirty (no plan to judge): the removed folders, and what is live below them
     /// (hardly ever any).
     fn taken_files(&self) -> Result<u64> {
-        if self.dirty_count()? == 0 {
-            return Ok(0);
-        }
         self.count(&format!(
             "WITH RECURSIVE {} \
              SELECT COUNT(DISTINCT t.id) FROM taken t JOIN base b ON b.folder = $F AND b.id = t.id \
              WHERE b.kind = 0",
-            taken_along()
+            taken_along("EXISTS (SELECT 1 FROM dirty WHERE folder = $F)")
         ))
     }
 
@@ -307,7 +312,7 @@ impl ReadTx<'_> {
                      OR coalesce(b.kind = 0 AND EXISTS (SELECT 1 FROM taken t WHERE t.id = d.id), 0) \
                  FROM (SELECT id FROM sub) d LEFT JOIN dirty k ON k.folder = $F AND k.id = d.id \
                  JOIN nodes n ON n.id = d.id LEFT JOIN base b ON b.folder = $F AND b.id = d.id",
-                taken_along()
+                taken_along("n.id IN (SELECT id FROM sub)")
             )
         });
         let mut stmt = self.prep(&SQL)?;

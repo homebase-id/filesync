@@ -117,7 +117,7 @@ pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
         // Placements that clash across pages: held as they are, with their folders.
         let placed: Vec<NodeId> = placed
             .into_iter()
-            .filter(|n| !holds.held.contains(n))
+            .filter(|n| !holds.paged.contains(n))
             .collect();
         for &node in &placed {
             holds.held.extend(held_from(view, node));
@@ -313,20 +313,23 @@ impl Holds {
             .collect();
         going.sort();
         going.dedup();
+        // The folders and what of the page is below them, across sides: left as they are,
+        // nothing done (`paged`). The folders above those, and the folders each is in now
+        // (moved out, say): held as they are, as above a file not hashed yet.
         let mut paged = HashSet::new();
+        let mut above_them = HashSet::new();
+        let trees = [&input.base, &input.local, &input.remote];
         for &folder in &going {
             paged.insert(folder);
-            paged.extend(held_from(input, folder));
-            for tree in [&input.base, &input.local, &input.remote] {
-                for node in tree.subtree(folder) {
-                    // With the folders it is in now, on every side (moved out of it, say).
-                    if input.dirty.contains(&node) && paged.insert(node) {
-                        paged.extend(held_from(input, node));
-                    }
+            above_them.extend(held_from(input, folder));
+            for node in crate::pages::subtree_any_side(trees, folder) {
+                if input.dirty.contains(&node) && paged.insert(node) {
+                    above_them.extend(held_from(input, node));
                 }
             }
         }
         held.extend(&paged);
+        held.extend(above_them);
         Holds {
             by_file,
             waits: BTreeSet::new(),
@@ -429,22 +432,10 @@ impl<'a> Reconciler<'a> {
     /// for another page, or for such a wait). The node is planned again held as it is (`placed`): nothing sent to
     /// fail meanwhile.
     fn places_held_elsewhere(&mut self) {
-        if self.elsewhere.is_empty() {
+        if self.elsewhere.is_empty() && self.paged.is_empty() {
             return;
         }
         let i = self.input;
-        let made = |local: bool| -> HashSet<NodeId> {
-            self.plan
-                .ops
-                .iter()
-                .filter_map(|op| match op {
-                    Op::LocalMkdir { node, .. } if local => Some(*node),
-                    Op::RemoteCreate { node, .. } if !local => Some(*node),
-                    _ => None,
-                })
-                .collect()
-        };
-        let (made_here, made_there) = (made(true), made(false));
         let mut together = Vec::new();
         for op in &self.plan.ops {
             let (node, parent, name, side) = match op {
@@ -456,21 +447,18 @@ impl<'a> Reconciler<'a> {
                 }
                 | Op::LocalDownload {
                     node, parent, name, ..
-                } => (*node, *parent, name, (&i.local, &made_here)),
+                } => (*node, *parent, name, &i.local),
                 Op::RemoteCreate {
                     node, parent, name, ..
                 }
                 | Op::RemoteUpdate {
                     node, parent, name, ..
-                } => (*node, *parent, name, (&i.remote, &made_there)),
+                } => (*node, *parent, name, &i.remote),
                 _ => continue,
             };
-            let (side, made) = side;
+            // Neither is made by this plan: one is in another page, the other left as it is.
             let mut with: Vec<NodeId> = Vec::new();
-            if (self.elsewhere(parent) || self.paged.contains(&parent))
-                && !side.contains(parent)
-                && !made.contains(&parent)
-            {
+            if (self.elsewhere(parent) || self.paged.contains(&parent)) && !side.contains(parent) {
                 with.push(parent);
             }
             if let Some(occupant) = side.child_named(parent, name, Some(node))
