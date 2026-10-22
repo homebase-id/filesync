@@ -14,6 +14,7 @@ use hbsync_engine::{EngineConfig, SyncReport};
 use hbsync_platform::name::name_key;
 use hbsync_remote::fake::FakeServer;
 use hbsync_state::testkit::Commit;
+use hbsync_types::NodeId;
 
 mod common;
 
@@ -514,6 +515,117 @@ fn crashes_of(seed: u64) -> Res<usize> {
                 down[i] = crash_at(&mut clients[i], at, before, kept)?;
                 crashes += usize::from(down[i]);
             }
+        }
+    }
+    let [mut a, mut b] = clients;
+    converged(&mut a, &mut b, &ledger, &server)?;
+    Ok(crashes)
+}
+
+/// As [`randomized_crashes`], with the mass-delete guard on at its strictest (no minimum, no
+/// share): every delete here is held, and a removal elsewhere of every synced file, and the user answers now and then, confirming them or putting them back, crashes
+/// and power cuts coming at any commit around those answers too. At the end the user confirms
+/// what is still held: the clients converge, with nothing lost and nothing twice.
+#[test]
+fn randomized_guarded_crashes() -> R {
+    let crashes = each_seed(seeds(), guarded_crashes_of)?;
+    let total: usize = crashes.iter().sum();
+    assert!(total >= crashes.len(), "only {total} crashes");
+    Ok(())
+}
+
+/// Two clients of `server` with the guard on at its strictest: every delete here is held.
+fn guarded_pair(server: &Arc<Mutex<FakeServer>>) -> Res<[Client; 2]> {
+    let guard = |c: &mut EngineConfig| {
+        c.guard.min = 0;
+        c.guard.fraction = 0.0;
+    };
+    Ok([
+        Client::with_config(server, "a", guard)?,
+        Client::with_config(server, "b", guard)?,
+    ])
+}
+
+/// Syncs `c`, whose scan then saw what its user did; what it holds for the user, and whether
+/// it did anything.
+fn guarded_sync(c: &mut Client, ledger: &mut Ledger) -> Res<(Vec<NodeId>, bool)> {
+    let report = c.sync()?;
+    ledger.scanned(&c.root);
+    let held = report.held.iter().map(|op| op.node()).collect();
+    Ok((held, report.ops_done > 0))
+}
+
+/// The user answers `shown`, held on `c`: delete, or put them back.
+fn answer(c: &mut Client, shown: Vec<NodeId>, rng: &mut Rng) -> Res<()> {
+    if rng.below(2) == 0 {
+        c.engine.confirm_deletes(shown);
+    } else {
+        c.engine.put_back(&shown)?;
+    }
+    Ok(())
+}
+
+/// One seed of [`randomized_guarded_crashes`]: how many crashes it had.
+fn guarded_crashes_of(seed: u64) -> Res<usize> {
+    let server = server();
+    let mut clients = guarded_pair(&server)?;
+    let mut rng = Rng(seed);
+    let mut ledger = Ledger::default();
+    let mut crashes = 0;
+    let mut down = [false; 2];
+    // What each client last held for its user.
+    let mut held: [Vec<NodeId>; 2] = Default::default();
+    for _ in 0..30 {
+        let i = rng.below(2);
+        match rng.below(4) {
+            0 => {
+                if std::mem::take(&mut down[i]) {
+                    held[i] = guarded_sync(&mut clients[i], &mut ledger)?.0;
+                }
+                act(&clients[i].root, &mut rng, &mut ledger)?;
+            }
+            1 => {
+                down[i] = false;
+                held[i] = guarded_sync(&mut clients[i], &mut ledger)?.0;
+                // The user answers what was shown, as often as not right away: delete, or put
+                // back (the next case, later).
+                if !held[i].is_empty() && rng.below(2) == 0 {
+                    answer(&mut clients[i], std::mem::take(&mut held[i]), &mut rng)?;
+                }
+            }
+            2 if !held[i].is_empty() && !down[i] => {
+                answer(&mut clients[i], std::mem::take(&mut held[i]), &mut rng)?;
+            }
+            _ => {
+                let at = if rng.below(2) == 0 {
+                    rng.below(8)
+                } else {
+                    rng.below(64)
+                };
+                let before = rng.below(2) == 0;
+                let kept = match rng.below(3) {
+                    0 => Kept::All,
+                    1 => Kept::Durable(None),
+                    _ => Kept::Durable(Some(rng.below(at + 1))),
+                };
+                down[i] = crash_at(&mut clients[i], at, before, kept)?;
+                crashes += usize::from(down[i]);
+            }
+        }
+    }
+    // The user confirms what is still held, till a round holds nothing and does nothing (a
+    // delete confirmed on one may be held on the other: every synced file there).
+    for _ in 0..12 {
+        let mut any = false;
+        for c in clients.iter_mut() {
+            let (shown, did) = guarded_sync(c, &mut ledger)?;
+            any |= did || !shown.is_empty();
+            if !shown.is_empty() {
+                c.engine.confirm_deletes(shown);
+            }
+        }
+        if !any {
+            break;
         }
     }
     let [mut a, mut b] = clients;

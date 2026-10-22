@@ -152,6 +152,15 @@ pub enum Action {
     Meanwhile {
         op: usize,
     },
+    /// Another device changes the node of this client's next local operation once its check
+    /// passed and its change is made here, before its commit, and the account pulls that
+    /// change meanwhile (another folder's engine, or an announcement): it edits the node where
+    /// it is a file (`op` even), removes it (odd), or restores one in Recently deleted. The
+    /// operation then commits as the executor does, against the drive as it is now: the
+    /// change must still be planned, nothing lost.
+    PullMidLocal {
+        op: usize,
+    },
     /// An app that opened a file before the client moved it aside to delete it (sync semantics
     /// §7) writes to it there, through its handle: a file of what is aside on the client, a new
     /// version. Nothing when nothing is aside.

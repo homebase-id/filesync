@@ -20,6 +20,17 @@ proptest! {
         run(3, &events)?;
     }
 
+    /// Another device's change of a node (an edit, a removal, a restore) is pulled between a
+    /// local operation's check and its commit (`Action::PullMidLocal`): the commit is against
+    /// the drive as it is then, the change is still planned, and the clients converge without
+    /// loss.
+    #[test]
+    fn a_pull_between_a_local_check_and_its_commit_loses_nothing(
+        events in proptest::collection::vec(events_of(3, pulling_action()), 0..120)
+    ) {
+        run(3, &events)?;
+    }
+
     /// The drive refuses some requests as they are, for good (a write it won't take, a
     /// download whose bytes don't match at a version): each client records a refusal and
     /// doesn't send the same operation again (`hbsync_engine::refused`). The record never hides

@@ -30,6 +30,15 @@ pub(crate) fn action() -> impl Strategy<Value = Action> + Clone {
     ]
 }
 
+/// The users' actions, with another device's change of a node pulled between a local
+/// operation's check and its commit ([`Action::PullMidLocal`]) now and then.
+pub(crate) fn pulling_action() -> impl Strategy<Value = Action> + Clone {
+    prop_oneof![
+        6 => action(),
+        1 => (0usize..16).prop_map(|op| Action::PullMidLocal { op }),
+    ]
+}
+
 /// The users' actions, with deletes another device stops half way and purges, more often.
 pub(crate) fn stopped_delete_action() -> impl Strategy<Value = Action> + Clone {
     let i = || 0usize..16;

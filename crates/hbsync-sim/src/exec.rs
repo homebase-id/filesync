@@ -504,6 +504,14 @@ impl Sim {
             None => None,
         };
         let outcome = self.execute(c, &op);
+        // Checked and done here, not committed yet: another device's change of the node may
+        // be pulled now ([`Action::PullMidLocal`]).
+        if outcome == Outcome::Done
+            && is_local(&op)
+            && let Some(pick) = self.clients[c].pull_mid_local.take()
+        {
+            self.pull_mid_local(c, node, pick);
+        }
         let landed = outcome == Outcome::Landed;
         let remote_write = outcome == Outcome::Done && writes_drive(&op);
         let outcome = if landed { Outcome::Done } else { outcome };
@@ -800,6 +808,38 @@ impl Sim {
         for name in kept {
             self.ledger.tags.kept_on_new_item(c, node, &name);
         }
+    }
+
+    /// Another device changes `node` between client `c`'s local operation's check and its
+    /// commit, and the account pulls it ([`Action::PullMidLocal`], `pick`): edits it where it is
+    /// a file (`pick` even), removes it (odd), or restores it from Recently deleted.
+    ///
+    /// [`Action::PullMidLocal`]: crate::Action::PullMidLocal
+    fn pull_mid_local(&mut self, c: usize, node: NodeId, pick: usize) {
+        if node == NodeId::RECOVERED || Role::of(node).is_some() {
+            return;
+        }
+        let what = match self
+            .server
+            .node(node)
+            .map(|(n, removed)| (n.state.kind, removed))
+        {
+            None => return,
+            Some((_, true)) => {
+                self.restore_with(node);
+                "restored"
+            }
+            Some((NodeKind::File, false)) if pick.is_multiple_of(2) => {
+                let version = VersionTag(self.server.uuid());
+                self.edit_on_drive(node, version);
+                "edited"
+            }
+            Some(_) => {
+                self.remove_live([node], true);
+                "removed"
+            }
+        };
+        self.note(|_| format!("  pulled mid-commit of c{c} {node}: {what}"));
     }
 
     /// Another device changes `node`, which client `c`'s remote write over `replaced` (the
@@ -2277,6 +2317,21 @@ fn planned(ops: &[Op]) -> Vec<Planned<'_>> {
             }
         })
         .collect()
+}
+
+/// Whether `op` is a local operation: one the executor checks against the item here, does,
+/// then commits.
+fn is_local(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::LocalMkdir { .. }
+            | Op::LocalMove { .. }
+            | Op::LocalDownload { .. }
+            | Op::LocalTags { .. }
+            | Op::LocalTrash { .. }
+            | Op::LocalFork { .. }
+            | Op::LocalDetach { .. }
+    )
 }
 
 #[cfg(test)]
