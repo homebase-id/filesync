@@ -17,9 +17,10 @@ const IDENTITY: &str = "test.example";
 
 pub type Res<T> = Result<T, Box<dyn std::error::Error>>;
 
-/// Called by the engine between a round's plan and its clearing of the dirty marks the plan
-/// found clean ([`EngineConfig::after_plan`]): what another engine or an announcement may do
-/// then.
+/// Called by the engine at a fixed point of a sync, for what another engine or an announcement
+/// may do then: between a round's plan and its clearing of the dirty marks the plan found
+/// clean ([`EngineConfig::after_plan`]), or between a sweep's reading of the guard's counts
+/// and its first page ([`EngineConfig::after_counts`]).
 #[derive(Clone)]
 pub struct AfterPlan(pub Arc<dyn Fn() + Send + Sync>);
 

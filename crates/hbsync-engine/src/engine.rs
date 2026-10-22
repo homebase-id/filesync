@@ -50,6 +50,9 @@ pub struct EngineConfig {
     /// Tests: called between a round's plan and its clearing of the dirty marks.
     #[cfg(feature = "testkit")]
     pub after_plan: Option<crate::testkit::AfterPlan>,
+    /// Tests: called between a sweep's reading of the guard's counts and its first page.
+    #[cfg(feature = "testkit")]
+    pub after_counts: Option<crate::testkit::AfterPlan>,
 }
 
 impl EngineConfig {
@@ -65,6 +68,8 @@ impl EngineConfig {
             check_narrow: false,
             #[cfg(feature = "testkit")]
             after_plan: None,
+            #[cfg(feature = "testkit")]
+            after_counts: None,
         }
     }
 }
@@ -651,41 +656,24 @@ impl Engine {
                 *self.held.pending.insert(p)
             }
         };
-        let (pending_deletes, synced_files, confirmed, computer, saved) = self.db.read(|s| {
-            let (here, there) = s.pending_file_deletes()?;
-            let (here, there) = (here + held_pending.0, there + held_pending.1);
+        let any = !self.held.ops.is_empty();
+        let (mut counts, computer, saved) = self.db.read(|s| {
             // Held as every synced file: until answered, each while its removal is pending.
             let saved: std::collections::HashSet<NodeId> =
                 read_wiped(s.get_kv(keys::WIPED)?.as_deref())
                     .into_iter()
                     .collect();
-            let mut still = std::collections::HashSet::new();
-            // Each file once, however many confirmed trashes it is under.
-            let (mut confirmed_here, mut confirmed_there) = (0, std::collections::HashSet::new());
-            for node in confirmed {
-                if let Some((gone_here, gone_there)) = s.confirmed_file_deletes(node)? {
-                    confirmed_here += u64::from(gone_here);
-                    confirmed_there.extend(gone_there);
-                    still.insert(node);
-                }
-            }
-            let pending = (
-                here.saturating_sub(confirmed_here),
-                there.saturating_sub(confirmed_there.len() as u64),
-            );
-            // Nothing dirty, nothing to plan: the guard has nothing to weigh against them.
-            let synced = match s.dirty_count()? == 0 && self.held.ops.is_empty() {
-                true => 0,
-                false => s.base_file_count()?,
-            };
+            let counts = guard_counts(s, &confirmed, Some(held_pending), None, any)?;
             // This computer's id for the account ([`Options::computer`]): every open gives the
             // DB one, so none is a fault, never a reason to plan without.
             let computer = s.db_id()?;
             if computer.is_empty() {
                 return Err(StateError::Corrupt("it has no id (db.id)".into()));
             }
-            Ok((pending, synced, still, computer, saved))
+            Ok((counts, computer, saved))
         })?;
+        let confirmed = std::mem::take(&mut counts.confirmed);
+        let (pending_deletes, synced_files) = (counts.pending, counts.synced.unwrap_or(0));
         self.confirmed = confirmed;
         let guard = self.cfg.guard;
         // This device's own removals held out are planned again once the guard would let them
@@ -726,7 +714,7 @@ impl Engine {
             save_wiped(&mut self.db, &wiped)?;
         }
         self.wiped = wiped.clone();
-        let opts = Options {
+        let mut opts = Options {
             device: self.cfg.device.clone(),
             computer,
             date: date.to_owned(),
@@ -738,6 +726,10 @@ impl Engine {
             held_files: self.held.files,
             taken: Arc::default(),
         };
+        #[cfg(feature = "testkit")]
+        if let Some(after) = &self.cfg.after_counts {
+            (after.0)();
+        }
         // The dirty set is planned page by page in node id order and swept round after
         // round, across syncs, so nodes that stay dirty (deferred, failing) can't starve the
         // rest; held deletes leave it once nothing else is (`hold_out`). A sync stops after a
@@ -756,7 +748,34 @@ impl Engine {
                 report.stopped = true;
                 break;
             }
-            let (dirty, next) = self.db.read(|s| s.dirty_marks(after, self.cfg.batch))?;
+            // Each page with the guard's counts of what it holds: counted again, in the same
+            // read, when another connection committed since they were (a pull, an
+            // announcement: what it marked counts too; never less than before), or when nothing
+            // dirty had them skip the synced files; with what is held as every synced file so
+            // far this sync.
+            let (dirty, next, fresh) = self.db.read(|s| {
+                let (dirty, next) = s.dirty_marks(after, self.cfg.batch)?;
+                let stale = !dirty.is_empty()
+                    && (counts.synced.is_none() || s.data_version()? != counts.version);
+                let fresh = match stale {
+                    true => Some(guard_counts(s, &self.confirmed, None, counts.synced, true)?),
+                    false => None,
+                };
+                Ok((dirty, next, fresh))
+            })?;
+            if let Some(mut fresh) = fresh {
+                // Never less pending than the sweep judged its earlier pages by: what this
+                // sync did meanwhile (a base gone with a file gone on both sides) or a restore
+                // elsewhere doesn't let through the rest of what those pages held.
+                fresh.pending = (
+                    fresh.pending.0.max(counts.pending.0),
+                    fresh.pending.1.max(counts.pending.1),
+                );
+                opts.synced_files = fresh.synced.unwrap_or(0) as usize;
+                opts.pending_deletes = (fresh.pending.0 as usize, fresh.pending.1 as usize);
+                opts.wiped = Arc::new(self.wiped.clone());
+                counts = fresh;
+            }
             if !dirty.is_empty() {
                 report.rounds += 1;
                 let done_before = report.ops_done;
@@ -1138,6 +1157,64 @@ enum Pull {
     Now,
     /// Only if the account's picture isn't [`Drive::current`].
     IfBehind,
+}
+
+/// What the mass-delete guard weighs a page's deletes against, as one read had it.
+#[derive(Debug)]
+struct Counts {
+    /// Files pending deletion across the dirty set and the held deletes out of it, but the
+    /// confirmed ones: (gone locally, gone remotely).
+    pending: (u64, u64),
+    /// The synced files; `None` when not counted (nothing was dirty).
+    synced: Option<u64>,
+    /// The confirmations whose deletes are still pending.
+    confirmed: std::collections::HashSet<NodeId>,
+    /// The connection's [`ReadTx::data_version`] before the read.
+    version: u64,
+}
+
+/// The guard's [`Counts`] in `s`: `held`, the files of the held deletes out of the dirty set
+/// (read here when `None`); `synced`, the synced files as counted already for the sweep (kept:
+/// it judges all its pages by one), else counted here if `count` or anything is dirty (with
+/// nothing dirty there is nothing to weigh, and a sync with nothing new reads no table).
+fn guard_counts(
+    s: &ReadTx<'_>,
+    confirmed: &std::collections::HashSet<NodeId>,
+    held: Option<(u64, u64)>,
+    synced: Option<u64>,
+    count: bool,
+) -> Result<Counts, StateError> {
+    let version = s.data_version()?;
+    let (here, there) = s.pending_file_deletes()?;
+    let held = match held {
+        Some(held) => held,
+        None => s.held_file_deletes()?,
+    };
+    let (here, there) = (here + held.0, there + held.1);
+    let mut still = std::collections::HashSet::new();
+    // Each file once, however many confirmed trashes it is under.
+    let (mut confirmed_here, mut confirmed_there) = (0, std::collections::HashSet::new());
+    for &node in confirmed {
+        if let Some((gone_here, gone_there)) = s.confirmed_file_deletes(node)? {
+            confirmed_here += u64::from(gone_here);
+            confirmed_there.extend(gone_there);
+            still.insert(node);
+        }
+    }
+    let synced = match synced {
+        Some(synced) => Some(synced),
+        None if count || s.dirty_count()? > 0 => Some(s.base_file_count()?),
+        None => None,
+    };
+    Ok(Counts {
+        pending: (
+            here.saturating_sub(confirmed_here),
+            there.saturating_sub(confirmed_there.len() as u64),
+        ),
+        synced,
+        confirmed: still,
+        version,
+    })
 }
 
 /// The nodes [`keys::WIPED`] holds; an id that doesn't parse is left out.
