@@ -150,7 +150,11 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    so while it does, a removed folder holds live nodes. A remote node in a folder in Recently
    deleted (directly or through live folders) written no later than the folder's removal, by
    the server's times, is remotely deleted with it; one written after (an edit or a new file from
-   a device that didn't know yet) keeps the folder alive: restored. Made here before its
+   a device that didn't know yet) keeps the folder alive: restored. Restored so, the folder
+   keeps what its removal took along that is unchanged here, as restoring a folder restores
+   what was deleted with it (node schema, Recently deleted), whether the plan holds those
+   nodes or not; one changed here stays taken along (§4: the drive's version stays with the
+   removal, this device's goes up as a new item). Made here before its
    restore on the drive, the folder has the removed version as its base until the restore
    settles (another device may restore it first, with changes of its own: a tag it removed
    stays removed). A removed folder outside this

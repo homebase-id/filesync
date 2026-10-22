@@ -111,6 +111,35 @@ impl Reconciler<'_> {
         }
     }
 
+    /// What the removal of `folder`, brought back, took along (still live on the drive, below
+    /// it there) and isn't changed here: merged as if no removal had, as the restore brings it
+    /// back with the folder (node schema, Recently deleted). One changed here stays taken: the
+    /// version the drive has, which this device never had, stays with the removal, and this
+    /// device's goes up as a new item (§4). A dirty one is merged again; the rest is context
+    /// as the drive has it. Each queued for [`Self::fix_orphans`].
+    fn untake_below(&mut self, folder: NodeId, queue: &mut Vec<NodeId>) {
+        let below: Vec<NodeId> = self
+            .input
+            .remote
+            .subtree(folder)
+            .into_iter()
+            .filter(|n| {
+                *n != folder && self.taken.contains(n) && !self.local_change(*n).is_change()
+            })
+            .collect();
+        for node in below {
+            self.taken.remove(&node);
+            if self.input.dirty.contains(&node) {
+                // Merged as taken: what that said (a delete's conflict) goes with it.
+                self.plan.conflicts.retain(|c| c.node() != node);
+                self.merge_node(node);
+            } else if let Some(state) = self.input.remote.get(node) {
+                self.merged.insert(node, state.clone());
+            }
+            queue.push(node);
+        }
+    }
+
     pub(super) fn fix_orphans(&mut self) {
         let mut queue: Vec<NodeId> = self.merged.ids().collect();
         queue.sort();
@@ -172,6 +201,9 @@ impl Reconciler<'_> {
                     }
                     self.retarget(parent, state);
                     queue.push(parent);
+                    // Restoring a folder restores what was deleted with it (node schema,
+                    // Recently deleted): what its removal took along, still live, stays.
+                    self.untake_below(parent, &mut queue);
                 }
                 Parent::Recover => {
                     if let Some(mut state) = self.merged.get(node).cloned() {
