@@ -2397,3 +2397,44 @@ fn a_folder_an_edit_restores_keeps_what_its_delete_took_along() {
         );
     }
 }
+
+/// As [`a_folder_an_edit_restores_keeps_what_its_delete_took_along`], `d` restored by its own
+/// change here (renamed): what its removal took along, unchanged, stays with it too, in the
+/// plan (`y`, dirty) or not (`h`).
+#[test]
+fn a_folder_restored_by_its_own_change_keeps_what_its_delete_took_along() {
+    let [d, y, h] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.input.remote_complete = true;
+    w.synced(d, folder(ROOT, "d"))
+        .synced(y, file(d, "y", "y"))
+        .synced(h, folder(d, "h"));
+    w.remote(d, None);
+    w.input.removed.insert(
+        d,
+        hbsync_engine::reconcile::Removed {
+            at: 100,
+            state: folder(ROOT, "d"),
+        },
+    );
+    for n in [y, h] {
+        w.input.changed_at.insert(n, 10);
+    }
+    w.local(d, Some(folder(ROOT, "e")));
+    w.input.dirty.insert(y);
+    let plan = w.plan();
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, Op::RemoteCreate { node, .. } if *node == d)),
+        "{:#?}",
+        plan.ops
+    );
+    assert!(
+        !plan.ops.iter().any(|op| [y, h].contains(&op.node())),
+        "{:#?}",
+        plan.ops
+    );
+}

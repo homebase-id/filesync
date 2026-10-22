@@ -395,6 +395,11 @@ impl<'a> Reconciler<'a> {
             }
             self.fix_orphans();
         }
+        // A removed folder kept keeps what its removal took along (node schema, Recently
+        // deleted): planned again as live, then its place checked as anything else's.
+        if self.untake_kept() {
+            self.fix_orphans();
+        }
         debug_assert!(
             self.scope.iter().all(|&n| {
                 self.merged.cycle_members(n).is_empty()
