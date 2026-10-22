@@ -370,7 +370,7 @@ impl Sim {
             (plan.ops.clone(), Vec::new())
         } else {
             let client = &self.clients[c];
-            let held = hbsync_engine::refused::hold_back(
+            let split = hbsync_engine::refused::take_refused(
                 plan.ops.clone(),
                 |op| {
                     Ok::<_, Infallible>(
@@ -389,8 +389,8 @@ impl Sim {
                 },
                 client.os != Os::Linux,
             );
-            let Ok(held) = held;
-            held
+            let Ok(split) = split;
+            split
         };
         let waiting: Vec<Op> = match self.faults.refusing {
             true => plan
@@ -402,7 +402,7 @@ impl Sim {
             false => Vec::new(),
         };
         let client = &mut self.clients[c];
-        client.held_back = refused
+        client.blocked = refused
             .into_iter()
             .map(|op| (op, true))
             .chain(waiting.into_iter().map(|op| (op, false)))

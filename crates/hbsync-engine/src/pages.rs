@@ -1,5 +1,5 @@
 //! The dirty set planned in pages (sync semantics §6.5): what a page leaves to another, and
-//! what it waits for (folders held for it with their dirty subtrees, clashes across pages),
+//! what it waits for (folders that wait for it with their dirty subtrees, clashes across pages),
 //! planned as pages of their own. The engine's rules, shared with the simulator's small-pages
 //! mode.
 
@@ -25,7 +25,7 @@ pub trait Pending {
 }
 
 /// What `input`'s page leaves to another page (sync semantics §6.5): its view's nodes outside
-/// the page still to plan, held as they are ([`Input::dirty_elsewhere`]); its topmost folders
+/// the page still to plan, left as they are ([`Input::dirty_elsewhere`]); its topmost folders
 /// that may go with something below them still to plan ([`Input::going`]); and the folders
 /// above its nodes that may go and another page plans ([`Input::going_above`]). A query a
 /// 500 nodes outside the page, and one a topmost such folder.
@@ -53,7 +53,7 @@ pub fn dirty_elsewhere<P: Pending>(
         (input.base.contains(n) || input.removed.contains_key(&n) || taken.contains(&n))
             && may_go(input, n, &hidden)
     };
-    let above = |n: NodeId| crate::reconcile::held_from(input, n);
+    let above = |n: NodeId| above_any_side(input, n);
     let in_page: HashSet<NodeId> = input.dirty.iter().copied().filter(|&n| goes(n)).collect();
     let mut going = HashSet::new();
     for &folder in &in_page {
@@ -123,12 +123,12 @@ pub trait PageStore {
 }
 
 /// What a page waits for to be planned with, as a page of its own (sync semantics §6.5):
-/// folders it held for what in them is dirty in another page ([`Plan::waits_for_pages`]),
+/// folders that wait for what in them is dirty in another page ([`Plan::waits_for_pages`]),
 /// with their dirty subtrees, a folder's own after its folders' where it is too big; and nodes
 /// whose names or places clash across pages, together ([`Plan::waits_together`]). A stack. A
 /// page of its own that still waits (a folder there whose name another page's node holds, say)
-/// is planned again with what it waits for, one larger page. Each once a sweep: what is held
-/// again by its own page (a held delete in it, say) waits for the next.
+/// is planned again with what it waits for, one larger page. Each once a sweep: what waits
+/// again in its own page (for a held delete in it, say) waits for the next.
 ///
 /// [`Plan::waits_for_pages`]: crate::plan::Plan::waits_for_pages
 /// [`Plan::waits_together`]: crate::plan::Plan::waits_together
@@ -281,6 +281,26 @@ impl OwnPages {
         self.current = Some(want);
         Ok(marks)
     }
+}
+
+/// Every folder `seed` is in here, on the drive or in the base, and every folder those are in,
+/// on any side: what waits with it, when it waits (sync semantics §6.3, §6.5).
+pub(crate) fn above_any_side(input: &Input, seed: NodeId) -> Vec<NodeId> {
+    let mut above = Vec::new();
+    let mut seen = HashSet::from([seed]);
+    let mut queue = vec![seed];
+    while let Some(node) = queue.pop() {
+        for tree in [&input.local, &input.remote, &input.base] {
+            if let Some(s) = tree.get(node)
+                && !s.parent.is_root()
+                && seen.insert(s.parent)
+            {
+                above.push(s.parent);
+                queue.push(s.parent);
+            }
+        }
+    }
+    above
 }
 
 /// `folder` and its subtree on any side, across sides (a child here of a folder in the base,

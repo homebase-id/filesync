@@ -190,8 +190,8 @@ impl Reconciler<'_> {
             // (`Plan::waits_together`): no folder brought back for it here, none merged (its
             // change unmerged, it read alive and brought its deleted folder back: review 14 R1).
             let decided = match decided {
-                Parent::Recover if self.held.contains(&node) => Parent::Wait,
-                // Held for another page, with its folders: decided there, never brought back
+                Parent::Recover if self.waits.contains(&node) => Parent::Wait,
+                // Waits for another page, with its folders: decided there, never brought back
                 // here (its folder may go with it there).
                 Parent::Recover | Parent::Folder(_) if self.paged.contains(&node) => Parent::Wait,
                 Parent::Recover if self.elsewhere(node) => {
@@ -278,8 +278,8 @@ impl Reconciler<'_> {
                             .zip(self.merged.get(*m))
                             .is_some_and(|(r, t)| !r.same_place(t))
                 });
-                // What waits for a hash stays as it is (`held`), and what another page plans.
-                let stays = |m: &NodeId| self.held.contains(m) || self.elsewhere(*m);
+                // What waits for a hash stays as it is (`waits`), and what another page plans.
+                let stays = |m: &NodeId| self.waits.contains(m) || self.elsewhere(*m);
                 let local_moved = local_moved.filter(|m| !stays(m));
                 let victim = local_moved.unwrap_or_else(|| {
                     *members.iter().filter(|m| !stays(m)).min().unwrap_or(&node)
@@ -314,9 +314,9 @@ impl Reconciler<'_> {
         self.masks.store_id(folder)
     }
 
-    /// Whether `node` holds its name as it is: held, or waiting for a name in this plan.
+    /// Whether `node` holds its name as it is: it waits, or waits for a name in this plan.
     fn holds_name(&self, node: NodeId) -> bool {
-        self.held.contains(&node) || self.waiters.contains(&node)
+        self.waits.contains(&node) || self.waiters.contains(&node)
     }
 
     /// The fork of `node`, if any, is undone: its copy isn't made.
@@ -328,9 +328,9 @@ impl Reconciler<'_> {
         }
     }
 
-    /// Scoped `node` and what is below it wait for a hash ([`super::held_from`]): it would take
-    /// a name what waits holds. Left as they are (a conflict copy isn't made); the plan is made
-    /// again holding them with their folders ([`reconcile`]). Whether any did.
+    /// Scoped `node` and what is below it wait for a hash ([`super::waits`]): it would take a
+    /// name what waits holds. Left as they are (a conflict copy isn't made); the plan is made
+    /// again with them waiting, with their folders ([`reconcile`]). Whether any did.
     fn wait_for_name(&mut self, node: NodeId) -> bool {
         let mut any = false;
         for n in self.merged.subtree(node) {
@@ -338,7 +338,7 @@ impl Reconciler<'_> {
                 continue;
             }
             any = true;
-            // A conflict copy waits as its original: planned again holding that, no copy.
+            // A conflict copy waits as its original: planned again with that waiting, no copy.
             self.waiters.insert(self.forked_into(n).unwrap_or(n));
             self.origin.remove(&n);
             self.adopted.remove(&n);
@@ -348,7 +348,7 @@ impl Reconciler<'_> {
                 self.merged.remove(n);
                 self.fork_waits(original);
             } else {
-                self.hold(n);
+                self.leave_as_is(n);
             }
         }
         any
@@ -360,10 +360,10 @@ impl Reconciler<'_> {
             .iter()
             .filter_map(|n| self.merged.get(*n).map(|s| s.parent))
             .collect();
-        // The drive's names of what waits for a hash elsewhere here (`held`, and this plan's
-        // waiters): held for it.
-        let mut drive_held: HashMap<(NodeId, String), Vec<NodeId>> = HashMap::new();
-        for &n in self.held.iter().chain(&self.waiters) {
+        // The drive's names of what waits for a hash elsewhere here (`waits`, and this plan's
+        // waiters): taken for it.
+        let mut drive_holders: HashMap<(NodeId, String), Vec<NodeId>> = HashMap::new();
+        for &n in self.waits.iter().chain(&self.waiters) {
             let Some(r) = self
                 .input
                 .remote
@@ -374,7 +374,7 @@ impl Reconciler<'_> {
             };
             if self.merged.get(n).is_none_or(|h| !h.same_place(r)) {
                 let key = (r.parent, name_key(&r.name));
-                drive_held.entry(key).or_default().push(n);
+                drive_holders.entry(key).or_default().push(n);
             }
         }
         for parent in parents {
@@ -384,24 +384,11 @@ impl Reconciler<'_> {
                     by_key.entry(name_key(&s.name)).or_default().push(child);
                 }
             }
-            // Judged on part of the folder: right only for the names whose possible clashes
-            // the input holds, and with no rename (a numbered name must be free among all).
+            // Judged on part of the folder ([`super::coverage`]).
             let covered_as = self.covered_as(parent);
-            let input = self.input;
-            let part = input
-                .coverage
-                .as_ref()
-                .filter(|c| !c.full.contains(&covered_as));
-            let mut uncovered = part.is_some_and(|coverage| {
-                self.merged.children(parent).any(|c| {
-                    self.scope.contains(&c)
-                        && self
-                            .merged
-                            .get(c)
-                            .is_some_and(|s| !coverage.holds(covered_as, &s.name))
-                })
-            });
-            // Names held remotely by nodes this device doesn't sync (§10) are taken: their
+            let part = self.judged_in_part(covered_as);
+            let mut uncovered = part && self.may_clash_unseen(parent, covered_as);
+            // Names on the drive of nodes this device doesn't sync (§10) are taken: their
             // holders keep them, and every node here loses.
             // And names this device's held removals keep there (§7): the same.
             let masked = self.masks.names.get(&parent);
@@ -409,7 +396,7 @@ impl Reconciler<'_> {
             let taken = |key: &str| {
                 masked.is_some_and(|m| m.contains(key)) || kept.is_some_and(|k| k.contains(key))
             };
-            // Each name once, and again when a node held where it is for a name comes to it
+            // Each name once, and again when a node left where it is for a name comes to it
             // (a chain of name waits in one folder, judged in one pass).
             let mut queue: std::collections::VecDeque<String> = by_key.keys().cloned().collect();
             while let Some(key) = queue.pop_front() {
@@ -418,9 +405,10 @@ impl Reconciler<'_> {
                 };
                 // A name what waits for a hash holds, here or on the drive: what would take it
                 // waits too, renamed never (§6.3).
-                // Held for its drive name by another than the group's own (a held folder whose
-                // name differs from the drive's in case only holds no name against itself).
-                let on_drive: Vec<NodeId> = drive_held
+                // Taken for its drive name by another than the group's own (a folder that waits
+                // whose name differs from the drive's in case only holds no name against
+                // itself).
+                let on_drive: Vec<NodeId> = drive_holders
                     .get(&(parent, key.clone()))
                     .into_iter()
                     .flatten()
@@ -441,12 +429,13 @@ impl Reconciler<'_> {
                     .chain(group.iter().copied().filter(|n| self.holds_name(*n)))
                     .chain(elsewhere.iter().copied())
                     .collect();
-                // A clash with what waits for a hash: everything planned in it waits, held
-                // or not (a held folder made or tagged too: never onto a name taken); what
-                // isn't planned stays as it is, and what is in it with it.
+                // A clash with what waits for a hash: everything planned in it waits, waiting
+                // already or not (a folder that waits made or tagged too: never onto a name
+                // taken); what isn't planned stays as it is, and what is in it with it.
                 if !holders.is_empty() && (group.len() > 1 || !on_drive.is_empty()) {
-                    // What waits for the name: this plan's, or an earlier one's (`waits`).
-                    let mut waited = group.iter().any(|n| self.waits.contains(n));
+                    // What waits for the name: this plan's, or an earlier one's
+                    // (`name_takers`).
+                    let mut waited = group.iter().any(|n| self.name_takers.contains(n));
                     let planned: Vec<NodeId> = group
                         .into_iter()
                         .filter(|n| self.scope.contains(n))
@@ -459,7 +448,7 @@ impl Reconciler<'_> {
                             continue;
                         }
                         waited = true;
-                        // Held where it is: under another name in this folder, it holds that
+                        // Left where it is: under another name in this folder, it holds that
                         // (and its drive name, if another).
                         let remote = self
                             .input
@@ -467,9 +456,9 @@ impl Reconciler<'_> {
                             .get(n)
                             .filter(|_| !self.taken.contains(&n));
                         let mut names = Vec::new();
-                        if let Some(held) = self.merged.get(n) {
-                            if let Some(r) = remote.filter(|r| !r.same_place(held)) {
-                                drive_held
+                        if let Some(left) = self.merged.get(n) {
+                            if let Some(r) = remote.filter(|r| !r.same_place(left)) {
+                                drive_holders
                                     .entry((r.parent, name_key(&r.name)))
                                     .or_default()
                                     .push(n);
@@ -477,8 +466,8 @@ impl Reconciler<'_> {
                                     names.push(name_key(&r.name));
                                 }
                             }
-                            if held.parent == parent {
-                                let to = name_key(&held.name);
+                            if left.parent == parent {
+                                let to = name_key(&left.name);
                                 if to != key {
                                     if let Some(g) = by_key.get_mut(&key) {
                                         g.retain(|m| *m != n);
@@ -499,7 +488,8 @@ impl Reconciler<'_> {
                 if group.len() <= keep {
                     continue;
                 }
-                uncovered |= part.is_some();
+                // A rename needs every name of the folder ([`super::coverage`]).
+                uncovered |= part;
                 // The lowest id keeps the name, except that a deferred node (a file still
                 // being written) is never renamed: it wins, and is left alone if it loses;
                 // and an orphan moving in, or Recovered files made beside a folder of its

@@ -185,7 +185,7 @@ pub fn inside<T, E>(
 /// What a row of Recently deleted holds: how many rows are below it, through removed folders
 /// ([`inside`]), and whether emptying it leaves it (a folder in it holds a live node).
 #[derive(Debug, Clone, Copy, Default)]
-pub(super) struct Held {
+pub(super) struct Contents {
     pub(super) count: usize,
     pub(super) stays: bool,
 }
@@ -194,33 +194,33 @@ pub(super) struct Held {
 /// holding a live node (`live`). With every row chosen, only a live node keeps one ([`select`]).
 /// Rows in a cycle (only a remote one leaves one) are each walked down on their own instead, as
 /// a lookup of one does.
-pub(super) fn held_below(rows: &[Chosen], live: &HashSet<NodeId>) -> HashMap<NodeId, Held> {
+pub(super) fn contents_below(rows: &[Chosen], live: &HashSet<NodeId>) -> HashMap<NodeId, Contents> {
     let mut children: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
     for r in rows.iter().filter(|r| r.node != r.parent) {
         children.entry(r.parent).or_default().push(r.node);
     }
     let none = Vec::new();
     let below = |n: &NodeId| children.get(n).unwrap_or(&none);
-    let mut held: HashMap<NodeId, Held> = HashMap::new();
+    let mut contents: HashMap<NodeId, Contents> = HashMap::new();
     let mut on_path = HashSet::new();
     let mut cycle = false;
     for r in rows {
         let mut stack = vec![(r.node, false)];
         while let Some((n, done)) = stack.pop() {
             if done {
-                let mut h = Held {
+                let mut h = Contents {
                     count: 0,
                     stays: live.contains(&n),
                 };
                 for c in below(&n) {
-                    if let Some(ch) = held.get(c) {
+                    if let Some(ch) = contents.get(c) {
                         h.count += 1 + ch.count;
                         h.stays |= ch.stays;
                     }
                 }
-                held.insert(n, h);
+                contents.insert(n, h);
                 on_path.remove(&n);
-            } else if !held.contains_key(&n) {
+            } else if !contents.contains_key(&n) {
                 if on_path.insert(n) {
                     stack.push((n, true));
                     stack.extend(below(&n).iter().map(|c| (*c, false)));
@@ -238,16 +238,16 @@ pub(super) fn held_below(rows: &[Chosen], live: &HashSet<NodeId>) -> HashMap<Nod
                 |n| Ok::<_, std::convert::Infallible>(below(n).clone()),
             );
             let stays = reach.iter().any(|n| live.contains(n));
-            held.insert(
+            contents.insert(
                 r.node,
-                Held {
+                Contents {
                     count: reach.len() - 1,
                     stays,
                 },
             );
         }
     }
-    held
+    contents
 }
 
 /// A row of Recently deleted as emptying sees it.

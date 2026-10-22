@@ -50,19 +50,20 @@ impl Reconciler<'_> {
             .ids()
             .chain(i.local.ids())
             .chain(i.remote.ids())
-            .filter(|n| !i.dirty.contains(n) && (!self.taken.contains(n) || self.held.contains(n)))
+            .filter(|n| !i.dirty.contains(n) && (!self.taken.contains(n) || self.waits.contains(n)))
             .collect();
         for node in ids {
             self.context(node);
         }
     }
 
-    /// Puts `node`, not in the plan, in the merged tree as context: as it is, held (a folder
-    /// above a file not hashed yet, say), else as the drive has it, else here, else the base.
+    /// Puts `node`, not in the plan, in the merged tree as context: as it is if it waits (a
+    /// folder above a file not hashed yet, say), else as the drive has it, else here, else the
+    /// base.
     pub(super) fn context(&mut self, node: NodeId) {
         let i = self.input;
-        if self.held.contains(&node) {
-            self.hold(node);
+        if self.waits.contains(&node) {
+            self.leave_as_is(node);
             return;
         }
         if let Some(state) = i
@@ -75,10 +76,10 @@ impl Reconciler<'_> {
         }
     }
 
-    /// Leaves held `node` ([`super::held`]) as it is on both sides: out of the plan's scope
-    /// (nothing done to it, dirty still), where it is here (else as the base has it, else the
-    /// drive), so that its folder here stays and its name is taken.
-    pub(super) fn hold(&mut self, node: NodeId) {
+    /// Leaves `node`, which waits ([`super::waits`]), as it is on both sides: out of the plan's
+    /// scope (nothing done to it, dirty still), where it is here (else as the base has it, else
+    /// the drive), so that its folder here stays and its name is taken.
+    pub(super) fn leave_as_is(&mut self, node: NodeId) {
         let i = self.input;
         if i.dirty.contains(&node) {
             self.deferred.insert(node);
@@ -109,9 +110,9 @@ impl Reconciler<'_> {
             && !same_edit(&l, r)
     }
 
-    /// Whether held folder `node` may go to `target` ([`super::held`]): it stays where it is
-    /// on each side it is on, and isn't gone from one it was on (a delete, or its undoing).
-    /// Making it where it isn't yet, and its tags, may go.
+    /// Whether folder `node`, which waits ([`super::waits`]), may go to `target`: it stays where
+    /// it is on each side it is on, and isn't gone from one it was on (a delete, or its
+    /// undoing). Making it where it isn't yet, and its tags, may go.
     fn stays_put(&self, node: NodeId, target: Option<&NodeState>) -> bool {
         let i = self.input;
         let Some(t) = target else {
@@ -204,12 +205,12 @@ impl Reconciler<'_> {
 
     pub(super) fn merge_node(&mut self, node: NodeId) {
         let i = self.input;
-        if self.held_as_is(node) {
+        if self.waits_as_is(node) {
             // Waiting for a name, and it would fork: its conflict copy waits, told so.
-            if self.waits.contains(&node) && self.would_fork(node) {
+            if self.name_takers.contains(&node) && self.would_fork(node) {
                 self.plan.conflicts.push(Conflict::CopyWaits { node });
             }
-            self.hold(node);
+            self.leave_as_is(node);
             return;
         }
         if i.local_unhashed.contains(&node) {
@@ -281,9 +282,9 @@ impl Reconciler<'_> {
                 r.tags.clone()
             };
         }
-        // Held for another page: as it is, nothing done (not even made where it isn't yet,
+        // Waits for another page: as it is, nothing done (not even made where it isn't yet,
         // into a folder that may not be there): its own page decides.
-        if self.held.contains(&node)
+        if self.waits.contains(&node)
             && (self.paged.contains(&node) || !self.stays_put(node, target.as_ref()))
         {
             if target.is_none() {
@@ -291,7 +292,7 @@ impl Reconciler<'_> {
             }
             self.plan.conflicts.retain(|c| c.node() != node);
             self.drop_fork(node);
-            self.hold(node);
+            self.leave_as_is(node);
             return;
         }
         self.scope.insert(node);

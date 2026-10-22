@@ -2158,11 +2158,11 @@ fn a_page_without_the_unread_file_holds_its_folder_too() -> R {
 /// folder); another device edits its file in it, and this device's user deletes the file. The
 /// narrow view plans as the whole one (the testkit checks every plan): the masked folder in it
 /// keeps it, so the file is planned back down (and waits, the drive's version unreadable
-/// here). The narrow view read only part of what is in a node held so, and planned the
+/// here). The narrow view read only part of what is in a node kept so, and planned the
 /// drive's node deleted, with the role folder and the other device's file. Hostile writer
 /// seed 22000000438.
 #[test]
-fn a_held_file_holding_a_masked_folder_plans_alike_narrow_and_whole() -> R {
+fn an_unreadable_file_holding_a_masked_folder_plans_alike_narrow_and_whole() -> R {
     use hbsync_remote::{NodeMeta, PayloadInfo, RemoteBody};
     use hbsync_types::schema::NodeContent;
     use hbsync_types::{NodeKind, Role};

@@ -1669,10 +1669,10 @@ fn a_rename_onto_the_name_of_a_file_not_hashed_yet_waits() {
     }
 }
 
-/// A file being written here, renamed on the drive (b to c): its drive name is held for it
+/// A file being written here, renamed on the drive (b to c): its drive name is taken for it
 /// too. A file this device's user renames to c meanwhile waits (it went up as a second c).
 #[test]
-fn the_drive_name_of_a_file_not_hashed_yet_is_held() {
+fn the_drive_name_of_a_file_not_hashed_yet_is_taken() {
     let [d, x] = ids(2)[..] else { unreachable!() };
     let mut w = World::default();
     w.synced(d, file(ROOT, "b", "1"));
@@ -1895,7 +1895,7 @@ fn a_node_waiting_for_a_name_keeps_its_folder_on_the_drive() {
 /// A chain of name waits five long: n1 would take the name of a file being written, n2 n1's,
 /// and so on, and the drive deleted n5's folder, where n5 has an edit here. Each plan again
 /// finds the next waiter (the folders judged before the top: ids below the root's), till none
-/// is new: n5's folder is held, never trashed with its edit (a cap on the plans did).
+/// is new: n5's folder waits, never trashed with its edit (a cap on the plans did).
 #[test]
 fn a_chain_of_name_waits_holds_its_last_folder() {
     let id = |n: u128| NodeId(Uuid::from_u128(n));
@@ -1952,7 +1952,7 @@ fn a_chain_of_name_waits_holds_its_last_folder() {
 /// put), keeps its name: a new file here whose name clashes with it waits, and so does the
 /// folder's tag, never the folder renamed on both sides with the file in it.
 #[test]
-fn a_held_folder_planned_keeps_its_name() {
+fn a_waiting_folder_planned_keeps_its_name() {
     let [x, g, wf] = ids(3)[..] else {
         unreachable!()
     };
@@ -1994,7 +1994,7 @@ fn a_held_folder_planned_keeps_its_name() {
 /// drive: neither goes, never a second "Photos" on the drive (nor the drive's renamed for
 /// good); once the file is hashed, a name clash as any.
 #[test]
-fn a_new_held_folder_and_a_new_drive_folder_of_its_name_wait() {
+fn a_new_waiting_folder_and_a_new_drive_folder_of_its_name_wait() {
     let [mine, theirs, wf] = ids(3)[..] else {
         unreachable!()
     };
@@ -2015,7 +2015,7 @@ fn a_new_held_folder_and_a_new_drive_folder_of_its_name_wait() {
 }
 
 /// A file edited on both sides, and a file being written here under the name its conflict
-/// copy would take: the fork waits (its copy would land on the held name), and isn't made
+/// copy would take: the fork waits (its copy would land on the taken name), and isn't made
 /// on a later plan either.
 #[test]
 fn a_fork_onto_the_name_of_a_file_not_hashed_yet_waits() {
@@ -2078,7 +2078,7 @@ fn a_confirmed_folder_that_stays_confirms_nothing_in_it() {
 /// A folder holding a file being written, renamed in case only on the drive ("photos" to
 /// "Photos"): it holds no name against itself, and an edit in it goes up as ever.
 #[test]
-fn a_held_folder_renamed_in_case_holds_up_nothing_in_it() {
+fn a_waiting_folder_renamed_in_case_holds_up_nothing_in_it() {
     let [h, wf, a, other] = ids(4)[..] else {
         unreachable!()
     };
@@ -2114,9 +2114,9 @@ fn a_held_folder_renamed_in_case_holds_up_nothing_in_it() {
 }
 
 /// A folder holding a file being written clashes with a new drive folder of its name: that
-/// one waits, and an edit inside the held folder goes up all the same.
+/// one waits, and an edit inside the waiting folder goes up all the same.
 #[test]
-fn a_clash_with_a_held_folder_holds_up_only_the_clash() {
+fn a_clash_with_a_waiting_folder_holds_up_only_the_clash() {
     let [h, wf, a, theirs] = ids(4)[..] else {
         unreachable!()
     };
@@ -2149,10 +2149,10 @@ fn a_clash_with_a_held_folder_holds_up_only_the_clash() {
     );
 }
 
-/// Edited on both sides, held for its conflict copy's name (a file being written has it): the
+/// Edited on both sides, waiting for its conflict copy's name (a file being written has it): the
 /// user is told the copy waits.
 #[test]
-fn a_fork_waiting_for_a_held_name_is_told() {
+fn a_fork_waiting_for_a_taken_name_is_told() {
     let [x, u] = ids(2)[..] else { unreachable!() };
     let mut w = World::default();
     w.synced(x, file(ROOT, "x.txt", "1"));
@@ -2204,7 +2204,7 @@ fn a_chain_through_drive_names_waits_whole() {
 /// holds on the drive (§10): never renamed with its file in it.
 #[cfg(target_os = "linux")]
 #[test]
-fn a_held_folder_on_a_masked_name_is_never_renamed() {
+fn a_waiting_folder_on_a_masked_name_is_never_renamed() {
     let [b, wf, masked, other] = ids(4)[..] else {
         unreachable!()
     };
@@ -2233,7 +2233,7 @@ fn a_held_folder_on_a_masked_name_is_never_renamed() {
 /// doesn't sync holds on the drive (§10): it waits, never made beside it under that name.
 #[cfg(target_os = "linux")]
 #[test]
-fn a_new_held_folder_on_a_masked_name_waits() {
+fn a_new_waiting_folder_on_a_masked_name_waits() {
     let [b, wf, masked] = ids(3)[..] else {
         unreachable!()
     };
@@ -2255,7 +2255,7 @@ fn a_new_held_folder_on_a_masked_name_waits() {
     assert!(!plan.ops.iter().any(|op| op.node() == b), "{:#?}", plan.ops);
 }
 
-/// A file inside a folder that waits for a held name, edited alike on both sides: no conflict
+/// A file inside a folder that waits for a taken name, edited alike on both sides: no conflict
 /// copy waits, none is told (only a fork's copy that waited is).
 #[test]
 fn the_same_edit_in_a_waiting_folder_tells_no_conflict() {
@@ -2266,7 +2266,7 @@ fn the_same_edit_in_a_waiting_folder_tells_no_conflict() {
     w.synced(u, file(ROOT, "u", "1"))
         .synced(wfold, folder(ROOT, "w"))
         .synced(x, file(wfold, "x", "1"));
-    // u renamed here to v, not hashed yet: its drive name u is held; w renamed here to u.
+    // u renamed here to v, not hashed yet: its drive name u is taken; w renamed here to u.
     w.local(
         u,
         Some(NodeState {
@@ -2320,7 +2320,7 @@ fn a_detached_file_waits_by_its_stored_id() {
     assert_eq!(plan.waiting, [x]);
 }
 
-/// A file in a folder that waits for a held name, edited unlike on both sides: its conflict
+/// A file in a folder that waits for a taken name, edited unlike on both sides: its conflict
 /// copy waits with it, and the user is told so.
 #[test]
 fn a_fork_in_a_waiting_folder_is_told() {

@@ -4,6 +4,36 @@
 
 use super::*;
 
+/// The drive's names `plan`'s held removals keep there (§7), by folder, where something else
+/// here has one of them: none, most of the time. They stay taken while held: what would take
+/// one here gets a numbered name ([`Reconciler::fix_names`]).
+pub(super) fn kept_names(view: &Input, plan: &Plan) -> HashMap<NodeId, HashSet<String>> {
+    let held: HashSet<NodeId> = plan
+        .held
+        .iter()
+        .filter_map(|op| match op {
+            Op::RemoteDelete { node, .. } => Some(*node),
+            _ => None,
+        })
+        .collect();
+    let mut kept: HashMap<NodeId, HashSet<String>> = HashMap::new();
+    for node in &held {
+        if let Some(r) = view.remote.get(*node) {
+            kept.entry(r.parent).or_default().insert(name_key(&r.name));
+        }
+    }
+    kept.retain(|parent, keys| {
+        view.local.children(*parent).any(|c| {
+            !held.contains(&c)
+                && view
+                    .local
+                    .get(c)
+                    .is_some_and(|l| keys.contains(&name_key(&l.name)))
+        })
+    });
+    kept
+}
+
 impl Reconciler<'_> {
     // ---- 5: mass-delete guard ----
 
