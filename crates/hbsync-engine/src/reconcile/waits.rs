@@ -58,7 +58,8 @@ impl Waits {
         // page of its own next (`pages::OwnPages`). (What is dirty in another page is never
         // moved by this plan's repairs: `Reconciler::elsewhere`.)
         // A folder of the page below one another page plans waits for that one alone: its
-        // page covers both (a piece of a split doesn't wait for the folder above it).
+        // page covers both (a piece of a split doesn't wait for the folder above it, but what
+        // that one's removal took along does: `Reconciler::waits_for_its_folder`).
         let above: HashSet<NodeId> = match own_page {
             true => HashSet::new(),
             false => input.going_above.clone(),
@@ -203,6 +204,31 @@ impl Reconciler<'_> {
         }
     }
 
+    /// In a piece of a folder too big for a page (`Options::own_page`), what the removal on the
+    /// drive of a folder above it took along (§6.3), unchanged here, waits for that folder's
+    /// plan, which another page makes ([`Input::going_above`]): planned again as it is
+    /// (`placed`). The folder's plan decides whether it stays, and with it whether what its
+    /// removal took along does ([`Reconciler::untake_kept`]); planned first, that went with the
+    /// removal while the folder came back. A node changed here plans the same either way.
+    pub(super) fn waits_for_its_folder(&mut self) {
+        let i = self.input;
+        if !self.opts.own_page || i.going_above.is_empty() || self.taken.is_empty() {
+            return;
+        }
+        let waiting: Vec<NodeId> = i
+            .dirty
+            .iter()
+            .copied()
+            .filter(|&n| {
+                self.taken.contains(&n)
+                    && self.scope.contains(&n)
+                    && !self.local_change(n).is_change()
+                    && taken_by(i, n).is_some_and(|f| i.going_above.contains(&f))
+            })
+            .collect();
+        self.placed.extend(waiting);
+    }
+
     /// Whether `node` is planned in another page, not in this one (`Input::dirty_elsewhere`):
     /// no fix here moves, renames or adopts it, and what it blocks waits to be planned with it
     /// ([`Reconciler::wait_together`]).
@@ -218,4 +244,23 @@ impl Reconciler<'_> {
         nodes.dedup();
         self.plan.waits_together.push(nodes);
     }
+}
+
+/// The removed folder whose removal on the drive took `node` along: the first folder above it
+/// there that isn't live, if it is in Recently deleted.
+fn taken_by(input: &Input, node: NodeId) -> Option<NodeId> {
+    let mut at = input.remote.get(node)?.parent;
+    // Bounded: a cycle on the drive ends at a node met again.
+    let mut seen = HashSet::from([node]);
+    while let Some(s) = input.remote.get(at) {
+        if !seen.insert(at) {
+            return None;
+        }
+        at = s.parent;
+    }
+    input
+        .removed
+        .get(&at)
+        .filter(|r| r.state.kind == NodeKind::Folder)
+        .map(|_| at)
 }

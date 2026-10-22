@@ -55,7 +55,8 @@ pub struct Options {
     pub taken: Arc<HashSet<NodeId>>,
     /// The page is a piece of a folder's subtree too big for a page
     /// ([`crate::pages::OwnPages`]), so what is in it doesn't wait for a folder above it that
-    /// another page deletes ([`Input::going_above`]): that one goes after it.
+    /// another page deletes ([`Input::going_above`]): that one goes after it. What that
+    /// folder's removal on the drive took along, unchanged here, waits for it all the same.
     pub own_page: bool,
 }
 
@@ -180,8 +181,8 @@ pub struct Input {
     pub going: HashSet<NodeId>,
     /// The folders above the page's nodes, on any side, synced before, that may go and that
     /// another page plans: what of the page is below them waits for them the same way, so a
-    /// folder's delete goes as one, never item by item (but in a page of its own:
-    /// [`Options::own_page`]).
+    /// folder's delete goes as one, never item by item (but in a piece of a page of its own:
+    /// [`Options::own_page`], where only what its removal took along waits).
     pub going_above: HashSet<NodeId>,
 }
 

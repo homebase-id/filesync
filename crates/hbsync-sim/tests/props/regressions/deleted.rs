@@ -1530,3 +1530,60 @@ fn an_old_version_aside_after_a_crash_keeps_a_write() {
         }
     }
 }
+
+/// c0 moves folder `a` into `c.txt` and tags `a/a` while another device removes `a` and stops:
+/// `a/a` is taken along, live. The move keeps `a`, and with it what its removal took along
+/// (`a/a`, tagged only). In pages of one node, `a`'s subtree is too big for a page, so `a/a` is
+/// planned first, without `a`: it waits for `a`'s plan, which keeps it. Before, it went with
+/// the removal while `a` came back empty (seed 523cb1ea).
+#[test]
+fn regression_what_a_removal_took_along_waits_for_its_folder_in_pages() {
+    use Action::*;
+    let acts = [
+        (0, CreateFolder { parent: 0, name: 0 }, false),
+        (0, Edit { file: 0 }, true),
+        (1, CreateFolder { parent: 1, name: 3 }, false),
+        (
+            1,
+            CreateFolder {
+                parent: 15,
+                name: 0,
+            },
+            false,
+        ),
+        (0, Edit { file: 0 }, true),
+        (0, Tag { node: 2, tag: 0 }, false),
+        (
+            0,
+            Move {
+                node: 3,
+                parent: 1,
+                name: 0,
+            },
+            false,
+        ),
+        (0, DeleteStopped { pick: 3, done: 2 }, false),
+    ];
+    for pages in [None, Some(1)] {
+        let mut sim = Sim::new(3).without_ignore_rules();
+        if let Some(size) = pages {
+            sim = sim.with_small_pages(size);
+        }
+        for (client, action, sync) in acts {
+            sim.run(&[Event::Act { client, action }]);
+            if sync {
+                assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
+            }
+        }
+        assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
+        if let Err(e) = sim.check() {
+            panic!("pages {pages:?}: {e}");
+        }
+        assert_eq!(
+            sim.server_paths(),
+            ["c.txt", "c.txt/a", "c.txt/a/a"],
+            "pages: {pages:?}"
+        );
+        assert_eq!(sim.server_counts(), (3, 0), "pages: {pages:?}");
+    }
+}

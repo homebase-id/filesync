@@ -248,6 +248,7 @@ impl<'a> Reconciler<'a> {
         }
         self.emit();
         self.places_across_pages();
+        self.waits_for_its_folder();
         self.guard_mass_delete();
         self.plan.waiting = self.waited_for();
         // The folders this page waits for, with everything of it below them.

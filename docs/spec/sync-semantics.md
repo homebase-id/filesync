@@ -255,10 +255,17 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    What waits is planned next as a page of its own: the folder with its whole dirty subtree,
    on every side. A subtree too big for a page goes as its folders' subtrees first (several
    together while they fit a page), then the folder once more; there they don't wait for the
-   folder above them. What is left then (more than a page directly in the folder) is planned
-   whole, as one larger page. So the drive removes the folder first, then what is in it, and
-   Recently deleted lists it as one item, or as its folders' items and then its own: never a
-   file of it apart. What waits stays queued across sweeps and syncs (a sync that stops at its
+   folder above them, but what its removal on the drive took along (§6.3), unchanged here,
+   does: left as it is, it waits for the folder's plan, which decides whether the folder
+   stays and so whether that does (a folder kept keeps what its removal took along). Planned
+   first, it went with the removal while the folder came back. Such a node, dirty (a tag
+   here, say), is planned in the folder's last page: about 1 KB more there, and a plan more
+   in its piece, a node (simulator:
+   `regression_what_a_removal_took_along_waits_for_its_folder_in_pages`; engine:
+   `what_a_held_removal_took_along_waits_without_a_spin`). What is left then (more than a
+   page directly in the folder, and what so waits) is planned whole, as one larger page. So the drive removes the
+   folder first, then what is in it, and Recently deleted lists it as one item, or as its
+   folders' items and then its own: never a file of it apart. What waits stays queued across sweeps and syncs (a sync that stops at its
    round limit goes on with it), each tried once a sweep; what a page of its own planned isn't
    planned again in the sweep's own pages (its plan stands), and a page so passed over costs
    no round. Cost: a plan takes about 1 KB a
