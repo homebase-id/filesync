@@ -15,8 +15,8 @@ use std::sync::{Mutex, MutexGuard};
 use hbsync_remote::{Remote, RemoteError};
 use hbsync_state::StateDb;
 
-use crate::drive::DriveNews;
 use crate::error::EngineError;
+use crate::news::DriveNews;
 use crate::policy::{InRun, policy};
 
 mod listing;

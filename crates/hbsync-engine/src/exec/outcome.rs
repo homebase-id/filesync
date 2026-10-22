@@ -1,7 +1,7 @@
 //! What an operation and a run come to: an operation's [`Outcome`] (or why it was left,
 //! [`Skip`]; why the run stopped, [`Stopped`]), how an error maps to one ([`Outcome::of`], by
 //! the policy table), and the run's [`ExecReport`], with what it learned of the drive for the
-//! account ([`crate::drive::DriveNews`]).
+//! account ([`crate::news::DriveNews`]).
 
 use std::io;
 use std::time::Duration;
@@ -11,7 +11,7 @@ use hbsync_remote::{ErrorClass, RemoteError};
 use hbsync_state::StateError;
 use hbsync_types::activity::Synced;
 
-use crate::drive::DriveNews;
+use crate::news::DriveNews;
 use crate::policy::{InRun, policy};
 use crate::reconcile::Op;
 

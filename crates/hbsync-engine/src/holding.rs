@@ -143,9 +143,7 @@ impl HeldDeletes {
                 return Err(StateError::Corrupt("it has no id (db.id)".into()));
             }
             // Held as every synced file: until answered, each while its removal is pending.
-            let saved: HashSet<NodeId> = read_wiped(s.get_kv(keys::WIPED)?.as_deref())
-                .into_iter()
-                .collect();
+            let saved = read_wiped(s.get_kv(keys::WIPED)?.as_deref());
             Ok((
                 guard_counts(s, &self.confirmed, self.out.pending, None, any_out)?,
                 saved,
@@ -350,8 +348,7 @@ impl HeldDeletes {
         let forget = |db: &mut StateDb, nodes: &[NodeId]| {
             db.write(|s| {
                 for &node in nodes {
-                    s.folder().delete_base(node)?;
-                    s.folder().mark_dirty(node)?;
+                    s.folder().forget_base(node)?;
                 }
                 Ok(())
             })
@@ -495,21 +492,29 @@ impl Sides for StoreSides<'_, '_> {
     }
 }
 
-/// The nodes [`keys::WIPED`] holds; an id that doesn't parse is left out.
-fn read_wiped(value: Option<&str>) -> Vec<NodeId> {
-    crate::scope::Scope::outside_of(value.unwrap_or_default())
-        .into_iter()
+/// The nodes [`keys::WIPED`] holds: their ids, comma-separated ([`wiped_value`]); one that
+/// doesn't parse is left out.
+fn read_wiped(value: Option<&str>) -> HashSet<NodeId> {
+    value
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|id| id.parse().ok().map(NodeId))
         .collect()
 }
 
-/// Keeps `wiped` as [`keys::WIPED`] (in [`crate::scope::Scope`]'s id list).
+/// Keeps `wiped` as [`keys::WIPED`] ([`wiped_value`]; none: the key goes).
 fn save_wiped(db: &mut StateDb, wiped: &HashSet<NodeId>) -> Result<(), StateError> {
+    db.write(|s| match wiped_value(wiped) {
+        None => s.folder().delete_kv(keys::WIPED),
+        Some(value) => s.folder().set_kv(keys::WIPED, &value),
+    })
+}
+
+/// [`keys::WIPED`]'s value for `wiped`: their ids, sorted, comma-separated; `None` for none.
+fn wiped_value(wiped: &HashSet<NodeId>) -> Option<String> {
     let mut ids: Vec<String> = wiped.iter().map(|n| n.0.to_string()).collect();
     ids.sort();
-    db.write(|s| match ids.is_empty() {
-        true => s.folder().delete_kv(keys::WIPED),
-        false => s.folder().set_kv(keys::WIPED, &ids.join(",")),
-    })
+    (!ids.is_empty()).then(|| ids.join(","))
 }
 
 #[cfg(test)]
@@ -536,6 +541,24 @@ mod tests {
             },
             removed_at,
         }
+    }
+
+    /// [`keys::WIPED`] is stored: what is written is pinned, and ids an earlier release wrote
+    /// still read.
+    #[test]
+    fn wiped_is_kept_as_stored() {
+        let (a, b) = (
+            "0274575b-c2cf-4ac7-b39b-d56b2c121b75",
+            "9b2f4c1e-0d7a-4e3b-8c55-2a6f1e9d0b47",
+        );
+        let ids: HashSet<NodeId> = [b, a]
+            .iter()
+            .map(|s| NodeId(s.parse().expect("an id")))
+            .collect();
+        assert_eq!(wiped_value(&ids), Some(format!("{a},{b}")));
+        assert_eq!(wiped_value(&HashSet::new()), None);
+        assert_eq!(read_wiped(Some(&format!("{a},not an id,{b}"))), ids);
+        assert!(read_wiped(None).is_empty());
     }
 
     /// The store's rows of Recently deleted as the rules read them ([`Sides::removed`]): the
