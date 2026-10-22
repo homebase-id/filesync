@@ -277,7 +277,14 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   nothing new while they are out reads the dirty set, the base's file count and the held count
   (5,051 held: about 1 ms, against 80 ms when they were planned each time). Simulator:
   `held_deletes_out_of_the_dirty_set_plan_alike` (a plan without them plans as one with them,
-  unless its view reaches them).
+  unless its view reaches them). The guard's counts (synced files, what is pending) are read
+  when a sync starts planning, and again with a page whenever another connection committed
+  since (an announcement, another folder's pull: what it marked counts too) or nothing dirty
+  had them skip the synced files: a change marked meanwhile is never judged against counts
+  that leave it out, or against no synced files (engine:
+  `a_wipe_marked_right_after_the_counts_is_still_held`,
+  `a_wipe_marked_after_the_counts_beside_a_dirty_file_is_still_held`). Cost: the connection's
+  `data_version` per page, and the counts again only when something else wrote.
 
   Removals made elsewhere (another computer, the phone, the file browser, another app) are
   followed here without asking: into `.hbsync/trash`, and the drive keeps them in Recently

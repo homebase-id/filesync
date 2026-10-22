@@ -192,6 +192,13 @@ impl ReadTx<'_> {
         Ok(dirty.then_some((gone_here, gone_there)))
     }
 
+    /// SQLite's `data_version` of this connection: it changes when another connection (another
+    /// folder's engine, the account's pull of the feed or an announcement) commits, so what was
+    /// counted before may be stale.
+    pub fn data_version(&self) -> Result<u64> {
+        self.count("PRAGMA data_version")
+    }
+
     pub fn dirty_count(&self) -> Result<u64> {
         self.count("SELECT COUNT(*) FROM dirty WHERE folder = $F")
     }
