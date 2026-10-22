@@ -245,11 +245,9 @@ impl Sim {
             );
         }
         let confirmed = Arc::new(client.confirmed.clone());
-        // Held as every synced file: until answered, each while a removal elsewhere is still
-        // to be followed in it: it, or (back on the drive) what is below it in the base. As
-        // the engine keeps `guard.wiped`.
-        // As the engine's store has them: the mirror (the plan's view of the drive) and what the
-        // scanner reports here.
+        // Held as every synced file: until answered, by the engine's rule (it keeps
+        // `guard.wiped` so), over what its store has: the mirror (the plan's view of the drive)
+        // and what the scanner reports here.
         let sides = crate::world::ModelSides {
             base: &client.base,
             local: &input.local,
@@ -262,10 +260,8 @@ impl Sim {
             .iter()
             .copied()
             .filter(|n| {
-                matches!(
-                    hbsync_engine::held::keep_held(*n, confirmed.contains(n), &sides),
-                    Ok(true)
-                )
+                let Ok(keep) = hbsync_engine::held::keep_held(*n, confirmed.contains(n), &sides);
+                keep
             })
             .collect();
         let synced_files = client

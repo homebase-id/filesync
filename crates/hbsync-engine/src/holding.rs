@@ -136,10 +136,6 @@ impl HeldDeletes {
         // The guard must judge the whole delete, even when it is planned in several batches;
         // confirmed deletes don't count. Confirmations of nodes with nothing left to do are
         // dropped (those whose plan no longer deletes them, in `after_plan`).
-        let held_pending = match self.out.pending {
-            Some(p) => p,
-            None => *self.out.pending.insert(db.read(|s| s.held_file_deletes())?),
-        };
         let any_out = !self.out.ops.is_empty();
         let (mut counts, saved, computer) = db.read(|s| {
             let computer = s.db_id()?;
@@ -151,12 +147,14 @@ impl HeldDeletes {
                 .into_iter()
                 .collect();
             Ok((
-                guard_counts(s, &self.confirmed, Some(held_pending), None, any_out)?,
+                guard_counts(s, &self.confirmed, self.out.pending, None, any_out)?,
                 saved,
                 computer,
             ))
         })?;
         self.confirmed = std::mem::take(&mut counts.confirmed);
+        // The held deletes' part, read once while they are out.
+        self.out.pending = Some(counts.held);
         let (pending, synced) = (
             (counts.pending.0 as usize, counts.pending.1 as usize),
             counts.synced.unwrap_or(0) as usize,
@@ -180,6 +178,9 @@ impl HeldDeletes {
         // plan that reaches it plans all of them again, from here.
         let mut wiped = HashSet::new();
         db.read(|s| {
+            if saved.is_empty() {
+                return Ok(());
+            }
             for &node in &saved {
                 let keep = self.out.nodes.contains(&node)
                     || held::keep_held(node, self.confirmed.contains(&node), &StoreSides(s))?;
@@ -371,6 +372,8 @@ pub(crate) struct Counts {
     synced: Option<u64>,
     /// The confirmations whose deletes are still pending.
     confirmed: HashSet<NodeId>,
+    /// The part of `pending` that the held deletes out of the dirty set take.
+    held: (u64, u64),
     /// The connection's [`ReadTx::data_version`] before the read.
     version: u64,
 }
@@ -415,6 +418,7 @@ fn guard_counts(
         ),
         synced,
         confirmed: still,
+        held,
         version,
     })
 }
@@ -485,4 +489,53 @@ fn save_wiped(db: &mut StateDb, wiped: &HashSet<NodeId>) -> Result<(), StateErro
         true => s.folder().delete_kv(keys::WIPED),
         false => s.folder().set_kv(keys::WIPED, &ids.join(",")),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use hbsync_state::testkit::RawPicture;
+    use hbsync_state::{MirrorRow, RemovedRow, StateDb};
+    use hbsync_types::{RemoteFileId, Uuid, VersionTag};
+
+    use super::*;
+
+    fn removed(node: NodeId, parent: NodeId, removed_at: Option<i64>) -> RemovedRow {
+        RemovedRow {
+            row: MirrorRow {
+                file_id: RemoteFileId(Uuid::new_v4()),
+                version: VersionTag(Uuid::new_v4()),
+                node,
+                parent,
+                name: node.0.to_string(),
+                kind: NodeKind::Folder,
+                file: None,
+                content_extra: None,
+                token: None,
+                changed_at: None,
+            },
+            removed_at,
+        }
+    }
+
+    /// The store's rows of Recently deleted as the rules read them ([`Sides::removed`]): the
+    /// folder each was in, and its removal's time, an open one the newest.
+    #[test]
+    fn the_store_gives_a_removed_rows_folder_and_time() -> Result<(), StateError> {
+        let mut db = StateDb::open_in_memory()?;
+        let (f, x, y) = (NodeId::new(), NodeId::new(), NodeId::new());
+        db.write(|s| {
+            s.account()
+                .put_removed(&removed(f, NodeId::ROOT, Some(5)))?;
+            s.account().put_removed(&removed(x, f, Some(7)))?;
+            s.account().put_removed(&removed(y, f, None))
+        })?;
+        db.read(|s| {
+            let sides = StoreSides(s);
+            assert_eq!(sides.removed(f)?, Some((NodeId::ROOT, 5)));
+            assert_eq!(sides.removed(x)?, Some((f, 7)));
+            assert_eq!(sides.removed(y)?, Some((f, i64::MAX)));
+            assert_eq!(sides.removed(NodeId::new())?, None);
+            Ok(())
+        })
+    }
 }

@@ -658,19 +658,12 @@ impl Sim {
             local.remove(n);
         }
         let coords = client.coords;
+        // The mirror, as the plan sees it.
+        let view = self.drive_seen(c);
         let sides = ModelSides {
             base: &client.base,
             local: &local,
-            // The mirror: what this client hasn't judged gone for good.
-            live: &|n| {
-                let drive = coords.to_drive(n);
-                !coords.hides(drive)
-                    && self
-                        .server
-                        .live
-                        .get(&drive)
-                        .is_some_and(|l| !client.gone.contains(&l.remote.file_id))
-            },
+            live: &|n| view.contains(n),
             server: &self.server,
             coords,
         };
@@ -680,10 +673,27 @@ impl Sim {
             client.base.remove(n);
             client.extra.remove(&n);
         }
-        for item in plan.items {
-            let item = coords.to_drive(item);
+        // What each item takes along, as the engine plans them all in one read: an item an
+        // earlier one brought back (a folder above it) still has what was deleted with it
+        // restored.
+        let items: Vec<(NodeId, Vec<NodeId>)> = plan
+            .items
+            .into_iter()
+            .map(|item| {
+                let item = coords.to_drive(item);
+                (item, self.server.group(item))
+            })
+            .collect();
+        for (item, group) in items {
             if !self.server.live.contains_key(&item) {
                 self.restore_with(item);
+            }
+            // In order, each after its folder; one whose folder didn't come back stays.
+            for n in group {
+                let back_into = self.server.removed.get(&n).map(|r| r.state.parent);
+                if back_into.is_some_and(|p| p.is_root() || self.server.live.contains_key(&p)) {
+                    self.restore_with(n);
+                }
             }
         }
     }

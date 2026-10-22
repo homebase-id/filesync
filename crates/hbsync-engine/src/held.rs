@@ -148,8 +148,9 @@ pub struct PutBack {
 ///   folder it was synced in); what is gone for good there loses its base, so it goes up again
 ///   from here; a folder already back has what is in it looked at.
 ///
-/// Costs, per node walked, a base, a live and (here) a row lookup, a listing per folder here,
-/// and a row of Recently deleted per node restored and per folder above it (each read once).
+/// Costs, per node walked, a base, a live and (here) a row lookup, a row lookup and a listing
+/// per folder here, and a row of Recently deleted per node restored and per folder above it
+/// (each read once).
 pub fn put_back_plan<S: Sides>(nodes: &[NodeId], sides: &S) -> Result<PutBack, S::Error> {
     let mut plan = PutBack::default();
     // Each once: a folder's held with what is in it.
