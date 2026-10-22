@@ -10,7 +10,7 @@ use hbsync_types::{NodeId, NodeKind, Role};
 use crate::root::AccountReader;
 use crate::walk::End;
 
-use super::rules::{Chosen, Held, Holdings, deleted_with, held_below, inside, select};
+use super::rules::{Chosen, Held, Holdings, deleted_with, held_below, inside, item_by, select};
 
 /// Recently deleted as a whole: how much it holds, and what emptying all of it as it is now
 /// takes.
@@ -292,73 +292,13 @@ impl<'a, 's> RemovedRows<'a, 's> {
     }
 }
 
-/// The items of Recently deleted whose deletes took `removed` along, each row of it with the
-/// folder it is in here: up from that folder, if it was deleted with it, as far as
-/// [`deleted_by_item`] goes; else the row's node, deleted on its own.
-pub(crate) fn items_of(
-    s: &ReadTx<'_>,
-    removed: Vec<(RemovedRow, NodeId)>,
-) -> Result<HashSet<NodeId>, StateError> {
-    let starts: Vec<(NodeId, i64, NodeId)> = removed
-        .iter()
-        .map(|(r, folder)| (r.row.node, r.time(), *folder))
-        .collect();
-    let rows = removed.into_iter().map(|(r, _)| r).collect();
-    let (mut rows, mut known) = (RemovedRows::new(s, rows), HashMap::new());
-    let mut items = HashSet::new();
-    for (node, at, folder) in starts {
-        let with_folder = rows.get(folder)?.is_some_and(|f| deleted_with(at, f));
-        items.insert(match with_folder {
-            true => deleted_by_item(&mut rows, folder, &mut known)?,
-            false => node,
-        });
-    }
-    Ok(items)
-}
-
-/// The item of Recently deleted whose delete took `node` along: up through the folders it was
-/// deleted with, as far as they go (`node` itself, deleted on its own). Memoized in `known`.
+/// The item of Recently deleted whose delete took `node` along ([`item_by`]), from the store.
 pub(super) fn deleted_by_item(
     rows: &mut RemovedRows<'_, '_>,
     node: NodeId,
     known: &mut HashMap<NodeId, NodeId>,
 ) -> Result<NodeId, StateError> {
-    let up = crate::walk::up::<_, StateError>(node, |at| {
-        if known.contains_key(&at) {
-            return Ok(None);
-        }
-        Ok(rows.deleted_with(at)?.map(|folder| (at, folder)))
-    })?;
-    let item = match up.end {
-        End::At(at) => known.get(&at).copied().unwrap_or(at),
-        // At the top, or past any depth a path may have: the last row walked. Cut off deep,
-        // that row is a delete of its own (remembered below), so the listing lists it. (A chain
-        // that deep is no path: only a malicious drive makes one; it lists, in pieces.)
-        End::Top | End::Deep => up.items.last().copied().unwrap_or(node),
-        // Removed rows in a cycle (left by a remote one): one of them, the same whichever row
-        // the walk started from.
-        End::Cycle => cycle_root(rows, &up.items)?,
-    };
-    if let End::At(at) = up.end {
-        known.insert(at, item);
-    }
-    known.extend(up.items.into_iter().map(|n| (n, item)));
-    Ok(item)
-}
-
-/// The item of a cycle of removed rows, each deleted with the next, that `walked` (a walk up
-/// that ended in it) reached: its smallest node, so a listing and a lookup of any of its rows
-/// agree.
-fn cycle_root(rows: &mut RemovedRows<'_, '_>, walked: &[NodeId]) -> Result<NodeId, StateError> {
-    let Some(&last) = walked.last() else {
-        return Ok(NodeId::ROOT);
-    };
-    // The walk ends where it would step again onto a row it walked: the cycle starts there.
-    let start = match rows.deleted_with(last)? {
-        Some(next) => walked.iter().position(|n| *n == next).unwrap_or(0),
-        None => 0,
-    };
-    Ok(walked[start..].iter().copied().min().unwrap_or(last))
+    item_by(node, known, |at| rows.deleted_with(at))
 }
 
 /// The path of folder `at` below the top it is under (one of `tops`, else the drive's root:

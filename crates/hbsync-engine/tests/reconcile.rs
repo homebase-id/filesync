@@ -73,7 +73,7 @@ impl World {
             .get(node)
             .is_some_and(|s| s.kind == NodeKind::File)
         {
-            self.opts.synced_files += 1;
+            self.opts.guarding.synced += 1;
         }
         self
     }
@@ -611,7 +611,7 @@ fn mass_delete_is_held() {
         "the rest of the plan proceeds"
     );
 
-    w.opts.guard.allow = true;
+    w.opts.guarding.settings.allow = true;
     assert_eq!(w.plan().ops.iter().filter(|op| op.is_delete()).count(), 80);
 }
 
@@ -2046,7 +2046,7 @@ fn a_confirmed_folder_that_stays_confirms_nothing_in_it() {
     let v = ids(8);
     let (f, wf, files) = (v[0], v[1], &v[2..]);
     let mut w = World::default();
-    w.opts.guard.min = 2;
+    w.opts.guarding.settings.min = 2;
     w.synced(f, folder(ROOT, "f"));
     for (i, n) in files.iter().enumerate() {
         w.synced(*n, file(f, &format!("x{i}"), "1"));
@@ -2063,7 +2063,7 @@ fn a_confirmed_folder_that_stays_confirms_nothing_in_it() {
         }),
     );
     w.input.local_unhashed.insert(wf);
-    w.opts.confirmed = std::sync::Arc::new(std::collections::HashSet::from([f]));
+    w.opts.guarding.confirmed = std::sync::Arc::new(std::collections::HashSet::from([f]));
     let plan = w.plan();
     assert_eq!(plan.held.len(), files.len(), "{plan:#?}");
     assert!(plan.delete_waits.is_empty(), "{:?}", plan.delete_waits);

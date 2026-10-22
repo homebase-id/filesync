@@ -31,8 +31,8 @@ pub(crate) mod merge;
 mod repair;
 
 pub use crate::plan::{
-    Agreement, BaseExtra, Conflict, Coverage, DeleteGuard, DriveVersion, Input, Masking, Op,
-    Options, Plan, Removed, Requirement,
+    Agreement, BaseExtra, Conflict, Coverage, DeleteGuard, DriveVersion, Guarding, Input, Masking,
+    Op, Options, Plan, Removed, Requirement,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

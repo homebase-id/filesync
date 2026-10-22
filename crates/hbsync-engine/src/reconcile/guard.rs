@@ -8,7 +8,7 @@ impl Reconciler<'_> {
     // ---- 5: mass-delete guard ----
 
     pub(super) fn guard_mass_delete(&mut self) {
-        if self.opts.guard.allow {
+        if self.opts.guarding.settings.allow {
             return;
         }
         let i = self.input;
@@ -21,7 +21,7 @@ impl Reconciler<'_> {
         // Deletes the user confirmed are theirs, and so is each of what was in a folder whose
         // delete they confirmed and that waits for a file in it not hashed yet (planned apart
         // meanwhile, §6.3): only the others are judged.
-        let yes = &self.opts.confirmed;
+        let yes = &self.opts.guarding.confirmed;
         let waiting: HashSet<NodeId> = self
             .plan
             .delete_waits
@@ -50,7 +50,7 @@ impl Reconciler<'_> {
             _ => None,
         };
         // With the held deletes out of the dirty set: counted as if planned with this one.
-        let (mut remote_files, mut local_files) = self.opts.held_files;
+        let (mut remote_files, mut local_files) = self.opts.guarding.held;
         for (here, there) in self
             .plan
             .ops
@@ -61,16 +61,16 @@ impl Reconciler<'_> {
             remote_files += here;
             local_files += there;
         }
-        let synced = self.opts.synced_files;
-        let guard = self.opts.guard;
+        let synced = self.opts.guarding.synced;
+        let guard = self.opts.guarding.settings;
         let trips = |n: usize| guard.trips(n, synced);
         let every = |n: usize| guard.every(n, synced);
-        let (gone_locally, gone_remotely) = self.opts.pending_deletes;
+        let (gone_locally, gone_remotely) = self.opts.guarding.pending;
         let hold_local = every(local_files) || every(gone_remotely);
         let hold_remote = trips(remote_files) || trips(gone_locally);
         // Once held so, a removal elsewhere stays held until the user answers, whatever the
         // count says since (one file of it back on the drive, a put back half done).
-        let wiped = &self.opts.wiped;
+        let wiped = &self.opts.guarding.wiped;
         let was_wiped = |node: NodeId| {
             wiped.contains(&node) || i.base.ancestors(node).iter().any(|a| wiped.contains(a))
         };

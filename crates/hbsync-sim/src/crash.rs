@@ -24,6 +24,10 @@ impl Sim {
     /// [`Event::Crash`]: crate::Event::Crash
     pub(crate) fn crash(&mut self, c: usize) {
         self.faults.crashes += 1;
+        // The user's Delete answers, and what they were shown, are kept in memory only: a new
+        // process shows its holds again and asks again (§7).
+        self.clients[c].confirmed.clear();
+        self.clients[c].held.clear();
         let front = self.clients[c].plan.front().map(|(op, _)| op.clone());
         match front {
             Some(op @ Op::LocalDownload { node, .. })

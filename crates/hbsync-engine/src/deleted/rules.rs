@@ -15,7 +15,56 @@ use crate::tree::restored_names;
 /// Whether a node removed at `removed_at` was deleted with `folder`, the folder it is in, in
 /// Recently deleted too: removed no earlier than the folder (node schema, Recently deleted).
 pub(super) fn deleted_with(removed_at: i64, folder: &RemovedRow) -> bool {
-    folder.time() <= removed_at
+    deleted_with_at(removed_at, folder.time())
+}
+
+/// [`deleted_with`] by the times: a node removed at `removed_at` in a folder removed at
+/// `folder_at` (each [`hbsync_types::removal_time`]).
+pub(crate) fn deleted_with_at(removed_at: i64, folder_at: i64) -> bool {
+    folder_at <= removed_at
+}
+
+/// The item of Recently deleted whose delete took `node` along: up through the folders it was
+/// deleted with, as far as they go (`node` itself, deleted on its own); `with` gives the
+/// folder a row was deleted with ([`deleted_with`]), if it was. Memoized in `known`. Removed
+/// rows in a cycle (left by a remote one) give one of them, the same whichever row the walk
+/// started from; a chain past any depth a path may have, the last row walked.
+pub(crate) fn item_by<E>(
+    node: NodeId,
+    known: &mut HashMap<NodeId, NodeId>,
+    mut with: impl FnMut(NodeId) -> Result<Option<NodeId>, E>,
+) -> Result<NodeId, E> {
+    use crate::walk::End;
+    let up = crate::walk::up::<_, E>(node, |at| {
+        if known.contains_key(&at) {
+            return Ok(None);
+        }
+        Ok(with(at)?.map(|folder| (at, folder)))
+    })?;
+    let item = match up.end {
+        End::At(at) => known.get(&at).copied().unwrap_or(at),
+        // At the top, or past any depth a path may have: the last row walked. Cut off deep,
+        // that row is a delete of its own (remembered below), so the listing lists it. (A chain
+        // that deep is no path: only a malicious drive makes one; it lists, in pieces.)
+        End::Top | End::Deep => up.items.last().copied().unwrap_or(node),
+        // In a cycle: the smallest node of it, where the walk would step again onto a row it
+        // walked.
+        End::Cycle => match up.items.last() {
+            None => NodeId::ROOT,
+            Some(&last) => {
+                let start = match with(last)? {
+                    Some(next) => up.items.iter().position(|n| *n == next).unwrap_or(0),
+                    None => 0,
+                };
+                up.items[start..].iter().copied().min().unwrap_or(last)
+            }
+        },
+    };
+    if let End::At(at) = up.end {
+        known.insert(at, item);
+    }
+    known.extend(up.items.into_iter().map(|n| (n, item)));
+    Ok(item)
 }
 
 /// The next wave of a restore, its rows split by the names they come back under.

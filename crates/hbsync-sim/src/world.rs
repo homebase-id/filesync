@@ -548,6 +548,8 @@ impl Sim {
             }
             Action::ToggleIgnore => {
                 let client = &mut self.clients[c];
+                // New rules make a new engine: the user's Delete answers are asked again.
+                client.confirmed.clear();
                 client.filter = Arc::new(if client.filter.rule_count() == 0 {
                     ignoring_d()
                 } else {
@@ -643,61 +645,45 @@ impl Sim {
     }
 
     /// The user puts back the deletes the guard held in client `c`'s last plan (sync semantics
-    /// §7), as the drive has them now, as `Engine::put_back` does: deleted here and live on the
-    /// drive, its base goes (with what below it is gone here and live there), so it comes down
-    /// again; still here, each synced item in it gone there is restored on the drive, or, gone
-    /// for good there, loses its base, so it goes up again. What the drive changed since wins.
+    /// §7), by the engine's rule ([`hbsync_engine::held::put_back_plan`]), as the drive has
+    /// them now. The engine restores the items together, in one set of waves; here one item
+    /// after the other, outermost first: the same rows come back (a restored name can differ
+    /// where one item's restored name is another's own).
     pub(crate) fn put_back(&mut self, c: usize) {
         let held = std::mem::take(&mut self.clients[c].held);
-        let (mut forget, mut restore) = (Vec::new(), Vec::new());
-        let mut seen = HashSet::new();
-        {
-            let client = &self.clients[c];
-            let live = |n: NodeId| self.server.live.contains_key(&n);
-            let here = |n: NodeId| client.local.contains(n);
-            for node in held {
-                if !client.base.contains(node) {
-                    continue;
-                }
-                match (here(node), live(node)) {
-                    // Below it in the base, gone here and live there.
-                    (false, true) => {
-                        let mut below = vec![node];
-                        while let Some(n) = below.pop() {
-                            if !seen.insert(n) {
-                                continue;
-                            }
-                            forget.push(n);
-                            below.extend(client.base.children(n).filter(|b| !here(*b) && live(*b)));
-                        }
-                    }
-                    // Here, parents first: each synced and gone there restored, or gone for
-                    // good.
-                    (true, _) => {
-                        for n in client.local.subtree(node) {
-                            if seen.insert(n) && client.base.contains(n) && !live(n) {
-                                match self.server.removed.contains_key(&n) {
-                                    true => restore.push(n),
-                                    false => forget.push(n),
-                                }
-                            }
-                        }
-                    }
-                    (false, false) => {}
-                }
-            }
+        let client = &self.clients[c];
+        // What the scanner reports here: never what the filter leaves out.
+        let mut local = client.local.clone();
+        for n in masked(&client.local, &client.filter) {
+            local.remove(n);
         }
+        let coords = client.coords;
+        let sides = ModelSides {
+            base: &client.base,
+            local: &local,
+            // The mirror: what this client hasn't judged gone for good.
+            live: &|n| {
+                let drive = coords.to_drive(n);
+                !coords.hides(drive)
+                    && self
+                        .server
+                        .live
+                        .get(&drive)
+                        .is_some_and(|l| !client.gone.contains(&l.remote.file_id))
+            },
+            server: &self.server,
+            coords,
+        };
+        let Ok(plan) = hbsync_engine::held::put_back_plan(&held, &sides);
         let client = &mut self.clients[c];
-        for n in forget {
+        for n in plan.forget {
             client.base.remove(n);
             client.extra.remove(&n);
         }
-        // One at a time (the engine restores the items of their removals together, in one set
-        // of waves: the same rows come back; a restored name can differ where one item's
-        // restored name is another's own).
-        for n in restore {
-            if !self.server.live.contains_key(&n) {
-                self.restore_with(n);
+        for item in plan.items {
+            let item = coords.to_drive(item);
+            if !self.server.live.contains_key(&item) {
+                self.restore_with(item);
             }
         }
     }
@@ -1083,6 +1069,70 @@ struct Row {
     node: NodeId,
     parent: NodeId,
     name: String,
+}
+
+/// What the rules of held deletes read ([`hbsync_engine::held::Sides`]) of a client's model,
+/// in its coordinates, as the engine's store has it: its base, what the scanner reports here
+/// (`local`), the drive as `live` says (the mirror, or the plan's view of it), and Recently
+/// deleted (the client's top is its root there too).
+pub(crate) struct ModelSides<'a> {
+    pub(crate) base: &'a Tree,
+    pub(crate) local: &'a Tree,
+    pub(crate) live: &'a dyn Fn(NodeId) -> bool,
+    pub(crate) server: &'a Server,
+    pub(crate) coords: Coords,
+}
+
+impl hbsync_engine::held::Sides for ModelSides<'_> {
+    type Error = Infallible;
+
+    fn synced(&self, node: NodeId) -> Result<Option<NodeId>, Infallible> {
+        Ok(self.base.get(node).map(|s| s.parent))
+    }
+
+    fn synced_children(&self, folder: NodeId) -> Result<Vec<NodeId>, Infallible> {
+        Ok(self.base.children(folder).collect())
+    }
+
+    fn here(&self, node: NodeId) -> Result<Option<NodeKind>, Infallible> {
+        Ok(self.local.get(node).map(|s| s.kind))
+    }
+
+    fn here_children(&self, node: NodeId) -> Result<Vec<(NodeId, NodeKind)>, Infallible> {
+        Ok(self
+            .local
+            .children(node)
+            .filter_map(|c| Some((c, self.local.get(c)?.kind)))
+            .collect())
+    }
+
+    fn live(&self, node: NodeId) -> Result<bool, Infallible> {
+        Ok((self.live)(node))
+    }
+
+    fn removed(&self, node: NodeId) -> Result<Option<(NodeId, i64)>, Infallible> {
+        if node.is_root() {
+            return Ok(None);
+        }
+        let drive = self.coords.to_drive(node);
+        Ok(self.server.removed.get(&drive).map(|n| {
+            let at = self
+                .server
+                .removed_at
+                .get(&drive)
+                .copied()
+                .unwrap_or(i64::MAX);
+            (self.coords.from_drive(n.state.parent), at)
+        }))
+    }
+
+    fn removal_pending_under(&self, node: NodeId) -> Result<bool, Infallible> {
+        Ok(self
+            .base
+            .subtree(node)
+            .into_iter()
+            .any(|n| self.local.contains(n) && !(self.live)(n)))
+    }
 }
 
 #[cfg(test)]

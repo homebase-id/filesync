@@ -125,10 +125,8 @@ impl Sim {
                 .copied()
                 .filter(|n| !nodes.contains(n))
                 .collect();
-            let opts = Options {
-                held_files: held::files(&all, out.iter().copied()),
-                ..opts.clone()
-            };
+            let mut opts = opts.clone();
+            opts.guarding.held = held::files(&all, out.iter().copied());
             let reached = std::cell::Cell::new(false);
             let reconcile = with(&opts);
             let without =
