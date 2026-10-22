@@ -6159,6 +6159,48 @@ fn a_swap_planned_in_pages_beside_held_deletes_settles() -> R {
     a_swap_planned_in_pages(true)
 }
 
+/// Another app removes `r` on the drive and stops there (`r/k.txt` taken along, live). b moves
+/// `d/m.txt` into `r` (which brings `r` back) and deletes `d`. In pages of one node, `m.txt`
+/// waits for `r`'s page of its own and keeps `d` meanwhile: what else b deleted in `d` waits
+/// with it, so `d` goes as one, as in one page, and Recently deleted lists no file of it
+/// apart. Before, `d/x.txt` went first, listed apart (§6.5).
+#[test]
+fn a_folder_kept_for_a_folders_own_page_goes_as_one_to_recently_deleted() -> R {
+    for batch in [1, 2, 20_000] {
+        let server = server();
+        let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+        let mut b = Client::with_config(&server, "b", move |cfg| {
+            cfg.guard.allow = true;
+            cfg.batch = batch;
+        })?;
+        a.write("d/x.txt", "x")?;
+        a.write("d/m.txt", "m")?;
+        a.write("r/k.txt", "k")?;
+        a.sync()?;
+        b.sync()?;
+        remove_on_drive(&server, &|name| name == "r")?;
+        fs::rename(b.root.join("d/m.txt"), b.root.join("r/m.txt"))?;
+        fs::remove_dir_all(b.root.join("d"))?;
+        let mut pending = u64::MAX;
+        for _ in 0..8 {
+            pending = b.sync()?.pending;
+            if pending == 0 {
+                break;
+            }
+        }
+        assert_eq!(pending, 0, "pages of {batch}");
+        assert_eq!(b.read_text("r/m.txt")?, "m", "pages of {batch}");
+        let deleted = b.recently_deleted(100)?;
+        let apart: Vec<&str> = deleted
+            .iter()
+            .filter(|d| d.root == d.node && d.path.starts_with("d/"))
+            .map(|d| d.path.as_str())
+            .collect();
+        assert!(apart.is_empty(), "pages of {batch}: {deleted:?}");
+    }
+    Ok(())
+}
+
 /// Another app removes every top folder and what is in them, and stops before `x.txt` in each
 /// (taken along, §6.3): every synced file goes, so b holds the removal for the user, in pages
 /// as in one. Counted from the dirty set, the taken-along files were still in the mirror, so a

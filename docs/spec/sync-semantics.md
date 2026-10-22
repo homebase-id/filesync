@@ -295,7 +295,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    `regression_a_swap_of_a_folder_and_the_one_in_it_planned_in_pages`). It is planned
    with the other node, as a page of its own; one that still waits there is planned again
    with what it waits for, one larger page. A folder such a wait keeps (a node in it moves
-   out into such a place), that the plan would delete, goes with that page too: what else
+   out into such a place, or into a folder that waits for its own page), that the plan would
+   delete, goes with that page too: what else
    the plan deletes in it waits with it, so the folder goes as one, as in one page. Only
    while something waits with a node outside the page: each such page is larger, so it ends;
    what still keeps the folder then isn't another page, and what is deleted in it goes as
