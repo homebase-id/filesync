@@ -234,7 +234,8 @@ impl Reconciler<'_> {
     }
 
     /// A folder this plan would delete that waits for another page (something in it does: a
-    /// placement or a name across pages, a folder that waits for its own page; §6.5) is
+    /// placement or a name across pages, or what goes into a folder that waits for its own
+    /// page; §6.5) is
     /// deleted with that page: what else this plan deletes in it waits with it, planned again
     /// as it is (`placed`), and with it as a page of its own next (`Plan::waits_together`), so
     /// the folder goes as one, with what was in it, as in one page. Deleted now, what was in it
@@ -244,21 +245,26 @@ impl Reconciler<'_> {
     /// whose delete waits for a file not hashed yet: it goes item by item (§6.3).
     pub(super) fn deletes_wait_with_their_folder(&mut self) {
         if self.plan.delete_waits.is_empty()
-            || (self.together.is_empty() && self.plan.waits_together.is_empty())
+            || (self.together.is_empty()
+                && self.plan.waits_together.is_empty()
+                && self.going.is_empty())
         {
             return;
         }
         let i = self.input;
-        // Only while a node waits with one outside this page: then the page planned with it
-        // comes, larger, and the folder's wait may end there. With all of them in it, what
-        // still keeps the folder isn't another page's: what is deleted in it goes as before.
+        // Only while a node waits with one outside this page, or for a folder's page of its
+        // own (`going`: what is below it, or it, is planned in another page): then the page
+        // planned with it comes, larger, and the folder's wait may end there. With all of them
+        // in it, what still keeps the folder isn't another page's: what is deleted in it goes
+        // as before.
         let page: HashSet<NodeId> = i.dirty.iter().map(|n| self.masks.store_id(*n)).collect();
-        if !self
-            .together
-            .iter()
-            .chain(&self.plan.waits_together)
-            .flatten()
-            .any(|n| !page.contains(n))
+        if self.going.is_empty()
+            && !self
+                .together
+                .iter()
+                .chain(&self.plan.waits_together)
+                .flatten()
+                .any(|n| !page.contains(n))
         {
             return;
         }
