@@ -804,40 +804,6 @@ fn a_change_wakes_the_folders_it_concerns() -> R {
     Ok(())
 }
 
-/// The purge empties the trash of every folder: what went there since it began, before the
-/// cut-off.
-#[test]
-fn the_purge_empties_every_folders_trash() -> R {
-    let dir = tempfile::tempdir()?;
-    let (drive, _) = drive(dir.path())?;
-    let (a, b) = (dir.path().join("a"), dir.path().join("b"));
-    let mut account = StateDb::open_account(&dir.path().join("state.db"))?;
-    account.write(|s| {
-        s.account()
-            .add_folder(NodeId::ROOT, &a.to_string_lossy(), "ma")?;
-        s.account()
-            .add_folder(NodeId::new(), &b.to_string_lossy(), "mb")
-    })?;
-    // The first purge starts the clock: what was in the trash before stays.
-    drive.purge(0)?;
-    let now = hbsync_types::unix_now();
-    let entry = |folder: &std::path::Path, at: u64| {
-        let path = hbsync_local::layout::trash_dir(folder)
-            .join(hbsync_local::layout::trash_entry(at, NodeId::new()))
-            .join("f.txt");
-        std::fs::create_dir_all(path.parent().expect("parent"))?;
-        std::fs::write(&path, "x")?;
-        std::io::Result::Ok(path)
-    };
-    let (in_a, in_b) = (entry(&a, now + 1)?, entry(&b, now + 1)?);
-    let young = entry(&b, now + 100)?;
-    // Kept less than nothing: what goes there in the next 10 s goes too.
-    drive.purge(-10_000)?;
-    assert!(!in_a.exists() && !in_b.exists(), "both trashes emptied");
-    assert!(young.exists(), "what is younger stays");
-    Ok(())
-}
-
 /// The files' tokens are sealed under a login's key: another login forgets them, the same one
 /// keeps them.
 #[test]

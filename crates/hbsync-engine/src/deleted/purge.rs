@@ -1,20 +1,17 @@
 //! Deleting Recently deleted for good: emptying it (as listed, or items of it), and the daily
-//! purge of what it kept long enough, with the tombstones and the folders' trash.
+//! purge of what it kept long enough, with the tombstones.
 
 use std::collections::{HashMap, HashSet};
-use std::path::Path;
 use std::time::Instant;
 
 use hbsync_remote::{Answers, Holds, Remote, RemoteError};
-use hbsync_state::{MirrorRow, ReadTx, RemovedRow, StateError, keys};
+use hbsync_state::{MirrorRow, ReadTx, RemovedRow, StateError};
 use hbsync_types::{Doomed, NodeId, NodeKind, RemoteFileId, RemoteRef, Role, Target};
 
 use crate::error::EngineError;
 use crate::gone;
 use crate::mirror;
 use crate::time::TRACE_MS;
-use crate::trash::empty_trash;
-use hbsync_local::layout;
 
 use super::AccountOps;
 use super::listing::{
@@ -26,9 +23,8 @@ impl AccountOps<'_> {
     /// The purge: deletes for good the items of Recently deleted kept `keep_ms` by `now_ms` (the
     /// server's clock), each with what was deleted with it, as emptying them would
     /// ([`select`](super::rules::select): removed nodes only, never a live one, and never a folder
-    /// holding one), files before their folders; the tombstones as old as [`TRACE_MS`]; and every
-    /// folder's trash (`.hbsync/trash`) of the same age (by this device's clock, which named its
-    /// entries). Node schema, "The purge":
+    /// holding one), files before their folders; and the tombstones as old as [`TRACE_MS`]. Node
+    /// schema, "The purge":
     /// - It never deletes a live node for good. What the delete of an item kept that long took
     ///   along and left live (a delete that stopped half way) it first removes, a folder before
     ///   what is in it ([`Self::remove_taken_along`]): each goes 30 days after its own removal. A
@@ -40,15 +36,13 @@ impl AccountOps<'_> {
     ///   else leaving a tombstone, which goes hard [`TRACE_MS`] after its own time.
     /// - What is known gone longer than that is forgotten ([`hbsync_state::AccountTx::prune_gone`]).
     ///
-    /// Each part runs whatever became of the others (the trash only once the items went); the
-    /// first error is returned at the end.
+    /// Each part runs whatever became of the others; the first error is returned at the end.
     /// Returns how many items went. Leaves the account behind ([`AccountOps::run`]) when the
     /// drive refused a delete for its state (written since, restored, gone already).
     pub fn purge(&mut self, keep_ms: i64, now_ms: i64) -> Result<usize, EngineError> {
         let traced = now_ms.saturating_sub(TRACE_MS);
         let before = now_ms.saturating_sub(keep_ms);
-        // Each part on its own: one that fails doesn't keep the others from their work, but for the
-        // trash: while Recently deleted's items didn't go, the local copies of deletes stay too.
+        // Each part on its own: one that fails doesn't keep the others from their work.
         let taken = self.remove_taken_along(before);
         let expired = self.expire(before, Some(traced));
         let tombstones = self.delete_tombstones(traced);
@@ -57,50 +51,11 @@ impl AccountOps<'_> {
             .write(|s| s.account().prune_gone(traced, now_ms))
             .map(drop)
             .map_err(EngineError::from);
-        let trash = match &expired {
-            Ok(_) => self.empty_trashes(keep_ms),
-            Err(_) => Ok(()),
-        };
         taken?;
         let gone = expired?;
         tombstones?;
         pruned?;
-        trash?;
         Ok(gone)
-    }
-
-    /// Empties every folder's trash (`.hbsync/trash`) of what went there `keep_ms` ago or more
-    /// (by this device's clock, which named its entries).
-    fn empty_trashes(&self, keep_ms: i64) -> Result<(), EngineError> {
-        let trashed_before = hbsync_types::unix_now_ms().saturating_sub(keep_ms);
-        let folders = self.db().read(|s| s.folders())?;
-        for folder in folders {
-            if folder.path.is_empty() {
-                continue;
-            }
-            // Only what went there since the purge has been emptying it: older entries (from
-            // before Recently deleted) may be the only copy left, and stay.
-            let since = self.db().write(|s| {
-                match s.folder_kv_of(folder.id, keys::TRASH_PURGED_SINCE)? {
-                    Some(v) => Ok(v.parse().unwrap_or(u64::MAX)),
-                    None => {
-                        let now = hbsync_types::unix_now();
-                        s.account().set_folder_kv_of(
-                            folder.id,
-                            keys::TRASH_PURGED_SINCE,
-                            &now.to_string(),
-                        )?;
-                        Ok(now)
-                    }
-                }
-            })?;
-            empty_trash(
-                &layout::trash_dir(Path::new(&folder.path)),
-                since,
-                trashed_before,
-            );
-        }
-        Ok(())
     }
 
     /// Deletes for good the items `nodes` name as `listed` showed them, each with all of Recently

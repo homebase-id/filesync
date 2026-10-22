@@ -110,10 +110,9 @@ fn edits_moves_and_deletes_propagate() -> R {
     Ok(())
 }
 
-/// Whether nothing of what `c` deleted is kept in its `.hbsync`: no trash, nothing aside.
+/// Whether nothing of what `c` deleted is kept in its `.hbsync`: nothing aside.
 fn nothing_kept(c: &Client) -> bool {
-    let empty = |dir: &str| fs::read_dir(c.root.join(dir)).map_or(true, |mut d| d.next().is_none());
-    empty(".hbsync/trash") && empty(".hbsync/aside")
+    fs::read_dir(c.root.join(".hbsync/aside")).map_or(true, |mut d| d.next().is_none())
 }
 
 #[test]
@@ -4256,7 +4255,7 @@ fn a_parked_item_put_back_takes_a_real_name() -> R {
 }
 
 /// Something in `.hbsync/aside` that no synced item here is (its state DB lost since, say) is
-/// left there, never deleted, and the sync goes on.
+/// left there, never deleted, and told; the sync goes on.
 #[test]
 fn an_unknown_item_aside_is_left() -> R {
     let server = server();
@@ -4265,12 +4264,26 @@ fn an_unknown_item_aside_is_left() -> R {
     b.sync()?;
     let aside = b.root.join(".hbsync/aside");
     fs::create_dir_all(&aside)?;
-    let stranger = aside.join(format!("{}", hbsync_types::NodeId::new().0.simple()));
+    let name = hbsync_types::NodeId::new().0.simple().to_string();
+    let stranger = aside.join(&name);
     fs::write(&stranger, "only copy")?;
     fs::write(aside.join("not an entry"), "nor this")?;
-    b.sync()?;
+    // Junk the OS leaves there is no delete's, and not told.
+    fs::write(aside.join(".DS_Store"), "junk")?;
+    let told = b.sync()?.left_aside;
+    let mut expected = [
+        format!(".hbsync/aside/{name}"),
+        ".hbsync/aside/not an entry".to_string(),
+    ];
+    expected.sort();
+    assert_eq!(told, expected);
     assert_eq!(fs::read_to_string(&stranger)?, "only copy");
     assert_eq!(fs::read_to_string(aside.join("not an entry"))?, "nor this");
+    assert_eq!(
+        fs::read_to_string(aside.join(".DS_Store"))?,
+        "junk",
+        "left too"
+    );
     assert_eq!(b.tree_text(""), ["y = y"]);
     Ok(())
 }
@@ -5996,8 +6009,7 @@ fn what_a_held_removal_took_along_waits_without_a_spin() -> R {
 /// along, live, and not marked (the feed marks the folder). b edits `d/e/f1.txt` and makes
 /// `d/e/new.txt` meanwhile, their marks in later pages than `d`'s. The page holding `d` waits
 /// for what is below it in other pages, so `d` is planned with its whole subtree: the edits
-/// keep it, as in one page. Planned apart, its trash took them along into `.hbsync/trash`
-/// (review 15).
+/// keep it, as in one page. Planned apart, its delete took them along (review 15).
 #[test]
 fn a_change_deep_in_a_folder_removed_elsewhere_keeps_it_in_pages() -> R {
     for batch in [1, 2, 20_000] {

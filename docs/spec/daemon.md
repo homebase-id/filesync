@@ -29,9 +29,9 @@ mirror, Recently deleted) once, each folder's own rows (what it has, what was ag
 the folder. It records its identity (`account.identity`).
 
 A sync folder keeps the rest in `<folder>/.hbsync` (temp files, and an item being deleted or
-replaced for the moment it is checked, on the folder's disk for atomic renames; the trash an
-older version filled, until the purge empties it; the ignore rules), hidden on Windows too
-(the hidden attribute, set at every start), and its marker `.hbsync/folder`: the identity and
+replaced for the moment it is checked, in `.hbsync/aside`, on the folder's disk for atomic
+renames; the ignore rules), hidden on Windows too (the hidden attribute, set at every start),
+and its marker `.hbsync/folder`: the identity and
 the folder's id in that DB.
 A folder is synced only through its marker: without one it is gone (or not mounted), with
 another identity's it is refused, and one the DB doesn't know is set up again. An account's DB
@@ -353,9 +353,9 @@ included (service managers restart it then).
   from the server yet) by name. Once a day (the time is kept in the state DB) the account deletes for good what
   was removed more than
   `keep_deleted_days` ago (a folder's delete as a whole, never a live node: a removed folder
-  still holding one stays, restorable), and empties `.hbsync/trash` of
-  entries that old, from those made since the purge began (older ones, from before Recently
-  deleted, may be the only copy and stay). What goes, and how: node schema, "The purge".
+  still holding one stays, restorable). Nothing is kept on the computers: Recently deleted on
+  the drive is the only copy of what was deleted (a `.hbsync/trash` an older version left is
+  no longer touched: the user deletes it by hand). What goes, and how: node schema, "The purge".
 
 ### States
 

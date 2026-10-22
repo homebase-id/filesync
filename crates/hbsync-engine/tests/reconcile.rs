@@ -1004,8 +1004,7 @@ fn a_remote_move_into_an_ignored_folder_takes_the_file_away_here() {
     w.synced(f, file(ROOT, "a.txt", "v1"));
     w.remote(b, Some(folder(ROOT, "build")))
         .remote(f, Some(file(b, "a.txt", "v1")));
-    // The copy here goes to the trash and the base with it, in one step: the remote is never
-    // touched.
+    // The copy here is deleted and the base with it, in one step: the remote is never touched.
     let plan = w.plan();
     assert_eq!(
         plan.ops,

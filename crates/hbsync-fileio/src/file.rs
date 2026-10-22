@@ -285,7 +285,7 @@ impl CompletedFile {
     /// version the plan saw). Otherwise the user changed it meanwhile and nothing is touched.
     ///
     /// A small window remains between the check and the swap; the caller keeps the old version
-    /// recoverable (conflict copy or trash) when it matters.
+    /// recoverable (a conflict copy) when it matters.
     pub fn persist_over(
         self,
         target: &Path,

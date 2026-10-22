@@ -7,23 +7,10 @@ impl ReadTx<'_> {
 
     /// This folder's setting `key`.
     pub fn get_kv(&self, key: FolderKey) -> Result<Option<String>> {
-        self.folder_kv_of(self.folder, key)
-    }
-
-    /// Folder `folder`'s setting `key`, from any handle (the account's purging every folder's
-    /// trash, say).
-    pub fn folder_kv_of(&self, folder: i64, key: FolderKey) -> Result<Option<String>> {
         Ok(self
             .prep("SELECT value FROM folder_kv WHERE folder = ?1 AND key = ?2")?
-            .query_row(params![folder, key.0], |r| r.get(0))
+            .query_row(params![self.folder, key.0], |r| r.get(0))
             .optional()?)
-    }
-
-    /// Sets folder `folder`'s setting `key` ([`FolderTx::set_kv`], [`AccountTx::set_folder_kv_of`]).
-    fn write_folder_kv(&self, folder: i64, key: FolderKey, value: &str) -> Result<()> {
-        self.prep("INSERT OR REPLACE INTO folder_kv (folder, key, value) VALUES (?1, ?2, ?3)")?
-            .execute(params![folder, key.0, value])?;
-        Ok(())
     }
 
     /// The account's setting `key` (the feed's cursor, the identity).
@@ -67,7 +54,9 @@ impl ReadTx<'_> {
 
 impl FolderTx<'_> {
     pub fn set_kv(&self, key: FolderKey, value: &str) -> Result<()> {
-        self.write_folder_kv(self.folder, key, value)
+        self.prep("INSERT OR REPLACE INTO folder_kv (folder, key, value) VALUES (?1, ?2, ?3)")?
+            .execute(params![self.folder, key.0, value])?;
+        Ok(())
     }
 
     pub fn delete_kv(&self, key: FolderKey) -> Result<()> {
@@ -116,10 +105,6 @@ impl AccountTx<'_> {
         self.prep("INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)")?
             .execute([key.0, value])?;
         Ok(())
-    }
-
-    pub fn set_folder_kv_of(&self, folder: i64, key: FolderKey, value: &str) -> Result<()> {
-        self.write_folder_kv(folder, key, value)
     }
 }
 

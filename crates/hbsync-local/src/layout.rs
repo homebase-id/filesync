@@ -27,23 +27,6 @@ pub fn tmp_dir(root: &Path) -> PathBuf {
     state_dir(root).join("tmp")
 }
 
-/// What syncing took from the folder in versions before verified deletes (an entry each,
-/// [`trash_entry`]), until the purge. Nothing goes there any more.
-pub fn trash_dir(root: &Path) -> PathBuf {
-    state_dir(root).join("trash")
-}
-
-/// The name of `node`'s entry in the [`trash_dir`]: `<Unix s>-<node>`, by when it went there
-/// (`at`, Unix s). Only read now, for the purge.
-pub fn trash_entry(at: u64, node: NodeId) -> String {
-    format!("{at}-{}", node.0.simple())
-}
-
-/// When a trash entry ([`trash_entry`]) went there, Unix s.
-pub fn trashed_at(entry: &str) -> Option<u64> {
-    entry.split_once('-')?.0.parse().ok()
-}
-
 /// Where an item being deleted, or the old version a download replaces, waits for the moment
 /// between its rename out of the folder and its unlink, once checked: on the folder's volume, so
 /// it leaves with one rename. Nothing stays there once the delete (or the download) is
@@ -51,16 +34,27 @@ pub fn trashed_at(entry: &str) -> Option<u64> {
 /// bytes: one taken (left by a crash) is a place the next one waits for, never one to rename
 /// over.
 pub fn aside_dir(root: &Path) -> PathBuf {
-    state_dir(root).join("aside")
+    state_dir(root).join(ASIDE)
+}
+
+/// The [`aside_dir`]'s name in the [`STATE_DIR`].
+const ASIDE: &str = "aside";
+
+/// The entry `name` of the [`aside_dir`] as a path in its folder, in the drive's spelling (`/`),
+/// for people.
+pub fn aside_shown(name: &str) -> String {
+    format!("{STATE_DIR}/{ASIDE}/{name}")
 }
 
 /// The entries of the [`aside_dir`] of the folder at `root`, each with what it holds (`None`:
-/// a name no delete gives).
+/// a name no delete gives), junk left out.
 pub fn aside_entries(root: &Path) -> impl Iterator<Item = (PathBuf, Option<AsideEntry>)> {
     std::fs::read_dir(aside_dir(root))
         .into_iter()
         .flatten()
         .flatten()
+        // Junk the OS leaves there (`.DS_Store`): no delete's, and nothing to tell.
+        .filter(|e| !e.file_name().to_str().is_some_and(crate::filter::is_junk))
         .map(|e| {
             let entry = e.file_name().to_str().and_then(AsideEntry::parse);
             (e.path(), entry)

@@ -1062,7 +1062,9 @@ use outcome::{Outcome, Step, io_outcome, remote_outcome, rescan};
 pub use outcome::{Skip, Stopped};
 use park::{numbered_place, occupant, release_place, release_place_for, restore_parked};
 use recover::{Applied, Judged, OnDisk, apply, judge, look, read_row};
-pub use recover::{UNHASHED_HOLD, record_dirs, recover, recover_aside, recover_placements};
+pub use recover::{
+    AsideOutcome, UNHASHED_HOLD, record_dirs, recover, recover_aside, recover_placements,
+};
 use recover::{complete_fork, download_key};
 use schedule::{Retried, Schedule};
 pub use transfer_ops::tags_lost;

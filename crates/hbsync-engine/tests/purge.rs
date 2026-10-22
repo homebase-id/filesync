@@ -14,7 +14,6 @@ use common::{Client, header_named, server};
 use hbsync_engine::deleted;
 use hbsync_engine::feed;
 use hbsync_engine::time::TRACE_MS;
-use hbsync_local::layout;
 use hbsync_remote::RemoteError;
 use hbsync_remote::fake::{FakeRemote, FakeServer};
 use hbsync_state::StateDb;
@@ -109,8 +108,8 @@ fn an_old_removal_goes_hard_at_once() -> common::Res<()> {
 }
 
 /// A device away longer than the feed keeps a trace of a delete for good doesn't see it in the
-/// feed: it reads the whole feed again, and what the feed no longer has is deleted here (to the
-/// folder's trash), never uploaded again. Back from that, it reads the feed as before.
+/// feed: it reads the whole feed again, and what the feed no longer has is deleted here, never
+/// uploaded again. Back from that, it reads the feed as before.
 #[test]
 fn a_device_away_longer_than_the_trace_reads_the_feed_again() -> common::Res<()> {
     let server = server();
@@ -1331,44 +1330,6 @@ fn an_unknown_answer_fails_the_purge() -> common::Res<()> {
     assert_eq!(db.read(|s| s.list_removed(10))?.len(), 1);
     assert!(!db.read(|s| s.file_gone(x))?);
     assert!(removed_on_server(&server, "x.txt"));
-    Ok(())
-}
-
-/// While deleting the items fails, every folder's trash keeps its old entries too (the local
-/// copies of what was deleted): emptied by a purge that went through.
-#[test]
-fn the_trash_waits_for_the_items() -> common::Res<()> {
-    let server = server();
-    let dir = tempfile::tempdir()?;
-    let folder = dir.path().join("a");
-    let account = Arc::new(Mutex::new(StateDb::open_in_memory()?));
-    account.lock().map_err(|_| "poisoned")?.write(|s| {
-        s.account()
-            .add_folder(NodeId::new(), &folder.to_string_lossy(), "ma")
-            .map(drop)
-    })?;
-    let mut remote = Watched::new(&server, &account, Duration::ZERO);
-    // The first purge starts the trash's clock.
-    let now = pull_into(&account, &remote)?;
-    purge(&account, &remote, 0, now, &mut false)?;
-    let entry = layout::trash_dir(&folder)
-        .join(layout::trash_entry(
-            hbsync_types::unix_now() + 1,
-            NodeId::new(),
-        ))
-        .join("f.txt");
-    fs::create_dir_all(entry.parent().ok_or("parent")?)?;
-    fs::write(&entry, "x")?;
-    seed(&server, "y.txt")?;
-    remove_on_server(&server, &header_named(&server, "y.txt"));
-    let now = pull_into(&account, &remote)?;
-    remote.soft_fails = true;
-    // Kept less than nothing: the entry is old enough, and so is y.
-    assert!(purge(&account, &remote, -10_000, now, &mut false).is_err());
-    assert!(entry.exists(), "the trash waits");
-    remote.soft_fails = false;
-    purge(&account, &remote, -10_000, now, &mut false)?;
-    assert!(!entry.exists(), "emptied");
     Ok(())
 }
 

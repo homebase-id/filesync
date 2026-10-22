@@ -521,7 +521,7 @@ impl Drive {
 
     /// Deletes for good what was deleted `keep_ms` ago or more: Recently deleted, by the
     /// server's clock (as read just now: a pull, whatever the announcements say, so a restore
-    /// elsewhere is in the picture), and the trash of every folder.
+    /// elsewhere is in the picture).
     pub fn purge(&self, keep_ms: i64) -> Result<usize, EngineError> {
         self.pull(None)?;
         let now = self.server_time.load(Ordering::SeqCst);
@@ -548,7 +548,7 @@ impl Drive {
     }
 
     /// Once a day: deletes for good what Recently deleted has kept `keep_days`, never less
-    /// than [`crate::time::MIN_KEEP_DAYS`] (and the trash of the same age). A failure waits for the
+    /// than [`crate::time::MIN_KEEP_DAYS`]. A failure waits for the
     /// next day's try... or the next call: it is only recorded as done when it worked.
     pub fn purge_when_due(&self, keep_days: u32) -> Result<Option<usize>, EngineError> {
         let keep_days = keep_days.max(crate::time::MIN_KEEP_DAYS);
