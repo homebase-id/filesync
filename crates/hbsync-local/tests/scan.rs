@@ -3,7 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use hbsync_fileio::HashAlgorithm;
-use hbsync_local::{Filter, ScanOptions, ScanReport, rescan_dirs, scan};
+use hbsync_local::{Filter, ScanOptions, ScanReport, Settle, rescan_dirs, scan};
 use hbsync_platform::RelPath;
 use hbsync_state::{BaseRow, StateDb};
 use hbsync_types::{
@@ -1136,4 +1136,96 @@ mod entries {
             events_equal_a_full_scan(exact, &ops).map_err(|e| proptest::test_runner::TestCaseError::fail(e.to_string()))?;
         }
     }
+}
+
+/// Now, in nanoseconds since the Unix epoch, `secs` on.
+fn now_ns(secs: i64) -> i64 {
+    hbsync_platform::meta::system_time_ns(std::time::SystemTime::now()) + secs * 1_000_000_000
+}
+
+/// The row of `rel`'s hash.
+fn hash_of(
+    f: &mut Fixture,
+    rel: &str,
+) -> Result<Option<hbsync_types::ContentHash>, Box<dyn std::error::Error>> {
+    let path = RelPath::new(rel)?;
+    Ok(f.db.read(|s| s.get_local(&path))?.ok_or("no row")?.hash)
+}
+
+/// A large file being written isn't read at every look, but once it has been quiet: till then
+/// it is unhashed and dirty, as one that couldn't be read is, and said so with how long it has
+/// left. A small one is read at once; so is one whose time is ahead of the clock (it would
+/// never get old), and any without [`ScanOptions::settle`].
+#[test]
+fn a_large_file_being_written_is_read_once_it_is_quiet() -> R {
+    let mut f = Fixture::new()?;
+    let quiet = std::time::Duration::from_secs(60);
+    f.opts.settle = Some(Settle {
+        from_size: 4,
+        quiet,
+    });
+    f.write("big", b"growing")?;
+    f.write("small", b"abc")?;
+    let (report, dirty) = f.scan()?;
+    assert_eq!((report.added, report.hashed), (2, 1), "{report:?}");
+    let young: Vec<String> = report.young.iter().map(|y| y.path.to_string()).collect();
+    assert_eq!(young, ["big"]);
+    assert!(report.young[0].left <= quiet && report.young[0].left > quiet / 2);
+    assert!(report.unhashed.is_empty(), "{report:?}");
+    let big = f.node("big")?;
+    assert!(dirty.contains(&big));
+    assert_eq!(hash_of(&mut f, "big")?, None);
+    assert!(hash_of(&mut f, "small")?.is_some());
+
+    // Written to again: still left.
+    f.write("big", b"growing more")?;
+    let (report, dirty) = f.scan()?;
+    assert_eq!((report.hashed, report.young.len()), (0, 1), "{report:?}");
+    assert_eq!(dirty, [big]);
+    assert_eq!(hash_of(&mut f, "big")?, None);
+
+    // Quiet for long enough: read.
+    hbsync_platform::ops::set_mtime(&f.root().join("big"), now_ns(-120))?;
+    let (report, dirty) = f.scan()?;
+    assert_eq!((report.hashed, report.young.len()), (1, 0), "{report:?}");
+    assert_eq!(dirty, [big]);
+    assert!(hash_of(&mut f, "big")?.is_some());
+
+    // A time ahead of the clock isn't recent.
+    f.write("big", b"from the future")?;
+    hbsync_platform::ops::set_mtime(&f.root().join("big"), now_ns(86_400))?;
+    let (report, _) = f.scan()?;
+    assert_eq!((report.hashed, report.young.len()), (1, 0), "{report:?}");
+
+    // Without it, a changed file is read at once.
+    f.opts.settle = None;
+    f.write("big", b"written just now")?;
+    let (report, _) = f.scan()?;
+    assert_eq!((report.hashed, report.young.len()), (1, 0), "{report:?}");
+    Ok(())
+}
+
+/// A new file that may be a vanished one moved (the same size: copied, then the original
+/// deleted) is read at once though it was just written: its hash tells whether it keeps the
+/// node.
+#[test]
+fn a_new_file_that_may_be_a_move_is_read_while_it_is_written() -> R {
+    let mut f = Fixture::new()?;
+    f.write("a/report.pdf", b"unique report bytes")?;
+    f.write("a/other.pdf", b"other bytes")?;
+    f.scan()?;
+    let node = f.node("a/report.pdf")?;
+    f.opts.settle = Some(Settle {
+        from_size: 1,
+        quiet: std::time::Duration::from_secs(60),
+    });
+    f.write("b/report.pdf", b"unique report bytes")?;
+    f.write("b/new.pdf", b"a new file of its own size")?;
+    fs::remove_file(f.root().join("a/report.pdf"))?;
+    let (report, _) = f.scan()?;
+    assert_eq!(f.node("b/report.pdf")?, node);
+    assert_eq!((report.moved, report.removed), (1, 0), "{report:?}");
+    let young: Vec<String> = report.young.iter().map(|y| y.path.to_string()).collect();
+    assert_eq!(young, ["b/new.pdf"], "{report:?}");
+    Ok(())
 }

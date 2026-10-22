@@ -8,7 +8,7 @@
 //! is seen by the watcher (and at worst handled twice, which is harmless). It rings a bell when
 //! there is something to record, so its owner can block until then instead of polling.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,7 +23,7 @@ use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::filter::Filter;
 use crate::journal::{CatchUp, catch_up, relpath_prefix};
-use crate::scan::{ScanOptions, ScanReport, rescan_dirs, rescan_entries, scan};
+use crate::scan::{ScanOptions, ScanReport, Settle, rescan_entries, scan};
 
 /// A coalesced set of changes from the watcher.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -306,7 +306,47 @@ pub struct LocalObserver {
     more: bool,
     /// When to look into new folders once more, and which (see [`RECHECK`]).
     recheck: Option<(Instant, Vec<RelPath>)>,
+    /// Large files left unhashed while they are written ([`Settle`]), each
+    /// looked at again once it may have been quiet long enough.
+    young: BTreeMap<RelPath, Waiting>,
 }
+
+/// A file being written, to look at again.
+#[derive(Debug, Clone, Copy)]
+struct Waiting {
+    at: Instant,
+    /// The wait after a look that finds it written to since the last ([`FIRST_WAIT`],
+    /// doubling up to [`MAX_WAIT`]).
+    wait: Duration,
+    /// Its modification time when last seen.
+    mtime_ns: i64,
+    /// Since when it has been left (or since it was last read anyway, [`READ_ANYWAY`]).
+    since: Instant,
+}
+
+impl Waiting {
+    /// A file's first look, `at`.
+    fn first(at: Instant, mtime_ns: i64) -> Self {
+        Waiting {
+            at,
+            wait: FIRST_WAIT,
+            mtime_ns,
+            since: Instant::now(),
+        }
+    }
+}
+
+/// A file still being written when it is looked at again waits this long for the next look,
+/// twice as long each time it is still written to, up to [`MAX_WAIT`]: a file written for
+/// minutes is looked at a few times, not at every batch, and is read at most this long after
+/// it went quiet.
+const FIRST_WAIT: Duration = Duration::from_secs(3);
+const MAX_WAIT: Duration = Duration::from_secs(60);
+
+/// A file written to without a quiet moment for this long is read all the same, at its next
+/// look, and again after as long each time: one that is never quiet (a log, a running VM's
+/// disk) still syncs where its upload fits between two writes.
+const READ_ANYWAY: Duration = Duration::from_secs(600);
 
 /// How long after a new folder is found it is rescanned once more. A watcher that watches
 /// folder by folder (inotify) starts watching a new one only after its creation event: what is
@@ -324,13 +364,18 @@ impl LocalObserver {
     /// [`LocalObserver::start`], ringing `bell` when there is something to record
     /// ([`LocalObserver::poll`]) or the ignore rules' file was touched
     /// ([`LocalObserver::rules_touched`]). Poll at [`LocalObserver::deadline`] too.
-    pub fn ringing(root: &Path, opts: ScanOptions, bell: Option<Bell>) -> Self {
+    ///
+    /// With a watcher, large files being written are hashed once they are quiet
+    /// ([`ScanOptions::settle`]: `opts`' own, else the default), and looked at again for it.
+    pub fn ringing(root: &Path, mut opts: ScanOptions, bell: Option<Bell>) -> Self {
         let filter = Arc::clone(&opts.filter);
         let (watcher, watcher_error) = match LiveWatcher::start(root, filter, bell) {
             Ok(w) => (Some(w), None),
             // Typically inotify's watch limit on very large trees.
             Err(e) => (None, Some(e.to_string())),
         };
+        // Without a watcher, the caller's periodic scans hash what they find.
+        opts.settle = watcher.as_ref().map(|_| opts.settle.unwrap_or_default());
         LocalObserver {
             root: root.to_path_buf(),
             journal: open_journal(root, opts.fs_family),
@@ -341,11 +386,36 @@ impl LocalObserver {
             settling: None,
             more: false,
             recheck: None,
+            young: BTreeMap::new(),
         }
     }
 
+    /// Brings the rows up to date with the disk ([`catch_up`]), reading every changed file it
+    /// finds, being written or not: a run that catches up, syncs once and stops leaves none
+    /// behind. The files left unhashed before (being written when the client stopped, locked)
+    /// that it didn't try to read are looked at again at the first poll: a journal names only
+    /// what changed since, and nothing else would.
     pub fn catch_up(&mut self, db: &mut StateDb) -> Result<CatchUp, StateError> {
-        catch_up(db, &self.root, self.journal.as_deref_mut(), &self.opts)
+        let opts = ScanOptions {
+            settle: None,
+            ..self.opts.clone()
+        };
+        let caught = catch_up(db, &self.root, self.journal.as_deref_mut(), &opts)?;
+        let tried: HashSet<&RelPath> = caught.report.unhashed.iter().map(|(p, _)| p).collect();
+        let unhashed = db.read(|s| {
+            let mut rows = Vec::new();
+            for node in s.unhashed_files()? {
+                rows.extend(s.local_by_node(node)?);
+            }
+            Ok(rows)
+        })?;
+        let now = Instant::now();
+        for row in unhashed.into_iter().filter(|r| !tried.contains(&r.path)) {
+            self.young
+                .entry(row.path)
+                .or_insert(Waiting::first(now, row.fingerprint.mtime_ns));
+        }
+        Ok(caught)
     }
 
     /// Waits up to `timeout` for live changes and records them. `None` if nothing happened
@@ -362,15 +432,48 @@ impl LocalObserver {
             w.rung.store(false, Ordering::SeqCst);
         }
         self.more = false;
-        // Without a watcher nothing is ever due for a recheck.
-        if self
+        // New folders and files being written, due for another look (none without a watcher,
+        // but those a watcher that stopped left).
+        let now = Instant::now();
+        let dirs = self
             .recheck
-            .as_ref()
-            .is_some_and(|(at, _)| Instant::now() >= *at)
-            && let Some((_, dirs)) = self.recheck.take()
-        {
-            let report = rescan_dirs(db, &self.root, &dirs, &self.opts)?;
+            .take_if(|(at, _)| now >= *at)
+            .map(|(_, dirs)| dirs)
+            .unwrap_or_default();
+        let due = self.young.iter().filter(|(_, w)| now >= w.at);
+        // Those left for long are read now, whether quiet or not (the rest at the next poll).
+        let forced: Vec<RelPath> = due
+            .clone()
+            .filter(|(_, w)| now.duration_since(w.since) >= READ_ANYWAY)
+            .map(|(path, _)| path.clone())
+            .collect();
+        let forcing = !forced.is_empty();
+        let anyway;
+        let (files, opts) = match forcing {
+            false => (due.map(|(path, _)| path.clone()).collect(), &self.opts),
+            true => {
+                anyway = ScanOptions {
+                    settle: self.opts.settle.map(|s| Settle {
+                        quiet: Duration::ZERO,
+                        ..s
+                    }),
+                    ..self.opts.clone()
+                };
+                (forced, &anyway)
+            }
+        };
+        if !dirs.is_empty() || !files.is_empty() {
+            let report = rescan_entries(db, &self.root, &dirs, &files, opts)?;
             self.note_new_folders(&report);
+            self.note_young(&report, &files);
+            if forcing {
+                self.more = true;
+                for path in &files {
+                    if let Some(w) = self.young.get_mut(path) {
+                        w.since = now;
+                    }
+                }
+            }
             if report.added + report.removed + report.modified + report.moved > 0 {
                 // The queue wasn't looked at: poll again at once.
                 self.more = true;
@@ -418,6 +521,7 @@ impl LocalObserver {
             // Left to the look's rescans from now on, as without a watcher.
             self.watcher_error = Some("the live watcher stopped".to_owned());
             self.watcher = None;
+            self.opts.settle = None;
             self.more = false;
             // No position is stored without a watcher; the one stored is older, which is safe.
             self.unsaved = false;
@@ -435,6 +539,8 @@ impl LocalObserver {
         } else {
             rescan_entries(db, &self.root, &dirs, &entries, &self.opts)?
         };
+        // Before anything else can fail: the scan's rows are written.
+        self.note_young(&report, &[]);
         match position {
             Some(position) if batch.drained => {
                 db.write(|s| s.folder().set_kv(keys::JOURNAL_CURSOR, &position))?;
@@ -456,12 +562,43 @@ impl LocalObserver {
         }
     }
 
+    /// Keeps the files `report` left unhashed while they are written ([`ScanReport::young`])
+    /// for another look, and lets go of those of `looked` (the ones due, just looked at) it
+    /// read or found gone. One found written to since it was last seen waits longer
+    /// ([`Waiting::wait`]); one found quiet waits only till it has been quiet long enough, and
+    /// one first found waits that long. One a batch saw keeps the look it has.
+    fn note_young(&mut self, report: &ScanReport, looked: &[RelPath]) {
+        let now = Instant::now();
+        let still: HashSet<&RelPath> = report.young.iter().map(|y| &y.path).collect();
+        self.young
+            .retain(|path, _| !looked.contains(path) || still.contains(path));
+        for young in &report.young {
+            match self.young.get_mut(&young.path) {
+                Some(w) if looked.contains(&young.path) => {
+                    if young.mtime_ns == w.mtime_ns {
+                        w.at = now + young.left;
+                    } else {
+                        w.at = now + w.wait.max(young.left);
+                        w.wait = (w.wait * 2).min(MAX_WAIT);
+                        w.mtime_ns = young.mtime_ns;
+                    }
+                }
+                Some(w) => w.mtime_ns = young.mtime_ns,
+                None => {
+                    let first = Waiting::first(now + young.left, young.mtime_ns);
+                    self.young.insert(young.path.clone(), first);
+                }
+            }
+        }
+    }
+
     pub fn has_watcher(&self) -> bool {
         self.watcher.is_some()
     }
 
     /// When to [`LocalObserver::poll`] even if the bell didn't ring: a recheck of new
-    /// folders, a journal position to store, or events a cut-off batch left queued.
+    /// folders or of a file being written, a journal position to store, or events a cut-off
+    /// batch left queued.
     pub fn deadline(&self) -> Option<Instant> {
         let journal_due = self.unsaved
             && self.journal.is_some()
@@ -469,6 +606,7 @@ impl LocalObserver {
             && self.settling.is_none();
         [
             self.recheck.as_ref().map(|(at, _)| *at),
+            self.young.values().map(|w| w.at).min(),
             self.settling.as_ref().map(|(_, at)| *at),
             (self.more || journal_due).then(Instant::now),
         ]
@@ -773,6 +911,119 @@ mod tests {
         Ok(())
     }
 
+    /// A large file being written is left unhashed at each batch, and read by a look of the
+    /// observer's own once it has been quiet long enough: no event comes for that.
+    #[test]
+    fn a_file_being_written_is_read_once_it_is_quiet() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().canonicalize()?;
+        let mut opts = ScanOptions::for_root(&root, hbsync_fileio::HashAlgorithm::Blake3);
+        opts.settle = Some(Settle {
+            from_size: 1,
+            quiet: Duration::from_millis(500),
+        });
+        let mut db = StateDb::open_in_memory()?;
+        let mut observer = LocalObserver::start(&root, opts);
+        observer.catch_up(&mut db)?;
+        // Only the events this test sends arrive.
+        let (tx, rx) = channel();
+        observer.watcher.as_mut().ok_or("no watcher")?.rx = rx;
+        let quick = Debounce {
+            quiet: Duration::from_millis(10),
+            max_delay: Duration::from_secs(1),
+        };
+        let path = root.join("big");
+        let mut file = fs::File::create(&path)?;
+        for step in 0..3 {
+            std::io::Write::write_all(&mut file, b"some more bytes")?;
+            let event = Event::new(EventKind::Modify(ModifyKind::Any)).add_path(path.clone());
+            tx.send(Ok(event))?;
+            let report = observer
+                .poll(&mut db, Duration::from_secs(1), quick)?
+                .ok_or("no batch")?;
+            assert_eq!(report.hashed, 0, "step {step}: {report:?}");
+            assert_eq!(report.young.len(), 1, "step {step}: {report:?}");
+            assert!(observer.deadline().is_some());
+        }
+        let row = db.read(|s| s.get_local(&rp("big")))?.ok_or("no row")?;
+        assert_eq!(row.hash, None);
+
+        // No more writes, and no event: read by the observer's look.
+        let until = Instant::now() + Duration::from_secs(10);
+        let mut hashed = 0;
+        while db
+            .read(|s| s.get_local(&rp("big")))?
+            .and_then(|r| r.hash)
+            .is_none()
+        {
+            assert!(Instant::now() < until, "never read");
+            if let Some(report) = observer.poll(&mut db, Duration::from_millis(50), quick)? {
+                hashed += report.hashed;
+            }
+        }
+        assert_eq!(hashed, 1);
+        assert!(observer.young.is_empty());
+        Ok(())
+    }
+
+    /// The looks at a file being written: the first once it may have been quiet long enough;
+    /// one finding it written to since waits 3, 6, 12 … 60 s for the next, one finding it
+    /// unchanged only till it has been quiet long enough, and a batch moves none. Read or gone,
+    /// it is let go.
+    #[test]
+    fn a_look_that_finds_a_file_still_written_waits_longer()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let opts = ScanOptions::for_root(dir.path(), hbsync_fileio::HashAlgorithm::Blake3);
+        let mut observer = LocalObserver::start(dir.path(), opts);
+        let a = rp("a");
+        let seen = |mtime_ns: i64, left: u64| ScanReport {
+            young: vec![crate::scan::Young {
+                path: rp("a"),
+                mtime_ns,
+                left: Duration::from_secs(left),
+            }],
+            ..ScanReport::default()
+        };
+        let batch: &[RelPath] = &[];
+        let looked = [a.clone()];
+        // How long till the next look, in whole seconds, and the wait after it.
+        let next = |o: &LocalObserver| -> Option<(u64, u64)> {
+            let w = o.young.get(&rp("a"))?;
+            let left = w.at.saturating_duration_since(Instant::now());
+            Some((
+                (left + Duration::from_millis(500)).as_secs(),
+                w.wait.as_secs(),
+            ))
+        };
+        observer.note_young(&seen(1, 4), batch);
+        assert_eq!(next(&observer), Some((4, 3)));
+        // A batch sees it again, written to: its look stays.
+        observer.note_young(&seen(2, 5), batch);
+        assert_eq!(next(&observer), Some((4, 3)));
+        observer.note_young(&seen(3, 5), &looked);
+        assert_eq!(next(&observer), Some((5, 6)));
+        observer.note_young(&seen(4, 5), &looked);
+        assert_eq!(next(&observer), Some((6, 12)));
+        observer.note_young(&seen(5, 5), &looked);
+        assert_eq!(next(&observer), Some((12, 24)));
+        // Unchanged since the last look: only till it is quiet.
+        observer.note_young(&seen(5, 2), &looked);
+        assert_eq!(next(&observer), Some((2, 24)));
+        // A batch saw it written to; quiet since: only till it is quiet.
+        observer.note_young(&seen(6, 5), batch);
+        observer.note_young(&seen(6, 3), &looked);
+        assert_eq!(next(&observer), Some((3, 24)));
+        for mtime in 7..11 {
+            observer.note_young(&seen(mtime, 5), &looked);
+        }
+        assert_eq!(next(&observer), Some((60, 60)));
+        // Read (or gone): let go.
+        observer.note_young(&ScanReport::default(), &looked);
+        assert_eq!(next(&observer), None);
+        Ok(())
+    }
+
     #[test]
     fn observer_picks_up_live_changes() -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
@@ -1011,6 +1262,94 @@ mod tests {
                 "test".into(),
             ))
         }
+    }
+
+    /// A file never quiet long enough is read all the same once it has been left for
+    /// [`READ_ANYWAY`], and left as long again before the next such read.
+    #[test]
+    fn a_file_never_quiet_is_read_anyway() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().canonicalize()?;
+        let mut opts = ScanOptions::for_root(&root, hbsync_fileio::HashAlgorithm::Blake3);
+        opts.settle = Some(Settle {
+            from_size: 1,
+            quiet: Duration::from_secs(3600),
+        });
+        let mut db = StateDb::open_in_memory()?;
+        fs::write(root.join("log"), b"appended all the time")?;
+        let mut observer = LocalObserver::start(&root, opts.clone());
+        assert_eq!(scan(&mut db, &root, &opts)?.young.len(), 1);
+        let mtime_ns = hbsync_platform::stat(&root.join("log"))?.mtime_ns;
+        let long_ago = Instant::now()
+            .checked_sub(READ_ANYWAY + Duration::from_secs(1))
+            .ok_or("clock")?;
+        let mut waiting = Waiting::first(Instant::now(), mtime_ns);
+        waiting.since = long_ago;
+        observer.young.insert(rp("log"), waiting);
+        let report = observer
+            .poll(&mut db, Duration::ZERO, Debounce::default())?
+            .ok_or("not read")?;
+        assert_eq!((report.hashed, report.young.len()), (1, 0), "{report:?}");
+        assert!(observer.young.is_empty());
+        Ok(())
+    }
+
+    /// A journal that names nothing: no change since the stored position.
+    #[derive(Debug)]
+    struct StillJournal;
+
+    impl ChangeJournal for StillJournal {
+        fn now(&mut self) -> Result<String, hbsync_platform::journal::JournalError> {
+            Ok("still".into())
+        }
+        fn since(
+            &mut self,
+            _: &str,
+        ) -> Result<hbsync_platform::journal::JournalDelta, hbsync_platform::journal::JournalError>
+        {
+            Ok(hbsync_platform::journal::JournalDelta {
+                cursor: "still".into(),
+                ..Default::default()
+            })
+        }
+    }
+
+    /// A file a scan left unhashed while it was written, the client stopped before it looked
+    /// again: the catch-up after a restart reads only what the journal names, which isn't it
+    /// (its last change came before the stored position). The observer looks at it again
+    /// itself, at its first poll.
+    #[test]
+    fn a_file_left_unhashed_before_a_restart_is_looked_at_again()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().canonicalize()?;
+        let mut opts = ScanOptions::for_root(&root, hbsync_fileio::HashAlgorithm::Blake3);
+        let mut db = StateDb::open_in_memory()?;
+        fs::write(root.join("big"), b"being written")?;
+        opts.settle = Some(Settle {
+            from_size: 1,
+            quiet: Duration::from_secs(60),
+        });
+        let report = scan(&mut db, &root, &opts)?;
+        assert_eq!(report.young.len(), 1, "{report:?}");
+        db.write(|s| s.folder().set_kv(keys::JOURNAL_CURSOR, "still"))?;
+        // Quiet since.
+        let old =
+            hbsync_platform::meta::system_time_ns(std::time::SystemTime::now()) - 120_000_000_000;
+        hbsync_platform::ops::set_mtime(&root.join("big"), old)?;
+
+        let mut observer = LocalObserver::start(&root, opts);
+        observer.journal = Some(Box::new(StillJournal));
+        let caught = observer.catch_up(&mut db)?;
+        assert_eq!(caught.tier, crate::Tier::Journal { dirs: 0 });
+        assert!(observer.deadline().is_some_and(|at| at <= Instant::now()));
+        let report = observer
+            .poll(&mut db, Duration::ZERO, Debounce::default())?
+            .ok_or("not looked at")?;
+        assert_eq!(report.hashed, 1, "{report:?}");
+        let row = db.read(|s| s.get_local(&rp("big")))?.ok_or("no row")?;
+        assert!(row.hash.is_some());
+        Ok(())
     }
 
     /// The stored journal position must never pass a change that isn't recorded yet: after a

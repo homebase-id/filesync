@@ -7,7 +7,9 @@
 //!    hash shows up at a new path is a move and keeps its node id, and so is a vanished file's
 //!    id showing up at a known path (moved onto that name); everything else new gets a fresh
 //!    node id.
-//! 3. **Hashing** only for files whose fingerprint changed (never at start for unchanged files).
+//! 3. **Hashing** only for files whose fingerprint changed (never at start for unchanged files),
+//!    and, where the caller looks again ([`ScanOptions::settle`]), not while a large one is
+//!    still being written.
 //! 4. **Tags** are read with the metadata of every new or changed item (a tag change moves the
 //!    change time).
 //! 5. **One transaction** updates the `local` rows and marks every node whose local state changed
@@ -16,8 +18,10 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use hbsync_fileio::{FileIoError, HashAlgorithm, hash_file};
+use hbsync_platform::meta::system_time_ns;
 use hbsync_platform::{EntryKind, FileId, FsFamily, LocalMeta, RelPath, tags};
 use hbsync_state::{LocalRow, StateDb, StateError};
 use hbsync_types::{ContentHash, NodeId, NodeKind, Tags};
@@ -36,6 +40,44 @@ pub struct ScanOptions {
     /// so a path names one entry whatever else is in its folder: a watcher's event is looked at
     /// by itself ([`rescan_entries`]). Otherwise only what a look at one path can't mistake.
     pub exact_names: bool,
+    /// Large files being written are left unhashed till they are quiet ([`Settle`]); `None`
+    /// hashes every changed file at once. Only for a caller that looks at what a scan left so
+    /// again ([`ScanReport::young`]), as the live observer does.
+    pub settle: Option<Settle>,
+}
+
+/// Files being written: a large file changed a moment ago isn't hashed at every look while it
+/// is written (each would read all of it, from the start, and each hash found would start an
+/// upload), but once it has been quiet for a while. Left unhashed, it waits as any file not
+/// hashed yet does (sync semantics §6.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Settle {
+    /// Files from this size on: a smaller one is read again in a few milliseconds, and waiting
+    /// would hold every save of a document.
+    pub from_size: u64,
+    /// A file modified less than this long ago (by its mtime) is being written.
+    pub quiet: Duration,
+}
+
+impl Default for Settle {
+    fn default() -> Self {
+        Settle {
+            from_size: 8 << 20,
+            quiet: Duration::from_secs(5),
+        }
+    }
+}
+
+impl Settle {
+    /// How long till `meta`, a file modified `now_ns`, has been quiet long enough; `None` if it
+    /// has been already, or is too small to wait. A modification time ahead of the clock (set
+    /// by an app, or another computer's clock) isn't recent: it would never get old.
+    fn wait(&self, meta: &LocalMeta, now_ns: i64) -> Option<Duration> {
+        let age = now_ns.checked_sub(meta.mtime_ns)?;
+        let quiet = i64::try_from(self.quiet.as_nanos()).unwrap_or(i64::MAX);
+        (meta.size >= self.from_size && (0..quiet).contains(&age))
+            .then(|| Duration::from_nanos(u64::try_from(quiet - age).unwrap_or_default()))
+    }
 }
 
 impl ScanOptions {
@@ -47,6 +89,7 @@ impl ScanOptions {
             fs_family: hbsync_platform::fskind::detect(root).unwrap_or(FsFamily::Other),
             filter: Arc::default(),
             exact_names: false,
+            settle: None,
         }
     }
 }
@@ -63,11 +106,24 @@ pub struct ScanReport {
     pub dirty: usize,
     /// Files that couldn't be hashed (locked, changing). They stay dirty and unhashed.
     pub unhashed: Vec<(RelPath, String)>,
+    /// Large files left unhashed for now, being written ([`ScanOptions::settle`]): changed a
+    /// moment ago, or while being read. Dirty and unhashed till a scan reads them.
+    pub young: Vec<Young>,
     /// Folders whose contents are unknown this time; their DB rows were left alone.
     pub unreadable: Vec<RelPath>,
     pub skipped: Vec<(std::path::PathBuf, SkipReason)>,
     /// Folders seen for the first time.
     pub new_folders: Vec<RelPath>,
+}
+
+/// A file a scan left unhashed while it is written ([`ScanReport::young`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Young {
+    pub path: RelPath,
+    /// Its modification time as seen: one that moved since was written to meanwhile.
+    pub mtime_ns: i64,
+    /// How long till it has been quiet long enough to be read.
+    pub left: Duration,
 }
 
 /// Runs a full tier-C scan of `root` and records the result in `db`.
@@ -675,25 +731,44 @@ fn resolve(
     report: &mut ScanReport,
 ) -> Result<Plan, StateError> {
     let mut plan = Plan::default();
-    let hash_now =
-        |path: &RelPath, meta: &LocalMeta, report: &mut ScanReport| -> Option<ContentHash> {
-            match hash_file(&path.to_native(root), opts.algorithm) {
-                Ok(h) if h.meta.fingerprint() == meta.fingerprint() => {
-                    report.hashed += 1;
-                    Some(h.hash)
-                }
-                Ok(_) => {
-                    report
-                        .unhashed
-                        .push((path.clone(), FileIoError::ChangedWhileReading.to_string()));
-                    None
-                }
-                Err(e) => {
-                    report.unhashed.push((path.clone(), e.to_string()));
-                    None
-                }
-            }
+    let now_ns = system_time_ns(SystemTime::now());
+    // The hash of what is at `path` now. A large file being written ([`Settle`]) is left
+    // unhashed and said so, for a later look, if it `may_wait`: where nothing in this scan
+    // depends on its hash (not a hash that tells a move, nor a moved file's bytes).
+    let hash_now = |path: &RelPath,
+                    meta: &LocalMeta,
+                    may_wait: bool,
+                    report: &mut ScanReport|
+     -> Option<ContentHash> {
+        let young = |left| Young {
+            path: path.clone(),
+            mtime_ns: meta.mtime_ns,
+            left,
         };
+        if let Some(left) = opts
+            .settle
+            .filter(|_| may_wait)
+            .and_then(|s| s.wait(meta, now_ns))
+        {
+            report.young.push(young(left));
+            return None;
+        }
+        let changed = match hash_file(&path.to_native(root), opts.algorithm) {
+            Ok(h) if h.meta.fingerprint() == meta.fingerprint() => {
+                report.hashed += 1;
+                return Some(h.hash);
+            }
+            Ok(_) | Err(FileIoError::ChangedWhileReading) => FileIoError::ChangedWhileReading,
+            Err(e) => e,
+        };
+        if let (FileIoError::ChangedWhileReading, Some(settle)) = (&changed, opts.settle)
+            && meta.size >= settle.from_size
+        {
+            report.young.push(young(settle.quiet));
+        }
+        report.unhashed.push((path.clone(), changed.to_string()));
+        None
+    };
 
     // A row for what the walk found at `path`, with its tags (carried over from `old` when
     // they can't have changed or can't be read now), and whether its tags changed.
@@ -727,11 +802,8 @@ fn resolve(
     let onto = moved_onto(db, &removed, &changed, opts, &mut |p, m| {
         *hashed
             .entry(p.clone())
-            .or_insert_with(|| hash_now(p, m, report))
+            .or_insert_with(|| hash_now(p, m, false, report))
     })?;
-    let mut hash_of = |p: &RelPath, m: &LocalMeta, report: &mut ScanReport| {
-        hashed.remove(p).unwrap_or_else(|| hash_now(p, m, report))
-    };
     for (row, meta) in changed {
         if onto.contains(&row.path) {
             added.push((row.path.clone(), meta));
@@ -743,7 +815,11 @@ fn resolve(
         if row.kind == NodeKind::File
             && (row.fingerprint != meta.fingerprint() || row.hash.is_none())
         {
-            new.hash = hash_of(&row.path, &meta, report);
+            // Changed in place: its identity is settled, only its bytes are asked.
+            new.hash = match hashed.remove(&row.path) {
+                Some(hash) => hash,
+                None => hash_now(&row.path, &meta, true, report),
+            };
             content_changed = new.hash.is_none() || new.hash != row.hash;
         }
         let x_changed = row.kind == NodeKind::File
@@ -758,6 +834,12 @@ fn resolve(
             plan.put_rows.push(new);
         }
     }
+
+    let mut hash_of = |p: &RelPath, m: &LocalMeta, report: &mut ScanReport| {
+        hashed
+            .remove(p)
+            .unwrap_or_else(|| hash_now(p, m, false, report))
+    };
 
     // Moves by file id.
     let mut removed_by_id: HashMap<FileId, usize> = HashMap::new();
@@ -852,12 +934,23 @@ fn resolve(
             by_hash.entry(h).or_default().push(i);
         }
     }
+    // The sizes of the vanished files a new one may be (some may be matched meanwhile: those
+    // only cost a hash).
+    let sizes: HashSet<u64> = by_hash
+        .values()
+        .flatten()
+        .map(|&i| removed[i].fingerprint.size)
+        .collect();
     let mut new_nodes = Vec::new();
     for (path, meta, known_hash) in fresh {
         let kind = kind_of(&meta);
         let hash = match known_hash {
             Some(h) => h,
-            None if kind == NodeKind::File => hash_now(&path, &meta, report),
+            // One that may be a vanished one moved is hashed even while it is written: its
+            // hash tells.
+            None if kind == NodeKind::File => {
+                hash_now(&path, &meta, !sizes.contains(&meta.size), report)
+            }
             None => None,
         };
         let candidate = hash

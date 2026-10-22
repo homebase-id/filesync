@@ -299,6 +299,7 @@ impl Executor<'_> {
             path,
             hash,
             size,
+            seen: row.fingerprint,
         };
         Ok((
             job,

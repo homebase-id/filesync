@@ -12,14 +12,15 @@
 //! off starts over).
 
 use std::collections::VecDeque;
-use std::io::{self, BufWriter, Write};
-use std::path::PathBuf;
+use std::io::{self, BufWriter, Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use hbsync_fileio::{CompletedFile, FileIoError, HashAlgorithm, PartialFile, hash_file};
+use hbsync_platform::Fingerprint;
 use hbsync_remote::{
     Answers, BATCH_FILES, ErrorClass, NodeMeta, Pace, Remote, RemoteError, Upload,
 };
@@ -156,13 +157,15 @@ pub struct Download {
 pub enum Job {
     Download(Download),
     /// Uploads the file at `path` as `meta`: a create, or with `target` an update of that
-    /// file at that version.
+    /// file at that version. `hash` is of its bytes as they were when its fingerprint was
+    /// `seen`: sent only while the file still shows it.
     Upload {
         meta: NodeMeta,
         target: Option<Target>,
         path: PathBuf,
         hash: ContentHash,
         size: u64,
+        seen: Fingerprint,
     },
     /// Writes `meta` without bytes: a create, or with `target` an update of that node at that
     /// version (a folder restored, a rename or move, tags, a removal).
@@ -241,6 +244,9 @@ pub enum JobError {
     File(#[from] FileIoError),
     #[error(transparent)]
     Io(#[from] io::Error),
+    /// An upload's file changed since it was hashed: left for the scan its change brings.
+    #[error("changed since it was hashed")]
+    Changed,
 }
 
 impl JobError {
@@ -250,6 +256,7 @@ impl JobError {
             JobError::Remote(e) => e.class(),
             JobError::File(e) => e.class(),
             JobError::Io(e) => ErrorClass::of_io(e),
+            JobError::Changed => ErrorClass::Stale,
         }
     }
 }
@@ -443,30 +450,89 @@ fn run_job(remote: &dyn Remote, job: &Job, meter: &Meter<'_>) -> JobResult {
             path,
             hash,
             size,
+            seen,
         } => (|| {
-            let mut file = std::fs::File::open(path)?;
-            // Changed size since it was hashed: no use sending it to be refused.
-            if file.metadata()?.len() != *size {
-                return Err(JobError::Remote(RemoteError::HashMismatch));
+            let file = std::fs::File::open(path)?;
+            // Changed since it was hashed (it may have waited in the queue): no use sending it
+            // to be refused.
+            if !hbsync_platform::stat(path).is_ok_and(|m| m.fingerprint() == *seen) {
+                return Err(JobError::Changed);
             }
+            let mut reader = Watched {
+                file,
+                path,
+                seen: *seen,
+                since_look: 0,
+                changed: false,
+            };
             let upload = Some(Upload {
                 hash: *hash,
                 size: *size,
-                reader: &mut file,
+                reader: &mut reader,
                 pace: Some(meter),
             });
-            Ok(JobResult::Written(write(
-                remote,
-                meta,
-                target.as_ref(),
-                upload,
-            )?))
+            match write(remote, meta, target.as_ref(), upload) {
+                Ok(written) => Ok(JobResult::Written(written)),
+                // However the remote took the read that stopped.
+                Err(_) if reader.changed => Err(JobError::Changed),
+                Err(e) => Err(e.into()),
+            }
         })(),
         Job::Meta { meta, target } => write(remote, meta, target.as_ref(), None)
             .map(JobResult::Written)
             .map_err(JobError::Remote),
     };
     result.unwrap_or_else(JobResult::Failed)
+}
+
+/// Bytes of an upload between two looks at its file: a change stops it there, not once all of
+/// it is sent (and refused for its hash). A `stat` each 16 MiB.
+const LOOK_EVERY: u64 = 16 << 20;
+
+/// An upload's file as it is read, looked at again every [`LOOK_EVERY`] bytes: other bytes than
+/// were hashed (its size, mtime or file id moved; a `stat` that fails) fail the read and set
+/// `changed`. Not its change time: a tag or a preview's mark moves that, and the bytes sent are
+/// checked against their hash anyway.
+struct Watched<'a> {
+    file: std::fs::File,
+    path: &'a Path,
+    seen: Fingerprint,
+    /// Bytes read since the last look.
+    since_look: u64,
+    changed: bool,
+}
+
+impl Read for Watched<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.since_look >= LOOK_EVERY {
+            self.since_look = 0;
+            let same = stat_open(&self.file, self.path)
+                .is_ok_and(|m| self.seen.same_after_rename(&m) && m.file_id == self.seen.file_id);
+            if !same {
+                self.changed = true;
+                return Err(io::Error::other("changed since it was hashed"));
+            }
+        }
+        let n = self.file.read(buf)?;
+        self.since_look += n as u64;
+        Ok(n)
+    }
+}
+
+/// The metadata of `file`, open at `path`: from the handle where that is one call (`fstat`),
+/// else by the path.
+fn stat_open(file: &std::fs::File, path: &Path) -> io::Result<hbsync_platform::LocalMeta> {
+    #[cfg(unix)]
+    {
+        let _ = path;
+        file.metadata()
+            .map(|m| hbsync_platform::meta::from_metadata(&m))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = file;
+        hbsync_platform::stat(path)
+    }
 }
 
 /// Removes the files of `jobs` (removals, [`Job::removal`]) in one call: each job with its file's
