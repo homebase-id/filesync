@@ -280,7 +280,16 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    such a wait), or onto a name such a node holds here now (a swap), or one whose folder
    another page decides, waits, left as it is (nothing sent to fail meanwhile). It is planned
    with the other node, as a page of its own; one that still waits there is planned again
-   with what it waits for, one larger page. Simulator:
+   with what it waits for, one larger page. A folder such a wait keeps (a node in it moves
+   out into such a place), that the plan would delete, goes with that page too: what else
+   the plan deletes in it waits with it, so the folder goes as one, as in one page. Only
+   while something waits with a node outside the page: each such page is larger, so it ends;
+   what still keeps the folder then isn't another page, and what is deleted in it goes as
+   before (engine:
+   `a_folder_kept_for_another_page_goes_as_one_to_recently_deleted`; simulator:
+   `regression_what_a_folder_waiting_for_another_page_deletes_waits_with_it`). Deleted first,
+   it was listed in Recently deleted apart from its folder. A folder whose delete waits for a
+   hash still goes item by item (§6.3). Simulator:
    `clients_planning_in_small_pages_converge_without_loss` and
    `planning_in_small_pages_ends_as_planning_whole` (pages of 1 to 4 against one page: the
    drive's folders and files, and the files Recently deleted lists apart from their folders);
