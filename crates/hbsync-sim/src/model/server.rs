@@ -24,6 +24,10 @@ pub(crate) struct Server {
     /// When each node went to Recently deleted (the server's time of that write: a header's
     /// `updated`, [`time`]).
     pub(crate) removed_at: BTreeMap<NodeId, i64>,
+    /// Each node's last removal: its folder then, its time and kind. Kept after the purge, so
+    /// what was removed apart from its folder is told whether it is still listed or not
+    /// ([`crate::Sim::removed_files_apart`]).
+    pub(crate) removals: BTreeMap<NodeId, (NodeId, i64, NodeKind)>,
     /// The tags each node had when it was last removed: a restore keeps them (§11).
     pub(crate) tags_at_removal: BTreeMap<NodeId, BTreeSet<String>>,
     next: u128,
@@ -85,6 +89,8 @@ impl Server {
         self.tags_at_removal.insert(node, tags);
         n.remote.version = VersionTag(self.uuid());
         self.removed_at.insert(node, time(n.remote.version));
+        self.removals
+            .insert(node, (n.state.parent, time(n.remote.version), n.state.kind));
         self.removed.insert(node, n);
     }
 

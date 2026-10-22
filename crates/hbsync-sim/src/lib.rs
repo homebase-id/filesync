@@ -369,22 +369,22 @@ impl Sim {
         (folders, live.len() - folders)
     }
 
-    /// How many files in a folder in Recently deleted it lists as items of their own: removed
-    /// before their folder (`deleted_with`, node schema "Recently deleted"), one by one.
+    /// How many files were removed before their folder (`deleted_with`, node schema
+    /// "Recently deleted": listed as items of their own, one by one), both still gone, whether
+    /// Recently deleted lists them still or the purge took them since: which of them it takes
+    /// depends on how many writes came after each, not on what was removed with what.
     pub fn removed_files_apart(&self) -> usize {
         let s = &self.server;
-        s.removed
+        let gone = |n: &NodeId| !s.live.contains_key(n);
+        s.removals
             .iter()
-            .filter(|(n, node)| {
-                node.state.kind == NodeKind::File && {
-                    let at = s.removed_at.get(n);
-                    let folder = node.state.parent;
-                    s.removed.contains_key(&folder)
-                        && s.removed_at
-                            .get(&folder)
-                            .zip(at)
-                            .is_some_and(|(f, a)| a < f)
-                }
+            .filter(|(n, (folder, at, kind))| {
+                *kind == NodeKind::File
+                    && gone(n)
+                    && gone(folder)
+                    && s.removals
+                        .get(folder)
+                        .is_some_and(|(_, f, fk)| *fk == NodeKind::Folder && at < f)
             })
             .count()
     }
