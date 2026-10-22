@@ -287,7 +287,12 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    Clashes across pages are planned the same way. A node whose name a node of another page
    holds, one going into a folder another page makes or that waits (for another page, or for
    such a wait), or onto a name such a node holds here now (a swap), or one whose folder
-   another page decides, waits, left as it is (nothing sent to fail meanwhile). It is planned
+   another page decides, waits, left as it is (nothing sent to fail meanwhile). So does one in
+   a cycle with a node another page plans (a folder and the folder in it swapped here), left
+   where the drive has it: no move of either is undone for the cycle, which one page plans
+   whole (engine: `a_swap_of_a_folder_and_the_one_in_it_planned_in_pages`, also beside
+   deletes the guard holds; simulator:
+   `regression_a_swap_of_a_folder_and_the_one_in_it_planned_in_pages`). It is planned
    with the other node, as a page of its own; one that still waits there is planned again
    with what it waits for, one larger page. A folder such a wait keeps (a node in it moves
    out into such a place), that the plan would delete, goes with that page too: what else

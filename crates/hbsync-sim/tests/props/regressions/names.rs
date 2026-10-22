@@ -1153,3 +1153,64 @@ fn regression_an_orphan_at_a_place_a_computer_ignores_stays_on_the_drive() {
         );
     }
 }
+
+/// c1 moves folder `A` out of `a` to the top (renamed), then `a` into it: a swap here. In pages
+/// of one node `a` was planned first, with `A` where the drive has it (inside `a`, its own page
+/// to plan): `a`'s move made a cycle, and its repair undid the user's move. Now `a` waits to be
+/// planned with `A`, and both moves go, as planned whole (seed 83ec0d17).
+#[test]
+fn regression_a_swap_of_a_folder_and_the_one_in_it_planned_in_pages() {
+    use Action::*;
+    let acts = [
+        (0, CreateFolder { parent: 3, name: 0 }, false),
+        (
+            0,
+            CreateFolder {
+                parent: 12,
+                name: 2,
+            },
+            false,
+        ),
+        (1, Colour { node: 5, tag: 1 }, true),
+        (
+            1,
+            Move {
+                node: 1,
+                parent: 5,
+                name: 6,
+            },
+            false,
+        ),
+        (
+            1,
+            Move {
+                node: 14,
+                parent: 4,
+                name: 11,
+            },
+            false,
+        ),
+        (1, Purge, true),
+    ];
+    let end = |pages: Option<usize>| {
+        let mut sim = Sim::new(3).without_ignore_rules();
+        if let Some(size) = pages {
+            sim = sim.with_small_pages(size);
+        }
+        for (client, action, sync) in acts {
+            sim.run(&[Event::Act { client, action }]);
+            if sync {
+                assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
+            }
+        }
+        assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
+        if let Err(e) = sim.check() {
+            panic!("pages {pages:?}: {e}");
+        }
+        sim.server_paths()
+    };
+    let whole = end(None);
+    assert_eq!(whole.len(), 2, "{whole:?}");
+    assert!(whole[1].starts_with(&whole[0]), "a in A: {whole:?}");
+    assert_eq!(end(Some(1)), whole, "in pages of one");
+}

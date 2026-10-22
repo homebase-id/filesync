@@ -385,6 +385,10 @@ impl Reconciler<'_> {
                 if members.is_empty() {
                     break;
                 }
+                if self.cycle_across_pages(&members) {
+                    fixed = true;
+                    continue;
+                }
                 // Undo a local move first: the remote side has already published its moves.
                 let local_moved = members.iter().copied().find(|m| {
                     self.input
@@ -427,6 +431,54 @@ impl Reconciler<'_> {
             }
         }
         fixed
+    }
+
+    /// A cycle with a node another page plans (`Reconciler::elsewhere`, §6.5): that page
+    /// decides that node, so no move here is undone for it. What of this page is in the cycle
+    /// waits to be planned with it, as a page of its own next (`Plan::waits_together`), left
+    /// where the drive has it meanwhile (`placed`): planned together, the moves go as one page
+    /// plans them (a folder and the folder in it swapped here: both). Planned apart, the
+    /// cycle's repair undid the user's move. Only while a member is outside this page, as for
+    /// any wait across pages: in one page the cycle is this plan's to repair. Whether it did.
+    fn cycle_across_pages(&mut self, members: &[NodeId]) -> bool {
+        if !members.iter().any(|m| self.elsewhere(*m)) {
+            return false;
+        }
+        let i = self.input;
+        let mut left = false;
+        let here: Vec<NodeId> = members
+            .iter()
+            .copied()
+            .filter(|m| !self.elsewhere(*m))
+            .collect();
+        for m in here {
+            let Some(at) = i.remote.get(m).or(i.base.get(m)) else {
+                continue;
+            };
+            let Some(mut state) = self.merged.get(m).cloned() else {
+                continue;
+            };
+            if state.same_place(at) || self.merged.would_cycle(m, at.parent) {
+                continue;
+            }
+            state.parent = at.parent;
+            state.name = at.name.clone();
+            self.merged.insert(m, state);
+            if self.scope.remove(&m) {
+                self.origin.remove(&m);
+                self.plan.conflicts.retain(|c| c.node() != m);
+                self.drop_fork(m);
+                self.placed.insert(m);
+            }
+            if i.dirty.contains(&m) {
+                self.deferred.insert(m);
+            }
+            left = true;
+        }
+        if left {
+            self.wait_together(members.to_vec());
+        }
+        left
     }
 
     /// The folder whose coverage holds `folder`'s children: a detached folder's are its old
