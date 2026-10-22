@@ -163,14 +163,17 @@ proptest! {
         run(3, &events)?;
     }
 
-    /// As [`remote_deletes_never_lose_an_edit`], with the clients dying at any step of a delete:
-    /// right after the move aside, and part way through the unlinks, before the commit. What is
-    /// left aside goes back at the next plan; nothing is lost.
+    /// As [`remote_deletes_never_lose_an_edit`], with the clients dying at any step of a delete
+    /// (right after the move aside, part way through the unlinks, before the commit), and of a
+    /// download into another folder (its old version aside, before the new one is in place,
+    /// with its commit lost, or committed and the old one not unlinked yet), apps writing to
+    /// what is aside meanwhile. Recovery decides what is left aside as the executor's does;
+    /// nothing is lost.
     #[test]
     fn a_crash_anywhere_in_a_delete_loses_nothing(
         events in proptest::collection::vec(with_crashes(3, events_of(3, deleting_action())), 0..120)
     ) {
-        run(3, &events)?;
+        run_with(3, None, Sim::with_split_downloads, &events)?;
     }
 
     /// Each client plans its nodes in pages of 1 to 4 (`Sim::with_small_pages`), as the engine

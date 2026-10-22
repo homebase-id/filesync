@@ -49,6 +49,10 @@ pub(crate) struct Client {
     /// Items being deleted, moved aside (`.hbsync/aside`) and not yet checked and unlinked: each
     /// with what was below it then, its top at its place in the folder (sync semantics §7).
     pub(crate) aside: BTreeMap<NodeId, Tree>,
+    /// Of those, the old versions a download replaced from another folder, with the bytes each
+    /// held when it went aside (its name there): unlinked once the new one is committed, if
+    /// still those (sync semantics §7, Old versions).
+    pub(crate) replaced: BTreeMap<NodeId, Option<hbsync_types::FileContent>>,
     /// Nodes parked under a temporary name, with their original (parent, name).
     pub(crate) parked: HashMap<NodeId, (NodeId, String)>,
     /// The local tree when the pending plan was made (for the fingerprint guard).
@@ -151,6 +155,7 @@ impl Client {
             removed_by_plan: BTreeSet::new(),
             unremoved: HashSet::new(),
             aside: BTreeMap::new(),
+            replaced: BTreeMap::new(),
             parked: HashMap::new(),
             planned_local: Tree::new(),
             planned_remote: Tree::new(),
