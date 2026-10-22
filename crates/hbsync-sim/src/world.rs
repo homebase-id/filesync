@@ -462,7 +462,9 @@ impl Sim {
             Action::Restore { node } => self.restore(node),
             Action::Phone { op, pick } => self.phone(op, pick),
             Action::Meanwhile { op } => self.clients[c].meanwhile = Some(op),
-            Action::PullMidLocal { op } => self.clients[c].pull_mid_local = Some(op),
+            Action::PullMidLocal { on, change } => {
+                self.clients[c].pull_mid_local = Some((on, change));
+            }
             Action::DeleteRoleFolder => self.delete_role_folder(),
             Action::DeleteStopped { pick, done } => self.delete_stopped(pick, done),
             Action::DeleteOutright { pick } => self.delete_outright(pick),

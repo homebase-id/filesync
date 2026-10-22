@@ -35,7 +35,7 @@ pub(crate) fn action() -> impl Strategy<Value = Action> + Clone {
 pub(crate) fn pulling_action() -> impl Strategy<Value = Action> + Clone {
     prop_oneof![
         6 => action(),
-        1 => (0usize..16).prop_map(|op| Action::PullMidLocal { op }),
+        1 => (0usize..5, 0usize..3).prop_map(|(on, change)| Action::PullMidLocal { on, change }),
     ]
 }
 

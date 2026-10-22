@@ -112,6 +112,18 @@ pub(crate) fn crash(
     kept: Kept,
     when: impl Fn(Commit, usize) -> bool + Send + Sync + 'static,
 ) -> Res<bool> {
+    Ok(crash_with(c, kept, when, |_| {})?.0)
+}
+
+/// [`crash`], `ready` run on the client once it started (before the sync: what lives in its
+/// engine's memory, an answer of the user's, is given again there); with the sync's report
+/// where it didn't crash.
+pub(crate) fn crash_with(
+    c: &mut Client,
+    kept: Kept,
+    when: impl Fn(Commit, usize) -> bool + Send + Sync + 'static,
+    ready: impl FnOnce(&mut Client),
+) -> Res<(bool, Option<SyncReport>)> {
     let power_cut = kept != Kept::All;
     let db = c.db_path();
     // What is on the disk: every sync ends durably.
@@ -144,19 +156,18 @@ pub(crate) fn crash(
     }));
     on_commit(&db, Some(hook));
     c.restart()?;
+    ready(c);
     let synced = std::panic::catch_unwind(AssertUnwindSafe(|| c.sync()));
     on_commit(&db, None);
-    let crashed = match synced {
-        Ok(synced) => {
-            synced?;
-            false
-        }
-        Err(e) if e.is::<Crash>() => true,
+    let report = match synced {
+        Ok(synced) => Some(synced?),
+        Err(e) if e.is::<Crash>() => None,
         Err(e) => std::panic::resume_unwind(e),
     };
+    let crashed = report.is_none();
     if crashed && power_cut {
         StateDb::open_account(&db)?.restore_from(&durable)?;
     }
     c.restart()?;
-    Ok(crashed)
+    Ok((crashed, report))
 }
