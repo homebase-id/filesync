@@ -233,6 +233,15 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
      another writer gave Recovered files' id to a file (a row no device reads, §11 of the
      schema's checks): no device can make it on the drive, and a move into it would wait for
      good, tried again at every sync.
+   - Only into a place the device syncs: an orphan isn't connected to the top, so the filter
+     (§10) never masked it. One whose place (in Recovered files, or at the top) the device
+     doesn't sync is left as it is, out of the plan, for a device that syncs it; so is what is
+     below a recovered orphan at a place it doesn't sync (an ignored name), as the filter masks
+     it once its folder is connected again. Brought in, it would read as an item the device
+     stopped syncing, and leave the drive: another device's files, deleted by one that never
+     synced them.
+   - A folder that leaves the picture for good (deleted outright, announced) while nodes are
+     live in it plans those again: they are orphans now, whichever of them changed.
 4. **Folder delete propagation** removes the folder on the drive first, then its descendants,
    top-down; here it deletes the topmost folder, its bases and its children's in one step (§7).
 5. **Planned in pages.** The engine plans its dirty set in pages of 20,000 nodes, in node id
