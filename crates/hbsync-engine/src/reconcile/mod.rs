@@ -78,12 +78,10 @@ pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
     // stay taken meanwhile, so what would take one here gets a numbered name: planned again
     // once, only when something here has such a name (hardly ever).
     let mut kept = HashMap::new();
-    // What waits to be planned with another page's nodes, judged before it waited.
-    let mut together: Vec<Vec<NodeId>> = Vec::new();
     let mut plan = loop {
         let r = Reconciler::new(view, opts, masking, &masks, &waits, &kept, taken.clone());
         let (mut plan, waiters, name_waits, placed) = r.run();
-        together.append(&mut plan.waits_together);
+        waits.together.append(&mut plan.waits_together);
         waits.name_waits = name_waits;
         // Placements that clash across pages, and what would take a name what waits holds:
         // they wait as they are, with their folders. Planned again while more come.
@@ -106,6 +104,7 @@ pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
             break plan;
         }
     };
+    let mut together = std::mem::take(&mut waits.together);
     together.sort();
     together.dedup();
     plan.waits_together = together;
@@ -150,6 +149,9 @@ struct Reconciler<'a> {
     going: &'a [NodeId],
     /// Of `waits`, what waits for them ([`Waits::paged`]).
     paged: &'a HashSet<NodeId>,
+    /// What earlier plans of this input left waiting with another page's nodes
+    /// ([`Waits::together`]).
+    together: &'a [Vec<NodeId>],
     /// What of this plan waits to be placed with another page's nodes
     /// ([`Reconciler::places_across_pages`]): planned again waiting as it is.
     placed: BTreeSet<NodeId>,
@@ -194,6 +196,7 @@ impl<'a> Reconciler<'a> {
             waits: &waits.waits,
             going: &waits.going,
             paged: &waits.paged,
+            together: &waits.together,
             elsewhere: &input.dirty_elsewhere,
             placed: BTreeSet::new(),
             by_file: &waits.by_file,
@@ -249,6 +252,7 @@ impl<'a> Reconciler<'a> {
         self.emit();
         self.places_across_pages();
         self.waits_for_its_folder();
+        self.deletes_wait_with_their_folder();
         self.guard_mass_delete();
         self.plan.waiting = self.waited_for();
         // The folders this page waits for, with everything of it below them.

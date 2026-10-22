@@ -34,6 +34,9 @@ pub(super) struct Waits {
     /// Of `waits`, what waits for `going`: those, the folders above them and what of the page
     /// is below them.
     pub(super) paged: HashSet<NodeId>,
+    /// What waits to be planned with another page's nodes (`Plan::waits_together`), as the
+    /// plans of the input so far judged it, before it waited; by store ids.
+    pub(super) together: Vec<Vec<NodeId>>,
 }
 
 impl Waits {
@@ -97,6 +100,7 @@ impl Waits {
             name_waits: HashSet::new(),
             going,
             paged,
+            together: Vec::new(),
         }
     }
 
@@ -227,6 +231,63 @@ impl Reconciler<'_> {
             })
             .collect();
         self.placed.extend(waiting);
+    }
+
+    /// A folder this plan would delete that waits for another page (something in it does: a
+    /// placement or a name across pages, a folder that waits for its own page; §6.5) is
+    /// deleted with that page: what else this plan deletes in it waits with it, planned again
+    /// as it is (`placed`), and with it as a page of its own next (`Plan::waits_together`), so
+    /// the folder goes as one, with what was in it, as in one page. Deleted now, what was in it
+    /// went to Recently deleted apart from it. Only while what waits does so with a node
+    /// outside this page: each such page is larger, so they end; then what still keeps the
+    /// folder isn't another page, and what is deleted in it goes as before. Nor for a folder
+    /// whose delete waits for a file not hashed yet: it goes item by item (§6.3).
+    pub(super) fn deletes_wait_with_their_folder(&mut self) {
+        if self.plan.delete_waits.is_empty()
+            || (self.together.is_empty() && self.plan.waits_together.is_empty())
+        {
+            return;
+        }
+        let i = self.input;
+        // Only while a node waits with one outside this page: then the page planned with it
+        // comes, larger, and the folder's wait may end there. With all of them in it, what
+        // still keeps the folder isn't another page's: what is deleted in it goes as before.
+        let page: HashSet<NodeId> = i.dirty.iter().map(|n| self.masks.store_id(*n)).collect();
+        if !self
+            .together
+            .iter()
+            .chain(&self.plan.waits_together)
+            .flatten()
+            .any(|n| !page.contains(n))
+        {
+            return;
+        }
+        let folders: HashSet<NodeId> = self
+            .plan
+            .delete_waits
+            .iter()
+            .copied()
+            .filter(|f| !self.by_file.iter().any(|(_, above)| above.contains(f)))
+            .collect();
+        if folders.is_empty() {
+            return;
+        }
+        let mut groups: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
+        for node in self.plan.ops.iter().filter_map(Op::deletes) {
+            if let Some(f) = i
+                .base
+                .ancestors(node)
+                .into_iter()
+                .find(|f| folders.contains(f))
+            {
+                groups.entry(f).or_default().push(node);
+            }
+        }
+        for (folder, mut nodes) in groups {
+            self.placed.extend(nodes.iter().copied());
+            nodes.push(folder);
+            self.wait_together(nodes);
+        }
     }
 
     /// Whether `node` is planned in another page, not in this one (`Input::dirty_elsewhere`):

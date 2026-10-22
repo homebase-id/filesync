@@ -5874,6 +5874,49 @@ fn a_delete_here_in_pages_goes_as_one_to_recently_deleted() -> R {
     Ok(())
 }
 
+/// b deletes `d` here while a moved `d/m.txt` out of it into a new folder `n`: in pages of
+/// one node, `m.txt` goes into `n`, which another page makes, so it waits, and keeps `d`
+/// meanwhile. What else b deleted in `d` waits with it, so `d` goes as one, as in one page:
+/// Recently deleted lists `d` alone. Before, `d/x.txt` went first, listed apart (§6.5).
+#[test]
+fn a_folder_kept_for_another_page_goes_as_one_to_recently_deleted() -> R {
+    for batch in [1, 2, 20_000] {
+        let server = server();
+        let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+        let mut b = Client::with_config(&server, "b", move |cfg| {
+            cfg.guard.allow = true;
+            cfg.batch = batch;
+        })?;
+        a.write("d/x.txt", "x")?;
+        a.write("d/m.txt", "m")?;
+        a.sync()?;
+        b.sync()?;
+        fs::create_dir(a.root.join("n"))?;
+        fs::rename(a.root.join("d/m.txt"), a.root.join("n/m.txt"))?;
+        a.sync()?;
+        fs::remove_dir_all(b.root.join("d"))?;
+        let mut pending = u64::MAX;
+        for _ in 0..8 {
+            pending = b.sync()?.pending;
+            if pending == 0 {
+                break;
+            }
+        }
+        // The wait settles: nothing left to plan.
+        assert_eq!(pending, 0, "pages of {batch}");
+        assert_eq!(b.read_text("n/m.txt")?, "m", "pages of {batch}");
+        let deleted = b.recently_deleted(100)?;
+        let mut roots: Vec<String> = deleted
+            .iter()
+            .filter(|d| d.root == d.node)
+            .map(|d| d.path.clone())
+            .collect();
+        roots.sort();
+        assert_eq!(roots, ["d"], "pages of {batch}: {deleted:?}");
+    }
+    Ok(())
+}
+
 /// Another app removes every top folder and what is in them, and stops before `x.txt` in each
 /// (taken along, §6.3): every synced file goes, so b holds the removal for the user, in pages
 /// as in one. Counted from the dirty set, the taken-along files were still in the mirror, so a

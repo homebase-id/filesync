@@ -1587,3 +1587,82 @@ fn regression_what_a_removal_took_along_waits_for_its_folder_in_pages() {
         assert_eq!(sim.server_counts(), (3, 0), "pages: {pages:?}");
     }
 }
+
+/// c1 deletes a folder while c0 moves a node out of it into a new folder whose name another
+/// page's node takes (c1's new folder of the same name). In pages of one node, the moved
+/// node waits for that page, which keeps the folder: what else c1 deleted in it waits with
+/// it, so the folder goes as one, with it, as planned whole. Before, it went first and
+/// Recently deleted listed it apart from its folder (seed 6743e2e6).
+#[test]
+fn regression_what_a_folder_waiting_for_another_page_deletes_waits_with_it() {
+    use Action::*;
+    let acts = [
+        (
+            2,
+            CreateFolder {
+                parent: 12,
+                name: 11,
+            },
+            false,
+        ),
+        (0, Phone { op: 6, pick: 4 }, true),
+        (
+            2,
+            CreateFile {
+                parent: 2,
+                name: 15,
+            },
+            false,
+        ),
+        (0, CreateFolder { parent: 7, name: 0 }, false),
+        (
+            1,
+            CreateFile {
+                parent: 12,
+                name: 7,
+            },
+            true,
+        ),
+        (1, DeleteStopped { pick: 7, done: 11 }, false),
+        (2, Tag { node: 8, tag: 3 }, true),
+        (1, Delete { node: 6 }, false),
+        (0, CreateFolder { parent: 5, name: 8 }, false),
+        (
+            0,
+            Move {
+                node: 2,
+                parent: 7,
+                name: 5,
+            },
+            false,
+        ),
+        (
+            1,
+            CreateFolder {
+                parent: 7,
+                name: 10,
+            },
+            false,
+        ),
+    ];
+    let end = |pages: Option<usize>| {
+        let mut sim = Sim::new(3).without_ignore_rules();
+        if let Some(size) = pages {
+            sim = sim.with_small_pages(size);
+        }
+        for (client, action, sync) in acts {
+            sim.run(&[Event::Act { client, action }]);
+            if sync {
+                assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
+            }
+        }
+        assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
+        if let Err(e) = sim.check() {
+            panic!("pages {pages:?}: {e}");
+        }
+        (sim.server_paths(), sim.removed_files_apart())
+    };
+    let whole = end(None);
+    assert_eq!(whole.1, 0, "{whole:?}");
+    assert_eq!(end(Some(1)), whole, "in pages of one");
+}
