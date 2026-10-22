@@ -454,8 +454,11 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   the user didn't see is never let through by a confirmation. A folder without its marker
   (moved, deleted, a disk not mounted) syncs nothing, so nothing is held, sent or put back
   there: an answer then is refused. Simulator:
-  `guarded_clients_delete_only_what_was_confirmed` (with `Event::PutBack`; the simulator
-  keeps the hold and puts back by the engine's own rules, `hbsync_engine::held`); engine:
+  `guarded_clients_delete_only_what_was_confirmed` (with `Event::PutBack`), and
+  `put_backs_that_go_wrong_lose_nothing` (a file deleted for good mid put back, a restore the
+  drive stops after a wave: nothing put back is trashed or held again but what still waits;
+  the simulator keeps the hold and puts back by the engine's own rules,
+  `hbsync_engine::held`); engine:
   `a_delete_here_is_held_and_put_back_brings_it_back`,
   `every_file_removed_elsewhere_is_held_and_put_back_restores_it`,
   `a_confirmed_folder_trash_does_not_hold_other_deletes`.

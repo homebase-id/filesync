@@ -70,6 +70,9 @@ pub(crate) struct Ledger {
     answer_undid: Option<String>,
     /// The first plan the engine's own planning path made otherwise ([`Sim::with_narrow_check`]).
     narrow_differs: Option<String>,
+    /// The first node a put back left held again though nothing of it waits in Recently
+    /// deleted any more ([`Sim::with_failing_put_backs`]).
+    held_after_put_back: Option<String>,
     /// The first item a client unlinked that wasn't the version its base records (sync
     /// semantics §7: a delete is checked, then final), junk aside.
     deleted_unverified: Option<String>,
@@ -196,6 +199,12 @@ impl Ledger {
         self.narrow_differs.is_some()
     }
 
+    /// A plan right after a put back held a node again that nothing waits for, if `what`
+    /// says which.
+    pub(crate) fn held_after_put_back(&mut self, what: impl FnOnce() -> Option<String>) {
+        first(&mut self.held_after_put_back, what);
+    }
+
     /// The engine's planning path planned otherwise than the sim, if `what` says how.
     pub(crate) fn narrow_differs(&mut self, what: impl FnOnce() -> Option<String>) {
         first(&mut self.narrow_differs, what);
@@ -313,6 +322,9 @@ impl Sim {
         }
         if let Some(what) = &ledger.narrow_differs {
             return Err(what.clone());
+        }
+        if let Some(what) = &ledger.held_after_put_back {
+            return Err(format!("after a put back: {what}"));
         }
         if let Some(what) = &ledger.answer_undid {
             return Err(format!("a write's answer was recorded wrongly: {what}"));
@@ -796,8 +808,13 @@ impl Ledger {
             let held_trashed: usize = seen
                 .held
                 .iter()
-                .map(|p| match p.what {
-                    What::LocalTrash { .. } if !was_wiped(p.node) => files_under(local, p.node),
+                .map(|p| match &p.what {
+                    // Nor a trash taking along what was held so (held with it, §7).
+                    What::LocalTrash { subtree }
+                        if !was_wiped(p.node) && !subtree.iter().any(|n| wiped.contains(n)) =>
+                    {
+                        files_under(local, p.node)
+                    }
                     _ => 0,
                 })
                 .sum();
@@ -811,11 +828,29 @@ impl Ledger {
                     seen.client, p.op
                 ));
             }
-            let held_elsewhere = held_trashed > 0 && !every(held_trashed + trashed);
+            // Judged with what is held so already: the engine weighs all its removals elsewhere
+            // together (a new one held with a held wipe as every synced file).
+            let held_all: usize = seen
+                .held
+                .iter()
+                .map(|p| match p.what {
+                    What::LocalTrash { .. } => files_under(local, p.node),
+                    _ => 0,
+                })
+                .sum();
+            let held_elsewhere = held_trashed > 0 && !every(held_all + trashed);
+            // And what isn't held is judged with what is: one let through that makes every
+            // synced file with a held wipe should have been held with it.
+            if trashed > 0 && held_all > held_trashed && every(held_all + trashed) {
+                return Some(format!(
+                    "{} let {trashed} removals from elsewhere through that, with the {held_all}                      held, are every synced file ({synced_files})",
+                    seen.client
+                ));
+            }
             if held_elsewhere {
                 return Some(format!(
-                    "{} held {held_trashed} removals from elsewhere, short of every synced \
-                     file ({synced_files}): {:?}",
+                    "{} held {held_trashed} removals from elsewhere ({held_all} with what was \
+                     held before), short of every synced file ({synced_files}): {:?}",
                     seen.client, seen.all_held
                 ));
             }

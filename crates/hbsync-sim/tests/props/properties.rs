@@ -80,6 +80,17 @@ proptest! {
         run_with(2, Some(min), |sim| sim, &events)?;
     }
 
+    /// The same with put backs that go wrong (sync semantics §7): a file deleted for good
+    /// between a put back's read of the drive and its restore, a restore that stops half way.
+    /// A put back loses nothing, and what it found gone for good goes up again from here: the
+    /// next plan holds nothing of it again but what still waits in Recently deleted.
+    #[test]
+    fn put_backs_that_go_wrong_lose_nothing(
+        events in proptest::collection::vec(guarded_event(2), 0..80),
+    ) {
+        run_with(2, Some(WIPED_MIN), with_a_folder_wiped, &events)?;
+    }
+
     /// The same with clients that crash now and then: a crash forgets the user's answers and
     /// what they were shown, as a new engine does; what the guard holds is held and asked
     /// about again, and nothing goes through unconfirmed.

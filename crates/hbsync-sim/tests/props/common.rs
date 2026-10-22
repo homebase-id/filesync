@@ -90,6 +90,34 @@ pub(crate) fn events_of(
     ]
 }
 
+/// Put backs that go wrong ([`Sim::with_failing_put_backs`]), from a folder of three files
+/// synced on both clients and deleted on client 0 (the guard off meanwhile): client 1's plan
+/// holds its removal as every synced file, to put back or confirm.
+pub(crate) fn with_a_folder_wiped(sim: Sim) -> Sim {
+    let mut sim = sim.with_failing_put_backs();
+    let act = |action| Event::Act { client: 0, action };
+    sim.run(&[
+        act(Action::CreateFolder { parent: 0, name: 0 }),
+        act(Action::CreateFile { parent: 0, name: 1 }),
+        act(Action::CreateFile { parent: 0, name: 3 }),
+        act(Action::CreateFile { parent: 0, name: 5 }),
+    ]);
+    assert!(sim.quiesce(10), "synced");
+    sim.run(&[act(Action::Delete { node: 0 }), Event::Plan { client: 0 }]);
+    sim.run(&[Event::Step { client: 0 }; 8]);
+    // The guard on (its minimum as the property runs it): client 1 holds the removal.
+    sim.guard = Some(WIPED_MIN);
+    sim.run(&[Event::Plan { client: 1 }]);
+    assert!(
+        !sim.held(1).is_empty(),
+        "client 1 holds the folder's removal"
+    );
+    sim
+}
+
+/// The mass-delete guard's minimum [`with_a_folder_wiped`] runs with.
+pub(crate) const WIPED_MIN: usize = 1;
+
 /// Events with the user confirming held deletes now and then.
 pub(crate) fn guarded_event(clients: usize) -> impl Strategy<Value = Event> {
     prop_oneof![
@@ -188,6 +216,7 @@ pub(crate) const SETUPS: &[Setup] = &[
     (Sim::with_role_device, None),
     (Sim::with_new_role_devices, Some(1)),
     (|sim| sim, Some(2)),
+    (with_a_folder_wiped, Some(WIPED_MIN)),
 ];
 
 /// The setups [`the_engines_planning_path_plans_as_the_sim`] picks from: those that settle
