@@ -8,7 +8,9 @@ use hbsync_engine::tree::{Tree, Violation};
 use hbsync_local::Filter;
 use hbsync_platform::Os;
 use hbsync_platform::name::check_remote_name;
-use hbsync_types::{ContentHash, FileContent, NodeId, NodeKind, NodeState, Role, Tags, VersionTag};
+use hbsync_types::{
+    ContentHash, FileContent, NodeId, NodeKind, NodeState, RECOVERED_NAME, Role, Tags, VersionTag,
+};
 
 use crate::Sim;
 use crate::tagbook::TagBook;
@@ -369,6 +371,8 @@ impl Sim {
         let mut refused_here: BTreeSet<NodeId> = BTreeSet::new();
         // What some client syncs: a node in a file no client syncs is left there by all.
         let mut synced_somewhere: BTreeSet<NodeId> = BTreeSet::new();
+        // Orphans some client leaves, its place there one it doesn't sync (§6.3, §10).
+        let mut left_somewhere: BTreeSet<NodeId> = BTreeSet::new();
         for (c, client) in self.clients.iter().enumerate() {
             let mut visible = client.local.clone();
             for n in filtered(&client.local, &client.filter) {
@@ -380,8 +384,9 @@ impl Sim {
                     kept_here.insert(*blob);
                 }
             }
-            let mut synced = self.expected(c, &drive, &taken);
+            let (mut synced, left) = self.expected(c, &drive, &taken);
             synced_somewhere.extend(synced.ids());
+            left_somewhere.extend(left);
             // What the client holds back for a refusal: each operation refused itself is one
             // the drive refuses as it is now (by its own judgement: a record that held back one
             // it takes hid a later change); it stays on its client with what is in it, and
@@ -457,6 +462,12 @@ impl Sim {
             .into_iter()
             .filter(|v| !matches!(v, Violation::DuplicateName { .. }))
             .filter(|v| !matches!(v, Violation::Orphan { node, .. } if refused_here.contains(node)))
+            // One left by a client whose place there it doesn't sync, and synced by none, stays
+            // (§6.3, §10).
+            .filter(|v| {
+                !matches!(v, Violation::Orphan { node, .. }
+                    if left_somewhere.contains(node) && !synced_somewhere.contains(node))
+            })
             // What is in a folder no client reads waits for it, in Recently deleted too.
             .filter(|v| {
                 !matches!(v, Violation::Orphan { parent, .. }
@@ -584,8 +595,14 @@ impl Sim {
     /// What client `c` syncs of the drive, in its folder's coordinates, by the oracle's own
     /// walks: the live nodes in its folder's part (the main folder's: all but the role folders
     /// and what is in them; a role folder's: what is in it), but for what a delete took along
-    /// (`taken`) and what its filter leaves out.
-    fn expected(&self, c: usize, drive: &Tree, taken: &BTreeSet<NodeId>) -> Tree {
+    /// (`taken`) and what its filter leaves out; with the orphans its engine leaves to other
+    /// clients ([`Sim::left_orphans`]), out of it.
+    fn expected(
+        &self,
+        c: usize,
+        drive: &Tree,
+        taken: &BTreeSet<NodeId>,
+    ) -> (Tree, BTreeSet<NodeId>) {
         let coords = self.clients[c].coords;
         // A folder no client reads, while it is on the drive, and what is in it: what is in
         // it waits for it (`Action::NewerFolder`).
@@ -612,7 +629,73 @@ impl Sim {
         for n in filtered(&tree, &self.clients[c].filter) {
             tree.remove(n);
         }
-        tree
+        let left = self.left_orphans(c, &tree, drive);
+        for n in &left {
+            tree.remove(*n);
+        }
+        (tree, left)
+    }
+
+    /// What of `tree` (what client `c` syncs of the drive) its engine leaves to other clients
+    /// (sync semantics §6.3, §10): an orphan (its folder nowhere, or a file) it holds nothing
+    /// of, whose place it doesn't sync, in Recovered files or at its top, with what is below
+    /// it. (What is below a recovered one at an ignored name is connected once it is, and
+    /// filtered as anything.)
+    fn left_orphans(&self, c: usize, tree: &Tree, drive: &Tree) -> BTreeSet<NodeId> {
+        let client = &self.clients[c];
+        // What the client's scan reports: not what it ignores, kept on its device only.
+        let ignored: BTreeSet<NodeId> = filtered(&client.local, &client.filter)
+            .into_iter()
+            .collect();
+        let held = |n: &NodeId| {
+            client.base.contains(*n) || (client.local.contains(*n) && !ignored.contains(n))
+        };
+        let names = |path: &[&str], is_dir| client.filter.names(path.iter().copied(), is_dir);
+        // Where an orphan goes, as the engine's `recovered_path` finds it: Recovered files
+        // where the tree has it; masked on the drive, the top; live but out of the tree
+        // otherwise (taken along, waiting, in a role folder), or in Recently deleted with its
+        // folder out of the tree, nowhere known: every orphan left; made here if the client
+        // syncs its name, else the top; at a role folder's top, the top.
+        let removed = self.server.removed.get(&NodeId::RECOVERED);
+        let recovered: Option<Vec<&str>> = match tree.path(NodeId::RECOVERED) {
+            _ if !client.coords.top.is_root() => Some(Vec::new()),
+            Some(path) => Some(path),
+            None if drive.contains(NodeId::RECOVERED) => drive
+                .path(NodeId::RECOVERED)
+                .filter(|path| !names(path, true).is_sync())
+                .map(|_| Vec::new()),
+            None => match removed {
+                Some(r) => tree.path(r.state.parent).map(|mut path| {
+                    path.push(&r.state.name);
+                    path
+                }),
+                None if names(&[RECOVERED_NAME], true).is_sync() => Some(vec![RECOVERED_NAME]),
+                None => Some(Vec::new()),
+            },
+        };
+        let mut left = BTreeSet::new();
+        for (node, state) in tree.iter() {
+            let orphan = !state.parent.is_root()
+                && tree
+                    .get(state.parent)
+                    .is_none_or(|p| p.kind == NodeKind::File);
+            if !orphan {
+                continue;
+            }
+            let subtree = below(tree, node);
+            if subtree.iter().any(held) {
+                continue;
+            }
+            let synced = recovered.as_ref().is_some_and(|place| {
+                let mut path = place.clone();
+                path.push(&state.name);
+                names(&path, state.kind == NodeKind::Folder).is_sync()
+            });
+            if !synced {
+                left.extend(subtree);
+            }
+        }
+        left
     }
 }
 
