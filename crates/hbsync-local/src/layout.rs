@@ -58,6 +58,19 @@ pub fn aside_dir(root: &Path) -> PathBuf {
     state_dir(root).join("aside")
 }
 
+/// The entries of the [`aside_dir`] of the folder at `root`, each with what it holds (`None`:
+/// a name no delete gives).
+pub fn aside_entries(root: &Path) -> impl Iterator<Item = (PathBuf, Option<AsideEntry>)> {
+    std::fs::read_dir(aside_dir(root))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| {
+            let entry = e.file_name().to_str().and_then(AsideEntry::parse);
+            (e.path(), entry)
+        })
+}
+
 /// What an entry of the [`aside_dir`] holds, by its name ([`AsideEntry::name`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AsideEntry {

@@ -1,4 +1,4 @@
-//! Local operations: folders, moves, tags, conflict copies, the trash and detaching.
+//! Local operations: folders, moves, tags, conflict copies, deletes and detaching.
 
 use super::*;
 
@@ -386,14 +386,14 @@ impl Executor<'_> {
         renamed_row(self.disk.root(), old, path)
     }
 
-    /// Moves the local item of `node` to the trash, with the bases of what goes; with `forget`
-    /// (§10), `node`'s base goes also where nothing of it is here.
+    /// Deletes the local item of `node` (§7: aside, checked, unlinked), with the bases of what
+    /// goes; with `forget` (§10), `node`'s base goes also where nothing of it is here.
     pub(super) fn trash(&mut self, node: NodeId, expected: &[NodeId], forget: bool) -> Step {
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
             if forget {
                 return self.forget_base(node);
             }
-            // Already gone: a trash earlier in this run took it along with its folder (and its
+            // Already gone: a delete earlier in this run took it along with its folder (and its
             // base, [`trashed`]); the executor holds the DB while it runs, so no scan did.
             return Ok(Outcome::Done);
         };
@@ -405,64 +405,104 @@ impl Executor<'_> {
                 "the folder holds something the plan didn't expect",
             ));
         }
-        // Everything on disk must be known and unchanged; otherwise rescan first.
-        let Some(holding) = self.subtree_check(&row, &rows) else {
+        // The item itself must be as its row has it (a folder's contents are checked aside).
+        if !self.on_disk_unchanged(&row) {
             return Ok(rescan(&mut self.report, &row.path));
-        };
-        if holding.is_empty() {
-            if let Err(e) = self.disk.move_to_trash(self.db, &row.path, node)? {
-                return Ok(io_outcome(e));
-            }
-        } else {
-            // Ignored items are kept here, and so are the folders they are in (§10): the rest
-            // goes, and those folders are released, for the scan to find as new ones.
-            let holders: HashSet<RelPath> = holding
-                .into_iter()
-                .flat_map(|folder| {
-                    std::iter::successors(Some(folder), |p| p.parent())
-                        .take_while(|p| p.starts_with(&row.path))
-                })
-                .collect();
-            let mut moved: Vec<&RelPath> = Vec::new();
-            for r in &rows {
-                let in_holder = r.path.parent().is_some_and(|p| holders.contains(&p));
-                if !in_holder || holders.contains(&r.path) {
-                    continue;
-                }
-                if let Err(e) = self.disk.move_to_trash(self.db, &r.path, r.node)? {
-                    self.report.rescan.push(row.path.clone());
-                    // What did go is in the trash: its rows and bases go now, as below.
-                    self.finish(&[], |s| {
-                        moved.iter().try_for_each(|path| trashed(s, path, node))
-                    })?;
-                    return Ok(io_outcome(e));
-                }
-                moved.push(&r.path);
-            }
-            // A released folder can't keep a temporary name (it carries the old id): it gets
-            // a real one. Deepest first, so the paths above stay valid.
-            let mut parked: Vec<(&LocalRow, RelPath)> = Vec::new();
-            for r in rows.iter().filter(|r| holders.contains(&r.path)) {
-                if let Some(original) = self.db.read(|s| view::parked_place(s, r))? {
-                    parked.push((r, original));
-                }
-            }
-            parked.sort_by_key(|(r, _)| std::cmp::Reverse(r.path.depth()));
-            for (r, original) in parked {
-                if let Some(to) = release_place(self.db, self.folder, &original, true)? {
-                    // Best effort: if it fails, the item keeps its name and the scan finds it there.
-                    let _ = self.disk.rename(self.db, &r.path, &to)?;
-                }
-            }
-            self.report
-                .rescan
-                .push(row.path.parent().unwrap_or_default());
         }
-        if self.crash_here(CrashPoint::AfterTrash) {
+        match self.delete_item(&row, &rows, true)? {
+            Err(outcome) => return Ok(outcome),
+            Ok(Deleted::All) => {}
+            Ok(Deleted::Holding(holding)) => {
+                return self.delete_holding(node, &row, &rows, holding);
+            }
+            Ok(Deleted::PutBack { gone }) => return self.went_put_back(&gone, node),
+        }
+        if self.crash_here(CrashPoint::AfterUnlink) {
             return Ok(Outcome::Retry("crash point reached".into()));
         }
-        // Nothing to settle: what went has neither base nor item here now ([`trashed`]), and the
-        // folders released stay for the scan to find as new ones.
+        // Nothing to settle: what went has neither base nor item here now ([`trashed`]).
+        self.finish(&[], |s| trashed(s, &row.path, node))
+    }
+
+    /// A delete found its item not as the plan saw it and put it back, after `gone` went: their
+    /// rows and bases go, and the item is planned again.
+    fn went_put_back(&mut self, gone: &[NodeId], node: NodeId) -> Step {
+        if !gone.is_empty() {
+            self.finish(&[], |s| went(s, gone.iter().copied(), node))?;
+        }
+        Ok(Outcome::stale("not as the plan saw it: put back"))
+    }
+
+    /// Deletes the folder of `row` that holds ignored items (§10), in the folders `holding`,
+    /// which stay here, and so do the folders they are in: everything else goes, item by item
+    /// (each aside, checked, unlinked), and those folders are released, for the scan to find as
+    /// new ones.
+    fn delete_holding(
+        &mut self,
+        node: NodeId,
+        row: &LocalRow,
+        rows: &[LocalRow],
+        holding: Vec<RelPath>,
+    ) -> Step {
+        let holders: HashSet<RelPath> = holding
+            .into_iter()
+            .flat_map(|folder| {
+                std::iter::successors(Some(folder), |p| p.parent())
+                    .take_while(|p| p.starts_with(&row.path))
+            })
+            .collect();
+        let mut gone: Vec<NodeId> = Vec::new();
+        for (i, r) in rows.iter().enumerate() {
+            let in_holder = r.path.parent().is_some_and(|p| holders.contains(&p));
+            if !in_holder || holders.contains(&r.path) {
+                continue;
+            }
+            // Its subtree: the rows after it below it (walk order).
+            let below = &rows[i..][..1 + rows[i + 1..]
+                .iter()
+                .take_while(|b| b.path.starts_with(&r.path))
+                .count()];
+            let stopped = match self.delete_item(r, below, false)? {
+                Ok(Deleted::All) => {
+                    gone.extend(below.iter().map(|b| b.node));
+                    None
+                }
+                Ok(Deleted::PutBack { gone: some }) => {
+                    gone.extend(some);
+                    Some(Outcome::stale("not as the plan saw it: put back"))
+                }
+                Ok(Deleted::Holding(_)) => Some(Outcome::stale("it holds ignored items")),
+                Err(outcome) => Some(outcome),
+            };
+            if let Some(outcome) = stopped {
+                self.report.rescan.push(row.path.clone());
+                // What did go: its rows and bases go now, as below.
+                self.went_put_back(&gone, node)?;
+                return Ok(outcome);
+            }
+        }
+        // A released folder can't keep a temporary name (it carries the old id): it gets
+        // a real one. Deepest first, so the paths above stay valid.
+        let mut parked: Vec<(&LocalRow, RelPath)> = Vec::new();
+        for r in rows.iter().filter(|r| holders.contains(&r.path)) {
+            if let Some(original) = self.db.read(|s| view::parked_place(s, r))? {
+                parked.push((r, original));
+            }
+        }
+        parked.sort_by_key(|(r, _)| std::cmp::Reverse(r.path.depth()));
+        for (r, original) in parked {
+            if let Some(to) = release_place(self.db, self.folder, &original, true)? {
+                // Best effort: if it fails, the item keeps its name and the scan finds it there.
+                let _ = self.disk.rename(self.db, &r.path, &to)?;
+            }
+        }
+        self.report
+            .rescan
+            .push(row.path.parent().unwrap_or_default());
+        if self.crash_here(CrashPoint::AfterUnlink) {
+            return Ok(Outcome::Retry("crash point reached".into()));
+        }
+        // What went, and the folders released (new ones to the scan): no rows, no bases.
         self.finish(&[], |s| trashed(s, &row.path, node))
     }
 
@@ -528,18 +568,39 @@ impl Executor<'_> {
     }
 }
 
-/// The item at `path` went to the trash, `node`'s trash: its rows go, and so do their bases,
-/// whatever the mirror holds by now. What went isn't synced here any more, and a base left
-/// behind would read as a local delete once the node is back in view: a restore (or another
-/// engine's pull of it) made meanwhile, or the folder that took it along brought back, would be
-/// removed again from here. What is in it that the drive still holds elsewhere is planned again.
+/// What was at `path` went from here, deleted with `node` (the item at the top of what went):
+/// its rows go, and so do their bases ([`forget`]).
 fn trashed(s: &Store<'_>, path: &RelPath, node: NodeId) -> Result<(), StateError> {
     for r in s.folder().delete_local_subtree(path)? {
-        s.folder().delete_parked(r.node)?;
-        if r.node != node && s.get_mirror(r.node)?.is_some() {
-            s.folder().mark_dirty(r.node)?;
-        }
-        s.folder().delete_base(r.node)?;
+        forget(s, r.node, node)?;
     }
+    Ok(())
+}
+
+/// `nodes` went from here, deleted with `node`: their rows go, and so do their bases
+/// ([`forget`]).
+pub(super) fn went(
+    s: &Store<'_>,
+    nodes: impl IntoIterator<Item = NodeId>,
+    node: NodeId,
+) -> Result<(), StateError> {
+    for n in nodes {
+        s.folder().delete_local(n)?;
+        forget(s, n, node)?;
+    }
+    Ok(())
+}
+
+/// `n` went from here, deleted with `node`, its row gone: its base goes too, whatever the
+/// mirror holds by now. What went isn't synced here any more, and a base left behind would read
+/// as a local delete once the node is back in view: a restore (or another engine's pull of it)
+/// made meanwhile, or the folder that took it along brought back, would be removed again from
+/// here. What is in it that the drive still holds elsewhere is planned again.
+fn forget(s: &Store<'_>, n: NodeId, node: NodeId) -> Result<(), StateError> {
+    s.folder().delete_parked(n)?;
+    if n != node && s.get_mirror(n)?.is_some() {
+        s.folder().mark_dirty(n)?;
+    }
+    s.folder().delete_base(n)?;
     Ok(())
 }

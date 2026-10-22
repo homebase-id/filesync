@@ -224,7 +224,7 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
      schema's checks): no device can make it on the drive, and a move into it would wait for
      good, tried again at every sync.
 4. **Folder delete propagation** removes the folder on the drive first, then its descendants,
-   top-down; here it trashes the topmost folder, its bases and its children's in one step.
+   top-down; here it deletes the topmost folder, its bases and its children's in one step (§7).
 5. **Planned in pages.** The engine plans its dirty set in pages of 20,000 nodes, in node id
    order (§8a). A node dirty in another page, or a held delete (§7), is held as it is: its
    change isn't merged in this plan, and no fix here moves, renames or adopts it.
@@ -236,8 +236,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    and is above a node of this page (then only it waits: its page covers the page's folders
    below it). A held delete out of the dirty set below it doesn't count: as in one page, it is
    planned again only when a view reaches it. Planned apart, what is below read alive as
-   context and kept a deleted folder alive; or the folder's trash took along what changed
-   there (an edit lost to `.hbsync/trash`); or its items went one by one before it, each an
+   context and kept a deleted folder alive; or the folder's delete took along what changed
+   there (an edit lost); or its items went one by one before it, each an
    item of its own in Recently deleted. A node held so is left as it is on every side,
    nothing done to it (not even made where it isn't yet), and never brought back here as an
    orphan, nor its folder: its own page decides.
@@ -281,17 +281,43 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   brings them back on every device (node schema, "Recently deleted"). The daily purge deletes
   older ones for good (node schema, "The purge"). The reconciler sees a removed node as
   deleted.
-- **Local deletes go to trash.** Removing a local file or folder because of a remote delete
-  moves it into the sync root's internal trash (`.hbsync/trash/`), never `unlink` (one rename:
-  junk and anything that appears meanwhile go along). The daily purge empties entries older
-  than `keep_deleted_days`, of those made since it began. A download that moves a file to
-  another folder puts the old version there; where the new one then can't be put in place, the
+- **Deletes from elsewhere are checked, then final.** On the computer where the user deletes,
+  Filesync touches nothing: it sees the item gone and removes it on the drive. On every other
+  computer, an item removed on the drive (or moved where this device doesn't sync it, §10) is
+  deleted here outright, and nothing is kept: it is renamed into `.hbsync/aside/` (one rename,
+  on its volume), checked there to be exactly what the plan saw, then unlinked, and its rows and
+  bases go in the commit after. A file is checked by its size and mtime and, where ids are
+  stable, its id (its ctime moved with the rename), and also by its hash where those can't prove
+  its bytes: a volume whose mtimes are coarse or whose ids aren't stable (FAT, exFAT, HFS+, ext2
+  and ext3, a network or FUSE volume; probed once per folder). A folder is first looked at where
+  it is (its items' metadata, one walk): a change, or something that stays here, is found
+  without moving it, and it stays in place while that walk runs. Aside, it is checked again in
+  one walk that judges ignore rules at its place: every item in it must be one the plan saw,
+  unchanged. Then it is unlinked deepest first, each file only while it is still the one checked
+  (read again, as the walk read it), each folder only once empty. Anything else found (an edit
+  through a handle an app had open, a new item, an ignored one) puts it back where it was (under
+  a numbered name if that is taken, at the folder's top if its folder is gone), and the next
+  plan decides: an edit wins (§4), ignored content stays (§10). Junk files go along; a folder on
+  the junk list (it may hold what was never synced) stays, as ignored content does. A parked
+  item goes back under its own name, never its temporary one, and its parking record goes. While
+  an item is aside, the scan keeps its rows, and the folders it is in, for it to come back to.
+  What the drive removed stays in Recently deleted for `keep_deleted_days`; a restore downloads
+  it again. Cost per file: a rename and an unlink, a stat more than the guard's, and on such
+  volumes a read of its bytes; per folder, one walk more (two in all: in place, then aside).
+  Accepted: an app that opened a file before the rename and writes to it in the microseconds
+  between the last check and the unlink loses that write (any delete has this window; Windows
+  refuses the rename while a file is open without delete sharing). Simulator:
+  `remote_deletes_never_lose_an_edit`, `a_crash_anywhere_in_a_delete_loses_nothing` (with apps
+  writing to what is aside), and every property's check that nothing is unlinked that isn't the
+  version its base records, and nothing stays aside.
+- **Old versions.** A download that moves a file to another folder puts the old version in
+  the trash (`.hbsync/trash/`); where the new one then can't be put in place, the
   old one comes back at once (gone, it would read as the user deleting it, against the drive's
   edit: a conflict, and the download again), and its emptied entry goes. Where that fails, or
-  a crash came between, it stays in the trash.
-- **Downloads look in the trash first.** A download (a delete taken back, say: a restore from
-  Recently deleted) first looks for the file in the trash: in the entry of the node, or of a
-  folder above it, under the names the download's place has. It takes one only once it hashed
+  a crash came between, it stays in the trash, which the daily purge empties of entries older
+  than `keep_deleted_days`, of those made since it began.
+- **Downloads look in the trash first.** A download first looks for the file in the trash: in
+  the entry of the node, or of a folder above it, under the names the download's place has. It takes one only once it hashed
   it there and it holds exactly the bytes wanted (the drive's content hash and size; one of
   another size or mtime isn't read): its bytes synced, it is put in place from there as any
   download is (the placement record first, the same durability), in one rename. Anything
@@ -317,7 +343,7 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   - **Delete**: they go to the drive's Recently deleted, as any delete does.
   - **Put them back**: the delete here is undone, as the drive has them now: each node's base
     goes (with what is below it in the base), so the drive's live node comes down again
-    (downloads look in `.hbsync/trash` first); what below it was moved elsewhere here keeps
+    what below it was moved elsewhere here keeps
     its base, and the move goes on. What the drive removed or changed since wins: it is never
     brought back. A newly ignored item stays on the drive and is synced here again where the
     drive has it (masking goes by the drive's path), beside the ignored copy, which stays as
@@ -363,19 +389,19 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   else wrote.
 
   Removals made elsewhere (another computer, the phone, the file browser, another app) are
-  followed here without asking: into `.hbsync/trash`, and the drive keeps them in Recently
+  followed here without asking: deleted here (checked, above), and the drive keeps them in Recently
   deleted for `keep_deleted_days`. One exception: removals that would take every synced file
   here at once, and more than the same `max(50, …)` (a broken device, a wiped drive), are held
   (a move elsewhere out of this device's view isn't a removal: the drive keeps it live). The
   count is the whole sync's, not a page's (§6.5): with the page's removals it takes what other
   pages still have to remove, the dirty ones and the files in folders the drive removed that
   are still live here (taken along, by §6.3's rule; read while anything is dirty: a walk of
-  Recently deleted's folders, 2 ms for 50,000 items), less those a confirmed trash takes. So a wipe planned in pages
+  Recently deleted's folders, 2 ms for 50,000 items), less those a confirmed delete here takes. So a wipe planned in pages
   is held as a whole (engine: `a_stopped_wipe_planned_in_pages_is_held`). Once
   held so, they stay held until answered, whatever the count says since (one of them back on
   the drive, a put back half done), across restarts (`guard.wiped`, kept as soon as planned):
   a held item stays held while a removal elsewhere is still to be followed in it, or below it
-  once it is back on the drive, and a trash of anything held or taking held items along is
+  once it is back on the drive, and a delete here of anything held or taking held items along is
   held. **Delete**, or **Put them back**: kept here, and each synced item in them the drive
   no longer has is restored from Recently deleted (each removal as an item: what was removed
   with its folder comes back with it; what was removed apart, before, on its own), or, gone
@@ -404,11 +430,11 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
 
 ## 8. Operations
 
-Local: `mkdir`, `download` (to temp, verify stored hash, atomic swap), `move`, `tags`, `trash`
+Local: `mkdir`, `download` (to temp, verify stored hash, atomic swap), `move`, `tags`, `delete`
 (what goes takes its bases along, whatever the drive holds by then: a base left behind would read
 as a local delete once the node is back in view, and undo a restore made while it ran),
 `rename-for-conflict`, and for filters (section 10) `detach` (a new node id in place) and
-`forget` (trash plus dropping the base, also where nothing of it is here). Remote: `create-folder`, `upload` (create by node id),
+`forget` (a delete plus dropping the base, also where nothing of it is here). Remote: `create-folder`, `upload` (create by node id),
 `update-content`, `move`, `tags`, `remove` (to Recently deleted; a create of a removed node
 restores it). Outside plans: `restore` and `purge` (Recently deleted). Every op that writes a
 node (create, upload, move, download, mkdir) writes its merged tags too; `tags` is for a change
@@ -441,7 +467,7 @@ expected fingerprint is treated as done.
   answer then stays out of the picture of the drive, which keeps the
   newer state, and the node settles against the answer, as if that pull came after it: the
   next plan reads the newer state as any device's change (another device's removal of a file
-  just renamed here takes it to the trash here too; a restore after a removal here brings it
+  just renamed here deletes it here too; a restore after a removal here brings it
   back here). The check and the write of the answer, and the settle, are one transaction,
   which no pull's commit comes into: writes to the state DB take turns (its process's gate,
   and SQLite's write lock across processes). The account reads the feed again at the next
@@ -452,7 +478,7 @@ expected fingerprint is treated as done.
   and everything it would send or fetch (its parent, name, tags, the version it acts on, the
   local bytes it uploads). The plan leaves out an operation whose key matches, and what waits
   for it (what goes into a folder whose create is refused, the removals in a folder whose
-  removal is, what goes to the local place the refused item doesn't leave, and the trash or
+  removal is, what goes to the local place the refused item doesn't leave, and the delete or
   forgetting of a folder it is in): it stays dirty, but isn't sent again, nor counted as
   unfinished work. Something else blocked behind it is tried and skipped, a local cost, told
   when it keeps coming back. Any change
@@ -461,7 +487,7 @@ expected fingerprint is treated as done.
   once reads the drive again first: it may have been written meanwhile.
 - **Retry within a plan.** An operation blocked only by order (target parent not created yet,
   a folder temporarily inside its own destination) goes to the back of the queue.
-- **Parking.** If a target name is held by a node the plan is about to move, trash or replace,
+- **Parking.** If a target name is held by a node the plan is about to move, delete or replace,
   that node is renamed to `.hbsync-move-<node id>` first, in its own folder, and the parking
   is recorded in the state DB. The local view reports a parked node under its original name
   in whatever folder it is in now, but only while it still carries the parked name: a rename
@@ -473,9 +499,10 @@ expected fingerprint is treated as done.
   reason (it is detached, or released as a folder that keeps ignored items, section 10) takes
   its original name if free, else a numbered one the same way: the temporary name carries the
   old id and never reaches the remote.
-- **Trash guard.** `LocalTrash` carries the nodes the plan expects in the subtree; if the
-  folder holds anything else (in the DB or on disk), it is not trashed and the folder is
-  rescanned.
+- **Delete guard.** `LocalTrash` carries the nodes the plan expects in the subtree; if the
+  folder holds anything else in the DB, or its top changed, it is not deleted and the folder is
+  rescanned; what is in it is checked once it is aside (§7), and anything else there puts it
+  back.
 - **Creates** run only while the local node still exists unchanged.
 - **Parents first on the server.** A remote create, upload or move waits (retry) until its
   parent folder is in the mirror; the server doesn't check parents, and a child of a folder
@@ -527,58 +554,70 @@ expected fingerprint is treated as done.
     new node (a conflict copy, under a free name); a rename, tags, a delete or a download of it
     is refused and not tried again while it is the same; the drive's version stands.
   - A later version that reads, or the file's delete, ends it.
-- **Crash recovery** needs no operation log: every operation is idempotent or detectable
-  (4105 on a re-create, fingerprint guards locally), state is re-derived from a scan and the
-  feed, and parked items come back from their records. A download (or a folder synced before,
-  made again) placed but not recorded (a crash just before its commit) is found again: each
-  batch of downloads is recorded before it runs, with the base each commit writes (the node as
-  the drive has it at that version: for a folder, the version its plan saw, else the mirror's;
-  one nowhere live, made again from Recently deleted, records the version there for recovery
-  only, its commit keeping its base), its target, what the item holds of tags and what the item
-  there held before (none: not known), and the base's version its plan saw (recovery checks it as the commit does; a record
-  from before records said so is settled against the base as it is). A download claims the tags it writes on the file before moving it into place, the
-  empty set too, as they read back (not known where the volume keeps none, learned when a tag
-  write finds it unsupported); where the write turns out otherwise, the record says so durably before the move,
-  so only a failure costs a commit. A folder is made without tags: it claims the empty set if it
-  is to hold none, and otherwise claims what was written once written, durably before its
-  commit. On the next sync the item at a record's target holding its bytes, new to the scan or
-  the node's own file replaced, is that node, settled as its commit settles it (one function for
-  both, against the same version), its tags as the record says the write changed them, a tag
-  the user changed since being their change; where it claims none, the base's tags start
-  afresh, each one the item holds and the drive holds too, so a tag only the drive has is
-  written on the item and one only the item has goes up. Where the mirror no longer has the
-  node as the plan reads it (deleted, in Recently deleted, or taken along by a folder there in
-  this folder's part, §6.3), the commit and
+- **Crash recovery** needs no operation log: every operation is idempotent or detectable (4105
+  on a re-create, fingerprint guards locally), state is re-derived from a scan and the feed, and
+  parked items come back from their records. What a delete left aside (a crash between its move
+  aside and its commit, or a put back that failed) is decided at the start of the next sync,
+  before the scan's records are read, by what it is, as the delete's own check decides (§7;
+  recovery finishes verified deletes, 2026-10-22): still its node's synced version (each item as
+  its row has it, each row as its base has it), it is unlinked with its rows and bases, whatever
+  became of its folder meanwhile (the drive's delete stands); anything else goes back to its
+  place, under its own name, and is planned again (an edit wins). Where its rows went (an item
+  took its place meanwhile), its base decides: a file holding the bytes its base records goes;
+  anything else goes back where it was last synced, read as a new item there. One whose node
+  this folder doesn't know (its state DB lost or replaced since) is left aside, and told. A
+  crash after an unlink and before its commit leaves the bases: the item reads as deleted here,
+  which the drive's removal settles; a restore made in between is removed again, to Recently
+  deleted (a known limit: a write-ahead record of a run's deletes, a durable commit more, would
+  close it). A download (or a folder synced before, made again) placed but not recorded (a crash
+  just before its commit) is found again: each batch of downloads is recorded before it runs,
+  with the base each commit writes (the node as the drive has it at that version: for a folder,
+  the version its plan saw, else the mirror's; one nowhere live, made again from Recently
+  deleted, records the version there for recovery only, its commit keeping its base), its
+  target, what the item holds of tags and what the item there held before (none: not known), and
+  the base's version its plan saw (recovery checks it as the commit does; a record from before
+  records said so is settled against the base as it is). A download claims the tags it writes on
+  the file before moving it into place, the empty set too, as they read back (not known where
+  the volume keeps none, learned when a tag write finds it unsupported); where the write turns
+  out otherwise, the record says so durably before the move, so only a failure costs a commit. A
+  folder is made without tags: it claims the empty set if it is to hold none, and otherwise
+  claims what was written once written, durably before its commit. On the next sync the item at
+  a record's target holding its bytes, new to the scan or the node's own file replaced, is that
+  node, settled as its commit settles it (one function for both, against the same version), its
+  tags as the record says the write changed them, a tag the user changed since being their
+  change; where it claims none, the base's tags start afresh, each one the item holds and the
+  drive holds too, so a tag only the drive has is written on the item and one only the item has
+  goes up. Where the mirror no longer has the node as the plan reads it (deleted, in Recently
+  deleted, or taken along by a folder there in this folder's part, §6.3), the commit and
   recovery alike settle the item at the record's version whatever the plan saw (its recorded
   spelling and the rest of the base as any settling keeps them), so the removal reaches it:
   never read as an edit, which would bring the node back; one whose item isn't the drive's to
-  take (its name) is held as a file not hashed yet is, then goes. A folder's recovery, like its commit, marks what is in it on
-  the drive dirty. Later changes on the drive are plain changes against it. A record goes once
-  its base is written, by the commit or by recovery, or when the operation that wrote it, in
-  that run, fails before its own item is in place, or its batch stops before it starts (so no
-  item the user puts at that place is ever taken for it); one whose item is in place stays
-  through a failed commit: where the state DB fails, the run stops and the next sync's
-  recovery settles it; where reading the item back fails, the operation ends there and
-  recovery settles it right away by that item alone, no other item read again (the one way an
-  item put in place settles then; a folder new here, without a record, is taken over by its
-  retry). One whose item can't be told yet (its file not hashed, say: locked; its folder
+  take (its name) is held as a file not hashed yet is, then goes. A folder's recovery, like its
+  commit, marks what is in it on the drive dirty. Later changes on the drive are plain changes
+  against it. A record goes once its base is written, by the commit or by recovery, or when the
+  operation that wrote it, in that run, fails before its own item is in place, or its batch
+  stops before it starts (so no item the user puts at that place is ever taken for it); one
+  whose item is in place stays through a failed commit: where the state DB fails, the run stops
+  and the next sync's recovery settles it; where reading the item back fails, the operation ends
+  there and recovery settles it right away by that item alone, no other item read again (the one
+  way an item put in place settles then; a folder new here, without a record, is taken over by
+  its retry). One whose item can't be told yet (its file not hashed, say: locked; its folder
   unreadable) stays for ten minutes from when recovery first found it so, then goes. Recovery
   runs at the start of a sync and of each of its rounds, and first rescans the folders its
   records go into and those their nodes' items are in (each record's once a sync); both it and
-  recovery in the run read the disk at a record's target alike: the item there with the
-  record's bytes is settled, a record whose target verifiably holds nothing (not found, a file
-  where a folder would be, a loop of links) goes, and one whose target holds another node is
-  left to adoption. A record never goes only because no scan has seen its item yet. An item
-  at its target whose bytes are neither the record's nor the base's (the user edited it before
-  the next sync) can't be told from the file that was there before (the crash may have come
-  during the transfer, before the move): the record goes, and the item reads against the old
-  base, a conflict copy where the drive changed too; the tags the download wrote read as this
-  device adding them (a known limit, §11). No operation writes over a
-  record it didn't write: it is left for the next plan, the node dirty, until recovery settles
-  the record. A verified download that couldn't be
-  placed stays in the temp folder for the retry; temp files no pending download wants are
-  removed before each plan. The stored journal position never passes a change that isn't
-  recorded: it is taken before waiting for events and stored only once the event queue has
+  recovery in the run read the disk at a record's target alike: the item there with the record's
+  bytes is settled, a record whose target verifiably holds nothing (not found, a file where a
+  folder would be, a loop of links) goes, and one whose target holds another node is left to
+  adoption. A record never goes only because no scan has seen its item yet. An item at its
+  target whose bytes are neither the record's nor the base's (the user edited it before the next
+  sync) can't be told from the file that was there before (the crash may have come during the
+  transfer, before the move): the record goes, and the item reads against the old base, a
+  conflict copy where the drive changed too; the tags the download wrote read as this device
+  adding them (a known limit, §11). No operation writes over a record it didn't write: it is
+  left for the next plan, the node dirty, until recovery settles the record. A verified download
+  that couldn't be placed stays in the temp folder for the retry; temp files no pending download
+  wants are removed before each plan. The stored journal position never passes a change that
+  isn't recorded: it is taken before waiting for events and stored only once the event queue has
   drained.
 - **Power cuts.** The state DB syncs its commits to the disk only now and then
   (`synchronous=NORMAL`): an OS crash or a power cut can lose the last ones, in order, while the
@@ -587,7 +626,7 @@ expected fingerprint is treated as done.
   DB (the ids the scan gave new items go out with them), and so does an upload after a detach
   (its new id); write-ahead records (parking, conflict copies, downloads, a folder this device
   synced before made again) and a folder's registration are durable; before something is put
-  where an item was moved or trashed from since the last durable commit, the commits are made
+  where an item was moved or deleted from since the last durable commit, the commits are made
   durable (with that record lost, the scan would take the newcomer for the old item); and the
   folders whose entries were changed are synced before any durable commit to the account's DB,
   whichever folder's engine makes it (macOS: a full sync per volume), and so are they before
@@ -633,15 +672,17 @@ here (or put up anew, if edited). That takes proof (`hbsync-engine/src/gone.rs`)
    deleted *after seeing it* exists in the converged tree (possibly as a conflict copy).
 3. **Invariants** of section 6 hold in every base tree at every step.
 4. **Filters** (section 10): convergence and no loss hold for what each client syncs; a
-   filtered local item is never changed or removed by sync, except junk going to the trash
-   with its folder.
+   filtered local item is never changed or removed by sync, except junk deleted with its
+   folder.
 5. **Tags** (section 11): convergence includes the tags as each client sees them (clients tag
    like macOS, Linux and Windows); a tag some user added and no user removed is on its node in
-   the end, unless the node was deleted, or the item it was added to went to the trash or got
-   a new id on that device (then it went along).
+   the end, unless the node was deleted, or the item it was added to was deleted or got a new
+   id on that device (then it went along).
 6. **Gone for good** (section 8b): with the drive saying now and then that a live file isn't
    there, once of each, no client takes a file the drive holds as gone for good, nor deletes
    it here; the clients converge without loss.
+7. **Deletes are checked:** no client unlinks an item that isn't the version its base
+   records (junk aside), and nothing stays aside once the clients settle (§7).
 
 ## 10. Filters
 
@@ -680,7 +721,7 @@ An item inside a filtered folder is filtered too.
 1. **Local.** The walk neither reports nor enters filtered entries (nothing is hashed), and the
    watcher drops their events. A synced item that becomes filtered (a rule was added, or it was
    moved into an ignored folder) looks deleted: it leaves the drive and the other devices
-   (their trash), and stays here. The mass-delete guard applies (§7): held over its limit;
+   (deleted there), and stays here. The mass-delete guard applies (§7): held over its limit;
    put back, it stays on the drive and is synced here again where the drive has it.
 2. **Remote.** A remote node whose path is filtered on this device is masked with its subtree:
    never downloaded, and never deleted by this device, with one exception: a node this device
@@ -696,19 +737,20 @@ An item inside a filtered folder is filtered too.
    the ignored place) is downloaded with everything in it.
    A synced node that becomes masked because another device moved it into a path this device
    ignores leaves this device, the remote untouched:
-   - an unchanged local copy goes to the trash, and its base goes in the same step
+   - an unchanged local copy is deleted (§7), and its base goes in the same step
      (`Forget`): a base left behind would read as a local delete once the node is back in view
      (another rule, another move);
    - a local copy with changes the remote doesn't have (edited, or never synced) is
      **detached** (`LocalDetach`): it becomes a new node where it is and is created remotely
      like any new item. The old id is still live remotely, so it can't be created again. The
      masked folders it sits in are detached with it, as are masked folders holding anything
-     else this device syncs; their unchanged contents go to the trash.
+     else this device syncs; their unchanged contents are deleted.
 3. **Folders.** A remote folder with masked live children (that aren't leaving) counts as
    having a live child: a local delete of it deletes what this device saw, and the folder comes
    back here, empty.
-   Locally, junk in a folder being trashed goes to the trash with it; ignored content keeps its
-   folder: the synced contents are trashed and the folder is released (the next scan sees it
+   Locally, junk files in a folder being deleted go with it; ignored content, and a folder on
+   the junk list, keep their folder: the synced contents are deleted, item by item, and the
+   folder is released (the next scan sees it
    as a new folder); junk directly in it stays with it.
 4. **Rule changes.** The filter's fingerprint (rules, junk list version, case sensitivity) is
    kept in the state DB. When it changed, start-up walks the whole tree (a journal doesn't
@@ -813,7 +855,7 @@ Before every sync of a role folder, after reading the drive, its top must be on 
 in Recently deleted comes back with what was deleted with it, one not there at all (never made,
 or deleted for good) is made at the drive's top with the role's id. So the first device to add
 a role makes its folder, the others join it, and a role folder deleted on the drive while a
-device syncs it comes back at that device's next sync, nothing trashed there and nothing
+device syncs it comes back at that device's next sync, nothing deleted there and nothing
 uploaded into Recently deleted. To delete a role folder for good, stop syncing it everywhere
 first.
 
@@ -829,7 +871,7 @@ A role folder holds no name for the scope: a plain folder of the same name at th
 left out again, from their tops; it needs no walk, as only the remote view changed. Recently
 deleted is the account's, like the mirror: one list, each item naming the folder of this
 device it comes back to (none for a role folder this device doesn't sync); restoring, emptying
-and the purge (by age, with every folder's trash) are the account's too. A change of the drive
+and the purge (by age) are the account's too. A change of the drive
 is planned in the folders it concerns: those holding the node, and the one whose part of the
 drive its place is in (every folder when that place isn't known).
 

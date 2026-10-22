@@ -2693,38 +2693,26 @@ fn an_old_version_that_cant_come_back_stays_in_the_trash() -> R {
     Ok(())
 }
 
-/// The download from another folder keeps the old version in the trash, in the node's entry of
-/// this second; the drive then deletes the node, and the file goes to the trash within the same
-/// second. Its entry was taken (nothing is renamed over anything), so the trash failed, run
-/// after run within that second, and the file stayed: a milestone seed's clients diverged
-/// (`randomized_wrong_not_theres`, seed 8474444713664359667). It takes the next second's entry:
-/// the newer stays the newer.
+/// The download from another folder keeps the old version in the trash; the drive then
+/// deletes the node, and the file is deleted outright (sync semantics §7): aside, checked,
+/// unlinked, nothing kept but that old version. (A node trashed twice within a second once
+/// collided on its entry, seed 8474444713664359667: deletes no longer make one.)
 #[test]
-fn a_node_trashed_twice_in_a_second_goes_both_times() -> R {
+fn a_node_replaced_then_deleted_goes() -> R {
     let mut h = Harness::new()?;
     let (node, op) = a_download_from_another_folder(&mut h)?;
     h.run(vec![op])?;
-    let [first] = &trash_entries(&h)[..] else {
-        panic!("one entry: {:?}", trash_entries(&h));
-    };
-    // The next second's entry taken too, so the trash collides whenever it runs.
-    let at = hbsync_local::layout::trashed_at(first).ok_or("an entry")?;
-    let trash = hbsync_local::layout::trash_dir(&h.folder.root);
-    let next = trash.join(hbsync_local::layout::trash_entry(at + 1, node));
-    fs::create_dir_all(&next)?;
-    fs::write(next.join("f"), b"older")?;
+    assert_eq!(trash_entries(&h).len(), 1, "the old version");
     let report = h.run(vec![Op::LocalTrash {
         node,
         subtree: vec![node],
     }])?;
     assert!(report.failed.is_empty(), "{:?}", report.failed);
     assert!(!h.at("p2/f")?.exists());
-    // Three entries, the newest the file (at `at + 2`, or later on a slow run).
-    let mut entries = trash_entries(&h);
-    entries.sort_by_key(|e| hbsync_local::layout::trashed_at(e));
-    assert_eq!(entries.len(), 3, "{entries:?}");
-    assert_eq!(fs::read(trash.join(&entries[2]).join("f"))?, b"B");
-    assert_eq!(fs::read(trash.join(first).join("f"))?, b"A");
+    assert_eq!(trash_entries(&h).len(), 1, "nothing more kept");
+    let aside = hbsync_local::layout::aside_dir(&h.folder.root);
+    assert!(fs::read_dir(aside)?.next().is_none(), "nothing left aside");
+    assert!(h.db.read(|s| s.get_base(node))?.is_none(), "its base went");
     Ok(())
 }
 

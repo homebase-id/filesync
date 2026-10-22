@@ -15,6 +15,10 @@ pub struct Hooks {
     /// with the run's state DB before each folder's commit.
     #[cfg(feature = "testkit")]
     pub before_commit: Option<Meanwhile>,
+    /// What an app does to an item the run just moved aside to delete, before it is checked
+    /// (a write through a handle it had open): run with the item's place aside.
+    #[cfg(feature = "testkit")]
+    pub aside: Option<Aside>,
 }
 
 impl Hooks {
@@ -50,6 +54,29 @@ impl Hooks {
 
     #[cfg(not(feature = "testkit"))]
     pub(crate) fn before_commit(&self, _: &mut hbsync_state::StateDb) {}
+
+    /// Does what a test does to an item moved aside ([`Hooks::aside`]).
+    #[cfg(feature = "testkit")]
+    pub(crate) fn aside(&self, at: &std::path::Path) {
+        if let Some(Aside(f)) = &self.aside {
+            f(at);
+        }
+    }
+
+    #[cfg(not(feature = "testkit"))]
+    pub(crate) fn aside(&self, _: &std::path::Path) {}
+}
+
+/// Tests only: what an app does to an item moved aside, with its place there.
+#[cfg(feature = "testkit")]
+#[derive(Clone)]
+pub struct Aside(pub std::sync::Arc<dyn Fn(&std::path::Path) + Send + Sync>);
+
+#[cfg(feature = "testkit")]
+impl std::fmt::Debug for Aside {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Aside")
+    }
 }
 
 /// Tests only: a write another thread makes meanwhile, with the run's state DB.
@@ -121,6 +148,9 @@ pub enum CrashPoint {
     /// After a download is moved into place, or a folder made in place (before its tags are
     /// written), before its commit.
     AfterPlaced,
-    /// After an item is moved to the trash, before its rows and bases follow.
-    AfterTrash,
+    /// After an item being deleted is moved aside, before it is checked.
+    AfterAside,
+    /// After an item being deleted is unlinked, before its rows and bases follow (the commit
+    /// lost).
+    AfterUnlink,
 }

@@ -173,6 +173,8 @@ impl Sim {
             filter: Arc::clone(&client.filter),
             scope: Arc::new(client.scope()),
             tags_kept: Arc::default(),
+            mtime_proves_bytes: Arc::default(),
+            family: Arc::default(),
         }
     }
 

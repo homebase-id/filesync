@@ -159,6 +159,50 @@ fn edit_and_touch() -> R {
     Ok(())
 }
 
+/// An item a delete moved aside (`.hbsync/aside`, sync semantics §7) isn't gone to the scan:
+/// its rows stay, with what is below it, for it to come back to (put back by the delete's check
+/// or the next sync's recovery), and nothing is dirtied. Back in place, it is the same node.
+#[test]
+fn an_item_aside_keeps_its_rows() -> R {
+    let mut f = Fixture::new()?;
+    f.write("d/a.txt", b"a")?;
+    f.write("d/sub/b.txt", b"b")?;
+    f.scan()?;
+    let (d, a) = (f.node("d")?, f.node("d/a.txt")?);
+    let aside = hbsync_local::layout::aside_dir(f.root());
+    fs::create_dir_all(&aside)?;
+    let entry = aside.join(hbsync_local::layout::AsideEntry::Folder(d).name());
+    fs::rename(f.root().join("d"), &entry)?;
+    let (report, dirty) = f.scan()?;
+    assert_eq!((report.removed, report.added), (0, 0), "{report:?}");
+    assert!(dirty.is_empty(), "{dirty:?}");
+    assert_eq!(f.node("d/a.txt")?, a);
+    fs::rename(&entry, f.root().join("d"))?;
+    let (report, _) = f.scan()?;
+    assert_eq!((report.removed, report.added), (0, 0), "{report:?}");
+    assert_eq!((f.node("d")?, f.node("d/a.txt")?), (d, a));
+    Ok(())
+}
+
+/// A rescan of a folder below one that is aside (a journal's events from before a crash) keeps
+/// its rows too: the aside folder's row, in the DB, says they are its.
+#[test]
+fn a_rescan_below_an_item_aside_keeps_its_rows() -> R {
+    let mut f = Fixture::new()?;
+    f.write("d/sub/b.txt", b"b")?;
+    f.scan()?;
+    let (d, b) = (f.node("d")?, f.node("d/sub/b.txt")?);
+    let aside = hbsync_local::layout::aside_dir(f.root());
+    fs::create_dir_all(&aside)?;
+    let entry = aside.join(hbsync_local::layout::AsideEntry::Folder(d).name());
+    fs::rename(f.root().join("d"), &entry)?;
+    let root = f.root().to_path_buf();
+    let report = hbsync_local::rescan_dirs(&mut f.db, &root, &[p("d/sub")], &f.opts)?;
+    assert_eq!(report.removed, 0, "{report:?}");
+    assert_eq!(f.node("d/sub/b.txt")?, b);
+    Ok(())
+}
+
 #[test]
 fn rename_keeps_node_without_rehash() -> R {
     let mut f = Fixture::new()?;

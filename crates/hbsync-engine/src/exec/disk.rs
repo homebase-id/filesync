@@ -19,6 +19,16 @@ use super::{FailPoint, Hooks};
 use crate::folder::FolderCtx;
 use crate::trash::Trash;
 
+/// What an item to unlink is ([`Disk::unlink`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Unlink {
+    File,
+    /// Empty by then: one that isn't stays.
+    Folder,
+    /// Disposable (§10): with whatever is in it.
+    Junk,
+}
+
 /// What a tag write left on an item ([`Disk::write_tags`]).
 #[derive(Debug, Clone)]
 pub(super) struct TagsLeft {
@@ -47,6 +57,8 @@ pub(super) struct Disk<'a> {
     ids_durable: bool,
     /// The folder's trash, read when a download first asks this run ([`Disk::in_trash`]).
     trash: Option<Trash>,
+    /// The aside folder is there ([`Disk::move_aside`]), as far as this run knows.
+    aside_ready: bool,
 }
 
 impl<'a> Disk<'a> {
@@ -57,6 +69,7 @@ impl<'a> Disk<'a> {
             hooks,
             ids_durable: false,
             trash: None,
+            aside_ready: false,
         }
     }
 
@@ -67,6 +80,10 @@ impl<'a> Disk<'a> {
 
     pub(super) fn root(&self) -> &'a Path {
         self.root
+    }
+
+    pub(super) fn folder(&self) -> &'a FolderCtx {
+        self.folder
     }
 
     /// The native path of `path`.
@@ -184,6 +201,55 @@ impl<'a> Disk<'a> {
     /// shown, never synced on, so a file system that won't take it is no failure.
     pub(super) fn set_created(&self, path: &Path, created_ms: i64) {
         let _ = ops::set_created(path, created_ms);
+    }
+
+    // ---- items being deleted, aside ----
+
+    /// Moves the item at `path` into the folder's aside folder ([`layout::aside_dir`]) as
+    /// `entry`, one rename on its volume, and returns where it is now. One of that name there
+    /// already (left by a crash, for the next sync's recovery) is never renamed over: the
+    /// rename fails ([`io::ErrorKind::AlreadyExists`]).
+    pub(super) fn move_aside(
+        &mut self,
+        db: &mut StateDb,
+        path: &RelPath,
+        entry: layout::AsideEntry,
+    ) -> Result<io::Result<PathBuf>, StateError> {
+        let dir = layout::aside_dir(self.root);
+        // Made with the first item it takes (once a run asks): then the state folder changed.
+        if !self.aside_ready {
+            match fs::create_dir(&dir) {
+                Ok(()) => db.changed(&dir),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Ok(Err(e)),
+            }
+            self.aside_ready = true;
+        }
+        let to = dir.join(entry.name());
+        Ok(rename_ordered(db, &self.abs(path), &to)?.map(|()| to))
+    }
+
+    /// Renames `from` (an item aside) to `path`, never over anything.
+    pub(super) fn rename_from(
+        &self,
+        db: &mut StateDb,
+        from: &Path,
+        path: &RelPath,
+    ) -> Result<io::Result<()>, StateError> {
+        rename_ordered(db, from, &self.abs(path))
+    }
+
+    /// Unlinks what is at `at`, as `what` says it is. The caller notes the folder it was in as
+    /// changed ([`StateDb::changed`]).
+    pub(super) fn unlink(&self, at: &Path, what: Unlink) -> io::Result<()> {
+        match what {
+            Unlink::File => fs::remove_file(at),
+            Unlink::Folder => fs::remove_dir(at),
+            Unlink::Junk => match fs::symlink_metadata(at)?.is_dir() {
+                true => fs::remove_dir_all(at),
+                false => fs::remove_file(at),
+            },
+        }
     }
 
     // ---- the folder's trash ----

@@ -1,5 +1,7 @@
 //! What a crash left behind: conflict copies half made, temporary files no download can use.
 
+use super::delete::{Look, check, put_back, put_back_at, unlink_checked};
+use super::local::went;
 use super::park::unpark;
 use super::*;
 use crate::adopt;
@@ -15,6 +17,105 @@ pub fn recover(db: &mut StateDb, folder: &FolderCtx) -> Result<(), StateError> {
     unpark(db, folder)?;
     sweep_tmp(db, &folder.root)?;
     recover_placements(db, folder)
+}
+
+/// Decides what a delete left aside (sync semantics §7: a crash between its move aside and its
+/// commit, or a put back that failed) by what it is, as the delete's own check does: where it
+/// is still its node's synced version (each item as its row has it, each row as its base has
+/// it: the drive's delete stands), it is unlinked, its rows and bases with it, whatever became
+/// of its folder meanwhile; anything else (an edit, a new item, an ignored one) goes back to its
+/// place, under its own name, else a numbered one there, else at the folder's top, to be planned
+/// again. One whose node this folder doesn't know (its state DB lost or replaced since) is left
+/// aside, and told. Run at the start of a sync, before the scan's records are read (the scan
+/// keeps an item's rows while it is aside); returns the folders to rescan.
+pub fn recover_aside(db: &mut StateDb, folder: &FolderCtx) -> Result<Vec<RelPath>, StateError> {
+    let hooks = Hooks::default();
+    let disk = Disk::new(folder, &hooks);
+    let mut dirs = Vec::new();
+    for (aside, parsed) in layout::aside_entries(&folder.root) {
+        let Some(parsed) = parsed else {
+            tracing::warn!("{} is left aside: no delete made it", aside.display());
+            continue;
+        };
+        let node = parsed.node();
+        let Some(row) = db.read(|s| s.local_by_node(node))? else {
+            // Its row let go (an item came at its place meanwhile): judged by its base alone.
+            if let Some(to) = recover_by_base(db, &disk, folder, &aside, parsed)? {
+                dirs.push(to);
+            }
+            continue;
+        };
+        let rows = db.read(|s| s.local_subtree(&row.path))?;
+        // Each row as its base has it: what the drive's delete took.
+        let synced = db.read(|s| {
+            rows.iter().try_fold(true, |all, r| {
+                Ok(all
+                    && s.get_base(r.node)?.is_some_and(|b| {
+                        r.kind == NodeKind::Folder || (r.hash.is_some() && b.local_hash == r.hash)
+                    }))
+            })
+        })?;
+        let named = match parsed {
+            layout::AsideEntry::Folder(_) => row.kind == NodeKind::Folder,
+            layout::AsideEntry::File(_, hash) => row.hash == Some(hash),
+        };
+        let gone = match (synced && named)
+            .then(|| check(folder, &aside, &row, &rows, Look::Aside))
+            .flatten()
+        {
+            Some(c) if c.holding.is_empty() => unlink_checked(db, &disk, &aside, c),
+            _ => Vec::new(),
+        };
+        if !gone.is_empty() {
+            db.write(|s| went(s, gone.iter().copied(), row.node))?;
+            // The folder it was in is read again: the scan kept it for the item, gone or not.
+            dirs.push(row.path.parent().unwrap_or_default());
+        }
+        if gone.len() < rows.len()
+            && let Some(to) = put_back(db, &disk, folder, &aside, &row)?
+        {
+            dirs.push(to.parent().unwrap_or_default());
+        }
+    }
+    Ok(dirs)
+}
+
+/// What a delete left aside of a node with no row here (an item took its place meanwhile, and
+/// the scan let the row go), judged by its base: a file that holds the bytes its base records
+/// goes, with its base; anything else goes back where it was last synced (read as a new item
+/// there, nothing lost); one of a node never synced here is left aside, and told. Returns the
+/// folder to rescan.
+fn recover_by_base(
+    db: &mut StateDb,
+    disk: &Disk<'_>,
+    folder: &FolderCtx,
+    aside: &Path,
+    entry: layout::AsideEntry,
+) -> Result<Option<RelPath>, StateError> {
+    let node = entry.node();
+    let place = db
+        .read(|s| crate::activity::path_of(s, node))?
+        .and_then(|p| RelPath::new(&p).ok());
+    let Some(place) = place else {
+        tracing::warn!(
+            "{} is left aside: nothing synced in this folder is its",
+            aside.display()
+        );
+        return Ok(None);
+    };
+    let base_hash = db.read(|s| s.get_base(node))?.and_then(|b| b.local_hash);
+    if let layout::AsideEntry::File(_, hash) = entry
+        && base_hash == Some(hash)
+        && hbsync_fileio::hash_file(aside, hash.algorithm).is_ok_and(|h| h.hash == hash)
+        && disk.unlink(aside, super::disk::Unlink::File).is_ok()
+    {
+        db.changed(aside);
+        db.write(|s| went(s, [node], node))?;
+        return Ok(place.parent());
+    }
+    let is_dir = std::fs::symlink_metadata(aside).is_ok_and(|m| m.is_dir());
+    Ok(put_back_at(db, disk, folder, aside, &place, node, is_dir)?
+        .map(|to| to.parent().unwrap_or_default()))
 }
 
 /// The DB half of a fork: the original's row leaves, the copy's row arrives, the record goes.

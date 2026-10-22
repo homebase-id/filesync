@@ -339,7 +339,7 @@ fn filters(run: &str, a: &mut Client, b: &mut Client) -> Res<()> {
         ["build/", "build/out.o = obj", "main.c = int main"]
     );
 
-    // b starts ignoring build/: it leaves the drive (a's copy goes to a's trash), stays on b.
+    // b starts ignoring build/: it leaves the drive (a's copy is deleted), stays on b.
     b.restart_ignoring("build/\n")?;
     b.write(&at("build/local.o"), "b only")?;
     b.sync()?;

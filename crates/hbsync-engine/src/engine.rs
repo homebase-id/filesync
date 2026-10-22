@@ -18,7 +18,9 @@ use crate::activity::{self, Counters};
 use crate::adopt::adopt;
 use crate::drive::Drive;
 use crate::error::EngineError;
-use crate::exec::{ExecConfig, Executor, Stopped, record_dirs, recover, recover_placements};
+use crate::exec::{
+    ExecConfig, Executor, Stopped, record_dirs, recover, recover_aside, recover_placements,
+};
 use crate::feed::FeedReport;
 use crate::folder::FolderCtx;
 use crate::holding::{HeldDeletes, HoldOut};
@@ -472,6 +474,13 @@ impl Engine {
         pulled: Pull,
         report: &mut SyncReport,
     ) -> Result<(), EngineError> {
+        // What a delete left aside (a crash, an item that couldn't be put back) is decided
+        // first, what it puts back read again where it is now. A listing of an empty folder
+        // where nothing is.
+        let back = recover_aside(&mut self.db, &self.cfg.folder)?;
+        if !back.is_empty() {
+            rescan_dirs(&mut self.db, &self.cfg.folder.root, &back, &self.scan_opts)?;
+        }
         self.rescan_records()?;
         recover(&mut self.db, &self.cfg.folder)?;
         let folder = Some(self.db.folder());
