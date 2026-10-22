@@ -605,10 +605,9 @@ fn answer(
         confirmed.extend(held);
         run.confirmed += 1;
     } else {
-        // Each that the drive still has as it was (removed meanwhile there too, it stays so).
-        let n = c.engine.put_back(&held)?;
-        assert!(n <= held.len(), "put back {n} of {held:?}");
-        run.put_back += n;
+        // Each that the drive still has as it was (removed meanwhile there too, it stays so),
+        // counted with what in them it put back too: more than were held, or none.
+        run.put_back += c.engine.put_back(&held)?;
     }
     Ok(())
 }
