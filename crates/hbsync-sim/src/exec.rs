@@ -1773,6 +1773,36 @@ impl Sim {
         synced
     }
 
+    /// What a run left aside of `node` (a crash, or a plan that replaced its own), decided at the
+    /// next plan by what it is, as the executor's recovery does: each synced item the version
+    /// its base records (the drive's delete stands), nothing new, nothing ignored: unlinked, its
+    /// bases with it, whatever became of its folder meanwhile; anything else put back
+    /// ([`Sim::put_back_aside`]).
+    pub(crate) fn recover_aside(&mut self, c: usize, node: NodeId) {
+        let client = &self.clients[c];
+        let Some(aside) = client.aside.get(&node) else {
+            return;
+        };
+        let (placed, hidden) = at_place_filtered(client, aside);
+        let unchanged = aside.iter().all(|(n, state)| {
+            if hidden.contains(&n) {
+                return verdict_in(&placed, &client.run_filter, n) != Verdict::Ignored;
+            }
+            client.base.get(n).is_some_and(|b| {
+                b.kind == state.kind
+                    && (state.kind == NodeKind::Folder || b.content == state.content)
+            })
+        });
+        if !unchanged {
+            self.note(|_| format!("  c{c} {node:?} aside isn't as synced: put back"));
+            return self.put_back_aside(c, node);
+        }
+        self.note(|_| format!("  c{c} {node:?} aside as synced: unlinked"));
+        for n in self.unlink_aside(c, node, &hidden, usize::MAX) {
+            self.clients[c].drop_base(n);
+        }
+    }
+
     /// Puts what is aside of `node` back into the folder, each item at the top of what is aside
     /// (the item, or what went of it) at its place, else under the first free numbered name
     /// there, else at the folder's top (its folder gone), as the executor does. Never a delete:
@@ -1798,13 +1828,18 @@ impl Sim {
                 continue;
             };
             let is_dir = state.kind == NodeKind::Folder;
+            // A parked item goes back under its own name, never the temporary one (it carries
+            // the old id), and its record goes.
+            let wanted = match client.parked.remove(&top) {
+                Some((_, original)) if state.name == parked_name(top) => original,
+                _ => state.name.clone(),
+            };
             let parent = match client.local.get(state.parent) {
                 Some(p) if p.kind == NodeKind::Folder => state.parent,
                 _ => NodeId::ROOT,
             };
             // Of the names, a hundred numbered ones are tried: one is free.
-            let name = release_name(client, top, parent, &state.name, is_dir)
-                .unwrap_or_else(|| state.name.clone());
+            let name = release_name(client, top, parent, &wanted, is_dir).unwrap_or(wanted);
             client.local.insert(
                 top,
                 NodeState {
@@ -1849,10 +1884,25 @@ impl Sim {
             {
                 name = n;
             }
-            if client.local.exists(parent)
-                && free(client, &name)
-                && !client.local.would_cycle(node, parent)
-            {
+            // Its folder gone (it went elsewhere since): never reported at a place that is no
+            // more, it takes a real name where it is, and the record goes.
+            if !client.local.exists(parent) {
+                let at = match client.local.exists(state.parent) {
+                    true => state.parent,
+                    false => NodeId::ROOT,
+                };
+                let name = release_name(client, node, at, &original, is_dir).unwrap_or(original);
+                client.local.insert(
+                    node,
+                    NodeState {
+                        parent: at,
+                        name,
+                        ..state
+                    },
+                );
+                continue;
+            }
+            if free(client, &name) && !client.local.would_cycle(node, parent) {
                 client.local.insert(
                     node,
                     NodeState {

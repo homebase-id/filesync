@@ -204,10 +204,10 @@ impl Sim {
     /// settled as the commit would have (the same rule, against the same version, the item
     /// read with the tags it was put in place with).
     pub(crate) fn recover(&mut self, c: usize) {
-        // What a crash left aside goes back, to be planned again (the executor's recovery).
+        // What a crash left aside is decided by what it is (the executor's recovery).
         let aside: Vec<NodeId> = self.clients[c].aside.keys().copied().collect();
         for node in aside {
-            self.put_back_aside(c, node);
+            self.recover_aside(c, node);
         }
         self.clients[c].unhashed.clear();
         for (node, p) in std::mem::take(&mut self.clients[c].placing) {
