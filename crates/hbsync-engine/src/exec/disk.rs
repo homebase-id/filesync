@@ -13,11 +13,10 @@ use std::path::{Path, PathBuf};
 use hbsync_local::layout;
 use hbsync_platform::{RelPath, ops, tags};
 use hbsync_state::{FolderTx, StateDb, StateError};
-use hbsync_types::{NodeId, Tags};
+use hbsync_types::Tags;
 
 use super::{FailPoint, Hooks};
 use crate::folder::FolderCtx;
-use crate::trash::Trash;
 
 /// What an item to unlink is ([`Disk::unlink`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -55,8 +54,6 @@ pub(super) struct Disk<'a> {
     /// The ids the scan gave new items are durable: before anything goes to the drive, they
     /// are (a power cut must not make the scan give others to what went out).
     ids_durable: bool,
-    /// The folder's trash, read when a download first asks this run ([`Disk::in_trash`]).
-    trash: Option<Trash>,
     /// The aside folder is there ([`Disk::move_aside`]), as far as this run knows.
     aside_ready: bool,
 }
@@ -68,7 +65,6 @@ impl<'a> Disk<'a> {
             folder,
             hooks,
             ids_durable: false,
-            trash: None,
             aside_ready: false,
         }
     }
@@ -250,127 +246,6 @@ impl<'a> Disk<'a> {
                 false => fs::remove_file(at),
             },
         }
-    }
-
-    // ---- the folder's trash ----
-
-    /// Moves a local item into `.hbsync/trash/<time>-<node>/`.
-    pub(super) fn move_to_trash(
-        &mut self,
-        db: &mut StateDb,
-        path: &RelPath,
-        node: NodeId,
-    ) -> Result<io::Result<PathBuf>, StateError> {
-        let trash_dir = layout::trash_dir(self.root);
-        // The trash folder too, made with the first item in it.
-        db.changed(&trash_dir);
-        // Its own entry folder, named by when and by the node (one name: a native path). The
-        // node trashed again within that second (the old version a download kept, then the
-        // file itself, deleted) finds its entry taken: it takes the next second's, so the
-        // newer stays the newer. Only the entry itself taken counts (`Ok(false)`).
-        let mut at = hbsync_types::unix_now();
-        let dir = loop {
-            let dir = trash_dir.join(layout::trash_entry(at, node));
-            let made = put_ordered(db, &dir, |dir| match fs::create_dir(dir) {
-                Ok(()) => Ok(true),
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    fs::create_dir_all(dir).map(|()| true)
-                }
-                Err(e) => Err(e),
-            })?;
-            match made {
-                Ok(true) => break dir,
-                Ok(false) => at += 1,
-                Err(e) => return Ok(Err(e)),
-            }
-        };
-        let to = dir.join(path.name().unwrap_or("item"));
-        let moved = rename_ordered(db, &self.abs(path), &to)?.map(|()| to);
-        match (&moved, &mut self.trash) {
-            (Ok(_), Some(trash)) => trash.add(node, dir),
-            (Ok(_), None) => {}
-            // Its entry, empty, goes (best effort: the purge takes one left).
-            (Err(_), _) => drop(fs::remove_dir(&dir)),
-        }
-        Ok(moved)
-    }
-
-    /// Files of the folder's trash that may hold the bytes a download of `node` (in `parent`)
-    /// to `target` wants: where its own entry, or the entry of a folder above it, holds it
-    /// under the names `target` has (a delete taken back); its own entries first, then each
-    /// folder's above it, each newest first. Only candidates: the download takes one only once
-    /// it read exactly the bytes wanted ([`hbsync_fileio::CompletedFile::adopt`]). Nothing to
-    /// look up while the trash is empty, or for a node one was refused for this run
-    /// ([`Disk::refuse_from_trash`]).
-    pub(super) fn in_trash(
-        &mut self,
-        db: &mut StateDb,
-        node: NodeId,
-        parent: NodeId,
-        target: &RelPath,
-    ) -> Result<Vec<PathBuf>, StateError> {
-        let root = self.root;
-        let trash = self
-            .trash
-            .get_or_insert_with(|| Trash::read(&layout::trash_dir(root)));
-        if trash.is_empty() || trash.refused(node) {
-            return Ok(Vec::new());
-        }
-        let names: Vec<&str> = target.components().collect();
-        // The folders above it, as far as `target` names them.
-        let mut left = names.len().saturating_sub(1);
-        let above = db.read(|s| {
-            crate::walk::up::<_, StateError>(parent, |at| {
-                if left == 0 {
-                    return Ok(None);
-                }
-                left -= 1;
-                Ok(s.get_mirror(at)?.map(|m| (at, m.parent)))
-            })
-        })?;
-        let mut found = Vec::new();
-        for (i, at) in (0..names.len())
-            .rev()
-            .zip(std::iter::once(node).chain(above.items))
-        {
-            let entries = trash.entries(at);
-            if entries.is_empty() {
-                continue;
-            }
-            // Its place in the entry: its name there, and the names below it to the item.
-            let Ok(place) = RelPath::new(&names[i..].join("/")) else {
-                continue;
-            };
-            found.extend(entries.iter().map(|e| place.to_native(e)));
-        }
-        Ok(found)
-    }
-
-    /// A file taken from the trash didn't do for `node` (its tags weren't written): its
-    /// download fetches the bytes for the rest of the run.
-    pub(super) fn refuse_from_trash(&mut self, node: NodeId) {
-        if let Some(trash) = &mut self.trash {
-            trash.refuse(node);
-        }
-    }
-
-    /// Brings an old version a download just put in the trash (at `entry`) back to `path`, and
-    /// removes its entry's folder, empty then (one that can't be removed, not empty after
-    /// all, stays for the daily purge).
-    pub(super) fn restore_from_trash(
-        &self,
-        db: &mut StateDb,
-        entry: &Path,
-        path: &RelPath,
-    ) -> Result<io::Result<()>, StateError> {
-        let back = rename_ordered(db, entry, &self.abs(path))?;
-        if back.is_ok()
-            && let Some(dir) = entry.parent()
-        {
-            drop(fs::remove_dir(dir));
-        }
-        Ok(back)
     }
 }
 

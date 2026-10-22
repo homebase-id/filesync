@@ -179,7 +179,6 @@ impl Executor<'_> {
             base_at: acted.base_at.into(),
             held_ms: None,
         };
-        let from_trash = self.disk.in_trash(self.db, node, parent, &record.target)?;
         let job = Job::Download(Download {
             node,
             file_id: mirror.file_id,
@@ -190,7 +189,6 @@ impl Executor<'_> {
             tmp_dir: layout::tmp_dir(&self.folder.root),
             key: download_key(node, &expected),
             local_algorithm: self.folder.algorithm,
-            from_trash,
         });
         Ok((
             job,
@@ -423,21 +421,9 @@ impl Executor<'_> {
         }
     }
 
-    /// Brings an old version a download just put in the trash back ([`Disk::restore_from_trash`]),
-    /// where the test fault [`FailPoint::Restore`] lets it.
-    fn restore_from_trash(
-        &mut self,
-        entry: &Path,
-        path: &RelPath,
-    ) -> Result<io::Result<()>, StateError> {
-        if self.fails(FailPoint::Restore) {
-            return Ok(Err(io::Error::other("bringing it back failed (a test)")));
-        }
-        self.disk.restore_from_trash(self.db, entry, path)
-    }
-
     /// Puts a verified download into place: over the old version (if it's still what the plan
-    /// saw) or as a new file; an old version at another path goes to the trash first.
+    /// saw) or as a new file; an old version at another path goes aside first, and is unlinked
+    /// once the new one is committed.
     fn place_download(
         &mut self,
         placement: Placement,
@@ -481,12 +467,6 @@ impl Executor<'_> {
             done.keep_for_retry();
             return Ok(Outcome::Retry("its tags weren't written".into()));
         }
-        // A file taken from the trash holds the tags it had there: written over, or not used.
-        if left.failed && done.adopted() {
-            self.disk.refuse_from_trash(node);
-            done.keep_for_retry();
-            return Ok(Outcome::Retry("its tags weren't written".into()));
-        }
         if left.claimed != record.placed_tags {
             record.placed_tags = left.claimed.clone();
             self.disk
@@ -496,6 +476,8 @@ impl Executor<'_> {
         // write failed and that can't be read, none, as a temp file made here holds (one an
         // earlier try left holds what it wrote then: claiming less only sends that up).
         let tags = self.disk.held_after(left, Tags::default());
+        // The old version a download replaces from another folder: aside till the commit.
+        let mut old_aside = None;
         let placed = match &current {
             Some(row) if &row.path == target => self.disk.put(self.db, target, |at| {
                 done.persist_over(at, &row.fingerprint, created_ms)
@@ -505,14 +487,19 @@ impl Executor<'_> {
                     done.keep_for_retry();
                     return Ok(Outcome::Retry("old version changed or name taken".into()));
                 }
-                let entry = match self.disk.move_to_trash(self.db, &row.path, node)? {
-                    Ok(entry) => entry,
-                    Err(e) => {
+                let Some(hash) = row.hash else {
+                    done.keep_for_retry();
+                    return Ok(rescan(&mut self.report, &row.path));
+                };
+                let entry = layout::AsideEntry::File(node, hash);
+                let aside = match self.move_aside(row, entry)? {
+                    Ok(aside) => aside,
+                    Err(outcome) => {
                         done.keep_for_retry();
-                        return Ok(io_outcome(e));
+                        return Ok(outcome);
                     }
                 };
-                let placed = match self.fails(FailPoint::AfterTrash) {
+                let placed = match self.fails(FailPoint::PlaceNew) {
                     true => Err(FileIoError::Io(io::Error::other(
                         "not put in place (a test)",
                     ))),
@@ -521,11 +508,13 @@ impl Executor<'_> {
                         .put(self.db, target, |at| done.persist_new(at, created_ms))?,
                 };
                 // Not put in place: the old version comes back at once, which nothing can have
-                // taken since (left in the trash, the next plan takes its absence for the user
-                // deleting it, against the drive's edit: a conflict, and the download again).
-                // Where that fails it stays there, as nothing else is worse.
+                // taken since (gone, the next plan takes its absence for the user deleting it,
+                // against the drive's edit: a conflict, and the download again). Where that
+                // fails it stays aside, for the next sync's recovery.
                 if matches!(&placed, Err(e) if !matches!(e, FileIoError::PlacedUnread(_))) {
-                    self.restore_from_trash(&entry, &row.path)?.ok();
+                    self.put_back_old(&aside, row)?;
+                } else {
+                    old_aside = Some(aside);
                 }
                 placed
             }
@@ -588,7 +577,28 @@ impl Executor<'_> {
             Err(e) => return Ok(Outcome::Fatal(e)),
         };
         self.note([(node, at)]);
+        // The old version, replaced: unlinked, if still what was there (else it waits aside for
+        // the next sync's recovery).
+        if let (Some(aside), Some(old)) = (old_aside, &current) {
+            self.unlink_old(&aside, old);
+        }
         Ok(Outcome::Settled)
+    }
+
+    /// Puts the old version of `row` a download moved aside back to its place (a numbered one,
+    /// or the top, where needed), where the test fault [`FailPoint::PutBack`] lets it; where
+    /// that fails, it stays aside, for the next sync's recovery.
+    fn put_back_old(&mut self, aside: &Path, row: &LocalRow) -> Result<(), StateError> {
+        if self.fails(FailPoint::PutBack) {
+            return Ok(());
+        }
+        let (db, disk, folder) = (&mut *self.db, &self.disk, self.folder);
+        if let Some(to) =
+            super::delete::put_back_at(db, disk, folder, aside, &row.path, Some(row.node), false)?
+        {
+            self.report.rescan.push(to.parent().unwrap_or_default());
+        }
+        Ok(())
     }
 }
 

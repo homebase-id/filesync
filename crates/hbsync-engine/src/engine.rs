@@ -454,7 +454,8 @@ impl Engine {
         pulled: Pull,
         report: &mut SyncReport,
     ) -> Result<(), EngineError> {
-        // What a delete left aside (a crash, an item that couldn't be put back) is decided
+        // What a delete or a download left aside (a crash, an item that couldn't be put back or
+        // read) is decided
         // first, what it puts back read again where it is now. A listing of an empty folder
         // where nothing is.
         let back = recover_aside(&mut self.db, &self.cfg.folder)?;
@@ -681,7 +682,7 @@ impl Engine {
 
     /// Rescans the folders that downloads and folders being placed go into (their records), and
     /// those their nodes' items are in now (an old version a download replaced from another
-    /// folder went to the trash), so recovery judges what is on disk: an item put in place but
+    /// folder went aside), so recovery judges what is on disk: an item put in place but
     /// not committed has its row then, and a record is never dropped only because its item had
     /// none yet. Each record's folders once a sync pass. One query when there is no record.
     fn rescan_records(&mut self) -> Result<(), EngineError> {

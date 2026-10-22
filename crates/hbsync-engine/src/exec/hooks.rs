@@ -105,10 +105,10 @@ pub enum FailPoint {
     /// Reading what a failed tag write left: the item is taken to hold what it held before.
     TagRead,
     /// Putting a download's new version in place, once the old one it replaces from another
-    /// folder is in the trash.
-    AfterTrash,
-    /// Bringing that old version back from the trash.
-    Restore,
+    /// folder is aside.
+    PlaceNew,
+    /// Putting that old version back from aside.
+    PutBack,
     /// Making a group of downloads' bytes durable: none of them is put in place.
     Barrier,
 }

@@ -777,6 +777,10 @@ impl Sim {
                 let from = restored.as_ref().or(op.drive());
                 self.new_item_settled(c, node, from.map(|d| &d.state));
             }
+            // Committed: the old version a download replaced goes, if still what it was.
+            if matches!(op, Op::LocalDownload { .. }) && !self.faults.keep_replaced {
+                self.unlink_replaced(c, node);
+            }
         }
         if remote_write && let Some(pick) = self.clients[c].meanwhile.take() {
             self.meanwhile(c, node, replaced, pick);
@@ -1199,6 +1203,13 @@ impl Sim {
                 {
                     return Retry;
                 }
+                // An earlier version still aside waits for the next sync's recovery.
+                if client.aside.contains_key(&node) {
+                    return Skip;
+                }
+                // From another folder: the old version goes aside first (the executor's).
+                self.replace_aside(c, node, parent, &name);
+                let client = &mut self.clients[c];
                 let tags = tags.held_by(client.os);
                 client.local.insert(
                     node,
@@ -1677,6 +1688,9 @@ impl Sim {
     /// bases with it, whatever became of its folder meanwhile; anything else put back
     /// ([`Sim::put_back_aside`]).
     pub(crate) fn recover_aside(&mut self, c: usize, node: NodeId) {
+        if let Some(name) = self.clients[c].replaced.remove(&node) {
+            return self.recover_replaced(c, node, name);
+        }
         let client = &self.clients[c];
         let Some(aside) = client.aside.get(&node) else {
             return;
@@ -1699,6 +1713,92 @@ impl Sim {
         for n in self.unlink_aside(c, node, &hidden, usize::MAX) {
             self.clients[c].drop_base(n);
         }
+    }
+
+    /// Moves the old version of `node` aside where a download puts the new one at another place
+    /// (`parent`, `name`), with the bytes it held (the executor's `place_download`).
+    pub(crate) fn replace_aside(&mut self, c: usize, node: NodeId, parent: NodeId, name: &str) {
+        let client = &mut self.clients[c];
+        let Some(old) = client
+            .local
+            .get(node)
+            .filter(|l| (l.parent, l.name.as_str()) != (parent, name))
+            .cloned()
+        else {
+            return;
+        };
+        client.local.remove(node);
+        client.replaced.insert(node, old.content);
+        let mut aside = Tree::new();
+        aside.insert(node, old);
+        client.aside.insert(node, aside);
+    }
+
+    /// The download of `node` committed: its old version aside goes, if it still holds the
+    /// bytes it went aside with; else it waits for the next sync's recovery.
+    fn unlink_replaced(&mut self, c: usize, node: NodeId) {
+        let client = &mut self.clients[c];
+        let Some(name) = client.replaced.get(&node).copied() else {
+            return;
+        };
+        let held = client.aside.get(&node).and_then(|t| t.get(node));
+        if held.is_some_and(|s| s.content == name) {
+            client.aside.remove(&node);
+            client.replaced.remove(&node);
+        }
+    }
+
+    /// The old version of `node` a download replaced, left aside (a crash, or written to),
+    /// decided at the next plan as the executor's recovery does. The download committed (the
+    /// base holds the new bytes): the old version goes if it still holds the bytes it went
+    /// aside with, else it comes back as a new item, never onto the new one. Not committed: it
+    /// goes only as the synced version (those bytes, its base's too), its base with it; else
+    /// it comes back, as its node where nothing of the new one is in place, else as a new item.
+    fn recover_replaced(
+        &mut self,
+        c: usize,
+        node: NodeId,
+        name: Option<hbsync_types::FileContent>,
+    ) {
+        let client = &mut self.clients[c];
+        let Some(old) = client.aside.get(&node).and_then(|t| t.get(node)).cloned() else {
+            client.aside.remove(&node);
+            return;
+        };
+        let base = client.base.get(node).map(|b| b.content);
+        let committed = base.is_some_and(|b| b != name);
+        let unchanged = old.content == name;
+        let synced = base == Some(name);
+        self.note(|_| {
+            format!("  c{c} recovers {node:?}'s old version: committed {committed}, unchanged {unchanged}, synced {synced}")
+        });
+        let client = &mut self.clients[c];
+        if unchanged && (committed || synced) {
+            client.aside.remove(&node);
+            if !committed {
+                client.drop_base(node);
+            }
+            return;
+        }
+        if !committed && !client.local.contains(node) {
+            return self.put_back_aside(c, node);
+        }
+        client.aside.remove(&node);
+        let new = self.ids.fresh();
+        let client = &mut self.clients[c];
+        let parent = match client.local.get(old.parent) {
+            Some(p) if p.kind == NodeKind::Folder => old.parent,
+            _ => NodeId::ROOT,
+        };
+        let name = release_name(client, new, parent, &old.name, false).unwrap_or(old.name.clone());
+        client.local.insert(
+            new,
+            NodeState {
+                parent,
+                name,
+                ..old
+            },
+        );
     }
 
     /// Puts what is aside of `node` back into the folder, each item at the top of what is aside

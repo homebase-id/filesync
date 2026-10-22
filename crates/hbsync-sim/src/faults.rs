@@ -23,6 +23,8 @@ pub(crate) struct Faults {
     /// For scripted tests: how many items the next crash in a delete's unlinks lets go first
     /// (else as many as the crashes so far say, of the items plus one).
     pub(crate) unlinks_before_crash: Option<usize>,
+    /// A crash after a download's commit, before its old version is unlinked: kept aside.
+    pub(crate) keep_replaced: bool,
     /// A download takes two steps: fetching, then putting in place and committing; anything
     /// may happen between them ([`crate::Sim::with_split_downloads`]).
     pub(crate) split_downloads: bool,

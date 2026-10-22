@@ -1482,3 +1482,51 @@ fn regression_a_folder_an_edit_restores_keeps_what_its_delete_took_along() {
         );
     }
 }
+
+/// Client 0 moves file `a` to `b` and edits it; client 1's download brings the new version to
+/// `b`, its old version aside first, and dies: before the new one is in place (`earlier` 2), or
+/// once it is committed (`earlier` 0). An app then writes to the old version aside. Recovery
+/// keeps that write (as the node where the new one never came, else as a new item beside it),
+/// and nothing is lost; unwritten, the old version simply goes.
+#[test]
+fn an_old_version_aside_after_a_crash_keeps_a_write() {
+    use Action::*;
+    for (earlier, write) in [(0, false), (0, true), (2, false), (2, true)] {
+        let mut sim = Sim::new(2).with_split_downloads();
+        let act = |client, action| Event::Act { client, action };
+        sim.run(&[act(0, CreateFile { parent: 0, name: 0 })]); // NAMES: "a"
+        assert!(sim.quiesce(30), "no convergence");
+        let a = sim.item(0, "a").expect("a");
+        let node = sim.pick(0, a, false).expect("a");
+        let file = sim.file_pick(0, a).expect("a");
+        sim.run(&[
+            act(
+                0,
+                Move {
+                    node,
+                    parent: 0,
+                    name: 1,
+                },
+            ), // NAMES: "b"
+            act(0, Edit { file }),
+        ]);
+        // Client 0 syncs alone.
+        sim.run(&[Event::Plan { client: 0 }]);
+        for _ in 0..10 {
+            sim.run(&[Event::Step { client: 0 }]);
+        }
+        sim.run(&[Event::Plan { client: 1 }, Event::Step { client: 1 }]);
+        assert_eq!(sim.planned(1), ["LocalDownload"]);
+        // Client 0's crashes, with nothing to run, only count: client 1's comes next.
+        let mut events = vec![Event::Crash { client: 0 }; earlier];
+        events.push(Event::Crash { client: 1 });
+        if write {
+            events.push(act(1, EditAside { pick: 0 }));
+        }
+        sim.run(&events);
+        assert!(sim.quiesce(30), "no convergence ({earlier}, {write})");
+        if let Err(e) = sim.check() {
+            panic!("({earlier}, {write}): {e}");
+        }
+    }
+}

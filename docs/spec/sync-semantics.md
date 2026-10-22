@@ -321,21 +321,14 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   `remote_deletes_never_lose_an_edit`, `a_crash_anywhere_in_a_delete_loses_nothing` (with apps
   writing to what is aside), and every property's check that nothing is unlinked that isn't the
   version its base records, and nothing stays aside.
-- **Old versions.** A download that moves a file to another folder puts the old version in
-  the trash (`.hbsync/trash/`); where the new one then can't be put in place, the
-  old one comes back at once (gone, it would read as the user deleting it, against the drive's
-  edit: a conflict, and the download again), and its emptied entry goes. Where that fails, or
-  a crash came between, it stays in the trash, which the daily purge empties of entries older
-  than `keep_deleted_days`, of those made since it began.
-- **Downloads look in the trash first.** A download first looks for the file in the trash: in
-  the entry of the node, or of a folder above it, under the names the download's place has. It takes one only once it hashed
-  it there and it holds exactly the bytes wanted (the drive's content hash and size; one of
-  another size or mtime isn't read): its bytes synced, it is put in place from there as any
-  download is (the placement record first, the same durability), in one rename. Anything
-  else stays in the trash, untouched, and the file is downloaded; so does one whose
-  placement doesn't go through (it is still in the trash), and one whose tags couldn't be
-  written over the ones it had there (downloaded instead). Nothing is read where no entry is
-  there.
+- **Old versions.** A download that moves a file to another folder moves the old version
+  aside first (`.hbsync/aside/`), puts the new one in place and, once that is committed,
+  unlinks the old one if it is still what was there (checked as a delete checks a file: on a
+  volume whose metadata can't prove the bytes, a read of them); anything else leaves it aside
+  for the next sync's recovery (§8a). Where the new one can't be put in place, the old one
+  comes back at once (gone, it would read as the user deleting it, against the drive's edit: a
+  conflict, and the download again). Nothing is kept, and a download never looks for its bytes
+  on this device: a restore from Recently deleted downloads them again.
 - **Fingerprint guard.** Before deleting, overwriting or moving a local item, the executor
   checks that the local fingerprint still equals the one the plan was made from. On mismatch
   the operation is skipped and the node is re-planned.
@@ -578,9 +571,11 @@ expected fingerprint is treated as done.
   recovery finishes verified deletes, 2026-10-22): still its node's synced version (each item as
   its row has it, each row as its base has it), it is unlinked with its rows and bases, whatever
   became of its folder meanwhile (the drive's delete stands); anything else goes back to its
-  place, under its own name, and is planned again (an edit wins). Where its rows went (an item
-  took its place meanwhile), its base decides: a file holding the bytes its base records goes;
-  anything else goes back where it was last synced, read as a new item there. One whose node
+  place, under its own name, and is planned again (an edit wins). An old version a download
+  replaced, its node holding the new bytes by then, goes once its bytes read as the old
+  version's; written to, it comes back as a new item beside the new one, never onto it;
+  unreadable now, it waits. Where its rows went (an item took its place meanwhile), its base
+  decides: a file holding the bytes its base records goes; anything else goes back where it was last synced, read as a new item there. One whose node
   this folder doesn't know (its state DB lost or replaced since) is left aside, and told. A
   crash after an unlink and before its commit leaves the bases: the item reads as deleted here,
   which the drive's removal settles; a restore made in between is removed again, to Recently

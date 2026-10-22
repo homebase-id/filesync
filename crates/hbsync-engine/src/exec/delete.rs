@@ -68,14 +68,9 @@ impl Executor<'_> {
                 Some(_) => {}
             }
         }
-        let aside = match self.disk.move_aside(self.db, &row.path, entry)? {
+        let aside = match self.move_aside(row, entry)? {
             Ok(at) => at,
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                return Ok(Err(Outcome::waiting(
-                    "an earlier delete of it is still aside, for the next sync",
-                )));
-            }
-            Err(e) => return Ok(Err(io_outcome(e))),
+            Err(outcome) => return Ok(Err(outcome)),
         };
         if self.crash_here(CrashPoint::AfterAside) {
             return Ok(Err(Outcome::Retry("crash point reached".into())));
@@ -99,6 +94,36 @@ impl Executor<'_> {
             .rescan
             .push(row.path.parent().unwrap_or_default());
         Ok(Ok(Deleted::PutBack { gone }))
+    }
+}
+
+impl Executor<'_> {
+    /// Moves the item of `row` aside as `entry`. An [`Outcome`] where it didn't go: one of that
+    /// name still aside (for the next sync's recovery) waits for it.
+    pub(super) fn move_aside(
+        &mut self,
+        row: &LocalRow,
+        entry: AsideEntry,
+    ) -> Result<Result<PathBuf, Outcome>, StateError> {
+        Ok(match self.disk.move_aside(self.db, &row.path, entry)? {
+            Ok(at) => Ok(at),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(Outcome::waiting(
+                "an earlier version of it is still aside, for the next sync",
+            )),
+            Err(e) => Err(io_outcome(e)),
+        })
+    }
+
+    /// Unlinks the old version a download replaced from another folder (`old`, aside at
+    /// `aside`), the new one committed, where it is still what was there (checked as any delete
+    /// checks a file: on a volume whose metadata can't prove the bytes, a read of them). Anything
+    /// else (it changed, or it couldn't be read or unlinked now) leaves it aside, for the next
+    /// sync's recovery to decide ([`super::recover_aside`]).
+    pub(super) fn unlink_old(&mut self, aside: &Path, old: &LocalRow) {
+        let one = std::slice::from_ref(old);
+        if let Some(c) = check(self.folder, aside, old, one, Look::Aside) {
+            unlink_checked(self.db, &self.disk, aside, c);
+        }
     }
 }
 
@@ -275,27 +300,28 @@ pub(super) fn put_back(
     let place = db
         .read(|s| view::parked_place(s, row))?
         .unwrap_or_else(|| row.path.clone());
-    let to = put_back_at(db, disk, folder, aside, &place, row.node, is_dir)?;
+    let to = put_back_at(db, disk, folder, aside, &place, Some(row.node), is_dir)?;
     if to.as_ref().is_some_and(|to| to != &row.path) {
         db.write(|s| s.folder().delete_parked(row.node))?;
     }
     Ok(to)
 }
 
-/// Puts what is at `aside` (of `node`) back at `place`, else under the first free numbered name
-/// there, else at the folder's top. Returns where it went; `None` where it stays aside.
+/// Puts what is at `aside` back at `place` (free but for `own`'s row there: the item's own
+/// node), else under the first free numbered name there, else at the folder's top. Returns where
+/// it went; `None` where it stays aside.
 pub(super) fn put_back_at(
     db: &mut StateDb,
     disk: &Disk<'_>,
     folder: &FolderCtx,
     aside: &Path,
     place: &RelPath,
-    node: NodeId,
+    own: Option<NodeId>,
     is_dir: bool,
 ) -> Result<Option<RelPath>, StateError> {
     let at_top = place.name().and_then(|n| RelPath::new(n).ok());
     for wanted in [Some(place.clone()), at_top].into_iter().flatten() {
-        let Some(to) = release_place_for(db, folder, &wanted, Some(node), is_dir)? else {
+        let Some(to) = release_place_for(db, folder, &wanted, own, is_dir)? else {
             continue;
         };
         if disk.rename_from(db, aside, &to)?.is_ok() {

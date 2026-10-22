@@ -29,7 +29,44 @@ impl Sim {
         self.clients[c].confirmed.clear();
         self.clients[c].held.clear();
         let front = self.clients[c].plan.front().map(|(op, _)| op.clone());
+        // A download into another folder moves the old version aside first: a crash comes
+        // before the new one is in place, or (as below) with its commit lost, or once committed,
+        // before the old one is unlinked (the executor's `place_download`).
+        // (Unchanged since the plan: the executor checks that before it moves anything.)
+        let moving = |sim: &Sim, node: NodeId, parent: NodeId, name: &str| {
+            let client = &sim.clients[c];
+            client.fetched.contains_key(&node)
+                && !client.aside.contains_key(&node)
+                && client.local.get(node).is_some_and(|l| {
+                    (l.parent, l.name.as_str()) != (parent, name)
+                        && client.planned_local.get(node) == Some(l)
+                })
+        };
         match front {
+            Some(Op::LocalDownload {
+                node,
+                parent,
+                ref name,
+                ..
+            }) if moving(self, node, parent, name) && self.faults.crashes.is_multiple_of(3) => {
+                self.note(|_| {
+                    format!("crash c{c}: {node:?}'s old version aside, the new one not in place")
+                });
+                self.replace_aside(c, node, parent, name);
+            }
+            Some(Op::LocalDownload {
+                node,
+                parent,
+                ref name,
+                ..
+            }) if moving(self, node, parent, name) && self.faults.crashes % 3 == 1 => {
+                self.note(|_| {
+                    format!("crash c{c}: {node:?} committed, its old version still aside")
+                });
+                self.faults.keep_replaced = true;
+                self.step(c);
+                self.faults.keep_replaced = false;
+            }
             Some(op @ Op::LocalDownload { node, .. })
                 if self.clients[c].fetched.contains_key(&node) =>
             {

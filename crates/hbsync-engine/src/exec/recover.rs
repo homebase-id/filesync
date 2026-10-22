@@ -20,7 +20,7 @@ pub fn recover(db: &mut StateDb, folder: &FolderCtx) -> Result<(), StateError> {
 }
 
 /// Decides what a delete left aside (sync semantics §7: a crash between its move aside and its
-/// commit, or a put back that failed) by what it is, as the delete's own check does: where it
+/// commit, or a put back that failed; or a download's replaced old version, §7 Old versions) by what it is, as the delete's own check does: where it
 /// is still its node's synced version (each item as its row has it, each row as its base has
 /// it: the drive's delete stands), it is unlinked, its rows and bases with it, whatever became
 /// of its folder meanwhile; anything else (an edit, a new item, an ignored one) goes back to its
@@ -45,6 +45,17 @@ pub fn recover_aside(db: &mut StateDb, folder: &FolderCtx) -> Result<Vec<RelPath
             }
             continue;
         };
+        // An old version a download replaced, its node holding the new one now: it goes once
+        // its bytes read as the old version's; written to, it comes back as a new item beside
+        // the new one; unreadable now, it waits.
+        if let layout::AsideEntry::File(_, hash) = parsed
+            && row.hash != Some(hash)
+        {
+            dirs.extend(
+                discard_old(db, &disk, folder, &aside, hash, Some(&row.path))?.into_inner(),
+            );
+            continue;
+        }
         let rows = db.read(|s| s.local_subtree(&row.path))?;
         // Each row as its base has it: what the drive's delete took.
         let synced = db.read(|s| {
@@ -80,11 +91,12 @@ pub fn recover_aside(db: &mut StateDb, folder: &FolderCtx) -> Result<Vec<RelPath
     Ok(dirs)
 }
 
-/// What a delete left aside of a node with no row here (an item took its place meanwhile, and
-/// the scan let the row go), judged by its base: a file that holds the bytes its base records
-/// goes, with its base; anything else goes back where it was last synced (read as a new item
-/// there, nothing lost); one of a node never synced here is left aside, and told. Returns the
-/// folder to rescan.
+/// What a delete (or a download's replace) left aside of a node with no row here (an item took
+/// its place meanwhile, and the scan let the row go, or the node went since), judged by what
+/// this device knows of it: a file goes once its bytes read as the name says (its base, if any,
+/// with it where those are the synced ones), else comes back as a new item where its node was
+/// last synced; a folder comes back there. One of a node this device never knew (its state DB
+/// lost or replaced since) is left aside, and told. Returns the folder to rescan.
 fn recover_by_base(
     db: &mut StateDb,
     disk: &Disk<'_>,
@@ -93,29 +105,96 @@ fn recover_by_base(
     entry: layout::AsideEntry,
 ) -> Result<Option<RelPath>, StateError> {
     let node = entry.node();
-    let place = db
-        .read(|s| crate::activity::path_of(s, node))?
-        .and_then(|p| RelPath::new(&p).ok());
-    let Some(place) = place else {
+    let (base, known) = db.read(|s| {
+        let base = s.get_base(node)?;
+        let known =
+            base.is_some() || s.get_mirror(node)?.is_some() || s.removed_by_node(node)?.is_some();
+        Ok((base, known))
+    })?;
+    if !known {
         tracing::warn!(
             "{} is left aside: nothing synced in this folder is its",
             aside.display()
         );
         return Ok(None);
-    };
-    let base_hash = db.read(|s| s.get_base(node))?.and_then(|b| b.local_hash);
-    if let layout::AsideEntry::File(_, hash) = entry
-        && base_hash == Some(hash)
-        && hbsync_fileio::hash_file(aside, hash.algorithm).is_ok_and(|h| h.hash == hash)
-        && disk.unlink(aside, super::disk::Unlink::File).is_ok()
-    {
-        db.changed(aside);
-        db.write(|s| went(s, [node], node))?;
-        return Ok(place.parent());
     }
-    let is_dir = std::fs::symlink_metadata(aside).is_ok_and(|m| m.is_dir());
-    Ok(put_back_at(db, disk, folder, aside, &place, node, is_dir)?
-        .map(|to| to.parent().unwrap_or_default()))
+    let place = db
+        .read(|s| crate::activity::path_of(s, node))?
+        .and_then(|p| RelPath::new(&p).ok());
+    let layout::AsideEntry::File(_, hash) = entry else {
+        let Some(place) = place else {
+            tracing::warn!("{} is left aside: its place isn't known", aside.display());
+            return Ok(None);
+        };
+        return Ok(
+            put_back_at(db, disk, folder, aside, &place, Some(node), true)?
+                .map(|to| to.parent().unwrap_or_default()),
+        );
+    };
+    let gone = discard_old(db, disk, folder, aside, hash, place.as_ref())?;
+    if let Discarded::Gone = gone
+        && base.is_some_and(|b| b.local_hash == Some(hash))
+    {
+        // It was the synced version: its delete is done, and its base goes with it.
+        db.write(|s| went(s, [node], node))?;
+        return Ok(place.and_then(|p| p.parent()));
+    }
+    Ok(gone.into_inner())
+}
+
+/// What became of a file a run left aside ([`discard_old`]).
+enum Discarded {
+    /// Its bytes read as its name says: unlinked.
+    Gone,
+    /// Written to aside: back as a new item, in this folder (to rescan), if it could go.
+    Back(Option<RelPath>),
+    /// Not read now, or not back: left aside, for the next sync.
+    Left,
+}
+
+impl Discarded {
+    /// The folder to rescan, if any.
+    fn into_inner(self) -> Option<RelPath> {
+        match self {
+            Discarded::Back(dir) => dir,
+            Discarded::Gone | Discarded::Left => None,
+        }
+    }
+}
+
+/// A file aside at `aside`, named for the bytes `hash`: unlinked where it holds them, still as
+/// read (read again before the unlink); written to, it goes back as a new item at `place`
+/// (numbered where that is taken: never onto a synced item, whose edit it would read as); what
+/// can't be read now, or has no place, stays aside, for the next sync.
+fn discard_old(
+    db: &mut StateDb,
+    disk: &Disk<'_>,
+    folder: &FolderCtx,
+    aside: &Path,
+    hash: hbsync_types::ContentHash,
+    place: Option<&RelPath>,
+) -> Result<Discarded, StateError> {
+    let Ok(read) = hbsync_fileio::hash_file(aside, hash.algorithm) else {
+        tracing::warn!("{} stays aside: it can't be read now", aside.display());
+        return Ok(Discarded::Left);
+    };
+    if read.hash == hash {
+        let same =
+            hbsync_platform::stat(aside).is_ok_and(|m| m.fingerprint() == read.meta.fingerprint());
+        if same && disk.unlink(aside, super::disk::Unlink::File).is_ok() {
+            db.changed(aside);
+            return Ok(Discarded::Gone);
+        }
+        return Ok(Discarded::Left);
+    }
+    let Some(place) = place else {
+        tracing::warn!("{} is left aside: its place isn't known", aside.display());
+        return Ok(Discarded::Left);
+    };
+    Ok(Discarded::Back(
+        put_back_at(db, disk, folder, aside, place, None, false)?
+            .map(|to| to.parent().unwrap_or_default()),
+    ))
 }
 
 /// The DB half of a fork: the original's row leaves, the copy's row arrives, the record goes.
