@@ -32,6 +32,7 @@ pub mod transfer;
 mod trash;
 pub mod tree;
 pub mod view;
+mod waiting;
 pub mod walk;
 
 pub use drive::Drive;

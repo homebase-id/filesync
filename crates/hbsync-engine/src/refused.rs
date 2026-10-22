@@ -63,24 +63,24 @@ pub(crate) fn key_of(s: &ReadTx<'_>, op: &Op) -> Result<String, StateError> {
 /// Takes the operations `refused` says the drive refused as they are out of `ops`, and those
 /// that wait for one of them, which would only wait again: what goes into a folder whose create
 /// is refused, the removals in a folder whose removal is, what goes to a local place the node
-/// of a held operation would have left, and the trash or forgetting of a local folder a held
+/// of a blocked operation would have left, and the trash or forgetting of a local folder a blocked
 /// operation's node is in, here, in the base or on the drive (`place`, [`Place`]; names
 /// compared as the folder does, `case_insensitive`). Returns `(kept, refused)`; the waiting
-/// ones are held silently: the refusal they wait for says why.
-pub fn hold_back<E>(
+/// ones are blocked silently: the refusal they wait for says why.
+pub fn take_refused<E>(
     ops: Vec<Op>,
     mut refused: impl FnMut(&Op) -> Result<bool, E>,
     mut place: impl FnMut(NodeId) -> Result<Place, E>,
     case_insensitive: bool,
 ) -> Result<(Vec<Op>, Vec<Op>), E> {
-    let mut held = Held {
+    let mut blocked = Blocked {
         case_insensitive,
-        ..Held::default()
+        ..Blocked::default()
     };
     let (mut kept, mut out) = (Vec::new(), Vec::new());
     for op in ops {
         if refused(&op)? {
-            held.add(&op, &mut place)?;
+            blocked.add(&op, &mut place)?;
             out.push(op);
         } else {
             kept.push(op);
@@ -89,22 +89,22 @@ pub fn hold_back<E>(
     if out.is_empty() {
         return Ok((kept, out));
     }
-    // What waits for a held operation, and what waits for that, in any order.
+    // What waits for a blocked operation, and what waits for that, in any order.
     loop {
         let (waiting, rest): (Vec<Op>, Vec<Op>) = std::mem::take(&mut kept)
             .into_iter()
-            .partition(|op| held.waits(op));
+            .partition(|op| blocked.waits(op));
         kept = rest;
         if waiting.is_empty() {
             return Ok((kept, out));
         }
         for op in &waiting {
-            held.add(op, &mut place)?;
+            blocked.add(op, &mut place)?;
         }
     }
 }
 
-/// Where a node is ([`hold_back`]).
+/// Where a node is ([`take_refused`]).
 #[derive(Debug, Default)]
 pub struct Place {
     /// Its local item's folder and name.
@@ -113,10 +113,10 @@ pub struct Place {
     pub folders: Vec<NodeId>,
 }
 
-/// What held operations leave undone: the folders whose create, and whose removal, is held,
+/// What blocked operations leave undone: the folders whose create, and whose removal, is blocked,
 /// the local places their nodes don't leave, and the local folders their nodes are in.
 #[derive(Default)]
-struct Held {
+struct Blocked {
     creates: HashSet<NodeId>,
     removals: HashSet<NodeId>,
     places: HashSet<(NodeId, String)>,
@@ -124,7 +124,7 @@ struct Held {
     case_insensitive: bool,
 }
 
-impl Held {
+impl Blocked {
     fn add<E>(
         &mut self,
         op: &Op,
@@ -154,7 +154,7 @@ impl Held {
         }
     }
 
-    /// Whether `op` waits for an operation held back.
+    /// Whether `op` waits for a blocked operation.
     fn waits(&self, op: &Op) -> bool {
         let waits_for_folder = match op.requires() {
             Some(Requirement::RemoteFolder(f)) => self.creates.contains(&f),
@@ -167,7 +167,7 @@ impl Held {
             | Op::LocalMove { parent, name, .. } => Some((*parent, self.key(name))),
             _ => None,
         };
-        // A folder isn't trashed or forgotten here while it holds a node a held operation
+        // A folder isn't trashed or forgotten here while it holds a node a blocked operation
         // would have taken out.
         let empties = matches!(op, Op::LocalTrash { node, .. } | Op::Forget { node, .. }
             if self.folders.contains(node));
@@ -188,7 +188,7 @@ pub(crate) struct FolderRefusals {
 impl FolderRefusals {
     /// The folder's refusals that still hold ([`REFUSED_FOR`]; older ones are forgotten), and
     /// the operations of `ops` refused as they are taken out, with what waits for them
-    /// ([`hold_back`]; names compared as the folder does, `case_insensitive`): the refusals,
+    /// ([`take_refused`]; names compared as the folder does, `case_insensitive`): the refusals,
     /// for the run, and the refused, with why.
     pub(crate) fn take(
         &mut self,
@@ -201,7 +201,7 @@ impl FolderRefusals {
             return Ok((refusals, Vec::new()));
         }
         let (kept, out) = db.read(|s| {
-            hold_back(
+            take_refused(
                 std::mem::take(ops),
                 |op| match refusals.get(op) {
                     Some(r) if r.refused => Ok(key_of(s, op)? == r.key),
@@ -351,9 +351,9 @@ mod tests {
         }
     }
 
-    /// What waits for a refused operation is held with it, silently; the rest goes.
+    /// What waits for a refused operation is blocked with it, silently; the rest goes.
     #[test]
-    fn what_waits_for_a_refusal_is_held_with_it() {
+    fn what_waits_for_a_refusal_is_blocked_with_it() {
         let (folder, child, grandchild, other) =
             (NodeId::new(), NodeId::new(), NodeId::new(), NodeId::new());
         let ops = vec![
@@ -381,16 +381,16 @@ mod tests {
                 folders: vec![parent],
             })
         };
-        let Ok((kept, out)) = hold_back(ops, refused, place, false);
+        let Ok((kept, out)) = take_refused(ops, refused, place, false);
         assert_eq!(out.len(), 1);
         assert_eq!(kept, [create(other, NodeId::ROOT, NodeKind::File)]);
     }
 
-    /// A download into the place a held download's item would have left waits; one into
+    /// A download into the place a blocked download's item would have left waits; one into
     /// another place doesn't, a name only alike in case on a folder that tells case apart too.
     #[test]
-    fn a_place_a_held_item_keeps_holds_back_what_goes_there() {
-        let (held, mover, other) = (NodeId::new(), NodeId::new(), NodeId::new());
+    fn a_place_a_blocked_item_keeps_blocks_what_goes_there() {
+        let (blocked, mover, other) = (NodeId::new(), NodeId::new(), NodeId::new());
         let download = |node, name: &str, replace| Op::LocalDownload {
             node,
             parent: NodeId::ROOT,
@@ -401,21 +401,21 @@ mod tests {
         };
         let ops = || {
             vec![
-                download(held, "new", true),
+                download(blocked, "new", true),
                 download(mover, "old", false),
                 download(other, "OLD", false),
             ]
         };
-        let refused = |op: &Op| Ok::<_, Infallible>(op.node() == held);
+        let refused = |op: &Op| Ok::<_, Infallible>(op.node() == blocked);
         let place = |node: NodeId| {
             Ok(Place {
-                local: (node == held).then(|| (NodeId::ROOT, "old".to_owned())),
+                local: (node == blocked).then(|| (NodeId::ROOT, "old".to_owned())),
                 folders: Vec::new(),
             })
         };
-        let Ok((kept, _)) = hold_back(ops(), refused, place, false);
+        let Ok((kept, _)) = take_refused(ops(), refused, place, false);
         assert_eq!(kept, [download(other, "OLD", false)]);
-        let Ok((kept, _)) = hold_back(ops(), refused, place, true);
+        let Ok((kept, _)) = take_refused(ops(), refused, place, true);
         assert!(kept.is_empty(), "{kept:?}");
     }
 }

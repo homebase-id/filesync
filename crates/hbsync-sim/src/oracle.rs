@@ -378,7 +378,7 @@ impl Sim {
             // behind one (an operation that waits for a refused one stays: a local cost, told
             // when it keeps coming back): it, too, stays as it is, unhidden.
             let mut base = client.base.clone();
-            for (op, refused) in &client.held_back {
+            for (op, refused) in &client.blocked {
                 if *refused && !self.drive_refused(c, op) {
                     return Err(format!(
                         "{}: the refusal record hid {op:?}, which the drive takes as it is",
@@ -387,7 +387,7 @@ impl Sim {
                 }
             }
             // A parked item waits for its name, which a folder held back may keep.
-            let left = client.held_back.iter().map(|(op, _)| op.node());
+            let left = client.blocked.iter().map(|(op, _)| op.node());
             let parked = client
                 .parked
                 .keys()

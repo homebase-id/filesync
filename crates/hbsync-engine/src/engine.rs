@@ -5,12 +5,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use hbsync_local::{
-    CatchUp, Debounce, LocalObserver, ScanOptions, ScanReport, rescan_dirs, rescan_entries, scan,
-};
-use hbsync_platform::RelPath;
+use hbsync_local::{CatchUp, Debounce, LocalObserver, ScanOptions, ScanReport, rescan_dirs, scan};
 use hbsync_remote::Remote;
-use hbsync_state::{DirtyCursor, Mark, ReadTx, StateDb, StateError, keys};
+use hbsync_state::{DirtyCursor, Mark, StateDb, StateError, keys};
 use hbsync_types::NodeId;
 use hbsync_types::activity::Synced;
 
@@ -29,6 +26,7 @@ use crate::refused::FolderRefusals;
 use crate::root::{RootError, SyncRoot};
 use crate::scope::Scope;
 use crate::view;
+use crate::waiting::Waited;
 
 /// Start-up's pull is the first sync's if the local catch-up ended within this of it.
 const FRESH_PULL: Duration = Duration::from_secs(2);
@@ -75,22 +73,6 @@ impl EngineConfig {
             after_counts: None,
         }
     }
-}
-
-/// The rows of `nodes` here, each with the path the user knows it by (a parked item's
-/// original one).
-fn waiting_rows(
-    s: &ReadTx<'_>,
-    nodes: &[NodeId],
-) -> Result<Vec<(hbsync_state::LocalRow, RelPath)>, StateError> {
-    let mut rows = Vec::new();
-    for &node in nodes {
-        if let Some(row) = s.local_by_node(node)? {
-            let shown = view::parked_place(s, &row)?.unwrap_or_else(|| row.path.clone());
-            rows.push((row, shown));
-        }
-    }
-    Ok(rows)
 }
 
 /// What start-up did.
@@ -210,12 +192,9 @@ pub struct Engine {
     /// Nodes whose placement records the current sync pass rescanned for: each once (a file
     /// that can't be hashed yet isn't read again every round).
     rescanned: std::collections::HashSet<NodeId>,
-    /// The files the current sweep found something waiting for, that couldn't be read
+    /// The files here not hashed yet that something waits for, read again and told
     /// ([`SyncReport::waiting`]).
-    waiting: Vec<(String, String)>,
-    /// The files waited for that this sync pass read already, and why those it couldn't read
-    /// couldn't: each read once a pass.
-    read_once: std::collections::HashMap<NodeId, Option<String>>,
+    waited: Waited,
     /// What a sync that failed had done before ([`Engine::take_unreported`]).
     unreported: Option<SyncReport>,
     /// The folder's refusals ([`crate::refused`]).
@@ -273,8 +252,7 @@ impl Engine {
             progress: Arc::default(),
             rescanned: Default::default(),
             refusals: FolderRefusals::default(),
-            waiting: Vec::new(),
-            read_once: Default::default(),
+            waited: Waited::default(),
             unreported: None,
         })
     }
@@ -451,8 +429,7 @@ impl Engine {
         let mut report = SyncReport::default();
         self.progress.reset();
         self.rescanned.clear();
-        self.waiting.clear();
-        self.read_once.clear();
+        self.waited.new_pass();
         self.unreported = None;
         match self.sync_into(date, pulled, &mut report) {
             Ok(()) => Ok(report),
@@ -611,7 +588,7 @@ impl Engine {
                 rounds += 1;
                 report.rounds += 1;
                 let done_before = report.ops_done;
-                // A piece of a folder too big for a page isn't held for the folders above it
+                // A piece of a folder too big for a page doesn't wait for the folders above it
                 // (`Options::own_page`).
                 opts.own_page = own == Some(true);
                 match self.plan_and_execute(&dirty, &opts, &mut hold_out, report)? {
@@ -636,7 +613,7 @@ impl Engine {
             if read < self.cfg.batch {
                 // End of a sweep: what it held, and what waits now.
                 report.held = self.held.shown(std::mem::take(&mut held));
-                report.waiting = std::mem::take(&mut self.waiting);
+                report.waiting = self.waited.take_told();
                 swept = true;
                 after = None;
                 self.own_pages.new_sweep();
@@ -652,7 +629,7 @@ impl Engine {
         }
         if !swept {
             report.held = self.held.shown(held);
-            report.waiting.append(&mut self.waiting);
+            report.waiting.extend(self.waited.take_told());
         }
         if let Some(page) = settled
             && !report.stopped
@@ -725,69 +702,23 @@ impl Engine {
     }
 
     /// Something in `plan` waits for files here not hashed yet (sync semantics §6.3): those
-    /// unchanged since the scan that couldn't read them (locked, unreadable: one still changing
-    /// is read by the scan its change brings) are read now, each once a sync pass, and `dirty`
-    /// planned again if that hashed one or found another change. What still waits is told, by name (`waiting`). Costs nothing unless
-    /// something waits; then a row and a stat a file, an open (or a read) and a small write of
-    /// each unchanged one, and, if that hashed or found a change, one more plan.
+    /// that can be are read now ([`Waited::read`]), and `dirty` planned again if that hashed
+    /// one or found another change. What still waits is told, by name.
     fn read_waiting(
         &mut self,
         plan: Plan,
         dirty: &[NodeId],
         opts: &Options,
     ) -> Result<Plan, EngineError> {
-        if plan.waiting.is_empty() {
-            return Ok(plan);
-        }
         let root = &self.cfg.folder.root;
-        let fresh: Vec<NodeId> = plan
-            .waiting
-            .iter()
-            .copied()
-            .filter(|n| !self.read_once.contains_key(n))
-            .collect();
-        let rows = self.db.read(|s| waiting_rows(s, &fresh))?;
-        let unchanged: Vec<(NodeId, RelPath)> = rows
-            .into_iter()
-            .filter(|(row, _)| {
-                // Its bytes as the scan saw them: size and mtime (a lock, or a mode change,
-                // moves ctime at most).
-                hbsync_platform::meta::stat(&row.path.to_native(root))
-                    .is_ok_and(|m| row.fingerprint.same_after_rename(&m))
-            })
-            .map(|(row, _)| (row.node, row.path))
-            .collect();
-        for node in fresh {
-            self.read_once.insert(node, None);
-        }
         let mut plan = plan;
-        if !unchanged.is_empty() {
-            let paths: Vec<RelPath> = unchanged.iter().map(|(_, p)| p.clone()).collect();
-            let scan = rescan_entries(&mut self.db, root, &[], &paths, &self.scan_opts)?;
-            // A read that failed again marks its node dirty again and records nothing new:
-            // planned again only for a hash or another change found.
-            if scan.hashed > 0 || scan.dirty > scan.unhashed.len() {
-                plan = self.plan(dirty, opts)?;
-            }
-            for (path, why) in scan.unhashed {
-                if let Some((node, _)) = unchanged.iter().find(|(_, p)| *p == path) {
-                    self.read_once.insert(*node, Some(why));
-                }
-            }
+        if self
+            .waited
+            .read(&mut self.db, root, &self.scan_opts, &plan.waiting)?
+        {
+            plan = self.plan(dirty, opts)?;
         }
-        if !plan.waiting.is_empty() {
-            let rows = self.db.read(|s| waiting_rows(s, &plan.waiting))?;
-            for (row, shown) in rows {
-                let why = self.read_once.get(&row.node).cloned().flatten();
-                let told = (
-                    shown.to_string(),
-                    why.unwrap_or_else(|| "being written".into()),
-                );
-                if !self.waiting.contains(&told) {
-                    self.waiting.push(told);
-                }
-            }
-        }
+        self.waited.tell(&mut self.db, &plan.waiting)?;
         Ok(plan)
     }
 

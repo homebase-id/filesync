@@ -168,12 +168,12 @@ pub struct Input {
     pub coverage: Option<Coverage>,
     /// What the view holds that is dirty but planned in another page (the engine plans its
     /// dirty set in pages), or a held delete out of the dirty set (§7): its change isn't merged
-    /// in this plan, so it is held as it is (§6.5): context as it is, a repair moved it with
+    /// in this plan, so it is left as it is (§6.5): context as it is, a repair moved it with
     /// what it was there (a tag added here lost).
     pub dirty_elsewhere: HashSet<NodeId>,
     /// The page's topmost dirty folders, synced before, that may go, with something still to
     /// plan below them, on any side, in another page: they wait for it, with everything of
-    /// the page below them, held as they are, and are planned with their whole dirty subtree
+    /// the page below them, left as they are, and are planned with their whole dirty subtree
     /// as a page of their own next (§6.5). Planned apart, what is below read alive as context
     /// and kept a deleted folder alive (review 14 R1), or the folder's delete took along what
     /// changed there (an edit lost).
@@ -197,7 +197,7 @@ pub struct Coverage {
 }
 
 impl Coverage {
-    /// Whether every child of `folder` whose name may clash with `name` is held.
+    /// Whether every child of `folder` whose name may clash with `name` is in the input.
     pub(crate) fn holds(&self, folder: NodeId, name: &str) -> bool {
         self.full.contains(&folder)
             || self
@@ -551,8 +551,9 @@ pub struct Plan {
     ///
     /// [`Engine::confirm_deletes`]: crate::Engine::confirm_deletes
     pub delete_waits: Vec<NodeId>,
-    /// Folders whose names the plan judged without all their children in the input
-    /// ([`Input::coverage`]): plan again with them covered in full.
+    /// Folders the plan judged without all their children in the input ([`Input::coverage`]):
+    /// names that may clash with one not in it, or a rename; a masked child; a node in a
+    /// file. Plan again with them covered in full.
     pub uncovered: BTreeSet<NodeId>,
     /// The folders that may go that this page waits for ([`Input::going`],
     /// [`Input::going_above`]): the engine plans each one's dirty subtree as a page of its

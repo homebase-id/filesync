@@ -57,6 +57,16 @@ The **root** is implicit: it has the fixed id from the node schema and is never 
 They live in the account's state DB (`daemon.md`, Files): the mirror once per account, base and
 local per sync root. Base, local and the dirty set of a root change only with that root.
 
+**Words.** In these rules a *held* delete, removal or item is one the mass-delete guard keeps
+back until the user answers (§7); nothing else is held so. What a plan leaves as it is,
+nothing done, until something else happens *waits*: for a hash (a file here not hashed yet,
+that is being written, locked or can't be read; the folders it is in; what would take a name
+it holds: §6.3), for another page (§6.5), or for a version this device can read (§8a). An
+operation the drive refused, and what waits for it, is left out (§8a, Refused). A file whose
+newer version on the drive this device can't read is *unreadable* (§8a). An item, a folder or
+a row of Recently deleted *holds* what is in it, and a node holds its name (a name is held by
+the node that has it).
+
 **Content state** (per file node, local only, never synced): `local` (default; may be evicted),
 `pinned` (always kept locally), `online-only` (no local bytes). A missing local file is a delete
 only when the base says the bytes were local.
@@ -137,8 +147,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    node with the lower node id (byte order) keeps the name; each other node is renamed to
    `<stem> (conflict <n>)<ext>` with the smallest `n ≥ 1` that is free. Applies equally to
    files and folders. Recovered files, and an orphan moving into it, lose a clash whatever the
-   ids (rule 3). A name held by what waits for a hash (rule 3) isn't renamed or taken: the
-   other node waits.
+   ids (rule 3). A name that what waits for a hash holds (rule 3) isn't renamed or taken:
+   the other node waits.
 2. **No cycles.** If merged moves form a cycle, revert the local moves taking part in it (the
    remote side has already published its moves). Revert one at a time until no cycle remains.
 3. **No orphans.** A live node whose merged parent is deleted resurrects the parent chain:
@@ -180,7 +190,7 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    seconds: below) and plans again; one that still can't be read is told, by name, and read
    again at the next sync (no poll: on Windows an app letting go of a file it didn't change
    tells no one, and the wait lasts till the next sync for another reason). A file that can
-   never be read holds what waits for it for as long. A large file being written (8 MiB or
+   never be read keeps what waits for it waiting for as long. A large file being written (8 MiB or
    more, modified in the last 5 s, or changed while it was read) isn't read at every batch
    while the live watcher runs: it is left unhashed, and the observer looks again once it may
    have been quiet 5 s, then 3, 6, 12 … 60 s apart while it is still written to; once quiet it
@@ -226,11 +236,11 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
 4. **Folder delete propagation** removes the folder on the drive first, then its descendants,
    top-down; here it deletes the topmost folder, its bases and its children's in one step (§7).
 5. **Planned in pages.** The engine plans its dirty set in pages of 20,000 nodes, in node id
-   order (§8a). A node dirty in another page, or a held delete (§7), is held as it is: its
+   order (§8a). A node dirty in another page, or a held delete (§7), is left as it is: its
    change isn't merged in this plan, and no fix here moves, renames or adopts it.
 
    A folder's delete is planned as one. A folder that may go (synced before or taken along,
-   and deleted or moved on a side) waits, held as it is with the folders above it and with
+   and deleted or moved on a side) waits, left as it is with the folders above it and with
    everything of the page below it (and the folders each of those is in now), when something
    below it on any side is dirty in another page, or when it is itself planned in another page
    and is above a node of this page (then only it waits: its page covers the page's folders
@@ -238,7 +248,7 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    planned again only when a view reaches it. Planned apart, what is below read alive as
    context and kept a deleted folder alive; or the folder's delete took along what changed
    there (an edit lost); or its items went one by one before it, each an
-   item of its own in Recently deleted. A node held so is left as it is on every side,
+   item of its own in Recently deleted. A node that waits so is left as it is on every side,
    nothing done to it (not even made where it isn't yet), and never brought back here as an
    orphan, nor its folder: its own page decides.
 
@@ -259,10 +269,11 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    them (100,000: 90 ms), and a page's topmost folder that may go a walk of its subtree.
 
    Clashes across pages are planned the same way. A node whose name a node of another page
-   holds, one going into a folder another page makes or that waits (one held for another
-   page, or for such a wait), or onto a name such a node holds here now (a swap), or one whose
-   folder another page decides, waits, held as it is (nothing sent to fail meanwhile). It is planned with the other node, as a page of its own; one that
-   still waits there is planned again with what it waits for, one larger page. Simulator:
+   holds, one going into a folder another page makes or that waits (for another page, or for
+   such a wait), or onto a name such a node holds here now (a swap), or one whose folder
+   another page decides, waits, left as it is (nothing sent to fail meanwhile). It is planned
+   with the other node, as a page of its own; one that still waits there is planned again
+   with what it waits for, one larger page. Simulator:
    `clients_planning_in_small_pages_converge_without_loss` and
    `planning_in_small_pages_ends_as_planning_whole` (pages of 1 to 4 against one page: the
    drive's folders and files, and the files Recently deleted lists apart from their folders);
@@ -529,7 +540,7 @@ expected fingerprint is treated as done.
   failure, and the rest run again after the pause.
 - **No starvation.** The dirty set is planned in pages, in node id order, swept round after
   round and across syncs, so nodes that stay dirty (deferred, failing) can't keep the rest
-  waiting; held deletes leave it till answered (§7). What a page holds for another page, a
+  waiting; held deletes leave it till answered (§7). What a page leaves for another page, a
   folder that may go with its subtree or a clash, is planned next as a page of its own
   (§6.5). A sync ends after a full sweep in which nothing was done. A round clears only
   the marks it read with its page (a change of the drive's picture moves a mark's version on):
@@ -554,9 +565,10 @@ expected fingerprint is treated as done.
   is left out, reported, and recorded as there all the same (node schema, Identity and
   tombstones):
   - What is in a folder this device can't read stays in it, waiting: it is never an orphan.
-  - A node whose newer version it can't read is held as it had it: a local edit goes up as a
-    new node (a conflict copy, under a free name); a rename, tags, a delete or a download of it
-    is refused and not tried again while it is the same; the drive's version stands.
+  - A node whose newer version it can't read (unreadable) is kept as it had it: a local edit
+    goes up as a new node (a conflict copy, under a free name); a rename, tags, a delete or a
+    download of it is refused and not tried again while it is the same; the drive's version
+    stands.
   - A later version that reads, or the file's delete, ends it.
 - **Crash recovery** needs no operation log: every operation is idempotent or detectable (4105
   on a re-create, fingerprint guards locally), state is re-derived from a scan and the feed, and
@@ -596,7 +608,7 @@ expected fingerprint is treated as done.
   recovery alike settle the item at the record's version whatever the plan saw (its recorded
   spelling and the rest of the base as any settling keeps them), so the removal reaches it:
   never read as an edit, which would bring the node back; one whose item isn't the drive's to
-  take (its name) is held as a file not hashed yet is, then goes. A folder's recovery, like its
+  take (its name) waits as a file not hashed yet does, then goes. A folder's recovery, like its
   commit, marks what is in it on the drive dirty. Later changes on the drive are plain changes
   against it. A record goes once its base is written, by the commit or by recovery, or when the
   operation that wrote it, in that run, fails before its own item is in place, or its batch

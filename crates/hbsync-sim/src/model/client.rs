@@ -72,7 +72,7 @@ pub(crate) struct Client {
     pub(crate) refused: HashMap<(NodeId, &'static str), (String, bool)>,
     /// The operations the last plan held back for a refusal: refused themselves (`true`), or
     /// waiting for one.
-    pub(crate) held_back: Vec<(Op, bool)>,
+    pub(crate) blocked: Vec<(Op, bool)>,
     /// The operations the last plan sent to run (with refusals on: once nothing more happens,
     /// those left are blocked, behind a refusal).
     pub(crate) last_plan: Vec<Op>,
@@ -160,7 +160,7 @@ impl Client {
             filter: Arc::new(filter),
             held: Vec::new(),
             refused: HashMap::new(),
-            held_back: Vec::new(),
+            blocked: Vec::new(),
             last_plan: Vec::new(),
             confirmed: HashSet::new(),
             wiped: HashSet::new(),

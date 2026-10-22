@@ -10,7 +10,9 @@ use hbsync_types::{NodeId, NodeKind, Role};
 use crate::root::AccountReader;
 use crate::walk::End;
 
-use super::rules::{Chosen, Held, Holdings, deleted_with, held_below, inside, item_by, select};
+use super::rules::{
+    Chosen, Contents, Holdings, contents_below, deleted_with, inside, item_by, select,
+};
 
 /// Recently deleted as a whole: how much it holds, and what emptying all of it as it is now
 /// takes.
@@ -50,7 +52,7 @@ pub fn deletes(
             .deletes()
             .filter(|&i| {
                 listing
-                    .held
+                    .contents
                     .get(&listing.rows.rows[i].row.node)
                     .is_some_and(|h| h.stays)
             })
@@ -128,8 +130,8 @@ struct Listing<'a, 's> {
     roots: Vec<NodeId>,
     /// Of the listed rows, how many emptying all of them deletes for good ([`select`]).
     going: usize,
-    /// What each row holds ([`held_below`]).
-    held: HashMap<NodeId, Held>,
+    /// What each row holds ([`contents_below`]).
+    contents: HashMap<NodeId, Contents>,
     folders: HashMap<NodeId, String>,
     /// Where a walk up stops: a folder's top (here or not), the role folders whether synced
     /// here or not; above them all, the main folder's top (the drive's root).
@@ -151,7 +153,7 @@ impl<'a, 's> Listing<'a, 's> {
             rows: RemovedRows::new(s, Vec::new()),
             roots: Vec::new(),
             going: 0,
-            held: HashMap::new(),
+            contents: HashMap::new(),
             folders,
             tops,
             places: HashMap::new(),
@@ -174,7 +176,7 @@ impl<'a, 's> Listing<'a, 's> {
         let rows = &listing.rows.rows[..count];
         let holdings = holdings(s)?;
         let chosen: Vec<Chosen> = rows.iter().map(Chosen::of).collect();
-        listing.held = held_below(&chosen, &holdings.live);
+        listing.contents = contents_below(&chosen, &holdings.live);
         // What emptying all of it deletes.
         listing.going = select(&chosen, &holdings).len();
         Ok(listing)
@@ -210,13 +212,13 @@ impl<'a, 's> Listing<'a, 's> {
             .into_iter()
             .map(|i| {
                 let d = self.describe(i)?;
-                let held = self.held.get(&d.node).copied().unwrap_or_default();
+                let contents = self.contents.get(&d.node).copied().unwrap_or_default();
                 Ok((
                     Deleted {
-                        stays: held.stays,
+                        stays: contents.stays,
                         ..d
                     },
-                    held.count,
+                    contents.count,
                 ))
             })
             .collect()
