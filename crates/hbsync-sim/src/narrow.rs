@@ -108,6 +108,14 @@ impl Sim {
             // The nodes whose sides differ dirty, and those the plan has work for, as the engine
             // keeps them.
             let dirty: Vec<NodeId> = engine_dirty(input, plan).into_iter().collect();
+            // The store's marks are those: filling it marks what it writes (a pull's rows), and
+            // a mark the page doesn't hold reads as another page's (§6.5).
+            db.write(|s| {
+                for n in s.dirty_nodes(usize::MAX)? {
+                    s.folder().clear_dirty(n)?;
+                }
+                dirty.iter().try_for_each(|&n| s.folder().mark_dirty(n))
+            })?;
             let folder = &folder;
             let with = |opts: &Options| {
                 let opts = opts.clone();
@@ -125,6 +133,15 @@ impl Sim {
                 .copied()
                 .filter(|n| !nodes.contains(n))
                 .collect();
+            // Out of the dirty set, as the engine takes them ([`held`]).
+            db.write(|s| {
+                for &n in &nodes {
+                    if let Some(mark) = s.dirty_mark(n)? {
+                        s.folder().hold_delete(mark)?;
+                    }
+                }
+                Ok(())
+            })?;
             let mut opts = opts.clone();
             opts.guarding.held = held::files(&all, out.iter().copied());
             let reached = std::cell::Cell::new(false);
