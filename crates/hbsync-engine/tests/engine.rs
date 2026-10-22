@@ -5308,3 +5308,66 @@ fn a_wipe_held_in_one_pass_stays_held_after_the_counts_are_read_again() -> R {
     assert_eq!(b.read_text("d/f2.txt")?, "2", "still held");
     Ok(())
 }
+
+/// A wipe held as every synced file, planned over several pages: one of its files restored
+/// elsewhere (and pulled) after the first page doesn't let the later pages' part of it
+/// through: the counts read again are never less than those the first page was judged by.
+#[test]
+fn a_wipe_over_pages_stays_held_after_a_restore_elsewhere() -> R {
+    use hbsync_engine::testkit::AfterPlan;
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    type Then = Box<dyn FnOnce() + Send>;
+    let then: Arc<Mutex<Option<Then>>> = Arc::default();
+    let hook = {
+        let then = then.clone();
+        AfterPlan(Arc::new(move || {
+            if let Some(then) = then.lock().ok().and_then(|mut t| t.take()) {
+                then();
+            }
+        }))
+    };
+    let mut b = Client::with_config(&server, "b", move |cfg| {
+        cfg.guard.min = 2;
+        cfg.batch = 2;
+        cfg.after_plan = Some(hook.clone());
+        cfg.check_narrow = false;
+    })?;
+    for i in 0..4 {
+        a.write(&format!("d{i}/f{i}.txt"), format!("{i}"))?;
+    }
+    a.sync()?;
+    b.sync()?;
+    for i in 0..4 {
+        fs::remove_dir_all(a.root.join(format!("d{i}")))?;
+    }
+    a.sync()?;
+    b.engine.drive().pull(None)?;
+    let (restorer, drive, f0) = (
+        FakeRemote::new(server.clone()),
+        Arc::clone(b.engine.drive()),
+        common::header_named(&server, "f0.txt"),
+    );
+    *then.lock().map_err(|_| "poisoned")? = Some(Box::new(move || {
+        let target = Target {
+            at: f0.at(),
+            token: f0.token.clone(),
+        };
+        restorer.set_removed(&[target], false).expect("restored");
+        drive.pull(None).expect("the pull");
+    }));
+    b.announced();
+    let report = b.engine.sync("2026-10-08", false)?;
+    assert!(
+        then.lock().map_err(|_| "poisoned")?.is_none(),
+        "the hook ran"
+    );
+    for i in 1..4 {
+        assert_eq!(
+            b.read_text(&format!("d{i}/f{i}.txt"))?,
+            i.to_string(),
+            "held: {report:?}"
+        );
+    }
+    Ok(())
+}

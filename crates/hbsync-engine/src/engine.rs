@@ -750,8 +750,9 @@ impl Engine {
             }
             // Each page with the guard's counts of what it holds: counted again, in the same
             // read, when another connection committed since they were (a pull, an
-            // announcement: what it marked counts too), or when nothing dirty had them skip the
-            // synced files; with what is held as every synced file so far this sync.
+            // announcement: what it marked counts too; never less than before), or when nothing
+            // dirty had them skip the synced files; with what is held as every synced file so
+            // far this sync.
             let (dirty, next, fresh) = self.db.read(|s| {
                 let (dirty, next) = s.dirty_marks(after, self.cfg.batch)?;
                 let stale = !dirty.is_empty()
@@ -762,7 +763,14 @@ impl Engine {
                 };
                 Ok((dirty, next, fresh))
             })?;
-            if let Some(fresh) = fresh {
+            if let Some(mut fresh) = fresh {
+                // Never less pending than the sweep judged its earlier pages by: what this
+                // sync did meanwhile (a base gone with a file gone on both sides) or a restore
+                // elsewhere doesn't let through the rest of what those pages held.
+                fresh.pending = (
+                    fresh.pending.0.max(counts.pending.0),
+                    fresh.pending.1.max(counts.pending.1),
+                );
                 opts.synced_files = fresh.synced.unwrap_or(0) as usize;
                 opts.pending_deletes = (fresh.pending.0 as usize, fresh.pending.1 as usize);
                 opts.wiped = Arc::new(self.wiped.clone());
@@ -1166,9 +1174,9 @@ struct Counts {
 }
 
 /// The guard's [`Counts`] in `s`: `held`, the files of the held deletes out of the dirty set
-/// (read here when `None`); `synced`, the synced files as counted already (only this engine
-/// writes this folder's base), else counted here if `count` or anything is dirty (with nothing
-/// dirty there is nothing to weigh, and a sync with nothing new reads no table).
+/// (read here when `None`); `synced`, the synced files as counted already for the sweep (kept:
+/// it judges all its pages by one), else counted here if `count` or anything is dirty (with
+/// nothing dirty there is nothing to weigh, and a sync with nothing new reads no table).
 fn guard_counts(
     s: &ReadTx<'_>,
     confirmed: &std::collections::HashSet<NodeId>,
