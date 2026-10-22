@@ -500,11 +500,7 @@ impl Drive {
 
     /// [`Drive::restore`] for a caller that has just read the feed itself.
     pub(crate) fn restore_read(&self, nodes: &[NodeId]) -> Result<usize, EngineError> {
-        let restored = self.with_ops(|ops| {
-            nodes
-                .iter()
-                .try_fold(0, |n, &node| Ok(n + ops.restore(node)?))
-        });
+        let restored = self.with_ops(|ops| ops.restore(nodes));
         self.wake_all();
         restored
     }

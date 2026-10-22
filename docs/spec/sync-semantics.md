@@ -305,13 +305,15 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   a held item stays held while a removal elsewhere is still to be followed in it, or below it
   once it is back on the drive, and a trash of anything held or taking held items along is
   held. **Delete**, or **Put them back**: kept here, and each synced item in them the drive
-  no longer has is restored from Recently deleted (one restore per removal: what was removed
+  no longer has is restored from Recently deleted (each removal as an item: what was removed
   with its folder comes back with it; what was removed apart, before, on its own), or, gone
   for good there, uploaded again from here as it is; a folder already back has what is in it
-  looked at. Every device then has them back. Cost: a feed read, then a restore (a read and a
-  write or more) per removal; held file by file (plans in pages, the folders kept on the drive
-  meanwhile), that is a restore per file. What a failure leaves is still held, and shown
-  again, with a note.
+  looked at. Every device then has them back. Cost: a feed read, then one restore of all the
+  removals together: one read, and per wave (what comes back into folders already back) a
+  request per 1,000 rows and one write; held file by file (plans in pages, the folders kept
+  on the drive meanwhile), that is still one restore (300 loose files: 2 requests, against 301
+  when each removal was restored on its own). A row whose name is taken is a request of its
+  own, as in any restore. What a failure leaves is still held, and shown again, with a note.
 
   A confirmation lasts while its removal is pending, or waits for a file in it not hashed yet
   (§6.3: what was in such a folder, sent apart meanwhile, goes with it); done or undone, it is

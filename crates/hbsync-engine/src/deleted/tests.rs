@@ -77,7 +77,7 @@ fn a_cycle_in_recently_deleted_ends() -> Result<(), StateError> {
         s.account().put_removed(&removed(a, b, 1))?;
         s.account().put_removed(&removed(b, a, 1))
     })?;
-    let plan = db.read(|s| plan_restore(s, a))?.map(|p| p.rows.len());
+    let plan = db.read(|s| plan_restore(s, &[a]))?.map(|p| p.rows.len());
     assert_eq!(plan, Some(2));
     // One of them is the item, the same one whichever row a walk starts from: the listing
     // and a lookup of either row agree on it and on its count.
@@ -123,6 +123,31 @@ fn an_item_is_found_up_from_the_folder_here() -> Result<(), StateError> {
     assert_eq!(item(here)?, HashSet::from([x]));
     // In `there`, deleted with it: with it.
     assert_eq!(item(there)?, HashSet::from([there]));
+    Ok(())
+}
+
+/// Restoring an item together with the folder whose delete took it along plans the folder's
+/// whole group once, whichever comes first: the item doesn't stand for the folder.
+#[test]
+fn a_restore_of_a_folder_and_an_item_in_it_takes_the_whole_folder() -> Result<(), StateError> {
+    let db = Db::new()?;
+    let (f, x, y) = (NodeId::new(), NodeId::new(), NodeId::new());
+    db.write(|s| {
+        s.account().put_removed(&removed(f, NodeId::ROOT, 1))?;
+        s.account().put_removed(&removed(x, f, 1))?;
+        s.account().put_removed(&removed(y, f, 1))
+    })?;
+    for nodes in [[x, f], [f, x]] {
+        let plan = db.read(|s| plan_restore(s, &nodes))?;
+        let mut rows: Vec<NodeId> = plan
+            .map(|p| p.rows.iter().map(|r| r.row.node).collect())
+            .unwrap_or_default();
+        assert_eq!(rows.first(), Some(&f), "the folder first: {nodes:?}");
+        rows.sort();
+        let mut all = vec![f, x, y];
+        all.sort();
+        assert_eq!(rows, all, "{nodes:?}");
+    }
     Ok(())
 }
 
@@ -499,7 +524,7 @@ fn what_went_before_its_folder_stays() -> Result<(), StateError> {
         s.account().put_removed(&removed(deeper, with, 12))
     })?;
     let plan: Option<Vec<NodeId>> = db
-        .read(|s| plan_restore(s, f))?
+        .read(|s| plan_restore(s, &[f]))?
         .map(|p| p.rows.iter().map(|r| r.row.node).collect());
     assert_eq!(plan, Some(vec![f, with, deeper]));
     let tops: HashMap<NodeId, NodeId> = db

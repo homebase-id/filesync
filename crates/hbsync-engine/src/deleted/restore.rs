@@ -18,16 +18,19 @@ use super::rules::{RestoreWave, restore_wave, take_restored_name, taken_in};
 use super::{AccountOps, lock};
 
 impl AccountOps<'_> {
-    /// Restores `node` with what was deleted with it, and the folders it was in that are in
-    /// Recently deleted too (just those, not their other contents). Returns how many items came
-    /// back; 0 when `node` isn't in Recently deleted (any more).
+    /// Restores each of `nodes` with what was deleted with it, and the folders it was in that
+    /// are in Recently deleted too (just those, not their other contents), all together: one
+    /// read, then each wave's rows (of all of them) in as few requests as the drive takes and
+    /// one write. What two of them hold comes back once. Returns how many items came back; 0
+    /// for a node not in Recently deleted (any more).
     /// Leaves the account behind ([`AccountOps::run`]) when the drive refused a write for its
     /// state (changed or deleted for good meanwhile), or a write may have landed unanswered.
-    pub fn restore(&mut self, node: NodeId) -> Result<usize, EngineError> {
-        let Some(plan) = lock(self.account).read(|s| plan_restore(s, node))? else {
+    pub fn restore(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
+        let Some(RestorePlan { rows, live, taken }) =
+            lock(self.account).read(|s| plan_restore(s, nodes))?
+        else {
             return Ok(0);
         };
-        let RestorePlan { rows, live, taken } = plan;
         let mut r = Restoring {
             remote: self.remote,
             in_plan: rows.iter().map(|r| r.row.node).collect(),
@@ -57,6 +60,9 @@ impl AccountOps<'_> {
             // as the drive takes; the rest once those answered (a name one didn't take is free
             // again), a rewrite each.
             for part in asked.chunks(hbsync_remote::BATCH_FILES) {
+                if r.failed.is_some() {
+                    break;
+                }
                 let targets: Vec<Target> = part.iter().map(|row| row.target()).collect();
                 let (answers, stopped) = self
                     .remote
@@ -208,10 +214,10 @@ impl Restoring<'_> {
     }
 }
 
-/// What a restore of a node does, worked out in one read.
+/// What a restore of some nodes does, worked out in one read.
 pub(super) struct RestorePlan {
-    /// In order: the folders above that are in Recently deleted (top-down), then the node and
-    /// what was deleted with it (each after its folder).
+    /// In order, for each node: the folders above it that are in Recently deleted (top-down),
+    /// then it and what was deleted with it (each after its folder); each row once.
     pub(super) rows: Vec<RemovedRow>,
     /// Folders in the tree that the rows may go into (the top included).
     live: HashSet<NodeId>,
@@ -221,41 +227,59 @@ pub(super) struct RestorePlan {
 
 pub(super) fn plan_restore(
     s: &ReadTx<'_>,
-    node: NodeId,
+    nodes: &[NodeId],
 ) -> Result<Option<RestorePlan>, StateError> {
-    let Some(top) = s.removed_by_node(node)? else {
-        return Ok(None);
-    };
-    // The folders above, as far as they are in Recently deleted (then in the tree, or deleted
-    // for good: the item comes back as an orphan, for Recovered files). A chain past any depth
-    // a path may have (only a malicious drive makes one) stays where it is: above its top is
-    // still a removed folder, not one gone for good.
-    let up = crate::walk::up::<_, StateError>(top.row.parent, |at| {
-        Ok(s.removed_by_node(at)?.map(|f| {
-            let parent = f.row.parent;
-            (f, parent)
-        }))
-    })?;
-    if matches!(up.end, End::Deep) {
-        return Ok(None);
-    }
-    let mut chain = up.items;
-    chain.reverse();
-    // Then the node and what was deleted with it, each after its folder; each node once. What
-    // is live still comes back with its folder by itself.
-    let mut seen = HashSet::new();
+    // Each row once, whichever of `nodes` takes it in; `grouped`: those whose group (what was
+    // deleted with them) is planned already.
+    let (mut seen, mut grouped) = (HashSet::new(), HashSet::new());
     let mut rows = Vec::new();
-    for r in chain.into_iter().chain(group(s, top)?) {
-        if seen.insert(r.row.node) && s.get_mirror(r.row.node)?.is_none() {
-            rows.push(r);
+    for &node in nodes {
+        if grouped.contains(&node) {
+            continue; // in what another of them took along
+        }
+        let Some(top) = s.removed_by_node(node)? else {
+            continue;
+        };
+        // The folders above, as far as they are in Recently deleted (then in the tree, or
+        // deleted for good: the item comes back as an orphan, for Recovered files), up to one
+        // planned already. A chain past any depth a path may have (only a malicious drive makes
+        // one) stays where it is: above its top is still a removed folder, not one gone for
+        // good.
+        let up = crate::walk::up::<_, StateError>(top.row.parent, |at| {
+            if seen.contains(&at) {
+                return Ok(None);
+            }
+            Ok(s.removed_by_node(at)?.map(|f| {
+                let parent = f.row.parent;
+                (f, parent)
+            }))
+        })?;
+        if matches!(up.end, End::Deep) {
+            continue;
+        }
+        let mut chain = up.items;
+        chain.reverse();
+        // Then the node and what was deleted with it, each after its folder. What is live
+        // still comes back with its folder by itself.
+        let group = group(s, top)?;
+        grouped.extend(group.iter().map(|r| r.row.node));
+        for r in chain.into_iter().chain(group) {
+            if seen.insert(r.row.node) && s.get_mirror(r.row.node)?.is_none() {
+                rows.push(r);
+            }
         }
     }
-    // The folders in the tree the rows may go into, and the folders coming back: their names.
-    // (One that is neither went for good: what was in it takes no name there.)
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    // The folders in the tree the rows may go into, and the folders coming back: their names,
+    // each folder read once. (One that is neither went for good: what was in it takes no name
+    // there.)
     let mut live = HashSet::from([NodeId::ROOT]);
     let mut taken: HashMap<NodeId, HashSet<String>> = HashMap::new();
+    let mut looked = HashSet::new();
     for parent in rows.iter().map(|r| r.row.parent).chain([NodeId::ROOT]) {
-        if taken.contains_key(&parent) {
+        if !looked.insert(parent) {
             continue;
         }
         if !parent.is_root() && s.get_mirror(parent)?.is_some() {

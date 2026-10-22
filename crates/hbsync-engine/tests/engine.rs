@@ -4938,7 +4938,7 @@ fn a_hold_of_every_file_paged_holds_the_whole_trash() -> R {
 /// Put back of a removal held file by file (plans in pages) brings back what it does held as
 /// one folder. Held whole it costs one restore (what was removed with the folder comes back
 /// with it); file by file, the folders were kept on the drive meanwhile (they hold what is
-/// held), so each file is a removal of its own: a restore each.
+/// held), so each file is a removal of its own, restored with the others in one go.
 #[test]
 fn put_back_held_file_by_file_comes_back_alike() -> R {
     let requests = |batch: usize| -> hbsync_engine::testkit::Res<(usize, Vec<String>)> {
@@ -5369,5 +5369,64 @@ fn a_wipe_over_pages_stays_held_after_a_restore_elsewhere() -> R {
             "held: {report:?}"
         );
     }
+    Ok(())
+}
+
+/// Putting back many loose files removed elsewhere (held as every synced file, §7) restores
+/// them together: a feed read and a request per [`hbsync_remote::BATCH_FILES`] restored, not a
+/// request each.
+#[test]
+fn putting_back_many_loose_files_takes_few_requests() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |cfg| cfg.guard.min = 2)?;
+    for i in 0..300 {
+        a.write(&format!("f{i:03}.txt"), format!("{i}"))?;
+    }
+    a.sync()?;
+    b.sync()?;
+    for i in 0..300 {
+        fs::remove_file(a.root.join(format!("f{i:03}.txt")))?;
+    }
+    a.sync()?;
+    let report = b.sync()?;
+    assert_eq!(report.held.len(), 300, "{report:?}");
+    let held: Vec<NodeId> = report.held.iter().map(|op| op.node()).collect();
+    let before = b.remote.faults().requests;
+    assert_eq!(b.engine.put_back(&held)?, 300);
+    let requests = b.remote.faults().requests - before;
+    assert!(requests <= 3, "{requests} requests");
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.read_text("f123.txt")?, "123", "back for every device");
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    Ok(())
+}
+
+/// Two items of one name in one folder restored together come back as when restored one after
+/// the other: the first asked for under its name, the other under a free restored one.
+#[test]
+fn two_items_of_one_name_restored_together_both_come_back() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    for v in ["one", "two"] {
+        a.write("x.txt", v)?;
+        a.sync()?;
+        fs::remove_file(a.root.join("x.txt"))?;
+        a.sync()?;
+    }
+    let nodes: Vec<NodeId> = a.recently_deleted(10)?.iter().map(|d| d.node).collect();
+    assert_eq!(nodes.len(), 2, "{nodes:?}");
+    assert_eq!(a.engine.drive().restore(&nodes)?, 2);
+    a.sync()?;
+    let tree = a.tree_text("");
+    let mut texts: Vec<&str> = tree
+        .iter()
+        .map(|l| l.split(" = ").nth(1).unwrap_or_default())
+        .collect();
+    texts.sort();
+    assert_eq!(texts, ["one", "two"], "{tree:?}");
+    // The newest first, as listed: it keeps the name.
+    assert!(tree.iter().any(|l| l == "x.txt = two"), "{tree:?}");
     Ok(())
 }

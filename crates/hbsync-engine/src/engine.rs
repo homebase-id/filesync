@@ -341,7 +341,7 @@ impl Engine {
     ///   it goes up again from here.
     ///
     /// The next sync does the rest; what a failure leaves is still held, and shown again.
-    /// Costs a feed read, and a restore (a read and a write or more) per item restored.
+    /// Costs a feed read, then one restore of them all: a request per wave and per thousand rows.
     /// Returns how many it put back.
     pub fn put_back(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
         // Whatever it puts back, the held deletes are planned again at the next sync.
@@ -349,8 +349,8 @@ impl Engine {
         self.drive.pull(None)?;
         // What loses its base.
         let mut forget = Vec::new();
-        // One restore per item of Recently deleted, the outermost first: what was removed with
-        // its folder comes back with it.
+        // Each removal's item, the outermost first, restored together: what was removed with its
+        // folder comes back with it.
         let mut tops: Vec<(usize, NodeId)> = Vec::new();
         // Each once: a folder's held with what is in it.
         let mut seen = std::collections::HashSet::new();
