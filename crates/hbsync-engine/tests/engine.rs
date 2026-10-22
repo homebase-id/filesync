@@ -6084,6 +6084,81 @@ fn a_folder_kept_for_another_page_goes_as_one_to_recently_deleted() -> R {
     Ok(())
 }
 
+/// b swaps folder `p` and folder `q` in it here: `q` out to the top, then `p` into it. In pages
+/// of one node `p` is planned with `q` where the drive has it (inside `p`): a cycle, which
+/// another page's node is in, so `p` waits to be planned with it, and both moves go, as in
+/// one page. Before, the cycle's repair undid the user's move of `p` (§6.5). `wipe`: b also
+/// deletes the other folders, more than the guard lets through, so it holds those deletes for
+/// the user: the wait settles all the same, a sync planning nothing once the hold does.
+fn a_swap_planned_in_pages(wipe: bool) -> R {
+    for batch in [1, 2, 20_000] {
+        let server = server();
+        let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+        let mut b = Client::with_config(&server, "b", move |cfg| {
+            if wipe {
+                cfg.guard.min = 2;
+            } else {
+                cfg.guard.allow = true;
+            }
+            cfg.batch = batch;
+        })?;
+        a.write("p/q/x.txt", "x")?;
+        if wipe {
+            three_folders(&mut a)?;
+        }
+        a.sync()?;
+        b.sync()?;
+        if wipe {
+            for d in ["d1", "d2", "d3"] {
+                fs::remove_dir_all(b.root.join(d))?;
+            }
+        }
+        fs::rename(b.root.join("p/q"), b.root.join("q"))?;
+        fs::rename(b.root.join("p"), b.root.join("q/p"))?;
+        let mut syncs = Vec::new();
+        for _ in 0..8 {
+            let report = b.sync()?;
+            syncs.push((report.rounds, report.ops_done, report.held.len()));
+        }
+        assert_eq!(b.read_text("q/x.txt")?, "x", "pages of {batch}");
+        assert!(
+            b.root.join("q/p").is_dir(),
+            "pages of {batch}: {:?}",
+            b.tree_text("")
+        );
+        let live = server.lock().map_err(|_| "poisoned")?.live_names();
+        assert!(
+            live.contains(&"q".to_owned()) && live.contains(&"p".to_owned()),
+            "pages of {batch}: {live:?}"
+        );
+        let mut c = Client::with_config(&server, "c", |cfg| cfg.guard.allow = true)?;
+        c.sync()?;
+        assert!(
+            c.root.join("q/p").is_dir(),
+            "pages of {batch}: {:?}",
+            c.tree_text("")
+        );
+        // Settled: the last syncs plan nothing (with a hold: it stays, shown).
+        assert!(
+            syncs[4..]
+                .iter()
+                .all(|&(rounds, ops, held)| rounds == 0 && ops == 0 && (held > 0) == wipe),
+            "pages of {batch}: (rounds, ops, held) a sync: {syncs:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_swap_of_a_folder_and_the_one_in_it_planned_in_pages() -> R {
+    a_swap_planned_in_pages(false)
+}
+
+#[test]
+fn a_swap_planned_in_pages_beside_held_deletes_settles() -> R {
+    a_swap_planned_in_pages(true)
+}
+
 /// Another app removes every top folder and what is in them, and stops before `x.txt` in each
 /// (taken along, §6.3): every synced file goes, so b holds the removal for the user, in pages
 /// as in one. Counted from the dirty set, the taken-along files were still in the mirror, so a
