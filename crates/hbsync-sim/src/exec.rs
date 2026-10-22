@@ -2234,7 +2234,8 @@ pub(crate) fn extra(local: &NodeState, version: Option<VersionTag>) -> BaseExtra
 
 /// The next page of `client`'s sweep over `all` (its nodes) in pages of `size`, as the engine
 /// pages its dirty set: what a page waits for first ([`hbsync_engine::pages::OwnPages`]), else
-/// the next `size` nodes in id order. And whether it is one of its own.
+/// the next `size` nodes in id order. And whether it is a piece of a folder too big for a page
+/// (`Options::own_page`).
 fn next_page(
     client: &Client,
     input: &Input,
@@ -2243,8 +2244,8 @@ fn next_page(
 ) -> (Vec<NodeId>, bool) {
     let mut pages = client.pages.borrow_mut();
     let mut store = SimPages { client, input, all };
-    if let Ok(Some(page)) = pages.own.next(size, &mut store) {
-        return (page, true);
+    if let Ok(Some((page, piece))) = pages.own.next(size, &mut store) {
+        return (page, piece);
     }
     let page: Vec<NodeId> = match pages.after {
         Some(after) => all
@@ -2281,12 +2282,28 @@ impl hbsync_engine::pages::Pending for SimPending<'_> {
             .collect())
     }
     fn below(&mut self, folder: NodeId, page: &BTreeSet<NodeId>) -> Result<bool, Infallible> {
-        Ok(self
-            .trees
-            .iter()
-            .flat_map(|t| t.subtree(folder))
-            .any(|n| n != folder && self.all.contains(&n) && !page.contains(&n)))
+        let [base, local, remote] = &self.trees;
+        Ok(subtree_any_side([base, local, remote], folder)
+            .into_iter()
+            .any(|n| self.all.contains(&n) && !page.contains(&n)))
     }
+}
+
+/// `folder` and its subtree on any side, across sides (a child here of a folder in the base,
+/// say), in id order: as the store's query walks it.
+fn subtree_any_side(trees: [&hbsync_engine::tree::Tree; 3], folder: NodeId) -> BTreeSet<NodeId> {
+    let mut seen = BTreeSet::from([folder]);
+    let mut queue = vec![folder];
+    while let Some(node) = queue.pop() {
+        for tree in trees {
+            for child in tree.children(node) {
+                if seen.insert(child) {
+                    queue.push(child);
+                }
+            }
+        }
+    }
+    seen
 }
 
 /// A client's model as [`hbsync_engine::pages::OwnPages`] reads it: `all` its dirty nodes.
@@ -2307,14 +2324,13 @@ impl hbsync_engine::pages::PageStore for SimPages<'_> {
             .collect())
     }
     fn marks_under(&mut self, folder: NodeId, limit: usize) -> Result<Vec<NodeId>, Infallible> {
-        // On any side, as the store's query.
         let i = self.input;
-        let under: BTreeSet<NodeId> = [&i.base, &i.local, &i.remote]
+        let under = subtree_any_side([&i.base, &i.local, &i.remote], folder);
+        Ok(under
             .into_iter()
-            .flat_map(|t| t.subtree(folder))
             .filter(|n| self.all.contains(n))
-            .collect();
-        Ok(under.into_iter().take(limit).collect())
+            .take(limit)
+            .collect())
     }
     fn folders_in(&mut self, folder: NodeId) -> Result<Vec<NodeId>, Infallible> {
         let base = &self.client.base;

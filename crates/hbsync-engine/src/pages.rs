@@ -18,7 +18,9 @@ pub trait Pending {
     type Error;
     /// Which of `nodes` are still to plan: dirty, or a held delete out of the dirty set.
     fn among(&mut self, nodes: &[NodeId]) -> Result<HashSet<NodeId>, Self::Error>;
-    /// Whether something below `folder`, on any side, not in `page`, is still to plan.
+    /// Whether something below `folder`, on any side, not in `page`, is dirty: what a page of
+    /// its own of `folder` plans (a held delete out of the dirty set is planned again only
+    /// when a view reaches it, as in one page).
     fn below(&mut self, folder: NodeId, page: &BTreeSet<NodeId>) -> Result<bool, Self::Error>;
 }
 
@@ -61,13 +63,13 @@ pub fn dirty_elsewhere<P: Pending>(
             going.insert(folder);
         }
     }
+    // Walked only where another page plans a folder that may go (hardly ever).
+    let candidates: HashSet<NodeId> = elsewhere.iter().copied().filter(|&a| goes(a)).collect();
     let mut going_above = HashSet::new();
-    for &node in &input.dirty {
-        going_above.extend(
-            above(node)
-                .into_iter()
-                .filter(|a| elsewhere.contains(a) && goes(*a)),
-        );
+    if !candidates.is_empty() {
+        for &node in &input.dirty {
+            going_above.extend(above(node).into_iter().filter(|a| candidates.contains(a)));
+        }
     }
     input.dirty_elsewhere = elsewhere;
     input.going = going;
@@ -96,7 +98,14 @@ pub(crate) fn may_go(input: &Input, node: NodeId, hidden: &HashSet<NodeId>) -> b
 struct Want {
     nodes: Vec<NodeId>,
     folders: Vec<NodeId>,
+    /// A piece of a folder too big for a page: it doesn't wait for that folder
+    /// ([`crate::plan::Options::own_page`]).
+    piece: bool,
 }
+
+/// A page of its own ([`OwnPages::next`]): its dirty nodes, and whether it is a piece of a
+/// folder too big for a page (`Options::own_page`).
+pub type OwnPage<M> = (Vec<M>, bool);
 
 /// Where [`OwnPages`] reads its pages: the engine's state DB, or the simulator's model.
 pub trait PageStore {
@@ -154,11 +163,11 @@ impl OwnPages {
                 .iter()
                 .map(|nodes| Want {
                     nodes: nodes.clone(),
-                    folders: Vec::new(),
+                    ..Want::default()
                 })
                 .chain(folders.iter().map(|&folder| Want {
-                    nodes: Vec::new(),
                     folders: vec![folder],
+                    ..Want::default()
                 }))
                 .collect(),
         };
@@ -170,9 +179,10 @@ impl OwnPages {
     }
 
     /// A new sweep: everything may be tried again. What waits stays queued, the last page's
-    /// too, across syncs (one that stopped at its round limit goes on with it).
+    /// too, across syncs (one that stopped at its round limit goes on with it), tried once
+    /// more this sweep.
     pub fn new_sweep(&mut self) {
-        self.tried.clear();
+        self.tried = self.queue.iter().map(|(want, _)| want.clone()).collect();
         self.current = None;
     }
 
@@ -181,12 +191,13 @@ impl OwnPages {
     /// subtrees come first, then it once more; what is left of it then (more than a page
     /// directly in it) is planned whole, one larger page. So every folder goes as one, or as
     /// its folders and then itself: never item by item. Folders split so go together while
-    /// they fit a page: a round each, not one a folder.
+    /// they fit a page: a round each, not one a folder. With whether it is such a piece, which
+    /// doesn't wait for the folder above it (`Options::own_page`).
     pub fn next<S: PageStore>(
         &mut self,
         batch: usize,
         store: &mut S,
-    ) -> Result<Option<Vec<S::Mark>>, S::Error> {
+    ) -> Result<Option<OwnPage<S::Mark>>, S::Error> {
         self.current = None;
         while let Some((want, split)) = self.queue.pop() {
             // One folder alone too big, the first time: its folders first.
@@ -199,14 +210,18 @@ impl OwnPages {
                     continue;
                 }
                 if marks.len() <= batch {
-                    return self.packed(want, marks, batch, store).map(Some);
+                    let piece = want.piece;
+                    return self
+                        .packed(want, marks, batch, store)
+                        .map(|page| Some((page, piece)));
                 }
                 let folders = store.folders_in(folder)?;
                 self.queue.push((want, true));
                 self.queue.extend(folders.into_iter().map(|folder| {
                     let want = Want {
-                        nodes: Vec::new(),
                         folders: vec![folder],
+                        piece: true,
+                        ..Want::default()
                     };
                     (want, false)
                 }));
@@ -225,8 +240,9 @@ impl OwnPages {
             if page.is_empty() {
                 continue;
             }
+            let piece = want.piece;
             self.current = Some(want);
-            return Ok(Some(page));
+            return Ok(Some((page, piece)));
         }
         Ok(None)
     }
@@ -243,6 +259,7 @@ impl OwnPages {
         let mut seen: HashSet<S::Mark> = marks.iter().cloned().collect();
         while let Some((next, false)) = self.queue.last()
             && next.nodes.is_empty()
+            && next.piece == want.piece
             && let [folder] = next.folders[..]
         {
             let under = store.marks_under(folder, batch + 1 - marks.len())?;

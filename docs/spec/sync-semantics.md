@@ -225,12 +225,16 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
 
    A folder's delete is planned as one. A folder that may go (synced before or taken along,
    and deleted or moved on a side) waits, held as it is with the folders above it and with
-   everything of the page below it, when something below it on any side is still to plan in
-   another page, or when it is itself planned in another page and is above a node of this
-   page. Planned apart, what is below read alive as context and kept a deleted folder alive;
-   or the folder's trash took along what changed there (an edit lost to `.hbsync/trash`); or
-   its items went one by one before it, each an item of its own in Recently deleted. A node
-   held so is never brought back here as an orphan, nor its folder: its own page decides.
+   everything of the page below it (and the folders each of those is in now), when something
+   below it on any side is dirty in another page, or when it is itself planned in another page
+   and is above a node of this page (then only it waits: its page covers the page's folders
+   below it). A held delete out of the dirty set below it doesn't count: as in one page, it is
+   planned again only when a view reaches it. Planned apart, what is below read alive as
+   context and kept a deleted folder alive; or the folder's trash took along what changed
+   there (an edit lost to `.hbsync/trash`); or its items went one by one before it, each an
+   item of its own in Recently deleted. A node held so is left as it is on every side,
+   nothing done to it (not even made where it isn't yet), and never brought back here as an
+   orphan, nor its folder: its own page decides.
 
    What waits is planned next as a page of its own: the folder with its whole dirty subtree,
    on every side. A subtree too big for a page goes as its folders' subtrees first (several
@@ -239,7 +243,9 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    whole, as one larger page. So the drive removes the folder first, then what is in it, and
    Recently deleted lists it as one item, or as its folders' items and then its own: never a
    file of it apart. What waits stays queued across sweeps and syncs (a sync that stops at its
-   round limit goes on with it), each tried once a sweep. Cost: a plan takes about 1 KB a
+   round limit goes on with it), each tried once a sweep; what a page of its own planned isn't
+   planned again in the sweep's own pages (its plan stands), and a page so passed over costs
+   no round. Cost: a plan takes about 1 KB a
    node at its peak, so 20 MB for a page; a flat folder of 100,000 items is one page of about
    100 MB, for that page only. Measured: 20,000 nodes peak at 24 MB (0.3 s), 100,000 at
    100 MB (2 s), 200,000 at 200 MB (5 s). Where the page isn't all there is to plan (a
@@ -247,16 +253,19 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    them (100,000: 90 ms), and a page's topmost folder that may go a walk of its subtree.
 
    Clashes across pages are planned the same way. A node whose name a node of another page
-   holds, one going into a folder another page makes, or onto a name such a node holds here
-   now (a swap), or one whose folder another page decides, waits, held as it is (nothing sent
-   to fail meanwhile). It is planned with the other node, as a page of its own; one that
+   holds, one going into a folder another page makes or that waits (one held for another
+   page, or for such a wait), or onto a name such a node holds here now (a swap), or one whose
+   folder another page decides, waits, held as it is (nothing sent to fail meanwhile). It is planned with the other node, as a page of its own; one that
    still waits there is planned again with what it waits for, one larger page. Simulator:
    `clients_planning_in_small_pages_converge_without_loss` and
    `planning_in_small_pages_ends_as_planning_whole` (pages of 1 to 4 against one page: the
    drive's folders and files, and the files Recently deleted lists apart from their folders);
    engine: `a_delete_here_in_pages_goes_as_one_to_recently_deleted`,
    `a_change_deep_in_a_folder_removed_elsewhere_keeps_it_in_pages`,
-   `what_was_moved_into_a_deleted_folder_goes_with_it_in_pages`.
+   `what_was_moved_into_a_deleted_folder_goes_with_it_in_pages`,
+   `a_node_moved_out_of_a_waiting_folder_keeps_its_new_one`,
+   `what_goes_into_a_folder_held_for_another_page_waits_too`,
+   `a_held_delete_below_a_removed_folder_doesnt_hold_it_for_good`.
 
 ## 7. Delete safety
 

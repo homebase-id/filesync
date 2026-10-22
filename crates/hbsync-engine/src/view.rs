@@ -691,7 +691,7 @@ impl crate::pages::Pending for StorePending<'_, '_> {
     }
     fn below(&mut self, folder: NodeId, page: &BTreeSet<NodeId>) -> Result<bool, StateError> {
         // One beyond the page's nodes is enough to tell.
-        let under = self.0.pending_under(folder, page.len() + 1)?;
+        let under = self.0.dirty_under(folder, page.len() + 1)?;
         Ok(under.iter().any(|n| !page.contains(n)))
     }
 }

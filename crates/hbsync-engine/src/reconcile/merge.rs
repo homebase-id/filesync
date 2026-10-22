@@ -274,7 +274,11 @@ impl Reconciler<'_> {
                 r.tags.clone()
             };
         }
-        if self.held.contains(&node) && !self.stays_put(node, target.as_ref()) {
+        // Held for another page: as it is, nothing done (not even made where it isn't yet,
+        // into a folder that may not be there): its own page decides.
+        if self.held.contains(&node)
+            && (self.paged.contains(&node) || !self.stays_put(node, target.as_ref()))
+        {
             if target.is_none() {
                 self.plan.delete_waits.push(node);
             }

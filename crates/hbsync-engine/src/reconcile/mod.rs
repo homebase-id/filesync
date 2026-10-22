@@ -107,13 +107,26 @@ pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
     let mut together: Vec<Vec<NodeId>> = Vec::new();
     let mut plan = loop {
         let r = Reconciler::new(view, opts, masking, &masks, &holds, taken.clone());
-        let (mut plan, waiters, named) = r.run();
+        let (mut plan, waiters, named, placed) = r.run();
         together.append(&mut plan.waits_together);
         holds.named = named;
         let new: Vec<NodeId> = waiters
             .into_iter()
             .filter(|n| !holds.waits.contains(n))
             .collect();
+        // Placements that clash across pages: held as they are, with their folders.
+        let placed: Vec<NodeId> = placed
+            .into_iter()
+            .filter(|n| !holds.held.contains(n))
+            .collect();
+        for &node in &placed {
+            holds.held.extend(held_from(view, node));
+            holds.held.insert(node);
+            holds.paged.insert(node);
+        }
+        if new.is_empty() && !placed.is_empty() {
+            continue;
+        }
         if new.is_empty() {
             if kept_judged {
                 break plan;
@@ -200,6 +213,9 @@ struct Reconciler<'a> {
     going: &'a [NodeId],
     /// Of `held`, what waits for them ([`Holds::paged`]).
     paged: &'a HashSet<NodeId>,
+    /// What of this plan waits to be placed with another page's nodes
+    /// ([`Reconciler::places_held_elsewhere`]): planned again held as it is.
+    placed: BTreeSet<NodeId>,
     /// What is dirty in another page (`Input::dirty_elsewhere`): context as it is, its change
     /// unmerged here, so no repair of this plan moves it, renames it or adopts it (it keeps
     /// its name against this page's nodes); its own page decides it.
@@ -282,10 +298,19 @@ impl Holds {
         // items went one by one before it. The engine plans it with its whole dirty subtree
         // as a page of its own next (`pages::OwnPages`). (What is dirty in another page is
         // never moved by this plan's repairs: `Reconciler::elsewhere`.)
-        let mut going: Vec<NodeId> = input.going.iter().copied().collect();
-        if !own_page {
-            going.extend(&input.going_above);
-        }
+        // A folder of the page below one another page plans waits for that one alone: its
+        // page covers both (a piece of a split doesn't wait for the folder above it).
+        let above: HashSet<NodeId> = match own_page {
+            true => HashSet::new(),
+            false => input.going_above.clone(),
+        };
+        let mut going: Vec<NodeId> = input
+            .going
+            .iter()
+            .copied()
+            .filter(|g| !held_from(input, *g).iter().any(|a| above.contains(a)))
+            .chain(above.iter().copied())
+            .collect();
         going.sort();
         going.dedup();
         let mut paged = HashSet::new();
@@ -293,11 +318,12 @@ impl Holds {
             paged.insert(folder);
             paged.extend(held_from(input, folder));
             for tree in [&input.base, &input.local, &input.remote] {
-                paged.extend(
-                    tree.subtree(folder)
-                        .into_iter()
-                        .filter(|n| input.dirty.contains(n)),
-                );
+                for node in tree.subtree(folder) {
+                    // With the folders it is in now, on every side (moved out of it, say).
+                    if input.dirty.contains(&node) && paged.insert(node) {
+                        paged.extend(held_from(input, node));
+                    }
+                }
             }
         }
         held.extend(&paged);
@@ -339,6 +365,7 @@ impl<'a> Reconciler<'a> {
             going: &holds.going,
             paged: &holds.paged,
             elsewhere: &input.dirty_elsewhere,
+            placed: BTreeSet::new(),
             held_by: &holds.by_file,
             kept: &holds.kept,
             waiters: BTreeSet::new(),
@@ -349,7 +376,7 @@ impl<'a> Reconciler<'a> {
 
     /// The plan, what waited for a name in it, and what held the names (with an earlier
     /// plan's).
-    fn run(mut self) -> (Plan, BTreeSet<NodeId>, HashSet<NodeId>) {
+    fn run(mut self) -> (Plan, BTreeSet<NodeId>, HashSet<NodeId>, BTreeSet<NodeId>) {
         self.build_context();
         let dirty: Vec<NodeId> = self.input.dirty.iter().copied().collect();
         for node in dirty {
@@ -389,20 +416,35 @@ impl<'a> Reconciler<'a> {
         self.guard_mass_delete();
         self.plan.waiting = self.waiting();
         // The folders this page waits for, with everything of it below them.
-        self.plan.waits_for_pages = self.going.to_vec();
+        self.plan.waits_for_pages = self.going.iter().map(|n| self.masks.store_id(*n)).collect();
         self.plan.deferred = self.deferred.into_iter().collect();
-        (self.plan, self.waiters, self.name_waits)
+        (self.plan, self.waiters, self.name_waits, self.placed)
     }
 
     /// Where this plan puts a node into a folder another page plans that isn't on that side
     /// yet, or onto a name such a node's item holds there now (it moves away in its own
     /// page): the two wait to be planned together, as a page of their own next
-    /// (`Plan::waits_together`), each alone failing for the other (a swap of places).
+    /// (`Plan::waits_together`), each alone failing for the other (a swap of places). So does
+    /// what goes into a folder that isn't on that side and that this plan doesn't make (held
+    /// for another page, or for such a wait). The node is planned again held as it is (`placed`): nothing sent to
+    /// fail meanwhile.
     fn places_held_elsewhere(&mut self) {
         if self.elsewhere.is_empty() {
             return;
         }
         let i = self.input;
+        let made = |local: bool| -> HashSet<NodeId> {
+            self.plan
+                .ops
+                .iter()
+                .filter_map(|op| match op {
+                    Op::LocalMkdir { node, .. } if local => Some(*node),
+                    Op::RemoteCreate { node, .. } if !local => Some(*node),
+                    _ => None,
+                })
+                .collect()
+        };
+        let (made_here, made_there) = (made(true), made(false));
         let mut together = Vec::new();
         for op in &self.plan.ops {
             let (node, parent, name, side) = match op {
@@ -414,17 +456,21 @@ impl<'a> Reconciler<'a> {
                 }
                 | Op::LocalDownload {
                     node, parent, name, ..
-                } => (*node, *parent, name, &i.local),
+                } => (*node, *parent, name, (&i.local, &made_here)),
                 Op::RemoteCreate {
                     node, parent, name, ..
                 }
                 | Op::RemoteUpdate {
                     node, parent, name, ..
-                } => (*node, *parent, name, &i.remote),
+                } => (*node, *parent, name, (&i.remote, &made_there)),
                 _ => continue,
             };
+            let (side, made) = side;
             let mut with: Vec<NodeId> = Vec::new();
-            if self.elsewhere(parent) && !side.contains(parent) {
+            if (self.elsewhere(parent) || self.paged.contains(&parent))
+                && !side.contains(parent)
+                && !made.contains(&parent)
+            {
                 with.push(parent);
             }
             if let Some(occupant) = side.child_named(parent, name, Some(node))
@@ -437,9 +483,8 @@ impl<'a> Reconciler<'a> {
                 together.push(with);
             }
         }
-        // Planned again with them held as they are: no operation sent to fail meanwhile.
         for group in together {
-            self.waiters
+            self.placed
                 .extend(group.iter().filter(|n| self.scope.contains(n)));
             self.wait_together(group);
         }
@@ -454,7 +499,8 @@ impl<'a> Reconciler<'a> {
 
     /// `nodes` wait to be planned together, as a page of their own next
     /// (`Plan::waits_together`): one of them is planned in another page.
-    fn wait_together(&mut self, mut nodes: Vec<NodeId>) {
+    fn wait_together(&mut self, nodes: Vec<NodeId>) {
+        let mut nodes: Vec<NodeId> = nodes.into_iter().map(|n| self.masks.store_id(n)).collect();
         nodes.sort();
         nodes.dedup();
         self.plan.waits_together.push(nodes);

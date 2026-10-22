@@ -786,7 +786,12 @@ impl Engine {
         let mut whole = after.is_none();
         let mut swept = false;
         self.own_pages.new_sweep();
-        for _ in 0..self.cfg.max_rounds {
+        // The nodes pages of their own planned this sweep.
+        let mut planned_own: std::collections::HashSet<NodeId> = Default::default();
+        // Rounds that planned something: a page whose nodes a page of their own planned this
+        // sweep is passed over without one.
+        let mut rounds = 0;
+        while rounds < self.cfg.max_rounds {
             if report.stopped || self.stop.load(Ordering::Relaxed) {
                 report.stopped = true;
                 break;
@@ -799,13 +804,23 @@ impl Engine {
             // before), or when nothing dirty had them skip the synced files; with what is held
             // as every synced file so far this sync.
             let own_page = self.next_own_page()?;
-            let (dirty, next, own, fresh) = self.db.read(|s| {
+            let (dirty, next, own, fresh, read) = self.db.read(|s| {
                 let (dirty, next, own) = match own_page {
-                    Some(page) => (page, after, true),
+                    Some((page, piece)) => (page, after, Some(piece)),
                     None => {
                         let (dirty, next) = s.dirty_marks(after, self.cfg.batch)?;
-                        (dirty, next, false)
+                        (dirty, next, None)
                     }
+                };
+                // What a page of its own planned this sweep isn't planned again in it: its
+                // plan stands (what it holds, what waits).
+                let read = dirty.len();
+                let dirty: Vec<Mark> = match own {
+                    Some(_) => dirty,
+                    None => dirty
+                        .into_iter()
+                        .filter(|m| !planned_own.contains(&m.node))
+                        .collect(),
                 };
                 let stale = !dirty.is_empty()
                     && (counts.synced.is_none() || s.data_version()? != counts.version);
@@ -813,7 +828,7 @@ impl Engine {
                     true => Some(guard_counts(s, &self.confirmed, None, counts.synced, true)?),
                     false => None,
                 };
-                Ok((dirty, next, own, fresh))
+                Ok((dirty, next, own, fresh, read))
             })?;
             if let Some(mut fresh) = fresh {
                 // Never less pending than the sweep judged its earlier pages by: what this
@@ -829,10 +844,12 @@ impl Engine {
                 counts = fresh;
             }
             if !dirty.is_empty() {
+                rounds += 1;
                 report.rounds += 1;
                 let done_before = report.ops_done;
-                // A page of its own isn't held for the folders above it (`Options::own_page`).
-                opts.own_page = own;
+                // A piece of a folder too big for a page isn't held for the folders above it
+                // (`Options::own_page`).
+                opts.own_page = own == Some(true);
                 match self.plan_and_execute(&dirty, &opts, &mut hold_out, report)? {
                     Some(page) => {
                         // A node planned again counts as its last plan says.
@@ -845,17 +862,19 @@ impl Engine {
                 }
                 progress |= report.ops_done > done_before;
             }
-            if own {
+            if own.is_some() {
+                planned_own.extend(dirty.iter().map(|m| m.node));
                 continue;
             }
             after = next;
-            if dirty.len() < self.cfg.batch {
+            if read < self.cfg.batch {
                 // End of a sweep: what it held, and what waits now.
                 report.held = self.with_held_out(std::mem::take(&mut held));
                 report.waiting = std::mem::take(&mut self.waiting);
                 swept = true;
                 after = None;
                 self.own_pages.new_sweep();
+                planned_own.clear();
                 let page = std::mem::take(&mut hold_out);
                 if !progress {
                     settled = whole.then_some(page);
@@ -881,7 +900,7 @@ impl Engine {
     /// than a page directly in a folder, costs about 1 KB a node at its peak (measured: a flat
     /// folder of 100,000 items, 100 MB). A query a folder (two for one too big, three for one
     /// planned whole), one a node waiting together.
-    fn next_own_page(&mut self) -> Result<Option<Vec<Mark>>, EngineError> {
+    fn next_own_page(&mut self) -> Result<Option<(Vec<Mark>, bool)>, EngineError> {
         Ok(self
             .own_pages
             .next(self.cfg.batch, &mut DbPages(&mut self.db))?)

@@ -4300,3 +4300,58 @@ fn a_node_in_a_file_meets_what_is_in_recovered_files() -> R {
     assert_ne!(name, "c", "not over what Recovered files holds");
     Ok(())
 }
+
+/// A folder removed on the drive at a time not known yet (an open removal) took along the
+/// synced file still live in it (`along::taken_along`: an open removal is the newest): the
+/// guard counts it with what is gone remotely, as the reconciler does, and a confirmed trash
+/// of the folder covers it (sync semantics §7).
+#[test]
+fn an_open_removal_counts_what_it_took_along() -> R {
+    let mut h = Harness::new()?;
+    let (folder, file) = (NodeId::new(), NodeId::new());
+    h.local_folder("d", folder)?;
+    h.local_file("d/f", file, b"f")?;
+    let f_c = h.content(b"f");
+    h.db.write(|s| {
+        s.folder().put_base(&BaseRow::new(
+            folder,
+            NodeState::folder(NodeId::ROOT, "d"),
+            some_version(),
+        ))?;
+        s.folder().put_base(&BaseRow::new(
+            file,
+            NodeState::file(folder, "f", f_c),
+            some_version(),
+        ))?;
+        let row = |node, parent, kind, name: &str| {
+            let content = match kind {
+                NodeKind::File => NodeContent::file(name, 0, f_c.size, false),
+                _ => NodeContent::folder(name),
+            };
+            let hash = (kind == NodeKind::File).then_some(f_c.hash);
+            MirrorRow::from_content(some_version(), node, parent, kind, &content, hash)
+        };
+        s.account().put_removed(&RemovedRow {
+            row: row(folder, NodeId::ROOT, NodeKind::Folder, "d"),
+            removed_at: None,
+        })?;
+        let mut live = row(file, folder, NodeKind::File, "f");
+        live.changed_at = Some(5);
+        s.account().put_mirror(&live)?;
+        s.folder().clear_dirty(file)?;
+        s.folder().mark_dirty(folder)
+    })?;
+    let (pending, confirmed) =
+        h.db.read(|s| Ok((s.pending_file_deletes()?, s.confirmed_file_deletes(folder)?)))?;
+    assert_eq!(
+        pending,
+        (0, 1),
+        "the file taken along counts as gone remotely"
+    );
+    assert_eq!(
+        confirmed,
+        Some((false, vec![file])),
+        "the folder's trash covers it"
+    );
+    Ok(())
+}

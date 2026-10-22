@@ -22,6 +22,30 @@ const WRITTEN_BY_REMOVAL: &str =
 /// [`WRITTEN_BY_REMOVAL`] below a node `t` taken along by the removal at `t.at`.
 const WRITTEN_BY_TAKEN: &str = "(t.at IS NULL OR m.changed_at IS NULL OR m.changed_at <= t.at)";
 
+/// A recursive CTE `sub(id)`: the node `?1` and its subtree on any side (the base's, here,
+/// the drive's), across sides (a child here of a folder in the base, say).
+fn subtree_any_side() -> String {
+    format!(
+        "sub(id) AS (SELECT {ID_OF} \
+           UNION SELECT b.id FROM base b JOIN sub ON b.parent = sub.id AND b.folder = $F \
+           UNION SELECT l.id FROM local l JOIN sub ON l.parent = sub.id AND l.folder = $F \
+           UNION SELECT m.id FROM remote m JOIN sub ON m.parent = sub.id)"
+    )
+}
+
+/// A recursive CTE `taken(id, at)`: the live nodes a folder's removal took along
+/// (`along::taken_along`), each with the time of the removal that took it.
+fn taken_along() -> String {
+    format!(
+        "taken(id, at) AS ( \
+           SELECT m.id, r.removed_at FROM removed r JOIN nodes n ON n.uuid = r.node \
+           JOIN remote m ON m.parent = n.id \
+           WHERE r.kind = 1 AND {WRITTEN_BY_REMOVAL} \
+           UNION SELECT m.id, t.at FROM remote m JOIN taken t ON m.parent = t.id \
+           WHERE {WRITTEN_BY_TAKEN})"
+    )
+}
+
 /// Nodes a query of [`ReadTx::pending_among`] asks about (SQLite allows only so many
 /// variables in one).
 const PENDING_CHUNK: usize = 500;
@@ -150,32 +174,28 @@ impl ReadTx<'_> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         self.many(
             &format!(
-                "WITH RECURSIVE sub(id) AS (SELECT {ID_OF} \
-                   UNION SELECT b.id FROM base b JOIN sub ON b.parent = sub.id AND b.folder = $F \
-                   UNION SELECT l.id FROM local l JOIN sub ON l.parent = sub.id AND l.folder = $F \
-                   UNION SELECT m.id FROM remote m JOIN sub ON m.parent = sub.id) \
+                "WITH RECURSIVE {} \
                  SELECT d.id, n.uuid, d.seq FROM sub JOIN dirty d ON d.folder = $F AND d.id = sub.id \
-                 JOIN nodes n ON n.id = d.id ORDER BY d.id LIMIT ?2"
+                 JOIN nodes n ON n.id = d.id ORDER BY d.id LIMIT ?2",
+                subtree_any_side()
             ),
             params![node.0.as_bytes(), limit],
             |r| mark_row(r)?,
         )
     }
 
-    /// Up to `limit` nodes still to plan (dirty, or a held delete) in `node`'s subtree on any
-    /// side, it too, in id order. Walks the subtree: one query.
-    pub fn pending_under(&self, node: NodeId, limit: usize) -> Result<Vec<NodeId>> {
+    /// Up to `limit` dirty nodes in `node`'s subtree on any side, it too, in no order: what a
+    /// page of its own of `node` would plan ([`ReadTx::dirty_marks_under`]; a held delete out
+    /// of the dirty set is planned again only when a view reaches it, as in one page). Walks
+    /// the subtree till it has them: one query.
+    pub fn dirty_under(&self, node: NodeId, limit: usize) -> Result<Vec<NodeId>> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         self.many(
             &format!(
-                "WITH RECURSIVE sub(id) AS (SELECT {ID_OF} \
-                   UNION SELECT b.id FROM base b JOIN sub ON b.parent = sub.id AND b.folder = $F \
-                   UNION SELECT l.id FROM local l JOIN sub ON l.parent = sub.id AND l.folder = $F \
-                   UNION SELECT m.id FROM remote m JOIN sub ON m.parent = sub.id) \
-                 SELECT n.uuid FROM sub JOIN nodes n ON n.id = sub.id \
-                 WHERE EXISTS (SELECT 1 FROM dirty d WHERE d.folder = $F AND d.id = sub.id) \
-                 OR EXISTS (SELECT 1 FROM held_deletes h WHERE h.folder = $F AND h.id = sub.id) \
-                 ORDER BY sub.id LIMIT ?2"
+                "WITH RECURSIVE {} \
+                 SELECT n.uuid FROM sub JOIN dirty d ON d.folder = $F AND d.id = sub.id \
+                 JOIN nodes n ON n.id = d.id LIMIT ?2",
+                subtree_any_side()
             ),
             params![node.0.as_bytes(), limit],
             |r| codec::node(&r.get::<_, Vec<u8>>(0)?),
@@ -235,16 +255,14 @@ impl ReadTx<'_> {
     /// nothing is dirty (no plan to judge): the removed folders, and what is live below them
     /// (hardly ever any).
     fn taken_files(&self) -> Result<u64> {
+        if self.dirty_count()? == 0 {
+            return Ok(0);
+        }
         self.count(&format!(
-            "WITH RECURSIVE taken(id, at) AS ( \
-               SELECT m.id, r.removed_at FROM removed r JOIN nodes n ON n.uuid = r.node \
-               JOIN remote m ON m.parent = n.id \
-               WHERE r.kind = 1 AND {WRITTEN_BY_REMOVAL} \
-               AND EXISTS (SELECT 1 FROM dirty WHERE folder = $F) \
-               UNION SELECT m.id, t.at FROM remote m JOIN taken t ON m.parent = t.id \
-               WHERE {WRITTEN_BY_TAKEN}) \
+            "WITH RECURSIVE {} \
              SELECT COUNT(DISTINCT t.id) FROM taken t JOIN base b ON b.folder = $F AND b.id = t.id \
-             WHERE b.kind = 0"
+             WHERE b.kind = 0",
+            taken_along()
         ))
     }
 
@@ -274,21 +292,22 @@ impl ReadTx<'_> {
     /// [`pending_file_deletes`](Self::pending_file_deletes): whether `node` is a file gone
     /// locally (deleted remotely, one node at a time), and the files gone remotely in its local
     /// subtree (a trash takes everything under it along): the dirty ones gone from the drive,
-    /// and the synced ones still live there, not dirty, which a trash of a folder in Recently
-    /// deleted takes along (counted by `taken_files`). `None` when `node` isn't dirty.
+    /// and the synced ones a folder's removal took along, still live there (as `taken_files`
+    /// counts them). `None` when `node` isn't dirty.
     pub fn confirmed_file_deletes(&self, node: NodeId) -> Result<Option<(bool, Vec<NodeId>)>> {
         static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             format!(
                 "WITH RECURSIVE top(id) AS (SELECT {ID_OF}), \
                  sub(id) AS (SELECT id FROM top \
                    UNION SELECT l.id FROM local l JOIN sub ON l.parent = sub.id \
-                   WHERE l.folder = $F) \
+                   WHERE l.folder = $F), {} \
                  SELECT n.uuid, k.id IS NOT NULL AND d.id = (SELECT id FROM top), \
                    k.id IS NOT NULL AND coalesce({GONE_LOCALLY}, 0), \
-                   CASE WHEN k.id IS NOT NULL THEN coalesce({GONE_REMOTELY}, 0) \
-                     ELSE b.kind = 0 AND EXISTS (SELECT 1 FROM remote m WHERE m.id = d.id) END \
+                   coalesce(k.id IS NOT NULL AND {GONE_REMOTELY}, 0) \
+                     OR coalesce(b.kind = 0 AND EXISTS (SELECT 1 FROM taken t WHERE t.id = d.id), 0) \
                  FROM (SELECT id FROM sub) d LEFT JOIN dirty k ON k.folder = $F AND k.id = d.id \
-                 JOIN nodes n ON n.id = d.id LEFT JOIN base b ON b.folder = $F AND b.id = d.id"
+                 JOIN nodes n ON n.id = d.id LEFT JOIN base b ON b.folder = $F AND b.id = d.id",
+                taken_along()
             )
         });
         let mut stmt = self.prep(&SQL)?;

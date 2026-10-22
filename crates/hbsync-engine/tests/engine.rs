@@ -5842,3 +5842,145 @@ fn a_delete_in_pages_of_any_size_lists_no_file_apart() -> R {
     }
     Ok(())
 }
+
+/// Syncs `c` until nothing is left to do, or 8 times; whether any sync failed an operation.
+fn settle(c: &mut Client) -> Result<bool, Box<dyn std::error::Error>> {
+    let mut failed = false;
+    for _ in 0..8 {
+        let report = c.sync()?;
+        failed |= !report.failed.is_empty();
+        if report.pending == 0 {
+            break;
+        }
+    }
+    Ok(failed)
+}
+
+/// Another device removes `d` and `q`; b moves `d/n.txt` into `q` and makes `d/new.txt`. The
+/// page that waits for `d` holds `n` with the folders it is in now: `q` stays with it, as in
+/// one page, never trashed with `n` in it (review 16).
+#[test]
+fn a_node_moved_out_of_a_waiting_folder_keeps_its_new_one() -> R {
+    for batch in [1, 2, 3, 20_000] {
+        let server = server();
+        let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+        let mut b = Client::with_config(&server, "b", move |cfg| {
+            cfg.guard.allow = true;
+            cfg.batch = batch;
+        })?;
+        a.write("d/n.txt", "n")?;
+        a.write("q/k.txt", "k")?;
+        a.write("keep.txt", "k")?;
+        a.sync()?;
+        b.sync()?;
+        remove_on_drive(&server, &|name| name == "d" || name == "q")?;
+        fs::rename(b.root.join("d/n.txt"), b.root.join("q/n.txt"))?;
+        b.write("d/new.txt", "new")?;
+        settle(&mut b)?;
+        assert_eq!(b.read_text("q/n.txt")?, "n", "pages of {batch}");
+        assert_eq!(b.read_text("d/new.txt")?, "new", "pages of {batch}");
+    }
+    Ok(())
+}
+
+/// Folder `e`, older than `d`, is moved into it, and b deletes `d`: the page holding `e` waits
+/// for `d` alone, whose page covers both, so Recently deleted lists one item, `d`, in pages
+/// that hold all of `d` as in one (review 16: `e` went first, an item of its own).
+#[test]
+fn an_older_folder_moved_into_a_deleted_one_goes_with_it() -> R {
+    for batch in [2, 4, 8, 9, 12, 20_000] {
+        let server = server();
+        let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+        let mut b = Client::with_config(&server, "b", move |cfg| {
+            cfg.guard.allow = true;
+            cfg.batch = batch;
+        })?;
+        for i in 0..3 {
+            a.write(&format!("e/x{i}.txt"), "x")?;
+        }
+        a.sync()?;
+        b.sync()?;
+        for i in 0..3 {
+            a.write(&format!("d/y{i}.txt"), "y")?;
+        }
+        fs::rename(a.root.join("e"), a.root.join("d/e"))?;
+        a.sync()?;
+        b.sync()?;
+        fs::remove_dir_all(b.root.join("d"))?;
+        settle(&mut b)?;
+        let deleted = b.recently_deleted(100)?;
+        let roots: Vec<&str> = deleted
+            .iter()
+            .filter(|d| d.root == d.node)
+            .map(|d| d.path.as_str())
+            .collect();
+        // `d` has 8 nodes: in smaller pages, `e` may go first, a piece of it.
+        let piece = batch < 8 && roots == ["d", "d/e"];
+        assert!(roots == ["d"] || piece, "pages of {batch}: {deleted:?}");
+    }
+    Ok(())
+}
+
+/// a makes `B`, then `A`, and moves `B` into `A` and `x.txt` into `B`; b, new, syncs in pages
+/// of 1: what goes into a folder held for another page waits with it, so nothing is sent to
+/// fail meanwhile (review 16), and b ends with all of it.
+#[test]
+fn what_goes_into_a_folder_held_for_another_page_waits_too() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    a.write("B/b.txt", "b")?;
+    a.write("x.txt", "x")?;
+    a.sync()?;
+    a.write("A/a.txt", "a")?;
+    fs::rename(a.root.join("B"), a.root.join("A/B"))?;
+    fs::rename(a.root.join("x.txt"), a.root.join("A/B/x.txt"))?;
+    a.sync()?;
+    let mut b = Client::with_config(&server, "b", |cfg| {
+        cfg.guard.allow = true;
+        cfg.batch = 1;
+    })?;
+    let failed = settle(&mut b)?;
+    assert!(!failed, "an operation was sent to fail");
+    assert_eq!(b.read_text("A/B/x.txt")?, "x");
+    assert_eq!(b.read_text("A/B/b.txt")?, "b");
+    Ok(())
+}
+
+/// b's delete of what is in `d/s` is held for the user (out of the dirty set), then another
+/// device removes `d`: a held delete below `d` doesn't make it wait for a page that never
+/// comes (review 16: planned again every sync, forever). In pages as in one.
+#[test]
+fn a_held_delete_below_a_removed_folder_doesnt_hold_it_for_good() -> R {
+    let outcome = |batch: usize| -> Result<(Vec<String>, u64), Box<dyn std::error::Error>> {
+        let server = server();
+        let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+        let mut b = Client::with_config(&server, "b", move |cfg| {
+            cfg.guard.min = 2;
+            cfg.batch = batch;
+        })?;
+        for i in 0..6 {
+            a.write(&format!("d/s/f{i}.txt"), "f")?;
+        }
+        a.write("d/t.txt", "t")?;
+        a.write("keep.txt", "k")?;
+        a.sync()?;
+        b.sync()?;
+        for i in 0..6 {
+            fs::remove_file(b.root.join(format!("d/s/f{i}.txt")))?;
+        }
+        let held = b.sync()?;
+        assert!(!held.held.is_empty(), "pages of {batch}: {held:?}");
+        b.sync()?;
+        remove_on_drive(&server, &|name| name == "d")?;
+        let mut pending = 0;
+        for _ in 0..8 {
+            pending = b.sync()?.pending;
+        }
+        Ok((b.tree_text(""), pending))
+    };
+    let whole = outcome(20_000)?;
+    for batch in [1, 2, 3] {
+        assert_eq!(outcome(batch)?, whole, "pages of {batch}");
+    }
+    Ok(())
+}
