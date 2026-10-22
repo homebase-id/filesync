@@ -89,6 +89,16 @@ impl RelPath {
             || (self.0.starts_with(&other.0) && self.0.as_bytes().get(other.0.len()) == Some(&b'/'))
     }
 
+    /// The path below `base` that leads here: `a/b/c` without `a` is `b/c`, without itself the
+    /// root. `None` where it isn't below `base`.
+    pub fn strip_prefix(&self, base: &RelPath) -> Option<RelPath> {
+        if !self.starts_with(base) {
+            return None;
+        }
+        let rest = self.0[base.0.len()..].trim_start_matches('/');
+        Some(RelPath(rest.to_owned()))
+    }
+
     /// The absolute native path below `root`, with the Windows long-path prefix where needed.
     pub fn to_native(&self, root: &Path) -> PathBuf {
         let mut path = root.to_path_buf();
@@ -153,6 +163,15 @@ mod tests {
 
     fn p(s: &str) -> RelPath {
         RelPath::new(s).expect("valid path")
+    }
+
+    #[test]
+    fn strip_prefix_leaves_what_is_below() {
+        assert_eq!(p("a/b/c").strip_prefix(&p("a")), Some(p("b/c")));
+        assert_eq!(p("a/b").strip_prefix(&p("a/b")), Some(RelPath::root()));
+        assert_eq!(p("a/b").strip_prefix(&RelPath::root()), Some(p("a/b")));
+        assert_eq!(p("ab/c").strip_prefix(&p("a")), None);
+        assert_eq!(p("a").strip_prefix(&p("a/b")), None);
     }
 
     #[test]

@@ -77,12 +77,14 @@ impl ContentHash {
         self.bytes.iter().map(|b| format!("{b:02x}")).collect()
     }
 
-    /// Parses `algorithm:hex`, the form used in the state DB and logs.
-    pub fn parse_tagged(s: &str) -> Result<Self, HashParseError> {
-        let (alg, hex) = s.split_once(':').ok_or(HashParseError::Base64)?;
-        let algorithm: HashAlgorithm = alg.parse()?;
+    /// Parses 64 hex digits made by `algorithm`.
+    pub fn from_hex(algorithm: HashAlgorithm, hex: &str) -> Result<Self, HashParseError> {
         if hex.len() != 64 {
             return Err(HashParseError::Length(hex.len() / 2));
+        }
+        // Digits only: a sign or a character of more than one byte isn't one.
+        if !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(HashParseError::Base64);
         }
         let mut bytes = [0u8; 32];
         for (i, byte) in bytes.iter_mut().enumerate() {
@@ -90,6 +92,12 @@ impl ContentHash {
                 .map_err(|_| HashParseError::Base64)?;
         }
         Ok(ContentHash { algorithm, bytes })
+    }
+
+    /// Parses `algorithm:hex`, the form used in the state DB and logs.
+    pub fn parse_tagged(s: &str) -> Result<Self, HashParseError> {
+        let (alg, hex) = s.split_once(':').ok_or(HashParseError::Base64)?;
+        Self::from_hex(alg.parse()?, hex)
     }
 }
 

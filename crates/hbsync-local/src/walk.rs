@@ -53,6 +53,8 @@ pub struct Walker<'a> {
     stack: Vec<Frame>,
     queued: Vec<WalkEvent>,
     descend: Option<DescendFn<'a>>,
+    /// Walking a folder that isn't at its place ([`Walker::moved`]): its place, and where it is.
+    moved: Option<(RelPath, PathBuf)>,
 }
 
 impl std::fmt::Debug for Walker<'_> {
@@ -85,19 +87,57 @@ impl<'a> Walker<'a> {
         filter: &'a Filter,
         descend: Option<DescendFn<'a>>,
     ) -> Self {
+        Self::build(root, start, None, filter, descend)
+    }
+
+    /// Walks the folder at `at` (anywhere) as if it were at its place `start` in the sync root
+    /// `root`: the paths it reports, and what `filter` makes of them, are those it has there.
+    /// For a folder moved aside to be deleted, whose ignore rules (by path) are the ones of its
+    /// place.
+    pub fn moved(
+        root: &Path,
+        start: RelPath,
+        at: &Path,
+        filter: &'a Filter,
+        descend: Option<DescendFn<'a>>,
+    ) -> Self {
+        let moved = Some((start.clone(), at.to_path_buf()));
+        Self::build(root, start, moved, filter, descend)
+    }
+
+    fn build(
+        root: &Path,
+        start: RelPath,
+        moved: Option<(RelPath, PathBuf)>,
+        filter: &'a Filter,
+        descend: Option<DescendFn<'a>>,
+    ) -> Self {
         let mut walker = Walker {
             root: root.to_path_buf(),
             filter,
             stack: Vec::new(),
             queued: Vec::new(),
             descend,
+            moved,
         };
         walker.open(start);
         walker
     }
 
+    /// Where folder `dir` is on disk; `None` for one outside a moved folder (never asked).
+    fn native(&self, dir: &RelPath) -> Option<PathBuf> {
+        match &self.moved {
+            None => Some(dir.to_native(&self.root)),
+            Some((start, at)) => Some(dir.strip_prefix(start)?.to_native(at)),
+        }
+    }
+
     fn open(&mut self, dir: RelPath) {
-        match list_dir(&dir.to_native(&self.root)) {
+        let listed = self
+            .native(&dir)
+            .ok_or_else(|| io::Error::other("not in the folder walked"))
+            .and_then(|at| list_dir(&at));
+        match listed {
             Ok(mut items) => {
                 items.sort_by(|a, b| b.name.cmp(&a.name));
                 self.stack.push(Frame { dir, items });
@@ -343,6 +383,52 @@ mod tests {
                 ..
             }]
         ));
+        Ok(())
+    }
+
+    #[test]
+    fn a_moved_folder_is_walked_as_at_its_place() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (root, aside) = (dir.path().join("root"), dir.path().join("aside/n1"));
+        for d in ["build", "src", "src/build"] {
+            fs::create_dir_all(aside.join(d))?;
+        }
+        fs::create_dir(&root)?;
+        for f in ["build/out.o", "src/main.rs", "src/build/x", ".DS_Store"] {
+            fs::write(aside.join(f), b"x")?;
+        }
+        // Rules by path: only the folder's place says what they match.
+        let filter = Filter::from_rules("/proj/build/\n", false).map_err(io::Error::other)?;
+        let start = RelPath::new("proj").map_err(io::Error::other)?;
+        let mut entries = Vec::new();
+        let mut skipped = Vec::new();
+        for event in Walker::moved(&root, start, &aside, &filter, None) {
+            match event {
+                WalkEvent::Entry { path, meta } => {
+                    entries.push((path.as_str().to_owned(), meta.kind));
+                }
+                WalkEvent::Skipped { path, reason } => skipped.push((path, reason)),
+                WalkEvent::Unreadable { .. } => return Err(io::Error::other("unreadable")),
+            }
+        }
+        assert_eq!(
+            entries,
+            [
+                ("proj/src".to_owned(), EntryKind::Dir),
+                ("proj/src/build".to_owned(), EntryKind::Dir),
+                ("proj/src/build/x".to_owned(), EntryKind::File),
+                ("proj/src/main.rs".to_owned(), EntryKind::File),
+            ]
+        );
+        let p = |s: &str| s.split('/').collect::<PathBuf>();
+        skipped.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(
+            skipped,
+            [
+                (p("proj/.DS_Store"), SkipReason::Junk),
+                (p("proj/build"), SkipReason::Ignored),
+            ]
+        );
         Ok(())
     }
 }

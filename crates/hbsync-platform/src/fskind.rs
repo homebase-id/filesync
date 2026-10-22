@@ -41,6 +41,25 @@ impl FsFamily {
         !matches!(self, FsFamily::Ntfs | FsFamily::ReFs | FsFamily::Apfs)
     }
 
+    /// `true` if the family can keep mtimes to the microsecond or finer, so a write after a
+    /// read moves the mtime it was read with. Not FAT (2 s), HFS+ (1 s) or exFAT (10 ms), nor a
+    /// network or FUSE volume, whose resolution isn't known. A volume of such a family may
+    /// still keep less (ext2 and ext3 report as ext4, and so does ext4 with small inodes, all
+    /// to the second): [`probe_fine_mtime`] tells for the volume.
+    pub fn has_fine_mtime(self) -> bool {
+        matches!(
+            self,
+            FsFamily::Ntfs
+                | FsFamily::ReFs
+                | FsFamily::Apfs
+                | FsFamily::Ext4
+                | FsFamily::Btrfs
+                | FsFamily::Xfs
+                | FsFamily::Zfs
+                | FsFamily::Tmpfs
+        )
+    }
+
     /// `true` if an OS change journal (USN / FSEvents) can be trusted on this file system.
     pub(crate) fn supports_journal(self) -> bool {
         matches!(
@@ -111,6 +130,19 @@ pub fn probe_case_sensitive(dir: &Path) -> io::Result<bool> {
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(true),
         Err(e) => Err(e),
     }
+}
+
+/// Whether the volume of folder `dir` keeps a file's mtime to the microsecond (see
+/// [`FsFamily::has_fine_mtime`]): a probe file in `dir` is given an mtime with a sub-second part
+/// and read back.
+pub fn probe_fine_mtime(dir: &Path) -> io::Result<bool> {
+    const SET_NS: i64 = 1_700_000_000_123_456_789;
+    let probe = tempfile::Builder::new()
+        .prefix(".hbsync-mtime-probe-")
+        .tempfile_in(dir)?;
+    crate::ops::set_mtime(probe.path(), SET_NS)?;
+    let read = crate::meta::stat(probe.path())?.mtime_ns;
+    Ok(read / 1_000 == SET_NS / 1_000)
 }
 
 #[cfg(target_os = "linux")]
@@ -257,8 +289,33 @@ mod tests {
     #[test]
     fn family_rules() {
         assert!(!FsFamily::ExFat.has_stable_file_ids());
+        for coarse in [
+            FsFamily::Fat,
+            FsFamily::ExFat,
+            FsFamily::HfsPlus,
+            FsFamily::Network,
+        ] {
+            assert!(!coarse.has_fine_mtime(), "{coarse:?}");
+        }
+        assert!(FsFamily::Apfs.has_fine_mtime() && FsFamily::Ext4.has_fine_mtime());
         assert!(FsFamily::Ntfs.supports_journal());
         assert!(!FsFamily::Ext4.supports_journal());
+    }
+
+    #[test]
+    fn mtime_probe_reads_the_volume() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        // The temp folder of the test machines: ext4, tmpfs, APFS or NTFS, all fine.
+        let family = detect(dir.path())?;
+        if family.has_fine_mtime() {
+            assert!(probe_fine_mtime(dir.path())?, "{family:?}");
+        }
+        assert_eq!(
+            std::fs::read_dir(dir.path())?.count(),
+            0,
+            "the probe file goes"
+        );
+        Ok(())
     }
 
     #[test]
