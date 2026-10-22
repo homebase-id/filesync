@@ -272,7 +272,7 @@ impl<'a> Executor<'a> {
     }
 
     /// Holds every upload: the drive was full lately (an earlier run's
-    /// [`DriveNews::full`](crate::drive::DriveNews::full)).
+    /// [`DriveNews::full`](crate::news::DriveNews::full)).
     pub(crate) fn with_full(mut self, full: bool) -> Self {
         self.full = full;
         self

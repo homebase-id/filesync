@@ -5,7 +5,7 @@
 //! them ([`AccountTx::put_live`], [`AccountTx::move_to_removed`], [`AccountTx::forget_file`],
 //! [`AccountTx::answered`]); the raw writes are the store's own.
 
-use hbsync_remote::{ChangeRef, NodeMeta, RemoteBody, RemoteHeader};
+use hbsync_remote::{ChangeRef, NodeMeta, RemoteBody, RemoteHeader, Skipped};
 use hbsync_state::{AccountTx, Answer, Answered, MirrorRow, RemovedRow, StateError};
 use hbsync_types::Role;
 use hbsync_types::{ContentHash, FileToken, NodeId, NodeKind, Written};
@@ -164,6 +164,16 @@ pub(crate) fn answered(s: AccountTx<'_>, answers: &[Answer]) -> Result<bool, Sta
         superseded |= s.answered(answer)? == Answered::Superseded;
     }
     Ok(superseded)
+}
+
+/// A row of the feed this device can't read ([`Skipped`]: one that doesn't decrypt, a newer
+/// writer's): where its file and version read, there all the same, as a row it can't read
+/// ([`AccountTx::put_unreadable`]).
+pub(crate) fn skipped(s: AccountTx<'_>, row: &Skipped) -> Result<(), StateError> {
+    if let Some(at) = row.at {
+        s.put_unreadable(at, row.node, row.parent)?;
+    }
+    Ok(())
 }
 
 /// The mirror's row of `meta` as written (`w`, the drive's answer).

@@ -19,6 +19,7 @@ use crate::error::EngineError;
 use crate::feed::{self, FeedError, FeedReport};
 use crate::lock;
 use crate::mirror;
+pub use crate::news::DriveNews;
 use crate::root::{RootError, SyncRoot};
 
 /// Rows of the change feed read per request, at most: whole pages (decrypted headers), and slim
@@ -58,18 +59,6 @@ pub struct Drive {
     server_time: AtomicI64,
     /// A re-read of the whole feed on its way, between pulls ([`feed::Reread`]).
     reread: Mutex<Option<feed::Reread>>,
-}
-
-/// What a folder's run or an operation of Recently deleted learned of the drive, for the
-/// account to take in ([`Drive::absorb`]).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-#[must_use = "what the drive said must be taken in"]
-pub struct DriveNews {
-    /// The account's picture may lack something: a write was refused for the drive's state,
-    /// an earlier try of it had landed unanswered, or an answer didn't come. The feed is read.
-    pub behind: bool,
-    /// The drive refused an upload, out of storage: uploads are held on the account this long.
-    pub full: Option<Duration>,
 }
 
 /// Wakes a folder's engine ([`Drive::subscribe_with`]).
@@ -452,9 +441,8 @@ impl Drive {
                     let answer = Answer::live(None, mirror::written(&meta, None, written));
                     let mut db = self.account();
                     // As the executor records a folder it made.
-                    if db.write(|s| mirror::answered(s.account(), &[answer]))? {
-                        self.set_behind();
-                    }
+                    let behind = db.write(|s| mirror::answered(s.account(), &[answer]))?;
+                    self.absorb(DriveNews { behind, full: None });
                     self.wake_touched(&mut db, None);
                 }
                 // Another device made it (or deleted it) meanwhile: read it.

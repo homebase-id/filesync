@@ -17,6 +17,7 @@ mod holding;
 mod id;
 pub mod mask;
 pub mod mirror;
+mod news;
 pub mod pages;
 pub mod plan;
 pub mod policy;

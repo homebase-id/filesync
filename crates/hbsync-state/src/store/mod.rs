@@ -27,6 +27,7 @@ mod base;
 mod dirty;
 pub use dirty::Mark;
 mod folders;
+mod guard;
 mod kv;
 mod local;
 mod mirror;
@@ -401,12 +402,6 @@ pub const MAX_DEPTH: usize = 16_384;
 const LOCAL_FROM: &str = "FROM local l JOIN nodes n ON n.id = l.id AND l.folder = $F";
 /// A node's integer id, by UUID.
 const ID_OF: &str = "(SELECT id FROM nodes WHERE uuid = ?1)";
-
-/// A dirty node `d` with base `b` is a synced file gone locally (online-only files have no
-/// local copy by design), or gone remotely: what the mass-delete guard counts.
-const GONE_LOCALLY: &str = "b.kind = 0 AND b.content_state != 2 \
-    AND NOT EXISTS (SELECT 1 FROM local l WHERE l.folder = $F AND l.id = d.id)";
-const GONE_REMOTELY: &str = "b.kind = 0 AND NOT EXISTS (SELECT 1 FROM remote m WHERE m.id = d.id)";
 
 /// A write transaction ([`crate::StateDb::write`]): it reads as a [`ReadTx`], and writes through
 /// the view of the tables' owner: [`Store::folder`] for this folder's tables (base, local,
