@@ -3,7 +3,7 @@
 //! for the scope check (`breaches`, `planned_writable`), which the oracle records: it reads the
 //! engine's `Op`, which the oracle may not import.
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -28,7 +28,7 @@ use crate::Sim;
 use crate::action::NAMES;
 use crate::model::client::{Client, rekey_client, verdict, verdict_in};
 use crate::model::server::{ServerNode, time};
-use crate::oracle::view_with;
+use crate::oracle::{PlanSeen, Planned, What, view_with};
 
 impl Sim {
     /// The version a folder made here by `op` of client `c` acts on, which a folder synced
@@ -319,180 +319,32 @@ impl Sim {
             self.ledger.narrow_differs(|| what);
         }
         // The files here not hashed yet (as the engine's view holds them: a row without a state
-        // only waits), and the new ids of those the plan detaches (§10).
+        // only waits), for the oracle's checks of the plan.
         let unhashed: HashSet<NodeId> = input
             .local_unhashed
             .iter()
             .copied()
             .filter(|n| input.local.contains(*n))
             .collect();
-        let detached: HashMap<NodeId, NodeId> = plan
-            .ops
-            .iter()
-            .filter_map(|op| match op {
-                Op::LocalDetach { node, new_node } => Some((*node, *new_node)),
-                _ => None,
-            })
-            .collect();
-        // What waits for a hash, worked out on its own (sync semantics §6.3): every folder a
-        // file here not hashed yet is in, on any side, and every folder those are in, on the
-        // drive as this device sees it (what its filter leaves out is out of view); a detached
-        // item is a new one here, held where it is here only, under its new id.
-        let out_of_view = masked(&remote, &client.filter);
-        let mut held: HashSet<NodeId> = HashSet::new();
-        let mut queue: Vec<(NodeId, bool)> = unhashed
-            .iter()
-            .map(|n| (*n, !detached.contains_key(n)))
-            .collect();
-        while let Some((n, synced)) = queue.pop() {
-            let sides: &[(&Tree, bool)] = match synced {
-                true => &[(&input.local, false), (&remote, true), (&input.base, false)],
-                false => &[(&input.local, false)],
-            };
-            for (i, (tree, on_drive)) in sides.iter().enumerate() {
-                if *on_drive && out_of_view.contains(&n) {
-                    continue;
-                }
-                if let Some(s) = tree.get(n)
-                    && !s.parent.is_root()
-                    && !(*on_drive && out_of_view.contains(&s.parent))
-                    && held.insert(s.parent)
-                {
-                    // Reached here, a detached folder is its new item, here only; reached
-                    // through the drive or the base, its old node, on every side.
-                    let here = i == 0;
-                    queue.push((s.parent, !(here && detached.contains_key(&s.parent))));
-                }
-            }
-        }
-        // A detached folder held under both its ids.
-        let held: HashSet<NodeId> = held
-            .iter()
-            .filter_map(|n| detached.get(n).copied())
-            .chain(held.iter().copied())
-            .collect();
-        let old_of: HashMap<NodeId, NodeId> =
-            detached.iter().map(|(old, new)| (*new, *old)).collect();
-        // No plan touches a file here not hashed yet, or moves, renames or deletes what holds
-        // it, on any side.
-        self.ledger.moved_what_waits(|| {
-            let touched: HashSet<NodeId> = unhashed
-                .iter()
-                .map(|n| detached.get(n).copied().unwrap_or(*n))
-                .collect();
-            plan.ops
-                .iter()
-                .find(|op| {
-                    let node = op.node();
-                    // A detached item's place here is its old node's.
-                    let at = old_of.get(&node).copied().unwrap_or(node);
-                    let moved = |t: &Tree, parent: &NodeId, name: &str| {
-                        t.get(at)
-                            .is_some_and(|s| s.parent != *parent || s.name != name)
-                    };
-                    // A detach only gives the item here another id (§10): it stays as it is.
-                    let detach = matches!(op, Op::LocalDetach { .. });
-                    ((touched.contains(&node) || unhashed.contains(&node)) && !detach)
-                        || (held.contains(&node)
-                            && match op {
-                                Op::RemoteDelete { .. } => true,
-                                _ if op.trashes().is_some() => true,
-                                Op::LocalMove { parent, name, .. } => {
-                                    moved(&input.local, parent, name)
-                                }
-                                Op::RemoteUpdate { parent, name, .. } => {
-                                    moved(&remote, parent, name)
-                                }
-                                _ => false,
-                            })
-                })
-                .map(|op| format!("{}: {op:?} moves what waits for a hash", client.name))
-        });
-        // The guard's rule, checked independently: no plan deletes more files on a side than
-        // the limit (or every file) without the user's confirmation.
-        if let Some(min) = self.guard {
-            // Counted only until the first breach is kept.
-            self.ledger.unconfirmed_mass_delete(|| {
-                let trips = |n: usize| n > min || (synced_files > 0 && n >= synced_files && n > 1);
-                let files_under = |tree: &Tree, node: NodeId| {
-                    tree.subtree(node)
-                        .into_iter()
-                        .filter(|n| tree.get(*n).is_some_and(|s| s.kind == NodeKind::File))
-                        .count()
-                };
-                let (mut deleted, mut trashed) = (0, 0);
-                // What was in a confirmed folder whose delete waits for a hash is confirmed:
-                // one synced, gone on a side (or taken along by a folder gone on the drive),
-                // holding a file here not hashed yet on any side.
-                let waits: HashSet<NodeId> = confirmed
-                    .iter()
-                    .copied()
-                    .filter(|f| {
-                        let gone = !input.local.contains(*f)
-                            || remote.path(*f).is_none()
-                            || out_of_view.contains(f);
-                        input.base.contains(*f) && gone && held.contains(f)
-                    })
-                    .collect();
-                let unconfirmed = |op: &&Op| {
-                    let node = op.node();
-                    !confirmed.contains(&node)
-                        && !input.base.ancestors(node).iter().any(|a| waits.contains(a))
-                };
-                for op in plan.ops.iter().filter(unconfirmed) {
-                    match op {
-                        Op::RemoteDelete { node, .. }
-                            if remote.get(*node).is_some_and(|s| s.kind == NodeKind::File) =>
-                        {
-                            deleted += 1;
-                        }
-                        Op::LocalTrash { node, .. } => trashed += files_under(&input.local, *node),
-                        _ => {}
-                    }
-                }
-                // Removals from elsewhere are followed, but every synced file over the limit.
-                let every = |n: usize| synced_files > 0 && n >= synced_files && n > min;
-                // Held before (sticky till answered) isn't judged again.
-                let was_wiped = |n: NodeId| {
-                    wiped.contains(&n) || input.base.ancestors(n).iter().any(|a| wiped.contains(a))
-                };
-                let held_trashed: usize = plan
-                    .held
-                    .iter()
-                    .map(|op| match op {
-                        Op::LocalTrash { node, .. } if !was_wiped(*node) => {
-                            files_under(&input.local, *node)
-                        }
-                        _ => 0,
-                    })
-                    .sum();
-                // And what was held so stays held till answered.
-                if let Some(op) = plan.ops.iter().filter(unconfirmed).find(|op| {
-                    matches!(op, Op::LocalTrash { node, subtree }
-                            if was_wiped(*node) || subtree.iter().any(|n| wiped.contains(n)))
-                }) {
-                    return Some(format!(
-                        "{} trashes what was held as every synced file, unanswered: {op:?}",
-                        client.name
-                    ));
-                }
-                let held_elsewhere = held_trashed > 0 && !every(held_trashed + trashed);
-                if held_elsewhere {
-                    return Some(format!(
-                        "{} held {held_trashed} removals from elsewhere, short of every synced \
-                         file ({synced_files}): {:?}",
-                        client.name, plan.held
-                    ));
-                }
-                (trips(deleted) || every(trashed)).then(|| {
-                    format!(
-                        "{} deletes {deleted} remote and trashes {trashed} local files \
-                         unconfirmed (limit {min}, {synced_files} synced): {:?}",
-                        client.name, plan.ops
-                    )
-                })
-            });
-        }
+        let (ops, held_ops) = (planned(&plan.ops), planned(&plan.held));
+        self.ledger.plan_made(
+            &PlanSeen {
+                client: &client.name,
+                local: &input.local,
+                base: &input.base,
+                remote: &remote,
+                filter: &client.filter,
+                unhashed: &unhashed,
+                ops: &ops,
+                held: &held_ops,
+                all_ops: &plan.ops,
+                all_held: &plan.held,
+                synced_files,
+                confirmed: &confirmed,
+                wiped: &wiped,
+            },
+            self.guard,
+        );
         if !plan.ops.is_empty() {
             self.note(|sim| format!("plan {}: {:?}", sim.clients[c].name, plan.ops));
             self.note(|sim| {
@@ -2393,6 +2245,38 @@ impl hbsync_engine::pages::PageStore for SimPages<'_> {
             .filter(|n| base.get(*n).is_some_and(|s| s.kind == NodeKind::Folder))
             .collect())
     }
+}
+
+/// `ops` as the oracle reads them ([`Planned`]): it may not import the engine's `Op`.
+fn planned(ops: &[Op]) -> Vec<Planned<'_>> {
+    ops.iter()
+        .map(|op| {
+            let what = match op {
+                Op::RemoteDelete { .. } => What::RemoteDelete,
+                Op::LocalTrash { subtree, .. } => What::LocalTrash {
+                    subtree: subtree.clone(),
+                },
+                _ if op.trashes().is_some() => What::Trash,
+                Op::LocalMove { parent, name, .. } => What::LocalMove {
+                    parent: *parent,
+                    name: name.clone(),
+                },
+                Op::RemoteUpdate { parent, name, .. } => What::RemoteUpdate {
+                    parent: *parent,
+                    name: name.clone(),
+                },
+                Op::LocalDetach { new_node, .. } => What::Detach {
+                    new_node: *new_node,
+                },
+                _ => What::Other,
+            };
+            Planned {
+                node: op.node(),
+                what,
+                op,
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]
