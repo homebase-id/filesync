@@ -185,6 +185,52 @@ fn failed_write_rolls_back() -> R {
     })
 }
 
+/// The base's file count (the guard's denominator) is one row the triggers keep: it follows
+/// files in and out, and a node turning file or folder, as a count of the
+/// rows would.
+#[test]
+fn the_base_file_count_follows_the_base() -> R {
+    let mut db = StateDb::open_in_memory()?;
+    let count = |db: &mut StateDb| -> Result<(u64, i64), StateError> {
+        db.read(|s| {
+            let rows: i64 = s
+                .base_children(NodeId::ROOT)?
+                .iter()
+                .filter(|b| b.state.kind == NodeKind::File)
+                .count() as i64;
+            Ok((s.base_file_count()?, rows))
+        })
+    };
+    assert_eq!(count(&mut db)?, (0, 0));
+    let files: Vec<BaseRow> = (0..3)
+        .map(|i| {
+            base(NodeState::file(
+                NodeId::ROOT,
+                format!("f{i}"),
+                content(b"x"),
+            ))
+        })
+        .collect();
+    let folder = base(NodeState::folder(NodeId::ROOT, "d"));
+    db.write(|s| {
+        files.iter().try_for_each(|f| s.folder().put_base(f))?;
+        s.folder().put_base(&folder)?;
+        // Written again: still one each.
+        s.folder().put_base(&files[0])
+    })?;
+    assert_eq!(count(&mut db)?, (3, 3));
+    db.write(|s| s.folder().delete_base(files[1].node).map(drop))?;
+    assert_eq!(count(&mut db)?, (2, 2));
+    // A file that turns into a folder, and back.
+    let mut turned = files[2].clone();
+    turned.state = NodeState::folder(NodeId::ROOT, "f2");
+    db.write(|s| s.folder().put_base(&turned))?;
+    assert_eq!(count(&mut db)?, (1, 1));
+    db.write(|s| s.folder().put_base(&files[2]))?;
+    assert_eq!(count(&mut db)?, (2, 2));
+    Ok(())
+}
+
 #[test]
 fn dirty_and_kv() -> R {
     let mut db = StateDb::open_in_memory()?;
@@ -360,7 +406,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 20);
+    assert_eq!(db.schema_version()?, 21);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -1230,7 +1276,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 20);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 21);
     Ok(())
 }
 

@@ -340,8 +340,13 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   less than the sweep's earlier pages were judged by (what the sync did meanwhile, or a restore
   elsewhere, doesn't let through the rest of what they held); the synced files stay as counted
   for the sweep, but where nothing was dirty at the start they are counted there, so a change
-  marked meanwhile is never judged against no synced files. What is held as every synced file
-  earlier in the sync stays held with the new counts (engine:
+  marked meanwhile is never judged against no synced files. The synced files are one row
+  per folder that triggers on the base keep (`base_files`): reading them costs nothing (a
+  count of the base was a scan, 2 ms at 20k files, paid by every sync while a file waiting for
+  its hash kept the dirty set busy); a commit that adds or removes a file's base row writes
+  that row too: about 1 µs, and a page (4 KB) more in the WAL (4.9k files downloaded, each
+  its own commit: 234 → 252 MB written, 8 % more; written again, a file costs nothing more).
+  What is held as every synced file earlier in the sync stays held with the new counts (engine:
   `a_wipe_marked_right_after_the_counts_is_still_held`,
   `a_wipe_marked_after_the_counts_beside_a_dirty_file_is_still_held`,
   `a_wipe_held_in_one_pass_stays_held_after_the_counts_are_read_again`,
