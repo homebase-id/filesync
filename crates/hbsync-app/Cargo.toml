@@ -59,6 +59,7 @@ testkit = []
 
 [dev-dependencies]
 hbsync-app = { path = ".", features = ["testkit"] }
+hbsync-engine = { workspace = true, features = ["testkit"] }
 hbsync-remote = { workspace = true, features = ["testkit"] }
 rusqlite.workspace = true
 tempfile.workspace = true
