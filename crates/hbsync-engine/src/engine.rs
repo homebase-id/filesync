@@ -663,7 +663,7 @@ impl Engine {
                 read_wiped(s.get_kv(keys::WIPED)?.as_deref())
                     .into_iter()
                     .collect();
-            let counts = guard_counts(s, &confirmed, held_pending, any)?;
+            let counts = guard_counts(s, &confirmed, Some(held_pending), None, any)?;
             // This computer's id for the account ([`Options::computer`]): every open gives the
             // DB one, so none is a fault, never a reason to plan without.
             let computer = s.db_id()?;
@@ -672,8 +672,8 @@ impl Engine {
             }
             Ok((counts, computer, saved))
         })?;
-        let confirmed = counts.confirmed.clone();
-        let (pending_deletes, synced_files) = (counts.pending, counts.synced);
+        let confirmed = std::mem::take(&mut counts.confirmed);
+        let (pending_deletes, synced_files) = (counts.pending, counts.synced.unwrap_or(0));
         self.confirmed = confirmed;
         let guard = self.cfg.guard;
         // This device's own removals held out are planned again once the guard would let them
@@ -751,20 +751,21 @@ impl Engine {
             // Each page with the guard's counts of what it holds: counted again, in the same
             // read, when another connection committed since they were (a pull, an
             // announcement: what it marked counts too), or when nothing dirty had them skip the
-            // synced files.
+            // synced files; with what is held as every synced file so far this sync.
             let (dirty, next, fresh) = self.db.read(|s| {
                 let (dirty, next) = s.dirty_marks(after, self.cfg.batch)?;
-                let stale =
-                    !dirty.is_empty() && (!counts.counted || s.data_version()? != counts.version);
+                let stale = !dirty.is_empty()
+                    && (counts.synced.is_none() || s.data_version()? != counts.version);
                 let fresh = match stale {
-                    true => Some(guard_counts(s, &self.confirmed, held_pending, true)?),
+                    true => Some(guard_counts(s, &self.confirmed, None, counts.synced, true)?),
                     false => None,
                 };
                 Ok((dirty, next, fresh))
             })?;
             if let Some(fresh) = fresh {
-                opts.synced_files = fresh.synced as usize;
+                opts.synced_files = fresh.synced.unwrap_or(0) as usize;
                 opts.pending_deletes = (fresh.pending.0 as usize, fresh.pending.1 as usize);
+                opts.wiped = Arc::new(self.wiped.clone());
                 counts = fresh;
             }
             if !dirty.is_empty() {
@@ -1156,26 +1157,31 @@ struct Counts {
     /// Files pending deletion across the dirty set and the held deletes out of it, but the
     /// confirmed ones: (gone locally, gone remotely).
     pending: (u64, u64),
-    /// The synced files; 0 when not `counted`.
-    synced: u64,
-    counted: bool,
+    /// The synced files; `None` when not counted (nothing was dirty).
+    synced: Option<u64>,
     /// The confirmations whose deletes are still pending.
     confirmed: std::collections::HashSet<NodeId>,
     /// The connection's [`ReadTx::data_version`] before the read.
     version: u64,
 }
 
-/// The guard's [`Counts`] in `s`, `held` the files of the held deletes out of the dirty set:
-/// the synced files counted only if `count` or anything is dirty (with nothing dirty there is
-/// nothing to weigh, and a sync with nothing new reads no table).
+/// The guard's [`Counts`] in `s`: `held`, the files of the held deletes out of the dirty set
+/// (read here when `None`); `synced`, the synced files as counted already (only this engine
+/// writes this folder's base), else counted here if `count` or anything is dirty (with nothing
+/// dirty there is nothing to weigh, and a sync with nothing new reads no table).
 fn guard_counts(
     s: &ReadTx<'_>,
     confirmed: &std::collections::HashSet<NodeId>,
-    held: (u64, u64),
+    held: Option<(u64, u64)>,
+    synced: Option<u64>,
     count: bool,
 ) -> Result<Counts, StateError> {
     let version = s.data_version()?;
     let (here, there) = s.pending_file_deletes()?;
+    let held = match held {
+        Some(held) => held,
+        None => s.held_file_deletes()?,
+    };
     let (here, there) = (here + held.0, there + held.1);
     let mut still = std::collections::HashSet::new();
     // Each file once, however many confirmed trashes it is under.
@@ -1187,17 +1193,17 @@ fn guard_counts(
             still.insert(node);
         }
     }
-    let counted = count || s.dirty_count()? > 0;
+    let synced = match synced {
+        Some(synced) => Some(synced),
+        None if count || s.dirty_count()? > 0 => Some(s.base_file_count()?),
+        None => None,
+    };
     Ok(Counts {
         pending: (
             here.saturating_sub(confirmed_here),
             there.saturating_sub(confirmed_there.len() as u64),
         ),
-        synced: match counted {
-            true => s.base_file_count()?,
-            false => 0,
-        },
-        counted,
+        synced,
         confirmed: still,
         version,
     })

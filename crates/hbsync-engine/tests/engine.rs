@@ -5248,3 +5248,63 @@ fn a_wipe_marked_after_the_counts_beside_a_dirty_file_is_still_held() -> R {
     assert_eq!(b.read_text("d2/f.txt")?, "2", "held, not trashed");
     Ok(())
 }
+
+/// A wipe held as every synced file in one pass of a sync stays held in the next pass, though
+/// the counts are read again meanwhile (another connection committed: here one of the files
+/// restored elsewhere, pulled) and no longer add up to every synced file: what is held so stays
+/// held till answered (§7).
+#[test]
+fn a_wipe_held_in_one_pass_stays_held_after_the_counts_are_read_again() -> R {
+    use hbsync_engine::testkit::AfterPlan;
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    type Then = Box<dyn FnOnce() + Send>;
+    let then: Arc<Mutex<Option<Then>>> = Arc::default();
+    let hook = {
+        let then = then.clone();
+        AfterPlan(Arc::new(move || {
+            if let Some(then) = then.lock().ok().and_then(|mut t| t.take()) {
+                then();
+            }
+        }))
+    };
+    let mut b = Client::with_config(&server, "b", move |cfg| {
+        cfg.guard.min = 2;
+        cfg.after_plan = Some(hook.clone());
+        cfg.check_narrow = false;
+    })?;
+    for i in 0..4 {
+        a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
+    }
+    a.sync()?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.sync()?;
+    // b pulls the wipe, and has a new file of its own: its first pass uploads it (so a second
+    // pass follows) and holds the wipe; meanwhile f0 is restored elsewhere and pulled.
+    b.engine.drive().pull(None)?;
+    b.write("new.txt", "n")?;
+    b.engine.scan_local()?;
+    let (restorer, drive, f0) = (
+        FakeRemote::new(server.clone()),
+        Arc::clone(b.engine.drive()),
+        common::header_named(&server, "f0.txt"),
+    );
+    *then.lock().map_err(|_| "poisoned")? = Some(Box::new(move || {
+        let target = Target {
+            at: f0.at(),
+            token: f0.token.clone(),
+        };
+        restorer.set_removed(&[target], false).expect("restored");
+        drive.pull(None).expect("the pull");
+    }));
+    b.announced();
+    let report = b.engine.sync("2026-10-08", false)?;
+    assert!(
+        then.lock().map_err(|_| "poisoned")?.is_none(),
+        "the hook ran"
+    );
+    assert!(!report.held.is_empty(), "{report:?}");
+    assert_eq!(b.read_text("d/f2.txt")?, "2", "still held");
+    Ok(())
+}

@@ -278,13 +278,19 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   (5,051 held: about 1 ms, against 80 ms when they were planned each time). Simulator:
   `held_deletes_out_of_the_dirty_set_plan_alike` (a plan without them plans as one with them,
   unless its view reaches them). The guard's counts (synced files, what is pending) are read
-  when a sync starts planning, and again with a page whenever another connection committed
-  since (an announcement, another folder's pull: what it marked counts too) or nothing dirty
-  had them skip the synced files: a change marked meanwhile is never judged against counts
-  that leave it out, or against no synced files (engine:
+  when a sync starts planning. Each page reads the connection's `data_version` with its marks:
+  when another connection committed since (an announcement, another folder's pull, this
+  sync's own catch-up), what is pending is counted again there, with what that marked; when
+  nothing was dirty at the start, the synced files are counted there too, so a change marked
+  meanwhile is never judged against no synced files. What is held as every synced file earlier
+  in the sync stays held with the new counts (engine:
   `a_wipe_marked_right_after_the_counts_is_still_held`,
-  `a_wipe_marked_after_the_counts_beside_a_dirty_file_is_still_held`). Cost: the connection's
-  `data_version` per page, and the counts again only when something else wrote.
+  `a_wipe_marked_after_the_counts_beside_a_dirty_file_is_still_held`,
+  `a_wipe_held_in_one_pass_stays_held_after_the_counts_are_read_again`). Not covered: a mark
+  committed between a page's read and its plan's own reads, a pull whose pages are only partly
+  committed, and marks this engine writes itself mid-sync (rescans) are judged against counts
+  read before them. Cost: a pragma per page; the pending counts again only when something
+  else wrote.
 
   Removals made elsewhere (another computer, the phone, the file browser, another app) are
   followed here without asking: into `.hbsync/trash`, and the drive keeps them in Recently
