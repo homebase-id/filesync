@@ -49,6 +49,14 @@ pub(super) fn notes(
             "{path}: can't be read yet ({why}), so changes around it wait till it can"
         ));
     }
+    // What a delete left aside that this folder can't place (sync semantics §8a): told, kept.
+    if !report.left_aside.is_empty() {
+        notes.push(format!(
+            "{}: left aside, as this device can't tell where they belong; look at them, and \
+             delete by hand what isn't needed",
+            listed(&report.left_aside)
+        ));
+    }
     if report.full {
         notes.push(
             "Homebase is out of storage: new and changed files wait until there is room".into(),
@@ -253,7 +261,6 @@ pub(super) fn scan_notes(scan: &ScanReport, told: &mut HashSet<u64>, whole: bool
         true => std::mem::take(told),
         false => HashSet::new(),
     };
-    const SHOWN: usize = 3;
     let unreadable = scan.unreadable.iter().map(|p| (0, p.to_string()));
     let skipped = scan.skipped.iter().filter_map(|(path, why)| {
         let reason = match why {
@@ -282,14 +289,18 @@ pub(super) fn scan_notes(scan: &ScanReport, told: &mut HashSet<u64>, whole: bool
     new.iter()
         .zip(said)
         .filter(|(paths, _)| !paths.is_empty())
-        .map(|(paths, said)| {
-            let shown = paths[..paths.len().min(SHOWN)].join(", ");
-            match paths.len().saturating_sub(SHOWN) {
-                0 => format!("{shown}: {said}"),
-                more => format!("{shown} and {more} more: {said}"),
-            }
-        })
+        .map(|(paths, said)| format!("{}: {said}", listed(paths)))
         .collect()
+}
+
+/// `paths` for a note: the first few, and how many more.
+fn listed(paths: &[String]) -> String {
+    const SHOWN: usize = 3;
+    let shown = paths[..paths.len().min(SHOWN)].join(", ");
+    match paths.len().saturating_sub(SHOWN) {
+        0 => shown,
+        more => format!("{shown} and {more} more"),
+    }
 }
 
 fn describe_conflict(engine: &mut Engine, c: &Conflict) -> Result<String, StateError> {

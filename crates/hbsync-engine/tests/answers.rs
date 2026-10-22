@@ -299,7 +299,7 @@ fn a_pull_waits_for_an_answers_commit() -> R {
     let (live, removed) = picture(&mut a, node)?;
     assert!(removed && !live, "the pull's newer removal over the answer");
     // The rename settled against its answer, which the pull's removal came after: the next
-    // round took it to the trash already, or the base waits at the name renamed.
+    // round deleted it here already, or the base waits at the name renamed.
     let base = a.engine.db().read(|s| s.get_base(node))?;
     match base {
         None => assert!(!a.root.join("g.txt").exists(), "{:?}", a.tree_text("")),

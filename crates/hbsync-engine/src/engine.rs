@@ -112,6 +112,10 @@ pub struct SyncReport {
     /// Files here not hashed yet (locked, being written, unreadable) that other changes wait
     /// for (sync semantics §6.3), as paths, with why they couldn't be read.
     pub waiting: Vec<(String, String)>,
+    /// What is in the folder's `.hbsync/aside` that this device can't place (its state DB lost
+    /// or replaced since, say), as paths in the folder: left there, for the user to look at and
+    /// delete. Each sync's recovery lists them all again.
+    pub left_aside: Vec<String>,
     /// Work is left that another try may do: the sweep was cut short by the round limit, or
     /// operations were skipped or failed with nodes still pending. Deletes held for a
     /// confirmation never count: another try doesn't let them through.
@@ -123,8 +127,8 @@ impl SyncReport {
         self.ops_done == 0 && self.pending == 0
     }
 
-    /// Adds a later sync's report to this one: counts and lists add up, `held`, `pending` and
-    /// `unfinished` are the later sync's.
+    /// Adds a later sync's report to this one: counts and lists add up, `held`, `pending`,
+    /// `left_aside` and `unfinished` are the later sync's.
     pub fn absorb(&mut self, later: SyncReport) {
         self.feed += later.feed;
         self.rounds += later.rounds;
@@ -140,6 +144,7 @@ impl SyncReport {
         self.full = later.full;
         self.refused.extend(later.refused);
         self.waiting.extend(later.waiting);
+        self.left_aside = later.left_aside;
         self.unfinished = later.unfinished;
     }
 }
@@ -440,7 +445,8 @@ impl Engine {
                 self.drive.latch(e.class(), &e);
                 let tell = !(report.conflicts.is_empty()
                     && report.failed.is_empty()
-                    && report.skipped.is_empty());
+                    && report.skipped.is_empty()
+                    && report.left_aside.is_empty());
                 self.unreported = tell.then_some(report);
                 Err(e)
             }
@@ -455,12 +461,17 @@ impl Engine {
         report: &mut SyncReport,
     ) -> Result<(), EngineError> {
         // What a delete or a download left aside (a crash, an item that couldn't be put back or
-        // read) is decided
-        // first, what it puts back read again where it is now. A listing of an empty folder
-        // where nothing is.
-        let back = recover_aside(&mut self.db, &self.cfg.folder)?;
-        if !back.is_empty() {
-            rescan_dirs(&mut self.db, &self.cfg.folder.root, &back, &self.scan_opts)?;
+        // read) is decided first, what it puts back read again where it is now. A listing of an
+        // empty folder where nothing is.
+        let aside = recover_aside(&mut self.db, &self.cfg.folder)?;
+        report.left_aside = aside.unknown;
+        if !aside.rescan.is_empty() {
+            rescan_dirs(
+                &mut self.db,
+                &self.cfg.folder.root,
+                &aside.rescan,
+                &self.scan_opts,
+            )?;
         }
         self.rescan_records()?;
         recover(&mut self.db, &self.cfg.folder)?;

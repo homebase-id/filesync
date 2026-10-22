@@ -20,5 +20,5 @@ pub use walk::{SkipReason, WalkEvent, Walker};
 pub use watch::{Bell, Debounce, LocalObserver};
 
 /// The client's own folder at the top of the sync root (its marker, ignore rules, temp files,
-/// trash). Never synced. The state DB is the account's, elsewhere.
+/// what is aside for a moment). Never synced. The state DB is the account's, elsewhere.
 pub const STATE_DIR: &str = ".hbsync";

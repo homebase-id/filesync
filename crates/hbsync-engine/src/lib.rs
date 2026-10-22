@@ -29,7 +29,6 @@ mod settle;
 pub mod testkit;
 pub mod time;
 pub mod transfer;
-mod trash;
 pub mod tree;
 pub mod view;
 mod waiting;

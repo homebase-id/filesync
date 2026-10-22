@@ -2659,7 +2659,6 @@ fn an_old_version_goes_once_the_new_one_is_in() -> R {
         assert_eq!(fs::read(h.at("p2/f")?)?, b"B");
         assert!(!h.at("p1/f")?.exists());
         assert_eq!(aside_entries(&h), Vec::<String>::new());
-        assert!(!hbsync_local::layout::trash_dir(&h.folder.root).exists());
         let row = h.db.read(|s| s.local_by_node(node))?;
         assert_eq!(row.map(|r| r.path.to_string()), Some("p2/f".into()));
     }

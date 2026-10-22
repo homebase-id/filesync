@@ -20,28 +20,35 @@ pub fn recover(db: &mut StateDb, folder: &FolderCtx) -> Result<(), StateError> {
 }
 
 /// Decides what a delete left aside (sync semantics §7: a crash between its move aside and its
-/// commit, or a put back that failed; or a download's replaced old version, §7 Old versions) by what it is, as the delete's own check does: where it
-/// is still its node's synced version (each item as its row has it, each row as its base has
-/// it: the drive's delete stands), it is unlinked, its rows and bases with it, whatever became
-/// of its folder meanwhile; anything else (an edit, a new item, an ignored one) goes back to its
-/// place, under its own name, else a numbered one there, else at the folder's top, to be planned
-/// again. One whose node this folder doesn't know (its state DB lost or replaced since) is left
-/// aside, and told. Run at the start of a sync, before the scan's records are read (the scan
-/// keeps an item's rows while it is aside); returns the folders to rescan.
-pub fn recover_aside(db: &mut StateDb, folder: &FolderCtx) -> Result<Vec<RelPath>, StateError> {
+/// commit, or a put back that failed; or a download's replaced old version, §7 Old versions)
+/// by what it is, as the delete's own check does: where it is still its node's synced version
+/// (each item as its row has it, each row as its base has it: the drive's delete stands), it
+/// is unlinked, its rows and bases with it, whatever became of its folder meanwhile; anything
+/// else (an edit, a new item, an ignored one) goes back to its place, under its own name, else
+/// a numbered one there, else at the folder's top, to be planned again. One whose node this
+/// folder doesn't know (its state DB lost or replaced since), or one to go back whose place it
+/// doesn't, is left aside, and told ([`AsideOutcome::unknown`], §8a). Run at the start of a
+/// sync, before the scan's records are read (the scan keeps an item's rows while it is aside).
+pub fn recover_aside(db: &mut StateDb, folder: &FolderCtx) -> Result<AsideOutcome, StateError> {
     let hooks = Hooks::default();
     let disk = Disk::new(folder, &hooks);
     let mut dirs = Vec::new();
+    let mut unknown = Vec::new();
+    let left = |aside: &Path| {
+        layout::aside_shown(&aside.file_name().unwrap_or_default().to_string_lossy())
+    };
     for (aside, parsed) in layout::aside_entries(&folder.root) {
         let Some(parsed) = parsed else {
-            tracing::warn!("{} is left aside: no delete made it", aside.display());
+            tracing::debug!("{} is left aside: no delete made it", aside.display());
+            unknown.push(left(&aside));
             continue;
         };
         let node = parsed.node();
         let Some(row) = db.read(|s| s.local_by_node(node))? else {
             // Its row let go (an item came at its place meanwhile): judged by its base alone.
-            if let Some(to) = recover_by_base(db, &disk, folder, &aside, parsed)? {
-                dirs.push(to);
+            match recover_by_base(db, &disk, folder, &aside, parsed)? {
+                ByBase::Rescan(dir) => dirs.extend(dir),
+                ByBase::Unknown => unknown.push(left(&aside)),
             }
             continue;
         };
@@ -88,7 +95,12 @@ pub fn recover_aside(db: &mut StateDb, folder: &FolderCtx) -> Result<Vec<RelPath
             dirs.push(to.parent().unwrap_or_default());
         }
     }
-    Ok(dirs)
+    // In one order, for the note to read the same each sync (told once).
+    unknown.sort();
+    Ok(AsideOutcome {
+        rescan: dirs,
+        unknown,
+    })
 }
 
 /// What a delete (or a download's replace) left aside of a node with no row here (an item took
@@ -96,50 +108,69 @@ pub fn recover_aside(db: &mut StateDb, folder: &FolderCtx) -> Result<Vec<RelPath
 /// this device knows of it: a file goes once its bytes read as the name says (its base, if any,
 /// with it where those are the synced ones), else comes back as a new item where its node was
 /// last synced; a folder comes back there. One of a node this device never knew (its state DB
-/// lost or replaced since) is left aside, and told. Returns the folder to rescan.
+/// lost or replaced since), or one to go back whose place it doesn't know, is left aside, and
+/// told.
 fn recover_by_base(
     db: &mut StateDb,
     disk: &Disk<'_>,
     folder: &FolderCtx,
     aside: &Path,
     entry: layout::AsideEntry,
-) -> Result<Option<RelPath>, StateError> {
+) -> Result<ByBase, StateError> {
     let node = entry.node();
-    let (base, known) = db.read(|s| {
+    let known = db.read(|s| {
         let base = s.get_base(node)?;
-        let known =
-            base.is_some() || s.get_mirror(node)?.is_some() || s.removed_by_node(node)?.is_some();
-        Ok((base, known))
+        if base.is_none() && s.get_mirror(node)?.is_none() && s.removed_by_node(node)?.is_none() {
+            return Ok(None);
+        }
+        let place = crate::activity::path_of(s, node)?.and_then(|p| RelPath::new(&p).ok());
+        Ok(Some((base, place)))
     })?;
-    if !known {
-        tracing::warn!(
-            "{} is left aside: nothing synced in this folder is its",
+    let Some((base, place)) = known else {
+        tracing::debug!(
+            "{} is left aside: nothing synced here is its",
             aside.display()
         );
-        return Ok(None);
-    }
-    let place = db
-        .read(|s| crate::activity::path_of(s, node))?
-        .and_then(|p| RelPath::new(&p).ok());
+        return Ok(ByBase::Unknown);
+    };
     let layout::AsideEntry::File(_, hash) = entry else {
         let Some(place) = place else {
-            tracing::warn!("{} is left aside: its place isn't known", aside.display());
-            return Ok(None);
+            tracing::debug!("{} is left aside: its place isn't known", aside.display());
+            return Ok(ByBase::Unknown);
         };
-        return Ok(
+        return Ok(ByBase::Rescan(
             put_back_at(db, disk, folder, aside, &place, Some(node), true)?
                 .map(|to| to.parent().unwrap_or_default()),
-        );
+        ));
     };
     let gone = discard_old(db, disk, folder, aside, hash, place.as_ref())?;
-    if let Discarded::Gone = gone
-        && base.is_some_and(|b| b.local_hash == Some(hash))
-    {
+    match gone {
         // It was the synced version: its delete is done, and its base goes with it.
-        db.write(|s| went(s, [node], node))?;
-        return Ok(place.and_then(|p| p.parent()));
+        Discarded::Gone if base.is_some_and(|b| b.local_hash == Some(hash)) => {
+            db.write(|s| went(s, [node], node))?;
+            Ok(ByBase::Rescan(place.and_then(|p| p.parent())))
+        }
+        Discarded::Stranded => Ok(ByBase::Unknown),
+        gone => Ok(ByBase::Rescan(gone.into_inner())),
     }
-    Ok(gone.into_inner())
+}
+
+/// What [`recover_by_base`] did with an entry.
+enum ByBase {
+    /// Decided: the folder to rescan, if any.
+    Rescan(Option<RelPath>),
+    /// Left aside, to be told: nothing this device knows places it.
+    Unknown,
+}
+
+/// What [`recover_aside`] did.
+#[derive(Debug, Default)]
+pub struct AsideOutcome {
+    /// The folders to rescan: what it put back is there.
+    pub rescan: Vec<RelPath>,
+    /// What it left aside, as nothing here places it (sync semantics §8a: told, never
+    /// deleted), as sorted paths in the folder (`.hbsync/aside/<name>`).
+    pub unknown: Vec<String>,
 }
 
 /// What became of a file a run left aside ([`discard_old`]).
@@ -150,6 +181,8 @@ enum Discarded {
     Back(Option<RelPath>),
     /// Not read now, or not back: left aside, for the next sync.
     Left,
+    /// Written to aside, with no place to go back to: left aside, to be told.
+    Stranded,
 }
 
 impl Discarded {
@@ -157,7 +190,7 @@ impl Discarded {
     fn into_inner(self) -> Option<RelPath> {
         match self {
             Discarded::Back(dir) => dir,
-            Discarded::Gone | Discarded::Left => None,
+            Discarded::Gone | Discarded::Left | Discarded::Stranded => None,
         }
     }
 }
@@ -188,8 +221,8 @@ fn discard_old(
         return Ok(Discarded::Left);
     }
     let Some(place) = place else {
-        tracing::warn!("{} is left aside: its place isn't known", aside.display());
-        return Ok(Discarded::Left);
+        tracing::debug!("{} is left aside: its place isn't known", aside.display());
+        return Ok(Discarded::Stranded);
     };
     Ok(Discarded::Back(
         put_back_at(db, disk, folder, aside, place, None, false)?

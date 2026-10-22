@@ -1,7 +1,7 @@
 //! What is never synced: the client's own folder, built-in junk, and the user's ignore rules.
 //!
-//! Junk is disposable (OS metadata, lock and swap files, partial downloads): it goes to the
-//! trash with its folder. Ignored items are the user's data kept on this device only: they
+//! Junk is disposable (OS metadata, lock and swap files, partial downloads): a junk file goes
+//! with its folder. Ignored items are the user's data kept on this device only: they
 //! keep their folder. Both are invisible to sync in either direction (sync semantics §10).
 
 use std::io;

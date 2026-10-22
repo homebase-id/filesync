@@ -39,5 +39,3 @@ pub const SCOPE: FolderKey = FolderKey("scope.fingerprint");
 /// Nodes whose removal elsewhere the mass-delete guard held as every synced file, until the
 /// user answers (sync semantics §7): their ids, comma-separated.
 pub const WIPED: FolderKey = FolderKey("guard.wiped");
-/// When the purge started emptying the folder's trash (Unix s).
-pub const TRASH_PURGED_SINCE: FolderKey = FolderKey("trash.purged_since");

@@ -687,10 +687,10 @@ mod targeted {
         let mut f = Fixture::new()?;
         f.write("real.txt", b"r")?;
         f.write(".hbsync/state.db", b"db")?;
-        f.write(".hbsync/trash/1-x/old.txt", b"old")?;
+        f.write(".hbsync/aside/x/old.txt", b"old")?;
         f.scan()?;
         // A journal reports changes inside .hbsync (it changes on every run).
-        let (report, dirty) = f.rescan(&[".hbsync", ".hbsync/trash/1-x"])?;
+        let (report, dirty) = f.rescan(&[".hbsync", ".hbsync/aside/x"])?;
         assert_eq!((report.added, dirty.len()), (0, 0), "{report:?}");
         assert_eq!(f.db.read(|s| s.local_count())?, 1);
         Ok(())

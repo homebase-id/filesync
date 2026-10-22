@@ -56,7 +56,7 @@ pub struct Config {
     pub roots: Vec<Root>,
 }
 
-/// Days Recently deleted keeps an item, and the trash its local copy (sync semantics §7): the
+/// Days Recently deleted keeps an item (sync semantics §7; nothing is kept on this device): the
 /// purge is the account's, so a value below [`KeepDays::MIN`] reads as it ([`Config::load`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]

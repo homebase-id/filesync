@@ -591,8 +591,10 @@ expected fingerprint is treated as done.
   replaced, its node holding the new bytes by then, goes once its bytes read as the old
   version's; written to, it comes back as a new item beside the new one, never onto it;
   unreadable now, it waits. Where its rows went (an item took its place meanwhile), its base
-  decides: a file holding the bytes its base records goes; anything else goes back where it was last synced, read as a new item there. One whose node
-  this folder doesn't know (its state DB lost or replaced since) is left aside, and told. A
+  decides: a file holding the bytes its base records goes; anything else goes back where it was
+  last synced, read as a new item there. One whose node this folder doesn't know (its state DB
+  lost or replaced since), or one to go back whose place it doesn't, is left aside, and told
+  (one note naming a few); junk the OS leaves there (`.DS_Store`) is passed over. A
   crash after an unlink and before its commit leaves the bases: the item reads as deleted here,
   which the drive's removal settles; a restore made in between is removed again, to Recently
   deleted (a known limit: a write-ahead record of a run's deletes, a durable commit more, would
