@@ -1604,3 +1604,85 @@ fn a_put_back_asked_again_a_minute_on_uploads_what_went_for_good() -> common::Re
     assert_eq!(a.read_text("d/e/g3.txt")?, "g3");
     Ok(())
 }
+
+/// Every file held on b (another device removed them); one of them is deleted for good on the
+/// drive before b puts them back, and the feed hasn't told yet: the restore's answer does (a
+/// tombstone). It goes up again from b as the rest come back (sync semantics §7, "Put them
+/// back"), not held again at the next sync, its base kept as if the drive had only removed it.
+#[test]
+fn a_put_back_uploads_what_its_restore_finds_deleted_for_good() -> common::Res<()> {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |cfg| cfg.guard.min = 2)?;
+    for i in 0..10 {
+        a.write(&format!("f{i}.txt"), format!("{i}"))?;
+    }
+    a.sync()?;
+    b.sync()?;
+    for i in 0..10 {
+        fs::remove_file(a.root.join(format!("f{i}.txt")))?;
+    }
+    a.sync()?;
+    let held: Vec<NodeId> = b.sync()?.held.iter().map(|op| op.node()).collect();
+    assert_eq!(held.len(), 10);
+    // Deleted for good (a tombstone), the feed not telling yet.
+    let f0 = header_named(&server, "f0.txt");
+    {
+        let mut s = server.lock().map_err(|_| "poisoned")?;
+        s.delete(f0.at().file_id, f0.at().version)?;
+        s.unlist(f0.at().file_id);
+    }
+    assert_eq!(b.engine.put_back(&held)?, 10);
+    let report = b.sync()?;
+    assert!(report.held.is_empty(), "{report:?}");
+    assert_eq!(b.read_text("f0.txt")?, "0");
+    a.sync()?;
+    assert_eq!(a.read_text("f0.txt")?, "0", "up again from b");
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    Ok(())
+}
+
+/// The same with a folder: it went for good meanwhile, and a file in it is said not there once
+/// (asked again a minute on). Its base stays while that file waits in Recently deleted, so
+/// the guard still holds the folder (it walks up the base) and nothing of it is trashed here;
+/// asked again, all of it goes up again from b.
+#[test]
+fn a_put_back_keeps_a_folder_gone_for_good_while_a_file_in_it_waits() -> common::Res<()> {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |cfg| cfg.guard.min = 2)?;
+    for i in 0..4 {
+        a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
+    }
+    a.sync()?;
+    b.sync()?;
+    let whole = b.tree_text("");
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.sync()?;
+    let held: Vec<NodeId> = b.sync()?.held.iter().map(|op| op.node()).collect();
+    assert_eq!(held.len(), 1, "the folder");
+    // The folder deleted for good (a tombstone the feed doesn't tell yet), a file in it gone
+    // without one (said not there once).
+    let (d, f1) = (header_named(&server, "d"), header_named(&server, "f1.txt"));
+    {
+        let mut s = server.lock().map_err(|_| "poisoned")?;
+        s.delete(d.at().file_id, d.at().version)?;
+        s.unlist(d.at().file_id);
+        s.hard_delete(f1.at().file_id, f1.at().version)?;
+    }
+    assert!(b.engine.put_back(&held).is_err(), "not there once");
+    assert!(
+        b.engine.db().read(|s| s.get_base(held[0]))?.is_some(),
+        "the folder's base stays"
+    );
+    let report = b.sync()?;
+    assert!(!report.held.is_empty(), "still held: {report:?}");
+    assert_eq!(b.tree_text(""), whole, "nothing trashed");
+    b.a_minute_on()?;
+    b.engine.put_back(&held)?;
+    assert!(b.sync()?.held.is_empty());
+    a.sync()?;
+    assert_eq!(a.tree_text(""), whole);
+    assert_eq!(b.tree_text(""), whole);
+    Ok(())
+}

@@ -654,34 +654,17 @@ impl Sim {
     /// where one item's restored name is another's own).
     pub(crate) fn put_back(&mut self, c: usize) {
         let held = std::mem::take(&mut self.clients[c].held);
-        let client = &self.clients[c];
-        // What the scanner reports here: never what the filter leaves out.
-        let mut local = client.local.clone();
-        for n in masked(&client.local, &client.filter) {
-            local.remove(n);
-        }
-        let coords = client.coords;
-        // The mirror, as the plan sees it.
-        let view = self.drive_seen(c);
-        let sides = ModelSides {
-            base: &client.base,
-            local: &local,
-            live: &|n| view.contains(n),
-            server: &self.server,
-            coords,
-        };
-        let Ok(plan) = hbsync_engine::held::put_back_plan(&held, &sides);
-        let client = &mut self.clients[c];
-        for n in plan.forget {
-            client.base.remove(n);
-            client.extra.remove(&n);
-        }
+        let Ok(plan) = self.with_sides(c, |sides| hbsync_engine::held::put_back_plan(&held, sides));
+        self.forget_bases(c, &plan.forget);
+        let coords = self.clients[c].coords;
         // What each item takes along, as the engine plans them all in one read: an item an
         // earlier one brought back (a folder above it) still has what was deleted with it
         // restored.
+        let had_items = !plan.items.is_empty();
         let items: Vec<(NodeId, Vec<NodeId>)> = plan
             .items
-            .into_iter()
+            .iter()
+            .copied()
             .map(|item| {
                 let item = coords.to_drive(item);
                 (item, self.server.group(item))
@@ -698,6 +681,44 @@ impl Sim {
                     self.restore_with(n);
                 }
             }
+        }
+        // By the same rule again, as the restore left the drive: a folder gone for good whose
+        // contents waited in Recently deleted goes up again now they are back.
+        if had_items {
+            let Ok(after) =
+                self.with_sides(c, |sides| hbsync_engine::held::after_restore(&plan, sides));
+            self.forget_bases(c, &after);
+        }
+    }
+
+    /// `f` over client `c`'s sides as its store would have them now, for the engine's rules of
+    /// held deletes ([`hbsync_engine::held`]).
+    fn with_sides<T>(&self, c: usize, f: impl FnOnce(&ModelSides<'_>) -> T) -> T {
+        let client = &self.clients[c];
+        // What the scanner reports here: never what the filter leaves out.
+        let mut local = client.local.clone();
+        for n in masked(&client.local, &client.filter) {
+            local.remove(n);
+        }
+        let coords = client.coords;
+        // The mirror, as the plan sees it.
+        let view = self.drive_seen(c);
+        let sides = ModelSides {
+            base: &client.base,
+            local: &local,
+            live: &|n| view.contains(n),
+            server: &self.server,
+            coords,
+        };
+        f(&sides)
+    }
+
+    /// Client `c`'s bases of `nodes` forgotten (a put back's): each planned again as new.
+    fn forget_bases(&mut self, c: usize, nodes: &[NodeId]) {
+        let client = &mut self.clients[c];
+        for &n in nodes {
+            client.base.remove(n);
+            client.extra.remove(&n);
         }
     }
 

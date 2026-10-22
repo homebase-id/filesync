@@ -134,8 +134,65 @@ pub struct PutBack {
     /// The items of Recently deleted to restore, the outermost (by the base) first: what was
     /// removed with its folder comes back with it.
     pub items: Vec<NodeId>,
-    /// How many synced nodes it brings back from Recently deleted.
-    pub restored: usize,
+    /// The synced nodes it brings back from Recently deleted ([`after_restore`] looks at them
+    /// again).
+    pub restored: Vec<NodeId>,
+    /// Nodes gone for good kept with their base for now: folders below which something synced
+    /// waits in Recently deleted ([`after_restore`] looks at them again).
+    pub kept: Vec<NodeId>,
+}
+
+/// The folders, synced, from each of `folders` up, when `gone` has any (else none: nothing to
+/// keep). A base read a folder, each once.
+fn waits_below<S: Sides>(
+    sides: &S,
+    folders: impl IntoIterator<Item = NodeId>,
+    gone: &[NodeId],
+) -> Result<HashSet<NodeId>, S::Error> {
+    let mut up = HashSet::new();
+    if gone.is_empty() {
+        return Ok(up);
+    }
+    for folder in folders {
+        let mut at = folder;
+        while up.insert(at) {
+            match sides.synced(at)? {
+                Some(parent) => at = parent,
+                None => break,
+            }
+        }
+    }
+    Ok(up)
+}
+
+/// What [`put_back_plan`]'s `plan` forgets more once its restore is done (or failed: what it
+/// did stands), as the drive has things then: each node it was to restore that the restore
+/// found deleted for good meanwhile (synced, neither live nor in Recently deleted), and each
+/// folder it kept, gone for good, so they go up again from here; a folder of them only once
+/// nothing synced below it waits in Recently deleted any more. Costs, per node restored or
+/// kept, a base, a live and a Recently deleted read (and base reads up from what still waits,
+/// when something is gone).
+pub fn after_restore<S: Sides>(plan: &PutBack, sides: &S) -> Result<Vec<NodeId>, S::Error> {
+    // Gone for good now: found so by the restore, or kept for what waited below.
+    let mut gone = Vec::new();
+    let mut waiting = Vec::new();
+    for &n in plan.restored.iter().chain(&plan.kept) {
+        let Some(folder) = sides.synced(n)? else {
+            continue;
+        };
+        if sides.live(n)? {
+            continue;
+        }
+        match sides.removed(n)? {
+            Some(_) => waiting.push(folder),
+            None => gone.push(n),
+        }
+    }
+    let above_waiting = waits_below(sides, waiting, &gone)?;
+    Ok(gone
+        .into_iter()
+        .filter(|n| !above_waiting.contains(n))
+        .collect())
 }
 
 /// Puts back the held removals of `nodes`, as the drive has them now (what it removed or
@@ -146,13 +203,17 @@ pub struct PutBack {
 /// - removed elsewhere, still here: restored on the drive from Recently deleted, and so is what
 ///   in it was removed apart before (each by the item whose delete took it along, up from the
 ///   folder it was synced in); what is gone for good there loses its base, so it goes up again
-///   from here; a folder already back has what is in it looked at.
+///   from here (a folder only once nothing synced below it waits in Recently deleted: else it
+///   is [`PutBack::kept`], for [`after_restore`], which also takes what the restore itself
+///   finds gone); a folder already back has what is in it looked at.
 ///
 /// Costs, per node walked, a base, a live and (here) a row lookup, a row lookup and a listing
 /// per folder here, and a row of Recently deleted per node restored and per folder above it
 /// (each read once).
 pub fn put_back_plan<S: Sides>(nodes: &[NodeId], sides: &S) -> Result<PutBack, S::Error> {
     let mut plan = PutBack::default();
+    // Synced and here, gone for good on the drive.
+    let mut gone = Vec::new();
     // Each once: a folder's held with what is in it.
     let mut seen = HashSet::new();
     // What to restore: each node, with the folder it was synced in and its removal's time.
@@ -200,7 +261,7 @@ pub fn put_back_plan<S: Sides>(nodes: &[NodeId], sides: &S) -> Result<PutBack, S
                     {
                         match removed(n)? {
                             Some((_, at)) => restore.push((n, folder, at)),
-                            None => plan.forget.push(n),
+                            None => gone.push(n),
                         }
                     }
                     if kind == NodeKind::Folder {
@@ -212,7 +273,17 @@ pub fn put_back_plan<S: Sides>(nodes: &[NodeId], sides: &S) -> Result<PutBack, S
             (None, false) => {}
         }
     }
-    plan.restored = restore.len();
+    // Gone for good: its base goes, but a folder's only once nothing synced below it waits in
+    // Recently deleted (its restore not done yet, or failed: the guard's hold on that walks up
+    // the base). Looked at again after the restore ([`after_restore`]), it goes then.
+    let above_waiting = waits_below(sides, restore.iter().map(|&(_, folder, _)| folder), &gone)?;
+    for n in gone {
+        match above_waiting.contains(&n) {
+            true => plan.kept.push(n),
+            false => plan.forget.push(n),
+        }
+    }
+    plan.restored = restore.iter().map(|&(n, ..)| n).collect();
     // Up through the folders each was deleted with, from the folder it was synced in, as
     // Recently deleted lists it.
     let with = |at: NodeId| -> Result<Option<NodeId>, S::Error> {
@@ -317,7 +388,7 @@ mod tests {
         };
         let items = |folder| {
             let Ok(plan) = put_back_plan(&[x], &model(folder));
-            (plan.items, plan.restored)
+            (plan.items, plan.restored.len())
         };
         assert_eq!(items(here), (vec![x], 1), "on its own");
         assert_eq!(
@@ -339,5 +410,38 @@ mod tests {
         };
         let Ok(plan) = put_back_plan(&[x], &model);
         assert_eq!(plan.items, vec![p.min(q)]);
+    }
+
+    /// A folder gone for good keeps its base while something synced below it waits in
+    /// Recently deleted (the guard's hold on that walks up the base); once that is back
+    /// ([`after_restore`]), it goes, to go up again from here.
+    #[test]
+    fn a_folder_gone_for_good_goes_once_nothing_below_it_waits() {
+        let (d, e, x) = (NodeId::new(), NodeId::new(), NodeId::new());
+        let mut model = Model {
+            base: HashMap::from([(d, NodeId::ROOT), (e, d), (x, e)]),
+            here: HashMap::from([
+                (d, (NodeId::ROOT, NodeKind::Folder)),
+                (e, (d, NodeKind::Folder)),
+                (x, (e, NodeKind::File)),
+            ]),
+            // `d` gone for good; `e` back on the drive; `x` in Recently deleted.
+            live: HashSet::from([e]),
+            removed: HashMap::from([(x, (e, 5))]),
+        };
+        let Ok(plan) = put_back_plan(&[d], &model);
+        assert_eq!(
+            (&plan.forget, &plan.items, &plan.kept),
+            (&vec![], &vec![x], &vec![d])
+        );
+        // Not back yet: still kept.
+        assert_eq!(after_restore(&plan, &model), Ok(vec![]));
+        // Back.
+        model.removed.clear();
+        model.live.insert(x);
+        assert_eq!(after_restore(&plan, &model), Ok(vec![d]));
+        // Found deleted for good by the restore: it goes too.
+        model.live.remove(&x);
+        assert_eq!(after_restore(&plan, &model), Ok(vec![x, d]));
     }
 }
