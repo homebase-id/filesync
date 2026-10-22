@@ -2438,3 +2438,58 @@ fn a_folder_restored_by_its_own_change_keeps_what_its_delete_took_along() {
         plan.ops
     );
 }
+
+/// As [`a_folder_restored_by_its_own_change_keeps_what_its_delete_took_along`], `y` dirty
+/// (tagged here: no change that keeps it on its own) and planned in a page without `d`, a
+/// piece of `d`'s too big for one (`Options::own_page`): `y` waits for `d`'s plan, which keeps
+/// it. Planned apart, `y` went with the removal while `d` came back (§6.5).
+#[test]
+fn what_a_removal_took_along_waits_for_its_folder_in_another_page() {
+    let [d, y] = ids(2)[..] else { unreachable!() };
+    let mut w = World::default();
+    w.input.remote_complete = true;
+    w.synced(d, folder(ROOT, "d")).synced(y, file(d, "y", "y"));
+    w.remote(d, None);
+    w.input.removed.insert(
+        d,
+        hbsync_engine::reconcile::Removed {
+            at: 100,
+            state: folder(ROOT, "d"),
+        },
+    );
+    w.input.changed_at.insert(y, 10);
+    w.local(d, Some(folder(ROOT, "e")));
+    let mut tagged = file(d, "y", "y");
+    tagged.tags = Tags::new([Tag::new("Red", 6)]);
+    w.local(y, Some(tagged));
+    // Planned whole: `d` comes back, and `y` with it, tagged.
+    let plan = w.plan();
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, Op::RemoteCreate { node, .. } if *node == d)),
+        "{:#?}",
+        plan.ops
+    );
+    assert!(
+        plan.ops
+            .iter()
+            .all(|op| op.node() != y || matches!(op, Op::RemoteTags { .. })),
+        "{:#?}",
+        plan.ops
+    );
+    // A piece without `d`, which another page plans: `y` waits, nothing done.
+    w.input.dirty.remove(&d);
+    w.input.dirty_elsewhere.insert(d);
+    w.input.going_above.insert(d);
+    w.opts.own_page = true;
+    let plan = w.plan();
+    assert!(plan.ops.is_empty(), "{:#?}", plan.ops);
+    assert!(plan.deferred.contains(&y), "{plan:#?}");
+    // Moved here, `y` plans the same whatever `d`'s plan: it doesn't wait.
+    let mut moved = file(ROOT, "y", "y");
+    moved.tags = Tags::new([Tag::new("Red", 6)]);
+    w.local(y, Some(moved));
+    let plan = w.plan();
+    assert!(!plan.deferred.contains(&y), "{plan:#?}");
+}

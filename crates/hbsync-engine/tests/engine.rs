@@ -5900,6 +5900,55 @@ fn a_stopped_wipe_planned_in_pages_is_held() -> R {
     Ok(())
 }
 
+/// As [`a_stopped_wipe_planned_in_pages_is_held`], with `d1/s`, taken along with `s/x.txt`,
+/// tagged here: planned in a page without `d1` (a piece of it), it waits for `d1`'s plan
+/// (§6.5), which the guard holds.
+/// The wait settles with the hold: later syncs plan nothing (no spin), and `x.txt` stays.
+#[test]
+fn what_a_held_removal_took_along_waits_without_a_spin() -> R {
+    use hbsync_platform::tags::{self, Tag, Tags};
+    for batch in [1, 2, 20_000] {
+        let server = server();
+        let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+        let mut b = Client::with_config(&server, "b", move |cfg| {
+            cfg.guard.min = 2;
+            cfg.batch = batch;
+        })?;
+        for d in ["d1", "d2", "d3"] {
+            a.write(&format!("{d}/a.txt"), "a")?;
+            a.write(&format!("{d}/s/x.txt"), "x")?;
+        }
+        if !tags::CAN_TAG || tags::write(&a.root.join("d1/s"), &Tags::default())?.is_none() {
+            eprintln!("no tags here; skipped");
+            return Ok(());
+        }
+        a.sync()?;
+        b.sync()?;
+        remove_on_drive_except(&server, &["s", "x.txt"])?;
+        tags::write(&b.root.join("d1/s"), &Tags::new([Tag::new("Red", 6)]))?;
+        let mut syncs = Vec::new();
+        for _ in 0..8 {
+            let report = b.sync()?;
+            syncs.push((report.rounds, report.ops_done, report.held.len()));
+        }
+        // Once the hold settles, a sync plans nothing: no wait planned again every sync.
+        assert!(
+            syncs[4..]
+                .iter()
+                .all(|&(rounds, ops, held)| rounds == 0 && ops == 0 && held > 0),
+            "pages of {batch}: (rounds, ops, held) a sync: {syncs:?}"
+        );
+        for d in ["d1", "d2", "d3"] {
+            assert_eq!(
+                b.read_text(&format!("{d}/s/x.txt"))?,
+                "x",
+                "pages of {batch}"
+            );
+        }
+    }
+    Ok(())
+}
+
 /// Another app removes `d` on the drive and stops there: `e` and `f1.txt` in it are taken
 /// along, live, and not marked (the feed marks the folder). b edits `d/e/f1.txt` and makes
 /// `d/e/new.txt` meanwhile, their marks in later pages than `d`'s. The page holding `d` waits

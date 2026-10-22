@@ -98,8 +98,8 @@ pub(crate) fn may_go(input: &Input, node: NodeId, hidden: &HashSet<NodeId>) -> b
 struct Want {
     nodes: Vec<NodeId>,
     folders: Vec<NodeId>,
-    /// A piece of a folder too big for a page: it doesn't wait for that folder
-    /// ([`crate::plan::Options::own_page`]).
+    /// A piece of a folder too big for a page: it doesn't wait for that folder, but for what
+    /// the folder's removal took along ([`crate::plan::Options::own_page`]).
     piece: bool,
 }
 
