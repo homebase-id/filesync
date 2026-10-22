@@ -347,18 +347,39 @@ impl HeldDeletes {
     ) -> Result<usize, EngineError> {
         self.out.plan_again = true;
         drive.pull(None)?;
+        let forget = |db: &mut StateDb, nodes: &[NodeId]| {
+            db.write(|s| {
+                for &node in nodes {
+                    s.folder().delete_base(node)?;
+                    s.folder().mark_dirty(node)?;
+                }
+                Ok(())
+            })
+        };
         let plan = db.read(|s| held::put_back_plan(nodes, &StoreSides(s)))?;
-        db.write(|s| {
-            for &node in &plan.forget {
-                s.folder().delete_base(node)?;
-                s.folder().mark_dirty(node)?;
-            }
-            Ok(())
-        })?;
-        if !plan.items.is_empty() {
-            drive.restore_read(&plan.items)?;
+        forget(db, &plan.forget)?;
+        if plan.items.is_empty() {
+            return Ok(plan.forget.len());
         }
-        Ok(plan.forget.len() + plan.restored)
+        let restored = drive.restore_read(&plan.items);
+        // As the restore left the drive (also when it failed: its waves' writes stand): what it
+        // found deleted for good goes up again, and a folder kept, gone for good, once nothing
+        // below it waits in Recently deleted any more. Its own error is the one told.
+        let after = db
+            .read(|s| held::after_restore(&plan, &StoreSides(s)))
+            .and_then(|after| forget(db, &after).map(|()| after));
+        let after = match (restored, after) {
+            (Err(e), after) => {
+                if let Err(a) = after {
+                    tracing::warn!("can't look again at what a failed put back left: {a}");
+                }
+                return Err(e);
+            }
+            (Ok(_), after) => after?,
+        };
+        let kept: HashSet<NodeId> = plan.kept.iter().copied().collect();
+        let kept_gone = after.iter().filter(|n| kept.contains(n)).count();
+        Ok(plan.forget.len() + plan.restored.len() + kept_gone)
     }
 }
 

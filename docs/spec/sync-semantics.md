@@ -405,8 +405,12 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   held. **Delete**, or **Put them back**: kept here, and each synced item in them the drive
   no longer has is restored from Recently deleted (each removal as an item: what was removed
   with its folder comes back with it; what was removed apart, before, on its own), or, gone
-  for good there, uploaded again from here as it is; a folder already back has what is in it
-  looked at. Every device then has them back. Cost: a feed read, then one restore of all the
+  for good there, uploaded again from here as it is, also what the restore itself finds gone
+  for good (looked at again after it: two reads a node restored); a folder gone for good only
+  once nothing synced below it waits in Recently deleted, till then held with what waits
+  (engine `a_put_back_uploads_what_its_restore_finds_deleted_for_good`,
+  `a_put_back_keeps_a_folder_gone_for_good_while_a_file_in_it_waits`); a folder already back
+  has what is in it looked at. Every device then has them back. Cost: a feed read, then one restore of all the
   removals together: one read, and per wave (what comes back into folders already back) a
   request per 1,000 rows and one write; held file by file (plans in pages, the folders kept
   on the drive meanwhile), that is still one restore (300 loose files: 2 requests, against 301

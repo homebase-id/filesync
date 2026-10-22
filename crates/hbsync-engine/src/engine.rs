@@ -311,11 +311,14 @@ impl Engine {
     ///   What below it was moved elsewhere here keeps its base: the move goes on;
     /// - removed elsewhere, still here: restored on the drive from Recently deleted, and so is
     ///   what in it was removed apart before; what is gone for good there loses its base, so
-    ///   it goes up again from here.
+    ///   it goes up again from here, also what the restore itself finds so; a folder gone for
+    ///   good only once nothing synced below it waits in Recently deleted (till then it stays
+    ///   held with what waits).
     ///
     /// The next sync does the rest; what a failure leaves is still held, and shown again.
-    /// Costs a feed read, then one restore of them all: a request per wave and per thousand rows.
-    /// Returns how many it put back.
+    /// Costs a feed read, then one restore of them all: a request per wave and per thousand rows,
+    /// and after it two reads per node restored ([`crate::held::after_restore`]). Returns how
+    /// many it put back.
     pub fn put_back(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
         self.held.put_back(&mut self.db, &self.drive, nodes)
     }
