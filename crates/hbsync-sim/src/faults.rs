@@ -20,6 +20,9 @@ pub(crate) struct Faults {
     pub(crate) fail_commit_next: bool,
     /// For scripted tests: the next tag write fails.
     pub(crate) fail_tags_next: bool,
+    /// For scripted tests: how many items the next crash in a delete's unlinks lets go first
+    /// (else as many as the crashes so far say, of the items plus one).
+    pub(crate) unlinks_before_crash: Option<usize>,
     /// A download takes two steps: fetching, then putting in place and committing; anything
     /// may happen between them ([`crate::Sim::with_split_downloads`]).
     pub(crate) split_downloads: bool,

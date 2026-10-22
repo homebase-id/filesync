@@ -1304,3 +1304,136 @@ fn regression_a_folder_made_from_recently_deleted_after_its_restore_waits() {
     let limits = known_limits_of(2, &events);
     assert!(limits.is_empty(), "{limits:?}");
 }
+
+/// Client 1 deletes file `a` (or, `folder`, folder `b` holding `b/c.txt`); client 0 moves it
+/// aside to delete it, then `between` runs (a crash there lets `unlinked` items go first) before
+/// client 0's next step, and every client settles. Returns the drive's paths once the check
+/// passed.
+fn delete_elsewhere_with(folder: bool, unlinked: usize, between: &[Event]) -> Vec<String> {
+    use Action::*;
+    let mut sim = Sim::new(2);
+    let act = |client, action| Event::Act { client, action };
+    let (a, b, c_txt) = (0, 1, 3); // NAMES: "a", "b", "c.txt"
+    let top = if folder {
+        sim.run(&[act(0, CreateFolder { parent: 0, name: b })]);
+        let node_b = sim.item(0, "b").expect("b");
+        let parent = sim.pick(0, node_b, true).expect("b");
+        sim.run(&[act(
+            0,
+            CreateFile {
+                parent,
+                name: c_txt,
+            },
+        )]);
+        "b"
+    } else {
+        sim.run(&[act(0, CreateFile { parent: 0, name: a })]);
+        "a"
+    };
+    assert!(sim.quiesce(30), "no convergence");
+    let item = sim.item(0, top).expect(top);
+    let node = sim.pick(1, item, false).expect(top);
+    sim.run(&[
+        act(1, Delete { node }),
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        Event::Step { client: 1 },
+        Event::Plan { client: 0 },
+    ]);
+    assert_eq!(sim.planned(0), ["LocalTrash"]);
+    sim.run(&[Event::Step { client: 0 }]);
+    assert!(sim.item(0, top).is_none(), "aside");
+    sim.crash_after_unlinks(unlinked);
+    sim.run(between);
+    assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+    sim.server_paths()
+}
+
+/// An app that had `a` open writes to it after client 0 moved it aside to delete it: the check
+/// finds it changed and puts it back, and the edit wins: `a` is restored on the drive with its
+/// new bytes. Unlinked, the edit was lost.
+#[test]
+fn an_edit_of_a_file_aside_is_kept() {
+    let edit = Event::Act {
+        client: 0,
+        action: Action::EditAside { pick: 0 },
+    };
+    let paths = delete_elsewhere_with(false, 0, &[edit, Event::Step { client: 0 }]);
+    assert_eq!(paths, ["a"], "the edit restored it");
+}
+
+/// An app saves a new file into folder `b` after client 0 moved it aside to delete it: the
+/// check finds it there and puts the folder back; the new file keeps the folder alive, restored,
+/// and what was synced in it goes.
+#[test]
+fn a_file_saved_into_a_folder_aside_is_kept() {
+    let save = Event::Act {
+        client: 0,
+        action: Action::CreateInAside { pick: 0, name: 0 },
+    };
+    let paths = delete_elsewhere_with(true, 0, &[save, Event::Step { client: 0 }]);
+    assert_eq!(paths, ["b", "b/a"], "the new file kept its folder");
+}
+
+/// Client 0 dies with folder `b` aside: before anything of it is unlinked, after `b/c.txt`
+/// is, and after both are (the commit lost: the bases stay). What is left aside goes back at the
+/// next plan, and the delete is made again; nothing is lost.
+#[test]
+fn a_crash_with_a_delete_aside_loses_nothing() {
+    for unlinked in 0..3 {
+        let paths = delete_elsewhere_with(true, unlinked, &[Event::Crash { client: 0 }]);
+        assert!(paths.is_empty(), "{paths:?}");
+    }
+}
+
+/// Client 1 keeps an ignored file `b/d` (it ignores `d`) in folder `b`, which client 0
+/// deletes: client 1 moves only `b/c.txt` aside, the folder staying for what it keeps (sync
+/// semantics §10). An app writes to `b/c.txt` there: the check puts it back, the edit wins, and
+/// `b` comes back on the drive with it; `b/d` stays on client 1 only.
+#[test]
+fn an_edit_aside_beside_an_ignored_item_is_kept() {
+    use Action::*;
+    let mut sim = Sim::new(2);
+    let act = |client, action| Event::Act { client, action };
+    let (b, c_txt, d) = (1, 3, 5); // NAMES: "b", "c.txt", "d"
+    sim.run(&[act(0, CreateFolder { parent: 0, name: b })]);
+    let node_b = sim.item(0, "b").expect("b");
+    let parent = sim.pick(0, node_b, true).expect("b");
+    sim.run(&[act(
+        0,
+        CreateFile {
+            parent,
+            name: c_txt,
+        },
+    )]);
+    assert!(sim.quiesce(30), "no convergence");
+    let parent = sim.pick(1, node_b, true).expect("b");
+    sim.run(&[act(1, CreateFile { parent, name: d })]);
+    let node = sim.pick(0, node_b, false).expect("b");
+    sim.run(&[
+        act(0, Delete { node }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        Event::Step { client: 0 },
+        Event::Plan { client: 1 },
+    ]);
+    assert_eq!(sim.planned(1), ["LocalTrash"]);
+    sim.run(&[Event::Step { client: 1 }]);
+    assert!(sim.item(1, "b/c.txt").is_none(), "aside");
+    assert!(sim.item(1, "b/d").is_some(), "kept");
+    sim.run(&[act(1, EditAside { pick: 0 }), Event::Step { client: 1 }]);
+    assert!(sim.item(1, "b/c.txt").is_some(), "put back");
+    assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+    assert_eq!(
+        sim.server_paths(),
+        ["b", "b/c.txt"],
+        "the edit kept its folder"
+    );
+    assert!(sim.item(1, "b/d").is_some(), "kept");
+}

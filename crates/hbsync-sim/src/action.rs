@@ -152,6 +152,18 @@ pub enum Action {
     Meanwhile {
         op: usize,
     },
+    /// An app that opened a file before the client moved it aside to delete it (sync semantics
+    /// §7) writes to it there, through its handle: a file of what is aside on the client, a new
+    /// version. Nothing when nothing is aside.
+    EditAside {
+        pick: usize,
+    },
+    /// An app whose working folder is a folder the client moved aside to delete saves a new
+    /// file into it there. Nothing when no folder is aside.
+    CreateInAside {
+        pick: usize,
+        name: usize,
+    },
 }
 
 /// Tags the users pick from: one no Linux client can hold, one with a newline no macOS client
@@ -190,7 +202,8 @@ pub enum Event {
         client: usize,
     },
     /// The client's process dies during its next step: a download's commit is lost after its
-    /// file is in place ([`Sim::with_split_downloads`]), and the rest of its plan with it. Its
+    /// file is in place ([`Sim::with_split_downloads`]), a delete stops aside or part way
+    /// through its unlinks, and the rest of its plan with it. Its
     /// next plan recovers first, as the engine's start of a sync does.
     ///
     /// [`Sim::with_split_downloads`]: crate::Sim::with_split_downloads

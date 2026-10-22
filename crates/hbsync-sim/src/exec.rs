@@ -25,7 +25,7 @@ use hbsync_types::{
 
 use crate::Sim;
 use crate::action::NAMES;
-use crate::model::client::{Client, rekey_client, verdict};
+use crate::model::client::{Client, rekey_client, verdict, verdict_in};
 use crate::model::server::{ServerNode, time};
 use crate::oracle::view_with;
 
@@ -615,8 +615,9 @@ impl Sim {
         if matches!(op, Op::RemoteDelete { .. }) && outcome != Outcome::Done && !retried {
             self.clients[c].unremoved.insert(node);
         }
-        if outcome == Outcome::Fetched {
-            // Put in place and committed by the next step, whatever happens meanwhile.
+        if matches!(outcome, Outcome::Fetched | Outcome::Aside) {
+            // Put in place and committed (a download), or checked and unlinked (a delete), by
+            // the next step, whatever happens meanwhile.
             self.clients[c].plan.push_front((op, attempts));
             return true;
         }
@@ -1428,10 +1429,11 @@ impl Sim {
                     // taken it along when the plan was made: anything else the engine removes no
                     // user wanted gone.
                     let version = self.server.live.get(&node).map(|n| n.remote.version);
-                    let rightly = now
-                        .as_ref()
-                        .is_some_and(|now| self.ledger.deleted_by_user(node, now))
-                        || version.is_some_and(|v| self.ledger.plan_saw_taken(c, node, v));
+                    let rightly = now.as_ref().is_some_and(|now| {
+                        self.ledger.deleted_by_user(node, now)
+                            || self.ledger.removed_by_lost_commit(c, node, now)
+                    }) || version
+                        .is_some_and(|v| self.ledger.plan_saw_taken(c, node, v));
                     if let Some(n) = self.server.live.remove(&node) {
                         self.remove_on_drive(node, n, rightly);
                         let client = &mut self.clients[c];
@@ -1511,11 +1513,17 @@ impl Sim {
         }
     }
 
-    /// Moves `node` and everything below it to the trash, as the executor does: only if the
-    /// visible part is `expected` and unchanged since planning, with the bases of all of it.
-    /// Junk goes along; ignored items stay, and so do the folders they sit in, released (§10).
+    /// Deletes `node` and everything below it, as the executor does (sync semantics §7): only
+    /// if the visible part is `expected` and unchanged since planning, with the bases of all of
+    /// it. In two steps: the item is moved aside ([`Outcome::Aside`]), then, at the next step,
+    /// checked again there and unlinked ([`Sim::finish_delete`]); anything else found there puts
+    /// it back. Junk goes along; ignored items stay, and so do the folders they sit in, released
+    /// (§10): those go item by item, at once.
     fn trash(&mut self, c: usize, node: NodeId, expected: &[NodeId]) -> Outcome {
-        use Outcome::{Done, Skip};
+        use Outcome::Skip;
+        if self.clients[c].aside.contains_key(&node) {
+            return self.finish_delete(c, node, expected);
+        }
         let unchanged = |client: &Client, node: NodeId| {
             client.local.get(node) == client.planned_local.get(node)
         };
@@ -1549,6 +1557,8 @@ impl Sim {
             );
         }
         // Junk sitting directly in a released folder, or anywhere in a kept one, isn't touched.
+        // The rest goes aside: with nothing kept, the whole item, one rename; else each item
+        // that goes, the released folders staying.
         let gone: Vec<NodeId> = all
             .iter()
             .copied()
@@ -1559,48 +1569,58 @@ impl Sim {
                     && !client.local.ancestors(*n).iter().any(|a| kept.contains(a))
             })
             .collect();
-        // A released folder can't keep a temporary name (it carries the old id): it gets a real
-        // one, deepest first, before the rest goes (the executor's DB still holds it then).
-        let mut parked: Vec<NodeId> = released
+        let client = &mut self.clients[c];
+        let mut aside = Tree::new();
+        for n in gone {
+            if let Some(state) = client.local.remove(n) {
+                aside.insert(n, state);
+            }
+        }
+        client.aside.insert(node, aside);
+        Outcome::Aside
+    }
+
+    /// The second step of deleting `node` (moved aside by [`Sim::trash`]): what is aside is
+    /// checked against what the plan saw ([`Sim::aside_check`]) and unlinked, with the bases of
+    /// `expected`, and the folders that stayed (holding ignored items) are released; anything
+    /// else aside puts it all back, for the next plan.
+    fn finish_delete(&mut self, c: usize, node: NodeId, expected: &[NodeId]) -> Outcome {
+        let Some(hidden) = self.aside_check(c, node, expected) else {
+            self.note(|_| format!("  c{c} {node:?} isn't as planned aside: put back"));
+            self.put_back_aside(c, node);
+            return Outcome::Skip;
+        };
+        self.unlink_aside(c, node, &hidden, usize::MAX);
+        // What stayed of what the plan saw: the folders holding ignored items. Released: a
+        // temporary name (it carries the old id) gives way to a real one, deepest first, and
+        // each takes a new id, for the scanner to find as a new folder.
+        let client = &self.clients[c];
+        let mut released: Vec<NodeId> = expected
             .iter()
             .copied()
-            .filter(|r| {
-                client.parked.contains_key(r)
-                    && client
-                        .local
-                        .get(*r)
-                        .is_some_and(|s| s.name == parked_name(*r))
-            })
+            .filter(|n| client.local.contains(*n))
             .collect();
-        parked.sort_by_key(|r| std::cmp::Reverse(client.local.ancestors(*r).len()));
-        for r in parked {
+        released.sort_by_cached_key(|r| std::cmp::Reverse(client.local.ancestors(*r).len()));
+        for &r in &released {
             let client = &mut self.clients[c];
             let (Some(state), Some((_, original))) =
                 (client.local.get(r).cloned(), client.parked.get(&r).cloned())
             else {
                 continue;
             };
+            if state.name != parked_name(r) {
+                continue;
+            }
             if let Some(name) = release_name(client, r, state.parent, &original, true) {
                 client.local.insert(r, NodeState { name, ..state });
             }
-        }
-        for n in gone {
-            if hidden.contains(&n) {
-                let content = self.clients[c].local.get(n).and_then(|s| s.content);
-                self.ledger.blob_superseded(content); // junk, disposed of by design
-            }
-            let client = &mut self.clients[c];
-            client.local.remove(n);
-            client.parked.remove(&n);
-            // Tag changes made here went to the trash with the item, but for an add sent up.
-            self.tag_changes_left(c, n);
         }
         // What went isn't synced here any more: its bases go with it, whatever the drive holds
         // by now (the executor's; one left behind would read as a local delete once the node
         // is back in view). Of what it had rows of: what isn't filtered (an ignored item kept
         // here keeps its base).
         let client = &mut self.clients[c];
-        for n in &shown {
+        for n in expected {
             client.drop_base(*n);
         }
         for r in released {
@@ -1610,7 +1630,130 @@ impl Sim {
             rekey_client(client, r, new);
             self.retrack(c, r, new);
         }
-        Done
+        Outcome::Done
+    }
+
+    /// Whether what is aside of `node` is exactly what the plan saw (`expected`, unchanged), but
+    /// for junk, which goes along: nothing new, nothing changed, nothing ignored (the filter
+    /// judging each item at its place). What of it the filter hides there, if so.
+    pub(crate) fn aside_check(
+        &self,
+        c: usize,
+        node: NodeId,
+        expected: &[NodeId],
+    ) -> Option<HashSet<NodeId>> {
+        let client = &self.clients[c];
+        let aside = client.aside.get(&node)?;
+        let (placed, hidden) = at_place_filtered(client, aside);
+        let mut shown = Vec::new();
+        for n in aside.ids() {
+            if !hidden.contains(&n) {
+                shown.push(n);
+            } else if verdict_in(&placed, &client.run_filter, n) == Verdict::Ignored {
+                return None;
+            }
+        }
+        shown.sort();
+        // What the plan saw, but for the folders that stayed (holding ignored items).
+        let went: Vec<NodeId> = expected
+            .iter()
+            .copied()
+            .filter(|n| !client.local.contains(*n))
+            .collect();
+        let unchanged = shown
+            .iter()
+            .all(|n| aside.get(*n) == client.planned_local.get(*n));
+        (shown == went && unchanged).then_some(hidden)
+    }
+
+    /// Unlinks up to `count` items of what is aside of `node`, deepest first, and returns those
+    /// the client syncs: junk (of `hidden`, [`Sim::aside_check`]'s) is disposed of; anything else
+    /// must be the version its base records ([`Ledger::deleted_unverified`]). The entry goes once
+    /// nothing is left of it.
+    ///
+    /// [`Ledger::deleted_unverified`]: crate::oracle::Ledger::deleted_unverified
+    pub(crate) fn unlink_aside(
+        &mut self,
+        c: usize,
+        node: NodeId,
+        hidden: &HashSet<NodeId>,
+        count: usize,
+    ) -> Vec<NodeId> {
+        let Some(mut aside) = self.clients[c].aside.remove(&node) else {
+            return Vec::new();
+        };
+        let mut order: Vec<NodeId> = aside.ids().collect();
+        order.sort_by_cached_key(|n| (std::cmp::Reverse(aside.ancestors(*n).len()), *n));
+        let mut synced = Vec::new();
+        for n in order.into_iter().take(count) {
+            let Some(state) = aside.remove(n) else {
+                continue;
+            };
+            if hidden.contains(&n) {
+                self.ledger.blob_superseded(state.content); // junk, disposed of by design
+            } else {
+                let base = self.clients[c].base.get(n);
+                let verified = base.is_some_and(|b| {
+                    b.kind == state.kind
+                        && (state.kind == NodeKind::Folder || b.content == state.content)
+                });
+                let name = &self.clients[c].name;
+                self.ledger.deleted_unverified(|| {
+                    (!verified).then(|| format!("{name} unlinked {n:?} {state:?}, base {base:?}"))
+                });
+                synced.push(n);
+            }
+            self.clients[c].parked.remove(&n);
+            // Tag changes made here went with the item, but for an add sent up.
+            self.tag_changes_left(c, n);
+        }
+        if !aside.is_empty() {
+            self.clients[c].aside.insert(node, aside);
+        }
+        synced
+    }
+
+    /// Puts what is aside of `node` back into the folder, each item at the top of what is aside
+    /// (the item, or what went of it) at its place, else under the first free numbered name
+    /// there, else at the folder's top (its folder gone), as the executor does. Never a delete:
+    /// what was put back is planned again.
+    pub(crate) fn put_back_aside(&mut self, c: usize, node: NodeId) {
+        let client = &mut self.clients[c];
+        let Some(aside) = client.aside.remove(&node) else {
+            return;
+        };
+        let mut tops: Vec<NodeId> = aside
+            .iter()
+            .filter(|(_, s)| !aside.contains(s.parent))
+            .map(|(n, _)| n)
+            .collect();
+        tops.sort();
+        for (n, state) in aside.iter() {
+            if !tops.contains(&n) {
+                client.local.insert(n, state.clone());
+            }
+        }
+        for top in tops {
+            let Some(state) = aside.get(top).cloned() else {
+                continue;
+            };
+            let is_dir = state.kind == NodeKind::Folder;
+            let parent = match client.local.get(state.parent) {
+                Some(p) if p.kind == NodeKind::Folder => state.parent,
+                _ => NodeId::ROOT,
+            };
+            // Of the names, a hundred numbered ones are tried: one is free.
+            let name = release_name(client, top, parent, &state.name, is_dir)
+                .unwrap_or_else(|| state.name.clone());
+            client.local.insert(
+                top,
+                NodeState {
+                    parent,
+                    name,
+                    ..state
+                },
+            );
+        }
     }
 
     /// The tags client `c`'s write of `node` sends over the drive's version with `drive`'s, as
@@ -1804,6 +1947,17 @@ fn at_place(client: &Client, node: NodeId, state: &NodeState) -> NodeState {
     }
 }
 
+/// What `client` has aside of an item (`aside`) back at its place in the tree its plan saw,
+/// and which of it the filter of its run hides there (junk, ignored): ignore rules go by path.
+fn at_place_filtered(client: &Client, aside: &Tree) -> (Tree, HashSet<NodeId>) {
+    let mut placed = client.planned_local.clone();
+    for (n, state) in aside.iter() {
+        placed.insert(n, state.clone());
+    }
+    let hidden = masked(&placed, &client.run_filter);
+    (placed, hidden)
+}
+
 /// Frees `name` in `parent` if a node that is about to move away or be trashed holds it, by
 /// parking that node under a temporary name (what the executor does for swaps and for a
 /// folder that must appear where a file is leaving). Returns `false` if the name stays taken.
@@ -1950,6 +2104,8 @@ pub(crate) enum Outcome {
     Skip,
     /// A download fetched its bytes: the next step puts them in place.
     Fetched,
+    /// An item being deleted was moved aside: the next step checks and unlinks it.
+    Aside,
     /// A create found its node on the drive (another device brought it back): it wrote
     /// nothing, and settles against what is there.
     Landed,

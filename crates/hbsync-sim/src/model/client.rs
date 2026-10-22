@@ -30,6 +30,9 @@ pub(crate) struct Client {
     /// The folders whose removal in the pending plan ended without removing them: what is in
     /// them waits for the next plan.
     pub(crate) unremoved: HashSet<NodeId>,
+    /// Items being deleted, moved aside (`.hbsync/aside`) and not yet checked and unlinked: each
+    /// with what was below it then, its top at its place in the folder (sync semantics §7).
+    pub(crate) aside: BTreeMap<NodeId, Tree>,
     /// Nodes parked under a temporary name, with their original (parent, name).
     pub(crate) parked: HashMap<NodeId, (NodeId, String)>,
     /// The local tree when the pending plan was made (for the fingerprint guard).
@@ -128,6 +131,7 @@ impl Client {
             plan: VecDeque::new(),
             removed_by_plan: BTreeSet::new(),
             unremoved: HashSet::new(),
+            aside: BTreeMap::new(),
             parked: HashMap::new(),
             planned_local: Tree::new(),
             planned_remote: Tree::new(),
@@ -177,14 +181,16 @@ pub(crate) fn ignoring_d() -> Filter {
 
 /// What the filter of the client's run says about its local item `node`.
 pub(crate) fn verdict(client: &Client, node: NodeId) -> Verdict {
-    let Some(path) = client.local.path(node) else {
+    verdict_in(&client.local, &client.run_filter, node)
+}
+
+/// What `filter` says about item `node` of `tree`, at its place there.
+pub(crate) fn verdict_in(tree: &Tree, filter: &Filter, node: NodeId) -> Verdict {
+    let Some(path) = tree.path(node) else {
         return Verdict::Sync;
     };
-    let is_dir = client
-        .local
-        .get(node)
-        .is_some_and(|s| s.kind == NodeKind::Folder);
-    client.run_filter.names(path, is_dir)
+    let is_dir = tree.get(node).is_some_and(|s| s.kind == NodeKind::Folder);
+    filter.names(path, is_dir)
 }
 
 /// Gives the client's local item `node` the id `new`: in its tree, in the tree its plan was

@@ -68,6 +68,14 @@ pub(crate) struct Ledger {
     answer_undid: Option<String>,
     /// The first plan the engine's own planning path made otherwise ([`Sim::with_narrow_check`]).
     narrow_differs: Option<String>,
+    /// The first item a client unlinked that wasn't the version its base records (sync
+    /// semantics §7: a delete is checked, then final), junk aside.
+    deleted_unverified: Option<String>,
+    /// Items a client unlinked whose delete's commit a crash lost, each as its base had it: the
+    /// known limit of a delete without a write-ahead record (sync semantics §8a). Its next plan
+    /// reads the item as deleted there; where the drive has it so (a restore since, a folder's
+    /// removal that took it along), it removes it, as a user's delete of it would.
+    commit_lost: BTreeMap<(usize, NodeId), Seen>,
 }
 
 /// An item as a user saw it on the drive, but for its tags (a tag change loses to a delete):
@@ -100,6 +108,27 @@ impl Ledger {
     /// The blob each content hash holds, for traces.
     pub(crate) fn blobs(&self) -> &HashMap<ContentHash, u64> {
         &self.blobs
+    }
+
+    /// A client unlinked an item that may not be the version its base records: `what`, if so.
+    pub(crate) fn deleted_unverified(&mut self, what: impl FnOnce() -> Option<String>) {
+        first(&mut self.deleted_unverified, what);
+    }
+
+    /// Client `c` unlinked `node`, as its base had it (`seen`), and a crash lost the commit:
+    /// [`Ledger::commit_lost`].
+    pub(crate) fn delete_commit_lost(&mut self, c: usize, node: NodeId, seen: Seen) {
+        self.commit_lost.insert((c, node), seen);
+    }
+
+    /// Whether client `c`'s removal of `node`, as the drive has it now, is the one a delete's
+    /// lost commit makes ([`Ledger::commit_lost`]): once, as it removes it.
+    pub(crate) fn removed_by_lost_commit(&mut self, c: usize, node: NodeId, now: &Seen) -> bool {
+        let lost = self.commit_lost.get(&(c, node)) == Some(now);
+        if lost {
+            self.commit_lost.remove(&(c, node));
+        }
+        lost
     }
 
     /// A user listed Recently deleted: `rows`, each node at its version.
@@ -278,6 +307,7 @@ impl Ledger {
     /// sends it up again over the version back).
     pub(crate) fn back(&mut self, c: usize, node: NodeId) {
         self.user_deleted.remove(&(c, node));
+        self.commit_lost.remove(&(c, node));
     }
 }
 
@@ -300,6 +330,16 @@ impl Sim {
         }
         if let Some(gone) = &ledger.gone_while_there {
             return Err(gone.clone());
+        }
+        if let Some(what) = &ledger.deleted_unverified {
+            return Err(format!("deleted what wasn't checked: {what}"));
+        }
+        // An item being deleted is aside for a step, or till the next sync's recovery: never
+        // once the clients settled.
+        for (c, client) in self.clients.iter().enumerate() {
+            if let Some(node) = client.aside.keys().next() {
+                return Err(format!("c{c}: {node:?} is left aside"));
+            }
         }
         // A record recovery keeps holds its node off placements until settled: never for good.
         for (c, client) in self.clients.iter().enumerate() {

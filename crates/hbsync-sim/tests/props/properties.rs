@@ -128,6 +128,28 @@ proptest! {
     ) {
         run_with(3, None, Sim::with_split_downloads, &events)?;
     }
+
+    /// Items deleted on one device are deleted outright on the others (sync semantics §7):
+    /// moved aside, checked, unlinked. Meanwhile apps that had a file open write to it there,
+    /// and save new files into a folder there, and users save at the names they left. Every
+    /// such write is kept (an edit wins), nothing is unlinked that isn't the version its base
+    /// records, nothing stays aside, and the clients converge without loss.
+    #[test]
+    fn remote_deletes_never_lose_an_edit(
+        events in proptest::collection::vec(events_of(3, deleting_action()), 0..120)
+    ) {
+        run(3, &events)?;
+    }
+
+    /// As [`remote_deletes_never_lose_an_edit`], with the clients dying at any step of a delete:
+    /// right after the move aside, and part way through the unlinks, before the commit. What is
+    /// left aside goes back at the next plan; nothing is lost.
+    #[test]
+    fn a_crash_anywhere_in_a_delete_loses_nothing(
+        events in proptest::collection::vec(with_crashes(3, events_of(3, deleting_action())), 0..120)
+    ) {
+        run(3, &events)?;
+    }
 }
 
 proptest! {

@@ -300,6 +300,54 @@ impl Sim {
         }
     }
 
+    /// The items of what is aside on client `c` of `kind`, with the item each is aside under.
+    fn aside_of(&self, c: usize, kind: NodeKind) -> Vec<(NodeId, NodeId)> {
+        let mut items: Vec<(NodeId, NodeId)> = self.clients[c]
+            .aside
+            .iter()
+            .flat_map(|(top, tree)| {
+                tree.iter()
+                    .filter(|(_, s)| s.kind == kind)
+                    .map(|(n, _)| (*top, n))
+            })
+            .collect();
+        // A tree iterates in no fixed order: a pick must land on the same item in every replay.
+        items.sort();
+        items
+    }
+
+    /// [`Action::EditAside`].
+    fn edit_aside(&mut self, c: usize, pick: usize) {
+        let files = self.aside_of(c, NodeKind::File);
+        let Some(&(top, node)) = files.get(pick % files.len().max(1)) else {
+            return;
+        };
+        let blob = self.new_blob();
+        let tree = self.clients[c].aside.get_mut(&top).expect("picked aside");
+        let mut state = tree.get(node).cloned().expect("picked aside");
+        self.ledger.blob_superseded(state.content.replace(blob));
+        tree.insert(node, state);
+    }
+
+    /// [`Action::CreateInAside`].
+    fn create_in_aside(&mut self, c: usize, pick: usize, name: usize) {
+        let folders = self.aside_of(c, NodeKind::Folder);
+        let Some(&(top, folder)) = folders.get(pick % folders.len().max(1)) else {
+            return;
+        };
+        let name = NAMES[name % NAMES.len()];
+        if self.clients[c].aside[&top]
+            .child_named(folder, name, None)
+            .is_some()
+        {
+            return;
+        }
+        let state = NodeState::file(folder, name, self.new_blob());
+        let node = self.ids.fresh();
+        let tree = self.clients[c].aside.get_mut(&top).expect("picked aside");
+        tree.insert(node, state);
+    }
+
     pub(crate) fn new_blob(&mut self) -> FileContent {
         self.next_blob += 1;
         let blob = self.next_blob;
@@ -347,6 +395,12 @@ impl Sim {
     }
 
     pub(crate) fn act(&mut self, c: usize, action: Action) {
+        // On what is aside (sync semantics §7), not on the folder.
+        match action {
+            Action::EditAside { pick } => return self.edit_aside(c, pick),
+            Action::CreateInAside { pick, name } => return self.create_in_aside(c, pick, name),
+            _ => {}
+        }
         let folders = self.folders_of(c);
         let all = self.items_of(c);
         let files = self.files_of(c);
@@ -355,6 +409,7 @@ impl Sim {
             t.child_named(parent, name, except).is_none()
         };
         match action {
+            Action::EditAside { .. } | Action::CreateInAside { .. } => {}
             Action::Tag { node, tag } | Action::Colour { node, tag } => {
                 if all.is_empty() {
                     return;
@@ -732,15 +787,22 @@ impl Sim {
     /// The user of client `c` took its item `node` out of what it syncs (a delete, a move to
     /// another folder, a filter rule): as they saw it, as the client's base has it.
     pub(crate) fn user_removed(&mut self, c: usize, node: NodeId) {
-        let client = &self.clients[c];
-        if let Some(b) = client.base.get(node) {
-            let seen = (
-                client.coords.to_drive(b.parent),
-                b.name.clone(),
-                b.content.map(|c| c.hash),
-            );
+        if let Some(seen) = self.base_seen(c, node) {
             self.ledger.user_deleted(c, node, seen);
         }
+    }
+
+    /// Client `c`'s base of `node`, as the drive would have it ([`Seen`]).
+    ///
+    /// [`Seen`]: crate::oracle::Seen
+    pub(crate) fn base_seen(&self, c: usize, node: NodeId) -> Option<Seen> {
+        let client = &self.clients[c];
+        let b = client.base.get(node)?;
+        Some((
+            client.coords.to_drive(b.parent),
+            b.name.clone(),
+            b.content.map(|c| c.hash),
+        ))
     }
 
     /// Live `node` as the drive has it, but for its tags ([`Seen`]).
