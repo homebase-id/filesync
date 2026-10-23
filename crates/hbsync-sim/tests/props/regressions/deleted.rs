@@ -1841,3 +1841,36 @@ fn regression_a_paged_delete_of_a_file_not_synced_here_is_weighed_in_its_plan() 
         panic!("{e}");
     }
 }
+
+/// c0 has the recycle bin (`$RECYCLE.BIN`, a junk folder, never synced) with a file in it inside
+/// folder `b`, and c1 deletes `b`: c0's delete keeps `b` with the junk folder in it (sync
+/// semantics §7: a folder on the junk list may hold what was never synced), as the engine's
+/// delete does (`exec::keeps_its_folder`). Before, the simulator's delete took it along.
+#[test]
+fn regression_a_junk_folder_keeps_its_folder_from_a_delete() {
+    use Action::*;
+    let mut sim = Sim::new(2).without_ignore_rules();
+    let act = |client, action| Event::Act { client, action };
+    let root = sim.pick(0, NodeId::ROOT, true).expect("root");
+    sim.run(&[act(
+        0,
+        CreateFolder {
+            parent: root,
+            name: 1,
+        },
+    )]);
+    let folder = sim.item(0, "b").expect("b");
+    let parent = sim.pick(0, folder, true).expect("b");
+    sim.run(&[act(0, CreateFile { parent, name: 0 })]);
+    assert!(sim.quiesce(30), "no convergence");
+    let parent = sim.pick(0, folder, true).expect("b");
+    sim.run(&[act(0, CreateJunkFolder { parent })]);
+    let pick = sim.pick(1, folder, false).expect("b on c1");
+    sim.run(&[act(1, Delete { node: pick })]);
+    assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+    assert!(sim.item(0, "b/$RECYCLE.BIN/x").is_some(), "kept");
+    assert!(sim.item(0, "b/a").is_none(), "the synced file went");
+}

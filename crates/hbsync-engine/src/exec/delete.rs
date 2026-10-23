@@ -186,8 +186,8 @@ pub(super) fn check<'r>(
             } => {
                 let below: PathBuf = path.components().skip(row.path.depth()).collect();
                 let place = at.join(below);
-                let file = std::fs::symlink_metadata(&place).is_ok_and(|m| !m.is_dir());
-                if reason == SkipReason::Junk && file {
+                let is_dir = std::fs::symlink_metadata(&place).is_ok_and(|m| m.is_dir());
+                if !keeps_its_folder(reason == SkipReason::Junk, is_dir) {
                     checked.junk.push(place);
                 } else {
                     // Its own name may be one we can't sync; its folder's we walked.
@@ -202,6 +202,13 @@ pub(super) fn check<'r>(
         }
     }
     expected.is_empty().then_some(checked)
+}
+
+/// Whether an item a delete finds but doesn't sync keeps the folder it is in (sync semantics
+/// §7): an ignored one does, and a folder on the junk list (it may hold what was never synced);
+/// only a junk file (`junk`, not `is_dir`) goes along. The simulator's deletes ask this too.
+pub fn keeps_its_folder(junk: bool, is_dir: bool) -> bool {
+    !junk || is_dir
 }
 
 /// Whether `meta` is of `row`'s item, as it was: its kind, its id where ids are stable here, and
