@@ -535,6 +535,63 @@ fn held_deletes_go_through_once_confirmed_as_shown() -> R {
     Ok(())
 }
 
+/// A folder without its marker (moved, deleted, a disk not mounted) syncs nothing, so nothing
+/// is held, sent or put back there (§7): an answer taken before it went is dropped and told,
+/// one given while it is gone is refused, and nothing is deleted. Back, its deletes are held
+/// again, to answer anew. (The scan of 2026-10-23, G8.)
+#[test]
+fn an_answer_is_refused_while_the_folder_is_gone() -> R {
+    let server = server();
+    let a = Device::start_with(&server, "a", |cfg| cfg.look = Duration::from_millis(300))?;
+    for i in 0..60 {
+        a.write(&format!("f{i:02}.txt"), &i.to_string())?;
+    }
+    wait_until("all 60 are up", || live_names(&server).len() == 60)?;
+    a.wait_idle()?;
+    for i in 0..60 {
+        std::fs::remove_file(a.root.join(format!("f{i:02}.txt")))?;
+    }
+    wait_until("the deletes are held", || {
+        a.status().held_deletes.is_some_and(|h| h.here == 60)
+    })?;
+    let held = a.status().held_deletes.ok_or("held")?;
+    // Answered while paused: taken, to go with the next sync.
+    a.handle.send(Command::Pause(Pause::UNTIL_RESUMED));
+    a.handle.answer(HeldAnswer::Delete, &held.token)?;
+
+    // The folder goes before that sync.
+    let away = a.root.with_file_name("away");
+    rename_with_retries(&a.root, &away)?;
+    a.handle.send(Command::Resume);
+    wait_until("the runner says the folder is gone", || {
+        a.status()
+            .error
+            .is_some_and(|e| e.contains("the folder is gone"))
+    })?;
+    wait_until("the answer is told dropped", || {
+        a.status().recent.iter().any(|n| {
+            n.text
+                .contains("Your answer to the held deletes wasn't used")
+        })
+    })?;
+    assert!(a.status().held_deletes.is_none(), "nothing is held there");
+    let refused = a.handle.answer(HeldAnswer::Delete, &held.token);
+    assert!(
+        refused.is_err_and(|why| why.contains("the folder is gone")),
+        "refused while it is gone"
+    );
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(live_names(&server).len(), 60, "nothing was deleted");
+
+    // Back: held again, to answer anew.
+    rename_with_retries(&away, &a.root)?;
+    wait_until("the deletes are held again", || {
+        a.status().held_deletes.is_some_and(|h| h.here == 60)
+    })?;
+    assert_eq!(live_names(&server).len(), 60, "nothing was deleted");
+    Ok(())
+}
+
 /// Held deletes put back as shown (sync semantics §7): the files come down again, nothing on
 /// the drive changed. Answered while paused, they come back once syncing resumes.
 #[test]
