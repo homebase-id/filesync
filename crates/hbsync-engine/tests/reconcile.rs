@@ -2325,6 +2325,45 @@ fn a_waiting_folder_on_a_masked_name_is_never_renamed() {
     assert!(!plan.ops.iter().any(|op| op.node() == b), "{:#?}", plan.ops);
 }
 
+/// File `f` was `d`; here it is renamed `L.txt` and tagged Red, and a folder `d` another
+/// device made, which this device ignores, takes the name `d` on the drive (§10: its holder
+/// keeps it). Planned in a page without `f` (another page plans it, §6.5), nothing renames `f`
+/// for that clash: its own page plans it with its change, as one page does (the rename and the
+/// tag go up). Before, the clash renamed it `d (conflict 1)` from the drive's version, and the
+/// user's rename and tag were lost.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_clash_never_renames_what_another_page_plans() {
+    let [f, d, n] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World {
+        filter: ignoring("/d/\n"),
+        ..World::default()
+    };
+    w.synced(f, file(ROOT, "d", "1"));
+    let mut renamed = file(ROOT, "L.txt", "1");
+    renamed.tags = Tags::new([Tag::new("Red", 6)]);
+    w.local(f, Some(renamed));
+    w.remote(d, Some(folder(ROOT, "d")));
+    w.local(n, Some(file(ROOT, "n", "n")));
+    // Whole: the rename and the tag go up.
+    let plan = w.plan();
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, Op::RemoteUpdate { node, name, .. }
+            if *node == f && name == "L.txt")),
+        "{:#?}",
+        plan.ops
+    );
+    // In a page of `n` alone: `f` is left to its page.
+    w.input.dirty = [n].into();
+    w.input.dirty_elsewhere.insert(f);
+    let plan = w.plan();
+    assert!(!plan.ops.iter().any(|op| op.node() == f), "{:#?}", plan.ops);
+}
+
 /// A new folder here holding a file being written, alone under a name a node this device
 /// doesn't sync holds on the drive (§10): it waits, never made beside it under that name.
 #[cfg(target_os = "linux")]

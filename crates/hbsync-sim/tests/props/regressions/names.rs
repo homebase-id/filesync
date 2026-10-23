@@ -1359,3 +1359,51 @@ fn regression_a_chain_of_waits_across_pages_is_planned_before_the_sweep_ends() {
         }
     }
 }
+
+/// c1 makes folder `d` and ignores what c0 has there; c0's file `d` goes up, c1's plan renames
+/// it `d (conflict 1)` on the drive (its folder made first), and meanwhile c0 renames it, tags
+/// it Red and ignores `d` too. In pages of 1, c0's page of another node met the clash on the
+/// drive (its folder `d`, ignored there, keeps the name) and renamed the file from the drive's
+/// version, though another page plans it: the user's rename and Red were lost. Now that page
+/// leaves it to its own (§6.5), and the rename and the tag stand, as planned whole.
+#[test]
+fn regression_a_clash_in_another_page_keeps_a_rename_and_its_tag() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(1, CreateFolder { parent: 0, name: 5 }),
+        act(1, ToggleIgnore),
+        act(0, CreateFile { parent: 0, name: 5 }),
+        Event::Plan { client: 0 },
+        act(1, CreateFile { parent: 0, name: 0 }),
+        act(1, CreateFile { parent: 0, name: 0 }),
+        Event::Step { client: 0 },
+        act(1, CreateFile { parent: 0, name: 0 }),
+        Event::Plan { client: 1 },
+        Event::Step { client: 0 },
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        act(
+            0,
+            Move {
+                node: 0,
+                parent: 0,
+                name: 6,
+            },
+        ),
+        act(0, ToggleIgnore),
+        act(0, Tag { node: 0, tag: 4 }),
+        act(0, CreateFile { parent: 0, name: 0 }),
+    ];
+    for pages in [None, Some(1)] {
+        for guard in [None, Some(1)] {
+            let setup = |sim: Sim| match pages {
+                Some(size) => sim.with_small_pages(size),
+                None => sim,
+            };
+            if let Err(e) = run_with(2, guard, setup, &events) {
+                panic!("pages {pages:?}, guard {guard:?}: {e}");
+            }
+        }
+    }
+}
