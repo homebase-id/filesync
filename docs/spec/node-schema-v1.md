@@ -258,10 +258,10 @@ of this schema may define some of them.)
      What a client still misses (a live file written into a folder in the moment between the
      question and the delete) is left with no folder: computers move it into Recovered files
      (above).
-  3. **Without a trace, or with one:** each node by its own trace and time. A removed node
-     removed more than 30 days ago goes without a trace (a hard delete: `hard-delete-batch`,
-     odin-core #1968), nothing of the file left, in the feed either. Anything else (a younger
-     node, and anything a user empties by hand) is deleted softly, leaving a tombstone, the
+  3. **Without a trace, or with one:** each node by its own trace and time. The purge takes
+     only nodes removed more than 30 days ago (1.), and each goes without a trace (a hard
+     delete: `hard-delete-batch`, odin-core #1968), nothing of the file left, in the feed
+     either. What a user empties by hand is deleted softly, leaving a tombstone, the
      trace (`soft-delete-batch`, odin-core #1977, many files a request, each at its version);
      any client deletes a tombstone hard more than 30 days after its own `updated`, at its
      version, both from its row in the feed (the soft delete's answer gives the time, not the

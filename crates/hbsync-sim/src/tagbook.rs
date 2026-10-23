@@ -12,8 +12,9 @@ use hbsync_types::NodeId;
 /// A tag add: the client, the node, the tag's name.
 pub(crate) type Add = (usize, NodeId, String);
 
-/// A known limit of the engine's tag sync that loses an add: named, so each case stays
-/// visible (the user's call, 2026-10-21: not now). Each excuses only its own case.
+/// A known limit of the engine's tag sync (sync semantics §11): three lose an add, two a
+/// removal (the tag comes back). Named, so each case stays visible (the user's call,
+/// 2026-10-21: not now). Each excuses only its own case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Limit {
     /// An add made while the adding client's own removal of the tag is still to land: a remote
