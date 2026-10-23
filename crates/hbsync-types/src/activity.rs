@@ -86,7 +86,7 @@ pub struct Deleted {
     /// `None` where no answer or feed row gave it yet: just now, and newer than any other.
     #[serde(default)]
     pub removed_at_ms: Option<i64>,
-    /// The node whose delete took it along (itself, or a folder it was in): restoring that
+    /// The node it was deleted with (itself, or a folder it was in): restoring that
     /// one restores this one.
     pub root: NodeId,
     /// The folder of this device it comes back to (its path); `None`: a part of the drive no

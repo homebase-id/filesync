@@ -147,7 +147,7 @@ impl Executor<'_> {
             placed_tags: (none && kept_tags).then(Tags::default),
             prior_tags: prior,
             base_at: a.base_at.into(),
-            held_ms: None,
+            waiting_since_ms: None,
         });
         let kept = !adopt && synced_before;
         // Its record is for recovery only: written ahead, gone with the commit.
@@ -415,7 +415,7 @@ impl Executor<'_> {
             Ok(Deleted::Holding(holding)) => {
                 return self.delete_holding(node, &row, &rows, holding);
             }
-            Ok(Deleted::PutBack { gone }) => return self.went_put_back(&gone, node),
+            Ok(Deleted::Returned { gone }) => return self.went_back(&gone, node),
         }
         if self.crash_here(CrashPoint::AfterUnlink) {
             return Ok(Outcome::Retry("crash point reached".into()));
@@ -426,11 +426,11 @@ impl Executor<'_> {
 
     /// A delete found its item not as the plan saw it and put it back, after `gone` went: their
     /// rows and bases go, and the item is planned again.
-    fn went_put_back(&mut self, gone: &[NodeId], node: NodeId) -> Step {
+    fn went_back(&mut self, gone: &[NodeId], node: NodeId) -> Step {
         if !gone.is_empty() {
             self.finish(&[], |s| went(s, gone.iter().copied(), node))?;
         }
-        Ok(Outcome::stale("not as the plan saw it: put back"))
+        Ok(Outcome::stale("not as the plan saw it: returned"))
     }
 
     /// Deletes the folder of `row` that holds ignored items (§10), in the folders `holding`,
@@ -467,9 +467,9 @@ impl Executor<'_> {
                     gone.extend(below.iter().map(|b| b.node));
                     None
                 }
-                Ok(Deleted::PutBack { gone: some }) => {
+                Ok(Deleted::Returned { gone: some }) => {
                     gone.extend(some);
-                    Some(Outcome::stale("not as the plan saw it: put back"))
+                    Some(Outcome::stale("not as the plan saw it: returned"))
                 }
                 Ok(Deleted::Holding(_)) => Some(Outcome::stale("it holds ignored items")),
                 Err(outcome) => Some(outcome),
@@ -477,7 +477,7 @@ impl Executor<'_> {
             if let Some(outcome) = stopped {
                 self.report.rescan.push(row.path.clone());
                 // What did go: its rows and bases go now, as below.
-                self.went_put_back(&gone, node)?;
+                self.went_back(&gone, node)?;
                 return Ok(outcome);
             }
         }

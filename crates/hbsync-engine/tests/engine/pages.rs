@@ -612,7 +612,7 @@ fn an_older_folder_moved_into_a_deleted_one_goes_with_it() -> R {
 /// of 1: what goes into a folder held for another page waits with it, so nothing is sent to
 /// fail meanwhile (review 16), and b ends with all of it.
 #[test]
-fn what_goes_into_a_folder_held_for_another_page_waits_too() -> R {
+fn what_goes_into_a_folder_waiting_for_another_page_waits_too() -> R {
     let server = server();
     let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
     a.write("B/b.txt", "b")?;

@@ -180,7 +180,7 @@ impl Executor<'_> {
                 None => Some(Tags::default()),
             },
             base_at: acted.base_at.into(),
-            held_ms: None,
+            waiting_since_ms: None,
         };
         let job = Job::Download(Download {
             node,
@@ -515,7 +515,7 @@ impl Executor<'_> {
                 // against the drive's edit: a conflict, and the download again). Where that
                 // fails it stays aside, for the next sync's recovery.
                 if matches!(&placed, Err(e) if !matches!(e, FileIoError::PlacedUnread(_))) {
-                    self.put_back_old(&aside, row)?;
+                    self.return_old(&aside, row)?;
                 } else {
                     old_aside = Some(aside);
                 }
@@ -589,15 +589,15 @@ impl Executor<'_> {
     }
 
     /// Puts the old version of `row` a download moved aside back to its place (a numbered one,
-    /// or the top, where needed), where the test fault [`FailPoint::PutBack`] lets it; where
+    /// or the top, where needed), where the test fault [`FailPoint::Return`] lets it; where
     /// that fails, it stays aside, for the next sync's recovery.
-    fn put_back_old(&mut self, aside: &Path, row: &LocalRow) -> Result<(), StateError> {
-        if self.fails(FailPoint::PutBack) {
+    fn return_old(&mut self, aside: &Path, row: &LocalRow) -> Result<(), StateError> {
+        if self.fails(FailPoint::Return) {
             return Ok(());
         }
         let (db, disk, folder) = (&mut *self.db, &self.disk, self.folder);
         if let Some(to) =
-            super::delete::put_back_at(db, disk, folder, aside, &row.path, Some(row.node), false)?
+            super::delete::return_to(db, disk, folder, aside, &row.path, Some(row.node), false)?
         {
             self.report.rescan.push(to.parent().unwrap_or_default());
         }

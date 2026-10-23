@@ -108,7 +108,7 @@ pub enum FailPoint {
     /// folder is aside.
     PlaceNew,
     /// Putting that old version back from aside.
-    PutBack,
+    Return,
     /// Making a group of downloads' bytes durable: none of them is put in place.
     Barrier,
 }

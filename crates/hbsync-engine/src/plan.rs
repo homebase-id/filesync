@@ -57,7 +57,7 @@ pub struct Options {
     /// ([`crate::pages::OwnPages`]), so what is in it doesn't wait for a folder above it that
     /// another page deletes ([`Input::going_above`]): that one goes after it. What that
     /// folder's removal on the drive took along, unchanged here, waits for it all the same.
-    pub own_page: bool,
+    pub piece: bool,
 }
 
 /// What the mass-delete guard judges a plan's deletes with (sync semantics §7): its settings,
@@ -130,7 +130,7 @@ impl Default for Options {
             date: "1970-01-01".into(),
             guarding: Guarding::default(),
             taken: Arc::default(),
-            own_page: false,
+            piece: false,
         }
     }
 }
@@ -182,7 +182,7 @@ pub struct Input {
     /// The folders above the page's nodes, on any side, synced before, that may go and that
     /// another page plans: what of the page is below them waits for them the same way, so a
     /// folder's delete goes as one, never item by item (but in a piece of a page of its own:
-    /// [`Options::own_page`], where only what its removal took along waits).
+    /// [`Options::piece`], where only what its removal took along waits).
     pub going_above: HashSet<NodeId>,
 }
 
@@ -454,8 +454,8 @@ pub enum Requirement {
     /// The folder exists remotely: nothing is created or moved into a folder whose own create
     /// failed, or other clients would see children pointing at nothing.
     RemoteFolder(NodeId),
-    /// The folder's removal, if the plan has one, ran first: what a folder's delete takes along
-    /// is removed no earlier than the folder (node schema, Recently deleted).
+    /// The folder's removal, if the plan has one, ran first: what is below a folder that is
+    /// deleted is removed no earlier than the folder (node schema, Recently deleted).
     FolderFirst(NodeId),
 }
 

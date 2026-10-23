@@ -390,7 +390,7 @@ impl StateDb {
     }
 
     /// The DB at `path` as the account's: no folder made, none seen (a folder's rows can't be
-    /// written through it). [`StateDb::with_folder`] picks one.
+    /// written through it).
     pub fn open_account(path: &Path) -> Result<Self> {
         let mut db = Self::setup(Connection::open(path)?, Some(path))?;
         db.folder = NO_FOLDER;
@@ -432,12 +432,6 @@ impl StateDb {
     /// The DB's file (`None` in memory).
     pub fn path(&self) -> Option<&Path> {
         self.path.as_deref()
-    }
-
-    /// This DB seen as folder `folder`: the same connection.
-    pub fn with_folder(mut self, folder: i64) -> Self {
-        self.folder = folder;
-        self
     }
 
     fn setup(mut conn: Connection, path: Option<&Path>) -> Result<Self> {

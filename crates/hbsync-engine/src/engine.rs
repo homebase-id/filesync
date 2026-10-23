@@ -532,7 +532,7 @@ impl Engine {
             date: date.to_owned(),
             guarding,
             taken: Arc::default(),
-            own_page: false,
+            piece: false,
         };
         #[cfg(feature = "testkit")]
         if let Some(after) = &self.cfg.after_counts {
@@ -628,8 +628,8 @@ impl Engine {
                 report.rounds += 1;
                 let done_before = report.ops_done;
                 // A piece of a folder too big for a page doesn't wait for the folders above it
-                // (`Options::own_page`).
-                opts.own_page = own == Some(true);
+                // (`Options::piece`).
+                opts.piece = own == Some(true);
                 match self.plan_and_execute(&dirty, &opts, &mut hold_out, report)? {
                     Some(page) => {
                         // A node planned again counts as its last plan says.

@@ -97,7 +97,7 @@ fn placing_row(r: &Row<'_>) -> Result<Placing> {
             Some([]) => PlannedBase::Absent,
             Some(v) => PlannedBase::At(codec::version(v)?),
         },
-        held_ms: r.get::<_, Option<i64>>(18)?,
+        waiting_since_ms: r.get::<_, Option<i64>>(18)?,
     })
 }
 
@@ -180,7 +180,7 @@ impl FolderTx<'_> {
                 PlannedBase::Absent => Some(Vec::new()),
                 PlannedBase::At(v) => Some(v.0.as_bytes().to_vec()),
             },
-            p.held_ms,
+            p.waiting_since_ms,
         ])?;
         Ok(())
     }

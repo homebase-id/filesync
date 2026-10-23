@@ -219,8 +219,8 @@ impl Sim {
             .collect();
         // In pages, as the engine: the next page of the sweep over what is dirty (what differs
         // between the base and a side, as the engine's scan and feed mark them), what else is
-        // to plan held as it is.
-        let mut own_page = false;
+        // to plan waits as it is.
+        let mut piece = false;
         if let Some(size) = self.faults.page_size {
             // What differs between the base and a side, the drive's as it is: what a folder's
             // removal took along isn't marked (the feed marks only the folder).
@@ -232,7 +232,7 @@ impl Sim {
                 })
                 .collect();
             let page;
-            (page, own_page) = next_page(client, &input, &all, size);
+            (page, piece) = next_page(client, &input, &all, size);
             input.dirty = page.iter().copied().collect();
             let scope = client.scope();
             let mut pending = SimPending {
@@ -291,7 +291,7 @@ impl Sim {
                 wiped: Arc::new(wiped.clone()),
                 ..Guarding::default()
             },
-            own_page,
+            piece,
             ..Options::default()
         };
         let masking = Masking {
@@ -1565,8 +1565,8 @@ impl Sim {
     /// else aside puts it all back, for the next plan.
     fn finish_delete(&mut self, c: usize, node: NodeId, expected: &[NodeId]) -> Outcome {
         let Some(hidden) = self.aside_check(c, node, expected) else {
-            self.note(|_| format!("  c{c} {node:?} isn't as planned aside: put back"));
-            self.put_back_aside(c, node);
+            self.note(|_| format!("  c{c} {node:?} isn't as planned aside: returned"));
+            self.return_from_aside(c, node);
             return Outcome::Skip;
         };
         self.unlink_aside(c, node, &hidden, usize::MAX);
@@ -1695,8 +1695,8 @@ impl Sim {
     /// What a run left aside of `node` (a crash, or a plan that replaced its own), decided at the
     /// next plan by what it is, as the executor's recovery does: each synced item the version
     /// its base records (the drive's delete stands), nothing new, nothing ignored: unlinked, its
-    /// bases with it, whatever became of its folder meanwhile; anything else put back
-    /// ([`Sim::put_back_aside`]).
+    /// bases with it, whatever became of its folder meanwhile; anything else goes back
+    /// ([`Sim::return_from_aside`]).
     pub(crate) fn recover_aside(&mut self, c: usize, node: NodeId) {
         if let Some(name) = self.clients[c].replaced.remove(&node) {
             return self.recover_replaced(c, node, name);
@@ -1716,8 +1716,8 @@ impl Sim {
             })
         });
         if !unchanged {
-            self.note(|_| format!("  c{c} {node:?} aside isn't as synced: put back"));
-            return self.put_back_aside(c, node);
+            self.note(|_| format!("  c{c} {node:?} aside isn't as synced: returned"));
+            return self.return_from_aside(c, node);
         }
         self.note(|_| format!("  c{c} {node:?} aside as synced: unlinked"));
         for n in self.unlink_aside(c, node, &hidden, usize::MAX) {
@@ -1794,7 +1794,7 @@ impl Sim {
             return;
         }
         if !committed && !client.local.contains(node) {
-            return self.put_back_aside(c, node);
+            return self.return_from_aside(c, node);
         }
         client.aside.remove(&node);
         let new = self.ids.fresh();
@@ -1831,8 +1831,8 @@ impl Sim {
     /// Puts what is aside of `node` back into the folder, each item at the top of what is aside
     /// (the item, or what went of it) at its place, else under the first free numbered name
     /// there, else at the folder's top (its folder gone), as the executor does. Never a delete:
-    /// what was put back is planned again.
-    pub(crate) fn put_back_aside(&mut self, c: usize, node: NodeId) {
+    /// what went back is planned again.
+    pub(crate) fn return_from_aside(&mut self, c: usize, node: NodeId) {
         let client = &mut self.clients[c];
         let Some(aside) = client.aside.remove(&node) else {
             return;
@@ -2311,7 +2311,7 @@ pub(crate) fn extra(local: &NodeState, version: Option<VersionTag>) -> BaseExtra
 /// The next page of `client`'s sweep over `all` (its nodes) in pages of `size`, as the engine
 /// pages its dirty set: what a page waits for first ([`hbsync_engine::pages::OwnPages`]), else
 /// the next `size` nodes in id order. And whether it is a piece of a folder too big for a page
-/// (`Options::own_page`).
+/// (`Options::piece`).
 fn next_page(
     client: &Client,
     input: &Input,

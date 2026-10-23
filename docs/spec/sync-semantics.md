@@ -331,7 +331,7 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    `a_change_deep_in_a_folder_removed_elsewhere_keeps_it_in_pages`,
    `what_was_moved_into_a_deleted_folder_goes_with_it_in_pages`,
    `a_node_moved_out_of_a_waiting_folder_keeps_its_new_one`,
-   `what_goes_into_a_folder_held_for_another_page_waits_too`,
+   `what_goes_into_a_folder_waiting_for_another_page_waits_too`,
    `a_held_delete_below_a_removed_folder_doesnt_hold_it_for_good`.
 
 ## 7. Delete safety

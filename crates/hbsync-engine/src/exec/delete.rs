@@ -20,9 +20,9 @@ pub(super) enum Deleted {
     /// It holds what stays here (ignored items, folders on the junk list: §10), in these
     /// folders: left at its place, to go item by item.
     Holding(Vec<RelPath>),
-    /// Not what the plan saw, or something came while it went: left or put back, after `gone`
+    /// Not what the plan saw, or something came while it went: left or returned to its place, after `gone`
     /// went (the nodes unlinked before that was found).
-    PutBack { gone: Vec<NodeId> },
+    Returned { gone: Vec<NodeId> },
 }
 
 /// What a check found to unlink: each synced item with its row, its place on disk, and whether
@@ -62,7 +62,7 @@ impl Executor<'_> {
                 Some(c) if !c.holding.is_empty() => {
                     return Ok(Ok(match whole {
                         true => Deleted::Holding(c.holding),
-                        false => Deleted::PutBack { gone: Vec::new() },
+                        false => Deleted::Returned { gone: Vec::new() },
                     }));
                 }
                 Some(_) => {}
@@ -87,13 +87,13 @@ impl Executor<'_> {
             }
             _ => Vec::new(),
         };
-        if let Some(to) = put_back(self.db, &self.disk, self.folder, &aside, row)? {
+        if let Some(to) = return_from_aside(self.db, &self.disk, self.folder, &aside, row)? {
             self.report.rescan.push(to.parent().unwrap_or_default());
         }
         self.report
             .rescan
             .push(row.path.parent().unwrap_or_default());
-        Ok(Ok(Deleted::PutBack { gone }))
+        Ok(Ok(Deleted::Returned { gone }))
     }
 }
 
@@ -240,7 +240,7 @@ fn proven(folder: &FolderCtx, at: &Path, meta: &LocalMeta, row: &LocalRow) -> bo
 /// it), each folder only once empty. Returns the nodes that went; something that came meanwhile
 /// stays, and so do the folders it is in. What changed is noted ([`StateDb::changed`]): synced
 /// before the next durable commit, so a durable commit that forgets an item never comes back to
-/// it on disk. Where all went, the aside folder is all there is to note; where some is put back,
+/// it on disk. Where all went, the aside folder is all there is to note; where some goes back,
 /// each folder something went from.
 pub(super) fn unlink_checked(
     db: &mut StateDb,
@@ -284,12 +284,12 @@ pub(super) fn unlink_checked(
     gone
 }
 
-/// Puts the item of `row` back from `aside`: at its place, else under the first free numbered
+/// Returns the item of `row` from `aside`: to its place, else under the first free numbered
 /// name there, else at the folder's top (its folder gone). A parked item takes its own name,
 /// never its temporary one (it carries the old id), and its record goes. Returns where it went;
 /// where none of that goes through, it stays aside, for the next sync's recovery (never a
 /// delete).
-pub(super) fn put_back(
+pub(super) fn return_from_aside(
     db: &mut StateDb,
     disk: &Disk<'_>,
     folder: &FolderCtx,
@@ -300,17 +300,17 @@ pub(super) fn put_back(
     let place = db
         .read(|s| view::parked_place(s, row))?
         .unwrap_or_else(|| row.path.clone());
-    let to = put_back_at(db, disk, folder, aside, &place, Some(row.node), is_dir)?;
+    let to = return_to(db, disk, folder, aside, &place, Some(row.node), is_dir)?;
     if to.as_ref().is_some_and(|to| to != &row.path) {
         db.write(|s| s.folder().delete_parked(row.node))?;
     }
     Ok(to)
 }
 
-/// Puts what is at `aside` back at `place` (free but for `own`'s row there: the item's own
+/// Returns what is at `aside` to `place` (free but for `own`'s row there: the item's own
 /// node), else under the first free numbered name there, else at the folder's top. Returns where
 /// it went; `None` where it stays aside.
-pub(super) fn put_back_at(
+pub(super) fn return_to(
     db: &mut StateDb,
     disk: &Disk<'_>,
     folder: &FolderCtx,
@@ -329,7 +329,7 @@ pub(super) fn put_back_at(
         }
     }
     tracing::warn!(
-        "{} stays aside: it couldn't be put back to {place}; the next sync tries again",
+        "{} stays aside: it couldn't go back to {place}; the next sync tries again",
         aside.display()
     );
     Ok(None)

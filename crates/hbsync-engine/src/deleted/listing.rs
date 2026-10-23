@@ -20,8 +20,8 @@ use super::rules::{
 pub struct DeletedSummary {
     /// The items deleted on their own.
     pub deletes: usize,
-    /// What emptying all of it now deletes for good ([`select`]): every item, those its deletes
-    /// took along too, but a folder holding a live node or a removal that stays.
+    /// What emptying all of it now deletes for good ([`select`]): every item, those deleted
+    /// with its deletes too, but a folder holding a live node or a removal that stays.
     pub items: usize,
     /// The items deleted on their own that emptying leaves: they hold a live node.
     pub stays: usize,
@@ -60,7 +60,7 @@ pub fn deletes(
         listed: listed_now(s)?,
     };
     let picked = listing.deletes().take(limit).collect();
-    Ok((listing.with_along(picked)?, summary))
+    Ok((listing.with_members(picked)?, summary))
 }
 
 /// What a listing of Recently deleted that reads it now sees ([`Listed`]): to read in the
@@ -72,7 +72,7 @@ pub fn listed_now(s: &ReadTx<'_>) -> Result<Listed, StateError> {
     })
 }
 
-/// The items of Recently deleted (deletes, or items a delete took along) that are `nodes`, each
+/// The items of Recently deleted (deletes, or items deleted with one) that are `nodes`, each
 /// with how many items are in it: only those rows are read, and walked up and down from.
 pub(super) fn find(s: &ReadTx<'_>, nodes: &[NodeId]) -> Result<Vec<(Deleted, usize)>, StateError> {
     let mut listing = Listing::lazy(s)?;
@@ -85,7 +85,7 @@ pub(super) fn find(s: &ReadTx<'_>, nodes: &[NodeId]) -> Result<Vec<(Deleted, usi
     Ok(found)
 }
 
-/// The items of Recently deleted named `names` (deletes, or items a delete took along), each
+/// The items of Recently deleted named `names` (deletes, or items deleted with one), each
 /// with how many items are in it: to pick by their places, which end in those names. Only
 /// those rows are read whole, and walked up from.
 pub(super) fn named(s: &ReadTx<'_>, names: &[String]) -> Result<Vec<(Deleted, usize)>, StateError> {
@@ -120,10 +120,10 @@ pub(super) fn deletes_before(
 pub(super) fn all(s: &ReadTx<'_>) -> Result<Vec<(Deleted, usize)>, StateError> {
     let mut listing = Listing::read(s)?;
     let picked = (0..listing.roots.len()).collect();
-    listing.with_along(picked)
+    listing.with_members(picked)
 }
 
-/// Recently deleted's rows, newest first, each with the item whose delete took it along.
+/// Recently deleted's rows, newest first, each with the item it was deleted with.
 struct Listing<'a, 's> {
     rows: RemovedRows<'a, 's>,
     /// For each of the first rows (the listed ones), its item: itself, deleted on its own.
@@ -207,7 +207,7 @@ impl<'a, 's> Listing<'a, 's> {
     }
 
     /// Rows `picked`, described, each with how many items are in it.
-    fn with_along(&mut self, picked: Vec<usize>) -> Result<Vec<(Deleted, usize)>, StateError> {
+    fn with_members(&mut self, picked: Vec<usize>) -> Result<Vec<(Deleted, usize)>, StateError> {
         picked
             .into_iter()
             .map(|i| {
@@ -294,7 +294,7 @@ impl<'a, 's> RemovedRows<'a, 's> {
     }
 }
 
-/// The item of Recently deleted whose delete took `node` along ([`item_by`]), from the store.
+/// The item of Recently deleted that `node` was deleted with ([`item_by`]), from the store.
 pub(super) fn deleted_by_item(
     rows: &mut RemovedRows<'_, '_>,
     node: NodeId,

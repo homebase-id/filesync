@@ -197,7 +197,7 @@ impl Sim {
             prior,
             fresh,
             unhashed,
-            held: false,
+            waited: false,
         };
         client.placing.insert(*node, placement);
         self.note(|_| format!("crash c{c}: {node:?} put in place, commit lost"));
@@ -235,7 +235,7 @@ impl Sim {
             prior,
             fresh,
             unhashed: false,
-            held: false,
+            waited: false,
         };
         client.placing.insert(*node, placement);
         self.note(|_| format!("  commit failed c{c}: {node:?} put in place, record kept"));
@@ -272,10 +272,10 @@ impl Sim {
             });
             if there {
                 if !self.settle_record(c, node, &p) {
-                    // Its node gone, its item not one the drive takes: held once (as a file not
-                    // hashed yet), then dropped.
-                    if !p.held {
-                        let p = Placement { held: true, ..p };
+                    // Its node gone, its item not one the drive takes: it waits once (as a file
+                    // not hashed yet), then is dropped.
+                    if !p.waited {
+                        let p = Placement { waited: true, ..p };
                         self.clients[c].placing.insert(node, p);
                     }
                 }
@@ -429,8 +429,8 @@ pub(crate) struct Placement {
     /// its place with the record's bytes).
     fresh: bool,
     unhashed: bool,
-    /// Held once already (its node gone, its item not the drive's to take): it goes next.
-    held: bool,
+    /// Waited once already (its node gone, its item not the drive's to take): it goes next.
+    waited: bool,
 }
 
 #[cfg(test)]

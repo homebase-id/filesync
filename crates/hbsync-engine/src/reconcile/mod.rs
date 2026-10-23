@@ -74,7 +74,7 @@ pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
     // What would take a name one that waits for a hash holds waits too (§6.3), where it is,
     // with its folders: planned again with it waiting, till no more come.
     // Ends: in each plan again at least one node more waits.
-    let mut waits = Waits::of(view, opts.own_page);
+    let mut waits = Waits::of(view, opts.piece);
     // And this device's removals from the drive held for the user (§7): their names there
     // stay taken meanwhile, so what would take one here gets a numbered name: planned again
     // once, only when something here has such a name (hardly ever).
