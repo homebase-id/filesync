@@ -97,7 +97,7 @@ impl Server {
             "<h1>Recently deleted</h1>\
              <p>Deleted items are kept on your Homebase for {days} days, then deleted for good. \
              A restored item comes back on every device.</p><ul class=deleted>{rows}</ul>{empty}",
-            days = self.keep_days(),
+            days = hbsync_app::KEEP_DAYS,
             empty = empty_offer(&list, &self.pages.url("deleted/empty")),
         )
     }
@@ -182,16 +182,6 @@ impl Server {
             escape(said),
             self.pages.url("deleted"),
         )
-    }
-
-    /// How long Recently deleted keeps items, from the config.
-    pub(super) fn keep_days(&self) -> u32 {
-        Config::load(&self.paths.config_file())
-            .ok()
-            .flatten()
-            .unwrap_or_default()
-            .keep_deleted_days
-            .days()
     }
 
     pub(super) fn confirm_deletes(&self, form: &HashMap<String, String>) -> String {

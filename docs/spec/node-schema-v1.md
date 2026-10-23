@@ -204,7 +204,7 @@ of this schema may define some of them.)
   it too, but for 3.). Any client runs it (the mobile browser too, at its own pace: most people
   rarely open a desktop app), by the server's clock: its `queryTime` against each `updated`.
   1. **What goes:** an item deleted on its own, with everything deleted with it, once all of it
-     was removed more than 30 days ago (the client's `keep_deleted_days`; strictly: `updated`
+     was removed more than 30 days ago (every client's, not a setting; strictly: `updated`
      before `queryTime` − 30 days), each node by its own removal: one removed later (in a
      folder a live node held, say) has its own 30 days, and the item waits with it. Files go before their folders, each at the version the client knows: one written
      since stays. An item holding a removal whose time the client doesn't know yet waits for a

@@ -20,9 +20,8 @@ use crate::protocol::AccountControl;
 
 /// What the keeper is asked to do.
 enum Job {
-    /// The purge, if a day has passed since the last one ([`Drive::purge_when_due`]): what was
-    /// kept this many days goes.
-    Purge(u32),
+    /// The purge, if a day has passed since the last one ([`Drive::purge_when_due`]).
+    Purge,
     Control(AccountControl),
 }
 
@@ -106,12 +105,9 @@ impl Keeper {
                         Err(RecvTimeoutError::Disconnected) => break,
                     };
                     match job {
-                        Some(Job::Purge(keep_days)) => {
+                        Some(Job::Purge) => {
                             purging.store(false, Ordering::SeqCst);
-                            if !held()
-                                && purge_now(&drive, keep_days)
-                                && drive.doubted().unwrap_or(true)
-                            {
+                            if !held() && purge_now(&drive) && drive.doubted().unwrap_or(true) {
                                 again = Some(Instant::now() + ask_after);
                             }
                         }
@@ -166,11 +162,11 @@ impl Keeper {
         };
     }
 
-    /// The purge, once a day: what Recently deleted has kept `keep_days` goes. Asked while one
+    /// The purge, once a day: what Recently deleted has kept 30 days goes. Asked while one
     /// waits to start, it is that one.
-    pub(super) fn purge(&mut self, keep_days: u32) {
+    pub(super) fn purge(&mut self) {
         if !self.purging.swap(true, Ordering::SeqCst) {
-            self.send(Job::Purge(keep_days));
+            self.send(Job::Purge);
         }
     }
 
@@ -222,15 +218,16 @@ impl Keeper {
 }
 
 /// The purge, if due: whether it ran (what it found not there once is to be asked again).
-fn purge_now(drive: &Drive, keep_days: u32) -> bool {
+fn purge_now(drive: &Drive) -> bool {
     // Refused: asked again once the identity lets this computer in.
     if drive.is_denied() {
         return false;
     }
-    match drive.purge_when_due(keep_days) {
+    match drive.purge_when_due() {
         Ok(Some(n)) => {
             if n > 0 {
-                tracing::info!("{n} items deleted for good after {keep_days} days");
+                let days = crate::KEEP_DAYS;
+                tracing::info!("{n} items deleted for good, kept {days} days or more");
             }
             true
         }
@@ -412,8 +409,8 @@ mod tests {
         // The purge reads the drive first: it waits for the server meanwhile.
         let server = remote.server();
         let asked = Instant::now();
-        keeper.purge(30);
-        keeper.purge(30);
+        keeper.purge();
+        keeper.purge();
         keeper.request(AccountControl::Restore { nodes: Vec::new() });
         assert!(asked.elapsed() < Duration::from_secs(1), "asking waited");
         std::thread::sleep(Duration::from_millis(100));
@@ -437,7 +434,7 @@ mod tests {
         let done = keeper.done.clone();
         let server = remote.server();
         keeper.request(AccountControl::Restore { nodes: Vec::new() });
-        keeper.purge(30);
+        keeper.purge();
         keeper.ending.store(true, Ordering::SeqCst);
         drop(server);
         keeper.finish();
@@ -512,7 +509,7 @@ mod tests {
         assert_eq!(count("removed")?, 1);
         let ask_after = Duration::from_secs(2);
         let mut keeper = Keeper::spawn_with(Arc::clone(&drive), Arc::new(|_| {}), ask_after);
-        keeper.purge(30);
+        keeper.purge();
         wait_for("the purge", || keeper.done() == 1)?;
         assert_eq!(count("removed")?, 1, "not there once: kept");
         assert_eq!(count("gone_suspects")?, 1);
@@ -635,14 +632,14 @@ mod tests {
         let mut keeper = Keeper::spawn(drive, Arc::new(|_| {}));
         let server = remote.server();
         keeper.request(AccountControl::Restore { nodes: Vec::new() });
-        keeper.purge(30);
+        keeper.purge();
         keeper.paused(true);
         drop(server);
         wait_for("the request and the purge", || keeper.done() == 2)?;
         let mut account = StateDb::open_account(&db)?;
         assert!(account.read(|s| s.account_kv(keys::PURGED_AT))?.is_none());
         keeper.paused(false);
-        keeper.purge(30);
+        keeper.purge();
         wait_for("the purge", || keeper.done() == 3)?;
         assert!(account.read(|s| s.account_kv(keys::PURGED_AT))?.is_some());
         keeper.finish();

@@ -337,8 +337,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
 ## 7. Delete safety
 
 - **Deletes are removals.** A remote delete sets the node's `archivalStatus` to removed and
-  keeps its bytes for `keep_deleted_days` (30, never less: the purge is the whole account's, so
-  a device may only keep longer): "Recently deleted" lists them, and a restore
+  keeps its bytes for 30 days (not a setting: the purge is the whole account's, so every client
+  keeps 30): "Recently deleted" lists them, and a restore
   brings them back on every device (node schema, "Recently deleted"). The daily purge deletes
   older ones for good (node schema, "The purge"). The reconciler sees a removed node as
   deleted.
@@ -362,7 +362,7 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   the junk list (it may hold what was never synced) stays, as ignored content does. A parked
   item goes back under its own name, never its temporary one, and its parking record goes. While
   an item is aside, the scan keeps its rows, and the folders it is in, for it to come back to.
-  What the drive removed stays in Recently deleted for `keep_deleted_days`; a restore downloads
+  What the drive removed stays in Recently deleted for 30 days; a restore downloads
   it again. Cost per file: a rename and an unlink, a stat more than the guard's, and on such
   volumes a read of its bytes; per folder, one walk more (two in all: in place, then aside).
   Accepted: an app that opened a file before the rename and writes to it in the microseconds
@@ -445,7 +445,7 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
 
   Removals made elsewhere (another computer, the phone, the file browser, another app) are
   followed here without asking: deleted here (checked, above), and the drive keeps them in Recently
-  deleted for `keep_deleted_days`. One exception: removals that would take every synced file
+  deleted for 30 days. One exception: removals that would take every synced file
   here at once, and more than the same `max(50, …)` (a broken device, a wiped drive), are held
   (a move elsewhere out of this device's view isn't a removal: the drive keeps it live). The
   count is the whole sync's, not a page's (§6.5): with the page's removals it takes what other
