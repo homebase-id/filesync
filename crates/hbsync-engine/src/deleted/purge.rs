@@ -332,10 +332,7 @@ impl AccountOps<'_> {
         for r in passes.iter().flatten() {
             *to_go.entry(r.row.parent).or_default() += 1;
         }
-        // A time of 0 is a header without one (a server's `updated` of 0): not known, never old.
-        let hard = |r: &RemovedRow| {
-            hard_before.is_some_and(|before| r.removed_at.is_some_and(|at| at > 0 && at < before))
-        };
+        let hard = |r: &RemovedRow| hard_before.is_some_and(|before| r.removed_before(before));
         // The rows of the passes not yet begun, at their versions.
         let mut later: HashSet<RemoteRef> = passes
             .iter()
@@ -499,8 +496,7 @@ fn passes_of(
     let mut chosen = Vec::new();
     for top in tops {
         let item = group(s, top)?;
-        let due = |r: &RemovedRow| r.removed_at.is_some_and(|at| at < before);
-        if item.iter().all(due) {
+        if item.iter().all(|r| r.removed_before(before)) {
             chosen.extend(item);
         }
     }
@@ -526,9 +522,7 @@ fn stuck_below(s: &ReadTx<'_>, before: i64) -> Result<Stuck, StateError> {
     let mut known = HashMap::new();
     for folder in s.removed_holding_taken()? {
         let item = deleted_by_item(&mut rows, folder, &mut known)?;
-        let due = rows
-            .get(item)?
-            .is_some_and(|r| r.removed_at.is_some_and(|at| at < before));
+        let due = rows.get(item)?.is_some_and(|r| r.removed_before(before));
         if due && let Some(row) = rows.get(folder)? {
             stuck.folders.push(row.clone());
         }

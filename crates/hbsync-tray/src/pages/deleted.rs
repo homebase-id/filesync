@@ -137,7 +137,7 @@ impl Server {
         self.ask_account(
             identity,
             AccountControl::Restore { nodes: vec![node] },
-            "Restoring: it comes back with the next sync, on every device.",
+            words::restoring(),
         )
     }
 
@@ -148,10 +148,12 @@ impl Server {
         if listed.is_empty() {
             return "Nothing was deleted.".into();
         }
+        // What stays, as the page said (`empty_offer`).
+        let stays = form.get("stays").and_then(|s| s.parse().ok()).unwrap_or(0);
         match control::empty_listed(&self.paths, &listed) {
             Ok(()) => {
                 (self.send)(Event::Wake);
-                "Emptying Recently deleted.".into()
+                words::emptying(stays)
             }
             Err(e) => {
                 (self.send)(Event::Wake);

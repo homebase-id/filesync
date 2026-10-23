@@ -388,8 +388,11 @@ pub struct FolderStatus {
     /// Entries added to the recently synced list since the daemon started: a client reads
     /// the list again ([`Ask::Recent`]) when this changes.
     pub synced_added: u64,
-    /// Why there is no live watcher (the folder is then rescanned once a minute).
+    /// Why there is no live watcher (the folder is then walked every `rescan_secs`).
     pub watcher_error: Option<String>,
+    /// How often the folder is walked for changes while there is no live watcher.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rescan_secs: Option<u64>,
     /// Ignore rules in `.hbsync/ignore`.
     pub rules: usize,
 }
@@ -413,6 +416,7 @@ impl FolderStatus {
             notes_added: 0,
             synced_added: 0,
             watcher_error: None,
+            rescan_secs: None,
             rules: 0,
         }
     }

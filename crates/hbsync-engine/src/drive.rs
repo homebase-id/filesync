@@ -540,7 +540,7 @@ impl Drive {
         let suspects = self.account().read(|s| s.removed_suspects())?;
         Ok(suspects
             .iter()
-            .any(|(_, first)| now - first.at <= crate::gone::CONFIRM_WITHIN_MS))
+            .any(|(_, first)| crate::gone::still_doubted(first, now)))
     }
 
     /// Once a day: deletes for good what Recently deleted has kept

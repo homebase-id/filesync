@@ -169,6 +169,13 @@ impl RemovedRow {
         hbsync_types::removal_time(self.removed_at)
     }
 
+    /// Whether it was removed before `before` (Unix ms, the server's): a time known, and not 0
+    /// (a header without one, a server's `updated` of 0: never old). The SQL of
+    /// [`ReadTx::removed_before`](crate::ReadTx::removed_before) says the same.
+    pub fn removed_before(&self, before: i64) -> bool {
+        self.removed_at.is_some_and(|at| at > 0 && at < before)
+    }
+
     /// This file at the version recorded in Recently deleted: what a delete may name.
     pub fn doomed(&self) -> Doomed {
         Doomed::unchecked(self.row.remote_ref())

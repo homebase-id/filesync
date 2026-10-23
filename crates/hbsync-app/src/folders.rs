@@ -5,7 +5,6 @@
 use std::path::{Path, PathBuf};
 
 use hbsync_engine::root::{RootError, SyncRoot};
-use hbsync_local::STATE_DIR;
 use hbsync_types::{NodeId, Role};
 
 use crate::config::ConfigLock;
@@ -148,10 +147,16 @@ fn within(path: &Path, folder: &Path) -> bool {
     }
 }
 
-/// Whether `folder` holds anything besides its `.hbsync` (a missing one holds nothing).
+/// Whether `folder` holds anything besides its `.hbsync` and junk (`.DS_Store`, the filter's
+/// built-in list: never synced), a missing one nothing.
 pub(crate) fn has_files(folder: &Path) -> std::io::Result<bool> {
+    use hbsync_local::{is_junk, is_state_dir};
     match std::fs::read_dir(folder) {
-        Ok(entries) => Ok(entries.flatten().any(|e| e.file_name() != STATE_DIR)),
+        Ok(entries) => Ok(entries.flatten().any(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            !is_state_dir(&name) && !is_junk(&name)
+        })),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),
     }
@@ -287,6 +292,18 @@ fn remove_locked(held: &ConfigLock, path: &Path) -> Result<Option<Root>, Error> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Junk (never synced) and the state folder in any case aren't files to merge.
+    #[test]
+    fn junk_and_the_state_folder_are_no_files() -> std::io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        std::fs::create_dir(dir.path().join(".HBSYNC"))?;
+        std::fs::write(dir.path().join(".DS_Store"), "x")?;
+        assert!(!has_files(dir.path())?);
+        std::fs::write(dir.path().join("a.txt"), "a")?;
+        assert!(has_files(dir.path())?);
+        Ok(())
+    }
 
     #[test]
     fn some_folders_are_refused() {

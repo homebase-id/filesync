@@ -1756,3 +1756,25 @@ fn an_answer_records_only_over_what_its_write_replaced() -> R {
     assert_eq!(lost, Answered::Superseded);
     Ok(())
 }
+
+/// A removal time of 0 (a header without one: a server's `updated` of 0) is never old, as the
+/// SQL of `removed_before` says; an open one isn't either.
+#[test]
+fn a_removal_at_0_is_never_old() {
+    use hbsync_state::{MirrorRow, RemovedRow};
+    let row = |removed_at| RemovedRow {
+        row: MirrorRow::from_content(
+            remote(),
+            NodeId::new(),
+            NodeId::ROOT,
+            NodeKind::Folder,
+            &hbsync_types::schema::NodeContent::folder("d"),
+            None,
+        ),
+        removed_at,
+    };
+    assert!(row(Some(5)).removed_before(10));
+    assert!(!row(Some(10)).removed_before(10));
+    assert!(!row(Some(0)).removed_before(10));
+    assert!(!row(None).removed_before(10));
+}

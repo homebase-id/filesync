@@ -88,12 +88,12 @@ pub fn state_dir_key() -> &'static str {
 
 /// Whether `name` is the state folder's ([`crate::STATE_DIR`]) in any case or spelling: caseless
 /// and normalization-insensitive (`name_key`), as a volume that ignores case compares names.
-fn is_state_dir(name: &str) -> bool {
+pub fn is_state_dir(name: &str) -> bool {
     name.len() <= crate::STATE_DIR.len() * 4 && name_key(name) == state_dir_key()
 }
 
 /// Whether `name` is on the built-in junk list (at any depth, in any case).
-pub(crate) fn is_junk(name: &str) -> bool {
+pub fn is_junk(name: &str) -> bool {
     JUNK.iter().any(|pat| match *pat {
         Pat::Name(n) => name.eq_ignore_ascii_case(n),
         Pat::Prefix(p) => starts(name, p),
@@ -124,14 +124,16 @@ pub enum FilterError {
     Read { path: PathBuf, source: io::Error },
     /// The rules as a whole couldn't be built (a line that doesn't parse is skipped instead,
     /// [`Filter::skipped`]).
-    #[error(".hbsync/ignore: {message}")]
+    #[error("{}/{}: {message}", crate::STATE_DIR, crate::layout::IGNORE_FILE)]
     Rules { message: String },
     /// Negations (`!…`) that don't parse, by line: skipped, what they keep synced would be
     /// ignored, and leave the drive and the other devices (sync semantics §10, rule 1). Never
     /// skipped: the folder doesn't sync till they are fixed. `message`: why the first doesn't.
     #[error(
-        ".hbsync/ignore {} ({message}), and keeps things synced: syncing stops till it is fixed \
+        "{}/{} {} ({message}), and keeps things synced: syncing stops till it is fixed \
          (fix it to resume)",
+        crate::STATE_DIR,
+        crate::layout::IGNORE_FILE,
         negations(lines)
     )]
     Negation { lines: Vec<usize>, message: String },
