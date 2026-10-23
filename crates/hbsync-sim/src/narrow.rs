@@ -371,7 +371,13 @@ pub(crate) fn mirror_row(node: NodeId, state: &NodeState, at: RemoteRef) -> Mirr
 pub(crate) fn sides_differ(input: &Input) -> BTreeSet<NodeId> {
     let taken = hbsync_engine::along::taken_along(
         input.remote.iter().map(|(n, s)| (n, s.parent)),
-        |f| input.removed.get(&f).map(|r| r.at),
+        |f| {
+            input
+                .removed
+                .get(&f)
+                .filter(|r| r.state.kind == NodeKind::Folder)
+                .map(|r| r.at)
+        },
         |n| input.changed_at.get(&n).copied(),
     );
     input

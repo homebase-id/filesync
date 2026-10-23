@@ -1492,6 +1492,45 @@ fn what_is_in_a_file_not_hashed_yet_is_recovered() {
     assert!(!plan.ops.iter().any(|op| op.node() == d), "{:#?}", plan.ops);
 }
 
+/// Another writer put `y` in file `f`, then `f` went to Recently deleted: a removed file takes
+/// nothing along, so `y` is an orphan for Recovered files, as in a live file (§6.3). Taken
+/// along, it was deleted here and left live on the drive, where nothing listed it.
+#[test]
+fn what_is_in_a_removed_file_is_recovered_not_taken_along() {
+    let [f, y] = ids(2)[..] else { unreachable!() };
+    let mut w = World::default();
+    w.input.remote_complete = true;
+    w.synced(f, file(ROOT, "f", "1"));
+    w.synced(y, file(ROOT, "y", "y"));
+    w.remote(f, None);
+    w.input.removed.insert(
+        f,
+        hbsync_engine::reconcile::Removed {
+            at: 100,
+            state: file(ROOT, "f", "1"),
+        },
+    );
+    w.remote(y, Some(file(f, "y", "y")));
+    w.input.changed_at.insert(y, 10);
+    let plan = w.plan();
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, Op::RemoteUpdate { node, parent, .. }
+            if *node == y && *parent == NodeId::RECOVERED)),
+        "{:#?}",
+        plan.ops
+    );
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| op.node() == y && op.deletes().is_some()),
+        "{:#?}",
+        plan.ops
+    );
+}
+
 /// The drive renames and moves a file while it is being written here: nothing is done to it
 /// till it is hashed, then the move comes down and the edit goes up, never lost.
 #[test]
