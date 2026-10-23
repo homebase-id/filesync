@@ -58,7 +58,8 @@ They live in the account's state DB (`daemon.md`, Files): the mirror once per ac
 local per sync root. Base, local and the dirty set of a root change only with that root.
 
 **Words.** In these rules a *held* delete, removal or item is one the mass-delete guard keeps
-back until the user answers (§7); nothing else is held so. What a plan leaves as it is,
+back until the user answers (§7); nothing else is held so. The app shows them as *deletions
+to review* (the tray, the CLI); its "waiting" means items not synced yet. What a plan leaves as it is,
 nothing done, until something else happens *waits*: for a hash (a file here not hashed yet,
 that is being written, locked or can't be read; the folders it is in; what would take a name
 it holds: §6.3), for another page (§6.5), or for a version this device can read (§8a). An

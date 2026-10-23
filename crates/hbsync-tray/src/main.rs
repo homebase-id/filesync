@@ -521,9 +521,9 @@ fn folder_notices(
     {
         out.push((
             "deletes",
-            "Deletions waiting for you",
+            "Deletions to review",
             format!(
-                "{} deletions wait until you review them (in the menu).",
+                "{} deletions to review, in the menu: nothing is deleted until you answer.",
                 held.total()
             ),
         ));
