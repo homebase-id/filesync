@@ -1729,8 +1729,11 @@ impl Sim {
         };
         client.local.remove(node);
         client.replaced.insert(node, old.content);
+        // Parked, it is known by the name it had (the executor's `parked_place`; with its row
+        // gone, recovery places it by its base): what comes back of it never takes the
+        // temporary one.
         let mut aside = Tree::new();
-        aside.insert(node, old);
+        aside.insert(node, at_place(client, node, &old));
         client.aside.insert(node, aside);
     }
 
@@ -1786,11 +1789,25 @@ impl Sim {
         client.aside.remove(&node);
         let new = self.ids.fresh();
         let client = &mut self.clients[c];
-        let parent = match client.local.get(old.parent) {
-            Some(p) if p.kind == NodeKind::Folder => old.parent,
+        // Beside its node, where that is now (the executor's row), numbered: the node holds
+        // the name, its own when parked too (`parked_place`): never the temporary one.
+        let (parent, wanted, parked) = match client.local.get(node) {
+            Some(now) => {
+                let at = at_place(client, node, now);
+                (now.parent, at.name.clone(), at.name != now.name)
+            }
+            None => (old.parent, old.name.clone(), false),
+        };
+        let parent = match client.local.get(parent) {
+            Some(p) if p.kind == NodeKind::Folder => parent,
             _ => NodeId::ROOT,
         };
-        let name = release_name(client, new, parent, &old.name, false).unwrap_or(old.name.clone());
+        let name = if parked {
+            numbered_name(client, Some(new), parent, &wanted, false)
+        } else {
+            release_name(client, new, parent, &wanted, false)
+        }
+        .unwrap_or(wanted);
         client.local.insert(
             new,
             NodeState {

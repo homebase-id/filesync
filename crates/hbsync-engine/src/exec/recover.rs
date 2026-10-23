@@ -54,13 +54,23 @@ pub fn recover_aside(db: &mut StateDb, folder: &FolderCtx) -> Result<AsideOutcom
         };
         // An old version a download replaced, its node holding the new one now: it goes once
         // its bytes read as the old version's; written to, it comes back as a new item beside
-        // the new one; unreadable now, it waits.
+        // the new one, numbered where that is taken; unreadable now, it waits. Its node parked
+        // (under a temporary name, to free its own), beside the name the node has and gets
+        // back: numbered, never the temporary name, which would go up as an item's name.
         if let layout::AsideEntry::File(_, hash) = parsed
             && row.hash != Some(hash)
         {
-            dirs.extend(
-                discard_old(db, &disk, folder, &aside, hash, Some(&row.path))?.into_inner(),
-            );
+            let place = match db.read(|s| crate::view::parked_place(s, &row))? {
+                Some(original) => super::park::numbered_place(db, folder, &original, false)?,
+                None => Some(row.path.clone()),
+            };
+            match discard_old(db, &disk, folder, &aside, hash, place.as_ref())? {
+                // Written to, with no name it could come back under (every numbered one
+                // taken, or the rename failing): the user's edit, told (§8a), and tried again
+                // at the next sync.
+                Discarded::Stranded | Discarded::Back(None) => unknown.push(left(&aside)),
+                gone => dirs.extend(gone.into_inner()),
+            }
             continue;
         }
         let rows = db.read(|s| s.local_subtree(&row.path))?;
@@ -150,7 +160,7 @@ fn recover_by_base(
             db.write(|s| went(s, [node], node))?;
             Ok(ByBase::Rescan(place.and_then(|p| p.parent())))
         }
-        Discarded::Stranded => Ok(ByBase::Unknown),
+        Discarded::Stranded | Discarded::Back(None) => Ok(ByBase::Unknown),
         gone => Ok(ByBase::Rescan(gone.into_inner())),
     }
 }
@@ -168,8 +178,9 @@ enum ByBase {
 pub struct AsideOutcome {
     /// The folders to rescan: what it put back is there.
     pub rescan: Vec<RelPath>,
-    /// What it left aside, as nothing here places it (sync semantics §8a: told, never
-    /// deleted), as sorted paths in the folder (`.hbsync/aside/<name>`).
+    /// What it left aside, as nothing here places it, or as an edit with no name to come back
+    /// under (sync semantics §8a: told, never deleted), as sorted paths in the folder
+    /// (`.hbsync/aside/<name>`).
     pub unknown: Vec<String>,
 }
 

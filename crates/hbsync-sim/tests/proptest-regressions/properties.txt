@@ -168,3 +168,4 @@ cc c88b764139422b7d2d9573aff6fbfe56b56cf5540c7805123e5c4fb59a96bb5d # orphans_ar
 cc c4e6cb2693e96b198e3c5740ff43c8a3eceafcabfa10eb7e30557d74a97c7a5c # orphans_are_recovered_without_loss: an orphan no computer syncs stays on the drive (#245, from #240 CI)
 cc 8f96db8762bcf6c6de21cec105ba43e88d1f872340cb5d6060c7476875ff979b # shrinks to size = 1: c1 moves a node out of a folder it deletes into one removed elsewhere (stopped): the deleted folder waited for that one's page, and what else was in it went first, listed apart
 cc ac26658e6bfe0d99f0f6f0563f82bc71bea684e065689abbf08931714a13a2d2 # held_deletes_out_of_the_dirty_set_plan_alike: the check's store marked clean nodes dirty (a page waited for another)
+cc 2545326161641b96c7650109ad40e6ed6edb4e33d8b8e3f52e74a77eb8bfb361 # remote_deletes_never_lose_an_edit: an old version written to aside while its node was parked came back under the temporary name
