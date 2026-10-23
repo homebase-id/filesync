@@ -4440,6 +4440,62 @@ fn a_node_in_a_file_meets_what_is_in_recovered_files() -> R {
     Ok(())
 }
 
+/// A folder `r` removed on the drive took along folder `g` in it and the synced file in `g`,
+/// still live; a confirmed delete of `g` here covers that file, though `r` is above `g`, not in
+/// it: the guard counts it gone remotely ([`ReadTx::pending_file_deletes`]) and the confirmed
+/// delete takes it from that count. Before, only a removed folder in `g` was looked at, and
+/// the count stayed too high till the delete ran.
+#[test]
+fn a_confirmed_delete_covers_what_a_removal_above_it_took_along() -> R {
+    let mut h = Harness::new()?;
+    let (r, g, file) = (NodeId::new(), NodeId::new(), NodeId::new());
+    h.local_folder("r", r)?;
+    h.local_folder("r/g", g)?;
+    h.local_file("r/g/f", file, b"f")?;
+    let f_c = h.content(b"f");
+    h.db.write(|s| {
+        for (node, state) in [
+            (r, NodeState::folder(NodeId::ROOT, "r")),
+            (g, NodeState::folder(r, "g")),
+            (file, NodeState::file(g, "f", f_c)),
+        ] {
+            s.folder()
+                .put_base(&BaseRow::new(node, state, some_version()))?;
+        }
+        let row = |node, parent, kind, name: &str| {
+            let content = match kind {
+                NodeKind::File => NodeContent::file(name, 0, f_c.size, false),
+                _ => NodeContent::folder(name),
+            };
+            let hash = (kind == NodeKind::File).then_some(f_c.hash);
+            let mut m = MirrorRow::from_content(some_version(), node, parent, kind, &content, hash);
+            m.changed_at = Some(5);
+            m
+        };
+        s.account().put_removed(&RemovedRow {
+            row: row(r, NodeId::ROOT, NodeKind::Folder, "r"),
+            removed_at: Some(10),
+        })?;
+        s.account().put_mirror(&row(g, r, NodeKind::Folder, "g"))?;
+        s.account().put_mirror(&row(file, g, NodeKind::File, "f"))?;
+        s.folder().clear_dirty(file)?;
+        s.folder().mark_dirty(g)
+    })?;
+    let (pending, confirmed) =
+        h.db.read(|s| Ok((s.pending_file_deletes()?, s.confirmed_file_deletes(g)?)))?;
+    assert_eq!(
+        pending,
+        (0, 1),
+        "the file taken along counts as gone remotely"
+    );
+    assert_eq!(
+        confirmed,
+        Some((false, vec![file])),
+        "the delete of g covers it"
+    );
+    Ok(())
+}
+
 /// A folder removed on the drive at a time not known yet (an open removal) took along the
 /// synced file still live in it (`along::taken_along`: an open removal is the newest): the
 /// guard counts it with what is gone remotely, as the reconciler does, and a confirmed delete

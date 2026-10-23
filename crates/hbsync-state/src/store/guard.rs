@@ -108,8 +108,8 @@ impl ReadTx<'_> {
     /// [`pending_file_deletes`](Self::pending_file_deletes): whether `node` is a file gone
     /// locally (deleted remotely, one node at a time), and the files gone remotely in its local
     /// subtree (a delete takes everything below it with it): the dirty ones gone from the drive,
-    /// and the synced ones a folder's removal took along, still live there (as `taken_files`
-    /// counts them). `None` when `node` isn't dirty.
+    /// and the synced ones a folder's removal took along, still live there, whether that folder
+    /// is in `node` or above it (as `taken_files` counts them). `None` when `node` isn't dirty.
     pub fn confirmed_file_deletes(&self, node: NodeId) -> Result<Option<(bool, Vec<NodeId>)>> {
         static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             format!(
@@ -123,7 +123,9 @@ impl ReadTx<'_> {
                      OR coalesce(b.kind = 0 AND EXISTS (SELECT 1 FROM taken t WHERE t.id = d.id), 0) \
                  FROM (SELECT id FROM sub) d LEFT JOIN dirty k ON k.folder = $F AND k.id = d.id \
                  JOIN nodes n ON n.id = d.id LEFT JOIN base b ON b.folder = $F AND b.id = d.id",
-                taken_along("n.id IN (SELECT id FROM sub)")
+                // Every removed folder, as `taken_files` seeds it: one above `node` takes what
+                // is in it along too (only what is in `node` is kept, below).
+                taken_along("1")
             )
         });
         let mut stmt = self.prep(&SQL)?;
