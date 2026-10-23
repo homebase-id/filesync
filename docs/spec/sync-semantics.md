@@ -394,8 +394,10 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   would remove from the drive more than `max(50, 25 % of synced files)` files deleted here (by
   the user, or newly ignored, §10 rule 1), or every synced file (two or more), those removals
   are held, sent nowhere: the drive and every other device keep them. 50 and 25 % are the
-  defaults (`[mass_delete]` `min_files` and `fraction` in `config.toml`, daemon.md). The rest
-  of the plan proceeds. The user answers, about exactly what was shown (a token names the
+  defaults (`[mass_delete]` `min_files` and `fraction` in `config.toml`, daemon.md). In pages
+  (§6.5) the synced files gone here are counted over the whole sync; a delete from the drive of
+  a file not synced here (one left there when another device removed its folder) is weighed
+  within its own plan, not across pages. The rest of the plan proceeds. The user answers, about exactly what was shown (a token names the
   held items; an answer to a set that changed since is refused, the new one shown; one taken
   goes with the next sync, for the items it named, and any held since stay held):
   - **Delete**: they go to the drive's Recently deleted, as any delete does.
