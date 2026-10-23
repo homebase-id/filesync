@@ -318,8 +318,9 @@ pub struct Runner {
     stalled: report::Stalled,
     /// What scans skipped and told, each once ([`report::scan_notes`]).
     scan_told: std::collections::HashSet<u64>,
-    /// The version of the ignore rules last told about (a hash of their fingerprint), and the
-    /// note told for their lines that aren't valid rules, if any ([`report::rules_note`]).
+    /// The version of the ignore rules last told about (a hash of their fingerprint; 0: rules
+    /// that can't be used, [`Runner::tell_rules_failing`]), and the note told for their lines
+    /// that aren't valid rules, if any ([`report::rules_note`]).
     rules_told: Option<(u64, Option<String>)>,
     /// Sync now was asked: the next sync sends what the drive refused once more.
     retry_refused: bool,
@@ -701,10 +702,17 @@ impl Runner {
                         opened = Some(marker);
                         parts.insert(p)
                     }
-                    // Rules that can't be read: say so, and look again at the next look.
+                    // Rules that can't be read, or with a negation that isn't a valid rule
+                    // (skipped, it would ignore what it keeps synced, §10: told once): say so,
+                    // and look again at the next look.
                     Err(RunnerError::Filter(e)) if !self.cfg.once => {
-                        tracing::warn!("{e}");
-                        self.tell_rules(None);
+                        match &e {
+                            FilterError::Negation { .. } => self.tell_rules_failing(&e),
+                            _ => {
+                                tracing::warn!("{e}");
+                                self.tell_rules(None);
+                            }
+                        }
                         self.failing(
                             State::Failing,
                             e.to_string(),
@@ -906,6 +914,21 @@ impl Runner {
         }
         self.tell(note.clone().into_iter().collect());
         self.rules_told = version.map(|v| (v, note));
+    }
+
+    /// Tells why the ignore rules can't be used (`e`: negations that aren't valid rules), once
+    /// while it is the same; the note told for other rules goes. Kept with no version: rules
+    /// in use, read again, are told anew.
+    fn tell_rules_failing(&mut self, e: &FilterError) {
+        let note = e.to_string();
+        if matches!(&self.rules_told, Some((0, Some(told))) if *told == note) {
+            return;
+        }
+        if let Some((_, Some(old))) = self.rules_told.take() {
+            self.set(|s| s.recent.retain(|n| n.text != old));
+        }
+        self.tell(vec![note.clone()]);
+        self.rules_told = Some((0, Some(note)));
     }
 
     /// Tells what a scan skipped and the user may want to know (a folder it can't read, a

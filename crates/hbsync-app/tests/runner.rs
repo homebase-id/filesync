@@ -753,6 +753,57 @@ fn a_bad_ignore_line_is_skipped_and_told_once() -> R {
     Ok(())
 }
 
+/// A negation that isn't a valid rule isn't skipped: what it keeps synced would be ignored and
+/// leave the drive and the other devices (sync semantics §10). The folder stops, failing, with
+/// one note naming the line, and nothing of what it kept leaves the drive; fixed, it resumes
+/// and the note goes.
+#[test]
+fn a_bad_negation_stops_the_folder_till_it_is_fixed() -> R {
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    a.write(".hbsync/ignore", "build/*\n!build/keep.txt\n")?;
+    a.handle.send(Command::SyncNow);
+    // In use before anything it covers is written.
+    wait_until("the rules are counted", || a.status().rules == 2)?;
+    a.write("build/keep.txt", "kept")?;
+    a.write("build/out.o", "built")?;
+    a.handle.send(Command::SyncNow);
+    wait_until("the kept file is up", || on_server(&server, "keep.txt"))?;
+    assert!(!on_server(&server, "out.o"));
+
+    // The negation broken: skipped, keep.txt would be ignored, and leave the drive.
+    let note = ".hbsync/ignore line 2 isn't a valid rule";
+    let told = |a: &Device| {
+        a.status()
+            .recent
+            .iter()
+            .filter(|n| n.text.starts_with(note) && n.text.contains("fix it to resume"))
+            .count()
+    };
+    a.write(".hbsync/ignore", "build/*\n!build/[z-a]\n")?;
+    a.handle.send(Command::SyncNow);
+    wait_until("the folder stops", || a.status().state == State::Failing)?;
+    wait_until("the line is told", || told(&a) == 1)?;
+    a.write("later.txt", "waits")?;
+    a.handle.send(Command::SyncNow);
+    a.handle.send(Command::SyncNow);
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(
+        on_server(&server, "keep.txt"),
+        "what the negation kept stays on the drive"
+    );
+    assert!(!on_server(&server, "later.txt"), "nothing syncs");
+    assert_eq!(told(&a), 1, "told once");
+
+    // Fixed: syncing resumes, and the note goes.
+    a.write(".hbsync/ignore", "build/*\n!build/keep.txt\n")?;
+    a.handle.send(Command::SyncNow);
+    wait_until("later.txt is up", || on_server(&server, "later.txt"))?;
+    wait_until("the note went", || told(&a) == 0)?;
+    assert!(on_server(&server, "keep.txt"));
+    Ok(())
+}
+
 /// The account DB of a test folder: beside it.
 fn db_of(root: &Path) -> PathBuf {
     root.with_file_name("state.db")
