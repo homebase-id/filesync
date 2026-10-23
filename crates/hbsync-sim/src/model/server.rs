@@ -101,14 +101,17 @@ impl Server {
             .removed
             .get(&node)
             .is_some_and(|r| r.state.kind == NodeKind::Folder);
-        let Some(at) = self.removed_at.get(&node).filter(|_| folder) else {
+        let Some(&at) = self.removed_at.get(&node).filter(|_| folder) else {
             return Vec::new();
+        };
+        let with = |n: &NodeId| {
+            self.removed_at
+                .get(n)
+                .is_some_and(|&t| hbsync_engine::deleted::deleted_with_at(t, at))
         };
         self.removed
             .iter()
-            .filter(|(n, r)| {
-                r.state.parent == node && self.removed_at.get(n).is_some_and(|t| t >= at)
-            })
+            .filter(|(n, r)| r.state.parent == node && with(n))
             .map(|(n, _)| *n)
             .collect()
     }
@@ -186,16 +189,15 @@ impl Server {
     }
 
     /// `top` and what was deleted with it ([`Server::deleted_with`]), level by level, each once:
-    /// what restoring it restores, and the purge's item of it (the engine's `group`).
+    /// what restoring it restores, and the purge's item of it (the engine's `group`, by its
+    /// rules: `deleted::inside`).
     pub(crate) fn group(&self, top: NodeId) -> Vec<NodeId> {
-        let mut seen = BTreeSet::from([top]);
-        let mut item = vec![top];
-        let mut next = 0;
-        while next < item.len() {
-            let with = self.deleted_with(item[next]);
-            item.extend(with.into_iter().filter(|n| seen.insert(*n)));
-            next += 1;
-        }
+        // `deleted_with` holds nothing for a file: each is asked.
+        let Ok(item) = hbsync_engine::deleted::inside::<_, std::convert::Infallible>(
+            top,
+            |n| (*n, true),
+            |folder| Ok(self.deleted_with(*folder)),
+        );
         item
     }
 

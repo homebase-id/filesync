@@ -1,6 +1,6 @@
 //! What the users, other devices and the server do, and how each folder sees the drive.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -844,50 +844,19 @@ impl Sim {
     /// didn't come back stays, with what is in it. It plans from the drive as it is: a device
     /// plans from its store, which may lag (a stale device's restore isn't simulated).
     pub(crate) fn restore_with(&mut self, node: NodeId) {
-        let removed = &self.server.removed;
-        let Some(top) = removed.get(&node) else {
+        // The engine's plan ([`deleted::plan_restore_from`]): the folders above it in Recently
+        // deleted, outermost first, then it and what was deleted with it, each once; the
+        // folders the rows may go into, and the names taken there.
+        let Ok(Some(plan)) = deleted::plan_restore_from(&mut RestoreFrom(&self.server), &[node])
+        else {
             return;
         };
-        // The folders above it in Recently deleted, outermost first (past any depth a path may
-        // have, nothing comes back: above is still a removed folder, as the engine's).
-        let Ok(up) = hbsync_engine::walk::up::<_, Infallible>(top.state.parent, |at| {
-            Ok(removed.get(&at).map(|f| (at, f.state.parent)))
-        });
-        if up.end == End::Deep {
-            return;
-        }
-        let mut nodes = up.items;
-        nodes.reverse();
-        // Then it and what was deleted with it ([`Server::group`]), each once.
-        let mut seen: HashSet<NodeId> = nodes.iter().copied().collect();
-        let group = self.server.group(node);
-        nodes.extend(group.into_iter().filter(|n| seen.insert(*n)));
-        let rows: Vec<Row> = nodes
-            .iter()
-            .map(|n| Row {
-                node: *n,
-                parent: removed[n].state.parent,
-                name: removed[n].state.name.clone(),
-            })
-            .collect();
-        // The folders in the tree the rows may go into, and the names taken in those and in
-        // the folders coming back (one that is neither went for good: no name is taken there).
-        let tree = self.server.tree();
-        let mut live = HashSet::from([NodeId::ROOT]);
-        let mut taken: HashMap<NodeId, HashSet<String>> = HashMap::new();
-        for parent in rows.iter().map(|r| r.parent).chain([NodeId::ROOT]) {
-            if taken.contains_key(&parent) {
-                continue;
-            }
-            if self.server.live.contains_key(&parent) {
-                live.insert(parent);
-            } else if !parent.is_root() && !seen.contains(&parent) {
-                continue;
-            }
-            let names = tree.children(parent).filter_map(|c| tree.get(c));
-            let names = deleted::taken_in(parent, names.map(|c| c.name.as_str()));
-            taken.insert(parent, names);
-        }
+        let deleted::RestorePlan {
+            rows,
+            mut live,
+            mut taken,
+        } = plan;
+        let seen: HashSet<NodeId> = rows.iter().map(|r| r.node).collect();
         let mut left: Vec<&Row> = rows.iter().collect();
         while let Some(wave) =
             deleted::restore_wave(left, |r| (r.parent, &r.name), &live, &seen, &mut taken)
@@ -1235,6 +1204,43 @@ struct Row {
     node: NodeId,
     parent: NodeId,
     name: String,
+}
+
+/// The drive as the engine's restore plan reads it ([`deleted::RestoreSource`]).
+struct RestoreFrom<'s>(&'s Server);
+
+impl deleted::RestoreSource for RestoreFrom<'_> {
+    type Row = Row;
+    type Error = Infallible;
+    fn removed(&mut self, node: NodeId) -> Result<Option<Row>, Infallible> {
+        Ok(self.0.removed.get(&node).map(|r| Row {
+            node,
+            parent: r.state.parent,
+            name: r.state.name.clone(),
+        }))
+    }
+    fn group(&mut self, top: Row) -> Result<Vec<Row>, Infallible> {
+        let mut rows = Vec::new();
+        for n in self.0.group(top.node) {
+            rows.extend(self.removed(n)?);
+        }
+        Ok(rows)
+    }
+    fn is_live(&mut self, node: NodeId) -> Result<bool, Infallible> {
+        Ok(self.0.live.contains_key(&node))
+    }
+    fn names_in(&mut self, folder: NodeId) -> Result<Vec<String>, Infallible> {
+        Ok(self
+            .0
+            .live
+            .values()
+            .filter(|n| n.state.parent == folder)
+            .map(|n| n.state.name.clone())
+            .collect())
+    }
+    fn place(row: &Row) -> (NodeId, NodeId) {
+        (row.node, row.parent)
+    }
 }
 
 /// What the rules of held deletes read ([`hbsync_engine::held::Sides`]) of a client's model,
