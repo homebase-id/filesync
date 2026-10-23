@@ -617,9 +617,21 @@ impl Sim {
         // A folder no client reads, while it is on the drive, and what is in it: what is in
         // it waits for it (`Action::NewerFolder`).
         let unread: BTreeSet<NodeId> = self.server.unreadable_on_drive().map(|(n, _)| *n).collect();
+        // A node's place goes through the folders in Recently deleted above it too (sync
+        // semantics §12): what is in one whose chain reaches a role folder is that folder's,
+        // never the main folder's, even where no device brings it back (the role folder's
+        // client then leaves it, `left_orphans`).
+        let removed = |n: &NodeId| self.server.removed.get(n).map(|r| r.state.parent);
         let mut tree = Tree::new();
         for (node, n) in &self.server.live {
-            let up = up_from(drive, *node);
+            let mut up = up_from(drive, *node);
+            while let Some(&last) = up.last()
+                && let Some(parent) = removed(&last)
+                && !up.contains(&parent)
+            {
+                up.push(parent);
+                up.extend(up_from(drive, parent).into_iter().skip(1));
+            }
             let ours = match coords.top {
                 top if top.is_root() => !Role::ALL.iter().any(|r| up.contains(&r.node())),
                 top => *node != top && up.contains(&top),
