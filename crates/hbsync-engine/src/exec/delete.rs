@@ -186,7 +186,8 @@ pub(super) fn check<'r>(
             } => {
                 let below: PathBuf = path.components().skip(row.path.depth()).collect();
                 let place = at.join(below);
-                let is_dir = std::fs::symlink_metadata(&place).is_ok_and(|m| m.is_dir());
+                // Only one known to be a file goes: one that can't be read now keeps its folder.
+                let is_dir = !std::fs::symlink_metadata(&place).is_ok_and(|m| !m.is_dir());
                 if !keeps_its_folder(reason == SkipReason::Junk, is_dir) {
                     checked.junk.push(place);
                 } else {
