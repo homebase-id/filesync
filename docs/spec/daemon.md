@@ -498,7 +498,8 @@ isn't running looks every second (every ten while nothing is set up).
   while the user is there) are
   pages the tray serves on `127.0.0.1`, on a random port, under a random path, and opens in the
   browser; the identity's approval returns there.
-- **Notifications:** a new problem note, held deletes, a refused login; each kind at most once a
+- **Notifications:** a new problem note, deletions to review (held deletes), a refused login;
+  each kind at most once a
   minute.
 - **The folder:** the tray gives the main folder (not a role folder: it is the user's own) the
   Filesync icon (`desktop.ini` on Windows, Finder's custom
@@ -580,8 +581,8 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 | `hbsync status [--json]` | what the daemon does; exit status 3 when it isn't running |
 | `hbsync sync`, `pause [--for 1h]`, `resume` | a pause with `--for` ends by itself |
 | `hbsync recent [-n N]` | what was synced lately, newest first |
-| `hbsync confirm-deletes [--yes]` | shows the held deletes and lets them through |
-| `hbsync put-back [--yes]` | shows the held deletes and puts them back (sync semantics §7) |
+| `hbsync confirm-deletes [--yes]` | shows the deletions to review (held deletes) and lets them through |
+| `hbsync put-back [--yes]` | shows the deletions to review and puts them back (sync semantics §7) |
 | `hbsync start`, `stop` | |
 | `hbsync autostart [on\|off]` | |
 | `hbsync logout` | stops the daemon, forgets the credentials, autostart off; the folder stays |

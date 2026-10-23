@@ -115,13 +115,13 @@ enum Command {
         #[arg(long)]
         yes: bool,
     },
-    /// Lets through the deletes held for confirmation.
+    /// Lets through the deletions to review (the mass-delete guard's).
     ConfirmDeletes {
         /// Don't ask.
         #[arg(long)]
         yes: bool,
     },
-    /// Puts the deletes held for confirmation back: what was deleted here comes back, what
+    /// Puts the deletions to review back: what was deleted here comes back, what
     /// another device removed is restored on Homebase.
     PutBack {
         /// Don't ask.
@@ -486,7 +486,7 @@ fn answer_held(paths: &Paths, yes: bool, answer: HeldAnswer) -> Res<()> {
         .filter_map(|f| Some((f.path, f.state == State::Paused, f.held_deletes?)))
         .collect();
     if held.is_empty() {
-        println!("No deletes are waiting for confirmation.");
+        println!("No deletions to review.");
         return Ok(());
     }
     for (path, paused, held) in held {
@@ -506,7 +506,7 @@ fn answer_held(paths: &Paths, yes: bool, answer: HeldAnswer) -> Res<()> {
             HeldAnswer::PutBack => "Put them back?",
         };
         if !yes && !ask_yes(question)? {
-            println!("Nothing done; they stay held.");
+            println!("Nothing done; they are still to review.");
             continue;
         }
         // Exactly these: any delete since is held again, for another look.
@@ -586,7 +586,7 @@ fn print_folder(s: &FolderStatus) {
     }
     if let Some(h) = &s.held_deletes {
         println!(
-            "  deletes held: {} here, {} elsewhere; `hbsync confirm-deletes` lets them through, \
+            "  deletions to review: {} here, {} elsewhere; `hbsync confirm-deletes` lets them through, \
              `hbsync put-back` puts them back",
             h.here, h.remotely
         );

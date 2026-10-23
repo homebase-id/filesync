@@ -15,7 +15,7 @@ impl Server {
             return "<h1>Deletions</h1><p>Filesync isn't running.</p>".into();
         };
         let Some(held) = &status.held_deletes else {
-            return "<h1>Deletions</h1><p>No deletions are waiting.</p>".into();
+            return "<h1>Deletions</h1><p>No deletions to review.</p>".into();
         };
         let what: String = words::held_deletes(held, "Delete", "Put them back")
             .iter()
@@ -32,7 +32,7 @@ impl Server {
             ""
         };
         format!(
-            "<h1>{} deletions are waiting</h1>\
+            "<h1>{} deletions to review</h1>\
              <p>Filesync holds back deletions this large until you answer. In \
              <code>{folder}</code>:</p>{what}\
              <ul>{examples}{more}</ul>\
@@ -41,7 +41,7 @@ impl Server {
              <button name=answer value=delete>Delete</button> \
              <button name=answer value=put_back>Put them back</button></form>\
              <p class=small>Not sure? Leave this page. Nothing changes, here or on Homebase, \
-             until you answer. Filesync reminds you while they wait.</p>",
+             until you answer. Filesync reminds you until you do.</p>",
             held.total(),
             folder = escape(&status.path.display().to_string()),
             url = self.pages.url("deletions"),

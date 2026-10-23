@@ -1012,7 +1012,7 @@ impl Runner {
         }
         if let Some(h) = &held {
             tracing::warn!(
-                "deletes held for confirmation: {} here, {} remotely",
+                "deletions to review: {} here, {} remotely",
                 h.here,
                 h.remotely
             );
