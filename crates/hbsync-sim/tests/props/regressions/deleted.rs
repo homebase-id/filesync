@@ -1801,3 +1801,43 @@ fn regression_a_computer_leaves_what_is_written_into_a_removed_folder_it_ignores
     }
     assert_eq!(sim.server_paths(), ["d", "d/c.txt"]);
 }
+
+/// In pages of one with the guard at one file: a file made in a folder another device removed
+/// meanwhile is left on the drive, its folder gone (detached), and c0 deletes it there, a file
+/// not synced here; another page has a synced file gone here (a conflict's fork). The guard
+/// weighs the page's delete in its plan, and the other pages' files gone here as its pending
+/// count: neither is over the limit, so it goes on (found by
+/// `guarded_clients_in_pages_hold_the_whole_delete`, whose oracle added the two).
+#[test]
+fn regression_a_paged_delete_of_a_file_not_synced_here_is_weighed_in_its_plan() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(0, CreateFile { parent: 0, name: 5 }),
+        act(0, Meanwhile { op: 1 }),
+        Event::Plan { client: 0 },
+        act(1, Meanwhile { op: 0 }),
+        act(1, CreateJunk { parent: 0 }),
+        Event::Step { client: 0 },
+        act(0, Meanwhile { op: 0 }),
+        act(1, CreateFile { parent: 0, name: 5 }),
+        act(1, CreateFolder { parent: 0, name: 6 }),
+        act(
+            1,
+            Move {
+                node: 0,
+                parent: 6,
+                name: 0,
+            },
+        ),
+        Event::Plan { client: 1 },
+        Event::Plan { client: 1 },
+        act(0, Edit { file: 0 }),
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        Event::Step { client: 1 },
+    ];
+    if let Err(e) = run_with(2, Some(1), |sim| sim.with_small_pages(1), &events) {
+        panic!("{e}");
+    }
+}

@@ -901,7 +901,10 @@ impl Ledger {
                     .filter(|n| tree.get(*n).is_some_and(|s| s.kind == NodeKind::File))
                     .count()
             };
-            let (mut deleted, mut deleted_here) = (0, 0);
+            // Remote deletes of files, and of them those synced here (a synced file gone here: the
+            // guard's pending counts those over the whole dirty set; one not synced here, as what
+            // a folder removed elsewhere left on the drive, it weighs in its plan only).
+            let (mut deleted, mut deleted_synced, mut deleted_here) = (0, 0, 0);
             // What was in a confirmed folder whose delete waits for a hash is confirmed: one
             // synced, gone on a side (or taken along by a folder gone on the drive), holding a
             // file here not hashed yet on any side.
@@ -924,6 +927,7 @@ impl Ledger {
                         if remote.get(p.node).is_some_and(|s| s.kind == NodeKind::File) =>
                     {
                         deleted += 1;
+                        deleted_synced += usize::from(base.contains(p.node));
                     }
                     What::LocalDelete { .. } => deleted_here += files_under(local, p.node),
                     _ => {}
@@ -991,8 +995,14 @@ impl Ledger {
                     seen.client, seen.all_held
                 ));
             }
-            let whole = (seen.pending.0.max(deleted + here_elsewhere), there_all);
-            ((deleted > 0 && trips(whole.0)) || (deleted_here > 0 && every(whole.1))).then(|| {
+            // Gone here over the whole dirty set: the guard's pending count, or the page's synced
+            // deletes with the other pages' (one a folder's removal took along isn't marked
+            // dirty); and the page's own deletes, synced or not.
+            let here_all = (seen.pending.0)
+                .max(deleted_synced + here_elsewhere)
+                .max(deleted);
+            let tripped = deleted > 0 && trips(here_all);
+            (tripped || (deleted_here > 0 && every(there_all))).then(|| {
                 format!(
                     "{} deletes {deleted} remote and deletes {deleted_here} local files \
                      unconfirmed (limit {min}, {synced_files} synced): {:?}",
