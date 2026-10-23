@@ -126,6 +126,27 @@ pub enum FilterError {
     /// [`Filter::skipped`]).
     #[error(".hbsync/ignore: {message}")]
     Rules { message: String },
+    /// Negations (`!…`) that don't parse, by line: skipped, what they keep synced would be
+    /// ignored, and leave the drive and the other devices (sync semantics §10, rule 1). Never
+    /// skipped: the folder doesn't sync till they are fixed. `message`: why the first doesn't.
+    #[error(
+        ".hbsync/ignore {} ({message}), and keeps things synced: syncing stops till it is fixed \
+         (fix it to resume)",
+        negations(lines)
+    )]
+    Negation { lines: Vec<usize>, message: String },
+}
+
+/// "line 2 isn't a valid rule", or "lines 2 and 7 aren't valid rules".
+fn negations(lines: &[usize]) -> String {
+    match lines {
+        [one] => format!("line {one} isn't a valid rule"),
+        [rest @ .., last] => {
+            let rest: Vec<String> = rest.iter().map(|l| l.to_string()).collect();
+            format!("lines {} and {last} aren't valid rules", rest.join(", "))
+        }
+        [] => "a line isn't a valid rule".into(),
+    }
 }
 
 /// A line of `.hbsync/ignore` that isn't a valid rule: skipped, matching nothing (as Git does).
@@ -174,7 +195,9 @@ impl Filter {
     }
 
     /// The built-ins plus `text` (gitignore syntax, paths relative to the sync root). A line
-    /// that doesn't parse matches nothing, as in Git, and is listed in [`Filter::skipped`].
+    /// that doesn't parse matches nothing, as in Git, and is listed in [`Filter::skipped`]; but
+    /// those meant as negations (starting with `!`, after any indent) are an error, naming
+    /// them all ([`FilterError::Negation`]): skipped, they would ignore what they keep synced.
     pub fn from_rules(text: &str, case_insensitive: bool) -> Result<Self, FilterError> {
         let failed = |e: ignore::Error| FilterError::Rules {
             message: e.to_string(),
@@ -183,13 +206,25 @@ impl Filter {
         // Never fails (its `Result` is a leftover of the `ignore` crate's).
         let _ = builder.case_insensitive(case_insensitive);
         let mut skipped = Vec::new();
+        // Negations that don't parse (indented too: meant as ones), with why the first doesn't.
+        let mut negations: Option<(Vec<usize>, String)> = None;
         for (i, line) in text.lines().enumerate() {
             if let Err(e) = builder.add_line(None, line) {
+                if line.trim_start().starts_with('!') {
+                    negations
+                        .get_or_insert_with(|| (Vec::new(), e.to_string()))
+                        .0
+                        .push(i + 1);
+                    continue;
+                }
                 skipped.push(SkippedRule {
                     line: i + 1,
                     message: e.to_string(),
                 });
             }
+        }
+        if let Some((lines, message)) = negations {
+            return Err(FilterError::Negation { lines, message });
         }
         let rules = builder.build().map_err(failed)?;
         Ok(Filter {
@@ -434,6 +469,39 @@ mod tests {
             f.fingerprint(),
             rules("*.log\n[a-z]\n\n# a comment\nbuild/\n").fingerprint()
         );
+    }
+
+    /// A negation that isn't a valid rule isn't skipped: what it keeps synced would be ignored,
+    /// and leave the drive (§10 rule 1). The rules are an error naming the line; one that only
+    /// looks like a negation, escaped (`\!`), is skipped as any other bad line.
+    #[test]
+    fn a_bad_negation_is_an_error_naming_its_line() {
+        let bad = Filter::from_rules("build/\n!build/[z-a]\n[z-a\r\n  !x/[z-a]\r\n", false);
+        match bad {
+            Err(FilterError::Negation { lines, message }) => {
+                // Indented too, and in a CRLF file; the plain bad line isn't one.
+                assert_eq!(lines, [2, 4]);
+                assert!(!message.is_empty());
+            }
+            other => panic!("not a negation error: {other:?}"),
+        }
+        let text = Filter::from_rules("*.log\n![z-a\n", false)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default();
+        assert!(
+            text.contains("line 2") && text.contains("fix it to resume"),
+            "{text}"
+        );
+        let escaped = rules("build/\n\\![z-a\n");
+        assert_eq!(
+            escaped.skipped().iter().map(|s| s.line).collect::<Vec<_>>(),
+            [2]
+        );
+        // A valid negation applies.
+        let ok = rules("build/*\n!build/keep\n");
+        assert!(ok.skipped().is_empty());
+        assert_eq!(ok.names(["build", "keep"], false), Verdict::Sync);
     }
 
     #[test]

@@ -770,9 +770,17 @@ on its own.
   as Git skips a bad pattern: the other rules apply and syncing goes on, and the folder's
   notes say which lines, once a version of the rules, not at every sync (the note goes once
   they are fixed). What such a line meant to keep here syncs; a working rule edited into a
-  bad one is a rule removed, and its items come into view and sync as new items (rule 4). A
-  rules file that can't be read (not a typo: its rules are unknown) stops the folder's sync
-  till it can.
+  bad one is a rule removed, and its items come into view and sync as new items (rule 4). But
+  a bad line that starts with `!` (a negation, or meant as one: indented too) isn't skipped:
+  without it, what it kept synced would be ignored, and by rule 1 leave the drive and the
+  other devices. It stops the folder's sync, failing, with one note naming every such line
+  (".hbsync/ignore line 2 isn't a valid rule (…), and keeps things synced: syncing stops till
+  it is fixed (fix it to resume)"); fixed, syncing resumes (within a minute: the watcher is
+  stopped with the folder) and the note goes (runner
+  `a_bad_negation_stops_the_folder_till_it_is_fixed`). An escaped `\!` is an ordinary
+  pattern, skipped like any other; a negation valid in Git but not in the glob syntax read
+  here (an unclosed `{`) stops the folder too. A rules file that can't be read (not a typo:
+  its rules are unknown) stops the folder's sync till it can.
 
 An item inside a filtered folder is filtered too.
 

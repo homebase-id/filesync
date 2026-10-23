@@ -271,8 +271,12 @@ included (service managers restart it then).
   engine with the new rules (sync semantics §10). A line that isn't a valid rule is skipped,
   and the folder's notes say so once a version of the rules: ".hbsync/ignore line 3 isn't a
   valid rule and is skipped: …" (several: "lines 3, 5 and 9 aren't valid rules and are
-  skipped (line 3: …)"); the note goes once the lines are fixed. A file that can't be read
-  stops the folder's sync, failing, till it can.
+  skipped (line 3: …)"); the note goes once the lines are fixed. A bad line that starts with
+  `!` (a negation, indented or not: skipped, it would ignore what it keeps synced) stops the
+  folder's sync, failing, till fixed, with one note naming every such line: ".hbsync/ignore
+  line 2 isn't a valid rule (…), and keeps things synced: syncing stops till it is fixed (fix
+  it to resume)"; it goes once fixed. A file that can't be read stops it too, failing, till
+  it can.
 - **The folder gone** (moved, deleted, a disk not mounted: its marker missing): nothing
   syncs, the status says why, and the loop waits for it to come back. It never creates a
   marker: only `hbsync setup` does.
