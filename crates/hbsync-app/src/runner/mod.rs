@@ -326,6 +326,26 @@ pub struct Runner {
     retry_refused: bool,
     /// Waited out a refusal: the next due sync asks the drive again ([`DENIED_LOOK`]).
     probing: bool,
+    /// The folder without a live watcher: told, asked for again, caught up on.
+    unwatched: Unwatched,
+}
+
+/// A folder without a live watcher ([`Runner::watcher_is`]): its changes are found by the
+/// look's walk till a watcher starts again.
+#[derive(Debug, Default)]
+struct Unwatched {
+    /// Why there is none, as the status shows it.
+    why: Option<String>,
+    /// The note shown, taken back once a watcher is there again; told once a run.
+    note: Option<String>,
+    told: bool,
+    /// When to ask for a watcher again, and how long after that if it fails then (from the
+    /// look, doubling: a tree over the watch limit fails each time, and each try walks it).
+    retry_at: Option<Instant>,
+    retry_wait: Duration,
+    /// A watcher started again: the look's walk to catch up on what changed without one is
+    /// still to be done.
+    catch_up: bool,
 }
 
 impl std::fmt::Debug for Runner {
@@ -407,6 +427,7 @@ impl Runner {
             rules_told: None,
             retry_refused: false,
             probing: false,
+            unwatched: Unwatched::default(),
         };
         let thread = std::thread::Builder::new()
             .name("hbsync-runner".into())
@@ -482,13 +503,7 @@ impl Runner {
             let _ = wakes.send(Msg::Local);
         });
         let observer = LocalObserver::ringing(root, engine.scan_options().clone(), Some(bell));
-        if let Some(why) = &observer.watcher_error {
-            tracing::warn!("no live watcher ({why}); the folder is rescanned once a minute");
-        }
-        self.set(|s| {
-            s.rules = rules;
-            s.watcher_error = observer.watcher_error.clone();
-        });
+        self.set(|s| s.rules = rules);
         let drive_changed = Arc::new(AtomicBool::new(false));
         let (alive, wakes) = (Arc::downgrade(&drive_changed), self.wakes.clone());
         // One message until the runner takes the change, however many wakes come.
@@ -529,7 +544,8 @@ impl Runner {
         loop {
             // Until something happens, or time alone changes something.
             let now = Instant::now();
-            let looking = parts.as_ref().is_none_or(|p| !p.observer.has_watcher());
+            let looking =
+                parts.as_ref().is_none_or(|p| !p.observer.has_watcher()) || self.unwatched.catch_up;
             let observer = match observe_after {
                 Some(at) if now < at => Some(at),
                 _ => parts.as_ref().and_then(|p| p.observer.deadline()),
@@ -597,13 +613,11 @@ impl Runner {
                 if p.observer.rules_touched() {
                     rules_at = Some(Instant::now() + RULES_QUIET);
                 }
-                if let Some(why) = &p.observer.watcher_error
-                    && lock(&self.status).watcher_error.is_none()
+                // One that stopped.
+                if self.unwatched.why.is_none()
+                    && let Some(why) = p.observer.watcher_error.clone()
                 {
-                    tracing::warn!(
-                        "no live watcher ({why}); the folder is rescanned once a minute"
-                    );
-                    self.set(|s| s.watcher_error = Some(why.clone()));
+                    self.watcher_is(Some(why));
                 }
             }
 
@@ -634,19 +648,31 @@ impl Runner {
             }
             if schedule.look_due(now) {
                 check_rules = true;
-                // Without a watcher, the folder's changes are found by scanning it.
-                if let Some(p) = &mut parts
-                    && !schedule.paused()
-                    && !p.observer.has_watcher()
-                {
-                    match p.engine.scan_local() {
-                        Ok(scan) => {
-                            self.tell_scan(&scan, true);
-                            if scan.dirty > 0 {
-                                schedule.want();
+                // Without a watcher, one is asked for again (its error gone: inotify's
+                // instances freed); the folder's changes are found by scanning it, and once
+                // one is back, what changed while there was none.
+                if let Some(p) = &mut parts {
+                    if !p.observer.has_watcher()
+                        && self.unwatched.retry_at.is_none_or(|at| now >= at)
+                    {
+                        let back = p.observer.rewatch();
+                        let why = p.observer.watcher_error.clone();
+                        self.watcher_is(why);
+                        self.unwatched.catch_up |= back;
+                    }
+                    if self.unwatched.catch_up || (!p.observer.has_watcher() && !schedule.paused())
+                    {
+                        match p.engine.scan_local() {
+                            Ok(scan) => {
+                                self.unwatched.catch_up = false;
+                                self.tell_scan(&scan, true);
+                                if scan.dirty > 0 {
+                                    schedule.want();
+                                }
                             }
+                            // Tried again at the next look.
+                            Err(e) => tracing::warn!("scanning the folder failed: {e}"),
                         }
-                        Err(e) => tracing::warn!("scanning the folder failed: {e}"),
                     }
                 }
             }
@@ -713,6 +739,7 @@ impl Runner {
                 None => match self.open() {
                     Ok(p) => {
                         self.tell_rules(Some(&p.engine.config().folder.filter));
+                        self.watcher_is(p.observer.watcher_error.clone());
                         started = false;
                         opened = Some(marker);
                         parts.insert(p)
@@ -899,6 +926,48 @@ impl Runner {
         });
     }
 
+    /// The watcher as it is now: `why` there is none. Lost, the status says why, the user is
+    /// told (once a run: a watcher that keeps stopping isn't told each time), and a watcher is
+    /// asked for again at the looks, less often each time it fails; back, the status and the
+    /// note say no more of it.
+    fn watcher_is(&mut self, why: Option<String>) {
+        let look = self.cfg.look;
+        let w = &mut self.unwatched;
+        match why {
+            Some(why) => {
+                if w.why.is_none() {
+                    w.retry_wait = look;
+                } else {
+                    w.retry_wait = (w.retry_wait * 2).min(look * 32);
+                }
+                w.retry_at = Some(Instant::now() + w.retry_wait);
+                if w.why.as_deref() == Some(why.as_str()) {
+                    return;
+                }
+                w.why = Some(why.clone());
+                let note = (!w.told).then(|| unwatched_note(&why, look));
+                self.set(|s| s.watcher_error = Some(why.clone()));
+                tracing::warn!("no live watcher ({why}); the folder is walked every {look:?}");
+                if let Some(note) = note {
+                    self.unwatched.told = true;
+                    self.unwatched.note = Some(note.clone());
+                    self.tell(vec![note]);
+                }
+            }
+            None if w.why.is_some() => {
+                w.why = None;
+                w.retry_at = None;
+                tracing::info!("the live watcher is back");
+                let note = w.note.take();
+                self.set(|s| {
+                    s.watcher_error = None;
+                    s.recent.retain(|n| Some(&n.text) != note.as_ref());
+                });
+            }
+            None => {}
+        }
+    }
+
     /// Adds `notes` to what the user is told.
     fn tell(&self, notes: Vec<String>) {
         if notes.is_empty() {
@@ -1020,4 +1089,22 @@ impl Runner {
         self.set(|s| report::record(s, report, notes, held, took, unix_now()));
         Ok(())
     }
+}
+
+/// The note for a folder without a live watcher (`why`), its changes found every `look`.
+fn unwatched_note(why: &str, look: Duration) -> String {
+    let every = match look.as_secs() {
+        60 => "once a minute".to_owned(),
+        secs => format!("every {secs} s"),
+    };
+    let fix = if cfg!(target_os = "linux") {
+        "Closing programs that watch many files, or raising the system's limits \
+         (fs.inotify.max_user_instances, max_user_watches), lets it watch again"
+    } else {
+        "It watches again once the system lets it"
+    };
+    format!(
+        "No live watcher here ({why}): changes in the folder are found {every}, a walk of all \
+         of it each time. {fix}; it asks again from time to time"
+    )
 }

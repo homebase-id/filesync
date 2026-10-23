@@ -17,6 +17,10 @@ ignore = "0.4.33"
 notify = "8.2"
 thiserror.workspace = true
 
+[features]
+# Tests: a watcher that can't start or stops (`watch::testkit`).
+testkit = []
+
 [dev-dependencies]
 proptest.workspace = true
 tempfile.workspace = true
