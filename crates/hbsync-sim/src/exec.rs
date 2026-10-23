@@ -221,19 +221,11 @@ impl Sim {
             .chain(remote.ids())
             .collect();
         let mut piece = false;
-        // What differs between the base and a side, the drive's as it is: what the engine's
-        // scan and feed mark dirty (what a folder's removal took along isn't marked: the feed
-        // marks only the folder). For pages and the guard's totals.
+        // What the engine's scan and feed mark dirty, for pages and the guard's totals (what an
+        // earlier plan left unsettled, which the engine keeps marked too, the narrow checks add:
+        // `narrow::engine_dirty`).
         let all: BTreeSet<NodeId> = match self.faults.page_size.is_some() || self.guard.is_some() {
-            true => input
-                .dirty
-                .iter()
-                .copied()
-                .filter(|n| {
-                    let base = input.base.get(*n);
-                    base != input.local.get(*n) || base != input.remote.get(*n)
-                })
-                .collect(),
+            true => crate::narrow::marked_dirty(&input),
             false => BTreeSet::new(),
         };
         // In pages, as the engine: the next page of the sweep over what is dirty, what else is
@@ -261,7 +253,7 @@ impl Sim {
         // The guard's totals over the whole dirty set, as the engine counts them
         // (`pending_file_deletes`): synced files gone here and gone there, but those confirmed;
         // and of them, those outside the page (for the oracle). Not the engine's files a
-        // removed folder took along (`taken_files`): the sim's dirty set doesn't mark them.
+        // removed folder took along (`taken_files`): see `narrow::marked_dirty`.
         let (mut pending, mut outside) = ((0, 0), (0, 0));
         let confirmed_at = |n: NodeId| {
             !client.confirmed.is_empty()
