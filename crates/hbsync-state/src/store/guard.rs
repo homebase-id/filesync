@@ -108,22 +108,27 @@ impl ReadTx<'_> {
     /// [`pending_file_deletes`](Self::pending_file_deletes): whether `node` is a file gone
     /// locally (deleted remotely, one node at a time), and the files gone remotely in its local
     /// subtree (a delete takes everything below it with it): the dirty ones gone from the drive,
-    /// and the synced ones a folder's removal took along, still live there (as `taken_files`
-    /// counts them). `None` when `node` isn't dirty.
+    /// and the synced ones a folder's removal took along, still live there, whether that folder
+    /// is in `node` or above it (as `taken_files` counts them). `None` when `node` isn't dirty.
     pub fn confirmed_file_deletes(&self, node: NodeId) -> Result<Option<(bool, Vec<NodeId>)>> {
         static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             format!(
                 "WITH RECURSIVE top(id) AS (SELECT {ID_OF}), \
                  sub(id) AS (SELECT id FROM top \
                    UNION SELECT l.id FROM local l JOIN sub ON l.parent = sub.id \
-                   WHERE l.folder = $F), {} \
+                   WHERE l.folder = $F), \
+                 up(id) AS (SELECT m.parent FROM remote m WHERE m.id = (SELECT id FROM top) \
+                   UNION SELECT m.parent FROM remote m JOIN up ON m.id = up.id), {} \
                  SELECT n.uuid, k.id IS NOT NULL AND d.id = (SELECT id FROM top), \
                    k.id IS NOT NULL AND coalesce({GONE_LOCALLY}, 0), \
                    coalesce(k.id IS NOT NULL AND {GONE_REMOTELY}, 0) \
                      OR coalesce(b.kind = 0 AND EXISTS (SELECT 1 FROM taken t WHERE t.id = d.id), 0) \
                  FROM (SELECT id FROM sub) d LEFT JOIN dirty k ON k.folder = $F AND k.id = d.id \
                  JOIN nodes n ON n.id = d.id LEFT JOIN base b ON b.folder = $F AND b.id = d.id",
-                taken_along("n.id IN (SELECT id FROM sub)")
+                // The removed folders in `node`, and the one above it on the drive (`up`: its
+                // live folders' parents, up to the first not live): its removal takes what is
+                // in `node` along too (only what is in `node` is kept, below).
+                taken_along("(n.id IN (SELECT id FROM sub) OR n.id IN (SELECT id FROM up))")
             )
         });
         let mut stmt = self.prep(&SQL)?;
