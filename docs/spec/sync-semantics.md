@@ -482,12 +482,12 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   there: an answer then is refused. Simulator:
   `guarded_clients_delete_only_what_was_confirmed` (with `Event::PutBack`), and
   `put_backs_that_go_wrong_lose_nothing` (a file deleted for good mid put back, a restore the
-  drive stops after a wave: nothing put back is trashed or held again but what still waits;
+  drive stops after a wave: nothing put back is deleted or held again but what still waits;
   the simulator keeps the hold and puts back by the engine's own rules,
   `hbsync_engine::held`); engine:
   `a_delete_here_is_held_and_put_back_brings_it_back`,
   `every_file_removed_elsewhere_is_held_and_put_back_restores_it`,
-  `a_confirmed_folder_trash_does_not_hold_other_deletes`.
+  `a_confirmed_folder_delete_does_not_hold_other_deletes`.
 - **Online-only files** are never deleted remotely just because they have no local bytes.
 
 ## 8. Operations
@@ -561,7 +561,7 @@ expected fingerprint is treated as done.
   reason (it is detached, or released as a folder that keeps ignored items, section 10) takes
   its original name if free, else a numbered one the same way: the temporary name carries the
   old id and never reaches the remote.
-- **Delete guard.** `LocalTrash` carries the nodes the plan expects in the subtree; if the
+- **Delete guard.** `LocalDelete` carries the nodes the plan expects in the subtree; if the
   folder holds anything else in the DB, or its top changed, it is not deleted and the folder is
   rescanned; what is in it is checked once it is aside (§7), and anything else there puts it
   back.

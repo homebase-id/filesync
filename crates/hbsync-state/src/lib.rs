@@ -505,7 +505,7 @@ impl StateDb {
         Ok(())
     }
 
-    /// The item at `path` on disk just left it (moved away or trashed), which the next write
+    /// The item at `path` on disk just left it (moved away or deleted), which the next write
     /// through this connection records. Before something else is put there
     /// ([`StateDb::filling`]), that write is made durable.
     pub fn emptied(&mut self, path: &Path) {

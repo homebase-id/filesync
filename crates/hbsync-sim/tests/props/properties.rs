@@ -214,7 +214,7 @@ proptest! {
     /// converged all the same, on folders no one kept: only the comparison shows it. Without
     /// what depends on the order of writes: what another device does while a client writes
     /// (`Meanwhile`), what picks from Recently deleted by its order (removal times), what a
-    /// trash keeps on its device (junk, ignored items: it gets new folders, or keeps its old
+    /// delete keeps on its device (junk, ignored items: it gets new folders, or keeps its old
     /// one, as the folders above it go before or after it, and a folder too big for a page
     /// goes as its folders first), and edits on more than one device (a conflict copy's id
     /// comes from the version it forked at, which the number of writes before sets, and an

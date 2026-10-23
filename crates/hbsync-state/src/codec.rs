@@ -124,7 +124,7 @@ pub(crate) fn synced_kind_to(kind: SyncedKind) -> i64 {
         SyncedKind::MovedRemotely => 2,
         SyncedKind::MovedLocally => 3,
         SyncedKind::DeletedRemotely => 4,
-        SyncedKind::TrashedLocally => 5,
+        SyncedKind::DeletedLocally => 5,
     }
 }
 
@@ -135,7 +135,7 @@ pub(crate) fn synced_kind_from(v: i64) -> Result<SyncedKind> {
         2 => SyncedKind::MovedRemotely,
         3 => SyncedKind::MovedLocally,
         4 => SyncedKind::DeletedRemotely,
-        5 => SyncedKind::TrashedLocally,
+        5 => SyncedKind::DeletedLocally,
         _ => return Err(StateError::Corrupt(format!("synced kind {v}"))),
     })
 }

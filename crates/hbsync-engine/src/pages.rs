@@ -47,7 +47,7 @@ pub fn dirty_elsewhere<P: Pending>(
     let elsewhere = pending.among(&outside)?;
     let hidden = crate::mask::hidden(&input.remote, filter, scope);
     // Synced before, in Recently deleted, or taken along by a folder's removal (still live on
-    // the drive, its base gone with the trash): a new folder has no delete to undo.
+    // the drive, its base gone with the delete): a new folder has no delete to undo.
     let taken = crate::reconcile::merge::taken_along(input);
     let goes = |n: NodeId| {
         (input.base.contains(n) || input.removed.contains_key(&n) || taken.contains(&n))

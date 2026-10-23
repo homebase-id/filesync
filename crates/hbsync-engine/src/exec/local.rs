@@ -388,13 +388,13 @@ impl Executor<'_> {
 
     /// Deletes the local item of `node` (§7: aside, checked, unlinked), with the bases of what
     /// goes; with `forget` (§10), `node`'s base goes also where nothing of it is here.
-    pub(super) fn trash(&mut self, node: NodeId, expected: &[NodeId], forget: bool) -> Step {
+    pub(super) fn delete_here(&mut self, node: NodeId, expected: &[NodeId], forget: bool) -> Step {
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
             if forget {
                 return self.drop_unsynced_base(node);
             }
             // Already gone: a delete earlier in this run took it along with its folder (and its
-            // base, [`trashed`]); the executor holds the DB while it runs, so no scan did.
+            // base, [`deleted_here`]); the executor holds the DB while it runs, so no scan did.
             return Ok(Outcome::Done);
         };
         let rows = self.db.read(|s| s.local_subtree(&row.path))?;
@@ -420,8 +420,8 @@ impl Executor<'_> {
         if self.crash_here(CrashPoint::AfterUnlink) {
             return Ok(Outcome::Retry("crash point reached".into()));
         }
-        // Nothing to settle: what went has neither base nor item here now ([`trashed`]).
-        self.finish(&[], |s| trashed(s, &row.path, node))
+        // Nothing to settle: what went has neither base nor item here now ([`deleted_here`]).
+        self.finish(&[], |s| deleted_here(s, &row.path, node))
     }
 
     /// A delete found its item not as the plan saw it and put it back, after `gone` went: their
@@ -503,7 +503,7 @@ impl Executor<'_> {
             return Ok(Outcome::Retry("crash point reached".into()));
         }
         // What went, and the folders released (new ones to the scan): no rows, no bases.
-        self.finish(&[], |s| trashed(s, &row.path, node))
+        self.finish(&[], |s| deleted_here(s, &row.path, node))
     }
 
     /// Makes the local item of `node` the new node `new_node`, in place (§10). Everything
@@ -569,7 +569,7 @@ impl Executor<'_> {
 
 /// What was at `path` went from here, deleted with `node` (the item at the top of what went):
 /// its rows go, and so do their bases ([`forget`]).
-fn trashed(s: &Store<'_>, path: &RelPath, node: NodeId) -> Result<(), StateError> {
+fn deleted_here(s: &Store<'_>, path: &RelPath, node: NodeId) -> Result<(), StateError> {
     for r in s.folder().delete_local_subtree(path)? {
         forget(s, r.node, node)?;
     }

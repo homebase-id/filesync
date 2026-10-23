@@ -21,7 +21,7 @@ use crate::plan::{Input, Op, Plan};
 
 /// What of `plan`, made for the dirty nodes `page`, is held and leaves the dirty set: the held
 /// deletes whose node is in `page`, and the nodes of `page` each of them covers (its node, and
-/// what a held trash takes along), where the plan has nothing else for any of them. What else
+/// what a held delete takes along), where the plan has nothing else for any of them. What else
 /// the plan does, defers or waits for stays dirty, and so does the delete it is part of.
 pub fn out_of_dirty<'p>(plan: &'p Plan, page: &[NodeId]) -> (Vec<&'p Op>, HashSet<NodeId>) {
     let mut nodes = HashSet::new();
@@ -40,7 +40,7 @@ pub fn out_of_dirty<'p>(plan: &'p Plan, page: &[NodeId]) -> (Vec<&'p Op>, HashSe
         .collect();
     let covers = |op: &'p Op| {
         let subtree = match op {
-            Op::LocalTrash { subtree, .. } => &subtree[..],
+            Op::LocalDelete { subtree, .. } => &subtree[..],
             _ => &[],
         };
         std::iter::once(op.node()).chain(subtree.iter().copied())
@@ -56,7 +56,7 @@ pub fn out_of_dirty<'p>(plan: &'p Plan, page: &[NodeId]) -> (Vec<&'p Op>, HashSe
 }
 
 /// The files `ops` (held deletes of `plan`) take, as the guard counted them
-/// ([`Plan::held_takes`]): (removed from the drive, trashed here).
+/// ([`Plan::held_takes`]): (removed from the drive, deleted here).
 pub fn files<'p>(plan: &Plan, ops: impl IntoIterator<Item = &'p Op>) -> (usize, usize) {
     ops.into_iter()
         .filter_map(|op| plan.held_takes.get(&op.node()))

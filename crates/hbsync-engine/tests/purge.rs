@@ -1605,7 +1605,7 @@ fn a_put_back_uploads_what_its_restore_finds_deleted_for_good() -> common::Res<(
 
 /// The same with a folder: it went for good meanwhile, and a file in it is said not there once
 /// (asked again a minute on). Its base stays while that file waits in Recently deleted, so
-/// the guard still holds the folder (it walks up the base) and nothing of it is trashed here;
+/// the guard still holds the folder (it walks up the base) and nothing of it is deleted here;
 /// asked again, all of it goes up again from b.
 #[test]
 fn a_put_back_keeps_a_folder_gone_for_good_while_a_file_in_it_waits() -> common::Res<()> {
@@ -1638,7 +1638,7 @@ fn a_put_back_keeps_a_folder_gone_for_good_while_a_file_in_it_waits() -> common:
     );
     let report = b.sync()?;
     assert!(!report.held.is_empty(), "still held: {report:?}");
-    assert_eq!(b.tree_text(""), whole, "nothing trashed");
+    assert_eq!(b.tree_text(""), whole, "nothing deleted");
     b.a_minute_on()?;
     b.engine.put_back(&held)?;
     assert!(b.sync()?.held.is_empty());

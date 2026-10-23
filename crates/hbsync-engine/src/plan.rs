@@ -73,12 +73,12 @@ pub struct Guarding {
     /// under them, until the user answers, whatever the count since.
     pub wiped: Arc<HashSet<NodeId>>,
     /// Files pending deletion across the whole dirty set and the held deletes out of it, not
-    /// just this plan's batch: (gone locally → remote deletes, gone remotely → local trash).
+    /// just this plan's batch: (gone locally → remote deletes, gone remotely → local delete).
     /// The guard trips on these totals too, so a large delete split over several batches is
     /// still held.
     pub pending: (usize, usize),
     /// The files the held deletes out of the dirty set take ([`crate::held`]): (removed from
-    /// the drive, trashed here). The guard counts them with each plan's own, as it would if
+    /// the drive, deleted here). The guard counts them with each plan's own, as it would if
     /// they were planned with it.
     pub held: (usize, usize),
 }
@@ -262,7 +262,7 @@ pub enum Op {
     /// Delete the local item and everything below it (sync semantics §7: aside, checked,
     /// unlinked), with their bases. `subtree` is every node the plan expects there (sorted,
     /// `node` included): if the folder holds anything else by the time this runs, it stays.
-    LocalTrash { node: NodeId, subtree: Vec<NodeId> },
+    LocalDelete { node: NodeId, subtree: Vec<NodeId> },
     /// Create the node remotely; files upload the local bytes.
     RemoteCreate {
         node: NodeId,
@@ -304,7 +304,7 @@ pub enum Op {
     /// what must stay here (§10). A later op creates it remotely.
     LocalDetach { node: NodeId, new_node: NodeId },
     /// This device no longer syncs `node` (§10): its local item is deleted, as with
-    /// [`Op::LocalTrash`] with `subtree` (empty if nothing of it is here), with its bases; where
+    /// [`Op::LocalDelete`] with `subtree` (empty if nothing of it is here), with its bases; where
     /// nothing of it is here, `node`'s base goes all the same. A base left behind would read as
     /// a local delete once the node is back in view.
     Forget { node: NodeId, subtree: Vec<NodeId> },
@@ -319,7 +319,7 @@ impl Op {
             Op::LocalMove { .. } => "LocalMove",
             Op::LocalDownload { .. } => "LocalDownload",
             Op::LocalTags { .. } => "LocalTags",
-            Op::LocalTrash { .. } => "LocalTrash",
+            Op::LocalDelete { .. } => "LocalDelete",
             Op::RemoteCreate { .. } => "RemoteCreate",
             Op::RemoteUpdate { .. } => "RemoteUpdate",
             Op::RemoteTags { .. } => "RemoteTags",
@@ -337,7 +337,7 @@ impl Op {
             | Op::LocalMove { node, .. }
             | Op::LocalDownload { node, .. }
             | Op::LocalTags { node, .. }
-            | Op::LocalTrash { node, .. }
+            | Op::LocalDelete { node, .. }
             | Op::RemoteCreate { node, .. }
             | Op::RemoteUpdate { node, .. }
             | Op::RemoteTags { node, .. }
@@ -379,19 +379,19 @@ impl Op {
         self.deletes().is_some()
     }
 
-    /// The node this op deletes on the drive or trashes here: what the mass-delete guard
+    /// The node this op deletes, on the drive or here: what the mass-delete guard
     /// judges, and what a user confirms.
     pub fn deletes(&self) -> Option<NodeId> {
         match self {
             Op::RemoteDelete { node, .. } => Some(*node),
-            _ => self.trashes(),
+            _ => self.deletes_here(),
         }
     }
 
     /// The node whose local item (with everything below it) this op deletes here.
-    pub fn trashes(&self) -> Option<NodeId> {
+    pub fn deletes_here(&self) -> Option<NodeId> {
         match self {
-            Op::LocalTrash { node, .. } => Some(*node),
+            Op::LocalDelete { node, .. } => Some(*node),
             Op::Forget { node, subtree } if !subtree.is_empty() => Some(*node),
             _ => None,
         }
@@ -414,11 +414,11 @@ impl Op {
         )
     }
 
-    /// The node whose local name this op gives up (it moves away, is trashed, forked, or
+    /// The node whose local name this op gives up (it moves away, is deleted, forked, or
     /// replaced by a download that may land elsewhere). A target held by that node can be
     /// freed early by parking the node under a temporary name.
     pub fn vacates_local_name(&self) -> Option<NodeId> {
-        if let Some(node) = self.trashes() {
+        if let Some(node) = self.deletes_here() {
             return Some(node);
         }
         match self {
@@ -535,7 +535,7 @@ pub struct Plan {
     /// Deletes held by the mass-delete guard.
     pub held: Vec<Op>,
     /// The files each of `held` takes, by its node, as the guard counted them: (removed from
-    /// the drive, trashed here).
+    /// the drive, deleted here).
     pub held_takes: BTreeMap<NodeId, (usize, usize)>,
     pub conflicts: Vec<Conflict>,
     /// Dirty nodes that need nothing (both sides and the base agree): the dirty flag can go.
@@ -547,7 +547,7 @@ pub struct Plan {
     /// again. By the ids the store knows them by (a detached item's old one, unlike
     /// `deferred`).
     pub waiting: Vec<NodeId>,
-    /// Nodes whose delete (or trash) waits for a file in them not hashed yet (§6.3): a
+    /// Nodes whose delete waits for a file in them not hashed yet (§6.3): a
     /// confirmation of it lasts ([`Engine::confirm_deletes`]).
     ///
     /// [`Engine::confirm_deletes`]: crate::Engine::confirm_deletes

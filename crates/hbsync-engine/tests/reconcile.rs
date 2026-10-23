@@ -135,7 +135,7 @@ fn kinds(ops: &[Op]) -> Vec<&'static str> {
             Op::LocalDownload { replace: false, .. } => "download",
             Op::LocalDownload { replace: true, .. } => "download-replace",
             Op::LocalTags { .. } => "local-tags",
-            Op::LocalTrash { .. } => "trash",
+            Op::LocalDelete { .. } => "delete",
             Op::RemoteCreate { .. } => "create",
             Op::RemoteUpdate { upload: true, .. } => "upload",
             Op::RemoteUpdate { upload: false, .. } => "rename",
@@ -144,7 +144,7 @@ fn kinds(ops: &[Op]) -> Vec<&'static str> {
             Op::Settle { .. } => "settle",
             Op::LocalDetach { .. } => "detach",
             Op::Forget { subtree, .. } if subtree.is_empty() => "forget",
-            Op::Forget { .. } => "forget+trash",
+            Op::Forget { .. } => "forget+delete",
         })
         .collect()
 }
@@ -251,7 +251,7 @@ fn local_folder_delete_goes_top_down() {
 }
 
 #[test]
-fn remote_folder_delete_trashes_only_the_top() {
+fn remote_folder_delete_deletes_only_the_top() {
     let [d, f] = ids(2)[..] else { unreachable!() };
     let mut w = World::default();
     w.synced(d, folder(ROOT, "d")).synced(f, file(d, "f", "1"));
@@ -259,7 +259,7 @@ fn remote_folder_delete_trashes_only_the_top() {
     let plan = w.plan();
     let mut subtree = vec![d, f];
     subtree.sort();
-    assert_eq!(plan.ops, [Op::LocalTrash { node: d, subtree }]);
+    assert_eq!(plan.ops, [Op::LocalDelete { node: d, subtree }]);
 }
 
 #[test]
@@ -722,7 +722,7 @@ fn file_moved_into_remotely_deleted_folder_keeps_the_folder() {
             !plan
                 .ops
                 .iter()
-                .any(|op| matches!(op, Op::LocalTrash { node, .. } if *node == folder_id)),
+                .any(|op| matches!(op, Op::LocalDelete { node, .. } if *node == folder_id)),
             "{plan:#?}"
         );
         assert!(
@@ -928,7 +928,7 @@ fn a_file_still_being_written_keeps_its_remotely_deleted_folder() {
         !plan
             .ops
             .iter()
-            .any(|op| matches!(op, Op::LocalTrash { .. })),
+            .any(|op| matches!(op, Op::LocalDelete { .. })),
         "{plan:#?}"
     );
     assert!(plan.ops.is_empty(), "the delete waits: {plan:#?}");
@@ -1142,7 +1142,7 @@ fn a_folder_moved_into_an_ignored_folder_goes_whole_unless_it_holds_news() {
     let plan = w.plan();
     assert_eq!(
         kinds(&plan.ops),
-        ["detach", "create", "create", "forget+trash"],
+        ["detach", "create", "create", "forget+delete"],
         "{plan:?}"
     );
     let Some(&Op::LocalDetach { node, new_node }) = plan.ops.first() else {
@@ -1445,8 +1445,8 @@ fn a_file_not_hashed_yet_keeps_its_deleted_folder() {
         !plan
             .ops
             .iter()
-            .any(|op| matches!(op, Op::LocalTrash { .. })),
-        "nothing trashed: {:#?}",
+            .any(|op| matches!(op, Op::LocalDelete { .. })),
+        "nothing deleted: {:#?}",
         plan.ops
     );
     assert!(plan.ops.is_empty(), "the delete waits: {:#?}", plan.ops);
@@ -1720,7 +1720,7 @@ fn a_folder_deleted_on_the_drive_isnt_restored_for_a_file_not_hashed_yet() {
     assert!(
         plan.ops
             .iter()
-            .any(|op| matches!(op, Op::LocalTrash { node, .. } if *node == p)),
+            .any(|op| matches!(op, Op::LocalDelete { node, .. } if *node == p)),
         "{:#?}",
         plan.ops
     );
@@ -1789,7 +1789,7 @@ fn the_drive_name_of_a_file_not_hashed_yet_is_taken() {
 }
 
 /// Not in the page planned (context), a file being written still holds what it is in: the
-/// drive deleted its folder (dirty), which isn't trashed with it; and one whose node another
+/// drive deleted its folder (dirty), which isn't deleted with it; and one whose node another
 /// writer put in a file isn't adopted from the drive's state.
 #[test]
 fn a_file_not_hashed_yet_holds_as_context_too() {
@@ -1874,7 +1874,7 @@ fn a_folder_that_holds_a_waiting_folder_on_the_drive_waits_too() {
         !plan
             .ops
             .iter()
-            .any(|op| matches!(op, Op::RemoteDelete { .. } | Op::LocalTrash { .. })),
+            .any(|op| matches!(op, Op::RemoteDelete { .. } | Op::LocalDelete { .. })),
         "{:#?}",
         plan.ops
     );
@@ -1882,7 +1882,7 @@ fn a_folder_that_holds_a_waiting_folder_on_the_drive_waits_too() {
 
 /// The drive moved folder b into c, a file being written here into b, and deleted b's old
 /// folder d; here a file in b has an edit. b waits where it is here (it holds the file), and
-/// so does d: never trashed here with b and the edit in it.
+/// so does d: never deleted here with b and the edit in it.
 #[test]
 fn a_folder_that_holds_a_waiting_folder_here_waits_too() {
     let [d, b, e, a, c, wf] = ids(6)[..] else {
@@ -1912,7 +1912,7 @@ fn a_folder_that_holds_a_waiting_folder_here_waits_too() {
         !plan
             .ops
             .iter()
-            .any(|op| matches!(op, Op::LocalTrash { .. } | Op::RemoteDelete { .. })),
+            .any(|op| matches!(op, Op::LocalDelete { .. } | Op::RemoteDelete { .. })),
         "{:#?}",
         plan.ops
     );
@@ -1920,7 +1920,7 @@ fn a_folder_that_holds_a_waiting_folder_here_waits_too() {
 
 /// The drive moved n out of g to the top as x.txt and deleted g; here n has an edit, and a new
 /// x.txt at the top is being written. n waits for the name where it is, and g, which holds it,
-/// waits too: never trashed with n's edit in it.
+/// waits too: never deleted with n's edit in it.
 #[test]
 fn a_node_waiting_for_a_name_keeps_its_folder_here() {
     let [g, n, hh] = ids(3)[..] else {
@@ -1945,7 +1945,7 @@ fn a_node_waiting_for_a_name_keeps_its_folder_here() {
         !plan
             .ops
             .iter()
-            .any(|op| matches!(op, Op::LocalTrash { .. } | Op::RemoteDelete { .. })),
+            .any(|op| matches!(op, Op::LocalDelete { .. } | Op::RemoteDelete { .. })),
         "{:#?}",
         plan.ops
     );
@@ -1981,7 +1981,7 @@ fn a_node_waiting_for_a_name_keeps_its_folder_on_the_drive() {
         !plan
             .ops
             .iter()
-            .any(|op| matches!(op, Op::LocalTrash { .. } | Op::RemoteDelete { .. })),
+            .any(|op| matches!(op, Op::LocalDelete { .. } | Op::RemoteDelete { .. })),
         "{:#?}",
         plan.ops
     );
@@ -1991,7 +1991,7 @@ fn a_node_waiting_for_a_name_keeps_its_folder_on_the_drive() {
 /// A chain of name waits five long: n1 would take the name of a file being written, n2 n1's,
 /// and so on, and the drive deleted n5's folder, where n5 has an edit here. Each plan again
 /// finds the next waiter (the folders judged before the top: ids below the root's), till none
-/// is new: n5's folder waits, never trashed with its edit (a cap on the plans did).
+/// is new: n5's folder waits, never deleted with its edit (a cap on the plans did).
 #[test]
 fn a_chain_of_name_waits_holds_its_last_folder() {
     let id = |n: u128| NodeId(Uuid::from_u128(n));
@@ -2036,7 +2036,7 @@ fn a_chain_of_name_waits_holds_its_last_folder() {
         !plan
             .ops
             .iter()
-            .any(|op| matches!(op, Op::LocalTrash { .. } | Op::RemoteDelete { .. })),
+            .any(|op| matches!(op, Op::LocalDelete { .. } | Op::RemoteDelete { .. })),
         "{:#?}",
         plan.ops
     );

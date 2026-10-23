@@ -750,11 +750,11 @@ pub(crate) struct Planned<'a> {
 /// What a [`Planned`] operation does, as far as the oracle's checks of a plan go.
 pub(crate) enum What {
     RemoteDelete,
-    LocalTrash {
+    LocalDelete {
         subtree: Vec<NodeId>,
     },
-    /// Another operation that trashes (a forget with something here).
-    Trash,
+    /// Another operation that deletes (a forget with something here).
+    DeletesHere,
     LocalMove {
         parent: NodeId,
         name: String,
@@ -871,7 +871,9 @@ impl Ledger {
                     ((touched.contains(&node) || unhashed.contains(&node)) && !detach)
                         || (held.contains(&node)
                             && match &p.what {
-                                What::RemoteDelete | What::LocalTrash { .. } | What::Trash => true,
+                                What::RemoteDelete
+                                | What::LocalDelete { .. }
+                                | What::DeletesHere => true,
                                 What::LocalMove { parent, name } => moved(local, parent, name),
                                 What::RemoteUpdate { parent, name } => moved(remote, parent, name),
                                 _ => false,
@@ -894,7 +896,7 @@ impl Ledger {
                     .filter(|n| tree.get(*n).is_some_and(|s| s.kind == NodeKind::File))
                     .count()
             };
-            let (mut deleted, mut trashed) = (0, 0);
+            let (mut deleted, mut deleted_here) = (0, 0);
             // What was in a confirmed folder whose delete waits for a hash is confirmed: one
             // synced, gone on a side (or taken along by a folder gone on the drive), holding a
             // file here not hashed yet on any side.
@@ -918,7 +920,7 @@ impl Ledger {
                     {
                         deleted += 1;
                     }
-                    What::LocalTrash { .. } => trashed += files_under(local, p.node),
+                    What::LocalDelete { .. } => deleted_here += files_under(local, p.node),
                     _ => {}
                 }
             }
@@ -928,12 +930,12 @@ impl Ledger {
             let was_wiped = |n: NodeId| {
                 wiped.contains(&n) || base.ancestors(n).iter().any(|a| wiped.contains(a))
             };
-            let held_trashed: usize = seen
+            let held_deleted_here: usize = seen
                 .held
                 .iter()
                 .map(|p| match &p.what {
-                    // Nor a trash taking along what was held so (held with it, §7).
-                    What::LocalTrash { subtree }
+                    // Nor a delete taking along what was held so (held with it, §7).
+                    What::LocalDelete { subtree }
                         if !was_wiped(p.node) && !subtree.iter().any(|n| wiped.contains(n)) =>
                     {
                         files_under(local, p.node)
@@ -943,11 +945,11 @@ impl Ledger {
                 .sum();
             // And what was held so stays held till answered.
             if let Some(p) = seen.ops.iter().filter(unconfirmed).find(|p| {
-                matches!(&p.what, What::LocalTrash { subtree }
+                matches!(&p.what, What::LocalDelete { subtree }
                         if was_wiped(p.node) || subtree.iter().any(|n| wiped.contains(n)))
             }) {
                 return Some(format!(
-                    "{} trashes what was held as every synced file, unanswered: {:?}",
+                    "{} deletes what was held as every synced file, unanswered: {:?}",
                     seen.client, p.op
                 ));
             }
@@ -957,29 +959,29 @@ impl Ledger {
                 .held
                 .iter()
                 .map(|p| match p.what {
-                    What::LocalTrash { .. } => files_under(local, p.node),
+                    What::LocalDelete { .. } => files_under(local, p.node),
                     _ => 0,
                 })
                 .sum();
-            let held_elsewhere = held_trashed > 0 && !every(held_all + trashed);
+            let held_elsewhere = held_deleted_here > 0 && !every(held_all + deleted_here);
             // And what isn't held is judged with what is: one let through that makes every
             // synced file with a held wipe should have been held with it.
-            if trashed > 0 && held_all > held_trashed && every(held_all + trashed) {
+            if deleted_here > 0 && held_all > held_deleted_here && every(held_all + deleted_here) {
                 return Some(format!(
-                    "{} let {trashed} removals from elsewhere through that, with the {held_all}                      held, are every synced file ({synced_files})",
+                    "{} let {deleted_here} removals from elsewhere through that, with the {held_all}                      held, are every synced file ({synced_files})",
                     seen.client
                 ));
             }
             if held_elsewhere {
                 return Some(format!(
-                    "{} held {held_trashed} removals from elsewhere ({held_all} with what was \
+                    "{} held {held_deleted_here} removals from elsewhere ({held_all} with what was \
                      held before), short of every synced file ({synced_files}): {:?}",
                     seen.client, seen.all_held
                 ));
             }
-            (trips(deleted) || every(trashed)).then(|| {
+            (trips(deleted) || every(deleted_here)).then(|| {
                 format!(
-                    "{} deletes {deleted} remote and trashes {trashed} local files \
+                    "{} deletes {deleted} remote and deletes {deleted_here} local files \
                      unconfirmed (limit {min}, {synced_files} synced): {:?}",
                     seen.client, seen.all_ops
                 )

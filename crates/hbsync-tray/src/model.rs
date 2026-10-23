@@ -280,7 +280,7 @@ fn recently_synced(recent: &[RecentItem], now: u64) -> Item {
             let text = cut(&recent_line(s, now));
             match s.kind {
                 // Gone from here: nothing to show.
-                SyncedKind::DeletedRemotely | SyncedKind::TrashedLocally => Item::Label(text),
+                SyncedKind::DeletedRemotely | SyncedKind::DeletedLocally => Item::Label(text),
                 _ => Item::Action(Action::Reveal(local_path(&item.folder, &s.path)), text),
             }
         })
@@ -588,7 +588,7 @@ mod tests {
             },
             Synced {
                 at: NOW - 60,
-                kind: SyncedKind::TrashedLocally,
+                kind: SyncedKind::DeletedLocally,
                 path: "old.txt".into(),
                 files: 1,
                 bytes: 0,

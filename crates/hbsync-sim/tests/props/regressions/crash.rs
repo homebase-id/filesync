@@ -451,8 +451,8 @@ fn regression_a_folder_moved_after_a_lost_commit_leaves_as_the_users() {
 }
 
 /// A file being written (not hashed at the next plan) in a folder another app deletes
-/// outright: the folder isn't trashed with it, the file's edit comes up, and the folder comes
-/// back with it (its edits win). It was trashed here, and the edit lost.
+/// outright: the folder isn't deleted with it, the file's edit comes up, and the folder comes
+/// back with it (its edits win). It was deleted here, and the edit lost.
 #[test]
 fn regression_a_file_being_written_keeps_its_folder() {
     use Action::*;

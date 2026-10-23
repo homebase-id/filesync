@@ -185,7 +185,7 @@ impl TagBook {
         self.deleted.contains(&node)
     }
 
-    /// Client `c`'s item `node` left it (deleted or trashed there): the tag changes made there
+    /// Client `c`'s item `node` left it (deleted there, by the user or a sync): the tag changes made there
     /// went with it, but for an add sent up, which stands with the node ([`TagBook::detach`]:
     /// where a delete loses, the drive's version comes back with it). An item made of the node
     /// here again later is not the one the user tagged, and doesn't take it along.

@@ -112,29 +112,31 @@ impl Sim {
             // removal settles, or, restored meanwhile, takes back to Recently deleted: the known
             // limit of a delete without a write-ahead record (sync semantics §8a).
             Some(
-                ref op @ (Op::LocalTrash {
+                ref op @ (Op::LocalDelete {
                     node, ref subtree, ..
                 }
                 | Op::Forget {
                     node, ref subtree, ..
                 }),
-            ) if op.trashes().is_some() => match self.clients[c].aside.get(&node).map(Tree::len) {
-                None => drop(self.execute(c, op)),
-                Some(count) => {
-                    if let Some(hidden) = self.aside_check(c, node, subtree) {
-                        let k = self
-                            .faults
-                            .unlinks_before_crash
-                            .take()
-                            .unwrap_or((self.faults.crashes % (count as u64 + 1)) as usize);
-                        for n in self.unlink_aside(c, node, &hidden, k) {
-                            if let Some(seen) = self.base_seen(c, n) {
-                                self.ledger.delete_commit_lost(c, n, seen);
+            ) if op.deletes_here().is_some() => {
+                match self.clients[c].aside.get(&node).map(Tree::len) {
+                    None => drop(self.execute(c, op)),
+                    Some(count) => {
+                        if let Some(hidden) = self.aside_check(c, node, subtree) {
+                            let k = self
+                                .faults
+                                .unlinks_before_crash
+                                .take()
+                                .unwrap_or((self.faults.crashes % (count as u64 + 1)) as usize);
+                            for n in self.unlink_aside(c, node, &hidden, k) {
+                                if let Some(seen) = self.base_seen(c, n) {
+                                    self.ledger.delete_commit_lost(c, n, seen);
+                                }
                             }
                         }
                     }
                 }
-            },
+            }
             _ => {}
         }
         let client = &mut self.clients[c];

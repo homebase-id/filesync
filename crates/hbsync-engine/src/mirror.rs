@@ -48,7 +48,7 @@ pub fn apply(s: AccountTx<'_>, header: &RemoteHeader) -> Result<Applied, StateEr
         return apply_known(s, &ChangeRef::of(header), header.token.as_ref());
     }
     // A node is one folder or one file for its life (node schema, Identity and tombstones).
-    // Taken as a delete and a create, a change of kind would trash this device's copy on
+    // Taken as a delete and a create, a change of kind would delete this device's copy on
     // another writer's mistake: left out, the drive keeps every byte, and the node is held as
     // this device had it (its writes fork; what is in it waits).
     if let Some((_, had, _)) = known

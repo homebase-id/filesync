@@ -1334,7 +1334,7 @@ fn a_delete_while_the_download_is_in_flight_is_taken() -> R {
     assert!(
         plan.ops
             .iter()
-            .any(|op| matches!(op, Op::LocalTrash { node: n, .. } if *n == node)),
+            .any(|op| matches!(op, Op::LocalDelete { node: n, .. } if *n == node)),
         "the delete reaches here: {:?}",
         plan.ops
     );
@@ -2792,14 +2792,14 @@ fn an_old_version_with_no_name_to_come_back_under_is_told() -> R {
 
 /// The download from another folder unlinks the old version; the drive then deletes the node,
 /// and the file is deleted outright (sync semantics §7): aside, checked, unlinked, nothing kept.
-/// (A node trashed twice within a second once collided on its entry, seed
+/// (A node deleted twice within a second once collided on its entry, seed
 /// 8474444713664359667: deletes no longer make one.)
 #[test]
 fn a_node_replaced_then_deleted_goes() -> R {
     let mut h = Harness::new()?;
     let (node, op) = a_download_from_another_folder(&mut h)?;
     h.run(vec![op])?;
-    let report = h.run(vec![Op::LocalTrash {
+    let report = h.run(vec![Op::LocalDelete {
         node,
         subtree: vec![node],
     }])?;
@@ -2893,7 +2893,7 @@ fn a_record_doesnt_bring_back_a_node_the_drive_deleted() -> R {
         assert!(
             plan.ops
                 .iter()
-                .any(|op| matches!(op, Op::LocalTrash { node: n, .. } if *n == node)),
+                .any(|op| matches!(op, Op::LocalDelete { node: n, .. } if *n == node)),
             "removed {removed}, {local:?}: {:?}",
             plan.ops
         );
@@ -3485,7 +3485,7 @@ fn a_commit_doesnt_bring_back_a_node_the_drive_deleted() -> R {
     assert!(
         plan.ops
             .iter()
-            .any(|op| matches!(op, Op::LocalTrash { node: n, .. } if *n == node)),
+            .any(|op| matches!(op, Op::LocalDelete { node: n, .. } if *n == node)),
         "{:?}",
         plan.ops
     );
@@ -4166,12 +4166,12 @@ fn errors_go_through_the_policy() {
     assert!(matches!(full, Outcome::Full(Some(_))));
 }
 
-/// The drive removes a file and a plan here trashes it; before the trash runs, the drive brings
+/// The drive removes a file and a plan here deletes it; before the delete runs, the drive brings
 /// it back (a restore, the same file at a new version) and another engine's pull puts that in
-/// the mirror. The trash acted on the removal: the next plan brings the file back here, and
+/// the mirror. The delete acted on the removal: the next plan brings the file back here, and
 /// never deletes it again (the user's restore stands).
 #[test]
-fn a_restore_while_the_trash_runs_stands() -> R {
+fn a_restore_while_the_delete_runs_stands() -> R {
     let mut h = Harness::new()?;
     let node = NodeId::new();
     let removed = some_version();
@@ -4189,11 +4189,11 @@ fn a_restore_while_the_trash_runs_stands() -> R {
     })?;
     // The pull: back in the mirror, at its new version.
     h.mirror(node, "a", back, b"A")?;
-    h.run(vec![Op::LocalTrash {
+    h.run(vec![Op::LocalDelete {
         node,
         subtree: vec![node],
     }])?;
-    assert!(!h.folder.root.join("a").exists(), "trashed");
+    assert!(!h.folder.root.join("a").exists(), "deleted");
     let plan = plan_of(&mut h, &[node])?;
     assert!(
         !plan
@@ -4439,7 +4439,7 @@ fn a_node_in_a_file_meets_what_is_in_recovered_files() -> R {
 
 /// A folder removed on the drive at a time not known yet (an open removal) took along the
 /// synced file still live in it (`along::taken_along`: an open removal is the newest): the
-/// guard counts it with what is gone remotely, as the reconciler does, and a confirmed trash
+/// guard counts it with what is gone remotely, as the reconciler does, and a confirmed delete
 /// of the folder covers it (sync semantics §7).
 #[test]
 fn an_open_removal_counts_what_it_took_along() -> R {
@@ -4498,7 +4498,7 @@ fn an_open_removal_counts_what_it_took_along() -> R {
     assert_eq!(
         confirmed,
         Some((false, vec![file])),
-        "the folder's trash covers it"
+        "the folder's delete covers it"
     );
     Ok(())
 }

@@ -451,7 +451,7 @@ fn remove_documents(server: &Arc<Mutex<FakeServer>>) -> R {
 }
 
 /// Documents deleted on the drive while a computer syncs it comes back at that computer's next
-/// sync, nothing trashed here, nothing uploaded into Recently deleted (§12).
+/// sync, nothing deleted here, nothing uploaded into Recently deleted (§12).
 #[test]
 fn documents_deleted_on_the_drive_while_synced_comes_back() -> R {
     let server = FakeServer::new(ServerConfig::default());

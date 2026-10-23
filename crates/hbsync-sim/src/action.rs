@@ -153,7 +153,7 @@ pub enum Action {
         op: usize,
     },
     /// Another device changes the node of this client's next local operation of a kind (`on`:
-    /// any; a tag write; a download; a move; a trash) once its check passed and its change is
+    /// any; a tag write; a download; a move; a delete) once its check passed and its change is
     /// made here, before its commit, and the account pulls that change meanwhile (another
     /// folder's engine, or an announcement): it edits the node where it is a file (`change` not
     /// 2), else removes it, or restores one in Recently deleted. The operation then commits as

@@ -6,7 +6,7 @@
 //!   there (name clashes): [`build_narrow`] reads those by their sibling hash, [`build_input`]
 //!   all children;
 //! - the children of a dirty folder that may go (live children keep it);
-//! - the full local subtree of a folder that is gone remotely (what a trash would take).
+//! - the full local subtree of a folder that is gone remotely (what a delete would take).
 //!
 //! The local side is translated from paths to the node model here: the parent is the node at
 //! the parent path, the name is the remote spelling (recorded mapping or [`to_remote`]), and a
@@ -272,7 +272,7 @@ fn build(
     for (folder, keys) in named {
         b.load_named(folder, &keys)?;
     }
-    // A folder that is gone remotely (or masked) but present locally may be trashed or
+    // A folder that is gone remotely (or masked) but present locally may be deleted or
     // detached: load all of it.
     // Each folder once: a dirty folder inside one already loaded is in it.
     let hidden = crate::mask::hidden(&b.input.remote, filter, scope);

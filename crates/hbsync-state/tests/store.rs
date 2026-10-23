@@ -1240,7 +1240,7 @@ fn synced_keeps_the_newest() -> R {
         kind: if i.is_multiple_of(2) {
             SyncedKind::Uploaded
         } else {
-            SyncedKind::TrashedLocally
+            SyncedKind::DeletedLocally
         },
         path: format!("f{i}"),
         files: 1,

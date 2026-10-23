@@ -57,7 +57,7 @@ impl ReadTx<'_> {
     }
 
     /// Synced files among the dirty nodes that are gone locally (and would be deleted
-    /// remotely), and those gone remotely (would be trashed locally). Online-only files have
+    /// remotely), and those gone remotely (would be deleted locally). Online-only files have
     /// no local copy by design and don't count. Used by the mass-delete guard, which must see
     /// the whole delete, not one planning batch: with [`ReadTx::held_file_deletes`].
     pub fn pending_file_deletes(&self) -> Result<(u64, u64)> {
@@ -107,7 +107,7 @@ impl ReadTx<'_> {
     /// What a confirmed delete of dirty `node` covers of the
     /// [`pending_file_deletes`](Self::pending_file_deletes): whether `node` is a file gone
     /// locally (deleted remotely, one node at a time), and the files gone remotely in its local
-    /// subtree (a trash takes everything under it along): the dirty ones gone from the drive,
+    /// subtree (a delete takes everything under it along): the dirty ones gone from the drive,
     /// and the synced ones a folder's removal took along, still live there (as `taken_files`
     /// counts them). `None` when `node` isn't dirty.
     pub fn confirmed_file_deletes(&self, node: NodeId) -> Result<Option<(bool, Vec<NodeId>)>> {

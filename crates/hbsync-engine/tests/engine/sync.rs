@@ -644,7 +644,7 @@ fn what_was_synced_is_listed_and_kept() -> R {
         there,
         [
             (MovedLocally, "report.txt".into(), 1, 0),
-            (TrashedLocally, "old.txt".into(), 1, 0)
+            (DeletedLocally, "old.txt".into(), 1, 0)
         ]
     );
 
