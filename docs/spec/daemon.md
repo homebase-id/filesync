@@ -68,7 +68,8 @@ change and reads it, and a program that finds it running can ask it.
 
 Recently deleted keeps removed items 30 days, then deletes them for good: not a setting (the
 purge is the account's, so every client keeps 30). A `keep_deleted_days` an older version
-wrote is no longer used: the file loads, with a warning, and the next write leaves it out.
+wrote is no longer used: the file loads, with a warning (once a run), and the next write
+leaves it out.
 
 A hand edit while the daemon runs isn't watched for; each setting takes effect as follows:
 

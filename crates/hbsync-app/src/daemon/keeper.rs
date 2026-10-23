@@ -226,8 +226,8 @@ fn purge_now(drive: &Drive) -> bool {
     match drive.purge_when_due() {
         Ok(Some(n)) => {
             if n > 0 {
-                let days = hbsync_engine::time::KEEP_DAYS;
-                tracing::info!("{n} items deleted for good after {days} days");
+                let days = crate::KEEP_DAYS;
+                tracing::info!("{n} items deleted for good, kept {days} days or more");
             }
             true
         }

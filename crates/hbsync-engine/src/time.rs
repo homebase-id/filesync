@@ -20,6 +20,7 @@ pub(crate) const REREAD_MS: i64 = TRACE_MS - DAY_MS;
 /// schema's two rules): the purge is the whole account's, and every client keeps 30 (node
 /// schema, The purge). Not a setting: one device can't keep longer or shorter.
 pub const KEEP_DAYS: u32 = 30;
+const _: () = assert!(TRACE_MS == KEEP_DAYS as i64 * DAY_MS, "the same 30 days");
 
 /// How long uploads are held after the drive said it is full: then one is tried again.
 pub(crate) const FULL_HOLD: Duration = Duration::from_secs(600);

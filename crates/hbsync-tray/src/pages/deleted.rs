@@ -97,7 +97,7 @@ impl Server {
             "<h1>Recently deleted</h1>\
              <p>Deleted items are kept on your Homebase for {days} days, then deleted for good. \
              A restored item comes back on every device.</p><ul class=deleted>{rows}</ul>{empty}",
-            days = hbsync_app::KEEP_DELETED_DAYS,
+            days = hbsync_app::KEEP_DAYS,
             empty = empty_offer(&list, &self.pages.url("deleted/empty")),
         )
     }

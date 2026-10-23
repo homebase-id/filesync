@@ -34,10 +34,6 @@ pub enum ConfigError {
     TooManyRoots(usize),
 }
 
-/// The days Recently deleted keeps an item, then deletes it for good: 30, on every client
-/// ([`hbsync_engine::time::KEEP_DAYS`]; not a setting).
-pub const KEEP_DELETED_DAYS: u32 = hbsync_engine::time::KEEP_DAYS;
-
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -56,8 +52,8 @@ pub struct Config {
     pub roots: Vec<Root>,
 }
 
-/// A setting no longer ([`KEEP_DELETED_DAYS`]): an older config that has it loads, with a
-/// warning, and a save leaves it out.
+/// A setting no longer (Recently deleted keeps [`hbsync_engine::time::KEEP_DAYS`]): an older
+/// config that has it loads, with a warning once a run, and a save leaves it out.
 const RETIRED_KEEP_DAYS: &str = "keep_deleted_days";
 
 /// A local folder synced with an identity's Filesync drive.
@@ -118,11 +114,16 @@ impl Config {
             false => toml::from_str(&text).map_err(parse)?,
             true => {
                 let mut table: toml::Table = toml::from_str(&text).map_err(parse)?;
-                if table.remove(RETIRED_KEEP_DAYS).is_some() {
+                static WARNED: std::sync::atomic::AtomicBool =
+                    std::sync::atomic::AtomicBool::new(false);
+                if table.remove(RETIRED_KEEP_DAYS).is_some()
+                    && !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed)
+                {
                     tracing::warn!(
                         "{}: keep_deleted_days is no longer used: Recently deleted keeps items \
-                         {KEEP_DELETED_DAYS} days",
+                         {} days",
                         path.display(),
+                        hbsync_engine::time::KEEP_DAYS,
                     );
                 }
                 table.try_into().map_err(parse)?
