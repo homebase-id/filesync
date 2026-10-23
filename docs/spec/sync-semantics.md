@@ -171,8 +171,9 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    settles (another device may restore it first, with changes of its own: a tag it removed
    stays removed). A removed folder outside this
    folder's part of the drive, or one it filters (§10), isn't its to bring back: a node written
-   into it waits for the folder that syncs that part, or, filtered, is left as it is for the
-   devices that sync it (one this device holds goes where an orphan does, below).
+   into it waits for the folder that syncs that part, or, filtered, is left to the devices
+   that sync that place (the orphans' rule below, "Nor is what is in a folder in Recently
+   deleted …", says when).
    A file not hashed yet keeps its folders as they are, neither deleted nor restored, till it
    is hashed (below); then it keeps a folder alive as any live child does.
 
@@ -246,7 +247,9 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
      holds nothing of is left as it is, the business of the devices that sync that place, which
      bring the folder back with it. Taken for an orphan, it was moved into Recovered files on
      the drive, and the folder stayed deleted for the others. One the device holds goes as
-     before.
+     before. Where no device syncs that place, such a node stays inside its removed folder,
+     ignored everywhere and never deleted: the purge deletes removed nodes only, so it keeps
+     the folder, restorable, while it holds a live node.
    - A folder that leaves the picture for good (deleted outright, announced) while nodes are
      live in it plans those again: they are orphans now, whichever of them changed.
 4. **Folder delete propagation** removes the folder on the drive first, then its descendants,
@@ -377,19 +380,20 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   deleted is a retry, and done.
 - **Mass-delete guard.** It holds this device's own removals from the drive: when one sync
   would remove from the drive more than `max(50, 25 % of synced files)` files deleted here (by
-  the user, or newly ignored, §10 rule 1), or every synced file, those removals are held, sent
-  nowhere: the drive and every other device keep them. The rest of the plan proceeds. The user
-  answers, about exactly what was shown (a token names the held items; an answer to a set that
-  changed since is refused, the new one shown; one taken goes with the next sync, for the
-  items it named, and any held since stay held):
+  the user, or newly ignored, §10 rule 1), or every synced file (two or more), those removals
+  are held, sent nowhere: the drive and every other device keep them. 50 and 25 % are the
+  defaults (`[mass_delete]` `min_files` and `fraction` in `config.toml`, daemon.md). The rest
+  of the plan proceeds. The user answers, about exactly what was shown (a token names the
+  held items; an answer to a set that changed since is refused, the new one shown; one taken
+  goes with the next sync, for the items it named, and any held since stay held):
   - **Delete**: they go to the drive's Recently deleted, as any delete does.
   - **Put them back**: the delete here is undone, as the drive has them now: each node's base
-    goes (with what is below it in the base), so the drive's live node comes down again
-    what below it was moved elsewhere here keeps
-    its base, and the move goes on. What the drive removed or changed since wins: it is never
-    brought back. A newly ignored item stays on the drive and is synced here again where the
-    drive has it (masking goes by the drive's path), beside the ignored copy, which stays as
-    it is: that folder's disk use twice, until the user removes one.
+    goes, with the bases below it of what is gone here and live on the drive, so the drive's
+    live nodes come down again; what below it was moved elsewhere here keeps its base, and the
+    move goes on. What the drive removed or changed since wins: it is never brought back. A
+    newly ignored item stays on the drive and is synced here again where the drive has it
+    (masking goes by the drive's path), beside the ignored copy, which stays as it is: that
+    folder's disk use twice, until the user removes one.
   While they are held, their names on the drive stay taken: a new item here of such a name
   syncs under a numbered one (`Projects (conflict 1)`, the dialog says so). Nothing held
   expires: the status and the tray show it until answered. Meanwhile what is held isn't planned
@@ -444,9 +448,9 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   the drive, a put back half done), across restarts (`guard.wiped`, kept as soon as planned):
   a held item stays held while a removal elsewhere is still to be followed in it, or below it
   once it is back on the drive, and a delete here of anything held or taking held items along is
-  held. **Delete**, or **Put them back**: kept here, and each synced item in them the drive
-  no longer has is restored from Recently deleted (each removal as an item: what was removed
-  with its folder comes back with it; what was removed apart, before, on its own), or, gone
+  held. **Delete** lets the removals through: deleted here (checked, above). **Put them
+  back**: kept here, and each synced item in them the drive no longer has is restored from
+  Recently deleted (each removal as an item: what was removed with its folder comes back with it; what was removed apart, before, on its own), or, gone
   for good there, uploaded again from here as it is, also what the restore itself finds gone
   for good (looked at again after it: two reads a node restored); a folder gone for good only
   once nothing synced below it waits in Recently deleted, till then held with what waits
@@ -729,8 +733,8 @@ here (or put up anew, if edited). That takes proof (`hbsync-engine/src/gone.rs`)
    filtered local item is never changed or removed by sync, except junk deleted with its
    folder.
 5. **Tags** (section 11): convergence includes the tags as each client sees them (clients tag
-   like macOS, Linux and Windows); a tag some user added and no user removed is on its node in
-   the end, unless the node was deleted, or the item it was added to was deleted or got a new
+   like macOS, Linux and Windows); but for §11's known limits, a tag some user added and no
+   user removed is on its node in the end, unless the node was deleted, or the item it was added to was deleted or got a new
    id on that device (then it went along).
 6. **Gone for good** (section 8b): with the drive saying now and then that a live file isn't
    there, once of each, no client takes a file the drive holds as gone for good, nor deletes
@@ -789,11 +793,8 @@ An item inside a filtered folder is filtered too.
    one (a name clash).
    A masked node that comes into view (a rule was removed, or another device moved it out of
    the ignored place) is downloaded with everything in it.
-   A folder in Recently deleted whose place is filtered is masked; what is live in it (a node
-   written into it after its removal, which keeps it) and this device holds nothing of is left
-   as it is, never an orphan to adopt here (§6.3). Where no device syncs that place, such a
-   node stays inside its removed folder, ignored everywhere and never deleted: the purge
-   deletes removed nodes only, so it keeps the folder, restorable, while it holds a live node.
+   A folder in Recently deleted whose place is filtered is masked; what is live in it is left
+   as §6.3 says (orphans: "Nor is what is in a folder in Recently deleted …").
    A synced node that becomes masked because another device moved it into a path this device
    ignores leaves this device, the remote untouched:
    - an unchanged local copy is deleted (§7), and its base goes in the same step
@@ -892,7 +893,28 @@ a new node on a device that can't hold all its tags (detached on Windows, §10) 
 the tags that device has. A download put in place whose commit a crash lost, its file edited
 before the next sync, is read against the old base (§8a, crash recovery): a tag the download
 wrote reads as this device adding it, so a tag another device removed meanwhile can come back.
-No tag is lost, only the removal; the simulator allows exactly this.
+That loses a removal, not a tag.
+
+**Known limits** (the user's call, 2026-10-21: not now). The simulator names each one
+(`hbsync-sim` `tagbook::Limit`) and excuses only that case. Three lose an add:
+- *Own removal in flight*: a tag added back while this device's removal of it is still on its
+  way. The removal's write settles the base on what both sides hold after it, so the add then
+  reads as the drive's removal, and goes.
+- *A new item keeps the base's tags*: an item replaced by a download (its own copy went into a
+  conflict copy) keeps in its base the old item's tags the write didn't touch. A tag neither
+  side holds any more then reads as this device's removal, and is sent over a later add.
+- *Added back to the base*: a tag removed and added back here matches the base, so nothing goes
+  up; where the drive dropped it meanwhile (another device's delete, the node made again
+  without it), the drive's state comes down over the add.
+
+Two lose a removal (the tag comes back):
+- *Own tag write in flight*: a tag removed while this device's plan still writes it (onto the
+  item, or up): the write, planned before, lands over the removal.
+- *Answer superseded*: a write carrying a tag landed, but another device changed the node
+  before its answer was recorded (§8a, Answers): the base never records the tag as on the
+  drive, so it goes up again, over another device's later removal.
+
+Apart from these and the crash case above, no tag add or removal is lost.
 
 ## 12. Scopes
 A device syncs the main folder (`~/Homebase`) and, if the user chooses, **role folders** where

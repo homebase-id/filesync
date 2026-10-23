@@ -63,7 +63,8 @@ a restore brought back something whose folder went for good).
 - Otherwise it is an ordinary folder: list, open, move things out, rename or delete it.
 - Leave the adopting to the desktops, as the purge's first step: don't move orphans into it,
   and don't create it. An item with no folder is simply not listed by the mini-app (no listing
-  reaches it) until a computer moves it in.
+  reaches it) until a computer moves it in (one at a place every computer ignores, by its name,
+  stays where it is).
 
 ## Listing a folder
 - One `query-batch` with `groupId: [<folder's node id>]`, `fileType: [7101, 7102]`,
@@ -127,7 +128,8 @@ Everything comes from the node's HomebaseFile; nothing is stored beside it.
   file (`versionTagMismatch`: changed since, leave it). The folder in one request, then what is
   in it.
   Desktop clients delete their local copies of what the phone deletes, and keep nothing:
-  Recently deleted on the drive is the only copy, for 30 days.
+  Recently deleted on the drive is the only copy, for 30 days. One exception: a delete of every
+  file a computer syncs at once (more than 50, by default) is held there until its user answers.
 - A retry keeps the node id, including one the user asks for after a failure, so a retry that gets 4105
   (`ExistingFileWithUniqueId`) means an earlier attempt already succeeded.
 
@@ -200,7 +202,10 @@ filesync's own rules are in its node schema ("Recently deleted") and the engine'
     (removed more than 30 days ago), the live nodes below its removed folders (directly or through live
     folders) that the delete took along: written no later than the removal of the nearest removed folder
     above (`updated` of the version you have, against the folder's). Skip a node whose `updated` you don't
-    know, one written after, and a role folder, and the live folders above them. Read the header of each
+    know, one written after, and a role folder, the live folders above them, and everything in those
+    folders: remove a node only where the folder it is in is removed already or by you (node schema,
+    "The purge", 2.: "what is in a folder one of them keeps"; filesync's `along::taken_levels`). Read the
+    header of each
     removed folder that directly holds one first: go on only if it is still removed at the version you
     have. Then remove them top-down, a level at a time, with `update-archival-status-batch`
     (`archivalStatus` 2, each at its `versionTag`): one answered `versionTagMismatch` or not found stays

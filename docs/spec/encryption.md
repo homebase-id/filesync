@@ -95,8 +95,8 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
   **[verified]** odin-core `DriveFileUtility.CreateClientFileHeader`), so the feed bringing the
   write back changes nothing; another device's write brings its token with it. One request does
   an update; the version tag guards it (4160 if the file changed since; a deleted file 4002). A
-  file without a token (a row an older client stored) has its header read first, as before; so
-  does one whose token doesn't open. Tokens are sealed under a login's shared secret: when the
+  file without a stored token has its header read first, as before; so does one whose token
+  doesn't open. Tokens are sealed under a login's shared secret: when the
   account connects with another login than the one its tokens were sealed under (a fingerprint
   of its key, `remote.tokens_sealed_by`), they are all forgotten, and each file's next update
   reads its header once and keeps the token it writes (the feed's slim rows carry none). A token

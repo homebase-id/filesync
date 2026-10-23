@@ -54,7 +54,8 @@ the same on every drive: devices that add one join it.
 A folder at the top holding what lost its folder for good: a live node whose `groupId` is no
 node on the drive (deleted for good while something was written into it, or by another app; or
 a restore of something whose folder went for good).
-Computers syncing the main folder move such a node into it (sync semantics §6.3).
+Computers syncing the main folder move such a node into it (sync semantics §6.3), where they
+sync its place: one at a place every computer ignores stays as it is.
 
 | `uniqueId` | Name when created |
 |---|---|
@@ -191,9 +192,10 @@ of this schema may define some of them.)
   it. (Writers from before 2026-10-15 removed what was in a folder first: their folder deletes
   list as separate items until they expire.)
 - Restore is the update back: `archivalStatus` `0` (and new bytes, when an edit
-  restores it; the same batch when nothing else changes). Restoring a folder also restores the removed nodes below it that were deleted
-  with it (not what was deleted from it before); a node whose parent is removed brings the
-  parent back first, and one whose parent is gone for good comes back as it was, an orphan
+  restores it; the same batch when nothing else changes). A user's restore (from Recently
+  deleted) of a folder also restores the removed nodes below it that were deleted with it (not
+  what was deleted from it before); a restore by a write (below, The server's time decides)
+  doesn't. A node whose parent is removed brings the parent back first, and one whose parent is gone for good comes back as it was, an orphan
   the computers move into Recovered files (see above). If a folder
   doesn't come back (changed meanwhile), what is in it stays removed. A name a live sibling took
   meanwhile gets ` (restored)`; so does `.hbsync`, in any case, at the top of the drive or of a
@@ -291,10 +293,11 @@ of this schema may define some of them.)
   back from the feed yet) takes it as written before. Deleting for good never takes it while
   it is live: the purge removes it first, 30 days after the folder's removal (The purge, 2.). A node written after the removal (an edit, a new file, a folder moved in, by
   a device that didn't know of the delete yet) is a change of its own: it stays with all that
-  is in it, and brings its folders back (the folders alone, not what was deleted with them;
-  sync-semantics §6.3). One rule decides this for the reconciler and Recently deleted
-  (`crate::along::taken_along`). A removed folder outside the part of the drive a device
-  syncs, or one it ignores, isn't its to bring back.
+  is in it, and brings its folders back: each folder with what its delete took along that is
+  still live (not changed on the device that brings it back), but not the removed nodes below
+  it, nor what a removed folder below took along (sync-semantics §6.3). One rule decides this
+  for the reconciler and Recently deleted (`crate::along::taken_along`). A removed folder
+  outside the part of the drive a device syncs, or one it ignores, isn't its to bring back.
 - Homebase gives `archivalStatus` no meaning: each app picks its values. `2` is odin-js mail's
   trash and the `Removed` of odin-js's and chat-kmp's types. It is replaced, like the whole
   header, on every update: a write that leaves it out sets it to `0` **[verified]**
@@ -342,6 +345,15 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-10-23: a live node written into a removed folder at a place a computer ignores is left
+  there for the computers that sync that place, which bring the folder back (before, a
+  computer that ignored it could move it into Recovered files). The node is the same.
+- 2026-10-22: a computer moves an orphan into Recovered files (or to the top) only where it
+  syncs that place: one at a place every computer ignores stays where it is. The node is the
+  same.
+- 2026-10-22: a folder brought back by a write keeps what its delete took along that is still
+  live (computers have done so since 2026-10-22; this page said "the folders alone"); the
+  removed nodes below it stay removed. The node is the same.
 - 2026-10-21: a restore never brings a node back as `.hbsync` (any case) at the top of the
   drive or of a role folder: it takes ` (restored)` there, as a name taken.
 - 2026-10-21: a computer keeps a row it can't read (one that doesn't decrypt, a newer
