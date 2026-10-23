@@ -37,7 +37,7 @@ use hbsync_types::{
 
 use crate::{
     Answers, BATCH_FILES, ChangeRef, ChangesPage, Deletes, ForGood, Holds, NodeMeta, PayloadInfo,
-    RefsPage, Remote, RemoteBody, RemoteError, RemoteHeader, Result, Skipped, Upload,
+    Planned, RefsPage, Remote, RemoteBody, RemoteError, RemoteHeader, Result, Skipped, Upload,
 };
 
 #[derive(Debug, Clone)]
@@ -197,7 +197,8 @@ impl FakeServer {
             (NodeKind::File, Some(upload)) => {
                 let mut bytes = Vec::with_capacity(upload.size as usize);
                 upload.reader.read_to_end(&mut bytes)?;
-                if hash_bytes(&bytes, upload.hash.algorithm) != upload.hash {
+                let hash = hash_bytes(&bytes, upload.hash.algorithm());
+                if !upload.hash.takes(hash) {
                     return Err(RemoteError::HashMismatch);
                 }
                 if let Some(quota) = self.config.quota {
@@ -215,7 +216,7 @@ impl FakeServer {
                     }
                 }
                 let info = PayloadInfo {
-                    hash: upload.hash,
+                    hash,
                     bytes: bytes.len() as u64,
                 };
                 Ok(Some((Arc::new(bytes), info)))
@@ -241,6 +242,7 @@ impl FakeServer {
             return Err(RemoteError::AlreadyExists);
         }
         let payload = self.receive(node.kind, upload)?;
+        let sent = payload.as_ref().map(|(_, info)| info.hash);
         let file_id = RemoteFileId(self.fresh_uuid());
         let version = VersionTag(self.fresh_uuid());
         let row = self.next_row;
@@ -272,7 +274,7 @@ impl FakeServer {
         self.by_node.insert(node.node, file_id);
         let at = self.clock_ms;
         self.touch(file_id, writer);
-        Ok(written(RemoteRef { file_id, version }, at))
+        Ok(written(RemoteRef { file_id, version }, at, sent))
     }
 
     pub fn update(
@@ -323,6 +325,7 @@ impl FakeServer {
             Some(upload) => self.receive(kind, Some(upload))?,
             None => None,
         };
+        let sent = new_payload.as_ref().map(|(_, info)| info.hash);
         let version = VersionTag(self.fresh_uuid());
         let f = self.files.get_mut(&file_id).ok_or(RemoteError::NotFound)?;
         f.header.version = version;
@@ -343,7 +346,7 @@ impl FakeServer {
         };
         let at = self.clock_ms;
         self.touch(file_id, writer);
-        Ok(written(RemoteRef { file_id, version }, at))
+        Ok(written(RemoteRef { file_id, version }, at, sent))
     }
 
     /// Deletes a file if it is still at `expected` (4160 otherwise), as Homebase's
@@ -411,6 +414,7 @@ impl FakeServer {
                     token: Some(token_of(file_id)),
                 },
                 changed_at: f.header.changed_at,
+                content: None,
             });
         }
         let version = VersionTag(self.fresh_uuid());
@@ -420,7 +424,7 @@ impl FakeServer {
         f.header.removed = removed;
         f.header.changed_at = Some(now);
         self.touch(file_id, writer);
-        Ok(written(RemoteRef { file_id, version }, now))
+        Ok(written(RemoteRef { file_id, version }, now, None))
     }
 
     /// Deletes a file for good if it is still at `expected`, as Homebase's hard delete: gone,
@@ -579,7 +583,7 @@ impl FakeServer {
         };
         let hash = hbsync_fileio::hash_bytes(data, algorithm);
         let upload = Upload {
-            hash,
+            hash: Planned::Known(hash),
             size: data.len() as u64,
             reader: &mut std::io::Cursor::new(data),
             pace: None,
@@ -784,6 +788,8 @@ pub struct Faults {
     pub lose_answer_named: Option<String>,
     /// Payloads received, for assertions.
     pub uploads: usize,
+    /// Bytes of the payloads taken in whole, for assertions (what was read to send them).
+    pub upload_bytes: u64,
     /// Payload reads give other bytes than the file holds (the first one flipped): stored
     /// bytes gone bad.
     pub corrupt_downloads: bool,
@@ -942,7 +948,14 @@ impl FakeRemote {
             }
             let n = upload.reader.read(&mut buf)?;
             if n == 0 {
-                return Ok(Some((upload.hash, bytes)));
+                // What was sent, checked as Homebase checks it once the payload is in: the
+                // hash planned, or, hashed on send, a source that didn't change.
+                let sent = hash_bytes(&bytes, upload.hash.algorithm());
+                if !upload.hash.takes(sent) {
+                    return Err(RemoteError::HashMismatch);
+                }
+                self.faults().upload_bytes += bytes.len() as u64;
+                return Ok(Some((sent, bytes)));
             }
             if let Some(pace) = upload.pace {
                 pace.take(n);
@@ -952,14 +965,16 @@ impl FakeRemote {
     }
 }
 
-/// The file written at `at` at server time `changed_at`, with its token.
-fn written(at: RemoteRef, changed_at: i64) -> Written {
+/// The file written at `at` at server time `changed_at`, with its token and the hash of the
+/// bytes it took, if any.
+fn written(at: RemoteRef, changed_at: i64, content: Option<hbsync_types::ContentHash>) -> Written {
     Written {
         target: Target {
             at,
             token: Some(token_of(at.file_id)),
         },
         changed_at: Some(changed_at),
+        content,
     }
 }
 
@@ -972,7 +987,7 @@ fn replay<T>(
         return send(None);
     };
     send(Some(Upload {
-        hash,
+        hash: Planned::Known(hash),
         size: bytes.len() as u64,
         reader: &mut std::io::Cursor::new(bytes.as_slice()),
         pace: None,

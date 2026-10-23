@@ -114,6 +114,10 @@ pub struct LocalRow {
     pub executable: Option<bool>,
     /// `None` until hashed; always `None` for folders.
     pub hash: Option<hbsync_types::ContentHash>,
+    /// A new file to be hashed as it is sent (sync semantics §3, Hash on send): `hash` is
+    /// `None` by design, and it isn't one of the files not hashed yet. The commit of its upload
+    /// writes the hash it sent.
+    pub send_hash: bool,
     /// `None` if not known: no tags on this system or file system, or the read failed.
     pub tags: Option<Tags>,
 }
@@ -392,9 +396,9 @@ const MIRROR_SELECT: &str = "SELECT m.file_id, m.version_tag, n.uuid, p.uuid, m.
      FROM remote m JOIN nodes n ON n.id = m.id JOIN nodes p ON p.id = m.parent";
 /// The columns [`RawLocal`] reads, from `local l JOIN nodes n`.
 const LOCAL_COLS: &str = "l.id, n.uuid, l.kind, l.size, l.mtime_ns, l.ctime_ns, l.volume, \
-     l.file_id, l.file_id_hi, l.executable, l.hash, l.parent, l.name, l.tags";
+     l.file_id, l.file_id_hi, l.executable, l.hash, l.parent, l.name, l.tags, l.send_hash";
 /// Columns in [`LOCAL_COLS`].
-const LOCAL_COL_COUNT: usize = 14;
+const LOCAL_COL_COUNT: usize = 15;
 /// Where a drive node is, for `fan_out`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Place {

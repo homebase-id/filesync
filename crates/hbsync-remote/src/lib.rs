@@ -14,8 +14,8 @@ use std::io::{Read, Write};
 pub use hbsync_types::ErrorClass;
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{
-    ContentHash, Doomed, FileContent, FileToken, NodeId, NodeKind, NodeState, RemoteFileId,
-    RemoteRef, Target, VersionTag, Written,
+    ContentHash, Doomed, FileContent, FileToken, HashAlgorithm, NodeId, NodeKind, NodeState,
+    RemoteFileId, RemoteRef, Target, VersionTag, Written,
 };
 
 #[cfg(feature = "testkit")]
@@ -284,14 +284,58 @@ pub struct NodeMeta {
     pub removed: bool,
 }
 
-/// Payload bytes to upload, with the hash they must have.
+/// Payload bytes to upload, with the hash they must have, or hashed as they are sent.
 pub struct Upload<'a> {
-    pub hash: ContentHash,
+    pub hash: Planned<'a>,
     pub size: u64,
     /// Read once, by the remote that sends it.
     pub reader: &'a mut dyn Read,
     /// Paces the bytes sent (a bandwidth cap).
     pub pace: Option<&'a dyn Pace>,
+}
+
+/// The content hash an upload is planned with.
+#[derive(Clone, Copy)]
+pub enum Planned<'a> {
+    /// The bytes must hash to it: other bytes are refused, nothing stored
+    /// ([`RemoteError::HashMismatch`]).
+    Known(ContentHash),
+    /// A new file hashed as it is sent (sync semantics §3, Hash on send), with `algorithm`: the
+    /// hash of the bytes sent is the content hash, given back in the answer
+    /// ([`Written::content`](hbsync_types::Written::content)). `unchanged` says whether the
+    /// source still is as it was when the send began: asked once all of it is read, it
+    /// refuses the payload if not, nothing stored ([`RemoteError::HashMismatch`]).
+    OnSend {
+        algorithm: HashAlgorithm,
+        unchanged: &'a (dyn Fn() -> bool + Sync),
+    },
+}
+
+impl Planned<'_> {
+    pub fn algorithm(&self) -> HashAlgorithm {
+        match self {
+            Planned::Known(h) => h.algorithm,
+            Planned::OnSend { algorithm, .. } => *algorithm,
+        }
+    }
+
+    /// Whether bytes that hash to `sent` may be stored: the planned hash, or, hashed on send,
+    /// from a source that didn't change.
+    pub fn takes(&self, sent: ContentHash) -> bool {
+        match self {
+            Planned::Known(h) => *h == sent,
+            Planned::OnSend { unchanged, .. } => !sent.is_on_send() && unchanged(),
+        }
+    }
+}
+
+impl std::fmt::Debug for Planned<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Planned::Known(h) => write!(f, "Known({h:?})"),
+            Planned::OnSend { algorithm, .. } => write!(f, "OnSend({algorithm})"),
+        }
+    }
 }
 
 /// A bandwidth cap: blocks until `bytes` more may go.

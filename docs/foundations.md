@@ -133,7 +133,9 @@ Fall back from A→B→C when the journal wrapped or its id changed, the FSEvent
 `MustScanSubDirs` was set, or the volume is FAT/exFAT/SMB.
 
 **Always, whatever the tier:**
-- **Hash only when (size, mtime, ctime, file id) changed.** Never re-hash at start.
+- **Hash only when (size, mtime, ctime, file id) changed.** Never re-hash at start. A new file
+  nothing on the drive can be compared with is hashed while it is sent (sync semantics §3,
+  Hash on send): read once, not twice.
 - **Streaming merge** of a sorted walk against sorted SQLite rows, so memory stays O(depth).
 - **Don't block sync on catch-up.** It runs at background priority and only gates uploads of local state that is still unknown.
 - **Remote:** resume from the persisted cursor; never re-list.

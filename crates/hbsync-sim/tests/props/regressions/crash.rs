@@ -522,3 +522,34 @@ fn regression_a_folder_made_from_recently_deleted_keeps_its_tags_through_a_crash
         .map_err(|e| e.to_string())
         .unwrap_or_else(|e| panic!("{e}"));
 }
+
+/// A new file hashed on send (sync semantics §3): the first crash comes before the upload's
+/// write, the second after it with its answer lost. The next plan finds the node on the drive:
+/// the file is read first, and settles as equal; its bytes went up once, and another device's
+/// file of its name made meanwhile is read first too.
+#[test]
+fn regression_an_upload_hashed_on_send_whose_answer_is_lost_is_sent_once() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let mut sim = Sim::new(2);
+    sim.verbose = true;
+    sim.run(&[
+        act(0, CreateFile { parent: 0, name: 0 }),
+        Event::Plan { client: 0 },
+        Event::Crash { client: 0 }, // before the write
+        Event::Plan { client: 0 },
+        Event::Crash { client: 0 }, // written, the answer lost
+        act(1, CreateFile { parent: 0, name: 0 }),
+    ]);
+    assert!(
+        sim.trace
+            .iter()
+            .any(|l| l.contains("sent, the answer lost")),
+        "{:#?}",
+        sim.trace
+    );
+    assert!(sim.quiesce(30));
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    // Client 0's file once; client 1's, of a name the drive had, read first and sent so.
+    assert_eq!(sim.sent_on_send(), 1);
+}

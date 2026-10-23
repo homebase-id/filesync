@@ -33,9 +33,9 @@ impl Mark {
     }
 }
 
-/// Nodes a query of [`ReadTx::pending_among`] asks about (SQLite allows only so many
-/// variables in one).
-const PENDING_CHUNK: usize = 500;
+/// Nodes a query of [`ReadTx::pending_among`] (or [`ReadTx::sending_among`]) asks about
+/// (SQLite allows only so many variables in one).
+pub(super) const PENDING_CHUNK: usize = 500;
 
 /// A dirty mark from a row of `d.id, n.uuid, d.seq`.
 fn mark_row(r: &Row<'_>) -> rusqlite::Result<Result<Mark>> {

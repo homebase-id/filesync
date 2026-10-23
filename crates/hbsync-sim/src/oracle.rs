@@ -33,6 +33,8 @@ pub(crate) struct Ledger {
     listed: Option<BTreeSet<(NodeId, VersionTag)>>,
     /// The first write that pointed a node at a folder the server never had.
     dangling: Option<String>,
+    /// How many times files' bytes went up hashed on send (sync semantics §3).
+    pub(crate) sent_on_send: usize,
     /// The first plan that deleted more than the guard allows without a confirmation.
     unguarded: Option<String>,
     /// The first operation a client ran outside its folder's part of the drive.
@@ -326,6 +328,27 @@ impl Sim {
         let ledger = &self.ledger;
         if let Some(op) = &ledger.dangling {
             return Err(format!("created under a folder the server never had: {op}"));
+        }
+        // The marker of a file hashed on send is the planner's alone: never stored, nor sent.
+        let marked = |s: &NodeState| s.content.is_some_and(|c| c.hash.is_on_send());
+        for (c, client) in self.clients.iter().enumerate() {
+            let trees = [&client.local, &client.base, &client.planned_remote];
+            if let Some((n, _)) = trees.iter().flat_map(|t| t.iter()).find(|(_, s)| marked(s)) {
+                return Err(format!("c{c}: {n:?} holds the hash-on-send marker"));
+            }
+            if let Some(e) = client
+                .extra
+                .iter()
+                .find(|(_, e)| e.local_hash.is_some_and(|h| h.is_on_send()))
+            {
+                return Err(format!(
+                    "c{c}: {:?}'s base holds the hash-on-send marker",
+                    e.0
+                ));
+            }
+        }
+        if let Some((n, _)) = self.server.tree().iter().find(|(_, s)| marked(s)) {
+            return Err(format!("the drive holds the hash-on-send marker in {n:?}"));
         }
         if let Some(what) = &ledger.narrow_differs {
             return Err(what.clone());

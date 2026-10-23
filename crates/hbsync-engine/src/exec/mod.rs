@@ -43,7 +43,9 @@ use crate::settle::rules::{DriveVersion, TagWrite, not_reached};
 use crate::settle::{
     Placed, Settle, mark_children, settle, settle_placement, settle_with, spell, tags_recorded,
 };
-use crate::transfer::{Download, Job, JobError, JobResult, TransferConfig, run_jobs_while};
+use crate::transfer::{
+    Download, Job, JobError, JobResult, SendHash, TransferConfig, run_jobs_while,
+};
 use crate::view;
 use hbsync_local::layout;
 
@@ -156,7 +158,6 @@ enum Ctx {
     Download(Box<Placement>),
     /// `from`: the folder on the drive an updated file is in now.
     Upload {
-        hash: hbsync_types::ContentHash,
         from: Option<NodeId>,
     },
     /// A metadata write; `from`: the folder on the drive the node leaves, if any.

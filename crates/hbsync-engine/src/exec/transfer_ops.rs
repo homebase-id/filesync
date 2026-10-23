@@ -217,12 +217,13 @@ impl Executor<'_> {
         if self.heard.full && kind == NodeKind::File {
             return Err(Outcome::waiting("the drive is out of storage"));
         }
-        let (row, mirror, base) = self.db.read(|s| {
-            Ok((
-                s.local_by_node(node)?,
-                s.get_mirror(node)?,
-                s.get_base(node)?,
-            ))
+        let (row, mirror, base, file) = self.db.read(|s| {
+            let (row, base) = (s.local_by_node(node)?, s.get_base(node)?);
+            let file = match (&row, s.local_parent(node)?) {
+                (Some(row), Some(parent)) => view::file_content(s, row, base.as_ref(), parent)?,
+                _ => None,
+            };
+            Ok((row, s.get_mirror(node)?, base, file))
         })?;
         let Some(row) = row else {
             return Err(Outcome::stale("gone locally"));
@@ -230,11 +231,17 @@ impl Executor<'_> {
         if !self.on_disk_unchanged(&row) {
             return Err(rescan(&mut self.report, &row.path));
         }
-        let Some(file) = view::local_content(&row, base.as_ref()) else {
+        let Some(file) = file else {
             return Err(Outcome::stale("not hashed yet"));
         };
         let mut content = NodeContent::file(name, file.mtime_ms, file.size, file.executable);
-        let (hash, size) = (file.hash, file.size);
+        // A free file hashed on send (the view's marker) goes as a new file, hashed as it is
+        // sent: nothing compares its hash before the write answers with it.
+        let hash = match file.hash.is_on_send() {
+            true => SendHash::OnSend(self.folder.algorithm),
+            false => SendHash::Known(file.hash),
+        };
+        let size = file.size;
         let path = self.disk.abs(&row.path);
         let removed = match existing {
             None => self.db.read(|s| s.removed_by_node(node))?,
@@ -305,7 +312,6 @@ impl Executor<'_> {
         Ok((
             job,
             Ctx::Upload {
-                hash,
                 from: existing.and(mirror.map(|m| m.parent)),
             },
         ))
@@ -401,19 +407,47 @@ impl Executor<'_> {
                 JobResult::Failed(JobError::File(e @ FileIoError::HashMismatch { .. })),
             ) => Ok(Outcome::Mismatch(e.to_string())),
             (_, _, JobResult::Failed(JobError::Remote(e))) => Ok(remote_outcome(e)),
+            // A file hashed on send that can't be read (locked, a bad sector): a file not
+            // hashed yet from now on, which waits and is told as one (sync semantics §6.3).
+            (
+                _,
+                Job::Upload {
+                    meta,
+                    hash: SendHash::OnSend(_),
+                    ..
+                },
+                JobResult::Failed(e @ JobError::Io(_)),
+            ) => {
+                self.db.write(|s| s.folder().unsend(meta.node))?;
+                Ok(Outcome::of(e.class(), e.to_string(), None))
+            }
             (_, _, JobResult::Failed(e)) => Ok(Outcome::of(e.class(), e.to_string(), None)),
             (Ctx::Download(d), _, JobResult::Downloaded { file, local_hash }) => {
                 self.place_download(*d, file, local_hash)
             }
             (
-                Ctx::Upload { hash, .. },
-                Job::Upload { meta, target, .. },
+                Ctx::Upload { .. },
+                Job::Upload {
+                    meta,
+                    target,
+                    hash,
+                    seen,
+                    ..
+                },
                 JobResult::Written(written),
             ) => {
-                let answer = remote::answer(&meta, Some(hash), target.as_ref(), written, false);
+                // Hashed on send: the hash of the bytes sent, as the write's answer gives it.
+                let Some(sent) = hash.known().or(written.content) else {
+                    self.report.news.behind = true;
+                    return Ok(Outcome::stale(
+                        "the drive's answer gave no hash of the bytes sent",
+                    ));
+                };
+                let answer = remote::answer(&meta, Some(sent), target.as_ref(), written, false);
                 // The bytes were just sent: equal even if the hashes use other algorithms.
                 let how = Settle {
                     same_bytes: true,
+                    sent: matches!(hash, SendHash::OnSend(_)).then_some((seen, sent)),
                     ..Settle::node(meta.node)
                 };
                 self.finish_answered(&[(how, answer)])
@@ -570,6 +604,7 @@ impl Executor<'_> {
                 executable: meta.executable,
                 hash: Some(local_hash),
                 tags,
+                send_hash: false,
             })?;
             // The bytes were just fetched: equal even if the hashes use other algorithms.
             settle_placement(s.folder(), &record, folder).map(Placed::at)

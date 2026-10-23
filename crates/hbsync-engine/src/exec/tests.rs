@@ -55,6 +55,7 @@ impl Harness {
             executable: Some(false),
             hash: Some(hash_bytes(data, self.folder.algorithm)),
             tags: None,
+            send_hash: false,
         };
         self.db.write(|s| s.folder().put_local(&row))?;
         Ok(())
@@ -72,6 +73,7 @@ impl Harness {
             executable: None,
             hash: None,
             tags: None,
+            send_hash: false,
         };
         self.db.write(|s| s.folder().put_local(&row))?;
         Ok(())
@@ -1372,6 +1374,7 @@ fn a_record_stays_when_the_commit_fails_after_placing() -> R {
             executable: None,
             hash: None,
             tags: None,
+            send_hash: false,
         })?;
         s.account().put_mirror(&MirrorRow::from_content(
             at,
@@ -2206,6 +2209,7 @@ fn recovery_in_the_run_leaves_another_nodes_row() -> R {
         executable: Some(false),
         hash: Some(h.content(b"A").hash),
         tags: None,
+        send_hash: false,
     };
     let folder = &h.folder;
     let applied =

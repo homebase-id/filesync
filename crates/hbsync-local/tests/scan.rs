@@ -124,6 +124,63 @@ fn first_scan_adds_and_hashes_everything() -> R {
     Ok(())
 }
 
+/// Hash on send (sync semantics §3): a new file is left to be hashed as it is sent, not read;
+/// a rescan reads it no more, an edit keeps it so (and dirty); a read of what waits (hashing
+/// on send off) hashes it.
+#[test]
+fn new_files_are_left_to_be_hashed_on_send() -> R {
+    let mut f = Fixture::new()?;
+    f.opts.hash_on_send = true;
+    f.write("a/b.txt", b"b")?;
+    f.write("c.txt", b"c")?;
+    let (report, dirty) = f.scan()?;
+    assert_eq!((report.added, report.hashed), (3, 0), "{report:?}");
+    assert_eq!(dirty.len(), 3);
+    let row = |f: &mut Fixture, rel: &str| -> Result<_, Box<dyn std::error::Error>> {
+        let path = RelPath::new(rel)?;
+        let row = f.db.read(|s| s.get_local(&path))?.ok_or("row")?;
+        Ok((row.send_hash, row.hash))
+    };
+    assert_eq!(row(&mut f, "c.txt")?, (true, None));
+    let (report, dirty) = f.scan()?;
+    assert_eq!((report.hashed, dirty.len()), (0, 0), "{report:?}");
+    f.write("c.txt", b"edited")?;
+    let (report, dirty) = f.scan()?;
+    assert_eq!((report.modified, report.hashed), (1, 0), "{report:?}");
+    assert_eq!(dirty, [f.node("c.txt")?]);
+    assert_eq!(row(&mut f, "c.txt")?, (true, None));
+    f.opts.hash_on_send = false;
+    let (report, _) = f.scan()?;
+    assert_eq!(report.hashed, 2, "{report:?}");
+    let hash = hbsync_fileio::hash_bytes(b"edited", HashAlgorithm::Blake3);
+    assert_eq!(row(&mut f, "c.txt")?, (false, Some(hash)));
+    Ok(())
+}
+
+/// A new file the size of a synced file that vanished may be that one moved (rule 3): it is
+/// hashed now, its hash tells. One of another size is left to be hashed on send.
+#[test]
+fn a_new_file_the_size_of_a_vanished_one_is_hashed_now() -> R {
+    let mut f = Fixture::new()?;
+    f.write("old.txt", b"content")?;
+    f.scan()?;
+    f.synced()?;
+    let node = f.node("old.txt")?;
+    f.opts.hash_on_send = true;
+    // A copy and a delete: another file id, the same bytes. (The other file first: one made
+    // after the delete may take the old one's recycled inode, and be hashed for that.)
+    f.write("other.txt", b"other size")?;
+    fs::copy(f.root().join("old.txt"), f.root().join("new.txt"))?;
+    fs::remove_file(f.root().join("old.txt"))?;
+    let (report, _) = f.scan()?;
+    assert_eq!((report.moved, report.hashed), (1, 1), "{report:?}");
+    assert_eq!(f.node("new.txt")?, node);
+    let path = RelPath::new("other.txt")?;
+    let other = f.db.read(|s| s.get_local(&path))?.ok_or("row")?;
+    assert!(other.send_hash && other.hash.is_none(), "{other:?}");
+    Ok(())
+}
+
 #[test]
 fn unchanged_rescan_does_nothing_and_hashes_nothing() -> R {
     let mut f = Fixture::new()?;

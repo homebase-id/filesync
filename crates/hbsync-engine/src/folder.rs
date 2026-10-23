@@ -68,6 +68,7 @@ impl FolderCtx {
             // Byte-exact names on case-sensitive Linux volumes (macOS folds normalization
             // whatever its case, and Windows can turn case sensitivity on per folder).
             exact_names: cfg!(target_os = "linux") && !self.case_insensitive,
+            hash_on_send: true,
             ..ScanOptions::for_root(&self.root, self.algorithm)
         }
     }

@@ -15,10 +15,10 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use hbsync_local::layout::parked_name;
-use hbsync_namemap::to_remote;
+use hbsync_namemap::{sibling_hash, to_remote};
 use hbsync_platform::{Os, RelPath};
 use hbsync_state::{BaseRow, LocalRow, MirrorRow, ReadTx, StateDb, StateError};
-use hbsync_types::{FileContent, NodeId, NodeKind, NodeState, RECOVERED_NAME, Tags};
+use hbsync_types::{ContentHash, FileContent, NodeId, NodeKind, NodeState, RECOVERED_NAME, Tags};
 
 use crate::folder::FolderCtx;
 use crate::plan::{Coverage, Plan};
@@ -85,19 +85,75 @@ fn local_state(
         name,
         kind: row.kind,
         // An unhashed file is reported without content; the caller defers it.
-        content: local_content(row, base.as_ref()),
+        content: file_content(s, row, base.as_ref(), parent)?,
         tags: Tags::fill(row.tags.as_ref(), &reference, os),
     }))
 }
 
-/// The synced content of a local file: `None` for folders and files not hashed yet. Where the
-/// OS has no x bit, the base's value is kept.
-pub(crate) fn local_content(row: &LocalRow, base: Option<&BaseRow>) -> Option<FileContent> {
+/// The synced content of a local file, as the planner and the upload read it: `None` for
+/// folders and files not hashed yet; [`ContentHash::ON_SEND`] for a file hashed on send while
+/// nothing can be compared with it ([`free_to_send`]). Where the OS has no x bit, the base's
+/// value is kept.
+pub(crate) fn file_content(
+    s: &ReadTx<'_>,
+    row: &LocalRow,
+    base: Option<&BaseRow>,
+    parent: NodeId,
+) -> Result<Option<FileContent>, StateError> {
+    let hash = match row.hash {
+        Some(h) => Some(h),
+        None if free_to_send(s, row, base, parent)? => Some(ContentHash::ON_SEND),
+        None => None,
+    };
+    Ok(hash.and_then(|h| local_content(row, h, base)))
+}
+
+/// Of `nodes`, the files left to be hashed on send that aren't free to be sent so
+/// ([`free_to_send`]): read before they are planned. (Free ones a plan defers for another
+/// reason, a page, say, are sent unread later.)
+pub(crate) fn not_free(s: &ReadTx<'_>, nodes: &[NodeId]) -> Result<Vec<NodeId>, StateError> {
+    let mut out = Vec::new();
+    for node in s.sending_among(nodes)? {
+        let (Some(row), Some(parent)) = (s.local_by_node(node)?, s.local_parent(node)?) else {
+            continue;
+        };
+        if !free_to_send(s, &row, s.get_base(node)?.as_ref(), parent)? {
+            out.push(node);
+        }
+    }
+    Ok(out)
+}
+
+/// Whether `row`, a file hashed on send (sync semantics §3, Hash on send), is free: nothing
+/// its bytes could be compared with, so it is sent as a new file without being read first.
+/// It has no base, its node isn't on the drive, nothing on the drive in its folder has its
+/// name, and it isn't parked. Otherwise it is a file not hashed yet, read before it is planned
+/// (`Engine::read_waiting`). Recently deleted needs no look: nothing there is compared with a
+/// new file's bytes (a restore over its own node detaches it first: it has no base to agree
+/// with).
+fn free_to_send(
+    s: &ReadTx<'_>,
+    row: &LocalRow,
+    base: Option<&BaseRow>,
+    parent: NodeId,
+) -> Result<bool, StateError> {
+    // The store keeps the mark on files not hashed yet alone.
+    let Some(name) = row.path.name().filter(|_| row.send_hash && base.is_none()) else {
+        return Ok(false);
+    };
+    Ok(s.get_mirror(row.node)?.is_none()
+        && s.mirror_named(parent, sibling_hash(name))?.is_empty()
+        && s.get_parked(row.node)?.is_none())
+}
+
+/// The synced content of a local file of content `hash`. Where the OS has no x bit, the base's
+/// value is kept.
+fn local_content(row: &LocalRow, hash: ContentHash, base: Option<&BaseRow>) -> Option<FileContent> {
     if row.kind != NodeKind::File {
         return None;
     }
     Some(FileContent {
-        hash: row.hash?,
+        hash,
         size: row.fingerprint.size,
         mtime_ms: row.fingerprint.mtime_ns.div_euclid(1_000_000),
         executable: row.executable.unwrap_or_else(|| {

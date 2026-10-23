@@ -187,6 +187,18 @@ proptest! {
         run_with(3, None, Sim::with_split_downloads, &events)?;
     }
 
+    /// New files are sent hashed as they go (sync semantics §3, Hash on send), while the
+    /// clients die at any point of an upload: before the write, or after it with its answer
+    /// lost (the next plan finds the node on the drive and reads the file first). The marker
+    /// the planner reads for such a file is never stored nor sent, and the clients converge
+    /// without loss.
+    #[test]
+    fn a_crash_anywhere_in_an_upload_hashed_on_send_loses_nothing(
+        events in proptest::collection::vec(with_crashes(3, events_of(3, sending_action())), 0..120)
+    ) {
+        run(3, &events)?;
+    }
+
     /// The mass-delete guard while each client plans in pages of 1 to 4 (§7, §6.5): a page is
     /// judged with what the rest of the dirty set has to delete, so a delete over the limit is
     /// held whole, never let through page by page; what is held so stays held till answered,

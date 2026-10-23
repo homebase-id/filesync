@@ -45,7 +45,16 @@ pub struct ScanOptions {
     /// hashes every changed file at once. Only for a caller that looks at what a scan left so
     /// again ([`ScanReport::young`]), as the live observer does.
     pub settle: Option<Settle>,
+    /// A new file with nothing it may be (no vanished file of its size), of at least
+    /// [`SEND_HASH_FROM`] bytes, isn't read: it is hashed as it is sent (sync semantics §3,
+    /// Hash on send; [`LocalRow::send_hash`]). Off, every such file is hashed, and so is one
+    /// that was left to be hashed on send (a file something waits for).
+    pub hash_on_send: bool,
 }
+
+/// The size from which a new file is hashed as it is sent, not by the scan
+/// ([`ScanOptions::hash_on_send`]): every size, as one read beats two whatever the size.
+pub const SEND_HASH_FROM: u64 = 0;
 
 /// Files being written: a large file changed a moment ago isn't hashed at every look while it
 /// is written (each would read all of it, from the start, and each hash found would start an
@@ -91,6 +100,7 @@ impl ScanOptions {
             filter: Arc::default(),
             exact_names: false,
             settle: None,
+            hash_on_send: false,
         }
     }
 }
@@ -134,6 +144,7 @@ pub fn scan(db: &mut StateDb, root: &Path, opts: &ScanOptions) -> Result<ScanRep
         db,
         Walker::new(root, &opts.filter),
         DbRows::tree(),
+        opts,
         &mut report,
     )?;
     let plan = resolve(db, root, diff, opts, &mut report)?;
@@ -366,7 +377,7 @@ fn look_alone(
             if !exact && row.fingerprint.file_id != meta.file_id {
                 return false;
             }
-            if differs(&row, &meta) {
+            if differs(&row, &meta, opts) {
                 diff.changed.push((row, meta));
             }
         }
@@ -445,7 +456,13 @@ fn rescan_diff(
             rows.extend(below.into_iter().filter(|r| r.path != *deep));
         }
         rows.sort_by(|a, b| a.path.cmp(&b.path)); // walk order
-        diff.append(merge(db, events.into_iter(), DbRows::fixed(rows), report)?);
+        diff.append(merge(
+            db,
+            events.into_iter(),
+            DbRows::fixed(rows),
+            opts,
+            report,
+        )?);
         covered.extend(descended);
     }
     Ok(diff)
@@ -509,6 +526,7 @@ fn merge(
     db: &mut StateDb,
     events: impl Iterator<Item = WalkEvent>,
     mut rows: DbRows,
+    opts: &ScanOptions,
     report: &mut ScanReport,
 ) -> Result<Diff, StateError> {
     let mut diff = Diff::default();
@@ -542,7 +560,7 @@ fn merge(
         match rows.peek(db)? {
             Some(row) if row.path == path => {
                 let row = rows.take(db)?;
-                if differs(&row, &meta) {
+                if differs(&row, &meta, opts) {
                     diff.changed.push((row, meta));
                 }
             }
@@ -625,13 +643,31 @@ fn moved_onto(
     }
 }
 
-fn differs(row: &LocalRow, meta: &LocalMeta) -> bool {
+fn differs(row: &LocalRow, meta: &LocalMeta, opts: &ScanOptions) -> bool {
     kind_of(meta) != row.kind
         || row.fingerprint != meta.fingerprint()
         || (row.kind == NodeKind::File && meta.executable.is_some() && meta.executable != row.executable)
-        // A file that couldn't be hashed last time gets another try, and so do tags.
-        || (row.kind == NodeKind::File && row.hash.is_none())
+        // A file that couldn't be hashed last time gets another try (not one to be hashed on
+        // send), and so do tags.
+        || (row.kind == NodeKind::File && row.hash.is_none() && !sends_hash(row, opts))
         || (tags::CAN_TAG && row.tags.is_none())
+}
+
+/// Whether a new file of `size` bytes is large enough to be hashed on send.
+#[allow(clippy::absurd_extreme_comparisons)] // Every size today: the floor is 0.
+fn large_enough_to_send_unread(size: u64) -> bool {
+    size >= SEND_HASH_FROM
+}
+
+/// Whether `row` stays a file hashed on send (not hashed by this scan, unless something tells
+/// by its hash). The store keeps the mark on files not hashed yet alone.
+fn sends_hash(row: &LocalRow, opts: &ScanOptions) -> bool {
+    row.send_hash && opts.hash_on_send
+}
+
+/// Whether the file `meta` is being written ([`Settle`]), as of `now_ns`.
+fn being_written(opts: &ScanOptions, meta: &LocalMeta, now_ns: i64) -> bool {
+    opts.settle.and_then(|s| s.wait(meta, now_ns)).is_some()
 }
 
 /// The node kind of an entry the scan keeps (a folder, else a file).
@@ -836,7 +872,16 @@ fn resolve(
         }
         let (mut new, tags_changed) = row_from(&row.path, &meta, row.hash, row.node, Some(&row));
         let mut content_changed = false;
-        if row.kind == NodeKind::File
+        // Still new: still sent as it is then (changed, it is sent again), unless it is being
+        // written (then it waits, as a file not hashed yet).
+        let edited = row.fingerprint != meta.fingerprint();
+        if sends_hash(&row, opts)
+            && !hashed.contains_key(&row.path)
+            && !(edited && being_written(opts, &meta, now_ns))
+        {
+            new.send_hash = true;
+            content_changed = edited;
+        } else if row.kind == NodeKind::File
             && (row.fingerprint != meta.fingerprint() || row.hash.is_none())
         {
             // Changed in place: its identity is settled, only its bytes are asked.
@@ -900,10 +945,11 @@ fn resolve(
             // moved together with its folder: same name inside a folder that moved as well.
             let moved_with_parent = old.path.name() == path.name()
                 && old.path.parent().and_then(|p| moved_folders.get(&p)) == path.parent().as_ref();
-            let trusted = same
-                && old.hash.is_some()
-                && (!opts.fs_family.reuses_file_ids() || moved_with_parent);
-            if !trusted {
+            let trusted = same && (!opts.fs_family.reuses_file_ids() || moved_with_parent);
+            if trusted && sends_hash(old, opts) {
+                // Moved before it was sent: still new.
+                new.send_hash = true;
+            } else if !(trusted && old.hash.is_some()) {
                 new.hash = hash_of(&path, &meta, report);
                 let content_changed = new.hash.is_none() || new.hash != old.hash;
                 if content_changed && opts.fs_family.reuses_file_ids() {
@@ -965,11 +1011,30 @@ fn resolve(
         .flatten()
         .map(|&i| removed[i].fingerprint.size)
         .collect();
+    // Where a download was put in place without its commit (a crash): what is there is read,
+    // for recovery to tell whether it is that node. Hardly ever any.
+    let placed: HashSet<RelPath> = match opts.hash_on_send && !fresh.is_empty() {
+        true => db.read(|s| Ok(s.all_placing()?.into_iter().map(|p| p.target).collect()))?,
+        false => HashSet::new(),
+    };
     let mut new_nodes = Vec::new();
     for (path, meta, known_hash) in fresh {
         let kind = kind_of(&meta);
+        // Hashed as it is sent where nothing it may be (a vanished file moved, a placement).
+        let mut send_hash = false;
         let hash = match known_hash {
             Some(h) => h,
+            // Nothing it may be, and not being written (then it waits, below).
+            None if kind == NodeKind::File
+                && opts.hash_on_send
+                && large_enough_to_send_unread(meta.size)
+                && !sizes.contains(&meta.size)
+                && !placed.contains(&path)
+                && !being_written(opts, &meta, now_ns) =>
+            {
+                send_hash = true;
+                None
+            }
             // One that may be a vanished one moved is hashed even while it is written: its
             // hash tells.
             None if kind == NodeKind::File => {
@@ -1000,8 +1065,9 @@ fn resolve(
         }
         plan.dirty.push(node);
         new_nodes.push((path.clone(), node));
-        plan.put_rows
-            .push(row_from(&path, &meta, hash, node, None).0);
+        let (mut row, _) = row_from(&path, &meta, hash, node, None);
+        row.send_hash = send_hash;
+        plan.put_rows.push(row);
     }
 
     // Unmatched vanished rows are local deletes.
@@ -1087,6 +1153,7 @@ pub fn row_from(
         },
         hash: if kind == NodeKind::File { hash } else { None },
         tags,
+        send_hash: false,
     }
 }
 

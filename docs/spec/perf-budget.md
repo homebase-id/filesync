@@ -17,7 +17,11 @@ scaled up in the nightly benchmark).
 | First-run adoption of an existing copy | hashing at disk speed, zero downloads for matching files |
 
 Rules that keep these reachable (from [../foundations.md](../foundations.md) §3):
-- Never re-hash at start; hash only when `(size, mtime, ctime, file id)` changed.
+- Never re-hash at start; hash only when `(size, mtime, ctime, file id)` changed. A new file
+  nothing on the drive can be compared with is hashed as it is sent, not by the scan: its
+  bytes are read once (sync semantics §3, Hash on send). 2,000 new files of 1 KiB to 4 MiB,
+  525 MB (fake remote, warm cache, 2026-10-23): 1,056 MB read and 0.87 s before, 532 MB
+  read and 0.72 s after.
 - Streaming, sorted merge of the walk against DB rows; never load the whole tree.
 - The reconciler works on the dirty set plus the ancestors and siblings it needs, not the
   whole tree: in a folder, only the children whose names may clash with a dirty node's (found

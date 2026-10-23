@@ -586,12 +586,15 @@ impl Sim {
                 if !name_free(local, parent, name, None) {
                     return;
                 }
+                let node = self.ids.fresh();
                 let state = if matches!(action, Action::CreateFile { .. }) {
+                    // A new file: the scan leaves it to be hashed as it is sent.
+                    self.clients[c].send_hash.insert(node);
                     NodeState::file(parent, name, self.new_blob())
                 } else {
                     NodeState::folder(parent, name)
                 };
-                self.clients[c].local.insert(self.ids.fresh(), state);
+                self.clients[c].local.insert(node, state);
             }
             Action::Edit { file } | Action::EditWriting { file } | Action::Lock { file } => {
                 if files.is_empty() {
@@ -602,6 +605,10 @@ impl Sim {
                 self.ledger.blob_superseded(state.content);
                 state.content = Some(self.new_blob());
                 self.clients[c].local.insert(node, state);
+                // Being written, or locked: not hashed, and not sent before it is.
+                if matches!(action, Action::EditWriting { .. } | Action::Lock { .. }) {
+                    self.clients[c].send_hash.remove(&node);
+                }
                 match action {
                     Action::EditWriting { .. } => self.clients[c].writing.insert(node),
                     Action::Lock { .. } => self.clients[c].locked.insert(node),

@@ -60,6 +60,19 @@ pub struct ContentHash {
 }
 
 impl ContentHash {
+    /// What the planner reads for a new file hashed on send (sync semantics §3, Hash on
+    /// send): it has nothing to be compared with, and its upload hashes the bytes it sends.
+    /// Never stored (the state DB refuses it) nor sent: no bytes hash to it.
+    pub const ON_SEND: ContentHash = ContentHash {
+        algorithm: HashAlgorithm::Blake3,
+        bytes: *b"hbsync: hashed on send, unstored",
+    };
+
+    /// Whether it is [`ContentHash::ON_SEND`].
+    pub fn is_on_send(&self) -> bool {
+        *self == Self::ON_SEND
+    }
+
     pub fn to_base64(&self) -> String {
         STANDARD.encode(self.bytes)
     }

@@ -113,14 +113,17 @@ const SCHEMA: &str = r#"
         tags       TEXT,                              -- Finder tags (JSON); NULL: not known (none on
                                                       -- this system, or the read failed)
         name_key   INTEGER NOT NULL DEFAULT 0,        -- sibling hash of name
+        send_hash  INTEGER NOT NULL DEFAULT 0,        -- 1: a new file hashed as it is sent (hash
+                                                      -- NULL by design; sync semantics §3)
         PRIMARY KEY (id, folder),
         UNIQUE (parent, name, folder)
     ) WITHOUT ROWID;
     CREATE INDEX local_file_id ON local(file_id, folder);
     CREATE INDEX local_key ON local(parent, name_key, folder);
     -- The files not hashed yet (being written, locked, unreadable): every plan holds what they
-    -- are in (sync semantics §6.3). Few, and only they in it.
-    CREATE INDEX local_unhashed ON local(folder) WHERE hash IS NULL AND kind = 0;
+    -- are in (sync semantics §6.3). Few, and only they in it: not the files hashed on send,
+    -- which may be all of a first sync's.
+    CREATE INDEX local_unhashed ON local(folder) WHERE hash IS NULL AND kind = 0 AND send_hash = 0;
 
     -- The client's copy of the live remote nodes (the remote side of the merge), the drive's
     -- whole tree.
@@ -413,6 +416,11 @@ const MIGRATIONS: &[&str] = &[
     END;
     INSERT INTO base_files (folder, n) SELECT folder, count(*) FROM base
         WHERE kind = 0 AND folder IN (SELECT id FROM folders) GROUP BY folder;",
+    // 22: new files hashed as they are sent, left out of the files not hashed yet.
+    "ALTER TABLE local ADD COLUMN send_hash INTEGER NOT NULL DEFAULT 0;
+    DROP INDEX local_unhashed;
+    CREATE INDEX local_unhashed ON local(folder)
+        WHERE hash IS NULL AND kind = 0 AND send_hash = 0;",
 ];
 
 /// The version this client makes and reads.

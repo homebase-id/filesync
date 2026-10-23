@@ -63,7 +63,10 @@ pub(crate) fn content_state_from(v: i64) -> Result<ContentState> {
 
 /// Algorithm byte (1 = SHA-256, 2 = BLAKE3, the numeric forms Homebase accepts) + 32 digest
 /// bytes.
+/// Every hash the DB stores goes through here. Never the marker of a file hashed on send
+/// ([`ContentHash::ON_SEND`]): it would read as equal to another such file's.
 pub(crate) fn hash_to(h: &ContentHash) -> Vec<u8> {
+    assert!(!h.is_on_send(), "the hash-on-send marker is never stored");
     let mut out = Vec::with_capacity(33);
     out.push(match h.algorithm {
         HashAlgorithm::Sha256 => 1,

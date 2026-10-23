@@ -3,9 +3,9 @@
 
 use hbsync_namemap::{to_local, to_remote};
 use hbsync_platform::name::NameIssue;
-use hbsync_platform::{Os, RelPath};
+use hbsync_platform::{Fingerprint, Os, RelPath};
 use hbsync_state::{BaseRow, FolderTx, MirrorRow, Placing, PlannedBase, ReadTx, StateError};
-use hbsync_types::{ContentState, NodeId, NodeKind, NodeState, RemoteRef};
+use hbsync_types::{ContentHash, ContentState, NodeId, NodeKind, NodeState, RemoteRef};
 
 pub(crate) mod rules;
 
@@ -27,6 +27,9 @@ pub(crate) struct Settle<'a> {
     /// takes the base there as unmoved (the plan's next operation on a node follows its earlier
     /// one; only another engine, the feed or recovery moves it otherwise).
     pub(crate) ours: Option<RemoteRef>,
+    /// An upload hashed on send sent the item's bytes, of this hash, while it showed this
+    /// fingerprint: its row takes the hash if it still shows it ([`FolderTx::sent_hash`]).
+    pub(crate) sent: Option<(Fingerprint, ContentHash)>,
 }
 
 impl<'a> Settle<'a> {
@@ -38,6 +41,7 @@ impl<'a> Settle<'a> {
             against: Against::Mirror,
             tags: TagWrite::Agreed,
             ours: None,
+            sent: None,
         }
     }
 
@@ -183,6 +187,13 @@ pub(crate) fn settle_with(
     os: Os,
 ) -> Result<Option<RemoteRef>, StateError> {
     let node = how.node;
+    // First: the local side below reads the item with the hash it sent.
+    if let Some((seen, hash)) = &how.sent
+        && !s.sent_hash(node, seen, *hash)?
+    {
+        // Changed since it was sent: read before it is planned again.
+        s.mark_dirty(node)?;
+    }
     let base = s.get_base(node)?;
     let at = base.as_ref().map(|b| b.remote);
     let ours = how.ours.filter(|o| at == Some(*o));
@@ -448,6 +459,7 @@ mod tests {
             executable: Some(false),
             hash: Some(local.hash),
             tags: None,
+            send_hash: false,
         })
     }
 

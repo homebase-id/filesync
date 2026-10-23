@@ -12,8 +12,8 @@ use std::rc::Rc;
 
 use hbsync_fileio::{HashAlgorithm, Hasher};
 use hbsync_remote::{
-    Answers, ChangesPage, Deletes, ErrorClass, ForGood, Holds, NodeMeta, Paced, RefsPage, Remote,
-    RemoteBody, RemoteError, RemoteHeader, Result, Upload,
+    Answers, ChangesPage, Deletes, ErrorClass, ForGood, Holds, NodeMeta, Paced, Planned, RefsPage,
+    Remote, RemoteBody, RemoteError, RemoteHeader, Result, Upload,
 };
 use hbsync_types::schema::{ARCHIVAL_REMOVED, NodeContent, PAYLOAD_KEY};
 use hbsync_types::{
@@ -152,6 +152,7 @@ fn archival_set(answer: &ArchivalSet, asked: &Target) -> Result<Written> {
             token: asked.token.clone(),
         },
         changed_at: answer.updated,
+        content: None,
     })
 }
 
@@ -231,14 +232,14 @@ impl HomebaseRemote {
             None => None,
             Some(p) => {
                 let iv = sealed::strong().map_err(remote_error)?;
-                let (plain, sent) = (tally(p.hash.algorithm), tally(p.hash.algorithm));
+                let (plain, sent) = (tally(p.hash.algorithm()), tally(p.hash.algorithm()));
                 let reader = Paced {
                     inner: tap(Encrypting::new(tap(p.reader, &plain), &key.key, &iv), &sent),
                     pace: p.pace,
                 };
                 Some(Sending {
                     descriptor: wire::PayloadDescriptor {
-                        algorithm: p.hash.algorithm,
+                        algorithm: p.hash.algorithm(),
                         iv,
                     },
                     reader,
@@ -302,6 +303,8 @@ impl HomebaseRemote {
                 token: Some(key.token(self.client.key())),
             },
             changed_at: updated,
+            // The plaintext's hash, as its hash part sent it (the server took it).
+            content: sending.as_ref().map(|s| finish(&s.plain).0),
         })
     }
 
@@ -387,17 +390,21 @@ impl HomebaseRemote {
 struct Sending<'a> {
     descriptor: wire::PayloadDescriptor,
     reader: Paced<'a, Tap<Encrypting<Tap<&'a mut dyn Read>>>>,
-    /// The plaintext's hash and size the upload was planned with.
-    planned: (ContentHash, u64),
+    /// The plaintext's hash (or hashed on send) and size the upload was planned with.
+    planned: (Planned<'a>, u64),
     plain: Tally,
     sent: Tally,
 }
 
-impl Sending<'_> {
+impl<'a> Sending<'a> {
     /// Makes the `payloadHash` part once the payload is sent. The server can't tell from
     /// ciphertext that the file changed since it was hashed: if the plaintext isn't what was
-    /// planned, values no bytes hash to make it refuse the payload.
-    fn hash_part<'k>(&self, key: &'k KeyHeader) -> impl FnOnce() -> Vec<u8> + 'k {
+    /// planned (hashed on send: if its source changed while it was read), values no bytes hash
+    /// to make it refuse the payload.
+    fn hash_part<'k>(&self, key: &'k KeyHeader) -> impl FnOnce() -> Vec<u8> + 'k
+    where
+        'a: 'k,
+    {
         let (plain, sent, planned, iv) = (
             self.plain.clone(),
             self.sent.clone(),
@@ -406,7 +413,7 @@ impl Sending<'_> {
         );
         move || {
             let (content, len) = finish(&plain);
-            if (content, len) != planned {
+            if len != planned.1 || !planned.0.takes(content) {
                 return wire::refused_payload_hash();
             }
             wire::payload_hash(key, &iv, &content, &finish(&sent).0)
@@ -1162,7 +1169,7 @@ mod tests {
         };
         for target in [None, Some(&target)] {
             let upload = Upload {
-                hash: hbsync_fileio::hash_bytes(b"", HashAlgorithm::Blake3),
+                hash: Planned::Known(hbsync_fileio::hash_bytes(b"", HashAlgorithm::Blake3)),
                 size,
                 reader: &mut Unread,
                 pace: None,

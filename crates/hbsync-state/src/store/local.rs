@@ -245,12 +245,42 @@ impl ReadTx<'_> {
         Ok(rows)
     }
 
+    /// Of `nodes`, the files here left to be hashed on send ([`LocalRow::send_hash`]): a query
+    /// per [`PENDING_CHUNK`](super::dirty::PENDING_CHUNK) nodes, none for none.
+    pub fn sending_among(&self, nodes: &[NodeId]) -> Result<Vec<NodeId>> {
+        use super::dirty::PENDING_CHUNK;
+        let mut sending = Vec::new();
+        if nodes.is_empty() {
+            return Ok(sending);
+        }
+        static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            let rows = vec!["(?)"; PENDING_CHUNK].join(", ");
+            format!(
+                "WITH q(u) AS (VALUES {rows}) SELECT DISTINCT q.u FROM q \
+                 CROSS JOIN nodes n ON n.uuid = q.u \
+                 JOIN local l ON l.id = n.id AND l.folder = $F WHERE l.send_hash = 1"
+            )
+        });
+        let mut stmt = self.prep(&SQL)?;
+        for chunk in nodes.chunks(PENDING_CHUNK) {
+            let pad = std::iter::repeat_n(&chunk[0], PENDING_CHUNK - chunk.len());
+            let params = chunk.iter().chain(pad).map(|n| n.0.as_bytes().to_vec());
+            let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+                r.get::<_, Vec<u8>>(0)
+            })?;
+            for row in rows {
+                sending.push(codec::node(&row?)?);
+            }
+        }
+        Ok(sending)
+    }
+
     /// The files here not hashed yet (being written, locked, unreadable; their own index):
     /// what they are in waits for them (sync semantics §6.3).
     pub fn unhashed_files(&self) -> Result<Vec<NodeId>> {
         let mut stmt = self.prep(
             "SELECT n.uuid FROM local l JOIN nodes n ON n.id = l.id \
-             WHERE l.folder = $F AND l.hash IS NULL AND l.kind = 0",
+             WHERE l.folder = $F AND l.hash IS NULL AND l.kind = 0 AND l.send_hash = 0",
         )?;
         let rows = stmt.query_map([], |r| r.get::<_, Vec<u8>>(0))?;
         rows.map(|r| codec::node(&r?)).collect()
@@ -330,6 +360,7 @@ pub(super) struct RawLocal {
     parent: i64,
     name: String,
     tags: Option<String>,
+    send_hash: bool,
 }
 
 impl RawLocal {
@@ -350,6 +381,7 @@ impl RawLocal {
             parent: r.get(at + 11)?,
             name: r.get(at + 12)?,
             tags: r.get(at + 13)?,
+            send_hash: r.get(at + 14)?,
         })
     }
 
@@ -369,6 +401,7 @@ impl RawLocal {
             executable: self.executable,
             hash: self.hash.as_deref().map(codec::hash_from).transpose()?,
             tags: self.tags.as_deref().map(tags_from_str),
+            send_hash: self.send_hash,
         })
     }
 }
@@ -418,11 +451,11 @@ impl FolderTx<'_> {
         let (lo, hi) = codec::file_id_parts(&fp.file_id);
         self.prep(
             "INSERT INTO local (folder, id, parent, name, kind, size, mtime_ns, ctime_ns, \
-                 volume, file_id, file_id_hi, executable, hash, tags, name_key) \
-                 VALUES ($F, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+                 volume, file_id, file_id_hi, executable, hash, tags, name_key, send_hash) \
+                 VALUES ($F, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
                  ON CONFLICT (id, folder) DO UPDATE SET kind = ?4, size = ?5, \
                  mtime_ns = ?6, ctime_ns = ?7, volume = ?8, file_id = ?9, file_id_hi = ?10, \
-                 executable = ?11, hash = ?12, tags = ?13",
+                 executable = ?11, hash = ?12, tags = ?13, send_hash = ?15",
         )?
         .execute(params![
             id,
@@ -439,6 +472,8 @@ impl FolderTx<'_> {
             row.hash.as_ref().map(codec::hash_to),
             row.tags.as_ref().map(tags_to_string),
             sibling_hash(name),
+            // Only a file not hashed yet is hashed on send.
+            row.send_hash && row.hash.is_none() && row.kind == NodeKind::File,
         ])?;
         // The row didn't move (checked above): what was found stays right, unless a folder
         // became a file. A new folder is known from now on.
@@ -476,6 +511,36 @@ impl FolderTx<'_> {
             self.forget_local_ids();
         }
         Ok(kind.is_some())
+    }
+
+    /// The upload of `node`'s file, hashed on send while it showed `seen`, sent bytes of
+    /// content `hash`: its row takes that hash if it still shows `seen`, and is hashed on send
+    /// no more. Whether it took it: else it stays to be hashed, not free any more (it has a
+    /// base), so it is read before it is planned again.
+    pub fn sent_hash(&self, node: NodeId, seen: &Fingerprint, hash: ContentHash) -> Result<bool> {
+        let Some(row) = self.local_by_node(node)?.filter(|r| r.send_hash) else {
+            return Ok(true);
+        };
+        if row.fingerprint != *seen {
+            return Ok(false);
+        }
+        self.prep(
+            "UPDATE local SET hash = ?2, send_hash = 0 \
+             WHERE folder = $F AND id = (SELECT id FROM nodes WHERE uuid = ?1)",
+        )?
+        .execute(params![node.0.as_bytes(), codec::hash_to(&hash)])?;
+        Ok(true)
+    }
+
+    /// `node`'s file can't be read as it is sent: a file not hashed yet from now on, which
+    /// waits as such (sync semantics §6.3), no more hashed on send.
+    pub fn unsend(&self, node: NodeId) -> Result<()> {
+        self.prep(
+            "UPDATE local SET send_hash = 0 \
+             WHERE folder = $F AND id = (SELECT id FROM nodes WHERE uuid = ?1)",
+        )?
+        .execute([node.0.as_bytes()])?;
+        Ok(())
     }
 
     /// The item recorded for `old` is node `new` from now on (adoption): same place, same

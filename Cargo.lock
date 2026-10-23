@@ -1718,6 +1718,7 @@ dependencies = [
  "hbsync-engine",
  "hbsync-fileio",
  "hbsync-local",
+ "hbsync-namemap",
  "hbsync-platform",
  "hbsync-state",
  "hbsync-types",
