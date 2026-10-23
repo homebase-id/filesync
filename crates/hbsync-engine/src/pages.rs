@@ -182,6 +182,11 @@ impl OwnPages {
         }
     }
 
+    /// Whether nothing waits to be planned as a page of its own.
+    pub fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
     /// A new sweep: everything may be tried again. What waits stays queued, the last page's
     /// too, across syncs (one that stopped at its round limit goes on with it), tried once
     /// more this sweep.

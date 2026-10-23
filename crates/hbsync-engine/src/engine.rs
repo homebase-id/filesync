@@ -557,9 +557,32 @@ impl Engine {
         // Rounds that planned something: a page whose nodes a page of their own planned this
         // sweep is passed over without one.
         let mut rounds = 0;
-        while rounds < self.cfg.max_rounds {
-            if report.stopped || self.stop.load(Ordering::Relaxed) {
-                report.stopped = true;
+        // The sweep's last page was planned: it ends once what its pages wait for is planned
+        // too, each as a page of its own (§6.5), or when the sync stops (round limit, a stop).
+        let mut ending = false;
+        loop {
+            let stop = report.stopped || self.stop.load(Ordering::Relaxed);
+            let go = rounds < self.cfg.max_rounds && !stop;
+            if ending && (!go || self.own_pages.is_empty()) {
+                // End of a sweep: what it held, and what waits now.
+                ending = false;
+                report.held = self.held.shown(std::mem::take(&mut held));
+                report.waiting = self.waited.take_told();
+                swept = true;
+                after = None;
+                self.own_pages.new_sweep();
+                planned_own.clear();
+                let page = std::mem::take(&mut hold_out);
+                if !progress {
+                    settled = whole.then_some(page);
+                    break;
+                }
+                progress = false;
+                whole = true;
+                continue;
+            }
+            if !go {
+                report.stopped |= stop;
                 break;
             }
             // What a page waits for (a folder it waits for with its dirty subtree; a clash
@@ -568,6 +591,10 @@ impl Engine {
             // holds: counted again, in the same read, when they are stale
             // ([`HeldDeletes::recount`]).
             let own_page = self.next_own_page()?;
+            if ending && own_page.is_none() {
+                // What they waited for had nothing left to plan: the sweep ends.
+                continue;
+            }
             let (dirty, next, own, fresh, read) = self.db.read(|s| {
                 let (dirty, next, own) = match own_page {
                     Some((page, piece)) => (page, after, Some(piece)),
@@ -622,22 +649,7 @@ impl Engine {
                 continue;
             }
             after = next;
-            if read < self.cfg.batch {
-                // End of a sweep: what it held, and what waits now.
-                report.held = self.held.shown(std::mem::take(&mut held));
-                report.waiting = self.waited.take_told();
-                swept = true;
-                after = None;
-                self.own_pages.new_sweep();
-                planned_own.clear();
-                let page = std::mem::take(&mut hold_out);
-                if !progress {
-                    settled = whole.then_some(page);
-                    break;
-                }
-                progress = false;
-                whole = true;
-            }
+            ending = read < self.cfg.batch;
         }
         if !swept {
             report.held = self.held.shown(held);

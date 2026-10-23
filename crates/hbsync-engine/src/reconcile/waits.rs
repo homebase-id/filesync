@@ -187,9 +187,18 @@ impl Reconciler<'_> {
                 _ => continue,
             };
             // Neither is made by this plan: one is in another page, the other left as it is.
+            let waits =
+                |f: NodeId| (self.elsewhere(f) || self.paged.contains(&f)) && !side.contains(f);
             let mut with: Vec<NodeId> = Vec::new();
-            if (self.elsewhere(parent) || self.paged.contains(&parent)) && !side.contains(parent) {
+            if waits(parent) {
+                // With the folders above it, on any side, that wait so too, all at once: else
+                // a chain of new folders is found a page at a time, each page a folder larger.
                 with.push(parent);
+                with.extend(
+                    crate::pages::above_any_side(i, parent)
+                        .into_iter()
+                        .filter(|&f| waits(f)),
+                );
             }
             if let Some(occupant) = side.child_named(parent, name, Some(node))
                 && self.elsewhere(occupant)
