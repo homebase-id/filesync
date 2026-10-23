@@ -303,7 +303,8 @@ impl Engine {
     /// and after it two reads per node restored ([`crate::held::after_restore`]). Returns how
     /// many it put back.
     pub fn put_back(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
-        self.held.put_back(&mut self.db, &self.drive, nodes)
+        self.held
+            .put_back(&mut self.db, &self.drive, nodes, &self.cfg.folder.scope)
     }
 
     /// Waits up to `timeout` for the live changes `observer`'s watcher reports, and records
@@ -525,7 +526,8 @@ impl Engine {
         report: &mut SyncReport,
     ) -> Result<Option<(bool, Option<DirtyCursor>)>, EngineError> {
         let (guarding, mut counts, computer) =
-            self.held.begin_sweep(&mut self.db, self.cfg.guard)?;
+            self.held
+                .begin_sweep(&mut self.db, self.cfg.guard, &self.cfg.folder.scope)?;
         let mut opts = Options {
             device: self.cfg.device.clone(),
             computer,

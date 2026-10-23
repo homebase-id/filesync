@@ -103,26 +103,42 @@ pub trait Sides {
     fn here(&self, node: NodeId) -> Result<Option<NodeKind>, Self::Error>;
     /// What is in folder `node` here, each with what it is.
     fn here_children(&self, node: NodeId) -> Result<Vec<(NodeId, NodeKind)>, Self::Error>;
-    /// Whether the drive has `node`, live.
+    /// Whether the drive has `node`, live (in Recently deleted or not there: not live; a node
+    /// taken along by a folder in Recently deleted is live, to come back with that folder).
     fn live(&self, node: NodeId) -> Result<bool, Self::Error>;
+    /// Whether the drive no longer has `node` as the plan reads it: not there, or taken along
+    /// by a folder in Recently deleted above it (the one rule, `along::taken_along`).
+    fn gone(&self, node: NodeId) -> Result<bool, Self::Error>;
     /// `node`'s row of Recently deleted: the folder it was in, and the removal's time
     /// ([`hbsync_types::removal_time`]).
     fn removed(&self, node: NodeId) -> Result<Option<(NodeId, i64)>, Self::Error>;
-    /// Whether a removal elsewhere is still to be followed at `node` or below it in the base:
-    /// a synced item still here that the drive no longer has.
-    fn removal_pending_under(&self, node: NodeId) -> Result<bool, Self::Error>;
 }
 
 /// Whether removals elsewhere held as every synced file at `node` stay held (sync semantics
 /// §7): until the user answers (`confirmed`: Delete), each while a removal elsewhere is still
-/// to be followed in it: it, or (back on the drive) what is below it.
+/// to be followed in it: it (gone on the drive as the plan reads it, taken along too), or (back
+/// on the drive) what is below it.
 pub fn keep_held<S: Sides>(node: NodeId, confirmed: bool, sides: &S) -> Result<bool, S::Error> {
     Ok(!confirmed
         && sides.synced(node)?.is_some()
-        && match sides.live(node)? {
-            false => sides.here(node)?.is_some(),
-            true => sides.removal_pending_under(node)?,
+        && match sides.gone(node)? {
+            true => sides.here(node)?.is_some(),
+            false => removal_pending_under(node, sides)?,
         })
+}
+
+/// Whether a removal elsewhere is still to be followed below `node` in the base: a synced item
+/// still here that the drive no longer has ([`Sides::gone`]). Costs, per node walked till the
+/// first, a here, a gone and a base read: only for a held wipe back on the drive.
+fn removal_pending_under<S: Sides>(node: NodeId, sides: &S) -> Result<bool, S::Error> {
+    let mut below = sides.synced_children(node)?;
+    while let Some(n) = below.pop() {
+        if sides.here(n)?.is_some() && sides.gone(n)? {
+            return Ok(true);
+        }
+        below.extend(sides.synced_children(n)?);
+    }
+    Ok(false)
 }
 
 /// What "Put them back" does (sync semantics §7), as the drive has things now.
@@ -330,6 +346,8 @@ mod tests {
         /// Here: the folder each is in, and what it is.
         here: HashMap<NodeId, (NodeId, NodeKind)>,
         live: HashSet<NodeId>,
+        /// Live, but taken along by a folder in Recently deleted.
+        taken: HashSet<NodeId>,
         /// In Recently deleted: its folder there and the removal's time.
         removed: HashMap<NodeId, (NodeId, i64)>,
     }
@@ -361,12 +379,44 @@ mod tests {
         fn live(&self, node: NodeId) -> Result<bool, Infallible> {
             Ok(self.live.contains(&node))
         }
+        fn gone(&self, node: NodeId) -> Result<bool, Infallible> {
+            Ok(!self.live.contains(&node) || self.taken.contains(&node))
+        }
         fn removed(&self, node: NodeId) -> Result<Option<(NodeId, i64)>, Infallible> {
             Ok(self.removed.get(&node).copied())
         }
-        fn removal_pending_under(&self, _: NodeId) -> Result<bool, Infallible> {
-            Ok(false)
-        }
+    }
+
+    /// A wipe held on folder `g`, which a folder removed on the drive took along (live there,
+    /// in a folder in Recently deleted), stays held: `g` is gone as the plan reads it, and it is
+    /// still here. Read as live, nothing below it would be pending and the hold would go
+    /// without an answer (scan A1: not reached by the simulator, where a removed folder above
+    /// holds it too, but one rule for "live" either way).
+    #[test]
+    fn a_wipe_held_on_a_node_taken_along_stays_held() {
+        let (r, g, f) = (NodeId::new(), NodeId::new(), NodeId::new());
+        let model = Model {
+            base: HashMap::from([(r, NodeId::ROOT), (g, r), (f, g)]),
+            here: HashMap::from([
+                (r, (NodeId::ROOT, NodeKind::Folder)),
+                (g, (r, NodeKind::Folder)),
+                (f, (g, NodeKind::File)),
+            ]),
+            live: HashSet::from([g, f]),
+            taken: HashSet::from([g, f]),
+            removed: HashMap::from([(r, (NodeId::ROOT, 5))]),
+        };
+        assert_eq!(keep_held(g, false, &model), Ok(true));
+        assert_eq!(keep_held(g, true, &model), Ok(false), "answered");
+        let back = Model {
+            taken: HashSet::new(),
+            ..model
+        };
+        assert_eq!(
+            keep_held(g, false, &back),
+            Ok(false),
+            "live again, nothing pending"
+        );
     }
 
     /// Put back restores a removed item from the folder it is in here, and up from there only
@@ -428,6 +478,7 @@ mod tests {
             // `d` gone for good; `e` back on the drive; `x` in Recently deleted.
             live: HashSet::from([e]),
             removed: HashMap::from([(x, (e, 5))]),
+            ..Model::default()
         };
         let Ok(plan) = put_back_plan(&[d], &model);
         assert_eq!(

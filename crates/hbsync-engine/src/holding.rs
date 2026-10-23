@@ -12,6 +12,7 @@ use crate::drive::Drive;
 use crate::error::EngineError;
 use crate::held::{self, Sides};
 use crate::reconcile::{DeleteGuard, Guarding, Op, Plan};
+use crate::scope::Scope;
 
 /// The held deletes of one folder's engine.
 #[derive(Debug)]
@@ -131,6 +132,7 @@ impl HeldDeletes {
         &mut self,
         db: &mut StateDb,
         settings: DeleteGuard,
+        scope: &Scope,
     ) -> Result<(Guarding, Counts, String), StateError> {
         self.out.reached = false;
         // The guard must judge the whole delete, even when it is planned in several batches;
@@ -171,7 +173,9 @@ impl HeldDeletes {
         {
             self.plan_again(db)?;
         }
-        // A row lookup or two each; a subtree walk only for one back on the drive. One held out
+        // Each: is it gone on the drive (the mirror up to the first folder it lacks, and a
+        // removed folder's subtree there), and for one back on the drive, a walk of its base
+        // subtree till the first item still here and gone there. One held out
         // of the dirty set is as it was then: anything that changed it marked it dirty, and the
         // plan that reaches it plans all of them again, from here.
         let mut wiped = HashSet::new();
@@ -181,7 +185,11 @@ impl HeldDeletes {
             }
             for &node in &saved {
                 let keep = self.out.nodes.contains(&node)
-                    || held::keep_held(node, self.confirmed.contains(&node), &StoreSides(s))?;
+                    || held::keep_held(
+                        node,
+                        self.confirmed.contains(&node),
+                        &StoreSides(s, scope),
+                    )?;
                 if keep {
                     wiped.insert(node);
                 }
@@ -342,6 +350,7 @@ impl HeldDeletes {
         db: &mut StateDb,
         drive: &Drive,
         nodes: &[NodeId],
+        scope: &Scope,
     ) -> Result<usize, EngineError> {
         self.out.plan_again = true;
         drive.pull(None)?;
@@ -353,7 +362,7 @@ impl HeldDeletes {
                 Ok(())
             })
         };
-        let plan = db.read(|s| held::put_back_plan(nodes, &StoreSides(s)))?;
+        let plan = db.read(|s| held::put_back_plan(nodes, &StoreSides(s, scope)))?;
         forget(db, &plan.forget)?;
         if plan.items.is_empty() {
             return Ok(plan.forget.len());
@@ -363,7 +372,7 @@ impl HeldDeletes {
         // found deleted for good goes up again, and a folder kept, gone for good, once nothing
         // below it waits in Recently deleted any more. Its own error is the one told.
         let after = db
-            .read(|s| held::after_restore(&plan, &StoreSides(s)))
+            .read(|s| held::after_restore(&plan, &StoreSides(s, scope)))
             .and_then(|after| forget(db, &after).map(|()| after));
         let after = match (restored, after) {
             (Err(e), after) => {
@@ -441,8 +450,9 @@ fn guard_counts(
     })
 }
 
-/// What the rules of held deletes read ([`held::Sides`]), from the store.
-struct StoreSides<'a, 's>(&'a ReadTx<'s>);
+/// What the rules of held deletes read ([`held::Sides`]), from the store, for the folder of
+/// `scope`.
+pub(crate) struct StoreSides<'a, 's>(pub(crate) &'a ReadTx<'s>, pub(crate) &'a Scope);
 
 impl Sides for StoreSides<'_, '_> {
     type Error = StateError;
@@ -480,15 +490,15 @@ impl Sides for StoreSides<'_, '_> {
         Ok(self.0.get_mirror(node)?.is_some())
     }
 
+    fn gone(&self, node: NodeId) -> Result<bool, StateError> {
+        crate::view::gone_on_drive(self.0, node, self.1)
+    }
+
     fn removed(&self, node: NodeId) -> Result<Option<(NodeId, i64)>, StateError> {
         Ok(self
             .0
             .removed_by_node(node)?
             .map(|r| (r.row.parent, r.time())))
-    }
-
-    fn removal_pending_under(&self, node: NodeId) -> Result<bool, StateError> {
-        self.0.removal_pending_under(node)
     }
 }
 
@@ -574,7 +584,7 @@ mod tests {
             s.account().put_removed(&removed(y, f, None))
         })?;
         db.read(|s| {
-            let sides = StoreSides(s);
+            let sides = StoreSides(s, &Scope::main());
             assert_eq!(sides.removed(f)?, Some((NodeId::ROOT, 5)));
             assert_eq!(sides.removed(x)?, Some((f, 7)));
             assert_eq!(sides.removed(y)?, Some((f, i64::MAX)));

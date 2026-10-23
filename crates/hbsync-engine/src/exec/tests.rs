@@ -4440,14 +4440,11 @@ fn a_node_in_a_file_meets_what_is_in_recovered_files() -> R {
     Ok(())
 }
 
-/// A folder `r` removed on the drive took along folder `g` in it and the synced file in `g`,
-/// still live; a confirmed delete of `g` here covers that file, though `r` is above `g`, not in
-/// it: the guard counts it gone remotely ([`ReadTx::pending_file_deletes`]) and the confirmed
-/// delete takes it from that count. Before, only a removed folder in `g` was looked at, and
-/// the count stayed too high till the delete ran.
-#[test]
-fn a_confirmed_delete_covers_what_a_removal_above_it_took_along() -> R {
-    let mut h = Harness::new()?;
+/// Folder `r` with folder `g` in it, holding synced file `f`, all here; on the drive `r` was
+/// removed (at 10) and took along `g` and `f`, written before (at 5), still live.
+fn a_removal_took_along_g(
+    h: &mut Harness,
+) -> Result<(NodeId, NodeId, NodeId), Box<dyn std::error::Error>> {
     let (r, g, file) = (NodeId::new(), NodeId::new(), NodeId::new());
     h.local_folder("r", r)?;
     h.local_folder("r/g", g)?;
@@ -4477,7 +4474,21 @@ fn a_confirmed_delete_covers_what_a_removal_above_it_took_along() -> R {
             removed_at: Some(10),
         })?;
         s.account().put_mirror(&row(g, r, NodeKind::Folder, "g"))?;
-        s.account().put_mirror(&row(file, g, NodeKind::File, "f"))?;
+        s.account().put_mirror(&row(file, g, NodeKind::File, "f"))
+    })?;
+    Ok((r, g, file))
+}
+
+/// A folder `r` removed on the drive took along folder `g` in it and the synced file in `g`,
+/// still live; a confirmed delete of `g` here covers that file, though `r` is above `g`, not in
+/// it: the guard counts it gone remotely ([`ReadTx::pending_file_deletes`]) and the confirmed
+/// delete takes it from that count. Before, only a removed folder in `g` was looked at, and
+/// the count stayed too high till the delete ran.
+#[test]
+fn a_confirmed_delete_covers_what_a_removal_above_it_took_along() -> R {
+    let mut h = Harness::new()?;
+    let (_, g, file) = a_removal_took_along_g(&mut h)?;
+    h.db.write(|s| {
         s.folder().clear_dirty(file)?;
         s.folder().mark_dirty(g)
     })?;
@@ -4493,6 +4504,26 @@ fn a_confirmed_delete_covers_what_a_removal_above_it_took_along() -> R {
         Some((false, vec![file])),
         "the delete of g covers it"
     );
+    Ok(())
+}
+
+/// A wipe held on folder `g`, which the removal of folder `r` on the drive took along (live
+/// there, written before): the store reads `g` as gone, as the plan does, and the hold stays
+/// till answered, however the count goes. Read as live, nothing below it was pending and the
+/// hold went without an answer (final scan A1).
+#[test]
+fn a_wipe_held_on_a_folder_taken_along_stays_held() -> R {
+    let mut h = Harness::new()?;
+    let (_, g, _) = a_removal_took_along_g(&mut h)?;
+    let (keep, answered) = h.db.read(|s| {
+        let sides = crate::holding::StoreSides(s, &Scope::main());
+        Ok((
+            crate::held::keep_held(g, false, &sides)?,
+            crate::held::keep_held(g, true, &sides)?,
+        ))
+    })?;
+    assert!(keep, "held till answered");
+    assert!(!answered, "answered: it goes");
     Ok(())
 }
 
