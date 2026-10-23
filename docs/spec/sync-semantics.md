@@ -608,9 +608,10 @@ expected fingerprint is treated as done.
   child created while another client deleted its folder for good) is moved into Recovered
   files (§6.3), made first where it isn't there. So is one whose parent is a file.
 - **Rows that aren't nodes.** A version that doesn't decrypt, that uses a fixed id out of place
-  (the root's, or a role folder's or Recovered files' on a file), or that changes a node's kind
-  is left out, reported, and recorded as there all the same (node schema, Identity and
-  tombstones):
+  (the root's, or a role folder's or Recovered files' on a file), that changes a node's kind,
+  or of a newer schema (`v` above 1: read-only, node schema; so a write of this client's never
+  loses its newer fields) is left out, reported, and recorded as there all the same (node
+  schema, Identity and tombstones):
   - What is in a folder this device can't read stays in it, waiting: it is never an orphan.
   - A node whose newer version it can't read (unreadable) is kept as it had it: a local edit
     goes up as a new node (a conflict copy, under a free name); a rename, tags, a delete or a

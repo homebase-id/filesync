@@ -336,6 +336,15 @@ pub(crate) fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<Remot
                 .map_err(|e| format!("file {id}: content: {e}"))?;
             let content = NodeContent::from_json(&content)
                 .map_err(|e| format!("file {id}: content isn't node schema v1: {e}"))?;
+            // A newer schema's node is read-only here (node schema, "v"): unreadable, as a
+            // newer writer's version is (§8a), so this client never renames, moves, retags or
+            // writes over it, and loses none of its newer fields.
+            if !content.is_writable() {
+                return Err(format!(
+                    "file {id}: node schema v{}, newer than this client's",
+                    content.v
+                ));
+            }
             let payload = match kind {
                 NodeKind::Folder => None,
                 NodeKind::File => {
@@ -700,6 +709,13 @@ mod tests {
         };
         // Without its size, the stored (padded) size would be taken for the file's.
         refused(with_size(None)?, "no size")?;
+        // A newer schema's node is read-only: unreadable here (node schema, "v").
+        let mut newer = fixture("file-node.json");
+        let meta = &mut newer.file_metadata.app_data;
+        let mut content = NodeContent::from_json(meta.content.as_deref().unwrap_or_default())?;
+        content.v = 2;
+        meta.content = Some(content.to_json());
+        refused(newer, "newer than this client's")?;
         // A size its stored bytes can't hold, or one near u64::MAX (whose sealed size would
         // overflow): every download would fail its check, in full.
         for (size, stored) in [(1000, None), (1040, None), (u64::MAX - 3, Some(u64::MAX))] {
