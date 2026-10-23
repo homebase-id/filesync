@@ -140,7 +140,7 @@ Written: [spec/sync-semantics.md](spec/sync-semantics.md),
   Recently deleted, or made; a folder another app syncs (OneDrive, iCloud) is refused. Next:
   a setup wizard offering them, then backups
 - **Previous versions** (next after the 2026-10-22 review round): an overwritten file's
-  earlier versions kept on the drive for `keep_deleted_days` (30), as Recently deleted keeps
+  earlier versions kept on the drive for 30 days, as Recently deleted keeps
   deleted ones, with a list and *Restore* in the tray and the file browser. It is the
   protection against ransomware and broken apps: a file encrypted or corrupted in place
   reaches the drive as an ordinary edit, which no delete guard sees, and replaces the good

@@ -174,7 +174,6 @@ impl Account {
 
         // Folders to start once no runner of theirs is left.
         let mut adding: Vec<Root> = Vec::new();
-        let keep_days = config.keep_deleted_days.days();
         let mut next_purge = Instant::now();
         loop {
             // Set and ended by the daemon ([`Account::pause`]), which wakes this thread.
@@ -229,7 +228,7 @@ impl Account {
             // never waits for it.
             if Instant::now() >= next_purge && !paused {
                 next_purge = Instant::now() + PURGE_LOOK;
-                keeper.purge(keep_days);
+                keeper.purge();
             }
             // A runner that ended takes its folder out, unless it failed: then it starts again
             // after a pause. The account ends with the last. Joined under the lock: a runner's

@@ -27,7 +27,7 @@ mod sync_root;
 pub mod unit;
 pub mod words;
 
-pub use config::{Config, ConfigError, MassDelete, Root};
+pub use config::{Config, ConfigError, KEEP_DELETED_DAYS, MassDelete, Root};
 pub use hbsync_homebase::app::{APP_NAME, files_online};
 pub use identity::Identity;
 pub use paths::{NoHome, Paths};

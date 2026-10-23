@@ -45,8 +45,6 @@ twice.
 ```toml
 device_name = "Anna's laptop"   # optional; the computer's name otherwise
 paused = false                  # hbsync pause / resume
-keep_deleted_days = 30          # Recently deleted: removed items are deleted for good after this;
-                                # at least 30 (the purge is the account's): less reads as 30, with a warning
 
 [mass_delete]                   # sync semantics, the mass-delete guard
 min_files = 50
@@ -68,12 +66,14 @@ daemon running keeps that lock from looking until it has written, and a daemon s
 before its own lock, and reads the config and binds its socket under it: it starts after such a
 change and reads it, and a program that finds it running can ask it.
 
-A hand edit while the daemon runs isn't watched for; each setting takes effect as follows (the
-tray's Recently deleted page shows the file's `keep_deleted_days` at once):
+Recently deleted keeps removed items 30 days, then deletes them for good: not a setting (the
+purge is the account's, so every client keeps 30). A `keep_deleted_days` an older version
+wrote is no longer used: the file loads, with a warning, and the next write leaves it out.
+
+A hand edit while the daemon runs isn't watched for; each setting takes effect as follows:
 
 | Setting | Takes effect |
 |---|---|
-| `keep_deleted_days` | when the account starts: the daemon's next start, or a login |
 | `device_name`, `mass_delete`, a root's `role` | when the folder's sync (re)starts: the daemon's next start, a login, or a restart after a failure |
 | `paused`, `paused_until` | at the daemon's next start (it holds the pause meanwhile); while it runs, `hbsync pause`/`resume` and the tray set them |
 | `[[roots]]` added or removed | at the daemon's next start; while it runs, `hbsync add`/`remove` and the tray do it |
@@ -364,7 +364,7 @@ included (service managers restart it then).
   since stays), or everything removed until the newest one listed, and the device's own removals shown "just now" (their time still open: not back
   from the server yet) by name. Once a day (the time is kept in the state DB) the account deletes for good what
   was removed more than
-  `keep_deleted_days` ago (a folder's delete as a whole, never a live node: a removed folder
+  30 days ago (a folder's delete as a whole, never a live node: a removed folder
   still holding one stays, restorable). Nothing is kept on the computers: Recently deleted on
   the drive is the only copy of what was deleted (a `.hbsync/trash` an older version left is
   no longer touched: the user deletes it by hand). What goes, and how: node schema, "The purge".

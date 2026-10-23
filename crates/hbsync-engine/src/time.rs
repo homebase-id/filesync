@@ -16,10 +16,10 @@ pub const TRACE_MS: i64 = 30 * DAY_MS;
 /// server answer's time and its clock that differ.
 pub(crate) const REREAD_MS: i64 = TRACE_MS - DAY_MS;
 
-/// The fewest days Recently deleted keeps an item (the same 30 days as [`TRACE_MS`], by the
-/// node schema's two rules): the purge is the whole account's, and every
-/// client keeps 30 (node schema, The purge). A device may keep longer, never shorter.
-pub const MIN_KEEP_DAYS: u32 = 30;
+/// The days Recently deleted keeps an item (the same 30 days as [`TRACE_MS`], by the node
+/// schema's two rules): the purge is the whole account's, and every client keeps 30 (node
+/// schema, The purge). Not a setting: one device can't keep longer or shorter.
+pub const KEEP_DAYS: u32 = 30;
 
 /// How long uploads are held after the drive said it is full: then one is tried again.
 pub(crate) const FULL_HOLD: Duration = Duration::from_secs(600);

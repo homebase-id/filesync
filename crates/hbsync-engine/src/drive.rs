@@ -543,11 +543,10 @@ impl Drive {
             .any(|(_, first)| now - first.at <= crate::gone::CONFIRM_WITHIN_MS))
     }
 
-    /// Once a day: deletes for good what Recently deleted has kept `keep_days`, never less
-    /// than [`crate::time::MIN_KEEP_DAYS`]. A failure waits for the
-    /// next day's try... or the next call: it is only recorded as done when it worked.
-    pub fn purge_when_due(&self, keep_days: u32) -> Result<Option<usize>, EngineError> {
-        let keep_days = keep_days.max(crate::time::MIN_KEEP_DAYS);
+    /// Once a day: deletes for good what Recently deleted has kept
+    /// [`crate::time::KEEP_DAYS`]. A failure waits for the next day's try... or the next call:
+    /// it is only recorded as done when it worked.
+    pub fn purge_when_due(&self) -> Result<Option<usize>, EngineError> {
         let now = hbsync_types::unix_now();
         let last = self
             .account()
@@ -556,7 +555,7 @@ impl Drive {
         if last.is_some_and(|last| now < last + crate::time::DAY_S) {
             return Ok(None);
         }
-        let gone = self.purge(i64::from(keep_days) * crate::time::DAY_MS)?;
+        let gone = self.purge(i64::from(crate::time::KEEP_DAYS) * crate::time::DAY_MS)?;
         self.account().write(|s| {
             s.account()
                 .set_account_kv(keys::PURGED_AT, &now.to_string())

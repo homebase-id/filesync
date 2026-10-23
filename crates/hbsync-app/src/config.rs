@@ -34,6 +34,10 @@ pub enum ConfigError {
     TooManyRoots(usize),
 }
 
+/// The days Recently deleted keeps an item, then deletes it for good: 30, on every client
+/// ([`hbsync_engine::time::KEEP_DAYS`]; not a setting).
+pub const KEEP_DELETED_DAYS: u32 = hbsync_engine::time::KEEP_DAYS;
+
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -48,35 +52,13 @@ pub struct Config {
     pub paused_until: Option<u64>,
     #[serde(default)]
     pub mass_delete: MassDelete,
-    /// Recently deleted keeps an item this long, then deletes it for good: at least
-    /// [`KeepDays::MIN`].
-    #[serde(default)]
-    pub keep_deleted_days: KeepDays,
     #[serde(default)]
     pub roots: Vec<Root>,
 }
 
-/// Days Recently deleted keeps an item (sync semantics §7; nothing is kept on this device): the
-/// purge is the account's, so a value below [`KeepDays::MIN`] reads as it ([`Config::load`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct KeepDays(u32);
-
-impl KeepDays {
-    /// What every client keeps (node schema, The purge): a device may keep longer only.
-    pub const MIN: u32 = hbsync_engine::time::MIN_KEEP_DAYS;
-
-    /// The days kept, at least [`KeepDays::MIN`].
-    pub fn days(self) -> u32 {
-        self.0.max(Self::MIN)
-    }
-}
-
-impl Default for KeepDays {
-    fn default() -> Self {
-        KeepDays(Self::MIN)
-    }
-}
+/// A setting no longer ([`KEEP_DELETED_DAYS`]): an older config that has it loads, with a
+/// warning, and a save leaves it out.
+const RETIRED_KEEP_DAYS: &str = "keep_deleted_days";
 
 /// A local folder synced with an identity's Filesync drive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -130,17 +112,22 @@ impl Config {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(ConfigError::Io(path.to_owned(), e)),
         };
-        let mut config: Config =
-            toml::from_str(&text).map_err(|e| ConfigError::Parse(path.to_owned(), e))?;
-        if config.keep_deleted_days.0 < KeepDays::MIN {
-            tracing::warn!(
-                "{}: keep_deleted_days = {} is below the {min} days every device keeps: {min} it is",
-                path.display(),
-                config.keep_deleted_days.0,
-                min = KeepDays::MIN,
-            );
-            config.keep_deleted_days = KeepDays::default();
-        }
+        let parse = |e| ConfigError::Parse(path.to_owned(), e);
+        // Parsed straight into a config (its errors say where), but for the retired key.
+        let mut config: Config = match text.contains(RETIRED_KEEP_DAYS) {
+            false => toml::from_str(&text).map_err(parse)?,
+            true => {
+                let mut table: toml::Table = toml::from_str(&text).map_err(parse)?;
+                if table.remove(RETIRED_KEEP_DAYS).is_some() {
+                    tracing::warn!(
+                        "{}: keep_deleted_days is no longer used: Recently deleted keeps items \
+                         {KEEP_DELETED_DAYS} days",
+                        path.display(),
+                    );
+                }
+                table.try_into().map_err(parse)?
+            }
+        };
         // Earlier versions kept Windows folders with `\\?\` (setup's `canonicalize`).
         for root in &mut config.roots {
             root.folder = hbsync_platform::winpath::plain(&root.folder);
@@ -320,7 +307,6 @@ mod tests {
                 min_files: 10,
                 fraction: 0.5,
             },
-            keep_deleted_days: KeepDays(45),
             roots: vec![
                 Root::main(&"anna.example.com".into(), Path::new("/home/anna/Homebase")),
                 Root {
@@ -362,23 +348,36 @@ mod tests {
         let config: Config = toml::from_str("").expect("ok");
         assert_eq!(config, Config::default());
         assert_eq!(config.mass_delete, MassDelete::default());
-        assert_eq!(config.keep_deleted_days.days(), 30);
         assert_eq!(config.root().expect("ok"), None);
         assert!(!config.device_name().is_empty());
     }
 
-    /// The purge is the whole account's: one device can't make Recently deleted keep less than
-    /// every client does, only more.
+    /// `keep_deleted_days` is no longer a setting (the purge is the whole account's: every
+    /// client keeps 30 days): a config that still has it loads as one without it, whatever its
+    /// value, and a save leaves it out.
     #[test]
-    fn keep_deleted_days_has_a_floor() -> Result<(), ConfigError> {
+    fn an_old_keep_deleted_days_loads_and_is_dropped() -> Result<(), ConfigError> {
         let dir = tempfile::tempdir().expect("ok");
         let path = dir.path().join("config.toml");
-        for (written, kept) in [(0, 30), (1, 30), (29, 30), (30, 30), (90, 90)] {
-            std::fs::write(&path, format!("keep_deleted_days = {written}\n")).expect("ok");
+        for written in ["0", "45", "\"long\""] {
+            std::fs::write(
+                &path,
+                format!("paused = true\nkeep_deleted_days = {written}\n"),
+            )
+            .expect("ok");
             let config = Config::load(&path)?.expect("a config");
-            assert_eq!(config.keep_deleted_days, KeepDays(kept), "{written}");
+            assert_eq!(
+                config,
+                Config {
+                    paused: true,
+                    ..Config::default()
+                },
+                "{written}"
+            );
+            config.save(&path)?;
+            let text = std::fs::read_to_string(&path).expect("ok");
+            assert!(!text.contains("keep_deleted_days"), "{text}");
         }
-        assert_eq!(KeepDays(3).days(), 30);
         Ok(())
     }
 
