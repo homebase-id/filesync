@@ -127,9 +127,9 @@ impl Sim {
     }
 
     /// Each client plans its nodes in pages of `size`, in node id order, as the engine plans
-    /// its dirty set (`EngineConfig::batch`): a node in another page is held as it is, one in
-    /// a page's folder that may go holds that folder too (`Input::dirty_elsewhere`), and what
-    /// a page held so, or whose names or places clash across pages, is planned as a page of
+    /// its dirty set (`EngineConfig::batch`): a node in another page waits as it is, one in a
+    /// page's folder that may go makes that folder wait too (`Input::dirty_elsewhere`), and
+    /// what waits so in a page, or whose names or places clash across pages, is planned as a page of
     /// its own next (`pages::OwnPages`). A plan's operations run before the next page is
     /// planned (a step that finds none plans it).
     pub fn with_small_pages(mut self, size: usize) -> Self {

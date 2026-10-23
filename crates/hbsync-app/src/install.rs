@@ -216,7 +216,7 @@ mod tests {
         let exe = |d: &Path, n: &str| d.join(format!("{n}{}", std::env::consts::EXE_SUFFIX));
         let app = Install::MacApp { bundle };
         let tray = exe(&macos, "homebase-filesync");
-        // All three in Contents/MacOS (an older layout): beside each other.
+        // All three in Contents/MacOS (a layout it still finds): beside each other.
         assert_eq!(app.program("hbsyncd", &tray), exe(&macos, "hbsyncd"));
         // The daemon and the CLI as helpers, found from either side.
         std::fs::create_dir_all(&macos)?;

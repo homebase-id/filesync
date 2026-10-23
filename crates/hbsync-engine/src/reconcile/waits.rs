@@ -40,7 +40,7 @@ pub(super) struct Waits {
 }
 
 impl Waits {
-    pub(super) fn of(input: &Input, own_page: bool) -> Self {
+    pub(super) fn of(input: &Input, piece: bool) -> Self {
         let mut by_file: Vec<(NodeId, Vec<NodeId>)> = input
             .local_unhashed
             .iter()
@@ -63,7 +63,7 @@ impl Waits {
         // A folder of the page below one another page plans waits for that one alone: its
         // page covers both (a piece of a split doesn't wait for the folder above it, but what
         // that one's removal took along does: `Reconciler::waits_for_its_folder`).
-        let above: HashSet<NodeId> = match own_page {
+        let above: HashSet<NodeId> = match piece {
             true => HashSet::new(),
             false => input.going_above.clone(),
         };
@@ -217,7 +217,7 @@ impl Reconciler<'_> {
         }
     }
 
-    /// In a piece of a folder too big for a page (`Options::own_page`), what the removal on the
+    /// In a piece of a folder too big for a page (`Options::piece`), what the removal on the
     /// drive of a folder above it took along (§6.3), unchanged here, waits for that folder's
     /// plan, which another page makes ([`Input::going_above`]): planned again as it is
     /// (`placed`). The folder's plan decides whether it stays, and with it whether what its
@@ -225,7 +225,7 @@ impl Reconciler<'_> {
     /// removal while the folder came back. A node changed here plans the same either way.
     pub(super) fn waits_for_its_folder(&mut self) {
         let i = self.input;
-        if !self.opts.own_page || i.going_above.is_empty() || self.taken.is_empty() {
+        if !self.opts.piece || i.going_above.is_empty() || self.taken.is_empty() {
             return;
         }
         let waiting: Vec<NodeId> = i

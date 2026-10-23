@@ -94,7 +94,8 @@ impl ContentHash {
         Ok(ContentHash { algorithm, bytes })
     }
 
-    /// Parses `algorithm:hex`, the form used in the state DB and logs.
+    /// Parses `algorithm:hex`, the form [`Display`](fmt::Display) writes (in logs). The state DB
+    /// stores bytes, not this.
     pub fn parse_tagged(s: &str) -> Result<Self, HashParseError> {
         let (alg, hex) = s.split_once(':').ok_or(HashParseError::Base64)?;
         Self::from_hex(alg.parse()?, hex)

@@ -1,5 +1,5 @@
 //! The engine's time rules (recovery's hold of a placement it can't judge yet stays with it:
-//! `exec::UNHASHED_HOLD`). Times of the drive are the server's clock (Unix ms); the local clock
+//! `exec::UNHASHED_WAIT`). Times of the drive are the server's clock (Unix ms); the local clock
 //! names only this device's own things (its purge's day).
 
 use std::time::Duration;

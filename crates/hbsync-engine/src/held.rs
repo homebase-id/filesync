@@ -21,7 +21,7 @@ use crate::plan::{Input, Op, Plan};
 
 /// What of `plan`, made for the dirty nodes `page`, is held and leaves the dirty set: the held
 /// deletes whose node is in `page`, and the nodes of `page` each of them covers (its node, and
-/// what a held delete takes along), where the plan has nothing else for any of them. What else
+/// what is below a held delete's node), where the plan has nothing else for any of them. What else
 /// the plan does, defers or waits for stays dirty, and so does the delete it is part of.
 pub fn out_of_dirty<'p>(plan: &'p Plan, page: &[NodeId]) -> (Vec<&'p Op>, HashSet<NodeId>) {
     let mut nodes = HashSet::new();

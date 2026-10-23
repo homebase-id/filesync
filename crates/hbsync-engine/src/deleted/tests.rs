@@ -68,7 +68,7 @@ fn removed(node: NodeId, parent: NodeId, removed_at: i64) -> RemovedRow {
 }
 
 /// Removed folders in a cycle (a remote one left them so) are restored once each, and the
-/// plan ends; so does the walk to the item that took them along.
+/// plan ends; so does the walk to the item they were deleted with.
 #[test]
 fn a_cycle_in_recently_deleted_ends() -> Result<(), StateError> {
     let db = Db::new()?;
@@ -103,7 +103,7 @@ fn a_cycle_in_recently_deleted_ends() -> Result<(), StateError> {
     Ok(())
 }
 
-/// Restoring an item together with the folder whose delete took it along plans the folder's
+/// Restoring an item together with the folder it was deleted with plans the folder's
 /// whole group once, whichever comes first: the item doesn't stand for the folder.
 #[test]
 fn a_restore_of_a_folder_and_an_item_in_it_takes_the_whole_folder() -> Result<(), StateError> {
@@ -179,8 +179,8 @@ fn sorted(mut nodes: Vec<NodeId>) -> Vec<NodeId> {
 }
 
 /// Emptying as listed deletes for good exactly what the listing saw: an open removal too,
-/// what a delete took along by then; not what was recorded after it (a removal that arrives
-/// later with an older server time, an item a listed folder's delete took along that came
+/// what was deleted with a delete by then; not what was recorded after it (a removal that
+/// arrives later with an older server time, an item deleted with a listed folder that came
 /// later, which keeps that folder), nor a node restored and deleted again since.
 #[test]
 fn emptying_takes_what_was_listed_and_nothing_since() -> Result<(), Box<dyn std::error::Error>> {
@@ -436,7 +436,7 @@ fn emptying_a_chain_deeper_than_any_path() {
 }
 
 /// Items picked by name are those rows alone, described and counted as the listing does
-/// them: a delete with its members, an item taken along with none.
+/// them: a delete with its members, an item deleted with one with none.
 #[test]
 fn items_are_found_by_name() -> Result<(), StateError> {
     let mut db = StateDb::open_in_memory()?;
@@ -475,7 +475,11 @@ fn items_are_found_by_name() -> Result<(), StateError> {
     ];
     expected.sort();
     assert_eq!(found, expected);
-    assert_eq!(listed[&data], (run, 1), "taken along, holding f.bin");
+    assert_eq!(
+        listed[&data],
+        (run, 1),
+        "deleted with another, holding f.bin"
+    );
     assert_eq!(
         listed[&other_data],
         (other_data, 0),

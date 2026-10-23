@@ -17,14 +17,9 @@ use hbsync_remote::{Remote, RemoteError};
 use hbsync_types::{Doomed, RemoteRef};
 
 /// Where the development tools keep the credentials of `identity`:
-/// `$XDG_CONFIG_HOME/hbsync/dev/<identity>.json` (default `~/.config`). The product keeps them
-/// in the OS keychain.
-pub fn credentials_path(identity: &str) -> Result<PathBuf, String> {
-    credentials_path_as(identity, None)
-}
-
-/// [`credentials_path`] of one of several clients of `identity` on this machine (`hbsync-register
-/// --as <client>`): `<identity>.<client>.json`; `None` is the default one. Each is a client
+/// `$XDG_CONFIG_HOME/hbsync/dev/<identity>.json` (default `~/.config`; the product keeps them in
+/// the OS keychain), or of one of several clients of it on this machine (`hbsync-register --as
+/// <client>`): `<identity>.<client>.json`; `None` is the default one. Each is a client
 /// registration of its own, as on another computer: a notification subscription leaves out
 /// only its own token's writes (`excludeOwnWrites`), so test "computers" that should hear each
 /// other need one each.

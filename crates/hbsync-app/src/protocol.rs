@@ -53,7 +53,7 @@ pub enum Ask {
         limit: usize,
     },
     /// The newest deletes of Recently deleted, every account's: each item deleted on its own,
-    /// with how many items its delete took along (never those items themselves).
+    /// with how many items were deleted with it (never those items themselves).
     Deleted {
         limit: usize,
     },
@@ -219,7 +219,7 @@ pub struct DeletedList {
 }
 
 impl DeletedList {
-    /// Every item, the ones the deletes took along too.
+    /// Every item, the ones deleted with another too.
     pub fn total(&self) -> usize {
         self.accounts.iter().map(|a| a.items).sum()
     }
@@ -236,8 +236,8 @@ pub struct DeletedAccount {
     pub identity: Identity,
     /// The items deleted on their own.
     pub deletes: usize,
-    /// What emptying all of it deletes for good: removed nodes only, every item and the ones its
-    /// deletes took along, but a folder holding a live node or a removal that stays.
+    /// What emptying all of it deletes for good: removed nodes only, every item and the ones
+    /// deleted with its deletes, but a folder holding a live node or a removal that stays.
     pub items: usize,
     /// The items deleted on their own that emptying leaves: they hold a live node.
     #[serde(default)]
@@ -262,8 +262,9 @@ pub struct DeletedItem {
     pub place: Option<String>,
     /// How many items are in it: all of Recently deleted below it (through removed folders),
     /// what was deleted with it, which restoring it restores, and what was deleted from it before
-    /// (listed on its own too), which emptying it takes along. A deleted folder of thousands of
-    /// files is one item with its count.
+    /// (listed on its own too), which emptying it takes with it. A deleted folder of thousands of
+    /// files is one item with its count. (Its name is the protocol's: these are the members
+    /// deleted with it, not what "taken along" means elsewhere, live nodes a delete left.)
     #[serde(default)]
     pub along: usize,
     /// The listing that saw it, as [`DeletedAccount::db`] and [`DeletedAccount::seq`]: emptying

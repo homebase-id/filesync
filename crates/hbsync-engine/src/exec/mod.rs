@@ -598,7 +598,7 @@ impl<'a> Executor<'a> {
         }
         if !self.should_stop() {
             for p in pending.into_values().rev() {
-                self.schedule.put_back(p.op, p.attempts);
+                self.schedule.requeue(p.op, p.attempts);
             }
         }
         if self.crashed {
@@ -815,7 +815,7 @@ pub use outcome::{Skip, Stopped};
 use park::{numbered_place, occupant, release_place, release_place_for, restore_parked};
 use recover::{Applied, Judged, OnDisk, apply, judge, look, read_row};
 pub use recover::{
-    AsideOutcome, UNHASHED_HOLD, record_dirs, recover, recover_aside, recover_placements,
+    AsideOutcome, UNHASHED_WAIT, record_dirs, recover, recover_aside, recover_placements,
 };
 use recover::{complete_fork, download_key};
 use schedule::{Retried, Schedule};

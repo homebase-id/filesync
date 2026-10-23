@@ -332,6 +332,7 @@ impl AccountOps<'_> {
         for r in passes.iter().flatten() {
             *to_go.entry(r.row.parent).or_default() += 1;
         }
+        // A time of 0 is a header without one (a server's `updated` of 0): not known, never old.
         let hard = |r: &RemovedRow| {
             hard_before.is_some_and(|before| r.removed_at.is_some_and(|at| at > 0 && at < before))
         };

@@ -68,14 +68,16 @@ pub struct Placing {
     pub placed_tags: Option<Tags>,
     pub prior_tags: Option<Tags>,
     pub base_at: PlannedBase,
-    /// Since when recovery has held it, its file there but not hashed yet, Unix milliseconds.
-    pub held_ms: Option<i64>,
+    /// Since when recovery has kept it waiting, its file there but not hashed yet, Unix
+    /// milliseconds (the column `held_ms`).
+    pub waiting_since_ms: Option<i64>,
 }
 
 /// The base a placement's plan saw.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlannedBase {
-    /// A record from before this was kept: settled against the base as it is.
+    /// Not known which base the plan saw (its node is gone on the drive as the plan read it):
+    /// settled against the base as it is.
     Unchecked,
     /// No base.
     Absent,

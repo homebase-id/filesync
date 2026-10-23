@@ -93,7 +93,7 @@ impl Schedule {
     }
 
     /// Puts an operation that didn't start back at the front of the queue.
-    pub(super) fn put_back(&mut self, op: Op, attempts: u8) {
+    pub(super) fn requeue(&mut self, op: Op, attempts: u8) {
         self.queue.push_front((op, attempts));
     }
 

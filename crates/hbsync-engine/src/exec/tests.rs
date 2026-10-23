@@ -233,7 +233,7 @@ fn recovery_writes_the_commits_base() -> R {
         placed_tags: Some(Tags::default()),
         prior_tags: Some(Tags::default()),
         base_at: PlannedBase::Absent,
-        held_ms: None,
+        waiting_since_ms: None,
     };
     h.db.write(|s| s.folder().put_placing(&record))?;
     recover_placements(&mut h.db, &h.folder)?;
@@ -275,7 +275,7 @@ fn recovery_reads_the_tags_the_item_was_placed_with() -> R {
         placed_tags: Some(work.clone()),
         prior_tags: Some(Tags::default()),
         base_at: PlannedBase::Absent,
-        held_ms: None,
+        waiting_since_ms: None,
     };
     h.db.write(|s| s.folder().put_placing(&record))?;
     recover_placements(
@@ -307,22 +307,22 @@ fn recovery_keeps_a_record_it_cannot_settle() -> R {
     Ok(())
 }
 
-/// The same, its node gone on the drive since: held as a file not hashed yet is, then dropped
-/// (kept for good, it held its node, a deleted one, for ever).
+/// The same, its node gone on the drive since: it waits as a file not hashed yet does, then is
+/// dropped (kept for good, it kept its node, a deleted one, for ever).
 #[test]
-fn recovery_holds_a_record_of_a_deleted_node_it_cannot_settle() -> R {
+fn recovery_keeps_a_record_of_a_deleted_node_it_cannot_settle() -> R {
     let (mut h, record) = a_record_it_cannot_settle(true)?;
     let node = record.base.node;
     recover_placements(&mut h.db, &h.folder)?;
-    let held = h.db.read(|s| s.get_placing(node))?.expect("held");
-    assert!(held.held_ms.is_some(), "{held:?}");
+    let waiting = h.db.read(|s| s.get_placing(node))?.expect("waiting");
+    assert!(waiting.waiting_since_ms.is_some(), "{waiting:?}");
     assert_eq!(h.base(node)?, None);
-    // Held long enough: it goes.
-    let since = hbsync_types::unix_now_ms() - UNHASHED_HOLD.as_millis() as i64 - 1;
+    // Waited long enough: it goes.
+    let since = hbsync_types::unix_now_ms() - UNHASHED_WAIT.as_millis() as i64 - 1;
     h.db.write(|s| {
         s.folder().put_placing(&Placing {
-            held_ms: Some(since),
-            ..held
+            waiting_since_ms: Some(since),
+            ..waiting
         })
     })?;
     recover_placements(&mut h.db, &h.folder)?;
@@ -347,7 +347,7 @@ fn a_record_it_cannot_settle(gone: bool) -> Result<(Harness, Placing), Box<dyn s
         placed_tags: Some(Tags::default()),
         prior_tags: Some(Tags::default()),
         base_at: PlannedBase::Absent,
-        held_ms: None,
+        waiting_since_ms: None,
     };
     h.db.write(|s| {
         if !gone {
@@ -551,12 +551,12 @@ fn a_folder_made_from_recently_deleted_keeps_its_record_through_a_crash() -> R {
     Ok(())
 }
 
-/// The same, from a record written before records said which base their plan saw (v0.6.0 and
-/// earlier): recovery settles it against the base as it is. Read as "the plan saw no base",
+/// The same, from a record that doesn't say which base its plan saw
+/// ([`PlannedBase::Unchecked`]): recovery settles it against the base as it is. Read as "the plan saw no base",
 /// the folder's base looked moved: the record went unsettled, and the next plan took the
 /// folder's missing tags for the user's and removed them from the drive.
 #[test]
-fn a_folder_from_an_older_record_keeps_its_tags_on_the_drive() -> R {
+fn a_folder_from_an_unchecked_record_keeps_its_tags_on_the_drive() -> R {
     let mut h = Harness::new()?;
     let node = NodeId::new();
     let work = Tags::new(vec![Tag::new("Work", 0)]);
@@ -585,7 +585,7 @@ fn a_folder_from_an_older_record_keeps_its_tags_on_the_drive() -> R {
             placed_tags: None,
             prior_tags: None,
             base_at: PlannedBase::Unchecked,
-            held_ms: None,
+            waiting_since_ms: None,
         })
     })?;
     // The scan finds the folder, made without tags.
@@ -998,7 +998,7 @@ fn a_removed_tag_stays_removed_through_recovery() -> R {
             placed_tags: Some(Tags::default()),
             prior_tags: Some(Tags::default()),
             base_at: PlannedBase::At(base.version),
-            held_ms: None,
+            waiting_since_ms: None,
         })
     })?;
     // The scan finds the new bytes, untagged.
@@ -1132,7 +1132,7 @@ fn recovering_a_folder_marks_what_is_in_it() -> R {
             placed_tags: None,
             prior_tags: Some(Tags::default()),
             base_at: PlannedBase::Absent,
-            held_ms: None,
+            waiting_since_ms: None,
         })?;
         // Pulled before: nothing marked now.
         s.folder().clear_dirty(child)
@@ -1606,7 +1606,7 @@ fn an_earlier_runs_record_holds_off_a_placement() -> R {
             placed_tags: None,
             prior_tags: Some(Tags::default()),
             base_at: PlannedBase::Absent,
-            held_ms: None,
+            waiting_since_ms: None,
         },
         Placing {
             base: BaseRow::new(folder, folder_state.clone(), folder_at),
@@ -1614,7 +1614,7 @@ fn an_earlier_runs_record_holds_off_a_placement() -> R {
             placed_tags: None,
             prior_tags: Some(Tags::default()),
             base_at: PlannedBase::At(folder_at.version),
-            held_ms: None,
+            waiting_since_ms: None,
         },
     ];
     h.db.write(|s| {
@@ -2195,7 +2195,7 @@ fn recovery_in_the_run_leaves_another_nodes_row() -> R {
         placed_tags: None,
         prior_tags: Some(Tags::default()),
         base_at: PlannedBase::Absent,
-        held_ms: None,
+        waiting_since_ms: None,
     };
     h.db.write(|s| s.folder().put_placing(&record))?;
     let row = LocalRow {
@@ -2241,7 +2241,7 @@ fn a_record_in_an_unreadable_folder_stays() -> R {
         placed_tags: None,
         prior_tags: Some(Tags::default()),
         base_at: PlannedBase::Absent,
-        held_ms: None,
+        waiting_since_ms: None,
     };
     h.db.write(|s| s.folder().put_placing(&record))?;
     let p = h.folder.root.join("p");
@@ -2257,16 +2257,16 @@ fn a_record_in_an_unreadable_folder_stays() -> R {
     Ok(())
 }
 
-/// A record whose file stays unhashed holds its node only so long ([`UNHASHED_HOLD`]), from
-/// when recovery first finds it so: however long ago the record was written (a long download,
-/// then a crash), the first finding holds it; past the hold, recovery drops it as main does
-/// (the file is then the scan's new item), rather than hold the node off for good.
+/// A record whose file stays unhashed waits only so long ([`UNHASHED_WAIT`]), from when
+/// recovery first finds it so: however long ago the record was written (a long download, then
+/// a crash), the first finding starts the wait; past it, recovery drops it as main does (the
+/// file is then the scan's new item), rather than keep the node off for good.
 #[test]
 fn a_record_whose_file_stays_unhashed_goes_in_time() -> R {
     let mut h = Harness::new()?;
     record_of_a_crashed_download(&mut h, &Tags::default())?;
     let node = h.records()?[0].base.node;
-    assert_eq!(h.records()?[0].held_ms, None);
+    assert_eq!(h.records()?[0].waiting_since_ms, None);
     h.local_file("f", NodeId::new(), b"A")?;
     let path = RelPath::new("f")?;
     h.db.write(|s| {
@@ -2274,22 +2274,25 @@ fn a_record_whose_file_stays_unhashed_goes_in_time() -> R {
         s.folder().put_local(&LocalRow { hash: None, ..row })
     })?;
     recover_placements(&mut h.db, &h.folder)?;
-    let held = h.records()?.remove(0);
-    let since = held.held_ms.expect("held from the first finding") - 5_000;
+    let waiting = h.records()?.remove(0);
+    let since = waiting
+        .waiting_since_ms
+        .expect("waiting from the first finding")
+        - 5_000;
     h.db.write(|s| {
         s.folder().put_placing(&Placing {
-            held_ms: Some(since),
-            ..held.clone()
+            waiting_since_ms: Some(since),
+            ..waiting.clone()
         })
     })?;
-    // A later finding doesn't hold it again.
+    // A later finding doesn't start the wait again.
     recover_placements(&mut h.db, &h.folder)?;
-    assert_eq!(h.records()?[0].held_ms, Some(since));
-    let old = hbsync_types::unix_now_ms() - UNHASHED_HOLD.as_millis() as i64 - 1;
+    assert_eq!(h.records()?[0].waiting_since_ms, Some(since));
+    let old = hbsync_types::unix_now_ms() - UNHASHED_WAIT.as_millis() as i64 - 1;
     h.db.write(|s| {
         s.folder().put_placing(&Placing {
-            held_ms: Some(old),
-            ..held
+            waiting_since_ms: Some(old),
+            ..waiting
         })
     })?;
     recover_placements(&mut h.db, &h.folder)?;
@@ -2693,7 +2696,7 @@ fn an_old_version_that_cant_come_back_stays_aside() -> R {
     let mut h = Harness::new()?;
     let (node, op) = a_download_from_another_folder(&mut h)?;
     h.cfg.hooks.faults.fail(FailPoint::PlaceNew, 1);
-    h.cfg.hooks.faults.fail(FailPoint::PutBack, 1);
+    h.cfg.hooks.faults.fail(FailPoint::Return, 1);
     h.run(vec![op])?;
     assert!(!h.at("p1/f")?.exists());
     assert_eq!(aside_entries(&h).len(), 1);
@@ -3039,7 +3042,7 @@ fn recovery_checks_the_base_the_record_saw() -> R {
             placed_tags: None,
             prior_tags: Some(Tags::default()),
             base_at: PlannedBase::At(planned.version),
-            held_ms: None,
+            waiting_since_ms: None,
         })?;
         s.folder().clear_dirty(node)
     })?;
@@ -3511,7 +3514,7 @@ fn recovery_of_a_deleted_folder_marks_what_is_in_it() -> R {
         placed_tags: Some(Tags::default()),
         prior_tags: Some(Tags::default()),
         base_at: PlannedBase::At(some_version().version),
-        held_ms: None,
+        waiting_since_ms: None,
     };
     let content = h.content(b"A");
     h.db.write(|s| {
@@ -4071,7 +4074,7 @@ fn removals_go_in_one_request_and_a_changed_file_stays() -> R {
 
 /// A folder with no base here at "b (conflict 1)" (a file has b), the drive's at b tagged Red:
 /// the plan renames it on the drive and writes Red here. The rename loses to another device's,
-/// which removes Red too, and the tag write runs first (as after a move put back for a name
+/// which removes Red too, and the tag write runs first (as after a move requeued for a name
 /// taken): no base records what it writes, so it waits, and the next plan sends no Red up.
 /// Written, Red read as this device's add, and went back up.
 #[test]

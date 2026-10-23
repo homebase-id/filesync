@@ -107,7 +107,7 @@ impl ReadTx<'_> {
     /// What a confirmed delete of dirty `node` covers of the
     /// [`pending_file_deletes`](Self::pending_file_deletes): whether `node` is a file gone
     /// locally (deleted remotely, one node at a time), and the files gone remotely in its local
-    /// subtree (a delete takes everything under it along): the dirty ones gone from the drive,
+    /// subtree (a delete takes everything below it with it): the dirty ones gone from the drive,
     /// and the synced ones a folder's removal took along, still live there (as `taken_files`
     /// counts them). `None` when `node` isn't dirty.
     pub fn confirmed_file_deletes(&self, node: NodeId) -> Result<Option<(bool, Vec<NodeId>)>> {

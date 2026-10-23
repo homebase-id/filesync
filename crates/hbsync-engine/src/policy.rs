@@ -14,7 +14,8 @@ pub enum InRun {
     Retry,
     /// The run stops: nothing else can succeed until the user acts.
     Stop,
-    /// This and every later upload of the run are held.
+    /// This and every later upload of the run are paused: the drive is full (not the guard's
+    /// held deletes).
     HoldUploads,
     /// The run ends, as at a crash: the state DB failed.
     End,

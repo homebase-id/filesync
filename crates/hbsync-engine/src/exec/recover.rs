@@ -1,6 +1,6 @@
 //! What a crash left behind: conflict copies half made, temporary files no download can use.
 
-use super::delete::{Look, check, put_back, put_back_at, unlink_checked};
+use super::delete::{Look, check, return_from_aside, return_to, unlink_checked};
 use super::local::went;
 use super::park::unpark;
 use super::*;
@@ -20,7 +20,7 @@ pub fn recover(db: &mut StateDb, folder: &FolderCtx) -> Result<(), StateError> {
 }
 
 /// Decides what a delete left aside (sync semantics §7: a crash between its move aside and its
-/// commit, or a put back that failed; or a download's replaced old version, §7 Old versions)
+/// commit, or a return to its place that failed; or a download's replaced old version, §7 Old versions)
 /// by what it is, as the delete's own check does: where it is still its node's synced version
 /// (each item as its row has it, each row as its base has it: the drive's delete stands), it
 /// is unlinked, its rows and bases with it, whatever became of its folder meanwhile; anything
@@ -100,7 +100,7 @@ pub fn recover_aside(db: &mut StateDb, folder: &FolderCtx) -> Result<AsideOutcom
             dirs.push(row.path.parent().unwrap_or_default());
         }
         if gone.len() < rows.len()
-            && let Some(to) = put_back(db, &disk, folder, &aside, &row)?
+            && let Some(to) = return_from_aside(db, &disk, folder, &aside, &row)?
         {
             dirs.push(to.parent().unwrap_or_default());
         }
@@ -149,7 +149,7 @@ fn recover_by_base(
             return Ok(ByBase::Unknown);
         };
         return Ok(ByBase::Rescan(
-            put_back_at(db, disk, folder, aside, &place, Some(node), true)?
+            return_to(db, disk, folder, aside, &place, Some(node), true)?
                 .map(|to| to.parent().unwrap_or_default()),
         ));
     };
@@ -176,7 +176,7 @@ enum ByBase {
 /// What [`recover_aside`] did.
 #[derive(Debug, Default)]
 pub struct AsideOutcome {
-    /// The folders to rescan: what it put back is there.
+    /// The folders to rescan: what went back is there.
     pub rescan: Vec<RelPath>,
     /// What it left aside, as nothing here places it, or as an edit with no name to come back
     /// under (sync semantics §8a: told, never deleted), as sorted paths in the folder
@@ -236,7 +236,7 @@ fn discard_old(
         return Ok(Discarded::Stranded);
     };
     Ok(Discarded::Back(
-        put_back_at(db, disk, folder, aside, place, None, false)?
+        return_to(db, disk, folder, aside, place, None, false)?
             .map(|to| to.parent().unwrap_or_default()),
     ))
 }
@@ -291,7 +291,7 @@ pub(super) fn recover_forks(db: &mut StateDb, root: &Path) -> Result<(), StateEr
 /// feed brings them. Each record is judged by what is on disk at its target ([`look`]), read
 /// as the scan read it: settled when it is the item; dropped when nothing is there, or another
 /// node is (the next batch writes its own); kept when it can't be told yet (its file not
-/// hashed, its folder unreadable), for a later recovery, for [`UNHASHED_HOLD`] at most from
+/// hashed, its folder unreadable), for a later recovery, for [`UNHASHED_WAIT`] at most from
 /// when it was first found so.
 pub fn recover_placements(db: &mut StateDb, folder: &FolderCtx) -> Result<(), StateError> {
     let (root, algorithm) = (folder.root.as_path(), folder.algorithm);
@@ -354,8 +354,8 @@ enum Scanned {
     Other,
 }
 
-/// How long a record whose file is there but can't be hashed yet holds its node.
-pub const UNHASHED_HOLD: std::time::Duration = std::time::Duration::from_secs(600);
+/// How long a record whose file is there but can't be hashed yet waits, keeping its node.
+pub const UNHASHED_WAIT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// What recovery does with a record.
 pub(super) enum Judged {
@@ -377,7 +377,7 @@ pub(super) enum Applied {
 }
 
 /// Judges record `p` by the item at its target (`row`, of the node or new); one file there not
-/// hashed yet is kept ([`hold`] says how long).
+/// hashed yet is kept ([`wait`] says how long).
 pub(super) fn judge(root: &Path, p: &Placing, row: Option<LocalRow>) -> Judged {
     let Some(row) = row else {
         return Judged::Drop;
@@ -398,8 +398,8 @@ pub(super) fn judge(root: &Path, p: &Placing, row: Option<LocalRow>) -> Judged {
 
 /// Does what recovery judged of record `p` (as of `now`); settled, the item's row is taken
 /// over (a new one) or written (one read off the disk, not in the DB yet), and no other: where
-/// another node's row is at the target, the record stays instead. One kept is held from now,
-/// if it wasn't already.
+/// another node's row is at the target, the record stays instead. One kept waits from now,
+/// if it didn't already.
 pub(super) fn apply(
     s: FolderTx<'_>,
     p: &Placing,
@@ -409,7 +409,7 @@ pub(super) fn apply(
 ) -> Result<Applied, StateError> {
     let node = p.base.node;
     match judged {
-        Judged::Keep => hold(s, p, now),
+        Judged::Keep => wait(s, p, now),
         Judged::Drop => {
             // Not put in place (or changed since): nothing to settle.
             s.delete_placing(node)?;
@@ -435,9 +435,9 @@ pub(super) fn apply(
             // What the commit does: the record goes with the base written, or stays until the
             // item can be read (its folder scanned).
             match settle_placement(s, p, folder)? {
-                // Its node gone on the drive, its item not one the drive takes (its name): held
-                // as a file not hashed yet is, then dropped.
-                Placed::Kept => hold(s, p, now),
+                // Its node gone on the drive, its item not one the drive takes (its name): it
+                // waits as a file not hashed yet does, then is dropped.
+                Placed::Kept => wait(s, p, now),
                 Placed::Settled(at) => {
                     s.mark_dirty(node)?;
                     Ok(Applied::Settled(at))
@@ -447,18 +447,18 @@ pub(super) fn apply(
     }
 }
 
-/// Holds record `p` as of `now`: from now, if it wasn't held yet; dropped once held for
-/// [`UNHASHED_HOLD`].
-fn hold(s: FolderTx<'_>, p: &Placing, now: i64) -> Result<Applied, StateError> {
-    match p.held_ms {
+/// Keeps record `p` waiting as of `now`: from now, if it didn't wait yet; dropped once it
+/// waited for [`UNHASHED_WAIT`].
+fn wait(s: FolderTx<'_>, p: &Placing, now: i64) -> Result<Applied, StateError> {
+    match p.waiting_since_ms {
         None => {
             s.put_placing(&Placing {
-                held_ms: Some(now),
+                waiting_since_ms: Some(now),
                 ..p.clone()
             })?;
             Ok(Applied::Kept)
         }
-        Some(since) if now.saturating_sub(since) >= UNHASHED_HOLD.as_millis() as i64 => {
+        Some(since) if now.saturating_sub(since) >= UNHASHED_WAIT.as_millis() as i64 => {
             s.delete_placing(p.base.node)?;
             Ok(Applied::Dropped)
         }

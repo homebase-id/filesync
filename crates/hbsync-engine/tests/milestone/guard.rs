@@ -105,7 +105,7 @@ fn a_confirmed_delete_that_was_undone_is_forgotten() -> R {
     Ok(())
 }
 
-/// A confirmed delete of a folder takes the files under it along: they are the user's, and
+/// A confirmed delete of a folder takes the files below it with it: they are the user's, and
 /// don't count against other deletes. A small delete that comes in with it isn't held.
 #[test]
 fn a_confirmed_folder_delete_does_not_hold_other_deletes() -> R {

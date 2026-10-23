@@ -392,9 +392,9 @@ impl Sim {
             let (mut synced, left) = self.expected(c, &drive, &taken);
             synced_somewhere.extend(synced.ids());
             left_somewhere.extend(left);
-            // What the client holds back for a refusal: each operation refused itself is one
-            // the drive refuses as it is now (by its own judgement: a record that held back one
-            // it takes hid a later change); it stays on its client with what is in it, and
+            // What the client blocks for a refusal: each operation refused itself is one the
+            // drive refuses as it is now (by its own judgement: a record that blocked one it
+            // takes hid a later change); it stays on its client with what is in it, and
             // anything else converges.
             // Once nothing more happens, what the last plan still sent was tried and is blocked
             // behind one (an operation that waits for a refused one stays: a local cost, told
@@ -813,9 +813,9 @@ impl Ledger {
         // What waits for a hash, worked out on its own (sync semantics §6.3): every folder a
         // file here not hashed yet is in, on any side, and every folder those are in, on the
         // drive as this device sees it (what its filter leaves out is out of view); a detached
-        // item is a new one here, held where it is here only, under its new id.
+        // item is a new one here, waiting where it is here only, under its new id.
         let out_of_view: HashSet<NodeId> = filtered(remote, seen.filter).into_iter().collect();
-        let mut held: HashSet<NodeId> = HashSet::new();
+        let mut waiting: HashSet<NodeId> = HashSet::new();
         let mut queue: Vec<(NodeId, bool)> = unhashed
             .iter()
             .map(|n| (*n, !detached.contains_key(n)))
@@ -832,7 +832,7 @@ impl Ledger {
                 if let Some(s) = tree.get(n)
                     && !s.parent.is_root()
                     && !(*on_drive && out_of_view.contains(&s.parent))
-                    && held.insert(s.parent)
+                    && waiting.insert(s.parent)
                 {
                     // Reached here, a detached folder is its new item, here only; reached
                     // through the drive or the base, its old node, on every side.
@@ -841,11 +841,11 @@ impl Ledger {
                 }
             }
         }
-        // A detached folder held under both its ids.
-        let held: HashSet<NodeId> = held
+        // A detached folder waits under both its ids.
+        let waiting: HashSet<NodeId> = waiting
             .iter()
             .filter_map(|n| detached.get(n).copied())
-            .chain(held.iter().copied())
+            .chain(waiting.iter().copied())
             .collect();
         let old_of: HashMap<NodeId, NodeId> =
             detached.iter().map(|(old, new)| (*new, *old)).collect();
@@ -869,7 +869,7 @@ impl Ledger {
                     // A detach only gives the item here another id (§10): it stays as it is.
                     let detach = matches!(p.what, What::Detach { .. });
                     ((touched.contains(&node) || unhashed.contains(&node)) && !detach)
-                        || (held.contains(&node)
+                        || (waiting.contains(&node)
                             && match &p.what {
                                 What::RemoteDelete
                                 | What::LocalDelete { .. }
@@ -906,7 +906,7 @@ impl Ledger {
                 .filter(|f| {
                     let gone =
                         !local.contains(*f) || remote.path(*f).is_none() || out_of_view.contains(f);
-                    base.contains(*f) && gone && held.contains(f)
+                    base.contains(*f) && gone && waiting.contains(f)
                 })
                 .collect();
             let unconfirmed = |p: &&Planned<'_>| {

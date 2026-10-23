@@ -74,7 +74,7 @@ pub(crate) struct Client {
     /// (`hbsync_engine::refused::key`) and whether refused (else one strike: a download whose
     /// bytes didn't match once): not sent again while their key is the same.
     pub(crate) refused: HashMap<(NodeId, &'static str), (String, bool)>,
-    /// The operations the last plan held back for a refusal: refused themselves (`true`), or
+    /// The operations the last plan blocked for a refusal: refused themselves (`true`), or
     /// waiting for one.
     pub(crate) blocked: Vec<(Op, bool)>,
     /// The operations the last plan sent to run (with refusals on: once nothing more happens,

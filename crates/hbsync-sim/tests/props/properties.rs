@@ -34,7 +34,7 @@ proptest! {
     /// The drive refuses some requests as they are, for good (a write it won't take, a
     /// download whose bytes don't match at a version): each client records a refusal and
     /// doesn't send the same operation again (`hbsync_engine::refused`). The record never hides
-    /// a later change: whatever a client holds back is refused by the drive as it is now (a
+    /// a later change: whatever a client blocks is refused by the drive as it is now (a
     /// local edit, a new version on the drive, a rename or a delete is another request), and
     /// everything else converges without loss.
     #[test]

@@ -99,12 +99,12 @@ struct Want {
     nodes: Vec<NodeId>,
     folders: Vec<NodeId>,
     /// A piece of a folder too big for a page: it doesn't wait for that folder, but for what
-    /// the folder's removal took along ([`crate::plan::Options::own_page`]).
+    /// the folder's removal took along ([`crate::plan::Options::piece`]).
     piece: bool,
 }
 
 /// A page of its own ([`OwnPages::next`]): its dirty nodes, and whether it is a piece of a
-/// folder too big for a page (`Options::own_page`).
+/// folder too big for a page (`Options::piece`).
 pub type OwnPage<M> = (Vec<M>, bool);
 
 /// Where [`OwnPages`] reads its pages: the engine's state DB, or the simulator's model.
@@ -205,7 +205,7 @@ impl OwnPages {
     /// directly in it) is planned whole, one larger page. So every folder goes as one, or as
     /// its folders and then itself: never item by item. Folders split so go together while
     /// they fit a page: a round each, not one a folder. With whether it is such a piece, which
-    /// doesn't wait for the folder above it (`Options::own_page`).
+    /// doesn't wait for the folder above it (`Options::piece`).
     pub fn next<S: PageStore>(
         &mut self,
         batch: usize,

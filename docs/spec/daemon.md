@@ -439,11 +439,11 @@ Replies:
   left out in the main folder, where it is its `path`), `along`, how many items are in it:
   all of Recently deleted below it, through removed folders, what was deleted with it (which
   restoring it restores) and what was deleted from it before (listed on its own too), which
-  emptying it takes along (not those items: a deleted folder of thousands of files is one
+  emptying it takes with it (not those items: a deleted folder of thousands of files is one
   entry), and `stays` (left out when false) when emptying leaves it: it holds a live node, and
   only what else is in it goes (clients say so, never "deleting" alone); and, for
   each account holding anything, its `deletes`, its `items` (what emptying all of it deletes
-  for good: removed nodes only, the deletes and what they took along, but a folder holding a
+  for good: removed nodes only, the deletes and what was deleted with them, but a folder holding a
   live node or a removal that stays: 0 when nothing can be emptied yet, which clients say
   instead of offering to empty), its `stays` (the items deleted on their own that emptying
   leaves: they hold a live node), and what the listing saw:
@@ -456,7 +456,7 @@ Replies:
   emptied of what was listed in it. A listing of another DB, or a `seq` the account never gave,
   is refused in the reply (and again by the drive as it empties).
 - `{"found":[…]}`: for `find_deleted`, the items named (a node id, or the place `hbsync deleted`
-  shows: a delete there before an item a delete took along, then the newest; a name shaped like a node id that isn't one is tried as a place),
+  shows: a delete there before an item deleted with one, then the newest; a name shaped like a node id that isn't one is tried as a place),
   deleted on their own or along with a folder; refused naming the first one that isn't there.
   Restore and empty pick through it, so no client reads Recently deleted whole.
 - `"done"`, `{"refused":"why"}`.
