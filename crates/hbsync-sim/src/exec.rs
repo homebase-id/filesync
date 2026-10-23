@@ -64,7 +64,8 @@ impl Sim {
 
     /// In pages ([`Sim::with_small_pages`]): client `c`'s plan ran out: its next pages are
     /// planned, as the engine's next rounds (into the next sweep: a sync goes on till a sweep
-    /// does nothing), till one has work or a whole sweep's worth had none. Whether one had.
+    /// does nothing), till one has work (or holds deletes) or a whole sweep's worth had none.
+    /// Whether one had.
     pub(crate) fn next_page_planned(&mut self, c: usize) -> bool {
         let Some(size) = self.faults.page_size else {
             return false;
@@ -79,7 +80,9 @@ impl Sim {
         {
             planned += 1;
             self.plan(c);
-            if !self.clients[c].plan.is_empty() {
+            // A page that holds deletes is one too: the user answers it (`Sim::quiesce`).
+            let client = &self.clients[c];
+            if !client.plan.is_empty() || !client.held.is_empty() {
                 return true;
             }
         }
@@ -217,20 +220,25 @@ impl Sim {
             .chain(client.local.ids())
             .chain(remote.ids())
             .collect();
-        // In pages, as the engine: the next page of the sweep over what is dirty (what differs
-        // between the base and a side, as the engine's scan and feed mark them), what else is
-        // to plan waits as it is.
         let mut piece = false;
-        if let Some(size) = self.faults.page_size {
-            // What differs between the base and a side, the drive's as it is: what a folder's
-            // removal took along isn't marked (the feed marks only the folder).
-            let all: BTreeSet<NodeId> = std::mem::take(&mut input.dirty)
-                .into_iter()
+        // What differs between the base and a side, the drive's as it is: what the engine's
+        // scan and feed mark dirty (what a folder's removal took along isn't marked: the feed
+        // marks only the folder). For pages and the guard's totals.
+        let all: BTreeSet<NodeId> = match self.faults.page_size.is_some() || self.guard.is_some() {
+            true => input
+                .dirty
+                .iter()
+                .copied()
                 .filter(|n| {
                     let base = input.base.get(*n);
                     base != input.local.get(*n) || base != input.remote.get(*n)
                 })
-                .collect();
+                .collect(),
+            false => BTreeSet::new(),
+        };
+        // In pages, as the engine: the next page of the sweep over what is dirty, what else is
+        // to plan waits as it is.
+        if let Some(size) = self.faults.page_size {
             let page;
             (page, piece) = next_page(client, &input, &all, size);
             input.dirty = page.iter().copied().collect();
@@ -249,6 +257,31 @@ impl Sim {
                 &scope,
                 &mut pending,
             );
+        }
+        // The guard's totals over the whole dirty set, as the engine counts them
+        // (`pending_file_deletes`): synced files gone here and gone there, but those confirmed;
+        // and of them, those outside the page (for the oracle). Not the engine's files a
+        // removed folder took along (`taken_files`): the sim's dirty set doesn't mark them.
+        let (mut pending, mut outside) = ((0, 0), (0, 0));
+        let confirmed_at = |n: NodeId| {
+            !client.confirmed.is_empty()
+                && (client.confirmed.contains(&n)
+                    || input
+                        .base
+                        .ancestors(n)
+                        .iter()
+                        .any(|a| client.confirmed.contains(a)))
+        };
+        let counted = |n: NodeId| {
+            input.base.get(n).is_some_and(|s| s.kind == NodeKind::File) && !confirmed_at(n)
+        };
+        for &n in all.iter().filter(|n| counted(**n)) {
+            let here = usize::from(!input.local.contains(n));
+            let there = usize::from(!input.remote.contains(n));
+            pending = (pending.0 + here, pending.1 + there);
+            if !input.dirty.contains(&n) {
+                outside = (outside.0 + here, outside.1 + there);
+            }
         }
         let confirmed = Arc::new(client.confirmed.clone());
         // Held as every synced file: until answered, by the engine's rule (it keeps
@@ -289,6 +322,7 @@ impl Sim {
                 synced: synced_files,
                 confirmed: Arc::clone(&confirmed),
                 wiped: Arc::new(wiped.clone()),
+                pending,
                 ..Guarding::default()
             },
             piece,
@@ -348,6 +382,8 @@ impl Sim {
                 synced_files,
                 confirmed: &confirmed,
                 wiped: &wiped,
+                pending,
+                outside,
             },
             self.guard,
         );
@@ -413,14 +449,20 @@ impl Sim {
             .map(|op| (op, true))
             .chain(waiting.into_iter().map(|op| (op, false)))
             .collect();
-        // A confirmation lasts while the plan deletes its node, or its delete waits for a hash.
+        // A confirmation lasts while the plan deletes its node, or its delete waits for a hash;
+        // one another page plans, while still dirty, till that page does (the engine's
+        // `after_plan`: one undone, clean again, is forgotten).
         let deleting: HashSet<NodeId> = plan
             .ops
             .iter()
             .filter_map(Op::deletes)
             .chain(plan.delete_waits.iter().copied())
             .collect();
-        client.confirmed = confirmed.intersection(&deleting).copied().collect();
+        client.confirmed = confirmed
+            .iter()
+            .copied()
+            .filter(|n| deleting.contains(n) || (all.contains(n) && !input.dirty.contains(n)))
+            .collect();
         client.held = plan.held.iter().map(Op::node).collect();
         client.wiped = wiped;
         client

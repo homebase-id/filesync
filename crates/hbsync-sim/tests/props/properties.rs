@@ -187,6 +187,19 @@ proptest! {
         run_with(3, None, Sim::with_split_downloads, &events)?;
     }
 
+    /// The mass-delete guard while each client plans in pages of 1 to 4 (§7, §6.5): a page is
+    /// judged with what the rest of the dirty set has to delete, so a delete over the limit is
+    /// held whole, never let through page by page; what is held so stays held till answered,
+    /// and the clients converge without loss whatever the users answer.
+    #[test]
+    fn guarded_clients_in_pages_hold_the_whole_delete(
+        size in 1usize..5,
+        min in 1usize..3,
+        events in proptest::collection::vec(guarded_event(2), 0..80),
+    ) {
+        run_with(2, Some(min), |sim| sim.with_small_pages(size), &events)?;
+    }
+
     /// Each client plans its nodes in pages of 1 to 4 (`Sim::with_small_pages`), as the engine
     /// plans a dirty set of more than a page (20,000 nodes), while folders are deleted, stopped
     /// half way and purged: what a page leaves to another holds its folders, and a folder held
