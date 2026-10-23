@@ -1267,3 +1267,60 @@ fn a_refused_computer_asks_nothing_until_the_user_acts() -> R {
     assert!(a.drive.denied().is_none());
     Ok(())
 }
+
+/// The notes about a missing watcher in `d`'s status.
+fn unwatched_notes(d: &Device) -> usize {
+    d.status()
+        .recent
+        .iter()
+        .filter(|n| n.text.starts_with("No live watcher here"))
+        .count()
+}
+
+/// A folder whose watcher can't start (inotify's instances all taken) says so in a note, and
+/// is synced by the look's walk meanwhile; at the next look its watcher is asked for again,
+/// and once it is there, the status and the note say no more of it.
+#[test]
+fn a_folder_without_a_watcher_is_told_and_watches_again() -> R {
+    let server = server();
+    let a = Device::start_with(&server, "a", |cfg| {
+        hbsync_local::watch_testkit::fail_next_start(&cfg.folder);
+        cfg.look = Duration::from_millis(500);
+    })?;
+    wait_until("it is told", || unwatched_notes(&a) == 1)?;
+    wait_until("the watcher is back", || a.status().watcher_error.is_none())?;
+    assert_eq!(unwatched_notes(&a), 0, "the note went with it");
+    a.write("new.txt", "new")?;
+    wait_until("the change is uploaded", || on_server(&server, "new.txt"))?;
+    Ok(())
+}
+
+/// A watcher that stops later (its thread ended) is told the same way and started again at
+/// the next look, which catches up on what changed without one. Told once a run: one that
+/// keeps stopping isn't told each time.
+#[test]
+fn a_watcher_that_stops_is_told_and_started_again() -> R {
+    let server = server();
+    let a = Device::start_with(&server, "a", |cfg| cfg.look = Duration::from_millis(500))?;
+    wait_until("it started", || a.status().last_sync.is_some())?;
+    a.wait_idle()?;
+    if let Some(why) = a.status().watcher_error {
+        eprintln!("no live watcher here ({why}): skipped");
+        return Ok(());
+    }
+    for (round, name) in ["one.txt", "two.txt"].into_iter().enumerate() {
+        hbsync_local::watch_testkit::stop(&a.root);
+        // Its next batch finds it stopped.
+        a.write(name, name)?;
+        wait_until("it stopped", || a.status().watcher_error.is_some())?;
+        assert_eq!(
+            unwatched_notes(&a),
+            usize::from(round == 0),
+            "told once a run"
+        );
+        wait_until("the watcher is back", || a.status().watcher_error.is_none())?;
+        wait_until("the change is up", || on_server(&server, name))?;
+    }
+    assert_eq!(unwatched_notes(&a), 0);
+    Ok(())
+}

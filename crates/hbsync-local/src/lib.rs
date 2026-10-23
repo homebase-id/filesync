@@ -17,6 +17,8 @@ pub use layout::IGNORE_FILE;
 pub use marker::Marker;
 pub use scan::{ScanOptions, ScanReport, Settle, Young, rescan_dirs, rescan_entries, scan};
 pub use walk::{SkipReason, WalkEvent, Walker};
+#[cfg(feature = "testkit")]
+pub use watch::testkit as watch_testkit;
 pub use watch::{Bell, Debounce, LocalObserver};
 
 /// The client's own folder at the top of the sync root (its marker, ignore rules, temp files,

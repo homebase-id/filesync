@@ -157,6 +157,13 @@ included (service managers restart it then).
 
 ### The sync loop
 
+- **No live watcher** (it couldn't start: inotify's instances, 128 a user, all taken by other
+  programs, or its watches on a very large tree; or it stopped): the folder's changes are found
+  by its look, a whole walk once a minute. The user is told in a note, once a run (and `hbsync
+  status` says why while it lasts). A watcher is asked for again at the next look, then
+  less often while it fails (doubling, up to 32 looks: a tree over the watch limit fails each
+  time, and each try walks it); once one starts, the look's walk catches up on what changed
+  meanwhile (again at each look till it has), and the status and the note say no more of it.
 - Syncs when the folder changes (live watcher; not its own writes coming back), when another
   folder's sync changed this one's part of the drive, when the identity announces a change on
   the drive (notification socket; once its announcements have stopped for 1 s, at most 10 s

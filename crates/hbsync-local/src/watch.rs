@@ -94,6 +94,10 @@ impl LiveWatcher {
         bell: Option<Bell>,
     ) -> notify::Result<Self> {
         let root = root.canonicalize().map_err(notify::Error::io)?;
+        #[cfg(feature = "testkit")]
+        if testkit::take(&testkit::FAIL, &root) {
+            return Err(notify::Error::io(std::io::Error::from_raw_os_error(24)));
+        }
         let (tx, rx) = channel();
         let (rung, rules): (Arc<AtomicBool>, Arc<AtomicBool>) = Default::default();
         let (filter_root, rang, touched) = (root.clone(), Arc::clone(&rung), Arc::clone(&rules));
@@ -289,6 +293,19 @@ fn fold(root: &Path, batch: &mut WatchBatch, event: notify::Result<Event>) {
     }
 }
 
+/// A watcher's bell, kept for a watcher started again.
+struct Ringer(Option<Bell>);
+
+impl std::fmt::Debug for Ringer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() {
+            "Ringer(Some)"
+        } else {
+            "Ringer(None)"
+        })
+    }
+}
+
 /// All local observation for one sync root: catch-up at start, then live batches.
 #[derive(Debug)]
 pub struct LocalObserver {
@@ -296,8 +313,13 @@ pub struct LocalObserver {
     opts: ScanOptions,
     journal: Option<Box<dyn ChangeJournal>>,
     watcher: Option<LiveWatcher>,
-    /// Why live watching isn't available (the caller then rescans periodically).
+    /// Why live watching isn't available (the caller then rescans periodically, and asks for
+    /// it again: [`LocalObserver::rewatch`]).
     pub watcher_error: Option<String>,
+    /// What a watcher rings, and how it lets files being written settle: kept for one started
+    /// again.
+    bell: Ringer,
+    settle: Settle,
     /// A batch was recorded without storing the journal position (see [`LocalObserver::poll`]).
     unsaved: bool,
     /// While `unsaved`: a position taken, stored if no change came until the instant.
@@ -369,19 +391,23 @@ impl LocalObserver {
     /// ([`ScanOptions::settle`]: `opts`' own, else the default), and looked at again for it.
     pub fn ringing(root: &Path, mut opts: ScanOptions, bell: Option<Bell>) -> Self {
         let filter = Arc::clone(&opts.filter);
-        let (watcher, watcher_error) = match LiveWatcher::start(root, filter, bell) {
+        let (watcher, watcher_error) = match LiveWatcher::start(root, filter, bell.clone()) {
             Ok(w) => (Some(w), None),
-            // Typically inotify's watch limit on very large trees.
+            // inotify's limits: its watches on very large trees, its instances (128 a user)
+            // when other programs hold them.
             Err(e) => (None, Some(e.to_string())),
         };
+        let settle = opts.settle.unwrap_or_default();
         // Without a watcher, the caller's periodic scans hash what they find.
-        opts.settle = watcher.as_ref().map(|_| opts.settle.unwrap_or_default());
+        opts.settle = watcher.as_ref().map(|_| settle);
         LocalObserver {
             root: root.to_path_buf(),
             journal: open_journal(root, opts.fs_family),
             opts,
             watcher,
             watcher_error,
+            bell: Ringer(bell),
+            settle,
             unsaved: false,
             settling: None,
             more: false,
@@ -517,7 +543,11 @@ impl LocalObserver {
         };
         self.settling = None;
         self.more = !batch.drained;
-        if watcher.gone.load(Ordering::Relaxed) {
+        #[cfg(feature = "testkit")]
+        let stopped = testkit::take(&testkit::STOP, &self.root);
+        #[cfg(not(feature = "testkit"))]
+        let stopped = false;
+        if stopped || watcher.gone.load(Ordering::Relaxed) {
             // Left to the look's rescans from now on, as without a watcher.
             self.watcher_error = Some("the live watcher stopped".to_owned());
             self.watcher = None;
@@ -594,6 +624,27 @@ impl LocalObserver {
 
     pub fn has_watcher(&self) -> bool {
         self.watcher.is_some()
+    }
+
+    /// Without a watcher (it couldn't start, or it stopped), tries to start one again: whether
+    /// there is one now. What changed meanwhile is the caller's rescan's, after this.
+    pub fn rewatch(&mut self) -> bool {
+        if self.watcher.is_some() {
+            return true;
+        }
+        let filter = Arc::clone(&self.opts.filter);
+        match LiveWatcher::start(&self.root, filter, self.bell.0.clone()) {
+            Ok(w) => {
+                self.watcher = Some(w);
+                self.watcher_error = None;
+                self.opts.settle = Some(self.settle);
+                true
+            }
+            Err(e) => {
+                self.watcher_error = Some(e.to_string());
+                false
+            }
+        }
     }
 
     /// When to [`LocalObserver::poll`] even if the bell didn't ring: a recheck of new
@@ -1485,5 +1536,49 @@ mod tests {
             );
         }
         Ok(())
+    }
+}
+
+/// Tests: a watcher that can't start, or stops (per folder: tests run side by side).
+#[cfg(feature = "testkit")]
+pub mod testkit {
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    pub(crate) static FAIL: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    pub(crate) static STOP: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    /// Whether any is asked for: the hook costs a batch nothing otherwise.
+    static ANY: AtomicBool = AtomicBool::new(false);
+
+    /// The next watcher started on `root` fails as out of inotify instances (`EMFILE`).
+    pub fn fail_next_start(root: &Path) {
+        add(&FAIL, root);
+    }
+
+    /// The watcher on `root` stops at its next batch, as one whose thread ended.
+    pub fn stop(root: &Path) {
+        add(&STOP, root);
+    }
+
+    fn add(list: &Mutex<Vec<PathBuf>>, root: &Path) {
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        list.lock().unwrap_or_else(|e| e.into_inner()).push(root);
+        ANY.store(true, Ordering::SeqCst);
+    }
+
+    pub(crate) fn take(list: &Mutex<Vec<PathBuf>>, root: &Path) -> bool {
+        if !ANY.load(Ordering::SeqCst) {
+            return false;
+        }
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let mut list = list.lock().unwrap_or_else(|e| e.into_inner());
+        match list.iter().position(|r| *r == root) {
+            Some(i) => {
+                list.swap_remove(i);
+                true
+            }
+            None => false,
+        }
     }
 }
