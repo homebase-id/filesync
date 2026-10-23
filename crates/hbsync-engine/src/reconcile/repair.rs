@@ -674,6 +674,8 @@ impl Reconciler<'_> {
                     }
                     continue;
                 }
+                // Alone on a name taken here: what another page plans is its page's (§6.5).
+                group.retain(|n| !self.elsewhere(*n));
                 let keep = usize::from(!taken(&key));
                 if group.len() <= keep {
                     continue;
@@ -689,11 +691,6 @@ impl Reconciler<'_> {
                     (!self.deferred.contains(n), arriving, *n)
                 });
                 for loser in group.into_iter().skip(keep) {
-                    // Never what another page plans (§6.5): context as it is, its page decides
-                    // it, with its change (a rename here, a tag) in.
-                    if self.elsewhere(loser) {
-                        continue;
-                    }
                     // Never what waits for a hash, or for a name (§6.3): planned, it waits.
                     if self.deferred.contains(&loser) || self.holds_name(loser) {
                         if self.scope.contains(&loser) {

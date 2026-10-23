@@ -2362,6 +2362,23 @@ fn a_clash_never_renames_what_another_page_plans() {
     w.input.dirty_elsewhere.insert(f);
     let plan = w.plan();
     assert!(!plan.ops.iter().any(|op| op.node() == f), "{:#?}", plan.ops);
+    assert!(plan.conflicts.is_empty(), "{:?}", plan.conflicts);
+    assert!(plan.uncovered.is_empty(), "{:?}", plan.uncovered);
+    // Only tagged, in its own page: still on `d`, it is renamed for the clash there.
+    let mut tagged = file(ROOT, "d", "1");
+    tagged.tags = Tags::new([Tag::new("Red", 6)]);
+    w.local(f, Some(tagged));
+    w.input.dirty = [f].into();
+    w.input.dirty_elsewhere = [n].into();
+    let plan = w.plan();
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, Op::RemoteUpdate { node, name, .. }
+            if *node == f && name == "d (conflict 1)")),
+        "{:#?}",
+        plan.ops
+    );
 }
 
 /// A new folder here holding a file being written, alone under a name a node this device
