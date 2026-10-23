@@ -1407,3 +1407,46 @@ fn regression_a_clash_in_another_page_keeps_a_rename_and_its_tag() {
         }
     }
 }
+
+/// Both devices ignore `*(conflict 1)*` and make `a`: the name clash's loser takes the first
+/// numbered name this device syncs, `a (conflict 2)`, as the executor's names do (§6.1). Before,
+/// the reconciler took `a (conflict 1)`, which the next scan found ignored: it left the drive
+/// and the other device (§10, rule 1), kept on one device only.
+#[test]
+fn regression_a_clash_name_is_one_this_device_syncs() {
+    use Action::*;
+    let mut sim = Sim::new(2).with_ignore_rules("*(conflict 1)*\n");
+    let act = |client, action| Event::Act { client, action };
+    sim.run(&[
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(1, CreateFile { parent: 0, name: 0 }),
+    ]);
+    assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+    let paths = sim.server_paths();
+    assert!(paths.iter().any(|p| p == "a (conflict 2)"), "{paths:?}");
+    assert!(!paths.iter().any(|p| p == "a (conflict 1)"), "{paths:?}");
+    for c in 0..2 {
+        assert!(sim.item(c, "a (conflict 2)").is_some(), "c{c}");
+    }
+    // Rules are a device's own: where only one device ignores the name, whichever device
+    // renames, the clash ends without loss (an item the other names so is out of this one's
+    // view, still on the drive).
+    for (rules_on, first) in [(0, 0), (0, 1), (1, 0), (1, 1)] {
+        let mut sim = Sim::new(2)
+            .without_ignore_rules()
+            .with_ignore_rules_on(rules_on, "*(conflict 1)*\n");
+        sim.run(&[
+            act(first, CreateFile { parent: 0, name: 0 }),
+            act(1 - first, CreateFile { parent: 0, name: 0 }),
+            Event::Plan { client: 0 },
+            Event::Plan { client: 1 },
+        ]);
+        assert!(sim.quiesce(30), "no convergence: rules on c{rules_on}");
+        if let Err(e) = sim.check() {
+            panic!("rules on c{rules_on}, c{first} first: {e}");
+        }
+    }
+}

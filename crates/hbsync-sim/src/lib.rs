@@ -145,6 +145,21 @@ impl Sim {
         self
     }
 
+    /// Every client ignores by `rules` (`.hbsync/ignore`'s text) instead.
+    pub fn with_ignore_rules(mut self, rules: &str) -> Self {
+        for c in 0..self.clients.len() {
+            self = self.with_ignore_rules_on(c, rules);
+        }
+        self
+    }
+
+    /// Client `c` ignores by `rules` (`.hbsync/ignore`'s text) instead.
+    pub fn with_ignore_rules_on(mut self, c: usize, rules: &str) -> Self {
+        let filter = Filter::from_rules(rules, false).expect("rules");
+        self.clients[c].filter = std::sync::Arc::new(filter);
+        self
+    }
+
     /// Every fourth plan a main folder makes is checked against the engine's own planning path: its
     /// planning input filled into a state DB as the engine's store holds it, planned from
     /// narrow views as the engine does (`view::plan_narrow`), against whole folders for the

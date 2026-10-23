@@ -146,7 +146,10 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
 
 1. **Unique names per folder**, compared by `key(name) = casefold(NFC(name))`. On a clash the
    node with the lower node id (byte order) keeps the name; each other node is renamed to
-   `<stem> (conflict <n>)<ext>` with the smallest `n ≥ 1` that is free. Applies equally to
+   `<stem> (conflict <n>)<ext>` with the smallest `n ≥ 1` that is free and that this device
+   syncs (§10: one it ignores would leave the drive at the next scan), of the first hundred,
+   as the executor's numbered names; else the smallest free one (simulator:
+   `regression_a_clash_name_is_one_this_device_syncs`). Applies equally to
    files and folders. Recovered files, and an orphan moving into it, lose a clash whatever the
    ids (rule 3). A name that what waits for a hash holds (rule 3) isn't renamed or taken:
    the other node waits.

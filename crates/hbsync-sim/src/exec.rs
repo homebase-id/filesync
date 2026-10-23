@@ -15,7 +15,7 @@ use hbsync_engine::reconcile::{
     Agreement, BaseExtra, DeleteGuard, DriveVersion, Guarding, Input, Masking, Op, Options,
     Removed, reconcile_with_known,
 };
-use hbsync_engine::tree::{Tree, first_free, numbered_names};
+use hbsync_engine::tree::{Tree, first_free_by, numbered_names};
 use hbsync_local::Verdict;
 use hbsync_local::layout::parked_name;
 use hbsync_platform::Os;
@@ -2189,12 +2189,10 @@ fn numbered_name(
     name: &str,
     is_dir: bool,
 ) -> Option<String> {
-    let free =
-        |c: &String| Ok::<_, Infallible>(client.local.child_named(parent, c, except).is_none());
-    let Ok(name) = first_free(numbered_names(name), free, |c| {
+    let free = |c: &String| client.local.child_named(parent, c, except).is_none();
+    first_free_by(numbered_names(name), free, |c| {
         syncs_at(client, parent, c, is_dir)
-    });
-    name
+    })
 }
 
 /// Whether the client syncs an item `name` in its folder `parent`.
