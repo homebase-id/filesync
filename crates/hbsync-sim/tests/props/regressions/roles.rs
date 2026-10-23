@@ -228,3 +228,35 @@ fn regression_a_role_folder_comes_back_without_what_was_restored_from_it() {
         panic!("{e}");
     }
 }
+
+/// Seed cc ca371601… of `stopped_deletes_and_the_purge_converge_without_loss` (macOS CI, PR
+/// #281). c3, the role device, makes `d/a` in Documents and then ignores `d`; `d` goes to
+/// Recently deleted, and another device writes `a` after that, so it stays live in the removed
+/// `d`. No device syncs that place: it stays as it is (node schema, Changes 2026-10-23). Its
+/// place, through the removed `d`, is in Documents: never the main folder's (sync semantics §12),
+/// as the main folder's engine plans it. The oracle took it for a main-folder orphan, as it
+/// walked live folders only, and said c0 diverged.
+#[test]
+fn regression_what_is_in_a_removed_folder_of_a_role_folder_is_never_the_main_folders() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(3, CreateFolder { parent: 0, name: 5 }),
+        act(3, CreateFile { parent: 6, name: 0 }),
+        Event::Plan { client: 3 },
+        Event::Step { client: 3 },
+        act(0, CreateFile { parent: 0, name: 0 }),
+        Event::Step { client: 3 },
+        act(3, ToggleIgnore),
+        Event::Step { client: 3 },
+        Event::Plan { client: 3 },
+        Event::Step { client: 3 },
+        Event::Step { client: 3 },
+        act(0, Restore { node: 0 }),
+        act(0, DeleteStopped { pick: 6, done: 2 }),
+        act(0, EditTaken { pick: 0 }),
+    ];
+    if let Err(e) = run_with(3, None, Sim::with_role_device, &events) {
+        panic!("{e}");
+    }
+}
