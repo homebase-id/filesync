@@ -16,36 +16,44 @@ impl Home {
     /// A config and credentials as `hbsync setup` leaves them, for an identity that can't be
     /// reached.
     fn set_up(&self) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        self.set_up_as(IDENTITY)
+    }
+
+    /// [`Home::set_up`] for `identity`.
+    fn set_up_as(&self, identity: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
         let folder = self.path().join("Homebase");
         std::fs::create_dir_all(&folder)?;
         // As the config keeps it: without `\\?\` on Windows.
         let folder = hbsync_platform::winpath::plain(&folder.canonicalize()?);
         let paths = hbsync_app::Paths::under(self.path());
         hbsync_engine::root::SyncRoot::create(
-            &paths.account_db(&IDENTITY.into()),
-            IDENTITY,
+            &paths.account_db(&identity.into()),
+            identity,
             &folder,
         )?;
         std::fs::write(
             self.path().join("config.toml"),
             format!(
-                "[[roots]]\nidentity = \"{IDENTITY}\"\nfolder = {}\n",
+                "[[roots]]\nidentity = \"{identity}\"\nfolder = {}\n",
                 toml_string(&folder)
             ),
         )?;
         let creds = hbsync_homebase::Credentials {
-            identity: IDENTITY.into(),
+            identity: identity.into(),
             client_auth_token: "Y2F0".into(),
             shared_secret: "AAECAwQFBgcICQoLDA0ODw==".into(),
         };
-        creds.save(&self.credentials())?;
+        creds.save(&self.credentials_of(identity))?;
         Ok(folder)
     }
 
     fn credentials(&self) -> PathBuf {
-        self.path()
-            .join("credentials")
-            .join(format!("{IDENTITY}.json"))
+        self.credentials_of(IDENTITY)
+    }
+
+    fn credentials_of(&self, identity: &str) -> PathBuf {
+        let key = hbsync_app::Identity::new(identity).file_key();
+        self.path().join("credentials").join(format!("{key}.json"))
     }
 }
 
@@ -141,13 +149,18 @@ fn the_daemon_answers_while_offline_and_stops() -> R {
     assert!(config.contains("paused = true"), "{config}");
     let out = home.hbsync(&["resume"])?;
     assert!(out.status.success(), "{}", text(&out));
-    // A timed pause ends by itself, also while the account can't connect: the daemon's timer.
-    let out = home.hbsync(&["pause", "--for", "2"])?;
-    assert!(out.status.success(), "{}", text(&out));
+    // A timed pause shows when it ends.
     let main = || crate::status(&home).map(|s| s["folders"][0].clone());
+    home.ok(&["pause", "--for", "1h"])?;
     let paused = main()?;
     assert_eq!(paused["state"], "paused", "{paused}");
     assert!(paused["paused_until"].is_u64(), "{paused}");
+    home.ok(&["resume"])?;
+    // It ends by itself, also while the account can't connect: the daemon's timer. One of a
+    // second may be over before a status is read (a slow machine): set it is, in the config.
+    home.ok(&["pause", "--for", "1"])?;
+    let config = std::fs::read_to_string(home.path().join("config.toml"))?;
+    assert!(config.contains("paused_until"), "{config}");
     let until = Instant::now() + Duration::from_secs(30);
     let resumed = loop {
         let folder = main()?;
@@ -173,6 +186,8 @@ fn the_daemon_answers_while_offline_and_stops() -> R {
         .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
         .collect();
     assert!(logged.contains("daemon"), "{logged}");
+    // The timed pause ended by the daemon's timer.
+    assert!(logged.contains("the pause is over"), "{logged}");
     Ok(())
 }
 
@@ -368,5 +383,38 @@ fn unlink_while_a_daemon_starts_leaves_none_syncing() -> R {
     assert_eq!(out.status.code(), Some(3), "{}", text(&out));
     let config = std::fs::read_to_string(home.path().join("config.toml"))?;
     assert!(!config.contains(IDENTITY), "{config}");
+    Ok(())
+}
+
+/// An identity that takes the connection and never answers (a resolver or a server that
+/// hangs, as Windows' can for an unknown host): the account waits in its connect. Stopping
+/// the daemon doesn't wait for that try to time out.
+#[test]
+fn the_daemon_stops_while_its_identity_doesnt_answer() -> R {
+    let silent = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let identity = format!("127.0.0.1:{}", silent.local_addr()?.port());
+    let home = Home::new()?;
+    home.set_up_as(&identity)?;
+    home.ok(&["start"])?;
+    // Its try came in, and hangs: taken, never read or answered.
+    silent.set_nonblocking(true)?;
+    let until = Instant::now() + Duration::from_secs(30);
+    let _held = loop {
+        match silent.accept() {
+            Ok((held, _)) => break held,
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                assert!(Instant::now() < until, "the daemon never tried to connect");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Err(e.into()),
+        }
+    };
+    let began = Instant::now();
+    home.ok(&["stop"])?;
+    assert!(
+        began.elapsed() < Duration::from_secs(10),
+        "stopped after {:?}",
+        began.elapsed()
+    );
     Ok(())
 }

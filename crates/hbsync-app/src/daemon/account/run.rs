@@ -9,8 +9,8 @@ use std::time::{Duration, Instant};
 
 use hbsync_engine::Drive;
 use hbsync_engine::root::SyncRoot;
-use hbsync_homebase::Client;
 use hbsync_homebase::drive::HomebaseRemote;
+use hbsync_homebase::{Client, HomebaseError};
 use hbsync_remote::ErrorClass;
 
 use super::parts::AccountParts;
@@ -181,6 +181,8 @@ impl Account {
             let mut changed = false;
             for msg in msgs.drain(..) {
                 match msg {
+                    // Only while it connects ([`Account::try_connect`]).
+                    Msg::Connected(_) => {}
                     Msg::Hint(event) => {
                         let Some(hints) = notifications.event(event, Instant::now(), paused) else {
                             continue;
@@ -432,6 +434,43 @@ impl Account {
         Ok(Some(creds))
     }
 
+    /// One try at connecting, on a thread of its own that answers on the account's channel:
+    /// an identity that takes long to answer, or never does (a resolver or a server that
+    /// hangs, up to the request's timeouts), doesn't keep the account from stopping. `None`:
+    /// it stops, the try left to end by itself (its answer, or the process's end). What else
+    /// comes meanwhile is kept in `early`.
+    fn try_connect(
+        &self,
+        client: &Client,
+        stop: &AtomicBool,
+        rx: &Receiver<Msg>,
+        early: &mut Vec<Msg>,
+    ) -> Option<Result<HomebaseRemote, HomebaseError>> {
+        if self.stopping(stop) {
+            return None;
+        }
+        let (trying, to_account) = (client.clone(), self.requests.clone());
+        let spawned = std::thread::Builder::new()
+            .name("hbsync-connect".into())
+            .spawn(move || {
+                let tried = HomebaseRemote::connect(trying);
+                let _ = to_account.send(Msg::Connected(Box::new(tried)));
+            });
+        if let Err(e) = spawned {
+            // Tried again after the backoff, as one that got no answer.
+            return Some(Err(HomebaseError::Network(format!("can't try: {e}"))));
+        }
+        while !self.stopping(stop) {
+            match rx.recv() {
+                Ok(Msg::Connected(tried)) => return Some(*tried),
+                Ok(Msg::Wake | Msg::Woke) => {}
+                Ok(msg) => early.push(msg),
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
     /// The drive, once the identity answers (finding it takes a request); `None` when stopped
     /// first.
     fn connect(
@@ -443,7 +482,7 @@ impl Account {
     ) -> Option<Arc<HomebaseRemote>> {
         let mut backoff = Backoff::new();
         loop {
-            match HomebaseRemote::connect(client.clone()) {
+            match self.try_connect(client, stop, rx, early)? {
                 Ok(r) => return Some(Arc::new(r)),
                 Err(e) => {
                     let class = e.class();
