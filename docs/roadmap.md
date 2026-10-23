@@ -146,6 +146,14 @@ Written: [spec/sync-semantics.md](spec/sync-semantics.md),
   reaches the drive as an ordinary edit, which no delete guard sees, and replaces the good
   version on every device. Counts against the user's storage, like Recently deleted; the
   cost per edit (bytes kept, requests) to be measured and named before building
+- **`.gitignore` inside git repos** (for consideration, 2026-10-23): inside a folder with
+  `.git`, honour its `.gitignore` files with git's rules (per folder, `!` included), so a repo
+  can live in a synced folder without its build output and temp files; ignored items stay on
+  each device, as with `.hbsync/ignore`, and the rules are the same on every device since
+  `.gitignore` syncs. To weigh first: a branch switch changes the rules (newly ignored items
+  leave the drive, a large swing held by the guard), turning it on for existing folders makes
+  their build output leave once, and `.git` itself synced from two computers that both commit
+  gives conflict copies git doesn't understand (say so, or leave `.git` out)
 - **Observability**: structured logs, per-item status, diagnostics bundle
 - **Packaging** (2026-10-11, `docs/spec/packaging.md`, `RELEASING.md`): Conveyor installers
   that update themselves (MSIX, Mac apps and `.dmg`, `.deb` with its apt repository), an `.rpm`,
