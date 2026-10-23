@@ -787,6 +787,11 @@ pub(crate) struct PlanSeen<'a> {
     pub(crate) synced_files: usize,
     pub(crate) confirmed: &'a HashSet<NodeId>,
     pub(crate) wiped: &'a HashSet<NodeId>,
+    /// The synced files gone here and gone there, unconfirmed, in the whole dirty set, and of
+    /// them those in the rest of it (another page's, in pages): the guard weighs the whole
+    /// delete (§7), a file gone on both sides too.
+    pub(crate) pending: (usize, usize),
+    pub(crate) outside: (usize, usize),
 }
 
 impl Ledger {
@@ -963,10 +968,17 @@ impl Ledger {
                     _ => 0,
                 })
                 .sum();
-            let held_elsewhere = held_deleted_here > 0 && !every(held_all + deleted_here);
+            // In pages, with what other pages have to delete; all of it, as the dirty set has
+            // it (what the drive no longer has: removed every synced file).
+            let (here_elsewhere, there_elsewhere) = seen.outside;
+            let there_all = seen
+                .pending
+                .1
+                .max(held_all + deleted_here + there_elsewhere);
+            let held_elsewhere = held_deleted_here > 0 && !every(there_all);
             // And what isn't held is judged with what is: one let through that makes every
             // synced file with a held wipe should have been held with it.
-            if deleted_here > 0 && held_all > held_deleted_here && every(held_all + deleted_here) {
+            if deleted_here > 0 && held_all > held_deleted_here && every(there_all) {
                 return Some(format!(
                     "{} let {deleted_here} removals from elsewhere through that, with the {held_all}                      held, are every synced file ({synced_files})",
                     seen.client
@@ -979,7 +991,8 @@ impl Ledger {
                     seen.client, seen.all_held
                 ));
             }
-            (trips(deleted) || every(deleted_here)).then(|| {
+            let whole = (seen.pending.0.max(deleted + here_elsewhere), there_all);
+            ((deleted > 0 && trips(whole.0)) || (deleted_here > 0 && every(whole.1))).then(|| {
                 format!(
                     "{} deletes {deleted} remote and deletes {deleted_here} local files \
                      unconfirmed (limit {min}, {synced_files} synced): {:?}",

@@ -427,6 +427,16 @@ impl Sim {
         self.server.removed.contains_key(&node)
     }
 
+    /// With the guard on, the user looks at what client `c` holds and confirms it (a
+    /// request). Whether something was held.
+    fn confirm_held(&mut self, c: usize) -> bool {
+        let held = self.guard.is_some() && !self.clients[c].held.is_empty();
+        if held {
+            self.run(&[Event::Confirm { client: c }]);
+        }
+        held
+    }
+
     /// Plans and executes every client until nothing changes. Returns `false` if it doesn't
     /// settle within `max_rounds`.
     pub fn quiesce(&mut self, max_rounds: usize) -> bool {
@@ -439,9 +449,7 @@ impl Sim {
             let mut any_planned = false;
             for c in 0..self.clients.len() {
                 self.plan(c);
-                if self.guard.is_some() && !self.clients[c].held.is_empty() {
-                    // The user looks at what is held and confirms it.
-                    self.run(&[Event::Confirm { client: c }]);
+                if self.confirm_held(c) {
                     self.plan(c);
                 }
                 // Still held after a confirmation would be a bug: keep going, and fail. A record
@@ -456,6 +464,9 @@ impl Sim {
                 let mut rounds = 0;
                 while self.step(c) || (rounds < 64 && self.next_page_planned(c)) {
                     rounds += 1;
+                    // A later page's held deletes, confirmed as the first's: planned again with
+                    // their page in the next sweep (the engine's answer comes into a later round).
+                    self.confirm_held(c);
                 }
             }
             let unchanged = !self.server.changed_since(&server);
@@ -507,9 +518,7 @@ impl Sim {
             for _ in 0..30 {
                 let before = self.ops_executed;
                 self.plan(c);
-                if self.guard.is_some() && !self.clients[c].held.is_empty() {
-                    // The user confirms what is held: a request.
-                    self.run(&[Event::Confirm { client: c }]);
+                if self.confirm_held(c) {
                     self.plan(c);
                 }
                 while self.step(c) {}
