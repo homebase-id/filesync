@@ -304,20 +304,40 @@ impl Restoring<'_> {
 }
 
 /// What a restore of some nodes does, worked out in one read.
-pub(super) struct RestorePlan {
+#[derive(Debug)]
+pub struct RestorePlan<R = RemovedRow> {
     /// In order, for each node: the folders above it that are in Recently deleted (top-down),
     /// then it and what was deleted with it (each after its folder); each row once.
-    pub(super) rows: Vec<RemovedRow>,
+    pub rows: Vec<R>,
     /// Folders in the tree that the rows may go into (the top included).
-    live: HashSet<NodeId>,
+    pub live: HashSet<NodeId>,
     /// The name keys taken in each of those folders.
-    taken: HashMap<NodeId, HashSet<String>>,
+    pub taken: HashMap<NodeId, HashSet<String>>,
 }
 
-pub(super) fn plan_restore(
-    s: &ReadTx<'_>,
+/// What [`plan_restore_from`] reads: the engine's store, or the simulator's drive.
+pub trait RestoreSource {
+    /// A row of Recently deleted.
+    type Row;
+    type Error;
+    /// `node`'s row in Recently deleted, if it is there.
+    fn removed(&mut self, node: NodeId) -> Result<Option<Self::Row>, Self::Error>;
+    /// `top` and what was deleted with it, each after its folder (the listing's `group`).
+    fn group(&mut self, top: Self::Row) -> Result<Vec<Self::Row>, Self::Error>;
+    /// Whether `node` is live on the drive.
+    fn is_live(&mut self, node: NodeId) -> Result<bool, Self::Error>;
+    /// The names of what is live in `folder`.
+    fn names_in(&mut self, folder: NodeId) -> Result<Vec<String>, Self::Error>;
+    /// A row's node and its folder.
+    fn place(row: &Self::Row) -> (NodeId, NodeId);
+}
+
+/// The plan of a restore of `nodes`, from `source` (the one rule: the engine's, which the
+/// simulator calls too).
+pub fn plan_restore_from<S: RestoreSource>(
+    source: &mut S,
     nodes: &[NodeId],
-) -> Result<Option<RestorePlan>, StateError> {
+) -> Result<Option<RestorePlan<S::Row>>, S::Error> {
     // Each row once, whichever of `nodes` takes it in; `grouped`: those whose group (what was
     // deleted with them) is planned already.
     let (mut seen, mut grouped) = (HashSet::new(), HashSet::new());
@@ -326,7 +346,7 @@ pub(super) fn plan_restore(
         if grouped.contains(&node) {
             continue; // in what another of them took along
         }
-        let Some(top) = s.removed_by_node(node)? else {
+        let Some(top) = source.removed(node)? else {
             continue;
         };
         // The folders above, as far as they are in Recently deleted (then in the tree, or
@@ -334,12 +354,12 @@ pub(super) fn plan_restore(
         // planned already. A chain past any depth a path may have (only a malicious drive makes
         // one) stays where it is: above its top is still a removed folder, not one gone for
         // good.
-        let up = crate::walk::up::<_, StateError>(top.row.parent, |at| {
+        let up = crate::walk::up::<_, S::Error>(S::place(&top).1, |at| {
             if seen.contains(&at) {
                 return Ok(None);
             }
-            Ok(s.removed_by_node(at)?.map(|f| {
-                let parent = f.row.parent;
+            Ok(source.removed(at)?.map(|f| {
+                let parent = S::place(&f).1;
                 (f, parent)
             }))
         })?;
@@ -350,10 +370,11 @@ pub(super) fn plan_restore(
         chain.reverse();
         // Then the node and what was deleted with it, each after its folder. What is live
         // still comes back with its folder by itself.
-        let group = group(s, top)?;
-        grouped.extend(group.iter().map(|r| r.row.node));
+        let group = source.group(top)?;
+        grouped.extend(group.iter().map(|r| S::place(r).0));
         for r in chain.into_iter().chain(group) {
-            if seen.insert(r.row.node) && s.get_mirror(r.row.node)?.is_none() {
+            let node = S::place(&r).0;
+            if seen.insert(node) && !source.is_live(node)? {
                 rows.push(r);
             }
         }
@@ -367,18 +388,54 @@ pub(super) fn plan_restore(
     let mut live = HashSet::from([NodeId::ROOT]);
     let mut taken: HashMap<NodeId, HashSet<String>> = HashMap::new();
     let mut looked = HashSet::new();
-    for parent in rows.iter().map(|r| r.row.parent).chain([NodeId::ROOT]) {
+    let parents: Vec<NodeId> = rows.iter().map(|r| S::place(r).1).collect();
+    for parent in parents.into_iter().chain([NodeId::ROOT]) {
         if !looked.insert(parent) {
             continue;
         }
-        if !parent.is_root() && s.get_mirror(parent)?.is_some() {
+        if !parent.is_root() && source.is_live(parent)? {
             live.insert(parent);
         } else if !parent.is_root() && !seen.contains(&parent) {
             continue;
         }
-        let children = s.mirror_children(parent)?;
-        let names = taken_in(parent, children.iter().map(|m| m.name.as_str()));
-        taken.insert(parent, names);
+        let names = source.names_in(parent)?;
+        taken.insert(parent, taken_in(parent, names.iter().map(String::as_str)));
     }
     Ok(Some(RestorePlan { rows, live, taken }))
+}
+
+/// [`plan_restore_from`] the store.
+pub(super) fn plan_restore(
+    s: &ReadTx<'_>,
+    nodes: &[NodeId],
+) -> Result<Option<RestorePlan>, StateError> {
+    plan_restore_from(&mut Store(s), nodes)
+}
+
+/// The store as a [`RestoreSource`].
+struct Store<'s, 'c>(&'s ReadTx<'c>);
+
+impl RestoreSource for Store<'_, '_> {
+    type Row = RemovedRow;
+    type Error = StateError;
+    fn removed(&mut self, node: NodeId) -> Result<Option<RemovedRow>, StateError> {
+        self.0.removed_by_node(node)
+    }
+    fn group(&mut self, top: RemovedRow) -> Result<Vec<RemovedRow>, StateError> {
+        group(self.0, top)
+    }
+    fn is_live(&mut self, node: NodeId) -> Result<bool, StateError> {
+        Ok(self.0.get_mirror(node)?.is_some())
+    }
+    fn names_in(&mut self, folder: NodeId) -> Result<Vec<String>, StateError> {
+        Ok(self
+            .0
+            .mirror_children(folder)?
+            .into_iter()
+            .map(|m| m.name)
+            .collect())
+    }
+    fn place(row: &RemovedRow) -> (NodeId, NodeId) {
+        (row.row.node, row.row.parent)
+    }
 }

@@ -20,7 +20,7 @@ pub(super) fn deleted_with(removed_at: i64, folder: &RemovedRow) -> bool {
 
 /// [`deleted_with`] by the times: a node removed at `removed_at` in a folder removed at
 /// `folder_at` (each [`hbsync_types::removal_time`]).
-pub(crate) fn deleted_with_at(removed_at: i64, folder_at: i64) -> bool {
+pub fn deleted_with_at(removed_at: i64, folder_at: i64) -> bool {
     folder_at <= removed_at
 }
 
