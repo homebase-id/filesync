@@ -14,6 +14,7 @@ pub(crate) fn action() -> impl Strategy<Value = Action> + Clone {
         2 => (i(), i(), i()).prop_map(|(node, parent, name)| Action::Move { node, parent, name }),
         1 => i().prop_map(|node| Action::Delete { node }),
         1 => i().prop_map(|parent| Action::CreateJunk { parent }),
+        1 => i().prop_map(|parent| Action::CreateJunkFolder { parent }),
         1 => Just(Action::ToggleIgnore),
         1 => i().prop_map(|node| Action::Restore { node }),
         1 => Just(Action::Purge),

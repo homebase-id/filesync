@@ -39,6 +39,11 @@ pub enum Action {
     CreateJunk {
         parent: usize,
     },
+    /// A folder on the built-in junk list (the recycle bin, [`JUNK_FOLDER`]) with a file in
+    /// it, never synced: a delete of a folder holding it keeps that folder (sync semantics §7).
+    CreateJunkFolder {
+        parent: usize,
+    },
     /// The client starts or stops ignoring `d` (a rule change, picked up at the next plan).
     ToggleIgnore,
     /// The user restores one item of Recently deleted, on the server at once, with what was
@@ -180,6 +185,9 @@ pub enum Action {
 /// Tags the users pick from: one no Linux client can hold, one with a newline no macOS client
 /// can hold.
 pub(crate) const TAGS: &[(&str, u8)] = &[("Red", 6), ("Work", 0), ("a,b", 4), ("x\ny", 2)];
+
+/// The junk folder [`Action::CreateJunkFolder`] makes.
+pub(crate) const JUNK_FOLDER: &str = "$RECYCLE.BIN";
 
 /// The junk name [`Action::CreateJunk`] uses.
 pub(crate) const JUNK: &str = "Thumbs.db";

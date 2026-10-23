@@ -19,7 +19,7 @@ use hbsync_types::{
 };
 
 use crate::Sim;
-use crate::action::{Action, JUNK, NAMES, TAGS};
+use crate::action::{Action, JUNK, JUNK_FOLDER, NAMES, TAGS};
 use crate::model::client::{Client, ignoring_d};
 use crate::model::server::{Server, ServerNode};
 use crate::oracle::Seen;
@@ -562,6 +562,16 @@ impl Sim {
                 } else {
                     Filter::default()
                 });
+            }
+            Action::CreateJunkFolder { parent } => {
+                let parent = folders[parent % folders.len()];
+                if name_free(local, parent, JUNK_FOLDER, None) {
+                    let folder = self.ids.fresh();
+                    let blob = self.new_blob();
+                    let local = &mut self.clients[c].local;
+                    local.insert(folder, NodeState::folder(parent, JUNK_FOLDER));
+                    local.insert(self.ids.fresh(), NodeState::file(folder, "x", blob));
+                }
             }
             Action::CreateJunk { parent } => {
                 let parent = folders[parent % folders.len()];

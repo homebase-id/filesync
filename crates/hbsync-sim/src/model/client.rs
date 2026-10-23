@@ -210,6 +210,15 @@ pub(crate) fn verdict(client: &Client, node: NodeId) -> Verdict {
     verdict_in(&client.local, &client.run_filter, node)
 }
 
+/// Whether the client's item `node` in `tree`, one its filter hides, keeps its folder from a
+/// delete as the engine's does ([`hbsync_engine::exec::keeps_its_folder`]): an ignored item and
+/// a junk folder do, a junk file goes along.
+pub(crate) fn keeps_in(tree: &Tree, filter: &Filter, node: NodeId) -> bool {
+    let is_dir = tree.get(node).is_some_and(|s| s.kind == NodeKind::Folder);
+    let verdict = verdict_in(tree, filter, node);
+    !verdict.is_sync() && hbsync_engine::exec::keeps_its_folder(verdict == Verdict::Junk, is_dir)
+}
+
 /// What `filter` says about item `node` of `tree`, at its place there.
 pub(crate) fn verdict_in(tree: &Tree, filter: &Filter, node: NodeId) -> Verdict {
     let Some(path) = tree.path(node) else {

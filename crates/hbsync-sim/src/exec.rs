@@ -16,7 +16,6 @@ use hbsync_engine::reconcile::{
     Removed, reconcile_with_known,
 };
 use hbsync_engine::tree::{Tree, first_free_by, numbered_names};
-use hbsync_local::Verdict;
 use hbsync_local::layout::parked_name;
 use hbsync_platform::Os;
 use hbsync_state::{Answer, RemovedRow, StateDb, StateError};
@@ -26,7 +25,7 @@ use hbsync_types::{
 
 use crate::Sim;
 use crate::action::NAMES;
-use crate::model::client::{Client, rekey_client, verdict, verdict_in};
+use crate::model::client::{Client, keeps_in, rekey_client, verdict};
 use crate::model::server::{ServerNode, time};
 use crate::oracle::{PlanSeen, Planned, What, view_with};
 
@@ -1552,12 +1551,12 @@ impl Sim {
         if all.is_empty() || shown.iter().any(|n| !unchanged(client, *n)) || shown != expected {
             return Skip;
         }
-        // Junk goes along. Ignored items stay, and so do the folders they sit in, but
-        // released: the scanner finds them as new folders.
+        // Junk files go along. Ignored items and junk folders stay, and so do the folders they
+        // sit in, but released: the scanner finds them as new folders.
         let kept: HashSet<NodeId> = all
             .iter()
             .copied()
-            .filter(|n| hidden.contains(n) && verdict(client, *n) == Verdict::Ignored)
+            .filter(|n| hidden.contains(n) && keeps_in(&client.local, &client.run_filter, *n))
             .collect();
         let mut released: BTreeSet<NodeId> = BTreeSet::new();
         for k in &kept {
@@ -1662,7 +1661,7 @@ impl Sim {
         for n in aside.ids() {
             if !hidden.contains(&n) {
                 shown.push(n);
-            } else if verdict_in(&placed, &client.run_filter, n) == Verdict::Ignored {
+            } else if keeps_in(&placed, &client.run_filter, n) {
                 return None;
             }
         }
@@ -1742,7 +1741,7 @@ impl Sim {
         let (placed, hidden) = at_place_filtered(client, aside);
         let unchanged = aside.iter().all(|(n, state)| {
             if hidden.contains(&n) {
-                return verdict_in(&placed, &client.run_filter, n) != Verdict::Ignored;
+                return !keeps_in(&placed, &client.run_filter, n);
             }
             client.base.get(n).is_some_and(|b| {
                 b.kind == state.kind
