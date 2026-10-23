@@ -505,6 +505,37 @@ fn crossing_moves_are_not_a_cycle() {
     assert_eq!(plan.conflicts, [Conflict::Cycle { node: a }]);
 }
 
+/// A cycle with no local move to undo (§6.2): two devices each moved one folder into the
+/// other, and the drive took both (its mirror holds `a` in `b` and `b` in `a`). The lowest id
+/// is undone: its drive place would close the cycle again, so it goes to the top, under its
+/// name; the other stays in it. Told as a cycle. (The scan of 2026-10-23, G9.)
+#[test]
+fn a_cycle_with_no_local_move_puts_the_lowest_at_the_top() {
+    let [a, b] = ids(2)[..] else { unreachable!() };
+    let (low, high) = (a.min(b), a.max(b));
+    let mut w = World::default();
+    w.synced(a, folder(ROOT, "a")).synced(b, folder(ROOT, "b"));
+    w.remote(a, Some(folder(b, "a")))
+        .remote(b, Some(folder(a, "b")));
+    let plan = w.plan();
+    assert_eq!(plan.conflicts, [Conflict::Cycle { node: low }], "{plan:?}");
+    let name = |n: NodeId| if n == a { "a" } else { "b" };
+    // The drive gets the lowest back at the top; here, the other goes into it.
+    assert!(
+        plan.ops.iter().any(|op| matches!(op,
+            Op::RemoteUpdate { node, parent, name: n, .. }
+                if *node == low && *parent == ROOT && n == name(low))),
+        "{:?}",
+        plan.ops
+    );
+    assert!(without_drive(&plan.ops).contains(&Op::LocalMove {
+        node: high,
+        parent: low,
+        name: name(high).into(),
+        drive: None,
+    }));
+}
+
 #[test]
 fn name_clash_lower_id_keeps_the_name() {
     let [low, high] = ids(2)[..] else {

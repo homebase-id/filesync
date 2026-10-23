@@ -151,6 +151,10 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    the other node waits.
 2. **No cycles.** If merged moves form a cycle, revert the local moves taking part in it (the
    remote side has already published its moves). Revert one at a time until no cycle remains.
+   With no local move in it (the drive took two devices' moves, each folder into the other),
+   the lowest id goes back to its place on the drive, else in the base, and to the top where
+   that would close the cycle again, under its name (reconcile
+   `a_cycle_with_no_local_move_puts_the_lowest_at_the_top`).
 3. **No orphans.** A live node whose merged parent is deleted resurrects the parent chain:
    - remote-deleted parent → restored remotely (still removed) or re-created with the same
      node id and its base name (deleted for good);
