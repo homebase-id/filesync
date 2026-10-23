@@ -331,11 +331,23 @@ pub(crate) fn to_remote(header: FileHeader, shared_secret: &Key) -> Result<Remot
             let key = header
                 .key(shared_secret)
                 .map_err(|e| format!("file {id}: {e}"))?;
-            let content = key
+            let text = key
                 .open_text(meta.app_data.content.as_deref().unwrap_or_default())
                 .map_err(|e| format!("file {id}: content: {e}"))?;
-            let content = NodeContent::from_json(&content)
-                .map_err(|e| format!("file {id}: content isn't node schema v1: {e}"))?;
+            // A newer schema's node is read-only here (node schema, "v"): unreadable, as a
+            // newer writer's version is (§8a), so this client never renames, moves, retags or
+            // writes over it, and loses none of its newer fields. Its `v` is looked at alone
+            // only where the content doesn't read (a newer one may change a field's type).
+            let newer = |v: u64| format!("file {id}: node schema v{v}, newer than this client's");
+            let content = NodeContent::from_json(&text).map_err(|e| {
+                match NodeContent::newer_version(&text) {
+                    Some(v) => newer(v),
+                    None => format!("file {id}: content isn't node schema v1: {e}"),
+                }
+            })?;
+            if !content.is_writable() {
+                return Err(newer(u64::from(content.v)));
+            }
             let payload = match kind {
                 NodeKind::Folder => None,
                 NodeKind::File => {
@@ -700,6 +712,16 @@ mod tests {
         };
         // Without its size, the stored (padded) size would be taken for the file's.
         refused(with_size(None)?, "no size")?;
+        // A newer schema's node is read-only: unreadable here (node schema, "v"), also where
+        // that schema changed a field's type.
+        for json in [
+            r#"{"v":2,"name":"a","mtime":1,"size":3}"#,
+            r#"{"v":2,"name":"a","mtime":"2026-10-23","size":3}"#,
+        ] {
+            let mut newer = fixture("file-node.json");
+            newer.file_metadata.app_data.content = Some(json.into());
+            refused(newer, "node schema v2, newer than this client's")?;
+        }
         // A size its stored bytes can't hold, or one near u64::MAX (whose sealed size would
         // overflow): every download would fail its check, in full.
         for (size, stored) in [(1000, None), (1040, None), (u64::MAX - 3, Some(u64::MAX))] {

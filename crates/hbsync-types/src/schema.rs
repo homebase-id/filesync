@@ -168,6 +168,16 @@ impl NodeContent {
     pub fn is_writable(&self) -> bool {
         self.v <= VERSION
     }
+
+    /// The version `json` says it is, where that is newer than this one: for content that
+    /// doesn't read as this version (a newer one may change a field's type).
+    pub fn newer_version(json: &str) -> Option<u64> {
+        let v = serde_json::from_str::<Value>(json)
+            .ok()?
+            .get("v")?
+            .as_u64()?;
+        (v > u64::from(VERSION)).then_some(v)
+    }
 }
 
 /// A Unix ms count: an integer, or a JavaScript-style fractional one rounded.
