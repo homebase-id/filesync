@@ -3928,6 +3928,107 @@ fn a_live_folder_with_a_leftover_removal_takes_nothing_along() -> R {
     Ok(())
 }
 
+/// A file written before folder `r`'s removal, in a folder `m` moved into `r` after it: `m`
+/// wasn't taken along, so neither is what is in it, as the plan reads it (`along`). Only the
+/// file's own time and the removal's were compared before.
+#[test]
+fn what_is_in_a_folder_moved_in_after_a_removal_isnt_taken_along() -> R {
+    // (the folder's time, the file's) against the removal at 100: whether the file is gone.
+    for (folder_at, file_at, gone) in [(200, 50, false), (50, 150, false), (50, 60, true)] {
+        let mut h = Harness::new()?;
+        let (r, m, node) = (NodeId::new(), NodeId::new(), NodeId::new());
+        let hash = h.content(b"A").hash;
+        let mut moved = MirrorRow::from_content(
+            some_version(),
+            m,
+            r,
+            NodeKind::Folder,
+            &NodeContent::folder("m"),
+            None,
+        );
+        moved.changed_at = Some(folder_at);
+        let mut file = MirrorRow::from_content(
+            some_version(),
+            node,
+            m,
+            NodeKind::File,
+            &NodeContent::file("f", 0, 1, false),
+            Some(hash),
+        );
+        file.changed_at = Some(file_at);
+        h.db.write(|s| {
+            s.account().put_removed(&RemovedRow {
+                row: MirrorRow::from_content(
+                    some_version(),
+                    r,
+                    NodeId::ROOT,
+                    NodeKind::Folder,
+                    &NodeContent::folder("r"),
+                    None,
+                ),
+                removed_at: Some(100),
+            })?;
+            s.account().put_mirror(&moved)?;
+            s.account().put_mirror(&file)
+        })?;
+        let read =
+            h.db.read(|s| view::gone_on_drive(s, node, &Scope::main()))?;
+        assert_eq!(read, gone, "folder at {folder_at}, file at {file_at}");
+    }
+    Ok(())
+}
+
+/// Below removed `r` (at 100), node `n`, a folder written before the removal: gone, unless
+/// something in it was written after (it keeps `n`), or `r` is a file, or `n` is in a live
+/// file (a file takes nothing along: what is in it is an orphan for Recovered files).
+#[test]
+fn what_keeps_a_node_from_a_removal_as_recovery_reads_it() -> R {
+    let row = |node: NodeId, parent: NodeId, kind: NodeKind, at: i64| {
+        let content = match kind {
+            NodeKind::File => NodeContent::file("f", 0, 1, false),
+            NodeKind::Folder => NodeContent::folder(node.0.to_string()),
+        };
+        let hash = (kind == NodeKind::File).then(|| h_content_hash(b"f"));
+        let mut m = MirrorRow::from_content(some_version(), node, parent, kind, &content, hash);
+        m.changed_at = Some(at);
+        m
+    };
+    // (the removed node's kind, the kind of `n`'s folder below it, `n`'s child's time, gone)
+    let cases = [
+        (NodeKind::Folder, None, 50, true),
+        (NodeKind::Folder, None, 150, false),
+        (NodeKind::File, None, 50, false),
+        (NodeKind::Folder, Some(NodeKind::File), 50, false),
+    ];
+    for (removed_kind, between, child_at, gone) in cases {
+        let mut h = Harness::new()?;
+        let (r, mid, n, child) = (NodeId::new(), NodeId::new(), NodeId::new(), NodeId::new());
+        h.db.write(|s| {
+            s.account().put_removed(&RemovedRow {
+                row: row(r, NodeId::ROOT, removed_kind, 1),
+                removed_at: Some(100),
+            })?;
+            let parent = match between {
+                Some(kind) => {
+                    s.account().put_mirror(&row(mid, r, kind, 50))?;
+                    mid
+                }
+                None => r,
+            };
+            s.account()
+                .put_mirror(&row(n, parent, NodeKind::Folder, 50))?;
+            s.account()
+                .put_mirror(&row(child, n, NodeKind::File, child_at))
+        })?;
+        let read = h.db.read(|s| view::gone_on_drive(s, n, &Scope::main()))?;
+        assert_eq!(
+            read, gone,
+            "{removed_kind:?} removed, {between:?} between, the child at {child_at}"
+        );
+    }
+    Ok(())
+}
+
 /// Removals go to the drive together, in one request, each file at the version its plan saw:
 /// one written since stays as it is (never forced) and is planned again, the others go.
 #[test]

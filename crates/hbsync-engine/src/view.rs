@@ -12,7 +12,7 @@
 //! the parent path, the name is the remote spelling (recorded mapping or [`to_remote`]), and a
 //! node parked under a temporary name is reported at its original place ([`parked_place`]).
 
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use hbsync_local::layout::parked_name;
 use hbsync_namemap::to_remote;
@@ -508,8 +508,9 @@ fn in_a_file(remote: &crate::tree::Tree, state: &NodeState) -> bool {
 
 /// Whether the mirror no longer has `node` as the plan reads it: not there, or taken along by
 /// the folder in Recently deleted its folders reach first in this folder's part of the drive,
-/// written no later than that folder's removal (the reconciler's `taken_along`; one outside,
-/// as the view leaves it out, isn't this folder's to bring back).
+/// by the one rule ([`crate::along::taken_along`], over the live folders between and what is
+/// in `node`; one outside, as the view leaves it out, isn't this folder's to bring back). Reads
+/// stop as soon as the answer is known: a later write on the way, or below `node`, keeps it.
 pub(crate) fn gone_on_drive(
     s: &ReadTx<'_>,
     node: NodeId,
@@ -518,15 +519,57 @@ pub(crate) fn gone_on_drive(
     let Some(row) = s.get_mirror(node)? else {
         return Ok(true);
     };
-    let coords = s.coords()?;
-    let Some((folder, at)) = s.removed_above(coords.to_drive(row.parent), coords.top)? else {
+    // Up through the mirror's folders to the first node it lacks.
+    let mut outside = false;
+    let up = crate::walk::up::<_, StateError>(row.parent, |at| {
+        if scope.outside.contains(&at) {
+            outside = true;
+            return Ok(None);
+        }
+        Ok(s.get_mirror(at)?.map(|m| {
+            let parent = m.parent;
+            (m, parent)
+        }))
+    })?;
+    let End::At(top) = up.end else {
         return Ok(false);
     };
-    if scope.outside.contains(&coords.from_drive(folder)) {
+    let Some(removed) = s.removed_by_node(top)?.filter(|_| !outside) else {
+        return Ok(false);
+    };
+    let removal = removed.time();
+    let by_removal = |at: Option<i64>| at.is_none_or(|at| at <= removal);
+    let chain = || std::iter::once(&row).chain(&up.items);
+    if removed.row.kind != NodeKind::Folder || !chain().all(|m| by_removal(m.changed_at)) {
         return Ok(false);
     }
-    let removed = hbsync_types::removal_time(at);
-    Ok(row.changed_at.is_none_or(|c| c <= removed))
+    let mut live: Vec<crate::along::Live> = chain().map(|m| (m.node, m.parent, m.kind)).collect();
+    let mut changed: HashMap<NodeId, Option<i64>> =
+        chain().map(|m| (m.node, m.changed_at)).collect();
+    // What is in `node`, through folders: one written later keeps it.
+    let mut below = match row.kind {
+        NodeKind::Folder => vec![node],
+        NodeKind::File => Vec::new(),
+    };
+    while let Some(parent) = below.pop() {
+        for child in s.mirror_children(parent)? {
+            if !by_removal(child.changed_at) {
+                return Ok(false);
+            }
+            if changed.insert(child.node, child.changed_at).is_none() {
+                live.push((child.node, parent, child.kind));
+                if child.kind == NodeKind::Folder {
+                    below.push(child.node);
+                }
+            }
+        }
+    }
+    let taken = crate::along::taken_along(
+        live,
+        |n| (n == top).then_some((removed.row.kind, removal)),
+        |n| changed.get(&n).copied().flatten(),
+    );
+    Ok(taken.contains(&node))
 }
 
 struct Builder<'s, 'c> {

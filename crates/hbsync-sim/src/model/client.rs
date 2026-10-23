@@ -99,10 +99,10 @@ pub(crate) struct Client {
     pub(crate) placing: BTreeMap<NodeId, Placement>,
     /// The version of each node `planned_remote` holds (the executor's mirror).
     pub(crate) planned_refs: BTreeMap<NodeId, RemoteRef>,
-    /// The folders in Recently deleted above live nodes, with when each went there, and the
-    /// server's time of each live node's version, as the pending plan's input had them (the
-    /// mirror's view of what a folder's removal took along).
-    pub(crate) planned_removed: BTreeMap<NodeId, i64>,
+    /// The nodes in Recently deleted above live nodes, with each one's kind and when it went
+    /// there, and the server's time of each live node's version, as the pending plan's input
+    /// had them (the mirror's view of what a folder's removal took along).
+    pub(crate) planned_removed: BTreeMap<NodeId, (NodeKind, i64)>,
     pub(crate) planned_changed: HashMap<NodeId, i64>,
     /// Where the pending plan's operations settled each node's base (the executor's): a later
     /// one's compare and set takes the base there as the one its plan saw.

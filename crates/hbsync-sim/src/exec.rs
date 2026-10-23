@@ -443,7 +443,11 @@ impl Sim {
         client.planned_local = client.local.clone();
         client.planned_remote = remote;
         client.planned_refs = std::mem::take(&mut input.remote_refs).into_iter().collect();
-        client.planned_removed = input.removed.iter().map(|(f, r)| (*f, r.at)).collect();
+        client.planned_removed = input
+            .removed
+            .iter()
+            .map(|(f, r)| (*f, (r.state.kind, r.at)))
+            .collect();
         client.planned_changed = std::mem::take(&mut input.changed_at).into_iter().collect();
         client.run_settled.clear();
         client.plan_saw = std::mem::take(&mut input.remote);
