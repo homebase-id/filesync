@@ -168,8 +168,7 @@ impl Reconciler<'_> {
         let i = self.input;
         let mut together = Vec::new();
         for op in &self.plan.ops {
-            // The side it goes to, and the one it comes from.
-            let (node, parent, name, side, from) = match op {
+            let (node, parent, name, side) = match op {
                 Op::LocalMkdir {
                     node, parent, name, ..
                 }
@@ -178,13 +177,13 @@ impl Reconciler<'_> {
                 }
                 | Op::LocalDownload {
                     node, parent, name, ..
-                } => (*node, *parent, name, &i.local, &i.remote),
+                } => (*node, *parent, name, &i.local),
                 Op::RemoteCreate {
                     node, parent, name, ..
                 }
                 | Op::RemoteUpdate {
                     node, parent, name, ..
-                } => (*node, *parent, name, &i.remote, &i.local),
+                } => (*node, *parent, name, &i.remote),
                 _ => continue,
             };
             // Neither is made by this plan: one is in another page, the other left as it is.
@@ -192,10 +191,14 @@ impl Reconciler<'_> {
                 |f: NodeId| (self.elsewhere(f) || self.paged.contains(&f)) && !side.contains(f);
             let mut with: Vec<NodeId> = Vec::new();
             if waits(parent) {
-                // With the folders above it that wait so too, all at once: else the chain is
-                // found a page at a time, each page a folder larger.
+                // With the folders above it, on any side, that wait so too, all at once: else
+                // a chain of new folders is found a page at a time, each page a folder larger.
                 with.push(parent);
-                with.extend(from.ancestors(parent).into_iter().take_while(|&f| waits(f)));
+                with.extend(
+                    crate::pages::above_any_side(i, parent)
+                        .into_iter()
+                        .filter(|&f| waits(f)),
+                );
             }
             if let Some(occupant) = side.child_named(parent, name, Some(node))
                 && self.elsewhere(occupant)

@@ -296,3 +296,19 @@ pub(crate) fn known_limits_of(clients: usize, events: &[Event]) -> Vec<String> {
     sim.check().unwrap_or_else(|e| panic!("{e}"));
     sim.tags_lost_to_known_limits()
 }
+
+/// `event` for `clients` clients: one of a client beyond them is its client modulo them.
+pub(crate) fn on_clients(event: Event, clients: usize) -> Event {
+    let on = |c: usize| c % clients;
+    match event {
+        Event::Act { client, action } => Event::Act {
+            client: on(client),
+            action,
+        },
+        Event::Plan { client } => Event::Plan { client: on(client) },
+        Event::Step { client } => Event::Step { client: on(client) },
+        Event::Confirm { client } => Event::Confirm { client: on(client) },
+        Event::PutBack { client } => Event::PutBack { client: on(client) },
+        Event::Crash { client } => Event::Crash { client: on(client) },
+    }
+}

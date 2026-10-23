@@ -558,10 +558,12 @@ impl Engine {
         // sweep is passed over without one.
         let mut rounds = 0;
         // The sweep's last page was planned: it ends once what its pages wait for is planned
-        // too, each as a page of its own (a chain of waits grows a page at a time: §6.5).
+        // too, each as a page of its own (§6.5), or when the sync stops (round limit, a stop).
         let mut ending = false;
-        while rounds < self.cfg.max_rounds || (ending && self.own_pages.is_empty()) {
-            if ending && self.own_pages.is_empty() {
+        loop {
+            let stop = report.stopped || self.stop.load(Ordering::Relaxed);
+            let go = rounds < self.cfg.max_rounds && !stop;
+            if ending && (!go || self.own_pages.is_empty()) {
                 // End of a sweep: what it held, and what waits now.
                 ending = false;
                 report.held = self.held.shown(std::mem::take(&mut held));
@@ -579,8 +581,8 @@ impl Engine {
                 whole = true;
                 continue;
             }
-            if report.stopped || self.stop.load(Ordering::Relaxed) {
-                report.stopped = true;
+            if !go {
+                report.stopped |= stop;
                 break;
             }
             // What a page waits for (a folder it waits for with its dirty subtree; a clash

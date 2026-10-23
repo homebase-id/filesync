@@ -196,12 +196,12 @@ proptest! {
     /// often (`regression_a_chain_of_waits_across_pages_is_planned_before_the_sweep_ends`).
     #[test]
     fn clients_planning_in_small_pages_converge_without_loss(
-        (size, clients, events) in (1usize..5, 2usize..4).prop_flat_map(|(size, clients)| (
-            Just(size),
-            Just(clients),
-            proptest::collection::vec(events_of(clients, stopped_delete_action()), 0..100),
-        )),
+        size in 1usize..5,
+        clients in 2usize..4,
+        events in proptest::collection::vec(events_of(3, stopped_delete_action()), 0..100),
     ) {
+        // Each shrinks on its own: a third client's events go to the others.
+        let events: Vec<Event> = events.into_iter().map(|e| on_clients(e, clients)).collect();
         run_with(clients, None, |sim| sim.with_small_pages(size), &events)?;
     }
 

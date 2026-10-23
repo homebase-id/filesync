@@ -2315,17 +2315,19 @@ fn next_page(
     size: usize,
 ) -> (Vec<NodeId>, bool) {
     let mut pages = client.pages.borrow_mut();
-    // A new sweep once the last one's last page was planned and what its pages wait for too,
-    // each a page of its own, as the engine's.
-    if pages.ended && pages.own.is_empty() {
-        pages.ended = false;
+    let mut store = SimPages { client, input, all };
+    // What the sweep's pages wait for, each a page of its own, first; a new sweep once the
+    // last one's last page was planned and they are too, as the engine's.
+    for _ in 0..2 {
+        if let Ok(Some((page, piece))) = pages.own.next(size, &mut store) {
+            pages.planned_own.extend(page.iter().copied());
+            return (page, piece);
+        }
+        if !std::mem::take(&mut pages.ended) {
+            break;
+        }
         pages.own.new_sweep();
         pages.planned_own.clear();
-    }
-    let mut store = SimPages { client, input, all };
-    if let Ok(Some((page, piece))) = pages.own.next(size, &mut store) {
-        pages.planned_own.extend(page.iter().copied());
-        return (page, piece);
     }
     loop {
         let read: Vec<NodeId> = match pages.after {

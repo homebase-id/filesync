@@ -288,8 +288,10 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    `what_a_held_removal_took_along_waits_without_a_spin`). What is left then (more than a
    page directly in the folder, and what so waits) is planned whole, as one larger page. So the drive removes the
    folder first, then what is in it, and Recently deleted lists it as one item, or as its
-   folders' items and then its own: never a file of it apart. What waits stays queued across sweeps and syncs (a sync that stops at its
-   round limit goes on with it), each tried once a sweep; what a page of its own planned isn't
+   folders' items and then its own: never a file of it apart. What waits is planned before
+   the sweep ends (a sync that stops, at its round limit say, goes on with it), each tried once
+   a sweep (engine: `a_sync_plans_what_its_pages_wait_for_before_it_ends`; simulator:
+   `regression_a_chain_of_waits_across_pages_is_planned_before_the_sweep_ends`); what a page of its own planned isn't
    planned again in the sweep's own pages (its plan stands), and a page so passed over costs
    no round. Cost: a plan takes about 1 KB a
    node at its peak, so 20 MB for a page; a flat folder of 100,000 items is one page of about
@@ -301,7 +303,9 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    Clashes across pages are planned the same way. A node whose name a node of another page
    holds, one going into a folder another page makes or that waits (for another page, or for
    such a wait), or onto a name such a node holds here now (a swap), or one whose folder
-   another page decides, waits, left as it is (nothing sent to fail meanwhile). So does one in
+   another page decides, waits, left as it is (nothing sent to fail meanwhile). One going
+   into a folder that waits so waits with every folder above it that does too, at once: a new
+   file deep in new folders isn't found a folder a page. So does one in
    a cycle with a node another page plans (a folder and the folder in it swapped here), left
    where the drive has it: no move of either is undone for the cycle, which one page plans
    whole (engine: `a_swap_of_a_folder_and_the_one_in_it_planned_in_pages`, also beside
@@ -584,7 +588,7 @@ expected fingerprint is treated as done.
   round and across syncs, so nodes that stay dirty (deferred, failing) can't keep the rest
   waiting; held deletes leave it till answered (§7). What a page leaves for another page, a
   folder that may go with its subtree or a clash, is planned next as a page of its own
-  (§6.5). A sync ends after a full sweep in which nothing was done. A round clears only
+  (§6.5), before the sweep ends. A sync ends after a full sweep in which nothing was done. A round clears only
   the marks it read with its page (a change of the drive's picture moves a mark's version on):
   a node another engine's pull or an announcement marks again meanwhile stays dirty, though it
   was dirty already, and the change it brought is planned at the next sweep.
