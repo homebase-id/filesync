@@ -12,7 +12,7 @@
 //! the parent path, the name is the remote spelling (recorded mapping or [`to_remote`]), and a
 //! node parked under a temporary name is reported at its original place ([`parked_place`]).
 
-use std::collections::{BTreeSet, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use hbsync_local::layout::parked_name;
 use hbsync_namemap::to_remote;
@@ -507,10 +507,10 @@ fn in_a_file(remote: &crate::tree::Tree, state: &NodeState) -> bool {
 }
 
 /// Whether the mirror no longer has `node` as the plan reads it: not there, or taken along by
-/// the folder in Recently deleted its folders reach first in this folder's part of the drive
-/// (the rule of [`crate::along::taken_along`], over the live folders between and what is in
-/// `node`; one outside, as the view leaves it out, isn't this folder's to bring back). A removed
-/// file takes nothing along (§6.3).
+/// the folder in Recently deleted its folders reach first in this folder's part of the drive,
+/// by the one rule ([`crate::along::taken_along`], over the live folders between and what is
+/// in `node`; one outside, as the view leaves it out, isn't this folder's to bring back). Reads
+/// stop as soon as the answer is known: a later write on the way, or below `node`, keeps it.
 pub(crate) fn gone_on_drive(
     s: &ReadTx<'_>,
     node: NodeId,
@@ -519,44 +519,54 @@ pub(crate) fn gone_on_drive(
     let Some(row) = s.get_mirror(node)? else {
         return Ok(true);
     };
-    let coords = s.coords()?;
-    let Some((folder, at)) = s.removed_above(coords.to_drive(row.parent), coords.top)? else {
+    // Up through the mirror's folders to the first node it lacks.
+    let mut outside = false;
+    let up = crate::walk::up::<_, StateError>(row.parent, |at| {
+        if scope.outside.contains(&at) {
+            outside = true;
+            return Ok(None);
+        }
+        Ok(s.get_mirror(at)?.map(|m| {
+            let parent = m.parent;
+            (m, parent)
+        }))
+    })?;
+    let End::At(top) = up.end else {
         return Ok(false);
     };
-    let removed = coords.from_drive(folder);
-    if scope.outside.contains(&removed)
-        || s.removed_by_node(folder)?
-            .is_none_or(|r| r.row.kind != NodeKind::Folder)
-    {
+    let Some(removed) = s.removed_by_node(top)?.filter(|_| !outside) else {
+        return Ok(false);
+    };
+    let removal = removed.time();
+    let by_removal = |at: Option<i64>| at.is_none_or(|at| at <= removal);
+    let chain = || std::iter::once(&row).chain(&up.items);
+    if removed.row.kind != NodeKind::Folder || !chain().all(|m| by_removal(m.changed_at)) {
         return Ok(false);
     }
-    // What the rule reads: `node`, the live folders up to the removed one, and what is in
-    // `node` (a later write in it keeps it).
-    let mut live: Vec<(NodeId, NodeId)> = vec![(node, row.parent)];
-    let mut changed: std::collections::HashMap<NodeId, Option<i64>> =
-        std::collections::HashMap::from([(node, row.changed_at)]);
-    let mut up = row.parent;
-    while up != removed && changed.len() < hbsync_state::MAX_DEPTH {
-        let Some(r) = s.get_mirror(up)? else {
-            break;
-        };
-        live.push((up, r.parent));
-        changed.insert(up, r.changed_at);
-        up = r.parent;
-    }
-    let mut below = vec![node];
-    while let Some(folder) = below.pop() {
-        for child in s.mirror_children(folder)? {
+    let mut live: Vec<crate::along::Live> = chain().map(|m| (m.node, m.parent, m.kind)).collect();
+    let mut changed: HashMap<NodeId, Option<i64>> =
+        chain().map(|m| (m.node, m.changed_at)).collect();
+    // What is in `node`, through folders: one written later keeps it.
+    let mut below = match row.kind {
+        NodeKind::Folder => vec![node],
+        NodeKind::File => Vec::new(),
+    };
+    while let Some(parent) = below.pop() {
+        for child in s.mirror_children(parent)? {
+            if !by_removal(child.changed_at) {
+                return Ok(false);
+            }
             if changed.insert(child.node, child.changed_at).is_none() {
-                live.push((child.node, folder));
-                below.push(child.node);
+                live.push((child.node, parent, child.kind));
+                if child.kind == NodeKind::Folder {
+                    below.push(child.node);
+                }
             }
         }
     }
-    let removal = hbsync_types::removal_time(at);
     let taken = crate::along::taken_along(
         live,
-        |f| (f == removed).then_some(removal),
+        |n| (n == top).then_some((removed.row.kind, removal)),
         |n| changed.get(&n).copied().flatten(),
     );
     Ok(taken.contains(&node))

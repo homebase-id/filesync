@@ -368,43 +368,44 @@ impl Sim {
                 .copied()
                 .filter(|t| Some(*t) == version)
         };
-        // Up to the removed folder, through live folders.
-        let mut live = vec![(node, state.parent)];
+        // Up through the mirror to the first node it lacks, as the engine's walk.
+        let mut live = vec![(node, state.parent, state.kind)];
         let mut seen = HashSet::from([node]);
         let mut at = state.parent;
-        let removed = loop {
+        loop {
             if at.is_root() || !seen.insert(at) {
                 return false;
             }
-            if let Some(removed) = client.planned_removed.get(&at) {
-                break (at, *removed);
-            }
-            match client.planned_remote.get(at) {
-                Some(up) => {
-                    live.push((at, up.parent));
-                    at = up.parent;
-                }
-                None => return false,
-            }
-        };
-        let folder = self
-            .server
-            .node(removed.0)
-            .is_some_and(|(n, _)| n.state.kind == hbsync_types::NodeKind::Folder);
-        if !folder {
-            return false;
+            let Some(up) = client.planned_remote.get(at) else {
+                break;
+            };
+            live.push((at, up.parent, up.kind));
+            at = up.parent;
         }
-        // And what is in `node` (a later write in it keeps it).
-        let mut below = vec![node];
+        let Some(&(kind, removal)) = client.planned_removed.get(&at) else {
+            return false;
+        };
+        // And what is in `node`, through folders (a later write in it keeps it).
+        let folder = |kind| kind == hbsync_types::NodeKind::Folder;
+        let mut below = if folder(state.kind) {
+            vec![node]
+        } else {
+            Vec::new()
+        };
         while let Some(f) = below.pop() {
             for child in client.planned_remote.children(f) {
+                let Some(s) = client.planned_remote.get(child) else {
+                    continue;
+                };
                 if seen.insert(child) {
-                    live.push((child, f));
-                    below.push(child);
+                    live.push((child, f, s.kind));
+                    if folder(s.kind) {
+                        below.push(child);
+                    }
                 }
             }
         }
-        hbsync_engine::along::taken_along(live, |f| (f == removed.0).then_some(removed.1), changed)
+        hbsync_engine::along::taken_along(live, |f| (f == at).then_some((kind, removal)), changed)
             .contains(&node)
     }
 }
@@ -548,10 +549,19 @@ mod tests {
         assert!(!sim.gone_for(0, file), "the server's, not the mirror's");
         sim.plan(0);
         assert!(sim.gone_for(0, file));
-        // Taken along: its folder in Recently deleted after it was written.
+        // Taken along: its folder in Recently deleted after it was written (out of the
+        // mirror: one the mirror has is live).
         let (mut sim, folder, file) = synced(1);
         assert!(!sim.gone_for(0, file));
-        sim.clients[0].planned_removed.insert(folder, i64::MAX);
+        sim.clients[0].planned_remote.remove(folder);
+        sim.clients[0]
+            .planned_removed
+            .insert(folder, (NodeKind::Folder, i64::MAX));
         assert!(sim.gone_for(0, file));
+        // A removed file takes nothing along.
+        sim.clients[0]
+            .planned_removed
+            .insert(folder, (NodeKind::File, i64::MAX));
+        assert!(!sim.gone_for(0, file));
     }
 }
