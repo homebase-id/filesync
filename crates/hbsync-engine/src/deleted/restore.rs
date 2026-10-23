@@ -17,6 +17,21 @@ use super::listing::group;
 use super::rules::{RestoreWave, restore_wave, take_restored_name, taken_in};
 use super::{AccountOps, lock};
 
+/// What a restore did, beyond how many items came back: for the user (sync semantics §8b).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Restored {
+    /// How many items came back.
+    pub back: usize,
+    /// The names of rows it was to bring back that stayed in Recently deleted, with no error:
+    /// no free name in their folder, changed meanwhile, or in a folder that didn't come back.
+    pub left: Vec<String>,
+    /// The names of rows it found deleted for good meanwhile: they can't come back.
+    pub went: Vec<String>,
+    /// Of the nodes asked for, those neither in Recently deleted nor on the drive: deleted for
+    /// good before it ran (another path found them so: the purge's asking again, say).
+    pub missing: Vec<NodeId>,
+}
+
 impl AccountOps<'_> {
     /// Restores each of `nodes` with what was deleted with it, and the folders it was in that
     /// are in Recently deleted too (just those, not their other contents), all together: one
@@ -26,10 +41,28 @@ impl AccountOps<'_> {
     /// Leaves the account behind ([`AccountOps::run`]) when the drive refused a write for its
     /// state (changed or deleted for good meanwhile), or a write may have landed unanswered.
     pub fn restore(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
-        let Some(RestorePlan { rows, live, taken }) =
-            lock(self.account).read(|s| plan_restore(s, nodes))?
-        else {
-            return Ok(0);
+        self.restore_told(nodes).map(|r| r.back)
+    }
+
+    /// [`AccountOps::restore`], with what stayed in Recently deleted and what went for good
+    /// ([`Restored`]). A first "not there" fails it ([`EngineError::NotThereOnce`]): asked
+    /// again a minute on, it is gone or there. Costs, when something didn't come back, a read
+    /// of its row each.
+    pub fn restore_told(&mut self, nodes: &[NodeId]) -> Result<Restored, EngineError> {
+        let (plan, missing) = lock(self.account).read(|s| {
+            let mut missing = Vec::new();
+            for &node in nodes {
+                if s.removed_by_node(node)?.is_none() && s.get_mirror(node)?.is_none() {
+                    missing.push(node);
+                }
+            }
+            Ok((plan_restore(s, nodes)?, missing))
+        })?;
+        let Some(RestorePlan { rows, live, taken }) = plan else {
+            return Ok(Restored {
+                missing,
+                ..Restored::default()
+            });
         };
         let mut r = Restoring {
             remote: self.remote,
@@ -39,9 +72,12 @@ impl AccountOps<'_> {
             behind: &mut self.behind,
             back: Vec::new(),
             heard: Vec::new(),
+            changed: HashSet::new(),
             failed: None,
         };
         let mut restored = 0;
+        let mut went: HashSet<NodeId> = HashSet::new();
+        let mut not_there = 0;
         let mut left: Vec<&MirrorRow> = rows.iter().map(|r| &r.row).collect();
         // In waves, each after the folders it comes back into ([`restore_wave`]). One that was to
         // come back into a folder that didn't stays in Recently deleted.
@@ -109,25 +145,74 @@ impl AccountOps<'_> {
             // Said not there once only: it stays in Recently deleted, and the restore fails, to
             // try again (a minute on, it is gone).
             let mut doubted: HashSet<NodeId> = HashSet::new();
-            for ((f, node, said), gone) in heard.into_iter().zip(gone) {
+            for ((_, node, said), gone) in heard.into_iter().zip(gone) {
                 if gone {
                     r.in_plan.remove(&node);
+                    went.insert(node);
                 } else if said == Said::NotThere {
                     doubted.insert(node);
-                    r.failed.get_or_insert(RemoteError::Transient(format!(
-                        "{f:?}: the identity says it isn't there; asked again later"
-                    )));
+                    not_there += 1;
                 }
             }
             // What was to come back into a folder said not there once is asked about too (a
             // header read each): asked again a minute on, all of it is gone at once (or there),
             // not a level of folders a minute.
             doubt_below(self.remote, self.account, &left, doubted);
+            // Stopped, to try again a minute on.
+            if not_there > 0 {
+                break;
+            }
         }
-        match r.failed {
-            Some(e) => Err(EngineError::Remote(e)),
-            None => Ok(restored),
+        if let Some(e) = r.failed {
+            return Err(EngineError::Remote(e));
         }
+        let names = |nodes: &dyn Fn(NodeId) -> bool| -> Vec<String> {
+            rows.iter()
+                .filter(|row| nodes(row.row.node))
+                .map(|row| row.row.name.clone())
+                .collect()
+        };
+        // What it was to bring back and didn't, still in Recently deleted: a read each, only
+        // where something didn't come back. One the drive had changed (another device's
+        // restore, likely) isn't named: the feed tells what it is.
+        let maybe: Vec<NodeId> = rows
+            .iter()
+            .map(|row| row.row.node)
+            .filter(|n| !r.live.contains(n) && !went.contains(n) && !r.changed.contains(n))
+            .collect();
+        let stayed: HashSet<NodeId> = match maybe.is_empty() {
+            true => HashSet::new(),
+            false => lock(self.account).read(|s| {
+                let mut stayed = HashSet::new();
+                for node in maybe {
+                    if s.removed_by_node(node)?.is_some() {
+                        stayed.insert(node);
+                    }
+                }
+                Ok(stayed)
+            })?,
+        };
+        let went = names(&|n| went.contains(&n));
+        if not_there > 0 {
+            // To restore again: every row of it still in Recently deleted (a folder that came
+            // back no longer stands for what in it didn't).
+            let rest = rows
+                .iter()
+                .filter(|row| stayed.contains(&row.row.node))
+                .map(|row| (row.row.node, row.row.name.clone()))
+                .collect();
+            return Err(EngineError::NotThereOnce {
+                files: not_there,
+                rest,
+                went,
+            });
+        }
+        Ok(Restored {
+            back: restored,
+            left: names(&|n| stayed.contains(&n)),
+            went,
+            missing,
+        })
     }
 }
 
@@ -168,6 +253,8 @@ struct Restoring<'a> {
     back: Vec<Answer>,
     /// What the drive said of files not found, to take ([`gone::heard`]).
     heard: Vec<(hbsync_types::RemoteFileId, NodeId, Said)>,
+    /// Rows the drive had changed since (refused for their version).
+    changed: HashSet<NodeId>,
     /// What stops the restore.
     failed: Option<RemoteError>,
 }
@@ -206,7 +293,9 @@ impl Restoring<'_> {
                 }
             }
             // Changed meanwhile: the feed tells what it is now.
-            RemoteError::VersionMismatch => {}
+            RemoteError::VersionMismatch => {
+                self.changed.insert(row.node);
+            }
             e => {
                 self.failed.get_or_insert(e);
             }

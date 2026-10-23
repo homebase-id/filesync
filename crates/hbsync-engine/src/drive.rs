@@ -482,8 +482,16 @@ impl Drive {
     /// the drive refused for its state, or one whose answer didn't come, leaves the account
     /// behind.
     pub fn restore(&self, nodes: &[NodeId]) -> Result<usize, EngineError> {
+        self.restore_told(nodes).map(|r| r.back)
+    }
+
+    /// [`Drive::restore`], with what stayed in Recently deleted and what went for good
+    /// ([`deleted::Restored`]): the user's restore, to tell them.
+    pub fn restore_told(&self, nodes: &[NodeId]) -> Result<deleted::Restored, EngineError> {
         self.pull(None)?;
-        self.restore_read(nodes)
+        let restored = self.with_ops(|ops| ops.restore_told(nodes));
+        self.wake_all();
+        restored
     }
 
     /// [`Drive::restore`] for a caller that has just read the feed itself.
