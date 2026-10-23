@@ -3,7 +3,7 @@
 //! for the scope check (`breaches`, `planned_writable`), which the oracle records: it reads the
 //! engine's `Op`, which the oracle may not import.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -182,37 +182,7 @@ impl Sim {
             .collect();
         // The folders in Recently deleted that live nodes are in, and the removed ones above
         // them, and the server's time of each live node's version, as the engine's view has them.
-        let outside = client.scope().outside;
-        for mut folder in hbsync_engine::view::looked_up_removed(&remote, client.coords.top) {
-            // Not one in a version no client reads: the feed records no row of it (only that
-            // it is there, unread), in Recently deleted or not.
-            while !input.removed.contains_key(&folder)
-                && !outside.contains(&folder)
-                && !self
-                    .server
-                    .unreadable
-                    .contains_key(&client.coords.to_drive(folder))
-                && let Some(n) = self.server.removed.get(&client.coords.to_drive(folder))
-            {
-                let state = NodeState {
-                    parent: client.coords.from_drive(n.state.parent),
-                    ..n.state.clone()
-                };
-                let drive = client.coords.to_drive(folder);
-                // Known at once, the engine's own removal's too: the write's answer has it.
-                let at = self.server.removed_at[&drive];
-                let parent = state.parent;
-                input.removed.insert(folder, Removed { at, state });
-                folder = parent;
-            }
-        }
-        input.changed_at = remote
-            .ids()
-            .filter_map(|id| {
-                let n = self.server.live.get(&client.coords.to_drive(id))?;
-                Some((id, time(n.remote.version)))
-            })
-            .collect();
+        (input.removed, input.changed_at) = self.removed_seen(c, &remote);
         input.dirty = client
             .base
             .ids()
@@ -278,10 +248,12 @@ impl Sim {
         // Held as every synced file: until answered, by the engine's rule (it keeps
         // `guard.wiped` so), over what its store has: the mirror (the plan's view of the drive)
         // and what the scanner reports here.
+        let taken = hbsync_engine::reconcile::taken_along(&input);
         let sides = crate::world::ModelSides {
             base: &client.base,
             local: &input.local,
             live: &|n| remote.contains(n),
+            taken: &|n| taken.contains(&n),
             server: &self.server,
             coords: client.coords,
         };
@@ -516,6 +488,63 @@ impl Sim {
             // drive (§10) is theirs.
             self.user_removed(c, n);
         }
+    }
+
+    /// The folders in Recently deleted that the live nodes of `remote` (client `c`'s view of
+    /// the drive) are in, and the removed ones above them, and the server's time of each live
+    /// node's version, as the engine's view has them.
+    pub(crate) fn removed_seen(
+        &self,
+        c: usize,
+        remote: &Tree,
+    ) -> (HashMap<NodeId, Removed>, HashMap<NodeId, i64>) {
+        let client = &self.clients[c];
+        let mut removed: HashMap<NodeId, Removed> = HashMap::new();
+        let outside = client.scope().outside;
+        for mut folder in hbsync_engine::view::looked_up_removed(remote, client.coords.top) {
+            // Not one in a version no client reads: the feed records no row of it (only that
+            // it is there, unread), in Recently deleted or not.
+            while !removed.contains_key(&folder)
+                && !outside.contains(&folder)
+                && !self
+                    .server
+                    .unreadable
+                    .contains_key(&client.coords.to_drive(folder))
+                && let Some(n) = self.server.removed.get(&client.coords.to_drive(folder))
+            {
+                let state = NodeState {
+                    parent: client.coords.from_drive(n.state.parent),
+                    ..n.state.clone()
+                };
+                let drive = client.coords.to_drive(folder);
+                // Known at once, the engine's own removal's too: the write's answer has it.
+                let at = self.server.removed_at[&drive];
+                let parent = state.parent;
+                removed.insert(folder, Removed { at, state });
+                folder = parent;
+            }
+        }
+        let changed_at = remote
+            .ids()
+            .filter_map(|id| {
+                let n = self.server.live.get(&client.coords.to_drive(id))?;
+                Some((id, time(n.remote.version)))
+            })
+            .collect();
+        (removed, changed_at)
+    }
+
+    /// What the removals of folders took along of client `c`'s view of the drive `remote`, by
+    /// the plan's rule (`reconcile::taken_along`).
+    pub(crate) fn taken_seen(&self, c: usize, remote: &Tree) -> HashSet<NodeId> {
+        let (removed, changed_at) = self.removed_seen(c, remote);
+        let input = Input {
+            remote: remote.clone(),
+            removed,
+            changed_at,
+            ..Default::default()
+        };
+        hbsync_engine::reconcile::taken_along(&input)
     }
 
     /// Executes the next planned operation. Returns `false` if the plan is empty.

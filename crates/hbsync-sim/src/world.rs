@@ -816,10 +816,12 @@ impl Sim {
         let coords = client.coords;
         // The mirror, as the plan sees it.
         let view = self.drive_seen(c);
+        let taken = self.taken_seen(c, &view);
         let sides = ModelSides {
             base: &client.base,
             local: &local,
             live: &|n| view.contains(n),
+            taken: &|n| taken.contains(&n),
             server: &self.server,
             coords,
         };
@@ -1251,6 +1253,9 @@ pub(crate) struct ModelSides<'a> {
     pub(crate) base: &'a Tree,
     pub(crate) local: &'a Tree,
     pub(crate) live: &'a dyn Fn(NodeId) -> bool,
+    /// Live on the drive but taken along by a folder in Recently deleted, as the plan reads it
+    /// (`reconcile::taken_along`).
+    pub(crate) taken: &'a dyn Fn(NodeId) -> bool,
     pub(crate) server: &'a Server,
     pub(crate) coords: Coords,
 }
@@ -1282,6 +1287,10 @@ impl hbsync_engine::held::Sides for ModelSides<'_> {
         Ok((self.live)(node))
     }
 
+    fn gone(&self, node: NodeId) -> Result<bool, Infallible> {
+        Ok(!(self.live)(node) || (self.taken)(node))
+    }
+
     fn removed(&self, node: NodeId) -> Result<Option<(NodeId, i64)>, Infallible> {
         if node.is_root() {
             return Ok(None);
@@ -1296,14 +1305,6 @@ impl hbsync_engine::held::Sides for ModelSides<'_> {
                 .unwrap_or(i64::MAX);
             (self.coords.from_drive(n.state.parent), at)
         }))
-    }
-
-    fn removal_pending_under(&self, node: NodeId) -> Result<bool, Infallible> {
-        Ok(self
-            .base
-            .subtree(node)
-            .into_iter()
-            .any(|n| self.local.contains(n) && !(self.live)(n)))
     }
 }
 
