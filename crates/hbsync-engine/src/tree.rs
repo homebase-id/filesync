@@ -232,6 +232,20 @@ impl Tree {
 
 /// The first of `candidates` that `is_free`, preferring one `syncs` says this device syncs
 /// (§10); `None` if none is free. How the executor and the simulator pick a numbered name.
+/// [`first_free`] where telling whether one is free can't fail.
+pub fn first_free_by<T>(
+    candidates: impl IntoIterator<Item = T>,
+    mut is_free: impl FnMut(&T) -> bool,
+    syncs: impl FnMut(&T) -> bool,
+) -> Option<T> {
+    let Ok(found) = first_free(
+        candidates,
+        |c| Ok::<_, std::convert::Infallible>(is_free(c)),
+        syncs,
+    );
+    found
+}
+
 pub fn first_free<T, E>(
     candidates: impl IntoIterator<Item = T>,
     mut is_free: impl FnMut(&T) -> Result<bool, E>,
@@ -249,9 +263,12 @@ pub fn first_free<T, E>(
     Ok(filtered)
 }
 
-/// The numbered variants of `name` tried for a free one, in order: a hundred at most.
+/// How many numbered variants of a name are tried for a free one ([`numbered_names`]).
+pub const NUMBERED_TRIES: usize = 100;
+
+/// The numbered variants of `name` tried for a free one, in order: [`NUMBERED_TRIES`] at most.
 pub fn numbered_names(name: &str) -> impl Iterator<Item = String> + '_ {
-    (1..=100).map(move |n| numbered_conflict_name(name, n))
+    (1..=NUMBERED_TRIES).map(move |n| numbered_conflict_name(name, n))
 }
 
 /// `"report (conflict 2).pdf"`: the name a node gets when another node keeps its name.

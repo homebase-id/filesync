@@ -3,6 +3,8 @@
 use super::*;
 use hbsync_types::RECOVERED_NAME;
 
+use crate::tree::{NUMBERED_TRIES, first_free_by, numbered_names};
+
 /// What becomes of a node whose folder isn't in the merged tree as a folder
 /// ([`Reconciler::fix_orphans`]).
 enum Parent {
@@ -690,6 +692,10 @@ impl Reconciler<'_> {
                     let arriving = self.adopted.contains(n) || *n == NodeId::RECOVERED;
                     (!self.deferred.contains(n), arriving, *n)
                 });
+                // The folder's path here, for the filter (`None`: not connected), read once
+                // a loser is renamed.
+                let folder_path: std::cell::OnceCell<Option<Vec<String>>> =
+                    std::cell::OnceCell::new();
                 for loser in group.into_iter().skip(keep) {
                     // Never what waits for a hash, or for a name (§6.3): planned, it waits.
                     if self.deferred.contains(&loser) || self.holds_name(loser) {
@@ -701,14 +707,30 @@ impl Reconciler<'_> {
                     let Some(mut state) = self.merged.get(loser).cloned() else {
                         continue;
                     };
-                    // Unbounded, and syncing or not: some numbered name is always free.
-                    let Some(new_name) = (1..)
-                        .map(|n| numbered_conflict_name(&state.name, n))
-                        .find(|c| {
-                            self.merged.child_named(parent, c, Some(loser)).is_none()
-                                && !taken(&name_key(c))
+                    // The first free one this device syncs (§10: one it ignores would leave the
+                    // drive at the next scan), as the executor picks one ([`first_free`]); else
+                    // the first free one, unbounded: some numbered name is always free.
+                    let free = |c: &String| {
+                        self.merged.child_named(parent, c, Some(loser)).is_none()
+                            && !taken(&name_key(c))
+                    };
+                    let is_dir = state.kind == NodeKind::Folder;
+                    let syncs = |c: &String| {
+                        let dir = folder_path.get_or_init(|| {
+                            let path = self.merged.path(parent)?;
+                            Some(path.into_iter().map(str::to_owned).collect())
+                        });
+                        dir.as_ref().is_none_or(|dir| {
+                            let names = dir.iter().map(String::as_str).chain([c.as_str()]);
+                            self.masking.filter.names(names, is_dir).is_sync()
                         })
-                    else {
+                    };
+                    let found = first_free_by(numbered_names(&state.name), free, syncs);
+                    let Some(new_name) = found.or_else(|| {
+                        (NUMBERED_TRIES + 1..)
+                            .map(|n| numbered_conflict_name(&state.name, n))
+                            .find(|c| free(c))
+                    }) else {
                         continue;
                     };
                     state.name = new_name;
