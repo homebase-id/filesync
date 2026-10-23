@@ -192,14 +192,10 @@ impl Server {
     /// what restoring it restores, and the purge's item of it (the engine's `group`, by its
     /// rules: `deleted::inside`).
     pub(crate) fn group(&self, top: NodeId) -> Vec<NodeId> {
-        let is_folder = |n: &NodeId| {
-            self.removed
-                .get(n)
-                .is_some_and(|r| r.state.kind == NodeKind::Folder)
-        };
+        // `deleted_with` holds nothing for a file: each is asked.
         let Ok(item) = hbsync_engine::deleted::inside::<_, std::convert::Infallible>(
             top,
-            |n| (*n, is_folder(n)),
+            |n| (*n, true),
             |folder| Ok(self.deleted_with(*folder)),
         );
         item

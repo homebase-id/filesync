@@ -1230,10 +1230,12 @@ impl deleted::RestoreSource for RestoreFrom<'_> {
         Ok(self.0.live.contains_key(&node))
     }
     fn names_in(&mut self, folder: NodeId) -> Result<Vec<String>, Infallible> {
-        let tree = self.0.tree();
-        Ok(tree
-            .children(folder)
-            .filter_map(|c| tree.get(c).map(|s| s.name.clone()))
+        Ok(self
+            .0
+            .live
+            .values()
+            .filter(|n| n.state.parent == folder)
+            .map(|n| n.state.name.clone())
             .collect())
     }
     fn place(row: &Row) -> (NodeId, NodeId) {
