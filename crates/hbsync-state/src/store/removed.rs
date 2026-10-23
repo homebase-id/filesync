@@ -268,6 +268,7 @@ impl ReadTx<'_> {
     pub fn removed_before(&self, at_ms: i64) -> Result<Vec<RemovedRow>> {
         self.removed_rows(
             &format!(
+                // As `RemovedRow::removed_before`: a 0 is never old.
                 "{REMOVED_SELECT} WHERE removed_at > 0 AND removed_at < ?1 ORDER BY removed_at"
             ),
             [at_ms],

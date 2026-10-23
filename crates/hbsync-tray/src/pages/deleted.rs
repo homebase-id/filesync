@@ -137,7 +137,7 @@ impl Server {
         self.ask_account(
             identity,
             AccountControl::Restore { nodes: vec![node] },
-            "Restoring: it comes back with the next sync, on every device.",
+            words::restoring(),
         )
     }
 
@@ -151,7 +151,7 @@ impl Server {
         match control::empty_listed(&self.paths, &listed) {
             Ok(()) => {
                 (self.send)(Event::Wake);
-                "Emptying Recently deleted.".into()
+                words::emptying(0)
             }
             Err(e) => {
                 (self.send)(Event::Wake);

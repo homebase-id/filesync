@@ -52,9 +52,8 @@ const DENIED_LOOK: Duration = Duration::from_secs(3600);
 
 /// Told when an answer to held deletes that was taken can't be used: what it named is no
 /// longer held there.
-const ANSWER_DROPPED_GONE: &str = "Your answer to the held deletes wasn't used: the folder is gone. Once it is back, answer again.";
-const ANSWER_DROPPED_SET_UP: &str =
-    "Your answer to the held deletes wasn't used: the folder was set up again. Answer again.";
+const ANSWER_DROPPED_GONE: &str = "Your answer to the deletions to review wasn't used: the folder is gone. Once it is back, answer again.";
+const ANSWER_DROPPED_SET_UP: &str = "Your answer to the deletions to review wasn't used: the folder was set up again. Answer again.";
 
 /// The ignore rules are read this long after their file was last touched: not half written.
 const RULES_QUIET: Duration = Duration::from_secs(1);
@@ -262,7 +261,7 @@ impl Handle {
             let mut held = lock(&self.held);
             if held.nodes.is_empty() || held.token != token {
                 return Err(
-                    "the held deletes changed since you looked (or the folder is gone): \
+                    "the deletions to review changed since you looked (or the folder is gone): \
                             look at them again"
                         .into(),
                 );
@@ -778,14 +777,14 @@ impl Runner {
                         // time, it runs once more a minute on (a file the identity said once
                         // isn't there is gone for good then, and goes up again from here).
                         let then = if once_more {
-                            "what is still held is shown again, to answer again"
+                            "what is still to review is shown again, to answer again"
                         } else {
                             let at = Instant::now() + self.cfg.put_back_again;
                             put_back_again = Some((at, Arc::clone(&seen)));
-                            "tried again in a minute; what is still held is shown again"
+                            "tried again in a minute; what is still to review is shown again"
                         };
                         self.tell(vec![format!(
-                            "The held deletes couldn't all be put back ({e}): {then}"
+                            "Not all of the deletions to review could be put back ({e}): {then}"
                         )]);
                     }
                 }
@@ -946,7 +945,10 @@ impl Runner {
                 }
                 w.why = Some(why.clone());
                 let note = (!w.told).then(|| unwatched_note(&why, look));
-                self.set(|s| s.watcher_error = Some(why.clone()));
+                self.set(|s| {
+                    s.watcher_error = Some(why.clone());
+                    s.rescan_secs = Some(look.as_secs());
+                });
                 tracing::warn!("no live watcher ({why}); the folder is walked every {look:?}");
                 if let Some(note) = note {
                     self.unwatched.told = true;
@@ -961,6 +963,7 @@ impl Runner {
                 let note = w.note.take();
                 self.set(|s| {
                     s.watcher_error = None;
+                    s.rescan_secs = None;
                     s.recent.retain(|n| Some(&n.text) != note.as_ref());
                 });
             }

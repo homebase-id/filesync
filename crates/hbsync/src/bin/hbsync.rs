@@ -269,7 +269,7 @@ fn run(command: Command) -> Res<ExitCode> {
                 return Ok(not_running());
             };
             daemon::restore(&paths, &found)?;
-            println!("Restoring; the next sync brings it back.");
+            println!("{}", words::restoring());
         }
         Command::EmptyDeleted { items, yes } if !items.is_empty() => {
             let Some(found) = daemon::find_deleted(&paths, items.clone())? else {
@@ -288,7 +288,7 @@ fn run(command: Command) -> Res<ExitCode> {
             daemon::empty(&paths, &found)?;
             let staying: Vec<DeletedItem> =
                 found.iter().filter(|i| i.deleted.stays).cloned().collect();
-            println!("{}", emptied(staying.len()));
+            println!("{}", words::emptying(staying.len()));
             for what in described(&staying) {
                 println!("  {what}");
             }
@@ -325,7 +325,7 @@ fn run(command: Command) -> Res<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             }
             daemon::empty_listed(&paths, &list.accounts)?;
-            println!("{}", emptied(list.staying()));
+            println!("{}", words::emptying(list.staying()));
         }
         Command::ConfirmDeletes { yes } => answer_held(&paths, yes, HeldAnswer::Delete)?,
         Command::PutBack { yes } => answer_held(&paths, yes, HeldAnswer::PutBack)?,
@@ -459,14 +459,6 @@ fn described(items: &[DeletedItem]) -> Vec<String> {
         .collect()
 }
 
-/// What emptying does, `staying` items left (they hold a live node): never "deleting" alone
-/// where something stays.
-fn emptied(staying: usize) -> String {
-    format!("Deleting for good. {}", words::staying(staying))
-        .trim_end()
-        .to_owned()
-}
-
 /// Asks `question` with [y/N]; whether the answer is yes.
 fn ask_yes(question: &str) -> Res<bool> {
     print!("{question} [y/N] ");
@@ -592,7 +584,12 @@ fn print_folder(s: &FolderStatus) {
         );
     }
     if let Some(why) = &s.watcher_error {
-        println!("  no live watcher ({why}): the folder is rescanned every minute");
+        let every = match s.rescan_secs {
+            Some(60) => "every minute".to_owned(),
+            Some(secs) => format!("every {secs} s"),
+            None => "from time to time".to_owned(),
+        };
+        println!("  no live watcher ({why}): the folder is rescanned {every}");
     }
     if s.rules > 0 {
         println!(

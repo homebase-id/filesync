@@ -128,6 +128,19 @@ pub fn deleted(item: &DeletedItem, now: u64) -> String {
 /// Why an item of Recently deleted stays when emptied.
 pub const STAYS: &str = "stays when emptied: it holds items that aren't deleted";
 
+/// The reply to a restore, the tray's and the CLI's.
+pub fn restoring() -> &'static str {
+    "Restoring: it comes back with the next sync, on every device."
+}
+
+/// The reply to emptying Recently deleted, `staying` items left (they hold a live node): never
+/// "deleting" alone where something stays. The tray's and the CLI's.
+pub fn emptying(staying_items: usize) -> String {
+    format!("Deleting for good. {}", staying(staying_items))
+        .trim_end()
+        .to_owned()
+}
+
 /// What emptying leaves of Recently deleted, `n` items deleted on their own that hold a live
 /// node: a sentence, empty for none.
 pub fn staying(n: usize) -> String {

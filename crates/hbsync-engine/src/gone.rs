@@ -61,6 +61,12 @@ pub fn confirms(first: &GoneSuspect, now_ms: i64) -> bool {
     (CONFIRM_AFTER_MS..=CONFIRM_WITHIN_MS).contains(&(now_ms - first.at))
 }
 
+/// Whether a first "not there" at `first` may still be confirmed at `now_ms` (it is no older
+/// than [`CONFIRM_WITHIN_MS`]): the drive is asked again, a minute on.
+pub fn still_doubted(first: &GoneSuspect, now_ms: i64) -> bool {
+    now_ms - first.at <= CONFIRM_WITHIN_MS
+}
+
 // ---- asking the drive ----
 
 /// What the drive says of a file a request found not there ([`gone_after`], [`look`]).

@@ -379,8 +379,8 @@ impl Op {
         self.deletes().is_some()
     }
 
-    /// The node this op deletes, on the drive or here: what the mass-delete guard
-    /// judges, and what a user confirms.
+    /// The node this op deletes, on the drive or here: what a user confirms. The mass-delete
+    /// guard judges `LocalDelete` and `RemoteDelete`, not a `Forget` (`reconcile::guard`).
     pub fn deletes(&self) -> Option<NodeId> {
         match self {
             Op::RemoteDelete { node, .. } => Some(*node),
