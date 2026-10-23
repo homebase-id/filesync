@@ -2738,6 +2738,58 @@ fn an_old_version_left_aside_by_a_crash_goes() -> R {
     Ok(())
 }
 
+/// An old version a download replaced, written to aside, comes back as a new item beside its
+/// node; its node parked meanwhile (under a temporary name, to free its own), beside the name
+/// the node gets back, numbered: never the temporary one, which would go up to the drive as an
+/// item's name, nor the name the node is parked to get back.
+#[test]
+fn an_old_version_of_a_parked_node_comes_back_beside_its_name() -> R {
+    let mut h = Harness::new()?;
+    let node = NodeId::new();
+    let parked = hbsync_local::layout::parked_name(node);
+    // The new version in place, parked; the record holds the name it had.
+    h.local_file(&parked, node, b"B")?;
+    let original = RelPath::new("f")?;
+    h.db.write(|s| s.folder().put_parked(node, &original))?;
+    let aside = hbsync_local::layout::aside_dir(&h.folder.root);
+    fs::create_dir_all(&aside)?;
+    let a = h.content(b"A").hash;
+    let entry = aside.join(hbsync_local::layout::AsideEntry::File(node, a).name());
+    fs::write(&entry, b"A, written aside")?;
+    crate::exec::recover_aside(&mut h.db, &h.folder)?;
+    assert!(!entry.exists());
+    assert_eq!(fs::read(h.at("f (conflict 1)")?)?, b"A, written aside");
+    assert!(!h.at("f")?.exists(), "left for the parked node");
+    assert!(!h.at(&format!("{parked} (conflict 1)"))?.exists());
+    Ok(())
+}
+
+/// As above, with every numbered name beside the one the parked node gets back taken: the
+/// written-to old version stays aside, and is told (`AsideOutcome::unknown`), not left for the
+/// user to find in `.hbsync/aside`.
+#[test]
+fn an_old_version_with_no_name_to_come_back_under_is_told() -> R {
+    let mut h = Harness::new()?;
+    let node = NodeId::new();
+    let parked = hbsync_local::layout::parked_name(node);
+    h.local_file(&parked, node, b"B")?;
+    let original = RelPath::new("f")?;
+    h.db.write(|s| s.folder().put_parked(node, &original))?;
+    for n in 1..=100 {
+        fs::write(h.at(&format!("f (conflict {n})"))?, b"taken")?;
+    }
+    let aside = hbsync_local::layout::aside_dir(&h.folder.root);
+    fs::create_dir_all(&aside)?;
+    let a = h.content(b"A").hash;
+    let name = hbsync_local::layout::AsideEntry::File(node, a).name();
+    let entry = aside.join(&name);
+    fs::write(&entry, b"A, written aside")?;
+    let outcome = crate::exec::recover_aside(&mut h.db, &h.folder)?;
+    assert_eq!(fs::read(&entry)?, b"A, written aside", "kept");
+    assert_eq!(outcome.unknown, [hbsync_local::layout::aside_shown(&name)]);
+    Ok(())
+}
+
 /// The download from another folder unlinks the old version; the drive then deletes the node,
 /// and the file is deleted outright (sync semantics §7): aside, checked, unlinked, nothing kept.
 /// (A node trashed twice within a second once collided on its entry, seed
