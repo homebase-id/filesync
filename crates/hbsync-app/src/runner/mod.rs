@@ -447,6 +447,21 @@ impl Runner {
     /// The engine and observer for the folder, which must have been set up (its marker names
     /// it): an unmounted disk's empty mount point must not become a new sync folder.
     fn open(&self) -> Result<Parts, RunnerError> {
+        // The rules are read before the watcher is there to see them change: an edit in
+        // between would wait for the next look (a minute). Read again once it is (one read
+        // more an open); changed, opened again with them.
+        // Edited all the while: the watcher, there now, sees the next edit.
+        for _ in 0..2 {
+            let parts = self.open_once()?;
+            if parts.observer.watcher_error.is_some() || !parts.rules_changed(&self.cfg.folder) {
+                return Ok(parts);
+            }
+            tracing::info!("the ignore rules changed as the folder opened: opening it again");
+        }
+        self.open_once()
+    }
+
+    fn open_once(&self) -> Result<Parts, RunnerError> {
         let root = &self.cfg.folder;
         let mut cfg = EngineConfig::new(root, &self.cfg.device);
         cfg.guard.min = self.cfg.mass_delete.min_files;

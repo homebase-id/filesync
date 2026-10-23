@@ -113,6 +113,51 @@ impl Device {
         })
     }
 
+    /// Waits until it has started (its first sync done, the engine and its watcher set up)
+    /// and is idle.
+    fn started(&self) -> R {
+        wait_until("it started", || self.status().last_sync.is_some())?;
+        self.wait_idle()
+    }
+
+    /// Whether its watcher is live, once it has started. A machine out of watchers (its
+    /// inotify instances, 128 a user, taken by many test runs at once) leaves the folder to a
+    /// look a minute, and a test of what the watcher does can't run there: said so, the test
+    /// returns. Any other watcher failure fails the test, and so does running out on CI.
+    fn watching(&self) -> Result<bool, Box<dyn std::error::Error>> {
+        self.started()?;
+        let Some(why) = self.status().watcher_error else {
+            return Ok(true);
+        };
+        let exhausted = ["os error 24", "os error 28", "Too many open files"]
+            .iter()
+            .any(|e| why.contains(e));
+        if !exhausted || std::env::var_os("CI").is_some() {
+            return Err(format!("no live watcher: {why}").into());
+        }
+        eprintln!("no live watcher here ({why}): skipped");
+        Ok(false)
+    }
+
+    /// Waits until `count` (its wakes, the feed's reads) holds still for `quiet`, within
+    /// `within`: what a sync left behind (a recheck, events of its own writes, the reads at
+    /// connecting) is done, however long the machine takes to do it.
+    fn settled<T: PartialEq>(&self, quiet: Duration, within: Duration, count: impl Fn() -> T) -> R {
+        let until = Instant::now() + within;
+        let (mut last, mut since) = (count(), Instant::now());
+        while since.elapsed() < quiet {
+            if Instant::now() > until {
+                return Err(format!("not still for {quiet:?} within {within:?}").into());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+            let now = count();
+            if now != last {
+                (last, since) = (now, Instant::now());
+            }
+        }
+        self.wait_idle()
+    }
+
     /// The feed pages read so far: slim and whole.
     fn feed_reads(&self) -> usize {
         let faults = self.remote.faults();
@@ -210,12 +255,17 @@ fn on_server(server: &Arc<Mutex<FakeServer>>, name: &str) -> bool {
 fn an_idle_runner_never_wakes_up() -> R {
     let server = server();
     let a = Device::start(&server, "a")?;
+    if !a.watching()? {
+        return Ok(());
+    }
     // Ignore rules, read when they change: reading them is no change.
     a.write(".hbsync/ignore", "*.log\n")?;
     wait_until("the rule is counted", || a.status().rules == 1)?;
-    a.wait_idle()?;
     // Whatever its first sync left (a recheck of new folders, events of its own writes).
-    std::thread::sleep(Duration::from_secs(2));
+    // Not left waking: still within ten seconds, however loaded the machine.
+    a.settled(Duration::from_secs(2), Duration::from_secs(10), || {
+        a.handle.woken()
+    })?;
     let woken = a.handle.woken();
     std::thread::sleep(Duration::from_secs(3));
     assert_eq!(a.handle.woken(), woken, "woke up while idle");
@@ -267,9 +317,9 @@ fn another_computers_changes_are_announced_and_own_ones_not() -> R {
     let a = Device::start(&server, "a")?;
     let b = Device::start(&server, "b")?;
     let (heard_a, heard_b) = (a.listen(), b.listen());
-    wait_until("both started", || {
-        a.status().last_sync.is_some() && b.status().last_sync.is_some()
-    })?;
+    if !(a.watching()? && b.watching()?) {
+        return Ok(());
+    }
     let file_of = |name: &str| -> Option<RemoteFileId> {
         let s = server.lock().ok()?;
         s.live()
@@ -278,8 +328,7 @@ fn another_computers_changes_are_announced_and_own_ones_not() -> R {
             .map(|h| h.file_id)
     };
     // The reads at connecting done.
-    std::thread::sleep(Duration::from_millis(300));
-    a.wait_idle()?;
+    a.settled(Duration::from_millis(500), PATIENCE, || a.feed_reads())?;
     let quiet = a.feed_reads();
     a.write("from-a.txt", "a")?;
     wait_until("b has from-a.txt", || b.has("from-a.txt"))?;
@@ -325,7 +374,11 @@ fn sync_now_reads_the_drive_unannounced() -> R {
     let server = server();
     let a = Device::start(&server, "a")?;
     let b = Device::start(&server, "b")?;
-    wait_until("b started", || b.status().last_sync.is_some())?;
+    // b's first sync done, its reads of the drive with it: none comes after a's upload.
+    b.started()?;
+    if !a.watching()? {
+        return Ok(());
+    }
     a.write("news.txt", "hot")?;
     wait_until("news.txt is up", || on_server(&server, "news.txt"))?;
     std::thread::sleep(Duration::from_millis(500));
@@ -744,6 +797,9 @@ fn an_answer_during_a_sync_that_holds_more_covers_what_was_shown() -> R {
 fn an_edited_ignore_file_applies_without_a_restart() -> R {
     let server = server();
     let a = Device::start(&server, "a")?;
+    if !a.watching()? {
+        return Ok(());
+    }
     a.write("notes.txt", "keep")?;
     a.write("debug.log", "noise")?;
     a.write("other.txt", "keep")?;
