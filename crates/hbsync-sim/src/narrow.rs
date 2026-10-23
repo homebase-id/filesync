@@ -369,11 +369,7 @@ pub(crate) fn mirror_row(node: NodeId, state: &NodeState, at: RemoteRef) -> Mirr
 /// The nodes of `input` whose sides differ, as the engine's scan and feed mark every change
 /// dirty (what a delete took along reads as gone).
 pub(crate) fn sides_differ(input: &Input) -> BTreeSet<NodeId> {
-    let taken = hbsync_engine::along::taken_along(
-        input.remote.iter().map(|(n, s)| (n, s.parent)),
-        |f| input.removed.get(&f).map(|r| r.at),
-        |n| input.changed_at.get(&n).copied(),
-    );
+    let taken = hbsync_engine::reconcile::taken_along(input);
     input
         .dirty
         .iter()

@@ -104,9 +104,9 @@ impl Sim {
     /// along), and whether it goes `rightly`: a user deleted it (here, on a device, or in
     /// another app), or a delete took it along (only then may its blob go for good).
     pub(crate) fn remove_on_drive(&mut self, node: NodeId, n: ServerNode, rightly: bool) {
-        // A file too may hold nodes (another app moved them into it: `Action::IntoFile`): its
-        // removal takes them along as a folder's does, by the same rule.
-        if rightly {
+        // A folder's removal takes along what is in it. A file's takes nothing: what another app
+        // moved into it (`Action::IntoFile`) is an orphan for Recovered files (§6.3).
+        if rightly && n.state.kind == NodeKind::Folder {
             // What is in it, through live folders (`node` is out of the tree already).
             let mut kids: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
             for (child, c) in &self.server.live {
@@ -116,8 +116,12 @@ impl Sim {
             let mut folders = vec![node];
             while let Some(f) = folders.pop() {
                 for child in kids.get(&f).into_iter().flatten() {
-                    below.insert(*child, self.server.live[child].remote.version);
-                    folders.push(*child);
+                    let c = &self.server.live[child];
+                    below.insert(*child, c.remote.version);
+                    // Through live folders: a file takes nothing along.
+                    if c.state.kind == NodeKind::Folder {
+                        folders.push(*child);
+                    }
                 }
             }
             self.ledger.folder_removed(node, below);

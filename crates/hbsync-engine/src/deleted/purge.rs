@@ -144,13 +144,13 @@ impl AccountOps<'_> {
     /// after putting back what needs it; another error is returned once the rest is done.
     pub(super) fn remove_taken_along(&mut self, before: i64) -> Result<usize, EngineError> {
         let Stuck { folders, live } = self.db().read(|s| stuck_below(s, before))?;
-        let removed_at: HashMap<NodeId, i64> = folders
+        let removed: HashMap<NodeId, (NodeKind, i64)> = folders
             .iter()
-            .filter_map(|f| Some((f.row.node, f.removed_at?)))
+            .filter_map(|f| Some((f.row.node, (f.row.kind, f.removed_at?))))
             .collect();
         let levels = crate::along::taken_levels(
-            live.values().map(|m| (m.node, m.parent)),
-            |f| removed_at.get(&f).copied(),
+            live.values().map(|m| (m.node, m.parent, m.kind)),
+            |f| removed.get(&f).copied(),
             |n| live[&n].changed_at,
             |n| Role::of(n).is_some(),
         );

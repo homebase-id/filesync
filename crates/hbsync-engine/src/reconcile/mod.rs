@@ -29,6 +29,7 @@ mod coverage;
 mod emit;
 mod guard;
 pub(crate) mod merge;
+pub use merge::taken_along;
 mod repair;
 mod waits;
 

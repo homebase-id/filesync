@@ -1214,3 +1214,120 @@ fn regression_a_swap_of_a_folder_and_the_one_in_it_planned_in_pages() {
     assert!(whole[1].starts_with(&whole[0]), "a in A: {whole:?}");
     assert_eq!(end(Some(1)), whole, "in pages of one");
 }
+
+/// Another app moves `d` into the file `c.txt`, and another device removes `c.txt` before any
+/// main client recovers `d`: a removed file takes nothing along, so `d` is still an orphan for
+/// Recovered files, as in a live file (§6.3). Taken along, it was deleted here and left on the
+/// drive below the removed file, where nothing lists it.
+#[test]
+fn regression_what_is_in_a_removed_file_is_recovered() {
+    use Action::*;
+    let mut sim = Sim::new(3);
+    let act = |client, action| Event::Act { client, action };
+    let (c, d) = (3, 5); // NAMES: "c.txt", "d"
+    let root = sim.pick(0, NodeId::ROOT, true).expect("root");
+    sim.run(&[act(
+        0,
+        CreateFile {
+            parent: root,
+            name: c,
+        },
+    )]);
+    let root = sim.pick(0, NodeId::ROOT, true).expect("root");
+    sim.run(&[act(
+        0,
+        CreateFile {
+            parent: root,
+            name: d,
+        },
+    )]);
+    assert!(sim.quiesce(30), "no convergence");
+    let (file, node) = (
+        sim.item(0, "c.txt").expect("c.txt"),
+        sim.item(0, "d").expect("d"),
+    );
+    // c1 edits c.txt and plans its upload; then the app moves d into it, and once the upload
+    // lands another device removes c.txt.
+    let edit = sim.file_pick(1, file).expect("c.txt on 1");
+    sim.run(&[
+        act(1, Edit { file: edit }),
+        act(1, Meanwhile { op: 0 }),
+        Event::Plan { client: 1 },
+    ]);
+    let (pick, into) = sim.file_move_picks(node, file).expect("on the drive");
+    sim.run(&[act(2, IntoFile { pick, file: into })]);
+    for _ in 0..20 {
+        if sim.is_removed(file) {
+            break;
+        }
+        sim.run(&[Event::Step { client: 1 }]);
+    }
+    let paths = sim.server_paths();
+    assert!(sim.is_removed(file), "c.txt removed: {paths:?}");
+    assert!(
+        !sim.is_removed(node) && !paths.iter().any(|p| p.ends_with("/d")),
+        "d still in c.txt: {paths:?}"
+    );
+    assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+    let paths = sim.server_paths();
+    assert!(paths.iter().any(|p| p == "Recovered files/d"), "{paths:?}");
+}
+
+/// Another app moves `d` into the file `b/c.txt` while client 0's delete of folder `b` is
+/// planned; the delete then lands: `b`'s removal takes `c.txt` along, but not what is in it (a
+/// file takes nothing along), so `d` goes to Recovered files, as from a live file (§6.3).
+/// Taken along through the file, it was deleted on every client, left live on the drive, and
+/// came back in Recovered files only once the purge removed `c.txt`.
+#[test]
+fn regression_what_is_in_a_file_in_a_removed_folder_is_recovered() {
+    use Action::*;
+    let mut sim = Sim::new(3);
+    let act = |client, action| Event::Act { client, action };
+    let (b, c, d) = (1, 3, 5); // NAMES: "b", "c.txt", "d"
+    let root = sim.pick(0, NodeId::ROOT, true).expect("root");
+    sim.run(&[act(
+        0,
+        CreateFolder {
+            parent: root,
+            name: b,
+        },
+    )]);
+    let folder = sim.item(0, "b").expect("b");
+    let parent = sim.pick(0, folder, true).expect("b");
+    sim.run(&[act(0, CreateFile { parent, name: c })]);
+    let root = sim.pick(0, NodeId::ROOT, true).expect("root");
+    sim.run(&[act(
+        0,
+        CreateFile {
+            parent: root,
+            name: d,
+        },
+    )]);
+    assert!(sim.quiesce(30), "no convergence");
+    let (file, node) = (
+        sim.item(0, "b/c.txt").expect("b/c.txt"),
+        sim.item(0, "d").expect("d"),
+    );
+    let pick = sim.pick(0, folder, false).expect("b on 0");
+    sim.run(&[act(0, Delete { node: pick }), Event::Plan { client: 0 }]);
+    let (pick, into) = sim.file_move_picks(node, file).expect("on the drive");
+    sim.run(&[act(2, IntoFile { pick, file: into })]);
+    for _ in 0..20 {
+        if sim.is_removed(folder) {
+            break;
+        }
+        sim.run(&[Event::Step { client: 0 }]);
+    }
+    let paths = sim.server_paths();
+    assert!(sim.is_removed(folder), "b removed: {paths:?}");
+    assert!(!sim.is_removed(node), "d still in c.txt: {paths:?}");
+    assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+    let paths = sim.server_paths();
+    assert!(paths.iter().any(|p| p == "Recovered files/d"), "{paths:?}");
+}
