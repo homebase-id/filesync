@@ -1647,3 +1647,52 @@ fn a_put_back_keeps_a_folder_gone_for_good_while_a_file_in_it_waits() -> common:
     assert_eq!(b.tree_text(""), whole);
     Ok(())
 }
+
+/// A restore stops at a folder said not there once (§8b) after the folder above it came back:
+/// what it hands to try again a minute on is every row still in Recently deleted, not the item
+/// asked for (back already, it no longer stands for what in it didn't come). Asked again, the
+/// folder is gone for good, told so, and what was in it comes back.
+#[test]
+fn a_restore_said_not_there_once_hands_back_what_stayed() -> common::Res<()> {
+    use hbsync_remote::Remote;
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("d/f.txt", "f")?;
+    a.write("d/e/g.txt", "g")?;
+    a.sync()?;
+    // Removed together by another app, row by row: deleted with `d`.
+    let target = |name: &str| {
+        let h = header_named(&server, name);
+        hbsync_types::Target {
+            at: h.at(),
+            token: Some(hbsync_remote::fake::token_of(h.at().file_id)),
+        }
+    };
+    let d_node = node_of(&header_named(&server, "d"));
+    let targets = ["d", "e", "f.txt", "g.txt"].map(target);
+    FakeRemote::new(server.clone()).set_removed(&targets, true)?;
+    a.sync()?;
+    // `e` deleted for good elsewhere, unheard of: not there, no tombstone.
+    let e = header_named(&server, "e");
+    server
+        .lock()
+        .map_err(|_| "poisoned")?
+        .hard_delete(e.at().file_id, e.at().version)?;
+    let rest = match a.engine.drive().restore_told(&[d_node]) {
+        Err(hbsync_engine::EngineError::NotThereOnce { files, rest, .. }) => {
+            assert_eq!(files, 1);
+            rest
+        }
+        other => return Err(format!("not a first not there: {other:?}").into()),
+    };
+    let mut names: Vec<&str> = rest.iter().map(|(_, n)| n.as_str()).collect();
+    names.sort();
+    assert_eq!(names, ["e", "g.txt"], "what stayed, not d (back)");
+    a.a_minute_on()?;
+    let nodes: Vec<NodeId> = rest.iter().map(|(n, _)| *n).collect();
+    let restored = a.engine.drive().restore_told(&nodes)?;
+    assert_eq!(restored.went, ["e"], "{restored:?}");
+    assert!(restored.left.is_empty(), "{restored:?}");
+    assert_eq!(restored.back, 1, "g.txt, into a folder gone for good");
+    Ok(())
+}

@@ -350,7 +350,15 @@ included (service managers restart it then).
 - **Recently deleted:** the account's removed nodes (node schema, "Recently deleted"), kept in
   its state DB (table `removed`), listed newest first with their path and the folder each comes
   back to. Restore and Empty are the account's: run on its Recently deleted thread when asked
-  (once connected), in turn with the purge.
+  (once connected), in turn with the purge. A restore the identity answers "not there" for
+  (its first word on it, sync semantics §8b) is noted as such ("Restoring from Recently
+  deleted: Homebase says one item isn't there; asking again in a minute") and run once more a
+  minute on, with what of it is still there (while the daemon runs; one a second restore
+  meets too joins it); what it then finds deleted for good, or another path found so meanwhile,
+  is noted ("… was deleted for good meanwhile and can't come back"). Rows a restore leaves in
+  Recently deleted with no error (a name taken where they go, a folder that didn't come back)
+  get one note naming the first five ("… stayed there (…): try again, or rename what holds the
+  name"); one the drive had changed meanwhile (another device's restore, likely) isn't named.
   Empty takes what the user was shown: the items named, each with what was in it when it was
   listed (a `deleted` or `find_deleted` answer carries its listing: a removal recorded in it
   since stays), or everything removed until the newest one listed, and the device's own removals shown "just now" (their time still open: not back

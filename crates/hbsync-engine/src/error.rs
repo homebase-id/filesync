@@ -21,6 +21,24 @@ pub enum EngineError {
     /// A remote call outside a sync (Recently deleted) failed.
     #[error(transparent)]
     Remote(#[from] RemoteError),
+    /// A restore found `files` not there, the identity's first word on it (sync semantics
+    /// §8b): a suspicion only, the rows stay; asked again a minute on, each is gone for good
+    /// (or there). `rest`: the rows of the restore still in Recently deleted, with their names,
+    /// to restore again; `went`: the names of those it found deleted for good meanwhile.
+    #[error("{}", not_there(*files))]
+    NotThereOnce {
+        files: usize,
+        rest: Vec<(hbsync_types::NodeId, String)>,
+        went: Vec<String>,
+    },
+}
+
+/// "Homebase says one item isn't there", or "… 3 items aren't there".
+fn not_there(files: usize) -> String {
+    match files {
+        1 => "Homebase says one item isn't there".into(),
+        n => format!("Homebase says {n} items aren't there"),
+    }
 }
 
 impl EngineError {
@@ -32,6 +50,7 @@ impl EngineError {
             EngineError::Panic(_) => ErrorClass::Bug,
             EngineError::Stopped(e) => e.class(),
             EngineError::Remote(e) => e.class(),
+            EngineError::NotThereOnce { .. } => ErrorClass::Gone,
         }
     }
 

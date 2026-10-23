@@ -2,7 +2,8 @@
 //! emptying as asked. The account's loop only asks: it never waits for the state DB or the
 //! drive meanwhile (a purge waits on the DB while the folders' first syncs hold it, and deletes
 //! many files), so the notifications, folders added or removed and pauses are taken at once.
-//! What a purge found not there once is asked again a minute on ([`Drive::ask_again`]).
+//! What a purge found not there once is asked again a minute on ([`Drive::ask_again`]); a
+//! restore that found something not there once is run once more a minute on.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +13,8 @@ use std::time::{Duration, Instant};
 
 use hbsync_engine::deleted::Listed;
 use hbsync_engine::{Drive, EngineError};
+
+use hbsync_types::NodeId;
 
 use crate::protocol::AccountControl;
 
@@ -84,9 +87,16 @@ impl Keeper {
                 // When to ask again what the last purge found not there once (a delete for
                 // good this device missed): once, a minute on, not paused.
                 let mut again: Option<Instant> = None;
+                // What restores found not there once: restored once more a minute on, each
+                // with its name (while the daemon runs).
+                let mut restore_again: Option<(Instant, Vec<(NodeId, String)>)> = None;
                 let held = || paused.load(Ordering::SeqCst) || ending.load(Ordering::SeqCst);
                 loop {
-                    let got = match again {
+                    let next = match (again, restore_again.as_ref().map(|(at, _)| *at)) {
+                        (Some(a), Some(b)) => Some(a.min(b)),
+                        (a, b) => a.or(b),
+                    };
+                    let got = match next {
                         Some(at) => rx.recv_timeout(at.saturating_duration_since(Instant::now())),
                         None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
                     };
@@ -105,7 +115,33 @@ impl Keeper {
                                 again = Some(Instant::now() + ask_after);
                             }
                         }
-                        Some(Job::Control(control)) => run_request(&drive, control, &*tell),
+                        Some(Job::Control(control)) => {
+                            let rest = run_request(&drive, control, &*tell, None);
+                            if !rest.is_empty() {
+                                // Another one pending too: both, a minute after this one.
+                                let mut all =
+                                    restore_again.take().map(|(_, r)| r).unwrap_or_default();
+                                all.extend(rest);
+                                all.sort();
+                                all.dedup_by_key(|(n, _)| *n);
+                                restore_again = Some((Instant::now() + ask_after, all));
+                            }
+                        }
+                        // The restore to run once more, due (paused or not: the user asked for
+                        // it; refused, not: asking no more till a login).
+                        None if restore_again
+                            .as_ref()
+                            .is_some_and(|(at, _)| *at <= Instant::now()) =>
+                        {
+                            if let Some((_, rest)) = restore_again.take()
+                                && !ending.load(Ordering::SeqCst)
+                                && !drive.is_denied()
+                            {
+                                let nodes = rest.iter().map(|(n, _)| *n).collect();
+                                let control = AccountControl::Restore { nodes };
+                                run_request(&drive, control, &*tell, Some(&rest));
+                            }
+                        }
                         // Paused: again a minute on, while what it would ask can still be
                         // confirmed (within the hour); ending: not again.
                         None if held() => {
@@ -219,14 +255,55 @@ fn ask_again(drive: &Drive) {
 }
 
 /// Runs a request for Recently deleted; the folders it concerns sync next. One that fails is
-/// told to the user (`tell`): it was answered before it ran.
-fn run_request(drive: &Drive, control: AccountControl, tell: &dyn Fn(String)) {
+/// told to the user (`tell`): it was answered before it ran. A restore that found something
+/// not there once (§8b) returns what of it is still in Recently deleted, with names, to restore
+/// once more a minute on; `again`: this is that once more, of these (no more after it). What
+/// a restore left in Recently deleted, or found deleted for good, is told.
+fn run_request(
+    drive: &Drive,
+    control: AccountControl,
+    tell: &dyn Fn(String),
+    again: Option<&[(NodeId, String)]>,
+) -> Vec<(NodeId, String)> {
     const EMPTY: (&str, &str) = ("Emptying Recently deleted", "deleted for good");
+    const RESTORE: &str = "Restoring from Recently deleted";
     let (result, (what, done)) = match control {
-        AccountControl::Restore { nodes } => (
-            drive.restore(&nodes),
-            ("Restoring from Recently deleted", "restored"),
-        ),
+        AccountControl::Restore { nodes } => {
+            match drive.restore_told(&nodes) {
+                Ok(restored) => {
+                    tracing::info!("{RESTORE}: {} items restored", restored.back);
+                    // Asked once more: what went for good since (another path found it so)
+                    // is named from the first time.
+                    let mut went = restored.went.clone();
+                    if let Some(again) = again {
+                        went.extend(
+                            again
+                                .iter()
+                                .filter(|(n, _)| restored.missing.contains(n))
+                                .map(|(_, name)| name.clone()),
+                        );
+                    }
+                    for note in restore_notes(&restored.left, &went) {
+                        tell(note);
+                    }
+                }
+                Err(EngineError::NotThereOnce { files, rest, went }) if again.is_none() => {
+                    let what = match files {
+                        1 => "one item isn't".to_owned(),
+                        n => format!("{n} items aren't"),
+                    };
+                    tell(format!(
+                        "{RESTORE}: Homebase says {what} there; asking again in a minute"
+                    ));
+                    for note in restore_notes(&[], &went) {
+                        tell(note);
+                    }
+                    return rest;
+                }
+                Err(e) => tell(failed(RESTORE, &e)),
+            }
+            return Vec::new();
+        }
         AccountControl::EmptyDeleted { nodes, db, seq } => {
             (drive.empty(&nodes, &Listed { db, seq }), EMPTY)
         }
@@ -237,10 +314,49 @@ fn run_request(drive: &Drive, control: AccountControl, tell: &dyn Fn(String)) {
         // Refused, the drive latched it: the account asks nothing more ([`Drive::deny`]).
         Err(e) => tell(failed(what, &e)),
     }
+    Vec::new()
+}
+
+/// The notes of a restore: what stayed in Recently deleted (`left`), and what was deleted for
+/// good meanwhile (`went`), one note each naming the first five.
+fn restore_notes(left: &[String], went: &[String]) -> Vec<String> {
+    let names = |names: &[String]| {
+        const SHOWN: usize = 5;
+        let mut shown: Vec<String> = names
+            .iter()
+            .take(SHOWN)
+            .map(|n| format!("\u{201c}{n}\u{201d}"))
+            .collect();
+        if names.len() > SHOWN {
+            shown.push(format!("{} more", names.len() - SHOWN));
+        }
+        shown.join(", ")
+    };
+    let mut notes = Vec::new();
+    if !left.is_empty() {
+        notes.push(format!(
+            "Restoring from Recently deleted: {} stayed there (a name taken where it goes, or \
+             a folder that didn't come back): try again, or rename what holds the name",
+            names(left)
+        ));
+    }
+    if !went.is_empty() {
+        let was = if went.len() == 1 { "was" } else { "were" };
+        notes.push(format!(
+            "Restoring from Recently deleted: {} {was} deleted for good meanwhile and can't \
+             come back",
+            names(went)
+        ));
+    }
+    notes
 }
 
 /// The note for `what` that failed with `e`: what to do about it.
 fn failed(what: &str, e: &EngineError) -> String {
+    // Not a network fault: the identity said it isn't there (twice too soon).
+    if let EngineError::NotThereOnce { .. } = e {
+        return format!("{what} failed ({e}): try again later");
+    }
     let then = match e.class() {
         hbsync_remote::ErrorClass::Transient | hbsync_remote::ErrorClass::RateLimited => {
             "Homebase can't be reached now: try again later"
@@ -405,6 +521,107 @@ mod tests {
         wait_for("asked again", || keeper.done() == 2)?;
         assert_eq!(count("removed")?, 0, "gone for good");
         keeper.finish();
+        Ok(())
+    }
+
+    /// The notes told, gathered.
+    fn notes() -> (Tell, Arc<std::sync::Mutex<Vec<String>>>) {
+        let told = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let notes = Arc::clone(&told);
+        let tell: Tell =
+            Arc::new(move |note| notes.lock().unwrap_or_else(|e| e.into_inner()).push(note));
+        (tell, told)
+    }
+
+    /// `name` seeded at the drive's top and removed, as the device's store has it: its node.
+    fn removed_file(
+        remote: &FakeRemote,
+        drive: &Drive,
+        name: &str,
+    ) -> Result<(hbsync_types::NodeId, hbsync_types::RemoteRef), Box<dyn std::error::Error>> {
+        use hbsync_remote::Remote;
+        let algorithm = hbsync_fileio::HashAlgorithm::Blake3;
+        let (node, at) =
+            remote
+                .server()
+                .seed_file(hbsync_types::NodeId::ROOT, name, b"x", algorithm)?;
+        let target = hbsync_types::Target {
+            at,
+            token: Some(hbsync_remote::fake::token_of(at.file_id)),
+        };
+        let (answers, _) = remote.set_removed(&[target], true)?.padded(1);
+        let removed = answers.into_iter().next().ok_or("an answer")??;
+        drive.pull(None)?;
+        Ok((node, removed.at()))
+    }
+
+    /// A restore finds its item not there, the identity's first word on it (§8b): told so, not
+    /// as a network fault, and run once more a minute on (here less), without the user asking
+    /// again. Gone for good by then: told it can't come back. Before, the note said Homebase
+    /// couldn't be reached, and nothing asked again (the scan of 2026-10-23, A3).
+    #[test]
+    fn a_restore_said_not_there_once_runs_once_more() -> R {
+        let home = tempfile::tempdir()?;
+        let db = home.path().join("state.db");
+        let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
+        let drive = Drive::open(&db, "a.example", remote.clone())?;
+        let (node, at) = removed_file(&remote, &drive, "x.txt")?;
+        // Deleted for good elsewhere, unheard of: the drive says not there, no tombstone.
+        remote.server().hard_delete(at.file_id, at.version)?;
+        let (tell, told) = notes();
+        let mut keeper = Keeper::spawn_with(Arc::clone(&drive), tell, Duration::from_secs(2));
+        keeper.request(AccountControl::Restore { nodes: vec![node] });
+        wait_for("the restore", || keeper.done() == 1)?;
+        let first = told.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(first.len(), 1, "{first:?}");
+        assert!(
+            first[0].contains("isn't there; asking again in a minute"),
+            "{first:?}"
+        );
+        assert!(!first[0].contains("can't be reached"), "{first:?}");
+        // As if a minute had passed since.
+        let sql = rusqlite::Connection::open(&db)?;
+        sql.execute("UPDATE gone_suspects SET at = at - 60000", [])?;
+        wait_for("run once more", || keeper.done() == 2)?;
+        keeper.finish();
+        let told = told.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(told.len(), 2, "{told:?}");
+        assert!(
+            told[1].contains("\u{201c}x.txt\u{201d} was deleted for good meanwhile"),
+            "{told:?}"
+        );
+        let removed: i64 = sql.query_row("SELECT count(*) FROM removed", [], |r| r.get(0))?;
+        assert_eq!(removed, 0, "forgotten");
+        Ok(())
+    }
+
+    /// A restore that leaves a row in Recently deleted with no error (here: every name it may
+    /// take is taken at the top) says which, once: before, it only logged "0 items restored".
+    #[test]
+    fn a_restore_that_leaves_a_row_says_which() -> R {
+        let home = tempfile::tempdir()?;
+        let db = home.path().join("state.db");
+        let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
+        let drive = Drive::open(&db, "a.example", remote.clone())?;
+        let (node, _) = removed_file(&remote, &drive, "x.txt")?;
+        {
+            let algorithm = hbsync_fileio::HashAlgorithm::Blake3;
+            let mut server = remote.server();
+            for name in hbsync_engine::tree::restored_names("x.txt") {
+                server.seed_file(hbsync_types::NodeId::ROOT, &name, b"y", algorithm)?;
+            }
+        }
+        let (tell, told) = notes();
+        let mut keeper = Keeper::spawn(Arc::clone(&drive), tell);
+        keeper.request(AccountControl::Restore { nodes: vec![node] });
+        keeper.finish();
+        let told = told.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(told.len(), 1, "{told:?}");
+        assert!(
+            told[0]
+                .starts_with("Restoring from Recently deleted: \u{201c}x.txt\u{201d} stayed there"),
+            "{told:?}"
+        );
         Ok(())
     }
 

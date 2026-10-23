@@ -711,7 +711,14 @@ here (or put up anew, if edited). That takes proof (`hbsync-engine/src/gone.rs`)
   to an hour on, at that version; one later than that, or one by a clock set back, is a first
   again. Meanwhile the operation is skipped (stale) and the file stays; a restore of it fails,
   to try again (what was to come back into such a folder is asked about too, a header read
-  each, so that a minute on all of it is gone at once); a put back (§7) that fails is run once
+  each, so that a minute on all of it is gone at once): the user's restore from Recently
+  deleted is run once more a minute on by the daemon, unasked, and says so ("Homebase says
+  one item isn't there; asking again in a minute", never a network fault), then what was
+  deleted for good meanwhile and can't come back; a restore that leaves rows in Recently
+  deleted with no error (no free name, a folder that didn't come back) says which, once
+  (keeper `a_restore_said_not_there_once_runs_once_more`,
+  `a_restore_that_leaves_a_row_says_which`; engine
+  `a_restore_said_not_there_once_hands_back_what_stayed`); a put back (§7) that fails is run once
   more a minute on; emptying Recently deleted leaves it listed until emptied again a minute on;
   and what the purge finds so is asked again a minute on, a header read each (a delete for good
   this device missed: it leaves nothing in the feed). A new row of the file (the feed, a write's answer) or a header that says
