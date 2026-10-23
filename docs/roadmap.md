@@ -100,7 +100,7 @@ Written: [spec/sync-semantics.md](spec/sync-semantics.md),
 - **Start-up orchestrator**: remote cursor catch-up and local catch-up run in parallel; uploads of local state that is still unknown wait for it
 - **First-run adoption**: match existing local files to remote nodes by hash, with no download
 - **Milestone**: two-client sync through the fake remote, green on all three OSes
-  (`crates/hbsync-engine/tests/milestone.rs`)
+  (`crates/hbsync-engine/tests/milestone/`)
 
 ## Layer 5: Homebase (server prerequisites can start in parallel with Layer 1)
 - **odin-core prerequisites**:
