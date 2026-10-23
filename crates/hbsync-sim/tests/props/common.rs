@@ -61,6 +61,20 @@ pub(crate) fn orphaning_action() -> impl Strategy<Value = Action> + Clone {
     ]
 }
 
+/// The users' actions, with new files more often, at names few enough that devices make the
+/// same ones (sync semantics §3, Hash on send: a new file is sent unread while nothing on the
+/// drive is its node or of its name).
+pub(crate) fn sending_action() -> impl Strategy<Value = Action> + Clone {
+    let i = || 0usize..4;
+    prop_oneof![
+        4 => action(),
+        4 => (i(), i()).prop_map(|(parent, name)| Action::CreateFile { parent, name }),
+        2 => i().prop_map(|file| Action::Edit { file }),
+        1 => i().prop_map(|file| Action::EditWriting { file }),
+        2 => (i(), i(), i()).prop_map(|(node, parent, name)| Action::Move { node, parent, name }),
+    ]
+}
+
 /// The users' actions, with deletes, and apps writing to what a client moved aside to delete
 /// (sync semantics §7), more often.
 pub(crate) fn deleting_action() -> impl Strategy<Value = Action> + Clone {

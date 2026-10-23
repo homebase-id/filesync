@@ -84,7 +84,7 @@ fn hash_rules() -> R {
     let f = file("f", NodeId::ROOT, b"real");
     let mut reader = std::io::Cursor::new(&b"corrupted"[..]);
     let lying = Upload {
-        hash: hash_bytes(b"real", HashAlgorithm::Blake3),
+        hash: hbsync_remote::Planned::Known(hash_bytes(b"real", HashAlgorithm::Blake3)),
         size: 4,
         reader: &mut reader,
         pace: None,

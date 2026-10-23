@@ -16,7 +16,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use hbsync_fileio::hash_file;
+use hbsync_local::{ScanOptions, rescan_entries};
 use hbsync_namemap::to_remote;
+use hbsync_platform::RelPath;
 use hbsync_platform::name::name_key;
 use hbsync_state::{FolderTx, LocalRow, MirrorRow, StateDb, StateError};
 use hbsync_types::{ContentHash, NodeId, NodeKind};
@@ -45,7 +47,7 @@ pub fn adopt(db: &mut StateDb, folder: &FolderCtx) -> Result<usize, StateError> 
                 .iter()
                 .take_while(|r| r.path.parent().unwrap_or_default() == parent_path)
                 .count();
-        let group = &candidates[start..end];
+        let group = start..end;
         start = end;
 
         let Some(parent) = db.read(|s| s.local_node_at(&parent_path))? else {
@@ -64,6 +66,10 @@ pub fn adopt(db: &mut StateDb, folder: &FolderCtx) -> Result<usize, StateError> 
         if siblings.is_empty() {
             continue;
         }
+        // A file left to be hashed on send with a name the drive has here is hashed now: its
+        // bytes tell whether it is that node.
+        hash_twins(db, folder, &mut candidates[group.clone()], &siblings)?;
+        let group = &candidates[group];
         // Matches are written per folder, in one transaction each.
         let mut claimed: HashSet<NodeId> = HashSet::new();
         let mut matches: Vec<(&LocalRow, NodeId, bool)> = Vec::new();
@@ -93,6 +99,45 @@ pub fn adopt(db: &mut StateDb, folder: &FolderCtx) -> Result<usize, StateError> 
         adopted += matches.len();
     }
     Ok(adopted)
+}
+
+/// The files of `group` left to be hashed on send (sync semantics §3) that a remote node of
+/// `siblings` may be: read now, as the scan reads a file (its hash on send off), their rows
+/// taken back into `group` as recorded.
+fn hash_twins(
+    db: &mut StateDb,
+    folder: &FolderCtx,
+    group: &mut [LocalRow],
+    siblings: &HashMap<String, Vec<MirrorRow>>,
+) -> Result<(), StateError> {
+    let twin = |r: &LocalRow| {
+        r.send_hash
+            && r.path
+                .name()
+                .and_then(|n| to_remote(n, folder.os).ok())
+                .is_some_and(|n| siblings.contains_key(&name_key(&n)))
+    };
+    let paths: Vec<RelPath> = group
+        .iter()
+        .filter(|r| twin(r))
+        .map(|r| r.path.clone())
+        .collect();
+    if paths.is_empty() {
+        return Ok(());
+    }
+    let opts = ScanOptions {
+        hash_on_send: false,
+        ..folder.scan_options()
+    };
+    rescan_entries(db, &folder.root, &[], &paths, &opts)?;
+    db.read(|s| {
+        for row in group.iter_mut().filter(|r| r.send_hash) {
+            if let Some(now) = s.local_by_node(row.node)? {
+                *row = now;
+            }
+        }
+        Ok(())
+    })
 }
 
 /// Hands the local item of `local` to `node`: it is that node from now on, to be planned.

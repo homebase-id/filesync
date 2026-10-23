@@ -105,6 +105,19 @@ in this order, and the first rule that matches wins:
 
 Folders match by rules 1 and 2 only.
 
+**Hash on send.** A new file (rule 4) that rule 3 can't match (no vanished file of its size)
+isn't read by the scan: it is hashed as it is sent, so its bytes are read once. While it is
+*free*, with nothing its bytes could be compared with (no base, its node not on the drive,
+nothing on the drive in its folder of its name, not parked), the planner takes it as a new
+file and uploads it unread; the upload checks its fingerprint before, every 16 MiB and after
+the last byte (as `hash_file` checks it), and the hash of the bytes sent settles the base and
+the local row in one commit (the row only if it still shows that fingerprint, else the next
+scan hashes it). One that isn't free (the drive got its node, a write's answer lost, or
+something of its name) is read before it is planned, as a file something waits for (§6.3),
+and so is one a first run may adopt. A base claims what it always does: both sides hold the
+bytes of hash H, here the hash of what the drive got. One being written when found is left
+unhashed and read once quiet, as ever (§6.3).
+
 ## 4. Merge rules
 
 Per node, after classifying both sides:
@@ -183,7 +196,9 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    that sync that place (the orphans' rule below, "Nor is what is in a folder in Recently
    deleted …", says when).
    A file not hashed yet keeps its folders as they are, neither deleted nor restored, till it
-   is hashed (below); then it keeps a folder alive as any live child does.
+   is hashed (below); then it keeps a folder alive as any live child does. A new file free to
+   be hashed on send (§3) is no file not hashed yet: it is a new file, nothing compares its
+   bytes, and it keeps its folders alive (restored with it) as any new file does.
 
    **What waits for a hash.** A file here not hashed yet (being written, locked, unreadable, a
    placement a crash left unread) can't be judged: until it is hashed it, and every folder it

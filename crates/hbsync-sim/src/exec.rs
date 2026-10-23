@@ -20,7 +20,8 @@ use hbsync_local::layout::parked_name;
 use hbsync_platform::Os;
 use hbsync_state::{Answer, RemovedRow, StateDb, StateError};
 use hbsync_types::{
-    ContentState, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, Role, Tags, VersionTag,
+    ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
+    Role, Tags, VersionTag,
 };
 
 use crate::Sim;
@@ -124,10 +125,28 @@ impl Sim {
         self.release_filtered(c);
         self.hear_not_theres(c);
         let remote = self.drive_seen(c);
+        // Left to be hashed on send: a new file, till its first upload's commit. One that
+        // isn't free to send so is read first (the engine reads it and plans again).
+        let client = &mut self.clients[c];
+        let send_hash = std::mem::take(&mut client.send_hash);
+        client.send_hash = send_hash
+            .into_iter()
+            .filter(|&n| client.free_to_send(n, &remote))
+            .collect();
         let client = &self.clients[c];
         // A parked node is reported at its original place ([`at_place`]): the temporary name
         // is the executor's business and must never reach the remote.
         let mut local_view = client.local.clone();
+        // A file hashed on send has no hash before it is sent: the view's marker.
+        for &n in &client.send_hash {
+            if let Some(state) = local_view.get(n).cloned() {
+                let content = state.content.map(|c| FileContent {
+                    hash: ContentHash::ON_SEND,
+                    ..c
+                });
+                local_view.insert(n, NodeState { content, ..state });
+            }
+        }
         for &node in client.parked.keys() {
             if let Some(state) = client.local.get(node) {
                 local_view.insert(node, at_place(client, node, state));
@@ -1365,6 +1384,9 @@ impl Sim {
                     NodeKind::Folder => None,
                     NodeKind::File => local.content,
                 };
+                if kind == NodeKind::File && client.send_hash.contains(&node) {
+                    self.ledger.sent_on_send += 1;
+                }
                 // A restore keeps the tags the removed version has (the executor merges them).
                 let tags = match self.server.removed.get(&node) {
                     Some(r) => self.merged_with_drive(c, node, &tags, &r.state.tags),

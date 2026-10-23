@@ -325,6 +325,7 @@ fn path_of(path: &[&str]) -> Option<RelPath> {
 /// The scan's row of the client's item `node` (`state`) at `path`.
 fn local_row(client: &Client, node: NodeId, state: &NodeState, path: RelPath) -> LocalRow {
     let content = state.content;
+    let send_hash = client.send_hash.contains(&node);
     LocalRow {
         path,
         node,
@@ -340,9 +341,10 @@ fn local_row(client: &Client, node: NodeId, state: &NodeState, path: RelPath) ->
         },
         executable: content.map(|c| c.executable),
         hash: content
-            .filter(|_| !client.unhashed_now().any(|n| n == node))
+            .filter(|_| !client.unhashed_now().any(|n| n == node) && !send_hash)
             .map(|c| c.hash),
         tags: (client.os != Os::Windows).then(|| state.tags.clone()),
+        send_hash,
     }
 }
 

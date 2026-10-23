@@ -527,6 +527,7 @@ fn adopting_a_wide_folder_takes_linear_time() -> R {
         filter: Default::default(),
         exact_names: false,
         settle: None,
+        hash_on_send: false,
     };
     hbsync_local::scan(&mut db, dir.path(), &opts)?;
     let cell = std::cell::RefCell::new(db);

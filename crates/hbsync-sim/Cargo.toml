@@ -11,6 +11,7 @@ publish.workspace = true
 hbsync-engine.workspace = true
 hbsync-fileio.workspace = true
 hbsync-local.workspace = true
+hbsync-namemap.workspace = true
 hbsync-platform.workspace = true
 hbsync-state.workspace = true
 hbsync-types.workspace = true

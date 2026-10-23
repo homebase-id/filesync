@@ -191,6 +191,12 @@ impl Sim {
         self
     }
 
+    /// For scripted tests: how many times files' bytes went up hashed on send (sync semantics
+    /// §3).
+    pub fn sent_on_send(&self) -> usize {
+        self.ledger.sent_on_send
+    }
+
     /// For scripted tests: the nodes of the deletes client `c`'s last plan held (§7).
     pub fn held(&self, c: usize) -> &[NodeId] {
         &self.clients[c].held

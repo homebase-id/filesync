@@ -3,11 +3,13 @@ use std::fs;
 use std::io::{Read, Write};
 use std::time::{Duration, Instant};
 
-use hbsync_engine::transfer::{Download, Job, JobError, JobResult, TransferConfig, run_jobs};
+use hbsync_engine::transfer::{
+    Download, Job, JobError, JobResult, SendHash, TransferConfig, run_jobs,
+};
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 use hbsync_remote::{
-    Answers, ChangesPage, Deletes, ErrorClass, ForGood, Holds, NodeMeta, RefsPage, Remote,
+    Answers, ChangesPage, Deletes, ErrorClass, ForGood, Holds, NodeMeta, Planned, RefsPage, Remote,
     RemoteHeader, Result as RemoteResult, Upload,
 };
 use hbsync_types::schema::NodeContent;
@@ -30,7 +32,7 @@ fn upload_job(dir: &std::path::Path, name: &str, size: usize) -> std::io::Result
         },
         target: None,
         path,
-        hash: hash_bytes(&data, HashAlgorithm::Blake3),
+        hash: SendHash::Known(hash_bytes(&data, HashAlgorithm::Blake3)),
         size: size as u64,
         seen,
     })
@@ -163,7 +165,7 @@ fn interrupted_download_resumes_without_refetching() -> R {
     let written = remote.create(
         &new,
         Some(Upload {
-            hash,
+            hash: Planned::Known(hash),
             size: data.len() as u64,
             reader: &mut std::io::Cursor::new(data.as_slice()),
             pace: None,
@@ -379,5 +381,50 @@ fn an_upload_whose_file_changed_stops() -> R {
     // Its own look, not the hash of what was sent.
     assert!(matches!(e, JobError::Changed), "{e}");
     assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 0);
+    Ok(())
+}
+
+/// An upload hashed on send (sync semantics §3): the answer gives the hash of the bytes sent.
+/// One whose file changes while it is sent, too small for a look on the way, is caught by the
+/// look after its last byte: stale, nothing stored.
+#[test]
+fn an_upload_hashed_on_send_is_looked_at_after_its_last_byte() -> R {
+    let dir = tempfile::tempdir()?;
+    let server = FakeServer::new(ServerConfig::default());
+    let remote = FakeRemote::new(server.clone());
+    let unread = |mut job: Job| {
+        if let Job::Upload { hash, .. } = &mut job {
+            *hash = SendHash::OnSend(HashAlgorithm::Blake3);
+        }
+        job
+    };
+    let mut results = Vec::new();
+    let job = unread(upload_job(dir.path(), "sent", 10)?);
+    run_jobs(&remote, TransferConfig::default(), vec![job], |_, r| {
+        results.push(r)
+    });
+    let [JobResult::Written(w)] = &results[..] else {
+        return Err(format!("{results:?}").into());
+    };
+    assert_eq!(
+        w.content,
+        Some(hash_bytes(&[b'x'; 10], HashAlgorithm::Blake3))
+    );
+
+    let job = unread(upload_job(dir.path(), "changed", 10)?);
+    let midway = ChangesWhileSent {
+        inner: remote.clone(),
+        path: dir.path().join("changed"),
+        after: 5,
+    };
+    let mut results = Vec::new();
+    run_jobs(&midway, TransferConfig::default(), vec![job], |_, r| {
+        results.push(r)
+    });
+    let [JobResult::Failed(e)] = &results[..] else {
+        return Err(format!("{results:?}").into());
+    };
+    assert!(matches!(e, JobError::Changed), "{e}");
+    assert_eq!(server.lock().map_err(|_| "poisoned")?.live().count(), 1);
     Ok(())
 }

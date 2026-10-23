@@ -738,11 +738,20 @@ impl Engine {
     ) -> Result<Plan, EngineError> {
         let root = &self.cfg.folder.root;
         let mut plan = plan;
-        if self
-            .waited
-            .read(&mut self.db, root, &self.scan_opts, &plan.waiting)?
-        {
-            plan = self.plan(dirty, opts)?;
+        // A file left to be hashed on send that isn't free to send (the drive has its node, or
+        // something of its name: `view::file_content`) is read first, as one something waits
+        // for: it is compared.
+        let mut read = plan.waiting.clone();
+        read.extend(self.db.read(|s| view::not_free(s, &plan.deferred))?);
+        // Read now, a file left to be hashed on send too.
+        if !read.is_empty() {
+            let now = ScanOptions {
+                hash_on_send: false,
+                ..self.scan_opts.clone()
+            };
+            if self.waited.read(&mut self.db, root, &now, &read)? {
+                plan = self.plan(dirty, opts)?;
+            }
         }
         self.waited.tell(&mut self.db, &plan.waiting)?;
         Ok(plan)

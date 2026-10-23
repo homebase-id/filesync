@@ -137,6 +137,19 @@ impl Sim {
                     }
                 }
             }
+            // A new file hashed on send: the drive wrote it, and the crash lost the answer (every
+            // other such crash: before the write). The next plan finds its node on the drive:
+            // read first, it settles as equal, sent once.
+            Some(ref op @ Op::RemoteCreate { node, .. })
+                if self.clients[c].send_hash.contains(&node)
+                    && self.faults.crashes.is_multiple_of(2) =>
+            {
+                let sent = self.execute(c, op) == Outcome::Done;
+                self.note(|_| match sent {
+                    true => format!("crash c{c}: {node:?} sent, the answer lost"),
+                    false => format!("crash c{c}: {node:?} not sent"),
+                });
+            }
             _ => {}
         }
         let client = &mut self.clients[c];

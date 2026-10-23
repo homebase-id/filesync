@@ -8,6 +8,7 @@ use hbsync_engine::reconcile::{BaseExtra, DriveVersion, Op};
 use hbsync_engine::scope::Scope;
 use hbsync_engine::tree::Tree;
 use hbsync_local::{Filter, Verdict};
+use hbsync_namemap::sibling_hash;
 use hbsync_platform::Os;
 use hbsync_state::Coords;
 use hbsync_types::{NodeId, NodeKind, RemoteRef, VersionTag};
@@ -117,6 +118,10 @@ pub(crate) struct Client {
     /// Files another app holds locked ([`crate::Action::Lock`]): not hashed at any plan till
     /// let go.
     pub(crate) locked: HashSet<NodeId>,
+    /// New files the scan leaves to be hashed as they are sent (sync semantics §3, Hash on
+    /// send): until their first upload's commit (a base), or a plan finds them not free
+    /// ([`Client::free_to_send`]: then they are read first).
+    pub(crate) send_hash: BTreeSet<NodeId>,
     /// The last plan found files still being written: the scan hashes them once written, and
     /// that asks for a sync (the engine keeps their nodes dirty).
     pub(crate) hashing: bool,
@@ -142,6 +147,24 @@ impl Client {
             .chain(&self.writing)
             .chain(&self.locked)
             .copied()
+    }
+
+    /// Whether `node`, a file left to be hashed on send, is free to be sent so against `remote`
+    /// (the drive as the plan sees it), as the engine's view tells (`view::free_to_send`): no
+    /// base, not on the drive, nothing there in its folder of its name, not parked.
+    pub(crate) fn free_to_send(&self, node: NodeId, remote: &Tree) -> bool {
+        let Some(l) = self.local.get(node) else {
+            return false;
+        };
+        let key = sibling_hash(&l.name);
+        l.kind == NodeKind::File
+            && !self.base.contains(node)
+            && !remote.contains(node)
+            && !self.parked.contains_key(&node)
+            && remote
+                .children(l.parent)
+                .filter_map(|k| remote.get(k))
+                .all(|r| sibling_hash(&r.name) != key)
     }
 
     pub(crate) fn new(name: String, os: Os, filter: Filter, coords: Coords) -> Self {
@@ -180,6 +203,7 @@ impl Client {
             unhashed: HashSet::new(),
             writing: HashSet::new(),
             locked: HashSet::new(),
+            send_hash: BTreeSet::new(),
             hashing: false,
             suspects: BTreeMap::new(),
             gone: BTreeSet::new(),
@@ -233,6 +257,9 @@ pub(crate) fn verdict_in(tree: &Tree, filter: &Filter, node: NodeId) -> Verdict 
 pub(crate) fn rekey_client(client: &mut Client, node: NodeId, new: NodeId) {
     rekey(&mut client.local, node, new);
     rekey(&mut client.planned_local, node, new);
+    if client.send_hash.remove(&node) {
+        client.send_hash.insert(new);
+    }
     for (parent, _) in client.parked.values_mut() {
         if *parent == node {
             *parent = new;

@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 use hbsync_fileio::{CompletedFile, FileIoError, HashAlgorithm, PartialFile, hash_file};
 use hbsync_platform::Fingerprint;
 use hbsync_remote::{
-    Answers, BATCH_FILES, ErrorClass, NodeMeta, Pace, Remote, RemoteError, Upload,
+    Answers, BATCH_FILES, ErrorClass, NodeMeta, Pace, Planned, Remote, RemoteError, Upload,
 };
 use hbsync_types::{ContentHash, NodeId, RemoteFileId, Target, Written};
 
@@ -154,12 +154,12 @@ pub enum Job {
     Download(Download),
     /// Uploads the file at `path` as `meta`: a create, or with `target` an update of that
     /// file at that version. `hash` is of its bytes as they were when its fingerprint was
-    /// `seen`: sent only while the file still shows it.
+    /// `seen`, or they are hashed as they are sent: sent only while the file still shows it.
     Upload {
         meta: NodeMeta,
         target: Option<Target>,
         path: PathBuf,
-        hash: ContentHash,
+        hash: SendHash,
         size: u64,
         seen: Fingerprint,
     },
@@ -169,6 +169,25 @@ pub enum Job {
         meta: NodeMeta,
         target: Option<Target>,
     },
+}
+
+/// The content hash an upload goes with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SendHash {
+    /// Of the bytes as the scan read them: the drive refuses others.
+    Known(ContentHash),
+    /// A new file hashed as it is sent, with this algorithm (sync semantics §3, Hash on send):
+    /// the write's answer gives the hash of the bytes sent.
+    OnSend(HashAlgorithm),
+}
+
+impl SendHash {
+    pub fn known(self) -> Option<ContentHash> {
+        match self {
+            SendHash::Known(h) => Some(h),
+            SendHash::OnSend(_) => None,
+        }
+    }
 }
 
 impl Job {
@@ -451,7 +470,7 @@ fn run_job(remote: &dyn Remote, job: &Job, meter: &Meter<'_>) -> JobResult {
             let file = std::fs::File::open(path)?;
             // Changed since it was hashed (it may have waited in the queue): no use sending it
             // to be refused.
-            if !hbsync_platform::stat(path).is_ok_and(|m| m.fingerprint() == *seen) {
+            if !shows(path, seen) {
                 return Err(JobError::Changed);
             }
             let mut reader = Watched {
@@ -460,9 +479,26 @@ fn run_job(remote: &dyn Remote, job: &Job, meter: &Meter<'_>) -> JobResult {
                 seen: *seen,
                 since_look: 0,
                 changed: false,
+                unreadable: None,
+            };
+            // Hashed on send, the bytes sent are what the file held while it shows `seen` as
+            // the looks on the way read it: asked once they are all read. (Its local row
+            // takes their hash only if it still shows all of `seen`: `FolderTx::sent_hash`.)
+            let moved = AtomicBool::new(false);
+            let unchanged = || {
+                let same = hbsync_platform::stat(path).is_ok_and(|m| same_bytes(seen, &m));
+                moved.fetch_or(!same, Ordering::Relaxed);
+                same
+            };
+            let hash = match *hash {
+                SendHash::Known(h) => Planned::Known(h),
+                SendHash::OnSend(algorithm) => Planned::OnSend {
+                    algorithm,
+                    unchanged: &unchanged,
+                },
             };
             let upload = Some(Upload {
-                hash: *hash,
+                hash,
                 size: *size,
                 reader: &mut reader,
                 pace: Some(meter),
@@ -470,7 +506,9 @@ fn run_job(remote: &dyn Remote, job: &Job, meter: &Meter<'_>) -> JobResult {
             match write(remote, meta, target.as_ref(), upload) {
                 Ok(written) => Ok(JobResult::Written(written)),
                 // However the remote took the read that stopped.
-                Err(_) if reader.changed => Err(JobError::Changed),
+                Err(_) if reader.changed || moved.load(Ordering::Relaxed) => Err(JobError::Changed),
+                // The file, not the drive, failed.
+                Err(_) if let Some(e) = reader.unreadable.take() => Err(JobError::Io(e)),
                 Err(e) => Err(e.into()),
             }
         })(),
@@ -479,6 +517,17 @@ fn run_job(remote: &dyn Remote, job: &Job, meter: &Meter<'_>) -> JobResult {
             .map_err(JobError::Remote),
     };
     result.unwrap_or_else(JobResult::Failed)
+}
+
+/// Whether the file at `path` still shows fingerprint `seen`.
+fn shows(path: &Path, seen: &Fingerprint) -> bool {
+    hbsync_platform::stat(path).is_ok_and(|m| m.fingerprint() == *seen)
+}
+
+/// Whether `meta` shows the bytes a file had at `seen`: its size, mtime and file id. Not its
+/// change time: a tag or a preview's mark moves that.
+fn same_bytes(seen: &Fingerprint, meta: &hbsync_platform::LocalMeta) -> bool {
+    seen.same_after_rename(meta) && meta.file_id == seen.file_id
 }
 
 /// Bytes of an upload between two looks at its file: a change stops it there, not once all of
@@ -496,20 +545,25 @@ struct Watched<'a> {
     /// Bytes read since the last look.
     since_look: u64,
     changed: bool,
+    /// The read of the file that failed, if one did.
+    unreadable: Option<io::Error>,
 }
 
 impl Read for Watched<'_> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.since_look >= LOOK_EVERY {
             self.since_look = 0;
-            let same = stat_open(&self.file, self.path)
-                .is_ok_and(|m| self.seen.same_after_rename(&m) && m.file_id == self.seen.file_id);
+            let same = stat_open(&self.file, self.path).is_ok_and(|m| same_bytes(&self.seen, &m));
             if !same {
                 self.changed = true;
                 return Err(io::Error::other("changed since it was hashed"));
             }
         }
-        let n = self.file.read(buf)?;
+        let n = self.file.read(buf).inspect_err(|e| {
+            if e.kind() != io::ErrorKind::Interrupted {
+                self.unreadable = Some(io::Error::new(e.kind(), e.to_string()));
+            }
+        })?;
         self.since_look += n as u64;
         Ok(n)
     }

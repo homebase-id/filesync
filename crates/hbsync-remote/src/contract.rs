@@ -16,7 +16,9 @@ use hbsync_types::{
     Doomed, FileToken, NodeId, NodeKind, RemoteFileId, RemoteRef, Tag, Tags, Target,
 };
 
-use crate::{ChangeRef, Holds, NodeMeta, Remote, RemoteBody, RemoteError, RemoteHeader, Upload};
+use crate::{
+    ChangeRef, Holds, NodeMeta, Planned, Remote, RemoteBody, RemoteError, RemoteHeader, Upload,
+};
 
 /// `files` to delete, unchecked ([`Doomed::unchecked`]): what a test wrote itself.
 pub fn doomed(files: &[RemoteRef]) -> Vec<Doomed> {
@@ -77,6 +79,7 @@ pub const SCENARIOS: &[(&str, Scenario)] = &[
         a_removed_node_deleted_for_good,
     ),
     ("hash_mismatch_stores_nothing", hash_mismatch_stores_nothing),
+    ("hashed_on_send", hashed_on_send),
     ("feed_pages_and_resumes", feed_pages_and_resumes),
     ("slim_pages_match_whole_ones", slim_pages_match_whole_ones),
     (
@@ -296,7 +299,7 @@ pub use crate::feed_end;
 pub fn upload<'a>(reader: &'a mut Cursor<&[u8]>) -> Upload<'a> {
     let data: &[u8] = reader.get_ref();
     Upload {
-        hash: hash_bytes(data, HashAlgorithm::Blake3),
+        hash: Planned::Known(hash_bytes(data, HashAlgorithm::Blake3)),
         size: data.len() as u64,
         reader,
         pace: None,
@@ -927,7 +930,7 @@ fn hash_mismatch_stores_nothing(b: &Bench) -> Outcome {
     for changed in [&b"fake"[..], b"rea", b"real, and more"] {
         let mut reader = Cursor::new(changed);
         let lying = Upload {
-            hash: hash_bytes(b"real", HashAlgorithm::Blake3),
+            hash: Planned::Known(hash_bytes(b"real", HashAlgorithm::Blake3)),
             size: 4,
             ..upload(&mut reader)
         };
@@ -938,7 +941,7 @@ fn hash_mismatch_stores_nothing(b: &Bench) -> Outcome {
     // An update whose source changed keeps the version it would have replaced.
     let mut reader = Cursor::new(&b"fake"[..]);
     let lying = Upload {
-        hash: hash_bytes(b"new!", HashAlgorithm::Blake3),
+        hash: Planned::Known(hash_bytes(b"new!", HashAlgorithm::Blake3)),
         ..upload(&mut reader)
     };
     ensure_err!(
@@ -948,6 +951,50 @@ fn hash_mismatch_stores_nothing(b: &Bench) -> Outcome {
     );
     ensure!(b.read(at.file_id, None)? == b"real", "the old bytes stay");
     b.update(at, &f, Some(b"new!"))?;
+    Ok(())
+}
+
+/// An upload hashed as it is sent (sync semantics §3): the answer gives the hash of the bytes
+/// sent, which the drive keeps; a source that changed while it was read stores nothing.
+fn hashed_on_send(b: &Bench) -> Outcome {
+    let data = b"sent unread";
+    let sent = hash_bytes(data, HashAlgorithm::Blake3);
+    let on_send = |unchanged: &'static (dyn Fn() -> bool + Sync)| Planned::OnSend {
+        algorithm: HashAlgorithm::Blake3,
+        unchanged,
+    };
+    let f = file("on send", b.scratch, data);
+    let mut reader = Cursor::new(&data[..]);
+    let unread = Upload {
+        hash: on_send(&|| true),
+        ..upload(&mut reader)
+    };
+    let written = b.remote.create(&f, Some(unread))?;
+    b.track(written.at().file_id);
+    ensure!(
+        written.content == Some(sent),
+        "the answer's hash: {:?}",
+        written.content
+    );
+    let at = written.at();
+    ensure!(b.read(at.file_id, None)? == data, "the bytes sent");
+    let kept = b.remote.header(at.file_id)?.state().and_then(|s| s.content);
+    ensure!(
+        kept.map(|c| c.hash) == Some(sent),
+        "the drive's hash: {kept:?}"
+    );
+    // Changed while it was read: refused, nothing stored (the node id is still free).
+    let g = file("changed", b.scratch, data);
+    let mut reader = Cursor::new(&data[..]);
+    let changed = Upload {
+        hash: on_send(&|| false),
+        ..upload(&mut reader)
+    };
+    ensure_err!(
+        b.remote.create(&g, Some(changed)),
+        RemoteError::HashMismatch
+    );
+    b.create(&g, Some(data))?;
     Ok(())
 }
 

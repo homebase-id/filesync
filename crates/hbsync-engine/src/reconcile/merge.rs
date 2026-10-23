@@ -215,6 +215,16 @@ impl Reconciler<'_> {
             self.defer(node);
             return;
         }
+        // A file hashed on send is free (the view): nothing has a hash to compare its marker
+        // with, which would read as equal to another such file's.
+        debug_assert!(
+            !i.local
+                .get(node)
+                .and_then(|l| l.content)
+                .is_some_and(|c| c.hash.is_on_send())
+                || (i.base.get(node).is_none() && i.remote.get(node).is_none()),
+            "{node:?}: a file hashed on send that isn't free"
+        );
         let (lc, rc) = (self.local_change(node), self.remote_change(node));
         // One a folder's removal took along isn't in the tree.
         let r = i.remote.get(node).filter(|_| !self.taken.contains(&node));

@@ -295,7 +295,7 @@ fn throughput() -> R {
         let at = remote.create(
             &meta,
             Some(Upload {
-                hash,
+                hash: hbsync_remote::Planned::Known(hash),
                 size,
                 reader,
                 pace: None,

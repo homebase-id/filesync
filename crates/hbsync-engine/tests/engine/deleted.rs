@@ -1276,7 +1276,7 @@ fn an_orphan_goes_to_the_top_when_recovered_files_id_is_taken() -> R {
         };
         let mut reader: &[u8] = &bytes;
         let upload = Upload {
-            hash,
+            hash: hbsync_remote::Planned::Known(hash),
             size: 2,
             reader: &mut reader,
             pace: None,

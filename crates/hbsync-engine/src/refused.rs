@@ -22,6 +22,12 @@ pub const REFUSED_FOR: Duration = Duration::from_secs(3600);
 pub fn key(op: &Op, content: Option<&FileContent>) -> String {
     let mut text = format!("{op:?}");
     if let Some(c) = content {
+        // The planner's marker for a file hashed on send isn't its bytes: keyed so, two such
+        // files would be one operation.
+        assert!(
+            !c.hash.is_on_send(),
+            "a refusal keyed by the hash-on-send marker"
+        );
         text.push_str(&format!(
             "|{}|{}|{}|{}",
             c.hash, c.size, c.mtime_ms, c.executable
@@ -49,15 +55,26 @@ pub(crate) fn key_of(s: &ReadTx<'_>, op: &Op) -> Result<String, StateError> {
         true => s.local_by_node(op.node())?,
         false => None,
     };
-    let content = row.and_then(|r| {
-        Some(FileContent {
-            hash: r.hash?,
-            size: r.fingerprint.size,
-            mtime_ms: r.fingerprint.mtime_ns / 1_000_000,
-            executable: r.executable.unwrap_or(false),
-        })
-    });
-    Ok(key(op, content.as_ref()))
+    let Some(row) = row else {
+        return Ok(key(op, None));
+    };
+    let Some(hash) = row.hash else {
+        // A file hashed on send has no hash before it is sent: its size, mtime and file id
+        // stand for its bytes (a change of them is another operation; a tag's isn't).
+        let fp = &row.fingerprint;
+        let text = format!(
+            "{op:?}|on send|{}|{}|{:?}|{:?}",
+            fp.size, fp.mtime_ns, fp.file_id, row.executable
+        );
+        return Ok(hash_bytes(text.as_bytes(), HashAlgorithm::Blake3).to_string());
+    };
+    let content = FileContent {
+        hash,
+        size: row.fingerprint.size,
+        mtime_ms: row.fingerprint.mtime_ns / 1_000_000,
+        executable: row.executable.unwrap_or(false),
+    };
+    Ok(key(op, Some(&content)))
 }
 
 /// Takes the operations `refused` says the drive refused as they are out of `ops`, and those

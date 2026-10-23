@@ -210,6 +210,7 @@ impl Executor<'_> {
             executable: None,
             hash: None,
             tags: self.disk.on_item_after(left, on_item_before),
+            send_hash: false,
         };
         let (os, folder) = (self.folder.os, self.folder);
         self.cfg.hooks.before_commit(self.db);
