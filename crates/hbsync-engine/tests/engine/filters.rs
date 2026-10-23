@@ -276,7 +276,7 @@ fn a_new_ignore_rule_takes_files_off_the_drive_but_not_off_the_disk() -> R {
     b.sync()?;
     assert_eq!(b.read_text("build/out.o")?, "obj");
 
-    // a starts ignoring build/: it leaves the drive and b (for b's trash), and stays on a.
+    // a starts ignoring build/: it leaves the drive and b (for b's delete), and stays on a.
     restart_ignoring(&mut a, "build/\n")?;
     a.sync()?;
     b.sync()?;
@@ -381,7 +381,7 @@ fn a_parked_file_whose_name_became_ignored_and_taken_moves_to_a_numbered_one() -
 }
 
 /// Another device moves a folder into a name this one ignores: it leaves this device (its
-/// trash), followed without asking (§7: another device's removals aren't held, short of every
+/// delete), followed without asking (§7: another device's removals aren't held, short of every
 /// synced file), and the drive keeps the folder.
 #[test]
 fn a_folder_moved_elsewhere_into_an_ignored_name_leaves_unasked() -> R {

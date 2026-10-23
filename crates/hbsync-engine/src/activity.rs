@@ -61,7 +61,7 @@ pub(crate) fn kind_of(op: &Op) -> Option<SyncedKind> {
         Op::RemoteUpdate { upload: false, .. } => SyncedKind::MovedRemotely,
         Op::LocalMove { .. } => SyncedKind::MovedLocally,
         Op::RemoteDelete { .. } => SyncedKind::DeletedRemotely,
-        Op::LocalTrash { .. } => SyncedKind::TrashedLocally,
+        Op::LocalDelete { .. } => SyncedKind::DeletedLocally,
         _ => return None,
     })
 }
@@ -164,7 +164,7 @@ mod tests {
         );
         // The top folder's group is the empty path.
         let top = (0..11)
-            .map(|i| entry(SyncedKind::TrashedLocally, &format!("f{i}"), 0))
+            .map(|i| entry(SyncedKind::DeletedLocally, &format!("f{i}"), 0))
             .collect();
         assert_eq!(group(top, GROUP_OVER)[0].path, "");
     }

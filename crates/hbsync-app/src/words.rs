@@ -79,7 +79,7 @@ pub(crate) fn verb(kind: SyncedKind) -> &'static str {
         SyncedKind::MovedRemotely => "moved",
         SyncedKind::MovedLocally => "moved on another device",
         SyncedKind::DeletedRemotely => "deleted",
-        SyncedKind::TrashedLocally => "deleted on another device",
+        SyncedKind::DeletedLocally => "deleted on another device",
     }
 }
 

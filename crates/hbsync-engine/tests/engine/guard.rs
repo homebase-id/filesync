@@ -48,7 +48,7 @@ fn a_confirmation_lasts_while_its_delete_waits_for_a_file() -> R {
     b.engine
         .confirm_deletes(report.held.iter().map(|op| op.node()));
     // Three of b's files can't be read now, unchanged (a mode change): the folder's delete
-    // waits for them, and after, their trashes alone trip the guard.
+    // waits for them, and after, their deletes alone trip the guard.
     let unread: Vec<_> = (0..3).map(|i| b.root.join(format!("d/f{i}.txt"))).collect();
     for f in &unread {
         fs::set_permissions(f, fs::Permissions::from_mode(0o000))?;
@@ -502,11 +502,11 @@ fn a_hold_of_every_file_outlasts_a_failed_sync() -> R {
 }
 
 /// A folder held as every synced file; one file of it back on the drive meanwhile, and a
-/// subfolder's trash waiting for a file in it not hashed yet: once it's read, the subfolder's
-/// trash (taking held files along) is held too.
+/// subfolder's delete waiting for a file in it not hashed yet: once it's read, the subfolder's
+/// delete (taking held files along) is held too.
 #[cfg(unix)]
 #[test]
-fn a_hold_of_every_file_holds_a_trash_taking_it_along() -> R {
+fn a_hold_of_every_file_holds_a_delete_taking_it_along() -> R {
     use std::os::unix::fs::PermissionsExt;
 
     let server = server();
@@ -547,10 +547,10 @@ fn a_hold_of_every_file_holds_a_trash_taking_it_along() -> R {
     Ok(())
 }
 
-/// Held file by file (plans in pages), then a restart plans the folder's trash whole, one file
+/// Held file by file (plans in pages), then a restart plans the folder's delete whole, one file
 /// back on the drive: still held.
 #[test]
-fn a_hold_of_every_file_paged_holds_the_whole_trash() -> R {
+fn a_hold_of_every_file_paged_holds_the_whole_delete() -> R {
     let server = server();
     let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
     let mut b = Client::with_config(&server, "b", |cfg| {
@@ -855,7 +855,7 @@ fn held_deletes_stay_dirty_beside_more_than_a_thousand_left_over() -> R {
 
 /// Another device removes every synced file, and this device hears of it (an announcement,
 /// another folder's pull) just after a sync read the guard's counts with nothing dirty: the
-/// removal is still judged against the synced files, and held (§7), not trashed with the
+/// removal is still judged against the synced files, and held (§7), not deleted with the
 /// every-file rule off.
 #[test]
 fn a_wipe_marked_right_after_the_counts_is_still_held() -> R {
@@ -893,7 +893,7 @@ fn a_wipe_marked_right_after_the_counts_is_still_held() -> R {
         "the hook ran"
     );
     assert!(!report.held.is_empty(), "{report:?}");
-    assert_eq!(b.read_text("d/f2.txt")?, "2", "held, not trashed");
+    assert_eq!(b.read_text("d/f2.txt")?, "2", "held, not deleted");
     Ok(())
 }
 
@@ -947,7 +947,7 @@ fn a_wipe_marked_after_the_counts_beside_a_dirty_file_is_still_held() -> R {
         "the hook ran"
     );
     assert!(!report.held.is_empty(), "{report:?}");
-    assert_eq!(b.read_text("d2/f.txt")?, "2", "held, not trashed");
+    assert_eq!(b.read_text("d2/f.txt")?, "2", "held, not deleted");
     Ok(())
 }
 

@@ -140,11 +140,11 @@ fn regression_create_under_concurrently_deleted_folder() {
         .unwrap_or_else(|e| panic!("{e}"));
 }
 
-/// A device confirms trashing a folder another device moved into a name it ignores. The drive
+/// A device confirms deleting a folder another device moved into a name it ignores. The drive
 /// keeps the folder, so the confirmation must not be dropped as "nothing to delete any more"
-/// before the trash ran: it would stay held for good.
+/// before the delete ran: it would stay held for good.
 #[test]
-fn regression_confirmed_trash_of_a_folder_moved_into_an_ignored_name() {
+fn regression_confirmed_delete_of_a_folder_moved_into_an_ignored_name() {
     use Action::*;
     use Event::*;
     let act = |client, action| Act { client, action };
@@ -1141,12 +1141,12 @@ fn regression_an_add_sent_up_outlives_its_own_delete_that_lost() {
     }
 }
 
-/// The phone deletes a file, and a plan here trashes it; before the trash runs, the user
-/// restores it on the drive. The trash acted on the removal: the file comes back here, and
-/// stays on the drive. A base the trash left behind read as this device deleting it: the plan
+/// The phone deletes a file, and a plan here deletes it; before the delete runs, the user
+/// restores it on the drive. The delete acted on the removal: the file comes back here, and
+/// stays on the drive. A base the delete left behind read as this device deleting it: the plan
 /// after removed it again, and the purge, 30 days on, for good.
 #[test]
-fn regression_a_restore_while_the_trash_runs_stands() {
+fn regression_a_restore_while_the_delete_runs_stands() {
     use Action::*;
     let mut sim = Sim::new(2);
     let act = |client, action| Event::Act { client, action };
@@ -1158,13 +1158,13 @@ fn regression_a_restore_while_the_trash_runs_stands() {
         act(1, Delete { node }),
         Event::Plan { client: 1 },
         Event::Step { client: 1 },
-        // Client 0 plans the trash; the user restores the file before it runs.
+        // Client 0 plans the delete; the user restores the file before it runs.
         Event::Plan { client: 0 },
     ]);
-    assert_eq!(sim.planned(0), ["LocalTrash"]);
+    assert_eq!(sim.planned(0), ["LocalDelete"]);
     let restore = sim.removed_pick(file).expect("in Recently deleted");
     sim.run(&[act(0, Restore { node: restore }), Event::Step { client: 0 }]);
-    assert!(sim.item(0, "a").is_none(), "trashed");
+    assert!(sim.item(0, "a").is_none(), "deleted");
     assert!(sim.quiesce(30), "no convergence");
     if let Err(e) = sim.check() {
         panic!("{e}");
@@ -1340,7 +1340,7 @@ fn delete_elsewhere_with(folder: bool, unlinked: usize, between: &[Event]) -> Ve
         Event::Step { client: 1 },
         Event::Plan { client: 0 },
     ]);
-    assert_eq!(sim.planned(0), ["LocalTrash"]);
+    assert_eq!(sim.planned(0), ["LocalDelete"]);
     sim.run(&[Event::Step { client: 0 }]);
     assert!(sim.item(0, top).is_none(), "aside");
     sim.crash_after_unlinks(unlinked);
@@ -1420,7 +1420,7 @@ fn an_edit_aside_beside_an_ignored_item_is_kept() {
         Event::Step { client: 0 },
         Event::Plan { client: 1 },
     ]);
-    assert_eq!(sim.planned(1), ["LocalTrash"]);
+    assert_eq!(sim.planned(1), ["LocalDelete"]);
     sim.run(&[Event::Step { client: 1 }]);
     assert!(sim.item(1, "b/c.txt").is_none(), "aside");
     assert!(sim.item(1, "b/d").is_some(), "kept");
@@ -1669,11 +1669,11 @@ fn regression_what_a_folder_waiting_for_another_page_deletes_waits_with_it() {
 
 /// A folder's removal elsewhere held as every synced file, confirmed; its files, held apart
 /// after (one of them still being written), held so too; then the confirmation lost (new
-/// ignore rules make a new engine). The folder's trash takes those held files along, so it is
+/// ignore rules make a new engine). The folder's delete takes those held files along, so it is
 /// held with them (§7), though the folder alone is short of every synced file now: the oracle
 /// counted it as a removal held by the count.
 #[test]
-fn a_trash_taking_held_files_along_is_held_with_them() {
+fn a_delete_taking_held_files_along_is_held_with_them() {
     let act = |client, action| Event::Act { client, action };
     let events = [
         act(1, Action::CreateJunk { parent: 0 }),

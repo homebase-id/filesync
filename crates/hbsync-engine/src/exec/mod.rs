@@ -698,7 +698,7 @@ impl<'a> Executor<'a> {
                 drive,
             } => self.local_move(*node, *parent, name, drive.as_deref()),
             Op::LocalTags { node, tags, drive } => self.local_tags(*node, tags, drive.as_deref()),
-            Op::LocalTrash { node, subtree } => self.trash(*node, subtree, false),
+            Op::LocalDelete { node, subtree } => self.delete_here(*node, subtree, false),
             Op::LocalDownload { .. }
             | Op::RemoteCreate { .. }
             | Op::RemoteUpdate { .. }
@@ -709,7 +709,7 @@ impl<'a> Executor<'a> {
             Op::Settle { .. } => Ok(Outcome::Done),
             Op::LocalDetach { node, new_node } => self.detach(*node, *new_node),
             Op::Forget { node, subtree } if subtree.is_empty() => self.drop_unsynced_base(*node),
-            Op::Forget { node, subtree } => self.trash(*node, subtree, true),
+            Op::Forget { node, subtree } => self.delete_here(*node, subtree, true),
         };
         result.unwrap_or_else(|o| o)
     }

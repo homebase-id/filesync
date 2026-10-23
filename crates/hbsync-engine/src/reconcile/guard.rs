@@ -65,7 +65,7 @@ impl Reconciler<'_> {
                 || (!waiting.is_empty()
                     && i.base.ancestors(node).iter().any(|a| waiting.contains(a)))
         };
-        // The files each delete takes: a file removed from the drive, what a trash takes here.
+        // The files each delete takes: a file removed from the drive, what a delete takes here.
         let takes = |op: &Op| match op {
             Op::RemoteDelete { node, .. }
                 if i.remote
@@ -76,7 +76,7 @@ impl Reconciler<'_> {
             }
             // A removal elsewhere: a move out of view (`Forget`) keeps the files live on
             // the drive, so it isn't one.
-            Op::LocalTrash { node, .. } => Some((0, files_under(&i.local, *node))),
+            Op::LocalDelete { node, .. } => Some((0, files_under(&i.local, *node))),
             _ => None,
         };
         // With the held deletes out of the dirty set: counted as if planned with this one.
@@ -113,7 +113,7 @@ impl Reconciler<'_> {
                 && match &op {
                     Op::RemoteDelete { .. } => hold_remote,
                     // Itself, a folder it is in, or anything it takes along.
-                    Op::LocalTrash { node, subtree } => {
+                    Op::LocalDelete { node, subtree } => {
                         hold_local || was_wiped(*node) || subtree.iter().any(|n| wiped.contains(n))
                     }
                     _ => false,

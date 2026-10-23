@@ -323,7 +323,7 @@ fn a_folder_kept_for_a_folders_own_page_goes_as_one_to_recently_deleted() -> R {
 /// Another app removes every top folder and what is in them, and stops before `x.txt` in each
 /// (taken along, §6.3): every synced file goes, so b holds the removal for the user, in pages
 /// as in one. Counted from the dirty set, the taken-along files were still in the mirror, so a
-/// page that trashed its folder alone didn't trip the every-file hold (review 14 R1).
+/// page that deleted its folder alone didn't trip the every-file hold (review 14 R1).
 #[test]
 fn a_stopped_wipe_planned_in_pages_is_held() -> R {
     for batch in [1, 2, 3, 20_000] {
@@ -545,7 +545,7 @@ fn settle(c: &mut Client) -> Result<bool, Box<dyn std::error::Error>> {
 
 /// Another device removes `d` and `q`; b moves `d/n.txt` into `q` and makes `d/new.txt`. The
 /// page that waits for `d` holds `n` with the folders it is in now: `q` stays with it, as in
-/// one page, never trashed with `n` in it (review 16).
+/// one page, never deleted with `n` in it (review 16).
 #[test]
 fn a_node_moved_out_of_a_waiting_folder_keeps_its_new_one() -> R {
     for batch in [1, 2, 3, 20_000] {

@@ -505,7 +505,7 @@ mod tests {
     #[test]
     fn a_token_names_exactly_its_deletes() {
         let (a, b) = (NodeId::new(), NodeId::new());
-        let trash = |node| Op::LocalTrash {
+        let delete_here = |node| Op::LocalDelete {
             node,
             subtree: vec![node],
         };
@@ -516,12 +516,15 @@ mod tests {
             expected: hbsync_types::VersionTag(hbsync_types::Uuid::nil()),
         };
         assert_eq!(
-            held_token(&[trash(a), trash(b)]),
-            held_token(&[trash(b), trash(a)])
+            held_token(&[delete_here(a), delete_here(b)]),
+            held_token(&[delete_here(b), delete_here(a)])
         );
-        assert_ne!(held_token(&[trash(a), trash(b)]), held_token(&[trash(a)]));
         assert_ne!(
-            held_token(&[trash(a)]),
+            held_token(&[delete_here(a), delete_here(b)]),
+            held_token(&[delete_here(a)])
+        );
+        assert_ne!(
+            held_token(&[delete_here(a)]),
             held_token(&[delete(a)]),
             "its way counts"
         );

@@ -39,8 +39,10 @@ pub enum SyncedKind {
     MovedLocally,
     /// Deleted here; deleted from Homebase.
     DeletedRemotely,
-    /// Deleted on another device; deleted here too (kept in Recently deleted).
-    TrashedLocally,
+    /// Deleted on another device; deleted here too (kept in Recently deleted). On the control
+    /// socket by its old name, which a tray of an earlier version reads.
+    #[serde(rename = "trashed_locally")]
+    DeletedLocally,
 }
 
 impl SyncedKind {
@@ -48,7 +50,7 @@ impl SyncedKind {
     pub fn removes(self) -> bool {
         matches!(
             self,
-            SyncedKind::DeletedRemotely | SyncedKind::TrashedLocally
+            SyncedKind::DeletedRemotely | SyncedKind::DeletedLocally
         )
     }
 

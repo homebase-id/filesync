@@ -63,7 +63,7 @@ pub(crate) fn key_of(s: &ReadTx<'_>, op: &Op) -> Result<String, StateError> {
 /// Takes the operations `refused` says the drive refused as they are out of `ops`, and those
 /// that wait for one of them, which would only wait again: what goes into a folder whose create
 /// is refused, the removals in a folder whose removal is, what goes to a local place the node
-/// of a blocked operation would have left, and the trash or forgetting of a local folder a blocked
+/// of a blocked operation would have left, and the delete or forgetting of a local folder a blocked
 /// operation's node is in, here, in the base or on the drive (`place`, [`Place`]; names
 /// compared as the folder does, `case_insensitive`). Returns `(kept, refused)`; the waiting
 /// ones are blocked silently: the refusal they wait for says why.
@@ -167,9 +167,9 @@ impl Blocked {
             | Op::LocalMove { parent, name, .. } => Some((*parent, self.key(name))),
             _ => None,
         };
-        // A folder isn't trashed or forgotten here while it holds a node a blocked operation
+        // A folder isn't deleted or forgotten here while it holds a node a blocked operation
         // would have taken out.
-        let empties = matches!(op, Op::LocalTrash { node, .. } | Op::Forget { node, .. }
+        let empties = matches!(op, Op::LocalDelete { node, .. } | Op::Forget { node, .. }
             if self.folders.contains(node));
         waits_for_folder || empties || goes_to.is_some_and(|p| self.places.contains(&p))
     }

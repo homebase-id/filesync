@@ -133,7 +133,7 @@ impl Reconciler<'_> {
                         let op = if self.masks.masked.contains(&node) {
                             Op::Forget { node, subtree }
                         } else {
-                            Op::LocalTrash { node, subtree }
+                            Op::LocalDelete { node, subtree }
                         };
                         deletes.push((depth(&i.local), op));
                         local_ops = true;
@@ -231,7 +231,7 @@ impl Reconciler<'_> {
         // children (what a folder's delete takes along is removed no earlier than the folder:
         // node schema, Recently deleted); then here, children before parents (a folder's base is
         // forgotten only after its children's deletes, on either side; only the topmost local
-        // trash of a subtree is needed).
+        // delete of a subtree is needed).
         creates.sort_by_key(|(d, op)| (op.is_transfer(), op.pooled(), *d, op.node()));
         deletes.sort_by_key(|(d, op)| {
             let depth = *d as i64;
@@ -243,12 +243,19 @@ impl Reconciler<'_> {
         });
         moves.sort_by_key(Op::pooled);
         content.sort_by_key(Op::pooled);
-        let trashed: HashSet<NodeId> = deletes.iter().filter_map(|(_, op)| op.trashes()).collect();
+        let deleted_here: HashSet<NodeId> = deletes
+            .iter()
+            .filter_map(|(_, op)| op.deletes_here())
+            .collect();
         let deletes: Vec<Op> = deletes
             .into_iter()
             .map(|(_, op)| op)
-            .filter(|op| match op.trashes() {
-                Some(node) => !i.local.ancestors(node).iter().any(|a| trashed.contains(a)),
+            .filter(|op| match op.deletes_here() {
+                Some(node) => !i
+                    .local
+                    .ancestors(node)
+                    .iter()
+                    .any(|a| deleted_here.contains(a)),
                 None => true,
             })
             .collect();

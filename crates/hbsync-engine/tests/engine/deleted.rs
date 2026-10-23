@@ -1406,12 +1406,12 @@ fn two_items_of_one_name_restored_together_both_come_back() -> R {
     Ok(())
 }
 
-/// b keeps what it ignores in a folder a deleted, so its trash moves the rest one item at a
+/// b keeps what it ignores in a folder a deleted, so its delete moves the rest one item at a
 /// time; one of them can't move (its folder is read-only). What did move left its base with
 /// it: a restore made meanwhile won't read as b deleting it.
 #[cfg(unix)]
 #[test]
-fn a_trash_that_stops_half_way_drops_the_bases_of_what_went() -> R {
+fn a_delete_that_stops_half_way_drops_the_bases_of_what_went() -> R {
     use std::os::unix::fs::PermissionsExt;
     let server = server();
     let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;

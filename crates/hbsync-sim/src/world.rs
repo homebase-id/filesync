@@ -747,18 +747,18 @@ impl Sim {
         }
     }
 
-    /// The plan right after client `c`'s put back of `put` (what was synced of it) trashes
+    /// The plan right after client `c`'s put back of `put` (what was synced of it) deletes
     /// nothing of it here that the drive doesn't have live, and holds nothing again but what
     /// still waits in Recently deleted, itself or below it in the base: what went for good goes
     /// up again (sync semantics §7).
     fn check_put_back(&mut self, c: usize, put: &HashSet<NodeId>) {
         self.plan(c);
         let client = &self.clients[c];
-        // Trashed though the drive doesn't have it (live anywhere: one it moved, or left in a
+        // Deleted though the drive doesn't have it (live anywhere: one it moved, or left in a
         // folder it lost, goes on as the drive has it).
         let coords = client.coords;
-        let trashed = client.plan.iter().find_map(|(op, _)| match op {
-            Op::LocalTrash { node, .. }
+        let deleted_here = client.plan.iter().find_map(|(op, _)| match op {
+            Op::LocalDelete { node, .. }
                 if put.contains(node)
                     && !self.server.live.contains_key(&coords.to_drive(*node)) =>
             {
@@ -767,7 +767,7 @@ impl Sim {
             _ => None,
         });
         self.ledger.held_after_put_back(|| {
-            trashed.map(|n| format!("c{c} trashed {n:?}, not on the drive"))
+            deleted_here.map(|n| format!("c{c} deleted {n:?}, not on the drive"))
         });
         let client = &self.clients[c];
         let coords = client.coords;
@@ -948,7 +948,7 @@ impl Sim {
         self.tag_changes_left(c, node);
     }
 
-    /// Client `c`'s item `node` left it (deleted or trashed there): [`TagBook::left`].
+    /// Client `c`'s item `node` left it (deleted there, by the user or a sync): [`TagBook::left`].
     ///
     /// [`TagBook::left`]: crate::tagbook::TagBook::left
     pub(crate) fn tag_changes_left(&mut self, c: usize, node: NodeId) {

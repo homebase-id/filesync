@@ -1,4 +1,4 @@
-//! Everything that mirrors the engine: planning, the executor's steps and guards, the trash,
+//! Everything that mirrors the engine: planning, the executor's steps and guards, the delete,
 //! unparking and settling. Each function calls the engine or says what of it it copies, but
 //! for the scope check (`breaches`, `planned_writable`), which the oracle records: it reads the
 //! engine's `Op`, which the oracle may not import.
@@ -426,7 +426,7 @@ impl Sim {
         client
             .wiped
             .extend(plan.held.iter().filter_map(|op| match op {
-                Op::LocalTrash { node, .. } => Some(*node),
+                Op::LocalDelete { node, .. } => Some(*node),
                 _ => None,
             }));
         if self.faults.refusing {
@@ -675,7 +675,7 @@ impl Sim {
             if matches!(
                 op,
                 Op::LocalMove { .. }
-                    | Op::LocalTrash { .. }
+                    | Op::LocalDelete { .. }
                     | Op::LocalFork { .. }
                     | Op::LocalDownload { .. }
             ) {
@@ -1260,7 +1260,7 @@ impl Sim {
                 );
                 Done
             }
-            Op::LocalTrash { node, subtree } => self.trash(c, node, &subtree),
+            Op::LocalDelete { node, subtree } => self.delete_here(c, node, &subtree),
             Op::RemoteCreate {
                 node,
                 parent,
@@ -1471,7 +1471,7 @@ impl Sim {
             }
             Op::Forget { node, subtree } => {
                 if !subtree.is_empty() {
-                    return self.trash(c, node, &subtree); // the bases go with it
+                    return self.delete_here(c, node, &subtree); // the bases go with it
                 }
                 let client = &mut self.clients[c];
                 // Still here, or its children's bases first, unless they are forgotten in this
@@ -1498,7 +1498,7 @@ impl Sim {
     /// checked again there and unlinked ([`Sim::finish_delete`]); anything else found there puts
     /// it back. Junk goes along; ignored items stay, and so do the folders they sit in, released
     /// (§10): those go item by item, at once.
-    fn trash(&mut self, c: usize, node: NodeId, expected: &[NodeId]) -> Outcome {
+    fn delete_here(&mut self, c: usize, node: NodeId, expected: &[NodeId]) -> Outcome {
         use Outcome::Skip;
         if self.clients[c].aside.contains_key(&node) {
             return self.finish_delete(c, node, expected);
@@ -1559,7 +1559,7 @@ impl Sim {
         Outcome::Aside
     }
 
-    /// The second step of deleting `node` (moved aside by [`Sim::trash`]): what is aside is
+    /// The second step of deleting `node` (moved aside by [`Sim::delete_here`]): what is aside is
     /// checked against what the plan saw ([`Sim::aside_check`]) and unlinked, with the bases of
     /// `expected`, and the folders that stayed (holding ignored items) are released; anything
     /// else aside puts it all back, for the next plan.
@@ -2093,7 +2093,7 @@ fn at_place_filtered(client: &Client, aside: &Tree) -> (Tree, HashSet<NodeId>) {
     (placed, hidden)
 }
 
-/// Frees `name` in `parent` if a node that is about to move away or be trashed holds it, by
+/// Frees `name` in `parent` if a node that is about to move away or be deleted holds it, by
 /// parking that node under a temporary name (what the executor does for swaps and for a
 /// folder that must appear where a file is leaving). Returns `false` if the name stays taken.
 fn park_occupant(client: &mut Client, parent: NodeId, name: &str, except: Option<NodeId>) -> bool {
@@ -2424,10 +2424,10 @@ fn planned(ops: &[Op]) -> Vec<Planned<'_>> {
         .map(|op| {
             let what = match op {
                 Op::RemoteDelete { .. } => What::RemoteDelete,
-                Op::LocalTrash { subtree, .. } => What::LocalTrash {
+                Op::LocalDelete { subtree, .. } => What::LocalDelete {
                     subtree: subtree.clone(),
                 },
-                _ if op.trashes().is_some() => What::Trash,
+                _ if op.deletes_here().is_some() => What::DeletesHere,
                 Op::LocalMove { parent, name, .. } => What::LocalMove {
                     parent: *parent,
                     name: name.clone(),
@@ -2452,7 +2452,7 @@ fn planned(ops: &[Op]) -> Vec<Planned<'_>> {
 
 /// Whether a pull between a local operation's check and its commit ([`Action::PullMidLocal`],
 /// `on`) lands on `op`: any local operation the executor checks, does, then commits; or a tag
-/// write, a download, a move, a trash.
+/// write, a download, a move, a delete.
 ///
 /// [`Action::PullMidLocal`]: crate::Action::PullMidLocal
 fn pulled_on(op: &Op, on: usize) -> bool {
@@ -2460,14 +2460,14 @@ fn pulled_on(op: &Op, on: usize) -> bool {
         1 => matches!(op, Op::LocalTags { .. }),
         2 => matches!(op, Op::LocalDownload { .. }),
         3 => matches!(op, Op::LocalMove { .. }),
-        4 => matches!(op, Op::LocalTrash { .. }),
+        4 => matches!(op, Op::LocalDelete { .. }),
         _ => matches!(
             op,
             Op::LocalMkdir { .. }
                 | Op::LocalMove { .. }
                 | Op::LocalDownload { .. }
                 | Op::LocalTags { .. }
-                | Op::LocalTrash { .. }
+                | Op::LocalDelete { .. }
                 | Op::LocalFork { .. }
                 | Op::LocalDetach { .. }
         ),

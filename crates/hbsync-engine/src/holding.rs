@@ -247,7 +247,7 @@ impl HeldDeletes {
         let before = self.wiped.len();
         self.wiped
             .extend(plan.held.iter().filter_map(|op| match op {
-                Op::LocalTrash { node, .. } => Some(*node),
+                Op::LocalDelete { node, .. } => Some(*node),
                 _ => None,
             }));
         if self.wiped.len() != before {
@@ -415,7 +415,7 @@ fn guard_counts(
     };
     let (here, there) = (here + held.0, there + held.1);
     let mut still = HashSet::new();
-    // Each file once, however many confirmed trashes it is under.
+    // Each file once, however many confirmed deletes it is under.
     let (mut confirmed_here, mut confirmed_there) = (0, HashSet::new());
     for &node in confirmed {
         if let Some((gone_here, gone_there)) = s.confirmed_file_deletes(node)? {

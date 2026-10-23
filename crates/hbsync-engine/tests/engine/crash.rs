@@ -186,7 +186,7 @@ fn crash_right_after_parking_leaks_no_temporary_name() -> R {
     a.sync()?;
     b.sync()?;
     // On a, the file x gives way to a folder x. On b the folder is created before the file is
-    // trashed, so the file is parked first; b's executor "crashes" right after that rename on
+    // deleted, so the file is parked first; b's executor "crashes" right after that rename on
     // disk, before the row follows. The file's own place on the server didn't change (it was
     // deleted there), so only the parked record stops its temporary name from being uploaded.
     fs::remove_file(a.root.join("x"))?;
@@ -355,7 +355,7 @@ fn a_download_placed_but_not_recorded_is_found_again() -> R {
 }
 
 /// A folder deleted on the drive and a new one made under its name: here the old one is parked
-/// for the new one, then trashed, in one sync. A power cut losing the parking's commit must not
+/// for the new one, then deleted, in one sync. A power cut losing the parking's commit must not
 /// leave the DB taking the new folder for the old one.
 #[test]
 fn a_power_cut_after_a_folder_was_replaced_keeps_the_new_folder() -> R {
