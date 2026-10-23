@@ -26,28 +26,16 @@ fn remote_change(i: &Input, node: NodeId) -> Change {
 /// The remote nodes a folder's removal took along ([`crate::along::taken_along`]): one this
 /// device wrote, whose time it doesn't know, was. A folder's delete removes the folder first,
 /// then what is in it: until it has, they count as gone. One written after the removal is a
-/// change of its own, and keeps the folder alive (§6.3). A removed file takes nothing along:
-/// what another writer put in it is an orphan for Recovered files (§6.3), as in a live file.
-pub(crate) fn taken_along(i: &Input) -> HashSet<NodeId> {
+/// change of its own, and keeps the folder alive (§6.3). A file takes nothing along.
+pub fn taken_along(i: &Input) -> HashSet<NodeId> {
     if i.removed.is_empty() {
         return HashSet::new();
     }
     crate::along::taken_along(
-        i.remote
-            .ids()
-            .filter_map(|n| Some((n, i.remote.get(n)?.parent))),
-        |folder| removed_folder_at(i, folder),
+        i.remote.iter().map(|(n, s)| (n, s.parent, s.kind)),
+        |n| i.removed.get(&n).map(|r| (r.state.kind, r.at)),
         |node| i.changed_at.get(&node).copied(),
     )
-}
-
-/// When folder `node` went to Recently deleted, if it is one there (a file there takes nothing
-/// along).
-fn removed_folder_at(i: &Input, node: NodeId) -> Option<i64> {
-    i.removed
-        .get(&node)
-        .filter(|r| r.state.kind == NodeKind::Folder)
-        .map(|r| r.at)
 }
 
 impl Reconciler<'_> {

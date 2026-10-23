@@ -233,11 +233,13 @@ impl Ledger {
     /// nearest one on its way up through live folders) that was in it when it went, at the same
     /// version since, and so was every folder between them; but a node not taken keeps the
     /// folders above it, up to the removed one (node schema, Recently deleted). `live` gives
-    /// each live node's folder and version.
+    /// each live node's folder and version, `folder` whether a node is a folder: a file, live
+    /// or removed, takes nothing along (what is in it is an orphan for Recovered files).
     pub(crate) fn taken_along(
         &self,
         live: &BTreeMap<NodeId, (NodeId, VersionTag)>,
         removed: impl Fn(NodeId) -> bool,
+        folder: impl Fn(NodeId) -> bool,
     ) -> BTreeSet<NodeId> {
         let mut taken = BTreeSet::new();
         let mut kept = BTreeSet::new();
@@ -249,6 +251,9 @@ impl Ledger {
                 let Some(&(parent, _)) = live.get(&at) else {
                     break None;
                 };
+                if !folder(parent) {
+                    break None;
+                }
                 if removed(parent) {
                     break Some(parent);
                 }
@@ -588,8 +593,13 @@ impl Sim {
             .iter()
             .map(|(n, l)| (*n, (l.state.parent, l.remote.version)))
             .collect();
+        let folder = |n: NodeId| {
+            self.server
+                .node(n)
+                .is_some_and(|(s, _)| s.state.kind == NodeKind::Folder)
+        };
         self.ledger
-            .taken_along(&live, |f| self.server.removed.contains_key(&f))
+            .taken_along(&live, |f| self.server.removed.contains_key(&f), folder)
     }
 
     /// What client `c` syncs of the drive, in its folder's coordinates, by the oracle's own

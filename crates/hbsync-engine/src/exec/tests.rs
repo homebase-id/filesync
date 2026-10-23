@@ -4343,9 +4343,10 @@ fn a_node_in_a_file_meets_what_is_in_recovered_files() -> R {
 #[test]
 fn an_open_removal_counts_what_it_took_along() -> R {
     let mut h = Harness::new()?;
-    let (folder, file) = (NodeId::new(), NodeId::new());
+    let (folder, file, inner) = (NodeId::new(), NodeId::new(), NodeId::new());
     h.local_folder("d", folder)?;
     h.local_file("d/f", file, b"f")?;
+    h.local_file("y", inner, b"f")?;
     let f_c = h.content(b"f");
     h.db.write(|s| {
         s.folder().put_base(&BaseRow::new(
@@ -4373,6 +4374,16 @@ fn an_open_removal_counts_what_it_took_along() -> R {
         let mut live = row(file, folder, NodeKind::File, "f");
         live.changed_at = Some(5);
         s.account().put_mirror(&live)?;
+        // And a synced file another writer put in it: a file takes nothing along, so it isn't
+        // gone (an orphan for Recovered files).
+        s.folder().put_base(&BaseRow::new(
+            inner,
+            NodeState::file(NodeId::ROOT, "y", f_c),
+            some_version(),
+        ))?;
+        let mut orphan = row(inner, file, NodeKind::File, "y");
+        orphan.changed_at = Some(5);
+        s.account().put_mirror(&orphan)?;
         s.folder().clear_dirty(file)?;
         s.folder().mark_dirty(folder)
     })?;
@@ -4381,7 +4392,7 @@ fn an_open_removal_counts_what_it_took_along() -> R {
     assert_eq!(
         pending,
         (0, 1),
-        "the file taken along counts as gone remotely"
+        "the file taken along counts as gone remotely, not what is in it"
     );
     assert_eq!(
         confirmed,

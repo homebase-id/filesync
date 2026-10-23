@@ -518,6 +518,33 @@ fn what_went_before_its_folder_stays() -> Result<(), StateError> {
     Ok(())
 }
 
+/// A file in Recently deleted takes nothing along: what another writer put in it, written
+/// before its removal, is an orphan for Recovered files (sync semantics §6.3), never the purge's.
+#[test]
+fn the_purge_takes_nothing_from_a_removed_file() -> Result<(), Box<dyn std::error::Error>> {
+    let db = Db::new()?;
+    let (file, folder, node) = (NodeId::new(), NodeId::new(), NodeId::new());
+    let mut in_file = removed(node, file, 0).row;
+    in_file.changed_at = Some(50);
+    db.write(|s| {
+        let mut f = removed(file, NodeId::ROOT, 100);
+        f.row.kind = NodeKind::File;
+        s.account().put_removed(&f)?;
+        s.account()
+            .put_removed(&removed(folder, NodeId::ROOT, 100))?;
+        s.account().put_mirror(&in_file)?;
+        s.account().put_mirror(&MirrorRow {
+            node: NodeId::new(),
+            parent: folder,
+            file_id: RemoteFileId(Uuid::new_v4()),
+            ..in_file.clone()
+        })
+    })?;
+    let holding = db.read(|s| s.removed_holding_taken())?;
+    assert_eq!(holding, HashSet::from([folder]));
+    Ok(())
+}
+
 /// The purge removes what a delete that stopped half way left live, a folder before what is
 /// in it, at the versions this device knows: one written since (its version here an old
 /// one) stays, and so does what is in it; so does one written after the removal, one whose

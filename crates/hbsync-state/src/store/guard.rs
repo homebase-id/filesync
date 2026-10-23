@@ -17,17 +17,17 @@ const WRITTEN_BY_REMOVAL: &str =
 /// [`WRITTEN_BY_REMOVAL`] below a node `t` taken along by the removal at `t.at`.
 const WRITTEN_BY_TAKEN: &str = "(t.at IS NULL OR m.changed_at IS NULL OR m.changed_at <= t.at)";
 
-/// A recursive CTE `taken(id, at)`: the live nodes a folder's removal took along
+/// A recursive CTE `taken(id, at, kind)`: the live nodes a folder's removal took along
 /// (`along::taken_along`), each with the time of the removal that took it: below the removed
-/// folders `n` that `seeds` lets in.
+/// folders `n` that `seeds` lets in, through live folders (a file takes nothing along).
 fn taken_along(seeds: &str) -> String {
     format!(
-        "taken(id, at) AS ( \
-           SELECT m.id, r.removed_at FROM removed r JOIN nodes n ON n.uuid = r.node \
+        "taken(id, at, kind) AS ( \
+           SELECT m.id, r.removed_at, m.kind FROM removed r JOIN nodes n ON n.uuid = r.node \
            JOIN remote m ON m.parent = n.id \
            WHERE r.kind = 1 AND {WRITTEN_BY_REMOVAL} AND {seeds} \
-           UNION SELECT m.id, t.at FROM remote m JOIN taken t ON m.parent = t.id \
-           WHERE {WRITTEN_BY_TAKEN})"
+           UNION SELECT m.id, t.at, m.kind FROM remote m JOIN taken t ON m.parent = t.id \
+           WHERE t.kind = 1 AND {WRITTEN_BY_TAKEN})"
     )
 }
 

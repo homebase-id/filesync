@@ -5,44 +5,46 @@
 
 use std::collections::{HashMap, HashSet};
 
-use hbsync_types::NodeId;
+use hbsync_types::{NodeId, NodeKind};
 
-/// Of the live nodes `live` (each with its folder), those the removal of a folder took along:
-/// below a removed folder (`removed_at` gives its removal's time, the server's), directly or
+/// A live node as the rule reads it: its id, its folder, and its kind.
+pub type Live = (NodeId, NodeId, NodeKind);
+
+/// Of the live nodes `live`, those the removal of a folder took along: below a removed folder
+/// (`removed` gives a removed node's kind and its removal's time, the server's), directly or
 /// through live folders it took along too, and written no later than the removal of the
 /// nearest removed folder above them (`changed_at`, the server's time of the node's version).
 /// A node whose time isn't known (this device's own write, not back from the feed yet) counts
 /// as written before.
 ///
 /// A live node written after the removal (moved in, edited, new) wasn't taken along: neither is
-/// anything in it, and it keeps the live folders above it, up to the removed one.
+/// anything in it, and it keeps the live folders above it, up to the removed one. A file, live
+/// or removed, takes nothing along: what another writer put in it is an orphan for Recovered
+/// files (sync semantics §6.3).
 pub fn taken_along(
-    live: impl IntoIterator<Item = (NodeId, NodeId)>,
-    removed_at: impl Fn(NodeId) -> Option<i64>,
+    live: impl IntoIterator<Item = Live>,
+    removed: impl Fn(NodeId) -> Option<(NodeKind, i64)>,
     changed_at: impl Fn(NodeId) -> Option<i64>,
 ) -> HashSet<NodeId> {
-    let written_by = |node: NodeId, removed: i64| changed_at(node).is_none_or(|at| at <= removed);
-    verdicts(live, removed_at, written_by)
-        .1
-        .into_keys()
-        .collect()
+    let written_by = |node: NodeId, removal: i64| changed_at(node).is_none_or(|at| at <= removal);
+    verdicts(live, removed, written_by).1.into_keys().collect()
 }
 
 /// What the purge removes of what deletes left live (node schema, The purge, 2.), in levels
-/// top-down, each node after the folder it is in: of `live` (each with its folder), those
+/// top-down, each node after the folder it is in: of `live`, those
 /// [`taken_along`] takes, but that a node whose time isn't known (`changed_at` `None`) or that
 /// `keep` names (a role folder) isn't, and neither are the folders above it: what is in them
 /// would be left without a folder.
 pub fn taken_levels(
-    live: impl IntoIterator<Item = (NodeId, NodeId)>,
-    removed_at: impl Fn(NodeId) -> Option<i64>,
+    live: impl IntoIterator<Item = Live>,
+    removed: impl Fn(NodeId) -> Option<(NodeKind, i64)>,
     changed_at: impl Fn(NodeId) -> Option<i64>,
     keep: impl Fn(NodeId) -> bool,
 ) -> Vec<Vec<NodeId>> {
-    let written_by = |node: NodeId, removed: i64| {
-        !keep(node) && changed_at(node).is_some_and(|at| at <= removed)
+    let written_by = |node: NodeId, removal: i64| {
+        !keep(node) && changed_at(node).is_some_and(|at| at <= removal)
     };
-    let (parent, depths) = verdicts(live, removed_at, written_by);
+    let (parent, depths) = verdicts(live, removed, written_by);
     let mut levels: Vec<Vec<NodeId>> = Vec::new();
     for (node, depth) in depths.iter().map(|(n, d)| (*n, *d)) {
         if levels.len() <= depth {
@@ -64,24 +66,31 @@ pub fn taken_levels(
     levels
 }
 
-/// The live nodes `live` (each with its folder) taken along by the removal of a folder, each
-/// with its depth below it (0: right in it): those `written_by(node, removal)` says were
-/// written by that removal's time, through live folders taken along too, but the folders above
-/// one not taken. And `live` by node.
-#[allow(clippy::type_complexity)]
+/// The live nodes `live` taken along by the removal of a folder, each with its depth below it
+/// (0: right in it): those `written_by(node, removal)` says were written by that removal's
+/// time, through live folders taken along too, but the folders above one not taken. And each
+/// live node's folder, by node.
 fn verdicts(
-    live: impl IntoIterator<Item = (NodeId, NodeId)>,
-    removed_at: impl Fn(NodeId) -> Option<i64>,
+    live: impl IntoIterator<Item = Live>,
+    removed: impl Fn(NodeId) -> Option<(NodeKind, i64)>,
     written_by: impl Fn(NodeId, i64) -> bool,
 ) -> (HashMap<NodeId, NodeId>, HashMap<NodeId, usize>) {
-    let parent: HashMap<NodeId, NodeId> = live.into_iter().collect();
+    let mut parent: HashMap<NodeId, NodeId> = HashMap::new();
+    let mut folders: HashSet<NodeId> = HashSet::new();
+    for (node, up, kind) in live {
+        parent.insert(node, up);
+        if kind == NodeKind::Folder {
+            folders.insert(node);
+        }
+    }
     // Each node's verdict: taken by the removal at that time, at that depth below it, or not
     // (`None`).
     let mut verdict: HashMap<NodeId, Option<(i64, usize)>> = HashMap::new();
     let mut chain = Vec::new();
     for &start in parent.keys() {
-        // Up to a node decided, a removed folder, or the top of the live nodes (or a cycle):
-        // the removal the last node of the chain is under, and its depth below it.
+        // Up to a node decided, a removed folder, a file (live or removed: it takes nothing
+        // along), or the top of the live nodes (or a cycle): the removal the last node of the
+        // chain is under, and its depth below it.
         chain.clear();
         let mut at = start;
         let mut above = loop {
@@ -90,10 +99,10 @@ fn verdicts(
             }
             chain.push(at);
             let up = parent[&at];
-            if let Some(removed) = removed_at(up) {
-                break Some((removed, 0));
+            if let Some((kind, removal)) = removed(up) {
+                break (kind == NodeKind::Folder).then_some((removal, 0));
             }
-            if !parent.contains_key(&up) || chain.contains(&up) {
+            if !folders.contains(&up) || chain.contains(&up) {
                 break None;
             }
             if let Some(&known) = verdict.get(&up) {
@@ -108,7 +117,7 @@ fn verdicts(
             above = taken.map(|(removed, depth)| (removed, depth + 1));
         }
     }
-    // A node not taken keeps the folders above it.
+    // A node not taken keeps the folders above it (one in a file keeps nothing: an orphan).
     let alive: Vec<NodeId> = verdict
         .iter()
         .filter(|(_, v)| v.is_none())
@@ -117,6 +126,7 @@ fn verdicts(
     for node in alive {
         let mut at = node;
         while let Some(&up) = parent.get(&at)
+            && folders.contains(&up)
             && verdict.get(&up).copied().flatten().is_some()
         {
             verdict.insert(up, None);
@@ -166,7 +176,8 @@ mod tests {
             (z, 1),
         ]
         .into();
-        let removed = |n: NodeId| (n == d).then_some(10);
+        let removed = |n: NodeId| (n == d).then_some((NodeKind::Folder, 10));
+        let live = live.map(|(n, p)| (n, p, NodeKind::Folder));
         let taken = taken_along(live, removed, |n| times.get(&n).copied());
         let mut taken: Vec<NodeId> = taken.into_iter().collect();
         taken.sort();
@@ -179,15 +190,38 @@ mod tests {
     #[test]
     fn a_time_not_known_is_taken() {
         let [d, x] = ids();
-        let removed = |n: NodeId| (n == d).then_some(10);
-        assert!(taken_along([(x, d)], removed, |_| None).contains(&x));
+        let removed = |n: NodeId| (n == d).then_some((NodeKind::Folder, 10));
+        assert!(taken_along([(x, d, NodeKind::File)], removed, |_| None).contains(&x));
+    }
+
+    /// A file takes nothing along, live or removed: what another writer put in it (`y` in `f`,
+    /// `x` in removed `r`) is an orphan for Recovered files. The file itself, in removed folder
+    /// `d`, is taken.
+    #[test]
+    fn a_file_takes_nothing_along() {
+        let [d, f, y, r, x] = ids();
+        let live = [
+            (f, d, NodeKind::File),
+            (y, f, NodeKind::File),
+            (x, r, NodeKind::Folder),
+        ];
+        let removed = |n: NodeId| match n {
+            n if n == d => Some((NodeKind::Folder, 10)),
+            n if n == r => Some((NodeKind::File, 10)),
+            _ => None,
+        };
+        let taken = taken_along(live, removed, |_| Some(1));
+        assert_eq!(taken, HashSet::from([f]));
+        let levels = taken_levels(live, removed, |_| Some(1), |_| false);
+        assert_eq!(levels, vec![vec![f]]);
     }
 
     /// Live folders in a cycle (left by remote moves) are in no removed folder: not taken.
     #[test]
     fn a_cycle_takes_nothing() {
         let [a, b] = ids();
-        let taken = taken_along([(a, b), (b, a)], |_| None, |_| Some(1));
+        let live = [(a, b, NodeKind::Folder), (b, a, NodeKind::Folder)];
+        let taken = taken_along(live, |_| None, |_| Some(1));
         assert!(taken.is_empty());
     }
 
@@ -219,8 +253,8 @@ mod tests {
         let times: HashMap<NodeId, Option<i64>> = live.iter().map(|(n, _, t)| (*n, *t)).collect();
         let levels = |removed: Option<i64>| {
             taken_levels(
-                live.iter().map(|(n, p, _)| (*n, *p)),
-                |n| (n == f).then_some(removed).flatten(),
+                live.iter().map(|(n, p, _)| (*n, *p, NodeKind::Folder)),
+                |n| (n == f).then_some((NodeKind::Folder, removed?)),
                 |n| times[&n],
                 |n| n == role,
             )

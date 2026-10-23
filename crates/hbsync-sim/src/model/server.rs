@@ -122,16 +122,17 @@ impl Server {
     /// [`Sim::remove_live`]: crate::Sim::remove_live
     pub(crate) fn purge(&mut self) -> Vec<NodeId> {
         self.next += PURGE_EVERY as u128;
-        let folders: HashMap<NodeId, i64> = self
+        let removed: HashMap<NodeId, (NodeKind, i64)> = self
             .items(self.purge_before())
             .into_iter()
             .flatten()
-            .filter(|n| self.removed[n].state.kind == NodeKind::Folder)
-            .filter_map(|n| Some((n, *self.removed_at.get(&n)?)))
+            .filter_map(|n| Some((n, (self.removed[&n].state.kind, *self.removed_at.get(&n)?))))
             .collect();
         hbsync_engine::along::taken_levels(
-            self.live.iter().map(|(n, l)| (*n, l.state.parent)),
-            |f| folders.get(&f).copied(),
+            self.live
+                .iter()
+                .map(|(n, l)| (*n, l.state.parent, l.state.kind)),
+            |f| removed.get(&f).copied(),
             |n| self.live.get(&n).map(|l| time(l.remote.version)),
             |n| Role::of(n).is_some(), // as the engine keeps them
         )

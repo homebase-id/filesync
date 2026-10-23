@@ -116,8 +116,12 @@ impl Sim {
             let mut folders = vec![node];
             while let Some(f) = folders.pop() {
                 for child in kids.get(&f).into_iter().flatten() {
-                    below.insert(*child, self.server.live[child].remote.version);
-                    folders.push(*child);
+                    let c = &self.server.live[child];
+                    below.insert(*child, c.remote.version);
+                    // Through live folders: a file takes nothing along.
+                    if c.state.kind == NodeKind::Folder {
+                        folders.push(*child);
+                    }
                 }
             }
             self.ledger.folder_removed(node, below);

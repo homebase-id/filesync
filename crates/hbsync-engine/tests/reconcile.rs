@@ -1492,6 +1492,22 @@ fn what_is_in_a_file_not_hashed_yet_is_recovered() {
     assert!(!plan.ops.iter().any(|op| op.node() == d), "{:#?}", plan.ops);
 }
 
+/// `node` moves into Recovered files on the drive, and nothing deletes it.
+fn assert_recovered_not_deleted(plan: &hbsync_engine::plan::Plan, node: NodeId) {
+    let ops = &plan.ops;
+    assert!(
+        ops.iter()
+            .any(|op| matches!(op, Op::RemoteUpdate { node: n, parent, .. }
+            if *n == node && *parent == NodeId::RECOVERED)),
+        "{ops:#?}"
+    );
+    assert!(
+        !ops.iter()
+            .any(|op| op.node() == node && op.deletes().is_some()),
+        "{ops:#?}"
+    );
+}
+
 /// Another writer put `y` in file `f`, then `f` went to Recently deleted: a removed file takes
 /// nothing along, so `y` is an orphan for Recovered files, as in a live file (§6.3). Taken
 /// along, it was deleted here and left live on the drive, where nothing listed it.
@@ -1512,23 +1528,34 @@ fn what_is_in_a_removed_file_is_recovered_not_taken_along() {
     );
     w.remote(y, Some(file(f, "y", "y")));
     w.input.changed_at.insert(y, 10);
-    let plan = w.plan();
-    assert!(
-        plan.ops
-            .iter()
-            .any(|op| matches!(op, Op::RemoteUpdate { node, parent, .. }
-            if *node == y && *parent == NodeId::RECOVERED)),
-        "{:#?}",
-        plan.ops
+    assert_recovered_not_deleted(&w.plan(), y);
+}
+
+/// Folder `d` went to Recently deleted with file `f` in it, and another writer had put `y` in
+/// `f`: `d`'s removal took `f` along but not `y` (a file takes nothing along), so `y` is an
+/// orphan for Recovered files (§6.3) and `f` goes here.
+#[test]
+fn what_is_in_a_file_a_removal_took_along_is_recovered() {
+    let [d, f, y] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.input.remote_complete = true;
+    w.synced(d, folder(ROOT, "d"));
+    w.synced(f, file(d, "f", "1"));
+    w.synced(y, file(ROOT, "y", "y"));
+    w.remote(d, None);
+    w.input.removed.insert(
+        d,
+        hbsync_engine::reconcile::Removed {
+            at: 100,
+            state: folder(ROOT, "d"),
+        },
     );
-    assert!(
-        !plan
-            .ops
-            .iter()
-            .any(|op| op.node() == y && op.deletes().is_some()),
-        "{:#?}",
-        plan.ops
-    );
+    w.input.changed_at.insert(f, 10);
+    w.remote(y, Some(file(f, "y", "y")));
+    w.input.changed_at.insert(y, 10);
+    assert_recovered_not_deleted(&w.plan(), y);
 }
 
 /// The drive renames and moves a file while it is being written here: nothing is done to it
