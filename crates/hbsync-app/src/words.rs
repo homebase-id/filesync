@@ -128,6 +128,17 @@ pub fn deleted(item: &DeletedItem, now: u64) -> String {
 /// Why an item of Recently deleted stays when emptied.
 pub const STAYS: &str = "stays when emptied: it holds items that aren't deleted";
 
+/// How often a folder without a live watcher is walked for changes, `secs` apart: "once a
+/// minute", "every 2 minutes", "every 30 s". The runner's note's and the CLI's.
+pub fn rescan_every(secs: u64) -> String {
+    match secs {
+        0 | 1 => "every second".to_owned(),
+        60 => "once a minute".to_owned(),
+        s if s % 60 == 0 => format!("every {} minutes", s / 60),
+        s => format!("every {s} s"),
+    }
+}
+
 /// The reply to a restore, the tray's and the CLI's.
 pub fn restoring() -> &'static str {
     "Restoring: it comes back with the next sync, on every device."

@@ -584,11 +584,9 @@ fn print_folder(s: &FolderStatus) {
         );
     }
     if let Some(why) = &s.watcher_error {
-        let every = match s.rescan_secs {
-            Some(60) => "every minute".to_owned(),
-            Some(secs) => format!("every {secs} s"),
-            None => "from time to time".to_owned(),
-        };
+        let every = s
+            .rescan_secs
+            .map_or_else(|| "from time to time".to_owned(), words::rescan_every);
         println!("  no live watcher ({why}): the folder is rescanned {every}");
     }
     if s.rules > 0 {

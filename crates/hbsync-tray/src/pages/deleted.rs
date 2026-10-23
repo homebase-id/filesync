@@ -148,10 +148,12 @@ impl Server {
         if listed.is_empty() {
             return "Nothing was deleted.".into();
         }
+        // What stays, as the page said (`empty_offer`).
+        let stays = form.get("stays").and_then(|s| s.parse().ok()).unwrap_or(0);
         match control::empty_listed(&self.paths, &listed) {
             Ok(()) => {
                 (self.send)(Event::Wake);
-                words::emptying(0)
+                words::emptying(stays)
             }
             Err(e) => {
                 (self.send)(Event::Wake);

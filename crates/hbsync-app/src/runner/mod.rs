@@ -1096,10 +1096,7 @@ impl Runner {
 
 /// The note for a folder without a live watcher (`why`), its changes found every `look`.
 fn unwatched_note(why: &str, look: Duration) -> String {
-    let every = match look.as_secs() {
-        60 => "once a minute".to_owned(),
-        secs => format!("every {secs} s"),
-    };
+    let every = crate::words::rescan_every(look.as_secs());
     let fix = if cfg!(target_os = "linux") {
         "Closing programs that watch many files, or raising the system's limits \
          (fs.inotify.max_user_instances, max_user_watches), lets it watch again"

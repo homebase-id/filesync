@@ -716,10 +716,10 @@ fn a_put_back_that_failed_runs_once_more() -> R {
     b.handle.answer(HeldAnswer::PutBack, &held.token)?;
     // The put back failed (its note), not before: its own read of the feed asks once mid-run.
     let failed = |b: &Device| {
-        b.status()
-            .recent
-            .iter()
-            .any(|n| n.text.contains("could be put back"))
+        b.status().recent.iter().any(|n| {
+            n.text
+                .contains("Not all of the deletions to review could be put back")
+        })
     };
     wait_until("the first put back failed", || failed(&b))?;
     // Not there, said once: as if a minute had passed since, before the put back runs again.
