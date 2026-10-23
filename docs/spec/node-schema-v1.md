@@ -135,7 +135,11 @@ of this schema may define some of them.)
   the drive), Windows nowhere (a Windows device keeps them all as they are). Readers take names
   in NFC. This client syncs at most about 2,000 bytes of tags per item; an item with more
   keeps what the drive has.
-- A reader that finds `v > 1` treats the node as read-only.
+- A reader that finds `v > 1` treats the node as read-only. A computer of this version reads
+  it as a row it can't read (below, and sync semantics §8a): kept as it is, never downloaded,
+  and what is in it waits. So whoever designs v2: bump `v` on files only, never on folders,
+  until every client reads v2 (a v2 folder hides everything in it from v1 clients), and never
+  on the fixed folders (the root, the role folders, Recovered files).
 - Content is capped by the server at 10,240 characters **[verified]**; with names capped at 255
   UTF-8 bytes by this client, v1 content stays far below it.
 
@@ -345,6 +349,8 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-10-23: a computer reads a node with `v > 1` as a row it can't read (it never wrote over
+  one before either, but nothing stopped it). The node is the same.
 - 2026-10-23: a live node written into a removed folder at a place a computer ignores is left
   there for the computers that sync that place, which bring the folder back (before, a
   computer that ignored it could move it into Recovered files). The node is the same.

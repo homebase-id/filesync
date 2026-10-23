@@ -32,7 +32,9 @@ Every file and folder is one Homebase file:
     `v`, `name` and maybe `ct`.
   - `tags` holds Finder tags, `[{"n": "Red", "c": 6}]` (`c` 1 grey … 7 orange, optional). The mini-app shows them as dots and
     chips and filters on them, and writes them back as read.
-  - Ignore keys you don't know. If `v` > 1, show the item but don't change it.
+  - Ignore keys you don't know. If `v` > 1, show the item but don't change it. The computers
+    read such a node as one they can't read (node schema, `v`): they keep it as it is and don't
+    download it, and what is in a folder with `v` > 1 waits there.
 
 ## Role folders
 Five top-level folders have fixed node ids, the same on every drive: Documents
