@@ -1331,3 +1331,31 @@ fn regression_what_is_in_a_file_in_a_removed_folder_is_recovered() {
     let paths = sim.server_paths();
     assert!(paths.iter().any(|p| p == "Recovered files/d"), "{paths:?}");
 }
+
+/// c1 has `a/a/a/a` (three folders and a file), new; c0's file `A` clashes with c1's folder `a`
+/// (case-insensitive). In pages of 4, c1's first page (the folders and `A`) is planned and then
+/// replanned before it runs, so the sweep goes on with `a/a/a/a` alone, which waits for its
+/// folder, which waits for its own... up to the clash with `A`. What waits is planned as a
+/// page of its own, the whole chain at once, and then with `A`, before the sweep ends (as the
+/// engine's sync, `a_sync_plans_what_its_pages_wait_for_before_it_ends`). Before, the chain
+/// grew a folder a page, and a sync ended before it reached `A`: c1 never synced.
+#[test]
+fn regression_a_chain_of_waits_across_pages_is_planned_before_the_sweep_ends() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(1, CreateFolder { parent: 0, name: 8 }),
+        act(1, CreateFolder { parent: 2, name: 0 }),
+        act(1, CreateFolder { parent: 7, name: 0 }),
+        act(0, CreateFile { parent: 0, name: 2 }),
+        Event::Plan { client: 0 },
+        act(1, CreateFile { parent: 2, name: 0 }),
+        Event::Step { client: 0 },
+        Event::Plan { client: 1 },
+    ];
+    for guard in [None, Some(1)] {
+        if let Err(e) = run_with(2, guard, |sim| sim.with_small_pages(4), &events) {
+            panic!("guard {guard:?}: {e}");
+        }
+    }
+}

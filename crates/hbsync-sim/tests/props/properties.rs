@@ -191,13 +191,18 @@ proptest! {
     /// plans a dirty set of more than a page (20,000 nodes), while folders are deleted, stopped
     /// half way and purged: what a page leaves to another holds its folders, and a folder held
     /// so goes with its subtree as a page of its own. The clients converge without loss, and no
-    /// deleted folder comes back (a child alive as context kept it alive: review 14 R1).
+    /// deleted folder comes back (a child alive as context kept it alive: review 14 R1). Two
+    /// clients or three: with two, a name clash's chain of waits across pages is reached more
+    /// often (`regression_a_chain_of_waits_across_pages_is_planned_before_the_sweep_ends`).
     #[test]
     fn clients_planning_in_small_pages_converge_without_loss(
-        size in 1usize..5,
-        events in proptest::collection::vec(events_of(3, stopped_delete_action()), 0..100),
+        (size, clients, events) in (1usize..5, 2usize..4).prop_flat_map(|(size, clients)| (
+            Just(size),
+            Just(clients),
+            proptest::collection::vec(events_of(clients, stopped_delete_action()), 0..100),
+        )),
     ) {
-        run_with(3, None, |sim| sim.with_small_pages(size), &events)?;
+        run_with(clients, None, |sim| sim.with_small_pages(size), &events)?;
     }
 
     /// The users act (folders deleted, stopped half way, purged), the clients syncing all now

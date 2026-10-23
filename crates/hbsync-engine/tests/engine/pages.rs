@@ -712,3 +712,52 @@ fn a_folder_below_a_waiting_one_across_sides_waits_too() -> R {
     }
     Ok(())
 }
+
+/// b has `a/a/a/f.txt`, all new, and a puts a file `a` at the top: b's folder `a` and it
+/// clash, and in pages of a few nodes what waits for what is found a page at a time, each
+/// such page larger (`f.txt` for its folder, that for its own, ... the top one for the
+/// clash). b's first page is stopped before its operations (a pause), so the next sync starts
+/// with what is left of the sweep, which waits: the sync goes on with what its pages wait for
+/// before it ends, and b's tree is up. Before, the sweep ended there, with that queued, and
+/// what b had was left unsynced until something else asked for a sync (§6.5).
+#[test]
+fn a_sync_plans_what_its_pages_wait_for_before_it_ends() -> R {
+    use hbsync_engine::testkit::AfterPlan;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    for batch in [2, 3, 4] {
+        let server = server();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_once = Arc::new(AtomicBool::new(false));
+        let hook = {
+            let (stop, once) = (Arc::clone(&stop), Arc::clone(&stop_once));
+            AfterPlan(Arc::new(move || {
+                if once.swap(false, Ordering::SeqCst) {
+                    stop.store(true, Ordering::SeqCst);
+                }
+            }))
+        };
+        let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+        let mut b = Client::with_config(&server, "b", move |cfg| {
+            cfg.guard.allow = true;
+            cfg.batch = batch;
+            cfg.after_plan = Some(hook.clone());
+        })?;
+        b.engine.set_stop(Arc::clone(&stop));
+        b.write("a/a/a/f.txt", "f")?;
+        stop_once.store(true, Ordering::SeqCst);
+        let first = b.sync()?;
+        assert!(first.stopped, "pages of {batch}");
+        stop.store(false, Ordering::SeqCst);
+        a.write("a", "top")?;
+        a.sync()?;
+        let report = b.sync()?;
+        assert_eq!(report.pending, 0, "pages of {batch}: {:?}", b.tree_text(""));
+        let live = server.lock().map_err(|_| "poisoned")?.live_names();
+        assert!(
+            live.contains(&"f.txt".to_owned()),
+            "pages of {batch}: {live:?}"
+        );
+    }
+    Ok(())
+}

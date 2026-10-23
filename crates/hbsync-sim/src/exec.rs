@@ -71,7 +71,13 @@ impl Sim {
         };
         let client = &self.clients[c];
         let nodes = client.base.len() + client.local.len() + self.server.live.len();
-        for _ in 0..nodes / size + 2 {
+        // A sweep's worth of pages, and what they wait for, each a page of its own (a chain of
+        // waits grows a page at a time; bounded: each such page is larger).
+        let mut planned = 0;
+        while planned < nodes / size + 2
+            || (planned < 2 * nodes + 2 && !self.clients[c].pages.borrow().own.is_empty())
+        {
+            planned += 1;
             self.plan(c);
             if !self.clients[c].plan.is_empty() {
                 return true;
@@ -2309,9 +2315,10 @@ fn next_page(
     size: usize,
 ) -> (Vec<NodeId>, bool) {
     let mut pages = client.pages.borrow_mut();
-    // A new sweep once the last one's last page was planned (what it waits for queued), as
-    // the engine's.
-    if std::mem::take(&mut pages.ended) {
+    // A new sweep once the last one's last page was planned and what its pages wait for too,
+    // each a page of its own, as the engine's.
+    if pages.ended && pages.own.is_empty() {
+        pages.ended = false;
         pages.own.new_sweep();
         pages.planned_own.clear();
     }

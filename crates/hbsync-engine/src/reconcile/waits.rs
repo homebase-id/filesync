@@ -168,7 +168,8 @@ impl Reconciler<'_> {
         let i = self.input;
         let mut together = Vec::new();
         for op in &self.plan.ops {
-            let (node, parent, name, side) = match op {
+            // The side it goes to, and the one it comes from.
+            let (node, parent, name, side, from) = match op {
                 Op::LocalMkdir {
                     node, parent, name, ..
                 }
@@ -177,19 +178,24 @@ impl Reconciler<'_> {
                 }
                 | Op::LocalDownload {
                     node, parent, name, ..
-                } => (*node, *parent, name, &i.local),
+                } => (*node, *parent, name, &i.local, &i.remote),
                 Op::RemoteCreate {
                     node, parent, name, ..
                 }
                 | Op::RemoteUpdate {
                     node, parent, name, ..
-                } => (*node, *parent, name, &i.remote),
+                } => (*node, *parent, name, &i.remote, &i.local),
                 _ => continue,
             };
             // Neither is made by this plan: one is in another page, the other left as it is.
+            let waits =
+                |f: NodeId| (self.elsewhere(f) || self.paged.contains(&f)) && !side.contains(f);
             let mut with: Vec<NodeId> = Vec::new();
-            if (self.elsewhere(parent) || self.paged.contains(&parent)) && !side.contains(parent) {
+            if waits(parent) {
+                // With the folders above it that wait so too, all at once: else the chain is
+                // found a page at a time, each page a folder larger.
                 with.push(parent);
+                with.extend(from.ancestors(parent).into_iter().take_while(|&f| waits(f)));
             }
             if let Some(occupant) = side.child_named(parent, name, Some(node))
                 && self.elsewhere(occupant)
