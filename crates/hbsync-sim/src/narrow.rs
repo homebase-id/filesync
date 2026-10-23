@@ -56,8 +56,8 @@ impl Sim {
                     "c{c}: the engine's view plans otherwise than the sim's input:\n  engine: {whole:?}\n  sim:    {plan:?}\n  inputs (sim, then engine): {differ}"
                 )));
             }
-            // The nodes whose sides differ dirty, as the engine keeps them, and every other
-            // one of the rest, by the planning round.
+            // The nodes the engine keeps dirty, and every other one of the rest, by the planning
+            // round.
             let differs = engine_dirty(input, plan);
             let some: Vec<NodeId> = all
                 .iter()
@@ -105,8 +105,7 @@ impl Sim {
         let folder = self.folder_ctx(c);
         let checked = (|| -> Result<Option<String>, StateError> {
             let mut db = self.fill(c, input)?;
-            // The nodes whose sides differ dirty, and those the plan has work for, as the engine
-            // keeps them.
+            // The nodes the engine keeps dirty: those marked, and those the plan has work for.
             let dirty: Vec<NodeId> = engine_dirty(input, plan).into_iter().collect();
             // The store's marks are those: filling it marks what it writes (a pull's rows), and
             // a mark the page doesn't hold reads as another page's (§6.5).
@@ -366,9 +365,14 @@ pub(crate) fn mirror_row(node: NodeId, state: &NodeState, at: RemoteRef) -> Mirr
     )
 }
 
-/// The nodes of `input` whose sides differ, as the engine's scan and feed mark every change
-/// dirty (what a delete took along reads as gone).
-pub(crate) fn sides_differ(input: &Input) -> BTreeSet<NodeId> {
+/// The nodes of `input` the engine's scan and feed have marked dirty: what differs between the
+/// base and a side. What a folder's removal on the drive took along isn't marked (the feed
+/// marks only the folder, the store's `put_removed`): one still synced is read on the drive as
+/// it is, and one whose base went with this device's own delete of its folder (the executor
+/// marks nothing then) is read as gone there. (One never synced here that the feed marked
+/// before the removal took it along is read as unmarked too: the engine plans it once more, to
+/// nothing.)
+pub(crate) fn marked_dirty(input: &Input) -> BTreeSet<NodeId> {
     let taken = hbsync_engine::reconcile::taken_along(input);
     input
         .dirty
@@ -376,15 +380,18 @@ pub(crate) fn sides_differ(input: &Input) -> BTreeSet<NodeId> {
         .copied()
         .filter(|n| {
             let base = input.base.get(*n);
-            let remote = input.remote.get(*n).filter(|_| !taken.contains(n));
+            let remote = input
+                .remote
+                .get(*n)
+                .filter(|_| base.is_some() || !taken.contains(n));
             base != input.local.get(*n) || base != remote
         })
         .collect()
 }
 
-/// The nodes of `input` dirty as the engine keeps them, `plan` made from it: those whose sides
-/// differ ([`sides_differ`]), and those the plan has work for (a node a plan didn't settle
-/// stays dirty).
+/// The nodes of `input` dirty as the engine keeps them, `plan` made from it: those its scan
+/// and feed marked ([`marked_dirty`]), and those the plan has work for (a node a plan didn't
+/// settle stays dirty).
 fn engine_dirty(input: &Input, plan: &Plan) -> BTreeSet<NodeId> {
     let work: BTreeSet<NodeId> = plan
         .ops
@@ -394,7 +401,37 @@ fn engine_dirty(input: &Input, plan: &Plan) -> BTreeSet<NodeId> {
         .chain(plan.deferred.iter().copied())
         .chain(plan.held.iter().map(|op| op.node()))
         .collect();
-    let mut dirty = sides_differ(input);
+    let mut dirty = marked_dirty(input);
     dirty.extend(input.dirty.iter().filter(|n| work.contains(n)));
     dirty
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hbsync_engine::plan::Removed;
+    use hbsync_types::Uuid;
+
+    /// Folder `d` removed on the drive took along `g` and `h`, live in it (written before):
+    /// the store marks neither. `g` is synced and unchanged; `h`'s base went with this
+    /// device's own delete of it. `n`, new on the drive outside `d`, is marked by the feed.
+    #[test]
+    fn what_a_removal_took_along_is_marked_as_the_store_marks_it() {
+        let id = |n: u128| NodeId(Uuid::from_u128(n));
+        let (d, g, h, n) = (id(1), id(2), id(3), id(4));
+        let mut input = Input::default();
+        let gs = NodeState::folder(d, "g");
+        let hs = NodeState::folder(d, "h");
+        let ds = NodeState::folder(NodeId::ROOT, "d");
+        input.base.insert(d, ds.clone());
+        input.local.insert(d, ds.clone());
+        input.base.insert(g, gs.clone());
+        input.local.insert(g, gs.clone());
+        input.remote.insert(g, gs);
+        input.remote.insert(h, hs);
+        input.remote.insert(n, NodeState::folder(NodeId::ROOT, "n"));
+        input.removed.insert(d, Removed { at: 100, state: ds });
+        input.dirty = [d, g, h, n].into_iter().collect();
+        assert_eq!(marked_dirty(&input), [d, n].into_iter().collect());
+    }
 }
