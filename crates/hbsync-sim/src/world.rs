@@ -658,15 +658,25 @@ impl Sim {
     /// where one item's restored name is another's own).
     pub(crate) fn put_back(&mut self, c: usize) {
         let held = std::mem::take(&mut self.clients[c].held);
-        // What it puts back, for the check after it.
-        let put: HashSet<NodeId> = match self.faults.failing_put_backs {
-            true => held
-                .iter()
-                .flat_map(|&n| self.clients[c].base.subtree(n))
-                .collect(),
-            false => HashSet::new(),
-        };
-        let Ok(plan) = self.with_sides(c, |sides| hbsync_engine::held::put_back_plan(&held, sides));
+        // What it puts back, for the check after it: what was synced of the held, but not one
+        // gone here and not live on the drive (removed there too: its state wins, §7). One a
+        // crash left aside comes back at recovery, and the plan follows the drive.
+        let check = self.faults.failing_put_backs;
+        let server = &self.server;
+        let (put, Ok(plan)) = self.with_sides(c, |sides| {
+            let checked = |n: NodeId| {
+                sides.local.contains(n) || server.live.contains_key(&sides.coords.to_drive(n))
+            };
+            let put: HashSet<NodeId> = match check {
+                true => held
+                    .iter()
+                    .flat_map(|&n| sides.base.subtree(n))
+                    .filter(|&n| checked(n))
+                    .collect(),
+                false => HashSet::new(),
+            };
+            (put, hbsync_engine::held::put_back_plan(&held, sides))
+        });
         self.forget_bases(c, &plan.forget);
         let coords = self.clients[c].coords;
         // What each item takes along, as the engine plans them all in one read: an item an
