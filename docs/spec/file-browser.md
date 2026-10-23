@@ -70,8 +70,12 @@ a restore brought back something whose folder went for good).
 
 ## Listing a folder
 - One `query-batch` with `groupId: [<folder's node id>]`, `fileType: [7101, 7102]`,
-  `fileState: [active]` and `archivalStatus: [0]`, in pages. A deleted node is only removed:
-  `archivalStatus` 2, still in its folder (filesync's "Recently deleted").
+  `fileState: [active]` and `archivalStatus: [0, 1, 3]`, in pages (the server takes any of the
+  list, **[verified]** odin-core `QueryBatch.cs`). A deleted node is only removed:
+  `archivalStatus` 2, still in its folder (filesync's "Recently deleted"); any other status is
+  live, and the computers sync it (another app's `1` or `3`). A status no app is known to use
+  isn't listed so; to list it too, leave `archivalStatus` out and skip the rows with `2` on the
+  device (that reads the folder's removed rows as well).
 - Every row is encrypted: names, sizes and times. Decrypt each one, then sort on the device.
 - Skip any row that won't decrypt, isn't encrypted or has a different file type; a name that
   breaks the name rules under "Uploading"; a file without `size` or without a hashed
@@ -174,8 +178,13 @@ filesync's own rules are in its node schema ("Recently deleted") and the engine'
     your computers syncs"). One whose folder didn't come back stays removed.
   - A name a live sibling took meanwhile gets ` (restored)`, then ` (restored 2)` up to 99, before the
     extension.
-  - A `VersionTagMismatch` or not-found skips the item: another device changed it. A folder above
-    that is not found went for good: what was to come back into it comes back as it was, as above.
+  - A `VersionTagMismatch` skips the item: another device changed it. A not-found is a first "not
+    there" only (node schema, "The purge", 5.): read the file's header; a tombstone means it went
+    for good, but a header not found means so only when it is not found again a minute to an hour
+    later, at the same version (one wrong 404 never makes a file gone). Until then, stop: restore
+    nothing into a folder above that was not found, and tell the user to try again in a minute.
+    A folder above that went for good: what was to come back into it comes back as it was, as
+    above.
 - **Delete forever:** only what the user saw.
   - Use `soft-delete-batch` (odin-core #1977), up to 1,000 files a request, each with its
     `versionTag` and no recipients: an item changed since isn't deleted, and the rest of the
@@ -187,10 +196,10 @@ filesync's own rules are in its node schema ("Recently deleted") and the engine'
     tombstones (node schema, "The purge", 3.).
   - Not `delete-batch/by-file-id`: one stale tag refuses its whole batch.
 - **The purge:** the mini-app purges too (when it opens, say), as every client does, by the
-  one rule in node schema, "The purge": all of it (what goes, never a live node, without a
-  trace or with one per node, asking the server 1.1 s into a pass before its folders go). On
-  the wire: `hard-delete-batch` (odin-core #1968) without a trace, `soft-delete-batch`
-  (odin-core #1977, as Delete forever) leaving one, each file with its `versionTag`; read the
+  one rule in node schema, "The purge": all of it (what goes, never a live node, asking the
+  server 1.1 s into a pass before its folders go). All it takes was removed more than 30 days
+  ago, so it goes without a trace. On the wire: `hard-delete-batch` (odin-core #1968), each
+  file with its `versionTag`; read the
   answer per file: `versionTagMismatch` was written since and stays (with the folders above
   it), `fileNotFound` is done once the file's header is not found too (or a tombstone), any
   other code stays and makes the purge fail (it runs again later). A request that fails
@@ -217,7 +226,8 @@ filesync's own rules are in its node schema ("Recently deleted") and the engine'
     wrote), with the folders above them you removed, top-down. Don't delete them for good in the same
     purge: each has its own 30 days from this removal. A mini-app that doesn't do this leaves it to the desktop clients' purge; it
     must never delete a live node for good instead.
-- **An item with `v` > 1** is listed, but restore and delete forever leave it as it is.
+- **An item with `v` > 1** is listed, but restore, delete forever and the purge (both its steps)
+  leave it as it is: as a node you don't read, it keeps its folders in Recently deleted.
 - **Every write sends `archivalStatus`:** the server replaces the whole header and takes a missing one for 0.
 - **Only the header fields of the node schema last:** a computer's next write of the node resets the rest
   (an ACL that shares it, `appData.tags`, `userDate`, a preview, an `archivalStatus` other than 0 or 2).

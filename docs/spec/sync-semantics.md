@@ -561,10 +561,10 @@ expected fingerprint is treated as done.
   reason (it is detached, or released as a folder that keeps ignored items, section 10) takes
   its original name if free, else a numbered one the same way: the temporary name carries the
   old id and never reaches the remote.
-- **Delete guard.** `LocalDelete` carries the nodes the plan expects in the subtree; if the
-  folder holds anything else in the DB, or its top changed, it is not deleted and the folder is
-  rescanned; what is in it is checked once it is aside (§7), and anything else there puts it
-  back.
+- **Delete guard.** `LocalDelete` carries the nodes the plan expects in the subtree: if the
+  DB holds anything else there, it is not deleted, and is planned again; if the item itself
+  changed, it is not deleted, and its place is rescanned. What is in it is checked once it is
+  aside (§7).
 - **Creates** run only while the local node still exists unchanged.
 - **Parents first on the server.** A remote create, upload or move waits (retry) until its
   parent folder is in the mirror; the server doesn't check parents, and a child of a folder
@@ -626,7 +626,8 @@ expected fingerprint is treated as done.
   recovery finishes verified deletes, 2026-10-22): still its node's synced version (each item as
   its row has it, each row as its base has it), it is unlinked with its rows and bases, whatever
   became of its folder meanwhile (the drive's delete stands); anything else goes back to its
-  place, under its own name, and is planned again (an edit wins). An old version a download
+  place under its own name, else under a numbered one, else at the folder's top (§7), and is
+  planned again (an edit wins). An old version a download
   replaced, its node holding the new bytes by then, goes once its bytes read as the old
   version's; written to, it comes back as a new item beside the new one, never onto it (its
   node parked: beside the name it gets back, numbered, never the temporary one); with no name
