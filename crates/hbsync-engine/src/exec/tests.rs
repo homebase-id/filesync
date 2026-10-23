@@ -3928,6 +3928,56 @@ fn a_live_folder_with_a_leftover_removal_takes_nothing_along() -> R {
     Ok(())
 }
 
+/// A file written before folder `r`'s removal, in a folder `m` moved into `r` after it: `m`
+/// wasn't taken along, so neither is what is in it, as the plan reads it (`along`). Only the
+/// file's own time and the removal's were compared before.
+#[test]
+fn what_is_in_a_folder_moved_in_after_a_removal_isnt_taken_along() -> R {
+    // (the folder's time, the file's) against the removal at 100: whether the file is gone.
+    for (folder_at, file_at, gone) in [(200, 50, false), (50, 150, false), (50, 60, true)] {
+        let mut h = Harness::new()?;
+        let (r, m, node) = (NodeId::new(), NodeId::new(), NodeId::new());
+        let hash = h.content(b"A").hash;
+        let mut moved = MirrorRow::from_content(
+            some_version(),
+            m,
+            r,
+            NodeKind::Folder,
+            &NodeContent::folder("m"),
+            None,
+        );
+        moved.changed_at = Some(folder_at);
+        let mut file = MirrorRow::from_content(
+            some_version(),
+            node,
+            m,
+            NodeKind::File,
+            &NodeContent::file("f", 0, 1, false),
+            Some(hash),
+        );
+        file.changed_at = Some(file_at);
+        h.db.write(|s| {
+            s.account().put_removed(&RemovedRow {
+                row: MirrorRow::from_content(
+                    some_version(),
+                    r,
+                    NodeId::ROOT,
+                    NodeKind::Folder,
+                    &NodeContent::folder("r"),
+                    None,
+                ),
+                removed_at: Some(100),
+            })?;
+            s.account().put_mirror(&moved)?;
+            s.account().put_mirror(&file)
+        })?;
+        let read =
+            h.db.read(|s| view::gone_on_drive(s, node, &Scope::main()))?;
+        assert_eq!(read, gone, "folder at {folder_at}, file at {file_at}");
+    }
+    Ok(())
+}
+
 /// Removals go to the drive together, in one request, each file at the version its plan saw:
 /// one written since stays as it is (never forced) and is planned again, the others go.
 #[test]

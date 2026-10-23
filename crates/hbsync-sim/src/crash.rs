@@ -351,31 +351,61 @@ impl Sim {
     }
 
     /// Whether client `c`'s mirror no longer has `node` as its plan would read it (the engine's
-    /// `gone_on_drive`): not there, or in a folder in Recently deleted, written no later than
-    /// that folder's removal (taken along; a version of its own writing has no time yet).
+    /// `gone_on_drive`): not there, or taken along by the folder in Recently deleted its folders
+    /// reach first, by the one rule (`along::taken_along`, over the live folders between and
+    /// what is in `node`; a version of its own writing has no time yet). A removed file takes
+    /// nothing along.
     fn gone_for(&self, c: usize, node: NodeId) -> bool {
         let client = &self.clients[c];
         let Some(state) = client.planned_remote.get(node) else {
             return true;
         };
-        let version = client.planned_refs.get(&node).map(|r| time(r.version));
-        let changed = client
-            .planned_changed
-            .get(&node)
-            .copied()
-            .filter(|t| Some(*t) == version);
-        let mut seen = HashSet::new();
+        let changed = |n: NodeId| {
+            let version = client.planned_refs.get(&n).map(|r| time(r.version));
+            client
+                .planned_changed
+                .get(&n)
+                .copied()
+                .filter(|t| Some(*t) == version)
+        };
+        // Up to the removed folder, through live folders.
+        let mut live = vec![(node, state.parent)];
+        let mut seen = HashSet::from([node]);
         let mut at = state.parent;
-        while !at.is_root() && seen.insert(at) {
+        let removed = loop {
+            if at.is_root() || !seen.insert(at) {
+                return false;
+            }
             if let Some(removed) = client.planned_removed.get(&at) {
-                return changed.is_none_or(|t| t <= *removed);
+                break (at, *removed);
             }
             match client.planned_remote.get(at) {
-                Some(up) => at = up.parent,
-                None => break,
+                Some(up) => {
+                    live.push((at, up.parent));
+                    at = up.parent;
+                }
+                None => return false,
+            }
+        };
+        let folder = self
+            .server
+            .node(removed.0)
+            .is_some_and(|(n, _)| n.state.kind == hbsync_types::NodeKind::Folder);
+        if !folder {
+            return false;
+        }
+        // And what is in `node` (a later write in it keeps it).
+        let mut below = vec![node];
+        while let Some(f) = below.pop() {
+            for child in client.planned_remote.children(f) {
+                if seen.insert(child) {
+                    live.push((child, f));
+                    below.push(child);
+                }
             }
         }
-        false
+        hbsync_engine::along::taken_along(live, |f| (f == removed.0).then_some(removed.1), changed)
+            .contains(&node)
     }
 }
 
