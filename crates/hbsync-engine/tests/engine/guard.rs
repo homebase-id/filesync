@@ -803,6 +803,56 @@ fn held_deletes_leave_the_dirty_set_beside_a_file_that_waits() -> R {
     Ok(())
 }
 
+/// More than a thousand other nodes left dirty (here files that can't be read yet) keep held
+/// deletes in the dirty set (`LEFTOVERS_MAX`): checking that the view of so many doesn't reach
+/// them, planned alone at the end of every sync, would cost about what planning them with it
+/// does. A thousand exactly, they leave it. (The scan of 2026-10-23, G7.)
+#[cfg(unix)]
+#[test]
+fn held_deletes_stay_dirty_beside_more_than_a_thousand_left_over() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    for (locked, out) in [(1_000, 5), (1_001, 0)] {
+        let server = server();
+        let mut a = Client::with_config(&server, "a", |cfg| {
+            cfg.guard.min = 2;
+            cfg.guard.fraction = 0.0;
+        })?;
+        for i in 0..4 {
+            a.write(&format!("Projects/f{i}.txt"), format!("{i}"))?;
+        }
+        for i in 0..locked {
+            a.write(&format!("other/l{i}.txt"), "l")?;
+        }
+        a.sync()?;
+        let paths: Vec<_> = (0..locked)
+            .map(|i| a.root.join(format!("other/l{i}.txt")))
+            .collect();
+        for path in &paths {
+            fs::write(path, "changed")?;
+            fs::set_permissions(path, fs::Permissions::from_mode(0o000))?;
+        }
+        fs::remove_dir_all(a.root.join("Projects"))?;
+        let report = a.sync();
+        let counts = a
+            .engine
+            .db()
+            .read(|s| Ok((s.held_delete_count()?, s.dirty_count()?)));
+        for path in &paths {
+            fs::set_permissions(path, fs::Permissions::from_mode(0o644))?;
+        }
+        assert_eq!(report?.held.len(), 5);
+        let (held_out, dirty) = counts?;
+        println!("ZZ locked {locked}: held out {held_out}, dirty {dirty}");
+        assert_eq!(held_out, out, "{locked} left over");
+        assert_eq!(
+            dirty as usize,
+            locked + 5 - out as usize,
+            "{locked} left over"
+        );
+    }
+    Ok(())
+}
+
 /// Another device removes every synced file, and this device hears of it (an announcement,
 /// another folder's pull) just after a sync read the guard's counts with nothing dirty: the
 /// removal is still judged against the synced files, and held (§7), not trashed with the
