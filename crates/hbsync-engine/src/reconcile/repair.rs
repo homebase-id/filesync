@@ -674,6 +674,8 @@ impl Reconciler<'_> {
                     }
                     continue;
                 }
+                // Alone on a name taken here: what another page plans is its page's (§6.5).
+                group.retain(|n| !self.elsewhere(*n));
                 let keep = usize::from(!taken(&key));
                 if group.len() <= keep {
                     continue;
