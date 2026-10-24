@@ -447,12 +447,13 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   less than the sweep's earlier pages were judged by (what the sync did meanwhile, or a restore
   elsewhere, doesn't let through the rest of what they held); the synced files stay as counted
   for the sweep, but where nothing was dirty at the start they are counted there, so a change
-  marked meanwhile is never judged against no synced files. The synced files are one row
-  per folder that triggers on the base keep (`base_files`): reading them costs nothing (a
-  count of the base was a scan, 2 ms at 20k files, paid by every sync while a file waiting for
-  its hash kept the dirty set busy); a commit that adds or removes a file's base row writes
-  that row too: about 1 µs, and a page (4 KB) more in the WAL (4.9k files downloaded, each
-  its own commit: 234 → 252 MB written, 8 % more; written again, a file costs nothing more).
+  marked meanwhile is never judged against no synced files. The synced files are a count
+  of the base (a scan, 2 ms at 20k files) that each connection keeps in memory while nothing
+  can have changed it: no other connection committed since (`data_version`) and it wrote no
+  base row. A sync while a file waiting for its hash keeps the dirty set busy reads it for
+  nothing; one after its own downloads or uploads counts again, once per sweep. (A row kept on
+  disk by triggers cost a page, 4 KB, more in the WAL per file a commit added: 8.5 MB on a
+  create of 2,067 files.)
   What is held as every synced file earlier in the sync stays held with the new counts (engine:
   `a_wipe_marked_right_after_the_counts_is_still_held`,
   `a_wipe_marked_after_the_counts_beside_a_dirty_file_is_still_held`,
@@ -612,7 +613,10 @@ expected fingerprint is treated as done.
   (§6.5), before the sweep ends. A sync ends after a full sweep in which nothing was done. A round clears only
   the marks it read with its page (a change of the drive's picture moves a mark's version on):
   a node another engine's pull or an announcement marks again meanwhile stays dirty, though it
-  was dirty already, and the change it brought is planned at the next sweep.
+  was dirty already, and the change it brought is planned at the next sweep. The answer to a
+  write of the folder's own run marks its node as the folder's own marks do, its version as
+  it was: no round of the folder plans while its run writes (and a mark rewritten per write
+  cost a page in the log each).
 - **Names that can't be spelled** locally (a Windows device name at the length limit) are
   skipped and reported, not retried; conflict names are shortened to fit 255 bytes.
 - **Conflict copies are write-ahead.** The fork is recorded before the rename and the record

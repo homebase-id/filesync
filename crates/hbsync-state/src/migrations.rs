@@ -23,9 +23,9 @@ const BASE: u32 = 13;
 /// `removed`, `kv`) is the account's; each synced folder has its rows in the other tables,
 /// with `folder` last in every key and index: a node's rows are found by id, a folder's listings
 /// by parent or file id, and a folder alone matches no index, so the planner (which has no
-/// statistics) never scans a whole folder for a lookup. The exceptions: `local_unhashed`,
+/// statistics) never scans a whole folder for a lookup. The exception: `local_unhashed`,
 /// partial, holds a folder's files not hashed yet alone, and only a query with its condition
-/// reads it; `base_files` is one row per folder, its count of base files.
+/// reads it.
 const SCHEMA: &str = r#"
     -- Every node gets a small integer id once; every other table is keyed by it, so the
     -- 16-byte UUID is stored a single time. AUTOINCREMENT: an id is never handed out again,
@@ -71,27 +71,6 @@ const SCHEMA: &str = r#"
     -- folder: planning a change reads the rows that may clash with its name, not the whole
     -- folder.
     CREATE INDEX base_parent ON base(parent, name_key, folder);
-    -- Per folder: how many files its base holds (the mass-delete guard's denominator), kept by
-    -- the triggers below: counting the base is a scan of every folder's rows. Nothing writes
-    -- `base` with REPLACE (its delete fires no trigger): a row is upserted or deleted.
-    CREATE TABLE base_files (
-        folder INTEGER PRIMARY KEY REFERENCES folders(id) ON DELETE CASCADE,
-        n      INTEGER NOT NULL
-    );
-    CREATE TRIGGER base_file_in AFTER INSERT ON base WHEN new.kind = 0 BEGIN
-        INSERT INTO base_files (folder, n) VALUES (new.folder, 1)
-            ON CONFLICT (folder) DO UPDATE SET n = n + 1;
-    END;
-    CREATE TRIGGER base_file_out AFTER DELETE ON base WHEN old.kind = 0 BEGIN
-        UPDATE base_files SET n = n - 1 WHERE folder = old.folder;
-    END;
-    CREATE TRIGGER base_file_kind AFTER UPDATE OF kind, folder ON base
-        WHEN (old.kind = 0 OR new.kind = 0) AND (old.kind != new.kind OR old.folder != new.folder)
-    BEGIN
-        UPDATE base_files SET n = n - 1 WHERE folder = old.folder AND old.kind = 0;
-        INSERT INTO base_files (folder, n) SELECT new.folder, 1 WHERE new.kind = 0
-            ON CONFLICT (folder) DO UPDATE SET n = n + 1;
-    END;
 
     -- Per folder: what the last observation saw on disk, as a tree: each row holds its folder
     -- and its on-disk name, so a path is derived and a moved folder changes one row.
@@ -116,10 +95,12 @@ const SCHEMA: &str = r#"
         send_hash  INTEGER NOT NULL DEFAULT 0,        -- 1: a new file hashed as it is sent (hash
                                                       -- NULL by design; sync semantics §3)
         PRIMARY KEY (id, folder),
-        UNIQUE (parent, name, folder)
+        -- A name once in a folder; and the rows that may clash with a name, by its sibling
+        -- hash (one index for both: a row in costs one page fewer than two would). name_key
+        -- is always sibling_hash(name), as on every side (the narrow views rely on it too).
+        UNIQUE (parent, name_key, name, folder)
     ) WITHOUT ROWID;
     CREATE INDEX local_file_id ON local(file_id, folder);
-    CREATE INDEX local_key ON local(parent, name_key, folder);
     -- The files not hashed yet (being written, locked, unreadable): every plan holds what they
     -- are in (sync semantics §6.3). Few, and only they in it: not the files hashed on send,
     -- which may be all of a first sync's.
@@ -421,6 +402,47 @@ const MIGRATIONS: &[&str] = &[
     DROP INDEX local_unhashed;
     CREATE INDEX local_unhashed ON local(folder)
         WHERE hash IS NULL AND kind = 0 AND send_hash = 0;",
+    // 23: no count of base files kept on disk: its row was a page more in the log per file
+    // synced (each connection keeps its count, `ReadTx::base_file_count`).
+    "DROP TRIGGER base_file_in;
+    DROP TRIGGER base_file_out;
+    DROP TRIGGER base_file_kind;
+    DROP TABLE base_files;",
+    // 24: local's name lookups and its unique names in one index: `local_key` is the unique
+    // one's start. The table made again with it (an index's columns can't change).
+    "CREATE TABLE local_new (
+        folder     INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+        id         INTEGER NOT NULL,
+        parent     INTEGER NOT NULL,
+        name       TEXT NOT NULL,
+        kind       INTEGER NOT NULL,
+        size       INTEGER NOT NULL,
+        mtime_ns   INTEGER NOT NULL,
+        ctime_ns   INTEGER NOT NULL,
+        volume     INTEGER NOT NULL,
+        file_id    INTEGER NOT NULL,
+        file_id_hi INTEGER,
+        executable INTEGER,
+        hash       BLOB,
+        tags       TEXT,
+        name_key   INTEGER NOT NULL DEFAULT 0,
+        send_hash  INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (id, folder),
+        UNIQUE (parent, name_key, name, folder)
+    ) WITHOUT ROWID;
+    INSERT INTO local_new SELECT folder, id, parent, name, kind, size, mtime_ns, ctime_ns,
+        volume, file_id, file_id_hi, executable, hash, tags, name_key, send_hash FROM local
+        WHERE folder IN (SELECT id FROM folders);
+    DROP TABLE local;
+    ALTER TABLE local_new RENAME TO local;
+    CREATE INDEX local_file_id ON local(file_id, folder);
+    CREATE INDEX local_unhashed ON local(folder)
+        WHERE hash IS NULL AND kind = 0 AND send_hash = 0;
+    CREATE TRIGGER local_gone AFTER DELETE ON local
+        BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END;
+    CREATE TRIGGER local_regone AFTER UPDATE OF id, parent ON local
+        WHEN old.id IS NOT new.id OR old.parent IS NOT new.parent
+        BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END;",
 ];
 
 /// The version this client makes and reads.
@@ -547,29 +569,6 @@ mod tests {
         assert_eq!(key("base")?, report);
         assert_eq!(key("remote")?, report);
         assert_eq!(key("local")?, hbsync_namemap::sibling_hash("a:b"));
-        Ok(())
-    }
-
-    /// An upgraded DB counts each folder's base files: two folders, files and a folder.
-    #[test]
-    fn an_upgrade_counts_the_base_files() -> Result<()> {
-        let mut conn = version_13()?;
-        conn.execute_batch(
-            "INSERT INTO folders (top, path, marker, added_at) VALUES (x'00', '/f', 'm', 0);
-             INSERT INTO folders (top, path, marker, added_at) VALUES (x'01', '/g', 'n', 0);
-             INSERT INTO base (folder, id, parent, name, kind, remote_file_id, version_tag)
-                 VALUES (1, 2, 1, 'a', 0, x'01', x'02'), (1, 3, 1, 'b', 0, x'03', x'04'),
-                        (1, 4, 1, 'c', 1, x'05', x'06'), (2, 5, 1, 'd', 0, x'07', x'08');",
-        )?;
-        apply(&mut conn)?;
-        let n = |folder: i64| -> Result<i64> {
-            Ok(conn.query_row(
-                "SELECT n FROM base_files WHERE folder = ?1",
-                [folder],
-                |r| r.get(0),
-            )?)
-        };
-        assert_eq!((n(1)?, n(2)?), (2, 1));
         Ok(())
     }
 

@@ -67,6 +67,12 @@ impl ReadTx<'_> {
     /// come while the folder's round plans: a node dirty already has its mark's version moved
     /// on (a row written), so that round doesn't clear it.
     pub(super) fn mark_changed_in(&self, folder: i64, id: i64) -> Result<()> {
+        // The folder's own run's answer: its round planned already (the mark stays for the
+        // next one, as any own mark), so its version needn't move. A dirty node's row isn't
+        // written again then: a page in the log less per write.
+        if self.own_run.get() && folder == self.folder {
+            return self.mark_dirty_in(folder, id);
+        }
         self.prep(
             "INSERT INTO dirty (folder, id) VALUES (?1, ?2) \
              ON CONFLICT (id, folder) DO UPDATE SET seq = seq + 1",

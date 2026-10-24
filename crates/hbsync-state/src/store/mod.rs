@@ -348,6 +348,10 @@ impl MirrorRow {
 #[derive(Debug)]
 pub struct ReadTx<'a> {
     conn: &'a Connection,
+    /// A read's: the connection's count of base files, if it keeps one.
+    files: Option<&'a crate::FileCount>,
+    /// A write's: whether it wrote a base row of the folder (its count is read again).
+    base_written: std::cell::Cell<bool>,
     /// `folders.id`, which `$F` in the SQL stands for.
     folder: i64,
     /// [`ReadTx::folders`], read once per transaction (a change through this store forgets it).
@@ -359,6 +363,9 @@ pub struct ReadTx<'a> {
     places: std::cell::RefCell<HashMap<NodeId, Place>>,
     /// The folders `fan_out` marked a node dirty in.
     touched: std::cell::RefCell<std::collections::BTreeSet<i64>>,
+    /// Recording an answer to a write of this store's folder's own run
+    /// ([`AccountTx::answered_in_run`]): its marks in this folder are its own.
+    own_run: std::cell::Cell<bool>,
     /// The ids of local folders by path, and their paths by id, found in this transaction
     /// ([`ReadTx::local_id_at`], [`ReadTx::folder_path`]); any local write but
     /// [`FolderTx::put_local`] forgets them.
@@ -428,7 +435,7 @@ pub struct Store<'a> {
 impl<'a> Store<'a> {
     pub(crate) fn new(conn: &'a Connection, folder: i64) -> Self {
         Store {
-            tx: ReadTx::new(conn, folder),
+            tx: ReadTx::new(conn, folder, None),
         }
     }
 
@@ -484,14 +491,21 @@ impl<'a> std::ops::Deref for AccountTx<'a> {
 }
 
 impl<'a> ReadTx<'a> {
-    pub(crate) fn new(conn: &'a Connection, folder: i64) -> Self {
+    pub(crate) fn new(
+        conn: &'a Connection,
+        folder: i64,
+        files: Option<&'a crate::FileCount>,
+    ) -> Self {
         ReadTx {
             conn,
+            files,
+            base_written: Default::default(),
             folder,
             folders: Default::default(),
             coords: Default::default(),
             places: Default::default(),
             touched: Default::default(),
+            own_run: Default::default(),
             local_ids: Default::default(),
             local_paths: Default::default(),
             removed_seq: std::cell::Cell::new(None),

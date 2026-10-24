@@ -56,22 +56,33 @@ impl ReadTx<'_> {
     }
 
     /// Number of file (not folder) nodes in the base; the mass-delete guard's denominator.
-    /// One row: the triggers on `base` keep it (a file's base row in or out costs a row update).
+    /// A scan of the base (every folder's rows), which a read keeps for the connection
+    /// (`FileCount`): used again while no other connection committed and this one wrote no
+    /// base row. A write counts afresh.
     pub fn base_file_count(&self) -> Result<u64> {
-        let n: i64 = self
-            .prep("SELECT coalesce((SELECT n FROM base_files WHERE folder = $F), 0)")?
-            .query_row([], |r| r.get(0))?;
-        // Below zero would be a count gone wrong: never read as a huge one (no guard at all).
-        let n = u64::try_from(n)
-            .map_err(|_| StateError::Corrupt(format!("base_files counts {n} files")))?;
-        // Debug builds (every test) check it against the rows it stands for.
-        debug_assert_eq!(
-            Some(n),
-            self.count("SELECT COUNT(*) FROM base WHERE +folder = $F AND kind = 0")
-                .ok(),
-            "base_files drifted from the base"
-        );
+        let count = || self.count("SELECT COUNT(*) FROM base WHERE folder = $F AND kind = 0");
+        let Some(files) = self.files else {
+            return count();
+        };
+        let version = self.data_version()?;
+        if let Some(n) = files.at(version) {
+            // Debug builds (every test) check it against the rows it stands for.
+            debug_assert_eq!(count().ok(), Some(n), "the base file count drifted");
+            return Ok(n);
+        }
+        let n = count()?;
+        files.keep(version, n);
         Ok(n)
+    }
+
+    /// This write wrote a base row of the folder.
+    pub(super) fn wrote_base(&self) {
+        self.base_written.set(true);
+    }
+
+    /// Whether this write wrote a base row of the folder (`FileCount::forget`).
+    pub(crate) fn base_written(&self) -> bool {
+        self.base_written.get()
     }
 }
 
@@ -83,6 +94,7 @@ impl FolderTx<'_> {
             self.key_or_insert(row.node)?,
             self.key_or_insert(row.state.parent)?,
         );
+        self.wrote_base();
         self.prep(
                 "INSERT INTO base (folder, id, parent, name, kind, hash, size, mtime_ms, \
                  executable, remote_file_id, version_tag, content_state, local_name, local_hash, \
@@ -114,6 +126,7 @@ impl FolderTx<'_> {
     }
 
     pub fn delete_base(&self, node: NodeId) -> Result<bool> {
+        self.wrote_base();
         self.change(
             &format!("DELETE FROM base WHERE folder = $F AND id = {ID_OF}"),
             node.0.as_bytes(),

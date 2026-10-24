@@ -79,7 +79,7 @@ impl Executor<'_> {
             let mut superseded = false;
             let mut settled = Vec::with_capacity(answers.len());
             for (how, answer) in &answers {
-                let newer = s.account().answered(answer)? == Answered::Superseded;
+                let newer = s.account().answered_in_run(answer)? == Answered::Superseded;
                 superseded |= newer;
                 if newer || answer.live_row().is_none() {
                     s.folder().mark_dirty(how.node)?;
