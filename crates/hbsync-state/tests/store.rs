@@ -186,9 +186,8 @@ fn failed_write_rolls_back() -> R {
     })
 }
 
-/// The base's file count (the guard's denominator) is one row the triggers keep: it follows
-/// files in and out, and a node turning file or folder, as a count of the
-/// rows would.
+/// The base's file count (the guard's denominator), kept by the connection between reads: it
+/// follows files in and out, and a node turning file or folder, as a count of the rows would.
 #[test]
 fn the_base_file_count_follows_the_base() -> R {
     let mut db = StateDb::open_in_memory()?;
@@ -337,6 +336,72 @@ fn a_clear_keeps_a_mark_a_change_moved_on() -> R {
     Ok(())
 }
 
+/// The answer to a write of the folder's own run marks its node as the folder's own marks do:
+/// a dirty node's mark stays at the version its round read (no row written again); another's
+/// answer (a restore's, outside a run) moves it on.
+#[test]
+fn a_runs_own_answer_leaves_a_mark_as_it_is() -> R {
+    use hbsync_state::{Answer, MirrorRow};
+    let mut db = StateDb::open_in_memory()?;
+    let a = NodeId::new();
+    let file_id = RemoteFileId(Uuid::new_v4());
+    let at = |v: u128| MirrorRow {
+        file_id,
+        version: VersionTag(Uuid::from_u128(v)),
+        node: a,
+        parent: NodeId::ROOT,
+        name: "a".into(),
+        kind: NodeKind::Folder,
+        file: None,
+        content_extra: None,
+        token: None,
+        changed_at: None,
+    };
+    let version = |v: u128| Some(VersionTag(Uuid::from_u128(v)));
+    db.write(|s| s.account().put_live(&at(1)))?;
+    let (read, _) = db.read(|s| s.dirty_marks(None, 10))?;
+    db.write(|s| {
+        s.account()
+            .answered_in_run(&Answer::live(version(1), at(2)))
+    })?;
+    db.write(|s| read.iter().try_for_each(|m| s.folder().clear_mark(*m)))?;
+    assert_eq!(db.read(|s| s.dirty_count())?, 0, "cleared as read");
+    db.write(|s| s.folder().mark_dirty(a))?;
+    let (read, _) = db.read(|s| s.dirty_marks(None, 10))?;
+    db.write(|s| s.account().answered(&Answer::live(version(2), at(3))))?;
+    db.write(|s| read.iter().try_for_each(|m| s.folder().clear_mark(*m)))?;
+    assert_eq!(db.read(|s| s.dirty_nodes(10))?, vec![a], "moved on");
+    Ok(())
+}
+
+/// A connection's count of base files follows another connection's writes to the base (its
+/// commits move the DB's data version on), and its own.
+#[test]
+fn the_base_file_count_follows_other_connections() -> R {
+    let dir = tempfile::tempdir().map_err(|e| StateError::Corrupt(e.to_string()))?;
+    let path = dir.path().join("state.db");
+    let (mut one, mut two) = (StateDb::open(&path)?, StateDb::open(&path)?);
+    let file = |name: &str| base(NodeState::file(NodeId::ROOT, name, content(b"x")));
+    let count = |db: &mut StateDb| db.read(|s| s.base_file_count());
+    assert_eq!(count(&mut one)?, 0);
+    two.write(|s| s.folder().put_base(&file("a")))?;
+    assert_eq!(count(&mut one)?, 1);
+    one.write(|s| s.folder().put_base(&file("b")))?;
+    assert_eq!((count(&mut one)?, count(&mut two)?), (2, 2));
+    // Read again, and kept while nothing changes.
+    assert_eq!(count(&mut one)?, 2);
+    // A write that rolls back changes nothing; one that commits, its count.
+    let failed = one.write(|s| {
+        s.folder().put_base(&file("c"))?;
+        Err::<(), _>(StateError::Conflict("rolled back".into()))
+    });
+    assert!(failed.is_err());
+    assert_eq!(count(&mut one)?, 2);
+    one.write(|s| s.folder().put_base(&file("c")))?;
+    assert_eq!(count(&mut one)?, 3);
+    Ok(())
+}
+
 /// Of the nodes outside a page, those still to plan: dirty, or a held delete; asked in
 /// chunks (more than one here).
 #[test]
@@ -407,7 +472,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 22);
+    assert_eq!(db.schema_version()?, 24);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -1277,7 +1342,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 22);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 24);
     Ok(())
 }
 

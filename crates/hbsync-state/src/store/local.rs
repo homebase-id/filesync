@@ -8,6 +8,18 @@ impl ReadTx<'_> {
     /// The id of the local row at `path`; for the root, the root's id (it has no row). Walks
     /// down from the nearest folder found before in this transaction, and keeps the folders it
     /// finds.
+    /// The id and kind of the row named `name` (of sibling hash `key`) in the folder `parent`
+    /// (an id), by the unique index.
+    fn local_child(&self, parent: i64, name: &str, key: i32) -> Result<Option<(i64, i64)>> {
+        Ok(self
+            .prep(
+                "SELECT id, kind FROM local \
+                 WHERE folder = $F AND parent = ?1 AND name_key = ?2 AND name = ?3",
+            )?
+            .query_row(params![parent, key, name], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?)
+    }
+
     pub(super) fn local_id_at(&self, path: &RelPath) -> Result<Option<i64>> {
         let full = path.as_str();
         // The longest known prefix: the whole path, a folder above it, or the root.
@@ -27,12 +39,16 @@ impl ReadTx<'_> {
         if known == full.len() {
             return Ok(Some(id));
         }
-        let mut stmt = self
-            .prep("SELECT id, kind FROM local WHERE folder = $F AND parent = ?1 AND name = ?2")?;
+        let mut stmt = self.prep(
+            "SELECT id, kind FROM local \
+                 WHERE folder = $F AND parent = ?1 AND name_key = ?2 AND name = ?3",
+        )?;
         let mut at = if known == 0 { 0 } else { known + 1 };
         for name in full[at..].split('/') {
             let found: Option<(i64, i64)> = stmt
-                .query_row(params![id, name], |r| Ok((r.get(0)?, r.get(1)?)))
+                .query_row(params![id, sibling_hash(name), name], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })
                 .optional()?;
             let Some((child, kind)) = found else {
                 return Ok(None);
@@ -159,8 +175,11 @@ impl ReadTx<'_> {
             return Ok(None);
         };
         let raw = self.raw_local(
-            &format!("SELECT {LOCAL_COLS} {LOCAL_FROM} WHERE l.parent = ?1 AND l.name = ?2"),
-            params![parent, name],
+            &format!(
+                "SELECT {LOCAL_COLS} {LOCAL_FROM} \
+                 WHERE l.parent = ?1 AND l.name_key = ?2 AND l.name = ?3"
+            ),
+            params![parent, sibling_hash(name), name],
         )?;
         raw.into_iter()
             .next()
@@ -418,6 +437,7 @@ impl FolderTx<'_> {
             StateError::Conflict(format!("{} has no recorded parent folder", row.path))
         })?;
         let (id, new) = self.node_key(row.node)?;
+        let key = sibling_hash(name);
         // A node new to the DB has no row yet.
         let place: Option<(i64, String, i64)> = if new {
             None
@@ -437,11 +457,7 @@ impl FolderTx<'_> {
             // At its own place: nobody else holds it.
             Some((_, _, kind)) => kind == codec::kind_to(NodeKind::Folder),
             None => {
-                let holder: Option<i64> = self
-                    .prep("SELECT id FROM local WHERE folder = $F AND parent = ?1 AND name = ?2")?
-                    .query_row(params![parent, name], |r| r.get(0))
-                    .optional()?;
-                if holder.is_some() {
+                if self.local_child(parent, name, key)?.is_some() {
                     return Err(StateError::Conflict(format!("{} is taken", row.path)));
                 }
                 false
@@ -471,7 +487,7 @@ impl FolderTx<'_> {
             row.executable,
             row.hash.as_ref().map(codec::hash_to),
             row.tags.as_ref().map(tags_to_string),
-            sibling_hash(name),
+            key,
             // Only a file not hashed yet is hashed on send.
             row.send_hash && row.hash.is_none() && row.kind == NodeKind::File,
         ])?;

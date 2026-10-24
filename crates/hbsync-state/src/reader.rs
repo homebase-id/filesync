@@ -66,7 +66,7 @@ impl Reader {
         folder: i64,
         f: impl FnOnce(&ReadTx<'_>) -> Result<T>,
     ) -> Result<T> {
-        crate::read_in(&mut self.conn, folder, f)
+        crate::read_in(&mut self.conn, folder, None, f)
     }
 }
 

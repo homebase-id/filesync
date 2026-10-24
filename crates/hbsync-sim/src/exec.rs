@@ -1028,7 +1028,8 @@ impl Sim {
                 .into_iter()
                 .chain(pulled)
                 .try_for_each(|n| record(s, n))?;
-            s.answered(&answered).map(drop)
+            // As the executor records its own write's answer.
+            s.answered_in_run(&answered).map(drop)
         })?;
         db.write(|s| {
             let picture = (

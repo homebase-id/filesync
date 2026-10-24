@@ -145,8 +145,32 @@ pub struct StateDb {
     /// The folders writes through this connection marked a node dirty in
     /// ([`StateDb::take_touched`]).
     touched: std::collections::BTreeSet<i64>,
+    /// Its count of its folder's base files ([`ReadTx::base_file_count`]).
+    files: FileCount,
     #[cfg(feature = "testkit")]
     hook: Option<testkit::Hook>,
+}
+
+/// A connection's count of its folder's base files, as a read counted it, with the DB's
+/// `data_version` then ([`ReadTx::base_file_count`]): right while no other connection
+/// committed since and this one wrote no base row (then forgotten). Kept in memory, not on
+/// disk: a row kept by triggers cost a page in the log per file synced.
+#[derive(Debug, Default)]
+pub(crate) struct FileCount(std::cell::Cell<Option<(u64, u64)>>);
+
+impl FileCount {
+    /// The count, if it was read at `version`.
+    pub(crate) fn at(&self, version: u64) -> Option<u64> {
+        self.0.get().filter(|&(v, _)| v == version).map(|(_, n)| n)
+    }
+
+    pub(crate) fn keep(&self, version: u64, n: u64) {
+        self.0.set(Some((version, n)));
+    }
+
+    pub(crate) fn forget(&self) {
+        self.0.set(None);
+    }
 }
 
 /// The DB file at `path` as one key, whatever the spelling.
@@ -351,10 +375,9 @@ pub mod testkit {
                     )?
                     .query_map([], |r| r.get(0))?
                     .collect::<rusqlite::Result<_>>()?;
-                // Last, what the triggers of the others write to: `gone` and `base_files`.
-                let (gone, others): (Vec<String>, Vec<String>) = tables
-                    .into_iter()
-                    .partition(|t| t == "gone" || t == "base_files");
+                // Last, what the triggers of the others write to: `gone`.
+                let (gone, others): (Vec<String>, Vec<String>) =
+                    tables.into_iter().partition(|t| t == "gone");
                 for t in others.into_iter().chain(gone) {
                     tx.execute_batch(&format!(
                         "DELETE FROM main.\"{t}\"; \
@@ -364,6 +387,8 @@ pub mod testkit {
                 Ok(tx.commit()?)
             })();
             self.conn.execute("DETACH copy", [])?;
+            // The base too.
+            self.files.forget();
             self.conn.pragma_update(None, "foreign_keys", true)?;
             restored
         }
@@ -466,6 +491,7 @@ impl StateDb {
             shared: shared(key.as_deref()),
             emptied: Emptied::default(),
             touched: Default::default(),
+            files: FileCount::default(),
             #[cfg(feature = "testkit")]
             hook: testkit::hook(key.as_deref()),
         })
@@ -473,7 +499,7 @@ impl StateDb {
 
     /// Runs `f` in a read transaction (a consistent snapshot).
     pub fn read<T>(&mut self, f: impl FnOnce(&ReadTx<'_>) -> Result<T>) -> Result<T> {
-        read_in(&mut self.conn, self.folder, f)
+        read_in(&mut self.conn, self.folder, Some(&self.files), f)
     }
 
     /// Runs `f` in a write transaction, committed only if `f` succeeds. The commit reaches the
@@ -586,11 +612,15 @@ impl StateDb {
             let out = f(&store)?;
             store.finish()?;
             let touched = store.take_touched();
+            let base_written = store.base_written();
             #[cfg(feature = "testkit")]
             if let Some(hook) = &self.hook {
                 (hook.0)(testkit::Commit::Before);
             }
             tx.commit()?;
+            if base_written {
+                self.files.forget();
+            }
             Ok((out, touched))
         })();
         if durable {
@@ -646,10 +676,11 @@ impl StateDb {
 fn read_in<T>(
     conn: &mut Connection,
     folder: i64,
+    files: Option<&FileCount>,
     f: impl FnOnce(&ReadTx<'_>) -> Result<T>,
 ) -> Result<T> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
-    let out = f(&ReadTx::new(&tx, folder))?;
+    let out = f(&ReadTx::new(&tx, folder, files))?;
     tx.finish()?;
     Ok(out)
 }

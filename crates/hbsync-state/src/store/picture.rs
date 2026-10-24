@@ -137,6 +137,16 @@ impl AccountTx<'_> {
         self.leave_tree(file_id)
     }
 
+    /// [`AccountTx::answered`] for a write of this store's folder's run (the executor's
+    /// commit): the mark it makes in this folder is the folder's own, which leaves a dirty
+    /// node's mark at its version (no round of the folder plans while its run writes).
+    pub fn answered_in_run(&self, answer: &Answer) -> Result<Answered> {
+        self.0.own_run.set(true);
+        let answered = self.answered(answer);
+        self.0.own_run.set(false);
+        answered
+    }
+
     /// This device's write's answer (`answer`), into the picture as a live version
     /// ([`AccountTx::put_live`]) or a removal ([`AccountTx::move_to_removed`]), unless a pull
     /// recorded a newer state of the file since the write landed ([`Answered::of`]; a delete

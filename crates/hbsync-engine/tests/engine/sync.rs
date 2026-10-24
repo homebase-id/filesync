@@ -733,3 +733,47 @@ fn a_change_pulled_between_plan_and_clear_is_planned() -> R {
     assert!(!a.root.join("f.txt").exists(), "{:?}", a.tree_text(""));
     Ok(())
 }
+
+/// The state DB's log written for a create, in pages per file (a commit each, on both devices;
+/// no checkpoint comes in between at this size). Each page is a 4 KiB write: an index, a
+/// trigger or a row more in a file's commit shows here. 2026-10-24: 10.6 on the uploader and
+/// 11.5 on the downloader before the base's file count left the disk, the uploader's own
+/// answers stopped rewriting its dirty marks, and `local_key` became the unique index's
+/// start; 8.5 and 9.4 after.
+#[test]
+fn a_create_writes_few_log_pages_per_file() -> R {
+    const FILES: usize = 100;
+    // The log's frames (a 32-byte header, then 24 bytes and a page each), and its salts, which
+    // a checkpoint that starts it over changes: then frames go over old ones, uncounted.
+    let log_pages = |c: &Client| -> (u64, Vec<u8>) {
+        let mut wal = c.db_path().into_os_string();
+        wal.push("-wal");
+        let log = fs::read(&wal).unwrap_or_default();
+        let page = log
+            .get(8..12)
+            .map_or(4096, |b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]));
+        let frames = (log.len() as u64).saturating_sub(32) / (24 + u64::from(page));
+        (frames, log.get(16..24).unwrap_or_default().to_vec())
+    };
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.sync()?;
+    b.sync()?;
+    let (a0, b0) = (log_pages(&a), log_pages(&b));
+    for i in 0..FILES {
+        a.write(&format!("d{}/f{i}.bin", i % 10), vec![i as u8; 100])?;
+    }
+    a.sync()?;
+    b.sync()?;
+    let per_file = |c: &Client, (before, salts): (u64, Vec<u8>)| {
+        let (after, now) = log_pages(c);
+        assert_eq!(salts, now, "a checkpoint started the log over: fewer files");
+        (after - before) as f64 / FILES as f64
+    };
+    let (up, down) = (per_file(&a, a0), per_file(&b, b0));
+    eprintln!("log pages per file: uploader {up:.2}, downloader {down:.2}");
+    assert!(up <= 9.0, "uploader: {up:.2} pages per file");
+    assert!(down <= 10.0, "downloader: {down:.2} pages per file");
+    Ok(())
+}

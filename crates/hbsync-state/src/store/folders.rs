@@ -164,6 +164,8 @@ impl AccountTx<'_> {
         self.coords.take();
         self.places.borrow_mut().clear();
         self.forget_local_ids();
+        // Its base goes with it.
+        self.wrote_base();
         self.change("DELETE FROM folders WHERE id = ?1", id)
     }
 
