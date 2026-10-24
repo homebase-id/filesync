@@ -700,9 +700,9 @@ checksum = "a31eee39dddec8330830986fcd7625edb5a24ec90ea038215273bbc3adb08ac6"
 
 [[package]]
 name = "crypto-bigint"
-version = "0.7.5"
+version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1a52aa3fcda4e6302a9f48734f234d35d4721b96f8fe07d073f07ce9df4f0271"
+checksum = "6bb08299a6046833a879ace115697f12fd2bd6c8d3e93c909ffc9e0738e7cae0"
 dependencies = [
  "cpubits",
  "ctutils",
@@ -1526,7 +1526,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync"
-version = "0.7.1"
+version = "0.9.0"
 dependencies = [
  "clap",
  "hbsync-app",
@@ -1545,7 +1545,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-app"
-version = "0.7.1"
+version = "0.9.0"
 dependencies = [
  "apple-native-keyring-store",
  "form_urlencoded",
@@ -1585,7 +1585,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-dev"
-version = "0.7.1"
+version = "0.9.0"
 dependencies = [
  "hbsync-app",
  "hbsync-engine",
@@ -1603,7 +1603,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-engine"
-version = "0.7.1"
+version = "0.9.0"
 dependencies = [
  "hbsync-engine",
  "hbsync-fileio",
@@ -1623,7 +1623,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-fileio"
-version = "0.7.1"
+version = "0.9.0"
 dependencies = [
  "blake3",
  "hbsync-platform",
@@ -1635,7 +1635,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-homebase"
-version = "0.7.1"
+version = "0.9.0"
 dependencies = [
  "aes",
  "base64",
@@ -1663,7 +1663,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-local"
-version = "0.7.1"
+version = "0.9.0"
 dependencies = [
  "hbsync-fileio",
  "hbsync-namemap",
@@ -1679,7 +1679,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-namemap"
-version = "0.7.1"
+version = "0.9.0"
 dependencies = [
  "hbsync-platform",
  "proptest",
@@ -1687,7 +1687,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-platform"
-version = "0.7.1"
+version = "0.9.0"
 dependencies = [
  "caseless",
  "filetime",
@@ -1702,7 +1702,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-remote"
-version = "0.7.1"
+version = "0.9.0"
 dependencies = [
  "hbsync-fileio",
  "hbsync-remote",
@@ -1713,7 +1713,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-sim"
-version = "0.7.1"
+version = "0.9.0"
 dependencies = [
  "hbsync-engine",
  "hbsync-fileio",
@@ -1727,7 +1727,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-state"
-version = "0.7.1"
+version = "0.9.0"
 dependencies = [
  "hbsync-fileio",
  "hbsync-namemap",
@@ -1741,7 +1741,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-tray"
-version = "0.7.1"
+version = "0.9.0"
 dependencies = [
  "hbsync-app",
  "hbsync-types",
@@ -1757,7 +1757,7 @@ dependencies = [
 
 [[package]]
 name = "hbsync-types"
-version = "0.7.1"
+version = "0.9.0"
 dependencies = [
  "base64",
  "hbsync-platform",
@@ -3719,7 +3719,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
