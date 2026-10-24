@@ -154,6 +154,12 @@ Written: [spec/sync-semantics.md](spec/sync-semantics.md),
   leave the drive, a large swing held by the guard), turning it on for existing folders makes
   their build output leave once, and `.git` itself synced from two computers that both commit
   gives conflict copies git doesn't understand (say so, or leave `.git` out)
+- **Duplicate finder** (idea, 2026-10-24): find duplicate files and folders from the BLAKE3
+  content hashes already kept, with no file reads and no requests. Files: group the state DB by
+  content hash and size. Folders: a hash per folder computed bottom-up from its children, in two
+  kinds: one over names and hashes (the same folder, file for file), one over hashes only (the
+  same contents under other names). The file browser could do the same from the drive's
+  hashes, without a computer
 - **Observability**: structured logs, per-item status, diagnostics bundle
 - **Packaging** (2026-10-11, `docs/spec/packaging.md`, `RELEASING.md`): Conveyor installers
   that update themselves (MSIX, Mac apps and `.dmg`, `.deb` with its apt repository), an `.rpm`,
