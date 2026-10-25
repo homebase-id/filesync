@@ -36,6 +36,49 @@ After an update on Linux, the menu offers **Restart to finish the update**.
 
 Your Homebase needs odin-core v0.1.962 or newer.
 
+## Using it
+
+**The tray icon** shows how things stand by the colour of its dot: green up to date, cyan
+syncing, grey paused, offline or not set up, magenta when something needs you. Its menu opens
+the folder or your files online, lists what synced lately and any problems, reviews held
+deletions, opens Recently deleted and the Folders page (Documents, Pictures and the like), and
+pauses, resumes or syncs now. **Quit stops syncing too**, and starting Homebase Filesync again
+starts it.
+
+**From a terminal,** `hbsync` does the same:
+
+| | |
+|---|---|
+| `hbsync status` | what it's doing now |
+| `hbsync recent` | what synced lately |
+| `hbsync sync`, `pause [--for 1h]`, `resume` | sync now, pause (for a while), resume |
+| `hbsync confirm-deletes`, `put-back` | let held deletions through, or put the files back |
+| `hbsync deleted` | what's in Recently deleted |
+| `hbsync restore <path>` | bring an item back from Recently deleted, on every computer |
+| `hbsync empty-deleted [<path>]` | delete Recently deleted (or one item) for good |
+| `hbsync add documents` (`pictures`, …), `remove …` | sync one of your own folders too, or stop |
+| `hbsync start`, `stop` | start or stop syncing (the daemon) |
+| `hbsync log` | where the logs are |
+
+`hbsync --help` and `hbsync <command> --help` say more. Every command and option:
+[docs/spec/daemon.md](docs/spec/daemon.md#command-line).
+
+Good to know:
+- **Deleting many files at once waits for you.** If you delete more than 50 files and more
+  than a quarter of the folder at once, or every file, the deletions are held until you confirm
+  them (the tray's *Review deletions…* or `hbsync confirm-deletes`) or put the files back. A
+  delete from another computer that would empty the whole folder here waits the same way.
+- **Where deleted files go.** What you delete waits in Recently deleted on your Homebase for 30
+  days, wherever you deleted it. On your computer, a file manager also puts it in the OS's
+  trash; `rm` doesn't. Your other computers delete their copy.
+- **Emptying Recently deleted runs in the background,** and on a big one it can take a while
+  (about 18 minutes for 22,000 items on one Homebase). For now, `hbsync stop` and Quit wait
+  until it's done.
+- **Commands that ask** (`empty-deleted`, `confirm-deletes`, `put-back`) need `--yes` where
+  nobody can answer, such as in a script.
+- **Leave things out** on one computer with gitignore-style rules in `.hbsync/ignore` in the
+  folder.
+
 ## Why it's nice
 
 - **Written in Rust, from top to bottom.** Three small native programs (about 10 MB each, with
