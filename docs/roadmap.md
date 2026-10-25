@@ -1,5 +1,21 @@
 # Roadmap: layered build plan
 
+## Fix first (found testing 0.9.0, 2026-10-25)
+
+Emptying Recently deleted (`hbsync empty-deleted`, the tray's *Empty*) runs in the daemon's
+background, in passes: all files, then the folders a level at a time. With 22,367 items, the
+user's Homebase answered about 70 s per batch of 1,000 files, so it took about 30 minutes,
+and nothing showed it was working:
+1. **Write each batch's result as it comes**, not once per pass: Recently deleted then
+   shrinks while it runs, and a crash or kill loses nothing done.
+2. **Let stop and quit interrupt it between batches.** Today `hbsync stop`, quitting the
+   tray and SIGTERM all wait for the whole job, and `stop` gives up after a minute with "the
+   daemon is still finishing a transfer"; what isn't done stays in Recently deleted for the
+   next time.
+3. **Say it runs in the background**: the CLI and the tray say emptying has started and goes
+   on in the background, the daemon logs when it starts (with the count) and ends, and
+   `status` shows it while it runs.
+
 Progress (2026-10-10): Layers 0–4 are built against the fake remote; Layer 5's adapter syncs
 two folders through a live identity (frodo), including the WebSocket wake-up. Open in Layer 5:
 batch deletes, app sign-in by slug (#1902), and the interop
