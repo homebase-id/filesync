@@ -175,6 +175,10 @@ Written: [spec/sync-semantics.md](spec/sync-semantics.md),
   (2026-10-11, `crates/hbsync-tray`: status and progress, recently synced, problems, timed
   pause, logging in, held deletes, notifications, folder icon and shortcut; the Folders page
   since 2026-10-14); selective sync comes next
+- **Ask before starting or stopping syncing** (the user, 2026-10-25): quitting the tray asks
+  whether to stop syncing too or keep it running in the background, and starting the tray
+  while the daemon isn't running asks whether to start it. Today both happen without asking:
+  quitting always stops the daemon, and the tray starts it whenever a folder is set up
 - **Linux FUSE mount** (later)
 
 ## Continuous: hardening
