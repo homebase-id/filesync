@@ -817,7 +817,7 @@ mod tests {
         let db = home.path().join("state.db");
         let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
         let drive = Drive::open(&db, "a.example", remote.clone())?;
-        let n = hbsync_remote::BATCH_FILES + 1;
+        let n = hbsync_engine::deleted::FOR_GOOD_BATCH + 1;
         let control = emptying(&remote, &drive, &db, n)?;
         let (tell, told) = notes();
         let (show, seen) = gathered();
@@ -849,7 +849,7 @@ mod tests {
         let db = home.path().join("state.db");
         let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
         let drive = Drive::open(&db, "a.example", remote.clone())?;
-        let batch = hbsync_remote::BATCH_FILES;
+        let batch = hbsync_engine::deleted::FOR_GOOD_BATCH;
         let n = 2 * batch + 1;
         let control = emptying(&remote, &drive, &db, n)?;
         let (tell, told) = notes();

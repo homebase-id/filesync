@@ -17,7 +17,7 @@ use super::listing::{
     Listed, RemovedRows, deleted_by_item, deletes_before, group, holdings, refuse_unlisted,
 };
 use super::rules::{Chosen, before_folders_go, inside, passes};
-use super::{AccountOps, Going};
+use super::{AccountOps, FOR_GOOD_BATCH, Going};
 
 impl AccountOps<'_> {
     /// The purge: deletes for good the items of Recently deleted kept `keep_ms` by `now_ms` (the
@@ -335,7 +335,7 @@ impl AccountOps<'_> {
     /// versions ([`before_folders_go`]): round a cycle of removed folders, one holds another
     /// still to go, and goes first. A node removed before `hard_before` (Unix ms, the
     /// server's) goes without a trace; any other leaves a tombstone (`None`: every one does),
-    /// recorded with its time; both in batches of [`BATCH_FILES`], a request each, each batch
+    /// recorded with its time; both in batches of [`FOR_GOOD_BATCH`], a request each, each batch
     /// written as it is answered: a stop, a crash or a failure keeps what went. Returns how many
     /// went. One written since, or not found, leaves the account behind ([`AccountOps::run`]);
     /// one not found is recorded gone once its header says so too. A request that fails stops
@@ -400,8 +400,8 @@ impl AccountOps<'_> {
             }
             let (hard, soft): (Vec<&RemovedRow>, Vec<&RemovedRow>) =
                 goes.into_iter().partition(|r| hard(r));
-            let batches = (hard.chunks(BATCH_FILES).map(|b| (b, true)))
-                .chain(soft.chunks(BATCH_FILES).map(|b| (b, false)));
+            let batches = (hard.chunks(FOR_GOOD_BATCH).map(|b| (b, true)))
+                .chain(soft.chunks(FOR_GOOD_BATCH).map(|b| (b, false)));
             for (batch, for_good) in batches {
                 going.check()?;
                 let doomed: Vec<Doomed> = batch.iter().map(|r| r.doomed()).collect();
@@ -484,8 +484,9 @@ impl AccountOps<'_> {
     /// Deletes hard the tombstones the feed brought that were written before `before_ms` (Unix ms,
     /// the server's clock): a delete for good that left one leaves nothing in the feed once every
     /// device has had time to see it. Each at its version: one written since stays, and so does
-    /// one a failed request didn't answer. In batches of [`BATCH_FILES`], each written as it is
-    /// answered; `going`'s stop, asked before each, ends it with [`Stopped::Requested`](crate::exec::Stopped::Requested).
+    /// one a failed request didn't answer. In batches of [`BATCH_FILES`] (a tombstone holds no
+    /// bytes), each written as it is answered; `going`'s stop, asked before each, ends it with
+    /// [`Stopped::Requested`](crate::exec::Stopped::Requested).
     fn delete_tombstones(&self, before_ms: i64, going: Going<'_>) -> Result<(), EngineError> {
         let tombstones = self.db().read(|s| s.tombstones_before(before_ms))?;
         for batch in tombstones.chunks(BATCH_FILES) {

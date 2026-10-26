@@ -1176,14 +1176,15 @@ fn a_page_read_during_a_write_may_be_kept_stale() -> R {
 
 /// A purge on the server's hard delete (`hard-delete-batch`, odin-core #1968): `n` files
 /// (`HARD_PURGE_FILES`, 2,100 by default) created, removed, then deleted for good a batch of
-/// 1,000 at a time, as the purge sends them. Prints each batch's time and bytes (this process's
-/// connections, the notification socket included), and checks that the notifier announces
-/// every hard delete as deleted (its `previousFileRef`), and none of the feed's rows is left.
+/// [`hbsync_engine::deleted::FOR_GOOD_BATCH`] at a time, as the purge sends them. Prints each
+/// batch's time and bytes (this process's connections, the notification socket included), and
+/// checks that the notifier announces every hard delete as deleted (its `previousFileRef`), and
+/// none of the feed's rows is left.
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE); a measurement"]
 fn hard_purge() -> R {
     let _drive = beside_others();
-    use hbsync_homebase::drive::BATCH_FILES;
+    use hbsync_engine::deleted::FOR_GOOD_BATCH;
     use hbsync_remote::contract::{file, removed};
     use hbsync_types::RemoteRef;
     use std::collections::HashSet;
@@ -1227,13 +1228,13 @@ fn hard_purge() -> R {
         )?;
         // Subscribed before the deletes.
         std::thread::sleep(Duration::from_secs(3));
-        println!("{n} removed files deleted for good, {BATCH_FILES} a request");
+        println!("{n} removed files deleted for good, {FOR_GOOD_BATCH} a request");
         println!(
             "{:<8} {:>6} {:>10} {:>12} {:>12}",
             "batch", "files", "ms", "bytes sent", "bytes recv"
         );
         let mut total = Duration::ZERO;
-        for (i, batch) in made.chunks(BATCH_FILES).enumerate() {
+        for (i, batch) in made.chunks(FOR_GOOD_BATCH).enumerate() {
             let (sent, recv) = (socket_count("bytes_sent:")?, socket_bytes()?);
             let start = std::time::Instant::now();
             let results = remote.delete_for_good(&doomed(batch))?.into_answers()?;

@@ -1370,12 +1370,12 @@ fn an_unknown_answer_fails_the_purge() -> common::Res<()> {
     Ok(())
 }
 
-/// Emptying many files deletes them softly a batch at a time (`soft-delete-batch`, 1,000 files a
-/// request), not a request each: 2,041 files, three requests and nothing else. Each is
-/// recorded gone at once with its tombstone's time; the tombstones' versions come with the
-/// feed, and they go hard [`TRACE_MS`] after their time.
+/// Emptying many files deletes them softly a batch at a time (`soft-delete-batch`,
+/// [`deleted::FOR_GOOD_BATCH`], 250 files a request), not a request each: 2,041 files, nine requests
+/// and nothing else. Each is recorded gone at once with its tombstone's time; the tombstones'
+/// versions come with the feed, and they go hard [`TRACE_MS`] after their time.
 #[test]
-fn emptying_many_files_takes_a_request_per_thousand() -> common::Res<()> {
+fn emptying_many_files_takes_a_request_per_batch() -> common::Res<()> {
     let server = server();
     let names: Vec<String> = (0..2041).map(|i| format!("f{i:04}.txt")).collect();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
@@ -1391,7 +1391,7 @@ fn emptying_many_files_takes_a_request_per_thousand() -> common::Res<()> {
         requests() - before,
         began.elapsed()
     );
-    assert_eq!(requests() - before, 3, "a request per 1,000 files");
+    assert_eq!(requests() - before, 9, "a request per 250 files");
     {
         let mut db = account.lock().map_err(|_| "poisoned")?;
         assert!(db.read(|s| s.list_removed(10))?.is_empty());
@@ -1769,7 +1769,7 @@ fn stop_after_the_first(stop: &AtomicBool) -> impl Fn(usize, usize) + '_ {
 /// far it got as it starts and after each batch.
 #[test]
 fn deleting_for_good_writes_each_batch_as_it_is_answered() -> common::Res<()> {
-    let batch = hbsync_remote::BATCH_FILES;
+    let batch = deleted::FOR_GOOD_BATCH;
     let n = 2 * batch + batch / 2;
     let server = server();
     let (account, remote, now) = many_removed(&server, n)?;
@@ -1796,7 +1796,7 @@ fn deleting_for_good_writes_each_batch_as_it_is_answered() -> common::Res<()> {
 /// written, the rest stays in Recently deleted, and the next purge takes it.
 #[test]
 fn a_stop_ends_deleting_for_good_after_the_batch_in_flight() -> common::Res<()> {
-    let batch = hbsync_remote::BATCH_FILES;
+    let batch = deleted::FOR_GOOD_BATCH;
     let n = 2 * batch + 1;
     let server = server();
     let (account, remote, now) = many_removed(&server, n)?;
@@ -1829,7 +1829,7 @@ fn a_stop_ends_deleting_for_good_after_the_batch_in_flight() -> common::Res<()> 
 /// A failed batch keeps what the batches before it deleted: written as each was answered.
 #[test]
 fn a_failed_batch_keeps_the_batches_before_it() -> common::Res<()> {
-    let batch = hbsync_remote::BATCH_FILES;
+    let batch = deleted::FOR_GOOD_BATCH;
     let n = 2 * batch;
     let server = server();
     let (account, remote, now) = many_removed(&server, n)?;

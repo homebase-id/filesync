@@ -103,7 +103,8 @@ Also from the test:
   SyncFolder types (not filed).
 - The server's `soft-delete-batch` took about 70 s per 1,000 files on the user's Homebase
   (2026-10-25; about 3–4 s on frodo), probably the per-file work plus S3. To examine with
-  odin-core.
+  odin-core. Meanwhile emptying sends 250 a request (`FOR_GOOD_BATCH`, 4× the requests), so a
+  stop waits less; back to 1,000 once it is fast.
 - odin-core, being fixed by the user (2026-10-26): an upload answered 200 once the server has
   received it, then moved to long-term storage in the background (today the answer waits for
   the S3 copy, and the load balancer cuts it after 300 s of silence); the duplicate check

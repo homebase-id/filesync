@@ -154,7 +154,8 @@ main e0d52f336 (frodo runs it): `V2DriveBatchFileWriteOperationsController.SoftD
   as the feed shows it (Unix ms; a tombstone already answers its own), null when it stayed.
   The answer carries no `versionTag`: the tombstone's comes with its row in the feed.
 - The client deletes softly through it (`HomebaseRemote::delete`: emptying Recently deleted,
-  and the purge's younger nodes), a request per 1,000 files. It records each file gone at once,
+  and the purge's younger nodes), a request per 250 files, so a stop waits less (a request of
+  1,000 took ~70 s on the user's Homebase). It records each file gone at once,
   since `updated` (`gone_files.gone_at`, which the 30 days of keeping its id count from), and
   the tombstone, at its version and time, from the feed's row, which the hard delete 30 days
   on needs (node schema, The purge, 3.).
