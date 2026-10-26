@@ -19,22 +19,29 @@ pub struct Reader {
     conn: Connection,
 }
 
+/// A connection to the DB at `path` that only reads, waiting out another's write, and never
+/// copying the log into the DB file as it closes (it couldn't, its file read-only here, but
+/// it doesn't try either).
+pub(crate) fn read_only(path: &Path) -> Result<Connection> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(BUSY_TIMEOUT)?;
+    conn.set_db_config(
+        rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+        true,
+    )?;
+    Ok(conn)
+}
+
 impl Reader {
     /// The DB at `path`; `None` if there is none (or nothing in it yet).
     pub fn open(path: &Path) -> Result<Option<Reader>> {
         if !path.exists() {
             return Ok(None);
         }
-        let conn = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        conn.busy_timeout(BUSY_TIMEOUT)?;
-        // It couldn't (its file is read-only here), but it doesn't try either.
-        conn.set_db_config(
-            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
-            true,
-        )?;
+        let conn = read_only(path)?;
         // What it reads is answered and let go: a small cache, not the default 2 MB a listing
         // of Recently deleted would fill and keep.
         conn.pragma_update(None, "cache_size", READER_CACHE_KIB)?;

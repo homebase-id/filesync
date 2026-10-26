@@ -13,7 +13,6 @@
 //!   `v<N>.sql` beside `v13.sql`, for the test to bring up to date too.
 
 use std::collections::BTreeSet;
-use std::sync::LazyLock;
 
 use rusqlite::{Connection, TransactionBehavior};
 
@@ -489,17 +488,12 @@ fn parts(conn: &Connection) -> Result<Parts> {
 /// Refuses ([`StateError::Damaged`]) a DB at [`VERSION`] that lacks a part of [`SCHEMA`]
 /// ([`parts`]): a table, a column, an index or a trigger.
 pub(crate) fn check_schema(conn: &Connection) -> Result<()> {
-    static WANTED: LazyLock<std::result::Result<Parts, String>> = LazyLock::new(|| {
-        let made = || -> Result<_> {
-            let conn = Connection::open_in_memory()?;
-            conn.execute_batch(SCHEMA)?;
-            parts(&conn)
-        };
-        made().map_err(|e| e.to_string())
-    });
-    let wanted = WANTED
-        .as_ref()
-        .map_err(|e| StateError::Conflict(e.clone()))?;
+    // Made at each check, once per account start (~1 ms), not kept.
+    let wanted = {
+        let made = Connection::open_in_memory()?;
+        made.execute_batch(SCHEMA)?;
+        parts(&made)?
+    };
     let have = parts(conn)?;
     let missing: Vec<String> = wanted
         .difference(&have)

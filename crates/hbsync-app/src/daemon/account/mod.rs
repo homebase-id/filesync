@@ -66,6 +66,9 @@ pub(crate) struct Account {
     ended: AtomicBool,
     /// Its thread is ending: joining it waits for no more than that.
     pub done: AtomicBool,
+    /// Its DB is ready ([`crate::folders::ready_account`]): the answers may open it, until
+    /// its thread ends (one set aside meanwhile must not be held open, nor read on).
+    ready: AtomicBool,
     /// A connection to its DB for the control socket's answers (recent, deleted), opened on
     /// first use.
     reader: Mutex<Option<AccountReader>>,
@@ -180,6 +183,7 @@ impl Account {
             requests,
             ended: AtomicBool::new(false),
             done: AtomicBool::new(false),
+            ready: AtomicBool::new(false),
             reader: Mutex::new(None),
             changed,
         };
@@ -331,8 +335,9 @@ impl Account {
         self.wake();
     }
 
-    /// Closes the answers' connection to its DB, once it ended: not opened again.
-    pub(super) fn close_reader(&self) {
+    /// Its thread ended: the answers' connection to its DB is closed, not opened again.
+    pub(super) fn ended_thread(&self) {
+        self.done.store(true, Ordering::SeqCst);
         *lock(&self.reader) = None;
     }
 
@@ -510,9 +515,8 @@ impl Account {
     ) -> Result<T, String> {
         let mut reader = lock(&self.reader);
         if reader.is_none() {
-            // Ended, its DB is another account's to open (it may set it aside).
-            if self.ended.load(Ordering::Relaxed) {
-                return Err("it is starting over".to_owned());
+            if !self.ready.load(Ordering::SeqCst) || self.done.load(Ordering::SeqCst) {
+                return Err("its state DB isn't ready".to_owned());
             }
             *reader = match AccountReader::open(&self.db, &self.identity) {
                 Ok(opened) => opened,
@@ -605,6 +609,7 @@ mod tests {
             Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default()))),
         )?;
         lock(&account.shown).waiting = None;
+        account.ready.store(true, Ordering::SeqCst);
         let listed = account.read(|r| r.deletes(0)).ok_or("unreadable")?.1.listed;
         let empty = |db: &str, seq| {
             account.request(AccountControl::EmptyListed {
@@ -629,6 +634,8 @@ mod tests {
         let paths = Paths::under(home.path());
         let root = Root::main(&"a.example".into(), &home.path().join("Homebase"));
         let (account, _requests) = Account::new(&paths, &root, None, Arc::default());
+        // Its DB ready, as its thread makes it.
+        account.ready.store(true, Ordering::SeqCst);
         let db = paths.account_db(&"a.example".into());
         std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
         Drive::open(

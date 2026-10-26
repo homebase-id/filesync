@@ -48,12 +48,13 @@ files named alike, never deleted: they are for a diagnosis, and old ones can be 
 The account's folders that are there (their marker this identity's) are then set up again in the
 new DB as folders with files, as `hbsync setup --existing` does: what they hold is adopted by
 hash, nothing is copied twice, and a file that differs from the drive's becomes a conflict copy.
-The tray and the log say so, once. The new DB records that it replaced one (`db.set_aside`): a
-folder not there then (a disk not plugged in), or one that couldn't be set up, is set up again
-at a later start of the account, once it is back. Not set aside: a DB of a newer version (a
-downgrade: setting it aside would throw a newer version's records away; the account waits,
-saying why), and one that can't be read for now (busy or locked, an I/O error, a full disk,
-access denied, a missing folder, a read-only file system: the daemon tries again).
+The tray and the log say so, once. The new DB records that it replaced one (`db.set_aside`)
+until it knows each of them: a folder not there then (a disk not plugged in), or one that
+couldn't be set up, is set up again at a later start of the account, once it is back. Not set
+aside: a DB of a newer version (a downgrade: setting it aside would throw a newer version's
+records away; the account waits, saying why), and one that can't be read for now (busy or
+locked, an I/O error, a full disk, access denied, a missing folder, a read-only file system: the
+daemon tries again).
 
 The recovery rule (data safety): setting a DB aside never deletes a file, here or on the drive:
 the new DB has no base, and without one nothing is deleted. What is lost is the old DB's

@@ -15,19 +15,14 @@ use hbsync_engine::Drive;
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 use hbsync_state::Unusable;
 
-type R = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+type E = Box<dyn std::error::Error + Send + Sync>;
+type R = Result<(), E>;
 
 const ID: &str = "test.example";
 
 /// A folder's files as `(path, contents)`, its state folder left out.
-fn files(
-    root: &Path,
-) -> Result<BTreeMap<String, String>, Box<dyn std::error::Error + Send + Sync>> {
-    fn walk(
-        root: &Path,
-        dir: &Path,
-        out: &mut BTreeMap<String, String>,
-    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+fn files(root: &Path) -> Result<BTreeMap<String, String>, E> {
+    fn walk(root: &Path, dir: &Path, out: &mut BTreeMap<String, String>) -> Result<(), E> {
         for entry in std::fs::read_dir(dir)? {
             let path = entry?.path();
             let rel = path
@@ -60,11 +55,7 @@ fn write_files(root: &Path) -> R {
 
 /// Syncs the folder `root` (set up in `db`) once with `server` and stops: what it sent and
 /// fetched (uploads, bytes served).
-fn sync_once(
-    server: &Arc<Mutex<FakeServer>>,
-    root: &Path,
-    db: &Path,
-) -> Result<(usize, u64), Box<dyn std::error::Error + Send + Sync>> {
+fn sync_once(server: &Arc<Mutex<FakeServer>>, root: &Path, db: &Path) -> Result<(usize, u64), E> {
     let remote = FakeRemote::new(server.clone());
     let cfg = RunnerConfig::new(root, db, &ID.into(), "a");
     let drive = Drive::open(&cfg.db, &cfg.identity, Arc::new(remote.clone()))?;
@@ -108,7 +99,7 @@ fn spoil(db: &Path, why: Unusable) -> R {
 }
 
 /// What was set aside beside `db`.
-fn set_aside(db: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error + Send + Sync>> {
+fn set_aside(db: &Path) -> Result<Vec<PathBuf>, E> {
     let name = db.file_name().ok_or("name")?.to_string_lossy().into_owned();
     let mut found = Vec::new();
     for entry in std::fs::read_dir(db.parent().ok_or("parent")?)? {
@@ -124,20 +115,46 @@ fn set_aside(db: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error + Send
     Ok(found)
 }
 
+/// A folder synced with a drive: its files up, its DB beside it.
+struct Synced {
+    server: Arc<Mutex<FakeServer>>,
+    root: PathBuf,
+    db: PathBuf,
+    /// What the folder holds.
+    files: BTreeMap<String, String>,
+    _dir: tempfile::TempDir,
+}
+
+fn synced() -> Result<Synced, E> {
+    let server = FakeServer::new(ServerConfig::default());
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().canonicalize()?.join("Homebase");
+    let db = root.with_file_name("state.db");
+    std::fs::create_dir_all(&root)?;
+    hbsync_engine::root::SyncRoot::create(&db, ID, &root)?;
+    write_files(&root)?;
+    sync_once(&server, &root, &db)?;
+    Ok(Synced {
+        server,
+        files: files(&root)?,
+        root,
+        db,
+        _dir: dir,
+    })
+}
+
 /// A folder synced, then a computer whose DB became unusable, as its account starts again (the
 /// daemon's start): the DB set aside, kept, and the folder adopted, nothing sent or fetched.
 #[test]
 fn the_daemon_sets_an_unusable_db_aside_and_adopts_the_folder() -> R {
     for why in [Unusable::TooOld, Unusable::Corrupt] {
-        let server = FakeServer::new(ServerConfig::default());
-        let dir = tempfile::tempdir()?;
-        let root = dir.path().canonicalize()?.join("Homebase");
-        let db = root.with_file_name("state.db");
-        std::fs::create_dir_all(&root)?;
-        hbsync_engine::root::SyncRoot::create(&db, ID, &root)?;
-        write_files(&root)?;
-        sync_once(&server, &root, &db)?;
-        let synced = files(&root)?;
+        let Synced {
+            server,
+            root,
+            db,
+            files: synced,
+            _dir,
+        } = synced()?;
         let on_drive = server.lock().map_err(|_| "poisoned")?.live_names();
 
         spoil(&db, why)?;
@@ -158,16 +175,13 @@ fn the_daemon_sets_an_unusable_db_aside_and_adopts_the_folder() -> R {
 /// set up again at a later start once it is back: adopted, nothing sent or fetched.
 #[test]
 fn a_folder_back_later_is_set_up_again_at_the_next_start() -> R {
-    let server = FakeServer::new(ServerConfig::default());
-    let dir = tempfile::tempdir()?;
-    let root = dir.path().canonicalize()?.join("Homebase");
-    let db = root.with_file_name("state.db");
-    std::fs::create_dir_all(&root)?;
-    hbsync_engine::root::SyncRoot::create(&db, ID, &root)?;
-    write_files(&root)?;
-    sync_once(&server, &root, &db)?;
-    let synced = files(&root)?;
-
+    let Synced {
+        server,
+        root,
+        db,
+        files: synced,
+        _dir,
+    } = synced()?;
     spoil(&db, Unusable::TooOld)?;
     let away = root.with_file_name("unplugged");
     std::fs::rename(&root, &away)?;
@@ -185,15 +199,13 @@ fn a_folder_back_later_is_set_up_again_at_the_next_start() -> R {
 /// drive's version after the folder is set up again, as a conflict copy; nothing is deleted.
 #[test]
 fn an_edit_never_sent_is_kept_beside_the_drives() -> R {
-    let server = FakeServer::new(ServerConfig::default());
-    let dir = tempfile::tempdir()?;
-    let root = dir.path().canonicalize()?.join("Homebase");
-    let db = root.with_file_name("state.db");
-    std::fs::create_dir_all(&root)?;
-    hbsync_engine::root::SyncRoot::create(&db, ID, &root)?;
-    write_files(&root)?;
-    sync_once(&server, &root, &db)?;
-
+    let Synced {
+        server,
+        root,
+        db,
+        _dir,
+        ..
+    } = synced()?;
     spoil(&db, Unusable::TooOld)?;
     std::fs::write(root.join("c.txt"), "changed here")?;
     let roots = [Root::main(&ID.into(), &root)];
@@ -235,8 +247,7 @@ fn setup_sets_an_unusable_db_aside() -> R {
             std::fs::remove_dir_all(&root)?;
             std::fs::create_dir_all(&root)?;
         }
-        let config = hbsync_app::Config::load(&paths.config_file())?.ok_or("no config")?;
-        let set = check_state(&paths, &config, &identity, &root, false)?;
+        let set = check_state(&paths, &identity, &root, false)?;
         assert_eq!(set, (false, Some(why)));
         assert_eq!(set_aside(&db)?.len(), 1, "{why:?}: kept");
         folders::add_synced(&paths, &identity, &root, None)?;
@@ -266,7 +277,7 @@ fn a_newer_db_is_refused_and_kept() -> R {
     rusqlite::Connection::open(&db)?.pragma_update(None, "user_version", 9999)?;
     let before = std::fs::read(&db)?;
     let config = hbsync_app::Config::load(&paths.config_file())?.ok_or("no config")?;
-    let refused = check_state(&paths, &config, &identity, &root, false);
+    let refused = check_state(&paths, &identity, &root, false);
     assert!(
         refused
             .as_ref()

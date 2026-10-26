@@ -231,23 +231,21 @@ pub fn plan(
 /// daemon runs, and why the DB was set aside here, if it was.
 pub fn check_state(
     paths: &Paths,
-    config: &Config,
     identity: &Identity,
     folder: &Path,
     existing: bool,
 ) -> crate::Result<(bool, Option<Unusable>)> {
     let db = paths.account_db(identity);
-    let (running, set_aside) = {
-        let _held = ConfigLock::take(&paths.config_file())?;
-        let running = control::running(paths)?;
-        let set_aside = match !running && db.exists() {
-            // Nothing else writes it: brought up to date here (or set aside and made again),
-            // for the checks (which only look).
-            true => folders::ready_account(&db, identity, &config.roots)?.map(|set| set.why),
-            false => None,
-        };
-        (running, set_aside)
-    };
+    let held = ConfigLock::take(&paths.config_file())?;
+    let running = control::running(paths)?;
+    let mut set_aside = None;
+    if !running && db.exists() {
+        // Nothing else writes it: readied here (set aside and made again if it can't be used),
+        // for the checks (which only look).
+        let roots = held.load()?.unwrap_or_default().roots;
+        set_aside = folders::ready_account(&db, identity, &roots)?.map(|set| set.why);
+    }
+    drop(held);
     match SyncRoot::find(&db, identity, folder) {
         Ok(_) => {}
         // The running daemon sets it aside as it adds the folder, where its account doesn't
@@ -359,7 +357,7 @@ pub fn set_up(
 
     // The folder in the account's state DB, and its marker: kept if set up before. Checked
     // here, set up by the daemon (or here, when it isn't running).
-    let (running, set_aside) = check_state(paths, &config, identity, &folder, checked.existing)?;
+    let (running, set_aside) = check_state(paths, identity, &folder, checked.existing)?;
     if running && authorized {
         control::start_over(paths, identity)?;
     }

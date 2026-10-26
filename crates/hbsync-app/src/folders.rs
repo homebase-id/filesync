@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use hbsync_engine::root::{AccountReader, RootError, SetAside, SyncRoot};
+use hbsync_engine::root::{RootError, SetAside, SyncRoot};
 use hbsync_types::{NodeId, Role};
 
 use crate::config::ConfigLock;
@@ -169,19 +169,23 @@ pub(crate) fn has_files(folder: &Path) -> std::io::Result<bool> {
 /// back from Recently deleted, or made when the folder first syncs). The daemon's half: see
 /// [`add_synced`]. One at a time, in any process or thread (the tray's pages serve each request
 /// on a thread): two set-ups of one folder would each make it anew, the second undoing the
-/// first.
+/// first. With `ready`, nothing else writes the account's DB (the daemon runs no account of
+/// the identity): it is readied first, as the account's start would ([`ready_account`]). What
+/// that set aside, if anything.
 pub fn add(
     paths: &Paths,
     identity: &Identity,
     path: &Path,
     role: Option<Role>,
-) -> Result<(), Error> {
+    ready: bool,
+) -> Result<Option<SetAside>, Error> {
     add_locked(
         &ConfigLock::take(&paths.config_file())?,
         paths,
         identity,
         path,
         role,
+        ready,
     )
 }
 
@@ -192,11 +196,17 @@ fn add_locked(
     identity: &Identity,
     path: &Path,
     role: Option<Role>,
-) -> Result<(), Error> {
+    ready: bool,
+) -> Result<Option<SetAside>, Error> {
     let config = held.load()?.unwrap_or_default();
     check(&config, identity, path, role, home().as_deref())?;
+    let db = paths.account_db(identity);
+    let set = match ready {
+        true => ready_account(&db, identity, &config.roots)?,
+        false => None,
+    };
     let top = role.map_or(NodeId::ROOT, Role::node);
-    SyncRoot::open_or_create_for(&paths.account_db(identity), identity, path, top)?;
+    SyncRoot::open_or_create_for(&db, identity, path, top)?;
     held.update(|config| {
         if !config.roots.iter().any(|r| r.folder == path) {
             config.roots.push(Root {
@@ -205,7 +215,7 @@ fn add_locked(
             });
         }
     })?;
-    Ok(())
+    Ok(set)
 }
 
 /// Who took a folder change: the running daemon (it syncs now), or the config (the daemon
@@ -217,13 +227,10 @@ pub enum Taken {
 }
 
 /// Readies `identity`'s state DB at `db` as its account starts, while nothing else may write
-/// it ([`SyncRoot::upgrade_or_set_aside`]; one at a time in this process). One that can't be
-/// used (from before 0.7, or damaged) is set aside and made again. In a DB made so, each of
-/// `roots` (the folders the config lists) that is the identity's (its marker says so) and
-/// unknown to the DB is set up again as a folder with files, as `hbsync setup --existing`
-/// does: what it holds is adopted, nothing is copied twice, and nothing is deleted (the DB has
-/// no base for it). At every start: one not there at first (a disk not plugged in), or one
-/// that failed, is set up at a later start. What was set aside now, if anything.
+/// it, one at a time in this process ([`SyncRoot::ready`]): one that can't be used (from
+/// before 0.7, or damaged) is set aside and made again, and the identity's folders among
+/// `roots` (the config's) are set up again in it as folders with files, as `hbsync setup
+/// --existing` does. What was set aside now, if anything.
 pub fn ready_account(
     db: &Path,
     identity: &Identity,
@@ -231,37 +238,12 @@ pub fn ready_account(
 ) -> Result<Option<SetAside>, RootError> {
     static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
     let _turn = crate::sync::lock(&TURN);
-    let set = SyncRoot::upgrade_or_set_aside(db, identity)?;
-    if let Some(set) = &set {
-        tracing::warn!(
-            "{identity}: its state DB was set aside, as {}; its folders are set up again",
-            set.to.display()
-        );
-    }
-    let replaced = match &set {
-        Some(_) => true,
-        None => match AccountReader::open(db, identity)? {
-            Some(mut reader) => reader.replaced_one()?,
-            None => false,
-        },
-    };
-    if !replaced {
-        return Ok(set);
-    }
-    for root in roots.iter().filter(|r| r.identity == *identity) {
-        let again = match SyncRoot::find(db, identity, &root.folder) {
-            Err(RootError::Unknown(_)) => {
-                let top = root.role.map_or(NodeId::ROOT, Role::node);
-                SyncRoot::create_for(db, identity, &root.folder, top).map(drop)
-            }
-            Ok(_) => Ok(()),
-            Err(e) => Err(e),
-        };
-        if let Err(e) = again {
-            tracing::warn!("{} isn't set up again now: {e}", root.folder.display());
-        }
-    }
-    Ok(set)
+    let folders: Vec<(&Path, NodeId)> = roots
+        .iter()
+        .filter(|r| r.identity == *identity)
+        .map(|r| (r.folder.as_path(), r.role.map_or(NodeId::ROOT, Role::node)))
+        .collect();
+    SyncRoot::ready(db, identity, &folders)
 }
 
 /// Has the running daemon set the folder at `path` up and sync it ([`add`]), or sets it up for
@@ -274,7 +256,8 @@ pub fn add_synced(
 ) -> Result<Taken, Error> {
     changed(
         paths,
-        |held| add_locked(held, paths, identity, path, role),
+        // Without a daemon, setup has readied the DB ([`crate::setup::check_state`]).
+        |held| add_locked(held, paths, identity, path, role, false).map(drop),
         || crate::control::add_folder(paths, identity, path, role),
     )
 }
@@ -374,27 +357,34 @@ mod tests {
         let paths = Paths::under(home.path());
         let folder = home.path().join("Homebase");
         std::fs::create_dir_all(&folder)?;
-        add(&paths, &"a.example".into(), &folder, None)?;
+        add(&paths, &"a.example".into(), &folder, None, false)?;
         let marker = hbsync_local::Marker::read(&folder)?;
-        add(&paths, &"a.example".into(), &folder, None)?;
+        add(&paths, &"a.example".into(), &folder, None, false)?;
         assert_eq!(hbsync_local::Marker::read(&folder)?, marker, "kept");
         let config = Config::load(&paths.config_file())?.ok_or("no config")?;
         assert_eq!(config.roots, [Root::main(&"a.example".into(), &folder)]);
         assert!(
-            add(&paths, &"a.example".into(), &folder, Some(Role::Documents)).is_err(),
+            add(
+                &paths,
+                &"a.example".into(),
+                &folder,
+                Some(Role::Documents),
+                false
+            )
+            .is_err(),
             "set up as the main folder"
         );
         let other = home.path().join("Other");
         std::fs::create_dir_all(&other)?;
         assert!(
-            add(&paths, &"a.example".into(), &other, None).is_err(),
+            add(&paths, &"a.example".into(), &other, None, false).is_err(),
             "one main folder per identity"
         );
 
         let inside = folder.join("Documents");
         std::fs::create_dir_all(&inside)?;
         assert!(
-            add(&paths, &"b.example".into(), &inside, None).is_err(),
+            add(&paths, &"b.example".into(), &inside, None, false).is_err(),
             "not inside another synced folder"
         );
 
@@ -422,14 +412,39 @@ mod tests {
         for f in [&main, &docs, &more] {
             std::fs::create_dir_all(f)?;
         }
-        add(&paths, &"a.example".into(), &main, None)?;
-        add(&paths, &"a.example".into(), &docs, Some(Role::Documents))?;
-        add(&paths, &"a.example".into(), &docs, Some(Role::Documents))?;
+        add(&paths, &"a.example".into(), &main, None, false)?;
+        add(
+            &paths,
+            &"a.example".into(),
+            &docs,
+            Some(Role::Documents),
+            false,
+        )?;
+        add(
+            &paths,
+            &"a.example".into(),
+            &docs,
+            Some(Role::Documents),
+            false,
+        )?;
         assert!(
-            add(&paths, &"a.example".into(), &more, Some(Role::Documents)).is_err(),
+            add(
+                &paths,
+                &"a.example".into(),
+                &more,
+                Some(Role::Documents),
+                false
+            )
+            .is_err(),
             "one Documents per identity"
         );
-        add(&paths, &"b.example".into(), &more, Some(Role::Documents))?;
+        add(
+            &paths,
+            &"b.example".into(),
+            &more,
+            Some(Role::Documents),
+            false,
+        )?;
         let config = Config::load(&paths.config_file())?.ok_or("no config")?;
         let roles: Vec<_> = config
             .roots
@@ -446,7 +461,16 @@ mod tests {
         );
         // Its DB knows it as the role folder: set up as another, it is refused.
         remove(&paths, &docs)?;
-        assert!(add(&paths, &"a.example".into(), &docs, Some(Role::Pictures)).is_err());
+        assert!(
+            add(
+                &paths,
+                &"a.example".into(),
+                &docs,
+                Some(Role::Pictures),
+                false
+            )
+            .is_err()
+        );
         Ok(())
     }
 
@@ -459,7 +483,7 @@ mod tests {
         let a: Identity = "a.example".into();
         let docs = home.path().join("Documents");
         std::fs::create_dir_all(&docs)?;
-        add(&paths, &a, &docs, Some(Role::Documents))?;
+        add(&paths, &a, &docs, Some(Role::Documents), false)?;
         let config = Config::load(&paths.config_file())?.ok_or("no config")?;
         let refused = |path: &Path, identity: &Identity, role| {
             check(&config, identity, path, role, None).expect_err("refused")

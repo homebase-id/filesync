@@ -562,15 +562,7 @@ impl StateDb {
         if !path.exists() {
             return Ok(());
         }
-        let conn = Connection::open_with_flags(
-            path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )?;
-        conn.busy_timeout(BUSY_TIMEOUT)?;
-        conn.set_db_config(
-            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
-            true,
-        )?;
+        let conn = reader::read_only(path)?;
         migrations::check(migrations::user_version(&conn)?)?;
         let found: String = conn.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
         if found == "ok" {

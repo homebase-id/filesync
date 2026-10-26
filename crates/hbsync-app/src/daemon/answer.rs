@@ -76,32 +76,20 @@ pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
             path,
             role,
         } => done((|| {
-            // An account not running yet starts from its DB as at the daemon's start, before
-            // its folder is set up in it: one that can't be used is set aside first (nothing
-            // writes it meanwhile), and told once the account is there. Not for a folder that
-            // isn't taken (checked again as it is added).
-            let set = match accounts.iter().any(|a| a.identity == identity) {
-                true => None,
-                false => {
-                    let config = crate::Config::load(&daemon.paths.config_file())?;
-                    let config = config.unwrap_or_default();
-                    let home = crate::paths::home();
-                    crate::folders::check(&config, &identity, &path, role, home.as_deref())?;
-                    let db = daemon.paths.account_db(&identity);
-                    crate::folders::ready_account(&db, &identity, &config.roots)?
-                }
-            };
-            crate::folders::add(&daemon.paths, &identity, &path, role)?;
+            // An account not running yet starts from its DB as at the daemon's start: one that
+            // can't be used is set aside as the folder is added, and told once the account is
+            // there.
+            let idle = daemon.account_idle(&identity);
+            let set = crate::folders::add(&daemon.paths, &identity, &path, role, idle)?;
             daemon.add_folder(&Root {
                 identity: identity.clone(),
                 folder: path,
                 role,
             })?;
-            if let Some(set) = set {
-                let note = words::set_aside(set.why);
-                for a in daemon.accounts().iter().filter(|a| a.identity == identity) {
-                    a.note(vec![note.clone()]);
-                }
+            if let Some(set) = set
+                && let Some(a) = daemon.accounts().iter().find(|a| a.identity == identity)
+            {
+                a.note(vec![words::set_aside(set.why)]);
             }
             Ok(())
         })()),

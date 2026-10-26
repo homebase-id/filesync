@@ -89,29 +89,10 @@ impl Account {
         // 0.7, damaged) is set aside and its folders set up again, told once; one only the user
         // can set right (a newer version's) is shown and waited out, asking nothing, the daemon
         // and the other accounts going on.
-        loop {
-            // With the answers' connection held closed: none reads the DB as it may be set
-            // aside (Windows can't rename an open file), or keeps reading the one set aside.
-            // The config's, as the daemon read it at its start (it adds them to the account
-            // one at a time), and those added since.
-            let mut roots = self.folders();
-            for root in &config.roots {
-                if !roots.iter().any(|r| r.folder == root.folder) {
-                    roots.push(root.clone());
-                }
-            }
-            let ready = {
-                let mut reader = lock(&self.reader);
-                *reader = None;
-                ready_account(&self.db, &self.identity, &roots)
-            };
-            match ready {
-                Ok(set) => {
-                    if let Some(set) = set {
-                        self.note(vec![words::set_aside(set.why)]);
-                    }
-                    break;
-                }
+        let set = loop {
+            // The config's folders, as read when the account was made: they all are in it.
+            match ready_account(&self.db, &self.identity, &config.roots) {
+                Ok(set) => break set,
                 Err(e) if e.class() != ErrorClass::NeedsUser => {
                     return Err(RunnerError::Folder(e).into());
                 }
@@ -123,6 +104,11 @@ impl Account {
                     }
                 }
             }
+        };
+        // Ready: the answers may read it now.
+        self.ready.store(true, Ordering::SeqCst);
+        if let Some(set) = set {
+            self.note(vec![words::set_aside(set.why)]);
         }
         let Some(creds) = self.credentials(paths, stop, requests, &mut msgs)? else {
             return Ok(());

@@ -191,7 +191,7 @@ fn the_daemon_answers_while_offline_and_stops() -> R {
     Ok(())
 }
 
-/// Waits until the daemon's status passes `done`; the last one read.
+/// Waits until the daemon's status passes `done`, and returns it.
 fn wait_for_status(
     home: &Home,
     done: impl Fn(&serde_json::Value) -> bool,
@@ -199,8 +199,11 @@ fn wait_for_status(
     let until = Instant::now() + Duration::from_secs(30);
     loop {
         let status = status(home)?;
-        if done(&status) || Instant::now() > until {
+        if done(&status) {
             return Ok(status);
+        }
+        if Instant::now() > until {
+            return Err(format!("timed out waiting for the status: {status}").into());
         }
         std::thread::sleep(Duration::from_millis(200));
     }
@@ -224,7 +227,6 @@ fn the_daemon_sets_an_old_state_db_aside_and_refuses_a_newer_one() -> R {
         })
     };
     let status = wait_for_status(&home, told)?;
-    assert!(told(&status), "{status}");
     let notes = status["accounts"][0]["recent"]
         .as_array()
         .map_or(0, Vec::len);
@@ -246,7 +248,6 @@ fn the_daemon_sets_an_old_state_db_aside_and_refuses_a_newer_one() -> R {
             .is_some_and(|e| e.contains("newer"))
     };
     let status = wait_for_status(&home, refused)?;
-    assert!(refused(&status), "{status}");
     assert_eq!(status["folders"][0]["state"], "failing", "{status}");
     home.ok(&["stop"])?;
     let user_version: u32 =
