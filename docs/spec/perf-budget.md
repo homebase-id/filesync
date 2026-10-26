@@ -55,6 +55,5 @@ network latency.
 | Deleting the 10,130 nodes | 33.6 s: a header check and a delete per node, one at a time |
 
 Follow-ups: batch deletes (done: removals through `update-archival-status-batch` since
-2026-10-18, emptying through `soft-delete-batch` since 2026-10-19, 1,000 files a request, 250 since
-2026-10-26);
+2026-10-18, emptying through `soft-delete-batch` since 2026-10-19, 250 files a request);
 find what drives peak memory during a large first download.

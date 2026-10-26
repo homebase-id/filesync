@@ -37,14 +37,12 @@ pub use rules::{
 
 use crate::lock;
 
-/// Files of Recently deleted a delete for good asks about in a request (emptying it, the
-/// purge): a quarter of what the drive takes ([`hbsync_remote::BATCH_FILES`]), since a stop
+/// Files of Recently deleted (with their bytes) a delete for good, soft or hard, asks about in a
+/// request: a quarter of what the drive takes ([`hbsync_remote::BATCH_FILES`]), since a stop
 /// ([`Going`]) waits for the batch in flight, and the user's Homebase took ~70 s to soft-delete
-/// 1,000, longer than `hbsync stop` waits. It costs 4× the requests, SQLite commits and status
-/// updates (88 for 22,000 files, not 22); a file takes as long either way (measured on a local
-/// Homebase on SQLite). One batch at a time: there two in flight took as long as one after the
-/// other, as odin-core deletes a file at a time (verified in its code) and SQLite writes one at a
-/// time; a server on Postgres wasn't measured.
+/// 1,000. It costs 4× the requests, SQLite commits and status updates (88 for 22,000 files, not
+/// 22), not time. One batch at a time: odin-core deletes a file at a time (verified in its
+/// code), and two in flight took as long as one after the other (frodo, on SQLite).
 pub const FOR_GOOD_BATCH: usize = 250;
 const _: () = assert!(FOR_GOOD_BATCH <= hbsync_remote::BATCH_FILES);
 

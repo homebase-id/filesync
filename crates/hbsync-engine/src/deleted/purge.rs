@@ -484,10 +484,9 @@ impl AccountOps<'_> {
     /// Deletes hard the tombstones the feed brought that were written before `before_ms` (Unix ms,
     /// the server's clock): a delete for good that left one leaves nothing in the feed once every
     /// device has had time to see it. Each at its version: one written since stays, and so does
-    /// one a failed request didn't answer. In batches of [`BATCH_FILES`], not
-    /// [`FOR_GOOD_BATCH`]: a tombstone holds no bytes, and the slow answers seen were soft
-    /// deletes. Each batch is written as it is answered; `going`'s stop, asked before each, ends
-    /// it with [`Stopped::Requested`](crate::exec::Stopped::Requested).
+    /// one a failed request didn't answer. In batches of [`BATCH_FILES`] (a tombstone holds no
+    /// bytes), each written as it is answered; `going`'s stop, asked before each, ends it with
+    /// [`Stopped::Requested`](crate::exec::Stopped::Requested).
     fn delete_tombstones(&self, before_ms: i64, going: Going<'_>) -> Result<(), EngineError> {
         let tombstones = self.db().read(|s| s.tombstones_before(before_ms))?;
         for batch in tombstones.chunks(BATCH_FILES) {
