@@ -12,6 +12,8 @@
 //! - a release that ships a [`SCHEMA`] the first time freezes its schema, as SQLite keeps it, in
 //!   `v<N>.sql` beside `v13.sql`, for the test to bring up to date too.
 
+use std::collections::BTreeSet;
+
 use rusqlite::{Connection, TransactionBehavior};
 
 use crate::{Result, StateError};
@@ -466,6 +468,49 @@ pub(crate) fn check(version: u32) -> Result<()> {
     }
 }
 
+/// A DB's parts ([`parts`]).
+type Parts = BTreeSet<(String, String, String)>;
+
+/// Every table's columns, and every index and trigger, of the DB `conn` has: (`table`,
+/// table, column), (`index`, name, "") and (`trigger`, name, ""). SQLite's own left out.
+fn parts(conn: &Connection) -> Result<Parts> {
+    let mut st = conn.prepare(
+        "SELECT m.type, m.name, p.name FROM sqlite_schema m, pragma_table_info(m.name) p
+             WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'
+         UNION ALL
+         SELECT type, name, '' FROM sqlite_schema
+             WHERE type IN ('index', 'trigger') AND name NOT LIKE 'sqlite_%'",
+    )?;
+    let all = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?;
+    Ok(all.collect::<rusqlite::Result<_>>()?)
+}
+
+/// Refuses ([`StateError::Damaged`]) a DB at [`VERSION`] that lacks a part of [`SCHEMA`]
+/// ([`parts`]): a table, a column, an index or a trigger.
+pub(crate) fn check_schema(conn: &Connection) -> Result<()> {
+    // Made at each check, once per account start (~1 ms), not kept.
+    let wanted = {
+        let made = Connection::open_in_memory()?;
+        made.execute_batch(SCHEMA)?;
+        parts(&made)?
+    };
+    let have = parts(conn)?;
+    let missing: Vec<String> = wanted
+        .difference(&have)
+        .map(|(kind, name, column)| match kind.as_str() {
+            "table" => format!("{name}.{column}"),
+            _ => format!("{kind} {name}"),
+        })
+        .collect();
+    match missing.is_empty() {
+        true => Ok(()),
+        false => Err(StateError::Damaged(format!(
+            "its schema lacks {}",
+            missing.join(", ")
+        ))),
+    }
+}
+
 /// `sibling_hash(name)` in SQL: what migration 14 fills the new columns with.
 fn sibling_hash_in_sql(conn: &Connection) -> Result<()> {
     use rusqlite::functions::FunctionFlags;
@@ -570,6 +615,15 @@ mod tests {
         assert_eq!(key("remote")?, report);
         assert_eq!(key("local")?, hbsync_namemap::sibling_hash("a:b"));
         Ok(())
+    }
+
+    /// One brought up from version 13 has every part of the schema a new one has.
+    #[test]
+    fn an_upgraded_db_passes_the_schema_check() -> Result<()> {
+        let mut conn = version_13()?;
+        assert!(matches!(check_schema(&conn), Err(StateError::Damaged(_))));
+        apply(&mut conn)?;
+        check_schema(&conn)
     }
 
     /// One from before 0.7 (6: 0.6.0's; 12: the last before 0.7; 4: one DB per folder) isn't

@@ -70,10 +70,12 @@ pub enum StateError {
     Corrupt(String),
     #[error("state DB schema version {found} is newer than this client ({supported})")]
     TooNew { found: u32, supported: u32 },
-    #[error(
-        "state DB schema version {found} is from a Filesync before 0.7 and isn't upgraded: move the account's state.db (and its -wal file) aside, then `hbsync setup --existing`"
-    )]
+    /// From before 0.7: not upgraded, set aside instead ([`StateError::unusable`]).
+    #[error("state DB schema version {found} is from a Filesync before 0.7 and isn't upgraded")]
     TooOld { found: u32 },
+    /// The file itself is bad: a page or its schema ([`StateDb::check_file`]).
+    #[error("state DB file is damaged: {0}")]
+    Damaged(String),
     /// Older than this client's, and a [`Reader`] can't bring it up to date: a writer does
     /// (the daemon of this version as it starts).
     #[error(
@@ -103,7 +105,58 @@ impl StateError {
             StateError::Corrupt(_)
             | StateError::TooNew { .. }
             | StateError::TooOld { .. }
+            | StateError::Damaged(_)
             | StateError::Behind { .. } => ErrorClass::NeedsUser,
+        }
+    }
+
+    /// Why the DB file it came from can't be used at all, as opening it (and
+    /// [`StateDb::check_file`]) found: too old to upgrade, or not a database, or damaged. Such
+    /// a file is set aside and the account starts over. `None` for anything else, the file
+    /// likely fine: a newer version's (a downgrade), busy or locked, an I/O error, the disk
+    /// full, access denied, a folder missing, a read-only file system.
+    pub fn unusable(&self) -> Option<Unusable> {
+        use rusqlite::ErrorCode as Code;
+        match self {
+            StateError::TooOld { .. } => Some(Unusable::TooOld),
+            StateError::Damaged(_) => Some(Unusable::Corrupt),
+            StateError::Sqlite(rusqlite::Error::SqliteFailure(e, _))
+                if matches!(e.code, Code::DatabaseCorrupt | Code::NotADatabase) =>
+            {
+                Some(Unusable::Corrupt)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The error of a page `quick_check` couldn't read (`found`, its answer), other than the page
+/// being damaged: SQLite tells those in its answer as `error code=N` (or `error code N`).
+fn unread_page(found: &str) -> Option<i32> {
+    found.match_indices("error code").find_map(|(at, _)| {
+        let rest = found[at + "error code".len()..].trim_start_matches(['=', ' ']);
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        let code: i32 = digits.parse().ok()?;
+        // SQLITE_CORRUPT, in any of its extended forms: damage.
+        (code & 0xff != 11).then_some(code)
+    })
+}
+
+/// Why a state DB file can't be used at all ([`StateError::unusable`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unusable {
+    /// From before 0.7, which this version doesn't upgrade.
+    TooOld,
+    /// Not a database, or damaged: a page, or a table, column, index or trigger missing.
+    Corrupt,
+}
+
+impl Unusable {
+    /// Its name in the name of a file set aside for it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Unusable::TooOld => "too-old",
+            Unusable::Corrupt => "corrupt",
         }
     }
 }
@@ -497,6 +550,48 @@ impl StateDb {
         })
     }
 
+    /// Checks the DB file at `path` before a writer opens it, on a connection that only reads
+    /// (its header, its log and its pages as they are: nothing is upgraded or written): its
+    /// version is this client's or one it upgrades ([`StateError::TooOld`],
+    /// [`StateError::TooNew`]), and every page reads as SQLite's `quick_check` expects
+    /// ([`StateError::Damaged`]), and, at this version, its schema is whole
+    /// ([`StateDb::check_schema`]). A page that can't be read now (an I/O error, memory) is
+    /// SQLite's error, not damage. No file is fine. Whether its schema was checked too. For an account's start, not every open: it
+    /// reads every page (~1 ms per 1,000 files synced; 0.3 s for a 226 MB DB of 300,000, its
+    /// pages in the page cache).
+    pub fn check_file(path: &Path) -> Result<bool> {
+        if !path.exists() {
+            return Ok(false);
+        }
+        let conn = reader::read_only(path)?;
+        let version = migrations::user_version(&conn)?;
+        migrations::check(version)?;
+        let found: String = conn.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
+        if found == "ok" {
+            // One of this version is whole before anything is written to it (one brought up
+            // to date is checked after: [`StateDb::check_schema`]).
+            if version != migrations::VERSION {
+                return Ok(false);
+            }
+            migrations::check_schema(&conn)?;
+            return Ok(true);
+        }
+        Err(match unread_page(&found) {
+            Some(code) => StateError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                Some(found),
+            )),
+            None => StateError::Damaged(found),
+        })
+    }
+
+    /// Refuses ([`StateError::Damaged`]) the DB if it lacks a table, a column, an index or a
+    /// trigger of this version's schema. One query on SQLite's own tables: for an account's
+    /// start, after [`StateDb::check_file`] and the upgrade.
+    pub fn check_schema(&self) -> Result<()> {
+        migrations::check_schema(&self.conn)
+    }
+
     /// Runs `f` in a read transaction (a consistent snapshot).
     pub fn read<T>(&mut self, f: impl FnOnce(&ReadTx<'_>) -> Result<T>) -> Result<T> {
         read_in(&mut self.conn, self.folder, Some(&self.files), f)
@@ -706,6 +801,125 @@ mod tests {
             supported: 1,
         };
         assert_eq!(too_new.class(), ErrorClass::NeedsUser);
+    }
+
+    /// Only a file that is itself bad, or too old, is unusable: never a busy, locked, full,
+    /// denied, missing or read-only one, nor a newer version's.
+    #[test]
+    fn only_a_bad_file_is_unusable() {
+        let sqlite = |code| {
+            StateError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                None,
+            ))
+        };
+        assert_eq!(sqlite(11).unusable(), Some(Unusable::Corrupt)); // SQLITE_CORRUPT
+        assert_eq!(sqlite(26).unusable(), Some(Unusable::Corrupt)); // SQLITE_NOTADB
+        let damaged = StateError::Damaged("page 3".into());
+        assert_eq!(damaged.unusable(), Some(Unusable::Corrupt));
+        assert_eq!(
+            StateError::TooOld { found: 6 }.unusable(),
+            Some(Unusable::TooOld)
+        );
+        // BUSY, LOCKED, IOERR, FULL, CANTOPEN, PERM, READONLY, AUTH.
+        for code in [5, 6, 10, 13, 14, 3, 8, 23] {
+            assert_eq!(sqlite(code).unusable(), None, "code {code}");
+        }
+        let too_new = StateError::TooNew {
+            found: 99,
+            supported: 1,
+        };
+        assert_eq!(too_new.unusable(), None);
+        assert_eq!(StateError::Corrupt("a row".into()).unusable(), None);
+    }
+
+    fn io(e: std::io::Error) -> StateError {
+        StateError::Conflict(e.to_string())
+    }
+
+    /// Garbage where the DB should be isn't a database: it can't be opened.
+    #[test]
+    fn garbage_is_not_a_database() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(io)?;
+        let path = dir.path().join("state.db");
+        std::fs::write(&path, [0x5a_u8; 8192]).map_err(io)?;
+        let e = StateDb::open_account(&path).err();
+        assert_eq!(e.and_then(|e| e.unusable()), Some(Unusable::Corrupt));
+        Ok(())
+    }
+
+    /// A DB with a damaged page opens, and the check of the whole file finds it; a sound one
+    /// passes.
+    #[test]
+    fn the_check_finds_a_damaged_page() -> Result<()> {
+        let dir = tempfile::tempdir().map_err(io)?;
+        let path = dir.path().join("state.db");
+        assert!(!StateDb::check_file(&path)?, "no file");
+        StateDb::open_account(&path)?.check_schema()?;
+        assert!(StateDb::check_file(&path)?, "its schema too");
+        drop(std::fs::remove_file(path.with_extension("db-wal")));
+        drop(std::fs::remove_file(path.with_extension("db-shm")));
+        std::fs::remove_file(&path).map_err(io)?;
+        let page: usize = 4096;
+        {
+            // Rollback journal: every page in the file itself.
+            let conn = Connection::open(&path)?;
+            conn.pragma_update(None, "page_size", page as i64)?;
+            conn.execute_batch(
+                "CREATE TABLE extra (v BLOB);
+                 WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 400)
+                 INSERT INTO extra SELECT randomblob(100) FROM n;",
+            )?;
+        }
+        // Past the first page (the header and the schema): a table page made garbage.
+        let mut bytes = std::fs::read(&path).map_err(io)?;
+        assert!(bytes.len() > 4 * page);
+        bytes[2 * page..3 * page].fill(0xa5);
+        std::fs::write(&path, bytes).map_err(io)?;
+        let e = StateDb::check_file(&path).err();
+        assert!(matches!(e, Some(StateError::Damaged(_))), "{e:?}");
+        Ok(())
+    }
+
+    /// A page `quick_check` couldn't read for another reason than damage (an I/O error) is
+    /// that error, not damage.
+    #[test]
+    fn a_page_not_read_is_not_damage() {
+        let io = "Tree 4 page 7: unable to get the page. error code=10";
+        assert_eq!(unread_page(io), Some(10));
+        assert_eq!(unread_page("btreeInitPage() returns error code 7"), Some(7));
+        assert_eq!(unread_page("btreeInitPage() returns error code 11"), None);
+        assert_eq!(
+            unread_page("Tree 2 page 3 cell 0: invalid page number 99"),
+            None
+        );
+        let e = StateError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(10),
+            Some(io.into()),
+        ));
+        assert_eq!(e.unusable(), None);
+    }
+
+    /// A DB at this version lacking a part of the schema is damaged.
+    #[test]
+    fn a_schema_missing_a_part_is_damaged() -> Result<()> {
+        for drop in [
+            "DROP TABLE dirty",
+            "ALTER TABLE synced DROP COLUMN at",
+            "DROP INDEX remote_parent",
+            "DROP TRIGGER local_gone",
+        ] {
+            let dir = tempfile::tempdir().map_err(io)?;
+            let path = dir.path().join("state.db");
+            StateDb::open_account(&path)?;
+            Connection::open(&path)?.execute_batch(drop)?;
+            let e = StateDb::open_account(&path)?.check_schema().err();
+            assert!(
+                matches!(&e, Some(StateError::Damaged(why)) if why.contains("lacks")),
+                "{drop}: {e:?}"
+            );
+        }
+        Ok(())
     }
 
     fn flushes(db: &mut StateDb) -> Result<Option<String>> {

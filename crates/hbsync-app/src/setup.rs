@@ -11,8 +11,10 @@ use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::{Client, Credentials, HomebaseError, app};
 use hbsync_remote::Remote;
 
+use hbsync_state::Unusable;
 use hbsync_types::Role;
 
+use crate::config::ConfigLock;
 use crate::paths::home;
 use crate::{Config, CredentialStore, Identity, Location, Paths, autostart};
 use crate::{control, folders};
@@ -219,6 +221,61 @@ pub fn plan(
     }
 }
 
+/// Checks the folder at `folder` (resolved) against `identity`'s state DB before it is set up
+/// there, changing nothing but the DB: when no daemon runs, it is brought up to date, or set
+/// aside and made again if it can't be used ([`folders::ready_account`]: from before 0.7,
+/// damaged), its folders set up again as folders with files; meanwhile the config's lock is
+/// held, so a daemon starting waits. Refused: a folder synced here before whose marker is gone
+/// (an empty mount point, most likely), and one with files whose state is gone, unless
+/// `existing` (merge them) or the DB was set aside here (its folders are merged). Whether the
+/// daemon runs, and why the DB was set aside here, if it was.
+pub fn check_state(
+    paths: &Paths,
+    identity: &Identity,
+    folder: &Path,
+    existing: bool,
+) -> crate::Result<(bool, Option<Unusable>)> {
+    let db = paths.account_db(identity);
+    let held = ConfigLock::take(&paths.config_file())?;
+    let running = control::running(paths)?;
+    let mut set_aside = None;
+    if !running && db.exists() {
+        // Nothing else writes it: readied here (set aside and made again if it can't be used),
+        // for the checks (which only look).
+        let roots = held.load()?.unwrap_or_default().roots;
+        set_aside = folders::ready_account(&db, identity, &roots)?.map(|set| set.why);
+    }
+    drop(held);
+    match SyncRoot::find(&db, identity, folder) {
+        Ok(_) => {}
+        // The running daemon sets it aside as it adds the folder, where its account doesn't
+        // run there (it would have as it started), and tells.
+        Err(RootError::State(e)) if running && e.unusable().is_some() => {}
+        // Synced here before, its marker gone: an empty mount point, most likely. Setting it
+        // up would start it over; only when asked to merge.
+        Err(RootError::NoMarker(_))
+            if !existing && SyncRoot::knows_path(&db, identity, folder)? =>
+        {
+            return Err(Refusal::No(format!(
+                "{} was synced here, but its .hbsync is gone: if it is on a disk, plug it in; \
+                 to start it over, set it up again merging its files",
+                folder.display()
+            ))
+            .into());
+        }
+        // Its state is gone (or it was copied here): its files are merged, when asked to, or
+        // as the DB was set aside.
+        Err(RootError::Unknown(_))
+            if !existing && set_aside.is_none() && folders::has_files(folder)? =>
+        {
+            return Err(Refusal::NeedsMerge(folder.to_path_buf()).into());
+        }
+        Err(RootError::NoMarker(_) | RootError::Unknown(_)) => {}
+        Err(e) => return Err(e.into()),
+    }
+    Ok((running, set_aside))
+}
+
 /// What to set up, as [`plan`] makes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetUp {
@@ -300,39 +357,15 @@ pub fn set_up(
 
     // The folder in the account's state DB, and its marker: kept if set up before. Checked
     // here, set up by the daemon (or here, when it isn't running).
-    let db = paths.account_db(identity);
-    let has_files = folders::has_files(&folder)?;
-    let running = control::running(paths)?;
-    if !running && db.exists() {
-        // Nothing else writes it: brought up to date here, for the checks (which only look).
-        SyncRoot::upgrade(&db, identity)?;
-    }
-    match SyncRoot::find(&db, identity, &folder) {
-        Ok(_) => {}
-        // Synced here before, its marker gone: an empty mount point, most likely. Setting it
-        // up would start it over; only when asked to merge.
-        Err(RootError::NoMarker(_))
-            if !checked.existing && SyncRoot::knows_path(&db, identity, &folder)? =>
-        {
-            return Err(Refusal::No(format!(
-                "{} was synced here, but its .hbsync is gone: if it is on a disk, plug it in; \
-                 to start it over, set it up again merging its files",
-                folder.display()
-            ))
-            .into());
-        }
-        // Its state is gone (or it was copied here): its files are merged, when asked to.
-        Err(RootError::Unknown(_)) if has_files && !checked.existing => {
-            return Err(Refusal::NeedsMerge(folder).into());
-        }
-        Err(RootError::NoMarker(_) | RootError::Unknown(_)) => {}
-        Err(e) => return Err(e.into()),
-    }
+    let (running, set_aside) = check_state(paths, identity, &folder, checked.existing)?;
     if running && authorized {
         control::start_over(paths, identity)?;
     }
     // A running daemon sets the folder up and starts syncing it, without a restart.
     let taken = crate::folders::add_synced(paths, identity, &folder, None)?;
+    if let Some(why) = set_aside {
+        say(&crate::words::set_aside(why));
+    }
     say(&format!("{} syncs with {identity}.", folder.display()));
 
     if request.at_logon {

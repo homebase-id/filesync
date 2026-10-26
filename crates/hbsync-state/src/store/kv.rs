@@ -96,7 +96,7 @@ impl FolderTx<'_> {
 }
 
 impl AccountTx<'_> {
-    pub(super) fn delete_account_kv(&self, key: AccountKey) -> Result<()> {
+    pub fn delete_account_kv(&self, key: AccountKey) -> Result<()> {
         self.change("DELETE FROM kv WHERE key = ?1", key.0)?;
         Ok(())
     }

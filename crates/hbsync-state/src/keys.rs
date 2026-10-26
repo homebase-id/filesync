@@ -27,6 +27,9 @@ pub(crate) const REMOVED_SEQ: AccountKey = AccountKey("deleted.seq");
 pub(crate) const DB_ID: AccountKey = AccountKey("db.id");
 /// Which login the stored file tokens are sealed under (a fingerprint of its key).
 pub const TOKENS_SEALED_BY: AccountKey = AccountKey("remote.tokens_sealed_by");
+/// Why the DB this one replaced was set aside (`too-old`, `corrupt`): one made so sets the
+/// account's folders up again as it starts, whichever it didn't have yet.
+pub const SET_ASIDE: AccountKey = AccountKey("db.set_aside");
 /// How often the DB was flushed to the disk on purpose (the write such a commit syncs).
 pub(crate) const FLUSHES: AccountKey = AccountKey("db.flushes");
 

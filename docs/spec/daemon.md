@@ -34,11 +34,37 @@ renames; the ignore rules), hidden on Windows too (the hidden attribute, set at 
 and its marker `.hbsync/folder`: the identity and
 the folder's id in that DB.
 A folder is synced only through its marker: without one it is gone (or not mounted), with
-another identity's it is refused, and one the DB doesn't know is set up again. An account's DB
-from before 0.7 isn't upgraded: the daemon stops (its log says why). Moving
-`accounts/<identity>/state.db` (and its `-wal` file) aside and running `hbsync setup --existing`
-sets the folder up again as a folder with files: what it has is adopted, nothing is copied
-twice.
+another identity's it is refused, and one the DB doesn't know is set up again by `hbsync setup`
+(merging its files, `--existing`), or as the account starts after its DB was set aside (below).
+
+An account's DB that can't be used at all is set aside as the account starts (the daemon's
+start, or setup while no daemon runs): one from before 0.7, which isn't upgraded, or one whose
+file is bad (not a database; a damaged page, which SQLite's `quick_check` finds, on a connection
+that only reads, before anything is upgraded or written: it reads the whole file at each start,
+~0.3 s and a read of 226 MB for 300,000 files; a table, column, index or trigger missing). A
+page that can't be read for now (an I/O error) isn't damage. It is renamed beside the new one,
+`state.db.too-old-<Unix time>` or `state.db.corrupt-<Unix time>`, with its `-wal` and `-shm`
+files named alike, never deleted: they are for a diagnosis, and old ones can be deleted by hand.
+The account's folders that are there (their marker this identity's) are then set up again in the
+new DB as folders with files, as `hbsync setup --existing` does: what they hold is adopted by
+hash, nothing is copied twice, and a file that differs from the drive's becomes a conflict copy.
+The tray and the log say so, once. The new DB records that it replaced one (`db.set_aside`)
+until it knows each of them: a folder not there then (a disk not plugged in), or one that
+couldn't be set up, is set up again at a later start of the account, once it is back. Not set
+aside: a DB of a newer version (a downgrade: setting it aside would throw a newer version's
+records away; the account waits, saying why), and one that can't be read for now (busy or
+locked, an I/O error, a full disk, access denied, a missing folder, a read-only file system:
+told as an error, and tried again as the daemon starts again).
+
+The recovery rule (data safety): setting a DB aside never deletes a file, here or on the drive:
+the new DB has no base, and without one nothing is deleted. What is lost is the old DB's
+pending state, and each part errs on the side of keeping: deletes held for review come back
+from the drive; Recently deleted's bookkeeping is read from the drive again (a removal's time
+is the server's: none goes for good sooner); a download placed but not recorded is adopted by
+its hash; what a delete or a download left in `.hbsync/aside` goes only where its bytes are the
+synced version its name says, else it goes back to its place, or stays there and is told; an
+item parked under `.hbsync-move-<node>` keeps that name; an edit not sent yet becomes a
+conflict copy beside the drive's version.
 
 ## `config.toml`
 

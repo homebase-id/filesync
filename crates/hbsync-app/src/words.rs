@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use hbsync_state::Unusable;
 use hbsync_types::NodeKind;
 use hbsync_types::activity::{Deleted, Progress, Synced, SyncedKind};
 
@@ -137,6 +138,19 @@ pub fn rescan_every(secs: u64) -> String {
         s if s % 60 == 0 => format!("every {} minutes", s / 60),
         s => format!("every {s} s"),
     }
+}
+
+/// The note told once when an account's state DB was set aside (too old, or damaged) and its
+/// folders set up again: the tray's, the log's and setup's.
+pub fn set_aside(why: Unusable) -> String {
+    let what = match why {
+        Unusable::TooOld => "were from an older version of Filesync",
+        Unusable::Corrupt => "were damaged",
+    };
+    format!(
+        "This computer's sync records {what} and were set aside: the folder is set up again, \
+         and the files already in it are kept and not copied twice."
+    )
 }
 
 /// The reply to a restore, the tray's and the CLI's.

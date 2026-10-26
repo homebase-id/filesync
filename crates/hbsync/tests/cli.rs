@@ -191,6 +191,71 @@ fn the_daemon_answers_while_offline_and_stops() -> R {
     Ok(())
 }
 
+/// Waits until the daemon's status passes `done`, and returns it.
+fn wait_for_status(
+    home: &Home,
+    done: impl Fn(&serde_json::Value) -> bool,
+) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let until = Instant::now() + Duration::from_secs(30);
+    loop {
+        let status = status(home)?;
+        if done(&status) {
+            return Ok(status);
+        }
+        if Instant::now() > until {
+            return Err(format!("timed out waiting for the status: {status}").into());
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+}
+
+/// An account's state DB from before 0.7 is set aside as the daemon starts, kept beside the new
+/// one, and its folder set up again: told once. One of a newer version is refused, and kept.
+#[test]
+fn the_daemon_sets_an_old_state_db_aside_and_refuses_a_newer_one() -> R {
+    let home = Home::new()?;
+    let folder = home.set_up()?;
+    let db = hbsync_app::Paths::under(home.path()).account_db(&IDENTITY.into());
+    rusqlite::Connection::open(&db)?.pragma_update(None, "user_version", 6)?;
+
+    home.ok(&["start"])?;
+    let told = |s: &serde_json::Value| {
+        s["accounts"][0]["recent"].as_array().is_some_and(|notes| {
+            notes
+                .iter()
+                .any(|n| n["text"].as_str().is_some_and(|t| t.contains("set aside")))
+        })
+    };
+    let status = wait_for_status(&home, told)?;
+    let notes = status["accounts"][0]["recent"]
+        .as_array()
+        .map_or(0, Vec::len);
+    assert_eq!(notes, 1, "told once: {status}");
+    hbsync_engine::root::SyncRoot::find(&db, IDENTITY, &folder)?;
+    let kept: Vec<String> = std::fs::read_dir(db.parent().ok_or("parent")?)?
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("state.db.too-old-") && !name.ends_with("-shm"))
+        .collect();
+    assert!(!kept.is_empty(), "the old DB is kept");
+    home.ok(&["stop"])?;
+
+    rusqlite::Connection::open(&db)?.pragma_update(None, "user_version", 9999)?;
+    home.ok(&["start"])?;
+    let refused = |s: &serde_json::Value| {
+        s["folders"][0]["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("newer"))
+    };
+    let status = wait_for_status(&home, refused)?;
+    assert_eq!(status["folders"][0]["state"], "failing", "{status}");
+    home.ok(&["stop"])?;
+    let user_version: u32 =
+        rusqlite::Connection::open(&db)?.pragma_query_value(None, "user_version", |r| r.get(0))?;
+    assert_eq!(user_version, 9999, "kept as it was");
+    Ok(())
+}
+
 #[test]
 fn logout_and_unlink_keep_the_files() -> R {
     let home = Home::new()?;

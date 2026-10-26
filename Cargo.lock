@@ -1537,6 +1537,7 @@ dependencies = [
  "hbsync-platform",
  "hbsync-state",
  "hbsync-types",
+ "rusqlite",
  "serde_json",
  "signal-hook",
  "tempfile",

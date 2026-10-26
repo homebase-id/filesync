@@ -14,7 +14,7 @@ mod watch;
 
 pub use account::{AccountParts, Notifications, Puller, UNANNOUNCED_READ};
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Instant;
@@ -108,7 +108,7 @@ pub fn run(paths: &Paths, stop: Stop) -> Result<(), DaemonError> {
         pause: Mutex::new(config.pause(unix_now())),
         pausing: Mutex::default(),
         accounts: Mutex::default(),
-        starting_over: AtomicUsize::new(0),
+        starting_over: Mutex::default(),
         changed: Arc::default(),
     });
     {
@@ -180,7 +180,7 @@ pub fn run(paths: &Paths, stop: Stop) -> Result<(), DaemonError> {
             stopping = true;
             daemon.stop_all();
         }
-        if left == 0 && daemon.starting_over.load(Ordering::SeqCst) == 0 {
+        if left == 0 && lock(&daemon.starting_over).is_empty() {
             break;
         }
         let now = Instant::now();
@@ -234,8 +234,10 @@ pub(crate) struct Daemon {
     /// accounts are told the changes in their order.
     pausing: Mutex<()>,
     accounts: Mutex<Vec<(Arc<Account>, AccountThread)>>,
-    /// Accounts starting over ([`Daemon::start_over`]): the daemon doesn't end meanwhile.
-    starting_over: AtomicUsize,
+    /// The identities of the accounts starting over ([`Daemon::start_over`]), named under the
+    /// `accounts` lock before they leave it (their threads still stopping): the daemon doesn't
+    /// end meanwhile, nor take one for idle. Taken after `accounts`, never before.
+    starting_over: Mutex<Vec<Identity>>,
     /// Raised when the status may have changed ([`watch`]).
     changed: Arc<Wakeup>,
 }
@@ -250,6 +252,15 @@ impl Daemon {
             .filter(|(_, thread)| !thread.is_finished())
             .map(|(a, _)| Arc::clone(a))
             .collect()
+    }
+
+    /// Whether no account of `identity` runs, nor starts over: nothing here writes its DB.
+    fn account_idle(&self, identity: &Identity) -> bool {
+        let accounts = lock(&self.accounts);
+        !accounts
+            .iter()
+            .any(|(a, thread)| a.identity == *identity && !thread.is_finished())
+            && !lock(&self.starting_over).contains(identity)
     }
 
     /// Syncs the folder `root` (set up, in the config): in its identity's account, or in a new
@@ -277,7 +288,7 @@ impl Daemon {
                 .spawn(move || {
                     // Told also when it panics.
                     let _ended = OnDrop(Some(|| {
-                        account.done.store(true, Ordering::SeqCst);
+                        account.ended_thread();
                         stop.wakeup.raise();
                     }));
                     account.run(&paths, &config, &requests, &stop.flag)
@@ -333,12 +344,15 @@ impl Daemon {
         let found = {
             let mut accounts = lock(&self.accounts);
             let at = accounts.iter().position(|(a, _)| a.identity == *identity);
+            // Named before it leaves the list: it is still running ([`Daemon::account_idle`]).
+            if at.is_some() {
+                lock(&self.starting_over).push(identity.clone());
+            }
             at.map(|at| accounts.remove(at))
         };
         let Some((account, thread)) = found else {
             return Ok(());
         };
-        self.starting_over.fetch_add(1, Ordering::SeqCst);
         // Its folders as they are now: those of an ending account go as their runners stop.
         let folders = account.folders();
         account.end();
@@ -346,7 +360,13 @@ impl Daemon {
             .join()
             .unwrap_or(Err(DaemonError::Runner(RunnerError::Panicked)));
         let again = folders.iter().try_for_each(|root| self.add_folder(root));
-        self.starting_over.fetch_sub(1, Ordering::SeqCst);
+        {
+            // This one: another start-over of the identity may be on its way too.
+            let mut starting_over = lock(&self.starting_over);
+            if let Some(at) = starting_over.iter().position(|i| i == identity) {
+                starting_over.swap_remove(at);
+            }
+        }
         self.stop.wakeup.raise();
         ended.and(again)
     }
@@ -442,7 +462,7 @@ mod tests {
             pause: Mutex::default(),
             pausing: Mutex::default(),
             accounts: Mutex::default(),
-            starting_over: AtomicUsize::new(0),
+            starting_over: Mutex::default(),
             changed: Arc::default(),
         };
         let (now, unix) = (Instant::now(), unix_now());

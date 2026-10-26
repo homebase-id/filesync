@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use hbsync_local::{Marker, layout};
 use hbsync_remote::ErrorClass;
-use hbsync_state::{FolderRow, Reader, StateDb, StateError, keys};
+use hbsync_state::{FolderRow, Reader, StateDb, StateError, Unusable, keys};
 use hbsync_types::NodeId;
 use hbsync_types::activity::Synced;
 
@@ -67,7 +67,7 @@ impl SyncRoot {
     pub fn open(db: &Path, identity: &str, path: &Path) -> Result<SyncRoot, RootError> {
         let (root, recorded) = match Self::locate(db, identity, path) {
             Err(RootError::State(StateError::Behind { .. })) => {
-                Self::upgrade(db, identity)?;
+                Self::open_account(db, identity)?;
                 Self::locate(db, identity, path)?
             }
             found => found?,
@@ -83,7 +83,7 @@ impl SyncRoot {
     /// [`SyncRoot::open`] without writing anything (a moved folder's new place isn't
     /// recorded), for a check while the daemon may be syncing. A DB of an older schema is
     /// refused ([`StateError::Behind`]) rather than brought up to date: see
-    /// [`SyncRoot::upgrade`].
+    /// [`SyncRoot::ready`].
     pub fn find(db: &Path, identity: &str, path: &Path) -> Result<SyncRoot, RootError> {
         Ok(Self::locate(db, identity, path)?.0)
     }
@@ -191,11 +191,91 @@ impl SyncRoot {
         Ok(account.folders()?.iter().any(|f| f.path == text))
     }
 
-    /// Brings `identity`'s DB at `db` up to date (made if new; refused if another's), for
-    /// what only looks next ([`SyncRoot::find`], [`AccountReader`]). Only while nothing else
-    /// may write it: an older daemon would find a schema it doesn't know.
-    pub fn upgrade(db: &Path, identity: &str) -> Result<(), RootError> {
-        Self::open_account(db, identity).map(drop)
+    /// Readies `identity`'s DB at `db` as the account starts (its daemon's start, or setup's
+    /// while none runs), for what only looks next ([`SyncRoot::find`], [`AccountReader`]).
+    /// Only while nothing else may write it: an older daemon would find a schema it doesn't
+    /// know. The whole file is checked first ([`StateDb::check_file`]: it reads every page),
+    /// then brought up to date (made if new; refused if another's), then its schema checked.
+    /// One that can't be used at all ([`StateError::unusable`]: from before 0.7, not a
+    /// database, damaged) is set aside, never deleted ([`set_aside`]), and a new one made,
+    /// which says so ([`keys::SET_ASIDE`]) until it knows each of `folders` (their places and
+    /// the drive's nodes they hold, as the config lists them): each is set up again as a folder
+    /// with files ([`SyncRoot::create_for`]: what it holds is adopted, nothing is copied twice,
+    /// nothing deleted). One not there now (a disk not plugged in), or one that fails, is set
+    /// up at a later start. Any other error is returned as it is: a newer version's DB, or one
+    /// busy, locked, unreadable for now. What was set aside now, if anything.
+    pub fn ready(
+        db: &Path,
+        identity: &str,
+        folders: &[(&Path, NodeId)],
+    ) -> Result<Option<SetAside>, RootError> {
+        let checked = (|| -> Result<StateDb, RootError> {
+            let whole = StateDb::check_file(db)?;
+            let account = Self::open_account(db, identity)?;
+            // One brought up to date (or made) is whole only now.
+            if !whole {
+                account.check_schema()?;
+            }
+            Ok(account)
+        })();
+        let (mut account, set) = match checked {
+            Ok(account) => (account, None),
+            Err(RootError::State(e)) => {
+                let Some(why) = e.unusable() else {
+                    return Err(e.into());
+                };
+                let to = set_aside(db, why)?;
+                tracing::warn!(
+                    "{}: {e}: set aside as {}, and made again",
+                    db.display(),
+                    to.display()
+                );
+                let mut account = Self::open_account(db, identity)?;
+                account
+                    .write_durable(|s| s.account().set_account_kv(keys::SET_ASIDE, why.name()))?;
+                (account, Some(SetAside { why, to }))
+            }
+            Err(e) => return Err(e),
+        };
+        // Made in place of one set aside; or knowing no folder at all beside one set aside
+        // (its key lost to a crash between the rename and its write): what it can't have set
+        // up is set up again.
+        let (replaced, known) =
+            account.read(|s| Ok((s.account_kv(keys::SET_ASIDE)?.is_some(), s.folders()?)))?;
+        if replaced || (known.is_empty() && beside_one_set_aside(db)) {
+            Self::set_up_again(&mut account, db, identity, folders, &known, replaced)?;
+        }
+        Ok(set)
+    }
+
+    /// Sets each of `folders` that is `identity`'s (its marker says so) and unknown to the
+    /// `account` (at `db`; it knows those of `known`) up again; once it knows every one there
+    /// is, it forgets it `replaced` one. One not there now, or that fails, waits for a later
+    /// start; one another identity's is left to its runner, which refuses it.
+    fn set_up_again(
+        account: &mut StateDb,
+        db: &Path,
+        identity: &str,
+        folders: &[(&Path, NodeId)],
+        known: &[FolderRow],
+        replaced: bool,
+    ) -> Result<(), RootError> {
+        let mut waiting = false;
+        for &(path, top) in folders {
+            let again = match Self::check(path, identity) {
+                Ok(marker) if known.iter().any(|f| f.marker == marker.id) => continue,
+                Ok(_) => Self::create_for(db, identity, path, top).map(drop),
+                Err(e) => Err(e),
+            };
+            if let Err(e) = again {
+                tracing::warn!("{} isn't set up again now: {e}", path.display());
+                waiting |= !matches!(e, RootError::OtherIdentity { .. });
+            }
+        }
+        if !waiting && replaced {
+            account.write(|s| s.account().delete_account_kv(keys::SET_ASIDE))?;
+        }
+        Ok(())
     }
 
     /// The account DB at `db`, for `identity` (made if new; refused if another's).
@@ -235,6 +315,84 @@ impl SyncRoot {
     pub fn top(&self) -> NodeId {
         self.top
     }
+}
+
+/// An account's DB that couldn't be used, set aside ([`SyncRoot::ready`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SetAside {
+    pub why: Unusable,
+    /// Where it is now, its `-wal` and `-shm` files beside it, named alike.
+    pub to: PathBuf,
+}
+
+/// A DB's file, and its log's and shared memory's: `state.db`, `state.db-wal`, `state.db-shm`.
+const SUFFIXES: [&str; 3] = ["", "-wal", "-shm"];
+
+/// `path` with `suffix` added to its name.
+fn with(path: &Path, suffix: &str) -> PathBuf {
+    let mut s = path.as_os_str().to_owned();
+    s.push(suffix);
+    PathBuf::from(s)
+}
+
+/// What the name of a DB set aside for `why` adds to its own, before the time: `.too-old-`.
+fn aside(why: Unusable) -> String {
+    format!(".{}-", why.name())
+}
+
+/// Whether a DB was set aside beside the one at `db` ([`set_aside`]'s names).
+fn beside_one_set_aside(db: &Path) -> bool {
+    let (Some(dir), Some(name)) = (db.parent(), db.file_name()) else {
+        return false;
+    };
+    let name = name.to_string_lossy();
+    let named = [Unusable::TooOld, Unusable::Corrupt].map(|why| format!("{name}{}", aside(why)));
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| {
+            let file = e.file_name();
+            let file = file.to_string_lossy();
+            named.iter().any(|n| file.starts_with(n.as_str()))
+        })
+}
+
+/// Moves the DB at `db` aside, beside it as `<name>.<why>-<Unix time>` (`state.db.too-old-…`,
+/// `state.db.corrupt-…`; numbered on if taken, never over another file), with its `-wal` and
+/// `-shm` files named alike. The DB first: its place never holds it without its log (SQLite
+/// drops a log it finds beside a new, empty DB). Where it is now.
+fn set_aside(db: &Path, why: Unusable) -> std::io::Result<PathBuf> {
+    let stamp = format!("{}{}", aside(why), hbsync_types::unix_now());
+    let mut to = with(db, &stamp);
+    let mut n = 0;
+    while SUFFIXES
+        .iter()
+        .any(|s| std::fs::symlink_metadata(with(&to, s)).is_ok())
+    {
+        n += 1;
+        to = with(db, &format!("{stamp}-{n}"));
+    }
+    // What moved, put back if the rest can't follow: never a DB apart from its log.
+    let mut moved: Vec<&str> = Vec::new();
+    for suffix in SUFFIXES {
+        match hbsync_platform::ops::rename_noreplace(&with(db, suffix), &with(&to, suffix)) {
+            Ok(()) => moved.push(suffix),
+            Err(e) if !suffix.is_empty() && e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                for back in moved.iter().rev() {
+                    if let Err(e) =
+                        hbsync_platform::ops::rename_noreplace(&with(&to, back), &with(db, back))
+                    {
+                        tracing::error!("{} can't be put back: {e}", with(&to, back).display());
+                    }
+                }
+                return Err(e);
+            }
+        }
+    }
+    hbsync_platform::ops::sync_dirs(db.parent().map(Path::to_path_buf));
+    Ok(to)
 }
 
 /// Refuses the DB at `db` if it is another identity's: `theirs`, the one it has (`None`: it
@@ -315,6 +473,93 @@ mod tests {
             SyncRoot::open(&db, anna, &moved),
             Err(RootError::Unknown(_))
         ));
+        Ok(())
+    }
+
+    /// A DB from before 0.7, with its log, is set aside, both kept and named alike, and a new
+    /// one made: it knows no folder. Once is enough.
+    #[test]
+    fn a_db_too_old_is_set_aside() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let db = home.path().join("accounts/anna/state.db");
+        let anna = "anna.example.com";
+        let root = home.path().join("Homebase");
+        std::fs::create_dir_all(&root)?;
+        SyncRoot::create(&db, anna, &root)?;
+        // As 0.6 left it: an older version, a log beside it.
+        rusqlite::Connection::open(&db)?.pragma_update(None, "user_version", 6)?;
+        std::fs::write(with(&db, "-wal"), "its log")?;
+        let before = std::fs::read(&db)?;
+
+        // Its folder not there yet (a disk not plugged in): set up at a later start.
+        let away = home.path().join("unplugged");
+        std::fs::rename(&root, &away)?;
+        let folders = [(root.as_path(), NodeId::ROOT)];
+        let set = SyncRoot::ready(&db, anna, &folders)?.ok_or("not set aside")?;
+        assert_eq!(set.why, Unusable::TooOld);
+        let name = set.to.file_name().ok_or("name")?.to_string_lossy();
+        assert!(name.starts_with("state.db.too-old-"), "{name}");
+        assert_eq!(std::fs::read(&set.to)?, before, "kept as it was");
+        assert_eq!(std::fs::read(with(&set.to, "-wal"))?, b"its log");
+        let mut reader = AccountReader::open(&db, anna)?.ok_or("no DB")?;
+        assert!(reader.folders()?.is_empty());
+        drop(reader);
+        assert!(!root.exists(), "nothing made where it was");
+        std::fs::rename(&away, &root)?;
+        assert!(matches!(
+            SyncRoot::find(&db, anna, &root),
+            Err(RootError::Unknown(_))
+        ));
+        assert_eq!(SyncRoot::ready(&db, anna, &folders)?, None);
+        SyncRoot::find(&db, anna, &root)?;
+        // Every folder known again: it no longer says it replaced one.
+        let replaced = StateDb::open_account(&db)?.read(|s| s.account_kv(keys::SET_ASIDE))?;
+        assert_eq!(replaced, None);
+        Ok(())
+    }
+
+    /// Garbage where the DB was is set aside as corrupt; a newer version's DB is refused and
+    /// left as it is.
+    #[test]
+    fn a_corrupt_db_is_set_aside_and_a_newer_one_refused() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let home = tempfile::tempdir()?;
+        let db = home.path().join("state.db");
+        let anna = "anna.example.com";
+        std::fs::write(&db, [0x5a_u8; 8192])?;
+        let set = SyncRoot::ready(&db, anna, &[])?.ok_or("not set aside")?;
+        assert_eq!(set.why, Unusable::Corrupt);
+        assert!(set.to.to_string_lossy().contains("state.db.corrupt-"));
+        assert_eq!(std::fs::read(&set.to)?, [0x5a_u8; 8192]);
+
+        rusqlite::Connection::open(&db)?.pragma_update(None, "user_version", 9999)?;
+        let before = std::fs::read(&db)?;
+        assert!(matches!(
+            SyncRoot::ready(&db, anna, &[]),
+            Err(RootError::State(StateError::TooNew { .. }))
+        ));
+        assert_eq!(std::fs::read(&db)?, before);
+        let aside = std::fs::read_dir(home.path())?
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("state.db."))
+            .count();
+        assert_eq!(aside, 1, "nothing else set aside");
+        Ok(())
+    }
+
+    /// One set aside in the same second as another takes the next name, never its place.
+    #[test]
+    fn a_set_aside_never_overwrites_one() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let db = home.path().join("state.db");
+        let mut kept = Vec::new();
+        for n in 0..3 {
+            std::fs::write(&db, format!("db {n}"))?;
+            kept.push(super::set_aside(&db, Unusable::Corrupt)?);
+        }
+        for (n, at) in kept.iter().enumerate() {
+            assert_eq!(std::fs::read_to_string(at)?, format!("db {n}"));
+        }
         Ok(())
     }
 
