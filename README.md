@@ -84,52 +84,35 @@ Good to know:
 - **Written in Rust, from top to bottom.** Three small native programs (about 10 MB each, with
   no runtime, no Electron and no Java): a tray app, a per-user daemon (`hbsyncd`) that does the
   syncing, and a command line (`hbsync`). The Linux programs are fully static.
-- **Barely there.** When idle, the daemon uses about 12–20 MB of memory and no CPU to speak
-  of: it waits on the OS's file events and on your Homebase's notification socket instead of
-  polling. A restart with nothing changed is idle again in about 55 ms. (A big first sync takes
-  more for a while: about 160 MB at its peak for 10,000 files.)
+- **Barely there.** When idle, it waits on the OS's file events and on your Homebase's
+  notification socket instead of polling, and writes nothing to disk.
 
-  Side by side on one six-year-old Linux desktop (Intel i7-8700K, October 2026), both started
-  at boot and left alone:
+  Side by side on one six-year-old Linux desktop (Intel i7-8700K, October 2026), Filesync 0.9
+  and Dropbox 274 each syncing the same folder: 127,000 files, 309 GB.
 
-  | | Memory (RSS) | Threads | CPU, first 10 minutes after boot | CPU, idle on average |
-  |---|---|---|---|---|
-  | Homebase Filesync (daemon + tray) | **33 MB** | 18 | **1.2 s** | **≈ 0** (0.03 s a minute) |
-  | Dropbox 272.4 | 469 MB | 86 | 18.9 s | 2.7% of a core, all the time (over 8 days) |
-
-  That's about 14 times less memory and 15 times less CPU at start-up. When idle, Filesync
-  sleeps until something changes, so a laptop's battery barely notices it.
-
-  To be fair, Dropbox was watching a bigger folder: 127,000 files and 288 GB, against
-  Filesync's 11,700 files and 1 GB. Filesync's memory stays flat as a folder grows. It walks
-  the tree a branch at a time and keeps the rest in its database. Pointed at that same Dropbox
-  folder (137,000 entries), Filesync's start-up check took 4.7 s and left it at 13 MB.
-
-  Syncing 2,041 files (387 MB) on the same desktop (October 2026), as seen on the computer
-  that made the change:
-
-  | | Filesync 0.7 | Dropbox 274 |
+  | | Homebase Filesync | Dropbox |
   |---|---|---|
   | Encrypted before it leaves your computer | **Yes** | No |
-  | Memory while idle, before / after the upload | **28 / 43 MB** | 134 / 361 MB |
-  | CPU while idle | **≈ 0** (0.01 s per 10 minutes) | 0.25% of a core (1.4–1.8 s per 10 minutes) |
-  | CPU to upload them | **2.5 s** ¹ | 38.7 s |
-  | CPU to delete them | **0.4 s** | 4.8 s |
-  | Time to upload them | TBD | 87 s |
-  | Time to delete them | TBD | 57 s |
-  | Memory at its peak while uploading | **43 MB** | 466 MB |
-  | Read back from disk to upload | **0 MB** | 134 MB |
-  | Written to disk while uploading | **74 MB** | 113 MB |
-  | Sent while uploading | **406 MB** | 445 MB |
-  | Written to disk to delete them all | **2.5 MB** | 16.7 MB |
-  | Idle: disk writes per 10 minutes | **0** | 0.3–2.7 MB |
-  | Idle: network traffic per 10 minutes | **≈ 7 KB** (keep-alive) | 0.4–2.7 MB |
+  | **Idle, overnight (8.4 hours)** | | |
+  | CPU | **5 s** | 142 s |
+  | Memory | **31 MB** | 261 MB |
+  | Threads | **27** | 88 |
+  | Written to disk | **0 MB** | 34 MB |
+  | **Restart, nothing changed** | | |
+  | CPU | **2 s** | 12 s |
+  | Memory afterwards | **33 MB** | 466 MB |
+  | Written to disk | **0 MB** | 21 MB |
+  | **Adding a folder of 5,204 files (4.8 GB)** | | |
+  | CPU | **62 s** | 160 s |
+  | Memory at its peak | **50 MB** | 696 MB |
+  | Written to disk | **266 MB** | 698 MB |
+  | Sent over the network | **5.1 GB** | 5.4 GB |
+  | **Deleting that folder** | | |
+  | CPU | **0.8 s** | 11.1 s |
+  | Written to disk | **11 MB** | 39 MB |
 
-  ¹ To a Homebase on the same machine; Dropbox went over Wi-Fi to its servers, which costs CPU
-  too (Filesync 0.6 used 7–10 s over that Wi-Fi). Times will follow from a like-for-like run.
-
-  Deleting those 2,041 files takes 11 requests to your Homebase (0.6 needed 4,148), and an
-  idle daemon wakes about once every 12 seconds.
+  Idle, that's 27 times less CPU and 8 times less memory; while syncing, 14 times less memory
+  and less than half the CPU and disk writes. A laptop's battery barely notices it.
 - **Every file is hashed in full with BLAKE3,** one of the fastest cryptographic hashes there
   is, while the file is read. The hash goes along with each file and is checked on the way
   back: a file that doesn't match is refused and downloaded again. The hash also tells real
