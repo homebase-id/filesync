@@ -348,6 +348,7 @@ impl AccountOps<'_> {
         hard_before: Option<i64>,
         going: Going<'_>,
     ) -> Result<usize, EngineError> {
+        going.check()?;
         let of = passes.iter().map(Vec::len).sum();
         (going.told)(0, of);
         // What each folder holds of the rows still to go: what is in a folder goes before it (but
@@ -433,14 +434,18 @@ impl AccountOps<'_> {
                     (heard, failed) =
                         gone::look_all(self.remote, not_found.iter().map(|r| r.row.file_id));
                 }
-                // Its id never comes back, nor its row from a page read before.
-                let confirmed = self.db().write(|s| {
-                    let confirmed = gone::heard_all(s.account(), &heard)?;
-                    gone_now
-                        .iter()
-                        .try_for_each(|(r, at)| s.account().forget_file(r.row.file_id, *at))?;
-                    Ok(confirmed)
-                })?;
+                // Its id never comes back, nor its row from a page read before. A batch that
+                // took nothing writes nothing.
+                let confirmed = match heard.is_empty() && gone_now.is_empty() {
+                    true => 0,
+                    false => self.db().write(|s| {
+                        let confirmed = gone::heard_all(s.account(), &heard)?;
+                        gone_now
+                            .iter()
+                            .try_for_each(|(r, at)| s.account().forget_file(r.row.file_id, *at))?;
+                        Ok(confirmed)
+                    })?,
+                };
                 gone += confirmed + gone_now.len();
                 (going.told)(gone, of);
                 if let Some(e) = failed {

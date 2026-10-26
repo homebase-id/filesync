@@ -114,7 +114,7 @@ fn the_purge_finishes_a_delete_that_stopped_half_way() -> R {
     // y.txt are removed, a folder first, and are restorable; nothing goes for good yet.
     drop(a);
     let mut b = Client::new(&server, "b")?;
-    assert_eq!(b.engine.drive().purge(0)?, 0);
+    assert_eq!(b.engine.drive().purge(0, Going::UNWATCHED)?, 0);
     assert_eq!(count(), (1, 4));
     let photos = b
         .recently_deleted(10)?
@@ -123,7 +123,7 @@ fn the_purge_finishes_a_delete_that_stopped_half_way() -> R {
         .ok_or("Photos not listed")?;
     assert!(!photos.stays, "nothing live holds it any more");
     // Their own removal kept long enough: all of it goes.
-    assert_eq!(b.engine.drive().purge(0)?, 4);
+    assert_eq!(b.engine.drive().purge(0, Going::UNWATCHED)?, 4);
     assert_eq!(count(), (1, 0));
     b.sync()?;
     assert_eq!(b.tree_text(""), ["keep.txt = k"]);
@@ -606,7 +606,7 @@ fn what_no_device_syncs_stays_in_its_removed_folder_through_the_purge() -> R {
     // The purge, twice, a day apart: the first removes what the delete took along, the second
     // deletes it for good.
     for _ in 0..2 {
-        a.engine.drive().purge(0)?;
+        a.engine.drive().purge(0, Going::UNWATCHED)?;
         a.sync()?;
         server
             .lock()
@@ -913,7 +913,7 @@ fn recently_deleted_restores_and_purges() -> R {
     // The purge leaves nothing restorable.
     fs::remove_file(a.root.join("z.txt"))?;
     a.sync()?;
-    assert_eq!(a.engine.drive().purge(0)?, 1);
+    assert_eq!(a.engine.drive().purge(0, Going::UNWATCHED)?, 1);
     b.sync()?;
     assert!(b.recently_deleted(10)?.is_empty());
     assert_eq!(server.lock().map_err(|_| "poisoned")?.removed().count(), 0);

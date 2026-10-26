@@ -512,9 +512,9 @@ impl Sim {
                 let rows = self.server.removed.iter().map(Server::at).collect();
                 self.ledger.deleted_listed(rows);
             }
-            Action::EmptyListed => self.empty_listed_upto(None),
+            Action::EmptyListed => self.empty_listed(usize::MAX),
             Action::EmptyItem { pick } => self.empty_item(pick),
-            Action::EmptyStopped { done } => self.empty_listed_upto(Some(done)),
+            Action::EmptyStopped { done } => self.empty_listed(done),
             Action::EditTaken { pick } => {
                 let taken: Vec<NodeId> = self
                     .taken_along()
@@ -552,7 +552,7 @@ impl Sim {
                     .filter(|(n, _)| self.server.removed_at.get(n).is_some_and(|at| *at < before))
                     .map(Server::at)
                     .collect();
-                self.delete_for_good(&due, &known);
+                self.delete_for_good(&due, &known, usize::MAX);
             }
             Action::ToggleIgnore => {
                 let client = &mut self.clients[c];
@@ -728,7 +728,7 @@ impl Sim {
                 if let Some(at) = file {
                     self.note(|_| format!("  put back: {:?} deleted for good meanwhile", at.0));
                     let known = self.server.removed.iter().map(Server::at).collect();
-                    self.delete_for_good(&BTreeSet::from([at]), &known);
+                    self.delete_for_good(&BTreeSet::from([at]), &known, usize::MAX);
                 }
             }
             // A folder of it deleted for good meanwhile (by another app: what is in it waits in
@@ -1045,10 +1045,11 @@ impl Sim {
         }
     }
 
-    /// [`Action::EmptyListed`], or [`Action::EmptyStopped`] after `upto` deletes.
-    fn empty_listed_upto(&mut self, upto: Option<usize>) {
+    /// [`Action::EmptyListed`] (`upto`: `usize::MAX`), or [`Action::EmptyStopped`] after `upto`
+    /// deletes.
+    fn empty_listed(&mut self, upto: usize) {
         if let Some(listed) = self.ledger.listing().cloned() {
-            self.delete_for_good_upto(&listed, &listed, upto);
+            self.delete_for_good(&listed, &listed, upto);
         }
     }
 
@@ -1096,7 +1097,7 @@ impl Sim {
                 .live
                 .values()
                 .any(|n| inside.contains(&n.state.parent));
-        self.delete_for_good(&chosen, &listed);
+        self.delete_for_good(&chosen, &listed, usize::MAX);
         let stayed = !kept && self.server.removed.contains_key(&item);
         self.ledger
             .emptied_kept(|| stayed.then(|| format!("{item:?}")));
@@ -1106,24 +1107,16 @@ impl Sim {
     /// engine does ([`deleted::passes`], with what the folders hold as the emptying device
     /// knows it: of Recently deleted, the rows in `known` at their versions), in its order: before a pass's folders go, the drive is asked which of them hold a
     /// file as the engine asks ([`deleted::before_folders_go`]), and those stay. Records the first it deletes that it mustn't: one not chosen at that version (a
-    /// live node, say), or a folder holding anything not going after it.
+    /// live node, say), or a folder holding anything not going after it. Stopped after `upto`
+    /// deletes (a stop between batches; `usize::MAX`: none), the rest stays in Recently deleted,
+    /// and no later pass runs.
     fn delete_for_good(
         &mut self,
         chosen: &BTreeSet<(NodeId, VersionTag)>,
         known: &BTreeSet<(NodeId, VersionTag)>,
+        upto: usize,
     ) {
-        self.delete_for_good_upto(chosen, known, None);
-    }
-
-    /// [`Sim::delete_for_good`], stopped after `upto` deletes (a stop between batches): the
-    /// rest stays in Recently deleted, and no later pass runs.
-    fn delete_for_good_upto(
-        &mut self,
-        chosen: &BTreeSet<(NodeId, VersionTag)>,
-        known: &BTreeSet<(NodeId, VersionTag)>,
-        upto: Option<usize>,
-    ) {
-        let mut left = upto.unwrap_or(usize::MAX);
+        let mut left = upto;
         let server = &self.server;
         let rows: Vec<deleted::Chosen> = server
             .removed

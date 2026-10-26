@@ -47,13 +47,13 @@ fn a_young_removal_leaves_a_tombstone_that_goes_hard_later() -> common::Res<()> 
     fs::remove_file(a.root.join("x.txt"))?;
     a.sync()?;
 
-    assert_eq!(a.engine.drive().purge(0)?, 1);
+    assert_eq!(a.engine.drive().purge(0, deleted::Going::UNWATCHED)?, 1);
     let header = server.lock().map_err(|_| "poisoned")?.header(x)?;
     assert!(header.is_deleted(), "a tombstone: {header:?}");
     a.sync()?;
 
     server.lock().map_err(|_| "poisoned")?.advance(LATER);
-    a.engine.drive().purge(0)?;
+    a.engine.drive().purge(0, deleted::Going::UNWATCHED)?;
     assert!(
         matches!(
             server.lock().map_err(|_| "poisoned")?.header(x),
@@ -87,7 +87,7 @@ fn an_old_removal_goes_hard_at_once() -> common::Res<()> {
     assert_eq!(b.recently_deleted(10)?.len(), 2, "b saw the delete");
 
     server.lock().map_err(|_| "poisoned")?.advance(LATER);
-    assert_eq!(a.engine.drive().purge(0)?, 2);
+    assert_eq!(a.engine.drive().purge(0, deleted::Going::UNWATCHED)?, 2);
     let gone = server
         .lock()
         .map_err(|_| "poisoned")?
@@ -124,7 +124,7 @@ fn a_device_away_longer_than_the_trace_reads_the_feed_again() -> common::Res<()>
     fs::remove_file(a.root.join("d/x.txt"))?;
     a.sync()?;
     server.lock().map_err(|_| "poisoned")?.advance(LATER);
-    assert_eq!(a.engine.drive().purge(0)?, 1);
+    assert_eq!(a.engine.drive().purge(0, deleted::Going::UNWATCHED)?, 1);
 
     b.sync()?;
     assert_eq!(
@@ -230,7 +230,7 @@ fn a_young_member_of_an_old_group_leaves_a_tombstone() -> common::Res<()> {
         server.update(y.file_id, y.version, &meta, None)?;
     }
     a.sync()?;
-    assert_eq!(a.engine.drive().purge(0)?, 3);
+    assert_eq!(a.engine.drive().purge(0, deleted::Going::UNWATCHED)?, 3);
     let server = server.lock().map_err(|_| "poisoned")?;
     assert!(server.header(y.file_id)?.is_deleted(), "y: a tombstone");
     let left = server.live().chain(server.removed()).count();
@@ -280,7 +280,13 @@ fn a_purge_removes_what_a_stopped_delete_left_and_a_restore_brings_it_back() -> 
     remove_on_server(&server, &d);
     let (e, x) = (header_named(&server, "e"), header_named(&server, "x.txt"));
     server.lock().map_err(|_| "poisoned")?.advance(LATER);
-    assert_eq!(a.engine.drive().purge(TRACE_MS)?, 0, "d holds e and x");
+    assert_eq!(
+        a.engine
+            .drive()
+            .purge(TRACE_MS, deleted::Going::UNWATCHED)?,
+        0,
+        "d holds e and x"
+    );
     {
         let server = server.lock().map_err(|_| "poisoned")?;
         for held in [&d, &e, &x] {
@@ -321,7 +327,13 @@ fn a_member_removed_later_keeps_its_own_time() -> common::Res<()> {
     // The delete carries on, long after: f removed now, with m.
     let f = header_named(&server, "f.txt");
     remove_on_server(&server, &f);
-    assert_eq!(a.engine.drive().purge(TRACE_MS)?, 0, "f has its own time");
+    assert_eq!(
+        a.engine
+            .drive()
+            .purge(TRACE_MS, deleted::Going::UNWATCHED)?,
+        0,
+        "f has its own time"
+    );
     {
         let server = server.lock().map_err(|_| "poisoned")?;
         assert!(server.header(m.file_id)?.removed, "m");
@@ -329,7 +341,12 @@ fn a_member_removed_later_keeps_its_own_time() -> common::Res<()> {
         assert_eq!(server.payload(f.file_id)?.as_slice(), b"f");
     }
     server.lock().map_err(|_| "poisoned")?.advance(LATER);
-    assert_eq!(a.engine.drive().purge(TRACE_MS)?, 2);
+    assert_eq!(
+        a.engine
+            .drive()
+            .purge(TRACE_MS, deleted::Going::UNWATCHED)?,
+        2
+    );
     assert!(live(&server).is_empty());
     Ok(())
 }
@@ -357,10 +374,14 @@ fn a_folder_holding_what_this_device_doesnt_read_stays() -> common::Res<()> {
         z
     };
     server.lock().map_err(|_| "poisoned")?.advance(LATER);
-    assert_eq!(a.engine.drive().purge(0)?, 1, "x went, d stays");
+    assert_eq!(
+        a.engine.drive().purge(0, deleted::Going::UNWATCHED)?,
+        1,
+        "x went, d stays"
+    );
     a.sync()?;
     server.lock().map_err(|_| "poisoned")?.advance(LATER);
-    assert_eq!(a.engine.drive().purge(0)?, 0);
+    assert_eq!(a.engine.drive().purge(0, deleted::Going::UNWATCHED)?, 0);
     let server = server.lock().map_err(|_| "poisoned")?;
     let d = server.header(d.file_id)?;
     assert!(d.removed, "d stays: {d:?}");
@@ -495,7 +516,11 @@ fn a_node_written_into_a_removed_folder_later_holds_it() -> common::Res<()> {
     )?;
 
     server.lock().map_err(|_| "poisoned")?.advance(LATER);
-    assert_eq!(a.engine.drive().purge(0)?, 1, "x went, d stays");
+    assert_eq!(
+        a.engine.drive().purge(0, deleted::Going::UNWATCHED)?,
+        1,
+        "x went, d stays"
+    );
     let server = server.lock().map_err(|_| "poisoned")?;
     let d = server.header(d.file_id)?;
     assert!(d.removed, "d stays: {d:?}");
@@ -913,13 +938,7 @@ impl Watched {
 
     /// A delete request: the rows of Recently deleted in the account now.
     fn deleting(&self) {
-        let rows = self
-            .account
-            .lock()
-            .expect("account")
-            .read(|s| s.list_removed(usize::MAX >> 1))
-            .expect("rows")
-            .len();
+        let rows = removed_rows(&self.account).expect("rows");
         self.rows.lock().expect("rows").push(rows);
     }
 
@@ -1536,8 +1555,10 @@ fn a_missed_delete_for_good_is_asked_again_a_minute_on() -> common::Res<()> {
     assert_eq!(b.recently_deleted(10)?.len(), 2, "b saw the delete");
 
     server.lock().map_err(|_| "poisoned")?.advance(LATER);
-    assert_eq!(a.engine.drive().purge(0)?, 2);
-    b.engine.drive().purge(TRACE_MS)?;
+    assert_eq!(a.engine.drive().purge(0, deleted::Going::UNWATCHED)?, 2);
+    b.engine
+        .drive()
+        .purge(TRACE_MS, deleted::Going::UNWATCHED)?;
     assert!(!b.recently_deleted(10)?.is_empty(), "not there once: kept");
     assert_eq!(b.engine.drive().ask_again()?, 0, "too soon");
     b.a_minute_on()?;
@@ -1569,7 +1590,9 @@ fn a_put_back_asked_again_a_minute_on_uploads_what_went_for_good() -> common::Re
         .lock()
         .map_err(|_| "poisoned")?
         .advance(40 * 86_400_000);
-    a.engine.drive().purge(30 * 86_400_000)?;
+    a.engine
+        .drive()
+        .purge(30 * 86_400_000, deleted::Going::UNWATCHED)?;
     let held: Vec<NodeId> = b.sync()?.held.iter().map(|op| op.node()).collect();
     assert!(!held.is_empty());
     assert!(b.engine.put_back(&held).is_err(), "not there once");
@@ -1721,13 +1744,9 @@ fn many_removed(
     server: &Arc<Mutex<FakeServer>>,
     n: usize,
 ) -> common::Res<(Arc<Mutex<StateDb>>, Watched, i64)> {
-    for i in 0..n {
-        let name = format!("{i}.txt");
-        seed(server, &name)?;
-        remove_on_server(server, &header_named(server, &name));
-    }
-    server.lock().map_err(|_| "poisoned")?.advance(1_000);
-    let account = Arc::new(Mutex::new(StateDb::open_in_memory()?));
+    let names: Vec<String> = (0..n).map(|i| format!("{i}.txt")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let (account, _) = removed_now(server, &names)?;
     let remote = Watched::new(server, &account, Duration::ZERO);
     let now = pull_into(&account, &remote)?;
     Ok((account, remote, now))

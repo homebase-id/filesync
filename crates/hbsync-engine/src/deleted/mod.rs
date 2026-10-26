@@ -61,7 +61,7 @@ impl Going<'static> {
 
 impl Going<'_> {
     /// Asked to stop: [`Stopped::Requested`](crate::exec::Stopped::Requested).
-    fn check(&self) -> Result<(), EngineError> {
+    pub(crate) fn check(&self) -> Result<(), EngineError> {
         match (self.stop)() {
             true => Err(EngineError::Stopped(crate::exec::Stopped::Requested)),
             false => Ok(()),
