@@ -52,7 +52,7 @@ makes the "site" (packages, update feeds, a download page), signs it and uploads
 - **A nested `.appex` (File Provider, for online-only files later) loses its own entitlements**
   when Conveyor signs the app, and macOS doesn't register it. That needs Conveyor's custom
   signing hook (`app.mac.sign.scripts`) or a separate signing step when File Provider comes
-  (roadmap Layer 7); it doesn't affect v0.1.
+  (roadmap: content on demand); it doesn't affect v0.1.
 - **MSIX updates follow the `.appinstaller`.** A package added from the `.msix` file alone
   isn't tied to its feed; users install through Conveyor's installer, which uses the feed.
   Installing from the feed doesn't work on the CI runners (Windows Server: `0x80D05011` fetching
