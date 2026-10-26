@@ -191,11 +191,7 @@ impl AccountOps<'_> {
                 }
                 Ok(_) | Err(RemoteError::NotFound | RemoteError::Deleted) => self.behind = true,
                 // Down for now, or busy and saying when to ask again: the purge stops.
-                Err(e)
-                    if crate::policy::policy(e.class()).in_run == crate::policy::InRun::Backoff =>
-                {
-                    return Err(EngineError::Remote(e));
-                }
+                Err(e) if unanswered(&e) => return Err(EngineError::Remote(e)),
                 Err(e) => {
                     failed.get_or_insert(e);
                 }
@@ -467,18 +463,15 @@ impl AccountOps<'_> {
                     return ended.map_or(Ok(()), Err);
                 }
                 // A batch in flight holds a sender, and sends before it ends.
-                let Ok(asked) = rx.recv() else {
-                    unreachable!("a batch in flight answers")
-                };
+                let asked = rx.recv().expect("a batch in flight answers");
                 in_flight -= 1;
-                let mut asked = match asked {
+                let (asked, failed) = match asked {
                     Ok(asked) => asked,
                     Err(p) => {
                         panicked.get_or_insert(p);
                         continue;
                     }
                 };
-                let failed = asked.failed.take();
                 match self.write(asked) {
                     Ok(n) => {
                         *gone += n;
@@ -489,7 +482,6 @@ impl AccountOps<'_> {
                     }
                 }
                 if let Some(e) = failed {
-                    self.behind |= unanswered(&e);
                     ended.get_or_insert(EngineError::Remote(e));
                 }
             }
@@ -502,8 +494,12 @@ impl AccountOps<'_> {
     /// never comes back, nor its row from a page read before. A batch that took nothing writes
     /// nothing. Returns how many went.
     fn write(&mut self, asked: Asked) -> Result<usize, EngineError> {
-        self.behind |= asked.behind;
-        let Asked { gone, heard, .. } = asked;
+        let Asked {
+            gone,
+            heard,
+            behind,
+        } = asked;
+        self.behind |= behind;
         if heard.is_empty() && gone.is_empty() {
             return Ok(0);
         }
@@ -648,20 +644,18 @@ struct Asked {
     gone: Vec<(RemoteFileId, Option<i64>)>,
     /// What the headers said of the files answered not found.
     heard: Vec<(RemoteFileId, gone::Said)>,
-    /// One was written since, or not found: the picture lacked that.
+    /// One was written since, or not found, or the request failed on the way (it may have
+    /// landed): the picture lacked that.
     behind: bool,
-    /// The error of a request that failed (the files it didn't answer stay), or of a file's
-    /// answer that isn't one of [`Answer`]'s.
-    failed: Option<RemoteError>,
 }
 
 /// Asks the drive to delete `batch` for good, hard or leaving tombstones: a request, then a
 /// header read for each file answered not found (deleted for good meanwhile, by another
 /// device's purge, if its header says so too; else it stays), unless the request failed (the
 /// rest stay, for the next purge).
-fn ask(remote: &dyn Remote, batch: &[&RemovedRow], hard: bool) -> Asked {
+fn ask(remote: &dyn Remote, batch: &[&RemovedRow], hard: bool) -> (Asked, Option<RemoteError>) {
     let doomed: Vec<Doomed> = batch.iter().map(|r| r.doomed()).collect();
-    let (answers, failed) = match hard {
+    let (answers, mut failed) = match hard {
         true => hard_delete(remote, &doomed),
         false => answers_to(&doomed, |f| remote.delete(f), |at| at),
     };
@@ -669,7 +663,6 @@ fn ask(remote: &dyn Remote, batch: &[&RemovedRow], hard: bool) -> Asked {
         gone: Vec::new(),
         heard: Vec::new(),
         behind: false,
-        failed,
     };
     let mut not_found = Vec::new();
     for (r, answer) in batch.iter().zip(answers) {
@@ -683,10 +676,12 @@ fn ask(remote: &dyn Remote, batch: &[&RemovedRow], hard: bool) -> Asked {
         }
     }
     asked.behind |= !not_found.is_empty();
-    if asked.failed.is_none() {
-        (asked.heard, asked.failed) = gone::look_all(remote, not_found);
+    if failed.is_none() {
+        (asked.heard, failed) = gone::look_all(remote, not_found);
     }
-    asked
+    // Whichever error ends the job: a stop or the other batch's may come first.
+    asked.behind |= failed.as_ref().is_some_and(unanswered);
+    (asked, failed)
 }
 
 /// What the drive answered for a file a delete for good asked about.
