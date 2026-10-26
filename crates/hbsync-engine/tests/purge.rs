@@ -7,7 +7,7 @@ mod common;
 use std::collections::HashSet;
 use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use common::{Client, header_named, server};
@@ -895,7 +895,8 @@ fn removed_on_server(server: &Arc<Mutex<FakeServer>>, name: &str) -> bool {
 /// a moment. With `cut`, a delete for good stops after that many files with that error, as a
 /// failed batch after others went; with `answer`, deletes answer that for each file, deleting
 /// nothing; with `soft_fails`, a soft delete fails as a broken connection; with `headers_fail`,
-/// so does a header read (`headers` counts them).
+/// so does a header read (`headers` counts them); with `paired`, each delete, soft or hard,
+/// waits up to that long for another in flight with it (`flight` counts them).
 struct Watched {
     inner: FakeRemote,
     account: Arc<Mutex<StateDb>>,
@@ -912,6 +913,26 @@ struct Watched {
     waited: Mutex<Vec<Duration>>,
     /// The rows of Recently deleted in the account when each delete request came.
     rows: Mutex<Vec<usize>>,
+    paired: Option<Duration>,
+    flight: Mutex<Flight>,
+    landed: Condvar,
+}
+
+/// The deletes in flight at a [`Watched`] remote.
+#[derive(Default)]
+struct Flight {
+    now: usize,
+    /// How many others were in flight as each delete came, in turn.
+    others: Vec<usize>,
+}
+
+/// A delete in flight ([`Watched::fly`]), until it is dropped.
+struct Flying<'a>(&'a Watched);
+
+impl Drop for Flying<'_> {
+    fn drop(&mut self) {
+        self.0.flight.lock().expect("flight").now -= 1;
+    }
 }
 
 impl Watched {
@@ -933,7 +954,30 @@ impl Watched {
             last: Mutex::default(),
             waited: Mutex::default(),
             rows: Mutex::default(),
+            paired: None,
+            flight: Mutex::default(),
+            landed: Condvar::new(),
         }
+    }
+
+    /// A delete request in flight, until the result is dropped: if `paired` and it came alone,
+    /// once another came, or that long passed.
+    fn fly(&self) -> Flying<'_> {
+        let mut flight = self.flight.lock().expect("flight");
+        let me = flight.others.len();
+        let others = flight.now;
+        flight.others.push(others);
+        flight.now += 1;
+        self.landed.notify_all();
+        if let Some(wait) = self.paired
+            && flight.now == 1
+        {
+            let _ = self
+                .landed
+                .wait_timeout_while(flight, wait, |f| f.others.len() == me + 1)
+                .expect("flight");
+        }
+        Flying(self)
     }
 
     /// A delete request: the rows of Recently deleted in the account now.
@@ -1014,6 +1058,7 @@ impl hbsync_remote::Remote for Watched {
         &self,
         files: &[hbsync_types::Doomed],
     ) -> hbsync_remote::Result<hbsync_remote::Deletes> {
+        let _flying = self.fly();
         self.request();
         self.deleting();
         if let Some(answer) = self.answer {
@@ -1029,6 +1074,7 @@ impl hbsync_remote::Remote for Watched {
         &self,
         files: &[hbsync_types::Doomed],
     ) -> hbsync_remote::Result<hbsync_remote::ForGood> {
+        let _flying = self.fly();
         self.request();
         if let Some(answer) = self.answer {
             let answers = files.iter().map(|_| Err(answer())).collect();
@@ -1780,24 +1826,113 @@ fn deleting_for_good_writes_each_batch_as_it_is_answered() -> common::Res<()> {
     };
     let (gone, _) = deleted::AccountOps::run(&account, &remote, |ops| ops.purge(0, now, going));
     assert_eq!(gone?, n);
+    // Two at once, the third once one of them is written.
     let rows = remote.rows.lock().map_err(|_| "poisoned")?.clone();
-    assert_eq!(
-        rows,
-        [n, n - batch, n - 2 * batch],
-        "written before the next batch"
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[..2], [n, n], "the first two in flight together");
+    assert!(
+        rows[2] <= n - batch,
+        "written before the next batch: {rows:?}"
     );
+    // Whichever is answered first: the third may overtake the second.
     let told = told.lock().map_err(|_| "poisoned")?.clone();
-    assert_eq!(told, [(0, n), (batch, n), (2 * batch, n), (n, n)]);
+    assert_eq!(told.len(), 4, "{told:?}");
+    assert_eq!(told[..2], [(0, n), (batch, n)]);
+    assert!(
+        [2 * batch, batch + batch / 2].contains(&told[2].0),
+        "{told:?}"
+    );
+    assert_eq!(told[3], (n, n));
     assert_eq!(removed_rows(&account)?, 0);
     Ok(())
 }
 
-/// A stop asked while deleting for good ends it after the batch in flight: what went is
+/// Deleting for good keeps [`deleted::FOR_GOOD_AT_ONCE`] requests in flight: the drive's
+/// storage work for one overlaps the other's. The remote holds each delete that came alone
+/// until another comes (or a while passed, so it can't hang).
+#[test]
+fn deleting_for_good_keeps_two_requests_in_flight() -> common::Res<()> {
+    assert_eq!(deleted::FOR_GOOD_AT_ONCE, 2);
+    let batch = deleted::FOR_GOOD_BATCH;
+    let n = 2 * batch;
+    let server = server();
+    let (account, mut remote, now) = many_removed(&server, n)?;
+    remote.paired = Some(Duration::from_secs(10));
+    let requests = || remote.inner.faults().requests;
+    let before = requests();
+    let began = Instant::now();
+    assert_eq!(purge(&account, &remote, 0, now, &mut false)?, n);
+    let flight = remote.flight.lock().map_err(|_| "poisoned")?;
+    assert_eq!(
+        flight.others,
+        [0, 1],
+        "the second came while the first was in flight"
+    );
+    assert!(
+        began.elapsed() < Duration::from_secs(10),
+        "the first didn't wait for the timeout"
+    );
+    assert_eq!(requests() - before, 2, "a request per batch, as before");
+    assert_eq!(removed_rows(&account)?, 0);
+    Ok(())
+}
+
+/// A pass starts no batch while one of the pass before is in flight: what is in a folder goes
+/// before it, answered. Each delete that came alone waits a moment for another, which a folder's
+/// batch started early would be.
+#[test]
+fn a_pass_starts_once_the_one_before_is_answered() -> common::Res<()> {
+    let server = server();
+    folder_with_a_file(&server)?;
+    let account = Arc::new(Mutex::new(StateDb::open_in_memory()?));
+    let mut remote = Watched::new(&server, &account, Duration::ZERO);
+    remote.paired = Some(Duration::from_millis(300));
+    let now = pull_into(&account, &remote)?;
+    assert_eq!(purge(&account, &remote, 0, now, &mut false)?, 2);
+    let flight = remote.flight.lock().map_err(|_| "poisoned")?;
+    assert_eq!(
+        flight.others,
+        [0, 0],
+        "the file's batch, then the folder's, alone"
+    );
+    Ok(())
+}
+
+/// A batch that fails keeps what the other in flight with it did: answered and written, the
+/// error returned once it is. The next purge takes the rest.
+#[test]
+fn a_failed_batch_keeps_the_other_in_flight() -> common::Res<()> {
+    let batch = deleted::FOR_GOOD_BATCH;
+    let n = 3 * batch;
+    let server = server();
+    let (account, mut remote, now) = many_removed(&server, n)?;
+    remote.paired = Some(Duration::from_secs(10));
+    // The first of the two in flight to reach the drive fails, before it.
+    remote.inner.faults().script = [true].into();
+    let told = Mutex::new(Vec::new());
+    let going = deleted::Going {
+        stop: &|| false,
+        told: &|done, of| told.lock().expect("told").push((done, of)),
+    };
+    let (gone, news) = deleted::AccountOps::run(&account, &remote, |ops| ops.purge(0, now, going));
+    assert!(gone.is_err(), "{gone:?}");
+    assert!(news.behind, "it may have landed");
+    let flight = remote.flight.lock().map_err(|_| "poisoned")?;
+    assert_eq!(flight.others, [0, 1], "no batch started after the failure");
+    assert_eq!(removed_rows(&account)?, n - batch, "the other went");
+    let told = told.lock().map_err(|_| "poisoned")?.clone();
+    assert_eq!(told.last(), Some(&(batch, n)));
+    drop(flight);
+    assert_eq!(purge(&account, &remote, 0, now, &mut false)?, n - batch);
+    Ok(())
+}
+
+/// A stop asked while deleting for good ends it after the batches in flight: what went is
 /// written, the rest stays in Recently deleted, and the next purge takes it.
 #[test]
-fn a_stop_ends_deleting_for_good_after_the_batch_in_flight() -> common::Res<()> {
+fn a_stop_ends_deleting_for_good_after_the_batches_in_flight() -> common::Res<()> {
     let batch = deleted::FOR_GOOD_BATCH;
-    let n = 2 * batch + 1;
+    let n = 3 * batch + 1;
     let server = server();
     let (account, remote, now) = many_removed(&server, n)?;
     let stop = AtomicBool::new(false);
@@ -1817,11 +1952,15 @@ fn a_stop_ends_deleting_for_good_after_the_batch_in_flight() -> common::Res<()> 
     );
     assert_eq!(
         remote.rows.lock().map_err(|_| "poisoned")?.len(),
-        1,
-        "one batch sent"
+        2,
+        "two batches sent, together"
     );
-    assert_eq!(removed_rows(&account)?, n - batch, "the first batch went");
-    assert_eq!(purge(&account, &remote, 0, now, &mut false)?, n - batch);
+    assert_eq!(
+        removed_rows(&account)?,
+        n - 2 * batch,
+        "both batches in flight went"
+    );
+    assert_eq!(purge(&account, &remote, 0, now, &mut false)?, n - 2 * batch);
     assert_eq!(removed_rows(&account)?, 0);
     Ok(())
 }
@@ -1830,21 +1969,20 @@ fn a_stop_ends_deleting_for_good_after_the_batch_in_flight() -> common::Res<()> 
 #[test]
 fn a_failed_batch_keeps_the_batches_before_it() -> common::Res<()> {
     let batch = deleted::FOR_GOOD_BATCH;
-    let n = 2 * batch;
+    let n = 3 * batch;
     let server = server();
     let (account, remote, now) = many_removed(&server, n)?;
-    remote.inner.faults().script = [false, true].into();
+    remote.inner.faults().script = [false, false, true].into();
     assert!(purge(&account, &remote, 0, now, &mut false).is_err());
-    assert_eq!(removed_rows(&account)?, n - batch);
+    assert_eq!(removed_rows(&account)?, batch);
     assert_eq!(purge(&account, &remote, 0, now, &mut false)?, batch);
     Ok(())
 }
 
-/// A stop between a file pass and the folders' never lets a folder go before what is in it:
-/// the job ends there, the folder stays in Recently deleted, and the next purge takes it.
-#[test]
-fn a_stop_after_the_files_leaves_their_folder() -> common::Res<()> {
-    let server = server();
+/// A folder `d` holding a file `x.txt` on the server, both removed a moment ago: their headers.
+fn folder_with_a_file(
+    server: &Arc<Mutex<FakeServer>>,
+) -> common::Res<(hbsync_remote::RemoteHeader, hbsync_remote::RemoteHeader)> {
     {
         let d = hbsync_remote::NodeMeta {
             node: NodeId::new(),
@@ -1857,12 +1995,21 @@ fn a_stop_after_the_files_leaves_their_folder() -> common::Res<()> {
         server.create(&d, None)?;
         server.seed_file(d.node, "x.txt", b"x", hbsync_fileio::HashAlgorithm::Blake3)?;
     }
-    let d = header_named(&server, "d");
-    let x = header_named(&server, "x.txt");
+    let d = header_named(server, "d");
+    let x = header_named(server, "x.txt");
     for name in ["d", "x.txt"] {
-        remove_on_server(&server, &header_named(&server, name));
+        remove_on_server(server, &header_named(server, name));
     }
     server.lock().map_err(|_| "poisoned")?.advance(1_000);
+    Ok((d, x))
+}
+
+/// A stop between a file pass and the folders' never lets a folder go before what is in it:
+/// the job ends there, the folder stays in Recently deleted, and the next purge takes it.
+#[test]
+fn a_stop_after_the_files_leaves_their_folder() -> common::Res<()> {
+    let server = server();
+    let (d, x) = folder_with_a_file(&server)?;
     let account = Arc::new(Mutex::new(StateDb::open_in_memory()?));
     let remote = Watched::new(&server, &account, Duration::ZERO);
     let now = pull_into(&account, &remote)?;

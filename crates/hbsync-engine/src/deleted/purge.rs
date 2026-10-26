@@ -2,6 +2,8 @@
 //! purge of what it kept long enough, with the tombstones.
 
 use std::collections::{HashMap, HashSet};
+use std::panic::{self, AssertUnwindSafe};
+use std::sync::mpsc;
 use std::time::Instant;
 
 use hbsync_remote::{Answers, BATCH_FILES, Holds, Remote, RemoteError};
@@ -17,7 +19,7 @@ use super::listing::{
     Listed, RemovedRows, deleted_by_item, deletes_before, group, holdings, refuse_unlisted,
 };
 use super::rules::{Chosen, before_folders_go, inside, passes};
-use super::{AccountOps, FOR_GOOD_BATCH, Going};
+use super::{AccountOps, FOR_GOOD_AT_ONCE, FOR_GOOD_BATCH, Going};
 
 impl AccountOps<'_> {
     /// The purge: deletes for good the items of Recently deleted kept `keep_ms` by `now_ms` (the
@@ -335,13 +337,15 @@ impl AccountOps<'_> {
     /// versions ([`before_folders_go`]): round a cycle of removed folders, one holds another
     /// still to go, and goes first. A node removed before `hard_before` (Unix ms, the
     /// server's) goes without a trace; any other leaves a tombstone (`None`: every one does),
-    /// recorded with its time; both in batches of [`FOR_GOOD_BATCH`], a request each, each batch
-    /// written as it is answered: a stop, a crash or a failure keeps what went. Returns how many
-    /// went. One written since, or not found, leaves the account behind ([`AccountOps::run`]);
-    /// one not found is recorded gone once its header says so too. A request that fails stops
-    /// it with its error, and `going`'s stop, asked before each pass and batch, with
-    /// [`Stopped::Requested`](crate::exec::Stopped::Requested): what it didn't answer stays, for the next purge, and no later
-    /// pass runs (what is in a folder goes before it).
+    /// recorded with its time; both in batches of [`FOR_GOOD_BATCH`], a request each, up to
+    /// [`FOR_GOOD_AT_ONCE`] of a pass at once and never two passes' ([`Self::delete_batches`]),
+    /// each written as it is answered: a stop, a crash or a failure keeps what went. Returns how
+    /// many went. One written since, or not found, leaves the account behind
+    /// ([`AccountOps::run`]); one not found is recorded gone once its header says so too. A
+    /// request that fails stops it with its error, and `going`'s stop, asked before each pass
+    /// and batch, with [`Stopped::Requested`](crate::exec::Stopped::Requested), once the batches
+    /// in flight are answered and written: what it didn't answer stays, for the next purge, and
+    /// no later pass runs (what is in a folder goes before it).
     fn delete_for_good(
         &mut self,
         passes: &[Vec<RemovedRow>],
@@ -402,58 +406,93 @@ impl AccountOps<'_> {
                 goes.into_iter().partition(|r| hard(r));
             let batches = (hard.chunks(FOR_GOOD_BATCH).map(|b| (b, true)))
                 .chain(soft.chunks(FOR_GOOD_BATCH).map(|b| (b, false)));
-            for (batch, for_good) in batches {
-                going.check()?;
-                let doomed: Vec<Doomed> = batch.iter().map(|r| r.doomed()).collect();
-                let (answers, mut failed) = match for_good {
-                    true => hard_delete(self.remote, &doomed),
-                    false => answers_to(&doomed, |f| self.remote.delete(f), |at| at),
-                };
-                // Each gone with its tombstone's time, if it left one.
-                let mut gone_now: Vec<(&RemovedRow, Option<i64>)> = Vec::new();
-                let mut not_found: Vec<&RemovedRow> = Vec::new();
-                for (&r, answer) in batch.iter().zip(answers) {
-                    match answer {
-                        Answer::Deleted(tombstone) => gone_now.push((r, tombstone)),
-                        Answer::Missing => not_found.push(r),
-                        // Restored or changed meanwhile: not ours to delete.
-                        Answer::Written => self.behind = true,
-                        Answer::Kept => {}
-                    }
-                }
-                // Not found: deleted for good meanwhile (another device's purge), if its header
-                // says so too; else it stays. Either way the picture lacked it. A request that
-                // fails stops the asking: the rest stay, for the next purge.
-                if !not_found.is_empty() {
-                    self.behind = true;
-                }
-                // What its header says, taken in the write ([`gone::heard`]: the identity's "not
-                // there" only the second time, a minute on, sync semantics §8b).
-                let mut heard = Vec::new();
-                if failed.is_none() {
-                    (heard, failed) =
-                        gone::look_all(self.remote, not_found.iter().map(|r| r.row.file_id));
-                }
-                // Its id never comes back, nor its row from a page read before. A batch that
-                // took nothing writes nothing.
-                let confirmed = match heard.is_empty() && gone_now.is_empty() {
-                    true => 0,
-                    false => self.db().write(|s| {
-                        let confirmed = gone::heard_all(s.account(), &heard)?;
-                        gone_now
-                            .iter()
-                            .try_for_each(|(r, at)| s.account().forget_file(r.row.file_id, *at))?;
-                        Ok(confirmed)
-                    })?,
-                };
-                gone += confirmed + gone_now.len();
-                (going.told)(gone, of);
-                if let Some(e) = failed {
-                    return Err(EngineError::Remote(e));
-                }
-            }
+            self.delete_batches(batches, going, &mut gone, of)?;
         }
         Ok(gone)
+    }
+
+    /// Deletes `batches` of a pass for good (each with whether it goes hard), up to
+    /// [`FOR_GOOD_AT_ONCE`] requests in flight, each on a thread of its own: nothing in a pass is
+    /// in another node of it, so they go in any order, and the pass ends once all are answered.
+    /// Each batch is written as it is answered, whichever comes first (the account's DB on this
+    /// thread only), counted in `gone` and told to `going` (of `of`). `going`'s stop is asked
+    /// before each batch starts; a stop, a failed request or a failed write starts no more, and
+    /// the batches in flight are still answered and written. Then the first of those errors is
+    /// returned.
+    fn delete_batches<'r>(
+        &mut self,
+        mut batches: impl Iterator<Item = (&'r [&'r RemovedRow], bool)>,
+        going: Going<'_>,
+        gone: &mut usize,
+        of: usize,
+    ) -> Result<(), EngineError> {
+        let remote = self.remote;
+        let (tx, rx) = mpsc::channel();
+        std::thread::scope(|scope| {
+            let mut in_flight = 0;
+            let mut ended = None;
+            loop {
+                while ended.is_none() && in_flight < FOR_GOOD_AT_ONCE {
+                    let Some((batch, hard)) = batches.next() else {
+                        break;
+                    };
+                    if let Err(e) = going.check() {
+                        ended = Some(e);
+                        break;
+                    }
+                    let tx = tx.clone();
+                    // A panic comes back as an answer: the batch in flight is still waited for.
+                    scope.spawn(move || {
+                        let asked =
+                            panic::catch_unwind(AssertUnwindSafe(|| ask(remote, batch, hard)));
+                        tx.send(asked).ok();
+                    });
+                    in_flight += 1;
+                }
+                if in_flight == 0 {
+                    return ended.map_or(Ok(()), Err);
+                }
+                // A batch in flight holds a sender, and sends before it ends.
+                let Ok(asked) = rx.recv() else {
+                    unreachable!("a batch in flight answers")
+                };
+                in_flight -= 1;
+                let mut asked = asked.unwrap_or_else(|p| panic::resume_unwind(p));
+                let failed = asked.failed.take().map(EngineError::Remote);
+                match self.write(asked) {
+                    Ok(n) => {
+                        *gone += n;
+                        (going.told)(*gone, of);
+                    }
+                    Err(e) => {
+                        ended.get_or_insert(e);
+                    }
+                }
+                if let Some(e) = failed {
+                    ended.get_or_insert(e);
+                }
+            }
+        })
+    }
+
+    /// Writes what the drive answered for a batch ([`ask`]): each file gone, with its tombstone's
+    /// time, and what the headers said of those not found, taken in ([`gone::heard`]: the
+    /// identity's "not there" only the second time, a minute on, sync semantics §8b). Its id
+    /// never comes back, nor its row from a page read before. A batch that took nothing writes
+    /// nothing. Returns how many went.
+    fn write(&mut self, asked: Asked) -> Result<usize, EngineError> {
+        self.behind |= asked.behind;
+        let Asked { gone, heard, .. } = asked;
+        if heard.is_empty() && gone.is_empty() {
+            return Ok(0);
+        }
+        let confirmed = self.db().write(|s| {
+            let confirmed = gone::heard_all(s.account(), &heard)?;
+            gone.iter()
+                .try_for_each(|&(f, at)| s.account().forget_file(f, at))?;
+            Ok(confirmed)
+        })?;
+        Ok(confirmed + gone.len())
     }
 
     /// Asks again about the files of Recently deleted the identity said once weren't there,
@@ -580,6 +619,53 @@ fn stuck_below(s: &ReadTx<'_>, before: i64) -> Result<Stuck, StateError> {
         }
     }
     Ok(stuck)
+}
+
+/// What the drive answered for a batch a delete for good asked about ([`ask`]), to write.
+struct Asked {
+    /// Each file gone, with its tombstone's time if it left one.
+    gone: Vec<(RemoteFileId, Option<i64>)>,
+    /// What the headers said of the files answered not found.
+    heard: Vec<(RemoteFileId, gone::Said)>,
+    /// One was written since, or not found: the picture lacked that.
+    behind: bool,
+    /// The error of a request that failed (the files it didn't answer stay), or of a file's
+    /// answer that isn't one of [`Answer`]'s.
+    failed: Option<RemoteError>,
+}
+
+/// Asks the drive to delete `batch` for good, hard or leaving tombstones: a request, then a
+/// header read for each file answered not found (deleted for good meanwhile, by another
+/// device's purge, if its header says so too; else it stays), unless the request failed (the
+/// rest stay, for the next purge).
+fn ask(remote: &dyn Remote, batch: &[&RemovedRow], hard: bool) -> Asked {
+    let doomed: Vec<Doomed> = batch.iter().map(|r| r.doomed()).collect();
+    let (answers, failed) = match hard {
+        true => hard_delete(remote, &doomed),
+        false => answers_to(&doomed, |f| remote.delete(f), |at| at),
+    };
+    let mut asked = Asked {
+        gone: Vec::new(),
+        heard: Vec::new(),
+        behind: false,
+        failed,
+    };
+    let mut not_found = Vec::new();
+    for (r, answer) in batch.iter().zip(answers) {
+        match answer {
+            Answer::Deleted(tombstone) => asked.gone.push((r.row.file_id, tombstone)),
+            // Either way the picture lacked it.
+            Answer::Missing => not_found.push(r.row.file_id),
+            // Restored or changed meanwhile: not ours to delete.
+            Answer::Written => asked.behind = true,
+            Answer::Kept => {}
+        }
+    }
+    asked.behind |= !not_found.is_empty();
+    if asked.failed.is_none() {
+        (asked.heard, asked.failed) = gone::look_all(remote, not_found);
+    }
+    asked
 }
 
 /// What the drive answered for a file a delete for good asked about.

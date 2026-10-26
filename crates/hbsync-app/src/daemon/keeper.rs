@@ -5,9 +5,9 @@
 //! What a purge found not there once is asked again a minute on ([`Drive::ask_again`]); a
 //! restore that found something not there once is run once more a minute on.
 //!
-//! Deleting for good (emptying, the purge) goes a batch at a time, each written as it is
+//! Deleting for good (emptying, the purge) goes in batches, two at a time, each written as it is
 //! answered, and is shown on the account's status meanwhile; once the account ends, it stops
-//! after the batch in flight, and what it didn't reach stays in Recently deleted.
+//! after the batches in flight, and what it didn't reach stays in Recently deleted.
 
 use std::cell::Cell;
 use std::sync::Arc;
@@ -50,7 +50,7 @@ pub(crate) struct Keeper {
     /// A purge is asked for and hasn't started: asked again meanwhile, it is that one.
     purging: Arc<AtomicBool>,
     /// The account is paused, or ends: a purge not started yet doesn't start (it is asked
-    /// again after the pause). Ending, deleting for good stops after its batch in flight, and
+    /// again after the pause). Ending, deleting for good stops after its batches in flight, and
     /// an emptying not started yet doesn't start ([`Keeper::stop`]).
     paused: Arc<AtomicBool>,
     ending: Arc<AtomicBool>,
@@ -220,7 +220,7 @@ impl Keeper {
         tracing::warn!("Recently deleted's thread isn't running: a request was dropped");
     }
 
-    /// The account ends: deleting for good stops after its batch in flight (what it didn't
+    /// The account ends: deleting for good stops after its batches in flight (what it didn't
     /// reach stays in Recently deleted), and no purge or emptying starts.
     pub(super) fn stop(&self) {
         self.ending.store(true, Ordering::SeqCst);
@@ -832,25 +832,31 @@ mod tests {
                 purge: false,
             })
         };
+        // Two batches in flight: whichever is answered first is shown first.
         let seen = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        assert_eq!(seen, [at(0), at(n - 1), at(n), None]);
+        assert!(
+            [at(n - 1), at(1)]
+                .iter()
+                .any(|first| seen == [at(0), *first, at(n), None]),
+            "{seen:?}"
+        );
         assert!(told.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
         assert_eq!(removed_rows(&db)?, 0);
         Ok(())
     }
 
     /// The account ending (`hbsync stop`, quitting the tray, SIGTERM) stops emptying after
-    /// the batch in flight, its result written: what it didn't reach stays in Recently deleted
-    /// for the next time, and nothing is told (it didn't fail). Before, the daemon's stop waited
-    /// for the whole job.
+    /// the batches in flight, their results written: what it didn't reach stays in Recently
+    /// deleted for the next time, and nothing is told (it didn't fail). Before, the daemon's
+    /// stop waited for the whole job.
     #[test]
-    fn the_account_ending_stops_emptying_after_the_batch_in_flight() -> R {
+    fn the_account_ending_stops_emptying_after_the_batches_in_flight() -> R {
         let home = tempfile::tempdir()?;
         let db = home.path().join("state.db");
         let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
         let drive = Drive::open(&db, "a.example", remote.clone())?;
         let batch = hbsync_engine::deleted::FOR_GOOD_BATCH;
-        let n = 2 * batch + 1;
+        let n = 3 * batch + 1;
         let control = emptying(&remote, &drive, &db, n)?;
         let (tell, told) = notes();
         // Stopped ([`Keeper::stop`]) while the first batch is answered.
@@ -872,8 +878,8 @@ mod tests {
         keeper.finish();
         assert_eq!(
             removed_rows(&db)?,
-            (n - batch) as i64,
-            "the first batch went"
+            (n - 2 * batch) as i64,
+            "the two batches in flight went"
         );
         assert!(told.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
         Ok(())

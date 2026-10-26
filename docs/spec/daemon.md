@@ -404,18 +404,20 @@ included (service managers restart it then).
   no longer touched: the user deletes it by hand). What goes, and how: node schema, "The purge".
 
   Emptying and the purge run in the background (the CLI and the tray say so when asked) and
-  delete a batch at a time (250 files a request, a quarter of what Homebase takes, so a stop
-  waits less), each batch written as it is answered: Recently deleted shrinks as it goes, and
+  delete in batches (250 files a request, a quarter of what Homebase takes, so a stop waits
+  less), two at once, each batch written as it is answered: Recently deleted shrinks as it goes, and
   a crash or a kill loses nothing done (a SQLite commit a batch). The log says when one starts (how many items) and ends (how many
   went, or how far it got when it stopped); the account's status carries `emptying` while it
   runs, which `hbsync status` and the tray's menu show. Once the account ends (`hbsync stop`,
-  Quit, SIGTERM, its last folder removed), it stops after the batch in flight, its answers
+  Quit, SIGTERM, its last folder removed), it stops after the batches in flight, their answers
   written, and runs no later pass (what is in a folder goes before it): what it didn't reach
   stays in Recently deleted, for the next emptying or purge. An emptying asked but not started
   by then doesn't start; a purge stopped so isn't recorded as done, and runs again at the next
   start. On a Homebase that answers slowly (about 70 s for 1,000 files, so about 18 s for a
-  batch), the batch in flight still delays `hbsync stop`. Batches go one at a time (parallel
-  ones weren't faster: `FOR_GOOD_BATCH`).
+  batch), the batches in flight still delay `hbsync stop`. Two batches of a pass go at once
+  (`FOR_GOOD_AT_ONCE`: two requests on the server, so its storage work overlaps; not shown on
+  a local server on SQLite, where they take as long as one after the other), and a pass starts
+  once the one before is answered.
 
 ### States
 
