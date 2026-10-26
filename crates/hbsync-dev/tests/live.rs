@@ -7,6 +7,7 @@ use std::time::Duration;
 use hbsync_dev::{
     OTHER_CLIENT, RunFolder, live_identity, on_threads, run_name, saved_client, saved_client_as,
 };
+use hbsync_engine::deleted::Going;
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier};
 use hbsync_remote::Remote;
@@ -687,7 +688,10 @@ fn echo_run(
                 .map(|d| d.node)
                 .collect();
             assert_eq!(nodes.len(), 1, "{run}/files in Recently deleted");
-            let gone = a.engine.drive().empty(&nodes, &a.listed()?)?;
+            let gone = a
+                .engine
+                .drive()
+                .empty(&nodes, &a.listed()?, Going::UNWATCHED)?;
             assert_eq!(gone, n + 1, "every file and their folder");
             Ok(())
         })?;
@@ -707,7 +711,9 @@ fn echo_run(
         .filter(|d| d.path == run)
         .map(|d| d.node)
         .collect();
-    a.engine.drive().empty(&top, &a.listed()?)?;
+    a.engine
+        .drive()
+        .empty(&top, &a.listed()?, Going::UNWATCHED)?;
     result?;
     taken?;
     Ok(rows)

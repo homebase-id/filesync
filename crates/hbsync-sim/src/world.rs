@@ -512,8 +512,9 @@ impl Sim {
                 let rows = self.server.removed.iter().map(Server::at).collect();
                 self.ledger.deleted_listed(rows);
             }
-            Action::EmptyListed => self.empty_listed(),
+            Action::EmptyListed => self.empty_listed_upto(None),
             Action::EmptyItem { pick } => self.empty_item(pick),
+            Action::EmptyStopped { done } => self.empty_listed_upto(Some(done)),
             Action::EditTaken { pick } => {
                 let taken: Vec<NodeId> = self
                     .taken_along()
@@ -1044,10 +1045,10 @@ impl Sim {
         }
     }
 
-    /// [`Action::EmptyListed`].
-    fn empty_listed(&mut self) {
+    /// [`Action::EmptyListed`], or [`Action::EmptyStopped`] after `upto` deletes.
+    fn empty_listed_upto(&mut self, upto: Option<usize>) {
         if let Some(listed) = self.ledger.listing().cloned() {
-            self.delete_for_good(&listed, &listed);
+            self.delete_for_good_upto(&listed, &listed, upto);
         }
     }
 
@@ -1111,6 +1112,18 @@ impl Sim {
         chosen: &BTreeSet<(NodeId, VersionTag)>,
         known: &BTreeSet<(NodeId, VersionTag)>,
     ) {
+        self.delete_for_good_upto(chosen, known, None);
+    }
+
+    /// [`Sim::delete_for_good`], stopped after `upto` deletes (a stop between batches): the
+    /// rest stays in Recently deleted, and no later pass runs.
+    fn delete_for_good_upto(
+        &mut self,
+        chosen: &BTreeSet<(NodeId, VersionTag)>,
+        known: &BTreeSet<(NodeId, VersionTag)>,
+        upto: Option<usize>,
+    ) {
+        let mut left = upto.unwrap_or(usize::MAX);
         let server = &self.server;
         let rows: Vec<deleted::Chosen> = server
             .removed
@@ -1153,6 +1166,10 @@ impl Sim {
                 .map(|(n, _)| n.state.parent)
                 .collect();
             for n in pass {
+                // Stopped: the job ends here.
+                if left == 0 {
+                    return;
+                }
                 // Only a pass's folders are asked about, as the engine asks (a file another
                 // writer put something in holds nothing: what is in it is its own item).
                 let folder = self.server.removed[&n].state.kind == NodeKind::Folder;
@@ -1175,6 +1192,7 @@ impl Sim {
                 let wrong = !was_chosen || held.is_some();
                 self.ledger
                     .emptied_unlisted(|| wrong.then(|| format!("{n:?} (holding {held:?})")));
+                left -= 1;
                 self.server.removed_at.remove(&n);
                 self.server.tags_at_removal.remove(&n);
                 if let Some(gone) = self.server.removed.remove(&n) {

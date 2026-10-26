@@ -6,7 +6,7 @@ mod common;
 
 use std::collections::HashSet;
 use std::fs;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -885,6 +885,8 @@ struct Watched {
     last: Mutex<Option<Instant>>,
     /// How long after the request before it each question about folders came.
     waited: Mutex<Vec<Duration>>,
+    /// The rows of Recently deleted in the account when each delete request came.
+    rows: Mutex<Vec<usize>>,
 }
 
 impl Watched {
@@ -905,7 +907,20 @@ impl Watched {
             locked: AtomicUsize::default(),
             last: Mutex::default(),
             waited: Mutex::default(),
+            rows: Mutex::default(),
         }
+    }
+
+    /// A delete request: the rows of Recently deleted in the account now.
+    fn deleting(&self) {
+        let rows = self
+            .account
+            .lock()
+            .expect("account")
+            .read(|s| s.list_removed(usize::MAX >> 1))
+            .expect("rows")
+            .len();
+        self.rows.lock().expect("rows").push(rows);
     }
 
     /// A request: was the account free, and how long since the one before.
@@ -981,6 +996,7 @@ impl hbsync_remote::Remote for Watched {
         files: &[hbsync_types::Doomed],
     ) -> hbsync_remote::Result<hbsync_remote::Deletes> {
         self.request();
+        self.deleting();
         if let Some(answer) = self.answer {
             let answers = files.iter().map(|_| Err(answer())).collect();
             return Ok(hbsync_remote::Deletes::all(answers));
@@ -1036,7 +1052,9 @@ fn purge(
     now: i64,
     behind: &mut bool,
 ) -> Result<usize, hbsync_engine::EngineError> {
-    let (gone, was) = deleted::AccountOps::run(account, remote, |ops| ops.purge(keep_ms, now));
+    let (gone, was) = deleted::AccountOps::run(account, remote, |ops| {
+        ops.purge(keep_ms, now, deleted::Going::UNWATCHED)
+    });
     *behind |= was.behind;
     gone
 }
@@ -1694,5 +1712,162 @@ fn a_restore_said_not_there_once_hands_back_what_stayed() -> common::Res<()> {
     assert_eq!(restored.went, ["e"], "{restored:?}");
     assert!(restored.left.is_empty(), "{restored:?}");
     assert_eq!(restored.back, 1, "g.txt, into a folder gone for good");
+    Ok(())
+}
+
+/// `n` files seeded at the drive's top and removed, read into a new account, with a remote
+/// that watches the deletes: the server's time then.
+fn many_removed(
+    server: &Arc<Mutex<FakeServer>>,
+    n: usize,
+) -> common::Res<(Arc<Mutex<StateDb>>, Watched, i64)> {
+    for i in 0..n {
+        let name = format!("{i}.txt");
+        seed(server, &name)?;
+        remove_on_server(server, &header_named(server, &name));
+    }
+    server.lock().map_err(|_| "poisoned")?.advance(1_000);
+    let account = Arc::new(Mutex::new(StateDb::open_in_memory()?));
+    let remote = Watched::new(server, &account, Duration::ZERO);
+    let now = pull_into(&account, &remote)?;
+    Ok((account, remote, now))
+}
+
+/// The rows of Recently deleted in `account`.
+fn removed_rows(account: &Mutex<StateDb>) -> common::Res<usize> {
+    let mut account = account.lock().map_err(|_| "poisoned")?;
+    Ok(account.read(|s| s.list_removed(usize::MAX >> 1))?.len())
+}
+
+/// Stopped once it has told that something went: as a stop asked while the first batch is
+/// answered.
+fn stop_after_the_first(stop: &AtomicBool) -> impl Fn(usize, usize) + '_ {
+    |done, _| stop.store(done > 0, Ordering::SeqCst)
+}
+
+/// Deleting for good writes each batch as it is answered (many files a request): Recently
+/// deleted shrinks while it runs, and a crash between batches loses nothing done. It tells how
+/// far it got as it starts and after each batch.
+#[test]
+fn deleting_for_good_writes_each_batch_as_it_is_answered() -> common::Res<()> {
+    let batch = hbsync_remote::BATCH_FILES;
+    let n = 2 * batch + batch / 2;
+    let server = server();
+    let (account, remote, now) = many_removed(&server, n)?;
+    let told = Mutex::new(Vec::new());
+    let going = deleted::Going {
+        stop: &|| false,
+        told: &|done, of| told.lock().expect("told").push((done, of)),
+    };
+    let (gone, _) = deleted::AccountOps::run(&account, &remote, |ops| ops.purge(0, now, going));
+    assert_eq!(gone?, n);
+    let rows = remote.rows.lock().map_err(|_| "poisoned")?.clone();
+    assert_eq!(
+        rows,
+        [n, n - batch, n - 2 * batch],
+        "written before the next batch"
+    );
+    let told = told.lock().map_err(|_| "poisoned")?.clone();
+    assert_eq!(told, [(0, n), (batch, n), (2 * batch, n), (n, n)]);
+    assert_eq!(removed_rows(&account)?, 0);
+    Ok(())
+}
+
+/// A stop asked while deleting for good ends it after the batch in flight: what went is
+/// written, the rest stays in Recently deleted, and the next purge takes it.
+#[test]
+fn a_stop_ends_deleting_for_good_after_the_batch_in_flight() -> common::Res<()> {
+    let batch = hbsync_remote::BATCH_FILES;
+    let n = 2 * batch + 1;
+    let server = server();
+    let (account, remote, now) = many_removed(&server, n)?;
+    let stop = AtomicBool::new(false);
+    let going = deleted::Going {
+        stop: &|| stop.load(Ordering::SeqCst),
+        told: &stop_after_the_first(&stop),
+    };
+    let (gone, _) = deleted::AccountOps::run(&account, &remote, |ops| ops.purge(0, now, going));
+    assert!(
+        matches!(
+            gone,
+            Err(hbsync_engine::EngineError::Stopped(
+                hbsync_engine::exec::Stopped::Requested
+            ))
+        ),
+        "{gone:?}"
+    );
+    assert_eq!(
+        remote.rows.lock().map_err(|_| "poisoned")?.len(),
+        1,
+        "one batch sent"
+    );
+    assert_eq!(removed_rows(&account)?, n - batch, "the first batch went");
+    assert_eq!(purge(&account, &remote, 0, now, &mut false)?, n - batch);
+    assert_eq!(removed_rows(&account)?, 0);
+    Ok(())
+}
+
+/// A failed batch keeps what the batches before it deleted: written as each was answered.
+#[test]
+fn a_failed_batch_keeps_the_batches_before_it() -> common::Res<()> {
+    let batch = hbsync_remote::BATCH_FILES;
+    let n = 2 * batch;
+    let server = server();
+    let (account, remote, now) = many_removed(&server, n)?;
+    remote.inner.faults().script = [false, true].into();
+    assert!(purge(&account, &remote, 0, now, &mut false).is_err());
+    assert_eq!(removed_rows(&account)?, n - batch);
+    assert_eq!(purge(&account, &remote, 0, now, &mut false)?, batch);
+    Ok(())
+}
+
+/// A stop between a file pass and the folders' never lets a folder go before what is in it:
+/// the job ends there, the folder stays in Recently deleted, and the next purge takes it.
+#[test]
+fn a_stop_after_the_files_leaves_their_folder() -> common::Res<()> {
+    let server = server();
+    {
+        let d = hbsync_remote::NodeMeta {
+            node: NodeId::new(),
+            parent: NodeId::ROOT,
+            kind: hbsync_types::NodeKind::Folder,
+            content: hbsync_types::schema::NodeContent::folder("d"),
+            removed: false,
+        };
+        let mut server = server.lock().map_err(|_| "poisoned")?;
+        server.create(&d, None)?;
+        server.seed_file(d.node, "x.txt", b"x", hbsync_fileio::HashAlgorithm::Blake3)?;
+    }
+    let d = header_named(&server, "d");
+    let x = header_named(&server, "x.txt");
+    for name in ["d", "x.txt"] {
+        remove_on_server(&server, &header_named(&server, name));
+    }
+    server.lock().map_err(|_| "poisoned")?.advance(1_000);
+    let account = Arc::new(Mutex::new(StateDb::open_in_memory()?));
+    let remote = Watched::new(&server, &account, Duration::ZERO);
+    let now = pull_into(&account, &remote)?;
+    let stop = AtomicBool::new(false);
+    let going = deleted::Going {
+        stop: &|| stop.load(Ordering::SeqCst),
+        told: &stop_after_the_first(&stop),
+    };
+    let (gone, _) = deleted::AccountOps::run(&account, &remote, |ops| ops.purge(0, now, going));
+    assert!(gone.is_err(), "stopped: {gone:?}");
+    let deleted = |f| -> common::Res<bool> {
+        Ok(server
+            .lock()
+            .map_err(|_| "poisoned")?
+            .header(f)?
+            .is_deleted())
+    };
+    assert!(deleted(x.file_id)?, "the file went");
+    assert!(
+        !deleted(d.file_id)? && removed_on_server(&server, "d"),
+        "its folder stays"
+    );
+    assert_eq!(removed_rows(&account)?, 1);
+    assert_eq!(purge(&account, &remote, 0, now, &mut false)?, 1);
+    assert!(deleted(d.file_id)?);
     Ok(())
 }

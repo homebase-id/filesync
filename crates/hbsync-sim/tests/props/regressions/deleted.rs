@@ -1874,3 +1874,51 @@ fn regression_a_junk_folder_keeps_its_folder_from_a_delete() {
     assert!(sim.item(0, "b/$RECYCLE.BIN/x").is_some(), "kept");
     assert!(sim.item(0, "b/a").is_none(), "the synced file went");
 }
+
+/// The daemon stops while it empties Recently deleted (between batches; here at every point
+/// of a folder of three files): what went is gone, the rest stays in Recently deleted, the
+/// folder with it while any of its files is still to go (no later pass runs). A restore of the
+/// folder then brings back what stayed, or emptying again takes the rest; nothing is lost and
+/// the clients converge.
+#[test]
+fn regression_an_emptying_stopped_part_way_keeps_the_rest() {
+    use Action::*;
+    let (a, files) = (0, [1, 3, 5]); // NAMES: "a"; "b", "c.txt", "d"
+    let act = |client, action| Event::Act { client, action };
+    for done in 0..=4 {
+        for restore in [false, true] {
+            let mut sim = Sim::new(2);
+            let root = sim.pick(0, NodeId::ROOT, true).expect("root");
+            sim.run(&[act(
+                0,
+                CreateFolder {
+                    parent: root,
+                    name: a,
+                },
+            )]);
+            let node_a = sim.item(0, "a").expect("a");
+            for name in files {
+                let parent = sim.pick(0, node_a, true).expect("a");
+                sim.run(&[act(0, CreateFile { parent, name })]);
+            }
+            assert!(sim.quiesce(30), "no convergence");
+            let node = sim.pick(0, node_a, false).expect("a");
+            sim.run(&[act(0, Delete { node })]);
+            assert!(sim.quiesce(30), "no convergence");
+            sim.run(&[act(0, ListDeleted), act(0, EmptyStopped { done })]);
+            let what = format!("stopped after {done}, restore {restore}");
+            // The folder goes last: only once all three files went.
+            assert_eq!(sim.is_removed(node_a), done < 4, "{what}");
+            if restore && let Some(node) = sim.removed_pick(node_a) {
+                sim.run(&[act(1, Restore { node })]);
+            } else {
+                sim.run(&[act(0, EmptyListed)]);
+                assert!(!sim.is_removed(node_a), "{what}: the rest went");
+            }
+            assert!(sim.quiesce(30), "no convergence: {what}");
+            if let Err(e) = sim.check() {
+                panic!("{what}: {e}");
+            }
+        }
+    }
+}

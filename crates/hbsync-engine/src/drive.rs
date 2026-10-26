@@ -502,26 +502,42 @@ impl Drive {
     }
 
     /// Deletes these items of Recently deleted for good as `listed` showed them, each with
-    /// what was in it then ([`deleted::AccountOps::empty`]).
-    pub fn empty(&self, nodes: &[NodeId], listed: &deleted::Listed) -> Result<usize, EngineError> {
+    /// what was in it then ([`deleted::AccountOps::empty`]); `going` stops it between batches
+    /// and is told how far it got ([`deleted::Going`]).
+    pub fn empty(
+        &self,
+        nodes: &[NodeId],
+        listed: &deleted::Listed,
+        going: deleted::Going<'_>,
+    ) -> Result<usize, EngineError> {
         self.catch_up(None)?;
-        self.with_ops(|ops| ops.empty(nodes, listed))
+        self.with_ops(|ops| ops.empty(nodes, listed, going))
     }
 
     /// Deletes for good what a listing of Recently deleted saw
-    /// ([`deleted::AccountOps::empty_listed`]), nothing recorded since.
-    pub fn empty_listed(&self, listed: &deleted::Listed) -> Result<usize, EngineError> {
+    /// ([`deleted::AccountOps::empty_listed`]), nothing recorded since; `going` as for
+    /// [`Drive::empty`].
+    pub fn empty_listed(
+        &self,
+        listed: &deleted::Listed,
+        going: deleted::Going<'_>,
+    ) -> Result<usize, EngineError> {
         self.catch_up(None)?;
-        self.with_ops(|ops| ops.empty_listed(listed))
+        self.with_ops(|ops| ops.empty_listed(listed, going))
     }
 
     /// Deletes for good what was deleted `keep_ms` ago or more: Recently deleted, by the
     /// server's clock (as read just now: a pull, whatever the announcements say, so a restore
     /// elsewhere is in the picture).
     pub fn purge(&self, keep_ms: i64) -> Result<usize, EngineError> {
+        self.purge_going(keep_ms, deleted::Going::UNWATCHED)
+    }
+
+    /// [`Drive::purge`], stopped between batches by `going` and telling it how far it got.
+    fn purge_going(&self, keep_ms: i64, going: deleted::Going<'_>) -> Result<usize, EngineError> {
         self.pull(None)?;
         let now = self.server_time.load(Ordering::SeqCst);
-        self.with_ops(|ops| ops.purge(keep_ms, now))
+        self.with_ops(|ops| ops.purge(keep_ms, now, going))
     }
 
     /// Asks again about the files of Recently deleted the identity said once weren't there, a
@@ -545,8 +561,9 @@ impl Drive {
 
     /// Once a day: deletes for good what Recently deleted has kept
     /// [`crate::time::KEEP_DAYS`]. A failure waits for the next day's try... or the next call:
-    /// it is only recorded as done when it worked.
-    pub fn purge_when_due(&self) -> Result<Option<usize>, EngineError> {
+    /// it is only recorded as done when it worked, and one `going` stopped
+    /// ([`deleted::Going`]) runs again at the next call.
+    pub fn purge_when_due(&self, going: deleted::Going<'_>) -> Result<Option<usize>, EngineError> {
         let now = hbsync_types::unix_now();
         let last = self
             .account()
@@ -555,7 +572,10 @@ impl Drive {
         if last.is_some_and(|last| now < last + crate::time::DAY_S) {
             return Ok(None);
         }
-        let gone = self.purge(i64::from(crate::time::KEEP_DAYS) * crate::time::DAY_MS)?;
+        let gone = self.purge_going(
+            i64::from(crate::time::KEEP_DAYS) * crate::time::DAY_MS,
+            going,
+        )?;
         self.account().write(|s| {
             s.account()
                 .set_account_kv(keys::PURGED_AT, &now.to_string())

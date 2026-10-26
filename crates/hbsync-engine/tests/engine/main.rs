@@ -5,6 +5,7 @@ use std::fs;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use hbsync_engine::deleted::Going;
 use hbsync_engine::exec::{CrashPoint, FailPoint};
 use hbsync_engine::walk;
 use hbsync_remote::fake::FakeRemote;

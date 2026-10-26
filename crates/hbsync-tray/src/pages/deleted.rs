@@ -153,7 +153,7 @@ impl Server {
         match control::empty_listed(&self.paths, &listed) {
             Ok(()) => {
                 (self.send)(Event::Wake);
-                words::emptying(stays)
+                words::emptying(stays, "the Filesync menu")
             }
             Err(e) => {
                 (self.send)(Event::Wake);

@@ -174,7 +174,13 @@ fn emptying_a_folder_never_deletes_what_is_live_in_it() -> R {
     let mut b = Client::new(&server, "b")?;
     b.engine.drive().catch_up(None)?;
     let listed = b.listed()?;
-    assert_eq!(b.engine.drive().empty(&[photos.node], &listed)?, 1, "x.txt");
+    assert_eq!(
+        b.engine
+            .drive()
+            .empty(&[photos.node], &listed, Going::UNWATCHED)?,
+        1,
+        "x.txt"
+    );
     assert_eq!(live(&server), 2, "2024 and y.txt stay");
     let left: Vec<String> = b
         .recently_deleted(10)?
@@ -217,7 +223,9 @@ fn emptying_an_item_takes_only_what_was_listed() -> R {
         "x.txt is in Recently deleted now"
     );
     assert_eq!(
-        a.engine.drive().empty(&[photos.node], &listed)?,
+        a.engine
+            .drive()
+            .empty(&[photos.node], &listed, Going::UNWATCHED)?,
         1,
         "a.txt only"
     );
@@ -233,14 +241,24 @@ fn emptying_an_item_takes_only_what_was_listed() -> R {
     );
     // Listed again, it all goes.
     let listed = a.listed()?;
-    assert_eq!(a.engine.drive().empty(&[photos.node], &listed)?, 2);
+    assert_eq!(
+        a.engine
+            .drive()
+            .empty(&[photos.node], &listed, Going::UNWATCHED)?,
+        2
+    );
     assert!(a.recently_deleted(10)?.is_empty());
     // A listing this DB never gave is refused.
     let other = hbsync_engine::deleted::Listed {
         db: "another".into(),
         seq: listed.seq,
     };
-    assert!(a.engine.drive().empty(&[photos.node], &other).is_err());
+    assert!(
+        a.engine
+            .drive()
+            .empty(&[photos.node], &other, Going::UNWATCHED)
+            .is_err()
+    );
     Ok(())
 }
 
@@ -279,7 +297,12 @@ fn emptying_a_folder_takes_what_was_deleted_from_it_before() -> R {
     );
     assert_eq!(summary.items, 6);
     let run = items[0].0.node;
-    assert_eq!(a.engine.drive().empty(&[run], &summary.listed)?, 6);
+    assert_eq!(
+        a.engine
+            .drive()
+            .empty(&[run], &summary.listed, Going::UNWATCHED)?,
+        6
+    );
     assert!(a.recently_deleted(10)?.is_empty());
     let s = server.lock().map_err(|_| "poisoned")?;
     assert_eq!(
@@ -1021,7 +1044,7 @@ fn a_subfolder_restores_with_what_was_in_it_and_empty_spares_later_deletes() -> 
     fs::remove_file(a.root.join("keep.txt"))?;
     a.write("other.txt", "o")?; // not every file deleted (the guard)
     a.sync()?;
-    assert_eq!(a.engine.drive().empty_listed(&listed)?, 1);
+    assert_eq!(a.engine.drive().empty_listed(&listed, Going::UNWATCHED)?, 1);
     let left: Vec<_> = a
         .recently_deleted(10)?
         .into_iter()

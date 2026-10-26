@@ -257,7 +257,9 @@ of this schema may define some of them.)
      pass deleting no folder asks nothing, and doesn't wait).
      What a client still misses (a live file written into a folder in the moment between the
      question and the delete) is left with no folder: computers move it into Recovered files
-     (above).
+     (above). A client that stops part way (between batches: its daemon stops) ends there and
+     runs no later pass, so what it didn't reach, and every folder holding any of it, stays
+     in Recently deleted.
   3. **Without a trace, or with one:** each node by its own trace and time. The purge takes
      only nodes removed more than 30 days ago (1.), and each goes without a trace (a hard
      delete: `hard-delete-batch`, odin-core #1968), nothing of the file left, in the feed
@@ -349,6 +351,8 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-10-26: deleting for good may stop part way (between batches); it then runs no later
+  pass, so a folder never goes before what is in it. The node is the same.
 - 2026-10-23: a computer reads a node with `v > 1` as a row it can't read (it never wrote over
   one before either, but nothing stopped it). The node is the same.
 - 2026-10-23: a live node written into a removed folder at a place a computer ignores is left

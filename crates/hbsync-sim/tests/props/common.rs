@@ -40,12 +40,14 @@ pub(crate) fn pulling_action() -> impl Strategy<Value = Action> + Clone {
     ]
 }
 
-/// The users' actions, with deletes another device stops half way and purges, more often.
+/// The users' actions, with deletes another device stops half way, emptyings the daemon stops
+/// part way, and purges, more often.
 pub(crate) fn stopped_delete_action() -> impl Strategy<Value = Action> + Clone {
     let i = || 0usize..16;
     prop_oneof![
         6 => action(),
         1 => (i(), i()).prop_map(|(pick, done)| Action::DeleteStopped { pick, done }),
+        1 => i().prop_map(|done| Action::EmptyStopped { done }),
         1 => Just(Action::Purge),
     ]
 }

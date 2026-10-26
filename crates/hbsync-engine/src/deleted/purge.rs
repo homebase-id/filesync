@@ -4,20 +4,21 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
-use hbsync_remote::{Answers, Holds, Remote, RemoteError};
+use hbsync_remote::{Answers, BATCH_FILES, Holds, Remote, RemoteError};
 use hbsync_state::{MirrorRow, ReadTx, RemovedRow, StateError};
 use hbsync_types::{Doomed, NodeId, NodeKind, RemoteFileId, RemoteRef, Role, Target};
 
 use crate::error::EngineError;
+use crate::exec::Stopped;
 use crate::gone;
 use crate::mirror;
 use crate::time::TRACE_MS;
 
-use super::AccountOps;
 use super::listing::{
     Listed, RemovedRows, deleted_by_item, deletes_before, group, holdings, refuse_unlisted,
 };
 use super::rules::{Chosen, before_folders_go, inside, passes};
+use super::{AccountOps, Going};
 
 impl AccountOps<'_> {
     /// The purge: deletes for good the items of Recently deleted kept `keep_ms` by `now_ms` (the
@@ -38,14 +39,21 @@ impl AccountOps<'_> {
     ///
     /// Each part runs whatever became of the others; the first error is returned at the end.
     /// Returns how many items went. Leaves the account behind ([`AccountOps::run`]) when the
-    /// drive refused a delete for its state (written since, restored, gone already).
-    pub fn purge(&mut self, keep_ms: i64, now_ms: i64) -> Result<usize, EngineError> {
+    /// drive refused a delete for its state (written since, restored, gone already). `going`
+    /// stops it between batches ([`Going`]), and is told how far the items of Recently deleted
+    /// got (not the tombstones).
+    pub fn purge(
+        &mut self,
+        keep_ms: i64,
+        now_ms: i64,
+        going: Going<'_>,
+    ) -> Result<usize, EngineError> {
         let traced = now_ms.saturating_sub(TRACE_MS);
         let before = now_ms.saturating_sub(keep_ms);
         // Each part on its own: one that fails doesn't keep the others from their work.
         let taken = self.remove_taken_along(before);
-        let expired = self.expire(before, Some(traced));
-        let tombstones = self.delete_tombstones(traced);
+        let expired = self.expire(before, Some(traced), going);
+        let tombstones = self.delete_tombstones(traced, going);
         let pruned = self
             .db()
             .write(|s| s.account().prune_gone(traced, now_ms))
@@ -63,8 +71,13 @@ impl AccountOps<'_> {
     /// before), as [`select`](super::rules::select)s it, leaving tombstones: nothing recorded since
     /// the listing (a removal that arrived inside it later, or the item deleted again after a
     /// restore), and never a live node. Refused like [`Self::empty_listed`] for a listing this DB
-    /// never gave. Returns how many items went.
-    pub fn empty(&mut self, nodes: &[NodeId], listed: &Listed) -> Result<usize, EngineError> {
+    /// never gave. Returns how many items went; `going` stops it between batches ([`Going`]).
+    pub fn empty(
+        &mut self,
+        nodes: &[NodeId],
+        listed: &Listed,
+        going: Going<'_>,
+    ) -> Result<usize, EngineError> {
         let passes = self.db().read(|s| {
             refuse_unlisted(s, listed)?;
             let mut chosen = Vec::new();
@@ -83,9 +96,9 @@ impl AccountOps<'_> {
                     );
                 }
             }
-            going(s, chosen)
+            in_passes(s, chosen)
         })?;
-        self.delete_for_good(&passes, None)
+        self.delete_for_good(&passes, None, going)
     }
 
     /// Deletes for good what a listing saw
@@ -93,14 +106,19 @@ impl AccountOps<'_> {
     /// counter, an open removal too; nothing recorded since (a removal that arrives later, whatever
     /// its server time, or a node deleted again after a restore), and never a live node
     /// ([`select`](super::rules::select)). Leaves tombstones. Refused for a listing of another DB
-    /// (the account's, made again) or one this DB never gave. Returns how many items went.
-    pub fn empty_listed(&mut self, listed: &Listed) -> Result<usize, EngineError> {
+    /// (the account's, made again) or one this DB never gave. Returns how many items went;
+    /// `going` stops it between batches ([`Going`]).
+    pub fn empty_listed(
+        &mut self,
+        listed: &Listed,
+        going: Going<'_>,
+    ) -> Result<usize, EngineError> {
         let passes = self.db().read(|s| {
             refuse_unlisted(s, listed)?;
             let chosen = s.recorded_upto(listed.seq)?;
-            going(s, chosen.into_iter().map(|r| r.removed).collect())
+            in_passes(s, chosen.into_iter().map(|r| r.removed).collect())
         })?;
-        self.delete_for_good(&passes, None)
+        self.delete_for_good(&passes, None, going)
     }
 
     /// The items of Recently deleted removed before `before_ms` (Unix ms, the server's): those
@@ -116,10 +134,11 @@ impl AccountOps<'_> {
         &mut self,
         before: i64,
         hard_before: Option<i64>,
+        going: Going<'_>,
     ) -> Result<usize, EngineError> {
         let tops = self.due(before)?;
         let passes = self.db().read(|s| passes_of(s, tops, before))?;
-        self.delete_for_good(&passes, hard_before)
+        self.delete_for_good(&passes, hard_before, going)
     }
 
     /// Removes what the deletes of the items removed before `before` (Unix ms, the server's) took
@@ -306,7 +325,7 @@ impl AccountOps<'_> {
         Ok(came)
     }
 
-    /// Deletes `passes` for good ([`going`]), one pass at a time, each node at the version this
+    /// Deletes `passes` for good ([`in_passes`]), one pass at a time, each node at the version this
     /// device knows: one written since stays, and so do the folders above it. A folder goes only
     /// while nothing else is in it, on this device or on the drive: one question for the pass's
     /// folders that may go ([`Holds::AnyBut`]), asked once the drive's queries show what was
@@ -317,15 +336,25 @@ impl AccountOps<'_> {
     /// versions ([`before_folders_go`]): round a cycle of removed folders, one holds another
     /// still to go, and goes first. A node removed before `hard_before` (Unix ms, the
     /// server's) goes without a trace; any other leaves a tombstone (`None`: every one does),
-    /// recorded with its time; both in batches, many files a request. Returns how many went. One
-    /// written since, or not found, leaves the account behind ([`AccountOps::run`]); one not
-    /// found is recorded gone once its header says so too. A request that fails stops it with its
-    /// error: what it didn't answer stays, for the next purge.
+    /// recorded with its time; both in batches of [`BATCH_FILES`], a request each, each batch
+    /// written as it is answered: a stop, a crash or a failure keeps what went. Returns how many
+    /// went. One written since, or not found, leaves the account behind ([`AccountOps::run`]);
+    /// one not found is recorded gone once its header says so too. A request that fails stops
+    /// it with its error, and `going`'s stop, asked before each pass and batch, with
+    /// [`Stopped::Requested`]: what it didn't answer stays, for the next purge, and no later
+    /// pass runs (what is in a folder goes before it).
     fn delete_for_good(
         &mut self,
         passes: &[Vec<RemovedRow>],
         hard_before: Option<i64>,
+        going: Going<'_>,
     ) -> Result<usize, EngineError> {
+        let of = passes.iter().map(Vec::len).sum();
+        (going.told)(0, of);
+        let stop = || match (going.stop)() {
+            true => Err(EngineError::Stopped(Stopped::Requested)),
+            false => Ok(()),
+        };
         // What each folder holds of the rows still to go: what is in a folder goes before it (but
         // round a cycle).
         let mut to_go: HashMap<NodeId, u64> = HashMap::new();
@@ -341,11 +370,12 @@ impl AccountOps<'_> {
             .collect();
         let mut gone = 0;
         for pass in passes {
+            stop()?;
             let began = Instant::now();
             for r in pass {
                 later.remove(&r.row.remote_ref());
             }
-            let mut going: Vec<&RemovedRow> = Vec::new();
+            let mut goes: Vec<&RemovedRow> = Vec::new();
             for r in pass {
                 let held = to_go.get(&r.row.node).copied().unwrap_or(0);
                 if let Some(n) = to_go.get_mut(&r.row.parent) {
@@ -358,9 +388,9 @@ impl AccountOps<'_> {
                 {
                     continue;
                 }
-                going.push(r);
+                goes.push(r);
             }
-            let folders: Vec<NodeId> = going
+            let folders: Vec<NodeId> = goes
                 .iter()
                 .filter(|r| r.row.kind == NodeKind::Folder)
                 .map(|r| r.row.node)
@@ -370,56 +400,57 @@ impl AccountOps<'_> {
                 // written up to the pass's start shows once that has passed.
                 std::thread::sleep(self.remote.hold_back().saturating_sub(began.elapsed()));
                 let holding = self.remote.holding(&folders, before_folders_go(&later))?;
-                going.retain(|r| !holding.contains(&r.row.node));
+                goes.retain(|r| !holding.contains(&r.row.node));
             }
             let (hard, soft): (Vec<&RemovedRow>, Vec<&RemovedRow>) =
-                going.into_iter().partition(|r| hard(r));
-            let refs =
-                |rows: &[&RemovedRow]| -> Vec<Doomed> { rows.iter().map(|r| r.doomed()).collect() };
-            let (answers, mut failed) = hard_delete(self.remote, &refs(&hard));
-            let mut answered: Vec<(&RemovedRow, Answer)> = hard.into_iter().zip(answers).collect();
-            if failed.is_none() {
-                let (answers, stopped) =
-                    answers_to(&refs(&soft), |f| self.remote.delete(f), |at| at);
-                failed = stopped;
-                answered.extend(soft.into_iter().zip(answers));
-            }
-            // Each gone with its tombstone's time, if it left one.
-            let mut gone_now: Vec<(&RemovedRow, Option<i64>)> = Vec::new();
-            let mut not_found: Vec<&RemovedRow> = Vec::new();
-            for (r, answer) in answered {
-                match answer {
-                    Answer::Deleted(tombstone) => gone_now.push((r, tombstone)),
-                    Answer::Missing => not_found.push(r),
-                    // Restored or changed meanwhile: not ours to delete.
-                    Answer::Written => self.behind = true,
-                    Answer::Kept => {}
+                goes.into_iter().partition(|r| hard(r));
+            let batches = (hard.chunks(BATCH_FILES).map(|b| (b, true)))
+                .chain(soft.chunks(BATCH_FILES).map(|b| (b, false)));
+            for (batch, for_good) in batches {
+                stop()?;
+                let doomed: Vec<Doomed> = batch.iter().map(|r| r.doomed()).collect();
+                let (answers, mut failed) = match for_good {
+                    true => hard_delete(self.remote, &doomed),
+                    false => answers_to(&doomed, |f| self.remote.delete(f), |at| at),
+                };
+                // Each gone with its tombstone's time, if it left one.
+                let mut gone_now: Vec<(&RemovedRow, Option<i64>)> = Vec::new();
+                let mut not_found: Vec<&RemovedRow> = Vec::new();
+                for (&r, answer) in batch.iter().zip(answers) {
+                    match answer {
+                        Answer::Deleted(tombstone) => gone_now.push((r, tombstone)),
+                        Answer::Missing => not_found.push(r),
+                        // Restored or changed meanwhile: not ours to delete.
+                        Answer::Written => self.behind = true,
+                        Answer::Kept => {}
+                    }
                 }
-            }
-            // Not found: deleted for good meanwhile (another device's purge), if its header says
-            // so too; else it stays. Either way the picture lacked it. A request that fails stops
-            // the asking: the rest stay, for the next purge.
-            if !not_found.is_empty() {
-                self.behind = true;
-            }
-            // What its header says, taken in the write ([`gone::heard`]: the identity's "not
-            // there" only the second time, a minute on, sync semantics §8b).
-            let mut heard = Vec::new();
-            if failed.is_none() {
-                (heard, failed) =
-                    gone::look_all(self.remote, not_found.iter().map(|r| r.row.file_id));
-            }
-            // Its id never comes back, nor its row from a page read before.
-            let confirmed = self.db().write(|s| {
-                let confirmed = gone::heard_all(s.account(), &heard)?;
-                gone_now
-                    .iter()
-                    .try_for_each(|(r, at)| s.account().forget_file(r.row.file_id, *at))?;
-                Ok(confirmed)
-            })?;
-            gone += confirmed + gone_now.len();
-            if let Some(e) = failed {
-                return Err(EngineError::Remote(e));
+                // Not found: deleted for good meanwhile (another device's purge), if its header
+                // says so too; else it stays. Either way the picture lacked it. A request that
+                // fails stops the asking: the rest stay, for the next purge.
+                if !not_found.is_empty() {
+                    self.behind = true;
+                }
+                // What its header says, taken in the write ([`gone::heard`]: the identity's "not
+                // there" only the second time, a minute on, sync semantics §8b).
+                let mut heard = Vec::new();
+                if failed.is_none() {
+                    (heard, failed) =
+                        gone::look_all(self.remote, not_found.iter().map(|r| r.row.file_id));
+                }
+                // Its id never comes back, nor its row from a page read before.
+                let confirmed = self.db().write(|s| {
+                    let confirmed = gone::heard_all(s.account(), &heard)?;
+                    gone_now
+                        .iter()
+                        .try_for_each(|(r, at)| s.account().forget_file(r.row.file_id, *at))?;
+                    Ok(confirmed)
+                })?;
+                gone += confirmed + gone_now.len();
+                (going.told)(gone, of);
+                if let Some(e) = failed {
+                    return Err(EngineError::Remote(e));
+                }
             }
         }
         Ok(gone)
@@ -453,27 +484,33 @@ impl AccountOps<'_> {
     /// Deletes hard the tombstones the feed brought that were written before `before_ms` (Unix ms,
     /// the server's clock): a delete for good that left one leaves nothing in the feed once every
     /// device has had time to see it. Each at its version: one written since stays, and so does
-    /// one a failed request didn't answer.
-    fn delete_tombstones(&self, before_ms: i64) -> Result<(), EngineError> {
+    /// one a failed request didn't answer. In batches of [`BATCH_FILES`], each written as it is
+    /// answered; `going`'s stop, asked before each, ends it with [`Stopped::Requested`].
+    fn delete_tombstones(&self, before_ms: i64, going: Going<'_>) -> Result<(), EngineError> {
         let tombstones = self.db().read(|s| s.tombstones_before(before_ms))?;
-        let (answers, failed) = hard_delete(self.remote, &tombstones);
-        self.db().write(|s| {
-            tombstones
-                .iter()
-                .zip(answers)
-                .filter(|(_, answer)| matches!(answer, Answer::Deleted(_) | Answer::Missing))
-                .try_for_each(|(t, _)| s.account().delete_tombstone_at(t.at()).map(drop))
-        })?;
-        match failed {
-            Some(e) => Err(EngineError::Remote(e)),
-            None => Ok(()),
+        for batch in tombstones.chunks(BATCH_FILES) {
+            if (going.stop)() {
+                return Err(EngineError::Stopped(Stopped::Requested));
+            }
+            let (answers, failed) = hard_delete(self.remote, batch);
+            self.db().write(|s| {
+                batch
+                    .iter()
+                    .zip(answers)
+                    .filter(|(_, answer)| matches!(answer, Answer::Deleted(_) | Answer::Missing))
+                    .try_for_each(|(t, _)| s.account().delete_tombstone_at(t.at()).map(drop))
+            })?;
+            if let Some(e) = failed {
+                return Err(EngineError::Remote(e));
+            }
         }
+        Ok(())
     }
 }
 
 /// What emptying `chosen` (rows of Recently deleted) deletes for good, in the passes
 /// [`passes`] gives.
-fn going(s: &ReadTx<'_>, chosen: Vec<RemovedRow>) -> Result<Vec<Vec<RemovedRow>>, StateError> {
+fn in_passes(s: &ReadTx<'_>, chosen: Vec<RemovedRow>) -> Result<Vec<Vec<RemovedRow>>, StateError> {
     let picked: Vec<Chosen> = chosen.iter().map(Chosen::of).collect();
     let mut rows: HashMap<NodeId, RemovedRow> =
         chosen.into_iter().map(|r| (r.row.node, r)).collect();
@@ -500,7 +537,7 @@ fn passes_of(
             chosen.extend(item);
         }
     }
-    going(s, chosen)
+    in_passes(s, chosen)
 }
 
 /// The removed folders whose delete may have left live what it took along, and what is live

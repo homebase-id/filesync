@@ -213,7 +213,8 @@ fn emptying_takes_what_was_listed_and_nothing_since() -> Result<(), Box<dyn std:
         }
     })?;
     assert_eq!(
-        twice(&db, || ops(&db, &remote).empty_listed(&summary.listed))?,
+        twice(&db, || ops(&db, &remote)
+            .empty_listed(&summary.listed, Going::UNWATCHED))?,
         2
     );
     assert_eq!(left(&db)?, sorted(vec![f, late, later_with, lone]));
@@ -267,15 +268,17 @@ fn a_live_node_is_never_deleted_for_good() -> Result<(), Box<dyn std::error::Err
                 // The count it shows is what emptying takes.
                 let (_, summary) = db.read(|s| deletes(s, 0))?;
                 assert_eq!((summary.deletes, summary.items), (4, 2));
-                twice(&db, || ops(&db, &remote).empty_listed(&summary.listed))?
+                twice(&db, || {
+                    ops(&db, &remote).empty_listed(&summary.listed, Going::UNWATCHED)
+                })?
             }
             "deletes" => {
                 let listing = listed(&db)?;
                 twice(&db, || {
-                    ops(&db, &remote).empty(&[outer, other, g, h], &listing)
+                    ops(&db, &remote).empty(&[outer, other, g, h], &listing, Going::UNWATCHED)
                 })?
             }
-            _ => twice(&db, || ops(&db, &remote).expire(11, None))?,
+            _ => twice(&db, || ops(&db, &remote).expire(11, None, Going::UNWATCHED))?,
         };
         assert_eq!(went, 2, "{how}");
         assert_eq!(left(&db)?, sorted(vec![outer, f, g, h]), "{how}");
@@ -312,7 +315,10 @@ fn a_folder_stays_when_a_delete_in_it_fails() -> Result<(), Box<dyn std::error::
         s.account().put_removed(&row)
     })?;
     let listing = listed(&db)?;
-    assert_eq!(ops(&db, &remote).empty_listed(&listing)?, 0);
+    assert_eq!(
+        ops(&db, &remote).empty_listed(&listing, Going::UNWATCHED)?,
+        0
+    );
     assert_eq!(left(&db)?, sorted(vec![f, child]));
     Ok(())
 }
@@ -330,7 +336,11 @@ fn emptying_an_unknown_listing_is_refused() -> Result<(), Box<dyn std::error::Er
         seq: listing.seq + 1,
         ..listing.clone()
     };
-    assert!(ops(&db, &remote).empty_listed(&ahead).is_err());
+    assert!(
+        ops(&db, &remote)
+            .empty_listed(&ahead, Going::UNWATCHED)
+            .is_err()
+    );
     // Another DB, its counter as far.
     let again = Db::new()?;
     let elsewhere = listed(&again)?;
@@ -339,14 +349,25 @@ fn emptying_an_unknown_listing_is_refused() -> Result<(), Box<dyn std::error::Er
         db: elsewhere.db,
         ..listing.clone()
     };
-    assert!(ops(&db, &remote).empty_listed(&other).is_err());
+    assert!(
+        ops(&db, &remote)
+            .empty_listed(&other, Going::UNWATCHED)
+            .is_err()
+    );
     let nothing = Listed {
         seq: 0,
         ..listing.clone()
     };
-    assert_eq!(ops(&db, &remote).empty_listed(&nothing)?, 0);
+    assert_eq!(
+        ops(&db, &remote).empty_listed(&nothing, Going::UNWATCHED)?,
+        0
+    );
     assert_eq!(left(&db)?, [x], "nothing went");
-    assert_eq!(twice(&db, || ops(&db, &remote).empty_listed(&listing))?, 1);
+    assert_eq!(
+        twice(&db, || ops(&db, &remote)
+            .empty_listed(&listing, Going::UNWATCHED))?,
+        1
+    );
     Ok(())
 }
 
@@ -365,9 +386,11 @@ fn a_cycle_in_recently_deleted_is_emptied() -> Result<(), Box<dyn std::error::Er
         let gone = match purge {
             false => {
                 let listing = listed(&db)?;
-                until_done(&db, || ops(&db, &remote).empty_listed(&listing))?
+                until_done(&db, || {
+                    ops(&db, &remote).empty_listed(&listing, Going::UNWATCHED)
+                })?
             }
-            true => until_done(&db, || ops(&db, &remote).expire(2, None))?,
+            true => until_done(&db, || ops(&db, &remote).expire(2, None, Going::UNWATCHED))?,
         };
         assert_eq!(gone, 2, "purge: {purge}");
         assert_eq!(left(&db)?, [], "purge: {purge}");
@@ -648,7 +671,7 @@ fn the_purge_removes_only_what_a_delete_took_along() -> Result<(), Box<dyn std::
         assert!(db.read(|s| s.get_mirror(n))?.is_some(), "{n:?}");
     }
     // Its folder kept that long, its own removal not: it waits for its own 30 days.
-    assert_eq!(ops(&db, &remote).expire(before, None)?, 0);
+    assert_eq!(ops(&db, &remote).expire(before, None, Going::UNWATCHED)?, 0);
     Ok(())
 }
 
@@ -694,10 +717,12 @@ fn a_folder_holding_a_removal_this_device_doesnt_know_stays()
         let went = match how {
             "listed" => {
                 let listing = listed(&db)?;
-                ops(&db, &remote).empty_listed(&listing)?
+                ops(&db, &remote).empty_listed(&listing, Going::UNWATCHED)?
             }
-            "deletes" => ops(&db, &remote).empty(&[f, other, a], &listed(&db)?)?,
-            _ => ops(&db, &remote).expire(11, None)?,
+            "deletes" => {
+                ops(&db, &remote).empty(&[f, other, a], &listed(&db)?, Going::UNWATCHED)?
+            }
+            _ => ops(&db, &remote).expire(11, None, Going::UNWATCHED)?,
         };
         assert_eq!(went, 4, "{how}");
         assert_eq!(left(&db)?, [f], "{how}");

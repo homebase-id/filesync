@@ -554,7 +554,7 @@ fn recently_deleted_names_the_folder_each_item_comes_back_to() -> R {
         ]
     );
     let listed = a.listed()?;
-    a.engine.drive().empty_listed(&listed)?;
+    a.engine.drive().empty_listed(&listed, Going::UNWATCHED)?;
     let srv = server.lock().map_err(|_| "poisoned")?;
     assert_eq!(srv.removed().count(), 0);
     Ok(())

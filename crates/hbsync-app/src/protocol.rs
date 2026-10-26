@@ -314,6 +314,9 @@ pub struct AccountStatus {
     pub recent: Vec<Note>,
     /// Notes added since the daemon started, as [`FolderStatus::notes_added`].
     pub notes_added: u64,
+    /// Recently deleted being deleted for good, while it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emptying: Option<Emptying>,
 }
 
 impl AccountStatus {
@@ -324,8 +327,23 @@ impl AccountStatus {
             credentials_warning: None,
             recent: Vec::new(),
             notes_added: 0,
+            emptying: None,
         }
     }
+}
+
+/// How far deleting Recently deleted for good has got, in the daemon's background: the user's
+/// emptying, or the daily purge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Emptying {
+    /// Items deleted for good so far.
+    pub done: u64,
+    /// Of how many it set out to delete (what was written or restored meanwhile, or a folder
+    /// still holding something, stays).
+    pub total: u64,
+    /// The daily purge of what was kept [`crate::KEEP_DAYS`] days, not the user's emptying.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub purge: bool,
 }
 
 /// The notification connection (wake-up hints from the identity).
@@ -480,5 +498,27 @@ mod tests {
         assert_eq!(Pause::UNTIL_RESUMED.end_at(now, 0), None);
         let far = Pause::ending_at(u64::MAX);
         assert_eq!(far.end_at(now, 0), None, "too far ahead for an instant");
+    }
+
+    /// An account's emptying is left out while there is none, and a status without it (a
+    /// daemon of the build before) reads: the protocol stays as it was.
+    #[test]
+    fn emptying_is_left_out_while_there_is_none() -> Result<(), serde_json::Error> {
+        let mut account = AccountStatus::new(&"anna.example.com".into());
+        let idle = serde_json::to_string(&account)?;
+        assert!(!idle.contains("emptying"), "{idle}");
+        assert_eq!(serde_json::from_str::<AccountStatus>(&idle)?, account);
+        account.emptying = Some(Emptying {
+            done: 3000,
+            total: 22_367,
+            purge: false,
+        });
+        let busy = serde_json::to_string(&account)?;
+        assert!(
+            busy.contains(r#""emptying":{"done":3000,"total":22367}"#),
+            "{busy}"
+        );
+        assert_eq!(serde_json::from_str::<AccountStatus>(&busy)?, account);
+        Ok(())
     }
 }
