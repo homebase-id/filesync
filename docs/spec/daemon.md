@@ -35,7 +35,9 @@ and its marker `.hbsync/folder`: the identity and
 the folder's id in that DB.
 A folder is synced only through its marker: without one it is gone (or not mounted), with
 another identity's it is refused, and one the DB doesn't know is set up again by `hbsync setup`
-(merging its files, `--existing`), or as below.
+(merging its files, `--existing`), or as the account starts when its DB knows no folder at all
+(the state folder wiped, or the DB set aside, below): then each folder of the config that is
+the identity's is set up again as a folder with files.
 
 An account's DB that can't be used at all is set aside as the account starts (the daemon's
 start, or setup while no daemon runs): one from before 0.7, which isn't upgraded, or one whose
@@ -53,8 +55,8 @@ until it knows each of them: a folder not there then (a disk not plugged in), or
 couldn't be set up, is set up again at a later start of the account, once it is back. Not set
 aside: a DB of a newer version (a downgrade: setting it aside would throw a newer version's
 records away; the account waits, saying why), and one that can't be read for now (busy or
-locked, an I/O error, a full disk, access denied, a missing folder, a read-only file system: the
-daemon tries again).
+locked, an I/O error, a full disk, access denied, a missing folder, a read-only file system:
+told as an error, and tried again as the daemon starts again).
 
 The recovery rule (data safety): setting a DB aside never deletes a file, here or on the drive:
 the new DB has no base, and without one nothing is deleted. What is lost is the old DB's

@@ -195,6 +195,29 @@ fn a_folder_back_later_is_set_up_again_at_the_next_start() -> R {
     Ok(())
 }
 
+/// A DB that knows no folder (the state folder wiped, or the key saying it replaced one lost
+/// to a crash) sets the config's folders up again all the same: adopted, nothing moved.
+#[test]
+fn a_db_that_knows_no_folder_sets_them_up_again() -> R {
+    let Synced {
+        server,
+        root,
+        db,
+        files: synced,
+        _dir,
+    } = synced()?;
+    for suffix in ["", "-wal", "-shm"] {
+        let mut path = db.as_os_str().to_owned();
+        path.push(suffix);
+        drop(std::fs::remove_file(path));
+    }
+    let roots = [Root::main(&ID.into(), &root)];
+    assert_eq!(folders::ready_account(&db, &ID.into(), &roots)?, None);
+    assert_eq!(sync_once(&server, &root, &db)?, (0, 0));
+    assert_eq!(files(&root)?, synced);
+    Ok(())
+}
+
 /// A file changed here while the DB was unusable (an edit never sent) is kept beside the
 /// drive's version after the folder is set up again, as a conflict copy; nothing is deleted.
 #[test]

@@ -109,6 +109,7 @@ pub fn run(paths: &Paths, stop: Stop) -> Result<(), DaemonError> {
         pausing: Mutex::default(),
         accounts: Mutex::default(),
         starting_over: AtomicUsize::new(0),
+        restarting: Mutex::default(),
         changed: Arc::default(),
     });
     {
@@ -236,6 +237,8 @@ pub(crate) struct Daemon {
     accounts: Mutex<Vec<(Arc<Account>, AccountThread)>>,
     /// Accounts starting over ([`Daemon::start_over`]): the daemon doesn't end meanwhile.
     starting_over: AtomicUsize,
+    /// Their identities, named before they leave `accounts` (their threads still stopping).
+    restarting: Mutex<Vec<Identity>>,
     /// Raised when the status may have changed ([`watch`]).
     changed: Arc<Wakeup>,
 }
@@ -254,7 +257,7 @@ impl Daemon {
 
     /// Whether no account of `identity` runs, nor starts over: nothing here writes its DB.
     fn account_idle(&self, identity: &Identity) -> bool {
-        self.starting_over.load(Ordering::SeqCst) == 0
+        !lock(&self.restarting).contains(identity)
             && !lock(&self.accounts)
                 .iter()
                 .any(|(a, thread)| a.identity == *identity && !thread.is_finished())
@@ -338,18 +341,17 @@ impl Daemon {
     /// Starts the account `identity` over (its credentials changed): it stops its folders
     /// between operations, then syncs them again with the new credentials.
     fn start_over(&self, identity: &Identity) -> Result<(), DaemonError> {
-        // Counted before it leaves the list: an account not listed isn't running only while
-        // none starts over ([`Daemon::account_idle`]).
-        self.starting_over.fetch_add(1, Ordering::SeqCst);
         let found = {
             let mut accounts = lock(&self.accounts);
             let at = accounts.iter().position(|(a, _)| a.identity == *identity);
+            // Named before it leaves the list: it is still running ([`Daemon::account_idle`]).
+            lock(&self.restarting).extend(at.map(|_| identity.clone()));
             at.map(|at| accounts.remove(at))
         };
         let Some((account, thread)) = found else {
-            self.starting_over.fetch_sub(1, Ordering::SeqCst);
             return Ok(());
         };
+        self.starting_over.fetch_add(1, Ordering::SeqCst);
         // Its folders as they are now: those of an ending account go as their runners stop.
         let folders = account.folders();
         account.end();
@@ -357,6 +359,7 @@ impl Daemon {
             .join()
             .unwrap_or(Err(DaemonError::Runner(RunnerError::Panicked)));
         let again = folders.iter().try_for_each(|root| self.add_folder(root));
+        lock(&self.restarting).retain(|i| i != identity);
         self.starting_over.fetch_sub(1, Ordering::SeqCst);
         self.stop.wakeup.raise();
         ended.and(again)
@@ -454,6 +457,7 @@ mod tests {
             pausing: Mutex::default(),
             accounts: Mutex::default(),
             starting_over: AtomicUsize::new(0),
+            restarting: Mutex::default(),
             changed: Arc::default(),
         };
         let (now, unix) = (Instant::now(), unix_now());

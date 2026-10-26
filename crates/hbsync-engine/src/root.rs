@@ -232,23 +232,28 @@ impl SyncRoot {
             }
             Err(e) => return Err(e),
         };
-        if account.read(|s| s.account_kv(keys::SET_ASIDE))?.is_some() {
-            Self::set_up_again(&mut account, db, identity, folders)?;
+        // Made in place of one set aside; or knowing no folder at all, as one made new (also
+        // when it was made, its old one set aside, and its key lost to a crash): what it
+        // can't have set up is set up again.
+        let (replaced, known) =
+            account.read(|s| Ok((s.account_kv(keys::SET_ASIDE)?.is_some(), s.folders()?)))?;
+        if replaced || known.is_empty() {
+            Self::set_up_again(&mut account, db, identity, folders, &known)?;
         }
         Ok(set)
     }
 
     /// Sets each of `folders` that is `identity`'s (its marker says so) and unknown to the
-    /// `account` (at `db`, made in place of one set aside) up again; once it knows every one
-    /// there is, it forgets it replaced one. One not there now (or unreadable) waits for a
-    /// later start; one that can't be set up is logged.
+    /// `account` (at `db`; it knows those of `known`) up again; once it knows every one there
+    /// is, it forgets it replaced one. One not there now, or that fails, waits for a later
+    /// start; one another identity's is left to its runner, which refuses it.
     fn set_up_again(
         account: &mut StateDb,
         db: &Path,
         identity: &str,
         folders: &[(&Path, NodeId)],
+        known: &[FolderRow],
     ) -> Result<(), RootError> {
-        let known = account.read(|s| s.folders())?;
         let mut waiting = false;
         for &(path, top) in folders {
             let again = match Self::check(path, identity) {
@@ -258,10 +263,10 @@ impl SyncRoot {
             };
             if let Err(e) = again {
                 tracing::warn!("{} isn't set up again now: {e}", path.display());
-                waiting |= matches!(e, RootError::NoMarker(_) | RootError::Io(_));
+                waiting |= !matches!(e, RootError::OtherIdentity { .. });
             }
         }
-        if !waiting {
+        if !waiting && account.read(|s| s.account_kv(keys::SET_ASIDE))?.is_some() {
             account.write(|s| s.account().delete_account_kv(keys::SET_ASIDE))?;
         }
         Ok(())

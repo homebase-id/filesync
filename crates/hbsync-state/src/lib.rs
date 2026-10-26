@@ -554,7 +554,8 @@ impl StateDb {
     /// (its header, its log and its pages as they are: nothing is upgraded or written): its
     /// version is this client's or one it upgrades ([`StateError::TooOld`],
     /// [`StateError::TooNew`]), and every page reads as SQLite's `quick_check` expects
-    /// ([`StateError::Damaged`]). A page that can't be read now (an I/O error, memory) is
+    /// ([`StateError::Damaged`]), and, at this version, its schema is whole
+    /// ([`StateDb::check_schema`]). A page that can't be read now (an I/O error, memory) is
     /// SQLite's error, not damage. No file is fine. For an account's start, not every open: it
     /// reads every page (~1 ms per 1,000 files synced; 0.3 s for a 226 MB DB of 300,000, its
     /// pages in the page cache).
@@ -563,10 +564,16 @@ impl StateDb {
             return Ok(());
         }
         let conn = reader::read_only(path)?;
-        migrations::check(migrations::user_version(&conn)?)?;
+        let version = migrations::user_version(&conn)?;
+        migrations::check(version)?;
         let found: String = conn.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
         if found == "ok" {
-            return Ok(());
+            // One of this version is whole before anything is written to it (one brought up
+            // to date is checked after: [`StateDb::check_schema`]).
+            return match version == migrations::VERSION {
+                true => migrations::check_schema(&conn),
+                false => Ok(()),
+            };
         }
         Err(match unread_page(&found) {
             Some(code) => StateError::Sqlite(rusqlite::Error::SqliteFailure(

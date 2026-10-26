@@ -236,8 +236,16 @@ pub fn ready_account(
     identity: &Identity,
     roots: &[Root],
 ) -> Result<Option<SetAside>, RootError> {
-    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _turn = crate::sync::lock(&TURN);
+    // One at a time per DB; other accounts' go on.
+    type Turns = std::collections::HashMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>;
+    static TURNS: std::sync::LazyLock<std::sync::Mutex<Turns>> =
+        std::sync::LazyLock::new(Default::default);
+    let turn = std::sync::Arc::clone(
+        crate::sync::lock(&TURNS)
+            .entry(db.to_path_buf())
+            .or_default(),
+    );
+    let _turn = crate::sync::lock(&turn);
     let folders: Vec<(&Path, NodeId)> = roots
         .iter()
         .filter(|r| r.identity == *identity)
@@ -256,8 +264,8 @@ pub fn add_synced(
 ) -> Result<Taken, Error> {
     changed(
         paths,
-        // Without a daemon, setup has readied the DB ([`crate::setup::check_state`]).
-        |held| add_locked(held, paths, identity, path, role, false).map(drop),
+        // No daemon runs: nothing else writes the DB.
+        |held| add_locked(held, paths, identity, path, role, true).map(drop),
         || crate::control::add_folder(paths, identity, path, role),
     )
 }
