@@ -19,7 +19,6 @@
 //! wakes) until the next thing time alone changes ([`Schedule::next_wake`]), so an idle folder
 //! with a watcher wakes only every [`WAIT_AT_MOST`](crate::sync::WAIT_AT_MOST).
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -137,9 +136,9 @@ impl RunnerConfig {
     }
 }
 
-/// The deletes held in the last sync, as the status shows them, and the user's answer to them
-/// for the next sync: one lock, so an answer is checked against what it answers and kept with
-/// the nodes it named.
+/// The deletes held in the last sync, as the status shows them until they are answered, and the
+/// user's answer to them for the next sync: one lock, so an answer is checked against what it
+/// answers and kept with the nodes it named.
 #[derive(Debug, Default)]
 struct Held {
     nodes: Arc<[NodeId]>,
@@ -275,19 +274,13 @@ impl Handle {
             tracing::info!("{} held deletes answered: {answer:?}", held.nodes.len());
             held.answer = Some((answer, Arc::clone(&held.nodes)));
             held.answered = true;
+            (self.control.0.send(Msg::Answered)).map_err(|_| "the sync has stopped".to_owned())?;
             // No longer to review: not shown while the sync that carries the answer out runs.
             // Under `held`, so a sync ending meanwhile doesn't show them again.
-            let mut status = lock(&self.status);
-            if status
-                .held_deletes
-                .as_ref()
-                .is_some_and(|h| h.token == token)
-            {
-                status.held_deletes = None;
-                self.changed.raise();
-            }
+            lock(&self.status).held_deletes = None;
         }
-        (self.control.0.send(Msg::Answered)).map_err(|_| "the sync has stopped".to_owned())
+        self.changed.raise();
+        Ok(())
     }
 
     /// How often the runner's loop has woken up (tests: none while idle).
@@ -650,6 +643,7 @@ impl Runner {
                     held.answer = Some((HeldAnswer::PutBack, still));
                     held.answered = true;
                     held.again = true;
+                    self.set(|s| s.held_deletes = None);
                     schedule.asked(now);
                 }
             }
@@ -1072,22 +1066,20 @@ impl Runner {
         let notes = self.notes_of(engine, report)?;
         let notes = self.told.fresh(notes);
         let token = report::held_token(&report.held);
-        let mut held = report::held(engine, report, &token)?;
         // Before the status shows the new token, so no answer can name it before it is held;
         // the status is set under this lock too ([`Handle::answer`] clears it under it).
         // An answer taken during this sync stays for the next: it names what the user saw.
         let mut kept = lock(&self.held);
+        // Answered during this sync, the same deletes (each its way too) aren't shown again.
+        let held = if kept.answer.is_some() && kept.token == token {
+            None
+        } else {
+            report::held(engine, report, &token)?
+        };
         kept.nodes = report.held.iter().map(|op| op.node()).collect();
         kept.token = token;
         // Shown again: one answer each time, but one taken during this sync still waits.
         kept.answered = kept.answer.is_some();
-        // ... and while it covers all of them, they aren't shown: they were answered.
-        if let Some((_, answered)) = &kept.answer {
-            let answered: HashSet<NodeId> = answered.iter().copied().collect();
-            if kept.nodes.iter().all(|n| answered.contains(n)) {
-                held = None;
-            }
-        }
         if report.ops_done > 0 || !notes.is_empty() {
             tracing::info!(
                 "synced in {took:.1?}: {} done, {} remote changes, {} adopted, {} pending",

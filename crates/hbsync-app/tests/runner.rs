@@ -816,17 +816,26 @@ fn an_answer_during_a_sync_holding_the_same_isnt_shown_again() -> R {
         handle.status().held_deletes.is_some_and(|h| h.here == 60)
     })?;
     let seen = handle.status().held_deletes.ok_or("held")?;
-    // A slow upload: the sync running when the answer comes holds the same 60.
-    std::fs::write(root.join("big.bin"), vec![7u8; 600_000])?;
+    // A slow upload (4 s): the sync running when the answer comes holds the same 60.
+    std::fs::write(root.join("big.bin"), vec![7u8; 1_200_000])?;
     wait_until("the upload runs", || {
         handle.status().progress.is_some_and(|p| p.bytes_done > 0)
     })?;
     handle.answer(HeldAnswer::Delete, &seen.token)?;
     assert_eq!(handle.status().held_deletes, None);
+    assert!(
+        handle.status().progress.is_some(),
+        "answered during the sync"
+    );
+    // And another (2 s) in the sync that deletes them: had the first sync's end shown them
+    // again, they would show all through it.
+    std::fs::write(root.join("big2.bin"), vec![7u8; 600_000])?;
     let mut shown_again = false;
     wait_until("the 60 are gone from the drive", || {
         shown_again |= handle.status().held_deletes.is_some();
-        live_names(&server) == ["big.bin"]
+        let mut live = live_names(&server);
+        live.sort();
+        live == ["big.bin", "big2.bin"]
     })?;
     assert!(!shown_again, "answered deletes were shown again");
     handle.send(Command::Stop);
