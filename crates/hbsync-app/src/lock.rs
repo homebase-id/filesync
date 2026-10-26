@@ -54,6 +54,15 @@ pub(crate) fn daemon_runs(paths: &Paths) -> io::Result<bool> {
     Ok(try_lock(paths, DAEMON)?.is_none())
 }
 
+/// The running daemon's process id, as it wrote it.
+pub fn daemon_pid(paths: &Paths) -> Option<u32> {
+    std::fs::read_to_string(pid_path(paths, DAEMON))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
 /// The lock file of `program`, locked; `None` when another process holds it.
 fn try_lock(paths: &Paths, program: &str) -> io::Result<Option<File>> {
     let file = lock_file(&lock_path(paths, program))?;

@@ -3,8 +3,8 @@
 //! recently synced list when a sync ended, and starting the daemon when it isn't running. It
 //! asks once more when woken (after an action); once a minute it shows what it was sent again
 //! (the menu's "2 min ago") and looks whether this program was replaced on disk. While the daemon
-//! isn't running it looks every second (it is starting), or every ten (nothing set up yet, or
-//! syncing stopped). The tray keeps it running while a folder is set up, unless syncing was
+//! isn't running it looks every second (it is starting), every ten (nothing set up yet), or once
+//! a minute (syncing stopped: Start syncing looks at once). The tray keeps it running while a folder is set up, unless syncing was
 //! stopped on purpose ([`control::stopped`]), and never starts it once it began to quit
 //! ([`Starts`]).
 
@@ -153,7 +153,9 @@ impl Watcher {
                 // A watch just ended: watched again in a moment.
                 Daemon::Running(_) if watch_soon => STARTING,
                 // Running, but it can't be watched: looked at now and then, not every second.
-                Daemon::NotSetUp | Daemon::Stopped | Daemon::Running(_) => UNWATCHED,
+                Daemon::NotSetUp | Daemon::Running(_) => UNWATCHED,
+                // Started again from the menu (which looks at once) or a terminal.
+                Daemon::Stopped => LOOK_FOR_UPDATE,
                 Daemon::Starting(_) => STARTING,
             };
             send(Event::Daemon(
@@ -208,7 +210,11 @@ impl Watcher {
             // Not running: started if a folder is set up, unless syncing was stopped.
             Ok(None) => {
                 return match control::configured(paths) {
-                    Ok(Some(_)) if control::stopped(paths) => Daemon::Stopped,
+                    Ok(Some(_)) if control::stopped(paths) => {
+                        // Started again, it starts at once.
+                        (self.next_start, self.start_failed) = (None, None);
+                        Daemon::Stopped
+                    }
                     Ok(Some(_)) => self.start(paths, send),
                     Ok(None) => {
                         self.recent.clear();

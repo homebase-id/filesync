@@ -281,7 +281,11 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
         ));
     }
     items.push(Item::Separator);
-    items.push(if stopped { quit() } else { quit_or_stop() });
+    // Nothing runs to keep or stop while stopped, or failing to start.
+    items.push(match view.daemon {
+        Daemon::Stopped | Daemon::Starting(Some(_)) => quit(),
+        _ => quit_or_stop(),
+    });
     items
 }
 
@@ -514,17 +518,19 @@ mod tests {
             running(status(State::Idle)),
             running(status(State::Paused)),
             Daemon::Starting(None),
-            Daemon::Starting(Some("the daemon exited".into())),
         ] {
             let m = menu(&view(&d, &[]));
             assert_eq!(m.last(), Some(&quit), "{d:?}");
             assert!(!actions(&m).contains(&Action::StartSyncing), "{d:?}");
         }
-        let m = menu(&view(&Daemon::NotSetUp, &[]));
-        assert!(
-            !actions(&m).contains(&Action::QuitAndStop),
-            "nothing to stop"
-        );
+        // Nothing to keep running.
+        for d in [
+            Daemon::NotSetUp,
+            Daemon::Starting(Some("the daemon exited".into())),
+        ] {
+            let m = menu(&view(&d, &[]));
+            assert_eq!(m.last(), Some(&super::quit()), "{d:?}");
+        }
     }
 
     #[test]

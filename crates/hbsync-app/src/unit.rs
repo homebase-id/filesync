@@ -34,6 +34,22 @@ pub fn move_to_scope(pid: u32) {
     }
 }
 
+/// Moves process `pid` (the daemon, which the tray leaves running as it quits) from a service
+/// of the app's (the tray's, started at login) into a scope of its own: systemd before 250 stops
+/// a service when its main process ends, with all that runs in it. Elsewhere it stays.
+pub fn outlive_service(pid: u32) {
+    let in_service = || {
+        std::fs::read_to_string(format!("/proc/{pid}/cgroup"))
+            .is_ok_and(|c| own_unit(&c).is_some_and(|u| u.ends_with(".service")))
+    };
+    if crate::control::dev_home() || !desktop() || !in_service() {
+        return;
+    }
+    if let Err(e) = start_scope(pid) {
+        tracing::info!("the daemon stays in the tray's service: {e}");
+    }
+}
+
 fn start_scope(pid: u32) -> zbus::Result<()> {
     let bus = zbus::blocking::connection::Builder::session()?
         .method_timeout(ANSWER)
@@ -75,10 +91,15 @@ fn in_own_unit(pid: u32) -> bool {
 /// `app-id.homebase.filesync@autostart.service` (at login), `app-gnome-id.homebase.filesync-
 /// 1234.scope` (GNOME's menu), and the like.
 fn ours(cgroup: &str) -> bool {
+    own_unit(cgroup).is_some()
+}
+
+/// The app's unit in a `/proc/<pid>/cgroup`, if it is in one.
+fn own_unit(cgroup: &str) -> Option<&str> {
     cgroup
         .lines()
         .filter_map(|line| line.rsplit('/').next())
-        .any(|unit| unit.starts_with("app-") && unit.contains(LABEL))
+        .find(|unit| unit.starts_with("app-") && unit.contains(LABEL))
 }
 
 #[cfg(test)]
@@ -102,6 +123,12 @@ mod tests {
         ] {
             assert!(!ours(&format!("{user}/{unit}\n")), "{unit}");
         }
+        // At login the app runs in a service, which may end with the tray.
+        let service = format!("{user}/app-id.homebase.filesync@autostart.service\n");
+        assert_eq!(
+            own_unit(&service),
+            Some("app-id.homebase.filesync@autostart.service")
+        );
         // cgroup v1: a line per hierarchy.
         assert!(ours(
             "12:pids:/user.slice\n1:name=systemd:/user.slice/user@1000.service/app.slice/\

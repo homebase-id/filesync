@@ -104,7 +104,7 @@ fn main() -> ExitCode {
             }
         });
     }
-    let restarted = std::env::args().any(|a| a == RESTARTED);
+    let restarted = std::env::args_os().any(|a| a == RESTARTED);
     match run(paths, restarted) {
         Ok(None) => ExitCode::SUCCESS,
         // Linux, after an update: the new program in this process's place. The lock is
@@ -148,10 +148,9 @@ struct App {
     notified: HashMap<&'static str, Instant>,
     /// The folder given its icon and shortcut ([`shell`]) by this run.
     decorated: Option<PathBuf>,
-    /// The watcher looked at the daemon already.
-    looked: bool,
-    /// Started by a tray restarting into its update ([`RESTARTED`]): nothing to tell again.
-    restarted: bool,
+    /// Until the watcher's first look: a stop it finds is told (not after restarting into an
+    /// update, [`RESTARTED`]: told already).
+    tell_stopped: bool,
 }
 
 /// What the tray shows now, to change only what changed.
@@ -203,8 +202,7 @@ impl App {
             shown: Shown::default(),
             notified: HashMap::new(),
             decorated: None,
-            looked: false,
-            restarted,
+            tell_stopped: !restarted,
         })
     }
 
@@ -237,13 +235,13 @@ impl App {
         match event {
             Event::Daemon(daemon, recent, updated) => {
                 // Started while syncing is stopped: it asks to be started from the menu.
-                if !self.looked && daemon == Daemon::Stopped && !self.restarted {
-                    os::notify(
-                        "Syncing is stopped".into(),
+                if std::mem::take(&mut self.tell_stopped) && daemon == Daemon::Stopped {
+                    self.notify_once(
+                        "stopped",
+                        "Syncing is stopped",
                         "To sync your files again, choose Start syncing in the menu.".into(),
                     );
                 }
-                self.looked = true;
                 self.notices(&daemon);
                 if let Some(s) = daemon.status()
                     && self.decorated.as_ref() != Some(&s.path)
@@ -390,6 +388,14 @@ impl App {
                     starts.quit();
                     if stop && let Err(e) = control::stop_syncing(&paths) {
                         tracing::warn!("stopping the daemon: {e}");
+                    }
+                    // Kept: out of the tray's unit, which may end with the tray.
+                    #[cfg(target_os = "linux")]
+                    if !stop
+                        && matches!(control::running(&paths), Ok(true))
+                        && let Some(pid) = hbsync_app::lock::daemon_pid(&paths)
+                    {
+                        hbsync_app::unit::outlive_service(pid);
                     }
                     tracing::info!("quit{}", if stop { ", syncing stopped" } else { "" });
                     send(Event::Exit);

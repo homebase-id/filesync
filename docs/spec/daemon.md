@@ -525,29 +525,32 @@ menu's relative times; and looks whether its program was replaced on disk), and 
 isn't running looks every second (every ten while nothing is set up or syncing is stopped).
 
 **Starting and stopping.** *Quit Homebase Filesync* asks, as a submenu, whether to **keep
-syncing in the background** (the daemon goes on without the tray) or **stop syncing too**.
-Stopping syncing (that choice, or `hbsync stop`) leaves a mark, `<state>/stopped`, before it
-stops the daemon; whatever starts a daemon next ends it (the daemon removes it as it starts).
-While the mark is there and the daemon isn't running, the tray doesn't start it: it shows
-*Syncing stopped* (the grey dot) with **Start syncing**, which removes the mark and starts it,
-and the menu's Quit just quits. A tray started while syncing is stopped says so once, in a
-notification: that is its question whether to start. It asks nothing otherwise, as nothing was
-stopped on purpose:
-- at login, the tray starts the daemon as before (the daemon isn't running yet then); where the
-  service manager starts the daemon itself (no tray installed), that start ends a stop too;
+syncing in the background** (the daemon goes on without the tray) or **stop syncing too**; with
+nothing running (not set up, stopped, failing to start) it just quits. Stopping syncing (that
+choice, or `hbsync stop`) leaves a mark, `<state>/stopped`, before it asks the daemon to stop
+(a request that doesn't reach it takes the mark off again). Starting it on purpose ends the
+stop (`hbsync start`, *Start syncing*, `setup`: `control::start` takes the mark off first);
+a daemon started otherwise while the mark is there (by the service manager at logon) ends at
+once, as with nothing to sync. While stopped, the tray shows *Syncing stopped* (the grey dot)
+with **Start syncing**, and looks once a minute (`hbsync start` shows within a minute). A tray
+started while syncing is stopped says so once, in a notification: that is its question whether
+to start. It asks nothing otherwise, as nothing was stopped on purpose:
+- at login, the tray starts the daemon as before (it isn't running yet then);
 - after an update, or a crash, the daemon was stopped without the mark, and is started again;
 - a tray restarting into its update (*Restart to finish the update*, `--restarted`) leaves the
   daemon as it was and doesn't tell a stop again.
 
 A stop lasts until syncing is started again, also across logins, as *Pause until I resume* does:
-starting at login starts the tray, which then shows that syncing is stopped. `hbsync start`
-starts it from a terminal (the tray follows within ten seconds).
+starting at login starts the tray, which then shows that syncing is stopped.
 
-A quit waits for a start the tray has in flight (at most its 15 s), and from then on the tray
-starts nothing: the daemon that start brings up is the one stopped, or left running. Before,
-a quit could find no daemon to stop yet and leave the one just started running, or watch the
-tray start the daemon again as the stopped one went (the stop then gave up after a minute,
-"still finishing a transfer").
+A quit waits for a start the tray has in flight (at most its 15 s; after an update, the restart
+of a daemon of another version, its stop included), and from then on the tray starts nothing:
+the daemon that start brings up is the one stopped, or left running. Before, a quit could find
+no daemon to stop yet and leave the one just started running, or watch the tray start the
+daemon again as the stopped one went (the stop then gave up after a minute, "still finishing a
+transfer"). On Linux a daemon left running moves out of the tray's autostart service into a
+scope of its own (`unit::outlive_service`): systemd before 250 stops a service, and all in it,
+when its main process ends.
 
 How the tray asks is its menu, not a dialog: it has no window, and a native message box on
 Linux (rfd's, without GTK) needs `zenity`, which KDE doesn't install.
@@ -664,7 +667,7 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 | `hbsync recent [-n N]` | what was synced lately, newest first |
 | `hbsync confirm-deletes [--yes]` | shows the deletions to review (held deletes) and lets them through |
 | `hbsync put-back [--yes]` | shows the deletions to review and puts them back (sync semantics §7) |
-| `hbsync start`, `stop` | `stop` stops syncing until `start` (or the tray's Start syncing): the tray doesn't start the daemon meanwhile |
+| `hbsync start`, `stop` | `stop` stops syncing until `start` (or the tray's Start syncing), also across logins: neither the tray nor the service manager starts the daemon meanwhile |
 | `hbsync autostart [on\|off]` | |
 | `hbsync logout` | stops the daemon, forgets the credentials, autostart off; the folder stays |
 | `hbsync unlink` | stops the daemon, removes the folder from the config, autostart off; its files, `.hbsync` and the account's DB stay, so setting it up again resumes |
