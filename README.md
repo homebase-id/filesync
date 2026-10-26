@@ -74,7 +74,7 @@ Good to know:
 - **Emptying Recently deleted runs in the background,** and on a big one it can take a while
   (about 18 minutes for 22,000 items on one Homebase). It shrinks as it goes, and `hbsync
   status` and the tray's menu show how far it got. `hbsync stop` and Quit stop it after the
-  batch in hand (up to 1,000 files): the rest stays in Recently deleted for the next time.
+  batch in hand (250 files): the rest stays in Recently deleted for the next time.
 - **Commands that ask** (`empty-deleted`, `confirm-deletes`, `put-back`) need `--yes` where
   nobody can answer, such as in a script.
 - **Leave things out** on one computer with gitignore-style rules in `.hbsync/ignore` in the

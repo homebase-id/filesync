@@ -414,8 +414,9 @@ included (service managers restart it then).
   stays in Recently deleted, for the next emptying or purge. An emptying asked but not started
   by then doesn't start; a purge stopped so isn't recorded as done, and runs again at the next
   start. On a Homebase that answers slowly (about 70 s for 1,000 files, so about 18 s for a
-  batch), the batch in flight still delays `hbsync stop`. Batches go one at a time: two in
-  flight took as long as one after the other, as the server deletes a file at a time.
+  batch), the batch in flight still delays `hbsync stop`. Batches go one at a time: on a local
+  Homebase (SQLite) two in flight took as long as one after the other, as odin-core deletes a
+  file at a time; a server on Postgres wasn't measured.
 
 ### States
 
