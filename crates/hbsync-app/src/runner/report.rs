@@ -190,7 +190,6 @@ pub(super) fn record(
     s: &mut FolderStatus,
     report: &SyncReport,
     notes: Vec<String>,
-    held: Option<HeldDeletes>,
     took: Duration,
     at: u64,
 ) {
@@ -198,7 +197,6 @@ pub(super) fn record(
     s.error = None;
     s.retry_at = None;
     s.pending = report.pending;
-    s.held_deletes = held;
     s.last_sync = Some(LastSync {
         at,
         millis: took.as_millis() as u64,
@@ -446,7 +444,6 @@ mod tests {
             &mut s,
             &report,
             notes,
-            None,
             Duration::from_millis(1500),
             1_800_000_000,
         );
