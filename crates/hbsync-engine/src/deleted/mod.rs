@@ -59,6 +59,16 @@ impl Going<'static> {
     };
 }
 
+impl Going<'_> {
+    /// Asked to stop: [`Stopped::Requested`](crate::exec::Stopped::Requested).
+    fn check(&self) -> Result<(), EngineError> {
+        match (self.stop)() {
+            true => Err(EngineError::Stopped(crate::exec::Stopped::Requested)),
+            false => Ok(()),
+        }
+    }
+}
+
 impl std::fmt::Debug for Going<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Going").finish_non_exhaustive()

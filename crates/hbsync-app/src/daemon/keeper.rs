@@ -291,14 +291,25 @@ impl Deleting {
                 }));
             }
         };
+        // Shown no more once it ends, however it ends (a panic too).
+        let _shown = Shown(&self.show, &far);
         let result = run(Going {
             stop: &stop,
             told: &told,
         });
-        if far.get().1 > 0 {
-            (self.show)(None);
-        }
         (result, far.get())
+    }
+}
+
+/// What deleting for good showed, cleared when dropped: how far it got (of none, nothing was
+/// shown).
+struct Shown<'a>(&'a Show, &'a Cell<(usize, usize)>);
+
+impl Drop for Shown<'_> {
+    fn drop(&mut self) {
+        if self.1.get().1 > 0 {
+            (self.0)(None);
+        }
     }
 }
 

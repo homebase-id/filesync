@@ -9,7 +9,6 @@ use hbsync_state::{MirrorRow, ReadTx, RemovedRow, StateError};
 use hbsync_types::{Doomed, NodeId, NodeKind, RemoteFileId, RemoteRef, Role, Target};
 
 use crate::error::EngineError;
-use crate::exec::Stopped;
 use crate::gone;
 use crate::mirror;
 use crate::time::TRACE_MS;
@@ -341,7 +340,7 @@ impl AccountOps<'_> {
     /// went. One written since, or not found, leaves the account behind ([`AccountOps::run`]);
     /// one not found is recorded gone once its header says so too. A request that fails stops
     /// it with its error, and `going`'s stop, asked before each pass and batch, with
-    /// [`Stopped::Requested`]: what it didn't answer stays, for the next purge, and no later
+    /// [`Stopped::Requested`](crate::exec::Stopped::Requested): what it didn't answer stays, for the next purge, and no later
     /// pass runs (what is in a folder goes before it).
     fn delete_for_good(
         &mut self,
@@ -351,10 +350,6 @@ impl AccountOps<'_> {
     ) -> Result<usize, EngineError> {
         let of = passes.iter().map(Vec::len).sum();
         (going.told)(0, of);
-        let stop = || match (going.stop)() {
-            true => Err(EngineError::Stopped(Stopped::Requested)),
-            false => Ok(()),
-        };
         // What each folder holds of the rows still to go: what is in a folder goes before it (but
         // round a cycle).
         let mut to_go: HashMap<NodeId, u64> = HashMap::new();
@@ -370,7 +365,7 @@ impl AccountOps<'_> {
             .collect();
         let mut gone = 0;
         for pass in passes {
-            stop()?;
+            going.check()?;
             let began = Instant::now();
             for r in pass {
                 later.remove(&r.row.remote_ref());
@@ -407,7 +402,7 @@ impl AccountOps<'_> {
             let batches = (hard.chunks(BATCH_FILES).map(|b| (b, true)))
                 .chain(soft.chunks(BATCH_FILES).map(|b| (b, false)));
             for (batch, for_good) in batches {
-                stop()?;
+                going.check()?;
                 let doomed: Vec<Doomed> = batch.iter().map(|r| r.doomed()).collect();
                 let (answers, mut failed) = match for_good {
                     true => hard_delete(self.remote, &doomed),
@@ -485,13 +480,11 @@ impl AccountOps<'_> {
     /// the server's clock): a delete for good that left one leaves nothing in the feed once every
     /// device has had time to see it. Each at its version: one written since stays, and so does
     /// one a failed request didn't answer. In batches of [`BATCH_FILES`], each written as it is
-    /// answered; `going`'s stop, asked before each, ends it with [`Stopped::Requested`].
+    /// answered; `going`'s stop, asked before each, ends it with [`Stopped::Requested`](crate::exec::Stopped::Requested).
     fn delete_tombstones(&self, before_ms: i64, going: Going<'_>) -> Result<(), EngineError> {
         let tombstones = self.db().read(|s| s.tombstones_before(before_ms))?;
         for batch in tombstones.chunks(BATCH_FILES) {
-            if (going.stop)() {
-                return Err(EngineError::Stopped(Stopped::Requested));
-            }
+            going.check()?;
             let (answers, failed) = hard_delete(self.remote, batch);
             self.db().write(|s| {
                 batch
