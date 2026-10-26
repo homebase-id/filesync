@@ -19,7 +19,7 @@ use super::listing::{
     Listed, RemovedRows, deleted_by_item, deletes_before, group, holdings, refuse_unlisted,
 };
 use super::rules::{Chosen, before_folders_go, inside, passes};
-use super::{AccountOps, FOR_GOOD_AT_ONCE, FOR_GOOD_BATCH, Going};
+use super::{AccountOps, FOR_GOOD_AT_ONCE, FOR_GOOD_BATCH, Going, unanswered};
 
 impl AccountOps<'_> {
     /// The purge: deletes for good the items of Recently deleted kept `keep_ms` by `now_ms` (the
@@ -412,27 +412,30 @@ impl AccountOps<'_> {
     }
 
     /// Deletes `batches` of a pass for good (each with whether it goes hard), up to
-    /// [`FOR_GOOD_AT_ONCE`] requests in flight, each on a thread of its own: nothing in a pass is
-    /// in another node of it, so they go in any order, and the pass ends once all are answered.
-    /// Each batch is written as it is answered, whichever comes first (the account's DB on this
-    /// thread only), counted in `gone` and told to `going` (of `of`). `going`'s stop is asked
-    /// before each batch starts; a stop, a failed request or a failed write starts no more, and
-    /// the batches in flight are still answered and written. Then the first of those errors is
-    /// returned.
+    /// [`FOR_GOOD_AT_ONCE`] requests in flight, each on a thread of its own (a pass of one batch
+    /// on this one): nothing in a pass is in another node of it, so they go in any order, and
+    /// the pass ends once all are answered. Each batch is written as it is answered, whichever
+    /// comes first (the account's DB on this thread only), counted in `gone` and told to `going`
+    /// (of `of`). `going`'s stop is asked before each batch starts; a stop, a failed request, a
+    /// failed write or a panic starts no more, and the batches in flight are still answered and
+    /// written. Then the panic goes on, or the first of those errors is returned; a request that
+    /// failed on the way leaves the account behind whichever it is.
     fn delete_batches<'r>(
         &mut self,
-        mut batches: impl Iterator<Item = (&'r [&'r RemovedRow], bool)>,
+        batches: impl Iterator<Item = (&'r [&'r RemovedRow], bool)>,
         going: Going<'_>,
         gone: &mut usize,
         of: usize,
     ) -> Result<(), EngineError> {
         let remote = self.remote;
+        let mut batches = batches.peekable();
         let (tx, rx) = mpsc::channel();
         std::thread::scope(|scope| {
             let mut in_flight = 0;
             let mut ended = None;
+            let mut panicked = None;
             loop {
-                while ended.is_none() && in_flight < FOR_GOOD_AT_ONCE {
+                while ended.is_none() && panicked.is_none() && in_flight < FOR_GOOD_AT_ONCE {
                     let Some((batch, hard)) = batches.next() else {
                         break;
                     };
@@ -440,16 +443,27 @@ impl AccountOps<'_> {
                         ended = Some(e);
                         break;
                     }
-                    let tx = tx.clone();
-                    // A panic comes back as an answer: the batch in flight is still waited for.
-                    scope.spawn(move || {
-                        let asked =
-                            panic::catch_unwind(AssertUnwindSafe(|| ask(remote, batch, hard)));
-                        tx.send(asked).ok();
-                    });
+                    // A panic comes back as an answer: the other batch in flight is still written.
+                    let run =
+                        move || panic::catch_unwind(AssertUnwindSafe(|| ask(remote, batch, hard)));
                     in_flight += 1;
+                    // Alone in its pass, or no thread to be had: on this one.
+                    let alone = in_flight == 1 && batches.peek().is_none();
+                    let spawned = !alone && {
+                        let tx = tx.clone();
+                        std::thread::Builder::new()
+                            .name("hbsync-delete-batch".into())
+                            .spawn_scoped(scope, move || tx.send(run()).ok())
+                            .is_ok()
+                    };
+                    if !spawned {
+                        tx.send(run()).ok();
+                    }
                 }
                 if in_flight == 0 {
+                    if let Some(p) = panicked {
+                        panic::resume_unwind(p);
+                    }
                     return ended.map_or(Ok(()), Err);
                 }
                 // A batch in flight holds a sender, and sends before it ends.
@@ -457,8 +471,14 @@ impl AccountOps<'_> {
                     unreachable!("a batch in flight answers")
                 };
                 in_flight -= 1;
-                let mut asked = asked.unwrap_or_else(|p| panic::resume_unwind(p));
-                let failed = asked.failed.take().map(EngineError::Remote);
+                let mut asked = match asked {
+                    Ok(asked) => asked,
+                    Err(p) => {
+                        panicked.get_or_insert(p);
+                        continue;
+                    }
+                };
+                let failed = asked.failed.take();
                 match self.write(asked) {
                     Ok(n) => {
                         *gone += n;
@@ -469,7 +489,8 @@ impl AccountOps<'_> {
                     }
                 }
                 if let Some(e) = failed {
-                    ended.get_or_insert(e);
+                    self.behind |= unanswered(&e);
+                    ended.get_or_insert(EngineError::Remote(e));
                 }
             }
         })

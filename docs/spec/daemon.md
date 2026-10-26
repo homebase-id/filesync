@@ -415,9 +415,9 @@ included (service managers restart it then).
   by then doesn't start; a purge stopped so isn't recorded as done, and runs again at the next
   start. On a Homebase that answers slowly (about 70 s for 1,000 files, so about 18 s for a
   batch), the batches in flight still delay `hbsync stop`. Two batches of a pass go at once
-  (`FOR_GOOD_AT_ONCE`: two requests on the server, so its storage work overlaps; not shown on
-  a local server on SQLite, where they take as long as one after the other), and a pass starts
-  once the one before is answered.
+  (`FOR_GOOD_AT_ONCE`: two requests on the server, so its storage work overlaps, inferred: not
+  shown on a local server on SQLite, where they take as long as one after the other), and a
+  pass starts once the one before is answered.
 
 ### States
 

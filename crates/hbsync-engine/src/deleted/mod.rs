@@ -91,6 +91,11 @@ impl std::fmt::Debug for Going<'_> {
     }
 }
 
+/// Whether `e` failed a request on the way (down, or busy): it may have landed unanswered.
+fn unanswered(e: &RemoteError) -> bool {
+    policy(e.class()).in_run == InRun::Backoff
+}
+
 /// Recently deleted's operations on the account's drive: restoring, emptying, the purge. The
 /// account's DB is held only while it is read or written, never while the server answers.
 pub struct AccountOps<'a> {
@@ -123,9 +128,8 @@ impl<'a> AccountOps<'a> {
     ) -> (Result<T, EngineError>, DriveNews) {
         let mut ops = AccountOps::new(account, remote);
         let done = op(&mut ops);
-        let failed = |e: &RemoteError| policy(e.class()).in_run == InRun::Backoff;
         let news = DriveNews {
-            behind: ops.behind || matches!(&done, Err(EngineError::Remote(e)) if failed(e)),
+            behind: ops.behind || matches!(&done, Err(EngineError::Remote(e)) if unanswered(e)),
             full: None,
         };
         (done, news)

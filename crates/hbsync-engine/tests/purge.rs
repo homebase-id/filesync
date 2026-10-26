@@ -896,7 +896,8 @@ fn removed_on_server(server: &Arc<Mutex<FakeServer>>, name: &str) -> bool {
 /// failed batch after others went; with `answer`, deletes answer that for each file, deleting
 /// nothing; with `soft_fails`, a soft delete fails as a broken connection; with `headers_fail`,
 /// so does a header read (`headers` counts them); with `paired`, each delete, soft or hard,
-/// waits up to that long for another in flight with it (`flight` counts them).
+/// waits up to that long for another in flight with it (`flight` counts them); with `panics`,
+/// the next soft delete panics.
 struct Watched {
     inner: FakeRemote,
     account: Arc<Mutex<StateDb>>,
@@ -915,6 +916,8 @@ struct Watched {
     rows: Mutex<Vec<usize>>,
     paired: Option<Duration>,
     flight: Mutex<Flight>,
+    /// The next soft delete panics (once in flight).
+    panics: AtomicBool,
     landed: Condvar,
 }
 
@@ -956,6 +959,7 @@ impl Watched {
             rows: Mutex::default(),
             paired: None,
             flight: Mutex::default(),
+            panics: AtomicBool::default(),
             landed: Condvar::new(),
         }
     }
@@ -1059,6 +1063,7 @@ impl hbsync_remote::Remote for Watched {
         files: &[hbsync_types::Doomed],
     ) -> hbsync_remote::Result<hbsync_remote::Deletes> {
         let _flying = self.fly();
+        assert!(!self.panics.swap(false, Ordering::SeqCst), "a bug");
         self.request();
         self.deleting();
         if let Some(answer) = self.answer {
@@ -1829,7 +1834,7 @@ fn deleting_for_good_writes_each_batch_as_it_is_answered() -> common::Res<()> {
     // Two at once, the third once one of them is written.
     let rows = remote.rows.lock().map_err(|_| "poisoned")?.clone();
     assert_eq!(rows.len(), 3);
-    assert_eq!(rows[..2], [n, n], "the first two in flight together");
+    assert_eq!(rows[0], n);
     assert!(
         rows[2] <= n - batch,
         "written before the next batch: {rows:?}"
@@ -1899,7 +1904,8 @@ fn a_pass_starts_once_the_one_before_is_answered() -> common::Res<()> {
 }
 
 /// A batch that fails keeps what the other in flight with it did: answered and written, the
-/// error returned once it is. The next purge takes the rest.
+/// error returned once it is. No batch starts after the failure is answered. The next purge
+/// takes the rest.
 #[test]
 fn a_failed_batch_keeps_the_other_in_flight() -> common::Res<()> {
     let batch = deleted::FOR_GOOD_BATCH;
@@ -1917,13 +1923,62 @@ fn a_failed_batch_keeps_the_other_in_flight() -> common::Res<()> {
     let (gone, news) = deleted::AccountOps::run(&account, &remote, |ops| ops.purge(0, now, going));
     assert!(gone.is_err(), "{gone:?}");
     assert!(news.behind, "it may have landed");
-    let flight = remote.flight.lock().map_err(|_| "poisoned")?;
-    assert_eq!(flight.others, [0, 1], "no batch started after the failure");
-    assert_eq!(removed_rows(&account)?, n - batch, "the other went");
+    let others = remote.flight.lock().map_err(|_| "poisoned")?.others.clone();
+    // The failure answered first: nothing more starts. The other answered first: the third
+    // starts then, and goes.
+    assert!(
+        others.starts_with(&[0, 1]) && others.len() <= 3,
+        "{others:?}"
+    );
+    let went = (others.len() - 1) * batch;
+    assert_eq!(removed_rows(&account)?, n - went, "the others went");
     let told = told.lock().map_err(|_| "poisoned")?.clone();
-    assert_eq!(told.last(), Some(&(batch, n)));
-    drop(flight);
-    assert_eq!(purge(&account, &remote, 0, now, &mut false)?, n - batch);
+    assert_eq!(told.last(), Some(&(went, n)));
+    remote.paired = None;
+    assert_eq!(purge(&account, &remote, 0, now, &mut false)?, n - went);
+    Ok(())
+}
+
+/// A request that failed on the way (it may have landed) leaves the account behind, whichever
+/// error ends the job: here a stop asked as the other batch in flight was answered.
+#[test]
+fn a_failed_request_after_a_stop_leaves_the_account_behind() -> common::Res<()> {
+    let batch = deleted::FOR_GOOD_BATCH;
+    let n = 3 * batch;
+    let server = server();
+    let (account, mut remote, now) = many_removed(&server, n)?;
+    remote.paired = Some(Duration::from_secs(10));
+    // The second of the two in flight to reach the drive fails, before it.
+    remote.inner.faults().script = [false, true].into();
+    let stop = AtomicBool::new(false);
+    let going = deleted::Going {
+        stop: &|| stop.load(Ordering::SeqCst),
+        told: &stop_after_the_first(&stop),
+    };
+    let (gone, news) = deleted::AccountOps::run(&account, &remote, |ops| ops.purge(0, now, going));
+    assert!(gone.is_err(), "{gone:?}");
+    assert!(news.behind, "it may have landed: {gone:?}");
+    assert_eq!(removed_rows(&account)?, n - batch);
+    Ok(())
+}
+
+/// A batch whose thread panics keeps what the other in flight with it did: answered and
+/// written before the panic goes on.
+#[test]
+fn a_panicking_batch_keeps_the_other_in_flight() -> common::Res<()> {
+    let batch = deleted::FOR_GOOD_BATCH;
+    let n = 2 * batch;
+    let server = server();
+    let (account, mut remote, now) = many_removed(&server, n)?;
+    remote.paired = Some(Duration::from_secs(10));
+    remote.panics.store(true, Ordering::SeqCst);
+    let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        purge(&account, &remote, 0, now, &mut false)
+    }));
+    assert!(ran.is_err(), "the panic goes on");
+    assert_eq!(removed_rows(&account)?, n - batch, "the other went");
+    remote.paired = None;
+    assert_eq!(purge(&account, &remote, 0, now, &mut false)?, batch);
     Ok(())
 }
 
