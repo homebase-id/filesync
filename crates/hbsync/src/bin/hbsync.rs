@@ -288,7 +288,7 @@ fn run(command: Command) -> Res<ExitCode> {
             daemon::empty(&paths, &found)?;
             let staying: Vec<DeletedItem> =
                 found.iter().filter(|i| i.deleted.stays).cloned().collect();
-            println!("{}", words::emptying(staying.len()));
+            println!("{}", words::emptying(staying.len(), "`hbsync status`"));
             for what in described(&staying) {
                 println!("  {what}");
             }
@@ -325,7 +325,7 @@ fn run(command: Command) -> Res<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             }
             daemon::empty_listed(&paths, &list.accounts)?;
-            println!("{}", words::emptying(list.staying()));
+            println!("{}", words::emptying(list.staying(), "`hbsync status`"));
         }
         Command::ConfirmDeletes { yes } => answer_held(&paths, yes, HeldAnswer::Delete)?,
         Command::PutBack { yes } => answer_held(&paths, yes, HeldAnswer::PutBack)?,
@@ -531,12 +531,14 @@ fn print_status(status: &DaemonStatus) {
             .credentials_warning
             .as_ref()
             .map(|w| format!("credentials: {w}"));
-        if hints.is_none() && credentials.is_none() && a.recent.is_empty() {
+        // Recently deleted being deleted for good, in the background.
+        let emptying = a.emptying.as_ref().map(words::emptying_status);
+        if hints.is_none() && credentials.is_none() && emptying.is_none() && a.recent.is_empty() {
             continue;
         }
         // Under its own heading: not read as the last folder's.
         println!("Account {}:", a.identity);
-        for line in hints.iter().chain(&credentials) {
+        for line in emptying.iter().chain(&hints).chain(&credentials) {
             println!("  {line}");
         }
         // The account's own: Recently deleted's requests, files on the drive that don't read.

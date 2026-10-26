@@ -715,7 +715,8 @@ fn a_put_back_that_failed_runs_once_more() -> R {
         let mut srv = server.lock().map_err(|_| "poisoned")?;
         srv.advance(40 * 86_400_000);
     }
-    a.drive.purge(30 * 86_400_000)?;
+    a.drive
+        .purge(30 * 86_400_000, hbsync_engine::deleted::Going::UNWATCHED)?;
     let held = b.status().held_deletes.ok_or("held")?;
     b.handle.answer(HeldAnswer::PutBack, &held.token)?;
     // The put back failed (its note), not before: its own read of the feed asks once mid-run.

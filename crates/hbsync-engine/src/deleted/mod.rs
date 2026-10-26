@@ -37,6 +37,44 @@ pub use rules::{
 
 use crate::lock;
 
+/// A delete for good as it goes (emptying Recently deleted, the purge), for its caller to stop
+/// and show: asked between batches whether to stop, told after each how far it got.
+#[derive(Clone, Copy)]
+pub struct Going<'a> {
+    /// Whether to stop, asked before each pass and each batch (many files a request): it then
+    /// ends with [`Stopped::Requested`](crate::exec::Stopped::Requested). What went is written
+    /// batch by batch, the rest stays in Recently deleted, and no later pass runs, so nothing
+    /// in a folder is left behind by it.
+    pub stop: &'a dyn Fn() -> bool,
+    /// Told how many items went, of how many it set out to delete: as it starts, and after
+    /// each batch is written.
+    pub told: &'a dyn Fn(usize, usize),
+}
+
+impl Going<'static> {
+    /// Never stopped, telling no one.
+    pub const UNWATCHED: Going<'static> = Going {
+        stop: &|| false,
+        told: &|_, _| {},
+    };
+}
+
+impl Going<'_> {
+    /// Asked to stop: [`Stopped::Requested`](crate::exec::Stopped::Requested).
+    pub(crate) fn check(&self) -> Result<(), EngineError> {
+        match (self.stop)() {
+            true => Err(EngineError::Stopped(crate::exec::Stopped::Requested)),
+            false => Ok(()),
+        }
+    }
+}
+
+impl std::fmt::Debug for Going<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Going").finish_non_exhaustive()
+    }
+}
+
 /// Recently deleted's operations on the account's drive: restoring, emptying, the purge. The
 /// account's DB is held only while it is read or written, never while the server answers.
 pub struct AccountOps<'a> {

@@ -114,7 +114,7 @@ fn the_purge_finishes_a_delete_that_stopped_half_way() -> R {
     // y.txt are removed, a folder first, and are restorable; nothing goes for good yet.
     drop(a);
     let mut b = Client::new(&server, "b")?;
-    assert_eq!(b.engine.drive().purge(0)?, 0);
+    assert_eq!(b.engine.drive().purge(0, Going::UNWATCHED)?, 0);
     assert_eq!(count(), (1, 4));
     let photos = b
         .recently_deleted(10)?
@@ -123,7 +123,7 @@ fn the_purge_finishes_a_delete_that_stopped_half_way() -> R {
         .ok_or("Photos not listed")?;
     assert!(!photos.stays, "nothing live holds it any more");
     // Their own removal kept long enough: all of it goes.
-    assert_eq!(b.engine.drive().purge(0)?, 4);
+    assert_eq!(b.engine.drive().purge(0, Going::UNWATCHED)?, 4);
     assert_eq!(count(), (1, 0));
     b.sync()?;
     assert_eq!(b.tree_text(""), ["keep.txt = k"]);
@@ -174,7 +174,13 @@ fn emptying_a_folder_never_deletes_what_is_live_in_it() -> R {
     let mut b = Client::new(&server, "b")?;
     b.engine.drive().catch_up(None)?;
     let listed = b.listed()?;
-    assert_eq!(b.engine.drive().empty(&[photos.node], &listed)?, 1, "x.txt");
+    assert_eq!(
+        b.engine
+            .drive()
+            .empty(&[photos.node], &listed, Going::UNWATCHED)?,
+        1,
+        "x.txt"
+    );
     assert_eq!(live(&server), 2, "2024 and y.txt stay");
     let left: Vec<String> = b
         .recently_deleted(10)?
@@ -217,7 +223,9 @@ fn emptying_an_item_takes_only_what_was_listed() -> R {
         "x.txt is in Recently deleted now"
     );
     assert_eq!(
-        a.engine.drive().empty(&[photos.node], &listed)?,
+        a.engine
+            .drive()
+            .empty(&[photos.node], &listed, Going::UNWATCHED)?,
         1,
         "a.txt only"
     );
@@ -233,14 +241,24 @@ fn emptying_an_item_takes_only_what_was_listed() -> R {
     );
     // Listed again, it all goes.
     let listed = a.listed()?;
-    assert_eq!(a.engine.drive().empty(&[photos.node], &listed)?, 2);
+    assert_eq!(
+        a.engine
+            .drive()
+            .empty(&[photos.node], &listed, Going::UNWATCHED)?,
+        2
+    );
     assert!(a.recently_deleted(10)?.is_empty());
     // A listing this DB never gave is refused.
     let other = hbsync_engine::deleted::Listed {
         db: "another".into(),
         seq: listed.seq,
     };
-    assert!(a.engine.drive().empty(&[photos.node], &other).is_err());
+    assert!(
+        a.engine
+            .drive()
+            .empty(&[photos.node], &other, Going::UNWATCHED)
+            .is_err()
+    );
     Ok(())
 }
 
@@ -279,7 +297,12 @@ fn emptying_a_folder_takes_what_was_deleted_from_it_before() -> R {
     );
     assert_eq!(summary.items, 6);
     let run = items[0].0.node;
-    assert_eq!(a.engine.drive().empty(&[run], &summary.listed)?, 6);
+    assert_eq!(
+        a.engine
+            .drive()
+            .empty(&[run], &summary.listed, Going::UNWATCHED)?,
+        6
+    );
     assert!(a.recently_deleted(10)?.is_empty());
     let s = server.lock().map_err(|_| "poisoned")?;
     assert_eq!(
@@ -583,7 +606,7 @@ fn what_no_device_syncs_stays_in_its_removed_folder_through_the_purge() -> R {
     // The purge, twice, a day apart: the first removes what the delete took along, the second
     // deletes it for good.
     for _ in 0..2 {
-        a.engine.drive().purge(0)?;
+        a.engine.drive().purge(0, Going::UNWATCHED)?;
         a.sync()?;
         server
             .lock()
@@ -890,7 +913,7 @@ fn recently_deleted_restores_and_purges() -> R {
     // The purge leaves nothing restorable.
     fs::remove_file(a.root.join("z.txt"))?;
     a.sync()?;
-    assert_eq!(a.engine.drive().purge(0)?, 1);
+    assert_eq!(a.engine.drive().purge(0, Going::UNWATCHED)?, 1);
     b.sync()?;
     assert!(b.recently_deleted(10)?.is_empty());
     assert_eq!(server.lock().map_err(|_| "poisoned")?.removed().count(), 0);
@@ -1021,7 +1044,7 @@ fn a_subfolder_restores_with_what_was_in_it_and_empty_spares_later_deletes() -> 
     fs::remove_file(a.root.join("keep.txt"))?;
     a.write("other.txt", "o")?; // not every file deleted (the guard)
     a.sync()?;
-    assert_eq!(a.engine.drive().empty_listed(&listed)?, 1);
+    assert_eq!(a.engine.drive().empty_listed(&listed, Going::UNWATCHED)?, 1);
     let left: Vec<_> = a
         .recently_deleted(10)?
         .into_iter()

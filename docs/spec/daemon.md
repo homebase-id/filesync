@@ -403,6 +403,19 @@ included (service managers restart it then).
   the drive is the only copy of what was deleted (a `.hbsync/trash` an older version left is
   no longer touched: the user deletes it by hand). What goes, and how: node schema, "The purge".
 
+  Emptying and the purge run in the background (the CLI and the tray say so when asked) and
+  delete a batch at a time (up to 1,000 files a request), each batch written as it is
+  answered: Recently deleted shrinks as it goes, and a crash or a kill loses nothing done (a
+  SQLite commit a batch). The log says when one starts (how many items) and ends (how many
+  went, or how far it got when it stopped); the account's status carries `emptying` while it
+  runs, which `hbsync status` and the tray's menu show. Once the account ends (`hbsync stop`,
+  Quit, SIGTERM, its last folder removed), it stops after the batch in flight, its answers
+  written, and runs no later pass (what is in a folder goes before it): what it didn't reach
+  stays in Recently deleted, for the next emptying or purge. An emptying asked but not started
+  by then doesn't start; a purge stopped so isn't recorded as done, and runs again at the next
+  start. On a Homebase that answers slowly (about 70 s for a batch of 1,000), the batch in
+  flight can still outlast `hbsync stop`'s minute.
+
 ### States
 
 `starting` (catching up, then the first sync, with its progress), `syncing`, `idle`, `paused`, `offline` (can't
@@ -414,7 +427,7 @@ refused this device: `hbsync setup` again), `stopped`.
 One request line, one reply line (JSON), then the connection closes; but `watch`, answered with
 the status now and again each time it changes (at most once a second while a folder syncs: its
 progress changes without telling), on the open connection until either side closes it (what
-the tray shows). Requests carry the protocol version (now 8); a daemon refuses another one
+the tray shows). Requests carry the protocol version (now 10); a daemon refuses another one
 with the reason (after an update: restart it). The
 wire types are `hbsync-app/src/protocol.rs`. A control goes to the daemon (every folder), to an
 account (its Recently deleted) or to one folder (its held deletes):
@@ -450,8 +463,9 @@ identity not synced yet), without a restart: `hbsync setup` checks what the user
 
 Replies:
 - `{"status":{"version":…,"accounts":[…],"folders":[…]}}`. An account has its `identity`, the
-  notification connection (`hints`), a `credentials_warning`, and its own notes (`recent`, with
-  `notes_added`, as a folder's). A folder has its `identity`,
+  notification connection (`hints`), a `credentials_warning`, its own notes (`recent`, with
+  `notes_added`, as a folder's), and `emptying` while Recently deleted is being deleted for
+  good (`done` of `total` items, `purge` when it is the daily purge; left out otherwise). A folder has its `identity`,
   `path`, `role` (`null` for the main folder), `state`, `progress` (while `starting` or
   `syncing`, once the sync has a plan; its totals grow as each batch of up to 20,000 items is
   planned), `paused_until`, `held_deletes`, and the counts `notes_added` and `synced_added`
@@ -516,7 +530,8 @@ isn't running looks every second (every ten while nothing is set up).
   user (a failure, held deletes, a refused login). On macOS the cloud in one colour; a problem
   shows the tile with its magenta dot. The files: `crates/hbsync-tray/assets/README.md`.
 - **Menu:** version, identity, a status line (with progress while syncing, the first sync after
-  starting included), Open Homebase folder, Browse files online (chat's web app on the
+  starting included), how far emptying Recently deleted (or the daily purge) has got while it
+  runs ("Emptying Recently deleted: 3,000 of 22,367"), Open Homebase folder, Browse files online (chat's web app on the
   identity, opened on its Filesync mini-app: `https://<identity>/apps/chat/#filesync`),
   Recently synced (the last 10; clicking one shows it
   in the file manager), Problems (the main folder's notes and its account's, newest first), Review N deletions…, Recently deleted…, Folders…, Log

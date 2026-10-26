@@ -72,8 +72,9 @@ Good to know:
   days, wherever you deleted it. On your computer, a file manager also puts it in the OS's
   trash; `rm` doesn't. Your other computers delete their copy.
 - **Emptying Recently deleted runs in the background,** and on a big one it can take a while
-  (about 18 minutes for 22,000 items on one Homebase). For now, `hbsync stop` and Quit wait
-  until it's done.
+  (about 18 minutes for 22,000 items on one Homebase). It shrinks as it goes, and `hbsync
+  status` and the tray's menu show how far it got. `hbsync stop` and Quit stop it after the
+  batch in hand (up to 1,000 files): the rest stays in Recently deleted for the next time.
 - **Commands that ask** (`empty-deleted`, `confirm-deletes`, `put-back`) need `--yes` where
   nobody can answer, such as in a script.
 - **Leave things out** on one computer with gitignore-style rules in `.hbsync/ignore` in the

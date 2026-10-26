@@ -512,8 +512,9 @@ impl Sim {
                 let rows = self.server.removed.iter().map(Server::at).collect();
                 self.ledger.deleted_listed(rows);
             }
-            Action::EmptyListed => self.empty_listed(),
+            Action::EmptyListed => self.empty_listed(usize::MAX),
             Action::EmptyItem { pick } => self.empty_item(pick),
+            Action::EmptyStopped { done } => self.empty_listed(done),
             Action::EditTaken { pick } => {
                 let taken: Vec<NodeId> = self
                     .taken_along()
@@ -551,7 +552,7 @@ impl Sim {
                     .filter(|(n, _)| self.server.removed_at.get(n).is_some_and(|at| *at < before))
                     .map(Server::at)
                     .collect();
-                self.delete_for_good(&due, &known);
+                self.delete_for_good(&due, &known, usize::MAX);
             }
             Action::ToggleIgnore => {
                 let client = &mut self.clients[c];
@@ -727,7 +728,7 @@ impl Sim {
                 if let Some(at) = file {
                     self.note(|_| format!("  put back: {:?} deleted for good meanwhile", at.0));
                     let known = self.server.removed.iter().map(Server::at).collect();
-                    self.delete_for_good(&BTreeSet::from([at]), &known);
+                    self.delete_for_good(&BTreeSet::from([at]), &known, usize::MAX);
                 }
             }
             // A folder of it deleted for good meanwhile (by another app: what is in it waits in
@@ -1044,10 +1045,11 @@ impl Sim {
         }
     }
 
-    /// [`Action::EmptyListed`].
-    fn empty_listed(&mut self) {
+    /// [`Action::EmptyListed`] (`upto`: `usize::MAX`), or [`Action::EmptyStopped`] after `upto`
+    /// deletes.
+    fn empty_listed(&mut self, upto: usize) {
         if let Some(listed) = self.ledger.listing().cloned() {
-            self.delete_for_good(&listed, &listed);
+            self.delete_for_good(&listed, &listed, upto);
         }
     }
 
@@ -1095,7 +1097,7 @@ impl Sim {
                 .live
                 .values()
                 .any(|n| inside.contains(&n.state.parent));
-        self.delete_for_good(&chosen, &listed);
+        self.delete_for_good(&chosen, &listed, usize::MAX);
         let stayed = !kept && self.server.removed.contains_key(&item);
         self.ledger
             .emptied_kept(|| stayed.then(|| format!("{item:?}")));
@@ -1105,12 +1107,16 @@ impl Sim {
     /// engine does ([`deleted::passes`], with what the folders hold as the emptying device
     /// knows it: of Recently deleted, the rows in `known` at their versions), in its order: before a pass's folders go, the drive is asked which of them hold a
     /// file as the engine asks ([`deleted::before_folders_go`]), and those stay. Records the first it deletes that it mustn't: one not chosen at that version (a
-    /// live node, say), or a folder holding anything not going after it.
+    /// live node, say), or a folder holding anything not going after it. Stopped after `upto`
+    /// deletes (a stop between batches; `usize::MAX`: none), the rest stays in Recently deleted,
+    /// and no later pass runs.
     fn delete_for_good(
         &mut self,
         chosen: &BTreeSet<(NodeId, VersionTag)>,
         known: &BTreeSet<(NodeId, VersionTag)>,
+        upto: usize,
     ) {
+        let mut left = upto;
         let server = &self.server;
         let rows: Vec<deleted::Chosen> = server
             .removed
@@ -1153,6 +1159,10 @@ impl Sim {
                 .map(|(n, _)| n.state.parent)
                 .collect();
             for n in pass {
+                // Stopped: the job ends here.
+                if left == 0 {
+                    return;
+                }
                 // Only a pass's folders are asked about, as the engine asks (a file another
                 // writer put something in holds nothing: what is in it is its own item).
                 let folder = self.server.removed[&n].state.kind == NodeKind::Folder;
@@ -1175,6 +1185,7 @@ impl Sim {
                 let wrong = !was_chosen || held.is_some();
                 self.ledger
                     .emptied_unlisted(|| wrong.then(|| format!("{n:?} (holding {held:?})")));
+                left -= 1;
                 self.server.removed_at.remove(&n);
                 self.server.tags_at_removal.remove(&n);
                 if let Some(gone) = self.server.removed.remove(&n) {

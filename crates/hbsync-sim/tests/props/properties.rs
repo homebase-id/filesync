@@ -257,6 +257,7 @@ proptest! {
                         | Restore { .. }
                         | EmptyItem { .. }
                         | EmptyListed
+                        | EmptyStopped { .. }
                         | ListDeleted
                         | EditTaken { .. }
                         | ToggleIgnore

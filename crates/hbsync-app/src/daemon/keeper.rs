@@ -4,19 +4,25 @@
 //! many files), so the notifications, folders added or removed and pauses are taken at once.
 //! What a purge found not there once is asked again a minute on ([`Drive::ask_again`]); a
 //! restore that found something not there once is run once more a minute on.
+//!
+//! Deleting for good (emptying, the purge) goes a batch at a time, each written as it is
+//! answered, and is shown on the account's status meanwhile; once the account ends, it stops
+//! after the batch in flight, and what it didn't reach stays in Recently deleted.
 
+use std::cell::Cell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{RecvTimeoutError, Sender, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
-use hbsync_engine::deleted::Listed;
+use hbsync_engine::deleted::{Going, Listed};
+use hbsync_engine::exec::Stopped;
 use hbsync_engine::{Drive, EngineError};
 
 use hbsync_types::NodeId;
 
-use crate::protocol::AccountControl;
+use crate::protocol::{AccountControl, Emptying};
 
 /// What the keeper is asked to do.
 enum Job {
@@ -28,17 +34,24 @@ enum Job {
 /// Tells the user a note (the account's: [`Keeper::spawn`]).
 pub(super) type Tell = Arc<dyn Fn(String) + Send + Sync>;
 
+/// Shows how far deleting for good has got on the account's status, `None` once it ended
+/// ([`Keeper::spawn`]).
+pub(super) type Show = Arc<dyn Fn(Option<Emptying>) + Send + Sync>;
+
 /// Does Recently deleted's work one job at a time, in the order asked, never on the asker's
 /// thread: a thread that ended (or couldn't start) is started again, as the puller's is.
 pub(crate) struct Keeper {
     drive: Arc<Drive>,
     /// How a request that failed is told.
     tell: Tell,
+    /// How far deleting for good has got is shown with it.
+    show: Show,
     worker: Option<(Sender<Job>, JoinHandle<()>)>,
     /// A purge is asked for and hasn't started: asked again meanwhile, it is that one.
     purging: Arc<AtomicBool>,
     /// The account is paused, or ends: a purge not started yet doesn't start (it is asked
-    /// again after the pause).
+    /// again after the pause). Ending, deleting for good stops after its batch in flight, and
+    /// an emptying not started yet doesn't start ([`Keeper::stop`]).
     paused: Arc<AtomicBool>,
     ending: Arc<AtomicBool>,
     /// How long after a purge what it found not there once is asked again.
@@ -48,16 +61,18 @@ pub(crate) struct Keeper {
 }
 
 impl Keeper {
-    /// The keeper of `drive`'s Recently deleted; a request that fails is told with `tell`.
-    pub(super) fn spawn(drive: Arc<Drive>, tell: Tell) -> Keeper {
-        Self::spawn_with(drive, tell, hbsync_engine::gone::ASK_AGAIN)
+    /// The keeper of `drive`'s Recently deleted; a request that fails is told with `tell`, and
+    /// how far deleting for good has got is shown with `show`.
+    pub(super) fn spawn(drive: Arc<Drive>, tell: Tell, show: Show) -> Keeper {
+        Self::spawn_with(drive, tell, show, hbsync_engine::gone::ASK_AGAIN)
     }
 
     /// [`Keeper::spawn`], asking again `ask_after` after a purge.
-    fn spawn_with(drive: Arc<Drive>, tell: Tell, ask_after: Duration) -> Keeper {
+    fn spawn_with(drive: Arc<Drive>, tell: Tell, show: Show, ask_after: Duration) -> Keeper {
         let mut keeper = Keeper {
             drive,
             tell,
+            show,
             worker: None,
             purging: Arc::default(),
             paused: Arc::default(),
@@ -73,10 +88,13 @@ impl Keeper {
         let (tx, rx) = channel::<Job>();
         let drive = Arc::clone(&self.drive);
         let tell = Arc::clone(&self.tell);
-        let (purging, paused, ending, done, ask_after) = (
+        let deleting = Deleting {
+            ending: Arc::clone(&self.ending),
+            show: Arc::clone(&self.show),
+        };
+        let (purging, paused, done, ask_after) = (
             Arc::clone(&self.purging),
             Arc::clone(&self.paused),
-            Arc::clone(&self.ending),
             self.done.clone(),
             self.ask_after,
         );
@@ -89,7 +107,7 @@ impl Keeper {
                 // What restores found not there once: restored once more a minute on, each
                 // with its name (while the daemon runs).
                 let mut restore_again: Option<(Instant, Vec<(NodeId, String)>)> = None;
-                let held = || paused.load(Ordering::SeqCst) || ending.load(Ordering::SeqCst);
+                let held = || paused.load(Ordering::SeqCst) || deleting.ending();
                 loop {
                     let next = match (again, restore_again.as_ref().map(|(at, _)| *at)) {
                         (Some(a), Some(b)) => Some(a.min(b)),
@@ -107,12 +125,15 @@ impl Keeper {
                     match job {
                         Some(Job::Purge) => {
                             purging.store(false, Ordering::SeqCst);
-                            if !held() && purge_now(&drive) && drive.doubted().unwrap_or(true) {
+                            if !held()
+                                && purge_now(&drive, &deleting)
+                                && drive.doubted().unwrap_or(true)
+                            {
                                 again = Some(Instant::now() + ask_after);
                             }
                         }
                         Some(Job::Control(control)) => {
-                            let rest = run_request(&drive, control, &*tell, None);
+                            let rest = run_request(&drive, control, &*tell, &deleting, None);
                             if !rest.is_empty() {
                                 // Another one pending too: both, a minute after this one.
                                 let mut all =
@@ -130,20 +151,19 @@ impl Keeper {
                             .is_some_and(|(at, _)| *at <= Instant::now()) =>
                         {
                             if let Some((_, rest)) = restore_again.take()
-                                && !ending.load(Ordering::SeqCst)
+                                && !deleting.ending()
                                 && !drive.is_denied()
                             {
                                 let nodes = rest.iter().map(|(n, _)| *n).collect();
                                 let control = AccountControl::Restore { nodes };
-                                run_request(&drive, control, &*tell, Some(&rest));
+                                run_request(&drive, control, &*tell, &deleting, Some(&rest));
                             }
                         }
                         // Paused: again a minute on, while what it would ask can still be
                         // confirmed (within the hour); ending: not again.
                         None if held() => {
-                            again = (!ending.load(Ordering::SeqCst)
-                                && drive.doubted().unwrap_or(true))
-                            .then(|| Instant::now() + ask_after);
+                            again = (!deleting.ending() && drive.doubted().unwrap_or(true))
+                                .then(|| Instant::now() + ask_after);
                         }
                         None => {
                             again = None;
@@ -200,10 +220,16 @@ impl Keeper {
         tracing::warn!("Recently deleted's thread isn't running: a request was dropped");
     }
 
-    /// The account ends: what was asked of it is done (but a purge not started yet), then its
-    /// thread ends.
-    pub(super) fn finish(self) {
+    /// The account ends: deleting for good stops after its batch in flight (what it didn't
+    /// reach stays in Recently deleted), and no purge or emptying starts.
+    pub(super) fn stop(&self) {
         self.ending.store(true, Ordering::SeqCst);
+    }
+
+    /// The account ends ([`Keeper::stop`]): what else was asked of it is done, then its thread
+    /// ends.
+    pub(super) fn finish(self) {
+        self.stop();
         if let Some((jobs, thread)) = self.worker {
             drop(jobs);
             let _ = thread.join();
@@ -217,13 +243,90 @@ impl Keeper {
     }
 }
 
+/// What deleting for good is stopped by and shown on: the account ending, its status.
+struct Deleting {
+    ending: Arc<AtomicBool>,
+    show: Show,
+}
+
+impl Deleting {
+    /// Whether the account ends: no deleting for good starts.
+    fn ending(&self) -> bool {
+        self.ending.load(Ordering::SeqCst)
+    }
+
+    /// Runs `run`, deleting for good (the daily purge if `purge`, else the user's emptying):
+    /// stopped between batches once the account ends (asked as it ends, it doesn't start),
+    /// shown while it runs, and logged as it starts and as it stops or fails part way.
+    fn run<T>(
+        &self,
+        purge: bool,
+        run: impl FnOnce(Going<'_>) -> Result<T, EngineError>,
+    ) -> Result<T, EngineError> {
+        let what = if purge { PURGE } else { EMPTY };
+        let far = Cell::new((0, 0));
+        let stop = || self.ending();
+        let told = |done: usize, total: usize| {
+            if far.get().1 == 0 && total > 0 {
+                tracing::info!("{what}: {total} items to delete for good, in the background");
+            }
+            far.set((done, total));
+            if total > 0 {
+                (self.show)(Some(Emptying {
+                    done: done as u64,
+                    total: total as u64,
+                    purge,
+                }));
+            }
+        };
+        // Shown no more once it ends, however it ends (a panic too).
+        let _shown = Shown(&self.show, &far);
+        let result = run(Going {
+            stop: &stop,
+            told: &told,
+        });
+        let (done, total) = far.get();
+        match &result {
+            Err(EngineError::Stopped(Stopped::Requested)) if total == 0 => {
+                tracing::info!("{what}: not started, as the account ends");
+            }
+            Err(EngineError::Stopped(Stopped::Requested)) => tracing::info!(
+                "{what} stopped as the account ends: {done} of {total} items deleted for good, \
+                 the rest stay in Recently deleted"
+            ),
+            Err(_) if done > 0 => {
+                tracing::info!("{what}: {done} of {total} items deleted for good, then it failed");
+            }
+            _ => {}
+        }
+        result
+    }
+}
+
+/// What deleting for good showed, cleared when dropped: how far it got (of none, nothing was
+/// shown).
+struct Shown<'a>(&'a Show, &'a Cell<(usize, usize)>);
+
+impl Drop for Shown<'_> {
+    fn drop(&mut self) {
+        if self.1.get().1 > 0 {
+            (self.0)(None);
+        }
+    }
+}
+
+/// What emptying Recently deleted is called in the log and in notes.
+const EMPTY: &str = "Emptying Recently deleted";
+/// What the daily purge is called in the log.
+const PURGE: &str = "Purging Recently deleted";
+
 /// The purge, if due: whether it ran (what it found not there once is to be asked again).
-fn purge_now(drive: &Drive) -> bool {
+fn purge_now(drive: &Drive, deleting: &Deleting) -> bool {
     // Refused: asked again once the identity lets this computer in.
     if drive.is_denied() {
         return false;
     }
-    match drive.purge_when_due() {
+    match deleting.run(true, |going| drive.purge_when_due(going)) {
         Ok(Some(n)) => {
             if n > 0 {
                 let days = crate::KEEP_DAYS;
@@ -232,8 +335,10 @@ fn purge_now(drive: &Drive) -> bool {
             true
         }
         Ok(None) => false,
+        // Not recorded as done: it runs again at the account's next start.
+        Err(EngineError::Stopped(Stopped::Requested)) => false,
         Err(e) => {
-            tracing::warn!("purging Recently deleted failed: {e}");
+            tracing::warn!("{PURGE} failed: {e}");
             true
         }
     }
@@ -255,16 +360,17 @@ fn ask_again(drive: &Drive) {
 /// told to the user (`tell`): it was answered before it ran. A restore that found something
 /// not there once (§8b) returns what of it is still in Recently deleted, with names, to restore
 /// once more a minute on; `again`: this is that once more, of these (no more after it). What
-/// a restore left in Recently deleted, or found deleted for good, is told.
+/// a restore left in Recently deleted, or found deleted for good, is told. Emptying goes as
+/// `deleting` has it: once the account ends, it doesn't start, or stops between batches.
 fn run_request(
     drive: &Drive,
     control: AccountControl,
     tell: &dyn Fn(String),
+    deleting: &Deleting,
     again: Option<&[(NodeId, String)]>,
 ) -> Vec<(NodeId, String)> {
-    const EMPTY: (&str, &str) = ("Emptying Recently deleted", "deleted for good");
     const RESTORE: &str = "Restoring from Recently deleted";
-    let (result, (what, done)) = match control {
+    let result = match control {
         AccountControl::Restore { nodes } => {
             match drive.restore_told(&nodes) {
                 Ok(restored) => {
@@ -301,15 +407,19 @@ fn run_request(
             }
             return Vec::new();
         }
-        AccountControl::EmptyDeleted { nodes, db, seq } => {
-            (drive.empty(&nodes, &Listed { db, seq }), EMPTY)
-        }
-        AccountControl::EmptyListed { db, seq } => (drive.empty_listed(&Listed { db, seq }), EMPTY),
+        AccountControl::EmptyDeleted { nodes, db, seq } => deleting.run(false, |going| {
+            drive.empty(&nodes, &Listed { db, seq }, going)
+        }),
+        AccountControl::EmptyListed { db, seq } => deleting.run(false, |going| {
+            drive.empty_listed(&Listed { db, seq }, going)
+        }),
     };
     match result {
-        Ok(n) => tracing::info!("{what}: {n} items {done}"),
+        Ok(n) => tracing::info!("{EMPTY}: {n} items deleted for good"),
+        // The account ends (logged): what is left stays in Recently deleted.
+        Err(EngineError::Stopped(Stopped::Requested)) => {}
         // Refused, the drive latched it: the account asks nothing more ([`Drive::deny`]).
-        Err(e) => tell(failed(what, &e)),
+        Err(e) => tell(failed(EMPTY, &e)),
     }
     Vec::new()
 }
@@ -401,7 +511,7 @@ mod tests {
         let db = home.path().join("state.db");
         let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
         let drive = Drive::open(&db, "a.example", remote.clone())?;
-        let mut keeper = Keeper::spawn(Arc::clone(&drive), Arc::new(|_| {}));
+        let mut keeper = Keeper::spawn(Arc::clone(&drive), Arc::new(|_| {}), Arc::new(|_| {}));
         let purged = || -> Result<bool, Box<dyn std::error::Error>> {
             let mut account = StateDb::open_account(&db)?;
             Ok(account.read(|s| s.account_kv(keys::PURGED_AT))?.is_some())
@@ -430,7 +540,7 @@ mod tests {
         let db = home.path().join("state.db");
         let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
         let drive = Drive::open(&db, "a.example", remote.clone())?;
-        let mut keeper = Keeper::spawn(drive, Arc::new(|_| {}));
+        let mut keeper = Keeper::spawn(drive, Arc::new(|_| {}), Arc::new(|_| {}));
         let done = keeper.done.clone();
         let server = remote.server();
         keeper.request(AccountControl::Restore { nodes: Vec::new() });
@@ -456,12 +566,13 @@ mod tests {
         let notes = Arc::clone(&told);
         let tell: Tell =
             Arc::new(move |note| notes.lock().unwrap_or_else(|e| e.into_inner()).push(note));
-        let mut keeper = Keeper::spawn(Arc::clone(&drive), tell);
+        let mut keeper = Keeper::spawn(Arc::clone(&drive), tell, Arc::new(|_| {}));
         remote.faults().denied = true;
         keeper.request(AccountControl::EmptyListed {
             db: "x".into(),
             seq: 0,
         });
+        wait_for("the request", || keeper.done() == 1)?;
         keeper.finish();
         assert!(drive.is_denied(), "the drive latched the refusal");
         let told = told.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -508,7 +619,12 @@ mod tests {
         };
         assert_eq!(count("removed")?, 1);
         let ask_after = Duration::from_secs(2);
-        let mut keeper = Keeper::spawn_with(Arc::clone(&drive), Arc::new(|_| {}), ask_after);
+        let mut keeper = Keeper::spawn_with(
+            Arc::clone(&drive),
+            Arc::new(|_| {}),
+            Arc::new(|_| {}),
+            ask_after,
+        );
         keeper.purge();
         wait_for("the purge", || keeper.done() == 1)?;
         assert_eq!(count("removed")?, 1, "not there once: kept");
@@ -521,13 +637,19 @@ mod tests {
         Ok(())
     }
 
+    /// What a callback was given, gathered: the notes told, what was shown.
+    #[allow(clippy::type_complexity)]
+    fn gathered<T: Send + 'static>() -> (Arc<dyn Fn(T) + Send + Sync>, Arc<std::sync::Mutex<Vec<T>>>)
+    {
+        let all = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let into = Arc::clone(&all);
+        let gather = Arc::new(move |t| into.lock().unwrap_or_else(|e| e.into_inner()).push(t));
+        (gather, all)
+    }
+
     /// The notes told, gathered.
     fn notes() -> (Tell, Arc<std::sync::Mutex<Vec<String>>>) {
-        let told = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
-        let notes = Arc::clone(&told);
-        let tell: Tell =
-            Arc::new(move |note| notes.lock().unwrap_or_else(|e| e.into_inner()).push(note));
-        (tell, told)
+        gathered()
     }
 
     /// `name` seeded at the drive's top and removed, as the device's store has it: its node.
@@ -566,7 +688,12 @@ mod tests {
         // Deleted for good elsewhere, unheard of: the drive says not there, no tombstone.
         remote.server().hard_delete(at.file_id, at.version)?;
         let (tell, told) = notes();
-        let mut keeper = Keeper::spawn_with(Arc::clone(&drive), tell, Duration::from_secs(2));
+        let mut keeper = Keeper::spawn_with(
+            Arc::clone(&drive),
+            tell,
+            Arc::new(|_| {}),
+            Duration::from_secs(2),
+        );
         keeper.request(AccountControl::Restore { nodes: vec![node] });
         wait_for("the restore", || keeper.done() == 1)?;
         let first = told.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -609,7 +736,7 @@ mod tests {
             }
         }
         let (tell, told) = notes();
-        let mut keeper = Keeper::spawn(Arc::clone(&drive), tell);
+        let mut keeper = Keeper::spawn(Arc::clone(&drive), tell, Arc::new(|_| {}));
         keeper.request(AccountControl::Restore { nodes: vec![node] });
         keeper.finish();
         let told = told.lock().unwrap_or_else(|e| e.into_inner()).clone();
@@ -629,7 +756,7 @@ mod tests {
         let db = home.path().join("state.db");
         let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
         let drive = Drive::open(&db, "a.example", remote.clone())?;
-        let mut keeper = Keeper::spawn(drive, Arc::new(|_| {}));
+        let mut keeper = Keeper::spawn(drive, Arc::new(|_| {}), Arc::new(|_| {}));
         let server = remote.server();
         keeper.request(AccountControl::Restore { nodes: Vec::new() });
         keeper.purge();
@@ -643,6 +770,130 @@ mod tests {
         wait_for("the purge", || keeper.done() == 3)?;
         assert!(account.read(|s| s.account_kv(keys::PURGED_AT))?.is_some());
         keeper.finish();
+        Ok(())
+    }
+
+    /// `n` files seeded at the drive's top and removed, as the device's store has them; and
+    /// a request to empty Recently deleted as listed now.
+    fn emptying(
+        remote: &FakeRemote,
+        drive: &Drive,
+        db: &std::path::Path,
+        n: usize,
+    ) -> Result<AccountControl, Box<dyn std::error::Error>> {
+        use hbsync_remote::Remote;
+        let algorithm = hbsync_fileio::HashAlgorithm::Blake3;
+        let mut targets = Vec::new();
+        for i in 0..n {
+            let name = format!("{i}.txt");
+            let (_, at) = remote
+                .server()
+                .seed_file(NodeId::ROOT, &name, b"x", algorithm)?;
+            let token = Some(hbsync_remote::fake::token_of(at.file_id));
+            targets.push(hbsync_types::Target { at, token });
+        }
+        for batch in targets.chunks(hbsync_remote::BATCH_FILES) {
+            remote.set_removed(batch, true)?;
+        }
+        drive.pull(None)?;
+        let listed = StateDb::open_account(db)?.read(hbsync_engine::deleted::listed_now)?;
+        Ok(AccountControl::EmptyListed {
+            db: listed.db,
+            seq: listed.seq,
+        })
+    }
+
+    /// The rows of Recently deleted in the account's DB at `db`.
+    fn removed_rows(db: &std::path::Path) -> Result<i64, Box<dyn std::error::Error>> {
+        let sql = rusqlite::Connection::open(db)?;
+        Ok(sql.query_row("SELECT count(*) FROM removed", [], |r| r.get(0))?)
+    }
+
+    /// Emptying shows how far it got on the account's status while it runs, a batch at a
+    /// time, and nothing once it ended; nothing is told (it didn't fail).
+    #[test]
+    fn emptying_shows_how_far_it_got() -> R {
+        let home = tempfile::tempdir()?;
+        let db = home.path().join("state.db");
+        let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
+        let drive = Drive::open(&db, "a.example", remote.clone())?;
+        let n = hbsync_remote::BATCH_FILES + 1;
+        let control = emptying(&remote, &drive, &db, n)?;
+        let (tell, told) = notes();
+        let (show, seen) = gathered();
+        let mut keeper = Keeper::spawn(Arc::clone(&drive), tell, show);
+        keeper.request(control);
+        wait_for("the emptying", || keeper.done() == 1)?;
+        keeper.finish();
+        let at = |done: usize| {
+            Some(Emptying {
+                done: done as u64,
+                total: n as u64,
+                purge: false,
+            })
+        };
+        let seen = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(seen, [at(0), at(n - 1), at(n), None]);
+        assert!(told.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
+        assert_eq!(removed_rows(&db)?, 0);
+        Ok(())
+    }
+
+    /// The account ending (`hbsync stop`, quitting the tray, SIGTERM) stops emptying after
+    /// the batch in flight, its result written: what it didn't reach stays in Recently deleted
+    /// for the next time, and nothing is told (it didn't fail). Before, the daemon's stop waited
+    /// for the whole job.
+    #[test]
+    fn the_account_ending_stops_emptying_after_the_batch_in_flight() -> R {
+        let home = tempfile::tempdir()?;
+        let db = home.path().join("state.db");
+        let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
+        let drive = Drive::open(&db, "a.example", remote.clone())?;
+        let batch = hbsync_remote::BATCH_FILES;
+        let n = 2 * batch + 1;
+        let control = emptying(&remote, &drive, &db, n)?;
+        let (tell, told) = notes();
+        // Stopped ([`Keeper::stop`]) while the first batch is answered.
+        let ending: Arc<std::sync::OnceLock<Arc<AtomicBool>>> = Arc::default();
+        let stopping = Arc::clone(&ending);
+        let show: Show = Arc::new(move |e| {
+            if e.is_some_and(|e| e.done > 0)
+                && let Some(ending) = stopping.get()
+            {
+                ending.store(true, Ordering::SeqCst);
+            }
+        });
+        let mut keeper = Keeper::spawn(Arc::clone(&drive), tell, show);
+        ending
+            .set(Arc::clone(&keeper.ending))
+            .map_err(|_| "set once")?;
+        keeper.request(control);
+        wait_for("the stop", || keeper.done() == 1)?;
+        keeper.finish();
+        assert_eq!(
+            removed_rows(&db)?,
+            (n - batch) as i64,
+            "the first batch went"
+        );
+        assert!(told.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
+        Ok(())
+    }
+
+    /// Emptying asked once the account ends doesn't start: Recently deleted keeps it all.
+    #[test]
+    fn emptying_asked_as_the_account_ends_doesnt_start() -> R {
+        let home = tempfile::tempdir()?;
+        let db = home.path().join("state.db");
+        let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
+        let drive = Drive::open(&db, "a.example", remote.clone())?;
+        let control = emptying(&remote, &drive, &db, 2)?;
+        let (show, seen) = gathered();
+        let mut keeper = Keeper::spawn(Arc::clone(&drive), Arc::new(|_| {}), show);
+        keeper.stop();
+        keeper.request(control);
+        keeper.finish();
+        assert_eq!(removed_rows(&db)?, 2);
+        assert!(seen.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
         Ok(())
     }
 }

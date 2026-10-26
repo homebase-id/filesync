@@ -6,7 +6,8 @@ use hbsync_state::Unusable;
 use hbsync_types::NodeKind;
 use hbsync_types::activity::{Deleted, Progress, Synced, SyncedKind};
 
-use crate::protocol::{DeletedItem, FolderStatus, HeldAnswer, HeldDeletes, State};
+use crate::KEEP_DAYS;
+use crate::protocol::{DeletedItem, Emptying, FolderStatus, HeldAnswer, HeldDeletes, State};
 
 /// Now, in Unix seconds.
 pub use hbsync_types::unix_now as now;
@@ -159,11 +160,26 @@ pub fn restoring() -> &'static str {
 }
 
 /// The reply to emptying Recently deleted, `staying` items left (they hold a live node): never
-/// "deleting" alone where something stays. The tray's and the CLI's.
-pub fn emptying(staying_items: usize) -> String {
-    format!("Deleting for good. {}", staying(staying_items))
-        .trim_end()
-        .to_owned()
+/// "deleting" alone where something stays. It goes on in the daemon's background, which
+/// `shown_in` shows (`hbsync status`, the tray's menu). The tray's and the CLI's.
+pub fn emptying(staying_items: usize, shown_in: &str) -> String {
+    format!(
+        "Deleting for good has started and goes on in the background: Recently deleted \
+         shrinks as it goes, and {shown_in} shows how far it got. {}",
+        staying(staying_items)
+    )
+    .trim_end()
+    .to_owned()
+}
+
+/// How far deleting Recently deleted for good has got, while it runs: the status's and the
+/// tray menu's line.
+pub fn emptying_status(e: &Emptying) -> String {
+    let what = match e.purge {
+        true => format!("Deleting what Recently deleted kept {KEEP_DAYS} days"),
+        false => "Emptying Recently deleted".to_owned(),
+    };
+    format!("{what}: {} of {}", count(e.done), count(e.total))
 }
 
 /// What emptying leaves of Recently deleted, `n` items deleted on their own that hold a live
@@ -453,5 +469,32 @@ mod tests {
             bytes_total: 40_000_000,
         };
         assert_eq!(progress(&p), "12 of 40 files, 3.1 MB of 40 MB");
+    }
+
+    /// Emptying says it goes on in the background, and where to see how far it got; while it
+    /// runs, the status says how far, the purge as itself.
+    #[test]
+    fn emptying_goes_on_in_the_background() {
+        let said = emptying(0, "`hbsync status`");
+        assert!(said.contains("in the background"), "{said}");
+        assert!(
+            said.ends_with("`hbsync status` shows how far it got."),
+            "{said}"
+        );
+        assert!(emptying(2, "the menu").ends_with("restoring one shows what it holds)."));
+        let mut e = Emptying {
+            done: 3000,
+            total: 22_367,
+            purge: false,
+        };
+        assert_eq!(
+            emptying_status(&e),
+            "Emptying Recently deleted: 3,000 of 22,367"
+        );
+        e.purge = true;
+        assert_eq!(
+            emptying_status(&e),
+            "Deleting what Recently deleted kept 30 days: 3,000 of 22,367"
+        );
     }
 }

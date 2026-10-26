@@ -22,29 +22,13 @@ set aside and the folder set up again on its own.
    twice. The lost answers themselves go away on the server's side: it will answer 200 once it
    has received the file, before moving it to long-term storage.)
 
-Emptying Recently deleted (`hbsync empty-deleted`, the tray's *Empty*) runs in the daemon's
-background, in passes: all files, then the folders a level at a time. With 22,367 items, the
-user's Homebase answered about 70 s per batch of 1,000 files, so it took about 30 minutes,
-and nothing showed it was working:
-2. **Write each batch's result as it comes**, not once per pass: Recently deleted then
-   shrinks while it runs, and a crash or kill loses nothing done.
-3. **Let stop and quit interrupt it between batches.** Today `hbsync stop`, quitting the
-   tray and SIGTERM all wait for the whole job, and `stop` gives up after a minute with "the
-   daemon is still finishing a transfer"; what isn't done stays in Recently deleted for the
-   next time.
-4. **Say it runs in the background**: the CLI and the tray say emptying has started and goes
-   on in the background, the daemon logs when it starts (with the count) and ends, and
-   `status` shows it while it runs.
-
-One more from the same test:
-5. **Quit while the tray starts the daemon leaves it running.** Quit at the moment the tray
+Also from the test:
+2. **Quit while the tray starts the daemon leaves it running.** Quit at the moment the tray
    was starting the daemon: the start went ahead, the stop gave up ("still finishing a
    transfer"), and the tray closed with the daemon still syncing.
-
-Also from the test:
-6. **Documents holds 14,164 dirty marks for nodes with no rows** (no local, base or mirror
+3. **Documents holds 14,164 dirty marks for nodes with no rows** (no local, base or mirror
    row): find what leaves them, clear them, and check what they cost each sync of that folder.
-7. **Auto-heal's leftovers** (a state DB set aside when too old or damaged): a DB that goes bad
+4. **Auto-heal's leftovers** (a state DB set aside when too old or damaged): a DB that goes bad
    while the daemon runs is only healed at the next start; `hbsync add` heals without printing
    the note; setup after a heal doesn't refuse the empty mount point of an unplugged disk; a
    version-13 DB missing a table fails its migration instead of being set aside.

@@ -183,6 +183,11 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
         items.push(Item::Label(s.identity.to_string()));
     }
     items.push(Item::Label(status_line(view)));
+    // Recently deleted being deleted for good, in the background.
+    let account = status.and_then(|s| view.daemon.account(&s.identity));
+    if let Some(e) = account.and_then(|a| a.emptying.as_ref()) {
+        items.push(Item::Label(cut(&words::emptying_status(e))));
+    }
     items.push(Item::Separator);
 
     if *view.daemon == Daemon::NotSetUp {
@@ -406,6 +411,30 @@ mod tests {
             Some(PathBuf::from("/home/anna/Pictures"))
         );
         assert!(actions(&menu(&view(&daemon, &[]))).contains(&Action::ReviewDeletions));
+    }
+
+    /// Emptying Recently deleted shows in the menu while it runs, under the status line.
+    #[test]
+    fn emptying_shows_while_it_runs() {
+        let Daemon::Running(mut daemon) = running(status(State::Idle)) else {
+            panic!("running");
+        };
+        let mut account = hbsync_app::protocol::AccountStatus::new(&"anna.example.com".into());
+        account.emptying = Some(hbsync_app::protocol::Emptying {
+            done: 3000,
+            total: 22_367,
+            purge: false,
+        });
+        daemon.accounts.push(account);
+        let d = Daemon::Running(daemon);
+        let m = menu(&view(&d, &[]));
+        let line = Item::Label("Emptying Recently deleted: 3,000 of 22,367".into());
+        assert_eq!(m.iter().position(|i| *i == line), Some(3), "{m:?}");
+        let idle = running(status(State::Idle));
+        assert!(!menu(&view(&idle, &[])).iter().any(|i| matches!(
+            i,
+            Item::Label(l) if l.starts_with("Emptying")
+        )));
     }
 
     #[test]

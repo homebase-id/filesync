@@ -159,12 +159,18 @@ impl Account {
                 a.note_unreadable(rows);
             }
         });
+        let shown_on = account.clone();
         let tell = Arc::new(move |note| {
             if let Some(a) = account.upgrade() {
                 a.note(vec![note]);
             }
         });
-        let mut keeper = Keeper::spawn(Arc::clone(&drive), tell);
+        let show = Arc::new(move |emptying| {
+            if let Some(a) = shown_on.upgrade() {
+                a.set_status(|s| s.emptying = emptying);
+            }
+        });
+        let mut keeper = Keeper::spawn(Arc::clone(&drive), tell, show);
         // A runner that couldn't start: the account stops its runners and ends with it, the
         // daemon with it (restarted whole). One that ended with an error is started again after a
         // pause, its folder showing why meanwhile; the others sync on.
@@ -251,6 +257,8 @@ impl Account {
             let ending = self.stopping(stop) || result.is_err();
             if ending {
                 adding.clear();
+                // Deleting for good stops after its batch in flight, while the runners stop.
+                keeper.stop();
             }
             let now = Instant::now();
             let (due, ready) = {

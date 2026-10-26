@@ -112,6 +112,13 @@ pub enum Action {
     EmptyItem {
         pick: usize,
     },
+    /// The user empties Recently deleted as last listed ([`Action::EmptyListed`]), and the
+    /// daemon stops part way: after the first `done` deletes, in the engine's order, the rest
+    /// stays (the engine stops between batches of many files: any point models them), and no
+    /// later pass runs.
+    EmptyStopped {
+        done: usize,
+    },
     /// Another device (the phone, which opened it before) saves an edit of a file a folder's
     /// delete took along, its own removal still on its way: on the server at once, the folder
     /// still deleted. Nothing when no file is taken along.
