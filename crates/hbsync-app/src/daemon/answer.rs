@@ -76,12 +76,30 @@ pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
             path,
             role,
         } => done((|| {
+            // An account not running yet starts from its DB as at the daemon's start, before
+            // its folder is set up in it: one that can't be used is set aside first (nothing
+            // writes it meanwhile), and told once the account is there.
+            let set = match accounts.iter().any(|a| a.identity == identity) {
+                true => None,
+                false => {
+                    let config = crate::Config::load(&daemon.paths.config_file())?;
+                    let roots = config.map(|c| c.roots).unwrap_or_default();
+                    let db = daemon.paths.account_db(&identity);
+                    crate::folders::ready_account(&db, &identity, &roots)?
+                }
+            };
             crate::folders::add(&daemon.paths, &identity, &path, role)?;
             daemon.add_folder(&Root {
-                identity,
+                identity: identity.clone(),
                 folder: path,
                 role,
             })?;
+            if let Some(set) = set {
+                let note = words::set_aside(set.why);
+                for a in daemon.accounts().iter().filter(|a| a.identity == identity) {
+                    a.note(vec![note.clone()]);
+                }
+            }
             Ok(())
         })()),
         Ask::RemoveFolder { path } => done((|| {

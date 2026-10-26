@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use hbsync_engine::root::{RootError, SyncRoot};
+use hbsync_engine::root::{RootError, SetAside, SyncRoot};
 use hbsync_types::{NodeId, Role};
 
 use crate::config::ConfigLock;
@@ -214,6 +214,37 @@ fn add_locked(
 pub enum Taken {
     Now,
     AtStart,
+}
+
+/// Readies `identity`'s state DB at `db` as its account starts, while nothing else may write
+/// it ([`SyncRoot::upgrade_or_set_aside`]). One that can't be used (from before 0.7, or
+/// damaged) is set aside and made again, and each of `roots` (the folders the config lists)
+/// that is the identity's (its marker says so) is set up again in it as a folder with files,
+/// as `hbsync setup --existing` does: what it holds is adopted, nothing is copied twice, and
+/// nothing is deleted (the new DB has no base). One not there now (a disk not plugged in) is
+/// left: once it is back, it is set up again by hand. What was set aside, if anything.
+pub fn ready_account(
+    db: &Path,
+    identity: &Identity,
+    roots: &[Root],
+) -> Result<Option<SetAside>, RootError> {
+    let Some(set) = SyncRoot::upgrade_or_set_aside(db, identity)? else {
+        return Ok(None);
+    };
+    tracing::warn!(
+        "{identity}: its state DB was set aside, as {}; its folders are set up again",
+        set.to.display()
+    );
+    for root in roots.iter().filter(|r| r.identity == *identity) {
+        match SyncRoot::check(&root.folder, identity) {
+            Ok(_) => {
+                let top = root.role.map_or(NodeId::ROOT, Role::node);
+                SyncRoot::create_for(db, identity, &root.folder, top)?;
+            }
+            Err(e) => tracing::warn!("{} isn't set up again: {e}", root.folder.display()),
+        }
+    }
+    Ok(Some(set))
 }
 
 /// Has the running daemon set the folder at `path` up and sync it ([`add`]), or sets it up for

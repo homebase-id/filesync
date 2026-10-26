@@ -8,7 +8,6 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use hbsync_engine::Drive;
-use hbsync_engine::root::SyncRoot;
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::{Client, HomebaseError};
 use hbsync_remote::ErrorClass;
@@ -18,9 +17,11 @@ use super::runners::{Life, Running};
 use super::{Account, Msg, Request};
 use crate::daemon::DaemonError;
 use crate::daemon::keeper::Keeper;
+use crate::folders::ready_account;
 use crate::protocol::{AccountStatus, Hints, Pause, State};
 use crate::runner::{Backoff, Command, Runner, RunnerConfig, RunnerError, shown};
 use crate::sync::{lock, wait_for};
+use crate::words;
 use crate::{Config, CredentialError, CredentialStore, Location, Paths, Root};
 
 /// While what only the user can fix keeps an account from starting, how often it looks again.
@@ -84,17 +85,28 @@ impl Account {
     ) -> Result<(), DaemonError> {
         // What came while waiting for the credentials and the identity.
         let mut msgs = Vec::new();
-        // Its state DB first, before any request: one only the user can set right (corrupt,
-        // from another version) is shown and waited out, asking nothing, the daemon and the
-        // other accounts going on.
-        while let Err(e) = SyncRoot::upgrade(&self.db, self.identity.as_str()) {
-            if e.class() != ErrorClass::NeedsUser {
-                return Err(RunnerError::Folder(e).into());
-            }
-            tracing::error!("{e}: {} waits for it to be set right", self.identity);
-            self.show_waiting(State::Failing, e.to_string());
-            if self.wait(NEEDS_USER_AGAIN, stop, requests, &mut msgs) {
-                return Ok(());
+        // Its state DB first, before any request: one that can't be used at all (from before
+        // 0.7, damaged) is set aside and its folders set up again, told once; one only the user
+        // can set right (a newer version's) is shown and waited out, asking nothing, the daemon
+        // and the other accounts going on.
+        loop {
+            match ready_account(&self.db, &self.identity, &self.folders()) {
+                Ok(set) => {
+                    if let Some(set) = set {
+                        self.note(vec![words::set_aside(set.why)]);
+                    }
+                    break;
+                }
+                Err(e) if e.class() != ErrorClass::NeedsUser => {
+                    return Err(RunnerError::Folder(e).into());
+                }
+                Err(e) => {
+                    tracing::error!("{e}: {} waits for it to be set right", self.identity);
+                    self.show_waiting(State::Failing, e.to_string());
+                    if self.wait(NEEDS_USER_AGAIN, stop, requests, &mut msgs) {
+                        return Ok(());
+                    }
+                }
             }
         }
         let Some(creds) = self.credentials(paths, stop, requests, &mut msgs)? else {

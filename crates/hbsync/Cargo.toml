@@ -24,6 +24,7 @@ signal-hook = "0.4"
 hbsync-dev.workspace = true
 hbsync-homebase.workspace = true
 hbsync-platform.workspace = true
+rusqlite.workspace = true
 tempfile.workspace = true
 
 [lints]
