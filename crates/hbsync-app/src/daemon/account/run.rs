@@ -257,7 +257,7 @@ impl Account {
             let ending = self.stopping(stop) || result.is_err();
             if ending {
                 adding.clear();
-                // Deleting for good stops after its batch in flight, while the runners stop.
+                // Deleting for good stops after its batches in flight, while the runners stop.
                 keeper.stop();
             }
             let now = Instant::now();

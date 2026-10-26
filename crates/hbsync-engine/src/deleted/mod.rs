@@ -39,12 +39,19 @@ use crate::lock;
 
 /// Files of Recently deleted (with their bytes) a delete for good, soft or hard, asks about in a
 /// request: a quarter of what the drive takes ([`hbsync_remote::BATCH_FILES`]), since a stop
-/// ([`Going`]) waits for the batch in flight, and the user's Homebase took ~70 s to soft-delete
+/// ([`Going`]) waits for the batches in flight, and the user's Homebase took ~70 s to soft-delete
 /// 1,000. It costs 4× the requests, SQLite commits and status updates (88 for 22,000 files, not
-/// 22), not time. One batch at a time: odin-core deletes a file at a time (verified in its
-/// code), and two in flight took as long as one after the other (frodo, on SQLite).
+/// 22), not time. [`FOR_GOOD_AT_ONCE`] of them in flight.
 pub const FOR_GOOD_BATCH: usize = 250;
 const _: () = assert!(FOR_GOOD_BATCH <= hbsync_remote::BATCH_FILES);
+
+/// Requests a delete for good keeps in flight, of one pass ([`FOR_GOOD_BATCH`] files each):
+/// odin-core deletes a file at a time within a request (verified in its code), ~70 ms each on
+/// the user's Homebase, likely its storage's work (Postgres and S3), which two requests at once
+/// should overlap. Not shown: on frodo (SQLite, its writes one at a time) two took as long as
+/// one after the other. It costs two requests at once on the server and a thread a batch, and a
+/// stop waits for both batches in flight (as long as one where they overlap, two where not).
+pub const FOR_GOOD_AT_ONCE: usize = 2;
 
 /// A delete for good as it goes (emptying Recently deleted, the purge), for its caller to stop
 /// and show: asked between batches whether to stop, told after each how far it got.
@@ -84,6 +91,11 @@ impl std::fmt::Debug for Going<'_> {
     }
 }
 
+/// Whether `e` failed a request on the way (down, or busy): it may have landed unanswered.
+fn unanswered(e: &RemoteError) -> bool {
+    policy(e.class()).in_run == InRun::Backoff
+}
+
 /// Recently deleted's operations on the account's drive: restoring, emptying, the purge. The
 /// account's DB is held only while it is read or written, never while the server answers.
 pub struct AccountOps<'a> {
@@ -116,9 +128,8 @@ impl<'a> AccountOps<'a> {
     ) -> (Result<T, EngineError>, DriveNews) {
         let mut ops = AccountOps::new(account, remote);
         let done = op(&mut ops);
-        let failed = |e: &RemoteError| policy(e.class()).in_run == InRun::Backoff;
         let news = DriveNews {
-            behind: ops.behind || matches!(&done, Err(EngineError::Remote(e)) if failed(e)),
+            behind: ops.behind || matches!(&done, Err(EngineError::Remote(e)) if unanswered(e)),
             full: None,
         };
         (done, news)
