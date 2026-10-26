@@ -35,9 +35,7 @@ and its marker `.hbsync/folder`: the identity and
 the folder's id in that DB.
 A folder is synced only through its marker: without one it is gone (or not mounted), with
 another identity's it is refused, and one the DB doesn't know is set up again by `hbsync setup`
-(merging its files, `--existing`), or as the account starts when its DB knows no folder at all
-(the state folder wiped, or the DB set aside, below): then each folder of the config that is
-the identity's is set up again as a folder with files.
+(merging its files, `--existing`), or as the account starts after its DB was set aside (below).
 
 An account's DB that can't be used at all is set aside as the account starts (the daemon's
 start, or setup while no daemon runs): one from before 0.7, which isn't upgraded, or one whose

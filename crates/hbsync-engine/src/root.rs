@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use hbsync_local::{Marker, layout};
 use hbsync_remote::ErrorClass;
-use hbsync_state::{FolderRow, Reader, StateDb, StateError, Unusable, keys};
+use hbsync_state::{Checked, FolderRow, Reader, StateDb, StateError, Unusable, keys};
 use hbsync_types::NodeId;
 use hbsync_types::activity::Synced;
 
@@ -211,8 +211,14 @@ impl SyncRoot {
     ) -> Result<Option<SetAside>, RootError> {
         let checked = StateDb::check_file(db)
             .map_err(RootError::from)
-            .and_then(|()| Self::open_account(db, identity))
-            .and_then(|account| Ok(account.check_schema().map(|()| account)?));
+            .and_then(|checked| Ok((checked, Self::open_account(db, identity)?)))
+            .and_then(|(checked, account)| {
+                // One brought up to date (or made) is whole only now.
+                if checked != Checked::Whole {
+                    account.check_schema()?;
+                }
+                Ok(account)
+            });
         let (mut account, set) = match checked {
             Ok(account) => (account, None),
             Err(RootError::State(e)) => {
@@ -232,12 +238,12 @@ impl SyncRoot {
             }
             Err(e) => return Err(e),
         };
-        // Made in place of one set aside; or knowing no folder at all, as one made new (also
-        // when it was made, its old one set aside, and its key lost to a crash): what it
-        // can't have set up is set up again.
+        // Made in place of one set aside; or knowing no folder at all beside one set aside
+        // (its key lost to a crash between the rename and its write): what it can't have set
+        // up is set up again.
         let (replaced, known) =
             account.read(|s| Ok((s.account_kv(keys::SET_ASIDE)?.is_some(), s.folders()?)))?;
-        if replaced || known.is_empty() {
+        if replaced || (known.is_empty() && beside_one_set_aside(db)) {
             Self::set_up_again(&mut account, db, identity, folders, &known)?;
         }
         Ok(set)
@@ -327,6 +333,24 @@ fn with(path: &Path, suffix: &str) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(suffix);
     PathBuf::from(s)
+}
+
+/// Whether a DB was set aside beside the one at `db` ([`set_aside`]'s names).
+fn beside_one_set_aside(db: &Path) -> bool {
+    let (Some(dir), Some(name)) = (db.parent(), db.file_name()) else {
+        return false;
+    };
+    let name = name.to_string_lossy();
+    let named = [Unusable::TooOld, Unusable::Corrupt].map(|why| format!("{name}.{}-", why.name()));
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| {
+            let file = e.file_name();
+            let file = file.to_string_lossy();
+            named.iter().any(|n| file.starts_with(n.as_str()))
+        })
 }
 
 /// Moves the DB at `db` aside, beside it as `<name>.<why>-<Unix time>` (`state.db.too-old-…`,

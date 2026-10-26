@@ -195,10 +195,12 @@ fn a_folder_back_later_is_set_up_again_at_the_next_start() -> R {
     Ok(())
 }
 
-/// A DB that knows no folder (the state folder wiped, or the key saying it replaced one lost
-/// to a crash) sets the config's folders up again all the same: adopted, nothing moved.
+/// A DB set aside, the new one's key saying so lost to a crash: knowing no folder beside one
+/// set aside, it sets the config's folders up again all the same, adopted, nothing moved. A DB
+/// that knows no folder without one set aside (the state folder wiped) doesn't: that folder is
+/// set up again by hand, merging its files.
 #[test]
-fn a_db_that_knows_no_folder_sets_them_up_again() -> R {
+fn a_new_db_beside_one_set_aside_sets_them_up_again() -> R {
     let Synced {
         server,
         root,
@@ -206,12 +208,23 @@ fn a_db_that_knows_no_folder_sets_them_up_again() -> R {
         files: synced,
         _dir,
     } = synced()?;
-    for suffix in ["", "-wal", "-shm"] {
-        let mut path = db.as_os_str().to_owned();
-        path.push(suffix);
-        drop(std::fs::remove_file(path));
-    }
+    let remove = |db: &Path| {
+        for suffix in ["", "-wal", "-shm"] {
+            let mut path = db.as_os_str().to_owned();
+            path.push(suffix);
+            drop(std::fs::remove_file(path));
+        }
+    };
+    remove(&db);
     let roots = [Root::main(&ID.into(), &root)];
+    assert_eq!(folders::ready_account(&db, &ID.into(), &roots)?, None);
+    assert!(matches!(
+        hbsync_engine::root::SyncRoot::find(&db, ID, &root),
+        Err(hbsync_engine::root::RootError::Unknown(_))
+    ));
+
+    remove(&db);
+    std::fs::write(db.with_file_name("state.db.too-old-1"), "the old one")?;
     assert_eq!(folders::ready_account(&db, &ID.into(), &roots)?, None);
     assert_eq!(sync_once(&server, &root, &db)?, (0, 0));
     assert_eq!(files(&root)?, synced);

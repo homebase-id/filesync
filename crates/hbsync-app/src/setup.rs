@@ -11,7 +11,7 @@ use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::{Client, Credentials, HomebaseError, app};
 use hbsync_remote::Remote;
 
-use hbsync_state::{StateError, Unusable};
+use hbsync_state::Unusable;
 use hbsync_types::Role;
 
 use crate::config::ConfigLock;
@@ -250,8 +250,7 @@ pub fn check_state(
         Ok(_) => {}
         // The running daemon sets it aside as it adds the folder, where its account doesn't
         // run there (it would have as it started), and tells.
-        Err(RootError::State(e))
-            if running && (e.unusable().is_some() || matches!(e, StateError::Behind { .. })) => {}
+        Err(RootError::State(e)) if running && e.unusable().is_some() => {}
         // Synced here before, its marker gone: an empty mount point, most likely. Setting it
         // up would start it over; only when asked to merge.
         Err(RootError::NoMarker(_))

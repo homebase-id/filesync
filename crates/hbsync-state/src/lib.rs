@@ -130,6 +130,18 @@ impl StateError {
     }
 }
 
+/// What [`StateDb::check_file`] checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Checked {
+    /// There is no file (a new DB is made).
+    NoFile,
+    /// Its pages: it is of an older version, its schema checked once brought up to date
+    /// ([`StateDb::check_schema`]).
+    Pages,
+    /// Its pages and its schema.
+    Whole,
+}
+
 /// The error of a page `quick_check` couldn't read (`found`, its answer), other than the page
 /// being damaged: SQLite tells those in its answer as `error code=N` (or `error code N`).
 fn unread_page(found: &str) -> Option<i32> {
@@ -559,9 +571,9 @@ impl StateDb {
     /// SQLite's error, not damage. No file is fine. For an account's start, not every open: it
     /// reads every page (~1 ms per 1,000 files synced; 0.3 s for a 226 MB DB of 300,000, its
     /// pages in the page cache).
-    pub fn check_file(path: &Path) -> Result<()> {
+    pub fn check_file(path: &Path) -> Result<Checked> {
         if !path.exists() {
-            return Ok(());
+            return Ok(Checked::NoFile);
         }
         let conn = reader::read_only(path)?;
         let version = migrations::user_version(&conn)?;
@@ -570,10 +582,11 @@ impl StateDb {
         if found == "ok" {
             // One of this version is whole before anything is written to it (one brought up
             // to date is checked after: [`StateDb::check_schema`]).
-            return match version == migrations::VERSION {
-                true => migrations::check_schema(&conn),
-                false => Ok(()),
-            };
+            if version != migrations::VERSION {
+                return Ok(Checked::Pages);
+            }
+            migrations::check_schema(&conn)?;
+            return Ok(Checked::Whole);
         }
         Err(match unread_page(&found) {
             Some(code) => StateError::Sqlite(rusqlite::Error::SqliteFailure(
@@ -853,9 +866,9 @@ mod tests {
     fn the_check_finds_a_damaged_page() -> Result<()> {
         let dir = tempfile::tempdir().map_err(io)?;
         let path = dir.path().join("state.db");
-        StateDb::check_file(&path)?;
+        assert_eq!(StateDb::check_file(&path)?, Checked::NoFile);
         StateDb::open_account(&path)?.check_schema()?;
-        StateDb::check_file(&path)?;
+        assert_eq!(StateDb::check_file(&path)?, Checked::Whole);
         drop(std::fs::remove_file(path.with_extension("db-wal")));
         drop(std::fs::remove_file(path.with_extension("db-shm")));
         std::fs::remove_file(&path).map_err(io)?;
