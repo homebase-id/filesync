@@ -581,10 +581,12 @@ fn held_deletes_go_through_once_confirmed_as_shown() -> R {
     assert!(refused.is_err_and(|why| why.contains("changed since")));
 
     a.handle.answer(HeldAnswer::Delete, &held.token)?;
+    // Answered: no longer to review, while the sync that deletes them runs.
+    assert_eq!(a.status().held_deletes, None);
     // One answer: a second one to the same (answered already, or gone since) is refused.
     assert!(a.handle.answer(HeldAnswer::PutBack, &held.token).is_err());
     wait_until("the drive is empty", || live_names(&server).is_empty())?;
-    wait_until("nothing is held", || a.status().held_deletes.is_none())?;
+    assert_eq!(a.status().held_deletes, None);
     Ok(())
 }
 
@@ -789,6 +791,44 @@ fn an_answer_during_a_sync_that_holds_more_covers_what_was_shown() -> R {
     let live = live_names(&server);
     assert!(live.iter().any(|n| n == "f060.txt"), "one not seen went");
     assert!(!live.iter().any(|n| n == "f059.txt"));
+    handle.send(Command::Stop);
+    Ok(())
+}
+
+/// An answer taken while a sync runs that holds the same deletes: the sync's end doesn't show
+/// them again (they were answered), and the next sync carries the answer out.
+#[test]
+fn an_answer_during_a_sync_holding_the_same_isnt_shown_again() -> R {
+    let server = server();
+    let dir = tempfile::tempdir()?;
+    let root = set_up(&dir.path().canonicalize()?.join("sync"))?;
+    let mut cfg = RunnerConfig::new(&root, &db_of(&root), &"test.example".into(), "a");
+    cfg.tweak = Some(|c| c.exec.transfer.max_bytes_per_sec = Some(300_000));
+    let (handle, _thread) = spawn(cfg, &server)?;
+    for i in 0..60 {
+        std::fs::write(root.join(format!("f{i:02}.txt")), i.to_string())?;
+    }
+    wait_until("all 60 are up", || live_names(&server).len() == 60)?;
+    for i in 0..60 {
+        std::fs::remove_file(root.join(format!("f{i:02}.txt")))?;
+    }
+    wait_until("the deletes are held", || {
+        handle.status().held_deletes.is_some_and(|h| h.here == 60)
+    })?;
+    let seen = handle.status().held_deletes.ok_or("held")?;
+    // A slow upload: the sync running when the answer comes holds the same 60.
+    std::fs::write(root.join("big.bin"), vec![7u8; 600_000])?;
+    wait_until("the upload runs", || {
+        handle.status().progress.is_some_and(|p| p.bytes_done > 0)
+    })?;
+    handle.answer(HeldAnswer::Delete, &seen.token)?;
+    assert_eq!(handle.status().held_deletes, None);
+    let mut shown_again = false;
+    wait_until("the 60 are gone from the drive", || {
+        shown_again |= handle.status().held_deletes.is_some();
+        live_names(&server) == ["big.bin"]
+    })?;
+    assert!(!shown_again, "answered deletes were shown again");
     handle.send(Command::Stop);
     Ok(())
 }
