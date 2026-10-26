@@ -35,6 +35,8 @@ impl Server {
         } else {
             ""
         };
+        // *Change…* submits a form of its own: Enter in the address submits with the form's
+        // first button, which must be *Continue* (in the form, it opened the folder picker).
         format!(
             "<h1>Connect to your Homebase</h1>\
              <p>Filesync keeps a folder on this computer in sync with your Homebase, \
@@ -45,10 +47,11 @@ impl Server {
              autofocus required>\
              <label>Folder on this computer</label>\
              <div class=folder><code>{folder}</code>\
-             <button class=secondary formaction=\"{choose}\" formnovalidate>Change…</button></div>\
+             <button class=secondary form=choose>Change…</button></div>\
              {merge}\
              <button>Continue</button>\
              </form>\
+             <form id=choose method=post action=\"{choose}\"></form>\
              <p class=small>Next, your Homebase asks you to approve this computer.</p>",
             setup = self.pages.url("setup"),
             choose = self.pages.url("setup/folder"),

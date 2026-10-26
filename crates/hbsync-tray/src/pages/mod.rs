@@ -306,6 +306,14 @@ mod tests {
 
         let page = request(&pages.url("setup"), "POST", "identity=anna")?;
         assert!(page.contains("value=\"anna\""), "kept what was typed");
+        // Enter in the address submits with the form's first own button: Continue.
+        let (_, form) = page.split_once("<form").ok_or("no form")?;
+        let (form, _) = form.split_once("</form>").ok_or("no form end")?;
+        let first = form
+            .split("<button")
+            .skip(1)
+            .find(|b| !b.contains(" form="));
+        assert!(first.is_some_and(|b| b.starts_with(">Continue")), "{form}");
         assert_eq!(
             lock(&pages.shared)
                 .error

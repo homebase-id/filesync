@@ -54,9 +54,6 @@ Also from the test:
 - **Held deletions still show after they are confirmed.** The tray's magenta dot and
   `status`'s "deletions to review" stay until the run that carries them out ends (93 s for
   12,101 files), because they show the previous run's report.
-- **Enter on the login page doesn't log in** (Windows, Firefox, 2026-10-26): the browser shows
-  it's loading, but nothing happens; only the *Log in* button works. Enter should submit the
-  form like the button.
 
 ## Performance (found comparing with Dropbox, 2026-10-26)
 
