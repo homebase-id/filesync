@@ -138,11 +138,11 @@ impl RunnerConfig {
 
 /// The deletes held in the last sync, as the status shows them until they are answered, and the
 /// user's answer to them for the next sync: one lock, so an answer is checked against what it
-/// answers and kept with the nodes it named, and the status shows them only while unanswered.
+/// answers and kept with the nodes it named, and the status shows what is unanswered.
 #[derive(Debug, Default)]
 struct Held {
     nodes: Arc<[NodeId]>,
-    /// As the status shows them ([`Handle::status`]: while not answered).
+    /// As the status shows them: `None` once answered, until a sync shows them again.
     shown: Option<HeldDeletes>,
     /// Their token ([`report::held_token`]).
     token: String,
@@ -278,8 +278,9 @@ impl Handle {
             tracing::info!("{} held deletes answered: {answer:?}", held.nodes.len());
             held.answer = Some((answer, Arc::clone(&held.nodes)));
             held.answered = true;
+            // No longer to review, while the sync carrying the answer out runs.
+            held.shown = None;
         }
-        // No longer shown to review.
         self.changed.raise();
         Ok(())
     }
@@ -291,11 +292,11 @@ impl Handle {
     }
 
     /// Paused while the pause flag is set: seen at once, not only once the runner gets to it.
-    /// The held deletes only while not answered: not while the sync carrying the answer out runs.
     pub fn status(&self) -> FolderStatus {
-        let mut status = lock(&self.status).clone();
+        // `held`, then the status, as a sync's end writes them: one sync's picture.
         let held = lock(&self.held);
-        status.held_deletes = held.shown.clone().filter(|_| !held.answered);
+        let mut status = lock(&self.status).clone();
+        status.held_deletes = held.shown.clone();
         drop(held);
         if self.stop.load(Ordering::Relaxed) && status.state != State::Stopped {
             status.state = State::Paused;
@@ -648,6 +649,7 @@ impl Runner {
                     held.answer = Some((HeldAnswer::PutBack, still));
                     held.answered = true;
                     held.again = true;
+                    held.shown = None;
                     self.cfg.changed.raise();
                     schedule.asked(now);
                 }
@@ -1070,19 +1072,20 @@ impl Runner {
         let notes = self.notes_of(engine, report)?;
         let notes = self.told.fresh(notes);
         let token = report::held_token(&report.held);
-        let held = report::held(engine, report, &token)?;
-        // One write, so the status never shows a token before it is held. An answer taken
-        // during this sync stays for the next: it names what the user saw.
-        let answered = {
-            let mut kept = lock(&self.held);
-            kept.nodes = report.held.iter().map(|op| op.node()).collect();
-            kept.token = token;
-            // Shown again: one answer each time, but while one taken during this sync waits,
-            // they are answered (not shown).
-            kept.answered = kept.answer.is_some();
-            kept.shown = held.clone();
-            kept.answered
+        // Before the status shows the new token, so no answer can name it before it is held;
+        // the status is set under this lock too ([`Handle::status`] reads them so).
+        // An answer taken during this sync stays for the next: it names what the user saw.
+        let mut kept = lock(&self.held);
+        // ... and the same deletes (each its way too) aren't shown again: they were answered.
+        kept.shown = if kept.answer.is_some() && kept.token == token {
+            None
+        } else {
+            report::held(engine, report, &token)?
         };
+        kept.nodes = report.held.iter().map(|op| op.node()).collect();
+        kept.token = token;
+        // Shown again: one answer each time, but one taken during this sync still waits.
+        kept.answered = kept.answer.is_some();
         if report.ops_done > 0 || !notes.is_empty() {
             tracing::info!(
                 "synced in {took:.1?}: {} done, {} remote changes, {} adopted, {} pending",
@@ -1095,7 +1098,7 @@ impl Runner {
         for note in &notes {
             tracing::warn!("{note}");
         }
-        if let Some(h) = held.as_ref().filter(|_| !answered) {
+        if let Some(h) = &kept.shown {
             tracing::warn!(
                 "deletions to review: {} here, {} remotely",
                 h.here,
@@ -1103,6 +1106,7 @@ impl Runner {
             );
         }
         self.set(|s| report::record(s, report, notes, took, unix_now()));
+        drop(kept);
         Ok(())
     }
 }

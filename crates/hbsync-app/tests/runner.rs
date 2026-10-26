@@ -586,6 +586,8 @@ fn held_deletes_go_through_once_confirmed_as_shown() -> R {
     // One answer: a second one to the same (answered already, or gone since) is refused.
     assert!(a.handle.answer(HeldAnswer::PutBack, &held.token).is_err());
     wait_until("the drive is empty", || live_names(&server).is_empty())?;
+    // Not held again once the sync that deleted them has ended.
+    a.wait_idle()?;
     assert_eq!(a.status().held_deletes, None);
     Ok(())
 }
