@@ -101,6 +101,10 @@ pub fn run(paths: &Paths, stop: Stop) -> Result<(), DaemonError> {
         let held = ConfigLock::take(&paths.config_file())?;
         claim(paths, &held)?
     };
+    // Started, however: syncing is no longer stopped.
+    if let Err(e) = crate::control::clear_stopped(paths) {
+        tracing::warn!("the stopped mark: {e}");
+    }
     let daemon = Arc::new(Daemon {
         paths: paths.clone(),
         stop,

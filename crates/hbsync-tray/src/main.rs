@@ -1,7 +1,7 @@
 //! Homebase Filesync in the tray (the menu bar on macOS): what the daemon does, at a glance, and
-//! what to do about it. It keeps the daemon running while a folder is set up, and quitting it
-//! stops the daemon too. Logging in and reviewing held deletes happen in pages it serves to the
-//! browser (`pages`).
+//! what to do about it. It keeps the daemon running while a folder is set up, unless syncing was
+//! stopped on purpose; quitting it asks whether the daemon goes on syncing. Logging in and
+//! reviewing held deletes happen in pages it serves to the browser (`pages`).
 
 // No console window.
 #![cfg_attr(windows, windows_subsystem = "windows")]
@@ -51,6 +51,8 @@ pub enum Event {
 pub type Sender = Arc<dyn Fn(Event) + Send + Sync>;
 
 const PROGRAM: &str = autostart::TRAY;
+/// The argument a tray restarting into its update passes the new one.
+const RESTARTED: &str = "--restarted";
 /// A notification of one kind at most this often.
 const NOTIFY_EVERY: Duration = Duration::from_secs(60);
 
@@ -102,7 +104,8 @@ fn main() -> ExitCode {
             }
         });
     }
-    match run(paths) {
+    let restarted = std::env::args().any(|a| a == RESTARTED);
+    match run(paths, restarted) {
         Ok(None) => ExitCode::SUCCESS,
         // Linux, after an update: the new program in this process's place. The lock is
         // released (its file is closed on exec), and the new tray takes it.
@@ -110,7 +113,9 @@ fn main() -> ExitCode {
         Ok(Some(exe)) => {
             tracing::info!("restarting into {}", exe.display());
             drop(_flush);
-            let e = std::os::unix::process::CommandExt::exec(&mut std::process::Command::new(&exe));
+            let e = std::os::unix::process::CommandExt::exec(
+                std::process::Command::new(&exe).arg(RESTARTED),
+            );
             eprintln!("{PROGRAM}: can't restart into {}: {e}", exe.display());
             ExitCode::FAILURE
         }
@@ -128,6 +133,8 @@ struct App {
     paths: Paths,
     send: Sender,
     wake: mpsc::Sender<poll::Poke>,
+    /// The watcher's starts of the daemon, which a quit waits for and ends.
+    starts: Arc<poll::Starts>,
     pages: Pages,
     tray: Option<TrayIcon>,
     daemon: Daemon,
@@ -141,6 +148,10 @@ struct App {
     notified: HashMap<&'static str, Instant>,
     /// The folder given its icon and shortcut ([`shell`]) by this run.
     decorated: Option<PathBuf>,
+    /// The watcher looked at the daemon already.
+    looked: bool,
+    /// Started by a tray restarting into its update ([`RESTARTED`]): nothing to tell again.
+    restarted: bool,
 }
 
 /// What the tray shows now, to change only what changed.
@@ -162,9 +173,10 @@ enum Handle {
 }
 
 impl App {
-    fn new(paths: Paths, send: Sender) -> Result<App, Box<dyn std::error::Error>> {
+    fn new(paths: Paths, send: Sender, restarted: bool) -> Result<App, Box<dyn std::error::Error>> {
         let pages = Pages::start(paths.clone(), send.clone())?;
-        let wake = poll::spawn(paths.clone(), send.clone())?;
+        let starts = Arc::new(poll::Starts::default());
+        let wake = poll::spawn(paths.clone(), send.clone(), Arc::clone(&starts))?;
         {
             let send = send.clone();
             MenuEvent::set_event_handler(Some(move |e: MenuEvent| send(Event::Menu(e.id))));
@@ -179,6 +191,7 @@ impl App {
             paths,
             send,
             wake,
+            starts,
             pages,
             tray: None,
             daemon: Daemon::Starting(None),
@@ -190,6 +203,8 @@ impl App {
             shown: Shown::default(),
             notified: HashMap::new(),
             decorated: None,
+            looked: false,
+            restarted,
         })
     }
 
@@ -221,6 +236,14 @@ impl App {
     fn handle(&mut self, event: Event) -> bool {
         match event {
             Event::Daemon(daemon, recent, updated) => {
+                // Started while syncing is stopped: it asks to be started from the menu.
+                if !self.looked && daemon == Daemon::Stopped && !self.restarted {
+                    os::notify(
+                        "Syncing is stopped".into(),
+                        "To sync your files again, choose Start syncing in the menu.".into(),
+                    );
+                }
+                self.looked = true;
                 self.notices(&daemon);
                 if let Some(s) = daemon.status()
                     && self.decorated.as_ref() != Some(&s.path)
@@ -347,16 +370,28 @@ impl App {
                     return false;
                 }
             }
-            Action::Quit => {
-                // Quitting stops syncing too, as people expect of a sync app. The icon goes at
-                // once; the daemon may first finish a transfer.
+            Action::StartSyncing => {
+                if let Err(e) = control::clear_stopped(&self.paths) {
+                    os::notify("Start syncing".into(), e.to_string());
+                }
+                let _ = self.wake.send(poll::Poke::Look);
+            }
+            Action::Quit | Action::QuitAndStop => {
+                // The icon goes at once. A start in flight goes first (the daemon it brings up
+                // is the one stopped, or left running); the daemon may first finish a transfer.
                 self.tray = None;
-                let (paths, send) = (self.paths.clone(), self.send.clone());
+                let stop = action == Action::QuitAndStop;
+                let (paths, send, starts) = (
+                    self.paths.clone(),
+                    self.send.clone(),
+                    Arc::clone(&self.starts),
+                );
                 std::thread::spawn(move || {
-                    if let Err(e) = control::stop(&paths) {
+                    starts.quit();
+                    if stop && let Err(e) = control::stop_syncing(&paths) {
                         tracing::warn!("stopping the daemon: {e}");
                     }
-                    tracing::info!("quit");
+                    tracing::info!("quit{}", if stop { ", syncing stopped" } else { "" });
                     send(Event::Exit);
                 });
                 return true;
@@ -617,7 +652,7 @@ fn same_shape(a: &[Item], b: &[Item]) -> bool {
 /// Linux: the tray (StatusNotifierItem over D-Bus) runs on threads of its own; this thread
 /// waits for events.
 #[cfg(target_os = "linux")]
-fn run(paths: Paths) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+fn run(paths: Paths, restarted: bool) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
     let (tx, rx) = mpsc::channel();
     let tx = std::sync::Mutex::new(tx);
     let send: Sender = Arc::new(move |e| {
@@ -625,7 +660,7 @@ fn run(paths: Paths) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
             let _ = tx.send(e);
         }
     });
-    let mut app = App::new(paths, send)?;
+    let mut app = App::new(paths, send, restarted)?;
     app.show()?;
     for event in rx {
         if !app.handle(event) {
@@ -637,7 +672,7 @@ fn run(paths: Paths) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
 
 /// Windows and macOS: the tray lives in the main thread's event loop.
 #[cfg(not(target_os = "linux"))]
-fn run(paths: Paths) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+fn run(paths: Paths, restarted: bool) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
     use tao::event::{Event as TaoEvent, StartCause};
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
 
@@ -655,7 +690,7 @@ fn run(paths: Paths) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
             let _ = p.send_event(e);
         }
     });
-    let mut app = App::new(paths, send)?;
+    let mut app = App::new(paths, send, restarted)?;
     event_loop.run(move |event, _, flow| {
         *flow = ControlFlow::Wait;
         match event {

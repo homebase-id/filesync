@@ -19,7 +19,7 @@ Otherwise:
 | | Linux | macOS | Windows |
 |---|---|---|---|
 | config, credentials file | `$XDG_CONFIG_HOME/hbsync` (`~/.config/hbsync`) | `~/Library/Application Support/Homebase Filesync` | `%APPDATA%\Homebase Filesync` |
-| locks, pids, pipe token, the tray's icon files, the state DBs | `$XDG_STATE_HOME/hbsync` (`~/.local/state/hbsync`) | same as config | `%LOCALAPPDATA%\Homebase Filesync` |
+| locks, pids, pipe token, the stopped mark, the tray's icon files, the state DBs | `$XDG_STATE_HOME/hbsync` (`~/.local/state/hbsync`) | same as config | `%LOCALAPPDATA%\Homebase Filesync` |
 | logs | `<state>/logs` | `~/Library/Logs/Homebase Filesync` | `<state>\logs` |
 | control socket | `$XDG_RUNTIME_DIR/hbsync`, else `<state>` | same as config | a named pipe |
 
@@ -518,11 +518,39 @@ Only the user can connect:
 `homebase-filesync` (the tray) is what people see, and what starts at logon when it is installed beside the
 command line. It keeps the daemon running while a folder is set up (starting it when it
 doesn't answer, at most every 30 s after a failed start, and once more when the daemon runs
-another version), and **Quit stops the daemon too**. One tray per user (`homebase-filesync.lock`).
+another version), unless syncing was stopped on purpose. One tray per user (`homebase-filesync.lock`).
 It watches the daemon's status (`watch` on the control socket: sent when it changes, read on a
 thread of its own), asks once more after an action, shows the status again once a minute (the
 menu's relative times; and looks whether its program was replaced on disk), and while the daemon
-isn't running looks every second (every ten while nothing is set up).
+isn't running looks every second (every ten while nothing is set up or syncing is stopped).
+
+**Starting and stopping.** *Quit Homebase Filesync* asks, as a submenu, whether to **keep
+syncing in the background** (the daemon goes on without the tray) or **stop syncing too**.
+Stopping syncing (that choice, or `hbsync stop`) leaves a mark, `<state>/stopped`, before it
+stops the daemon; whatever starts a daemon next ends it (the daemon removes it as it starts).
+While the mark is there and the daemon isn't running, the tray doesn't start it: it shows
+*Syncing stopped* (the grey dot) with **Start syncing**, which removes the mark and starts it,
+and the menu's Quit just quits. A tray started while syncing is stopped says so once, in a
+notification: that is its question whether to start. It asks nothing otherwise, as nothing was
+stopped on purpose:
+- at login, the tray starts the daemon as before (the daemon isn't running yet then); where the
+  service manager starts the daemon itself (no tray installed), that start ends a stop too;
+- after an update, or a crash, the daemon was stopped without the mark, and is started again;
+- a tray restarting into its update (*Restart to finish the update*, `--restarted`) leaves the
+  daemon as it was and doesn't tell a stop again.
+
+A stop lasts until syncing is started again, also across logins, as *Pause until I resume* does:
+starting at login starts the tray, which then shows that syncing is stopped. `hbsync start`
+starts it from a terminal (the tray follows within ten seconds).
+
+A quit waits for a start the tray has in flight (at most its 15 s), and from then on the tray
+starts nothing: the daemon that start brings up is the one stopped, or left running. Before,
+a quit could find no daemon to stop yet and leave the one just started running, or watch the
+tray start the daemon again as the stopped one went (the stop then gave up after a minute,
+"still finishing a transfer").
+
+How the tray asks is its menu, not a dialog: it has no window, and a native message box on
+Linux (rfd's, without GTK) needs `zenity`, which KDE doesn't install.
 
 - **Linux:** a StatusNotifierItem over D-Bus (pure Rust, no GTK), as KDE, Xfce, Cinnamon and
   most panels show them; GNOME needs the AppIndicator extension. Windows and macOS: tao's event
@@ -539,7 +567,8 @@ isn't running looks every second (every ten while nothing is set up).
   Recently synced (the last 10; clicking one shows it
   in the file manager), Problems (the main folder's notes and its account's, newest first), Review N deletions…, Recently deleted…, Folders…, Log
   in again… (refused), Pause syncing (1 h, 8 h, 24 h, until resumed) or Resume, Sync now, Start
-  at login, Open logs, Log out, Quit.
+  at login, Open logs, Log out, Quit (keep syncing in the background, or stop syncing too).
+  Syncing stopped: Start syncing, Open Homebase folder, Start at login, Open logs, Quit.
 - **Pages:** logging in (the Homebase address, the folder, `~/Homebase` unless chosen with the
   OS's picker, merging a folder with files only when ticked), reviewing held deletes and
   Recently deleted (the topmost items: path, size, date, how many items their restore brings
@@ -635,7 +664,7 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 | `hbsync recent [-n N]` | what was synced lately, newest first |
 | `hbsync confirm-deletes [--yes]` | shows the deletions to review (held deletes) and lets them through |
 | `hbsync put-back [--yes]` | shows the deletions to review and puts them back (sync semantics §7) |
-| `hbsync start`, `stop` | |
+| `hbsync start`, `stop` | `stop` stops syncing until `start` (or the tray's Start syncing): the tray doesn't start the daemon meanwhile |
 | `hbsync autostart [on\|off]` | |
 | `hbsync logout` | stops the daemon, forgets the credentials, autostart off; the folder stays |
 | `hbsync unlink` | stops the daemon, removes the folder from the config, autostart off; its files, `.hbsync` and the account's DB stay, so setting it up again resumes |

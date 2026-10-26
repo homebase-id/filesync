@@ -239,9 +239,13 @@ fn the_daemon_sets_an_old_state_db_aside_and_refuses_a_newer_one() -> R {
         .collect();
     assert!(!kept.is_empty(), "the old DB is kept");
     home.ok(&["stop"])?;
+    // Stopped on purpose: the tray doesn't start it until it is started again.
+    let paths = hbsync_app::Paths::under(home.path());
+    assert!(hbsync_app::control::stopped(&paths));
 
     rusqlite::Connection::open(&db)?.pragma_update(None, "user_version", 9999)?;
     home.ok(&["start"])?;
+    assert!(!hbsync_app::control::stopped(&paths), "started again");
     let refused = |s: &serde_json::Value| {
         s["folders"][0]["error"]
             .as_str()

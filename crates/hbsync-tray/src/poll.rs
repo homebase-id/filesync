@@ -3,11 +3,14 @@
 //! recently synced list when a sync ended, and starting the daemon when it isn't running. It
 //! asks once more when woken (after an action); once a minute it shows what it was sent again
 //! (the menu's "2 min ago") and looks whether this program was replaced on disk. While the daemon
-//! isn't running it looks every second (it is starting), or every ten (nothing set up yet). The
-//! tray keeps it running while a folder is set up.
+//! isn't running it looks every second (it is starting), or every ten (nothing set up yet, or
+//! syncing stopped). The tray keeps it running while a folder is set up, unless syncing was
+//! stopped on purpose ([`control::stopped`]), and never starts it once it began to quit
+//! ([`Starts`]).
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use hbsync_app::Paths;
@@ -40,18 +43,50 @@ pub(crate) enum Poke {
     Gone,
 }
 
-/// Starts watching; [`Poke::Look`] sent on the returned channel has it look at once.
-pub(crate) fn spawn(paths: Paths, send: Sender) -> std::io::Result<mpsc::Sender<Poke>> {
+/// Starts watching; [`Poke::Look`] sent on the returned channel has it look at once. It
+/// starts the daemon through `starts`.
+pub(crate) fn spawn(
+    paths: Paths,
+    send: Sender,
+    starts: Arc<Starts>,
+) -> std::io::Result<mpsc::Sender<Poke>> {
     let (wake, woken) = mpsc::channel();
     let me = wake.clone();
+    let watcher = Watcher {
+        starts,
+        ..Watcher::default()
+    };
     std::thread::Builder::new()
         .name("hbsync-tray-poll".into())
-        .spawn(move || Watcher::default().run(&paths, &send, &woken, &me))?;
+        .spawn(move || watcher.run(&paths, &send, &woken, &me))?;
     Ok(wake)
+}
+
+/// Starting the daemon and quitting the tray, one after the other: a quit waits for a start in
+/// flight, so that it stops (or leaves) the daemon that start brings up, and no start follows
+/// it. (Before, a quit's stop could find no daemon yet, or the watcher start one again as the
+/// stopped one went, and the tray ended with the daemon running.)
+#[derive(Debug, Default)]
+pub(crate) struct Starts {
+    quitting: Mutex<bool>,
+}
+
+impl Starts {
+    /// Runs `start` unless the tray is quitting (`None`); a quit waits until it's done.
+    pub(crate) fn start<T>(&self, start: impl FnOnce() -> T) -> Option<T> {
+        let quitting = self.quitting.lock().unwrap_or_else(PoisonError::into_inner);
+        (!*quitting).then(start)
+    }
+
+    /// From now on nothing starts; returns once a start in flight is done.
+    pub(crate) fn quit(&self) {
+        *self.quitting.lock().unwrap_or_else(PoisonError::into_inner) = true;
+    }
 }
 
 #[derive(Default)]
 struct Watcher {
+    starts: Arc<Starts>,
     recent: Vec<RecentItem>,
     /// The daemon's `synced_added` when the recent list was read.
     read_at: Option<u64>,
@@ -118,7 +153,7 @@ impl Watcher {
                 // A watch just ended: watched again in a moment.
                 Daemon::Running(_) if watch_soon => STARTING,
                 // Running, but it can't be watched: looked at now and then, not every second.
-                Daemon::NotSetUp | Daemon::Running(_) => UNWATCHED,
+                Daemon::NotSetUp | Daemon::Stopped | Daemon::Running(_) => UNWATCHED,
                 Daemon::Starting(_) => STARTING,
             };
             send(Event::Daemon(
@@ -170,9 +205,10 @@ impl Watcher {
     fn look(&mut self, paths: &Paths, send: &Sender) -> Daemon {
         let status = match control::status(paths) {
             Ok(Some(status)) => Some(status),
-            // Not running: started if a folder is set up.
+            // Not running: started if a folder is set up, unless syncing was stopped.
             Ok(None) => {
                 return match control::configured(paths) {
+                    Ok(Some(_)) if control::stopped(paths) => Daemon::Stopped,
                     Ok(Some(_)) => self.start(paths, send),
                     Ok(None) => {
                         self.recent.clear();
@@ -203,8 +239,13 @@ impl Watcher {
                 hbsync_app::VERSION
             );
             self.restarted = true;
-            if let Err(e) = control::stop(paths) {
-                tracing::warn!("stopping the daemon: {e}");
+            // One start, stop and all: a quit waits for both.
+            let restart = self.starts.start(|| {
+                control::stop(paths)?;
+                control::start(paths)
+            });
+            if let Some(Err(e)) = restart {
+                tracing::warn!("restarting the daemon: {e}");
             }
             return Daemon::Starting(None);
         }
@@ -230,8 +271,15 @@ impl Watcher {
             self.recent.clone(),
             self.replaced.clone(),
         ));
-        tracing::info!("starting the daemon");
-        match control::start(paths) {
+        let started = self.starts.start(|| {
+            tracing::info!("starting the daemon");
+            control::start(paths)
+        });
+        // Quitting: the quit decides what runs.
+        let Some(started) = started else {
+            return Daemon::Starting(None);
+        };
+        match started {
             Ok(()) => {
                 self.next_start = None;
                 self.start_failed = None;
@@ -244,5 +292,48 @@ impl Watcher {
                 Daemon::Starting(self.start_failed.clone())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A quit waits for a start in flight, and nothing starts after it: the daemon that start
+    /// brings up is the quit's to stop.
+    #[test]
+    fn a_quit_waits_for_a_start_in_flight_and_no_start_follows() {
+        let starts = Arc::new(Starts::default());
+        let (started, starting) = mpsc::channel();
+        let (finish, finishing) = mpsc::channel::<()>();
+        let start = {
+            let starts = Arc::clone(&starts);
+            std::thread::spawn(move || {
+                starts.start(|| {
+                    started.send(()).expect("told");
+                    finishing.recv().expect("finished");
+                })
+            })
+        };
+        starting.recv().expect("the start is in flight");
+        let (quit, quitted) = mpsc::channel();
+        {
+            let starts = Arc::clone(&starts);
+            std::thread::spawn(move || {
+                starts.quit();
+                quit.send(()).expect("told");
+            });
+        }
+        assert!(
+            quitted.recv_timeout(Duration::from_millis(200)).is_err(),
+            "the quit went ahead of the start"
+        );
+        finish.send(()).expect("finish");
+        assert_eq!(start.join().expect("start"), Some(()));
+        quitted.recv().expect("the quit followed the start");
+        assert_eq!(
+            starts.start(|| unreachable!("started after the quit")),
+            None::<()>
+        );
     }
 }

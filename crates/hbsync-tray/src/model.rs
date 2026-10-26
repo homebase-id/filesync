@@ -22,6 +22,9 @@ pub enum Daemon {
     NotSetUp,
     /// Set up, not answering yet: being started, or failing to start (why).
     Starting(Option<String>),
+    /// Set up, and stopped on purpose (quitting the tray and stopping syncing, `hbsync stop`):
+    /// not started until the user starts it.
+    Stopped,
     Running(Box<DaemonStatus>),
 }
 
@@ -114,7 +117,12 @@ pub(crate) enum Action {
     OpenLogs,
     /// Start the program that replaced this one, and end this one.
     Restart,
+    /// Start the daemon stopped on purpose ([`Daemon::Stopped`]).
+    StartSyncing,
+    /// End the tray; the daemon goes on.
     Quit,
+    /// End the tray and stop the daemon until it is started again.
+    QuitAndStop,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -129,7 +137,7 @@ pub(crate) enum Item {
 
 pub(crate) fn look(view: &View) -> Look {
     match view.daemon {
-        Daemon::NotSetUp => Look::Quiet,
+        Daemon::NotSetUp | Daemon::Stopped => Look::Quiet,
         Daemon::Starting(Some(_)) => Look::Attention,
         Daemon::Starting(None) => Look::Busy,
         Daemon::Running(_) => view.daemon.most_urgent().map_or(Look::Quiet, folder_look),
@@ -156,6 +164,7 @@ pub(crate) fn status_line(view: &View) -> String {
         Daemon::NotSetUp => "Not connected".into(),
         Daemon::Starting(None) => "Starting…".into(),
         Daemon::Starting(Some(why)) => cut(&format!("Can't start: {why}")),
+        Daemon::Stopped => "Syncing stopped".into(),
         Daemon::Running(_) => match view.daemon.most_urgent() {
             Some(s) => cut(&words::status_line(s, view.now)),
             None => "Nothing to sync".into(),
@@ -199,6 +208,10 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
         return items;
     }
 
+    let stopped = *view.daemon == Daemon::Stopped;
+    if stopped {
+        items.push(Item::Action(Action::StartSyncing, "Start syncing".into()));
+    }
     items.push(Item::Action(
         Action::OpenFolder,
         "Open Homebase folder".into(),
@@ -268,12 +281,23 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
         ));
     }
     items.push(Item::Separator);
-    items.push(quit());
+    items.push(if stopped { quit() } else { quit_or_stop() });
     items
 }
 
 fn quit() -> Item {
     Item::Action(Action::Quit, "Quit Homebase Filesync".into())
+}
+
+/// Quitting while the daemon runs (or is being started) asks whether it goes on.
+fn quit_or_stop() -> Item {
+    Item::Submenu(
+        "Quit Homebase Filesync".into(),
+        vec![
+            Item::Action(Action::Quit, "Keep syncing in the background".into()),
+            Item::Action(Action::QuitAndStop, "Stop syncing too".into()),
+        ],
+    )
 }
 
 fn recently_synced(recent: &[RecentItem], now: u64) -> Item {
@@ -454,6 +478,53 @@ mod tests {
         };
         assert!(actions(&menu(&busy)).contains(&Action::LogIn));
         assert_eq!(status_line(&busy), "Logging in…");
+    }
+
+    /// Stopped on purpose: started from the menu, never by itself; quitting has nothing to
+    /// stop.
+    #[test]
+    fn stopped_offers_to_start_syncing() {
+        let d = Daemon::Stopped;
+        let v = view(&d, &[]);
+        assert_eq!(look(&v), Look::Quiet);
+        assert_eq!(status_line(&v), "Syncing stopped");
+        assert_eq!(
+            actions(&menu(&v)),
+            [
+                Action::StartSyncing,
+                Action::OpenFolder,
+                Action::StartAtLogin,
+                Action::OpenLogs,
+                Action::Quit
+            ]
+        );
+    }
+
+    /// Quitting while the daemon runs, or is being started, asks whether it goes on.
+    #[test]
+    fn quitting_asks_whether_to_keep_syncing() {
+        let quit = Item::Submenu(
+            "Quit Homebase Filesync".into(),
+            vec![
+                Item::Action(Action::Quit, "Keep syncing in the background".into()),
+                Item::Action(Action::QuitAndStop, "Stop syncing too".into()),
+            ],
+        );
+        for d in [
+            running(status(State::Idle)),
+            running(status(State::Paused)),
+            Daemon::Starting(None),
+            Daemon::Starting(Some("the daemon exited".into())),
+        ] {
+            let m = menu(&view(&d, &[]));
+            assert_eq!(m.last(), Some(&quit), "{d:?}");
+            assert!(!actions(&m).contains(&Action::StartSyncing), "{d:?}");
+        }
+        let m = menu(&view(&Daemon::NotSetUp, &[]));
+        assert!(
+            !actions(&m).contains(&Action::QuitAndStop),
+            "nothing to stop"
+        );
     }
 
     #[test]

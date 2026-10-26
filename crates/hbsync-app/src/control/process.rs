@@ -1,5 +1,5 @@
 //! The daemon's process: whether it runs, starting it (through the service manager or beside
-//! the calling program) and stopping it.
+//! the calling program) and stopping it, and whether syncing was stopped on purpose.
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -126,6 +126,32 @@ pub fn stop(paths: &Paths) -> Result<bool> {
         std::thread::sleep(Duration::from_millis(100));
     }
     Err("the daemon is still finishing a transfer; try again in a moment".into())
+}
+
+/// Stops syncing until it is started again: marks it stopped ([`stopped`]: the tray doesn't
+/// start the daemon), then stops the daemon ([`stop`]). False when it wasn't running.
+pub fn stop_syncing(paths: &Paths) -> Result<bool> {
+    let mark = stopped_mark(paths);
+    if let Some(dir) = mark.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&mark, b"")?;
+    stop(paths)
+}
+
+/// Whether syncing was stopped ([`stop_syncing`]) and no daemon has started since.
+pub fn stopped(paths: &Paths) -> bool {
+    stopped_mark(paths).exists()
+}
+
+/// Ends a stop ([`stop_syncing`]): the tray starts the daemon again. A daemon ends it as it
+/// starts, however it was started.
+pub fn clear_stopped(paths: &Paths) -> std::io::Result<()> {
+    crate::paths::remove_if_exists(&stopped_mark(paths))
+}
+
+fn stopped_mark(paths: &Paths) -> std::path::PathBuf {
+    paths.state.join("stopped")
 }
 
 /// Turns starting at logon off, unless this is a private instance. True when it was on.
