@@ -51,9 +51,6 @@ Also from the test:
 
 ## Small fixes
 
-- **Held deletions still show after they are confirmed.** The tray's magenta dot and
-  `status`'s "deletions to review" stay until the run that carries them out ends (93 s for
-  12,101 files), because they show the previous run's report.
 - **The folder picker can open behind the browser** (Windows): *Change…* on the login page
   opens the OS's picker from the tray, which has no window to put it in front of, so the
   browser just shows it's loading. (Pressing Enter opened it too, the reason Enter didn't log
