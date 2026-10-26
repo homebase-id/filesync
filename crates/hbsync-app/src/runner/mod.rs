@@ -210,6 +210,7 @@ impl Drop for Owner {
 pub struct Handle {
     control: Arc<Owner>,
     stop: Arc<AtomicBool>,
+    /// Its `held_deletes` is filled from `held` by [`Handle::status`], not stored here.
     status: Arc<Mutex<FolderStatus>>,
     held: Arc<Mutex<Held>>,
     progress: Arc<Counters>,
