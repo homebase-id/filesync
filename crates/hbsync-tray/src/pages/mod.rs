@@ -176,7 +176,7 @@ impl Server {
             }
             ("GET", "setup") => self.html(&mut stream, self.setup_page()),
             ("POST", "setup/folder") => {
-                self.choose_folder();
+                self.choose_folder(&request.form);
                 redirect(&mut stream, &self.pages.url("setup"))
             }
             ("POST", "setup") => match self.start_setup(&request.form) {
@@ -259,6 +259,7 @@ border:1px solid #c9c3d6;border-radius:8px}\
 button{margin-top:24px;padding:10px 24px;font:inherit;font-weight:600;color:#fff;border:0;\
 border-radius:999px;background:var(--purple);cursor:pointer}\
 button.secondary{margin:0;color:var(--purple);background:#fff;border:1px solid var(--purple)}\
+button.enter{position:absolute;left:-10000px}\
 .error{color:#a0006e;background:#fde7f8;padding:10px 12px;border-radius:8px}\
 .small{color:#666;font-size:14px}\
 ul.deleted{padding:0;list-style:none}\
@@ -306,6 +307,13 @@ mod tests {
 
         let page = request(&pages.url("setup"), "POST", "identity=anna")?;
         assert!(page.contains("value=\"anna\""), "kept what was typed");
+        // Enter in the address submits with the form's first button: Continue, not Change….
+        let (_, form) = page.split_once("<form").ok_or("no form")?;
+        let first = form.split("<button").nth(1).ok_or("no button")?;
+        assert!(first.starts_with(" class=enter"), "{form}");
+        assert!(first.contains(">Continue</button>"), "{form}");
+        let choose = format!("formaction=\"{}\"", pages.url("setup/folder"));
+        assert!(form.contains(&choose), "{form}");
         assert_eq!(
             lock(&pages.shared)
                 .error
@@ -348,6 +356,37 @@ mod tests {
         // Only roles it knows; nothing set up on this computer's real folders here.
         let page = request(&pages.url("folders/add"), "POST", "role=papers")?;
         assert!(page.contains("Nothing changed"), "{page}");
+        Ok(())
+    }
+
+    /// Choosing the folder keeps the address typed; from a stale page while a login runs, it
+    /// does nothing.
+    #[test]
+    fn choosing_the_folder_keeps_the_address() -> R {
+        let dir = tempfile::tempdir()?;
+        // No picker here: it answers nothing.
+        let send: Sender = Arc::new(|_| {});
+        let pages = Pages::start(Paths::under(&dir.path().join("home")), send)?;
+        pages.prepare_setup("", None);
+        request(
+            &pages.url("setup/folder"),
+            "POST",
+            "identity=anna.example.com",
+        )?;
+        let page = request(&pages.url("setup"), "GET", "")?;
+        assert!(page.contains("value=\"anna.example.com\""), "{page}");
+
+        lock(&pages.shared).phase = Phase::Connecting;
+        request(
+            &pages.url("setup/folder"),
+            "POST",
+            "identity=bob.example.com",
+        )?;
+        let s = lock(&pages.shared);
+        assert_eq!(
+            (s.phase.clone(), s.identity.as_str()),
+            (Phase::Connecting, "anna.example.com")
+        );
         Ok(())
     }
 
