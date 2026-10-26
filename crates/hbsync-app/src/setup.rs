@@ -14,6 +14,7 @@ use hbsync_remote::Remote;
 use hbsync_state::Unusable;
 use hbsync_types::Role;
 
+use crate::config::ConfigLock;
 use crate::paths::home;
 use crate::{Config, CredentialStore, Identity, Location, Paths, autostart};
 use crate::{control, folders};
@@ -221,33 +222,37 @@ pub fn plan(
 }
 
 /// Checks the folder at `folder` (resolved) against `identity`'s state DB before it is set up
-/// there, changing nothing but the DB: when no daemon is `running`, it is brought up to date,
-/// or set aside and made again if it can't be used ([`folders::ready_account`]: from before
-/// 0.7, damaged), its folders set up again as folders with files. Refused: a folder synced
-/// here before whose marker is gone (an empty mount point, most likely), and one with files
-/// whose state is gone, unless `existing` (merge them) or the DB was set aside (its folders are
-/// merged). Why the DB was set aside, if it was (by the running daemon as it adds the folder,
-/// where its account isn't running).
+/// there, changing nothing but the DB: when no daemon runs, it is brought up to date, or set
+/// aside and made again if it can't be used ([`folders::ready_account`]: from before 0.7,
+/// damaged), its folders set up again as folders with files; meanwhile the config's lock is
+/// held, so a daemon starting waits. Refused: a folder synced here before whose marker is gone
+/// (an empty mount point, most likely), and one with files whose state is gone, unless
+/// `existing` (merge them) or the DB was set aside here (its folders are merged). Whether the
+/// daemon runs, and why the DB was set aside here, if it was.
 pub fn check_state(
     paths: &Paths,
     config: &Config,
     identity: &Identity,
     folder: &Path,
     existing: bool,
-    running: bool,
-) -> crate::Result<Option<Unusable>> {
+) -> crate::Result<(bool, Option<Unusable>)> {
     let db = paths.account_db(identity);
-    let mut set_aside = None;
-    if !running && db.exists() {
-        // Nothing else writes it: brought up to date here (or set aside and made again), for
-        // the checks (which only look).
-        set_aside = folders::ready_account(&db, identity, &config.roots)?.map(|set| set.why);
-    }
+    let (running, set_aside) = {
+        let _held = ConfigLock::take(&paths.config_file())?;
+        let running = control::running(paths)?;
+        let set_aside = match !running && db.exists() {
+            // Nothing else writes it: brought up to date here (or set aside and made again),
+            // for the checks (which only look).
+            true => folders::ready_account(&db, identity, &config.roots)?.map(|set| set.why),
+            false => None,
+        };
+        (running, set_aside)
+    };
     match SyncRoot::find(&db, identity, folder) {
         Ok(_) => {}
-        // The running daemon sets it aside as it adds the folder, the account not running
-        // there (it would have as it started).
-        Err(RootError::State(e)) if e.unusable().is_some() => set_aside = e.unusable(),
+        // The running daemon sets it aside as it adds the folder, where its account doesn't
+        // run there (it would have as it started), and tells.
+        Err(RootError::State(e)) if running && e.unusable().is_some() => {}
         // Synced here before, its marker gone: an empty mount point, most likely. Setting it
         // up would start it over; only when asked to merge.
         Err(RootError::NoMarker(_))
@@ -260,7 +265,8 @@ pub fn check_state(
             ))
             .into());
         }
-        // Its state is gone (or it was copied here): its files are merged, when asked to.
+        // Its state is gone (or it was copied here): its files are merged, when asked to, or
+        // as the DB was set aside.
         Err(RootError::Unknown(_))
             if !existing && set_aside.is_none() && folders::has_files(folder)? =>
         {
@@ -269,7 +275,7 @@ pub fn check_state(
         Err(RootError::NoMarker(_) | RootError::Unknown(_)) => {}
         Err(e) => return Err(e.into()),
     }
-    Ok(set_aside)
+    Ok((running, set_aside))
 }
 
 /// What to set up, as [`plan`] makes it.
@@ -353,8 +359,7 @@ pub fn set_up(
 
     // The folder in the account's state DB, and its marker: kept if set up before. Checked
     // here, set up by the daemon (or here, when it isn't running).
-    let running = control::running(paths)?;
-    let set_aside = check_state(paths, &config, identity, &folder, checked.existing, running)?;
+    let (running, set_aside) = check_state(paths, &config, identity, &folder, checked.existing)?;
     if running && authorized {
         control::start_over(paths, identity)?;
     }

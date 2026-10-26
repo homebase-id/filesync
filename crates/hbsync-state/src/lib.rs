@@ -130,6 +130,18 @@ impl StateError {
     }
 }
 
+/// The error of a page `quick_check` couldn't read (`found`, its answer), other than the page
+/// being damaged: SQLite tells those in its answer as `error code=N` (or `error code N`).
+fn unread_page(found: &str) -> Option<i32> {
+    found.match_indices("error code").find_map(|(at, _)| {
+        let rest = found[at + "error code".len()..].trim_start_matches(['=', ' ']);
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        let code: i32 = digits.parse().ok()?;
+        // SQLITE_CORRUPT, in any of its extended forms: damage.
+        (code & 0xff != 11).then_some(code)
+    })
+}
+
 /// Why a state DB file can't be used at all ([`StateError::unusable`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unusable {
@@ -538,17 +550,45 @@ impl StateDb {
         })
     }
 
-    /// Reads the whole file to see that it can be used: every page (SQLite's `quick_check`),
-    /// and every table, column, index and trigger of this version's schema there
-    /// ([`StateError::Damaged`] if not). For a start, not every open: it reads every page
-    /// (~1 ms per 1,000 files synced, measured: 0.3 s for a 226 MB DB of 300,000).
-    pub fn check_file(&mut self) -> Result<()> {
-        let found: String = self
-            .conn
-            .query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
-        if found != "ok" {
-            return Err(StateError::Damaged(found));
+    /// Checks the DB file at `path` before a writer opens it, on a connection that only reads
+    /// (its header, its log and its pages as they are: nothing is upgraded or written): its
+    /// version is this client's or one it upgrades ([`StateError::TooOld`],
+    /// [`StateError::TooNew`]), and every page reads as SQLite's `quick_check` expects
+    /// ([`StateError::Damaged`]). A page that can't be read now (an I/O error, memory) is
+    /// SQLite's error, not damage. No file is fine. For an account's start, not every open: it
+    /// reads every page (~1 ms per 1,000 files synced; 0.3 s for a 226 MB DB of 300,000, its
+    /// pages in the page cache).
+    pub fn check_file(path: &Path) -> Result<()> {
+        if !path.exists() {
+            return Ok(());
         }
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        conn.set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
+            true,
+        )?;
+        migrations::check(migrations::user_version(&conn)?)?;
+        let found: String = conn.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
+        if found == "ok" {
+            return Ok(());
+        }
+        Err(match unread_page(&found) {
+            Some(code) => StateError::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(code),
+                Some(found),
+            )),
+            None => StateError::Damaged(found),
+        })
+    }
+
+    /// Refuses ([`StateError::Damaged`]) the DB if it lacks a table, a column, an index or a
+    /// trigger of this version's schema. One query on SQLite's own tables: for an account's
+    /// start, after [`StateDb::check_file`] and the upgrade.
+    pub fn check_schema(&self) -> Result<()> {
         migrations::check_schema(&self.conn)
     }
 
@@ -814,7 +854,11 @@ mod tests {
     fn the_check_finds_a_damaged_page() -> Result<()> {
         let dir = tempfile::tempdir().map_err(io)?;
         let path = dir.path().join("state.db");
-        StateDb::open_account(&path)?.check_file()?;
+        StateDb::check_file(&path)?;
+        StateDb::open_account(&path)?.check_schema()?;
+        StateDb::check_file(&path)?;
+        drop(std::fs::remove_file(path.with_extension("db-wal")));
+        drop(std::fs::remove_file(path.with_extension("db-shm")));
         std::fs::remove_file(&path).map_err(io)?;
         let page: usize = 4096;
         {
@@ -832,9 +876,28 @@ mod tests {
         assert!(bytes.len() > 4 * page);
         bytes[2 * page..3 * page].fill(0xa5);
         std::fs::write(&path, bytes).map_err(io)?;
-        let e = StateDb::open_account(&path)?.check_file().err();
+        let e = StateDb::check_file(&path).err();
         assert!(matches!(e, Some(StateError::Damaged(_))), "{e:?}");
         Ok(())
+    }
+
+    /// A page `quick_check` couldn't read for another reason than damage (an I/O error) is
+    /// that error, not damage.
+    #[test]
+    fn a_page_not_read_is_not_damage() {
+        let io = "Tree 4 page 7: unable to get the page. error code=10";
+        assert_eq!(unread_page(io), Some(10));
+        assert_eq!(unread_page("btreeInitPage() returns error code 7"), Some(7));
+        assert_eq!(unread_page("btreeInitPage() returns error code 11"), None);
+        assert_eq!(
+            unread_page("Tree 2 page 3 cell 0: invalid page number 99"),
+            None
+        );
+        let e = StateError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(10),
+            Some(io.into()),
+        ));
+        assert_eq!(e.unusable(), None);
     }
 
     /// A DB at this version lacking a part of the schema is damaged.
@@ -850,7 +913,7 @@ mod tests {
             let path = dir.path().join("state.db");
             StateDb::open_account(&path)?;
             Connection::open(&path)?.execute_batch(drop)?;
-            let e = StateDb::open_account(&path)?.check_file().err();
+            let e = StateDb::open_account(&path)?.check_schema().err();
             assert!(
                 matches!(&e, Some(StateError::Damaged(why)) if why.contains("lacks")),
                 "{drop}: {e:?}"

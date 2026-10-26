@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use hbsync_engine::root::{RootError, SetAside, SyncRoot};
+use hbsync_engine::root::{AccountReader, RootError, SetAside, SyncRoot};
 use hbsync_types::{NodeId, Role};
 
 use crate::config::ConfigLock;
@@ -217,34 +217,51 @@ pub enum Taken {
 }
 
 /// Readies `identity`'s state DB at `db` as its account starts, while nothing else may write
-/// it ([`SyncRoot::upgrade_or_set_aside`]). One that can't be used (from before 0.7, or
-/// damaged) is set aside and made again, and each of `roots` (the folders the config lists)
-/// that is the identity's (its marker says so) is set up again in it as a folder with files,
-/// as `hbsync setup --existing` does: what it holds is adopted, nothing is copied twice, and
-/// nothing is deleted (the new DB has no base). One not there now (a disk not plugged in) is
-/// left: once it is back, it is set up again by hand. What was set aside, if anything.
+/// it ([`SyncRoot::upgrade_or_set_aside`]; one at a time in this process). One that can't be
+/// used (from before 0.7, or damaged) is set aside and made again. In a DB made so, each of
+/// `roots` (the folders the config lists) that is the identity's (its marker says so) and
+/// unknown to the DB is set up again as a folder with files, as `hbsync setup --existing`
+/// does: what it holds is adopted, nothing is copied twice, and nothing is deleted (the DB has
+/// no base for it). At every start: one not there at first (a disk not plugged in), or one
+/// that failed, is set up at a later start. What was set aside now, if anything.
 pub fn ready_account(
     db: &Path,
     identity: &Identity,
     roots: &[Root],
 ) -> Result<Option<SetAside>, RootError> {
-    let Some(set) = SyncRoot::upgrade_or_set_aside(db, identity)? else {
-        return Ok(None);
+    static TURN: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _turn = crate::sync::lock(&TURN);
+    let set = SyncRoot::upgrade_or_set_aside(db, identity)?;
+    if let Some(set) = &set {
+        tracing::warn!(
+            "{identity}: its state DB was set aside, as {}; its folders are set up again",
+            set.to.display()
+        );
+    }
+    let replaced = match &set {
+        Some(_) => true,
+        None => match AccountReader::open(db, identity)? {
+            Some(mut reader) => reader.replaced_one()?,
+            None => false,
+        },
     };
-    tracing::warn!(
-        "{identity}: its state DB was set aside, as {}; its folders are set up again",
-        set.to.display()
-    );
+    if !replaced {
+        return Ok(set);
+    }
     for root in roots.iter().filter(|r| r.identity == *identity) {
-        match SyncRoot::check(&root.folder, identity) {
-            Ok(_) => {
+        let again = match SyncRoot::find(db, identity, &root.folder) {
+            Err(RootError::Unknown(_)) => {
                 let top = root.role.map_or(NodeId::ROOT, Role::node);
-                SyncRoot::create_for(db, identity, &root.folder, top)?;
+                SyncRoot::create_for(db, identity, &root.folder, top).map(drop)
             }
-            Err(e) => tracing::warn!("{} isn't set up again: {e}", root.folder.display()),
+            Ok(_) => Ok(()),
+            Err(e) => Err(e),
+        };
+        if let Err(e) = again {
+            tracing::warn!("{} isn't set up again now: {e}", root.folder.display());
         }
     }
-    Ok(Some(set))
+    Ok(set)
 }
 
 /// Has the running daemon set the folder at `path` up and sync it ([`add`]), or sets it up for

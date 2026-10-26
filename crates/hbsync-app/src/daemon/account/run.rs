@@ -90,7 +90,22 @@ impl Account {
         // can set right (a newer version's) is shown and waited out, asking nothing, the daemon
         // and the other accounts going on.
         loop {
-            match ready_account(&self.db, &self.identity, &self.folders()) {
+            // With the answers' connection held closed: none reads the DB as it may be set
+            // aside (Windows can't rename an open file), or keeps reading the one set aside.
+            // The config's, as the daemon read it at its start (it adds them to the account
+            // one at a time), and those added since.
+            let mut roots = self.folders();
+            for root in &config.roots {
+                if !roots.iter().any(|r| r.folder == root.folder) {
+                    roots.push(root.clone());
+                }
+            }
+            let ready = {
+                let mut reader = lock(&self.reader);
+                *reader = None;
+                ready_account(&self.db, &self.identity, &roots)
+            };
+            match ready {
                 Ok(set) => {
                     if let Some(set) = set {
                         self.note(vec![words::set_aside(set.why)]);

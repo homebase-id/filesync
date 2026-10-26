@@ -199,16 +199,20 @@ impl SyncRoot {
     }
 
     /// [`SyncRoot::upgrade`] as the account starts (its daemon's start, or setup's while none
-    /// runs), the whole file checked first ([`StateDb::check_file`]: it reads every page). One
-    /// that can't be used at all ([`StateError::unusable`]: from before 0.7, not a database,
-    /// damaged) is set aside, never deleted ([`set_aside`]), and a new one made: the account
-    /// starts over, its folders unknown to it, each to be set up again as a folder with files
-    /// ([`SyncRoot::create_for`]: what it holds is adopted, nothing is copied twice, nothing
-    /// deleted). Any other error is returned as it is: a newer version's DB, or one busy,
-    /// locked, unreadable for now.
+    /// runs), the whole file checked first ([`StateDb::check_file`]: it reads every page) and
+    /// its schema after. One that can't be used at all ([`StateError::unusable`]: from before
+    /// 0.7, not a database, damaged) is set aside, never deleted ([`set_aside`]), and a new one
+    /// made, which says so ([`keys::SET_ASIDE`]): the account starts over, its folders unknown
+    /// to it, each to be set up again as a folder with files ([`SyncRoot::create_for`]: what it
+    /// holds is adopted, nothing is copied twice, nothing deleted). Any other error is returned
+    /// as it is: a newer version's DB, or one busy, locked, unreadable for now.
     pub fn upgrade_or_set_aside(db: &Path, identity: &str) -> Result<Option<SetAside>, RootError> {
-        let why = match Self::open_account_with(db, identity, true) {
-            Ok(_) => return Ok(None),
+        let checked = StateDb::check_file(db)
+            .map_err(RootError::from)
+            .and_then(|()| Self::open_account(db, identity))
+            .and_then(|account| Ok(account.check_schema()?));
+        let why = match checked {
+            Ok(()) => return Ok(None),
             Err(RootError::State(e)) => match e.unusable() {
                 Some(why) => {
                     tracing::warn!("{}: {e}: set aside, and made again", db.display());
@@ -219,25 +223,17 @@ impl SyncRoot {
             Err(e) => return Err(e),
         };
         let to = set_aside(db, why)?;
-        Self::upgrade(db, identity)?;
+        Self::open_account(db, identity)?
+            .write_durable(|s| s.account().set_account_kv(keys::SET_ASIDE, why.name()))?;
         Ok(Some(SetAside { why, to }))
     }
 
     /// The account DB at `db`, for `identity` (made if new; refused if another's).
     pub(crate) fn open_account(db: &Path, identity: &str) -> Result<StateDb, RootError> {
-        Self::open_account_with(db, identity, false)
-    }
-
-    /// [`SyncRoot::open_account`], the whole file checked first when `check`
-    /// ([`StateDb::check_file`]).
-    fn open_account_with(db: &Path, identity: &str, check: bool) -> Result<StateDb, RootError> {
         if let Some(dir) = db.parent() {
             std::fs::create_dir_all(dir)?;
         }
         let mut account = StateDb::open_account(db)?;
-        if check {
-            account.check_file()?;
-        }
         // Read first: a DB that has its identity is opened without writing.
         let theirs = account.read(|s| s.account_kv(keys::IDENTITY))?;
         if theirs.is_none() {
@@ -303,10 +299,22 @@ fn set_aside(db: &Path, why: Unusable) -> std::io::Result<PathBuf> {
     let Some(to) = free else {
         return Err(std::io::ErrorKind::AlreadyExists.into());
     };
+    // What moved, put back if the rest can't follow: never a DB apart from its log.
+    let mut moved: Vec<&str> = Vec::new();
     for suffix in ["", "-wal", "-shm"] {
         match hbsync_platform::ops::rename_noreplace(&with(db, suffix), &with(&to, suffix)) {
+            Ok(()) => moved.push(suffix),
             Err(e) if !suffix.is_empty() && e.kind() == std::io::ErrorKind::NotFound => {}
-            done => done?,
+            Err(e) => {
+                for back in moved.iter().rev() {
+                    if let Err(e) =
+                        hbsync_platform::ops::rename_noreplace(&with(&to, back), &with(db, back))
+                    {
+                        tracing::error!("{} can't be put back: {e}", with(&to, back).display());
+                    }
+                }
+                return Err(e);
+            }
         }
     }
     hbsync_platform::ops::sync_dirs(db.parent().map(Path::to_path_buf));
@@ -347,6 +355,11 @@ impl AccountReader {
     /// The folders synced with the account on this device.
     pub fn folders(&mut self) -> Result<Vec<FolderRow>, StateError> {
         self.db.read(|s| s.folders())
+    }
+
+    /// Whether the DB was made in place of one set aside ([`keys::SET_ASIDE`]).
+    pub fn replaced_one(&mut self) -> Result<bool, StateError> {
+        Ok(self.db.read(|s| s.account_kv(keys::SET_ASIDE))?.is_some())
     }
 
     /// The newest `limit` entries of `folder`'s recently synced list.

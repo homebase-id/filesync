@@ -331,6 +331,11 @@ impl Account {
         self.wake();
     }
 
+    /// Closes the answers' connection to its DB, once it ended: not opened again.
+    pub(super) fn close_reader(&self) {
+        *lock(&self.reader) = None;
+    }
+
     /// Has its thread look again (whether to stop, its pause).
     pub(super) fn wake(&self) {
         self.tell(Msg::Wake);
@@ -505,6 +510,10 @@ impl Account {
     ) -> Result<T, String> {
         let mut reader = lock(&self.reader);
         if reader.is_none() {
+            // Ended, its DB is another account's to open (it may set it aside).
+            if self.ended.load(Ordering::Relaxed) {
+                return Err("it is starting over".to_owned());
+            }
             *reader = match AccountReader::open(&self.db, &self.identity) {
                 Ok(opened) => opened,
                 Err(RootError::State(e @ StateError::Behind { .. })) => {

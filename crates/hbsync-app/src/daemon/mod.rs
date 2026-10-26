@@ -345,6 +345,8 @@ impl Daemon {
         let ended = thread
             .join()
             .unwrap_or(Err(DaemonError::Runner(RunnerError::Panicked)));
+        // Its DB is the new account's to open as it starts, which may set it aside.
+        account.close_reader();
         let again = folders.iter().try_for_each(|root| self.add_folder(root));
         self.starting_over.fetch_sub(1, Ordering::SeqCst);
         self.stop.wakeup.raise();

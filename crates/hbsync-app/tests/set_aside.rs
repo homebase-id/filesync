@@ -154,6 +154,33 @@ fn the_daemon_sets_an_unusable_db_aside_and_adopts_the_folder() -> R {
     Ok(())
 }
 
+/// A folder not there when the DB is set aside (its disk unplugged) is left alone then, and
+/// set up again at a later start once it is back: adopted, nothing sent or fetched.
+#[test]
+fn a_folder_back_later_is_set_up_again_at_the_next_start() -> R {
+    let server = FakeServer::new(ServerConfig::default());
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().canonicalize()?.join("Homebase");
+    let db = root.with_file_name("state.db");
+    std::fs::create_dir_all(&root)?;
+    hbsync_engine::root::SyncRoot::create(&db, ID, &root)?;
+    write_files(&root)?;
+    sync_once(&server, &root, &db)?;
+    let synced = files(&root)?;
+
+    spoil(&db, Unusable::TooOld)?;
+    let away = root.with_file_name("unplugged");
+    std::fs::rename(&root, &away)?;
+    let roots = [Root::main(&ID.into(), &root)];
+    folders::ready_account(&db, &ID.into(), &roots)?.ok_or("not set aside")?;
+    assert!(!root.exists(), "nothing made where it was");
+    std::fs::rename(&away, &root)?;
+    assert_eq!(folders::ready_account(&db, &ID.into(), &roots)?, None);
+    assert_eq!(sync_once(&server, &root, &db)?, (0, 0));
+    assert_eq!(files(&root)?, synced);
+    Ok(())
+}
+
 /// A file changed here while the DB was unusable (an edit never sent) is kept beside the
 /// drive's version after the folder is set up again, as a conflict copy; nothing is deleted.
 #[test]
@@ -209,8 +236,8 @@ fn setup_sets_an_unusable_db_aside() -> R {
             std::fs::create_dir_all(&root)?;
         }
         let config = hbsync_app::Config::load(&paths.config_file())?.ok_or("no config")?;
-        let set = check_state(&paths, &config, &identity, &root, false, false)?;
-        assert_eq!(set, Some(why));
+        let set = check_state(&paths, &config, &identity, &root, false)?;
+        assert_eq!(set, (false, Some(why)));
         assert_eq!(set_aside(&db)?.len(), 1, "{why:?}: kept");
         folders::add_synced(&paths, &identity, &root, None)?;
         let (uploads, served) = sync_once(&server, &root, &db)?;
@@ -239,7 +266,7 @@ fn a_newer_db_is_refused_and_kept() -> R {
     rusqlite::Connection::open(&db)?.pragma_update(None, "user_version", 9999)?;
     let before = std::fs::read(&db)?;
     let config = hbsync_app::Config::load(&paths.config_file())?.ok_or("no config")?;
-    let refused = check_state(&paths, &config, &identity, &root, false, false);
+    let refused = check_state(&paths, &config, &identity, &root, false);
     assert!(
         refused
             .as_ref()
