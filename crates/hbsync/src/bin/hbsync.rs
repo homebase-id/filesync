@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use hbsync_app::control::{clear_stopped, running, start, stop_syncing};
+use hbsync_app::control::{running, start, stop_syncing};
 use hbsync_app::daemon::UNANNOUNCED_READ;
 use hbsync_app::folders::{self, Taken};
 use hbsync_app::protocol::{
@@ -330,14 +330,17 @@ fn run(command: Command) -> Res<ExitCode> {
         Command::ConfirmDeletes { yes } => answer_held(&paths, yes, HeldAnswer::Delete)?,
         Command::PutBack { yes } => answer_held(&paths, yes, HeldAnswer::PutBack)?,
         Command::Start => {
-            if running(&paths)? {
-                // A stop that didn't go through ends here too.
-                clear_stopped(&paths)?;
-                println!("The daemon is already running.");
-            } else {
-                start(&paths)?;
-                println!("Started.");
-            }
+            let was = running(&paths)?;
+            // Also ends a stop that didn't go through.
+            start(&paths)?;
+            println!(
+                "{}",
+                if was {
+                    "The daemon is already running."
+                } else {
+                    "Started."
+                }
+            );
         }
         Command::Stop => {
             if stop_syncing(&paths)? {

@@ -208,8 +208,7 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
         return items;
     }
 
-    let stopped = *view.daemon == Daemon::Stopped;
-    if stopped {
+    if *view.daemon == Daemon::Stopped {
         items.push(Item::Action(Action::StartSyncing, "Start syncing".into()));
     }
     items.push(Item::Action(

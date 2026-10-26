@@ -4,13 +4,12 @@
 //! asks once more when woken (after an action); once a minute it shows what it was sent again
 //! (the menu's "2 min ago") and looks whether this program was replaced on disk. While the daemon
 //! isn't running it looks every second (it is starting), every ten (nothing set up yet), or once
-//! a minute (syncing stopped: Start syncing looks at once). The tray keeps it running while a folder is set up, unless syncing was
-//! stopped on purpose ([`control::stopped`]), and never starts it once it began to quit
-//! ([`Starts`]).
+//! a minute (syncing stopped: Start syncing looks at once). The tray keeps it running while a
+//! folder is set up, unless syncing was stopped on purpose ([`control::stopped`]). Quitting goes
+//! through this thread too ([`Poke::Quit`]): after a start in flight, and with none after it.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use hbsync_app::Paths;
@@ -41,52 +40,51 @@ pub(crate) enum Poke {
     Status(Box<DaemonStatus>),
     /// The watched daemon's connection ended (it stopped).
     Gone,
+    /// The tray quits: stopping syncing too, or leaving the daemon running. The watcher ends
+    /// with [`Event::Exit`].
+    Quit { stop: bool },
 }
 
-/// Starts watching; [`Poke::Look`] sent on the returned channel has it look at once. It
-/// starts the daemon through `starts`.
-pub(crate) fn spawn(
-    paths: Paths,
-    send: Sender,
-    starts: Arc<Starts>,
-) -> std::io::Result<mpsc::Sender<Poke>> {
+/// Of two pokes in a row, the one that counts: a quit, else the end of a watch, else the newer
+/// (statuses that came while the watcher was busy: only the newest counts).
+fn newer(poke: Poke, next: Poke) -> Poke {
+    match (poke, next) {
+        (quit @ Poke::Quit { .. }, _) | (_, quit @ Poke::Quit { .. }) => quit,
+        (Poke::Gone, _) => Poke::Gone,
+        (_, next) => next,
+    }
+}
+
+/// Starts watching; [`Poke::Look`] sent on the returned channel has it look at once.
+pub(crate) fn spawn(paths: Paths, send: Sender) -> std::io::Result<mpsc::Sender<Poke>> {
     let (wake, woken) = mpsc::channel();
     let me = wake.clone();
-    let watcher = Watcher {
-        starts,
-        ..Watcher::default()
-    };
     std::thread::Builder::new()
         .name("hbsync-tray-poll".into())
-        .spawn(move || watcher.run(&paths, &send, &woken, &me))?;
+        .spawn(move || Watcher::default().run(&paths, &send, &woken, &me))?;
     Ok(wake)
 }
 
-/// Starting the daemon and quitting the tray, one after the other: a quit waits for a start in
-/// flight, so that it stops (or leaves) the daemon that start brings up, and no start follows
-/// it. (Before, a quit's stop could find no daemon yet, or the watcher start one again as the
-/// stopped one went, and the tray ended with the daemon running.)
-#[derive(Debug, Default)]
-pub(crate) struct Starts {
-    quitting: Mutex<bool>,
-}
-
-impl Starts {
-    /// Runs `start` unless the tray is quitting (`None`); a quit waits until it's done.
-    pub(crate) fn start<T>(&self, start: impl FnOnce() -> T) -> Option<T> {
-        let quitting = self.quitting.lock().unwrap_or_else(PoisonError::into_inner);
-        (!*quitting).then(start)
+/// The tray quits, on the watcher's thread: so after any start of the daemon (the daemon it
+/// brings up is the one stopped, or left running), and before none.
+fn quit(paths: &Paths, send: &Sender, stop: bool) {
+    if stop {
+        if let Err(e) = control::stop_syncing(paths) {
+            tracing::warn!("stopping the daemon: {e}");
+        }
+    } else {
+        // Kept: out of the tray's unit, which may end with the tray.
+        #[cfg(target_os = "linux")]
+        if let Some(pid) = hbsync_app::lock::daemon_pid(paths) {
+            hbsync_app::unit::outlive_service(pid);
+        }
     }
-
-    /// From now on nothing starts; returns once a start in flight is done.
-    pub(crate) fn quit(&self) {
-        *self.quitting.lock().unwrap_or_else(PoisonError::into_inner) = true;
-    }
+    tracing::info!("quit{}", if stop { ", syncing stopped" } else { "" });
+    send(Event::Exit);
 }
 
 #[derive(Default)]
 struct Watcher {
-    starts: Arc<Starts>,
     recent: Vec<RecentItem>,
     /// The daemon's `synced_added` when the recent list was read.
     read_at: Option<u64>,
@@ -125,6 +123,7 @@ impl Watcher {
                 self.replaced = crate::os::replacement();
             }
             let daemon = match poke {
+                Poke::Quit { stop } => return quit(paths, send, stop),
                 Poke::Status(status) => {
                     self.pushed = Some((*status).clone());
                     self.show(paths, Some(*status))
@@ -168,12 +167,8 @@ impl Watcher {
                 Err(RecvTimeoutError::Timeout) => Poke::Again,
                 Err(RecvTimeoutError::Disconnected) => return,
             };
-            // Statuses that came while this thread was busy: only the newest counts; an end of
-            // the watch is never skipped.
             for next in woken.try_iter() {
-                if !matches!(poke, Poke::Gone) {
-                    poke = next;
-                }
+                poke = newer(poke, next);
             }
         }
     }
@@ -245,12 +240,9 @@ impl Watcher {
                 hbsync_app::VERSION
             );
             self.restarted = true;
-            // One start, stop and all: a quit waits for both.
-            let restart = self.starts.start(|| {
-                control::stop(paths)?;
-                control::start(paths)
-            });
-            if let Some(Err(e)) = restart {
+            // Started here too: a quit (which follows) finds it running.
+            let restart = control::stop(paths).and_then(|_| control::start(paths));
+            if let Err(e) = restart {
                 tracing::warn!("restarting the daemon: {e}");
             }
             return Daemon::Starting(None);
@@ -277,15 +269,8 @@ impl Watcher {
             self.recent.clone(),
             self.replaced.clone(),
         ));
-        let started = self.starts.start(|| {
-            tracing::info!("starting the daemon");
-            control::start(paths)
-        });
-        // Quitting: the quit decides what runs.
-        let Some(started) = started else {
-            return Daemon::Starting(None);
-        };
-        match started {
+        tracing::info!("starting the daemon");
+        match control::start(paths) {
             Ok(()) => {
                 self.next_start = None;
                 self.start_failed = None;
@@ -305,41 +290,20 @@ impl Watcher {
 mod tests {
     use super::*;
 
-    /// A quit waits for a start in flight, and nothing starts after it: the daemon that start
-    /// brings up is the quit's to stop.
+    /// A quit is never skipped for what came after it, nor the end of a watch for a look;
+    /// otherwise the newest counts.
     #[test]
-    fn a_quit_waits_for_a_start_in_flight_and_no_start_follows() {
-        let starts = Arc::new(Starts::default());
-        let (started, starting) = mpsc::channel();
-        let (finish, finishing) = mpsc::channel::<()>();
-        let start = {
-            let starts = Arc::clone(&starts);
-            std::thread::spawn(move || {
-                starts.start(|| {
-                    started.send(()).expect("told");
-                    finishing.recv().expect("finished");
-                })
-            })
-        };
-        starting.recv().expect("the start is in flight");
-        let (quit, quitted) = mpsc::channel();
-        {
-            let starts = Arc::clone(&starts);
-            std::thread::spawn(move || {
-                starts.quit();
-                quit.send(()).expect("told");
-            });
+    fn a_quit_counts_over_whatever_follows() {
+        let quit = Poke::Quit { stop: true };
+        for (poke, next) in [(quit, Poke::Gone), (Poke::Gone, Poke::Quit { stop: true })] {
+            assert!(matches!(newer(poke, next), Poke::Quit { stop: true }));
         }
-        assert!(
-            quitted.recv_timeout(Duration::from_millis(200)).is_err(),
-            "the quit went ahead of the start"
-        );
-        finish.send(()).expect("finish");
-        assert_eq!(start.join().expect("start"), Some(()));
-        quitted.recv().expect("the quit followed the start");
-        assert_eq!(
-            starts.start(|| unreachable!("started after the quit")),
-            None::<()>
-        );
+        let quit = Poke::Quit { stop: false };
+        assert!(matches!(
+            newer(quit, Poke::Look),
+            Poke::Quit { stop: false }
+        ));
+        assert!(matches!(newer(Poke::Gone, Poke::Look), Poke::Gone));
+        assert!(matches!(newer(Poke::Again, Poke::Look), Poke::Look));
     }
 }

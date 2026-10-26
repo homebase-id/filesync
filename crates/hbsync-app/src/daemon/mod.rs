@@ -208,12 +208,12 @@ fn claim(
     paths: &Paths,
     held: &ConfigLock,
 ) -> Result<(InstanceLock, Config, ipc::Listener), DaemonError> {
-    let lock = InstanceLock::acquire(paths)?;
     // Started by the service manager at logon, say, after `hbsync stop`: what starts it on
     // purpose ends the stop first (`control::start`).
     if crate::control::stopped(paths) {
         return Err(DaemonError::Stopped);
     }
+    let lock = InstanceLock::acquire(paths)?;
     let config = match held.load()? {
         Some(config) if !config.roots.is_empty() => config,
         other => {

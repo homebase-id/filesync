@@ -529,7 +529,8 @@ syncing in the background** (the daemon goes on without the tray) or **stop sync
 nothing running (not set up, stopped, failing to start) it just quits. Stopping syncing (that
 choice, or `hbsync stop`) leaves a mark, `<state>/stopped`, before it asks the daemon to stop
 (a request that doesn't reach it takes the mark off again). Starting it on purpose ends the
-stop (`hbsync start`, *Start syncing*, `setup`: `control::start` takes the mark off first);
+stop (`hbsync start`, *Start syncing*, `setup`: `control::start` takes the mark off, and
+starts the daemon unless it runs);
 a daemon started otherwise while the mark is there (by the service manager at logon) ends at
 once, as with nothing to sync. While stopped, the tray shows *Syncing stopped* (the grey dot)
 with **Start syncing**, and looks once a minute (`hbsync start` shows within a minute). A tray
@@ -543,9 +544,9 @@ to start. It asks nothing otherwise, as nothing was stopped on purpose:
 A stop lasts until syncing is started again, also across logins, as *Pause until I resume* does:
 starting at login starts the tray, which then shows that syncing is stopped.
 
-A quit waits for a start the tray has in flight (at most its 15 s; after an update, the restart
-of a daemon of another version, its stop included), and from then on the tray starts nothing:
-the daemon that start brings up is the one stopped, or left running. Before, a quit could find
+A quit runs on the thread that starts the daemon (the watcher's): after a start in flight (at
+most its 15 s; after an update, the restart of a daemon of another version, its stop included),
+and with none after it. The daemon that start brings up is the one stopped, or left running. Before, a quit could find
 no daemon to stop yet and leave the one just started running, or watch the tray start the
 daemon again as the stopped one went (the stop then gave up after a minute, "still finishing a
 transfer"). On Linux a daemon left running moves out of the tray's autostart service into a

@@ -36,9 +36,7 @@ impl InstanceLock {
     /// Takes the lock of `program`, or says which process has it.
     pub fn acquire_for(paths: &Paths, program: &'static str) -> Result<InstanceLock, LockError> {
         let Some(file) = try_lock(paths, program)? else {
-            let pid = std::fs::read_to_string(pid_path(paths, program))
-                .ok()
-                .and_then(|p| p.trim().parse().ok());
+            let pid = pid(paths, program);
             return Err(LockError::Held { program, pid });
         };
         // Beside the lock file: Windows doesn't let others read a locked file.
@@ -56,7 +54,12 @@ pub(crate) fn daemon_runs(paths: &Paths) -> io::Result<bool> {
 
 /// The running daemon's process id, as it wrote it.
 pub fn daemon_pid(paths: &Paths) -> Option<u32> {
-    std::fs::read_to_string(pid_path(paths, DAEMON))
+    pid(paths, DAEMON)
+}
+
+/// The process id the holder of `program`'s lock wrote.
+fn pid(paths: &Paths, program: &str) -> Option<u32> {
+    std::fs::read_to_string(pid_path(paths, program))
         .ok()?
         .trim()
         .parse()

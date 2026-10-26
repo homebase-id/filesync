@@ -25,12 +25,15 @@ pub fn dev_home() -> bool {
     std::env::var_os("HBSYNC_HOME").is_some_and(|h| !h.is_empty())
 }
 
-/// Starts the daemon and waits until it answers: through the service manager when it starts
-/// the daemon at logon (so that it supervises it), else `hbsyncd` beside this program, on its
-/// own (on a Linux desktop, in a scope of the app's: [`crate::unit`]). It ends a stop
-/// ([`stop_syncing`]).
+/// Starts the daemon, unless it runs, and waits until it answers: through the service manager
+/// when it starts the daemon at logon (so that it supervises it), else `hbsyncd` beside this
+/// program, on its own (on a Linux desktop, in a scope of the app's: [`crate::unit`]). It ends
+/// a stop ([`stop_syncing`]) either way.
 pub fn start(paths: &Paths) -> Result<()> {
     clear_stopped(paths)?;
+    if running(paths)? {
+        return Ok(());
+    }
     if !dev_home() && autostart::installed()? && autostart::start()? {
         return wait_until_running(paths, None);
     }
@@ -142,17 +145,9 @@ fn gone(paths: &Paths) -> Result<bool> {
 
 /// Stops syncing until it is started again ([`start`]): marks it stopped ([`stopped`]: the tray
 /// doesn't start the daemon, and a daemon started otherwise, by the service manager at logon,
-/// doesn't run), then stops the daemon ([`stop`]). False when it wasn't running. With nothing
-/// set up, it only stops.
+/// doesn't run), then stops the daemon ([`stop`]). False when it wasn't running.
 pub fn stop_syncing(paths: &Paths) -> Result<bool> {
-    if super::configured(paths)?.is_none() {
-        return stop(paths);
-    }
-    let mark = stopped_mark(paths);
-    if let Some(dir) = mark.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(&mark, b"")?;
+    hbsync_fileio::write_atomic(&stopped_mark(paths), b"")?;
     // A stop that didn't reach the daemon leaves it syncing: not stopped.
     let asked = ask_stop(paths).inspect_err(|_| {
         let _ = clear_stopped(paths);

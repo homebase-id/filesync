@@ -104,8 +104,7 @@ fn main() -> ExitCode {
             }
         });
     }
-    let restarted = std::env::args_os().any(|a| a == RESTARTED);
-    match run(paths, restarted) {
+    match run(paths) {
         Ok(None) => ExitCode::SUCCESS,
         // Linux, after an update: the new program in this process's place. The lock is
         // released (its file is closed on exec), and the new tray takes it.
@@ -133,8 +132,6 @@ struct App {
     paths: Paths,
     send: Sender,
     wake: mpsc::Sender<poll::Poke>,
-    /// The watcher's starts of the daemon, which a quit waits for and ends.
-    starts: Arc<poll::Starts>,
     pages: Pages,
     tray: Option<TrayIcon>,
     daemon: Daemon,
@@ -148,8 +145,8 @@ struct App {
     notified: HashMap<&'static str, Instant>,
     /// The folder given its icon and shortcut ([`shell`]) by this run.
     decorated: Option<PathBuf>,
-    /// Until the watcher's first look: a stop it finds is told (not after restarting into an
-    /// update, [`RESTARTED`]: told already).
+    /// A stop found at the watcher's first look is told; not after restarting into an update
+    /// ([`RESTARTED`]).
     tell_stopped: bool,
 }
 
@@ -172,10 +169,9 @@ enum Handle {
 }
 
 impl App {
-    fn new(paths: Paths, send: Sender, restarted: bool) -> Result<App, Box<dyn std::error::Error>> {
+    fn new(paths: Paths, send: Sender) -> Result<App, Box<dyn std::error::Error>> {
         let pages = Pages::start(paths.clone(), send.clone())?;
-        let starts = Arc::new(poll::Starts::default());
-        let wake = poll::spawn(paths.clone(), send.clone(), Arc::clone(&starts))?;
+        let wake = poll::spawn(paths.clone(), send.clone())?;
         {
             let send = send.clone();
             MenuEvent::set_event_handler(Some(move |e: MenuEvent| send(Event::Menu(e.id))));
@@ -190,7 +186,6 @@ impl App {
             paths,
             send,
             wake,
-            starts,
             pages,
             tray: None,
             daemon: Daemon::Starting(None),
@@ -202,7 +197,7 @@ impl App {
             shown: Shown::default(),
             notified: HashMap::new(),
             decorated: None,
-            tell_stopped: !restarted,
+            tell_stopped: !std::env::args_os().any(|a| a == RESTARTED),
         })
     }
 
@@ -375,32 +370,11 @@ impl App {
                 let _ = self.wake.send(poll::Poke::Look);
             }
             Action::Quit | Action::QuitAndStop => {
-                // The icon goes at once. A start in flight goes first (the daemon it brings up
-                // is the one stopped, or left running); the daemon may first finish a transfer.
+                // The icon goes at once; the watcher quits after a start in flight (the daemon
+                // may first finish a transfer).
                 self.tray = None;
                 let stop = action == Action::QuitAndStop;
-                let (paths, send, starts) = (
-                    self.paths.clone(),
-                    self.send.clone(),
-                    Arc::clone(&self.starts),
-                );
-                std::thread::spawn(move || {
-                    starts.quit();
-                    if stop && let Err(e) = control::stop_syncing(&paths) {
-                        tracing::warn!("stopping the daemon: {e}");
-                    }
-                    // Kept: out of the tray's unit, which may end with the tray.
-                    #[cfg(target_os = "linux")]
-                    if !stop
-                        && matches!(control::running(&paths), Ok(true))
-                        && let Some(pid) = hbsync_app::lock::daemon_pid(&paths)
-                    {
-                        hbsync_app::unit::outlive_service(pid);
-                    }
-                    tracing::info!("quit{}", if stop { ", syncing stopped" } else { "" });
-                    send(Event::Exit);
-                });
-                return true;
+                return self.wake.send(poll::Poke::Quit { stop }).is_ok();
             }
         }
         self.render();
@@ -658,7 +632,7 @@ fn same_shape(a: &[Item], b: &[Item]) -> bool {
 /// Linux: the tray (StatusNotifierItem over D-Bus) runs on threads of its own; this thread
 /// waits for events.
 #[cfg(target_os = "linux")]
-fn run(paths: Paths, restarted: bool) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+fn run(paths: Paths) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
     let (tx, rx) = mpsc::channel();
     let tx = std::sync::Mutex::new(tx);
     let send: Sender = Arc::new(move |e| {
@@ -666,7 +640,7 @@ fn run(paths: Paths, restarted: bool) -> Result<Option<PathBuf>, Box<dyn std::er
             let _ = tx.send(e);
         }
     });
-    let mut app = App::new(paths, send, restarted)?;
+    let mut app = App::new(paths, send)?;
     app.show()?;
     for event in rx {
         if !app.handle(event) {
@@ -678,7 +652,7 @@ fn run(paths: Paths, restarted: bool) -> Result<Option<PathBuf>, Box<dyn std::er
 
 /// Windows and macOS: the tray lives in the main thread's event loop.
 #[cfg(not(target_os = "linux"))]
-fn run(paths: Paths, restarted: bool) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+fn run(paths: Paths) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
     use tao::event::{Event as TaoEvent, StartCause};
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
 
@@ -696,7 +670,7 @@ fn run(paths: Paths, restarted: bool) -> Result<Option<PathBuf>, Box<dyn std::er
             let _ = p.send_event(e);
         }
     });
-    let mut app = App::new(paths, send, restarted)?;
+    let mut app = App::new(paths, send)?;
     event_loop.run(move |event, _, flow| {
         *flow = ControlFlow::Wait;
         match event {
