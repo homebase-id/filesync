@@ -4,14 +4,26 @@
 use super::*;
 
 impl Server {
-    /// Asks the tray (its main thread) for the OS's folder picker.
-    pub(super) fn choose_folder(&self) {
+    /// Asks the tray (its main thread) for the OS's folder picker, keeping the address typed
+    /// in `form`. Only while the form is shown: not for a stale page while a login runs.
+    pub(super) fn choose_folder(&self, form: &HashMap<String, String>) {
+        {
+            let mut s = lock(&self.pages.shared);
+            if s.phase != Phase::Form {
+                return;
+            }
+            if let Some(typed) = form.get("identity") {
+                s.identity = typed.clone();
+            }
+        }
         let (tx, rx) = mpsc::channel();
         (self.send)(Event::PickFolder(tx));
         if let Ok(Some(folder)) = rx.recv() {
             let mut s = lock(&self.pages.shared);
-            s.folder = Some(folder);
-            s.clear_form();
+            if s.phase == Phase::Form {
+                s.folder = Some(folder);
+                s.clear_form();
+            }
         }
     }
 
@@ -35,23 +47,23 @@ impl Server {
         } else {
             ""
         };
-        // *Change…* submits a form of its own: Enter in the address submits with the form's
-        // first button, which must be *Continue* (in the form, it opened the folder picker).
+        // Enter in the address submits with the form's first button: an unseen *Continue*
+        // ahead of *Change…* (which opened the folder picker instead).
         format!(
             "<h1>Connect to your Homebase</h1>\
              <p>Filesync keeps a folder on this computer in sync with your Homebase, \
              encrypted.</p>{error}\
              <form method=post action=\"{setup}\">\
+             <button class=enter tabindex=-1 aria-hidden=true>Continue</button>\
              <label for=identity>Your Homebase address</label>\
              <input id=identity name=identity placeholder=\"anna.example.com\" value=\"{identity}\" \
              autofocus required>\
              <label>Folder on this computer</label>\
              <div class=folder><code>{folder}</code>\
-             <button class=secondary form=choose>Change…</button></div>\
+             <button class=secondary formaction=\"{choose}\" formnovalidate>Change…</button></div>\
              {merge}\
              <button>Continue</button>\
              </form>\
-             <form id=choose method=post action=\"{choose}\"></form>\
              <p class=small>Next, your Homebase asks you to approve this computer.</p>",
             setup = self.pages.url("setup"),
             choose = self.pages.url("setup/folder"),
