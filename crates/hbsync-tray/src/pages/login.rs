@@ -7,15 +7,14 @@ impl Server {
     /// Asks the tray (its main thread) for the OS's folder picker, keeping the address typed
     /// in `form`. Only while the form is shown: not for a stale page while a login runs.
     pub(super) fn choose_folder(&self, form: &HashMap<String, String>) {
-        {
-            let mut s = lock(&self.pages.shared);
-            if s.phase != Phase::Form {
-                return;
-            }
-            if let Some(typed) = form.get("identity") {
-                s.identity = typed.clone();
-            }
+        let mut s = lock(&self.pages.shared);
+        if s.phase != Phase::Form {
+            return;
         }
+        if let Some(typed) = form.get("identity") {
+            s.identity = hbsync_app::Identity::new(typed).to_string();
+        }
+        drop(s);
         let (tx, rx) = mpsc::channel();
         (self.send)(Event::PickFolder(tx));
         if let Ok(Some(folder)) = rx.recv() {
