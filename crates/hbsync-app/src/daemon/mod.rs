@@ -345,7 +345,9 @@ impl Daemon {
             let mut accounts = lock(&self.accounts);
             let at = accounts.iter().position(|(a, _)| a.identity == *identity);
             // Named before it leaves the list: it is still running ([`Daemon::account_idle`]).
-            lock(&self.starting_over).extend(at.map(|_| identity.clone()));
+            if at.is_some() {
+                lock(&self.starting_over).push(identity.clone());
+            }
             at.map(|at| accounts.remove(at))
         };
         let Some((account, thread)) = found else {

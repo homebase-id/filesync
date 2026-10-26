@@ -2,12 +2,15 @@
 //! folder is set up in its account's state DB (its marker written, [`SyncRoot`]) and listed in
 //! the config; the daemon then starts syncing it.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use hbsync_engine::root::{RootError, SetAside, SyncRoot};
 use hbsync_types::{NodeId, Role};
 
 use crate::config::ConfigLock;
+use crate::sync::lock;
 use crate::{Config, Error, Identity, Paths, Root};
 
 /// Whether the folder at `path` (resolved: [`crate::setup::resolve`]) can be set up for
@@ -237,15 +240,9 @@ pub fn ready_account(
     roots: &[Root],
 ) -> Result<Option<SetAside>, RootError> {
     // One at a time per DB; other accounts' go on.
-    type Turns = std::collections::HashMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>;
-    static TURNS: std::sync::LazyLock<std::sync::Mutex<Turns>> =
-        std::sync::LazyLock::new(Default::default);
-    let turn = std::sync::Arc::clone(
-        crate::sync::lock(&TURNS)
-            .entry(db.to_path_buf())
-            .or_default(),
-    );
-    let _turn = crate::sync::lock(&turn);
+    static TURNS: Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
+    let turn = Arc::clone(lock(&TURNS).entry(db.to_path_buf()).or_default());
+    let _turn = lock(&turn);
     let folders: Vec<(&Path, NodeId)> = roots
         .iter()
         .filter(|r| r.identity == *identity)

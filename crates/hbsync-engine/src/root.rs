@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use hbsync_local::{Marker, layout};
 use hbsync_remote::ErrorClass;
-use hbsync_state::{Checked, FolderRow, Reader, StateDb, StateError, Unusable, keys};
+use hbsync_state::{FolderRow, Reader, StateDb, StateError, Unusable, keys};
 use hbsync_types::NodeId;
 use hbsync_types::activity::Synced;
 
@@ -209,16 +209,15 @@ impl SyncRoot {
         identity: &str,
         folders: &[(&Path, NodeId)],
     ) -> Result<Option<SetAside>, RootError> {
-        let checked = StateDb::check_file(db)
-            .map_err(RootError::from)
-            .and_then(|checked| Ok((checked, Self::open_account(db, identity)?)))
-            .and_then(|(checked, account)| {
-                // One brought up to date (or made) is whole only now.
-                if checked != Checked::Whole {
-                    account.check_schema()?;
-                }
-                Ok(account)
-            });
+        let checked = (|| -> Result<StateDb, RootError> {
+            let whole = StateDb::check_file(db)?;
+            let account = Self::open_account(db, identity)?;
+            // One brought up to date (or made) is whole only now.
+            if !whole {
+                account.check_schema()?;
+            }
+            Ok(account)
+        })();
         let (mut account, set) = match checked {
             Ok(account) => (account, None),
             Err(RootError::State(e)) => {
@@ -244,14 +243,14 @@ impl SyncRoot {
         let (replaced, known) =
             account.read(|s| Ok((s.account_kv(keys::SET_ASIDE)?.is_some(), s.folders()?)))?;
         if replaced || (known.is_empty() && beside_one_set_aside(db)) {
-            Self::set_up_again(&mut account, db, identity, folders, &known)?;
+            Self::set_up_again(&mut account, db, identity, folders, &known, replaced)?;
         }
         Ok(set)
     }
 
     /// Sets each of `folders` that is `identity`'s (its marker says so) and unknown to the
     /// `account` (at `db`; it knows those of `known`) up again; once it knows every one there
-    /// is, it forgets it replaced one. One not there now, or that fails, waits for a later
+    /// is, it forgets it `replaced` one. One not there now, or that fails, waits for a later
     /// start; one another identity's is left to its runner, which refuses it.
     fn set_up_again(
         account: &mut StateDb,
@@ -259,6 +258,7 @@ impl SyncRoot {
         identity: &str,
         folders: &[(&Path, NodeId)],
         known: &[FolderRow],
+        replaced: bool,
     ) -> Result<(), RootError> {
         let mut waiting = false;
         for &(path, top) in folders {
@@ -272,7 +272,7 @@ impl SyncRoot {
                 waiting |= !matches!(e, RootError::OtherIdentity { .. });
             }
         }
-        if !waiting && account.read(|s| s.account_kv(keys::SET_ASIDE))?.is_some() {
+        if !waiting && replaced {
             account.write(|s| s.account().delete_account_kv(keys::SET_ASIDE))?;
         }
         Ok(())
@@ -335,13 +335,18 @@ fn with(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
+/// What the name of a DB set aside for `why` adds to its own, before the time: `.too-old-`.
+fn aside(why: Unusable) -> String {
+    format!(".{}-", why.name())
+}
+
 /// Whether a DB was set aside beside the one at `db` ([`set_aside`]'s names).
 fn beside_one_set_aside(db: &Path) -> bool {
     let (Some(dir), Some(name)) = (db.parent(), db.file_name()) else {
         return false;
     };
     let name = name.to_string_lossy();
-    let named = [Unusable::TooOld, Unusable::Corrupt].map(|why| format!("{name}.{}-", why.name()));
+    let named = [Unusable::TooOld, Unusable::Corrupt].map(|why| format!("{name}{}", aside(why)));
     std::fs::read_dir(dir)
         .into_iter()
         .flatten()
@@ -358,7 +363,7 @@ fn beside_one_set_aside(db: &Path) -> bool {
 /// `-shm` files named alike. The DB first: its place never holds it without its log (SQLite
 /// drops a log it finds beside a new, empty DB). Where it is now.
 fn set_aside(db: &Path, why: Unusable) -> std::io::Result<PathBuf> {
-    let stamp = format!(".{}-{}", why.name(), hbsync_types::unix_now());
+    let stamp = format!("{}{}", aside(why), hbsync_types::unix_now());
     let mut to = with(db, &stamp);
     let mut n = 0;
     while SUFFIXES
