@@ -5,25 +5,34 @@ use super::*;
 
 impl Server {
     /// Asks the tray (its main thread) for the OS's folder picker, keeping the address typed
-    /// in `form`. Only while the form is shown: not for a stale page while a login runs.
+    /// in `form`, and returns without waiting for it: the page says a window opened until it
+    /// closes. Only while the form is shown (not for a stale page while a login runs), and
+    /// one picker at a time.
     pub(super) fn choose_folder(&self, form: &HashMap<String, String>) {
         let mut s = lock(&self.pages.shared);
-        if s.phase != Phase::Form {
+        if s.phase != Phase::Form || s.picking {
             return;
         }
         if let Some(typed) = form.get("identity") {
             s.identity = hbsync_app::Identity::new(typed).to_string();
         }
+        s.picking = true;
         drop(s);
         let (tx, rx) = mpsc::channel();
         (self.send)(Event::PickFolder(tx));
-        if let Ok(Some(folder)) = rx.recv() {
-            let mut s = lock(&self.pages.shared);
-            if s.phase == Phase::Form {
+        let shared = Arc::clone(&self.pages.shared);
+        std::thread::spawn(move || {
+            // Nothing chosen, or the tray gone (the answer dropped): the folder stays.
+            let picked = rx.recv().ok().flatten();
+            let mut s = lock(&shared);
+            s.picking = false;
+            if let Some(folder) = picked
+                && s.phase == Phase::Form
+            {
                 s.folder = Some(folder);
                 s.clear_form();
             }
-        }
+        });
     }
 
     pub(super) fn setup_page(&self) -> String {
@@ -31,6 +40,16 @@ impl Server {
         if s.phase != Phase::Form {
             drop(s);
             return self.done_page();
+        }
+        // In case the picker isn't in front (focus rules: a Linux portal's, Windows's): where
+        // to look for it, until it closes.
+        if s.picking {
+            return "<meta http-equiv=refresh content=1>\
+                    <h1>Choose the folder</h1>\
+                    <p>Choose the folder to sync in the window that opened. This page goes on \
+                    once you have.</p>\
+                    <p class=small>Don't see it? It may be behind this window.</p>"
+                .to_owned();
         }
         let folder = s
             .folder()

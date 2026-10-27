@@ -264,11 +264,8 @@ impl App {
                 }
             }
             Event::PickFolder(reply) => {
-                let picked = rfd::FileDialog::new()
-                    .set_title("Choose the folder to sync")
-                    .set_directory(hbsync_app::paths::home().unwrap_or_default())
-                    .pick_folder();
-                let _ = reply.send(picked);
+                let home = hbsync_app::paths::home().unwrap_or_default();
+                let _ = reply.send(os::pick_folder("Choose the folder to sync", &home));
             }
             Event::Wake => {
                 let _ = self.wake.send(poll::Poke::Look);

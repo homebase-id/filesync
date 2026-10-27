@@ -31,6 +31,10 @@ tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
 tao = "0.37"
 tray-icon = "0.26"
 
+# Windows: the window that owns the folder picker, to open it in front of the browser.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+
 [dev-dependencies]
 hbsync-app = { workspace = true, features = ["testkit"] }
 tempfile.workspace = true

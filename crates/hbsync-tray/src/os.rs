@@ -1,5 +1,5 @@
 //! What the tray asks of the OS: opening folders and pages, showing a file in the file manager,
-//! notifications.
+//! choosing a folder, notifications.
 
 use hbsync_app::install::Install;
 use std::path::{Path, PathBuf};
@@ -66,6 +66,111 @@ fn show_selected(path: &Path) -> std::io::Result<()> {
         Ok(())
     } else {
         Err(std::io::Error::other("no file manager answered"))
+    }
+}
+
+/// Asks for a folder with the OS's picker, starting in `start`. On the main thread; it waits
+/// until the picker closes.
+pub(crate) fn pick_folder(title: &str, start: &Path) -> Option<PathBuf> {
+    let dialog = rfd::FileDialog::new().set_title(title).set_directory(start);
+    // Windows: the tray has no window, and a process in the background can't take the
+    // foreground from the browser, so a picker of its own opens behind it. One owned by a
+    // topmost window is topmost too: in front, though not focused until clicked. (macOS's
+    // panel floats above every window already.)
+    #[cfg(windows)]
+    if let Some(owner) = owner::Owner::new() {
+        return dialog.set_parent(&owner).pick_folder();
+    }
+    dialog.pick_folder()
+}
+
+#[cfg(windows)]
+mod owner {
+    use std::num::NonZeroIsize;
+    use std::ptr::{null, null_mut};
+
+    use tao::rwh_06::{
+        DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawWindowHandle,
+        Win32WindowHandle, WindowHandle,
+    };
+    use windows_sys::Win32::Foundation::{HWND, RECT};
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, GetForegroundWindow, GetWindowRect, WS_EX_TOOLWINDOW,
+        WS_EX_TOPMOST, WS_POPUP,
+    };
+
+    /// A hidden topmost window that owns one dialog and goes with it. It sits in the middle
+    /// of the window in front (the browser), where the dialog centres itself.
+    #[derive(Debug)]
+    pub(super) struct Owner(HWND);
+
+    impl Owner {
+        pub(super) fn new() -> Option<Owner> {
+            let (x, y) = middle_of_foreground().unwrap_or((0, 0));
+            // SAFETY: a system class (registered, with its own window procedure) and no
+            // parent, menu or creation data; null when it fails.
+            let hwnd = unsafe {
+                CreateWindowExW(
+                    WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                    windows_sys::w!("STATIC"),
+                    null(),
+                    WS_POPUP,
+                    x,
+                    y,
+                    0,
+                    0,
+                    null_mut(),
+                    null_mut(),
+                    null_mut(),
+                    null(),
+                )
+            };
+            if hwnd.is_null() {
+                tracing::debug!(
+                    "no window to own the folder picker: {}",
+                    std::io::Error::last_os_error()
+                );
+                return None;
+            }
+            Some(Owner(hwnd))
+        }
+    }
+
+    fn middle_of_foreground() -> Option<(i32, i32)> {
+        let mut r = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        // SAFETY: queries only; `r` outlives the call.
+        let found = unsafe {
+            let front = GetForegroundWindow();
+            !front.is_null() && GetWindowRect(front, &raw mut r) != 0
+        };
+        found.then(|| (r.left.midpoint(r.right), r.top.midpoint(r.bottom)))
+    }
+
+    impl Drop for Owner {
+        fn drop(&mut self) {
+            // SAFETY: the window this made, on the thread that made it, once.
+            unsafe { DestroyWindow(self.0) };
+        }
+    }
+
+    impl HasWindowHandle for Owner {
+        fn window_handle(&self) -> Result<WindowHandle<'_>, HandleError> {
+            let hwnd = NonZeroIsize::new(self.0 as isize).ok_or(HandleError::Unavailable)?;
+            let raw = RawWindowHandle::Win32(Win32WindowHandle::new(hwnd));
+            // SAFETY: the window lives as long as `self`.
+            Ok(unsafe { WindowHandle::borrow_raw(raw) })
+        }
+    }
+
+    impl HasDisplayHandle for Owner {
+        fn display_handle(&self) -> Result<DisplayHandle<'_>, HandleError> {
+            Ok(DisplayHandle::windows())
+        }
     }
 }
 

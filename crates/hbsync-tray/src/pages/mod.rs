@@ -36,6 +36,8 @@ enum Phase {
 struct Shared {
     identity: String,
     folder: Option<PathBuf>,
+    /// The OS's folder picker is open.
+    picking: bool,
     /// Asked to merge a folder with files in it.
     merge_asked: bool,
     error: Option<String>,
@@ -85,6 +87,7 @@ impl Pages {
             shared: Arc::new(Mutex::new(Shared {
                 identity: String::new(),
                 folder: None,
+                picking: false,
                 merge_asked: false,
                 error: None,
                 phase: Phase::Form,
@@ -359,22 +362,62 @@ mod tests {
         Ok(())
     }
 
-    /// Choosing the folder keeps the address typed; from a stale page while a login runs, it
-    /// does nothing.
+    /// Choosing the folder answers at once, the page saying where the picker is until it
+    /// closes, one picker at a time; it keeps the address typed. From a stale page while a
+    /// login runs, it does nothing.
     #[test]
     fn choosing_the_folder_keeps_the_address() -> R {
         let dir = tempfile::tempdir()?;
-        // No picker here: it answers nothing.
-        let send: Sender = Arc::new(|_| {});
+        // The pickers asked for, answered by hand.
+        let (asked_tx, asked) = mpsc::channel();
+        let asked_tx = Mutex::new(asked_tx);
+        let send: Sender = Arc::new(move |e| {
+            if let Event::PickFolder(reply) = e {
+                let _ = lock(&asked_tx).send(reply);
+            }
+        });
         let pages = Pages::start(Paths::under(&dir.path().join("home")), send)?;
         pages.prepare_setup("", None);
-        request(
+        let answer = request(
             &pages.url("setup/folder"),
             "POST",
             "identity=anna.example.com",
         )?;
+        assert!(
+            answer.contains(&format!("Location: {}", pages.url("setup"))),
+            "{answer}"
+        );
+        let reply = asked.recv_timeout(Duration::from_secs(10))?;
+        let page = request(&pages.url("setup"), "GET", "")?;
+        assert!(page.contains("the window that opened"), "{page}");
+        assert!(page.contains("http-equiv=refresh"), "{page}");
+        // A second click while it's open opens no second picker.
+        request(&pages.url("setup/folder"), "POST", "identity=bob")?;
+        assert!(asked.try_recv().is_err());
+
+        let closed = || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(10);
+            while lock(&pages.shared).picking {
+                assert!(std::time::Instant::now() < deadline, "still picking");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        };
+        let chosen = dir.path().join("Chosen");
+        reply.send(Some(chosen.clone()))?;
+        closed();
         let page = request(&pages.url("setup"), "GET", "")?;
         assert!(page.contains("value=\"anna.example.com\""), "{page}");
+        assert!(
+            page.contains(&*escape(&chosen.display().to_string())),
+            "{page}"
+        );
+        assert!(!page.contains("the window that opened"), "{page}");
+
+        // Closed without a choice: the folder stays.
+        request(&pages.url("setup/folder"), "POST", "")?;
+        drop(asked.recv_timeout(Duration::from_secs(10))?);
+        closed();
+        assert_eq!(lock(&pages.shared).folder.as_ref(), Some(&chosen));
 
         lock(&pages.shared).phase = Phase::Connecting;
         request(
