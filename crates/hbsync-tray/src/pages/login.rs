@@ -96,15 +96,14 @@ impl Server {
     /// identity's approval page (`Some`), or back to the form with what's wrong (`None`).
     pub(super) fn start_setup(&self, form: &HashMap<String, String>) -> Option<String> {
         let typed = form.get("identity").map_or("", |s| s.as_str());
-        let (picking, folder) = {
-            let s = lock(&self.pages.shared);
-            (s.picking, s.folder())
-        };
+        let s = lock(&self.pages.shared);
         // Continue in another tab while the picker is open: the folder isn't chosen yet (the
         // page says so).
-        if picking {
+        if s.picking {
             return None;
         }
+        let folder = s.folder();
+        drop(s);
         let planned = match (Config::load(&self.paths.config_file()), folder) {
             (Ok(config), Some(folder)) => setup::plan(
                 &config.unwrap_or_default(),
