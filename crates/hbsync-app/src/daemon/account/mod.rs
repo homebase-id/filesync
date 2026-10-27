@@ -708,7 +708,8 @@ mod tests {
             std::thread::spawn(move || {
                 let mut msgs = Vec::new();
                 let roots = [root];
-                account.ready_db(&roots, None, &stop, &requests, &mut msgs)?;
+                let start = super::run::Readying::Start(&roots);
+                account.ready_db(&paths, start, &stop, &requests, &mut msgs)?;
                 account.sync(
                     &paths,
                     &Config::default(),
@@ -777,35 +778,40 @@ mod tests {
             Ok(dir.flatten().filter(named).count())
         };
 
-        wait("the first sync", &synced)?;
-        let uploads = remote.faults().uploads;
-        damage()?;
-        sync_now()?;
-        wait("set aside and synced again", &|s, f| {
-            told(s) == 1 && synced(s, f)
-        })?;
-        assert_eq!(aside()?, 1, "kept");
-        hbsync_engine::root::SyncRoot::find(&db, &identity, &folder)?;
-        assert_eq!(
-            remote.faults().uploads,
-            uploads,
-            "adopted: nothing sent again"
-        );
-        assert_eq!(server.lock().map_err(|_| "poisoned")?.removed().count(), 0);
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            wait("the first sync", &synced)?;
+            let uploads = remote.faults().uploads;
+            damage()?;
+            sync_now()?;
+            wait("set aside and synced again", &|s, f| {
+                told(s) == 1 && synced(s, f)
+            })?;
+            assert_eq!(aside()?, 1, "kept");
+            hbsync_engine::root::SyncRoot::find(&db, &identity, &folder)?;
+            assert_eq!(
+                remote.faults().uploads,
+                uploads,
+                "adopted: nothing sent again"
+            );
+            assert_eq!(server.lock().map_err(|_| "poisoned")?.removed().count(), 0);
 
-        damage()?;
-        sync_now()?;
-        wait("failing", &|_, f| {
-            f.state == State::Failing && f.error.as_deref().is_some_and(|e| e.contains("malformed"))
-        })?;
-        std::thread::sleep(Duration::from_millis(300));
-        let (status, _) = account.status();
-        assert_eq!((told(&status), aside()?), (1, 1), "set aside once a run");
-
+            damage()?;
+            sync_now()?;
+            wait("failing", &|_, f| {
+                f.state == State::Failing
+                    && f.error.as_deref().is_some_and(|e| e.contains("malformed"))
+            })?;
+            std::thread::sleep(Duration::from_millis(300));
+            let (status, _) = account.status();
+            assert_eq!((told(&status), aside()?), (1, 1), "set aside once a run");
+            Ok(())
+        };
+        let checked = checks();
+        // Stopped whatever the checks found: nothing runs on into the other tests.
         stop.store(true, Ordering::SeqCst);
         account.wake();
         running.join().map_err(|_| "panicked")??;
-        Ok(())
+        checked
     }
 
     /// The account's notes are on its status, its folders' untouched: a row of the drive that

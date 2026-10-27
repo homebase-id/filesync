@@ -205,8 +205,13 @@ fn add_locked(
     let config = held.load()?.unwrap_or_default();
     check(&config, identity, path, role, home().as_deref())?;
     let db = paths.account_db(identity);
+    // In the DB's turn until the config lists it: a DB set aside meanwhile by its running
+    // account ([`heal_account`]) is set aside before it is written here, or after the config
+    // lists it, which the account reads then.
+    let turn = turn(&db);
+    let _turn = lock(&turn);
     let set = match ready {
-        true => ready_account(&db, identity, &config.roots)?,
+        true => ready_in_turn(&db, identity, &config.roots, None)?,
         false => None,
     };
     let top = role.map_or(NodeId::ROOT, Role::node);
@@ -240,32 +245,53 @@ pub fn ready_account(
     identity: &Identity,
     roots: &[Root],
 ) -> Result<Option<SetAside>, RootError> {
-    readied(db, identity, roots, None)
+    let turn = turn(db);
+    let _turn = lock(&turn);
+    ready_in_turn(db, identity, roots, None)
 }
 
-/// [`ready_account`] for a DB found unusable (`why`) while its account ran, which nothing has
-/// open any more: set aside unchecked ([`SyncRoot::ready`]), its folders among `roots` set up
-/// again. What was set aside.
+/// [`ready_account`] at `paths` for a DB its account found unusable as it ran, which nothing
+/// of it has open any more: checked as at a start, or with `found`, set aside unchecked
+/// ([`SyncRoot::ready`]). Its `folders` are set up again in a new one with those the config
+/// lists for it, read in the DB's turn (one being added meanwhile is in it). What was set
+/// aside, if anything.
 pub(crate) fn heal_account(
-    db: &Path,
+    paths: &Paths,
     identity: &Identity,
-    roots: &[Root],
-    why: Unusable,
+    folders: &[Root],
+    found: Option<Unusable>,
 ) -> Result<Option<SetAside>, RootError> {
-    readied(db, identity, roots, Some(why))
+    let db = paths.account_db(identity);
+    let turn = turn(&db);
+    let _turn = lock(&turn);
+    let mut roots = folders.to_vec();
+    match Config::load(&paths.config_file()) {
+        Ok(config) => {
+            for root in config.unwrap_or_default().roots {
+                if !roots.iter().any(|r| r.folder == root.folder) {
+                    roots.push(root);
+                }
+            }
+        }
+        Err(e) => tracing::warn!("can't read the config: {e}"),
+    }
+    ready_in_turn(&db, identity, &roots, found)
 }
 
-/// [`ready_account`], or [`heal_account`] with `found`.
-fn readied(
+/// The turn of the DB at `db`, one at a time in this process: readying it or setting it aside,
+/// and setting a folder up in it ([`add`]). Other accounts' go on.
+fn turn(db: &Path) -> Arc<Mutex<()>> {
+    static TURNS: Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
+    Arc::clone(lock(&TURNS).entry(db.to_path_buf()).or_default())
+}
+
+/// [`ready_account`], or [`heal_account`] with `found`, in the DB's turn.
+fn ready_in_turn(
     db: &Path,
     identity: &Identity,
     roots: &[Root],
     found: Option<Unusable>,
 ) -> Result<Option<SetAside>, RootError> {
-    // One at a time per DB; other accounts' go on.
-    static TURNS: Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
-    let turn = Arc::clone(lock(&TURNS).entry(db.to_path_buf()).or_default());
-    let _turn = lock(&turn);
     let folders: Vec<(&Path, NodeId)> = roots
         .iter()
         .filter(|r| r.identity == *identity)

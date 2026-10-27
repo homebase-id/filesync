@@ -263,9 +263,12 @@ pub fn check_state(
         Err(RootError::NoMarker(_))
             if !existing && (listed() || SyncRoot::knows_path(&db, identity, folder)?) =>
         {
+            // Set aside here all the same: told with the refusal.
+            let told = set_aside.map(|why| format!("{} ", crate::words::set_aside(why)));
             return Err(Refusal::No(format!(
-                "{} was synced here, but its .hbsync is gone: if it is on a disk, plug it in; \
+                "{}{} was synced here, but its .hbsync is gone: if it is on a disk, plug it in; \
                  to start it over, set it up again merging its files",
+                told.unwrap_or_default(),
                 folder.display()
             ))
             .into());

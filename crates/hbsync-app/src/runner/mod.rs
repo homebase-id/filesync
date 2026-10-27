@@ -125,6 +125,9 @@ pub struct RunnerConfig {
     pub tweak: Option<fn(&mut EngineConfig)>,
     /// Raised when its status may have changed (the daemon pushes it to the tray).
     pub(crate) changed: Arc<Wakeup>,
+    /// Its account sets the state DB aside when it can't be used ([`RunnerError::unusable`]):
+    /// the runner ends for that, rather than backing off as after any failed sync.
+    pub(crate) end_if_unusable: bool,
 }
 
 impl RunnerConfig {
@@ -142,6 +145,7 @@ impl RunnerConfig {
             put_back_again: hbsync_engine::gone::ASK_AGAIN,
             tweak: None,
             changed: Arc::default(),
+            end_if_unusable: false,
         }
     }
 }
@@ -617,7 +621,7 @@ impl Runner {
                         }
                     }
                     // A DB that can't be used: its account sets it aside.
-                    Some(Err(e)) if e.unusable().is_some() => return Err(e.into()),
+                    Some(Err(e)) if self.ends_for(e.unusable()) => return Err(e.into()),
                     // Kept (a busy DB, say): the folder backs off, as after a failed sync,
                     // instead of starting over, and doesn't take them again before then.
                     Some(Err(e)) => {
@@ -695,6 +699,7 @@ impl Runner {
                                     schedule.want();
                                 }
                             }
+                            Err(e) if self.ends_for(e.unusable()) => return Err(e.into()),
                             // Tried again at the next look.
                             Err(e) => tracing::warn!("scanning the folder failed: {e}"),
                         }
@@ -859,7 +864,7 @@ impl Runner {
                     };
                     schedule.synced(Instant::now(), outcome);
                     match self.record(&mut p.engine, &report, began.elapsed()) {
-                        Err(e) if e.unusable().is_some() => return Err(e.into()),
+                        Err(e) if self.ends_for(e.unusable()) => return Err(e.into()),
                         Err(e) => {
                             let class = e.class();
                             self.backs_off(&mut schedule, "recording the sync", class, &e, None);
@@ -875,7 +880,7 @@ impl Runner {
                         tracing::warn!("telling what the failed sync did failed: {e}");
                     }
                     // A DB that can't be used: its account sets it aside.
-                    if e.unusable().is_some() {
+                    if self.ends_for(e.unusable()) {
                         return Err(e.into());
                     }
                     self.backs_off(&mut schedule, "the sync", e.class(), &e, e.retry_after());
@@ -885,6 +890,12 @@ impl Runner {
                 return Ok(());
             }
         }
+    }
+
+    /// Whether it ends for an error that means the DB can't be used (`unusable`): when its
+    /// account sets the DB aside for that ([`RunnerConfig::end_if_unusable`]).
+    fn ends_for(&self, unusable: Option<Unusable>) -> bool {
+        self.cfg.end_if_unusable && unusable.is_some()
     }
 
     /// Takes `command` (but a stop).

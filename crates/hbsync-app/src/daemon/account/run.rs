@@ -26,6 +26,15 @@ use crate::sync::{lock, wait_for};
 use crate::words;
 use crate::{Config, CredentialError, CredentialStore, Location, Paths, Root};
 
+/// How an account readies its state DB ([`Account::ready_db`]).
+pub(super) enum Readying<'a> {
+    /// As it starts ([`ready_account`]), its folders among these (the config's).
+    Start(&'a [Root]),
+    /// As it was found unusable while the account ran ([`heal_account`], its folders those it
+    /// syncs): checked, or with why, set aside unchecked.
+    Heal(Option<Unusable>),
+}
+
 /// While what only the user can fix keeps an account from starting, how often it looks again.
 const NEEDS_USER_AGAIN: Duration = Duration::from_secs(3600);
 
@@ -89,7 +98,11 @@ impl Account {
         let mut msgs = Vec::new();
         // Its state DB first, before any request. The config's folders, as read when the
         // account was made: they all are in it.
-        if !self.ready_db(&config.roots, None, stop, requests, &mut msgs)? {
+        let start = Readying::Start(&config.roots);
+        if self
+            .ready_db(paths, start, stop, requests, &mut msgs)?
+            .is_none()
+        {
             return Ok(());
         }
         let Some(creds) = self.credentials(paths, stop, requests, &mut msgs)? else {
@@ -118,54 +131,62 @@ impl Account {
         })
     }
 
-    /// Readies its state DB ([`ready_account`]), or sets it aside for `found`, as it was found
-    /// while the account ran ([`heal_account`]): one that can't be used at all (from before 0.7,
-    /// damaged) is set aside and its folders among `roots` set up again, told once. One only
-    /// the user can set right (a newer version's) is shown and waited out, asking nothing, the
-    /// daemon and the other accounts going on; so is any error setting one found aside (not a
-    /// daemon started again and again). Whether it is ready: not when it stops first.
+    /// Readies its state DB as `readying` says: one that can't be used at all (from before 0.7,
+    /// damaged) is set aside and its folders set up again, told once. One only the user can
+    /// set right (a newer version's) is shown and waited out, asking nothing, the daemon and
+    /// the other accounts going on; so is any error while healing, tried again after a pause,
+    /// checked (not the daemon started again and again). Whether it set one aside; `None` when
+    /// it stops first.
     pub(super) fn ready_db(
         &self,
-        roots: &[Root],
-        mut found: Option<Unusable>,
+        paths: &Paths,
+        mut readying: Readying<'_>,
         stop: &AtomicBool,
         requests: &Receiver<Msg>,
         msgs: &mut Vec<Msg>,
-    ) -> Result<bool, DaemonError> {
-        let healing = found.is_some();
+    ) -> Result<Option<bool>, DaemonError> {
+        let healing = matches!(readying, Readying::Heal(_));
+        let mut backoff = Backoff::new();
         loop {
-            // Set aside unchecked once: what is there at a later try is checked.
-            let readied = match found.take() {
-                Some(why) => heal_account(&self.db, &self.identity, roots, why),
-                None => ready_account(&self.db, &self.identity, roots),
+            let readied = match &mut readying {
+                Readying::Start(roots) => ready_account(&self.db, &self.identity, roots),
+                // Set aside unchecked once: what is there at a later try is checked.
+                Readying::Heal(found) => {
+                    heal_account(paths, &self.identity, &self.folders(), found.take())
+                }
             };
-            match readied {
+            let e = match readied {
                 Ok(set) => {
                     // Ready: the answers may read it now.
                     self.ready.store(true, Ordering::SeqCst);
-                    if let Some(set) = set {
+                    if let Some(set) = &set {
                         self.note(vec![words::set_aside(set.why)]);
                     }
-                    return Ok(true);
+                    return Ok(Some(set.is_some()));
                 }
                 Err(e) if !healing && e.class() != ErrorClass::NeedsUser => {
                     return Err(RunnerError::Folder(e).into());
                 }
-                Err(e) => {
-                    tracing::error!("{e}: {} waits for it to be set right", self.identity);
-                    self.show_waiting(State::Failing, e.to_string());
-                    if self.wait(NEEDS_USER_AGAIN, stop, requests, msgs) {
-                        return Ok(false);
-                    }
-                }
+                Err(e) => e,
+            };
+            let wait_for = match healing {
+                true => backoff.after(e.class(), None),
+                false => NEEDS_USER_AGAIN,
+            };
+            tracing::error!("{e}: {} waits for it to be set right", self.identity);
+            self.show_waiting(State::Failing, e.to_string());
+            if self.wait(wait_for, stop, requests, msgs) {
+                return Ok(None);
             }
         }
     }
 
     /// Syncs its folders on the account's parts, which `open` makes from its DB, until it
-    /// should stop. A DB found unusable as it syncs (a runner ended for it) is set aside once a
-    /// run, every folder stopped and every part closed first, and its folders set up again in
-    /// a new one; found so again, the runners only start again after a pause.
+    /// should stop. A DB found unusable as it syncs (a runner ended for it) is looked at with
+    /// every folder stopped and every part closed: first checked, as at a start (a passing
+    /// fault isn't worth every folder set up again: hashing their files, reading the whole
+    /// drive); found so again, set aside unchecked (an index's damage, which the check doesn't
+    /// see). Once set aside, not again in this run: found so again, the runners back off.
     pub(super) fn sync(
         self: &Arc<Self>,
         paths: &Paths,
@@ -175,22 +196,28 @@ impl Account {
         msgs: &mut Vec<Msg>,
         open: impl Fn(&Path) -> Result<AccountParts, RunnerError>,
     ) -> Result<(), DaemonError> {
-        let mut healed = false;
+        // Found unusable and checked; set aside.
+        let (mut checked, mut healed) = (false, false);
+        // After a heal, the config as it is then: the runners start with its settings.
+        let mut now: Option<Config> = None;
         loop {
             let parts = open(&self.db)?;
+            let config = now.as_ref().unwrap_or(config);
             let found = self.serve(paths, config, requests, stop, msgs, parts, !healed)?;
             let Some(why) = found.filter(|_| !self.stopping(stop)) else {
                 return Ok(());
             };
-            healed = true;
             // Nothing else has it open now: the answers' connection is closed, and not
             // opened again until it is ready.
             self.ready.store(false, Ordering::SeqCst);
             *lock(&self.reader) = None;
-            let roots = self.folders();
-            if !self.ready_db(&roots, Some(why), stop, requests, msgs)? {
-                return Ok(());
+            let force = checked.then_some(why);
+            checked = true;
+            match self.ready_db(paths, Readying::Heal(force), stop, requests, msgs)? {
+                Some(set) => healed = set,
+                None => return Ok(()),
             }
+            now = Self::config(paths);
         }
     }
 
@@ -258,7 +285,7 @@ impl Account {
             let mut shown = lock(&self.shown);
             let roots = shown.waiting.take().map(|w| w.roots).unwrap_or_default();
             for root in roots {
-                match self.start(&drive, config, &root, shown.paused()) {
+                match self.start(&drive, config, &root, shown.paused(), can_heal) {
                     Ok(r) => shown.runners.push(r),
                     Err(e) => {
                         result = Err(e.into());
@@ -301,12 +328,12 @@ impl Account {
                         let _ = lock(&self.shown).send(&self.identity, &Command::Woke);
                     }
                     Msg::Request(Request::Deleted(control)) => keeper.request(control),
-                    // Started below, once no runner of the folder is left (one removed a moment
-                    // ago may still be finishing an operation).
                     // While its DB is set aside, its folders wait ([`Account::add_folder`]).
                     Msg::Request(Request::AddFolder(root)) if heal.is_some() => {
                         self.add_folder(&root);
                     }
+                    // Started below, once no runner of the folder is left (one removed a moment
+                    // ago may still be finishing an operation).
                     Msg::Request(Request::AddFolder(root)) => {
                         let synced = lock(&self.shown)
                             .shown()
@@ -362,17 +389,15 @@ impl Account {
                     .filter_map(|r| r.ended(ending))
                     .collect();
                 if let Some(&why) = unusable.first().filter(|_| can_heal) {
-                    // Its folders wait while the DB is set aside, as at the account's start:
-                    // they show starting, and one added or removed meanwhile changes them.
-                    tracing::error!(
-                        "{}: its state DB can't be used: setting it aside",
-                        self.identity
-                    );
+                    // Its folders wait while the DB is looked at ([`Account::sync`]), as at the
+                    // account's start: they show starting, and one added or removed meanwhile
+                    // changes them.
+                    tracing::error!("{}: its state DB can't be used: stopping", self.identity);
                     let roots = shown.shown().map(|r| r.root.clone());
                     shown.waiting = Some(Waiting {
                         roots: roots.chain(adding.drain(..)).collect(),
                         state: State::Starting,
-                        error: None,
+                        error: Some("its state DB can't be used: it is being checked".into()),
                     });
                     heal = Some(why);
                     drop(shown);
@@ -405,7 +430,7 @@ impl Account {
                 let paused = lock(&self.shown).paused();
                 let start = |root: &Root| {
                     let config = config.as_ref()?;
-                    Some(self.start(&drive, config, root, paused))
+                    Some(self.start(&drive, config, root, paused, can_heal))
                 };
                 let restarted: Vec<_> = due.iter().map(start).collect();
                 let started: Vec<_> = ready.iter().map(start).collect();
@@ -487,13 +512,14 @@ impl Account {
     }
 
     /// Starts syncing the folder `root` on the account's `drive`, with `config`'s settings,
-    /// paused when `paused`.
+    /// paused when `paused`; ending when the DB can't be used if the account `heals` it.
     fn start(
         &self,
         drive: &Arc<Drive>,
         config: &Config,
         root: &Root,
         paused: Option<Pause>,
+        heals: bool,
     ) -> Result<Running, RunnerError> {
         let mut cfg = RunnerConfig::new(
             &root.folder,
@@ -507,6 +533,7 @@ impl Account {
         let role = listed.map_or(root.role, |r| r.role);
         cfg.role = role;
         cfg.paused = paused;
+        cfg.end_if_unusable = heals;
         cfg.changed = Arc::clone(&self.changed);
         let done = Arc::new(AtomicBool::new(false));
         let (ending, tell) = (Arc::clone(&done), self.requests.clone());

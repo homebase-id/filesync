@@ -339,6 +339,9 @@ fn setup_after_a_set_aside_refuses_an_empty_mount_point() -> R {
             said.as_ref().is_some_and(|e| e.contains("plug it in")),
             "{heal_first}: {refused:?}"
         );
+        // Set aside by setup itself: told with the refusal.
+        let told = said.is_some_and(|e| e.contains("set aside"));
+        assert_eq!(told, !heal_first, "{refused:?}");
         assert_eq!(set_aside(&db)?.len(), 1, "{heal_first}");
         assert!(files(&root)?.is_empty(), "{heal_first}: nothing made there");
         assert!(!root.join(".hbsync").exists(), "{heal_first}: not set up");

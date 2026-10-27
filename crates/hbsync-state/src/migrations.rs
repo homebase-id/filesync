@@ -542,13 +542,30 @@ fn sibling_hash_in_sql(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-/// The error `e` of the migration to version `to`: SQLite's plain error (`no such table`,
-/// `no such column`, `duplicate column name`) means the DB lacks a part of its version's
-/// schema, or has one it shouldn't: damaged ([`StateError::Damaged`]), as the schema check
-/// finds a DB of this version that lacks one. Any other (busy, the disk full, I/O) as it is.
+/// The error `e` of the migration to version `to`: SQLite saying a table, column, index or
+/// trigger isn't there (`no such table`, `no such column`), or is there already (`duplicate
+/// column name`, `already exists`), means the DB lacks a part of its version's schema or has
+/// one it shouldn't: damaged ([`StateError::Damaged`]), as the schema check finds a DB of this
+/// version that lacks one. Any other error as it is: busy, the disk full, I/O, or a bug (a
+/// migration's own SQL, which `the_schema_is_what_an_upgrade_makes` runs).
 fn lacking(e: rusqlite::Error, to: u32) -> StateError {
-    match &e {
-        rusqlite::Error::SqliteFailure(f, _) if f.extended_code == rusqlite::ffi::SQLITE_ERROR => {
+    // A statement's error comes with its place in the SQL (`SqlInputError`) or without.
+    let said = match &e {
+        rusqlite::Error::SqliteFailure(f, said)
+            if f.extended_code == rusqlite::ffi::SQLITE_ERROR =>
+        {
+            said.as_deref()
+        }
+        rusqlite::Error::SqlInputError { error, msg, .. }
+            if error.extended_code == rusqlite::ffi::SQLITE_ERROR =>
+        {
+            Some(msg.as_str())
+        }
+        _ => None,
+    };
+    let schema = ["no such ", "duplicate column name", "already exists"];
+    match said {
+        Some(said) if schema.iter().any(|s| said.contains(s)) => {
             StateError::Damaged(format!("its upgrade to version {to} failed: {e}"))
         }
         _ => e.into(),
@@ -661,17 +678,26 @@ mod tests {
         check_schema(&conn)
     }
 
-    /// One of version 13 lacking a table a migration changes is damaged (set aside as the
-    /// account starts), not an error of the upgrade; nothing of it is changed.
+    /// One of version 13 lacking a table or a column a migration reads, or with one a
+    /// migration adds, is damaged (set aside as the account starts), not an error of the
+    /// upgrade; nothing of it is changed.
     #[test]
-    fn a_version_13_db_lacking_a_table_is_damaged() -> Result<()> {
-        for table in ["remote", "dirty"] {
+    fn a_version_13_db_lacking_a_part_is_damaged() -> Result<()> {
+        let spoiled = [
+            "DROP TABLE remote",
+            "DROP TABLE dirty",
+            // Read by migration 24 (`INSERT … SELECT`: an error with its place in the SQL).
+            "ALTER TABLE local DROP COLUMN tags",
+            "ALTER TABLE base ADD COLUMN name_key INTEGER",
+            "CREATE TABLE refused (id INTEGER)",
+        ];
+        for sql in spoiled {
             let mut conn = version_13()?;
-            conn.execute_batch(&format!("DROP TABLE {table}"))?;
+            conn.execute_batch(sql)?;
             let e = apply(&mut conn).expect_err("upgraded");
-            assert!(matches!(e, StateError::Damaged(_)), "{table}: {e:?}");
+            assert!(matches!(e, StateError::Damaged(_)), "{sql}: {e:?}");
             assert_eq!(e.unusable(), Some(crate::Unusable::Corrupt));
-            assert_eq!(user_version(&conn)?, 13, "{table}");
+            assert_eq!(user_version(&conn)?, 13, "{sql}");
         }
         Ok(())
     }
