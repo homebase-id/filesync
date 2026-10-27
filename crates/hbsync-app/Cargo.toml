@@ -53,8 +53,9 @@ zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] 
 # The secret service's, already: systemd's scopes (`unit`).
 zbus = "5.19"
 # Not used here: pins zbus's thread pool (the tray's too) for the whole workspace. 1.7.0 never ends
-# an idle pool thread, which then wakes twice a second; 1.6.2 ends it after 0.5 s idle (a later D-Bus
-# call starts one again: tens of µs). Unpin for a release that ends them again.
+# an idle pool thread, which then wakes twice a second (smol-rs/blocking#83); 1.6.2 ends it after
+# 0.5 s idle (a later D-Bus connection starts one again: tens of µs). It holds back a zbus or
+# async-process that needs 1.7: unpin, and lift deny.toml's ban, once #83 is fixed.
 blocking = "=1.6.2"
 
 [features]
