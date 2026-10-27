@@ -53,6 +53,9 @@ pub type Sender = Arc<dyn Fn(Event) + Send + Sync>;
 const PROGRAM: &str = autostart::TRAY;
 /// The argument a tray restarting into its update passes the new one.
 const RESTARTED: &str = "--restarted";
+/// And the children it was waiting for (`--reap=<pid>,<pid>`): the new one waits for them.
+#[cfg(unix)]
+const REAP: &str = "--reap=";
 /// A notification of one kind at most this often.
 const NOTIFY_EVERY: Duration = Duration::from_secs(60);
 
@@ -88,6 +91,16 @@ fn main() -> ExitCode {
         }
     };
     tracing::info!("{PROGRAM} {} started", hbsync_app::VERSION);
+    #[cfg(unix)]
+    hbsync_app::reap::adopt(
+        std::env::args()
+            .filter_map(|a| a.strip_prefix(REAP).map(str::to_owned))
+            .flat_map(|pids| {
+                pids.split(',')
+                    .filter_map(|p| p.parse().ok())
+                    .collect::<Vec<u32>>()
+            }),
+    );
     // Started from a terminal, say: listed as itself, not as the terminal.
     #[cfg(target_os = "linux")]
     hbsync_app::unit::move_to_scope(std::process::id());
@@ -113,7 +126,14 @@ fn main() -> ExitCode {
             tracing::info!("restarting into {}", exe.display());
             drop(_flush);
             let e = std::os::unix::process::CommandExt::exec(
-                std::process::Command::new(&exe).arg(RESTARTED),
+                std::process::Command::new(&exe).arg(RESTARTED).arg(format!(
+                    "{REAP}{}",
+                    hbsync_app::reap::waiting()
+                        .iter()
+                        .map(u32::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )),
             );
             eprintln!("{PROGRAM}: can't restart into {}: {e}", exe.display());
             ExitCode::FAILURE

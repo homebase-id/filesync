@@ -84,36 +84,40 @@ fn keep_std_handles_from_children() {
 }
 
 /// Waits until the daemon answers, or `child` (when we started it) exits. A child still running
-/// is let go ([`crate::reap`]): waited for when it exits.
+/// then is let go ([`crate::reap`]).
 fn wait_until_running(paths: &Paths, mut child: Option<std::process::Child>) -> Result<()> {
-    let result = wait_for(paths, &mut child);
-    if let Some(child) = child {
-        crate::reap(child);
-    }
-    result
-}
-
-fn wait_for(paths: &Paths, child: &mut Option<std::process::Child>) -> Result<()> {
     let until = Instant::now() + Duration::from_secs(15);
-    while Instant::now() < until {
-        if running(paths)? {
-            return Ok(());
+    let result = loop {
+        match running(paths) {
+            Ok(true) => break Ok(()),
+            Ok(false) => {}
+            Err(e) => break Err(e.into()),
         }
-        if let Some(status) = child.as_mut().map(|c| c.try_wait()).transpose()?.flatten() {
-            *child = None;
-            return Err(format!(
-                "the daemon exited ({status}); its log is in {}",
+        match child.as_mut().map(|c| c.try_wait()).transpose() {
+            // Waited for already: nothing left to reap.
+            Ok(Some(Some(status))) => {
+                return Err(format!(
+                    "the daemon exited ({status}); its log is in {}",
+                    paths.logs.display()
+                )
+                .into());
+            }
+            Ok(_) => {}
+            Err(e) => break Err(e.into()),
+        }
+        if Instant::now() >= until {
+            break Err(format!(
+                "the daemon didn't answer; its log is in {}",
                 paths.logs.display()
             )
             .into());
         }
         std::thread::sleep(Duration::from_millis(100));
+    };
+    if let Some(child) = child {
+        crate::reap(child);
     }
-    Err(format!(
-        "the daemon didn't answer; its log is in {}",
-        paths.logs.display()
-    )
-    .into())
+    result
 }
 
 /// Stops the daemon and waits until it's gone. False when it wasn't running.

@@ -39,7 +39,10 @@ fn show_selected(path: &Path) -> std::io::Result<()> {
 fn show_selected(path: &Path) -> std::io::Result<()> {
     let mut arg = std::ffi::OsString::from("/select,");
     arg.push(path);
-    Command::new("explorer").arg(arg).spawn().map(drop)
+    Command::new("explorer")
+        .arg(arg)
+        .spawn()
+        .map(hbsync_app::reap)
 }
 
 /// The file manager interface Dolphin, Nautilus and others implement.
