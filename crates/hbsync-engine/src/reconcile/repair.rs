@@ -256,6 +256,7 @@ impl Reconciler<'_> {
                 any = true;
                 self.taken.remove(&node);
                 if self.input.dirty.contains(&node) {
+                    self.untaken.entry(folder).or_default().push(node);
                     self.plan.conflicts.retain(|c| c.node() != node);
                     self.plan.delete_waits.retain(|n| *n != node);
                     self.deferred.remove(&node);

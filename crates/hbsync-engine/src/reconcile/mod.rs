@@ -140,6 +140,10 @@ struct Reconciler<'a> {
     adopted: HashSet<NodeId>,
     /// Remote nodes a folder's removal takes along ([`merge::taken_along`]).
     taken: HashSet<NodeId>,
+    /// The removed folders this plan keeps, each with the dirty nodes its removal took along
+    /// that are merged again as live for it ([`Reconciler::untake_kept`]): they wait with it
+    /// when it waits ([`Reconciler::places_across_pages`]).
+    untaken: BTreeMap<NodeId, Vec<NodeId>>,
     /// What would take a name what waits holds: waits as a file not hashed yet does
     /// ([`Waits::name_takers`]).
     name_takers: &'a BTreeSet<NodeId>,
@@ -193,6 +197,7 @@ impl<'a> Reconciler<'a> {
             deferred: BTreeSet::new(),
             adopted: HashSet::new(),
             taken,
+            untaken: BTreeMap::new(),
             name_takers: &waits.name_takers,
             waits: &waits.waits,
             going: &waits.going,

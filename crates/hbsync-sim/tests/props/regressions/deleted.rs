@@ -1755,6 +1755,69 @@ fn regression_what_a_folder_waiting_for_a_folders_page_deletes_waits_with_it() {
     assert_eq!(end(Some(1)), whole, "in pages of one");
 }
 
+/// Folder `a (conflict 1)` holds folder `a` and in it file `a`. Another device deletes the
+/// top folder and stops after its folder `a`: the file stays live, taken along. Before it
+/// syncs, c0 renames that folder `b`, tags the file and adds a file to the top folder: the
+/// rename keeps the folders, and with them what their removal took along, the file with its
+/// tag. In pages of one, `b`'s restore waited for its parent's page (placed into a folder
+/// another page plans), while the file, planned in `b`'s page, went with the removal: into
+/// Recently deleted apart from its folder, its tag lost. Now it waits with `b` and is planned
+/// with it, as in one page (seed cece07fa).
+#[test]
+fn regression_what_a_waiting_folders_removal_took_along_waits_with_it() {
+    use Action::*;
+    let acts = [
+        (1, CreateFile { parent: 0, name: 0 }, false),
+        (0, CreateFolder { parent: 0, name: 0 }, false),
+        (0, Purge, true),
+        (1, CreateFolder { parent: 2, name: 0 }, false),
+        (
+            1,
+            Move {
+                node: 0,
+                parent: 7,
+                name: 0,
+            },
+            false,
+        ),
+        (0, Edit { file: 0 }, true),
+        (0, DeleteStopped { pick: 8, done: 4 }, false),
+        (
+            0,
+            Move {
+                node: 11,
+                parent: 3,
+                name: 1,
+            },
+            false,
+        ),
+        (0, Tag { node: 15, tag: 12 }, false),
+        (0, Purge, false),
+        (0, CreateFile { parent: 0, name: 0 }, false),
+    ];
+    let end = |pages: Option<usize>| {
+        let mut sim = Sim::new(3).without_ignore_rules();
+        if let Some(size) = pages {
+            sim = sim.with_small_pages(size);
+        }
+        for (client, action, sync) in acts {
+            sim.run(&[Event::Act { client, action }]);
+            if sync {
+                assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
+            }
+        }
+        assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
+        if let Err(e) = sim.check() {
+            panic!("pages {pages:?}: {e}");
+        }
+        let tags = sim.server_tags("a (conflict 1)/b/a");
+        (sim.server_paths(), sim.removed_files_apart(), tags)
+    };
+    let whole = end(None);
+    assert_eq!(whole.2, Some(vec!["Red:6".to_string()]), "{whole:?}");
+    assert_eq!(end(Some(1)), whole, "in pages of one");
+}
+
 /// c2 makes d/c.txt; the phone deletes d and stops after the folder (c.txt live, taken along),
 /// then edits c.txt there: a live child, which keeps d (§6.3). c1 ignores everything named d
 /// (§10): what is in d isn't its. It planned c.txt as an orphan (d in Recently deleted, at a

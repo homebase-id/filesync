@@ -2645,3 +2645,61 @@ fn what_a_removal_took_along_waits_for_its_folder_in_another_page() {
     let plan = w.plan();
     assert!(!plan.deferred.contains(&y), "{plan:#?}");
 }
+
+/// Another device removed `p` and stopped after `d` in it: `y` in `d` is taken along, live.
+/// Here `d` is renamed (it comes back, into `p`) and `y` tagged, in a page with them both
+/// but not `p`, which another page plans (a piece of `p`'s too big for one). `d`'s restore
+/// waits for `p`'s page (it goes into a folder the drive doesn't hold yet), and so does `y`,
+/// which stays only if `d` does: all three planned together next, as in one page. Before, `y`
+/// went with the removal (into Recently deleted apart from its folder, its tag lost) while
+/// `d` waited, and came back after (§6.5).
+#[test]
+fn what_a_removal_took_along_waits_with_its_folder_placed_with_another_page() {
+    let [p, d, y] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.input.remote_complete = true;
+    w.synced(p, folder(ROOT, "p"))
+        .synced(d, folder(p, "d"))
+        .synced(y, file(d, "y", "y"));
+    w.remote(p, None).remote(d, None);
+    for (n, at, state) in [(p, 100, folder(ROOT, "p")), (d, 101, folder(p, "d"))] {
+        w.input
+            .removed
+            .insert(n, hbsync_engine::reconcile::Removed { at, state });
+    }
+    w.input.changed_at.insert(y, 10);
+    w.local(d, Some(folder(p, "e")));
+    let mut tagged = file(d, "y", "y");
+    tagged.tags = Tags::new([Tag::new("Red", 6)]);
+    w.local(y, Some(tagged));
+    // Planned whole: `p` and `d` come back, and `y` with them, tagged.
+    let plan = w.plan();
+    for folder in [p, d] {
+        assert!(
+            plan.ops
+                .iter()
+                .any(|op| matches!(op, Op::RemoteCreate { node, .. } if *node == folder)),
+            "{:#?}",
+            plan.ops
+        );
+    }
+    assert!(
+        plan.ops
+            .iter()
+            .all(|op| op.node() != y || matches!(op, Op::RemoteTags { .. })),
+        "{:#?}",
+        plan.ops
+    );
+    // A piece with `d` and `y`, without `p`: they wait for `p`, nothing done.
+    w.input.dirty.remove(&p);
+    w.input.dirty_elsewhere.insert(p);
+    w.input.going_above.insert(p);
+    w.opts.piece = true;
+    let plan = w.plan();
+    assert!(plan.ops.is_empty(), "{:#?}", plan.ops);
+    let mut together = vec![p, d, y];
+    together.sort();
+    assert_eq!(plan.waits_together, [together], "{plan:#?}");
+}
