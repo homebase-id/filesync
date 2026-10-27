@@ -83,41 +83,36 @@ fn keep_std_handles_from_children() {
     }
 }
 
-/// Waits until the daemon answers, or `child` (when we started it) exits. A child still running
-/// then is let go ([`crate::reap`]).
+/// Waits until the daemon answers, or `child` (when we started it) exits, then lets the child go
+/// ([`crate::reap`]; one already waited for returns at once).
 fn wait_until_running(paths: &Paths, mut child: Option<std::process::Child>) -> Result<()> {
+    let result = answers(paths, child.as_mut());
+    if let Some(child) = child {
+        crate::reap(child);
+    }
+    result
+}
+
+fn answers(paths: &Paths, mut child: Option<&mut std::process::Child>) -> Result<()> {
     let until = Instant::now() + Duration::from_secs(15);
-    let result = loop {
-        match running(paths) {
-            Ok(true) => break Ok(()),
-            Ok(false) => {}
-            Err(e) => break Err(e.into()),
+    while Instant::now() < until {
+        if running(paths)? {
+            return Ok(());
         }
-        match child.as_mut().map(|c| c.try_wait()).transpose() {
-            // Waited for already: nothing left to reap.
-            Ok(Some(Some(status))) => {
-                return Err(format!(
-                    "the daemon exited ({status}); its log is in {}",
-                    paths.logs.display()
-                )
-                .into());
-            }
-            Ok(_) => {}
-            Err(e) => break Err(e.into()),
-        }
-        if Instant::now() >= until {
-            break Err(format!(
-                "the daemon didn't answer; its log is in {}",
+        if let Some(status) = child.as_mut().map(|c| c.try_wait()).transpose()?.flatten() {
+            return Err(format!(
+                "the daemon exited ({status}); its log is in {}",
                 paths.logs.display()
             )
             .into());
         }
         std::thread::sleep(Duration::from_millis(100));
-    };
-    if let Some(child) = child {
-        crate::reap(child);
     }
-    result
+    Err(format!(
+        "the daemon didn't answer; its log is in {}",
+        paths.logs.display()
+    )
+    .into())
 }
 
 /// Stops the daemon and waits until it's gone. False when it wasn't running.

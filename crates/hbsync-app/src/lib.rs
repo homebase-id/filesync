@@ -16,7 +16,7 @@ pub mod logging;
 mod login;
 pub mod paths;
 pub mod protocol;
-pub mod reap;
+mod reap;
 pub mod runner;
 mod secrets;
 pub mod setup;
@@ -35,6 +35,8 @@ pub use hbsync_homebase::app::{APP_NAME, files_online};
 pub use identity::Identity;
 pub use paths::{NoHome, Paths};
 pub use protocol::{Control, DaemonStatus, FolderStatus, HeldAnswer, State};
+#[cfg(target_os = "linux")]
+pub use reap::adopt_children;
 pub use reap::reap;
 pub use runner::{Command, Handle, Runner, RunnerConfig};
 pub use secrets::CredentialError;

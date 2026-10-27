@@ -1,44 +1,51 @@
 //! Children let go: the daemon a program started beside itself, the openers. On Unix an exited
 //! child stays a zombie until its parent waits for it, and the tray runs for days.
 
-#[cfg(unix)]
-use std::sync::Mutex;
-
-/// The children being waited for, by pid: handed on when the tray restarts into its update
-/// (an exec keeps them its children but ends the threads waiting for them).
-#[cfg(unix)]
-static WAITING: Mutex<Vec<u32>> = Mutex::new(Vec::new());
-
 /// Lets `child` go on its own: on Unix a thread waits for it. The thread sleeps in `wait` (no
 /// wakeups) on a small stack.
 pub fn reap(child: std::process::Child) {
     #[cfg(unix)]
     {
-        let pid = child.id();
         let mut child = child;
-        wait_aside(pid, move || drop(child.wait()));
+        wait_aside(move || drop(child.wait()));
     }
     #[cfg(not(unix))]
     drop(child);
 }
 
-/// The children [`reap`] still waits for.
-#[cfg(unix)]
-pub fn waiting() -> Vec<u32> {
-    WAITING.lock().map(|w| w.clone()).unwrap_or_default()
+/// Waits for the children this process has already: on Linux the tray restarts into its update
+/// with an exec, which ends the threads waiting for the children it started (the daemon, an
+/// opener) but keeps them its children. Before anything is started, so nothing else waits for
+/// them.
+#[cfg(target_os = "linux")]
+pub fn adopt_children() {
+    adopt(children());
 }
 
-/// Waits for children this process has from before an exec ([`waiting`] then).
-#[cfg(unix)]
-pub fn adopt(pids: impl IntoIterator<Item = u32>) {
+/// This process's children, from `/proc/self/task/*/children`.
+#[cfg(target_os = "linux")]
+fn children() -> Vec<libc::pid_t> {
+    let Ok(tasks) = std::fs::read_dir("/proc/self/task") else {
+        return Vec::new();
+    };
+    tasks
+        .flatten()
+        .filter_map(|task| std::fs::read_to_string(task.path().join("children")).ok())
+        .flat_map(|list| {
+            list.split_whitespace()
+                .filter_map(|pid| pid.parse().ok())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+#[cfg(target_os = "linux")]
+fn adopt(pids: Vec<libc::pid_t>) {
     for pid in pids {
-        wait_aside(pid, move || {
-            let Ok(raw) = libc::pid_t::try_from(pid) else {
-                return;
-            };
+        wait_aside(move || {
             let mut status = 0;
             // SAFETY: waitpid only writes the status; a pid that isn't our child is ECHILD.
-            while unsafe { libc::waitpid(raw, &mut status, 0) } < 0
+            while unsafe { libc::waitpid(pid, &mut status, 0) } < 0
                 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
             {
             }
@@ -47,27 +54,13 @@ pub fn adopt(pids: impl IntoIterator<Item = u32>) {
 }
 
 #[cfg(unix)]
-fn wait_aside(pid: u32, wait: impl FnOnce() + Send + 'static) {
-    let mark = move |add: bool| {
-        if let Ok(mut w) = WAITING.lock() {
-            if add {
-                w.push(pid);
-            } else {
-                w.retain(|&p| p != pid);
-            }
-        }
-    };
-    mark(true);
+fn wait_aside(wait: impl FnOnce() + Send + 'static) {
     let waiter = std::thread::Builder::new()
         .name("reap".into())
         .stack_size(64 * 1024)
-        .spawn(move || {
-            wait();
-            mark(false);
-        });
+        .spawn(wait);
     if let Err(e) = waiter {
-        mark(false);
-        tracing::warn!("can't wait for child process {pid}: it stays a zombie when it ends: {e}");
+        tracing::warn!("can't wait for a child process: it stays a zombie when it ends: {e}");
     }
 }
 
@@ -98,7 +91,6 @@ mod tests {
         reap(child);
         // Once waited for, the pid may be someone else's, but never our zombie.
         until("the zombie goes", || state(pid) != Some('Z'));
-        until("no longer listed", || !waiting().contains(&pid));
         Ok(())
     }
 
@@ -109,7 +101,10 @@ mod tests {
         // As after an exec: a child of ours that nothing holds a `Child` for.
         std::mem::forget(child);
         until("the child ends", || state(pid) == Some('Z'));
-        adopt([pid]);
+        let raw = libc::pid_t::try_from(pid).map_err(std::io::Error::other)?;
+        assert!(children().contains(&raw), "listed among the children");
+        // Only this one: the other tests' children are theirs to wait for.
+        adopt(vec![raw]);
         until("the zombie goes", || state(pid) != Some('Z'));
         Ok(())
     }
