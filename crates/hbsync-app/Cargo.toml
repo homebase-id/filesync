@@ -52,6 +52,9 @@ zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] 
 [target.'cfg(target_os = "linux")'.dependencies]
 # The secret service's, already: systemd's scopes (`unit`).
 zbus = "5.19"
+# Not used here: zbus's thread pool, pinned. In 1.7.0 an idle pool thread never ends, so it wakes
+# twice a second for good in the daemon and the tray; in 1.6.2 it ends after half a second idle.
+blocking = "=1.6.2"
 
 [features]
 # Counters the tests wait on (`testkit`).
