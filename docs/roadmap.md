@@ -27,8 +27,9 @@ set aside and the folder set up again on its own.
 In this order:
 
 - **Idle wakeups, the rest:** about 2 a second in each of the daemon and the tray were zbus's
-  idle pool thread (`blocking-1`, blocking 1.7.0 never lets it end): pinned to 1.6.2, measured
-  2.7 a second before, none after. The daemon alone idled at once every 12 s on frodo: check
+  idle pool thread (`blocking-1`, blocking 1.7.0 never lets it end): pinned to 1.6.2. A private
+  daemon idling 60 s: `blocking-1` 2.7 wakeups a second with 1.7.0 (its 500 ms waits, plus the
+  D-Bus calls of a daemon retrying an identity it can't reach), no such thread with 1.6.2. The daemon alone idled at once every 12 s on frodo: check
   what is left there after the next release. On Windows, 9.7 of the 10 a second were notify's
   watcher thread waking every 100 ms: fixed in a patched copy (`vendor/notify/PATCHED.md`);
   re-measure there after the next release.

@@ -43,6 +43,9 @@ ignore = true
 # Duplicate versions are shown (cargo-deny's default), not refused: most come with other crates.
 wildcards = "deny"
 allow-wildcard-paths = true
+# blocking 1.7.0 never ends an idle pool thread: zbus's then wakes twice a second for good in the
+# daemon and the tray (pinned to 1.6.2 in hbsync-app). Allow a release that ends them again.
+deny = [{ crate = "blocking@=1.7.0", reason = "an idle pool thread never ends: 2 wakeups a second" }]
 
 [sources]
 unknown-registry = "deny"
