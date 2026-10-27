@@ -151,7 +151,6 @@ impl Server {
         let (paths, pages, send) = (self.paths.clone(), self.pages.clone(), self.send.clone());
         let mut owner = InTray {
             first: Some(url_tx),
-            done: self.pages.url("setup/done"),
             cancel: Arc::clone(&cancel),
             pages: self.pages.clone(),
         };
@@ -220,7 +219,6 @@ impl Server {
 struct InTray {
     /// Where the first page goes: the form's answer sends the browser there.
     first: Option<mpsc::Sender<String>>,
-    done: String,
     cancel: Arc<AtomicBool>,
     pages: Pages,
 }
@@ -254,13 +252,13 @@ impl setup::Owner for InTray {
         identity: &str,
         device: &str,
     ) -> Result<setup::Credentials, setup::HomebaseError> {
-        let login = setup::begin(identity, device)?.return_to(&self.done);
+        let login = setup::begin(identity, device)?.return_to(&self.pages.url("setup/done"));
         self.show(login.authorize_url());
         login.finish_unless(setup::APPROVAL_TIMEOUT, &self.cancel)
     }
 
     fn restore_drive(&mut self, identity: &str) -> Result<bool, setup::HomebaseError> {
-        let restore = setup::begin_restore(identity)?.return_to(&self.done);
+        let restore = setup::begin_restore(identity)?.return_to(&self.pages.url("setup/done"));
         self.show(restore.url());
         let given = restore.finish_unless(setup::APPROVAL_TIMEOUT, &self.cancel);
         // Not taken (the page wasn't looked at again): not sent there later.

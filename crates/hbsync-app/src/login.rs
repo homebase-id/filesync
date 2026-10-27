@@ -14,25 +14,28 @@ use crate::local_http::{self, Request};
 const CALLBACK_PATH: &str = "/authorization-code-callback";
 const DRIVE_PATH: &str = "/drive-callback";
 
-/// Where on localhost the identity sends the browser back to: one path, waited for.
+/// Where on localhost the identity sends the browser back to: one path, waited for, and where
+/// the browser goes on to from there.
 #[derive(Debug)]
 struct Callback {
     listener: TcpListener,
     path: String,
+    /// Where the browser goes once it is back (`?error=` added on failure); else it shows a
+    /// line of text.
+    return_to: Option<String>,
 }
 
 impl Callback {
-    /// Listens on a free port; the URL the browser is sent back to. `secret` adds a random part
-    /// to the path, for an answer that carries nothing else only the owner app knows.
-    fn bind(path: &str, secret: bool) -> std::io::Result<(Callback, String)> {
+    /// Listens on a free port for `path`; the URL the browser is sent back to.
+    fn bind(path: String) -> std::io::Result<(Callback, String)> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
-        let path = if secret {
-            format!("{path}/{}", uuid::Uuid::new_v4().simple())
-        } else {
-            path.to_owned()
-        };
         let url = format!("http://localhost:{}{path}", listener.local_addr()?.port());
-        Ok((Callback { listener, path }, url))
+        let back = Callback {
+            listener,
+            path,
+            return_to: None,
+        };
+        Ok((back, url))
     }
 
     /// Waits up to `timeout` for the browser's request, given up as soon as `cancel` is set.
@@ -74,22 +77,25 @@ impl Callback {
     }
 }
 
-/// Answers the browser that came back: sent on to `return_to` (with `?error=<why>` on
-/// failure), else a line of text. A browser gone meanwhile (the tab closed) changes nothing:
-/// the owner's answer came.
-fn answer(stream: &mut TcpStream, return_to: Option<&str>, outcome: Result<&str, String>) {
-    let answered = match (return_to, outcome) {
-        (Some(url), Ok(_)) => local_http::redirect(stream, url),
-        (Some(url), Err(why)) => {
-            let why = utf8_percent_encode(&why, NON_ALPHANUMERIC).to_string();
-            let sep = if url.contains('?') { '&' } else { '?' };
-            local_http::redirect(stream, &format!("{url}{sep}error={why}"))
+impl Callback {
+    /// Answers the browser that came back: sent on to `return_to` (with `?error=<why>` on
+    /// failure), else a line of text. A browser gone meanwhile (the tab closed) changes
+    /// nothing: the owner's answer came.
+    fn answer(&self, stream: &mut TcpStream, outcome: Result<&str, String>) {
+        let answered = match (&self.return_to, outcome) {
+            (Some(url), Ok(_)) => local_http::redirect(stream, url),
+            (Some(url), Err(why)) => {
+                let why = utf8_percent_encode(&why, NON_ALPHANUMERIC).to_string();
+                let sep = if url.contains('?') { '&' } else { '?' };
+                local_http::redirect(stream, &format!("{url}{sep}error={why}"))
+            }
+            (None, outcome) => {
+                local_http::message(stream, 200, outcome.as_deref().unwrap_or_else(|w| w))
+            }
+        };
+        if let Err(e) = answered {
+            tracing::debug!("the browser didn't take the answer: {e}");
         }
-        (None, Ok(done)) => local_http::message(stream, 200, done),
-        (None, Err(why)) => local_http::message(stream, 200, &why),
-    };
-    if let Err(e) = answered {
-        tracing::debug!("the browser didn't take the answer: {e}");
     }
 }
 
@@ -98,20 +104,16 @@ fn answer(stream: &mut TcpStream, return_to: Option<&str>, outcome: Result<&str,
 pub struct Login {
     pending: Pending,
     back: Callback,
-    /// Where the browser goes once the identity is back (`?error=` added on failure); else it
-    /// shows a line of text.
-    return_to: Option<String>,
 }
 
 /// Starts logging in to `identity` (a domain such as `frodo.dotyou.cloud`); `friendly_name`
 /// names the device in the owner's list.
 pub(crate) fn begin(identity: &str, friendly_name: &str) -> Result<Login, HomebaseError> {
     // The identity's answer carries the request's state.
-    let (back, redirect_uri) = Callback::bind(CALLBACK_PATH, false)?;
+    let (back, redirect_uri) = Callback::bind(CALLBACK_PATH.to_owned())?;
     Ok(Login {
         pending: hbsync_homebase::youauth::begin(identity, friendly_name, &redirect_uri)?,
         back,
-        return_to: None,
     })
 }
 
@@ -124,7 +126,7 @@ impl Login {
     /// Sends the browser to `url` once the identity is back, instead of showing a line of text
     /// (`?error=<why>` added when connecting failed).
     pub fn return_to(mut self, url: &str) -> Self {
-        self.return_to = Some(url.to_owned());
+        self.back.return_to = Some(url.to_owned());
         self
     }
 
@@ -145,7 +147,7 @@ impl Login {
             Ok(_) => Ok("Homebase Filesync is connected. You can close this window."),
             Err(e) => Err(format!("Homebase Filesync could not connect: {e}")),
         };
-        answer(&mut stream, self.return_to.as_deref(), outcome);
+        self.back.answer(&mut stream, outcome);
         result
     }
 }
@@ -156,16 +158,16 @@ impl Login {
 pub struct DriveRestore {
     url: String,
     back: Callback,
-    return_to: Option<String>,
 }
 
 /// Starts asking the owner of `identity` to give the app its drive again.
 pub(crate) fn begin_restore(identity: &str) -> Result<DriveRestore, HomebaseError> {
-    let (back, return_url) = Callback::bind(DRIVE_PATH, true)?;
+    // A random part in the path: the answer carries nothing else only the owner app knows.
+    let path = format!("{DRIVE_PATH}/{}", uuid::Uuid::new_v4().simple());
+    let (back, return_url) = Callback::bind(path)?;
     Ok(DriveRestore {
         url: hbsync_homebase::app::restore_drive_url(identity, &return_url),
         back,
-        return_to: None,
     })
 }
 
@@ -177,12 +179,17 @@ impl DriveRestore {
 
     /// Sends the browser to `url` once the owner has answered, instead of showing a line of text.
     pub fn return_to(mut self, url: &str) -> Self {
-        self.return_to = Some(url.to_owned());
+        self.back.return_to = Some(url.to_owned());
         self
     }
 
-    /// Waits up to `timeout` (given up when `cancel` is set) for the owner's answer: `false`
-    /// when they said no. Whether the drive is there is for looking up afterwards.
+    /// Waits up to `timeout` for the owner's answer: `false` when they said no. Whether the
+    /// drive is there is for looking up afterwards.
+    pub fn finish(self, timeout: Duration) -> Result<bool, HomebaseError> {
+        self.finish_unless(timeout, &AtomicBool::new(false))
+    }
+
+    /// [`DriveRestore::finish`], given up as soon as `cancel` is set.
     pub fn finish_unless(
         self,
         timeout: Duration,
@@ -195,7 +202,7 @@ impl DriveRestore {
         } else {
             Err("Homebase Filesync didn't get its drive back.".to_owned())
         };
-        answer(&mut stream, self.return_to.as_deref(), outcome);
+        self.back.answer(&mut stream, outcome);
         Ok(given)
     }
 }
@@ -210,13 +217,8 @@ mod tests {
     /// The URL the owner app sends the browser back to, from the page's `return`.
     fn return_url(page: &str) -> Result<String, Box<dyn std::error::Error>> {
         let (_, query) = page.split_once('?').ok_or("no query")?;
-        let back = query
-            .split('&')
-            .find_map(|kv| kv.strip_prefix("return="))
-            .ok_or("no return")?;
-        Ok(percent_encoding::percent_decode_str(back)
-            .decode_utf8()?
-            .into_owned())
+        let mut params = local_http::parse_form(query.as_bytes());
+        Ok(params.remove("return").ok_or("no return")?)
     }
 
     /// The browser coming back to `url` with `query`: the answer it gets.
@@ -224,6 +226,7 @@ mod tests {
         let rest = url.trim_start_matches("http://");
         let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
         let mut s = TcpStream::connect(host.replace("localhost", "127.0.0.1"))?;
+        s.set_read_timeout(Some(Duration::from_secs(10)))?;
         write!(s, "GET /{path}{query} HTTP/1.1\r\nHost: {host}\r\n\r\n")?;
         let mut out = String::new();
         s.read_to_string(&mut out)?;
@@ -238,7 +241,7 @@ mod tests {
             let restore = begin_restore("anna.example.com")?.return_to("http://x/done");
             let back = return_url(restore.url())?;
             let browser = std::thread::spawn(move || come_back(&back, query));
-            let answer = restore.finish_unless(Duration::from_secs(10), &AtomicBool::new(false))?;
+            let answer = restore.finish(Duration::from_secs(10))?;
             assert_eq!(answer, given);
             let page = browser.join().map_err(|_| "browser")??;
             let expected = if given {

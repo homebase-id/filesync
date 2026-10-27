@@ -47,20 +47,6 @@ pub fn begin(identity: &str, device: &str) -> Result<crate::login::Login, Homeba
     crate::login::begin(identity, &format!("Filesync on {device}"))
 }
 
-/// Asks the owner of `identity` to give the app its drive again: opens the page in `browser`
-/// (as [`authorize`]), passes its URL to `show`, and waits for the answer (`false`: they said
-/// no).
-pub fn restore_drive(
-    identity: &str,
-    browser: Option<&str>,
-    show: impl FnOnce(&str),
-) -> Result<bool, HomebaseError> {
-    let restore = begin_restore(identity)?;
-    show(restore.url());
-    let _ = open_browser(browser, restore.url());
-    restore.finish_unless(APPROVAL_TIMEOUT, &std::sync::atomic::AtomicBool::new(false))
-}
-
 /// Starts asking the owner of `identity` to give the app its drive again: the caller takes the
 /// browser to `url` and waits with `finish_unless` ([`APPROVAL_TIMEOUT`]).
 pub fn begin_restore(identity: &str) -> Result<crate::login::DriveRestore, HomebaseError> {
@@ -73,6 +59,47 @@ pub trait Owner {
     fn authorize(&mut self, identity: &str, device: &str) -> Result<Credentials, HomebaseError>;
     /// Asks for the app's drive on `identity` again, waiting for the answer (`false`: no).
     fn restore_drive(&mut self, identity: &str) -> Result<bool, HomebaseError>;
+}
+
+/// The owner's answers in a browser this opens (`browser`, the system's when `None`), each
+/// page's URL passed to `say` too, for when none opens.
+pub struct InBrowser<'a> {
+    pub browser: Option<&'a str>,
+    pub say: &'a dyn Fn(&str),
+}
+
+impl std::fmt::Debug for InBrowser<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InBrowser")
+            .field("browser", &self.browser)
+            .finish_non_exhaustive()
+    }
+}
+
+impl InBrowser<'_> {
+    fn visit(&self, url: &str) {
+        (self.say)(&format!("If it doesn't open, visit:\n{url}\n"));
+    }
+}
+
+impl Owner for InBrowser<'_> {
+    fn authorize(&mut self, identity: &str, device: &str) -> Result<Credentials, HomebaseError> {
+        (self.say)(&format!(
+            "Opening your browser to authorize this computer on {identity}..."
+        ));
+        authorize(identity, device, self.browser, |url| self.visit(url))
+    }
+
+    fn restore_drive(&mut self, identity: &str) -> Result<bool, HomebaseError> {
+        (self.say)(&format!(
+            "Opening your browser to give Filesync its drive back on {identity}..."
+        ));
+        let restore = begin_restore(identity)?;
+        self.visit(restore.url());
+        // The URL was shown: a browser that doesn't start isn't an error.
+        let _ = open_browser(self.browser, restore.url());
+        restore.finish(APPROVAL_TIMEOUT)
+    }
 }
 
 /// What [`prepare`] found and did.
@@ -460,7 +487,7 @@ pub fn set_up(
 fn synced_before(paths: &Paths, config: &Config, identity: &Identity, folder: &Path) -> bool {
     paths.account_db(identity).exists()
         || config.roots.iter().any(|r| r.identity == *identity)
-        || folder.join(hbsync_local::STATE_DIR).exists()
+        || hbsync_local::layout::state_dir(folder).exists()
 }
 
 /// The app's drive is gone from `identity` (deleted in the owner app, say): the owner is asked
@@ -516,8 +543,8 @@ mod tests {
 
     type R = crate::Result<()>;
 
-    /// An owner who gives the drive back (or not), counting the asks.
-    struct GivesBack(bool, usize);
+    /// An owner who gives the drive back, or not.
+    struct GivesBack(bool);
 
     impl Owner for GivesBack {
         fn authorize(&mut self, _: &str, _: &str) -> Result<Credentials, HomebaseError> {
@@ -525,7 +552,6 @@ mod tests {
         }
 
         fn restore_drive(&mut self, _: &str) -> Result<bool, HomebaseError> {
-            self.1 += 1;
             Ok(self.0)
         }
     }
@@ -535,10 +561,8 @@ mod tests {
     fn the_drive_is_given_back_when_the_owner_says_so() -> R {
         let anna = Identity::new("anna.example.com");
         let mut quiet = |_: &str| {};
-        let mut yes = GivesBack(true, 0);
-        give_drive_back(&anna, &mut yes, &mut quiet)?;
-        assert_eq!(yes.1, 1);
-        let mut no = GivesBack(false, 0);
+        give_drive_back(&anna, &mut GivesBack(true), &mut quiet)?;
+        let mut no = GivesBack(false);
         let refused = give_drive_back(&anna, &mut no, &mut quiet);
         assert!(refused.is_err_and(|e| e.to_string().contains("approve")));
         Ok(())
@@ -556,15 +580,14 @@ mod tests {
         let mut config = Config::default();
         assert!(!synced_before(&paths, &config, &anna, &folder));
 
-        std::fs::create_dir(folder.join(hbsync_local::STATE_DIR))?;
+        let state = hbsync_local::layout::state_dir(&folder);
+        std::fs::create_dir(&state)?;
         assert!(synced_before(&paths, &config, &anna, &folder));
-        std::fs::remove_dir(folder.join(hbsync_local::STATE_DIR))?;
+        std::fs::remove_dir(&state)?;
 
-        config.roots.push(crate::Root {
-            identity: anna.clone(),
-            folder: dir.path().join("Elsewhere"),
-            role: None,
-        });
+        config
+            .roots
+            .push(crate::Root::main(&anna, &dir.path().join("Elsewhere")));
         assert!(synced_before(&paths, &config, &anna, &folder));
         config.roots.clear();
 
