@@ -3,8 +3,10 @@
 //! recently synced list when a sync ended, and starting the daemon when it isn't running. It
 //! asks once more when woken (after an action); once a minute it shows what it was sent again
 //! (the menu's "2 min ago") and looks whether this program was replaced on disk. While the daemon
-//! isn't running it looks every second (it is starting), or every ten (nothing set up yet). The
-//! tray keeps it running while a folder is set up.
+//! isn't running it looks every second (it is starting), every ten (nothing set up yet), or once
+//! a minute (syncing stopped: Start syncing looks at once). The tray keeps it running while a
+//! folder is set up, unless syncing was stopped on purpose ([`control::stopped`]). Quitting goes
+//! through this thread too ([`Poke::Quit`]): after a start in flight, and with none after it.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -38,6 +40,19 @@ pub(crate) enum Poke {
     Status(Box<DaemonStatus>),
     /// The watched daemon's connection ended (it stopped).
     Gone,
+    /// The tray quits: stopping syncing too, or leaving the daemon running. The watcher ends
+    /// with [`Event::Exit`].
+    Quit { stop: bool },
+}
+
+/// Of two pokes in a row, the one that counts: a quit, else the end of a watch, else the newer
+/// (statuses that came while the watcher was busy: only the newest counts).
+fn newer(poke: Poke, next: Poke) -> Poke {
+    match (poke, next) {
+        (quit @ Poke::Quit { .. }, _) | (_, quit @ Poke::Quit { .. }) => quit,
+        (Poke::Gone, _) => Poke::Gone,
+        (_, next) => next,
+    }
 }
 
 /// Starts watching; [`Poke::Look`] sent on the returned channel has it look at once.
@@ -48,6 +63,24 @@ pub(crate) fn spawn(paths: Paths, send: Sender) -> std::io::Result<mpsc::Sender<
         .name("hbsync-tray-poll".into())
         .spawn(move || Watcher::default().run(&paths, &send, &woken, &me))?;
     Ok(wake)
+}
+
+/// The tray quits, on the watcher's thread: so after any start of the daemon (the daemon it
+/// brings up is the one stopped, or left running), and before none.
+fn quit(paths: &Paths, send: &Sender, stop: bool) {
+    if stop {
+        if let Err(e) = control::stop_syncing(paths) {
+            tracing::warn!("stopping the daemon: {e}");
+        }
+    } else {
+        // Kept: out of the tray's unit, which may end with the tray.
+        #[cfg(target_os = "linux")]
+        if let Some(pid) = hbsync_app::lock::daemon_pid(paths) {
+            hbsync_app::unit::outlive_service(pid);
+        }
+    }
+    tracing::info!("quit{}", if stop { ", syncing stopped" } else { "" });
+    send(Event::Exit);
 }
 
 #[derive(Default)]
@@ -90,6 +123,7 @@ impl Watcher {
                 self.replaced = crate::os::replacement();
             }
             let daemon = match poke {
+                Poke::Quit { stop } => return quit(paths, send, stop),
                 Poke::Status(status) => {
                     self.pushed = Some((*status).clone());
                     self.show(paths, Some(*status))
@@ -119,6 +153,8 @@ impl Watcher {
                 Daemon::Running(_) if watch_soon => STARTING,
                 // Running, but it can't be watched: looked at now and then, not every second.
                 Daemon::NotSetUp | Daemon::Running(_) => UNWATCHED,
+                // Started again from the menu (which looks at once) or a terminal.
+                Daemon::Stopped => LOOK_FOR_UPDATE,
                 Daemon::Starting(_) => STARTING,
             };
             send(Event::Daemon(
@@ -131,12 +167,8 @@ impl Watcher {
                 Err(RecvTimeoutError::Timeout) => Poke::Again,
                 Err(RecvTimeoutError::Disconnected) => return,
             };
-            // Statuses that came while this thread was busy: only the newest counts; an end of
-            // the watch is never skipped.
             for next in woken.try_iter() {
-                if !matches!(poke, Poke::Gone) {
-                    poke = next;
-                }
+                poke = newer(poke, next);
             }
         }
     }
@@ -170,9 +202,14 @@ impl Watcher {
     fn look(&mut self, paths: &Paths, send: &Sender) -> Daemon {
         let status = match control::status(paths) {
             Ok(Some(status)) => Some(status),
-            // Not running: started if a folder is set up.
+            // Not running: started if a folder is set up, unless syncing was stopped.
             Ok(None) => {
                 return match control::configured(paths) {
+                    Ok(Some(_)) if control::stopped(paths) => {
+                        // Started again, it starts at once.
+                        (self.next_start, self.start_failed) = (None, None);
+                        Daemon::Stopped
+                    }
                     Ok(Some(_)) => self.start(paths, send),
                     Ok(None) => {
                         self.recent.clear();
@@ -203,8 +240,10 @@ impl Watcher {
                 hbsync_app::VERSION
             );
             self.restarted = true;
-            if let Err(e) = control::stop(paths) {
-                tracing::warn!("stopping the daemon: {e}");
+            // Started here too: a quit (which follows) finds it running.
+            let restart = control::stop(paths).and_then(|_| control::start(paths));
+            if let Err(e) = restart {
+                tracing::warn!("restarting the daemon: {e}");
             }
             return Daemon::Starting(None);
         }
@@ -244,5 +283,27 @@ impl Watcher {
                 Daemon::Starting(self.start_failed.clone())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A quit is never skipped for what came after it, nor the end of a watch for a look;
+    /// otherwise the newest counts.
+    #[test]
+    fn a_quit_counts_over_whatever_follows() {
+        let quit = Poke::Quit { stop: true };
+        for (poke, next) in [(quit, Poke::Gone), (Poke::Gone, Poke::Quit { stop: true })] {
+            assert!(matches!(newer(poke, next), Poke::Quit { stop: true }));
+        }
+        let quit = Poke::Quit { stop: false };
+        assert!(matches!(
+            newer(quit, Poke::Look),
+            Poke::Quit { stop: false }
+        ));
+        assert!(matches!(newer(Poke::Gone, Poke::Look), Poke::Gone));
+        assert!(matches!(newer(Poke::Again, Poke::Look), Poke::Look));
     }
 }

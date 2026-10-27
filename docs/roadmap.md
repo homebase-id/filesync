@@ -23,12 +23,9 @@ set aside and the folder set up again on its own.
    has received the file, before moving it to long-term storage.)
 
 Also from the test:
-2. **Quit while the tray starts the daemon leaves it running.** Quit at the moment the tray
-   was starting the daemon: the start went ahead, the stop gave up ("still finishing a
-   transfer"), and the tray closed with the daemon still syncing.
-3. **Documents holds 14,164 dirty marks for nodes with no rows** (no local, base or mirror
+2. **Documents holds 14,164 dirty marks for nodes with no rows** (no local, base or mirror
    row): find what leaves them, clear them, and check what they cost each sync of that folder.
-4. **Auto-heal's leftovers** (a state DB set aside when too old or damaged): a DB that goes bad
+3. **Auto-heal's leftovers** (a state DB set aside when too old or damaged): a DB that goes bad
    while the daemon runs is only healed at the next start; `hbsync add` heals without printing
    the note; setup after a heal doesn't refuse the empty mount point of an unplugged disk; a
    version-13 DB missing a table fails its migration instead of being set aside.
@@ -56,10 +53,6 @@ Also from the test:
 
 ## Next
 
-- **Ask before starting or stopping syncing** (the user, 2026-10-25): quitting the tray asks
-  whether to stop syncing too or keep it running in the background, and starting the tray
-  while the daemon isn't running asks whether to start it. Today both happen without asking:
-  quitting always stops the daemon, and the tray starts it whenever a folder is set up
 - **Previous versions**: an overwritten file's earlier versions kept on the drive for 30
   days, as Recently deleted keeps deleted ones, with a list and *Restore* in the tray and the
   file browser. It is the protection against ransomware and broken apps: a file encrypted or

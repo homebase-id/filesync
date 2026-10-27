@@ -42,8 +42,9 @@ Your Homebase needs odin-core v0.1.962 or newer.
 syncing, grey paused, offline or not set up, magenta when something needs you. Its menu opens
 the folder or your files online, lists what synced lately and any problems, reviews held
 deletions, opens Recently deleted and the Folders page (Documents, Pictures and the like), and
-pauses, resumes or syncs now. **Quit stops syncing too**, and starting Homebase Filesync again
-starts it.
+pauses, resumes or syncs now. **Quit** asks whether to keep syncing in the background or stop
+syncing too; stopped, syncing on this computer waits until you choose **Start syncing** in the
+menu (or run `hbsync start`), also after you log in again. Your other computers keep syncing.
 
 **From a terminal,** `hbsync` does the same:
 
@@ -73,8 +74,9 @@ Good to know:
   trash; `rm` doesn't. Your other computers delete their copy.
 - **Emptying Recently deleted runs in the background,** and on a big one it can take a while
   (about 18 minutes for 22,000 items on one Homebase). It shrinks as it goes, and `hbsync
-  status` and the tray's menu show how far it got. `hbsync stop` and Quit stop it after the
-  batch in hand (250 files): the rest stays in Recently deleted for the next time.
+  status` and the tray's menu show how far it got. `hbsync stop` and quitting with *Stop
+  syncing too* stop it after the batch in hand (250 files): the rest stays in Recently deleted
+  for the next time.
 - **Commands that ask** (`empty-deleted`, `confirm-deletes`, `put-back`) need `--yes` where
   nobody can answer, such as in a script.
 - **Leave things out** on one computer with gitignore-style rules in `.hbsync/ignore` in the

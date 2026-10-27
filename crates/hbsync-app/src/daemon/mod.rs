@@ -49,6 +49,9 @@ pub enum DaemonError {
     Runner(#[from] RunnerError),
     #[error("the control socket: {0}")]
     Ipc(std::io::Error),
+    /// Syncing was stopped on purpose ([`crate::control::stop_syncing`]) and not started since.
+    #[error("syncing was stopped: `hbsync start` (or Start syncing in the tray) starts it")]
+    Stopped,
 }
 
 impl DaemonError {
@@ -67,7 +70,8 @@ impl DaemonError {
             DaemonError::NotSetUp(_)
             | DaemonError::Lock(LockError::Held { .. })
             | DaemonError::Config(_)
-            | DaemonError::Credentials(_) => ErrorClass::NeedsUser,
+            | DaemonError::Credentials(_)
+            | DaemonError::Stopped => ErrorClass::NeedsUser,
             DaemonError::Homebase(e) => e.class(),
             DaemonError::Runner(e) => e.class(),
             DaemonError::Ipc(e) => ErrorClass::of_io(e),
@@ -204,6 +208,11 @@ fn claim(
     paths: &Paths,
     held: &ConfigLock,
 ) -> Result<(InstanceLock, Config, ipc::Listener), DaemonError> {
+    // Started by the service manager at logon, say, after `hbsync stop`: what starts it on
+    // purpose ends the stop first (`control::start`).
+    if crate::control::stopped(paths) {
+        return Err(DaemonError::Stopped);
+    }
     let lock = InstanceLock::acquire(paths)?;
     let config = match held.load()? {
         Some(config) if !config.roots.is_empty() => config,

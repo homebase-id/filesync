@@ -1,7 +1,7 @@
 //! Homebase Filesync in the tray (the menu bar on macOS): what the daemon does, at a glance, and
-//! what to do about it. It keeps the daemon running while a folder is set up, and quitting it
-//! stops the daemon too. Logging in and reviewing held deletes happen in pages it serves to the
-//! browser (`pages`).
+//! what to do about it. It keeps the daemon running while a folder is set up, unless syncing was
+//! stopped on purpose; quitting it asks whether the daemon goes on syncing. Logging in and
+//! reviewing held deletes happen in pages it serves to the browser (`pages`).
 
 // No console window.
 #![cfg_attr(windows, windows_subsystem = "windows")]
@@ -51,6 +51,8 @@ pub enum Event {
 pub type Sender = Arc<dyn Fn(Event) + Send + Sync>;
 
 const PROGRAM: &str = autostart::TRAY;
+/// The argument a tray restarting into its update passes the new one.
+const RESTARTED: &str = "--restarted";
 /// A notification of one kind at most this often.
 const NOTIFY_EVERY: Duration = Duration::from_secs(60);
 
@@ -110,7 +112,9 @@ fn main() -> ExitCode {
         Ok(Some(exe)) => {
             tracing::info!("restarting into {}", exe.display());
             drop(_flush);
-            let e = std::os::unix::process::CommandExt::exec(&mut std::process::Command::new(&exe));
+            let e = std::os::unix::process::CommandExt::exec(
+                std::process::Command::new(&exe).arg(RESTARTED),
+            );
             eprintln!("{PROGRAM}: can't restart into {}: {e}", exe.display());
             ExitCode::FAILURE
         }
@@ -141,6 +145,9 @@ struct App {
     notified: HashMap<&'static str, Instant>,
     /// The folder given its icon and shortcut ([`shell`]) by this run.
     decorated: Option<PathBuf>,
+    /// A stop found at the watcher's first look is told; not after restarting into an update
+    /// ([`RESTARTED`]).
+    tell_stopped: bool,
 }
 
 /// What the tray shows now, to change only what changed.
@@ -190,6 +197,7 @@ impl App {
             shown: Shown::default(),
             notified: HashMap::new(),
             decorated: None,
+            tell_stopped: !std::env::args_os().any(|a| a == RESTARTED),
         })
     }
 
@@ -221,6 +229,14 @@ impl App {
     fn handle(&mut self, event: Event) -> bool {
         match event {
             Event::Daemon(daemon, recent, updated) => {
+                // Started while syncing is stopped: it asks to be started from the menu.
+                if std::mem::take(&mut self.tell_stopped) && daemon == Daemon::Stopped {
+                    self.notify_once(
+                        "stopped",
+                        "Syncing is stopped",
+                        "To sync your files again, choose Start syncing in the menu.".into(),
+                    );
+                }
                 self.notices(&daemon);
                 if let Some(s) = daemon.status()
                     && self.decorated.as_ref() != Some(&s.path)
@@ -347,19 +363,18 @@ impl App {
                     return false;
                 }
             }
-            Action::Quit => {
-                // Quitting stops syncing too, as people expect of a sync app. The icon goes at
-                // once; the daemon may first finish a transfer.
+            Action::StartSyncing => {
+                if let Err(e) = control::clear_stopped(&self.paths) {
+                    os::notify("Start syncing".into(), e.to_string());
+                }
+                let _ = self.wake.send(poll::Poke::Look);
+            }
+            Action::Quit | Action::QuitAndStop => {
+                // The icon goes at once; the watcher quits after a start in flight (the daemon
+                // may first finish a transfer).
                 self.tray = None;
-                let (paths, send) = (self.paths.clone(), self.send.clone());
-                std::thread::spawn(move || {
-                    if let Err(e) = control::stop(&paths) {
-                        tracing::warn!("stopping the daemon: {e}");
-                    }
-                    tracing::info!("quit");
-                    send(Event::Exit);
-                });
-                return true;
+                let stop = action == Action::QuitAndStop;
+                return self.wake.send(poll::Poke::Quit { stop }).is_ok();
             }
         }
         self.render();

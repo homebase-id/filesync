@@ -1,5 +1,5 @@
 //! The daemon's process: whether it runs, starting it (through the service manager or beside
-//! the calling program) and stopping it.
+//! the calling program) and stopping it, and whether syncing was stopped on purpose.
 
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -25,10 +25,15 @@ pub fn dev_home() -> bool {
     std::env::var_os("HBSYNC_HOME").is_some_and(|h| !h.is_empty())
 }
 
-/// Starts the daemon and waits until it answers: through the service manager when it starts
-/// the daemon at logon (so that it supervises it), else `hbsyncd` beside this program, on its
-/// own (on a Linux desktop, in a scope of the app's: [`crate::unit`]).
+/// Starts the daemon, unless it runs, and waits until it answers: through the service manager
+/// when it starts the daemon at logon (so that it supervises it), else `hbsyncd` beside this
+/// program, on its own (on a Linux desktop, in a scope of the app's: [`crate::unit`]). It ends
+/// a stop ([`stop_syncing`]) either way.
 pub fn start(paths: &Paths) -> Result<()> {
+    clear_stopped(paths)?;
+    if running(paths)? {
+        return Ok(());
+    }
     if !dev_home() && autostart::installed()? && autostart::start()? {
         return wait_until_running(paths, None);
     }
@@ -103,6 +108,11 @@ fn wait_until_running(paths: &Paths, mut child: Option<std::process::Child>) -> 
 
 /// Stops the daemon and waits until it's gone. False when it wasn't running.
 pub fn stop(paths: &Paths) -> Result<bool> {
+    Ok(ask_stop(paths)? && gone(paths)?)
+}
+
+/// Asks the daemon to stop. False when it wasn't running.
+fn ask_stop(paths: &Paths) -> Result<bool> {
     match ask(paths, Ask::Stop) {
         Err(IpcError::NotRunning) => return Ok(false),
         // The daemon may exit before its answer is out: the connection just ends.
@@ -117,6 +127,11 @@ pub fn stop(paths: &Paths) -> Result<bool> {
         Err(e) => return Err(e.into()),
         Ok(_) => {}
     }
+    Ok(true)
+}
+
+/// Waits until the daemon asked to stop is gone.
+fn gone(paths: &Paths) -> Result<bool> {
     let until = Instant::now() + Duration::from_secs(60);
     while Instant::now() < until {
         // A daemon on its way out may drop a connection: that's not an answer.
@@ -126,6 +141,33 @@ pub fn stop(paths: &Paths) -> Result<bool> {
         std::thread::sleep(Duration::from_millis(100));
     }
     Err("the daemon is still finishing a transfer; try again in a moment".into())
+}
+
+/// Stops syncing until it is started again ([`start`]): marks it stopped ([`stopped`]: the tray
+/// doesn't start the daemon, and a daemon started otherwise, by the service manager at logon,
+/// doesn't run), then stops the daemon ([`stop`]). False when it wasn't running.
+pub fn stop_syncing(paths: &Paths) -> Result<bool> {
+    hbsync_fileio::write_atomic(&stopped_mark(paths), b"")?;
+    // A stop that didn't reach the daemon leaves it syncing: not stopped.
+    let asked = ask_stop(paths).inspect_err(|_| {
+        let _ = clear_stopped(paths);
+    })?;
+    Ok(asked && gone(paths)?)
+}
+
+/// Whether syncing was stopped ([`stop_syncing`]) and not started since. A mark that can't be
+/// looked at (being replaced, say) counts as a stop: only one not there is none.
+pub fn stopped(paths: &Paths) -> bool {
+    !matches!(std::fs::metadata(stopped_mark(paths)), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
+}
+
+/// Ends a stop ([`stop_syncing`]), as [`start`] does: the tray starts the daemon again.
+pub fn clear_stopped(paths: &Paths) -> std::io::Result<()> {
+    crate::paths::remove_if_exists(&stopped_mark(paths))
+}
+
+fn stopped_mark(paths: &Paths) -> std::path::PathBuf {
+    paths.state.join("stopped")
 }
 
 /// Turns starting at logon off, unless this is a private instance. True when it was on.

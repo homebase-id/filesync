@@ -13,7 +13,7 @@ pub use client::{
     empty_listed, find_deleted, put_back, recent, restore, start_over, status, watch,
 };
 pub use leave::{LoggedOut, Unlinked, log_out, unlink};
-pub use process::{dev_home, running, start, stop};
+pub use process::{clear_stopped, dev_home, running, start, stop, stop_syncing, stopped};
 
 /// The folder synced, if set up.
 pub fn configured(paths: &Paths) -> Result<Option<Root>> {
