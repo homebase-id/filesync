@@ -340,12 +340,15 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    before (engine:
    `a_folder_kept_for_another_page_goes_as_one_to_recently_deleted`; simulator:
    `regression_what_a_folder_waiting_for_another_page_deletes_waits_with_it`). Deleted first,
-   it was listed in Recently deleted apart from its folder. A removed folder this plan keeps
-   that waits so (it comes back into a folder another page makes) keeps what its removal took
-   along only if it stays: what of that the page plans waits with it, planned together
-   (engine: `what_a_removal_took_along_waits_with_its_folder_placed_with_another_page`;
-   simulator: `regression_what_a_waiting_folders_removal_took_along_waits_with_it`). Planned
-   first, it went with the removal while the folder came back. A folder whose delete waits for a
+   it was listed in Recently deleted apart from its folder. A removed folder that waits so
+   (it comes back into a folder another page makes, say, or is in a cycle with a node another
+   page plans) decides whether what its removal took along stays: what of that, unchanged
+   here, the page plans waits with it, planned together (engine:
+   `what_a_removal_took_along_waits_with_its_folder_placed_with_another_page`,
+   `what_a_removal_took_along_waits_with_its_folder_in_a_cycle_across_pages`; simulator:
+   `regression_what_a_waiting_folders_removal_took_along_waits_with_it`). Planned first, it
+   went with the removal (a tag added here lost) while the folder came back. A group another
+   holds is planned in that one. A folder whose delete waits for a
    hash still goes item by item (§6.3). Simulator:
    `clients_planning_in_small_pages_converge_without_loss` and
    `planning_in_small_pages_ends_as_planning_whole` (pages of 1 to 4 against one page: the

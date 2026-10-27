@@ -2685,10 +2685,9 @@ fn what_a_removal_took_along_waits_with_its_folder_placed_with_another_page() {
             plan.ops
         );
     }
+    let of_y: Vec<&Op> = plan.ops.iter().filter(|op| op.node() == y).collect();
     assert!(
-        plan.ops
-            .iter()
-            .all(|op| op.node() != y || matches!(op, Op::RemoteTags { .. })),
+        matches!(of_y[..], [Op::RemoteTags { .. }]),
         "{:#?}",
         plan.ops
     );
@@ -2702,4 +2701,55 @@ fn what_a_removal_took_along_waits_with_its_folder_placed_with_another_page() {
     let mut together = vec![p, d, y];
     together.sort();
     assert_eq!(plan.waits_together, [together], "{plan:#?}");
+}
+
+/// Another device removed `d` and stopped: `y` in it is taken along, live, and tagged here.
+/// Here `d` moved into `q` and `r` into `d`; another device moved `q` into `r`, and another
+/// page plans `q`: a cycle across pages, so `d` and `r` wait where the drive has them, to be
+/// planned with `q` (§6.5). `y` stays only if `d` does, which that page decides: it waits
+/// with them. Before, it went with the removal while `d` came back next.
+#[test]
+fn what_a_removal_took_along_waits_with_its_folder_in_a_cycle_across_pages() {
+    let [d, q, r, y] = ids(4)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.input.remote_complete = true;
+    w.synced(d, folder(ROOT, "d"))
+        .synced(q, folder(ROOT, "q"))
+        .synced(r, folder(ROOT, "r"))
+        .synced(y, file(d, "y", "y"));
+    w.remote(d, None).remote(q, Some(folder(r, "q")));
+    w.input.removed.insert(
+        d,
+        hbsync_engine::reconcile::Removed {
+            at: 100,
+            state: folder(ROOT, "d"),
+        },
+    );
+    w.input.changed_at.insert(y, 10);
+    w.local(d, Some(folder(q, "d")))
+        .local(r, Some(folder(d, "r")));
+    let mut tagged = file(d, "y", "y");
+    tagged.tags = Tags::new([Tag::new("Red", 6)]);
+    w.local(y, Some(tagged));
+    // Planned whole: `d` comes back, and `y` with it, tagged.
+    let plan = w.plan();
+    let of_y: Vec<&Op> = plan.ops.iter().filter(|op| op.node() == y).collect();
+    assert!(
+        matches!(of_y[..], [Op::RemoteTags { .. }]),
+        "{:#?}",
+        plan.ops
+    );
+    // `q` in another page: `y` waits with `d`, nothing done to it.
+    w.input.dirty.remove(&q);
+    w.input.dirty_elsewhere.insert(q);
+    let plan = w.plan();
+    assert!(!plan.ops.iter().any(|op| op.node() == y), "{:#?}", plan.ops);
+    assert!(
+        plan.waits_together
+            .iter()
+            .any(|g| g.contains(&d) && g.contains(&y)),
+        "{plan:#?}"
+    );
 }

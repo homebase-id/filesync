@@ -221,29 +221,73 @@ impl Reconciler<'_> {
         }
     }
 
-    /// In a piece of a folder too big for a page (`Options::piece`), what the removal on the
-    /// drive of a folder above it took along (§6.3), unchanged here, waits for that folder's
-    /// plan, which another page makes ([`Input::going_above`]): planned again as it is
-    /// (`placed`). The folder's plan decides whether it stays, and with it whether what its
-    /// removal took along does ([`Reconciler::untake_kept`]); planned first, that went with the
-    /// removal while the folder came back. A node changed here plans the same either way.
+    /// What the removal on the drive of a folder took along (§6.3), unchanged here, waits for
+    /// that folder's plan when another page makes it: planned again as it is (`placed`). The
+    /// folder's plan decides whether it stays, and with it whether what its removal took along
+    /// does ([`Reconciler::untake_kept`]); planned first, that went with the removal while the
+    /// folder came back. A node changed here plans the same either way. The folder is in
+    /// another page ([`Input::going_above`], in a piece of a folder too big for a page,
+    /// `Options::piece`: that one's last page plans it), or in this one but waits to be planned
+    /// with another page's nodes (placed into a folder another page makes, say): then the node
+    /// waits with it, planned together next.
     pub(super) fn waits_for_its_folder(&mut self) {
         let i = self.input;
-        if !self.opts.piece || i.going_above.is_empty() || self.taken.is_empty() {
+        if self.taken.is_empty() {
             return;
         }
-        let waiting: Vec<NodeId> = i
-            .dirty
+        // The folders of this page that wait with another page's nodes, by store ids.
+        let waiting_folders: HashSet<NodeId> = self
+            .together
             .iter()
+            .chain(&self.plan.waits_together)
+            .flatten()
             .copied()
-            .filter(|&n| {
-                self.taken.contains(&n)
-                    && self.scope.contains(&n)
-                    && !self.local_change(n).is_change()
-                    && taken_by(i, n).is_some_and(|f| i.going_above.contains(&f))
-            })
+            .chain(
+                self.paged
+                    .iter()
+                    .chain(&self.placed)
+                    .map(|n| self.masks.store_id(*n)),
+            )
             .collect();
-        self.placed.extend(waiting);
+        let mut waiting = Vec::new();
+        for &n in &i.dirty {
+            if !self.taken.contains(&n)
+                || !self.scope.contains(&n)
+                || self.local_change(n).is_change()
+            {
+                continue;
+            }
+            let Some(folder) = taken_by(i, n) else {
+                continue;
+            };
+            if self.opts.piece && i.going_above.contains(&folder) {
+                waiting.push((n, None));
+            } else if i.dirty.contains(&folder)
+                && !self.scope.contains(&folder)
+                && waiting_folders.contains(&self.masks.store_id(folder))
+            {
+                waiting.push((n, Some(folder)));
+            }
+        }
+        for (n, folder) in waiting {
+            self.placed.insert(n);
+            if let Some(folder) = folder {
+                // With what the folder waits with (store ids): one page, not one a node.
+                let id = self.masks.store_id(folder);
+                let mut with: Vec<NodeId> = self
+                    .together
+                    .iter()
+                    .chain(&self.plan.waits_together)
+                    .filter(|group| group.contains(&id))
+                    .flatten()
+                    .copied()
+                    .collect();
+                with.extend([id, self.masks.store_id(n)]);
+                with.sort();
+                with.dedup();
+                self.plan.waits_together.push(with);
+            }
+        }
     }
 
     /// A folder this plan would delete that waits for another page (something in it does: a
