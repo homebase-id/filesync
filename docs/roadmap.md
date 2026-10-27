@@ -26,11 +26,10 @@ set aside and the folder set up again on its own.
 
 In this order:
 
-- **Idle wakeups: about 2 a second in each of the daemon and the tray,** all on one thread
-  (`blocking-1`), probably the desktop's D-Bus link (the app's systemd scope, the tray's
-  StatusNotifierItem). The daemon alone idled at once every 12 s on frodo: bring it back.
-  On Windows, 9.7 of the 10 a second were notify's watcher thread waking every 100 ms: fixed
-  in a patched copy (`vendor/notify/PATCHED.md`); re-measure there after the next release.
+- **Idle wakeups, the rest:** the daemon's and the tray's 2 a second (zbus's `blocking-1`) are
+  gone with blocking pinned to 1.6.2. After the next release, check what is left of the daemon's
+  once every 12 s on frodo, and re-measure on Windows, where 9.7 of the 10 a second were notify's
+  watcher thread (fixed in a patched copy, `vendor/notify/PATCHED.md`).
 - **Idle syncs that read a lot on Windows:** two syncs with nothing to do read 3.5 GB (4.6 s
   CPU) and 460 MB (0.5 s) in a 4.4 h idle run (windows-bench, 2026-10-27; 127,000 files, a
   100 MB state DB). Nothing is logged for a sync at the default level, so what started them

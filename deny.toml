@@ -43,6 +43,8 @@ ignore = true
 # Duplicate versions are shown (cargo-deny's default), not refused: most come with other crates.
 wildcards = "deny"
 allow-wildcard-paths = true
+# The guard for the blocking pin in crates/hbsync-app/Cargo.toml (smol-rs/blocking#83).
+deny = [{ crate = "blocking@>=1.7.0", reason = "never ends an idle pool thread: 2 wakeups a second" }]
 
 [sources]
 unknown-registry = "deny"
