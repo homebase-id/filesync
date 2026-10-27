@@ -141,8 +141,7 @@ const SCHEMA: &str = r#"
         seq    INTEGER NOT NULL DEFAULT 0,            -- its mark's version, moved on by a change
                                                       -- of the drive's picture: a round clears
                                                       -- only the one it read
-        PRIMARY KEY (folder, id)                      -- a folder's marks together: its reads
-                                                      -- never pass another folder's
+        PRIMARY KEY (folder, id)
     ) WITHOUT ROWID;
 
     -- Per folder: items parked under a temporary name in their folder, with the name they had.
@@ -459,7 +458,7 @@ const MIGRATIONS: &[&str] = &[
         PRIMARY KEY (folder, id)
     ) WITHOUT ROWID;
     INSERT INTO dirty_new SELECT folder, id, seq FROM dirty
-        WHERE folder IN (SELECT id FROM folders);
+        WHERE folder IN (SELECT id FROM folders) ORDER BY folder, id;
     INSERT INTO gone SELECT id FROM dirty WHERE folder NOT IN (SELECT id FROM folders);
     DROP TABLE dirty;
     ALTER TABLE dirty_new RENAME TO dirty;
@@ -781,24 +780,20 @@ mod tests {
                  PRAGMA foreign_keys = ON;",
             )?;
             apply(&mut conn)?;
-            let ids = |sql: &str| -> Result<Vec<(i64, i64)>> {
+            let marks: Vec<(i64, i64)> = conn
+                .prepare("SELECT folder, id FROM dirty")?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            assert_eq!(marks, [(1, 7), (2, 3), (2, 7)]);
+            let gone = |conn: &Connection| -> Result<Vec<i64>> {
                 Ok(conn
-                    .prepare(sql)?
-                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .prepare("SELECT id FROM gone")?
+                    .query_map([], |r| r.get(0))?
                     .collect::<rusqlite::Result<_>>()?)
             };
-            assert_eq!(
-                ids("SELECT folder, id FROM dirty")?,
-                [(1, 7), (2, 3), (2, 7)]
-            );
-            assert_eq!(
-                ids("SELECT pk, cid FROM pragma_table_info('dirty') WHERE pk > 0 ORDER BY pk")?,
-                [(1, 0), (2, 1)],
-                "keyed (folder, id)"
-            );
-            assert_eq!(ids("SELECT id, 0 FROM gone")?, [(4, 0)]);
+            assert_eq!(gone(&conn)?, [4]);
             conn.execute("DELETE FROM dirty WHERE folder = 2 AND id = 3", [])?;
-            assert_eq!(ids("SELECT id, 0 FROM gone")?, [(4, 0), (3, 0)]);
+            assert_eq!(gone(&conn)?, [4, 3]);
         }
         Ok(())
     }

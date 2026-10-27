@@ -129,18 +129,6 @@ impl ReadTx<'_> {
     /// `place` is in (the folder with the nearest top above it, [`ReadTx::place_of`]). Every
     /// folder when `place` doesn't reach the drive's top (a gap or a cycle): none is left out.
     pub(super) fn fan_out(&self, node: NodeId, place: NodeId) -> Result<()> {
-        self.fan_out_from(node, Some(place))
-    }
-
-    /// Marks `node` dirty in every folder: a node whose folder left the drive for good, or that
-    /// waited in one this client couldn't read, has no place to go by (an orphan, for the main
-    /// folder to adopt, §6.3), whatever its folder's place was.
-    pub(super) fn fan_out_everywhere(&self, node: NodeId) -> Result<()> {
-        self.fan_out_from(node, None)
-    }
-
-    /// [`ReadTx::fan_out`] from `place`; `None`: not known.
-    fn fan_out_from(&self, node: NodeId, place: Option<NodeId>) -> Result<()> {
         let folders = self.folder_list()?;
         let id = self.key_or_insert(node)?;
         let marked: std::collections::BTreeSet<i64> = match &*folders {
@@ -157,25 +145,39 @@ impl ReadTx<'_> {
                     )?
                     .query_map([id], |r| r.get(0))?
                     .collect::<rusqlite::Result<std::collections::BTreeSet<i64>>>()?;
-                let place = match place {
-                    Some(place) => self.place_of(place, &folders)?,
-                    None => None,
-                };
-                match place {
+                match self.place_of(place, &folders)? {
                     Some(Place::Folder(folder)) => {
                         holders.insert(folder);
                     }
                     Some(Place::Unheld) => {}
-                    // A gap or a cycle, or no place: whose it is isn't known.
+                    // A gap or a cycle: whose it is isn't known.
                     None => holders.extend(folders.iter().map(|f| f.id)),
                 }
                 holders
             }
         };
-        for &folder in &marked {
+        self.mark_changed_in_all(&marked, id)
+    }
+
+    /// Marks `node` dirty in every folder: a node whose folder left the drive for good, or that
+    /// waited in one this client couldn't read, has no place to go by (an orphan, for the main
+    /// folder to adopt, §6.3), whatever its folder's place was.
+    pub(super) fn fan_out_everywhere(&self, node: NodeId) -> Result<()> {
+        let folders: std::collections::BTreeSet<i64> =
+            self.folder_list()?.iter().map(|f| f.id).collect();
+        self.mark_changed_in_all(&folders, self.key_or_insert(node)?)
+    }
+
+    /// [`ReadTx::mark_changed_in`] in each of `folders`, which `fan_out` touched.
+    fn mark_changed_in_all(
+        &self,
+        folders: &std::collections::BTreeSet<i64>,
+        id: i64,
+    ) -> Result<()> {
+        for &folder in folders {
             self.mark_changed_in(folder, id)?;
         }
-        self.touched.borrow_mut().extend(marked);
+        self.touched.borrow_mut().extend(folders);
         Ok(())
     }
 
@@ -187,7 +189,6 @@ impl ReadTx<'_> {
     /// ([`ReadTx::moved_folder`]).
     pub(super) fn place_of(&self, place: NodeId, folders: &[FolderRow]) -> Result<Option<Place>> {
         let mut parent = self.prep(MIRROR_PARENT)?;
-        let mut removed = self.prep("SELECT parent FROM removed WHERE node = ?1")?;
         let mut chain = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let mut at = place;
@@ -202,17 +203,20 @@ impl ReadTx<'_> {
                 break Some(Place::Unheld);
             }
             chain.push(at);
-            let mut up: Option<Vec<u8>> = parent
+            let up: Option<Vec<u8>> = match parent
                 .query_row([at.0.as_bytes()], |r| r.get(0))
-                .optional()?;
-            if up.is_none() {
-                up = removed
-                    .query_row([at.0.as_bytes()], |r| r.get(0))
-                    .optional()?;
-                // Only live folders are remembered: a row of Recently deleted may go (deleted
-                // for good) with nothing telling the places.
-                chain.clear();
-            }
+                .optional()?
+            {
+                Some(up) => Some(up),
+                None => {
+                    // Only live folders are remembered: a row of Recently deleted may go
+                    // (deleted for good) with nothing telling the places.
+                    chain.clear();
+                    self.prep("SELECT parent FROM removed WHERE node = ?1")?
+                        .query_row([at.0.as_bytes()], |r| r.get(0))
+                        .optional()?
+                }
+            };
             match up {
                 Some(up) if seen.insert(at) && seen.len() <= MAX_DEPTH => at = codec::node(&up)?,
                 _ => break None,
