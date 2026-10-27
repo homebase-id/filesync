@@ -9,19 +9,6 @@ macOS and Linux, with the tray, the daemon and the CLI, role folders, filters, R
 deleted and signed installers that update themselves; a state DB too old or damaged to use is
 set aside and the folder set up again on its own.
 
-## Fix first (found testing 0.9.0, 2026-10-25/26)
-
-1. **An upload whose uniqueId the server already has** (#295). The server answers with an
-   error code (4105, odin-core #2019) right after the metadata, while the payload is still
-   being sent. React to it at once: stop sending and treat the file as already there. If we
-   don't react within about 5 seconds, the server closes the connection, so a 20 GB file isn't
-   wastefully sent twice. Then, and after any upload that ended without an answer, look the file up by
-   its uniqueId (`getByUniqueId`) before sending it again.
-
-   (Found in the first sync of 309 GB: six files of 11–20 GB lost their answer, one was sent
-   twice. The lost answers themselves go away on the server's side: it will answer 200 once it
-   has received the file, before moving it to long-term storage.)
-
 ## Small fixes
 
 - **The folder picker can open behind the browser** (Windows): *Change…* on the login page
@@ -65,6 +52,14 @@ set aside and the folder set up again on its own.
 
 ## Next
 
+- **An upload whose uniqueId the server already has** (#295; found in the first sync of
+  309 GB on 0.9.0, where six files of 11–20 GB lost their answer and one was sent twice). The
+  server answers 4105 (odin-core #2019) right after the metadata, while the payload is still
+  being sent: react at once (stop sending, treat the file as already there), as the server
+  closes the connection after about 5 seconds, so a 20 GB file isn't sent twice. Then, and
+  after any upload that ended without an answer, look the file up by its uniqueId
+  (`getByUniqueId`) before sending it again. (The lost answers go away on the server's side:
+  it will answer 200 once it has the file, before moving it to long-term storage.)
 - **Previous versions**: an overwritten file's earlier versions kept on the drive for 30
   days, as Recently deleted keeps deleted ones, with a list and *Restore* in the tray and the
   file browser. It is the protection against ransomware and broken apps: a file encrypted or
