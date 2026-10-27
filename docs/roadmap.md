@@ -26,13 +26,10 @@ set aside and the folder set up again on its own.
 
 In this order:
 
-- **Idle wakeups, the rest:** about 2 a second in each of the daemon and the tray were zbus's
-  idle pool thread (`blocking-1`, blocking 1.7.0 never lets it end): pinned to 1.6.2. A private
-  daemon idling 60 s: `blocking-1` 2.7 wakeups a second with 1.7.0 (its 500 ms waits, plus the
-  D-Bus calls of a daemon retrying an identity it can't reach), no such thread with 1.6.2. The daemon alone idled at once every 12 s on frodo: check
-  what is left there after the next release. On Windows, 9.7 of the 10 a second were notify's
-  watcher thread waking every 100 ms: fixed in a patched copy (`vendor/notify/PATCHED.md`);
-  re-measure there after the next release.
+- **Idle wakeups, the rest:** the daemon's and the tray's 2 a second (zbus's `blocking-1`) are
+  gone with blocking pinned to 1.6.2. After the next release, check what is left of the daemon's
+  once every 12 s on frodo, and re-measure on Windows, where 9.7 of the 10 a second were notify's
+  watcher thread (fixed in a patched copy, `vendor/notify/PATCHED.md`).
 - **Idle syncs that read a lot on Windows:** two syncs with nothing to do read 3.5 GB (4.6 s
   CPU) and 460 MB (0.5 s) in a 4.4 h idle run (windows-bench, 2026-10-27; 127,000 files, a
   100 MB state DB). Nothing is logged for a sync at the default level, so what started them
