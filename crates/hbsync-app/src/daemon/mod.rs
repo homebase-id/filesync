@@ -168,7 +168,8 @@ pub fn run(paths: &Paths, stop: Stop) -> Result<(), DaemonError> {
         // No write to a state DB is left half done, and none comes; the threads still asking
         // end with the process.
         hbsync_state::hold_for_exit();
-        // Held till the process ends: no daemon starts while this one's threads still run.
+        // Held till the process ends (its log written out meanwhile): no daemon starts while
+        // this one's threads may still change a folder.
         std::mem::forget(instance);
     }
     tracing::info!("daemon stopped");
@@ -284,10 +285,7 @@ impl Daemon {
                 return (result, true);
             }
             // Stopping, the pause no longer changes.
-            let deadline = match cut_at {
-                Some(at) => Some(at),
-                None => self.end_pause_when_due(now),
-            };
+            let deadline = cut_at.or_else(|| self.end_pause_when_due(now));
             rung = self.stop.wakeup.wait(rung, wait_for(now, deadline));
         }
     }
@@ -513,9 +511,13 @@ mod tests {
     fn account(daemon: &Daemon, identity: &str, hangs: bool) {
         let root = Root::main(&identity.into(), &daemon.paths.state.join(identity));
         let (account, requests) = Account::new(&daemon.paths, &root, None, Arc::default());
-        let stop = daemon.stop.clone();
+        let (ending, stop) = (Arc::clone(&account), daemon.stop.clone());
         let thread = std::thread::spawn(move || {
-            let _ended = OnDrop(Some(|| stop.wakeup.raise()));
+            // As the account's thread tells its end.
+            let _ended = OnDrop(Some(|| {
+                ending.ended_thread();
+                stop.wakeup.raise();
+            }));
             let _ = requests.recv();
             if hangs {
                 loop {

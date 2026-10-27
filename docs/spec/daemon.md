@@ -183,15 +183,17 @@ minutes, a server that hangs up to a request's timeout). Past it, the daemon end
 as a crash would, but with its state DBs whole (`hbsync_state::hold_for_exit`): it waits for a
 write in progress (no transaction is left open), makes every commit durable (the folders
 changed synced first), holds every later write, and exits; the threads still waiting for an
-answer end with the process. What they did is found again at the next start, which starts
-behind (its first sync reads the feed), as after a crash (sync semantics §8a, §8b): a transfer
+answer end with the process. A write in progress isn't cut short, however long it takes (one
+waiting for another program's, say). What they did is found again at the next start (its
+first sync reads the feed, as every start's does), as after a crash (sync semantics §8a, §8b): a transfer
 cut short goes again, a delete for good the server carried out without its answer being
 written is found not there by the next emptying or purge and confirmed by its header, an
 upload it took is found again (a re-create answers 4105). As at a crash, a hard delete
 announced and not taken yet is lost (its file's row is stale until it is next written), and a
 thread that did something on disk without committing it yet is cut there (each operation's
-write-ahead records and guards take it from there, §8a). `hbsync stop` waits 25 s for the
-daemon to be gone.
+write-ahead records and guards take it from there, §8a). `hbsync stop` waits for the daemon
+to be gone, a minute at most (a daemon of an earlier version, stopped by an update, waits for
+every request in flight).
 
 Exit status: 0 when stopped, when there is nothing to do (not set up, already running), and on
 an error only the user can fix (a state DB that is corrupt or from another version, a config

@@ -325,28 +325,52 @@ fn shared(key: Option<&Path>) -> Arc<Shared> {
 /// durable commit or a checkpoint is done), makes every commit durable as a durable commit
 /// would (the folders whose entries changed synced first, then the DB's log), then leaves every
 /// later write, and opening a DB file, waiting for good. What a thread did on disk and hasn't
-/// committed yet is found again at the next start, as after a crash.
+/// committed yet is found again at the next start, as after a crash. A write in progress isn't
+/// cut short however long it takes (SQLite's wait for another process's, say).
 pub fn hold_for_exit() {
-    let files = lock(&SHARED);
-    for (path, shared) in files.iter() {
-        // As a durable commit takes them.
-        let turn = lock(&shared.durable);
-        let mut gate = lock(&shared.gate);
-        hbsync_platform::ops::sync_dirs(std::mem::take(&mut gate.dirs));
-        if gate.unsynced {
-            // A commit is durable once the log holding it is on the disk (`synchronous=FULL`).
-            let mut log = path.clone().into_os_string();
-            log.push("-wal");
-            // Best effort: none there holds nothing.
-            let _ = std::fs::OpenOptions::new()
-                .write(true)
-                .open(&log)
-                .and_then(|f| f.sync_all());
+    let mut held = HashSet::new();
+    loop {
+        // Each file's locks without holding the list's: a thread that opens a DB file while it
+        // writes another isn't waited for while it waits for the list.
+        let files: Vec<(PathBuf, Arc<Shared>)> = lock(&SHARED)
+            .iter()
+            .filter(|(path, _)| !held.contains(*path))
+            .map(|(path, shared)| (path.clone(), Arc::clone(shared)))
+            .collect();
+        for (path, shared) in files {
+            hold_file(&path, &shared);
+            held.insert(path);
         }
-        std::mem::forget(gate);
-        std::mem::forget(turn);
+        // Then the list's, unless a file was opened meanwhile.
+        let files = lock(&SHARED);
+        if files.keys().all(|path| held.contains(path)) {
+            std::mem::forget(files);
+            return;
+        }
     }
-    std::mem::forget(files);
+}
+
+/// [`hold_for_exit`] of the DB file at `path`: its writes held for good, its commits durable.
+fn hold_file(path: &Path, shared: &Shared) {
+    // As a durable commit takes them.
+    let turn = lock(&shared.durable);
+    let mut gate = lock(&shared.gate);
+    // The folders changed first: a durable commit never holds a change the disk lost.
+    hbsync_platform::ops::sync_dirs(std::mem::take(&mut gate.dirs));
+    if gate.unsynced {
+        // A commit is durable once the log holding it is on the disk (`synchronous=FULL`), and
+        // the log's entry in its folder (one made in this process SQLite never synced).
+        let mut log = path.as_os_str().to_owned();
+        log.push("-wal");
+        // Best effort: none there holds nothing.
+        let _ = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&log)
+            .and_then(|f| f.sync_all());
+        hbsync_platform::ops::sync_dirs(path.parent().map(Path::to_path_buf));
+    }
+    std::mem::forget(gate);
+    std::mem::forget(turn);
 }
 
 /// Watching commits, for tests that crash a client at one, and the picture's raw writes for
@@ -545,6 +569,10 @@ impl StateDb {
     }
 
     fn setup(mut conn: Connection, path: Option<&Path>) -> Result<Self> {
+        // First: once the process holds its DBs for its exit ([`hold_for_exit`]), a DB opened
+        // writes nothing (setting it up or bringing it up to date).
+        let key = path.map(file_key);
+        let shared = shared(key.as_deref());
         // Start-up runs the local catch-up and the feed on two connections; a long scan
         // transaction must not make the other writer give up.
         conn.busy_timeout(BUSY_TIMEOUT)?;
@@ -568,12 +596,11 @@ impl StateDb {
         // Enough for every statement the store prepares, so hot lookups are never re-parsed.
         conn.set_prepared_statement_cache_capacity(128);
         migrations::apply(&mut conn)?;
-        let key = path.map(file_key);
         Ok(StateDb {
             conn,
             folder: FIRST_FOLDER,
             path: path.map(Path::to_path_buf),
-            shared: shared(key.as_deref()),
+            shared,
             emptied: Emptied::default(),
             touched: Default::default(),
             files: FileCount::default(),
@@ -901,6 +928,9 @@ mod tests {
             Some("in progress")
         );
         assert_eq!(db.read(|s| s.account_kv(keys::PURGED_AT))?, None);
+        let new = Connection::open(path.with_file_name("new.db"))?;
+        let tables: i64 = new.query_row("SELECT count(*) FROM sqlite_master", [], |r| r.get(0))?;
+        assert_eq!(tables, 0, "nothing written to a DB opened after the hold");
         Ok(())
     }
 
@@ -936,8 +966,12 @@ mod tests {
         let after = std::thread::spawn(move || {
             later.write(|s| s.account().set_account_kv(keys::PURGED_AT, "after"))
         });
+        // A DB opened now isn't set up (its schema written) either.
+        let new = path.with_file_name("new.db");
+        let opened = std::thread::spawn(move || StateDb::open_account(&new).map(drop));
         std::thread::sleep(Duration::from_millis(300));
         assert!(!after.is_finished(), "held");
+        assert!(!opened.is_finished(), "held");
         std::process::exit(0);
     }
 

@@ -911,8 +911,9 @@ mod tests {
     /// batch of deletes for good the server doesn't answer: the process ends with the batches
     /// answered before written whole and the rest in Recently deleted, for the next emptying or
     /// purge (what the server did of a batch whose answer wasn't written is then not found, and
-    /// confirmed gone by its header: sync semantics §8b); the account starts behind, its next
-    /// sync reading the feed. In a process of its own, which the stop ends.
+    /// confirmed gone by its header: sync semantics §8b), the DB whole for the next start. The
+    /// bound itself: `daemon::tests::a_stop_waits_for_the_accounts_up_to_its_bound`. In a
+    /// process of its own, which the stop ends.
     #[test]
     fn a_stop_past_its_bound_leaves_the_rest_in_recently_deleted() -> R {
         if std::env::var_os(CUT_CHILD).is_some() {
@@ -947,10 +948,10 @@ mod tests {
             [n - batch, n - 2 * batch].contains(&left),
             "whole batches went, not all: {left} of {n} left"
         );
-        // The next start.
+        // The next start takes the DB as it is.
+        assert!(StateDb::check_file(&db)?, "whole");
         let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
-        let drive = Drive::open(&db, "a.example", remote)?;
-        assert!(!drive.current(), "behind");
+        Drive::open(&db, "a.example", remote)?;
         Ok(())
     }
 
