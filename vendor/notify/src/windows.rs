@@ -13,6 +13,7 @@ use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
 use std::os::raw::c_void;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
 use std::ptr;
@@ -21,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ACCESS_DENIED, ERROR_OPERATION_ABORTED, ERROR_SUCCESS, HANDLE,
-    INVALID_HANDLE_VALUE, WAIT_IO_COMPLETION, WAIT_OBJECT_0,
+    INVALID_HANDLE_VALUE, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, ReadDirectoryChangesW, FILE_ACTION_ADDED, FILE_ACTION_MODIFIED,
@@ -38,24 +39,6 @@ use windows_sys::Win32::System::Threading::{
 use windows_sys::Win32::System::IO::{CancelIo, OVERLAPPED};
 
 const BUF_SIZE: u32 = 16384;
-
-/// hbsync: the wake-up semaphore, shared by the watcher and its thread and closed when both are
-/// done with it. Upstream's thread closed it when it stopped, while `Drop` could still be about
-/// to release it (a closed or reused handle).
-#[derive(Debug)]
-struct WakeupSem(HANDLE);
-
-// The semaphore handle is usable from any thread.
-unsafe impl Send for WakeupSem {}
-unsafe impl Sync for WakeupSem {}
-
-impl Drop for WakeupSem {
-    fn drop(&mut self) {
-        unsafe {
-            CloseHandle(self.0);
-        }
-    }
-}
 
 #[derive(Clone)]
 struct ReadData {
@@ -104,7 +87,7 @@ struct ReadDirectoryChangesServer {
     meta_tx: Sender<MetaEvent>,
     cmd_tx: Sender<Result<PathBuf>>,
     watches: HashMap<PathBuf, WatchState>,
-    wakeup_sem: Arc<WakeupSem>,
+    wakeup_sem: Arc<OwnedHandle>,
 }
 
 impl ReadDirectoryChangesServer {
@@ -112,7 +95,7 @@ impl ReadDirectoryChangesServer {
         event_handler: Arc<Mutex<dyn EventHandler>>,
         meta_tx: Sender<MetaEvent>,
         cmd_tx: Sender<Result<PathBuf>>,
-        wakeup_sem: Arc<WakeupSem>,
+        wakeup_sem: Arc<OwnedHandle>,
     ) -> Sender<Action> {
         let (action_tx, action_rx) = unbounded();
         let _ = thread::Builder::new()
@@ -170,19 +153,15 @@ impl ReadDirectoryChangesServer {
                 // nothing happens). The watcher releases the semaphore after each action it
                 // sends; an action a completion routine sends (an unwatch) is picked up because
                 // running the routine ends the alertable wait (WAIT_IO_COMPLETION).
-                let waitres = WaitForSingleObjectEx(self.wakeup_sem.0, INFINITE, 1);
+                let waitres = WaitForSingleObjectEx(self.wakeup_sem.as_raw_handle(), INFINITE, 1);
                 if waitres == WAIT_OBJECT_0 {
                     let _ = self.meta_tx.send(MetaEvent::WatcherAwakened);
-                } else if waitres != WAIT_IO_COMPLETION {
-                    // A failed wait returns at once: don't spin on it.
-                    log::error!("ReadDirectoryChangesWatcher wait failed: {waitres}");
-                    thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
         }
 
-        // hbsync: the semaphore is closed by the last of the watcher and this thread to go
-        // (WakeupSem).
+        // hbsync: the semaphore is shared with the watcher and closed by the last of the two
+        // to go (upstream closed it here, while the watcher's Drop could still release it).
     }
 
     fn add_watch(&mut self, path: PathBuf, is_recursive: bool) -> Result<PathBuf> {
@@ -489,7 +468,7 @@ unsafe extern "system" fn handle_event(
 pub struct ReadDirectoryChangesWatcher {
     tx: Sender<Action>,
     cmd_rx: Receiver<Result<PathBuf>>,
-    wakeup_sem: Arc<WakeupSem>,
+    wakeup_sem: Arc<OwnedHandle>,
 }
 
 impl ReadDirectoryChangesWatcher {
@@ -503,7 +482,8 @@ impl ReadDirectoryChangesWatcher {
         if wakeup_sem.is_null() || wakeup_sem == INVALID_HANDLE_VALUE {
             return Err(Error::generic("Failed to create wakeup semaphore."));
         }
-        let wakeup_sem = Arc::new(WakeupSem(wakeup_sem));
+        // SAFETY: a semaphore just created, owned by nothing else.
+        let wakeup_sem = Arc::new(unsafe { OwnedHandle::from_raw_handle(wakeup_sem) });
 
         let action_tx =
             ReadDirectoryChangesServer::start(event_handler, meta_tx, cmd_tx, wakeup_sem.clone());
@@ -516,12 +496,10 @@ impl ReadDirectoryChangesWatcher {
     }
 
     fn wakeup_server(&mut self) {
-        // breaks the server out of its wait state.  right now this is really just an optimization,
-        // so that if you add a watch you don't block for 100ms in watch() while the
-        // server sleeps. hbsync: no longer an optimization: the server waits without a
-        // timeout, so every action sent from here must wake it.
+        // breaks the server out of its wait state. hbsync: the server waits without a timeout,
+        // so every action sent from here must wake it.
         unsafe {
-            ReleaseSemaphore(self.wakeup_sem.0, 1, ptr::null_mut());
+            ReleaseSemaphore(self.wakeup_sem.as_raw_handle(), 1, ptr::null_mut());
         }
     }
 
