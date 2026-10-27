@@ -1485,6 +1485,33 @@ fn drive_changes_fan_out_to_the_folders_they_concern() -> R {
         .ok_or(StateError::Corrupt("gone".into()))?;
     main.write(|s| s.account().put_mirror(&again))?;
     assert!(!dirty(&mut pics_db, inside)?);
+    // Work deleted, then what it holds (its delete takes it along, or a file written into it
+    // since): Work's place is where its row in Recently deleted is, Documents. Not every
+    // folder's: each node a folder's delete takes along would be dirty in all of them.
+    let clear = |db: &mut StateDb, node| db.write(|s| s.folder().clear_dirty(node));
+    for db in [&mut main, &mut docs_db, &mut pics_db] {
+        clear(db, inside)?;
+    }
+    let work = main
+        .read(|s| s.get_mirror(inside))?
+        .ok_or(StateError::Corrupt("gone".into()))?;
+    let letter = NodeId::new();
+    main.write(|s| {
+        s.account().move_to_removed(&hbsync_state::RemovedRow {
+            row: work.clone(),
+            removed_at: Some(1),
+        })?;
+        s.account().put_mirror(&folder(letter, inside, "Letter"))
+    })?;
+    assert!(dirty(&mut docs_db, letter)? && dirty(&mut pics_db, inside)?);
+    assert!(!dirty(&mut main, letter)? && !dirty(&mut pics_db, letter)?);
+    // Work deleted for good: Letter has no place, an orphan for the main folder. Every folder
+    // looks.
+    clear(&mut docs_db, letter)?;
+    main.write(|s| s.account().forget_file(work.file_id, None))?;
+    for db in [&mut main, &mut docs_db, &mut pics_db] {
+        assert!(dirty(db, letter)?);
+    }
     // A place the mirror doesn't connect to the top: every folder looks.
     let lost = NodeId::new();
     main.write(|s| s.account().put_mirror(&folder(lost, NodeId::new(), "Lost")))?;

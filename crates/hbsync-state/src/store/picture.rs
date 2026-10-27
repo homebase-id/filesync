@@ -129,11 +129,12 @@ impl AccountTx<'_> {
             )?
             .query_map([file_id.0.as_bytes()], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect::<rusqlite::Result<_>>()?;
+        self.delete_removed_file(file_id)?;
         for (folder, child) in orphans {
-            // Where the folder is, while the mirror still has it (else every folder's).
+            // Where the folder is, while the mirror still has it (else every folder's: its row
+            // in Recently deleted, which would place it, is gone already).
             self.fan_out(codec::node(&child)?, codec::node(&folder)?)?;
         }
-        self.delete_removed_file(file_id)?;
         self.leave_tree(file_id)
     }
 

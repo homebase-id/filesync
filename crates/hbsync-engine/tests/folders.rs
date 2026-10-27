@@ -320,6 +320,93 @@ fn a_file_moved_across_the_folders_here_is_kept() -> R {
     Ok(())
 }
 
+/// Makes `dirs` folders of `files` files each in a folder `tree` at `root`.
+fn make_tree(root: &Path, tree: &str, dirs: usize, files: usize) -> R {
+    for d in 0..dirs {
+        let dir = root.join(tree).join(format!("d{d}"));
+        std::fs::create_dir_all(&dir)?;
+        for f in 0..files {
+            std::fs::write(dir.join(format!("f{f}.txt")), format!("{tree} {d} {f}"))?;
+        }
+    }
+    Ok(())
+}
+
+/// How many nodes `engine`'s folder holds dirty.
+fn dirty(engine: &mut Engine) -> Result<u64, Box<dyn std::error::Error>> {
+    Ok(engine.db().read(|s| s.dirty_count())?)
+}
+
+/// A folder deleted in one folder is planned there only: what its delete took along is in its
+/// part of the drive (through its row in Recently deleted), not the other folder's. Before, each
+/// node below its top was marked dirty in every folder of the account, and stayed so in one
+/// that didn't sync (each sync of the others then read past them: 20,000 cost an idle sync of
+/// the main folder ~6 ms instead of ~0.2).
+#[test]
+fn a_folder_deleted_in_one_folder_marks_nothing_in_the_other() -> R {
+    let server = server_with_documents()?;
+    let mut pc = Computer::new(&server)?;
+    make_tree(&pc.main_root, "Projects", 3, 5)?;
+    make_tree(&pc.docs_root, "Letters", 3, 5)?;
+    pc.sync()?;
+    assert_eq!((dirty(&mut pc.main)?, dirty(&mut pc.docs)?), (0, 0));
+
+    std::fs::remove_dir_all(pc.main_root.join("Projects"))?;
+    sync(&mut pc.main)?;
+    assert_eq!(
+        dirty(&mut pc.docs)?,
+        0,
+        "the main folder's delete is its own"
+    );
+    std::fs::remove_dir_all(pc.docs_root.join("Letters"))?;
+    sync(&mut pc.docs)?;
+    assert_eq!(dirty(&mut pc.main)?, 0, "Documents' delete is its own");
+
+    pc.sync()?;
+    assert_eq!(files(&pc.main_root), ["notes.txt"]);
+    assert_eq!(files(&pc.docs_root), ["cv.txt"]);
+    assert_eq!(
+        drive_listing(&server).len(),
+        3,
+        "{:?}",
+        drive_listing(&server)
+    );
+    Ok(())
+}
+
+/// A folder deleted on another computer reaches the folder here whose part of the drive it was
+/// in, with what its delete took along, and only that one.
+#[test]
+fn a_folder_deleted_elsewhere_reaches_its_folder_here() -> R {
+    let server = server_with_documents()?;
+    let mut here = Computer::new(&server)?;
+    let mut there = Computer::new(&server)?;
+    make_tree(&here.docs_root, "Letters", 3, 5)?;
+    make_tree(&here.main_root, "Projects", 2, 5)?;
+    here.sync()?;
+    there.sync()?;
+    assert_eq!(files(&there.docs_root).len(), 16);
+
+    std::fs::remove_dir_all(there.docs_root.join("Letters"))?;
+    std::fs::remove_dir_all(there.main_root.join("Projects").join("d0"))?;
+    there.sync()?;
+    // Documents reads the drive first: what it marks in the main folder is the main folder's
+    // own delete (the folder and its 5 files), none of Documents'.
+    sync(&mut here.docs)?;
+    assert_eq!(files(&here.docs_root), ["cv.txt"]);
+    assert_eq!(dirty(&mut here.main)?, 6);
+    sync(&mut here.main)?;
+    assert_eq!(
+        files(&here.main_root),
+        (0..5)
+            .map(|f| format!("Projects/d1/f{f}.txt"))
+            .chain(["notes.txt".into()])
+            .collect::<Vec<_>>()
+    );
+    assert_eq!((dirty(&mut here.main)?, dirty(&mut here.docs)?), (0, 0));
+    Ok(())
+}
+
 /// A computer syncing only Documents, as set up on its account's DB, and its observer.
 struct DocsOnly {
     _dir: tempfile::TempDir,

@@ -23,9 +23,7 @@ set aside and the folder set up again on its own.
    has received the file, before moving it to long-term storage.)
 
 Also from the test:
-2. **Documents holds 14,164 dirty marks for nodes with no rows** (no local, base or mirror
-   row): find what leaves them, clear them, and check what they cost each sync of that folder.
-3. **Auto-heal's leftovers** (a state DB set aside when too old or damaged): a DB that goes bad
+2. **Auto-heal's leftovers** (a state DB set aside when too old or damaged): a DB that goes bad
    while the daemon runs is only healed at the next start; `hbsync add` heals without printing
    the note; setup after a heal doesn't refuse the empty mount point of an unplugged disk; a
    version-13 DB missing a table fails its migration instead of being set aside.

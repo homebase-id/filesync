@@ -126,8 +126,8 @@ impl ReadTx<'_> {
 
     /// Marks `node` dirty in the folders a change of it, now in the drive's folder `place`,
     /// concerns: those holding a base or local row of it, and the one whose part of the drive
-    /// `place` is in (the folder with the nearest top above it). Every folder when `place`
-    /// doesn't reach the drive's top through the mirror (a gap or a cycle): none is left out.
+    /// `place` is in (the folder with the nearest top above it, [`ReadTx::place_of`]). Every
+    /// folder when `place` doesn't reach the drive's top (a gap or a cycle): none is left out.
     pub(super) fn fan_out(&self, node: NodeId, place: NodeId) -> Result<()> {
         let folders = self.folder_list()?;
         let id = self.key_or_insert(node)?;
@@ -164,10 +164,14 @@ impl ReadTx<'_> {
     }
 
     /// The place of the drive's folder `place` (the folder with the nearest top above it);
-    /// `None` if the mirror doesn't connect it to the top. Remembered for every folder on the
-    /// way, until one of them changes ([`ReadTx::moved_folder`]).
+    /// `None` if it doesn't reach the top. A folder the mirror lacks has its place where its row
+    /// in Recently deleted is (sync semantics §6.3: where its own folder is, live or in Recently
+    /// deleted in turn): what a folder's delete takes along is that folder's only, not every
+    /// folder's. Remembered for every live folder on the way, until one of them changes
+    /// ([`ReadTx::moved_folder`]).
     pub(super) fn place_of(&self, place: NodeId, folders: &[FolderRow]) -> Result<Option<Place>> {
         let mut parent = self.prep(MIRROR_PARENT)?;
+        let mut removed = self.prep("SELECT parent FROM removed WHERE node = ?1")?;
         let mut chain = Vec::new();
         let mut seen = std::collections::HashSet::new();
         let mut at = place;
@@ -182,9 +186,17 @@ impl ReadTx<'_> {
                 break Some(Place::Unheld);
             }
             chain.push(at);
-            let up: Option<Vec<u8>> = parent
+            let mut up: Option<Vec<u8>> = parent
                 .query_row([at.0.as_bytes()], |r| r.get(0))
                 .optional()?;
+            if up.is_none() {
+                up = removed
+                    .query_row([at.0.as_bytes()], |r| r.get(0))
+                    .optional()?;
+                // Only live folders are remembered: a row of Recently deleted may go (deleted
+                // for good) with nothing telling the places.
+                chain.clear();
+            }
             match up {
                 Some(up) if seen.insert(at) && seen.len() <= MAX_DEPTH => at = codec::node(&up)?,
                 _ => break None,
