@@ -175,6 +175,25 @@ says so when it couldn't reach the keychain to remove the credentials there.
 An account stopped by what only the user can fix ends alone; one failing otherwise stops the
 daemon (it is restarted whole).
 
+**Stopping** (a stop request, SIGTERM, SIGINT, an account failing) ends every account's work
+between operations and waits for the requests in flight (a transfer, a batch of deletes for
+good, a read of the feed) at most 15 s (`daemon::STOP_WITHIN`: under launchd's 20 s before it
+kills a job; a batch of deletes for good takes about 18 s on a slow Homebase, a large transfer
+minutes, a server that hangs up to a request's timeout). Past it, the daemon ends without them,
+as a crash would, but with its state DBs whole (`hbsync_state::hold_for_exit`): it waits for
+the write in progress, however long it takes (no transaction is left open), makes every
+commit durable, holds every later write, and exits; the threads still waiting for an answer
+end with the process. `hbsync stop` waits for the daemon to be gone, a minute at most (a daemon
+of an earlier version, stopped by an update, waits for every request in flight).
+
+What those threads did is found again at the next start, as after a crash (sync semantics
+§8a, §8b): a transfer cut short goes again, a delete for good the server carried out without
+its answer being written is found not there by the next emptying or purge and confirmed by its
+header, an upload it took is found again (a re-create answers 4105). As at a crash, a hard
+delete announced and not taken yet is lost (its file's row is stale until it is next written),
+and a thread that did something on disk without committing it yet is cut there (each
+operation's write-ahead records and guards take it from there, §8a).
+
 Exit status: 0 when stopped, when there is nothing to do (not set up, already running), and on
 an error only the user can fix (a state DB that is corrupt or from another version, a config
 that doesn't parse, credentials that don't parse): a service manager starting it again every
@@ -414,10 +433,12 @@ included (service managers restart it then).
   stays in Recently deleted, for the next emptying or purge. An emptying asked but not started
   by then doesn't start; a purge stopped so isn't recorded as done, and runs again at the next
   start. On a Homebase that answers slowly (about 70 s for 1,000 files, so about 18 s for a
-  batch), the batches in flight still delay `hbsync stop`. Two batches of a pass go at once
-  (`FOR_GOOD_AT_ONCE`: two requests on the server, so its storage work overlaps, inferred: not
-  shown on a local server on SQLite, where they take as long as one after the other), and a
-  pass starts once the one before is answered.
+  batch), a daemon's stop doesn't wait for the batches in flight past its 15 s (Stopping,
+  above): what such a batch deleted stays in Recently deleted here until the next emptying or
+  purge finds it not there, confirmed by its header a minute on (sync semantics §8b). Two
+  batches of a pass go at once (`FOR_GOOD_AT_ONCE`: two requests on the server, so its storage
+  work overlaps, inferred: not shown on a local server on SQLite, where they take as long as one
+  after the other), and a pass starts once the one before is answered.
 
 ### States
 
@@ -624,12 +645,12 @@ daemon), else the daemon:
 
 Windows uses the `Run` key rather than a logon task: creating an `ONLOGON` task needs an
 administrator **[inferred, not tried]**. `hbsyncd.exe` has no console window.
-The daemon's launchd agent sets `ExitTimeOut` to 60 s (launchd's default kills a job 20 s
-after SIGTERM): a stop may wait for two delete batches in flight, about 36 s on a slow server.
-systemd waits 90 s (`DefaultTimeoutStopSec`). The tray's agent needs none: the tray quits at
-once, and the daemon it starts runs in its own process group (so the daemon's agent is only
-there without the tray, as with the command line alone). An agent written before keeps the old
-timeout until it is written again (`hbsync autostart on`, `setup`).
+A stop takes 15 s at most, and a write in progress (Stopping, above): within launchd's default
+of 20 s before it kills a job, and systemd's 90 s (`DefaultTimeoutStopSec`). The daemon's
+launchd agent still sets `ExitTimeOut` to 60 s, room for a long write (a kill then is as a
+crash). The tray's agent needs none: the tray quits at once, and the daemon it starts runs in
+its own process group (so the daemon's agent is only there without the tray, as with the
+command line alone).
 `HBSYNC_HOME`, `HBSYNC_CREDENTIALS`, `XDG_CONFIG_HOME` and `XDG_STATE_HOME` are passed on in
 the plist and the unit (not on Windows), so the daemon uses the same files as the command line
 that set it up. The unit goes where the user's systemd looks by default, whatever the shell's

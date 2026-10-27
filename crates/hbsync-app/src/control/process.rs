@@ -130,7 +130,10 @@ fn ask_stop(paths: &Paths) -> Result<bool> {
     Ok(true)
 }
 
-/// Waits until the daemon asked to stop is gone.
+/// Waits until the daemon asked to stop is gone: within [`crate::daemon::STOP_WITHIN`] and a
+/// write to its state in progress. A minute at most: a daemon of an earlier version (stopped by
+/// an update) waits for every request in flight, two batches of deletes for good about 36 s on
+/// a slow server.
 fn gone(paths: &Paths) -> Result<bool> {
     let until = Instant::now() + Duration::from_secs(60);
     while Instant::now() < until {
@@ -140,7 +143,11 @@ fn gone(paths: &Paths) -> Result<bool> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    Err("the daemon is still finishing a transfer; try again in a moment".into())
+    Err(format!(
+        "the daemon hasn't stopped yet; try again in a moment (its log is in {})",
+        paths.logs.display()
+    )
+    .into())
 }
 
 /// Stops syncing until it is started again ([`start`]): marks it stopped ([`stopped`]: the tray

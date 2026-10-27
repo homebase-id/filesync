@@ -17,7 +17,7 @@ pub use account::{AccountParts, Notifications, Puller, UNANNOUNCED_READ};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use hbsync_homebase::HomebaseError;
 use hbsync_remote::ErrorClass;
@@ -99,9 +99,11 @@ impl Stop {
 
 /// Runs the daemon until a stop request, or until `stop` (a signal). It ends when its last
 /// account has; one stopped by what only the user can fix ends alone, the others sync on, and
-/// one failing otherwise stops them all (the daemon is restarted whole).
+/// one failing otherwise stops them all (the daemon is restarted whole). A stop waits for the
+/// requests in flight [`STOP_WITHIN`] at most: past it, it returns with every write to the state
+/// DBs held ([`hbsync_state::hold_for_exit`]), for the process to exit.
 pub fn run(paths: &Paths, stop: Stop) -> Result<(), DaemonError> {
-    let (_lock, config, listener) = {
+    let (instance, config, listener) = {
         let held = ConfigLock::take(&paths.config_file())?;
         claim(paths, &held)?
     };
@@ -161,43 +163,25 @@ pub fn run(paths: &Paths, stop: Stop) -> Result<(), DaemonError> {
             .spawn(move || ipc::serve(listener, move |r| answer::answer(r, &daemon), watch))
             .map_err(DaemonError::Ipc)?;
     }
-    let mut result: Result<(), DaemonError> = Ok(());
-    let (mut rung, mut stopping) = (0, false);
-    loop {
-        let (ended, left) = daemon.reap();
-        // What only the user can fix ends that account alone: the others sync on, and the
-        // daemon ends with the last. Any other failure stops them all: the daemon is started
-        // again whole.
-        if let Err(e) = ended {
-            tracing::error!("an account stopped: {e}");
-            let fault = e.class() != ErrorClass::NeedsUser;
-            if fault {
-                daemon.stop.stop();
-            }
-            // The exit tells a fault rather than what only the user can fix.
-            let told_fault = matches!(&result, Err(f) if f.class() != ErrorClass::NeedsUser);
-            if result.is_ok() || (fault && !told_fault) {
-                result = Err(e);
-            }
-        }
-        if daemon.stop.stopped() && !stopping {
-            stopping = true;
-            daemon.stop_all();
-        }
-        if left == 0 && lock(&daemon.starting_over).is_empty() {
-            break;
-        }
-        let now = Instant::now();
-        // Stopping, the pause no longer changes.
-        let pause_end = match stopping {
-            true => None,
-            false => daemon.end_pause_when_due(now),
-        };
-        rung = daemon.stop.wakeup.wait(rung, wait_for(now, pause_end));
+    let (result, cut) = daemon.serve(STOP_WITHIN);
+    if cut {
+        // No write to a state DB is left half done, and none comes; the threads still asking
+        // end with the process.
+        hbsync_state::hold_for_exit();
+        // Held till the process ends (its log written out meanwhile): no daemon starts while
+        // this one's threads may still change a folder.
+        std::mem::forget(instance);
     }
     tracing::info!("daemon stopped");
     result
 }
+
+/// How long a stop waits for the requests in flight (a transfer, a batch of deletes for good,
+/// a read of the feed) to end: past it, the daemon ends without them, as a crash would, which
+/// loses nothing (what was answered and not written is asked again). Under launchd's 20 s
+/// before it kills a job; a batch of deletes for good takes about 18 s on a slow server, a
+/// large transfer minutes.
+pub const STOP_WITHIN: Duration = Duration::from_secs(15);
 
 /// The daemon's lock, its config and its socket, taken holding the config's lock (`held`): a
 /// program that finds no daemon running changes the config holding it
@@ -254,6 +238,64 @@ pub(crate) struct Daemon {
 type AccountThread = JoinHandle<Result<(), DaemonError>>;
 
 impl Daemon {
+    /// Runs until every account has ended (a stop ends them all), or, once stopping, until
+    /// `within` has passed: then the accounts still running are left to the process's end
+    /// (true). The first error an account ended with, a fault before what only the user can
+    /// fix.
+    fn serve(&self, within: Duration) -> (Result<(), DaemonError>, bool) {
+        let mut result: Result<(), DaemonError> = Ok(());
+        let (mut rung, mut cut_at) = (0, None);
+        loop {
+            let (ended, left) = self.reap();
+            // What only the user can fix ends that account alone: the others sync on, and the
+            // daemon ends with the last. Any other failure stops them all: the daemon is
+            // started again whole.
+            if let Err(e) = ended {
+                tracing::error!("an account stopped: {e}");
+                let fault = e.class() != ErrorClass::NeedsUser;
+                if fault {
+                    self.stop.stop();
+                }
+                // The exit tells a fault rather than what only the user can fix.
+                let told_fault = matches!(&result, Err(f) if f.class() != ErrorClass::NeedsUser);
+                if result.is_ok() || (fault && !told_fault) {
+                    result = Err(e);
+                }
+            }
+            if self.stop.stopped() && cut_at.is_none() {
+                cut_at = Some(Instant::now() + within);
+                self.stop_all();
+            }
+            if left == 0 && lock(&self.starting_over).is_empty() {
+                return (result, false);
+            }
+            let now = Instant::now();
+            if cut_at.is_some_and(|at| now >= at) {
+                tracing::warn!(
+                    "still stopping after {within:?} ({}): ending without waiting for the \
+                     requests in flight (what they did is found again at the next start)",
+                    self.still_running()
+                );
+                return (result, true);
+            }
+            // Stopping, the pause no longer changes.
+            let deadline = cut_at.or_else(|| self.end_pause_when_due(now));
+            rung = self.stop.wakeup.wait(rung, wait_for(now, deadline));
+        }
+    }
+
+    /// The identities of the accounts running or starting over, for the log.
+    fn still_running(&self) -> String {
+        let accounts = self.accounts();
+        let running = accounts.iter().map(|a| &a.identity);
+        let starting_over = lock(&self.starting_over).clone();
+        let all: Vec<String> = running
+            .chain(&starting_over)
+            .map(|i| i.to_string())
+            .collect();
+        all.join(", ")
+    }
+
     /// The accounts running.
     fn accounts(&self) -> Vec<Arc<Account>> {
         lock(&self.accounts)
@@ -457,6 +499,73 @@ mod tests {
         );
     }
 
+    /// A daemon at `paths` with no account yet.
+    fn daemon(paths: &Paths) -> Daemon {
+        Daemon {
+            paths: paths.clone(),
+            stop: Stop::default(),
+            pause: Mutex::default(),
+            pausing: Mutex::default(),
+            accounts: Mutex::default(),
+            starting_over: Mutex::default(),
+            changed: Arc::default(),
+        }
+    }
+
+    /// An account of `daemon` whose thread ends once it is told something (a stop), or, if
+    /// `hangs`, never (a request in flight that isn't answered).
+    fn account(daemon: &Daemon, identity: &str, hangs: bool) {
+        let root = Root::main(&identity.into(), &daemon.paths.state.join(identity));
+        let (account, requests) = Account::new(&daemon.paths, &root, None, Arc::default());
+        let (ending, stop) = (Arc::clone(&account), daemon.stop.clone());
+        let thread = std::thread::spawn(move || {
+            // As the account's thread tells its end.
+            let _ended = OnDrop(Some(|| {
+                ending.ended_thread();
+                stop.wakeup.raise();
+            }));
+            let _ = requests.recv();
+            if hangs {
+                loop {
+                    std::thread::park();
+                }
+            }
+            Ok(())
+        });
+        lock(&daemon.accounts).push((account, thread));
+    }
+
+    /// A stop waits for the accounts to end, as long as they take within its bound; one still
+    /// waiting for an answer then (a batch of deletes for good on a slow server, a transfer)
+    /// is left to the process's end, and the daemon ends on time. Before, it waited for every
+    /// request in flight (a minute and more), and launchd killed it after 20 s.
+    #[test]
+    fn a_stop_waits_for_the_accounts_up_to_its_bound() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let paths = Paths::under(home.path());
+        let within = Duration::from_millis(300);
+
+        let ending = daemon(&paths);
+        account(&ending, "a.example", false);
+        ending.stop.stop();
+        let began = Instant::now();
+        let (result, cut) = ending.serve(within);
+        assert!(result.is_ok() && !cut);
+        assert!(began.elapsed() < within, "{:?}", began.elapsed());
+
+        let hanging = daemon(&paths);
+        account(&hanging, "a.example", false);
+        account(&hanging, "b.example", true);
+        hanging.stop.stop();
+        let began = Instant::now();
+        let (result, cut) = hanging.serve(within);
+        assert!(result.is_ok() && cut);
+        let took = began.elapsed();
+        assert!(took >= within && took < within * 3, "{took:?}");
+        assert_eq!(hanging.accounts().len(), 1, "b.example still asks");
+        Ok(())
+    }
+
     /// The daemon's pause: kept in the config as set; a timed one ends once its time has come
     /// (its end the one deadline until then), one until resumed never; while the pause is being
     /// changed, its end isn't looked at.
@@ -465,15 +574,7 @@ mod tests {
         let home = tempfile::tempdir()?;
         let paths = Paths::under(home.path());
         std::fs::create_dir_all(&paths.config)?;
-        let daemon = Daemon {
-            paths: paths.clone(),
-            stop: Stop::default(),
-            pause: Mutex::default(),
-            pausing: Mutex::default(),
-            accounts: Mutex::default(),
-            starting_over: Mutex::default(),
-            changed: Arc::default(),
-        };
+        let daemon = daemon(&paths);
         let (now, unix) = (Instant::now(), unix_now());
         let saved = || Config::load(&paths.config_file()).map(|c| c.and_then(|c| c.pause(unix)));
 

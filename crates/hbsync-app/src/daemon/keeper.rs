@@ -902,4 +902,68 @@ mod tests {
         assert!(seen.lock().unwrap_or_else(|e| e.into_inner()).is_empty());
         Ok(())
     }
+
+    /// The account's DB [`a_stop_past_its_bound_child`] empties in: set only in that test's
+    /// own process.
+    const CUT_CHILD: &str = "HBSYNC_TEST_STOP_PAST_ITS_BOUND";
+
+    /// The daemon's stop doesn't wait past its bound ([`crate::daemon::STOP_WITHIN`]) for a
+    /// batch of deletes for good the server doesn't answer: the process ends with the batches
+    /// answered before written whole and the rest in Recently deleted, for the next emptying or
+    /// purge (what the server did of a batch whose answer wasn't written is then not found, and
+    /// confirmed gone by its header: sync semantics §8b), the DB whole for the next start. The
+    /// bound itself: `daemon::tests::a_stop_waits_for_the_accounts_up_to_its_bound`. In a
+    /// process of its own, which the stop ends.
+    #[test]
+    fn a_stop_past_its_bound_leaves_the_rest_in_recently_deleted() -> R {
+        let home = tempfile::tempdir()?;
+        let db = home.path().join("state.db");
+        let child = "daemon::keeper::tests::a_stop_past_its_bound_child";
+        hbsync_state::testkit::run_test_alone(child, CUT_CHILD, db.as_os_str())?;
+        let batch = hbsync_engine::deleted::FOR_GOOD_BATCH as i64;
+        let left = removed_rows(&db)?;
+        let n = 3 * batch + 1;
+        assert!(
+            [n - batch, n - 2 * batch].contains(&left),
+            "whole batches went, not all: {left} of {n} left"
+        );
+        // The next start takes the DB as it is.
+        assert!(StateDb::check_file(&db)?, "whole");
+        let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
+        Drive::open(&db, "a.example", remote)?;
+        Ok(())
+    }
+
+    /// The process of [`a_stop_past_its_bound_leaves_the_rest_in_recently_deleted`]: it empties
+    /// Recently deleted, the server answers a batch and then no more, the account ends, and the
+    /// daemon ends without waiting for the batch in flight.
+    #[test]
+    fn a_stop_past_its_bound_child() -> R {
+        let Some(db) = std::env::var_os(CUT_CHILD).map(std::path::PathBuf::from) else {
+            return Ok(());
+        };
+        let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
+        let drive = Drive::open(&db, "a.example", remote.clone())?;
+        let n = 3 * hbsync_engine::deleted::FOR_GOOD_BATCH + 1;
+        let control = emptying(&remote, &drive, &db, n)?;
+        let (hung, slow) = (Arc::new(AtomicBool::new(false)), Arc::clone(&remote));
+        let hangs = Arc::clone(&hung);
+        let show: Show = Arc::new(move |e| {
+            if e.is_some_and(|e| e.done > 0) {
+                // A request asked from now on isn't answered.
+                slow.faults().latency = Duration::from_secs(3600);
+                hangs.store(true, Ordering::SeqCst);
+            }
+        });
+        let mut keeper = Keeper::spawn(Arc::clone(&drive), Arc::new(|_| {}), show);
+        keeper.request(control);
+        wait_for("a batch answered", || hung.load(Ordering::SeqCst))?;
+        // The next batch on its way, unanswered; the daemon stops (the account ends).
+        std::thread::sleep(Duration::from_millis(100));
+        keeper.stop();
+        std::thread::sleep(Duration::from_millis(100));
+        // As `daemon::run` does past its bound.
+        hbsync_state::hold_for_exit();
+        std::process::exit(0);
+    }
 }
