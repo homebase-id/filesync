@@ -298,9 +298,11 @@ fn wal_size(_: &rusqlite::hooks::Wal, pages: std::ffi::c_int) -> rusqlite::Resul
     Ok(())
 }
 
+/// What the connections of this process to each DB file share, by [`file_key`].
+static SHARED: LazyLock<Mutex<HashMap<PathBuf, Arc<Shared>>>> = LazyLock::new(Default::default);
+
 /// What the connections of this process to the DB file `key` ([`file_key`]) share.
 fn shared(key: Option<&Path>) -> Arc<Shared> {
-    static SHARED: LazyLock<Mutex<HashMap<PathBuf, Arc<Shared>>>> = LazyLock::new(Default::default);
     let Some(key) = key else {
         return Arc::default();
     };
@@ -315,6 +317,36 @@ fn shared(key: Option<&Path>) -> Arc<Shared> {
             durable: Mutex::new(()),
         })
     }))
+}
+
+/// Holds every write to the DB files this process opened, until it ends: for a process about
+/// to exit without waiting for its threads (the daemon, once its stop has waited long enough
+/// for requests in flight). Waits for the writes in progress (an open transaction ends, a
+/// durable commit or a checkpoint is done), makes every commit durable as a durable commit
+/// would (the folders whose entries changed synced first, then the DB's log), then leaves every
+/// later write, and opening a DB file, waiting for good. What a thread did on disk and hasn't
+/// committed yet is found again at the next start, as after a crash.
+pub fn hold_for_exit() {
+    let files = lock(&SHARED);
+    for (path, shared) in files.iter() {
+        // As a durable commit takes them.
+        let turn = lock(&shared.durable);
+        let mut gate = lock(&shared.gate);
+        hbsync_platform::ops::sync_dirs(std::mem::take(&mut gate.dirs));
+        if gate.unsynced {
+            // A commit is durable once the log holding it is on the disk (`synchronous=FULL`).
+            let mut log = path.clone().into_os_string();
+            log.push("-wal");
+            // Best effort: none there holds nothing.
+            let _ = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&log)
+                .and_then(|f| f.sync_all());
+        }
+        std::mem::forget(gate);
+        std::mem::forget(turn);
+    }
+    std::mem::forget(files);
 }
 
 /// Watching commits, for tests that crash a client at one, and the picture's raw writes for
@@ -835,6 +867,78 @@ mod tests {
 
     fn io(e: std::io::Error) -> StateError {
         StateError::Conflict(e.to_string())
+    }
+
+    /// The DB [`holding_for_exit_child`] works on: set only in that test's own process.
+    const HOLD_CHILD: &str = "HBSYNC_TEST_HOLD_FOR_EXIT";
+
+    /// A process about to exit without waiting for its threads ([`hold_for_exit`]) waits for
+    /// the write in progress, then holds every later one: the DB is left with that write
+    /// committed whole and nothing after it. In a process of its own, which the hold keeps
+    /// from writing again.
+    #[test]
+    fn holding_for_exit_waits_for_the_write_in_progress() -> Result<()> {
+        if std::env::var_os(HOLD_CHILD).is_some() {
+            return Ok(());
+        }
+        let dir = tempfile::tempdir().map_err(io)?;
+        let path = dir.path().join("state.db");
+        drop(StateDb::open_account(&path)?);
+        let out = std::process::Command::new(std::env::current_exe().map_err(io)?)
+            .args(["--exact", "tests::holding_for_exit_child", "--nocapture"])
+            .env(HOLD_CHILD, &path)
+            .output()
+            .map_err(io)?;
+        let said = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && said.contains("running 1 test"),
+            "{said}{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let mut db = StateDb::open_account(&path)?;
+        assert_eq!(
+            db.read(|s| s.account_kv(keys::READ_AT))?.as_deref(),
+            Some("in progress")
+        );
+        assert_eq!(db.read(|s| s.account_kv(keys::PURGED_AT))?, None);
+        Ok(())
+    }
+
+    /// The process of [`holding_for_exit_waits_for_the_write_in_progress`]: a write is in
+    /// progress as it holds the DB for its exit, another comes after.
+    #[test]
+    fn holding_for_exit_child() -> Result<()> {
+        let Some(path) = std::env::var_os(HOLD_CHILD).map(PathBuf::from) else {
+            return Ok(());
+        };
+        let (mut writing, mut reading, mut later) = (
+            StateDb::open_account(&path)?,
+            StateDb::open_account(&path)?,
+            StateDb::open_account(&path)?,
+        );
+        let (began, in_progress) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            writing.write(|s| {
+                let _ = began.send(());
+                std::thread::sleep(Duration::from_millis(300));
+                s.account().set_account_kv(keys::READ_AT, "in progress")
+            })
+        });
+        in_progress
+            .recv()
+            .map_err(|e| StateError::Conflict(e.to_string()))?;
+        hold_for_exit();
+        assert_eq!(
+            reading.read(|s| s.account_kv(keys::READ_AT))?.as_deref(),
+            Some("in progress"),
+            "committed before the hold"
+        );
+        let after = std::thread::spawn(move || {
+            later.write(|s| s.account().set_account_kv(keys::PURGED_AT, "after"))
+        });
+        std::thread::sleep(Duration::from_millis(300));
+        assert!(!after.is_finished(), "held");
+        std::process::exit(0);
     }
 
     /// Garbage where the DB should be isn't a database: it can't be opened.

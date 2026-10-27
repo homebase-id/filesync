@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use super::Result;
 use super::client::ask;
+use crate::daemon::STOP_WITHIN;
 use crate::ipc::IpcError;
 use crate::protocol::Ask;
 use crate::{Paths, autostart};
@@ -130,9 +131,10 @@ fn ask_stop(paths: &Paths) -> Result<bool> {
     Ok(true)
 }
 
-/// Waits until the daemon asked to stop is gone.
+/// Waits until the daemon asked to stop is gone: within [`STOP_WITHIN`], and a moment for a
+/// write to its state in progress.
 fn gone(paths: &Paths) -> Result<bool> {
-    let until = Instant::now() + Duration::from_secs(60);
+    let until = Instant::now() + STOP_WITHIN + Duration::from_secs(10);
     while Instant::now() < until {
         // A daemon on its way out may drop a connection: that's not an answer.
         if matches!(running(paths), Ok(false)) {
@@ -140,7 +142,11 @@ fn gone(paths: &Paths) -> Result<bool> {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    Err("the daemon is still finishing a transfer; try again in a moment".into())
+    Err(format!(
+        "the daemon hasn't stopped yet; try again in a moment (its log is in {})",
+        paths.logs.display()
+    )
+    .into())
 }
 
 /// Stops syncing until it is started again ([`start`]): marks it stopped ([`stopped`]: the tray
