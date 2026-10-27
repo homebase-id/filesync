@@ -33,6 +33,8 @@ set aside and the folder set up again on its own.
   but the files its removal took along (live, unchanged here) go to Recently deleted on their
   own, so they come back apart from it. Nothing is lost and it's the same whatever the page
   size; they could wait with the folder, as they do when it waits for another page (#309).
+- **`hbsync add <role>` on an unplugged disk:** a role folder whose marker is gone isn't
+  refused as setup refuses the main folder's empty mount point ("plug it in").
 - **Requests in flight cancellable on stop** (later): a stop waits up to 15 s for them, then
   holds the state DBs and exits (#307); cancelling the transfers and requests at once would
   make a stop immediate and the cut rarer.
@@ -48,7 +50,16 @@ set aside and the folder set up again on its own.
 - **Idle wakeups: about 2 a second in each of the daemon and the tray,** all on one thread
   (`blocking-1`), probably the desktop's D-Bus link (the app's systemd scope, the tray's
   StatusNotifierItem). The daemon alone idled at once every 12 s on frodo: bring it back.
-  Windows idles at about 10 a second (Dropbox 33; windows-bench, 2026-10-27): find what wakes.
+  Windows idles at about 10 a second (Dropbox 37; windows-bench, 2026-10-27), 9.7 of them
+  from notify's Windows watcher thread: its loop waits on its semaphore with a 100 ms timeout
+  (notify 8.2.0 `src/windows.rs:154`, the same on upstream main). Wait without a timeout (and
+  wake the loop on `Configure` too, the one action that doesn't), in a patched copy until
+  upstream takes it.
+- **Idle syncs that read a lot on Windows:** two syncs with nothing to do read 3.5 GB (4.6 s
+  CPU) and 460 MB (0.5 s) in a 4.4 h idle run (windows-bench, 2026-10-27; 127,000 files, a
+  100 MB state DB). Nothing is logged for a sync at the default level, so what started them
+  and what was read (the DB, a rescan) is unknown: log each sync's cause and size at info,
+  then measure.
 - **State DB writes per file** (about 70 KB per file in a first sync of many small files):
   grouping commits is parked as a data-safety rule; look for anything cheaper first.
 

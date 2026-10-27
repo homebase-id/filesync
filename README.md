@@ -116,6 +116,22 @@ Good to know:
 
   Idle, that's 27 times less CPU and 8 times less memory; while syncing, 14 times less memory
   and less than half the CPU and disk writes. A laptop's battery barely notices it.
+
+  On a Windows laptop (AMD Ryzen 9 6900HX, Windows 10, October 2026), Filesync 0.9.1 and
+  Dropbox 276 each syncing the same 127,000 files (288 GB). Memory is Task Manager's (the
+  private working set); Dropbox there is eight processes and a service.
+
+  | | Homebase Filesync | Dropbox |
+  |---|---|---|
+  | **Idle (4.4 hours)** | | |
+  | CPU | **7 s** | 68 s |
+  | Memory | **16 MB** | 617 MB |
+  | Threads | **23** | 299 |
+  | Written to disk | **0.2 MB** | 10 MB |
+  | **Restart, nothing changed** | | |
+  | Quiet after | **3 s** | 117 s |
+  | CPU | **2.5 s** | 48 s |
+  | Memory afterwards | **16 MB** | 622 MB |
 - **Every file is hashed in full with BLAKE3,** one of the fastest cryptographic hashes there
   is, while the file is read. The hash goes along with each file and is checked on the way
   back: a file that doesn't match is refused and downloaded again. The hash also tells real
