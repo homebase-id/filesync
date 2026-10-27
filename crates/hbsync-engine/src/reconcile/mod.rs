@@ -109,14 +109,16 @@ pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
     together.sort();
     together.dedup();
     // A group a larger one holds goes (one grown by what waits with it: `waits_for_its_folder`):
-    // planned in it. Groups are sorted.
-    let held_by = |small: &Vec<NodeId>, big: &Vec<NodeId>| {
+    // planned in it, a page fewer. Groups are sorted.
+    let held_by = |small: &[NodeId], big: &[NodeId]| {
         small.len() < big.len() && small.iter().all(|n| big.binary_search(n).is_ok())
     };
-    if together.len() > 1 {
-        let all = together.clone();
-        together.retain(|g| !all.iter().any(|big| held_by(g, big)));
-    }
+    let held: Vec<bool> = together
+        .iter()
+        .map(|g| together.iter().any(|big| held_by(g, big)))
+        .collect();
+    let mut held = held.into_iter();
+    together.retain(|_| !held.next().unwrap_or(false));
     plan.waits_together = together;
     // What the plan needs more of, from a narrow view (`Plan::uncovered`'s producers are
     // listed in `coverage`; `fix_names` adds its own).
