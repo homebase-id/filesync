@@ -82,9 +82,16 @@ impl Program {
 
 /// The launchd agent for `program`.
 pub fn launchd_plist(program: &Program, env: &[(String, String)]) -> String {
-    let (label, kind) = match program {
-        Program::Tray(_) => (program.label(), "Interactive"),
-        Program::Daemon(_) => (program.label(), "Background"),
+    let label = program.label();
+    // The daemon's stop may wait for two delete batches in flight (~36 s on a slow server);
+    // launchd's default is to kill it 20 s after SIGTERM. The tray quits at once (the daemon it
+    // starts has its own process group, which launchd's stop of the tray doesn't reach).
+    let (kind, exit) = match program {
+        Program::Tray(_) => ("Interactive", ""),
+        Program::Daemon(_) => (
+            "Background",
+            "  <key>ExitTimeOut</key>\n  <integer>60</integer>\n",
+        ),
     };
     let esc = crate::local_http::escape;
     let mut env_xml = String::new();
@@ -119,7 +126,7 @@ pub fn launchd_plist(program: &Program, env: &[(String, String)]) -> String {
   </dict>
   <key>ProcessType</key>
   <string>{kind}</string>
-{env_xml}</dict>
+{exit}{env_xml}</dict>
 </plist>
 "#,
         esc(&program.path().display().to_string())
@@ -650,6 +657,8 @@ mod tests {
         assert!(plist.contains("<string>id.homebase.filesync</string>"));
         assert!(plist.contains("<string>/Applications/Filesync/hbsyncd</string>"));
         assert!(plist.contains("<key>SuccessfulExit</key>\n    <false/>"));
+        // Time to finish the batches in flight before launchd kills it.
+        assert!(plist.contains("<key>ExitTimeOut</key>\n  <integer>60</integer>\n"));
         assert!(!plist.contains("EnvironmentVariables"));
         let plist = launchd_plist(&Program::Daemon("/x/hbsyncd".into()), &env());
         assert!(plist.contains(
@@ -687,6 +696,7 @@ mod tests {
         let plist = launchd_plist(&Program::Tray(tray.into()), &[]);
         assert!(plist.contains("<string>id.homebase.filesync.tray</string>"));
         assert!(plist.contains("<string>Interactive</string>"));
+        assert!(!plist.contains("ExitTimeOut"));
     }
 
     #[cfg(target_os = "linux")]

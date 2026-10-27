@@ -622,6 +622,12 @@ daemon), else the daemon:
 
 Windows uses the `Run` key rather than a logon task: creating an `ONLOGON` task needs an
 administrator **[inferred, not tried]**. `hbsyncd.exe` has no console window.
+The daemon's launchd agent sets `ExitTimeOut` to 60 s (launchd's default kills a job 20 s
+after SIGTERM): a stop may wait for two delete batches in flight, about 36 s on a slow server.
+systemd waits 90 s (`DefaultTimeoutStopSec`). The tray's agent needs none: the tray quits at
+once, and the daemon it starts runs in its own process group (so the daemon's agent is only
+there without the tray, as with the command line alone). An agent written before keeps the old
+timeout until it is written again (`hbsync autostart on`, `setup`).
 `HBSYNC_HOME`, `HBSYNC_CREDENTIALS`, `XDG_CONFIG_HOME` and `XDG_STATE_HOME` are passed on in
 the plist and the unit (not on Windows), so the daemon uses the same files as the command line
 that set it up. The unit goes where the user's systemd looks by default, whatever the shell's
