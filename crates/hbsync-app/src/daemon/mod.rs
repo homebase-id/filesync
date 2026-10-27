@@ -271,16 +271,10 @@ impl Daemon {
             }
             let now = Instant::now();
             if cut_at.is_some_and(|at| now >= at) {
-                let mut running: Vec<String> = self
-                    .accounts()
-                    .iter()
-                    .map(|a| a.identity.to_string())
-                    .collect();
-                running.extend(lock(&self.starting_over).iter().map(|i| i.to_string()));
                 tracing::warn!(
                     "still stopping after {within:?} ({}): ending without waiting for the \
                      requests in flight (what they did is found again at the next start)",
-                    running.join(", ")
+                    self.still_running()
                 );
                 return (result, true);
             }
@@ -288,6 +282,18 @@ impl Daemon {
             let deadline = cut_at.or_else(|| self.end_pause_when_due(now));
             rung = self.stop.wakeup.wait(rung, wait_for(now, deadline));
         }
+    }
+
+    /// The identities of the accounts running or starting over, for the log.
+    fn still_running(&self) -> String {
+        let accounts = self.accounts();
+        let running = accounts.iter().map(|a| &a.identity);
+        let starting_over = lock(&self.starting_over).clone();
+        let all: Vec<String> = running
+            .chain(&starting_over)
+            .map(|i| i.to_string())
+            .collect();
+        all.join(", ")
     }
 
     /// The accounts running.

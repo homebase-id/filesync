@@ -83,7 +83,7 @@ impl Program {
 /// The launchd agent for `program`.
 pub fn launchd_plist(program: &Program, env: &[(String, String)]) -> String {
     let label = program.label();
-    // The daemon stops within 15 s and a write in progress (`daemon::STOP_WITHIN`), under
+    // The daemon stops within `daemon::STOP_WITHIN` and a write in progress, under
     // launchd's default of 20 s before it kills a job; 60 s leaves room for a long write. The
     // tray quits at once (the daemon it starts has its own process group, which launchd's stop
     // of the tray doesn't reach).
@@ -658,7 +658,7 @@ mod tests {
         assert!(plist.contains("<string>id.homebase.filesync</string>"));
         assert!(plist.contains("<string>/Applications/Filesync/hbsyncd</string>"));
         assert!(plist.contains("<key>SuccessfulExit</key>\n    <false/>"));
-        // Room for a write in progress after the stop's 15 s before launchd kills it.
+        // Room for a write in progress after the stop's bound before launchd kills it.
         assert!(plist.contains("<key>ExitTimeOut</key>\n  <integer>60</integer>\n"));
         assert!(!plist.contains("EnvironmentVariables"));
         let plist = launchd_plist(&Program::Daemon("/x/hbsyncd".into()), &env());

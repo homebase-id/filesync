@@ -180,20 +180,19 @@ between operations and waits for the requests in flight (a transfer, a batch of 
 good, a read of the feed) at most 15 s (`daemon::STOP_WITHIN`: under launchd's 20 s before it
 kills a job; a batch of deletes for good takes about 18 s on a slow Homebase, a large transfer
 minutes, a server that hangs up to a request's timeout). Past it, the daemon ends without them,
-as a crash would, but with its state DBs whole (`hbsync_state::hold_for_exit`): it waits for a
-write in progress (no transaction is left open), makes every commit durable (the folders
-changed synced first), holds every later write, and exits; the threads still waiting for an
-answer end with the process. A write in progress isn't cut short, however long it takes (one
-waiting for another program's, say). What they did is found again at the next start (its
-first sync reads the feed, as every start's does), as after a crash (sync semantics §8a, §8b): a transfer
-cut short goes again, a delete for good the server carried out without its answer being
-written is found not there by the next emptying or purge and confirmed by its header, an
-upload it took is found again (a re-create answers 4105). As at a crash, a hard delete
-announced and not taken yet is lost (its file's row is stale until it is next written), and a
-thread that did something on disk without committing it yet is cut there (each operation's
-write-ahead records and guards take it from there, §8a). `hbsync stop` waits for the daemon
-to be gone, a minute at most (a daemon of an earlier version, stopped by an update, waits for
-every request in flight).
+as a crash would, but with its state DBs whole (`hbsync_state::hold_for_exit`): it waits for
+the write in progress, however long it takes (no transaction is left open), makes every
+commit durable, holds every later write, and exits; the threads still waiting for an answer
+end with the process. `hbsync stop` waits for the daemon to be gone, a minute at most (a daemon
+of an earlier version, stopped by an update, waits for every request in flight).
+
+What those threads did is found again at the next start, as after a crash (sync semantics
+§8a, §8b): a transfer cut short goes again, a delete for good the server carried out without
+its answer being written is found not there by the next emptying or purge and confirmed by its
+header, an upload it took is found again (a re-create answers 4105). As at a crash, a hard
+delete announced and not taken yet is lost (its file's row is stale until it is next written),
+and a thread that did something on disk without committing it yet is cut there (each
+operation's write-ahead records and guards take it from there, §8a).
 
 Exit status: 0 when stopped, when there is nothing to do (not set up, already running), and on
 an error only the user can fix (a state DB that is corrupt or from another version, a config
@@ -436,10 +435,10 @@ included (service managers restart it then).
   start. On a Homebase that answers slowly (about 70 s for 1,000 files, so about 18 s for a
   batch), a daemon's stop doesn't wait for the batches in flight past its 15 s (Stopping,
   above): what such a batch deleted stays in Recently deleted here until the next emptying or
-  purge finds it not there, confirmed by its header a minute on (sync semantics §8b). Two batches of a pass go at once
-  (`FOR_GOOD_AT_ONCE`: two requests on the server, so its storage work overlaps, inferred: not
-  shown on a local server on SQLite, where they take as long as one after the other), and a
-  pass starts once the one before is answered.
+  purge finds it not there, confirmed by its header a minute on (sync semantics §8b). Two
+  batches of a pass go at once (`FOR_GOOD_AT_ONCE`: two requests on the server, so its storage
+  work overlaps, inferred: not shown on a local server on SQLite, where they take as long as one
+  after the other), and a pass starts once the one before is answered.
 
 ### States
 

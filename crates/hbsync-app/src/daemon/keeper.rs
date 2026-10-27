@@ -916,31 +916,10 @@ mod tests {
     /// process of its own, which the stop ends.
     #[test]
     fn a_stop_past_its_bound_leaves_the_rest_in_recently_deleted() -> R {
-        if std::env::var_os(CUT_CHILD).is_some() {
-            return Ok(());
-        }
         let home = tempfile::tempdir()?;
         let db = home.path().join("state.db");
-        let began = Instant::now();
-        let out = std::process::Command::new(std::env::current_exe()?)
-            .args([
-                "--exact",
-                "daemon::keeper::tests::a_stop_past_its_bound_child",
-                "--nocapture",
-            ])
-            .env(CUT_CHILD, &db)
-            .output()?;
-        let said = String::from_utf8_lossy(&out.stdout);
-        assert!(
-            out.status.success() && said.contains("running 1 test"),
-            "{said}{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert!(
-            began.elapsed() < Duration::from_secs(20),
-            "{:?}",
-            began.elapsed()
-        );
+        let child = "daemon::keeper::tests::a_stop_past_its_bound_child";
+        hbsync_state::testkit::run_test_alone(child, CUT_CHILD, db.as_os_str())?;
         let batch = hbsync_engine::deleted::FOR_GOOD_BATCH as i64;
         let left = removed_rows(&db)?;
         let n = 3 * batch + 1;
@@ -967,23 +946,23 @@ mod tests {
         let drive = Drive::open(&db, "a.example", remote.clone())?;
         let n = 3 * hbsync_engine::deleted::FOR_GOOD_BATCH + 1;
         let control = emptying(&remote, &drive, &db, n)?;
-        let server = remote.server_handle();
-        let hung = Arc::new(std::sync::OnceLock::new());
+        let (hung, slow) = (Arc::new(AtomicBool::new(false)), Arc::clone(&remote));
         let hangs = Arc::clone(&hung);
         let show: Show = Arc::new(move |e| {
             if e.is_some_and(|e| e.done > 0) {
-                // Answered no more, for good.
-                hangs.get_or_init(|| std::mem::forget(server.lock()));
+                // A request asked from now on isn't answered.
+                slow.faults().latency = Duration::from_secs(3600);
+                hangs.store(true, Ordering::SeqCst);
             }
         });
         let mut keeper = Keeper::spawn(Arc::clone(&drive), Arc::new(|_| {}), show);
         keeper.request(control);
-        wait_for("a batch answered", || hung.get().is_some())?;
+        wait_for("a batch answered", || hung.load(Ordering::SeqCst))?;
         // The next batch on its way, unanswered; the daemon stops (the account ends).
         std::thread::sleep(Duration::from_millis(100));
         keeper.stop();
         std::thread::sleep(Duration::from_millis(100));
-        // Past the stop's bound ([`crate::daemon::run`]).
+        // As `daemon::run` does past its bound.
         hbsync_state::hold_for_exit();
         std::process::exit(0);
     }
