@@ -217,29 +217,67 @@ impl Reconciler<'_> {
         }
     }
 
-    /// In a piece of a folder too big for a page (`Options::piece`), what the removal on the
-    /// drive of a folder above it took along (§6.3), unchanged here, waits for that folder's
-    /// plan, which another page makes ([`Input::going_above`]): planned again as it is
-    /// (`placed`). The folder's plan decides whether it stays, and with it whether what its
-    /// removal took along does ([`Reconciler::untake_kept`]); planned first, that went with the
-    /// removal while the folder came back. A node changed here plans the same either way.
+    /// What the removal on the drive of a folder took along (§6.3), unchanged here, waits for
+    /// that folder's plan when another page makes it: planned again as it is (`placed`). The
+    /// folder's plan decides whether it stays, and with it whether what its removal took along
+    /// does ([`Reconciler::untake_kept`]); planned first, that went with the removal while the
+    /// folder came back. A node changed here plans the same either way. The folder is in
+    /// another page ([`Input::going_above`], in a piece of a folder too big for a page,
+    /// `Options::piece`: that one's last page plans it), or in this one but waits to be planned
+    /// with another page's nodes (placed into a folder another page makes, say): then the node
+    /// waits with it, planned together next.
     pub(super) fn waits_for_its_folder(&mut self) {
         let i = self.input;
-        if !self.opts.piece || i.going_above.is_empty() || self.taken.is_empty() {
+        let piece = self.opts.piece && !i.going_above.is_empty();
+        if self.taken.is_empty() || (!piece && self.groups().next().is_none()) {
             return;
         }
-        let waiting: Vec<NodeId> = i
-            .dirty
-            .iter()
-            .copied()
-            .filter(|&n| {
-                self.taken.contains(&n)
-                    && self.scope.contains(&n)
-                    && !self.local_change(n).is_change()
-                    && taken_by(i, n).is_some_and(|f| i.going_above.contains(&f))
-            })
-            .collect();
-        self.placed.extend(waiting);
+        // The members of the groups, by store ids: a folder of this page among them waits with
+        // another page's nodes (a group's own page, or one waiting for its own page, holds what
+        // is in it already). Read only for a node whose folder this plan leaves (hardly ever).
+        let mut grouped: Option<HashSet<NodeId>> = None;
+        let mut with_folder: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
+        for &n in &i.dirty {
+            if !self.taken.contains(&n)
+                || !self.scope.contains(&n)
+                || self.local_change(n).is_change()
+            {
+                continue;
+            }
+            let Some(folder) = taken_by(i, n) else {
+                continue;
+            };
+            if piece && i.going_above.contains(&folder) {
+                self.placed.insert(n);
+            } else if i.dirty.contains(&folder)
+                && !self.scope.contains(&folder)
+                && grouped
+                    .get_or_insert_with(|| self.groups().flatten().copied().collect())
+                    .contains(&self.masks.store_id(folder))
+            {
+                with_folder.entry(folder).or_default().push(n);
+            }
+        }
+        // Each folder's nodes with it and what it waits with: one page.
+        for (folder, nodes) in with_folder {
+            let id = self.masks.store_id(folder);
+            let mut with: Vec<NodeId> = self
+                .groups()
+                .filter(|group| group.contains(&id))
+                .flatten()
+                .copied()
+                .collect();
+            with.push(folder);
+            self.placed.extend(nodes.iter().copied());
+            with.extend(nodes);
+            self.wait_together(with);
+        }
+    }
+
+    /// What waits to be planned with another page's nodes so far, by store ids: earlier
+    /// plans' of this input ([`Waits::together`]) and this one's.
+    fn groups(&self) -> impl Iterator<Item = &Vec<NodeId>> {
+        self.together.iter().chain(&self.plan.waits_together)
     }
 
     /// A folder this plan would delete that waits for another page (something in it does: a
@@ -267,14 +305,7 @@ impl Reconciler<'_> {
         // in it, what still keeps the folder isn't another page's: what is deleted in it goes
         // as before.
         let page: HashSet<NodeId> = i.dirty.iter().map(|n| self.masks.store_id(*n)).collect();
-        if self.going.is_empty()
-            && !self
-                .together
-                .iter()
-                .chain(&self.plan.waits_together)
-                .flatten()
-                .any(|n| !page.contains(n))
-        {
+        if self.going.is_empty() && !self.groups().flatten().any(|n| !page.contains(n)) {
             return;
         }
         let folders: HashSet<NodeId> = self

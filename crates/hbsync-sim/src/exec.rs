@@ -1499,18 +1499,14 @@ impl Sim {
                     }) || version
                         .is_some_and(|v| self.ledger.plan_saw_taken(c, node, v));
                     if let Some(n) = self.server.live.remove(&node) {
+                        let parent = n.state.parent;
                         self.remove_on_drive(node, n, rightly);
                         let client = &mut self.clients[c];
-                        let after = client.removed_by_plan.iter().find(|r| {
-                            self.server
-                                .removed
-                                .get(r)
-                                .is_some_and(|n| n.state.parent == node)
-                        });
                         self.ledger.folder_removed_after_contents(|| {
-                            after.map(|r| format!("{} removed {node} after {r} in it", client.name))
+                            let r = client.removed_by_plan.get(&node)?;
+                            Some(format!("{} removed {node} after {r} in it", client.name))
                         });
-                        client.removed_by_plan.insert(node);
+                        client.removed_by_plan.entry(parent).or_insert(node);
                     }
                     self.clients[c].planned_remote.remove(node);
                     // Its tags go with it: a tag change loses to a delete (§11).

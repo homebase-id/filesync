@@ -1755,6 +1755,69 @@ fn regression_what_a_folder_waiting_for_a_folders_page_deletes_waits_with_it() {
     assert_eq!(end(Some(1)), whole, "in pages of one");
 }
 
+/// Folder `a (conflict 1)` holds folder `a` and in it file `a`. Another device deletes the
+/// top folder and stops after its folder `a`: the file stays live, taken along. Before it
+/// syncs, c0 renames that folder `b`, tags the file and adds a file to the top folder: the
+/// rename keeps the folders, and with them what their removal took along, the file with its
+/// tag. In pages of one, `b`'s restore waited for its parent's page (placed into a folder
+/// another page plans), while the file, planned in `b`'s page, went with the removal: into
+/// Recently deleted apart from its folder, its tag lost. Now it waits with `b` and is planned
+/// with it, as in one page (seed cece07fa).
+#[test]
+fn regression_what_a_waiting_folders_removal_took_along_waits_with_it() {
+    use Action::*;
+    let acts = [
+        (1, CreateFile { parent: 0, name: 0 }, false),
+        (0, CreateFolder { parent: 0, name: 0 }, false),
+        (0, Purge, true),
+        (1, CreateFolder { parent: 2, name: 0 }, false),
+        (
+            1,
+            Move {
+                node: 0,
+                parent: 7,
+                name: 0,
+            },
+            false,
+        ),
+        (0, Edit { file: 0 }, true),
+        (0, DeleteStopped { pick: 8, done: 4 }, false),
+        (
+            0,
+            Move {
+                node: 11,
+                parent: 3,
+                name: 1,
+            },
+            false,
+        ),
+        (0, Tag { node: 15, tag: 12 }, false),
+        (0, Purge, false),
+        (0, CreateFile { parent: 0, name: 0 }, false),
+    ];
+    let end = |pages: Option<usize>| {
+        let mut sim = Sim::new(3).without_ignore_rules();
+        if let Some(size) = pages {
+            sim = sim.with_small_pages(size);
+        }
+        for (client, action, sync) in acts {
+            sim.run(&[Event::Act { client, action }]);
+            if sync {
+                assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
+            }
+        }
+        assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
+        if let Err(e) = sim.check() {
+            panic!("pages {pages:?}: {e}");
+        }
+        let tags = sim.server_tags("a (conflict 1)/b/a");
+        (sim.server_paths(), sim.removed_files_apart(), tags)
+    };
+    let whole = end(None);
+    assert_eq!(whole.2, Some(vec!["Red:6".to_string()]), "{whole:?}");
+    assert_eq!(end(Some(1)), whole, "in pages of one");
+}
+
 /// c2 makes d/c.txt; the phone deletes d and stops after the folder (c.txt live, taken along),
 /// then edits c.txt there: a live child, which keeps d (§6.3). c1 ignores everything named d
 /// (§10): what is in d isn't its. It planned c.txt as an orphan (d in Recently deleted, at a
@@ -1920,5 +1983,66 @@ fn regression_an_emptying_stopped_part_way_keeps_the_rest() {
                 panic!("{what}: {e}");
             }
         }
+    }
+}
+
+/// c0 deletes file `A` and folder `c.txt`, one plan, the file first (both at the top). Between
+/// its two removals, c2 brings `A` back into `c.txt` (moved there before it heard of the
+/// delete) and another device removes it again there. c0's removal of `c.txt` isn't one after
+/// what is in it: `A`'s removal there isn't c0's. The oracle took it as c0's, by node alone
+/// (seed 5689ab73); it now goes by the folder `A` was in when c0 removed it.
+#[test]
+fn regression_a_removal_after_a_restore_elsewhere_is_not_the_plans() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let (plan, step) = (
+        |client| Event::Plan { client },
+        |client| Event::Step { client },
+    );
+    let events = [
+        act(2, CreateJunk { parent: 0 }),
+        act(
+            2,
+            Move {
+                node: 0,
+                parent: 0,
+                name: 2,
+            },
+        ),
+        act(0, CreateFolder { parent: 0, name: 3 }),
+        plan(2),
+        step(2),
+        plan(0),
+        step(0),
+        plan(2),
+        step(2),
+        step(0),
+        act(
+            0,
+            Move {
+                node: 14,
+                parent: 2,
+                name: 0,
+            },
+        ),
+        act(0, Delete { node: 7 }),
+        act(
+            2,
+            Move {
+                node: 2,
+                parent: 2,
+                name: 0,
+            },
+        ),
+        plan(0),
+        step(0),
+        plan(2),
+        act(2, Meanwhile { op: 6 }),
+        step(2),
+        step(0),
+    ];
+    let settle = |sim: &mut Sim| sim.quiesce_announced(300);
+    if let Err(e) = run_settled(3, Some(1), |sim| sim, settle, &events) {
+        panic!("{e}");
     }
 }
