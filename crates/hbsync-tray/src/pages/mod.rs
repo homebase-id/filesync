@@ -44,6 +44,9 @@ struct Shared {
     phase: Phase,
     /// Gives up the login in progress (starting over): set, that login's outcome is ignored.
     cancel: Option<Arc<AtomicBool>>,
+    /// A page of the identity's owner app the login goes on to (giving the app its drive
+    /// back): where the page that follows along sends the browser, once.
+    owner_page: Option<String>,
     /// The daemon's latest status, for the deletes page.
     status: Option<FolderStatus>,
 }
@@ -52,6 +55,7 @@ impl Shared {
     /// The form, fresh.
     fn clear_form(&mut self) {
         self.phase = Phase::Form;
+        self.owner_page = None;
         self.error = None;
         self.merge_asked = false;
     }
@@ -92,6 +96,7 @@ impl Pages {
                 error: None,
                 phase: Phase::Form,
                 cancel: None,
+                owner_page: None,
                 status: None,
             })),
         };
@@ -186,7 +191,13 @@ impl Server {
                 Some(url) => redirect(&mut stream, &url),
                 None => self.html(&mut stream, self.setup_page()),
             },
-            ("GET", "setup/done") => self.html(&mut stream, self.done_page()),
+            ("GET", "setup/done") => {
+                let owner_page = lock(&self.pages.shared).owner_page.take();
+                match owner_page {
+                    Some(url) => redirect(&mut stream, &url),
+                    None => self.html(&mut stream, self.done_page()),
+                }
+            }
             ("POST", "setup/again") => {
                 self.pages.start_over();
                 (self.send)(Event::Wake);
@@ -481,6 +492,26 @@ mod tests {
         assert!(cancel.load(Ordering::Relaxed));
         let s = lock(&pages.shared);
         assert_eq!((s.phase.clone(), s.cancel.is_none()), (Phase::Form, true));
+        Ok(())
+    }
+
+    /// Giving the app its drive back goes on from the page that follows along: it sends the
+    /// browser to the owner app's page once, then follows along again.
+    #[test]
+    fn the_page_that_follows_along_goes_on_to_the_owner_page_once() -> R {
+        let dir = tempfile::tempdir()?;
+        let send: Sender = Arc::new(|_| {});
+        let pages = Pages::start(Paths::under(dir.path()), send)?;
+        let owner = "https://anna.example.com/owner/appupdate?x=1";
+        {
+            let mut s = lock(&pages.shared);
+            s.phase = Phase::Connecting;
+            s.owner_page = Some(owner.into());
+        }
+        let first = request(&pages.url("setup/done"), "GET", "")?;
+        assert!(first.contains(&format!("Location: {owner}\r\n")), "{first}");
+        let again = request(&pages.url("setup/done"), "GET", "")?;
+        assert!(again.contains("Connecting"), "{again}");
         Ok(())
     }
 

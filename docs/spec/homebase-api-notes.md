@@ -51,6 +51,16 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   `/owner/appreg`, which creates the requested drives and registers the app, then returns to
   the authorize URL (`YouAuthUnifiedController.cs:155-162` sets `return`), so the flow resumes
   by itself. An app cannot create drives itself.
+- **A registered app without its drive** **[verified]** (2026-10-27): logging in to an app that
+  is registered goes straight to consent, which creates nothing, so a drive deleted since stays
+  missing; finding it by slug answers 400 `invalidDrive` ("No drive 'filesync' on app
+  'filesync'", the same for an unknown app). The owner app's `/owner/appupdate` (odin-js
+  `ExtendAppPermissions.tsx`, params `appId`, `d`, `cd`, `return`) creates a requested drive
+  that is missing and not another app's well-known one, owned by the app asking
+  (`ensureAppOwnedDrives`); one that exists is only granted (`ensureDrive`). Cancelled, it
+  returns with `status=canceled`. The same alias and type come back, so nothing tells the new,
+  empty drive from the old one: setup asks for it only on a computer that never synced with
+  the identity (`setup.rs`, `give_drive_back`).
 - **Circles** **[verified]** (odin-core #1939, PR #1943, v0.1.960; odin-js #976): a circle has a
   slug, unique within the app that owns it, immutable. An app declares its circles at
   registration, in the YouAuth `ac` parameter (`YouAuthAppParameters.AppCirclesParamName`): a

@@ -1,23 +1,97 @@
-//! Logging this device in to an identity in the browser: the YouAuth exchange
-//! ([`hbsync_homebase::youauth`]) with the page on localhost the identity sends the browser
-//! back to.
+//! Trips of the browser to the identity's owner app that come back to a page on localhost:
+//! logging this device in (the YouAuth exchange, [`hbsync_homebase::youauth`]), and giving the
+//! app its drive again.
 
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use hbsync_homebase::{Credentials, HomebaseError, Pending};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 
-use crate::local_http;
+use crate::local_http::{self, Request};
 
 const CALLBACK_PATH: &str = "/authorization-code-callback";
+const DRIVE_PATH: &str = "/drive-callback";
+
+/// Where on localhost the identity sends the browser back to: one path, waited for.
+#[derive(Debug)]
+struct Callback {
+    listener: TcpListener,
+    path: &'static str,
+}
+
+impl Callback {
+    /// Listens on a free port; the URL the browser is sent back to.
+    fn bind(path: &'static str) -> std::io::Result<(Callback, String)> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://localhost:{}{path}", listener.local_addr()?.port());
+        Ok((Callback { listener, path }, url))
+    }
+
+    /// Waits up to `timeout` for the browser's request, given up as soon as `cancel` is set.
+    fn wait(
+        &self,
+        timeout: Duration,
+        cancel: &AtomicBool,
+    ) -> Result<(TcpStream, Request), HomebaseError> {
+        let deadline = Instant::now() + timeout;
+        self.listener.set_nonblocking(true)?;
+        loop {
+            let (mut stream, _) = match self.listener.accept() {
+                Ok(conn) => conn,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Err(HomebaseError::Protocol("given up: started over".into()));
+                    }
+                    if Instant::now() > deadline {
+                        return Err(HomebaseError::Protocol(
+                            "no answer from the browser in time".into(),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                    continue;
+                }
+                Err(e) => return Err(e.into()),
+            };
+            stream.set_nonblocking(false)?;
+            // Anything else is ignored: a favicon request, or a TLS handshake from a browser
+            // that tries https first (Firefox's HTTPS-First) before falling back to http.
+            let request = local_http::read_request(&mut stream).ok().flatten();
+            match request.filter(|r| r.method == "GET" && r.path == self.path) {
+                Some(request) => return Ok((stream, request)),
+                None => {
+                    let _ = local_http::message(&mut stream, 404, "Not here.");
+                }
+            }
+        }
+    }
+}
+
+/// Answers the browser that came back: sent on to `return_to` (with `?error=<why>` on
+/// failure), else a line of text.
+fn answer(
+    stream: &mut TcpStream,
+    return_to: Option<&str>,
+    outcome: Result<&str, String>,
+) -> std::io::Result<()> {
+    match (return_to, outcome) {
+        (Some(url), Ok(_)) => local_http::redirect(stream, url),
+        (Some(url), Err(why)) => {
+            let why = utf8_percent_encode(&why, NON_ALPHANUMERIC).to_string();
+            let sep = if url.contains('?') { '&' } else { '?' };
+            local_http::redirect(stream, &format!("{url}{sep}error={why}"))
+        }
+        (None, Ok(done)) => local_http::message(stream, 200, done),
+        (None, Err(why)) => local_http::message(stream, 200, &why),
+    }
+}
 
 /// A login waiting for the browser to come back.
 #[derive(Debug)]
 pub struct Login {
     pending: Pending,
-    listener: TcpListener,
+    back: Callback,
     /// Where the browser goes once the identity is back (`?error=` added on failure); else it
     /// shows a line of text.
     return_to: Option<String>,
@@ -26,12 +100,10 @@ pub struct Login {
 /// Starts logging in to `identity` (a domain such as `frodo.dotyou.cloud`); `friendly_name`
 /// names the device in the owner's list.
 pub(crate) fn begin(identity: &str, friendly_name: &str) -> Result<Login, HomebaseError> {
-    let listener = TcpListener::bind("127.0.0.1:0")?;
-    let port = listener.local_addr()?.port();
-    let redirect_uri = format!("http://localhost:{port}{CALLBACK_PATH}");
+    let (back, redirect_uri) = Callback::bind(CALLBACK_PATH)?;
     Ok(Login {
         pending: hbsync_homebase::youauth::begin(identity, friendly_name, &redirect_uri)?,
-        listener,
+        back,
         return_to: None,
     })
 }
@@ -60,54 +132,115 @@ impl Login {
         timeout: Duration,
         cancel: &AtomicBool,
     ) -> Result<Credentials, HomebaseError> {
-        let deadline = Instant::now() + timeout;
-        self.listener.set_nonblocking(true)?;
-        loop {
-            let (mut stream, _) = match self.listener.accept() {
-                Ok(conn) => conn,
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    if cancel.load(Ordering::Relaxed) {
-                        return Err(HomebaseError::Protocol("given up: started over".into()));
-                    }
-                    if Instant::now() > deadline {
-                        return Err(HomebaseError::Protocol(
-                            "no answer from the browser in time".into(),
-                        ));
-                    }
-                    std::thread::sleep(Duration::from_millis(100));
-                    continue;
-                }
-                Err(e) => return Err(e.into()),
+        let (mut stream, request) = self.back.wait(timeout, cancel)?;
+        let result = self.pending.complete(&request.query);
+        let outcome = match &result {
+            Ok(_) => Ok("Homebase Filesync is connected. You can close this window."),
+            Err(e) => Err(format!("Homebase Filesync could not connect: {e}")),
+        };
+        answer(&mut stream, self.return_to.as_deref(), outcome)?;
+        result
+    }
+}
+
+/// The owner giving the app its drive again ([`hbsync_homebase::app::restore_drive_url`]),
+/// waiting for the browser to come back.
+#[derive(Debug)]
+pub struct DriveRestore {
+    url: String,
+    back: Callback,
+    return_to: Option<String>,
+}
+
+/// Starts asking the owner of `identity` to give the app its drive again.
+pub(crate) fn begin_restore(identity: &str) -> Result<DriveRestore, HomebaseError> {
+    let (back, return_url) = Callback::bind(DRIVE_PATH)?;
+    Ok(DriveRestore {
+        url: hbsync_homebase::app::restore_drive_url(identity, &return_url),
+        back,
+        return_to: None,
+    })
+}
+
+impl DriveRestore {
+    /// Open this in the browser.
+    pub fn url(&self) -> &str {
+        &self.url
+    }
+
+    /// Sends the browser to `url` once the owner has answered, instead of showing a line of text.
+    pub fn return_to(mut self, url: &str) -> Self {
+        self.return_to = Some(url.to_owned());
+        self
+    }
+
+    /// Waits up to `timeout` (given up when `cancel` is set) for the owner's answer: `false`
+    /// when they said no. Whether the drive is there is for looking up afterwards.
+    pub fn finish_unless(
+        self,
+        timeout: Duration,
+        cancel: &AtomicBool,
+    ) -> Result<bool, HomebaseError> {
+        let (mut stream, request) = self.back.wait(timeout, cancel)?;
+        let given = request.query.get("status").map(String::as_str) != Some("canceled");
+        let outcome = if given {
+            Ok("Homebase Filesync goes on setting up. You can close this window.")
+        } else {
+            Err("Homebase Filesync didn't get its drive back.".to_owned())
+        };
+        answer(&mut stream, self.return_to.as_deref(), outcome)?;
+        Ok(given)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    type R = Result<(), Box<dyn std::error::Error>>;
+
+    /// The URL the owner app sends the browser back to, from the page's `return`.
+    fn return_url(page: &str) -> Result<String, Box<dyn std::error::Error>> {
+        let (_, query) = page.split_once('?').ok_or("no query")?;
+        let back = query
+            .split('&')
+            .find_map(|kv| kv.strip_prefix("return="))
+            .ok_or("no return")?;
+        Ok(percent_encoding::percent_decode_str(back)
+            .decode_utf8()?
+            .into_owned())
+    }
+
+    /// The browser coming back to `url` with `query`: the answer it gets.
+    fn come_back(url: &str, query: &str) -> std::io::Result<String> {
+        let rest = url.trim_start_matches("http://");
+        let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+        let mut s = TcpStream::connect(host.replace("localhost", "127.0.0.1"))?;
+        write!(s, "GET /{path}{query} HTTP/1.1\r\nHost: {host}\r\n\r\n")?;
+        let mut out = String::new();
+        s.read_to_string(&mut out)?;
+        Ok(out)
+    }
+
+    /// The owner's answer to giving the drive back: given unless they cancelled; the browser
+    /// sent on to the page that follows along, with why when not.
+    #[test]
+    fn giving_the_drive_back_waits_for_the_owner() -> R {
+        for (query, given) in [("", true), ("?status=canceled", false)] {
+            let restore = begin_restore("anna.example.com")?.return_to("http://x/done");
+            let back = return_url(restore.url())?;
+            let browser = std::thread::spawn(move || come_back(&back, query));
+            let answer = restore.finish_unless(Duration::from_secs(10), &AtomicBool::new(false))?;
+            assert_eq!(answer, given);
+            let page = browser.join().map_err(|_| "browser")??;
+            let expected = if given {
+                "Location: http://x/done\r\n"
+            } else {
+                "Location: http://x/done?error="
             };
-            stream.set_nonblocking(false)?;
-            // Anything else is ignored: a favicon request, or a TLS handshake from a browser
-            // that tries https first (Firefox's HTTPS-First) before falling back to http.
-            let request = local_http::read_request(&mut stream).ok().flatten();
-            let Some(request) = request.filter(|r| r.method == "GET" && r.path == CALLBACK_PATH)
-            else {
-                let _ = local_http::message(&mut stream, 404, "Not here.");
-                continue;
-            };
-            let result = self.pending.complete(&request.query);
-            match (&self.return_to, &result) {
-                (Some(url), Ok(_)) => local_http::redirect(&mut stream, url)?,
-                (Some(url), Err(e)) => {
-                    let why = utf8_percent_encode(&e.to_string(), NON_ALPHANUMERIC).to_string();
-                    let sep = if url.contains('?') { '&' } else { '?' };
-                    local_http::redirect(&mut stream, &format!("{url}{sep}error={why}"))?;
-                }
-                (None, Ok(_)) => local_http::message(
-                    &mut stream,
-                    200,
-                    "Homebase Filesync is connected. You can close this window.",
-                )?,
-                (None, Err(e)) => local_http::message(
-                    &mut stream,
-                    200,
-                    &format!("Homebase Filesync could not connect: {e}"),
-                )?,
-            }
-            return result;
+            assert!(page.contains(expected), "{page}");
         }
+        Ok(())
     }
 }

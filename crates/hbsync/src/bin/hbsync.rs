@@ -161,6 +161,30 @@ fn main() -> ExitCode {
     }
 }
 
+/// The owner's answers in the browser (`--browser`, or the system's), the page's URL printed
+/// in case none opens.
+struct InBrowser<'a>(Option<&'a str>);
+
+impl setup::Owner for InBrowser<'_> {
+    fn authorize(
+        &mut self,
+        identity: &str,
+        device: &str,
+    ) -> Result<setup::Credentials, setup::HomebaseError> {
+        println!("Opening your browser to authorize this computer on {identity}...");
+        setup::authorize(identity, device, self.0, show_url)
+    }
+
+    fn restore_drive(&mut self, identity: &str) -> Result<bool, setup::HomebaseError> {
+        println!("Opening your browser to give Filesync its drive back on {identity}...");
+        setup::restore_drive(identity, self.0, show_url)
+    }
+}
+
+fn show_url(url: &str) {
+    println!("If it doesn't open, visit:\n{url}\n");
+}
+
 /// Says the daemon isn't running: exit status 3.
 fn not_running() -> ExitCode {
     println!("The daemon isn't running (`hbsync start` starts it).");
@@ -198,15 +222,8 @@ fn run(command: Command) -> Res<ExitCode> {
                 };
             request.start = !no_start;
             request.at_logon = !no_autostart;
-            let mut authorize = |identity: &str, device: &str| {
-                println!("Opening your browser to authorize this computer on {identity}...");
-                setup::authorize(identity, device, browser.as_deref(), |url| {
-                    println!("If it doesn't open, visit:\n{url}\n");
-                })
-            };
-            setup::set_up(&paths, &request, &mut authorize, &mut |line| {
-                println!("{line}")
-            })?;
+            let mut owner = InBrowser(browser.as_deref());
+            setup::set_up(&paths, &request, &mut owner, &mut |line| println!("{line}"))?;
         }
         Command::Status { json } => match daemon::status(&paths)? {
             Some(s) if json => println!("{}", serde_json::to_string_pretty(&s)?),

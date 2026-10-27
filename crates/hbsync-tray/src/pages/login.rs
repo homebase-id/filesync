@@ -148,15 +148,15 @@ impl Server {
         };
         (self.send)(Event::Wake);
         let (url_tx, url_rx) = mpsc::channel::<String>();
-        let done = self.pages.url("setup/done");
         let (paths, pages, send) = (self.paths.clone(), self.pages.clone(), self.send.clone());
+        let mut owner = InTray {
+            first: Some(url_tx),
+            done: self.pages.url("setup/done"),
+            cancel: Arc::clone(&cancel),
+            pages: self.pages.clone(),
+        };
         std::thread::spawn(move || {
-            let mut authorize = |identity: &str, device: &str| {
-                let login = setup::begin(identity, device)?.return_to(&done);
-                let _ = url_tx.send(login.authorize_url().to_owned());
-                login.finish_unless(setup::APPROVAL_TIMEOUT, &cancel)
-            };
-            let result = setup::set_up(&paths, &request, &mut authorize, &mut |line| {
+            let result = setup::set_up(&paths, &request, &mut owner, &mut |line| {
                 tracing::info!("{line}");
             });
             let result = result
@@ -212,5 +212,47 @@ impl Server {
                 self.pages.url("setup/again")
             ),
         }
+    }
+}
+
+/// The owner's answers in the browser that came from the form: each owner-app page comes back
+/// to the page that follows along.
+struct InTray {
+    /// Where the first page goes: the form's answer sends the browser there.
+    first: Option<mpsc::Sender<String>>,
+    done: String,
+    cancel: Arc<AtomicBool>,
+    pages: Pages,
+}
+
+impl InTray {
+    /// Sends the browser to `url`: the first page as the form's answer, a later one from the
+    /// page that follows along (once the browser is back on it).
+    fn show(&mut self, url: &str) {
+        match self.first.take() {
+            Some(first) => drop(first.send(url.to_owned())),
+            None => lock(&self.pages.shared).owner_page = Some(url.to_owned()),
+        }
+    }
+}
+
+impl setup::Owner for InTray {
+    fn authorize(
+        &mut self,
+        identity: &str,
+        device: &str,
+    ) -> Result<setup::Credentials, setup::HomebaseError> {
+        let login = setup::begin(identity, device)?.return_to(&self.done);
+        self.show(login.authorize_url());
+        login.finish_unless(setup::APPROVAL_TIMEOUT, &self.cancel)
+    }
+
+    fn restore_drive(&mut self, identity: &str) -> Result<bool, setup::HomebaseError> {
+        let restore = setup::begin_restore(identity)?.return_to(&self.done);
+        self.show(restore.url());
+        let given = restore.finish_unless(setup::APPROVAL_TIMEOUT, &self.cancel);
+        // Not taken (the page wasn't looked at again): not sent there later.
+        lock(&self.pages.shared).owner_page = None;
+        given
     }
 }
