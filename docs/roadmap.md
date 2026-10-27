@@ -24,12 +24,8 @@ set aside and the folder set up again on its own.
 
 ## Performance (found comparing with Dropbox, 2026-10-26)
 
-- **Start the large files alongside the small ones.** Filesync sends a folder's small files
-  first and its large ones after; Dropbox starts the large ones at once and fills the link.
-  With 5,204 files (4.8 GB), most of the 130 s difference.
-- **Small files: find where the 0.3 s per file goes.** The server takes 80–230 ms of it (core's
-  log analysis); the rest is ours or on the way (building and encrypting the upload, TLS, our
-  per-file commit). Measure, then decide on more uploads at once or less work per file.
+In this order:
+
 - **Idle wakeups: about 2 a second in each of the daemon and the tray,** all on one thread
   (`blocking-1`), probably the desktop's D-Bus link (the app's systemd scope, the tray's
   StatusNotifierItem). The daemon alone idled at once every 12 s on frodo: bring it back.
@@ -43,10 +39,21 @@ set aside and the folder set up again on its own.
 - **State DB writes per file** (about 70 KB per file in a first sync of many small files):
   grouping commits is parked as a data-safety rule; look for anything cheaper first.
 
+Later, together (not urgent):
+
+- **Start the large files alongside the small ones.** Filesync sends a folder's small files
+  first and its large ones after; Dropbox starts the large ones at once and fills the link.
+  With 5,204 files (4.8 GB), most of the 130 s difference. Likely better: a mix of large and
+  small at once, as large files use the bandwidth and small ones wait on round trips.
+- **Small files: find where the 0.3 s per file goes.** The server takes 80–230 ms of it (core's
+  log analysis); the rest is ours or on the way (building and encrypting the upload, TLS, our
+  per-file commit). Measure, then decide on more uploads at once or less work per file.
+
 ## Next
 
-- **An upload whose uniqueId the server already has** (#295; found in the first sync of
-  309 GB on 0.9.0, where six files of 11–20 GB lost their answer and one was sent twice). The
+- **An upload whose uniqueId the server already has** (waits for a fix in odin-core first;
+  #295; found in the first sync of 309 GB on 0.9.0, where six files of 11–20 GB lost their
+  answer and one was sent twice). The
   server answers 4105 (odin-core #2019) right after the metadata, while the payload is still
   being sent: react at once (stop sending, treat the file as already there), as the server
   closes the connection after about 5 seconds, so a 20 GB file isn't sent twice. Then, and
