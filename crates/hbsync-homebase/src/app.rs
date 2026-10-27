@@ -155,7 +155,7 @@ pub fn restore_drive_url(identity: &str, return_url: &str) -> String {
     let query = crate::query(&[
         ("appId", &APP_ID.simple().to_string()),
         ("d", &json!([drive_request(&SYNC_DRIVE)]).to_string()),
-        // Required, as at registration: no circle grants asked for.
+        // No circle grants asked for (a missing `cd` reads the same there, verified).
         ("cd", "[]"),
         ("return", return_url),
     ]);

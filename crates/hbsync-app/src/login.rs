@@ -75,9 +75,7 @@ impl Callback {
             }
         }
     }
-}
 
-impl Callback {
     /// Answers the browser that came back: sent on to `return_to` (with `?error=<why>` on
     /// failure), else a line of text. A browser gone meanwhile (the tab closed) changes
     /// nothing: the owner's answer came.

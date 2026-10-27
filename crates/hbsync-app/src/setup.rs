@@ -418,13 +418,19 @@ pub fn set_up(
         Err(HomebaseError::NoDrive(_)) => {
             // Every local refusal first: the new drive is for every computer.
             if synced_before(paths, &config, identity, &folder) {
+                // Logged in again on the way: a running daemon takes the new credentials.
+                if authorized && control::running(paths)? {
+                    control::start_over(paths, identity)?;
+                }
                 return Err(Refusal::No(format!(
-                    "Filesync's drive isn't on {identity} any more, and this computer synced \
+                    "Filesync's drive isn't at its address on {identity} (deleted, or another app's), and this computer synced \
                      with it before: Filesync doesn't make a new one by itself, as this computer \
                      would take the empty new drive for every file deleted. No drive was made"
                 ))
                 .into());
             }
+            // Only looking (no DB here to ready); looked at again below, as a daemon may start
+            // while the owner answers.
             check_state(paths, identity, &folder, checked.existing)?;
             give_drive_back(identity, owner, say)?;
             // Still not at its address: a drive with its ids that another app owns (the owner
@@ -482,12 +488,12 @@ pub fn set_up(
 }
 
 /// Whether this computer synced with `identity` before: its account's DB, a folder of it in the
-/// config, or the folder's own state folder (the DB set aside or wiped since). Then a drive
-/// made again would be taken for every file deleted.
+/// config, or the folder's marker (the DB set aside or wiped since). Then a drive made again
+/// would be taken for every file deleted.
 fn synced_before(paths: &Paths, config: &Config, identity: &Identity, folder: &Path) -> bool {
     paths.account_db(identity).exists()
         || config.roots.iter().any(|r| r.identity == *identity)
-        || hbsync_local::layout::state_dir(folder).exists()
+        || hbsync_local::layout::marker_file(folder).exists()
 }
 
 /// The app's drive is gone from `identity` (deleted in the owner app, say): the owner is asked
@@ -580,10 +586,15 @@ mod tests {
         let mut config = Config::default();
         assert!(!synced_before(&paths, &config, &anna, &folder));
 
+        // A state folder alone (the user's ignore rules, say) isn't syncing.
         let state = hbsync_local::layout::state_dir(&folder);
         std::fs::create_dir(&state)?;
+        std::fs::write(hbsync_local::layout::ignore_file(&folder), "*.tmp\n")?;
+        assert!(!synced_before(&paths, &config, &anna, &folder));
+        let marker = hbsync_local::layout::marker_file(&folder);
+        std::fs::write(&marker, "")?;
         assert!(synced_before(&paths, &config, &anna, &folder));
-        std::fs::remove_dir(&state)?;
+        std::fs::remove_file(&marker)?;
 
         config
             .roots

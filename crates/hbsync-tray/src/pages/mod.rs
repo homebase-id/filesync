@@ -182,6 +182,11 @@ impl Server {
             ("GET", "app-icon.png") => {
                 respond(&mut stream, 200, "image/png", crate::icons::APP_256)
             }
+            // While a login goes on, the page that follows along (and the owner page it goes
+            // on to): the tray opens this one.
+            ("GET", "setup") if lock(&self.pages.shared).phase != Phase::Form => {
+                redirect(&mut stream, &self.pages.url("setup/done"))
+            }
             ("GET", "setup") => self.html(&mut stream, self.setup_page()),
             ("POST", "setup/folder") => {
                 self.choose_folder(&request.form);
@@ -508,7 +513,14 @@ mod tests {
             s.phase = Phase::Connecting;
             s.owner_page = Some(owner.into());
         }
-        let first = request(&pages.url("setup/done"), "GET", "")?;
+        // The tray opens the login page (Log in, again): it goes on to the one that follows.
+        let opened = request(&pages.url("setup"), "GET", "")?;
+        let done = pages.url("setup/done");
+        assert!(
+            opened.contains(&format!("Location: {done}\r\n")),
+            "{opened}"
+        );
+        let first = request(&done, "GET", "")?;
         assert!(first.contains(&format!("Location: {owner}\r\n")), "{first}");
         let again = request(&pages.url("setup/done"), "GET", "")?;
         assert!(again.contains("Connecting"), "{again}");

@@ -37,7 +37,7 @@ pub enum HomebaseError {
     /// The identity has the app but no drive at its address (`invalidDrive`): deleted, say, or
     /// made by another app. The owner can give the app its drive again
     /// ([`app::restore_drive_url`]).
-    #[error("Filesync's drive isn't on {0}")]
+    #[error("Filesync's drive isn't on {0} (deleted, or another app's)")]
     NoDrive(String),
     #[error("protocol: {0}")]
     Protocol(String),
