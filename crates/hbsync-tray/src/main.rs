@@ -38,8 +38,8 @@ pub enum Event {
     /// that replaced this one on disk ([`os::replacement`]).
     Daemon(Daemon, Vec<RecentItem>, Option<PathBuf>),
     Menu(MenuId),
-    /// A page wants a folder chosen (the OS's picker runs on the main thread).
-    PickFolder(mpsc::Sender<Option<PathBuf>>),
+    /// The login page wants a folder chosen (the OS's picker runs on the main thread).
+    PickFolder,
     /// Something changed: look again soon.
     Wake,
     /// Starting at login is now on (or off).
@@ -263,9 +263,10 @@ impl App {
                     return self.act(action);
                 }
             }
-            Event::PickFolder(reply) => {
+            Event::PickFolder => {
                 let home = hbsync_app::paths::home().unwrap_or_default();
-                let _ = reply.send(os::pick_folder("Choose the folder to sync", &home));
+                let picked = os::pick_folder("Choose the folder to sync", &home);
+                self.pages.picked(picked);
             }
             Event::Wake => {
                 let _ = self.wake.send(poll::Poke::Look);

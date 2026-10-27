@@ -75,8 +75,9 @@ pub(crate) fn pick_folder(title: &str, start: &Path) -> Option<PathBuf> {
     let dialog = rfd::FileDialog::new().set_title(title).set_directory(start);
     // Windows: the tray has no window, and a process in the background can't take the
     // foreground from the browser, so a picker of its own opens behind it. One owned by a
-    // topmost window is topmost too: in front, though not focused until clicked. (macOS's
-    // panel floats above every window already.)
+    // topmost window is topmost too: in front, though not focused until clicked. It stays
+    // above other windows while open, the price of never opening behind. (macOS's panel floats
+    // above every window already.)
     #[cfg(windows)]
     if let Some(owner) = owner::Owner::new() {
         return dialog.set_parent(&owner).pick_folder();
@@ -93,25 +94,27 @@ mod owner {
         DisplayHandle, HandleError, HasDisplayHandle, HasWindowHandle, RawWindowHandle,
         Win32WindowHandle, WindowHandle,
     };
-    use windows_sys::Win32::Foundation::{HWND, RECT};
+    use windows_sys::Win32::Foundation::HWND;
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromWindow,
+    };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        CreateWindowExW, DestroyWindow, GetForegroundWindow, GetWindowRect, WS_EX_TOOLWINDOW,
-        WS_EX_TOPMOST, WS_POPUP,
+        CreateWindowExW, DestroyWindow, GetForegroundWindow, WS_EX_TOPMOST, WS_POPUP,
     };
 
     /// A hidden topmost window that owns one dialog and goes with it. It sits in the middle
-    /// of the window in front (the browser), where the dialog centres itself.
+    /// of the screen the window in front (the browser) is on: the dialog centres itself on it.
     #[derive(Debug)]
     pub(super) struct Owner(HWND);
 
     impl Owner {
         pub(super) fn new() -> Option<Owner> {
-            let (x, y) = middle_of_foreground().unwrap_or((0, 0));
+            let (x, y) = middle_of_the_screen_in_front().unwrap_or((0, 0));
             // SAFETY: a system class (registered, with its own window procedure) and no
             // parent, menu or creation data; null when it fails.
             let hwnd = unsafe {
                 CreateWindowExW(
-                    WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                    WS_EX_TOPMOST,
                     windows_sys::w!("STATIC"),
                     null(),
                     WS_POPUP,
@@ -136,18 +139,19 @@ mod owner {
         }
     }
 
-    fn middle_of_foreground() -> Option<(i32, i32)> {
-        let mut r = RECT {
-            left: 0,
-            top: 0,
-            right: 0,
-            bottom: 0,
+    /// The middle of the work area of the monitor showing the window in front (where it was
+    /// before it was minimized; the main monitor when there's none).
+    fn middle_of_the_screen_in_front() -> Option<(i32, i32)> {
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
         };
-        // SAFETY: queries only; `r` outlives the call.
+        // SAFETY: queries only; `info` outlives the call and says its size.
         let found = unsafe {
-            let front = GetForegroundWindow();
-            !front.is_null() && GetWindowRect(front, &raw mut r) != 0
+            let monitor = MonitorFromWindow(GetForegroundWindow(), MONITOR_DEFAULTTOPRIMARY);
+            !monitor.is_null() && GetMonitorInfoW(monitor, &raw mut info) != 0
         };
+        let r = info.rcWork;
         found.then(|| (r.left.midpoint(r.right), r.top.midpoint(r.bottom)))
     }
 

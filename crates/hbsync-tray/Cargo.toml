@@ -33,7 +33,7 @@ tray-icon = "0.26"
 
 # Windows: the window that owns the folder picker, to open it in front of the browser.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_UI_WindowsAndMessaging"] }
 
 [dev-dependencies]
 hbsync-app = { workspace = true, features = ["testkit"] }

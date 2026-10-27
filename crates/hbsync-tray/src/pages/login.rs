@@ -3,6 +3,21 @@
 
 use super::*;
 
+impl Pages {
+    /// The picker [`Event::PickFolder`] opened closed, with the folder chosen, if any. Taken
+    /// unless a login started meanwhile.
+    pub(crate) fn picked(&self, folder: Option<PathBuf>) {
+        let mut s = lock(&self.shared);
+        s.picking = false;
+        if let Some(folder) = folder
+            && s.phase == Phase::Form
+        {
+            s.folder = Some(folder);
+            s.clear_form();
+        }
+    }
+}
+
 impl Server {
     /// Asks the tray (its main thread) for the OS's folder picker, keeping the address typed
     /// in `form`, and returns without waiting for it: the page says a window opened until it
@@ -18,21 +33,7 @@ impl Server {
         }
         s.picking = true;
         drop(s);
-        let (tx, rx) = mpsc::channel();
-        (self.send)(Event::PickFolder(tx));
-        let shared = Arc::clone(&self.pages.shared);
-        std::thread::spawn(move || {
-            // Nothing chosen, or the tray gone (the answer dropped): the folder stays.
-            let picked = rx.recv().ok().flatten();
-            let mut s = lock(&shared);
-            s.picking = false;
-            if let Some(folder) = picked
-                && s.phase == Phase::Form
-            {
-                s.folder = Some(folder);
-                s.clear_form();
-            }
-        });
+        (self.send)(Event::PickFolder);
     }
 
     pub(super) fn setup_page(&self) -> String {
@@ -42,9 +43,10 @@ impl Server {
             return self.done_page();
         }
         // In case the picker isn't in front (focus rules: a Linux portal's, Windows's): where
-        // to look for it, until it closes.
+        // to look for it, until it closes. Looked at again every 2 s meanwhile (the page and
+        // its icon, on 127.0.0.1), as while connecting.
         if s.picking {
-            return "<meta http-equiv=refresh content=1>\
+            return "<meta http-equiv=refresh content=2>\
                     <h1>Choose the folder</h1>\
                     <p>Choose the folder to sync in the window that opened. This page goes on \
                     once you have.</p>\
@@ -94,7 +96,15 @@ impl Server {
     /// identity's approval page (`Some`), or back to the form with what's wrong (`None`).
     pub(super) fn start_setup(&self, form: &HashMap<String, String>) -> Option<String> {
         let typed = form.get("identity").map_or("", |s| s.as_str());
-        let folder = lock(&self.pages.shared).folder();
+        let (picking, folder) = {
+            let s = lock(&self.pages.shared);
+            (s.picking, s.folder())
+        };
+        // Continue in another tab while the picker is open: the folder isn't chosen yet (the
+        // page says so).
+        if picking {
+            return None;
+        }
         let planned = match (Config::load(&self.paths.config_file()), folder) {
             (Ok(config), Some(folder)) => setup::plan(
                 &config.unwrap_or_default(),
