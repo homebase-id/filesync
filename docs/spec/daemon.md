@@ -613,7 +613,9 @@ Linux (rfd's, without GTK) needs `zenity`, which KDE doesn't install.
   at login, Open logs, Log out, Quit (keep syncing in the background, or stop syncing too).
   Syncing stopped: Start syncing, Open Homebase folder, Start at login, Open logs, Quit.
 - **Pages:** logging in (the Homebase address, the folder, `~/Homebase` unless chosen with the
-  OS's picker, merging a folder with files only when ticked), reviewing held deletes and
+  OS's picker, merging a folder with files only when ticked; while the picker is open the page
+  says a window opened, and on Windows, where the tray can't take the foreground from the
+  browser, a hidden topmost window owns the picker to keep it in front), reviewing held deletes and
   Recently deleted (the topmost items: path, size, date, how many items their restore brings
   back, Restore; Empty now, after a confirmation), and the folders (each role where this
   computer keeps it, how many files and bytes it holds, counted for 2 s at most; Sync, or why

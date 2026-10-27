@@ -36,6 +36,8 @@ enum Phase {
 struct Shared {
     identity: String,
     folder: Option<PathBuf>,
+    /// The OS's folder picker is open.
+    picking: bool,
     /// Asked to merge a folder with files in it.
     merge_asked: bool,
     error: Option<String>,
@@ -85,6 +87,7 @@ impl Pages {
             shared: Arc::new(Mutex::new(Shared {
                 identity: String::new(),
                 folder: None,
+                picking: false,
                 merge_asked: false,
                 error: None,
                 phase: Phase::Form,
@@ -359,24 +362,82 @@ mod tests {
         Ok(())
     }
 
-    /// Choosing the folder keeps the address typed; from a stale page while a login runs, it
-    /// does nothing.
+    /// Choosing the folder answers at once, the page saying where the picker is until it
+    /// closes; one picker at a time, and no login while it's open; it keeps the address typed.
     #[test]
     fn choosing_the_folder_keeps_the_address() -> R {
         let dir = tempfile::tempdir()?;
-        // No picker here: it answers nothing.
-        let send: Sender = Arc::new(|_| {});
+        // The pickers asked for (before the request is answered), answered by hand.
+        let (tx, rx) = mpsc::channel();
+        let send: Sender = Arc::new(move |e| {
+            if matches!(e, Event::PickFolder) {
+                let _ = tx.send(());
+            }
+        });
+        let asked = || rx.try_iter().count();
         let pages = Pages::start(Paths::under(&dir.path().join("home")), send)?;
         pages.prepare_setup("", None);
-        request(
+        let answer = request(
             &pages.url("setup/folder"),
             "POST",
             "identity=anna.example.com",
         )?;
+        assert!(
+            answer.contains(&format!("Location: {}", pages.url("setup"))),
+            "{answer}"
+        );
+        assert_eq!(asked(), 1);
+        let page = request(&pages.url("setup"), "GET", "")?;
+        assert!(page.contains("the window that opened"), "{page}");
+        assert!(page.contains("http-equiv=refresh"), "{page}");
+        // A second click while it's open opens no second picker; Continue (from another tab)
+        // starts nothing.
+        request(&pages.url("setup/folder"), "POST", "identity=bob")?;
+        assert_eq!(asked(), 0);
+        let page = request(&pages.url("setup"), "POST", "identity=anna.example.com")?;
+        assert!(page.contains("the window that opened"), "{page}");
+        assert_eq!(lock(&pages.shared).phase, Phase::Form);
+
+        let chosen = dir.path().join("Chosen");
+        pages.picked(Some(chosen.clone()));
         let page = request(&pages.url("setup"), "GET", "")?;
         assert!(page.contains("value=\"anna.example.com\""), "{page}");
+        assert!(
+            page.contains(&*escape(&chosen.display().to_string())),
+            "{page}"
+        );
+        assert!(!page.contains("the window that opened"), "{page}");
 
-        lock(&pages.shared).phase = Phase::Connecting;
+        // Closed without a choice: the folder stays.
+        request(&pages.url("setup/folder"), "POST", "")?;
+        assert_eq!(asked(), 1);
+        pages.picked(None);
+        assert_eq!(lock(&pages.shared).folder.as_ref(), Some(&chosen));
+        Ok(())
+    }
+
+    /// While a login runs, a stale page's *Change…* does nothing, and a folder chosen in a
+    /// picker that closes only now leaves the login alone.
+    #[test]
+    fn a_login_under_way_keeps_its_folder() -> R {
+        let dir = tempfile::tempdir()?;
+        let send: Sender = Arc::new(|_| {});
+        let pages = Pages::start(Paths::under(&dir.path().join("home")), send)?;
+        let folder = dir.path().join("Mine");
+        pages.prepare_setup("anna.example.com", Some(folder.clone()));
+        {
+            let mut s = lock(&pages.shared);
+            s.phase = Phase::Connecting;
+            s.picking = true;
+        }
+        pages.picked(Some(dir.path().join("Late")));
+        {
+            let s = lock(&pages.shared);
+            assert_eq!(
+                (s.phase.clone(), s.folder.as_ref(), s.picking),
+                (Phase::Connecting, Some(&folder), false)
+            );
+        }
         request(
             &pages.url("setup/folder"),
             "POST",

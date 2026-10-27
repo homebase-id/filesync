@@ -11,10 +11,6 @@ set aside and the folder set up again on its own.
 
 ## Small fixes
 
-- **The folder picker can open behind the browser** (Windows): *Change…* on the login page
-  opens the OS's picker from the tray, which has no window to put it in front of, so the
-  browser just shows it's loading. (Pressing Enter opened it too, the reason Enter didn't log
-  in; fixed.) Bring the picker to the front, or have the page say a window opened.
 - **A removed folder waiting for its name lets what its removal took along go** (potential):
   a folder deleted part way elsewhere, restored here, whose name is taken waits for the name,
   but the files its removal took along (live, unchanged here) go to Recently deleted on their
