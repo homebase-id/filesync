@@ -541,8 +541,10 @@ to start. It asks nothing otherwise, as nothing was stopped on purpose:
 - a tray restarting into its update (*Restart to finish the update*, `--restarted`) leaves the
   daemon as it was and doesn't tell a stop again.
 
-A stop lasts until syncing is started again, also across logins, as *Pause until I resume* does:
-starting at login starts the tray, which then shows that syncing is stopped.
+A stop is this computer's, for this user (the mark is in the local state folder): other
+computers, and another user's Filesync on this one, keep syncing. It lasts until syncing is
+started again, also across logins, as *Pause until I resume* does: starting at login starts the
+tray, which then shows that syncing is stopped.
 
 A quit runs on the thread that starts the daemon (the watcher's): after a start in flight (at
 most its 15 s; after an update, the restart of a daemon of another version, its stop included),
@@ -674,7 +676,7 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 | `hbsync recent [-n N]` | what was synced lately, newest first |
 | `hbsync confirm-deletes [--yes]` | shows the deletions to review (held deletes) and lets them through |
 | `hbsync put-back [--yes]` | shows the deletions to review and puts them back (sync semantics §7) |
-| `hbsync start`, `stop` | `stop` stops syncing until `start` (or the tray's Start syncing), also across logins: neither the tray nor the service manager starts the daemon meanwhile |
+| `hbsync start`, `stop` | `stop` stops syncing on this computer until `start` (or the tray's Start syncing), also across logins: neither the tray nor the service manager starts the daemon meanwhile |
 | `hbsync autostart [on\|off]` | |
 | `hbsync logout` | stops the daemon, forgets the credentials, autostart off; the folder stays |
 | `hbsync unlink` | stops the daemon, removes the folder from the config, autostart off; its files, `.hbsync` and the account's DB stay, so setting it up again resumes |

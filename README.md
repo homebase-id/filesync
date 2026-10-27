@@ -43,8 +43,8 @@ syncing, grey paused, offline or not set up, magenta when something needs you. I
 the folder or your files online, lists what synced lately and any problems, reviews held
 deletions, opens Recently deleted and the Folders page (Documents, Pictures and the like), and
 pauses, resumes or syncs now. **Quit** asks whether to keep syncing in the background or stop
-syncing too; stopped, syncing waits until you choose **Start syncing** in the menu (or run
-`hbsync start`), also after you log in again.
+syncing too; stopped, syncing on this computer waits until you choose **Start syncing** in the
+menu (or run `hbsync start`), also after you log in again. Your other computers keep syncing.
 
 **From a terminal,** `hbsync` does the same:
 

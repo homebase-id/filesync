@@ -155,9 +155,10 @@ pub fn stop_syncing(paths: &Paths) -> Result<bool> {
     Ok(asked && gone(paths)?)
 }
 
-/// Whether syncing was stopped ([`stop_syncing`]) and not started since.
+/// Whether syncing was stopped ([`stop_syncing`]) and not started since. A mark that can't be
+/// looked at (being replaced, say) counts as a stop: only one not there is none.
 pub fn stopped(paths: &Paths) -> bool {
-    stopped_mark(paths).exists()
+    !matches!(std::fs::metadata(stopped_mark(paths)), Err(e) if e.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// Ends a stop ([`stop_syncing`]), as [`start`] does: the tray starts the daemon again.
