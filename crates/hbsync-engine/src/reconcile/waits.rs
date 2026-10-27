@@ -207,10 +207,6 @@ impl Reconciler<'_> {
             }
             if !with.is_empty() {
                 with.push(node);
-                // A removed folder kept: what its removal took along stays only if it does,
-                // so it waits with it (planned now, it went with the removal: a tag added
-                // here lost, the item apart in Recently deleted).
-                with.extend(self.untaken.get(&node).into_iter().flatten());
                 together.push(with);
             }
         }
