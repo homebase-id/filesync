@@ -14,7 +14,9 @@ hbsync-namemap.workspace = true
 hbsync-state.workspace = true
 hbsync-types.workspace = true
 ignore = "0.4.33"
-notify = "8.2"
+# Exactly the version patched in vendor/notify (PATCHED.md): a newer one would leave the patch
+# unused without failing.
+notify = "=8.2.0"
 thiserror.workspace = true
 
 [features]
