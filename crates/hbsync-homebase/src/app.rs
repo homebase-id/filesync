@@ -13,7 +13,6 @@
 //! kind afterwards (verified in odin-js `useApp.ts` / `DriveProvider.ts`). Until then the
 //! client sends hashes on every upload anyway, and the drive is only recognised by its type.
 
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::{Value, json};
 use uuid::{Uuid, uuid};
 
@@ -153,18 +152,14 @@ pub(crate) fn permission_request(friendly_name: &str, return_url: &str) -> serde
 /// (`ensureAppOwnedDrives` and `ensureDrive`, verified). The browser comes back to `return_url`,
 /// with `status=canceled` when the owner says no. For [`HomebaseError::NoDrive`].
 pub fn restore_drive_url(identity: &str, return_url: &str) -> String {
-    let params = [
-        ("appId", APP_ID.simple().to_string()),
-        ("d", json!([drive_request(&SYNC_DRIVE)]).to_string()),
+    let query = crate::query(&[
+        ("appId", &APP_ID.simple().to_string()),
+        ("d", &json!([drive_request(&SYNC_DRIVE)]).to_string()),
         // Required, as at registration: no circle grants asked for.
-        ("cd", "[]".to_owned()),
-        ("return", return_url.to_owned()),
-    ];
-    let query: Vec<String> = params
-        .iter()
-        .map(|(k, v)| format!("{k}={}", utf8_percent_encode(v, NON_ALPHANUMERIC)))
-        .collect();
-    format!("https://{identity}/owner/appupdate?{}", query.join("&"))
+        ("cd", "[]"),
+        ("return", return_url),
+    ]);
+    format!("https://{identity}/owner/appupdate?{query}")
 }
 
 /// The app's circle on the identity, by its slug: the one installing the app created, the one an

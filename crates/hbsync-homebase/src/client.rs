@@ -230,11 +230,8 @@ impl Client {
         path: &str,
         query: &[(&str, &str)],
     ) -> Result<T, HomebaseError> {
-        let qs: Vec<String> = query
-            .iter()
-            .map(|(k, v)| format!("{k}={}", utf8_percent_encode(v, NON_ALPHANUMERIC)))
-            .collect();
-        let ss = serde_json::to_string(&Envelope::seal(&self.key, qs.join("&").as_bytes())?)?;
+        let qs = crate::query(query);
+        let ss = serde_json::to_string(&Envelope::seal(&self.key, qs.as_bytes())?)?;
         let url = format!(
             "{}?ss={}",
             self.url(path),

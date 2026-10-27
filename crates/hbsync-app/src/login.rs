@@ -18,13 +18,19 @@ const DRIVE_PATH: &str = "/drive-callback";
 #[derive(Debug)]
 struct Callback {
     listener: TcpListener,
-    path: &'static str,
+    path: String,
 }
 
 impl Callback {
-    /// Listens on a free port; the URL the browser is sent back to.
-    fn bind(path: &'static str) -> std::io::Result<(Callback, String)> {
+    /// Listens on a free port; the URL the browser is sent back to. `secret` adds a random part
+    /// to the path, for an answer that carries nothing else only the owner app knows.
+    fn bind(path: &str, secret: bool) -> std::io::Result<(Callback, String)> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
+        let path = if secret {
+            format!("{path}/{}", uuid::Uuid::new_v4().simple())
+        } else {
+            path.to_owned()
+        };
         let url = format!("http://localhost:{}{path}", listener.local_addr()?.port());
         Ok((Callback { listener, path }, url))
     }
@@ -69,13 +75,10 @@ impl Callback {
 }
 
 /// Answers the browser that came back: sent on to `return_to` (with `?error=<why>` on
-/// failure), else a line of text.
-fn answer(
-    stream: &mut TcpStream,
-    return_to: Option<&str>,
-    outcome: Result<&str, String>,
-) -> std::io::Result<()> {
-    match (return_to, outcome) {
+/// failure), else a line of text. A browser gone meanwhile (the tab closed) changes nothing:
+/// the owner's answer came.
+fn answer(stream: &mut TcpStream, return_to: Option<&str>, outcome: Result<&str, String>) {
+    let answered = match (return_to, outcome) {
         (Some(url), Ok(_)) => local_http::redirect(stream, url),
         (Some(url), Err(why)) => {
             let why = utf8_percent_encode(&why, NON_ALPHANUMERIC).to_string();
@@ -84,6 +87,9 @@ fn answer(
         }
         (None, Ok(done)) => local_http::message(stream, 200, done),
         (None, Err(why)) => local_http::message(stream, 200, &why),
+    };
+    if let Err(e) = answered {
+        tracing::debug!("the browser didn't take the answer: {e}");
     }
 }
 
@@ -100,7 +106,8 @@ pub struct Login {
 /// Starts logging in to `identity` (a domain such as `frodo.dotyou.cloud`); `friendly_name`
 /// names the device in the owner's list.
 pub(crate) fn begin(identity: &str, friendly_name: &str) -> Result<Login, HomebaseError> {
-    let (back, redirect_uri) = Callback::bind(CALLBACK_PATH)?;
+    // The identity's answer carries the request's state.
+    let (back, redirect_uri) = Callback::bind(CALLBACK_PATH, false)?;
     Ok(Login {
         pending: hbsync_homebase::youauth::begin(identity, friendly_name, &redirect_uri)?,
         back,
@@ -138,7 +145,7 @@ impl Login {
             Ok(_) => Ok("Homebase Filesync is connected. You can close this window."),
             Err(e) => Err(format!("Homebase Filesync could not connect: {e}")),
         };
-        answer(&mut stream, self.return_to.as_deref(), outcome)?;
+        answer(&mut stream, self.return_to.as_deref(), outcome);
         result
     }
 }
@@ -154,7 +161,7 @@ pub struct DriveRestore {
 
 /// Starts asking the owner of `identity` to give the app its drive again.
 pub(crate) fn begin_restore(identity: &str) -> Result<DriveRestore, HomebaseError> {
-    let (back, return_url) = Callback::bind(DRIVE_PATH)?;
+    let (back, return_url) = Callback::bind(DRIVE_PATH, true)?;
     Ok(DriveRestore {
         url: hbsync_homebase::app::restore_drive_url(identity, &return_url),
         back,
@@ -188,7 +195,7 @@ impl DriveRestore {
         } else {
             Err("Homebase Filesync didn't get its drive back.".to_owned())
         };
-        answer(&mut stream, self.return_to.as_deref(), outcome)?;
+        answer(&mut stream, self.return_to.as_deref(), outcome);
         Ok(given)
     }
 }

@@ -194,8 +194,8 @@ impl Server {
             Phase::Form => "<h1>Not connected yet</h1>".to_owned(),
             Phase::Connecting => format!(
                 "<meta http-equiv=refresh content=2>\
-                 <h1>Connecting…</h1><p>Approve this computer on your Homebase, in the page \
-                 that opened. This page follows along.</p>\
+                 <h1>Connecting…</h1><p>Approve on your Homebase, in the page that opened: \
+                 this computer, and Filesync's drive if it asks. This page follows along.</p>\
                  <form method=post action=\"{}\"><p class=small>A typo in the address, or the \
                  page closed? <button class=secondary>Start over</button></p></form>",
                 self.pages.url("setup/again")
@@ -229,9 +229,21 @@ impl InTray {
     /// Sends the browser to `url`: the first page as the form's answer, a later one from the
     /// page that follows along (once the browser is back on it).
     fn show(&mut self, url: &str) {
-        match self.first.take() {
-            Some(first) => drop(first.send(url.to_owned())),
-            None => lock(&self.pages.shared).owner_page = Some(url.to_owned()),
+        if let Some(first) = self.first.take()
+            && first.send(url.to_owned()).is_ok()
+        {
+            return;
+        }
+        self.set_owner_page(Some(url));
+    }
+
+    /// The owner page the page that follows along goes on to, unless this login was given up
+    /// (started over): then the pages are another login's. Checked under the lock that starting
+    /// over takes.
+    fn set_owner_page(&self, url: Option<&str>) {
+        let mut s = lock(&self.pages.shared);
+        if !self.cancel.load(Ordering::Relaxed) {
+            s.owner_page = url.map(str::to_owned);
         }
     }
 }
@@ -252,7 +264,7 @@ impl setup::Owner for InTray {
         self.show(restore.url());
         let given = restore.finish_unless(setup::APPROVAL_TIMEOUT, &self.cancel);
         // Not taken (the page wasn't looked at again): not sent there later.
-        lock(&self.pages.shared).owner_page = None;
+        self.set_owner_page(None);
         given
     }
 }

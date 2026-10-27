@@ -389,7 +389,17 @@ pub fn set_up(
     };
     match prepared {
         Err(HomebaseError::NoDrive(_)) => {
-            give_drive_back(paths, identity, owner, say)?;
+            // Every local refusal first: the new drive is for every computer.
+            if synced_before(paths, &config, identity, &folder) {
+                return Err(Refusal::No(format!(
+                    "Filesync's drive isn't on {identity} any more, and this computer synced \
+                     with it before: Filesync doesn't make a new one by itself, as this computer \
+                     would take the empty new drive for every file deleted. No drive was made"
+                ))
+                .into());
+            }
+            check_state(paths, identity, &folder, checked.existing)?;
+            give_drive_back(identity, owner, say)?;
             // Still not at its address: a drive with its ids that another app owns (the owner
             // app only grants one that exists).
             prepare(&creds).map_err(|e| match e {
@@ -444,24 +454,22 @@ pub fn set_up(
     Ok(())
 }
 
+/// Whether this computer synced with `identity` before: its account's DB, a folder of it in the
+/// config, or the folder's own state folder (the DB set aside or wiped since). Then a drive
+/// made again would be taken for every file deleted.
+fn synced_before(paths: &Paths, config: &Config, identity: &Identity, folder: &Path) -> bool {
+    paths.account_db(identity).exists()
+        || config.roots.iter().any(|r| r.identity == *identity)
+        || folder.join(hbsync_local::STATE_DIR).exists()
+}
+
 /// The app's drive is gone from `identity` (deleted in the owner app, say): the owner is asked
-/// to give it again, which makes an empty one. Only for a computer that never synced with the
-/// identity: one that did keeps the old drive's state, and would take every file of it as
-/// deleted on the drive.
+/// to give it again, which makes an empty one ([`synced_before`] is the caller's).
 fn give_drive_back(
-    paths: &Paths,
     identity: &Identity,
     owner: &mut dyn Owner,
     say: &mut dyn FnMut(&str),
 ) -> crate::Result<()> {
-    if paths.account_db(identity).exists() {
-        return Err(Refusal::No(format!(
-            "Filesync's drive isn't on {identity} any more, and this computer synced with it \
-             before: Filesync doesn't make a new one by itself, as this computer would take the \
-             empty new drive for every file deleted. Nothing was changed"
-        ))
-        .into());
-    }
     say(&format!(
         "Filesync's drive isn't on {identity}: asking your Homebase to give it back."
     ));
@@ -522,30 +530,48 @@ mod tests {
         }
     }
 
-    /// The drive is asked for again only where this computer never synced with the identity:
-    /// its state would take the new, empty drive for every file deleted.
+    /// The owner is asked, and their no is a refusal.
     #[test]
-    fn the_drive_is_given_back_only_where_nothing_synced_with_it() -> R {
-        let dir = tempfile::tempdir()?;
-        let paths = Paths::under(dir.path());
+    fn the_drive_is_given_back_when_the_owner_says_so() -> R {
         let anna = Identity::new("anna.example.com");
         let mut quiet = |_: &str| {};
-
         let mut yes = GivesBack(true, 0);
-        give_drive_back(&paths, &anna, &mut yes, &mut quiet)?;
+        give_drive_back(&anna, &mut yes, &mut quiet)?;
         assert_eq!(yes.1, 1);
-
         let mut no = GivesBack(false, 0);
-        let refused = give_drive_back(&paths, &anna, &mut no, &mut quiet);
+        let refused = give_drive_back(&anna, &mut no, &mut quiet);
         assert!(refused.is_err_and(|e| e.to_string().contains("approve")));
+        Ok(())
+    }
+
+    /// Any trace of syncing with the identity here counts: its DB, a folder of it in the
+    /// config, the folder's state folder.
+    #[test]
+    fn a_computer_synced_before_by_any_trace() -> R {
+        let dir = tempfile::tempdir()?;
+        let paths = Paths::under(&dir.path().join("home"));
+        let anna = Identity::new("anna.example.com");
+        let folder = dir.path().join("Homebase");
+        std::fs::create_dir_all(&folder)?;
+        let mut config = Config::default();
+        assert!(!synced_before(&paths, &config, &anna, &folder));
+
+        std::fs::create_dir(folder.join(hbsync_local::STATE_DIR))?;
+        assert!(synced_before(&paths, &config, &anna, &folder));
+        std::fs::remove_dir(folder.join(hbsync_local::STATE_DIR))?;
+
+        config.roots.push(crate::Root {
+            identity: anna.clone(),
+            folder: dir.path().join("Elsewhere"),
+            role: None,
+        });
+        assert!(synced_before(&paths, &config, &anna, &folder));
+        config.roots.clear();
 
         let db = paths.account_db(&anna);
         std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
         std::fs::write(&db, "")?;
-        let mut never = GivesBack(true, 0);
-        let refused = give_drive_back(&paths, &anna, &mut never, &mut quiet);
-        assert!(refused.is_err_and(|e| e.to_string().contains("synced with it before")));
-        assert_eq!(never.1, 0);
+        assert!(synced_before(&paths, &config, &anna, &folder));
         Ok(())
     }
 

@@ -48,3 +48,13 @@ pub enum HomebaseError {
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 }
+
+/// `k=v&…`, each value percent-encoded.
+pub(crate) fn query(params: &[(&str, &str)]) -> String {
+    use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+    let pairs: Vec<String> = params
+        .iter()
+        .map(|(k, v)| format!("{k}={}", utf8_percent_encode(v, NON_ALPHANUMERIC)))
+        .collect();
+    pairs.join("&")
+}

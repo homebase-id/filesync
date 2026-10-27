@@ -15,7 +15,6 @@ use std::path::Path;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
@@ -99,23 +98,16 @@ pub fn begin(
     let exchange = Exchange::new()?;
     let state = uuid::Uuid::from_bytes(random::<16>()?).simple().to_string();
     let request = crate::app::permission_request(friendly_name, redirect_uri);
-    let params = [
-        ("client_id", crate::app::APP_ID.simple().to_string()),
-        ("client_type", "app".to_owned()),
-        ("client_info", friendly_name.to_owned()),
-        ("public_key", exchange.public_jwk_base64url()),
-        ("permission_request", request.to_string()),
-        ("state", state.clone()),
-        ("redirect_uri", redirect_uri.to_owned()),
-    ];
-    let query: Vec<String> = params
-        .iter()
-        .map(|(k, v)| format!("{k}={}", utf8_percent_encode(v, NON_ALPHANUMERIC)))
-        .collect();
-    let authorize_url = format!(
-        "https://{identity}/api/owner/v1/youauth/authorize?{}",
-        query.join("&")
-    );
+    let query = crate::query(&[
+        ("client_id", &crate::app::APP_ID.simple().to_string()),
+        ("client_type", "app"),
+        ("client_info", friendly_name),
+        ("public_key", &exchange.public_jwk_base64url()),
+        ("permission_request", &request.to_string()),
+        ("state", &state),
+        ("redirect_uri", redirect_uri),
+    ]);
+    let authorize_url = format!("https://{identity}/api/owner/v1/youauth/authorize?{query}");
     Ok(Pending {
         identity: identity.to_owned(),
         exchange,
