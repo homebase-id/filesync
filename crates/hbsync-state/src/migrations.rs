@@ -138,7 +138,8 @@ const SCHEMA: &str = r#"
         seq    INTEGER NOT NULL DEFAULT 0,            -- its mark's version, moved on by a change
                                                       -- of the drive's picture: a round clears
                                                       -- only the one it read
-        PRIMARY KEY (id, folder)
+        PRIMARY KEY (folder, id)                      -- a folder's marks together: its reads
+                                                      -- never pass another folder's
     ) WITHOUT ROWID;
 
     -- Per folder: items parked under a temporary name in their folder, with the name they had.
@@ -445,6 +446,21 @@ const MIGRATIONS: &[&str] = &[
     CREATE TRIGGER local_regone AFTER UPDATE OF id, parent ON local
         WHEN old.id IS NOT new.id OR old.parent IS NOT new.parent
         BEGIN INSERT INTO gone VALUES (old.id), (old.parent); END;",
+    // 25: the dirty set keyed by folder first: a folder's reads of its marks (its pages, its
+    // counts, each sync) read past no other folder's (20,000 of a role folder's made an idle
+    // sync of the main folder ~30 times dearer). The table made again with it.
+    "CREATE TABLE dirty_new (
+        folder INTEGER NOT NULL REFERENCES folders(id) ON DELETE CASCADE,
+        id     INTEGER NOT NULL,
+        seq    INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (folder, id)
+    ) WITHOUT ROWID;
+    INSERT INTO dirty_new SELECT folder, id, seq FROM dirty
+        WHERE folder IN (SELECT id FROM folders);
+    DROP TABLE dirty;
+    ALTER TABLE dirty_new RENAME TO dirty;
+    CREATE TRIGGER dirty_gone AFTER DELETE ON dirty
+        BEGIN INSERT INTO gone VALUES (old.id); END;",
 ];
 
 /// The version this client makes and reads.
@@ -733,6 +749,36 @@ mod tests {
         let (new, upgraded) = (shape(&new)?, shape(&upgraded)?);
         assert!(new.len() > 20, "{new:#?}");
         assert_eq!(new, upgraded);
+        Ok(())
+    }
+
+    /// The dirty set keyed by folder first keeps every folder's marks (a removed folder's
+    /// leftovers go), and what goes from it later still frees its node ids.
+    #[test]
+    fn the_dirty_set_keeps_its_marks_keyed_by_folder() -> Result<()> {
+        let mut conn = version_13()?;
+        // A mark of a folder that is no more: left by a removal with foreign keys off.
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             INSERT INTO folders (top, path, marker, added_at) VALUES (x'00', '/f', 'm', 0);
+             INSERT INTO folders (top, path, marker, added_at) VALUES (x'01', '/d', 'm', 0);
+             INSERT INTO dirty (folder, id) VALUES (1, 7), (2, 3), (2, 7), (9, 4);
+             PRAGMA foreign_keys = ON;",
+        )?;
+        apply(&mut conn)?;
+        let marks: Vec<(i64, i64)> = conn
+            .prepare("SELECT folder, id FROM dirty")?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<rusqlite::Result<_>>()?;
+        assert_eq!(marks, [(1, 7), (2, 3), (2, 7)]);
+        let key: Vec<String> = conn
+            .prepare("SELECT name FROM pragma_table_info('dirty') WHERE pk > 0 ORDER BY pk")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        assert_eq!(key, ["folder", "id"]);
+        conn.execute("DELETE FROM dirty WHERE folder = 2 AND id = 3", [])?;
+        let gone: i64 = conn.query_row("SELECT id FROM gone", [], |r| r.get(0))?;
+        assert_eq!(gone, 3);
         Ok(())
     }
 }

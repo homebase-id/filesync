@@ -75,7 +75,7 @@ impl ReadTx<'_> {
         }
         self.prep(
             "INSERT INTO dirty (folder, id) VALUES (?1, ?2) \
-             ON CONFLICT (id, folder) DO UPDATE SET seq = seq + 1",
+             ON CONFLICT (folder, id) DO UPDATE SET seq = seq + 1",
         )?
         .execute([folder, id])?;
         Ok(())

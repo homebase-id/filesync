@@ -472,7 +472,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 24);
+    assert_eq!(db.schema_version()?, 25);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -1342,7 +1342,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 24);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 25);
     Ok(())
 }
 

@@ -172,7 +172,7 @@ impl AccountTx<'_> {
     /// Forgets the ids of nodes nothing refers to any more (gone everywhere, nothing pending).
     /// Only ids that lost a reference since the last call are checked (triggers note them in
     /// `gone`). Ids are never handed out again, so an id held anywhere can't come to mean
-    /// another node.
+    /// another node. The dirty set, keyed by folder first, is probed in each folder.
     pub fn collect_nodes(&self) -> Result<usize> {
         let n = self
             .prep(
@@ -183,7 +183,8 @@ impl AccountTx<'_> {
              AND NOT EXISTS (SELECT 1 FROM base WHERE parent = nodes.id) \
              AND NOT EXISTS (SELECT 1 FROM remote WHERE id = nodes.id) \
              AND NOT EXISTS (SELECT 1 FROM remote WHERE parent = nodes.id) \
-             AND NOT EXISTS (SELECT 1 FROM dirty WHERE id = nodes.id) \
+             AND NOT EXISTS (SELECT 1 FROM folders f CROSS JOIN dirty d \
+                 ON d.folder = f.id AND d.id = nodes.id) \
              AND NOT EXISTS (SELECT 1 FROM parked WHERE id = nodes.id) \
              AND NOT EXISTS (SELECT 1 FROM held_deletes WHERE id = nodes.id) \
              AND NOT EXISTS (SELECT 1 FROM forks WHERE id = nodes.id OR new_node = nodes.id) \
