@@ -1985,3 +1985,64 @@ fn regression_an_emptying_stopped_part_way_keeps_the_rest() {
         }
     }
 }
+
+/// c0 deletes file `A` and folder `c.txt`, one plan, the file first (both at the top). Between
+/// its two removals, c2 brings `A` back into `c.txt` (moved there before it heard of the
+/// delete) and another device removes it again there. c0's removal of `c.txt` isn't one after
+/// what is in it: `A`'s removal there isn't c0's. The oracle took it as c0's, by node alone
+/// (seed 5689ab73); it now matches the version c0's removal gave it.
+#[test]
+fn regression_a_removal_after_a_restore_elsewhere_is_not_the_plans() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let (plan, step) = (
+        |client| Event::Plan { client },
+        |client| Event::Step { client },
+    );
+    let events = [
+        act(2, CreateJunk { parent: 0 }),
+        act(
+            2,
+            Move {
+                node: 0,
+                parent: 0,
+                name: 2,
+            },
+        ),
+        act(0, CreateFolder { parent: 0, name: 3 }),
+        plan(2),
+        step(2),
+        plan(0),
+        step(0),
+        plan(2),
+        step(2),
+        step(0),
+        act(
+            0,
+            Move {
+                node: 14,
+                parent: 2,
+                name: 0,
+            },
+        ),
+        act(0, Delete { node: 7 }),
+        act(
+            2,
+            Move {
+                node: 2,
+                parent: 2,
+                name: 0,
+            },
+        ),
+        plan(0),
+        step(0),
+        plan(2),
+        act(2, Meanwhile { op: 6 }),
+        step(2),
+        step(0),
+    ];
+    let settle = |sim: &mut Sim| sim.quiesce_announced(300);
+    if let Err(e) = run_settled(3, Some(1), |sim| sim, settle, &events) {
+        panic!("{e}");
+    }
+}

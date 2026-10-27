@@ -1501,16 +1501,19 @@ impl Sim {
                     if let Some(n) = self.server.live.remove(&node) {
                         self.remove_on_drive(node, n, rightly);
                         let client = &mut self.clients[c];
-                        let after = client.removed_by_plan.iter().find(|r| {
+                        let after = client.removed_by_plan.iter().find(|(r, v)| {
                             self.server
                                 .removed
                                 .get(r)
-                                .is_some_and(|n| n.state.parent == node)
+                                .is_some_and(|n| n.state.parent == node && n.remote.version == **v)
                         });
                         self.ledger.folder_removed_after_contents(|| {
-                            after.map(|r| format!("{} removed {node} after {r} in it", client.name))
+                            after.map(|(r, _)| {
+                                format!("{} removed {node} after {r} in it", client.name)
+                            })
                         });
-                        client.removed_by_plan.insert(node);
+                        let removed = self.server.removed[&node].remote.version;
+                        client.removed_by_plan.insert(node, removed);
                     }
                     self.clients[c].planned_remote.remove(node);
                     // Its tags go with it: a tag change loses to a delete (§11).
