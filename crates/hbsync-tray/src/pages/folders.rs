@@ -126,14 +126,18 @@ impl Server {
                 // Read here, now: macOS asks for access to a protected folder (Documents,
                 // Downloads) while the user is at this page, not later out of the blue.
                 std::fs::read_dir(&folder)?;
-                return Ok(
-                    match folders::add_synced(&self.paths, &identity, &folder, Some(role))? {
-                        Taken::Now => format!("{} syncs now.", role.name()),
-                        Taken::AtStart => {
-                            format!("{} is set up: it syncs once Filesync runs.", role.name())
-                        }
-                    },
-                );
+                let (taken, set_aside) =
+                    folders::add_synced(&self.paths, &identity, &folder, Some(role))?;
+                let said = match taken {
+                    Taken::Now => format!("{} syncs now.", role.name()),
+                    Taken::AtStart => {
+                        format!("{} is set up: it syncs once Filesync runs.", role.name())
+                    }
+                };
+                return Ok(match set_aside {
+                    Some(why) => format!("{} {said}", hbsync_app::words::set_aside(why)),
+                    None => said,
+                });
             }
             let Some(root) = config.folder(&identity, Some(role)) else {
                 return Ok(format!("{} wasn't synced.", role.name()));

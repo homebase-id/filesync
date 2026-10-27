@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use hbsync_engine::root::{RootError, SetAside, SyncRoot};
+use hbsync_state::Unusable;
 use hbsync_types::{NodeId, Role};
 
 use crate::config::ConfigLock;
@@ -204,8 +205,13 @@ fn add_locked(
     let config = held.load()?.unwrap_or_default();
     check(&config, identity, path, role, home().as_deref())?;
     let db = paths.account_db(identity);
+    // In the DB's turn until the config lists it: a DB set aside meanwhile by its running
+    // account ([`heal_account`]) is set aside before it is written here, or after the config
+    // lists it, which the account reads then.
+    let turn = turn(&db);
+    let _turn = lock(&turn);
     let set = match ready {
-        true => ready_account(&db, identity, &config.roots)?,
+        true => ready_in_turn(&db, identity, &config.roots, None)?,
         false => None,
     };
     let top = role.map_or(NodeId::ROOT, Role::node);
@@ -239,32 +245,77 @@ pub fn ready_account(
     identity: &Identity,
     roots: &[Root],
 ) -> Result<Option<SetAside>, RootError> {
-    // One at a time per DB; other accounts' go on.
-    static TURNS: Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
-    let turn = Arc::clone(lock(&TURNS).entry(db.to_path_buf()).or_default());
+    let turn = turn(db);
     let _turn = lock(&turn);
+    ready_in_turn(db, identity, roots, None)
+}
+
+/// [`ready_account`] at `paths` for a DB its account found unusable as it ran, which nothing
+/// of it has open any more: checked as at a start, or with `found`, set aside unchecked
+/// ([`SyncRoot::ready`]). Its `folders` are set up again in a new one with those the config
+/// lists for it, read in the DB's turn (one being added meanwhile is in it). What was set
+/// aside, if anything.
+pub(crate) fn heal_account(
+    paths: &Paths,
+    identity: &Identity,
+    folders: &[Root],
+    found: Option<Unusable>,
+) -> Result<Option<SetAside>, RootError> {
+    let db = paths.account_db(identity);
+    let turn = turn(&db);
+    let _turn = lock(&turn);
+    let mut roots = folders.to_vec();
+    for root in Config::now(paths).map(|c| c.roots).unwrap_or_default() {
+        if !roots.iter().any(|r| r.folder == root.folder) {
+            roots.push(root);
+        }
+    }
+    ready_in_turn(&db, identity, &roots, found)
+}
+
+/// The turn of the DB at `db`, one at a time in this process: readying it or setting it aside,
+/// and setting a folder up in it ([`add`]). Other accounts' go on.
+fn turn(db: &Path) -> Arc<Mutex<()>> {
+    static TURNS: Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
+    Arc::clone(lock(&TURNS).entry(db.to_path_buf()).or_default())
+}
+
+/// [`ready_account`], or [`heal_account`] with `found`, in the DB's turn.
+fn ready_in_turn(
+    db: &Path,
+    identity: &Identity,
+    roots: &[Root],
+    found: Option<Unusable>,
+) -> Result<Option<SetAside>, RootError> {
     let folders: Vec<(&Path, NodeId)> = roots
         .iter()
         .filter(|r| r.identity == *identity)
         .map(|r| (r.folder.as_path(), r.role.map_or(NodeId::ROOT, Role::node)))
         .collect();
-    SyncRoot::ready(db, identity, &folders)
+    SyncRoot::ready(db, identity, &folders, found)
 }
 
 /// Has the running daemon set the folder at `path` up and sync it ([`add`]), or sets it up for
-/// the daemon's start when none runs ([`changed`]).
+/// the daemon's start when none runs ([`changed`]). Why the account's DB was set aside here as
+/// it was readied, if it was, for the caller to tell ([`crate::words::set_aside`]); a running
+/// daemon tells it on the account's status.
 pub fn add_synced(
     paths: &Paths,
     identity: &Identity,
     path: &Path,
     role: Option<Role>,
-) -> Result<Taken, Error> {
-    changed(
+) -> Result<(Taken, Option<Unusable>), Error> {
+    let mut set_aside = None;
+    let taken = changed(
         paths,
         // No daemon runs: nothing else writes the DB.
-        |held| add_locked(held, paths, identity, path, role, true).map(drop),
+        |held| {
+            set_aside = add_locked(held, paths, identity, path, role, true)?.map(|s| s.why);
+            Ok(())
+        },
         || crate::control::add_folder(paths, identity, path, role),
-    )
+    )?;
+    Ok((taken, set_aside))
 }
 
 /// Has the running daemon stop syncing the folder at `path` and take it off the config, or
@@ -283,10 +334,10 @@ pub fn remove_synced(paths: &Paths, path: &Path) -> Result<Taken, Error> {
 /// running has its socket bound. One gone before it was asked is looked at again.
 fn changed(
     paths: &Paths,
-    here: impl Fn(&ConfigLock) -> Result<(), Error>,
+    mut here: impl FnMut(&ConfigLock) -> Result<(), Error>,
     ask: impl Fn() -> Result<(), Error>,
 ) -> Result<Taken, Error> {
-    let runs = || -> Result<bool, Error> {
+    let mut runs = || -> Result<bool, Error> {
         let held = ConfigLock::take(&paths.config_file())?;
         if crate::lock::daemon_runs(paths)? {
             return Ok(true);

@@ -38,19 +38,35 @@ another identity's it is refused, and one the DB doesn't know is set up again by
 (merging its files, `--existing`), or as the account starts after its DB was set aside (below).
 
 An account's DB that can't be used at all is set aside as the account starts (the daemon's
-start, or setup while no daemon runs): one from before 0.7, which isn't upgraded, or one whose
-file is bad (not a database; a damaged page, which SQLite's `quick_check` finds, on a connection
-that only reads, before anything is upgraded or written: it reads the whole file at each start,
-~0.3 s and a read of 226 MB for 300,000 files; a table, column, index or trigger missing). A
-page that can't be read for now (an I/O error) isn't damage. It is renamed beside the new one,
+start, or `hbsync setup` or `hbsync add` while no daemon runs): one from before 0.7, which isn't
+upgraded, or one whose file is bad (not a database; a damaged page, which SQLite's `quick_check`
+finds, on a connection that only reads, before anything is upgraded or written: it reads the
+whole file at each start, ~0.3 s and a read of 226 MB for 300,000 files; a table, column, index
+or trigger missing, also where its upgrade fails for one). A page that can't be read for now (an
+I/O error) isn't damage. One found bad while the account runs (SQLite answers a folder's runner
+that it is malformed, or not a database, as it takes changes, scans or syncs) is looked at then:
+the runner ends, the account stops the rest of its folders and closes every part holding the DB
+(its feed, Recently deleted's keeper, the answers' connection), and checks it as at a start,
+its folders showing *starting* meanwhile; damaged, it is set aside and the account syncs on in
+a new one. A check that finds nothing (a passing fault is not worth every folder set up again:
+their files hashed, the whole drive read) lets the folders start again; found bad again, it is
+set aside unchecked (a check of its pages doesn't see an index's damage). Once set aside, not
+again in that run of the account: found bad again, its folders back off as after any failed
+sync, until the daemon starts again and checks the file. An error setting it aside is shown
+and tried again after a pause, checked (not the daemon started again and again). A folder
+added meanwhile waits for it (one DB's turn in the daemon: its setting up, and the config read
+for the folders to set up again). It is renamed beside the new one,
 `state.db.too-old-<Unix time>` or `state.db.corrupt-<Unix time>`, with its `-wal` and `-shm`
 files named alike, never deleted: they are for a diagnosis, and old ones can be deleted by hand.
 The account's folders that are there (their marker this identity's) are then set up again in the
 new DB as folders with files, as `hbsync setup --existing` does: what they hold is adopted by
 hash, nothing is copied twice, and a file that differs from the drive's becomes a conflict copy.
-The tray and the log say so, once. The new DB records that it replaced one (`db.set_aside`)
-until it knows each of them: a folder not there then (a disk not plugged in), or one that
-couldn't be set up, is set up again at a later start of the account, once it is back. Not set
+The tray and the log say so, once, and `hbsync setup` and `hbsync add` print it when they set
+it aside (setup also when it then refuses the folder). The new DB records that it replaced one (`db.set_aside`) until it knows each of them:
+a folder not there then (a disk not plugged in), or one that couldn't be set up, is set up again
+at a later start of the account, once it is back. Meanwhile setup refuses it as it refuses any
+folder synced here whose marker is gone (the empty mount point of a disk not plugged in), unless
+asked to merge: the config lists it, though the new DB doesn't know it yet. Not set
 aside: a DB of a newer version (a downgrade: setting it aside would throw a newer version's
 records away; the account waits, saying why), and one that can't be read for now (busy or
 locked, an I/O error, a full disk, access denied, a missing folder, a read-only file system:

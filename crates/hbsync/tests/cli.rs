@@ -307,6 +307,23 @@ fn a_role_folder_is_added_and_removed_without_a_daemon() -> R {
     Ok(())
 }
 
+/// Adding a role folder with no daemon running readies the account's DB: one from before 0.7 is
+/// set aside, and that is said, as setup and the daemon say it.
+#[test]
+fn adding_a_folder_tells_a_state_db_set_aside() -> R {
+    let home = Home::new()?;
+    home.set_up()?;
+    let db = hbsync_app::Paths::under(home.path()).account_db(&IDENTITY.into());
+    rusqlite::Connection::open(&db)?.pragma_update(None, "user_version", 6)?;
+    let docs = home.path().join("Docs");
+    std::fs::create_dir_all(&docs)?;
+    let said = home.ok(&["add", "documents", "--folder", &docs.to_string_lossy()])?;
+    let told = hbsync_app::words::set_aside(hbsync_state::Unusable::TooOld);
+    assert!(said.contains(&told), "{said}");
+    assert!(said.contains("hbsync start"), "{said}");
+    Ok(())
+}
+
 #[test]
 fn a_role_folder_is_added_for_an_identity_set_up_only() -> R {
     let home = Home::new()?;

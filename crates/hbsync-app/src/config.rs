@@ -101,6 +101,18 @@ impl Default for MassDelete {
 }
 
 impl Config {
+    /// The config at `paths` as it is now; `None` (logged) while it can't be read (being
+    /// edited, say): what needs it waits.
+    pub(crate) fn now(paths: &crate::Paths) -> Option<Config> {
+        match Config::load(&paths.config_file()) {
+            Ok(c) => Some(c.unwrap_or_default()),
+            Err(e) => {
+                tracing::warn!("can't read the config: {e}");
+                None
+            }
+        }
+    }
+
     /// The config at `path`; `None` when there is no file yet.
     pub fn load(path: &Path) -> Result<Option<Config>, ConfigError> {
         let text = match std::fs::read_to_string(path) {
