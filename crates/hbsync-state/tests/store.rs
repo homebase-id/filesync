@@ -1511,6 +1511,18 @@ fn drive_changes_fan_out_to_the_folders_they_concern() -> R {
     main.write(|s| s.account().forget_file(work.file_id, None))?;
     for db in [&mut main, &mut docs_db, &mut pics_db] {
         assert!(dirty(db, letter)?);
+        clear(db, letter)?;
+    }
+    // So too where the folder was live in Documents when it went for good.
+    let (live, note) = (folder(NodeId::new(), docs_top, "Live"), NodeId::new());
+    main.write(|s| {
+        s.account().put_mirror(&live)?;
+        s.account().put_mirror(&folder(note, live.node, "Note"))
+    })?;
+    assert!(!dirty(&mut main, note)?);
+    main.write(|s| s.account().forget_file(live.file_id, None))?;
+    for db in [&mut main, &mut docs_db, &mut pics_db] {
+        assert!(dirty(db, note)?);
     }
     // A place the mirror doesn't connect to the top: every folder looks.
     let lost = NodeId::new();

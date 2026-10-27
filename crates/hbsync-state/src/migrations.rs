@@ -25,9 +25,12 @@ const BASE: u32 = 13;
 /// `removed`, `kv`) is the account's; each synced folder has its rows in the other tables,
 /// with `folder` last in every key and index: a node's rows are found by id, a folder's listings
 /// by parent or file id, and a folder alone matches no index, so the planner (which has no
-/// statistics) never scans a whole folder for a lookup. The exception: `local_unhashed`,
+/// statistics) never scans a whole folder for a lookup. The exceptions: `local_unhashed`,
 /// partial, holds a folder's files not hashed yet alone, and only a query with its condition
-/// reads it.
+/// reads it; `dirty` is keyed by folder first, as a folder reads its own marks in pages and
+/// counts them every sync (keyed by node, each read passed every other folder's), and its
+/// lookups of a node or a subtree name the folder too (`CROSS JOIN` where the planner would
+/// otherwise read the folder's whole dirty set).
 const SCHEMA: &str = r#"
     -- Every node gets a small integer id once; every other table is keyed by it, so the
     -- 16-byte UUID is stored a single time. AUTOINCREMENT: an id is never handed out again,
@@ -457,6 +460,7 @@ const MIGRATIONS: &[&str] = &[
     ) WITHOUT ROWID;
     INSERT INTO dirty_new SELECT folder, id, seq FROM dirty
         WHERE folder IN (SELECT id FROM folders);
+    INSERT INTO gone SELECT id FROM dirty WHERE folder NOT IN (SELECT id FROM folders);
     DROP TABLE dirty;
     ALTER TABLE dirty_new RENAME TO dirty;
     CREATE TRIGGER dirty_gone AFTER DELETE ON dirty
@@ -659,9 +663,19 @@ mod tests {
 
     /// A DB of 0.7.0 or 0.7.1 (version 13), as SQLite keeps its schema.
     fn version_13() -> Result<Connection> {
+        frozen(include_str!("v13.sql"), 13)
+    }
+
+    /// A DB of 0.9.0 or 0.9.1 (version 24), as SQLite keeps its schema.
+    fn version_24() -> Result<Connection> {
+        frozen(include_str!("v24.sql"), 24)
+    }
+
+    /// The frozen schema `sql` of `version`.
+    fn frozen(sql: &str, version: u32) -> Result<Connection> {
         let conn = Connection::open_in_memory()?;
-        conn.execute_batch(include_str!("v13.sql"))?;
-        conn.pragma_update(None, "user_version", 13)?;
+        conn.execute_batch(sql)?;
+        conn.pragma_update(None, "user_version", version)?;
         Ok(conn)
     }
 
@@ -737,48 +751,55 @@ mod tests {
         Ok(out)
     }
 
-    /// A new DB and one of 0.7.1 brought up to date have the same schema: [`SCHEMA`] is what
-    /// the migrations from it made.
+    /// A new DB and one of 0.7.1 or 0.9.1 brought up to date have the same schema: [`SCHEMA`]
+    /// is what the migrations from them made.
     #[test]
     fn the_schema_is_what_an_upgrade_makes() -> Result<()> {
         let mut new = Connection::open_in_memory()?;
         apply(&mut new)?;
-        let mut upgraded = version_13()?;
-        apply(&mut upgraded)?;
-        assert_eq!(user_version(&upgraded)?, VERSION);
-        let (new, upgraded) = (shape(&new)?, shape(&upgraded)?);
+        let new = shape(&new)?;
         assert!(new.len() > 20, "{new:#?}");
-        assert_eq!(new, upgraded);
+        for mut upgraded in [version_13()?, version_24()?] {
+            apply(&mut upgraded)?;
+            assert_eq!(user_version(&upgraded)?, VERSION);
+            assert_eq!(new, shape(&upgraded)?);
+        }
         Ok(())
     }
 
-    /// The dirty set keyed by folder first keeps every folder's marks (a removed folder's
-    /// leftovers go), and what goes from it later still frees its node ids.
+    /// The dirty set keyed by folder first keeps every folder's marks; a removed folder's
+    /// leftovers go, their node ids to be collected. What goes from it later frees its ids too.
     #[test]
     fn the_dirty_set_keeps_its_marks_keyed_by_folder() -> Result<()> {
-        let mut conn = version_13()?;
-        // A mark of a folder that is no more: left by a removal with foreign keys off.
-        conn.execute_batch(
-            "PRAGMA foreign_keys = OFF;
-             INSERT INTO folders (top, path, marker, added_at) VALUES (x'00', '/f', 'm', 0);
-             INSERT INTO folders (top, path, marker, added_at) VALUES (x'01', '/d', 'm', 0);
-             INSERT INTO dirty (folder, id) VALUES (1, 7), (2, 3), (2, 7), (9, 4);
-             PRAGMA foreign_keys = ON;",
-        )?;
-        apply(&mut conn)?;
-        let marks: Vec<(i64, i64)> = conn
-            .prepare("SELECT folder, id FROM dirty")?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?;
-        assert_eq!(marks, [(1, 7), (2, 3), (2, 7)]);
-        let key: Vec<String> = conn
-            .prepare("SELECT name FROM pragma_table_info('dirty') WHERE pk > 0 ORDER BY pk")?
-            .query_map([], |r| r.get(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        assert_eq!(key, ["folder", "id"]);
-        conn.execute("DELETE FROM dirty WHERE folder = 2 AND id = 3", [])?;
-        let gone: i64 = conn.query_row("SELECT id FROM gone", [], |r| r.get(0))?;
-        assert_eq!(gone, 3);
+        for mut conn in [version_13()?, version_24()?] {
+            // A mark of a folder that is no more: left by a removal with foreign keys off.
+            conn.execute_batch(
+                "PRAGMA foreign_keys = OFF;
+                 INSERT INTO folders (top, path, marker, added_at) VALUES (x'00', '/f', 'm', 0);
+                 INSERT INTO folders (top, path, marker, added_at) VALUES (x'01', '/d', 'm', 0);
+                 INSERT INTO dirty (folder, id) VALUES (1, 7), (2, 3), (2, 7), (9, 4);
+                 PRAGMA foreign_keys = ON;",
+            )?;
+            apply(&mut conn)?;
+            let ids = |sql: &str| -> Result<Vec<(i64, i64)>> {
+                Ok(conn
+                    .prepare(sql)?
+                    .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                    .collect::<rusqlite::Result<_>>()?)
+            };
+            assert_eq!(
+                ids("SELECT folder, id FROM dirty")?,
+                [(1, 7), (2, 3), (2, 7)]
+            );
+            assert_eq!(
+                ids("SELECT pk, cid FROM pragma_table_info('dirty') WHERE pk > 0 ORDER BY pk")?,
+                [(1, 0), (2, 1)],
+                "keyed (folder, id)"
+            );
+            assert_eq!(ids("SELECT id, 0 FROM gone")?, [(4, 0)]);
+            conn.execute("DELETE FROM dirty WHERE folder = 2 AND id = 3", [])?;
+            assert_eq!(ids("SELECT id, 0 FROM gone")?, [(4, 0), (3, 0)]);
+        }
         Ok(())
     }
 }

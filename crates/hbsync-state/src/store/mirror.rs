@@ -129,6 +129,18 @@ impl ReadTx<'_> {
     /// `place` is in (the folder with the nearest top above it, [`ReadTx::place_of`]). Every
     /// folder when `place` doesn't reach the drive's top (a gap or a cycle): none is left out.
     pub(super) fn fan_out(&self, node: NodeId, place: NodeId) -> Result<()> {
+        self.fan_out_from(node, Some(place))
+    }
+
+    /// Marks `node` dirty in every folder: a node whose folder left the drive for good, or that
+    /// waited in one this client couldn't read, has no place to go by (an orphan, for the main
+    /// folder to adopt, §6.3), whatever its folder's place was.
+    pub(super) fn fan_out_everywhere(&self, node: NodeId) -> Result<()> {
+        self.fan_out_from(node, None)
+    }
+
+    /// [`ReadTx::fan_out`] from `place`; `None`: not known.
+    fn fan_out_from(&self, node: NodeId, place: Option<NodeId>) -> Result<()> {
         let folders = self.folder_list()?;
         let id = self.key_or_insert(node)?;
         let marked: std::collections::BTreeSet<i64> = match &*folders {
@@ -145,12 +157,16 @@ impl ReadTx<'_> {
                     )?
                     .query_map([id], |r| r.get(0))?
                     .collect::<rusqlite::Result<std::collections::BTreeSet<i64>>>()?;
-                match self.place_of(place, &folders)? {
+                let place = match place {
+                    Some(place) => self.place_of(place, &folders)?,
+                    None => None,
+                };
+                match place {
                     Some(Place::Folder(folder)) => {
                         holders.insert(folder);
                     }
                     Some(Place::Unheld) => {}
-                    // A gap or a cycle: whose it is isn't known.
+                    // A gap or a cycle, or no place: whose it is isn't known.
                     None => holders.extend(folders.iter().map(|f| f.id)),
                 }
                 holders
