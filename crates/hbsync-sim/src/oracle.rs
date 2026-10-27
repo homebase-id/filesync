@@ -1285,6 +1285,42 @@ mod tests {
         assert!(wrong.contains("no one deleted it"), "{wrong}");
     }
 
+    /// A plan that removes a file from its folder and then the folder is reported: restored,
+    /// the folder comes back without it. By the folder the file was in when the plan removed
+    /// it, whatever the drive did with it since.
+    #[test]
+    fn a_folder_removed_after_what_is_in_it_is_reported() {
+        let mut sim = Sim::new(1);
+        sim.run(&[act(0, Action::CreateFolder { parent: 0, name: 1 })]);
+        let folder = sim.item(0, "b").expect("b");
+        let parent = sim.pick(0, folder, true).expect("b");
+        sim.run(&[act(0, Action::CreateFile { parent, name: 0 })]);
+        assert!(sim.quiesce(10));
+        let file = sim.item(0, "b/a").expect("b/a");
+        // The user deletes b; the plan's removals go wrong way round.
+        let node = sim.pick(0, folder, false).expect("b");
+        sim.run(&[act(0, Action::Delete { node })]);
+        let delete = |sim: &Sim, node: NodeId, parent: NodeId| {
+            let remote = sim.server.live[&node].remote;
+            hbsync_engine::reconcile::Op::RemoteDelete {
+                node,
+                parent,
+                file_id: remote.file_id,
+                expected: remote.version,
+            }
+        };
+        let op = delete(&sim, file, folder);
+        sim.execute(0, &op);
+        let op = delete(&sim, folder, NodeId::ROOT);
+        sim.execute(0, &op);
+        assert!(sim.quiesce(10));
+        let wrong = sim.check().expect_err("the folder after what was in it");
+        assert!(
+            wrong.contains("a folder was removed after what is in it"),
+            "{wrong}"
+        );
+    }
+
     /// A user's delete covers the item as they saw it: an edit made elsewhere since wins, and a
     /// removal of the edited version is reported.
     #[test]

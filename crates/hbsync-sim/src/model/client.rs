@@ -42,9 +42,10 @@ pub(crate) struct Client {
     pub(crate) extra: HashMap<NodeId, BaseExtra>,
     /// Pending operations with their retry count.
     pub(crate) plan: VecDeque<(Op, u8)>,
-    /// What the pending plan removed to Recently deleted so far, each at the version its
-    /// removal gave it: one restored and removed again since (another device's) isn't its.
-    pub(crate) removed_by_plan: BTreeMap<NodeId, VersionTag>,
+    /// What the pending plan removed to Recently deleted so far, each with the folder it was in
+    /// then: what the drive did to it since (restored and removed again elsewhere, by another
+    /// device) isn't the plan's.
+    pub(crate) removed_by_plan: BTreeMap<NodeId, NodeId>,
     /// The folders whose removal in the pending plan ended without removing them: what is in
     /// them waits for the next plan.
     pub(crate) unremoved: HashSet<NodeId>,
