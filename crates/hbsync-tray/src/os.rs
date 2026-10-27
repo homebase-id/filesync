@@ -28,14 +28,21 @@ pub(crate) fn reveal(path: &Path) {
 
 #[cfg(target_os = "macos")]
 fn show_selected(path: &Path) -> std::io::Result<()> {
-    Command::new("open").arg("-R").arg(path).spawn().map(drop)
+    Command::new("open")
+        .arg("-R")
+        .arg(path)
+        .spawn()
+        .map(hbsync_app::reap)
 }
 
 #[cfg(windows)]
 fn show_selected(path: &Path) -> std::io::Result<()> {
     let mut arg = std::ffi::OsString::from("/select,");
     arg.push(path);
-    Command::new("explorer").arg(arg).spawn().map(drop)
+    Command::new("explorer")
+        .arg(arg)
+        .spawn()
+        .map(hbsync_app::reap)
 }
 
 /// The file manager interface Dolphin, Nautilus and others implement.

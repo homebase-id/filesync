@@ -88,6 +88,9 @@ fn main() -> ExitCode {
         }
     };
     tracing::info!("{PROGRAM} {} started", hbsync_app::VERSION);
+    // Restarted into an update: the children of the tray before, the daemon say, are ours.
+    #[cfg(target_os = "linux")]
+    hbsync_app::adopt_children();
     // Started from a terminal, say: listed as itself, not as the terminal.
     #[cfg(target_os = "linux")]
     hbsync_app::unit::move_to_scope(std::process::id());
