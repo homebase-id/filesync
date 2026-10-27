@@ -49,6 +49,15 @@ impl RootError {
             }
         }
     }
+
+    /// Why the account's DB can't be used at all, if that is what it means
+    /// ([`StateError::unusable`]).
+    pub fn unusable(&self) -> Option<Unusable> {
+        match self {
+            RootError::State(e) => e.unusable(),
+            _ => None,
+        }
+    }
 }
 
 /// A folder synced with an account, found through its marker.
@@ -216,11 +225,12 @@ impl SyncRoot {
             Some(why) => Err((why, "found unusable while syncing".to_owned())),
             None => match Self::check_and_open(db, identity) {
                 Ok(account) => Ok(account),
-                Err(RootError::State(e)) => match e.unusable() {
-                    Some(why) => Err((why, e.to_string())),
-                    None => return Err(e.into()),
-                },
-                Err(e) => return Err(e),
+                Err(e) => {
+                    let Some(why) = e.unusable() else {
+                        return Err(e);
+                    };
+                    Err((why, e.to_string()))
+                }
             },
         };
         let (mut account, set) = match checked {

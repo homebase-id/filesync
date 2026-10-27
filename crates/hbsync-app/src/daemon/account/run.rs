@@ -169,9 +169,10 @@ impl Account {
                 }
                 Err(e) => e,
             };
-            let wait_for = match healing {
-                true => backoff.after(e.class(), None),
-                false => NEEDS_USER_AGAIN,
+            let wait_for = if healing {
+                backoff.after(e.class(), None)
+            } else {
+                NEEDS_USER_AGAIN
             };
             tracing::error!("{e}: {} waits for it to be set right", self.identity);
             self.show_waiting(State::Failing, e.to_string());
@@ -217,7 +218,7 @@ impl Account {
                 Some(set) => healed = set,
                 None => return Ok(()),
             }
-            now = Self::config(paths);
+            now = Config::now(paths);
         }
     }
 
@@ -383,12 +384,11 @@ impl Account {
                     }
                 }
                 let before = shown.runners.len();
-                let unusable: Vec<Unusable> = shown
-                    .runners
-                    .iter_mut()
+                // Every runner joined if it ended; the first that ended for the DB.
+                let unusable = (shown.runners.iter_mut())
                     .filter_map(|r| r.ended(ending))
-                    .collect();
-                if let Some(&why) = unusable.first().filter(|_| can_heal) {
+                    .reduce(|first, _| first);
+                if let Some(why) = unusable.filter(|_| can_heal) {
                     // Its folders wait while the DB is looked at ([`Account::sync`]), as at the
                     // account's start: they show starting, and one added or removed meanwhile
                     // changes them.
@@ -426,7 +426,7 @@ impl Account {
                 // Started without the lock (only this thread changes the runners), with the
                 // config as it is now (its settings may have changed meanwhile); while it
                 // can't be read, restarts wait a while and new folders wait a moment.
-                let config = Self::config(paths);
+                let config = Config::now(paths);
                 let paused = lock(&self.shown).paused();
                 let start = |root: &Root| {
                     let config = config.as_ref()?;
@@ -496,18 +496,6 @@ impl Account {
             let wait = wait_for(now, deadlines.into_iter().flatten());
             msgs.extend(requests.recv_timeout(wait).ok());
             msgs.extend(requests.try_iter());
-        }
-    }
-
-    /// The config as it is now; `None` (logged) while it can't be read (being edited, say):
-    /// what needs it waits.
-    fn config(paths: &Paths) -> Option<Config> {
-        match Config::load(&paths.config_file()) {
-            Ok(c) => Some(c.unwrap_or_default()),
-            Err(e) => {
-                tracing::warn!("can't read the config: {e}");
-                None
-            }
         }
     }
 

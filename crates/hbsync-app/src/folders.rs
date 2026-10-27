@@ -265,15 +265,10 @@ pub(crate) fn heal_account(
     let turn = turn(&db);
     let _turn = lock(&turn);
     let mut roots = folders.to_vec();
-    match Config::load(&paths.config_file()) {
-        Ok(config) => {
-            for root in config.unwrap_or_default().roots {
-                if !roots.iter().any(|r| r.folder == root.folder) {
-                    roots.push(root);
-                }
-            }
+    for root in Config::now(paths).map(|c| c.roots).unwrap_or_default() {
+        if !roots.iter().any(|r| r.folder == root.folder) {
+            roots.push(root);
         }
-        Err(e) => tracing::warn!("can't read the config: {e}"),
     }
     ready_in_turn(&db, identity, &roots, found)
 }
@@ -310,18 +305,17 @@ pub fn add_synced(
     path: &Path,
     role: Option<Role>,
 ) -> Result<(Taken, Option<Unusable>), Error> {
-    let set_aside = std::cell::Cell::new(None);
+    let mut set_aside = None;
     let taken = changed(
         paths,
         // No daemon runs: nothing else writes the DB.
         |held| {
-            let set = add_locked(held, paths, identity, path, role, true)?;
-            set_aside.set(set.map(|s| s.why));
+            set_aside = add_locked(held, paths, identity, path, role, true)?.map(|s| s.why);
             Ok(())
         },
         || crate::control::add_folder(paths, identity, path, role),
     )?;
-    Ok((taken, set_aside.get()))
+    Ok((taken, set_aside))
 }
 
 /// Has the running daemon stop syncing the folder at `path` and take it off the config, or
@@ -340,10 +334,10 @@ pub fn remove_synced(paths: &Paths, path: &Path) -> Result<Taken, Error> {
 /// running has its socket bound. One gone before it was asked is looked at again.
 fn changed(
     paths: &Paths,
-    here: impl Fn(&ConfigLock) -> Result<(), Error>,
+    mut here: impl FnMut(&ConfigLock) -> Result<(), Error>,
     ask: impl Fn() -> Result<(), Error>,
 ) -> Result<Taken, Error> {
-    let runs = || -> Result<bool, Error> {
+    let mut runs = || -> Result<bool, Error> {
         let held = ConfigLock::take(&paths.config_file())?;
         if crate::lock::daemon_runs(paths)? {
             return Ok(true);

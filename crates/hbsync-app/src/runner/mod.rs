@@ -92,7 +92,8 @@ impl RunnerError {
     /// ([`StateError::unusable`]): its account sets it aside ([`crate::folders::heal_account`]).
     pub fn unusable(&self) -> Option<Unusable> {
         match self {
-            RunnerError::State(e) | RunnerError::Folder(RootError::State(e)) => e.unusable(),
+            RunnerError::State(e) => e.unusable(),
+            RunnerError::Folder(e) => e.unusable(),
             RunnerError::Engine(e) => e.unusable(),
             _ => None,
         }
