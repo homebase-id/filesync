@@ -116,22 +116,22 @@ impl AccountTx<'_> {
         }
         // A folder gone for good (deleted outright, another app's; or purged from Recently
         // deleted) with nodes still live in it: they are orphans now, planned again too, dirty
-        // or not, in every view alike (sync semantics §6.3). Hardly ever any: one statement, two
-        // index probes a file (a purge's too), finding nothing where what was in the folder left
-        // with it.
-        let orphans: Vec<(Vec<u8>, Vec<u8>)> = self
+        // or not, in every view alike (sync semantics §6.3): in every folder, the main folder
+        // adopting them wherever their folder was. Hardly ever any: one statement, two index
+        // probes a file (a purge's too), finding nothing where what was in the folder left with
+        // it.
+        let orphans: Vec<Vec<u8>> = self
             .prep(
                 "WITH f(id) AS (SELECT id FROM remote WHERE file_id = ?1 \
                  UNION ALL SELECT n.id FROM removed r JOIN nodes n ON n.uuid = r.node \
                  WHERE r.file_id = ?1) \
-                 SELECT p.uuid, n.uuid FROM f JOIN nodes p ON p.id = f.id \
-                 JOIN remote c ON c.parent = f.id JOIN nodes n ON n.id = c.id",
+                 SELECT n.uuid FROM f JOIN remote c ON c.parent = f.id \
+                 JOIN nodes n ON n.id = c.id",
             )?
-            .query_map([file_id.0.as_bytes()], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .query_map([file_id.0.as_bytes()], |r| r.get(0))?
             .collect::<rusqlite::Result<_>>()?;
-        for (folder, child) in orphans {
-            // Where the folder is, while the mirror still has it (else every folder's).
-            self.fan_out(codec::node(&child)?, codec::node(&folder)?)?;
+        for child in orphans {
+            self.fan_out_everywhere(codec::node(&child)?)?;
         }
         self.delete_removed_file(file_id)?;
         self.leave_tree(file_id)

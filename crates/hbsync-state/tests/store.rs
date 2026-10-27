@@ -472,7 +472,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 24);
+    assert_eq!(db.schema_version()?, 25);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -1342,7 +1342,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 24);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 25);
     Ok(())
 }
 
@@ -1485,6 +1485,45 @@ fn drive_changes_fan_out_to_the_folders_they_concern() -> R {
         .ok_or(StateError::Corrupt("gone".into()))?;
     main.write(|s| s.account().put_mirror(&again))?;
     assert!(!dirty(&mut pics_db, inside)?);
+    // Work deleted, then what it holds (its delete takes it along, or a file written into it
+    // since): Work's place is where its row in Recently deleted is, Documents. Not every
+    // folder's: each node a folder's delete takes along would be dirty in all of them.
+    let clear = |db: &mut StateDb, node| db.write(|s| s.folder().clear_dirty(node));
+    for db in [&mut main, &mut docs_db, &mut pics_db] {
+        clear(db, inside)?;
+    }
+    let work = main
+        .read(|s| s.get_mirror(inside))?
+        .ok_or(StateError::Corrupt("gone".into()))?;
+    let letter = NodeId::new();
+    main.write(|s| {
+        s.account().move_to_removed(&hbsync_state::RemovedRow {
+            row: work.clone(),
+            removed_at: Some(1),
+        })?;
+        s.account().put_mirror(&folder(letter, inside, "Letter"))
+    })?;
+    assert!(dirty(&mut docs_db, letter)? && dirty(&mut pics_db, inside)?);
+    assert!(!dirty(&mut main, letter)? && !dirty(&mut pics_db, letter)?);
+    // Work deleted for good: Letter has no place, an orphan for the main folder. Every folder
+    // looks.
+    clear(&mut docs_db, letter)?;
+    main.write(|s| s.account().forget_file(work.file_id, None))?;
+    for db in [&mut main, &mut docs_db, &mut pics_db] {
+        assert!(dirty(db, letter)?);
+        clear(db, letter)?;
+    }
+    // So too where the folder was live in Documents when it went for good.
+    let (live, note) = (folder(NodeId::new(), docs_top, "Live"), NodeId::new());
+    main.write(|s| {
+        s.account().put_mirror(&live)?;
+        s.account().put_mirror(&folder(note, live.node, "Note"))
+    })?;
+    assert!(!dirty(&mut main, note)?);
+    main.write(|s| s.account().forget_file(live.file_id, None))?;
+    for db in [&mut main, &mut docs_db, &mut pics_db] {
+        assert!(dirty(db, note)?);
+    }
     // A place the mirror doesn't connect to the top: every folder looks.
     let lost = NodeId::new();
     main.write(|s| s.account().put_mirror(&folder(lost, NodeId::new(), "Lost")))?;

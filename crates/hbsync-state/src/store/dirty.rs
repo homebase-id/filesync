@@ -16,7 +16,9 @@ pub struct Mark {
 }
 
 /// A recursive CTE `sub(id)`: the node `?1` and its subtree on any side (the base's, here,
-/// the drive's), across sides (a child here of a folder in the base, say).
+/// the drive's), across sides (a child here of a folder in the base, say). Its users join it
+/// to the dirty set with `CROSS JOIN`: a probe of the folder's marks per node of the subtree,
+/// not a read of all of them.
 fn subtree_any_side() -> String {
     format!(
         "sub(id) AS (SELECT {ID_OF} \
@@ -75,7 +77,7 @@ impl ReadTx<'_> {
         }
         self.prep(
             "INSERT INTO dirty (folder, id) VALUES (?1, ?2) \
-             ON CONFLICT (id, folder) DO UPDATE SET seq = seq + 1",
+             ON CONFLICT (folder, id) DO UPDATE SET seq = seq + 1",
         )?
         .execute([folder, id])?;
         Ok(())
@@ -155,7 +157,7 @@ impl ReadTx<'_> {
         self.many(
             &format!(
                 "WITH RECURSIVE {} \
-                 SELECT d.id, n.uuid, d.seq FROM sub JOIN dirty d ON d.folder = $F AND d.id = sub.id \
+                 SELECT d.id, n.uuid, d.seq FROM sub CROSS JOIN dirty d ON d.folder = $F AND d.id = sub.id \
                  JOIN nodes n ON n.id = d.id ORDER BY d.id LIMIT ?2",
                 subtree_any_side()
             ),
@@ -173,7 +175,7 @@ impl ReadTx<'_> {
         self.many(
             &format!(
                 "WITH RECURSIVE {} \
-                 SELECT n.uuid FROM sub JOIN dirty d ON d.folder = $F AND d.id = sub.id \
+                 SELECT n.uuid FROM sub CROSS JOIN dirty d ON d.folder = $F AND d.id = sub.id \
                  JOIN nodes n ON n.id = d.id LIMIT ?2",
                 subtree_any_side()
             ),

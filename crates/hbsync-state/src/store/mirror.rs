@@ -126,8 +126,8 @@ impl ReadTx<'_> {
 
     /// Marks `node` dirty in the folders a change of it, now in the drive's folder `place`,
     /// concerns: those holding a base or local row of it, and the one whose part of the drive
-    /// `place` is in (the folder with the nearest top above it). Every folder when `place`
-    /// doesn't reach the drive's top through the mirror (a gap or a cycle): none is left out.
+    /// `place` is in (the folder with the nearest top above it, [`ReadTx::place_of`]). Every
+    /// folder when `place` doesn't reach the drive's top (a gap or a cycle): none is left out.
     pub(super) fn fan_out(&self, node: NodeId, place: NodeId) -> Result<()> {
         let folders = self.folder_list()?;
         let id = self.key_or_insert(node)?;
@@ -156,16 +156,37 @@ impl ReadTx<'_> {
                 holders
             }
         };
-        for &folder in &marked {
+        self.mark_changed_in_all(&marked, id)
+    }
+
+    /// Marks `node` dirty in every folder: a node whose folder left the drive for good, or that
+    /// waited in one this client couldn't read, has no place to go by (an orphan, for the main
+    /// folder to adopt, §6.3), whatever its folder's place was.
+    pub(super) fn fan_out_everywhere(&self, node: NodeId) -> Result<()> {
+        let folders: std::collections::BTreeSet<i64> =
+            self.folder_list()?.iter().map(|f| f.id).collect();
+        self.mark_changed_in_all(&folders, self.key_or_insert(node)?)
+    }
+
+    /// [`ReadTx::mark_changed_in`] in each of `folders`, which `fan_out` touched.
+    fn mark_changed_in_all(
+        &self,
+        folders: &std::collections::BTreeSet<i64>,
+        id: i64,
+    ) -> Result<()> {
+        for &folder in folders {
             self.mark_changed_in(folder, id)?;
         }
-        self.touched.borrow_mut().extend(marked);
+        self.touched.borrow_mut().extend(folders);
         Ok(())
     }
 
     /// The place of the drive's folder `place` (the folder with the nearest top above it);
-    /// `None` if the mirror doesn't connect it to the top. Remembered for every folder on the
-    /// way, until one of them changes ([`ReadTx::moved_folder`]).
+    /// `None` if it doesn't reach the top. A folder the mirror lacks has its place where its row
+    /// in Recently deleted is (sync semantics §6.3: where its own folder is, live or in Recently
+    /// deleted in turn): what a folder's delete takes along is that folder's only, not every
+    /// folder's. Remembered for every live folder on the way, until one of them changes
+    /// ([`ReadTx::moved_folder`]).
     pub(super) fn place_of(&self, place: NodeId, folders: &[FolderRow]) -> Result<Option<Place>> {
         let mut parent = self.prep(MIRROR_PARENT)?;
         let mut chain = Vec::new();
@@ -182,9 +203,20 @@ impl ReadTx<'_> {
                 break Some(Place::Unheld);
             }
             chain.push(at);
-            let up: Option<Vec<u8>> = parent
+            let up: Option<Vec<u8>> = match parent
                 .query_row([at.0.as_bytes()], |r| r.get(0))
-                .optional()?;
+                .optional()?
+            {
+                Some(up) => Some(up),
+                None => {
+                    // Only live folders are remembered: a row of Recently deleted may go
+                    // (deleted for good) with nothing telling the places.
+                    chain.clear();
+                    self.prep("SELECT parent FROM removed WHERE node = ?1")?
+                        .query_row([at.0.as_bytes()], |r| r.get(0))
+                        .optional()?
+                }
+            };
             match up {
                 Some(up) if seen.insert(at) && seen.len() <= MAX_DEPTH => at = codec::node(&up)?,
                 _ => break None,

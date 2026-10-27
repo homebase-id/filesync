@@ -1005,7 +1005,10 @@ deleted is the account's, like the mirror: one list, each item naming the folder
 device it comes back to (none for a role folder this device doesn't sync); restoring, emptying
 and the purge (by age) are the account's too. A change of the drive
 is planned in the folders it concerns: those holding the node, and the one whose part of the
-drive its place is in (every folder when that place isn't known).
+drive its place is in (every folder when that place isn't known). A folder in Recently deleted
+has its place where its row there says it was (§6.3): what a folder's delete takes along is
+planned in that folder's part only, not in every folder of the account. A folder deleted for
+good has none: what is still live in it is planned in every folder.
 
 A detached item's new id is fixed for the node and the computer (the state DB's own id, as
 for conflict copies, section 5), so a replan picks the same one,

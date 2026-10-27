@@ -144,8 +144,10 @@ impl AccountTx<'_> {
         )?;
         if let Some(node) = node.flatten() {
             self.fan_out(node, NodeId::ROOT)?;
+            // Where the node goes isn't recorded yet (its place may be a row of Recently deleted
+            // about to be replaced): every folder looks.
             for child in self.mirror_children(node)? {
-                self.fan_out(child.node, node)?;
+                self.fan_out_everywhere(child.node)?;
             }
         }
         Ok(())
