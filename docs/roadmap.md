@@ -4,7 +4,7 @@ Open work first, in order: what to fix, what to build next, then later and conti
 What is built is under **=== DONE ===** at the end, by layer, as it was planned bottom-up.
 Decisions referenced here are in [foundations.md](foundations.md).
 
-Status (2026-10-26): v0.9.1 is released. It syncs folders with a live Homebase on Windows,
+Status (2026-10-27): v0.10.0 is released. It syncs folders with a live Homebase on Windows,
 macOS and Linux, with the tray, the daemon and the CLI, role folders, filters, Recently
 deleted and signed installers that update themselves; a state DB too old or damaged to use is
 set aside and the folder set up again on its own.
@@ -34,6 +34,14 @@ Also from the test:
   opens the OS's picker from the tray, which has no window to put it in front of, so the
   browser just shows it's loading. (Pressing Enter opened it too, the reason Enter didn't log
   in; fixed.) Bring the picker to the front, or have the page say a window opened.
+- **A removed folder waiting for its name lets what its removal took along go** (potential):
+  a folder deleted part way elsewhere, restored here, whose name is taken waits for the name,
+  but the files its removal took along (live, unchanged here) go to Recently deleted on their
+  own, so they come back apart from it. Nothing is lost and it's the same whatever the page
+  size; they could wait with the folder, as they do when it waits for another page (#309).
+- **Requests in flight cancellable on stop** (later): a stop waits up to 15 s for them, then
+  holds the state DBs and exits (#307); cancelling the transfers and requests at once would
+  make a stop immediate and the cut rarer.
 
 ## Performance (found comparing with Dropbox, 2026-10-26)
 
@@ -46,6 +54,7 @@ Also from the test:
 - **Idle wakeups: about 2 a second in each of the daemon and the tray,** all on one thread
   (`blocking-1`), probably the desktop's D-Bus link (the app's systemd scope, the tray's
   StatusNotifierItem). The daemon alone idled at once every 12 s on frodo: bring it back.
+  Windows idles at about 10 a second (Dropbox 33; windows-bench, 2026-10-27): find what wakes.
 - **State DB writes per file** (about 70 KB per file in a first sync of many small files):
   grouping commits is parked as a data-safety rule; look for anything cheaper first.
 
