@@ -76,6 +76,25 @@ pub fn today() -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
+/// Lets `child` go on its own: on Unix a thread waits for it, so that it doesn't stay behind as
+/// a zombie until this process ends (the tray runs for days, starting the daemon and openers).
+/// The thread sleeps in `wait` and takes a small stack.
+pub fn reap(child: std::process::Child) {
+    #[cfg(unix)]
+    {
+        let mut child = child;
+        let waiter = std::thread::Builder::new()
+            .name("reap".into())
+            .stack_size(64 * 1024)
+            .spawn(move || child.wait());
+        if let Err(e) = waiter {
+            tracing::debug!("can't wait for a child process: {e}");
+        }
+    }
+    #[cfg(not(unix))]
+    drop(child);
+}
+
 /// Days since 1970-01-01 to a proleptic Gregorian date (Howard Hinnant's algorithm).
 fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let z = days + 719_468;
@@ -93,6 +112,25 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A child let go is waited for: no zombie stays behind.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_child_let_go_leaves_no_zombie() -> std::io::Result<()> {
+        let child = std::process::Command::new("true").spawn()?;
+        let proc = std::path::PathBuf::from(format!("/proc/{}", child.id()));
+        reap(child);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while proc.exists() {
+            assert!(
+                std::time::Instant::now() < until,
+                "{} is still there",
+                proc.display()
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        Ok(())
+    }
 
     #[test]
     fn dates() {

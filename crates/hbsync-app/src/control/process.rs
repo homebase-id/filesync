@@ -83,14 +83,24 @@ fn keep_std_handles_from_children() {
     }
 }
 
-/// Waits until the daemon answers, or `child` (when we started it) exits.
+/// Waits until the daemon answers, or `child` (when we started it) exits. A child still running
+/// is let go ([`crate::reap`]): waited for when it exits.
 fn wait_until_running(paths: &Paths, mut child: Option<std::process::Child>) -> Result<()> {
+    let result = wait_for(paths, &mut child);
+    if let Some(child) = child {
+        crate::reap(child);
+    }
+    result
+}
+
+fn wait_for(paths: &Paths, child: &mut Option<std::process::Child>) -> Result<()> {
     let until = Instant::now() + Duration::from_secs(15);
     while Instant::now() < until {
         if running(paths)? {
             return Ok(());
         }
         if let Some(status) = child.as_mut().map(|c| c.try_wait()).transpose()?.flatten() {
+            *child = None;
             return Err(format!(
                 "the daemon exited ({status}); its log is in {}",
                 paths.logs.display()

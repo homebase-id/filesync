@@ -102,7 +102,7 @@ pub fn open_browser(
     } else {
         "xdg-open"
     });
-    Command::new(opener).arg(url).spawn().map(drop)
+    Command::new(opener).arg(url).spawn().map(crate::reap)
 }
 
 /// The folder synced when none is chosen: `Homebase` in the home folder.
