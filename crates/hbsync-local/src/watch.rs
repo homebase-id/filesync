@@ -687,6 +687,38 @@ mod tests {
         RelPath::new(s).expect("valid path")
     }
 
+    /// The OS watcher answers with nothing happening on disk: watching, configuring, unwatching,
+    /// a watched folder removed, and dropping it. On Windows its thread waits without a timeout
+    /// (`vendor/notify/PATCHED.md`), so a call it isn't woken for would hang here.
+    #[test]
+    fn an_idle_watcher_answers_every_call() {
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let dir = tempfile::tempdir().expect("temp dir");
+            let watched = dir.path().join("watched");
+            let gone = dir.path().join("gone");
+            fs::create_dir(&watched).expect("folder");
+            fs::create_dir(&gone).expect("folder");
+            let mut watcher =
+                notify::recommended_watcher(|_: notify::Result<Event>| {}).expect("a watcher");
+            watcher
+                .watch(&watched, RecursiveMode::Recursive)
+                .expect("watched");
+            watcher
+                .watch(&gone, RecursiveMode::Recursive)
+                .expect("watched");
+            let _ = watcher.configure(notify::Config::default());
+            watcher.unwatch(&watched).expect("unwatched");
+            fs::remove_dir(&gone).expect("removed");
+            std::thread::sleep(Duration::from_millis(200));
+            drop(watcher);
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("every call answered");
+    }
+
     #[test]
     fn events_name_their_entries() {
         let root = Path::new("/sync");
