@@ -1503,13 +1503,10 @@ impl Sim {
                         self.remove_on_drive(node, n, rightly);
                         let client = &mut self.clients[c];
                         self.ledger.folder_removed_after_contents(|| {
-                            let (r, _) = client
-                                .removed_by_plan
-                                .iter()
-                                .find(|(_, in_folder)| **in_folder == node)?;
+                            let r = client.removed_by_plan.get(&node)?;
                             Some(format!("{} removed {node} after {r} in it", client.name))
                         });
-                        client.removed_by_plan.insert(node, parent);
+                        client.removed_by_plan.entry(parent).or_insert(node);
                     }
                     self.clients[c].planned_remote.remove(node);
                     // Its tags go with it: a tag change loses to a delete (§11).

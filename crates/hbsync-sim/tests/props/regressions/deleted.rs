@@ -1990,7 +1990,7 @@ fn regression_an_emptying_stopped_part_way_keeps_the_rest() {
 /// its two removals, c2 brings `A` back into `c.txt` (moved there before it heard of the
 /// delete) and another device removes it again there. c0's removal of `c.txt` isn't one after
 /// what is in it: `A`'s removal there isn't c0's. The oracle took it as c0's, by node alone
-/// (seed 5689ab73); it now matches the version c0's removal gave it.
+/// (seed 5689ab73); it now goes by the folder `A` was in when c0 removed it.
 #[test]
 fn regression_a_removal_after_a_restore_elsewhere_is_not_the_plans() {
     use Action::*;

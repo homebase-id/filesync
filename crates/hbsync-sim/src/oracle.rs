@@ -1145,6 +1145,17 @@ mod tests {
     use crate::action::{Action, Event, act};
     use hbsync_types::Tag;
 
+    /// The removal of live `node` from `parent` as a plan sends it, at its version now.
+    fn remote_delete(sim: &Sim, node: NodeId, parent: NodeId) -> hbsync_engine::reconcile::Op {
+        let remote = sim.server.live[&node].remote;
+        hbsync_engine::reconcile::Op::RemoteDelete {
+            node,
+            parent,
+            file_id: remote.file_id,
+            expected: remote.version,
+        }
+    }
+
     /// A restore ends a delete: a tag removed after it counts, and coming back is reported. A
     /// node once deleted stayed exempt from the check for good.
     #[test]
@@ -1272,13 +1283,7 @@ mod tests {
         sim.run(&[act(0, Action::CreateFile { parent: 0, name: 0 })]);
         assert!(sim.quiesce(10));
         let file = sim.item(1, "a").expect("a");
-        let remote = sim.server.live[&file].remote;
-        let op = hbsync_engine::reconcile::Op::RemoteDelete {
-            node: file,
-            parent: NodeId::ROOT,
-            file_id: remote.file_id,
-            expected: remote.version,
-        };
+        let op = remote_delete(&sim, file, NodeId::ROOT);
         sim.execute(1, &op);
         assert!(sim.quiesce(10));
         let wrong = sim.check().expect_err("a removal no one asked for");
@@ -1300,18 +1305,9 @@ mod tests {
         // The user deletes b; the plan's removals go wrong way round.
         let node = sim.pick(0, folder, false).expect("b");
         sim.run(&[act(0, Action::Delete { node })]);
-        let delete = |sim: &Sim, node: NodeId, parent: NodeId| {
-            let remote = sim.server.live[&node].remote;
-            hbsync_engine::reconcile::Op::RemoteDelete {
-                node,
-                parent,
-                file_id: remote.file_id,
-                expected: remote.version,
-            }
-        };
-        let op = delete(&sim, file, folder);
+        let op = remote_delete(&sim, file, folder);
         sim.execute(0, &op);
-        let op = delete(&sim, folder, NodeId::ROOT);
+        let op = remote_delete(&sim, folder, NodeId::ROOT);
         sim.execute(0, &op);
         assert!(sim.quiesce(10));
         let wrong = sim.check().expect_err("the folder after what was in it");
@@ -1335,13 +1331,7 @@ mod tests {
             Event::Plan { client: 1 },
             Event::Step { client: 1 },
         ]);
-        let remote = sim.server.live[&file].remote;
-        let op = hbsync_engine::reconcile::Op::RemoteDelete {
-            node: file,
-            parent: NodeId::ROOT,
-            file_id: remote.file_id,
-            expected: remote.version,
-        };
+        let op = remote_delete(&sim, file, NodeId::ROOT);
         sim.execute(0, &op);
         let wrong = sim.check().expect_err("the edit was removed");
         assert!(wrong.contains("no one deleted it"), "{wrong}");
