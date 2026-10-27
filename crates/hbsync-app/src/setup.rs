@@ -423,9 +423,10 @@ pub fn set_up(
                     control::start_over(paths, identity)?;
                 }
                 return Err(Refusal::No(format!(
-                    "Filesync's drive isn't at its address on {identity} (deleted, or another app's), and this computer synced \
-                     with it before: Filesync doesn't make a new one by itself, as this computer \
-                     would take the empty new drive for every file deleted. No drive was made"
+                    "Filesync's drive isn't at its address on {identity} (deleted, or another \
+                     app's), and this computer synced with it before: Filesync doesn't make a new \
+                     one by itself, as this computer would take the empty new drive for every \
+                     file deleted. No drive was made"
                 ))
                 .into());
             }
