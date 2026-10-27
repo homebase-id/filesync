@@ -389,7 +389,11 @@ fn run(command: Command) -> Res<ExitCode> {
                 folder.display(),
                 role.name()
             );
-            match folders::add_synced(&paths, &identity, &folder, Some(role))? {
+            let (taken, set_aside) = folders::add_synced(&paths, &identity, &folder, Some(role))?;
+            if let Some(why) = set_aside {
+                println!("{}", words::set_aside(why));
+            }
+            match taken {
                 Taken::Now => println!("{what}."),
                 Taken::AtStart => println!("{what} once Filesync runs (`hbsync start`)."),
             }

@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use hbsync_state::Unusable;
+
 use crate::Root;
 use crate::runner::{Backoff, Command, Handle, RunnerError};
 
@@ -64,31 +66,33 @@ impl Running {
 
     /// Joins the runner if it ended: one that failed is to start again after a pause, unless
     /// its folder was removed or the account is `ending`; one waiting for that goes when the
-    /// account ends.
-    pub(super) fn ended(&mut self, ending: bool) {
+    /// account ends. Why the account's DB can't be used, if that is why it failed (not while
+    /// `ending`).
+    pub(super) fn ended(&mut self, ending: bool) -> Option<Unusable> {
         let ending_now = self.done.load(Ordering::SeqCst);
         match &self.life {
-            Life::Syncing(t) | Life::Stopping(t) if !t.is_finished() && !ending_now => return,
-            Life::Waiting(_) if !ending => return,
+            Life::Syncing(t) | Life::Stopping(t) if !t.is_finished() && !ending_now => {
+                return None;
+            }
+            Life::Waiting(_) if !ending => return None,
             _ => {}
         }
         let failed = match std::mem::replace(&mut self.life, Life::Gone) {
-            Life::Syncing(t) => t.join().unwrap_or(Err(RunnerError::Panicked)).is_err(),
+            Life::Syncing(t) => t.join().unwrap_or(Err(RunnerError::Panicked)).err(),
             Life::Stopping(t) => {
                 let _ = t.join();
-                false
+                None
             }
-            Life::Waiting(_) | Life::Gone => false,
+            Life::Waiting(_) | Life::Gone => None,
         };
-        if !failed || ending {
-            return;
-        }
+        let failed = failed.filter(|_| !ending)?;
         if self.started.elapsed() >= RAN_WELL {
             self.backoff = Backoff::new();
         }
         let pause = self.backoff.next();
         tracing::info!("syncing {} again in {pause:?}", self.root.folder.display());
         self.life = Life::Waiting(Instant::now() + pause);
+        failed.unusable()
     }
 }
 

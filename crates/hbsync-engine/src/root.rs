@@ -203,27 +203,29 @@ impl SyncRoot {
     /// with files ([`SyncRoot::create_for`]: what it holds is adopted, nothing is copied twice,
     /// nothing deleted). One not there now (a disk not plugged in), or one that fails, is set
     /// up at a later start. Any other error is returned as it is: a newer version's DB, or one
-    /// busy, locked, unreadable for now. What was set aside now, if anything.
+    /// busy, locked, unreadable for now. With `found`, the DB was found unusable while the
+    /// account ran (SQLite said so: a check of its pages may not see an index's damage), and is
+    /// set aside unchecked. What was set aside now, if anything.
     pub fn ready(
         db: &Path,
         identity: &str,
         folders: &[(&Path, NodeId)],
+        found: Option<Unusable>,
     ) -> Result<Option<SetAside>, RootError> {
-        let checked = (|| -> Result<StateDb, RootError> {
-            let whole = StateDb::check_file(db)?;
-            let account = Self::open_account(db, identity)?;
-            // One brought up to date (or made) is whole only now.
-            if !whole {
-                account.check_schema()?;
-            }
-            Ok(account)
-        })();
+        let checked = match found {
+            Some(why) => Err((why, "found unusable while syncing".to_owned())),
+            None => match Self::check_and_open(db, identity) {
+                Ok(account) => Ok(account),
+                Err(RootError::State(e)) => match e.unusable() {
+                    Some(why) => Err((why, e.to_string())),
+                    None => return Err(e.into()),
+                },
+                Err(e) => return Err(e),
+            },
+        };
         let (mut account, set) = match checked {
             Ok(account) => (account, None),
-            Err(RootError::State(e)) => {
-                let Some(why) = e.unusable() else {
-                    return Err(e.into());
-                };
+            Err((why, e)) => {
                 let to = set_aside(db, why)?;
                 tracing::warn!(
                     "{}: {e}: set aside as {}, and made again",
@@ -235,7 +237,6 @@ impl SyncRoot {
                     .write_durable(|s| s.account().set_account_kv(keys::SET_ASIDE, why.name()))?;
                 (account, Some(SetAside { why, to }))
             }
-            Err(e) => return Err(e),
         };
         // Made in place of one set aside; or knowing no folder at all beside one set aside
         // (its key lost to a crash between the rename and its write): what it can't have set
@@ -246,6 +247,18 @@ impl SyncRoot {
             Self::set_up_again(&mut account, db, identity, folders, &known, replaced)?;
         }
         Ok(set)
+    }
+
+    /// The account's DB at `db`, its whole file checked, then brought up to date (made if new;
+    /// refused if another's), then its schema checked ([`SyncRoot::ready`]).
+    fn check_and_open(db: &Path, identity: &str) -> Result<StateDb, RootError> {
+        let whole = StateDb::check_file(db)?;
+        let account = Self::open_account(db, identity)?;
+        // One brought up to date (or made) is whole only now.
+        if !whole {
+            account.check_schema()?;
+        }
+        Ok(account)
     }
 
     /// Sets each of `folders` that is `identity`'s (its marker says so) and unknown to the
@@ -495,7 +508,7 @@ mod tests {
         let away = home.path().join("unplugged");
         std::fs::rename(&root, &away)?;
         let folders = [(root.as_path(), NodeId::ROOT)];
-        let set = SyncRoot::ready(&db, anna, &folders)?.ok_or("not set aside")?;
+        let set = SyncRoot::ready(&db, anna, &folders, None)?.ok_or("not set aside")?;
         assert_eq!(set.why, Unusable::TooOld);
         let name = set.to.file_name().ok_or("name")?.to_string_lossy();
         assert!(name.starts_with("state.db.too-old-"), "{name}");
@@ -510,7 +523,7 @@ mod tests {
             SyncRoot::find(&db, anna, &root),
             Err(RootError::Unknown(_))
         ));
-        assert_eq!(SyncRoot::ready(&db, anna, &folders)?, None);
+        assert_eq!(SyncRoot::ready(&db, anna, &folders, None)?, None);
         SyncRoot::find(&db, anna, &root)?;
         // Every folder known again: it no longer says it replaced one.
         let replaced = StateDb::open_account(&db)?.read(|s| s.account_kv(keys::SET_ASIDE))?;
@@ -527,7 +540,7 @@ mod tests {
         let db = home.path().join("state.db");
         let anna = "anna.example.com";
         std::fs::write(&db, [0x5a_u8; 8192])?;
-        let set = SyncRoot::ready(&db, anna, &[])?.ok_or("not set aside")?;
+        let set = SyncRoot::ready(&db, anna, &[], None)?.ok_or("not set aside")?;
         assert_eq!(set.why, Unusable::Corrupt);
         assert!(set.to.to_string_lossy().contains("state.db.corrupt-"));
         assert_eq!(std::fs::read(&set.to)?, [0x5a_u8; 8192]);
@@ -535,7 +548,7 @@ mod tests {
         rusqlite::Connection::open(&db)?.pragma_update(None, "user_version", 9999)?;
         let before = std::fs::read(&db)?;
         assert!(matches!(
-            SyncRoot::ready(&db, anna, &[]),
+            SyncRoot::ready(&db, anna, &[], None),
             Err(RootError::State(StateError::TooNew { .. }))
         ));
         assert_eq!(std::fs::read(&db)?, before);
@@ -544,6 +557,49 @@ mod tests {
             .filter(|e| e.file_name().to_string_lossy().starts_with("state.db."))
             .count();
         assert_eq!(aside, 1, "nothing else set aside");
+        Ok(())
+    }
+
+    /// A DB of an older version whose upgrade fails for a part of its schema it lacks is set
+    /// aside as corrupt, not returned as the upgrade's error.
+    #[test]
+    fn a_db_whose_upgrade_lacks_a_table_is_set_aside() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let db = home.path().join("state.db");
+        let anna = "anna.example.com";
+        let root = home.path().join("Homebase");
+        std::fs::create_dir_all(&root)?;
+        SyncRoot::create(&db, anna, &root)?;
+        let conn = rusqlite::Connection::open(&db)?;
+        conn.execute_batch("DROP TABLE remote")?;
+        conn.pragma_update(None, "user_version", 13)?;
+        drop(conn);
+        let folders = [(root.as_path(), NodeId::ROOT)];
+        let set = SyncRoot::ready(&db, anna, &folders, None)?.ok_or("not set aside")?;
+        assert_eq!(set.why, Unusable::Corrupt);
+        SyncRoot::find(&db, anna, &root)?;
+        Ok(())
+    }
+
+    /// A DB found unusable while the account ran is set aside though its check finds nothing
+    /// (an index's damage, which `quick_check` doesn't look for), and its folders set up again.
+    #[test]
+    fn a_db_found_unusable_is_set_aside_unchecked() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let db = home.path().join("state.db");
+        let anna = "anna.example.com";
+        let root = home.path().join("Homebase");
+        std::fs::create_dir_all(&root)?;
+        SyncRoot::create(&db, anna, &root)?;
+        let folders = [(root.as_path(), NodeId::ROOT)];
+        assert_eq!(SyncRoot::ready(&db, anna, &folders, None)?, None, "whole");
+        let found = Some(Unusable::Corrupt);
+        let set = SyncRoot::ready(&db, anna, &folders, found)?.ok_or("not set aside")?;
+        assert_eq!(set.why, Unusable::Corrupt);
+        assert!(set.to.exists(), "kept");
+        SyncRoot::find(&db, anna, &root)?;
+        let replaced = StateDb::open_account(&db)?.read(|s| s.account_kv(keys::SET_ASIDE))?;
+        assert_eq!(replaced, None, "every folder set up again");
         Ok(())
     }
 

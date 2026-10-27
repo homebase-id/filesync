@@ -66,4 +66,13 @@ impl EngineError {
             _ => None,
         }
     }
+
+    /// Why the state DB can't be used at all, if that is what it means
+    /// ([`StateError::unusable`]).
+    pub fn unusable(&self) -> Option<hbsync_state::Unusable> {
+        match self {
+            EngineError::State(e) | EngineError::Feed(FeedError::State(e)) => e.unusable(),
+            _ => None,
+        }
+    }
 }

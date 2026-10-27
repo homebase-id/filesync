@@ -542,6 +542,19 @@ fn sibling_hash_in_sql(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// The error `e` of the migration to version `to`: SQLite's plain error (`no such table`,
+/// `no such column`, `duplicate column name`) means the DB lacks a part of its version's
+/// schema, or has one it shouldn't: damaged ([`StateError::Damaged`]), as the schema check
+/// finds a DB of this version that lacks one. Any other (busy, the disk full, I/O) as it is.
+fn lacking(e: rusqlite::Error, to: u32) -> StateError {
+    match &e {
+        rusqlite::Error::SqliteFailure(f, _) if f.extended_code == rusqlite::ffi::SQLITE_ERROR => {
+            StateError::Damaged(format!("its upgrade to version {to} failed: {e}"))
+        }
+        _ => e.into(),
+    }
+}
+
 /// Makes a new DB, or brings one of [`BASE`] or later up to [`VERSION`].
 pub(crate) fn apply(conn: &mut Connection) -> Result<()> {
     let seen = user_version(conn)?;
@@ -567,8 +580,11 @@ pub(crate) fn apply(conn: &mut Connection) -> Result<()> {
         )?;
     } else {
         sibling_hash_in_sql(&tx)?;
-        for sql in &MIGRATIONS[(current - BASE) as usize..] {
-            tx.execute_batch(sql)?;
+        for (sql, to) in MIGRATIONS[(current - BASE) as usize..]
+            .iter()
+            .zip(current + 1..)
+        {
+            tx.execute_batch(sql).map_err(|e| lacking(e, to))?;
         }
     }
     tx.pragma_update(None, "user_version", VERSION)?;
@@ -643,6 +659,21 @@ mod tests {
         assert!(matches!(check_schema(&conn), Err(StateError::Damaged(_))));
         apply(&mut conn)?;
         check_schema(&conn)
+    }
+
+    /// One of version 13 lacking a table a migration changes is damaged (set aside as the
+    /// account starts), not an error of the upgrade; nothing of it is changed.
+    #[test]
+    fn a_version_13_db_lacking_a_table_is_damaged() -> Result<()> {
+        for table in ["remote", "dirty"] {
+            let mut conn = version_13()?;
+            conn.execute_batch(&format!("DROP TABLE {table}"))?;
+            let e = apply(&mut conn).expect_err("upgraded");
+            assert!(matches!(e, StateError::Damaged(_)), "{table}: {e:?}");
+            assert_eq!(e.unusable(), Some(crate::Unusable::Corrupt));
+            assert_eq!(user_version(&conn)?, 13, "{table}");
+        }
+        Ok(())
     }
 
     /// One from before 0.7 (6: 0.6.0's; 12: the last before 0.7; 4: one DB per folder) isn't

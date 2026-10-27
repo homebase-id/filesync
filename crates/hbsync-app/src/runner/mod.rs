@@ -32,7 +32,7 @@ use hbsync_engine::{Drive, Engine, EngineConfig, EngineError, SyncReport};
 use hbsync_local::journal::Tier;
 use hbsync_local::{Bell, Filter, FilterError, LocalObserver};
 use hbsync_remote::ErrorClass;
-use hbsync_state::StateError;
+use hbsync_state::{StateError, Unusable};
 use hbsync_types::NodeId;
 use hbsync_types::unix_now;
 
@@ -85,6 +85,16 @@ impl RunnerError {
             RunnerError::Io(e) => ErrorClass::of_io(e),
             RunnerError::Panicked => ErrorClass::Bug,
             RunnerError::Folder(e) => e.class(),
+        }
+    }
+
+    /// Why the account's state DB can't be used at all, if that is what it means
+    /// ([`StateError::unusable`]): its account sets it aside ([`crate::folders::heal_account`]).
+    pub fn unusable(&self) -> Option<Unusable> {
+        match self {
+            RunnerError::State(e) | RunnerError::Folder(RootError::State(e)) => e.unusable(),
+            RunnerError::Engine(e) => e.unusable(),
+            _ => None,
         }
     }
 }
@@ -606,6 +616,8 @@ impl Runner {
                             }
                         }
                     }
+                    // A DB that can't be used: its account sets it aside.
+                    Some(Err(e)) if e.unusable().is_some() => return Err(e.into()),
                     // Kept (a busy DB, say): the folder backs off, as after a failed sync,
                     // instead of starting over, and doesn't take them again before then.
                     Some(Err(e)) => {
@@ -846,8 +858,13 @@ impl Runner {
                         Synced::Done
                     };
                     schedule.synced(Instant::now(), outcome);
-                    if let Err(e) = self.record(&mut p.engine, &report, began.elapsed()) {
-                        self.backs_off(&mut schedule, "recording the sync", e.class(), &e, None);
+                    match self.record(&mut p.engine, &report, began.elapsed()) {
+                        Err(e) if e.unusable().is_some() => return Err(e.into()),
+                        Err(e) => {
+                            let class = e.class();
+                            self.backs_off(&mut schedule, "recording the sync", class, &e, None);
+                        }
+                        Ok(()) => {}
                     }
                 }
                 Err(e) => {
@@ -856,6 +873,10 @@ impl Runner {
                         && let Err(e) = self.tell_unreported(&mut p.engine, &partial)
                     {
                         tracing::warn!("telling what the failed sync did failed: {e}");
+                    }
+                    // A DB that can't be used: its account sets it aside.
+                    if e.unusable().is_some() {
+                        return Err(e.into());
                     }
                     self.backs_off(&mut schedule, "the sync", e.class(), &e, e.retry_after());
                 }

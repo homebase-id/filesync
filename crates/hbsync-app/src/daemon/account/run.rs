@@ -2,6 +2,7 @@
 //! the account up (the notifications, the [`Drive`], the puller, Recently deleted's keeper),
 //! starts its folders' runners, and serves its channel ([`Msg`]) until it ends.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, channel};
@@ -11,13 +12,14 @@ use hbsync_engine::Drive;
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::{Client, HomebaseError};
 use hbsync_remote::ErrorClass;
+use hbsync_state::Unusable;
 
 use super::parts::AccountParts;
 use super::runners::{Life, Running};
-use super::{Account, Msg, Request};
+use super::{Account, Msg, Request, Waiting};
 use crate::daemon::DaemonError;
 use crate::daemon::keeper::Keeper;
-use crate::folders::ready_account;
+use crate::folders::{heal_account, ready_account};
 use crate::protocol::{AccountStatus, Hints, Pause, State};
 use crate::runner::{Backoff, Command, Runner, RunnerConfig, RunnerError, shown};
 use crate::sync::{lock, wait_for};
@@ -85,30 +87,10 @@ impl Account {
     ) -> Result<(), DaemonError> {
         // What came while waiting for the credentials and the identity.
         let mut msgs = Vec::new();
-        // Its state DB first, before any request: one that can't be used at all (from before
-        // 0.7, damaged) is set aside and its folders set up again, told once; one only the user
-        // can set right (a newer version's) is shown and waited out, asking nothing, the daemon
-        // and the other accounts going on.
-        let set = loop {
-            // The config's folders, as read when the account was made: they all are in it.
-            match ready_account(&self.db, &self.identity, &config.roots) {
-                Ok(set) => break set,
-                Err(e) if e.class() != ErrorClass::NeedsUser => {
-                    return Err(RunnerError::Folder(e).into());
-                }
-                Err(e) => {
-                    tracing::error!("{e}: {} waits for it to be set right", self.identity);
-                    self.show_waiting(State::Failing, e.to_string());
-                    if self.wait(NEEDS_USER_AGAIN, stop, requests, &mut msgs) {
-                        return Ok(());
-                    }
-                }
-            }
-        };
-        // Ready: the answers may read it now.
-        self.ready.store(true, Ordering::SeqCst);
-        if let Some(set) = set {
-            self.note(vec![words::set_aside(set.why)]);
+        // Its state DB first, before any request. The config's folders, as read when the
+        // account was made: they all are in it.
+        if !self.ready_db(&config.roots, None, stop, requests, &mut msgs)? {
+            return Ok(());
         }
         let Some(creds) = self.credentials(paths, stop, requests, &mut msgs)? else {
             return Ok(());
@@ -131,11 +113,107 @@ impl Account {
                 }
             })
             .map_err(DaemonError::Ipc)?;
+        self.sync(paths, config, requests, stop, &mut msgs, |db| {
+            AccountParts::open(&self.identity, Arc::clone(&remote), db, tx.clone())
+        })
+    }
+
+    /// Readies its state DB ([`ready_account`]), or sets it aside for `found`, as it was found
+    /// while the account ran ([`heal_account`]): one that can't be used at all (from before 0.7,
+    /// damaged) is set aside and its folders among `roots` set up again, told once. One only
+    /// the user can set right (a newer version's) is shown and waited out, asking nothing, the
+    /// daemon and the other accounts going on; so is any error setting one found aside (not a
+    /// daemon started again and again). Whether it is ready: not when it stops first.
+    pub(super) fn ready_db(
+        &self,
+        roots: &[Root],
+        mut found: Option<Unusable>,
+        stop: &AtomicBool,
+        requests: &Receiver<Msg>,
+        msgs: &mut Vec<Msg>,
+    ) -> Result<bool, DaemonError> {
+        let healing = found.is_some();
+        loop {
+            // Set aside unchecked once: what is there at a later try is checked.
+            let readied = match found.take() {
+                Some(why) => heal_account(&self.db, &self.identity, roots, why),
+                None => ready_account(&self.db, &self.identity, roots),
+            };
+            match readied {
+                Ok(set) => {
+                    // Ready: the answers may read it now.
+                    self.ready.store(true, Ordering::SeqCst);
+                    if let Some(set) = set {
+                        self.note(vec![words::set_aside(set.why)]);
+                    }
+                    return Ok(true);
+                }
+                Err(e) if !healing && e.class() != ErrorClass::NeedsUser => {
+                    return Err(RunnerError::Folder(e).into());
+                }
+                Err(e) => {
+                    tracing::error!("{e}: {} waits for it to be set right", self.identity);
+                    self.show_waiting(State::Failing, e.to_string());
+                    if self.wait(NEEDS_USER_AGAIN, stop, requests, msgs) {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Syncs its folders on the account's parts, which `open` makes from its DB, until it
+    /// should stop. A DB found unusable as it syncs (a runner ended for it) is set aside once a
+    /// run, every folder stopped and every part closed first, and its folders set up again in
+    /// a new one; found so again, the runners only start again after a pause.
+    pub(super) fn sync(
+        self: &Arc<Self>,
+        paths: &Paths,
+        config: &Config,
+        requests: &Receiver<Msg>,
+        stop: &AtomicBool,
+        msgs: &mut Vec<Msg>,
+        open: impl Fn(&Path) -> Result<AccountParts, RunnerError>,
+    ) -> Result<(), DaemonError> {
+        let mut healed = false;
+        loop {
+            let parts = open(&self.db)?;
+            let found = self.serve(paths, config, requests, stop, msgs, parts, !healed)?;
+            let Some(why) = found.filter(|_| !self.stopping(stop)) else {
+                return Ok(());
+            };
+            healed = true;
+            // Nothing else has it open now: the answers' connection is closed, and not
+            // opened again until it is ready.
+            self.ready.store(false, Ordering::SeqCst);
+            *lock(&self.reader) = None;
+            let roots = self.folders();
+            if !self.ready_db(&roots, Some(why), stop, requests, msgs)? {
+                return Ok(());
+            }
+        }
+    }
+
+    /// Syncs its folders on `parts` until it should stop, or until a runner ended as its DB
+    /// can't be used, if it may set it aside (`can_heal`): then its folders wait (they show
+    /// starting) once every runner has stopped, and why it can't be used is returned. An error:
+    /// a runner that couldn't start.
+    #[allow(clippy::too_many_arguments)]
+    fn serve(
+        self: &Arc<Self>,
+        paths: &Paths,
+        config: &Config,
+        requests: &Receiver<Msg>,
+        stop: &AtomicBool,
+        msgs: &mut Vec<Msg>,
+        parts: AccountParts,
+        can_heal: bool,
+    ) -> Result<Option<Unusable>, DaemonError> {
         let AccountParts {
             drive,
             notifier,
             mut notifications,
-        } = AccountParts::open(&self.identity, remote, &self.db, tx)?;
+        } = parts;
         let notifier = match notifier {
             Ok(n) => {
                 self.set_status(|s| s.hints = Hints::Connecting);
@@ -194,6 +272,8 @@ impl Account {
         // Folders to start once no runner of theirs is left.
         let mut adding: Vec<Root> = Vec::new();
         let mut next_purge = Instant::now();
+        // Its DB can't be used: it is set aside once every runner has stopped.
+        let mut heal: Option<Unusable> = None;
         loop {
             // Set and ended by the daemon ([`Account::pause`]), which wakes this thread.
             let paused = lock(&self.shown).paused().is_some();
@@ -223,6 +303,10 @@ impl Account {
                     Msg::Request(Request::Deleted(control)) => keeper.request(control),
                     // Started below, once no runner of the folder is left (one removed a moment
                     // ago may still be finishing an operation).
+                    // While its DB is set aside, its folders wait ([`Account::add_folder`]).
+                    Msg::Request(Request::AddFolder(root)) if heal.is_some() => {
+                        self.add_folder(&root);
+                    }
                     Msg::Request(Request::AddFolder(root)) => {
                         let synced = lock(&self.shown)
                             .shown()
@@ -232,6 +316,9 @@ impl Account {
                         }
                     }
                     Msg::Request(Request::RemoveFolder(folder)) => {
+                        if heal.is_some() {
+                            self.remove_folder(&folder);
+                        }
                         adding.retain(|a| a.folder != folder);
                         let mut shown = lock(&self.shown);
                         for r in shown.runners.iter_mut().filter(|r| r.root.folder == folder) {
@@ -254,7 +341,7 @@ impl Account {
             // A runner that ended takes its folder out, unless it failed: then it starts again
             // after a pause. The account ends with the last. Joined under the lock: a runner's
             // thread is done ([`Running::ended`]) only once it has nothing left to do.
-            let ending = self.stopping(stop) || result.is_err();
+            let ending = self.stopping(stop) || result.is_err() || heal.is_some();
             if ending {
                 adding.clear();
                 // Deleting for good stops after its batches in flight, while the runners stop.
@@ -269,7 +356,30 @@ impl Account {
                     }
                 }
                 let before = shown.runners.len();
-                shown.runners.iter_mut().for_each(|r| r.ended(ending));
+                let unusable: Vec<Unusable> = shown
+                    .runners
+                    .iter_mut()
+                    .filter_map(|r| r.ended(ending))
+                    .collect();
+                if let Some(&why) = unusable.first().filter(|_| can_heal) {
+                    // Its folders wait while the DB is set aside, as at the account's start:
+                    // they show starting, and one added or removed meanwhile changes them.
+                    tracing::error!(
+                        "{}: its state DB can't be used: setting it aside",
+                        self.identity
+                    );
+                    let roots = shown.shown().map(|r| r.root.clone());
+                    shown.waiting = Some(Waiting {
+                        roots: roots.chain(adding.drain(..)).collect(),
+                        state: State::Starting,
+                        error: None,
+                    });
+                    heal = Some(why);
+                    drop(shown);
+                    self.changed.raise();
+                    // Stopped at once.
+                    continue;
+                }
                 shown.runners.retain(|r| !matches!(r.life, Life::Gone));
                 changed |= shown.runners.len() != before;
                 let due: Vec<Root> = shown
@@ -346,7 +456,7 @@ impl Account {
                     drop(shown);
                     notifications.finish();
                     keeper.finish();
-                    return result;
+                    return result.map(|()| heal);
                 }
                 let restart = shown.runners.iter().filter_map(Running::restart_at).min();
                 (shown.paused().is_some(), restart)

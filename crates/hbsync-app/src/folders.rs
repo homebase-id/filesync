@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use hbsync_engine::root::{RootError, SetAside, SyncRoot};
+use hbsync_state::Unusable;
 use hbsync_types::{NodeId, Role};
 
 use crate::config::ConfigLock;
@@ -239,6 +240,28 @@ pub fn ready_account(
     identity: &Identity,
     roots: &[Root],
 ) -> Result<Option<SetAside>, RootError> {
+    readied(db, identity, roots, None)
+}
+
+/// [`ready_account`] for a DB found unusable (`why`) while its account ran, which nothing has
+/// open any more: set aside unchecked ([`SyncRoot::ready`]), its folders among `roots` set up
+/// again. What was set aside.
+pub(crate) fn heal_account(
+    db: &Path,
+    identity: &Identity,
+    roots: &[Root],
+    why: Unusable,
+) -> Result<Option<SetAside>, RootError> {
+    readied(db, identity, roots, Some(why))
+}
+
+/// [`ready_account`], or [`heal_account`] with `found`.
+fn readied(
+    db: &Path,
+    identity: &Identity,
+    roots: &[Root],
+    found: Option<Unusable>,
+) -> Result<Option<SetAside>, RootError> {
     // One at a time per DB; other accounts' go on.
     static TURNS: Mutex<BTreeMap<PathBuf, Arc<Mutex<()>>>> = Mutex::new(BTreeMap::new());
     let turn = Arc::clone(lock(&TURNS).entry(db.to_path_buf()).or_default());
@@ -248,23 +271,31 @@ pub fn ready_account(
         .filter(|r| r.identity == *identity)
         .map(|r| (r.folder.as_path(), r.role.map_or(NodeId::ROOT, Role::node)))
         .collect();
-    SyncRoot::ready(db, identity, &folders)
+    SyncRoot::ready(db, identity, &folders, found)
 }
 
 /// Has the running daemon set the folder at `path` up and sync it ([`add`]), or sets it up for
-/// the daemon's start when none runs ([`changed`]).
+/// the daemon's start when none runs ([`changed`]). Why the account's DB was set aside here as
+/// it was readied, if it was, for the caller to tell ([`crate::words::set_aside`]); a running
+/// daemon tells it on the account's status.
 pub fn add_synced(
     paths: &Paths,
     identity: &Identity,
     path: &Path,
     role: Option<Role>,
-) -> Result<Taken, Error> {
-    changed(
+) -> Result<(Taken, Option<Unusable>), Error> {
+    let set_aside = std::cell::Cell::new(None);
+    let taken = changed(
         paths,
         // No daemon runs: nothing else writes the DB.
-        |held| add_locked(held, paths, identity, path, role, true).map(drop),
+        |held| {
+            let set = add_locked(held, paths, identity, path, role, true)?;
+            set_aside.set(set.map(|s| s.why));
+            Ok(())
+        },
         || crate::control::add_folder(paths, identity, path, role),
-    )
+    )?;
+    Ok((taken, set_aside.get()))
 }
 
 /// Has the running daemon stop syncing the folder at `path` and take it off the config, or

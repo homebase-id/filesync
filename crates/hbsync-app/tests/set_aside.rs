@@ -259,7 +259,8 @@ fn an_edit_never_sent_is_kept_beside_the_drives() -> R {
 
 /// Setup on a computer whose DB is unusable, no daemon running: the DB is set aside without
 /// asking to merge, and the folder set up again. One that holds the files adopts them; an empty
-/// one (the folder deleted meanwhile) fetches them.
+/// one without its marker (the folder deleted meanwhile, or a disk's mount point) is set up only
+/// when asked to merge, and then fetches them.
 #[test]
 fn setup_sets_an_unusable_db_aside() -> R {
     for (why, emptied) in [(Unusable::TooOld, false), (Unusable::Corrupt, true)] {
@@ -272,7 +273,7 @@ fn setup_sets_an_unusable_db_aside() -> R {
         std::fs::create_dir_all(&root)?;
         assert_eq!(
             folders::add_synced(&paths, &identity, &root, None)?,
-            Taken::AtStart
+            (Taken::AtStart, None)
         );
         write_files(&root)?;
         sync_once(&server, &root, &db)?;
@@ -283,8 +284,14 @@ fn setup_sets_an_unusable_db_aside() -> R {
             std::fs::remove_dir_all(&root)?;
             std::fs::create_dir_all(&root)?;
         }
-        let set = check_state(&paths, &identity, &root, false)?;
-        assert_eq!(set, (false, Some(why)));
+        let set = check_state(&paths, &identity, &root, false);
+        if emptied {
+            let said = set.as_ref().err().map(ToString::to_string);
+            assert!(said.is_some_and(|e| e.contains("plug it in")), "{set:?}");
+            assert_eq!(check_state(&paths, &identity, &root, true)?, (false, None));
+        } else {
+            assert_eq!(set?, (false, Some(why)));
+        }
         assert_eq!(set_aside(&db)?.len(), 1, "{why:?}: kept");
         folders::add_synced(&paths, &identity, &root, None)?;
         let (uploads, served) = sync_once(&server, &root, &db)?;
@@ -296,6 +303,49 @@ fn setup_sets_an_unusable_db_aside() -> R {
         );
         assert_eq!(files(&root)?, synced, "{why:?}");
         assert_eq!(server.lock().map_err(|_| "poisoned")?.removed().count(), 0);
+    }
+    Ok(())
+}
+
+/// Setup of a folder whose disk isn't plugged in (an empty mount point where it was) is
+/// refused after the DB was set aside, as before: the DB made again doesn't know the folder
+/// yet, the config does. Nothing is made there; merging its files is still asked for.
+#[test]
+fn setup_after_a_set_aside_refuses_an_empty_mount_point() -> R {
+    for heal_first in [false, true] {
+        let server = FakeServer::new(ServerConfig::default());
+        let home = tempfile::tempdir()?;
+        let paths = Paths::under(&home.path().canonicalize()?);
+        let identity = Identity::new(ID);
+        let root = setup::resolve(&home.path().join("Homebase"));
+        let db = paths.account_db(&identity);
+        std::fs::create_dir_all(&root)?;
+        folders::add_synced(&paths, &identity, &root, None)?;
+        write_files(&root)?;
+        sync_once(&server, &root, &db)?;
+
+        spoil(&db, Unusable::Corrupt)?;
+        // Unplugged: its mount point is left, empty.
+        std::fs::rename(&root, root.with_file_name("unplugged"))?;
+        std::fs::create_dir_all(&root)?;
+        let roots = [Root::main(&identity, &root)];
+        if heal_first {
+            // Set aside as the daemon started, before setup.
+            folders::ready_account(&db, &identity, &roots)?.ok_or("not set aside")?;
+        }
+        let refused = check_state(&paths, &identity, &root, false);
+        let said = refused.as_ref().err().map(ToString::to_string);
+        assert!(
+            said.as_ref().is_some_and(|e| e.contains("plug it in")),
+            "{heal_first}: {refused:?}"
+        );
+        assert_eq!(set_aside(&db)?.len(), 1, "{heal_first}");
+        assert!(files(&root)?.is_empty(), "{heal_first}: nothing made there");
+        assert!(!root.join(".hbsync").exists(), "{heal_first}: not set up");
+        assert!(
+            check_state(&paths, &identity, &root, true).is_ok(),
+            "merging"
+        );
     }
     Ok(())
 }

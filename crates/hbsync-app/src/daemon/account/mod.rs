@@ -671,6 +671,143 @@ mod tests {
         Ok(())
     }
 
+    /// Its DB damaged while the account runs (SQLite answers that it is malformed): its folder's
+    /// runner ends, the account stops its parts, sets the DB aside, tells it once, and syncs on
+    /// in a new one, the folder adopted (nothing sent, nothing deleted). Damaged again, it isn't
+    /// set aside again: the folder fails, starting again after a pause.
+    #[test]
+    fn a_db_damaged_while_running_is_set_aside_once() -> Result<(), Box<dyn std::error::Error>> {
+        use std::time::{Duration, Instant};
+
+        use super::feed::{Notifications, Puller};
+        use crate::Config;
+
+        let home = tempfile::tempdir()?;
+        let paths = Paths::under(&home.path().canonicalize()?);
+        let identity: Identity = "a.example".into();
+        let folder = paths.state.with_file_name("Homebase");
+        std::fs::create_dir_all(&folder)?;
+        std::fs::write(folder.join("a.txt"), "a")?;
+        let root = Root::main(&identity, &folder);
+        let db = paths.account_db(&identity);
+        std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
+        hbsync_engine::root::SyncRoot::create(&db, &identity, &folder)?;
+        let server = FakeServer::new(ServerConfig::default());
+        let remote = FakeRemote::new(server.clone());
+
+        let (account, requests) = Account::new(&paths, &root, None, Arc::default());
+        let stop = Arc::new(AtomicBool::new(false));
+        let running = {
+            let (account, paths, stop, remote) = (
+                Arc::clone(&account),
+                paths.clone(),
+                Arc::clone(&stop),
+                remote.clone(),
+            );
+            let identity = identity.clone();
+            std::thread::spawn(move || {
+                let mut msgs = Vec::new();
+                let roots = [root];
+                account.ready_db(&roots, None, &stop, &requests, &mut msgs)?;
+                account.sync(
+                    &paths,
+                    &Config::default(),
+                    &requests,
+                    &stop,
+                    &mut msgs,
+                    |db| {
+                        let drive = Drive::open(db, &identity, Arc::new(remote.clone()))?;
+                        let puller = Puller::spawn(Arc::clone(&drive));
+                        Ok(AccountParts {
+                            drive,
+                            notifier: Err(std::io::Error::other("none here")),
+                            notifications: Notifications::new(puller, Instant::now()),
+                        })
+                    },
+                )
+            })
+        };
+        let wait = |what: &str, done: &dyn Fn(&AccountStatus, &FolderStatus) -> bool| {
+            let until = Instant::now() + Duration::from_secs(30);
+            loop {
+                let (status, folders) = account.status();
+                if folders.first().is_some_and(|f| done(&status, f)) {
+                    return Ok(());
+                }
+                if Instant::now() > until {
+                    return Err(format!("timed out: {what}: {status:?} {folders:?}"));
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        };
+        let synced = |_: &AccountStatus, f: &FolderStatus| {
+            f.state == State::Idle && f.last_sync.is_some() && f.pending == 0
+        };
+        let told = |s: &AccountStatus| {
+            let set_aside = words::set_aside(hbsync_state::Unusable::Corrupt);
+            s.recent.iter().filter(|n| n.text == set_aside).count()
+        };
+        // Its table's root page past the file's end: SQLite answers that the DB is malformed,
+        // on every connection, once each reads the schema again.
+        let damage = || -> Result<(), Box<dyn std::error::Error>> {
+            let conn = rusqlite::Connection::open(&db)?;
+            let version: i64 = conn.pragma_query_value(None, "schema_version", |r| r.get(0))?;
+            conn.execute_batch(
+                "PRAGMA writable_schema = ON;
+                 UPDATE sqlite_schema SET rootpage = 99999 WHERE name = 'dirty';",
+            )?;
+            conn.pragma_update(None, "schema_version", version + 1)?;
+            Ok(())
+        };
+        let sync_now = || -> Result<(), Box<dyn std::error::Error>> {
+            account
+                .runner(&folder)
+                .ok_or("no runner")??
+                .send(Command::SyncNow);
+            Ok(())
+        };
+        let aside = || -> std::io::Result<usize> {
+            let named = |e: &std::fs::DirEntry| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with("state.db.corrupt-")
+                    && !name.ends_with("-wal")
+                    && !name.ends_with("-shm")
+            };
+            let dir = std::fs::read_dir(db.parent().unwrap_or(&db))?;
+            Ok(dir.flatten().filter(named).count())
+        };
+
+        wait("the first sync", &synced)?;
+        let uploads = remote.faults().uploads;
+        damage()?;
+        sync_now()?;
+        wait("set aside and synced again", &|s, f| {
+            told(s) == 1 && synced(s, f)
+        })?;
+        assert_eq!(aside()?, 1, "kept");
+        hbsync_engine::root::SyncRoot::find(&db, &identity, &folder)?;
+        assert_eq!(
+            remote.faults().uploads,
+            uploads,
+            "adopted: nothing sent again"
+        );
+        assert_eq!(server.lock().map_err(|_| "poisoned")?.removed().count(), 0);
+
+        damage()?;
+        sync_now()?;
+        wait("failing", &|_, f| {
+            f.state == State::Failing && f.error.as_deref().is_some_and(|e| e.contains("malformed"))
+        })?;
+        std::thread::sleep(Duration::from_millis(300));
+        let (status, _) = account.status();
+        assert_eq!((told(&status), aside()?), (1, 1), "set aside once a run");
+
+        stop.store(true, Ordering::SeqCst);
+        account.wake();
+        running.join().map_err(|_| "panicked")??;
+        Ok(())
+    }
+
     /// The account's notes are on its status, its folders' untouched: a row of the drive that
     /// doesn't read is told once a version (again for a new one), a failed request each time;
     /// many rows at once are one note.
