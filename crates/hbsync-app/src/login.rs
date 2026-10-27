@@ -181,7 +181,7 @@ impl DriveRestore {
         self
     }
 
-    /// Waits up to `timeout` for the owner's answer: `false` when they said no. Whether the
+    /// Waits up to `timeout` for the owner's answer: `false` unless they gave it. Whether the
     /// drive is there is for looking up afterwards.
     pub fn finish(self, timeout: Duration) -> Result<bool, HomebaseError> {
         self.finish_unless(timeout, &AtomicBool::new(false))
@@ -194,7 +194,8 @@ impl DriveRestore {
         cancel: &AtomicBool,
     ) -> Result<bool, HomebaseError> {
         let (mut stream, request) = self.back.wait(timeout, cancel)?;
-        let given = request.query.get("status").map(String::as_str) != Some("canceled");
+        // Given comes back without a status; cancelled (or anything else) with one.
+        let given = !request.query.contains_key("status");
         let outcome = if given {
             Ok("Homebase Filesync goes on setting up. You can close this window.")
         } else {

@@ -254,7 +254,10 @@ impl setup::Owner for InTray {
     ) -> Result<setup::Credentials, setup::HomebaseError> {
         let login = setup::begin(identity, device)?.return_to(&self.pages.url("setup/done"));
         self.show(login.authorize_url());
-        login.finish_unless(setup::APPROVAL_TIMEOUT, &self.cancel)
+        let authorized = login.finish_unless(setup::APPROVAL_TIMEOUT, &self.cancel);
+        // Not taken (the page wasn't looked at again): not sent there later.
+        self.set_owner_page(None);
+        authorized
     }
 
     fn restore_drive(&mut self, identity: &str) -> Result<bool, setup::HomebaseError> {
