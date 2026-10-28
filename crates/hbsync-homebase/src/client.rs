@@ -8,7 +8,6 @@ use std::io::{Read, Write};
 use std::sync::Arc;
 use std::time::Duration;
 
-use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::de::DeserializeOwned;
 use ureq::Timeout;
 use ureq::http::Response;
@@ -230,16 +229,9 @@ impl Client {
         path: &str,
         query: &[(&str, &str)],
     ) -> Result<T, HomebaseError> {
-        let qs: Vec<String> = query
-            .iter()
-            .map(|(k, v)| format!("{k}={}", utf8_percent_encode(v, NON_ALPHANUMERIC)))
-            .collect();
-        let ss = serde_json::to_string(&Envelope::seal(&self.key, qs.join("&").as_bytes())?)?;
-        let url = format!(
-            "{}?ss={}",
-            self.url(path),
-            utf8_percent_encode(&ss, NON_ALPHANUMERIC)
-        );
+        let qs = crate::query(query);
+        let ss = serde_json::to_string(&Envelope::seal(&self.key, qs.as_bytes())?)?;
+        let url = format!("{}?{}", self.url(path), crate::query(&[("ss", &ss)]));
         let call = self.connections.call();
         let response = call
             .get(&url)

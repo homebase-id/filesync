@@ -34,6 +34,11 @@ pub enum HomebaseError {
     /// The owner refused, or the credentials no longer work (401/403).
     #[error("denied: {0}")]
     Denied(String),
+    /// The identity has the app but no drive at its address (`invalidDrive`): deleted, say, or
+    /// made by another app. The owner can give the app its drive again
+    /// ([`app::restore_drive_url`]).
+    #[error("Filesync's drive isn't on {0} (deleted, or another app's)")]
+    NoDrive(String),
     #[error("protocol: {0}")]
     Protocol(String),
     #[error("crypto: {0}")]
@@ -42,4 +47,14 @@ pub enum HomebaseError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+}
+
+/// `k=v&…`, each value percent-encoded.
+pub(crate) fn query(params: &[(&str, &str)]) -> String {
+    use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+    let pairs: Vec<String> = params
+        .iter()
+        .map(|(k, v)| format!("{k}={}", utf8_percent_encode(v, NON_ALPHANUMERIC)))
+        .collect();
+    pairs.join("&")
 }

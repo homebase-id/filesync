@@ -8,7 +8,9 @@ use std::time::Duration;
 
 use hbsync_engine::root::{RootError, SyncRoot};
 use hbsync_homebase::drive::HomebaseRemote;
-use hbsync_homebase::{Client, Credentials, HomebaseError, app};
+use hbsync_homebase::{Client, app};
+/// What an [`Owner`] answers with.
+pub use hbsync_homebase::{Credentials, HomebaseError};
 use hbsync_remote::Remote;
 
 use hbsync_state::Unusable;
@@ -43,6 +45,61 @@ pub fn authorize(
 /// ([`APPROVAL_TIMEOUT`]).
 pub fn begin(identity: &str, device: &str) -> Result<crate::login::Login, HomebaseError> {
     crate::login::begin(identity, &format!("Filesync on {device}"))
+}
+
+/// Starts asking the owner of `identity` to give the app its drive again: the caller takes the
+/// browser to `url` and waits with `finish_unless` ([`APPROVAL_TIMEOUT`]).
+pub fn begin_restore(identity: &str) -> Result<crate::login::DriveRestore, HomebaseError> {
+    crate::login::begin_restore(identity)
+}
+
+/// The owner's answers in the browser that setting up may need ([`set_up`]).
+pub trait Owner {
+    /// Authorizes this computer (named `device`) on `identity`, waiting for the approval.
+    fn authorize(&mut self, identity: &str, device: &str) -> Result<Credentials, HomebaseError>;
+    /// Asks for the app's drive on `identity` again, waiting for the answer (`false`: no).
+    fn restore_drive(&mut self, identity: &str) -> Result<bool, HomebaseError>;
+}
+
+/// The owner's answers in a browser this opens (`browser`, the system's when `None`), each
+/// page's URL passed to `say` too, for when none opens.
+pub struct InBrowser<'a> {
+    pub browser: Option<&'a str>,
+    pub say: &'a dyn Fn(&str),
+}
+
+impl std::fmt::Debug for InBrowser<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InBrowser")
+            .field("browser", &self.browser)
+            .finish_non_exhaustive()
+    }
+}
+
+impl InBrowser<'_> {
+    fn visit(&self, url: &str) {
+        (self.say)(&format!("If it doesn't open, visit:\n{url}\n"));
+    }
+}
+
+impl Owner for InBrowser<'_> {
+    fn authorize(&mut self, identity: &str, device: &str) -> Result<Credentials, HomebaseError> {
+        (self.say)(&format!(
+            "Opening your browser to authorize this computer on {identity}..."
+        ));
+        authorize(identity, device, self.browser, |url| self.visit(url))
+    }
+
+    fn restore_drive(&mut self, identity: &str) -> Result<bool, HomebaseError> {
+        (self.say)(&format!(
+            "Opening your browser to give Filesync its drive back on {identity}..."
+        ));
+        let restore = begin_restore(identity)?;
+        self.visit(restore.url());
+        // The URL was shown: a browser that doesn't start isn't an error.
+        let _ = open_browser(self.browser, restore.url());
+        restore.finish(APPROVAL_TIMEOUT)
+    }
 }
 
 /// What [`prepare`] found and did.
@@ -301,13 +358,13 @@ pub struct SetUp {
 }
 
 /// Sets syncing up: authorizes this computer on the identity unless it already is and the
-/// identity still accepts it (`authorize` gets the identity and the device's name, and waits
-/// for the owner's approval), prepares the identity, the folder and the config, and starts the
-/// daemon. Progress goes to `say`, a line at a time.
+/// identity still accepts it (through `owner`, who also gives the app its drive again when it is
+/// gone and this computer never synced with it), prepares the identity, the folder and the
+/// config, and starts the daemon. Progress goes to `say`, a line at a time.
 pub fn set_up(
     paths: &Paths,
     request: &SetUp,
-    authorize: &mut dyn FnMut(&str, &str) -> Result<Credentials, HomebaseError>,
+    owner: &mut dyn Owner,
     say: &mut dyn FnMut(&str),
 ) -> crate::Result<()> {
     let config_path = paths.config_file();
@@ -330,8 +387,8 @@ pub fn set_up(
     let device = config.device_name();
     // New credentials reach a running daemon's account only when it starts over.
     let mut authorized = false;
-    let mut authorize = || -> crate::Result<Credentials> {
-        let creds = authorize(identity, &device)?;
+    let mut authorize = |owner: &mut dyn Owner| -> crate::Result<Credentials> {
+        let creds = owner.authorize(identity, &device)?;
         store.save(&creds)?;
         authorized = true;
         Ok(creds)
@@ -343,17 +400,50 @@ pub fn set_up(
             ));
             creds
         }
-        None => authorize()?,
+        None => authorize(owner)?,
     };
-    match prepare(&creds) {
+    let prepared = match prepare(&creds) {
         // Revoked since: authorize again.
         Err(HomebaseError::Denied(why)) => {
             say(&format!(
                 "{identity} no longer accepts this computer's authorization ({why})."
             ));
             store.delete(identity)?;
-            creds = authorize()?;
-            prepare(&creds)?;
+            creds = authorize(owner)?;
+            prepare(&creds)
+        }
+        other => other,
+    };
+    match prepared {
+        Err(HomebaseError::NoDrive(_)) => {
+            // Every local refusal first: the new drive is for every computer.
+            if synced_before(paths, &config, identity, &folder) {
+                // Logged in again on the way: a running daemon takes the new credentials.
+                if authorized && control::running(paths)? {
+                    control::start_over(paths, identity)?;
+                }
+                return Err(Refusal::No(format!(
+                    "Filesync's drive isn't at its address on {identity} (deleted, or another \
+                     app's), and this computer synced with it before: Filesync doesn't make a new \
+                     one by itself, as this computer would take the empty new drive for every \
+                     file deleted. No drive was made"
+                ))
+                .into());
+            }
+            // Only looking (no DB here to ready); looked at again below, as a daemon may start
+            // while the owner answers.
+            check_state(paths, identity, &folder, checked.existing)?;
+            give_drive_back(identity, owner, say)?;
+            // Still not at its address: a drive with its ids that another app owns (the owner
+            // app only grants one that exists).
+            prepare(&creds).map_err(|e| match e {
+                HomebaseError::NoDrive(_) => crate::Error::from(Refusal::No(format!(
+                    "Filesync's drive still isn't on {identity}: if your Homebase lists a drive \
+                     named Filesync under another app, delete it there if it is empty, and try \
+                     again"
+                ))),
+                e => e.into(),
+            })?;
         }
         other => drop(other?),
     }
@@ -398,6 +488,34 @@ pub fn set_up(
     Ok(())
 }
 
+/// Whether this computer synced with `identity` before: its account's DB, a folder of it in the
+/// config, or the folder's marker (the DB set aside or wiped since). Then a drive made again
+/// would be taken for every file deleted.
+fn synced_before(paths: &Paths, config: &Config, identity: &Identity, folder: &Path) -> bool {
+    paths.account_db(identity).exists()
+        || config.roots.iter().any(|r| r.identity == *identity)
+        || hbsync_local::layout::marker_file(folder).exists()
+}
+
+/// The app's drive is gone from `identity` (deleted in the owner app, say): the owner is asked
+/// to give it again, which makes an empty one ([`synced_before`] is the caller's).
+fn give_drive_back(
+    identity: &Identity,
+    owner: &mut dyn Owner,
+    say: &mut dyn FnMut(&str),
+) -> crate::Result<()> {
+    say(&format!(
+        "Filesync's drive isn't on {identity}: asking your Homebase to give it back."
+    ));
+    if !owner.restore_drive(identity)? {
+        return Err(Refusal::No(format!(
+            "Filesync needs its drive on {identity}: approve giving it back to set up"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,6 +549,66 @@ mod tests {
     }
 
     type R = crate::Result<()>;
+
+    /// An owner who gives the drive back, or not.
+    struct GivesBack(bool);
+
+    impl Owner for GivesBack {
+        fn authorize(&mut self, _: &str, _: &str) -> Result<Credentials, HomebaseError> {
+            Err(HomebaseError::Protocol("not asked here".into()))
+        }
+
+        fn restore_drive(&mut self, _: &str) -> Result<bool, HomebaseError> {
+            Ok(self.0)
+        }
+    }
+
+    /// The owner is asked, and their no is a refusal.
+    #[test]
+    fn the_drive_is_given_back_when_the_owner_says_so() -> R {
+        let anna = Identity::new("anna.example.com");
+        let mut quiet = |_: &str| {};
+        give_drive_back(&anna, &mut GivesBack(true), &mut quiet)?;
+        let mut no = GivesBack(false);
+        let refused = give_drive_back(&anna, &mut no, &mut quiet);
+        assert!(refused.is_err_and(|e| e.to_string().contains("approve")));
+        Ok(())
+    }
+
+    /// Any trace of syncing with the identity here counts: its DB, a folder of it in the
+    /// config, the folder's state folder.
+    #[test]
+    fn a_computer_synced_before_by_any_trace() -> R {
+        let dir = tempfile::tempdir()?;
+        let paths = Paths::under(&dir.path().join("home"));
+        let anna = Identity::new("anna.example.com");
+        let folder = dir.path().join("Homebase");
+        std::fs::create_dir_all(&folder)?;
+        let mut config = Config::default();
+        assert!(!synced_before(&paths, &config, &anna, &folder));
+
+        // A state folder alone (the user's ignore rules, say) isn't syncing.
+        let state = hbsync_local::layout::state_dir(&folder);
+        std::fs::create_dir(&state)?;
+        std::fs::write(hbsync_local::layout::ignore_file(&folder), "*.tmp\n")?;
+        assert!(!synced_before(&paths, &config, &anna, &folder));
+        let marker = hbsync_local::layout::marker_file(&folder);
+        std::fs::write(&marker, "")?;
+        assert!(synced_before(&paths, &config, &anna, &folder));
+        std::fs::remove_file(&marker)?;
+
+        config
+            .roots
+            .push(crate::Root::main(&anna, &dir.path().join("Elsewhere")));
+        assert!(synced_before(&paths, &config, &anna, &folder));
+        config.roots.clear();
+
+        let db = paths.account_db(&anna);
+        std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
+        std::fs::write(&db, "")?;
+        assert!(synced_before(&paths, &config, &anna, &folder));
+        Ok(())
+    }
 
     #[test]
     fn folders_are_resolved_before_they_are_judged() -> R {

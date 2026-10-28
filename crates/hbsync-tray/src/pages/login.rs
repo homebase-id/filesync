@@ -148,15 +148,14 @@ impl Server {
         };
         (self.send)(Event::Wake);
         let (url_tx, url_rx) = mpsc::channel::<String>();
-        let done = self.pages.url("setup/done");
         let (paths, pages, send) = (self.paths.clone(), self.pages.clone(), self.send.clone());
+        let mut owner = InTray {
+            first: Some(url_tx),
+            cancel: Arc::clone(&cancel),
+            pages: self.pages.clone(),
+        };
         std::thread::spawn(move || {
-            let mut authorize = |identity: &str, device: &str| {
-                let login = setup::begin(identity, device)?.return_to(&done);
-                let _ = url_tx.send(login.authorize_url().to_owned());
-                login.finish_unless(setup::APPROVAL_TIMEOUT, &cancel)
-            };
-            let result = setup::set_up(&paths, &request, &mut authorize, &mut |line| {
+            let result = setup::set_up(&paths, &request, &mut owner, &mut |line| {
                 tracing::info!("{line}");
             });
             let result = result
@@ -194,8 +193,8 @@ impl Server {
             Phase::Form => "<h1>Not connected yet</h1>".to_owned(),
             Phase::Connecting => format!(
                 "<meta http-equiv=refresh content=2>\
-                 <h1>Connecting…</h1><p>Approve this computer on your Homebase, in the page \
-                 that opened. This page follows along.</p>\
+                 <h1>Connecting…</h1><p>Approve on your Homebase, in the page that opened: \
+                 this computer, and Filesync's drive if it asks. This page follows along.</p>\
                  <form method=post action=\"{}\"><p class=small>A typo in the address, or the \
                  page closed? <button class=secondary>Start over</button></p></form>",
                 self.pages.url("setup/again")
@@ -212,5 +211,61 @@ impl Server {
                 self.pages.url("setup/again")
             ),
         }
+    }
+}
+
+/// The owner's answers in the browser that came from the form: each owner-app page comes back
+/// to the page that follows along.
+struct InTray {
+    /// Where the first page goes: the form's answer sends the browser there.
+    first: Option<mpsc::Sender<String>>,
+    cancel: Arc<AtomicBool>,
+    pages: Pages,
+}
+
+impl InTray {
+    /// Sends the browser to `url`: the first page as the form's answer, a later one from the
+    /// page that follows along (once the browser is back on it).
+    fn show(&mut self, url: &str) {
+        if let Some(first) = self.first.take()
+            && first.send(url.to_owned()).is_ok()
+        {
+            return;
+        }
+        self.set_owner_page(Some(url));
+    }
+
+    /// The owner page the page that follows along goes on to, unless this login was given up
+    /// (started over): then the pages are another login's. Checked under the lock that starting
+    /// over takes.
+    fn set_owner_page(&self, url: Option<&str>) {
+        let mut s = lock(&self.pages.shared);
+        if !self.cancel.load(Ordering::Relaxed) {
+            s.owner_page = url.map(str::to_owned);
+        }
+    }
+}
+
+impl setup::Owner for InTray {
+    fn authorize(
+        &mut self,
+        identity: &str,
+        device: &str,
+    ) -> Result<setup::Credentials, setup::HomebaseError> {
+        let login = setup::begin(identity, device)?.return_to(&self.pages.url("setup/done"));
+        self.show(login.authorize_url());
+        let authorized = login.finish_unless(setup::APPROVAL_TIMEOUT, &self.cancel);
+        // Not taken (the page wasn't looked at again): not sent there later.
+        self.set_owner_page(None);
+        authorized
+    }
+
+    fn restore_drive(&mut self, identity: &str) -> Result<bool, setup::HomebaseError> {
+        let restore = setup::begin_restore(identity)?.return_to(&self.pages.url("setup/done"));
+        self.show(restore.url());
+        let given = restore.finish_unless(setup::APPROVAL_TIMEOUT, &self.cancel);
+        // Not taken (the page wasn't looked at again): not sent there later.
+        self.set_owner_page(None);
+        given
     }
 }
