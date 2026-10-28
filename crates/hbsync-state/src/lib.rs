@@ -149,6 +149,9 @@ pub enum Unusable {
     TooOld,
     /// Not a database, or damaged: a page, or a table, column, index or trigger missing.
     Corrupt,
+    /// Of a drive that isn't the one on the identity now: it was deleted and made again
+    /// ([`crate::keys::DRIVE_MADE`]).
+    OtherDrive,
 }
 
 impl Unusable {
@@ -157,6 +160,7 @@ impl Unusable {
         match self {
             Unusable::TooOld => "too-old",
             Unusable::Corrupt => "corrupt",
+            Unusable::OtherDrive => "other-drive",
         }
     }
 }

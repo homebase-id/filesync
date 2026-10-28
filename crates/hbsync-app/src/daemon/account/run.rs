@@ -9,6 +9,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use hbsync_engine::Drive;
+use hbsync_engine::root::SyncRoot;
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::{Client, HomebaseError};
 use hbsync_remote::ErrorClass;
@@ -109,9 +110,15 @@ impl Account {
             return Ok(());
         };
         let client = Client::new(&creds)?;
-        let Some(remote) = self.connect(&client, stop, requests, &mut msgs) else {
+        let Some((remote, made)) = self.connect(&client, stop, requests, &mut msgs) else {
             return Ok(());
         };
+        if self
+            .on_drive(paths, made, stop, requests, &mut msgs)?
+            .is_none()
+        {
+            return Ok(());
+        }
         // The notifications' events reach this thread's channel through a thread of their own,
         // which ends with them.
         let (tx, events) = channel();
@@ -178,6 +185,48 @@ impl Account {
             self.show_waiting(State::Failing, e.to_string());
             if self.wait(wait_for, stop, requests, msgs) {
                 return Ok(None);
+            }
+        }
+    }
+
+    /// Readies its state DB for the drive made at `made` (its marker's time) before anything
+    /// syncs: one that synced with another drive (deleted and made again: the same alias,
+    /// nothing of the old one on it) is set aside and its folders set up again, told once, as a
+    /// damaged one is ([`SyncRoot::other_drive`]). Read against the new drive, what it knows
+    /// would look deleted there, and be deleted here. `None` when it stops first.
+    fn on_drive(
+        &self,
+        paths: &Paths,
+        made: i64,
+        stop: &AtomicBool,
+        requests: &Receiver<Msg>,
+        msgs: &mut Vec<Msg>,
+    ) -> Result<Option<()>, DaemonError> {
+        let mut backoff = Backoff::new();
+        loop {
+            match SyncRoot::other_drive(&self.db, &self.identity, made) {
+                Ok(false) => return Ok(Some(())),
+                Ok(true) => {
+                    tracing::warn!(
+                        "{}: its drive was made again since this computer synced with it",
+                        self.identity
+                    );
+                    // Nothing else has it open while it is set aside.
+                    self.ready.store(false, Ordering::SeqCst);
+                    *lock(&self.reader) = None;
+                    let found = Readying::Heal(Some(Unusable::OtherDrive));
+                    if self.ready_db(paths, found, stop, requests, msgs)?.is_none() {
+                        return Ok(None);
+                    }
+                    // The new DB takes the drive at the next look.
+                }
+                Err(e) => {
+                    tracing::error!("{e}: {} waits for it", self.identity);
+                    self.show_waiting(State::Failing, e.to_string());
+                    if self.wait(backoff.after(e.class(), None), stop, requests, msgs) {
+                        return Ok(None);
+                    }
+                }
             }
         }
     }
@@ -591,7 +640,7 @@ impl Account {
         stop: &AtomicBool,
         rx: &Receiver<Msg>,
         early: &mut Vec<Msg>,
-    ) -> Option<Result<HomebaseRemote, HomebaseError>> {
+    ) -> Option<Result<(HomebaseRemote, i64), HomebaseError>> {
         if self.stopping(stop) {
             return None;
         }
@@ -599,7 +648,9 @@ impl Account {
         let spawned = std::thread::Builder::new()
             .name("hbsync-connect".into())
             .spawn(move || {
-                let tried = HomebaseRemote::connect(trying);
+                // When the drive was made: once per connection.
+                let tried = HomebaseRemote::connect(trying)
+                    .and_then(|remote| remote.made().map(|made| (remote, made)));
                 let _ = to_account.send(Msg::Connected(Box::new(tried)));
             });
         if let Err(e) = spawned {
@@ -617,19 +668,19 @@ impl Account {
         None
     }
 
-    /// The drive, once the identity answers (finding it takes a request); `None` when stopped
-    /// first.
+    /// The drive and when it was made, once the identity answers (finding them takes two
+    /// requests, four where the drive gets its marker); `None` when stopped first.
     fn connect(
         &self,
         client: &Client,
         stop: &AtomicBool,
         rx: &Receiver<Msg>,
         early: &mut Vec<Msg>,
-    ) -> Option<Arc<HomebaseRemote>> {
+    ) -> Option<(Arc<HomebaseRemote>, i64)> {
         let mut backoff = Backoff::new();
         loop {
             match self.try_connect(client, stop, rx, early)? {
-                Ok(r) => return Some(Arc::new(r)),
+                Ok((remote, made)) => return Some((Arc::new(remote), made)),
                 Err(e) => {
                     let class = e.class();
                     // Refused: the credentials won't work sooner; a login starts it over.

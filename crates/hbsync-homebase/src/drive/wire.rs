@@ -9,7 +9,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use hbsync_remote::{ChangeRef, NodeMeta, PayloadInfo, RemoteBody, RemoteHeader, Skipped};
 use hbsync_types::schema::{
-    ARCHIVAL_REMOVED, FILE_TYPE_FILE, FILE_TYPE_FOLDER, NodeContent, PAYLOAD_KEY,
+    ARCHIVAL_REMOVED, FILE_TYPE_FILE, FILE_TYPE_FOLDER, FILE_TYPE_MARKER, MARKER_ID, NodeContent,
+    PAYLOAD_KEY,
 };
 use hbsync_types::{
     ContentHash, HashAlgorithm, NodeId, NodeKind, RemoteFileId, RemoteRef, VersionTag,
@@ -558,25 +559,66 @@ pub(crate) fn metadata(
         NodeKind::Folder => FILE_TYPE_FOLDER,
         NodeKind::File => FILE_TYPE_FILE,
     };
+    let app_data = json!({
+        "uniqueId": meta.node.0,
+        "groupId": meta.parent.0,
+        "fileType": file_type,
+        "dataType": 0,
+        "content": key.seal_text(&meta.content.to_json()),
+        // Homebase sets a missing one to 0: a write that left it out would restore.
+        "archivalStatus": if meta.removed { ARCHIVAL_REMOVED } else { 0 },
+    });
+    sealed_header(app_data, version, shared_secret, transfer_iv, key)
+}
+
+/// The `metadata` part of the drive's marker (node schema, "The drive's marker"): a file of its
+/// own type at [`MARKER_ID`], in no folder, its content `{}`, encrypted as a node is.
+pub(crate) fn marker_metadata(
+    shared_secret: &Key,
+    transfer_iv: &[u8; 16],
+    key: &KeyHeader,
+) -> Vec<u8> {
+    let app_data = json!({
+        "uniqueId": MARKER_ID,
+        "fileType": FILE_TYPE_MARKER,
+        "dataType": 0,
+        "content": key.seal_text("{}"),
+    });
+    sealed_header(app_data, None, shared_secret, transfer_iv, key)
+}
+
+/// A header with `app_data`, owner only, encrypted under `key`, as the `metadata` part sends it.
+fn sealed_header(
+    app_data: Value,
+    version: Option<VersionTag>,
+    shared_secret: &Key,
+    transfer_iv: &[u8; 16],
+    key: &KeyHeader,
+) -> Vec<u8> {
     let plain = json!({
         "encryptedKeyHeader": key.seal(shared_secret, transfer_iv),
         "fileMetadata": {
             "isEncrypted": true,
             "allowDistribution": false,
             "accessControlList": { "requiredSecurityGroup": "owner" },
-            "appData": {
-                "uniqueId": meta.node.0,
-                "groupId": meta.parent.0,
-                "fileType": file_type,
-                "dataType": 0,
-                "content": key.seal_text(&meta.content.to_json()),
-                // Homebase sets a missing one to 0: a write that left it out would restore.
-                "archivalStatus": if meta.removed { ARCHIVAL_REMOVED } else { 0 },
-            },
+            "appData": app_data,
             "versionTag": version.map(|v| v.0),
         },
     });
     aes_cbc_encrypt(shared_secret, transfer_iv, plain.to_string().as_bytes())
+}
+
+/// The drive's marker's header (node schema, "The drive's marker"): when the identity made it.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct MarkerHeader {
+    #[serde(rename = "fileMetadata")]
+    pub meta: MarkerMeta,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct MarkerMeta {
+    /// Unix ms, the identity's clock.
+    pub created: i64,
 }
 
 #[cfg(test)]
@@ -967,6 +1009,25 @@ mod tests {
         assert_eq!(KeyHeader::open(&key, &SS)?, kh);
         let content = app["content"].as_str().ok_or("content")?;
         assert_eq!(kh.open_text(content)?, meta.content.to_json());
+
+        // The drive's marker: its own type, at its fixed id, in no folder (no folder's query
+        // sees it), owner only, encrypted as a node is.
+        let sealed = marker_metadata(&SS, &transfer_iv, &kh);
+        let plain: Value = serde_json::from_slice(&aes_cbc_decrypt(&SS, &transfer_iv, &sealed)?)?;
+        let file = &plain["fileMetadata"];
+        assert_eq!(file["isEncrypted"], true);
+        assert_eq!(file["accessControlList"]["requiredSecurityGroup"], "owner");
+        let app = &file["appData"];
+        assert_eq!(app["uniqueId"], json!(MARKER_ID));
+        assert_eq!(app["fileType"], FILE_TYPE_MARKER);
+        assert!(app.get("groupId").is_none());
+        assert_eq!(
+            kh.open_text(app["content"].as_str().ok_or("content")?)?,
+            "{}"
+        );
+        let header: MarkerHeader = serde_json::from_value(json!({
+            "fileId": Uuid::from_u128(1), "fileMetadata": {"created": 1759920000000_i64}}))?;
+        assert_eq!(header.meta.created, 1759920000000);
         Ok(())
     }
 }

@@ -12,6 +12,10 @@ changes in the same pull request as the schema.
 - Find it by slug: `GET /api/v2/apps/filesync/drives/filesync` (the drive type GUID
   `5da48122-e946-487a-8b9d-589642f3c91d` is provisional, so don't hard-code it).
 - The app needs a read grant on the drive (write too, for uploading).
+- One file on it isn't a node: the drive's marker (`fileType` `7103`, node schema "The drive's
+  marker"), which the computers make and read. Never list, write or delete it; querying by the
+  nodes' file types or a folder's `groupId` leaves it out. Deleting it makes every computer merge
+  its folders with the drive again.
 
 ## Nodes
 Every file and folder is one Homebase file:

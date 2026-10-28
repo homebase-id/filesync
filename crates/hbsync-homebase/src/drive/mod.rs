@@ -15,7 +15,7 @@ use hbsync_remote::{
     Answers, ChangesPage, Deletes, ErrorClass, ForGood, Holds, NodeMeta, Paced, Planned, RefsPage,
     Remote, RemoteBody, RemoteError, RemoteHeader, Result, Upload,
 };
-use hbsync_types::schema::{ARCHIVAL_REMOVED, NodeContent, PAYLOAD_KEY};
+use hbsync_types::schema::{ARCHIVAL_REMOVED, MARKER_ID, NodeContent, PAYLOAD_KEY};
 use hbsync_types::{
     ContentHash, Doomed, NodeId, RemoteFileId, RemoteRef, Target, VersionTag, Written,
 };
@@ -202,6 +202,57 @@ impl HomebaseRemote {
         self.client
             .get(&format!("{}/header", self.file(file_id)), &[])
             .map_err(remote_error)
+    }
+
+    /// When the drive was made, as its marker says (node schema, "The drive's marker"): the
+    /// marker's creation time on the identity, Unix ms. A drive without one gets one now; of two
+    /// computers making it at once, the second finds the first's. One request where it is
+    /// there; three where it is made.
+    pub fn made(&self) -> Result<i64, HomebaseError> {
+        if let Some(made) = self.marker()? {
+            return Ok(made);
+        }
+        let key = KeyHeader::random()?;
+        let transfer_iv = sealed::strong()?;
+        let parts = vec![
+            Part::bytes(
+                "instructions",
+                "application/json",
+                wire::instructions(&transfer_iv, None, false)
+                    .to_string()
+                    .into_bytes(),
+            ),
+            Part::bytes(
+                "metadata",
+                wire::CONTENT_TYPE,
+                wire::marker_metadata(self.client.key(), &transfer_iv, &key),
+            ),
+        ];
+        let boundary = Uuid::new_v4().simple().to_string();
+        let made = self.client.upload::<WriteResult>(
+            UploadMethod::Post,
+            &self.files(),
+            Multipart::new(boundary, parts),
+        );
+        match made {
+            Err(e) if !matches!(drive_error(&e), Some(RemoteError::AlreadyExists)) => {
+                return Err(e);
+            }
+            _ => {}
+        }
+        self.marker()?.ok_or_else(|| {
+            HomebaseError::Protocol("the drive's marker isn't there once made".into())
+        })
+    }
+
+    /// The drive's marker's creation time, if the identity has one.
+    fn marker(&self) -> Result<Option<i64>, HomebaseError> {
+        let path = format!("{}/by-uid/{}/header", self.files(), MARKER_ID.simple());
+        match self.client.get::<wire::MarkerHeader>(&path, &[]) {
+            Ok(header) => Ok(Some(header.meta.created)),
+            Err(e) if matches!(drive_error(&e), Some(RemoteError::NotFound)) => Ok(None),
+            Err(e) => Err(e),
+        }
     }
 
     /// Creates a file, or with `target` updates that file at its version (the key from its
@@ -766,6 +817,14 @@ fn remote_error(e: HomebaseError) -> RemoteError {
         e @ (HomebaseError::Protocol(_) | HomebaseError::Crypto(_) | HomebaseError::Json(_)) => {
             RemoteError::Fatal(e.to_string())
         }
+    }
+}
+
+/// The trait's error for `e`, if it is an error answer.
+fn drive_error(e: &HomebaseError) -> Option<RemoteError> {
+    match e {
+        HomebaseError::Api { what, error } => Some(api_error(what, error)),
+        _ => None,
     }
 }
 

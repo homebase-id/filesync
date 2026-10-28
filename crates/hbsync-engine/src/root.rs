@@ -259,6 +259,24 @@ impl SyncRoot {
         Ok(set)
     }
 
+    /// Whether `identity`'s DB at `db` synced with another drive than the one made at `made`
+    /// (its marker's time, node schema "The drive's marker"): one deleted and made again, the
+    /// same alias, nothing of the old one on it. Then the DB must be set aside
+    /// ([`Unusable::OtherDrive`]) before anything syncs: read against the new drive, what it
+    /// knows would look deleted there. A DB that knows no drive yet (new, set up again, or from
+    /// before the marker) takes this one. Only while nothing else writes it.
+    pub fn other_drive(db: &Path, identity: &str, made: i64) -> Result<bool, RootError> {
+        let mut account = Self::open_account(db, identity)?;
+        let made = made.to_string();
+        match account.read(|s| s.account_kv(keys::DRIVE_MADE))? {
+            Some(known) => Ok(known != made),
+            None => {
+                account.write_durable(|s| s.account().set_account_kv(keys::DRIVE_MADE, &made))?;
+                Ok(false)
+            }
+        }
+    }
+
     /// The account's DB at `db`, its whole file checked, then brought up to date (made if new;
     /// refused if another's), then its schema checked ([`SyncRoot::ready`]).
     fn check_and_open(db: &Path, identity: &str) -> Result<StateDb, RootError> {
@@ -369,7 +387,8 @@ fn beside_one_set_aside(db: &Path) -> bool {
         return false;
     };
     let name = name.to_string_lossy();
-    let named = [Unusable::TooOld, Unusable::Corrupt].map(|why| format!("{name}{}", aside(why)));
+    let named = [Unusable::TooOld, Unusable::Corrupt, Unusable::OtherDrive]
+        .map(|why| format!("{name}{}", aside(why)));
     std::fs::read_dir(dir)
         .into_iter()
         .flatten()

@@ -69,6 +69,37 @@ fn a_missing_file_is_not_found() -> R {
     Ok(())
 }
 
+/// The drive has one marker (node schema, "The drive's marker"): computers asking at once, on
+/// a drive without one (the first run on an identity), find the one the first made; asked
+/// again, the same time.
+#[test]
+#[ignore = "needs a live identity (HBSYNC_LIVE)"]
+fn the_drive_has_one_marker() -> R {
+    let _drive = beside_others();
+    let asking: Vec<_> = (0..4)
+        .map(|_| {
+            std::thread::spawn(|| {
+                live_remote()
+                    .map_err(|e| e.to_string())?
+                    .made()
+                    .map_err(|e| e.to_string())
+            })
+        })
+        .collect();
+    let mut made = Vec::new();
+    for asked in asking {
+        made.push(asked.join().map_err(|_| "panicked")??);
+    }
+    made.dedup();
+    assert_eq!(made.len(), 1, "{made:?}");
+    let remote = live_remote()?;
+    assert_eq!(remote.made()?, made[0]);
+    // Its creation time on the identity, Unix ms.
+    assert!(made[0] > 1_700_000_000_000, "{made:?}");
+    println!("the drive was made at {}", made[0]);
+    Ok(())
+}
+
 /// Every registration finds the app's one circle by its slug: asking twice, or from a second
 /// registration of the app on the same identity (`hbsync-register <identity> --as b`), gives
 /// the same id; nothing is created when the app holds the slug.

@@ -142,8 +142,11 @@ pub(crate) enum Msg {
     Woke,
     /// Look again: it is to end, the daemon stops, its pause changed, or a runner is ending.
     Wake,
-    /// A try at connecting ended (its thread's answer, while the account connects).
-    Connected(Box<Result<hbsync_homebase::drive::HomebaseRemote, hbsync_homebase::HomebaseError>>),
+    /// A try at connecting ended (its thread's answer, while the account connects): the drive,
+    /// and when it was made.
+    Connected(
+        Box<Result<(hbsync_homebase::drive::HomebaseRemote, i64), hbsync_homebase::HomebaseError>>,
+    ),
 }
 
 /// What the account's thread is asked to do.

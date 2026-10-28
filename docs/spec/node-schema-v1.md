@@ -25,6 +25,22 @@ reserved in odin-core.
 - The drive should have `requirePayloadHashes = true` (owner setting; apps can't set it
   **[verified]** `OwnerDriveManagementController.cs`).
 
+## The drive's marker
+- One file on the drive that isn't a node: `fileType` `7103` **[provisional]**, `uniqueId`
+  `34f57652-5082-4f24-9246-e3ca8b991373`, no `groupId`, content `{}`, owner only, encrypted as a
+  node is. Its `created` (the identity's clock) tells this drive from one made again: a drive
+  deleted and made again has the same alias and the same slugs, and nothing else the server
+  shows changes.
+- The first computer to connect to a drive without one makes it; of two at once, the second
+  finds the first's (`existingFileWithUniqueId`). Each computer reads it once as it connects
+  (`GET /api/v2/drives/{alias}/files/by-uid/{uniqueId}/header` **[verified]**
+  `V2DriveFileReadonlyByUidController`) and keeps its time: a computer that finds another one
+  synced with a drive that is gone, and sets its records of it aside rather than take what
+  it knew as deleted (`daemon.md`, the state DB).
+- Other clients never write, delete or list it. Queries by the nodes' file types and by
+  `groupId` never return it. Deleting it costs every computer a merge of its folders with the
+  drive (nothing is deleted or copied twice), as if the drive had been made again.
+
 ## Root
 - Root node id: `2a1c0d55-8ad3-417e-a5d7-42c3d0baba0e`, the same on every drive.
 - The root is never stored as a file. A node with `groupId == root id` is top level.
@@ -351,6 +367,8 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-10-28: the drive's marker (`fileType` `7103`), a file that isn't a node: other clients
+  leave it alone. The nodes are the same.
 - 2026-10-26: deleting for good may stop part way (between batches); it then runs no later
   pass, so a folder never goes before what is in it. The node is the same.
 - 2026-10-23: a computer reads a node with `v > 1` as a row it can't read (it never wrote over
