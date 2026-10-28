@@ -149,14 +149,21 @@ pub enum Unusable {
     TooOld,
     /// Not a database, or damaged: a page, or a table, column, index or trigger missing.
     Corrupt,
+    /// Of a drive that isn't the one on the identity now: it was deleted and made again
+    /// ([`crate::keys::DRIVE_MADE`]).
+    OtherDrive,
 }
 
 impl Unusable {
+    /// Every reason, as a DB set aside for it is named ([`Unusable::name`]).
+    pub const ALL: [Unusable; 3] = [Unusable::TooOld, Unusable::Corrupt, Unusable::OtherDrive];
+
     /// Its name in the name of a file set aside for it.
     pub fn name(self) -> &'static str {
         match self {
             Unusable::TooOld => "too-old",
             Unusable::Corrupt => "corrupt",
+            Unusable::OtherDrive => "other-drive",
         }
     }
 }

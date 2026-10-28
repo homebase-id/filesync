@@ -69,7 +69,8 @@ sync, until the daemon starts again and checks the file. An error setting it asi
 and tried again after a pause, checked (not the daemon started again and again). A folder
 added meanwhile waits for it (one DB's turn in the daemon: its setting up, and the config read
 for the folders to set up again). It is renamed beside the new one,
-`state.db.too-old-<Unix time>` or `state.db.corrupt-<Unix time>`, with its `-wal` and `-shm`
+`state.db.too-old-<Unix time>`, `state.db.corrupt-<Unix time>` or `state.db.other-drive-<Unix
+time>` (a drive made again, below), with its `-wal` and `-shm`
 files named alike, never deleted: they are for a diagnosis, and old ones can be deleted by hand.
 The account's folders that are there (their marker this identity's) are then set up again in the
 new DB as folders with files, as `hbsync setup --existing` does: what they hold is adopted by
@@ -84,6 +85,21 @@ aside: a DB of a newer version (a downgrade: setting it aside would throw a newe
 records away; the account waits, saying why), and one that can't be read for now (busy or
 locked, an I/O error, a full disk, access denied, a missing folder, a read-only file system:
 told as an error, and tried again as the daemon starts again).
+
+A DB of a drive made again is set aside too. A drive deleted and made again has the same alias
+and slugs, nothing of the old one on it: read against it, what the DB knows would look deleted
+there and be deleted here, one file at a time as each is found gone for good (sync semantics
+§8b), which the mass-delete guard doesn't hold (it holds removals from elsewhere only when they
+would take every synced file at once, §7). So when the drive was made (`created` in the drive
+answer, which the account reads once as it connects: no request more) is kept in the DB
+(`remote.drive_made`); the account's DB is bound to the drive where it
+opens with it (its `Drive`, after any setting aside too), and one that knows another time is set
+aside before anything syncs, whatever was set aside before in that run, as
+`state.db.other-drive-<Unix time>`, and its folders set up again as above: their files go up to
+the new drive, told once. A DB that knows no drive yet (new, set up again, or from an earlier version)
+takes the one it finds, unless it read its drive before that one was made (`remote.read_at`, the
+server's clock): another drive. A drive made again while the account stays connected is found at
+its next connect (a login, or the daemon's start).
 
 The recovery rule (data safety): setting a DB aside never deletes a file, here or on the drive:
 the new DB has no base, and without one nothing is deleted. What is lost is the old DB's

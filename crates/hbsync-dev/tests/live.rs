@@ -69,6 +69,19 @@ fn a_missing_file_is_not_found() -> R {
     Ok(())
 }
 
+/// The drive answer says when the drive was made (the identity's clock), the same on every
+/// connection: what tells it from one deleted and made again.
+#[test]
+#[ignore = "needs a live identity (HBSYNC_LIVE)"]
+fn the_drive_says_when_it_was_made() -> R {
+    let _drive = beside_others();
+    let made = live_remote()?.made();
+    assert_eq!(live_remote()?.made(), made);
+    assert!(made > 1_600_000_000_000, "{made}");
+    println!("the drive was made at {made}");
+    Ok(())
+}
+
 /// Every registration finds the app's one circle by its slug: asking twice, or from a second
 /// registration of the app on the same identity (`hbsync-register <identity> --as b`), gives
 /// the same id; nothing is created when the app holds the slug.

@@ -55,12 +55,16 @@ pub struct TargetDrive {
 pub struct HomebaseRemote {
     client: Client,
     drive: TargetDrive,
+    /// When the drive was made ([`HomebaseRemote::made`]).
+    made: i64,
 }
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct DriveAnswer {
     target_drive: TargetDrive,
+    /// When the drive was made, Unix ms (the identity's clock).
+    created: i64,
 }
 
 /// A create's or update's answer (`CreateFileResult`, `UpdateFileResult`): the version written
@@ -180,7 +184,14 @@ impl HomebaseRemote {
         Ok(HomebaseRemote {
             client,
             drive: answer.target_drive,
+            made: answer.created,
         })
+    }
+
+    /// When the drive was made, as the identity said as it was found: Unix ms, its clock. A
+    /// drive deleted and made again has the same alias and slugs, and another time.
+    pub fn made(&self) -> i64 {
+        self.made
     }
 
     pub fn drive(&self) -> TargetDrive {
@@ -1188,6 +1199,7 @@ mod tests {
                 alias: Uuid::nil(),
                 drive_type: Uuid::nil(),
             },
+            made: 0,
         };
         let size = MAX_FILE + 1;
         let meta = NodeMeta {

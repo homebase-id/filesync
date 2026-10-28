@@ -94,6 +94,7 @@ fn spoil(db: &Path, why: Unusable) -> R {
                 std::fs::write(path, [0x5a_u8; 8192])?;
             }
         }
+        Unusable::OtherDrive => return Err("nothing to spoil: the drive was made again".into()),
     }
     Ok(())
 }

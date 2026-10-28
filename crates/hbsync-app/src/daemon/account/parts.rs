@@ -9,6 +9,7 @@ use std::time::Instant;
 use hbsync_engine::Drive;
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::{Event, Notifier};
+use hbsync_remote::Remote;
 
 use super::feed::{Notifications, Puller};
 use crate::runner::RunnerError;
@@ -33,8 +34,8 @@ impl AccountParts {
         db: &Path,
         events: Sender<Event>,
     ) -> Result<Self, RunnerError> {
+        let drive = Self::open_drive(identity, Arc::clone(&remote), db)?;
         let notifier = Notifier::spawn(remote.client().clone(), remote.drive(), events);
-        let drive = Self::open_drive(identity, remote, db)?;
         Ok(AccountParts {
             notifier,
             notifications: Notifications::new(Puller::spawn(Arc::clone(&drive)), Instant::now()),
@@ -42,19 +43,38 @@ impl AccountParts {
         })
     }
 
-    /// Only the drive of [`AccountParts::open`], for a sync that doesn't listen. The files'
-    /// tokens it kept for another login are forgotten: they don't open under `remote`'s.
+    /// Only the drive of [`AccountParts::open`], for a sync that doesn't listen. A DB that
+    /// synced with a drive made at another time than `remote`'s is refused
+    /// ([`RunnerError::OtherDrive`]): the daemon's account sets it aside; `hbsync-sync` stops.
+    /// The files' tokens it kept for another login are forgotten: they don't open under
+    /// `remote`'s.
     pub fn open_drive(
         identity: &str,
         remote: Arc<HomebaseRemote>,
         db: &Path,
     ) -> Result<Arc<Drive>, RunnerError> {
-        let login = remote.client().login_id().to_owned();
-        let drive = Drive::open(db, identity, remote)?;
+        let (login, made) = (remote.client().login_id().to_owned(), remote.made());
+        let drive = drive_made(identity, remote, made, db)?;
         // Tokens are sealed under the login's shared secret: another login's don't open.
         if drive.tokens_sealed_by(&login)? {
             tracing::info!("a new login: the files' tokens are read again as they're written");
         }
         Ok(drive)
     }
+}
+
+/// The account's drive on `remote`, made at `made` (its creation time), from its DB at `db`:
+/// refused if the DB synced with another ([`RunnerError::OtherDrive`]), taken by one that knows
+/// none yet.
+pub(super) fn drive_made(
+    identity: &str,
+    remote: Arc<dyn Remote>,
+    made: i64,
+    db: &Path,
+) -> Result<Arc<Drive>, RunnerError> {
+    let drive = Drive::open(db, identity, remote)?;
+    if drive.other_drive(made)? {
+        return Err(RunnerError::OtherDrive);
+    }
+    Ok(drive)
 }

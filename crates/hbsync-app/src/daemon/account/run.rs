@@ -199,27 +199,64 @@ impl Account {
     ) -> Result<(), DaemonError> {
         // Found unusable and checked; set aside.
         let (mut checked, mut healed) = (false, false);
+        // Between tries at setting aside a DB of another drive.
+        let mut other_drive = Backoff::new();
         // After a heal, the config as it is then: the runners start with its settings.
         let mut now: Option<Config> = None;
         loop {
-            let parts = open(&self.db)?;
+            let parts = match open(&self.db) {
+                // Synced with a drive made again since: set aside before anything syncs,
+                // whatever was set aside before in this run (read against the new drive, what
+                // it knows would be deleted here).
+                // Not the run's one heal of a damaged DB: a new one takes the drive, and isn't
+                // set aside for it again. One that wasn't set aside (a try that failed after
+                // a check found nothing wrong with it) is opened again after a pause.
+                Err(e) if e.unusable() == Some(Unusable::OtherDrive) => {
+                    tracing::warn!("{}: {e}", self.identity);
+                    match self.heal(paths, Some(Unusable::OtherDrive), stop, requests, msgs)? {
+                        Some(true) => {}
+                        Some(false) => {
+                            let wait_for = other_drive.after(ErrorClass::LocalFault, None);
+                            if self.wait(wait_for, stop, requests, msgs) {
+                                return Ok(());
+                            }
+                        }
+                        None => return Ok(()),
+                    }
+                    now = Config::now(paths);
+                    continue;
+                }
+                opened => opened?,
+            };
             let config = now.as_ref().unwrap_or(config);
             let found = self.serve(paths, config, requests, stop, msgs, parts, !healed)?;
             let Some(why) = found.filter(|_| !self.stopping(stop)) else {
                 return Ok(());
             };
-            // Nothing else has it open now: the answers' connection is closed, and not
-            // opened again until it is ready.
-            self.ready.store(false, Ordering::SeqCst);
-            *lock(&self.reader) = None;
             let force = checked.then_some(why);
             checked = true;
-            match self.ready_db(paths, Readying::Heal(force), stop, requests, msgs)? {
+            match self.heal(paths, force, stop, requests, msgs)? {
                 Some(set) => healed = set,
                 None => return Ok(()),
             }
             now = Config::now(paths);
         }
+    }
+
+    /// Readies its DB, which nothing of it has open any more, as found unusable while it ran
+    /// ([`Readying::Heal`]): the answers' connection is closed, and not opened again until it is
+    /// ready. Whether it set one aside; `None` when it stops first.
+    fn heal(
+        &self,
+        paths: &Paths,
+        found: Option<Unusable>,
+        stop: &AtomicBool,
+        requests: &Receiver<Msg>,
+        msgs: &mut Vec<Msg>,
+    ) -> Result<Option<bool>, DaemonError> {
+        self.ready.store(false, Ordering::SeqCst);
+        *lock(&self.reader) = None;
+        self.ready_db(paths, Readying::Heal(found), stop, requests, msgs)
     }
 
     /// Syncs its folders on `parts` until it should stop, or until a runner ended as its DB

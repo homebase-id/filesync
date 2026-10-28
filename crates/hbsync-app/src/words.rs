@@ -141,17 +141,25 @@ pub fn rescan_every(secs: u64) -> String {
     }
 }
 
-/// The note told once when an account's state DB was set aside (too old, or damaged) and its
-/// folders set up again: the tray's, the log's and setup's.
+/// The note told once when an account's state DB was set aside (too old, damaged, or of a
+/// drive made again since) and its folders set up again: the tray's, the log's and setup's.
 pub fn set_aside(why: Unusable) -> String {
-    let what = match why {
-        Unusable::TooOld => "were from an older version of Filesync",
-        Unusable::Corrupt => "were damaged",
+    let set_aside = |what: &str| {
+        format!(
+            "This computer's sync records {what} and were set aside: the folder is set up \
+             again, and the files already in it are kept and not copied twice."
+        )
     };
-    format!(
-        "This computer's sync records {what} and were set aside: the folder is set up again, \
-         and the files already in it are kept and not copied twice."
-    )
+    match why {
+        Unusable::TooOld => set_aside("were from an older version of Filesync"),
+        Unusable::Corrupt => set_aside("were damaged"),
+        Unusable::OtherDrive => "Filesync's drive on your Homebase cloud was deleted and made \
+                                 again since this computer last synced. Nothing here was \
+                                 deleted: this computer's sync records were set aside, and the \
+                                 folder is set up again. Its files go up to your Homebase cloud; \
+                                 those already there aren't copied twice."
+            .to_owned(),
+    }
 }
 
 /// The reply to a restore, the tray's and the CLI's.

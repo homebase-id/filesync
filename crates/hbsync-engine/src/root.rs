@@ -222,7 +222,7 @@ impl SyncRoot {
         found: Option<Unusable>,
     ) -> Result<Option<SetAside>, RootError> {
         let checked = match found {
-            Some(why) => Err((why, "found unusable while syncing".to_owned())),
+            Some(why) => Err((why, format!("found {} while syncing", why.name()))),
             None => match Self::check_and_open(db, identity) {
                 Ok(account) => Ok(account),
                 Err(e) => {
@@ -369,7 +369,7 @@ fn beside_one_set_aside(db: &Path) -> bool {
         return false;
     };
     let name = name.to_string_lossy();
-    let named = [Unusable::TooOld, Unusable::Corrupt].map(|why| format!("{name}{}", aside(why)));
+    let named = Unusable::ALL.map(|why| format!("{name}{}", aside(why)));
     std::fs::read_dir(dir)
         .into_iter()
         .flatten()
