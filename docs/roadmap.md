@@ -4,7 +4,7 @@ Open work first, in order: what to fix, what to build next, then later and conti
 What is built is under **=== DONE ===** at the end, by layer, as it was planned bottom-up.
 Decisions referenced here are in [foundations.md](foundations.md).
 
-Status (2026-10-28): v0.10.1 is released. It syncs folders with a live Homebase on Windows,
+Status (2026-10-28): v0.10.2 is released. It syncs folders with a live Homebase on Windows,
 macOS and Linux, with the tray, the daemon and the CLI, role folders, filters, Recently
 deleted and signed installers that update themselves; a state DB too old or damaged to use is
 set aside and the folder set up again on its own.
@@ -46,14 +46,15 @@ set aside and the folder set up again on its own.
 In this order:
 
 - **Idle wakeups, the rest:** the daemon's and the tray's 2 a second (zbus's `blocking-1`) are
-  gone with blocking pinned to 1.6.2. After the next release, check what is left of the daemon's
-  once every 12 s on frodo, and re-measure on Windows, where 9.7 of the 10 a second were notify's
-  watcher thread (fixed in a patched copy, `vendor/notify/PATCHED.md`).
+  gone with blocking pinned to 1.6.2 (0.10.1 on the user's Linux desktop, idle: the daemon 2.08
+  a second before, 0.07 after; the tray 2.05, 0.15). Left: the daemon's notification thread
+  wakes about once every 13 s, and the tray about 9 times a minute over its threads (the main
+  one, the menu's, the status poll's once a minute). Re-measure on Windows too, where 9.7 of the
+  10 a second were notify's watcher thread (fixed in a patched copy, `vendor/notify/PATCHED.md`).
 - **Idle syncs that read a lot on Windows:** two syncs with nothing to do read 3.5 GB (4.6 s
   CPU) and 460 MB (0.5 s) in a 4.4 h idle run (windows-bench, 2026-10-27; 127,000 files, a
-  100 MB state DB). Nothing is logged for a sync at the default level, so what started them
-  and what was read (the DB, a rescan) is unknown: log each sync's cause and size at info,
-  then measure.
+  100 MB state DB). Since 0.10.2 every sync logs what asked for it, a start-up's catch-up and
+  the process's I/O (#322): run it idle on Windows for a few hours and read the daemon's log.
 - **State DB writes per file** (about 70 KB per file in a first sync of many small files):
   grouping commits is parked as a data-safety rule; look for anything cheaper first.
 
