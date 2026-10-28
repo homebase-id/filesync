@@ -23,6 +23,19 @@ Otherwise:
 | logs | `<state>/logs` | `~/Library/Logs/Homebase Filesync` | `<state>\logs` |
 | control socket | `$XDG_RUNTIME_DIR/hbsync`, else `<state>` | same as config | a named pipe |
 
+The daemon's log has a line for every sync, failed ones too (info, about 300 bytes: an idle
+daemon writes one only when something asks for a sync; at most one every 5 min, about 86 kB a
+day, while work stays unfinished): the folder, how long it took, what asked for it (a change here
+or on the drive, a walk of the folder, asked, a wake-up, unfinished work, …), a start-up's
+catch-up (the folders the journal named, or a full walk and why), what it did (a failure is told
+on the next line, with its wait), and what the process read and wrote during it and in all (the
+gap between two lines is what happened between syncs). Those are the OS's counters for the whole
+process (`hbsync_platform::io`), so a folder's line counts what other folders did meanwhile: on
+Linux every read and write call (files, sockets, cache hits), on Windows read and write
+operations (files, network) and, apart, other I/O (directory listings, the change journal, device
+control), on macOS the storage's reads and writes. The daemon's start says which. What an idle
+sync costs, and why it ran, can be read there.
+
 Each account has one state DB, `<state>/accounts/<identity>/state.db` (the identity in lower
 case, a port's `:` as `_`), for every folder it syncs on this computer: the drive's side (its
 mirror, Recently deleted) once, each folder's own rows (what it has, what was agreed) keyed by
@@ -411,8 +424,10 @@ included (service managers restart it then).
   failing, after a pause from 5 s doubling to 5 min. A row on the drive the
   client can't read (not encrypted, another key, no content hash) is noted too. So is what a
   scan of the folder skips that the user may want to know: a folder it can't read (what is in
-  it isn't synced), a name Homebase can't hold, a link, a device or socket; one note a reason
-  with a few of its paths, each item once (again once a whole scan found it fixed). A
+  it isn't synced), a name Homebase can't hold, a device or socket; one note a reason
+  with a few of its paths, each item once a run of the daemon (again once a whole scan found it
+  fixed). A link isn't a problem: links aren't synced by design (as junk and ignored items
+  aren't), so they are only logged, each named, once a run. A
   sync that stops (refused, the drive out of reach) still tells the conflicts and failures it
   had come to. What is the account's is noted on the account (its status's `recent`), not on a
   folder: a restore or an emptying of Recently deleted that fails (it was answered before it

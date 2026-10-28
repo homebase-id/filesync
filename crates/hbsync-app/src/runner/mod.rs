@@ -31,6 +31,7 @@ use hbsync_engine::root::{RootError, SyncRoot};
 use hbsync_engine::{Drive, Engine, EngineConfig, EngineError, SyncReport};
 use hbsync_local::journal::Tier;
 use hbsync_local::{Bell, Filter, FilterError, LocalObserver};
+use hbsync_platform::io::Io;
 use hbsync_remote::ErrorClass;
 use hbsync_state::{StateError, Unusable};
 use hbsync_types::NodeId;
@@ -45,7 +46,7 @@ mod schedule;
 
 pub(crate) use report::add_notes;
 pub(crate) use schedule::{Backoff, shown};
-use schedule::{Schedule, Synced};
+use schedule::{Schedule, Synced, Why, Whys};
 
 /// While the identity refuses this computer, how often a folder asks again (one sync).
 const DENIED_LOOK: Duration = Duration::from_secs(3600);
@@ -602,7 +603,7 @@ impl Runner {
                         return Ok(());
                     }
                     Msg::Command(command) => self.command(command, &mut schedule, &mut check_rules),
-                    Msg::Answered => schedule.asked(Instant::now()),
+                    Msg::Answered => schedule.asked(Instant::now(), Why::Asked),
                     // Taken below.
                     Msg::Drive | Msg::Local => {}
                 }
@@ -614,7 +615,7 @@ impl Runner {
             if let Some(p) = &mut parts {
                 // A change in this folder's part of the drive.
                 if p.drive_changed.swap(false, Ordering::SeqCst) {
-                    schedule.want();
+                    schedule.want(Why::Drive);
                 }
                 let observing = observe_after.is_none_or(|at| Instant::now() >= at);
                 match observing.then(|| p.engine.observe(&mut p.observer, Duration::ZERO)) {
@@ -623,7 +624,7 @@ impl Runner {
                         if let Some(scan) = scan {
                             self.tell_scan(&scan, false);
                             if scan.dirty > 0 {
-                                schedule.want();
+                                schedule.want(Why::Local);
                             }
                         }
                     }
@@ -675,7 +676,7 @@ impl Runner {
                     held.again = true;
                     held.shown = None;
                     self.cfg.changed.raise();
-                    schedule.asked(now);
+                    schedule.asked(now, Why::Retry);
                 }
             }
             if rules_at.is_some_and(|at| now >= at) {
@@ -703,7 +704,7 @@ impl Runner {
                                 self.unwatched.catch_up = false;
                                 self.tell_scan(&scan, true);
                                 if scan.dirty > 0 {
-                                    schedule.want();
+                                    schedule.want(Why::Scan);
                                 }
                             }
                             Err(e) if self.ends_for(e.unusable()) => return Err(e.into()),
@@ -720,7 +721,7 @@ impl Runner {
             {
                 tracing::info!("the ignore rules changed: starting over");
                 parts = None;
-                schedule.want();
+                schedule.want(Why::Rules);
             }
             if !schedule.due(now) {
                 continue;
@@ -759,6 +760,8 @@ impl Runner {
                 }
                 Err(e) => return Err(e.into()),
             };
+            // Before what this sync does first (opening the folder, an answer's put back).
+            let io_before = hbsync_platform::io::counted();
             // Set up again meanwhile (a new folder in the DB, the open one removed): the
             // engine would only fail now. Start over with the new one.
             if opened.as_ref().is_some_and(|m| *m != marker) {
@@ -835,6 +838,9 @@ impl Runner {
             // This sync pulls what woke it so far.
             p.drive_changed.store(false, Ordering::SeqCst);
             let began = Instant::now();
+            let why = schedule.why(began);
+            // A start-up's catch-up, which can walk the whole folder.
+            let mut catch_up = None;
             // Before showing it syncs: the last sync's numbers aren't this one's.
             self.progress.reset();
             self.set(|s| {
@@ -850,13 +856,14 @@ impl Runner {
                 p.engine.sync(&today, read)
             } else {
                 p.engine.start_up(&mut p.observer, &today).map(|r| {
-                    self.tell_scan(
-                        &r.local.report,
-                        matches!(r.local.tier, Tier::FullWalk { .. }),
-                    );
+                    let whole = matches!(r.local.tier, Tier::FullWalk { .. });
+                    self.tell_scan(&r.local.report, whole);
+                    catch_up = Some(r.local.tier);
                     r.sync
                 })
             };
+            let took = began.elapsed();
+            self.log_sync(&result, took, &why, catch_up, io_before);
             match result {
                 Ok(report) => {
                     started = true;
@@ -870,7 +877,7 @@ impl Runner {
                         Synced::Done
                     };
                     schedule.synced(Instant::now(), outcome);
-                    match self.record(&mut p.engine, &report, began.elapsed()) {
+                    match self.record(&mut p.engine, &report, took) {
                         Err(e) if self.ends_for(e.unusable()) => return Err(e.into()),
                         Err(e) => {
                             let class = e.class();
@@ -909,7 +916,7 @@ impl Runner {
     fn command(&mut self, command: Command, schedule: &mut Schedule, check_rules: &mut bool) {
         match command {
             Command::SyncNow => {
-                schedule.asked(Instant::now());
+                schedule.asked(Instant::now(), Why::Asked);
                 *check_rules = true;
                 // The user may have made room on the drive, changed what it refused, or let
                 // this computer in again.
@@ -1071,12 +1078,15 @@ impl Runner {
     }
 
     /// Tells what a scan skipped and the user may want to know (a folder it can't read, a
-    /// name or kind it can't sync), each once.
+    /// name or kind it can't sync), each once; links, skipped by design, only in the log.
     /// `whole`: the scan walked the whole folder, so what it didn't skip is no longer skipped
     /// (told again if it is again).
     fn tell_scan(&mut self, scan: &hbsync_local::ScanReport, whole: bool) {
-        let notes = report::scan_notes(scan, &mut self.scan_told, whole);
-        self.tell(notes);
+        let told = report::scan_notes(scan, &mut self.scan_told, whole);
+        if !told.links.is_empty() {
+            tracing::info!("not synced, as links aren't: {}", told.links.join(", "));
+        }
+        self.tell(told.notes);
     }
 
     /// Tells the conflicts and failures of a sync that then failed (`partial`).
@@ -1100,6 +1110,54 @@ impl Runner {
     ) -> Result<Vec<String>, StateError> {
         let skips = self.stalled.told(&report.skipped, Instant::now());
         report::notes(engine, report, &skips)
+    }
+
+    /// Logs a sync that ended (its `result`), at info, every one: the folder, how long it took,
+    /// what asked for it (`why`), a start-up's catch-up, what it did (a failure is told right
+    /// after, with its wait), and what the process read and wrote during it and in all (the gap
+    /// between two lines is what happened between syncs). What an idle sync costs, and why it
+    /// ran. About 300 bytes of log a sync.
+    fn log_sync(
+        &self,
+        result: &Result<SyncReport, EngineError>,
+        took: Duration,
+        why: &Whys,
+        catch_up: Option<Tier>,
+        io_before: Option<Io>,
+    ) {
+        use std::fmt::Write;
+        let how = if result.is_ok() { "synced" } else { "failed" };
+        let mut line = format!("{}: {how} in {took:.1?} ({why}", self.cfg.folder.display());
+        match catch_up {
+            Some(Tier::Journal { dirs }) => {
+                let _ = write!(line, ", start-up: {dirs} folders rescanned");
+            }
+            Some(Tier::FullWalk { reason }) => {
+                let _ = write!(line, ", start-up: a full walk, {reason}");
+            }
+            None => {}
+        }
+        line.push(')');
+        if let Ok(r) = result {
+            let _ = write!(
+                line,
+                ": done {}, remote changes {}, feed pages {}, adopted {}, pending {}",
+                r.ops_done,
+                r.feed.live + r.feed.deleted,
+                r.feed.pages,
+                r.adopted,
+                r.pending
+            );
+        }
+        if let (Some(before), Some(after)) = (io_before, hbsync_platform::io::counted()) {
+            let _ = write!(
+                line,
+                "; the process {} (in all: {})",
+                io_words(after.since(before)),
+                io_words(after)
+            );
+        }
+        tracing::info!("{line}");
     }
 
     /// Publishes a finished sync.
@@ -1126,15 +1184,6 @@ impl Runner {
         kept.token = token;
         // Shown again: one answer each time, but one taken during this sync still waits.
         kept.answered = kept.answer.is_some();
-        if report.ops_done > 0 || !notes.is_empty() {
-            tracing::info!(
-                "synced in {took:.1?}: {} done, {} remote changes, {} adopted, {} pending",
-                report.ops_done,
-                report.feed.live + report.feed.deleted,
-                report.adopted,
-                report.pending
-            );
-        }
         for note in &notes {
             tracing::warn!("{note}");
         }
@@ -1149,6 +1198,19 @@ impl Runner {
         drop(kept);
         Ok(())
     }
+}
+
+/// "read 1.2 MB, wrote 40 kB", with Windows' other I/O where there was some.
+fn io_words(io: Io) -> String {
+    let other = match io.other {
+        0 => String::new(),
+        n => format!(", other I/O {}", crate::words::bytes(n)),
+    };
+    format!(
+        "read {}, wrote {}{other}",
+        crate::words::bytes(io.read),
+        crate::words::bytes(io.written)
+    )
 }
 
 /// The note for a folder without a live watcher (`why`), its changes found every `look`.

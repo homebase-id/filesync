@@ -54,6 +54,73 @@ pub(crate) fn shown(class: ErrorClass) -> State {
     }
 }
 
+/// What asked for a sync, told in its log line ([`Schedule::take_why`]), in this order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Why {
+    /// The folder started.
+    Start,
+    /// A change here (the watcher's).
+    Local,
+    /// A change in this folder's part of the drive.
+    Drive,
+    /// A walk of the folder (no watcher, or one back) found changes.
+    Scan,
+    /// The ignore rules changed.
+    Rules,
+    /// Asked for: sync now, an answer to held deletes.
+    Asked,
+    Woke,
+    /// The drive could be reached again.
+    Online,
+    Resumed,
+    /// Work left unfinished, tried again (a sync's, a put back's).
+    Retry,
+}
+
+impl Why {
+    fn word(self) -> &'static str {
+        match self {
+            Why::Start => "start",
+            Why::Local => "a change here",
+            Why::Drive => "a change on the drive",
+            Why::Scan => "a walk of the folder",
+            Why::Rules => "new ignore rules",
+            Why::Asked => "asked",
+            Why::Woke => "a wake-up",
+            Why::Online => "back online",
+            Why::Resumed => "resumed",
+            Why::Retry => "unfinished work",
+        }
+    }
+}
+
+/// What asked for a sync since the last one began: "a change here, a change on the drive".
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Whys(std::collections::BTreeSet<Why>);
+
+impl Whys {
+    fn add(&mut self, why: Why) {
+        self.0.insert(why);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl std::fmt::Display for Whys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut words = self.0.iter().map(|w| w.word());
+        match words.next() {
+            None => f.write_str("nothing"),
+            Some(first) => {
+                f.write_str(first)?;
+                words.try_for_each(|w| write!(f, ", {w}"))
+            }
+        }
+    }
+}
+
 /// How a sync ended, for [`Schedule::synced`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Synced {
@@ -71,8 +138,8 @@ pub(crate) struct Schedule {
     /// How often what is local is looked at (`RunnerConfig::look`).
     look: Duration,
     next_look: Instant,
-    /// Something asked for a sync since the last one.
-    wanted: bool,
+    /// What asked for a sync since the last one ended (none: no sync wanted).
+    why: Whys,
     /// The next sync reads the feed first, whatever the notifications say: it was asked for
     /// (sync now, a resume, a wake-up).
     read: bool,
@@ -93,7 +160,7 @@ impl Schedule {
         Schedule {
             look,
             next_look: now + look,
-            wanted: true,
+            why: Whys([Why::Start].into()),
             read: false,
             not_before: now,
             paused,
@@ -104,16 +171,31 @@ impl Schedule {
     }
 
     /// Something changed (here, or in this folder's part of the drive): a sync when allowed.
-    pub(crate) fn want(&mut self) {
-        self.wanted = true;
+    pub(crate) fn want(&mut self, why: Why) {
+        self.why.add(why);
     }
 
     /// A sync asked for now (sync now, a confirmation, a resume, a wake-up): without waiting
     /// out a backoff, reading the feed first.
-    pub(crate) fn asked(&mut self, now: Instant) {
-        self.wanted = true;
+    pub(crate) fn asked(&mut self, now: Instant, why: Why) {
+        self.want(why);
         self.read = true;
         self.not_before = now;
+    }
+
+    /// What asked for the sync beginning now (`now`): unfinished work's retry when nothing else
+    /// did. Kept until a sync ends ([`Schedule::synced`]), so a failed one is asked for again.
+    pub(crate) fn why(&self, now: Instant) -> Whys {
+        let mut why = self.why.clone();
+        if why.is_empty() && self.retry_due(now) {
+            why.add(Why::Retry);
+        }
+        why
+    }
+
+    /// Whether unfinished work's retry has come.
+    fn retry_due(&self, now: Instant) -> bool {
+        self.retry.is_some_and(|at| now >= at)
     }
 
     /// Whether the sync starting now reads the feed first whatever the notifications say.
@@ -124,7 +206,12 @@ impl Schedule {
 
     /// The machine woke up: sync now, the backoff forgotten.
     pub(crate) fn woke(&mut self, now: Instant) {
-        self.asked(now);
+        self.again(now, Why::Woke);
+    }
+
+    /// Sync now for `why`, the backoff forgotten.
+    fn again(&mut self, now: Instant, why: Why) {
+        self.asked(now, why);
         self.backoff = Backoff::new();
     }
 
@@ -133,7 +220,7 @@ impl Schedule {
     /// One that waits for nothing doesn't.
     pub(crate) fn online(&mut self, now: Instant) {
         if self.retry.is_some() || now < self.not_before {
-            self.woke(now);
+            self.again(now, Why::Online);
             self.retry_backoff = Backoff::new();
         }
     }
@@ -148,7 +235,7 @@ impl Schedule {
 
     /// Syncing goes on, at once. Whether it was paused.
     pub(crate) fn resume(&mut self, now: Instant) -> bool {
-        self.asked(now);
+        self.asked(now, Why::Resumed);
         std::mem::take(&mut self.paused)
     }
 
@@ -165,8 +252,7 @@ impl Schedule {
     /// Whether to sync now: wanted (or unfinished work's retry has come), not paused, not
     /// backing off.
     pub(crate) fn due(&self, now: Instant) -> bool {
-        let retry = self.retry.is_some_and(|at| now >= at);
-        !self.paused && (self.wanted || retry) && now >= self.not_before
+        !self.paused && (!self.why.is_empty() || self.retry_due(now)) && now >= self.not_before
     }
 
     /// Not now: tried again at the next look (the folder gone, rules that can't be read: both
@@ -185,12 +271,12 @@ impl Schedule {
         match outcome {
             Synced::Stopped => {}
             Synced::Done => {
-                self.wanted = false;
+                self.why = Whys::default();
                 self.retry = None;
                 self.retry_backoff = Backoff::new();
             }
             Synced::Unfinished { progressed } => {
-                self.wanted = false;
+                self.why = Whys::default();
                 if progressed {
                     self.retry_backoff = Backoff::new();
                 }
@@ -206,7 +292,7 @@ impl Schedule {
         let sync = match self.paused {
             true => None,
             false => {
-                let wanted = self.wanted.then_some(now);
+                let wanted = (!self.why.is_empty()).then_some(now);
                 let earliest = wanted.into_iter().chain(self.retry).min();
                 earliest.map(|at| at.max(self.not_before))
             }
@@ -238,6 +324,34 @@ mod tests {
         Duration::from_millis(n)
     }
 
+    /// A sync says what asked for it: the start, then what came since the sync before ended;
+    /// unfinished work's retry when nothing else did. A sync that fails keeps them.
+    #[test]
+    fn a_sync_says_what_asked_for_it() {
+        let t0 = Instant::now();
+        let mut s = Schedule::new(t0, LOOK, false);
+        assert_eq!(s.why(t0).to_string(), "start");
+        s.synced(t0, Synced::Unfinished { progressed: false });
+        assert_eq!(s.why(t0).to_string(), "nothing", "told once");
+        for why in [Why::Local, Why::Drive, Why::Local] {
+            s.want(why);
+        }
+        assert_eq!(
+            s.why(t0).to_string(),
+            "a change here, a change on the drive"
+        );
+        s.failed(t0, ErrorClass::Transient, None);
+        assert_eq!(
+            s.why(t0).to_string(),
+            "a change here, a change on the drive",
+            "a failed sync's, asked for again"
+        );
+        s.synced(t0, Synced::Unfinished { progressed: false });
+        assert_eq!(s.why(t0 + ms(10_000)).to_string(), "unfinished work");
+        s.woke(t0);
+        assert_eq!(s.why(t0).to_string(), "a wake-up");
+    }
+
     #[test]
     fn it_syncs_at_start_then_when_something_changes() {
         let t0 = Instant::now();
@@ -245,7 +359,7 @@ mod tests {
         assert!(s.due(t0));
         s.synced(t0, Synced::Done);
         assert!(!s.due(t0 + ms(10)));
-        s.want();
+        s.want(Why::Local);
         assert!(s.due(t0 + ms(20)));
     }
 
@@ -280,7 +394,7 @@ mod tests {
         assert!(!s.due(t0 + s5 * 2 - ms(1)));
         assert!(s.due(t0 + s5 * 2));
         // A change meanwhile syncs at once.
-        s.want();
+        s.want(Why::Local);
         assert!(s.due(t0 + ms(1)));
         // A try that did some: from the start again.
         s.synced(t0, Synced::Unfinished { progressed: true });
@@ -341,7 +455,7 @@ mod tests {
         assert!(s.due(t0));
         assert_eq!(s.failed(t0, ErrorClass::Bug, None), FIRST_BACKOFF);
         // A sync now doesn't wait out the backoff, nor forget it.
-        s.asked(t0);
+        s.asked(t0, Why::Asked);
         assert!(s.due(t0));
         assert_eq!(s.failed(t0, ErrorClass::Bug, None), Duration::from_secs(10));
     }
@@ -352,7 +466,7 @@ mod tests {
         let t0 = Instant::now();
         let mut s = Schedule::new(t0, LOOK, true);
         assert!(!s.due(t0), "started paused");
-        s.want();
+        s.want(Why::Local);
         assert!(!s.due(t0 + Duration::from_secs(3600)));
         assert!(s.resume(t0));
         assert!(!s.paused());
@@ -381,7 +495,7 @@ mod tests {
         // A failure's backoff: a change waits for its end.
         let wait = s.failed(t0, ErrorClass::Transient, None);
         assert_eq!(s.next_wake(t0, false), None, "nothing wanted");
-        s.want();
+        s.want(Why::Local);
         assert_eq!(s.next_wake(t0, false), Some(t0 + wait));
         assert!(!s.due(t0 + wait - ms(1)));
         assert!(s.due(t0 + wait));
@@ -393,7 +507,7 @@ mod tests {
 
         // Paused (a timed pause too: the daemon ends it): no sync, only the look.
         s.pause();
-        s.want();
+        s.want(Why::Local);
         assert_eq!(s.next_wake(t0, false), None);
         assert_eq!(s.next_wake(t0, true), Some(t0 + LOOK));
     }
@@ -455,7 +569,7 @@ mod tests {
         let t0 = Instant::now();
         let mut s = Schedule::new(t0, LOOK, false);
         assert!(!s.read(), "a start reads anyway");
-        s.asked(t0);
+        s.asked(t0, Why::Asked);
         assert!(s.read());
         s.failed(t0, ErrorClass::Bug, None);
         assert!(s.read(), "the failed sync may not have read");

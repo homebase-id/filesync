@@ -4,7 +4,7 @@ members = ["crates/*"]
 exclude = ["vendor"]
 
 [workspace.package]
-version = "0.10.1"
+version = "0.10.3"
 edition = "2024"
 rust-version = "1.99"
 publish = false
@@ -56,7 +56,9 @@ codegen-units = 1
 strip = "symbols"
 
 # notify 8.2.0 with its Windows watcher waiting without a timeout (upstream wakes its thread
-# every 100 ms while nothing happens: 10 wakeups a second). vendor/notify/PATCHED.md says what
-# changed; drop this once upstream has it.
+# every 100 ms while nothing happens: 10 wakeups a second); tray-icon 0.26.1 with its Windows
+# leave timer stopping (upstream's can fire every 15 ms for good after a hover). Each
+# vendor/<crate>/PATCHED.md says what changed; drop each once upstream has it.
 [patch.crates-io]
 notify = { path = "vendor/notify" }
+tray-icon = { path = "vendor/tray-icon" }

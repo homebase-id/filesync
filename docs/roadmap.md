@@ -4,10 +4,25 @@ Open work first, in order: what to fix, what to build next, then later and conti
 What is built is under **=== DONE ===** at the end, by layer, as it was planned bottom-up.
 Decisions referenced here are in [foundations.md](foundations.md).
 
-Status (2026-10-28): v0.10.1 is released. It syncs folders with a live Homebase on Windows,
+Status (2026-10-28): v0.10.3 is released. It syncs folders with a live Homebase on Windows,
 macOS and Linux, with the tray, the daemon and the CLI, role folders, filters, Recently
 deleted and signed installers that update themselves; a state DB too old or damaged to use is
 set aside and the folder set up again on its own.
+
+## Waiting on odin-core
+
+- **A drive made again tells itself apart by its creation time** (#319, a draft until
+  odin-core #2038 is deployed: the drive answer's `created`). A computer that synced the old
+  drive then sets its records aside and merges its folders with the new one, instead of taking
+  its files as deleted there. Merge it once the server has it (no fallback).
+- **An upload whose uniqueId the server already has** (#295; found in the first sync of
+  309 GB on 0.9.0, where six files of 11–20 GB lost their answer and one was sent twice). The
+  server answers 4105 (odin-core #2019) right after the metadata, while the payload is still
+  being sent: react at once (stop sending, treat the file as already there), as the server
+  closes the connection after about 5 seconds, so a 20 GB file isn't sent twice. Then, and
+  after any upload that ended without an answer, look the file up by its uniqueId
+  (`getByUniqueId`) before sending it again. (The lost answers go away on the server's side:
+  it will answer 200 once it has the file, before moving it to long-term storage.)
 
 ## Small fixes
 
@@ -21,26 +36,24 @@ set aside and the folder set up again on its own.
 - **Requests in flight cancellable on stop** (later): a stop waits up to 15 s for them, then
   holds the state DBs and exits (#307); cancelling the transfers and requests at once would
   make a stop immediate and the cut rarer.
-- **A drive made again under computers that synced the old one** (for the user to decide):
-  setup gives the app its drive back only on a computer that never synced with the identity,
-  as the new drive has the old one's alias and type. A computer that did is refused there, and
-  one whose daemon runs meets the new, empty drive with the old drive's state. Needs a way to
-  tell the drives apart (an id of our own on the drive, say), then the state set aside and the
-  folders merged again.
 
 ## Performance (found comparing with Dropbox, 2026-10-26)
 
 In this order:
 
 - **Idle wakeups, the rest:** the daemon's and the tray's 2 a second (zbus's `blocking-1`) are
-  gone with blocking pinned to 1.6.2. After the next release, check what is left of the daemon's
-  once every 12 s on frodo, and re-measure on Windows, where 9.7 of the 10 a second were notify's
-  watcher thread (fixed in a patched copy, `vendor/notify/PATCHED.md`).
+  gone with blocking pinned to 1.6.2 (0.10.1 on the user's Linux desktop, idle: the daemon 2.08
+  a second before, 0.07 after; the tray 2.05, 0.15 while its menu's times changed, 2 a minute
+  idle). Windows 0.10.2 (windows-bench, 2026-10-28): the daemon 0.32 a second (10.2 on 0.9.1:
+  notify's watcher, patched in `vendor/notify`); the tray 0.09, but 89–94 a second for good after
+  the cursor rested on its icon (tray-icon's leave timer never stopped: patched in
+  `vendor/tray-icon`). Left: the daemon's notification thread, its ping every 30 s and the pong
+  (about 4 a minute): longer only if no proxy in front of an identity closes a connection quiet
+  for a minute.
 - **Idle syncs that read a lot on Windows:** two syncs with nothing to do read 3.5 GB (4.6 s
   CPU) and 460 MB (0.5 s) in a 4.4 h idle run (windows-bench, 2026-10-27; 127,000 files, a
-  100 MB state DB). Nothing is logged for a sync at the default level, so what started them
-  and what was read (the DB, a rescan) is unknown: log each sync's cause and size at info,
-  then measure.
+  100 MB state DB). Since 0.10.2 every sync logs what asked for it, a start-up's catch-up and
+  the process's I/O (#322): run it idle on Windows for a few hours and read the daemon's log.
 - **State DB writes per file** (about 70 KB per file in a first sync of many small files):
   grouping commits is parked as a data-safety rule; look for anything cheaper first.
 
@@ -56,15 +69,6 @@ Later, together (not urgent):
 
 ## Next
 
-- **An upload whose uniqueId the server already has** (waits for a fix in odin-core first;
-  #295; found in the first sync of 309 GB on 0.9.0, where six files of 11–20 GB lost their
-  answer and one was sent twice). The
-  server answers 4105 (odin-core #2019) right after the metadata, while the payload is still
-  being sent: react at once (stop sending, treat the file as already there), as the server
-  closes the connection after about 5 seconds, so a 20 GB file isn't sent twice. Then, and
-  after any upload that ended without an answer, look the file up by its uniqueId
-  (`getByUniqueId`) before sending it again. (The lost answers go away on the server's side:
-  it will answer 200 once it has the file, before moving it to long-term storage.)
 - **Previous versions**: an overwritten file's earlier versions kept on the drive for 30
   days, as Recently deleted keeps deleted ones, with a list and *Restore* in the tray and the
   file browser. It is the protection against ransomware and broken apps: a file encrypted or
@@ -77,6 +81,15 @@ Later, together (not urgent):
 
 ## Ideas and things to weigh
 
+- **Sync links as links** (idea, 2026-10-28): a file type of its own for a link (a node that
+  says "this is a link, not a file"), holding its target as the OS that made it wrote it
+  (relative or absolute), and made again as a link on the other computers, as Dropbox does.
+  What a link is differs per OS and file system: symbolic links on Linux and macOS; on Windows
+  symbolic links (NTFS only, and only with Developer Mode or an elevated process), junctions and
+  `.lnk` shortcuts; none on FAT or exFAT. Where one can't be made, it stays on the drive only.
+  Hard links aren't links in this sense: each name is an ordinary file and syncs as one (two
+  copies elsewhere). Costs a node kind in the schema, the file browser showing it, and a rule
+  for a target outside the folder or broken.
 - **`.gitignore` inside git repos** (for consideration, 2026-10-23): inside a folder with
   `.git`, honour its `.gitignore` files with git's rules (per folder, `!` included), so a repo
   can live in a synced folder without its build output and temp files; ignored items stay on
