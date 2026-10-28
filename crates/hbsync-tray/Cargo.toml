@@ -24,12 +24,14 @@ uuid.workspace = true
 # Linux: the StatusNotifierItem over D-Bus (what KDE and the AppIndicator extension show), in
 # pure Rust: no GTK, no event loop of its own.
 [target.'cfg(target_os = "linux")'.dependencies]
-tray-icon = { version = "0.26", default-features = false, features = ["ksni"] }
+tray-icon = { version = "=0.26.1", default-features = false, features = ["ksni"] }
 
 # Windows and macOS: the tray needs an event loop on the thread that made it (the main thread).
 [target.'cfg(not(target_os = "linux"))'.dependencies]
 tao = "0.37"
-tray-icon = "0.26"
+# Exactly the patched copy's version (vendor/tray-icon/PATCHED.md): a newer release can't leave
+# the patch unused.
+tray-icon = "=0.26.1"
 
 # Windows: the window that owns the folder picker, to open it in front of the browser.
 [target.'cfg(windows)'.dependencies]

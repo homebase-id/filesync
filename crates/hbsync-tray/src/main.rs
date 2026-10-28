@@ -179,6 +179,9 @@ impl App {
             let send = send.clone();
             MenuEvent::set_event_handler(Some(move |e: MenuEvent| send(Event::Menu(e.id))));
         }
+        // The icon's own events (a hover, a click) aren't used: taken and dropped, or they
+        // would pile up in tray-icon's channel for the tray's life.
+        tray_icon::TrayIconEvent::set_event_handler(Some(|_| {}));
         {
             let send = send.clone();
             std::thread::spawn(move || {
