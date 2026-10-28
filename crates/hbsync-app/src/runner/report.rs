@@ -249,8 +249,9 @@ pub(super) fn rules_note(skipped: &[SkippedRule]) -> Option<String> {
 
 /// What `scan` skipped that the user may want to know, each item once (`told`, a hash of its
 /// reason and path: 8 bytes an item), one note a reason with a few of its paths: a folder it
-/// can't read, a name the drive can't hold, a link or a device it doesn't sync. (Junk, ignored
-/// items and the client's own folder are by design; a file locked for now is hashed later.)
+/// can't read, a name the drive can't hold, a device it doesn't sync. Links are left out by
+/// design, as junk, ignored items and the client's own folder are: logged once each, never a
+/// problem. (A file locked for now is hashed later.)
 ///
 /// `whole`: the scan walked the whole folder; `told` becomes what it skipped, so an item fixed
 /// and skipped again later is told again, and `told` holds no more than the folder skips.
@@ -278,10 +279,15 @@ pub(super) fn scan_notes(scan: &ScanReport, told: &mut HashSet<u64>, whole: bool
             new[reason].push(path);
         }
     }
+    // By design, not a problem: the log says so, once.
+    let links = std::mem::take(&mut new[2]);
+    if !links.is_empty() {
+        tracing::info!("{}: a link, which isn't synced", listed(&links));
+    }
     let said = [
         "can't be read, so what is in it isn't synced",
         "its name can't be used on Homebase, so it isn't synced",
-        "a link, which isn't synced",
+        "",
         "not a file or a folder, so it isn't synced",
     ];
     new.iter()
@@ -391,26 +397,28 @@ mod tests {
         };
         let mut told = HashSet::new();
         let notes = scan_notes(&scan, &mut told, false);
-        assert_eq!(notes.len(), 3, "{notes:?}");
+        // A link isn't a problem: left out by design, as junk and ignored items are.
+        assert_eq!(notes.len(), 2, "{notes:?}");
         assert!(notes[0].starts_with("Locked: can't be read"), "{notes:?}");
+        assert!(notes.iter().all(|n| !n.contains("link")), "{notes:?}");
         assert!(scan_notes(&scan, &mut told, false).is_empty(), "told once");
         // Many of one reason: one note, a few of them named.
-        let links = ScanReport {
+        let names = ScanReport {
             skipped: (0..10)
-                .map(|i| (format!("l{i}").into(), SkipReason::Symlink))
+                .map(|i| (format!("n{i}").into(), SkipReason::InvalidName))
                 .collect(),
             ..ScanReport::default()
         };
         assert_eq!(
-            scan_notes(&links, &mut told, false),
-            ["l0, l1, l2 and 7 more: a link, which isn't synced"]
+            scan_notes(&names, &mut told, false),
+            ["n0, n1, n2 and 7 more: its name can't be used on Homebase, so it isn't synced"]
         );
         // A whole scan forgets what it no longer skips: skipped again later, it is told again.
         let none = ScanReport::default();
         assert!(scan_notes(&none, &mut told, true).is_empty());
         assert!(told.is_empty());
-        assert_eq!(scan_notes(&links, &mut told, true).len(), 1);
-        assert!(scan_notes(&links, &mut told, true).is_empty(), "told once");
+        assert_eq!(scan_notes(&names, &mut told, true).len(), 1);
+        assert!(scan_notes(&names, &mut told, true).is_empty(), "told once");
     }
 
     #[test]

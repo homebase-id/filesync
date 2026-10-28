@@ -408,8 +408,10 @@ included (service managers restart it then).
   failing, after a pause from 5 s doubling to 5 min. A row on the drive the
   client can't read (not encrypted, another key, no content hash) is noted too. So is what a
   scan of the folder skips that the user may want to know: a folder it can't read (what is in
-  it isn't synced), a name Homebase can't hold, a link, a device or socket; one note a reason
-  with a few of its paths, each item once (again once a whole scan found it fixed). A
+  it isn't synced), a name Homebase can't hold, a device or socket; one note a reason
+  with a few of its paths, each item once (again once a whole scan found it fixed). A link
+  isn't a problem: links aren't synced by design (as junk and ignored items aren't), so they
+  are only logged, once each. A
   sync that stops (refused, the drive out of reach) still tells the conflicts and failures it
   had come to. What is the account's is noted on the account (its status's `recent`), not on a
   folder: a restore or an emptying of Recently deleted that fails (it was answered before it

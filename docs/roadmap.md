@@ -26,10 +26,6 @@ set aside and the folder set up again on its own.
 
 ## Small fixes
 
-- **A link isn't a sync problem** (first): links aren't synced (not followed, not stored), so
-  the tray counts them as a sync problem after every start, one that never clears (34 links in
-  the user's folder: an old git project's, a `node_modules`'). Show them once as not synced
-  here, as an ignored item is, not as a problem.
 - **A removed folder waiting for its name lets what its removal took along go** (potential):
   a folder deleted part way elsewhere, restored here, whose name is taken waits for the name,
   but the files its removal took along (live, unchanged here) go to Recently deleted on their
