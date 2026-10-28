@@ -26,6 +26,10 @@ set aside and the folder set up again on its own.
 
 ## Small fixes
 
+- **A link isn't a sync problem** (first): links aren't synced (not followed, not stored), so
+  the tray counts them as a sync problem after every start, one that never clears (34 links in
+  the user's folder: an old git project's, a `node_modules`'). Show them once as not synced
+  here, as an ignored item is, not as a problem.
 - **A removed folder waiting for its name lets what its removal took along go** (potential):
   a folder deleted part way elsewhere, restored here, whose name is taken waits for the name,
   but the files its removal took along (live, unchanged here) go to Recently deleted on their
@@ -77,6 +81,15 @@ Later, together (not urgent):
 
 ## Ideas and things to weigh
 
+- **Sync links as links** (idea, 2026-10-28): a file type of its own for a link (a node that
+  says "this is a link, not a file"), holding its target as the OS that made it wrote it
+  (relative or absolute), and made again as a link on the other computers, as Dropbox does.
+  What a link is differs per OS and file system: symbolic links on Linux and macOS; on Windows
+  symbolic links (NTFS only, and only with Developer Mode or an elevated process), junctions and
+  `.lnk` shortcuts; none on FAT or exFAT. Where one can't be made, it stays on the drive only.
+  Hard links aren't links in this sense: each name is an ordinary file and syncs as one (two
+  copies elsewhere). Costs a node kind in the schema, the file browser showing it, and a rule
+  for a target outside the folder or broken.
 - **`.gitignore` inside git repos** (for consideration, 2026-10-23): inside a folder with
   `.git`, honour its `.gitignore` files with git's rules (per folder, `!` included), so a repo
   can live in a synced folder without its build output and temp files; ignored items stay on
