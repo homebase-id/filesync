@@ -55,6 +55,8 @@ pub struct TargetDrive {
 pub struct HomebaseRemote {
     client: Client,
     drive: TargetDrive,
+    /// When the drive was made, as its marker said ([`HomebaseRemote::made`]).
+    made: i64,
 }
 
 #[derive(Deserialize)]
@@ -163,7 +165,8 @@ fn refused(what: &str, code: &str) -> RemoteError {
 }
 
 impl HomebaseRemote {
-    /// Finds the Filesync drive on the client's identity.
+    /// Finds the Filesync drive on the client's identity, and when it was made (its marker,
+    /// made if it has none): two requests, four where the marker is made.
     pub fn connect(client: Client) -> Result<Self, HomebaseError> {
         let answer: DriveAnswer = client.get(
             &format!(
@@ -173,10 +176,13 @@ impl HomebaseRemote {
             ),
             &[],
         )?;
-        Ok(HomebaseRemote {
+        let mut remote = HomebaseRemote {
             client,
             drive: answer.target_drive,
-        })
+            made: 0,
+        };
+        remote.made = remote.find_made()?;
+        Ok(remote)
     }
 
     pub fn drive(&self) -> TargetDrive {
@@ -204,45 +210,35 @@ impl HomebaseRemote {
             .map_err(remote_error)
     }
 
-    /// When the drive was made, as its marker says (node schema, "The drive's marker"): the
-    /// marker's creation time on the identity, Unix ms. A drive without one gets one now; of two
-    /// computers making it at once, the second finds the first's. One request where it is
-    /// there; three where it is made.
-    pub fn made(&self) -> Result<i64, HomebaseError> {
+    /// When the drive was made, as its marker said as it connected (node schema, "The drive's
+    /// marker"): the marker's creation time on the identity, Unix ms.
+    pub fn made(&self) -> i64 {
+        self.made
+    }
+
+    /// When the drive was made, as its marker says; a drive without one gets one now. Of two
+    /// computers making it at once, the second finds the first's, whatever its own write was
+    /// answered (odin-core checks the `uniqueId` before it inserts: a race may end in the
+    /// table's constraint, not `existingFileWithUniqueId`). One request where it is there;
+    /// three where it is made.
+    fn find_made(&self) -> Result<i64, HomebaseError> {
         if let Some(made) = self.marker()? {
             return Ok(made);
         }
         let key = KeyHeader::random()?;
         let transfer_iv = sealed::strong()?;
-        let parts = vec![
-            Part::bytes(
-                "instructions",
-                "application/json",
-                wire::instructions(&transfer_iv, None, false)
-                    .to_string()
-                    .into_bytes(),
-            ),
-            Part::bytes(
-                "metadata",
-                wire::CONTENT_TYPE,
-                wire::marker_metadata(self.client.key(), &transfer_iv, &key),
-            ),
-        ];
-        let boundary = Uuid::new_v4().simple().to_string();
-        let made = self.client.upload::<WriteResult>(
-            UploadMethod::Post,
-            &self.files(),
-            Multipart::new(boundary, parts),
+        let parts = header_parts(
+            wire::instructions(&transfer_iv, None, false),
+            wire::marker_metadata(self.client.key(), &transfer_iv, &key),
         );
-        match made {
-            Err(e) if !matches!(drive_error(&e), Some(RemoteError::AlreadyExists)) => {
-                return Err(e);
-            }
-            _ => {}
+        let written = self.send(UploadMethod::Post, &self.files(), parts);
+        match (self.marker()?, written) {
+            (Some(made), _) => Ok(made),
+            (None, Err(e)) => Err(e),
+            (None, Ok(_)) => Err(HomebaseError::Protocol(
+                "the drive's marker isn't there once made".into(),
+            )),
         }
-        self.marker()?.ok_or_else(|| {
-            HomebaseError::Protocol("the drive's marker isn't there once made".into())
-        })
     }
 
     /// The drive's marker's creation time, if the identity has one.
@@ -253,6 +249,18 @@ impl HomebaseRemote {
             Err(e) if matches!(drive_error(&e), Some(RemoteError::NotFound)) => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// Sends one multipart upload of `parts`.
+    fn send(
+        &self,
+        method: UploadMethod,
+        path: &str,
+        parts: Vec<Part<'_>>,
+    ) -> Result<WriteResult, HomebaseError> {
+        let boundary = Uuid::new_v4().simple().to_string();
+        self.client
+            .upload(method, path, Multipart::new(boundary, parts))
     }
 
     /// Creates a file, or with `target` updates that file at its version (the key from its
@@ -307,14 +315,7 @@ impl HomebaseRemote {
             target.is_some(),
         );
         let metadata = wire::metadata(meta, version, self.client.key(), &transfer_iv, &key);
-        let mut parts = vec![
-            Part::bytes(
-                "instructions",
-                "application/json",
-                instructions.to_string().into_bytes(),
-            ),
-            Part::bytes("metadata", wire::CONTENT_TYPE, metadata),
-        ];
+        let mut parts = header_parts(instructions, metadata);
         if let Some(s) = &mut sending {
             let hash_part = s.hash_part(&key);
             parts.push(Part::reader(
@@ -336,15 +337,11 @@ impl HomebaseRemote {
             None => (UploadMethod::Post, self.files()),
             Some(at) => (UploadMethod::Patch, self.file(at.file_id)),
         };
-        let boundary = Uuid::new_v4().simple().to_string();
         let WriteResult {
             file_id,
             new_version_tag,
             updated,
-        } = self
-            .client
-            .upload(method, &path, Multipart::new(boundary, parts))
-            .map_err(remote_error)?;
+        } = self.send(method, &path, parts).map_err(remote_error)?;
         Ok(Written {
             target: Target {
                 at: RemoteRef {
@@ -820,6 +817,18 @@ fn remote_error(e: HomebaseError) -> RemoteError {
     }
 }
 
+/// The first parts of an upload: its `instructions` and the header (`metadata`).
+fn header_parts<'a>(instructions: serde_json::Value, metadata: Vec<u8>) -> Vec<Part<'a>> {
+    vec![
+        Part::bytes(
+            "instructions",
+            "application/json",
+            instructions.to_string().into_bytes(),
+        ),
+        Part::bytes("metadata", wire::CONTENT_TYPE, metadata),
+    ]
+}
+
 /// The trait's error for `e`, if it is an error answer.
 fn drive_error(e: &HomebaseError) -> Option<RemoteError> {
     match e {
@@ -1210,6 +1219,7 @@ mod tests {
                 alias: Uuid::nil(),
                 drive_type: Uuid::nil(),
             },
+            made: 0,
         };
         let size = MAX_FILE + 1;
         let meta = NodeMeta {

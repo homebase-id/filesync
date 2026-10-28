@@ -57,7 +57,7 @@ and tried again after a pause, checked (not the daemon started again and again).
 added meanwhile waits for it (one DB's turn in the daemon: its setting up, and the config read
 for the folders to set up again). It is renamed beside the new one,
 `state.db.too-old-<Unix time>`, `state.db.corrupt-<Unix time>` or `state.db.other-drive-<Unix
-time>` (below), with its `-wal` and `-shm`
+time>` (a drive made again, below), with its `-wal` and `-shm`
 files named alike, never deleted: they are for a diagnosis, and old ones can be deleted by hand.
 The account's folders that are there (their marker this identity's) are then set up again in the
 new DB as folders with files, as `hbsync setup --existing` does: what they hold is adopted by
@@ -72,6 +72,19 @@ aside: a DB of a newer version (a downgrade: setting it aside would throw a newe
 records away; the account waits, saying why), and one that can't be read for now (busy or
 locked, an I/O error, a full disk, access denied, a missing folder, a read-only file system:
 told as an error, and tried again as the daemon starts again).
+
+A DB of a drive made again is set aside too. A drive deleted and made again has the same alias
+and slugs, nothing of the old one on it: read against it, what the DB knows would look deleted
+there and be deleted here, one file at a time, which the mass-delete guard (it holds this
+computer's own removals) doesn't see. So the drive's marker (node schema, "The drive's marker")
+is read once as the account connects (one request more; two more where the drive gets it), and
+its time kept in the DB (`remote.drive_made`); the account's DB is bound to the drive where it
+opens with it (its `Drive`, after any setting aside too), and one that knows another time is set
+aside before anything syncs, whatever was set aside before in that run, as
+`state.db.other-drive-<Unix time>`, and its folders set up again as above: their files go up to
+the new drive, told once. A DB that knows no drive yet (new, set up again, or from before the
+marker) takes the one it finds. A drive made again while the account stays connected is found at
+its next connect (a login, or the daemon's start).
 
 The recovery rule (data safety): setting a DB aside never deletes a file, here or on the drive:
 the new DB has no base, and without one nothing is deleted. What is lost is the old DB's
@@ -169,17 +182,7 @@ says so when it couldn't reach the keychain to remove the credentials there.
       (`offline`, at least as long as its `Retry-After` says); a refusal (the device revoked)
       shows as `denied` and is asked again hourly (new credentials start it over at once). Meanwhile `pause` and `resume` work
       (kept in the config); other requests are refused;
-   4. reads the drive's marker as it connects, once (node schema, "The drive's marker"; made
-      if the drive has none: two requests more, once per drive): a DB that synced with a drive
-      made at another time synced with one deleted and made again since, the same alias and
-      nothing of the old one on it. Read against the new one, what it knows would look deleted
-      there and be deleted here, one file at a time, which the mass-delete guard (it holds this
-      computer's own removals) doesn't see. So it is set aside before anything syncs, as a
-      damaged one is (`state.db.other-drive-<Unix time>`), and its folders set up again as
-      folders with files: nothing here is deleted, and their files go up to the new drive (those
-      it has already are adopted, not copied twice), told once. A DB that knows no drive yet
-      (new, set up again, or from before the marker) takes the one it finds;
-   5. opens the account's `Drive` and the notification socket, and runs a sync loop
+   4. opens the account's `Drive` and the notification socket, and runs a sync loop
       (`Runner`) for each of its folders until a stop request, SIGTERM or SIGINT. It passes the
       notifications on to every folder's loop, reconnects the socket after a sleep, and has
       Recently deleted's requests and its daily purge (not while paused) run on a thread of

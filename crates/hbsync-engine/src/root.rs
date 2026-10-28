@@ -222,6 +222,10 @@ impl SyncRoot {
         found: Option<Unusable>,
     ) -> Result<Option<SetAside>, RootError> {
         let checked = match found {
+            Some(Unusable::OtherDrive) => Err((
+                Unusable::OtherDrive,
+                "synced with a drive deleted and made again since".to_owned(),
+            )),
             Some(why) => Err((why, "found unusable while syncing".to_owned())),
             None => match Self::check_and_open(db, identity) {
                 Ok(account) => Ok(account),
@@ -257,24 +261,6 @@ impl SyncRoot {
             Self::set_up_again(&mut account, db, identity, folders, &known, replaced)?;
         }
         Ok(set)
-    }
-
-    /// Whether `identity`'s DB at `db` synced with another drive than the one made at `made`
-    /// (its marker's time, node schema "The drive's marker"): one deleted and made again, the
-    /// same alias, nothing of the old one on it. Then the DB must be set aside
-    /// ([`Unusable::OtherDrive`]) before anything syncs: read against the new drive, what it
-    /// knows would look deleted there. A DB that knows no drive yet (new, set up again, or from
-    /// before the marker) takes this one. Only while nothing else writes it.
-    pub fn other_drive(db: &Path, identity: &str, made: i64) -> Result<bool, RootError> {
-        let mut account = Self::open_account(db, identity)?;
-        let made = made.to_string();
-        match account.read(|s| s.account_kv(keys::DRIVE_MADE))? {
-            Some(known) => Ok(known != made),
-            None => {
-                account.write_durable(|s| s.account().set_account_kv(keys::DRIVE_MADE, &made))?;
-                Ok(false)
-            }
-        }
     }
 
     /// The account's DB at `db`, its whole file checked, then brought up to date (made if new;

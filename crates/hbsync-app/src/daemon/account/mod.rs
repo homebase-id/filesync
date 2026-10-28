@@ -142,11 +142,8 @@ pub(crate) enum Msg {
     Woke,
     /// Look again: it is to end, the daemon stops, its pause changed, or a runner is ending.
     Wake,
-    /// A try at connecting ended (its thread's answer, while the account connects): the drive,
-    /// and when it was made.
-    Connected(
-        Box<Result<(hbsync_homebase::drive::HomebaseRemote, i64), hbsync_homebase::HomebaseError>>,
-    ),
+    /// A try at connecting ended (its thread's answer, while the account connects).
+    Connected(Box<Result<hbsync_homebase::drive::HomebaseRemote, hbsync_homebase::HomebaseError>>),
 }
 
 /// What the account's thread is asked to do.
@@ -686,9 +683,10 @@ mod tests {
         use crate::Config;
 
         let home = tempfile::tempdir()?;
-        let paths = Paths::under(&home.path().canonicalize()?);
+        let home_dir = home.path().canonicalize()?;
+        let paths = Paths::under(&home_dir);
         let identity: Identity = "a.example".into();
-        let folder = paths.state.with_file_name("Homebase");
+        let folder = home_dir.join("Homebase");
         std::fs::create_dir_all(&folder)?;
         std::fs::write(folder.join("a.txt"), "a")?;
         let root = Root::main(&identity, &folder);
@@ -815,6 +813,125 @@ mod tests {
         account.wake();
         running.join().map_err(|_| "panicked")??;
         checked
+    }
+
+    /// The drive deleted and made again while the computer was off (another time on its
+    /// marker, nothing of the old drive on it): as the account starts again, its DB is set
+    /// aside before anything syncs, told once, and the folder set up again: nothing here is
+    /// deleted, its files go up to the new drive, the old drive is left as it was.
+    #[test]
+    fn a_db_of_a_drive_made_again_is_set_aside_before_anything_syncs()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::time::{Duration, Instant};
+
+        use super::feed::{Notifications, Puller};
+        use crate::Config;
+
+        let home = tempfile::tempdir()?;
+        let home_dir = home.path().canonicalize()?;
+        let paths = Paths::under(&home_dir);
+        let identity: Identity = "a.example".into();
+        let folder = home_dir.join("Homebase");
+        std::fs::create_dir_all(folder.join("sub"))?;
+        std::fs::write(folder.join("a.txt"), "a")?;
+        std::fs::write(folder.join("sub/b.txt"), "b")?;
+        let db = paths.account_db(&identity);
+        std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
+        hbsync_engine::root::SyncRoot::create(&db, &identity, &folder)?;
+        let other_drive = words::set_aside(hbsync_state::Unusable::OtherDrive);
+
+        // The account started on `remote`'s drive, made at `made`, until its folder synced:
+        // how often it told that the DB was set aside.
+        let run = |remote: &FakeRemote, made: i64| -> Result<usize, Box<dyn std::error::Error>> {
+            let root = Root::main(&identity, &folder);
+            let (account, requests) = Account::new(&paths, &root, None, Arc::default());
+            let stop = Arc::new(AtomicBool::new(false));
+            let running = {
+                let (account, paths, stop) =
+                    (Arc::clone(&account), paths.clone(), Arc::clone(&stop));
+                let (identity, remote) = (identity.clone(), remote.clone());
+                std::thread::spawn(move || {
+                    let mut msgs = Vec::new();
+                    let roots = [root];
+                    let start = super::run::Readying::Start(&roots);
+                    account.ready_db(&paths, start, &stop, &requests, &mut msgs)?;
+                    account.sync(
+                        &paths,
+                        &Config::default(),
+                        &requests,
+                        &stop,
+                        &mut msgs,
+                        |db| {
+                            let drive =
+                                parts::drive_made(&identity, Arc::new(remote.clone()), made, db)?;
+                            let puller = Puller::spawn(Arc::clone(&drive));
+                            Ok(AccountParts {
+                                drive,
+                                notifier: Err(std::io::Error::other("none here")),
+                                notifications: Notifications::new(puller, Instant::now()),
+                            })
+                        },
+                    )
+                })
+            };
+            let until = Instant::now() + Duration::from_secs(30);
+            let synced = loop {
+                let (status, folders) = account.status();
+                if folders.first().is_some_and(|f| {
+                    f.state == State::Idle && f.last_sync.is_some() && f.pending == 0
+                }) {
+                    break Ok(status
+                        .recent
+                        .iter()
+                        .filter(|n| n.text == other_drive)
+                        .count());
+                }
+                if Instant::now() > until {
+                    break Err(format!("timed out: {status:?} {folders:?}"));
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
+            stop.store(true, Ordering::SeqCst);
+            account.wake();
+            running.join().map_err(|_| "panicked")??;
+            Ok(synced?)
+        };
+        let aside = || -> std::io::Result<usize> {
+            let dir = std::fs::read_dir(db.parent().unwrap_or(&db))?;
+            Ok(dir
+                .flatten()
+                .filter(|e| {
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    name.starts_with("state.db.other-drive-")
+                        && !name.ends_with("-wal")
+                        && !name.ends_with("-shm")
+                })
+                .count())
+        };
+
+        let old = FakeServer::new(ServerConfig::default());
+        let old_remote = FakeRemote::new(old.clone());
+        assert_eq!(run(&old_remote, 1)?, 0, "the first drive is taken");
+        assert_eq!(run(&old_remote, 1)?, 0, "the same drive");
+        let on_old = old.lock().map_err(|_| "poisoned")?.live_names();
+
+        let made_again = FakeServer::new(ServerConfig::default());
+        let new_remote = FakeRemote::new(made_again.clone());
+        assert_eq!(run(&new_remote, 2)?, 1, "told once");
+        assert_eq!(aside()?, 1, "kept");
+        assert_eq!(std::fs::read_to_string(folder.join("a.txt"))?, "a");
+        assert_eq!(std::fs::read_to_string(folder.join("sub/b.txt"))?, "b");
+        assert_eq!(new_remote.faults().uploads, 2, "every file up");
+        assert_eq!(
+            made_again.lock().map_err(|_| "poisoned")?.live_names(),
+            on_old
+        );
+        let old = old.lock().map_err(|_| "poisoned")?;
+        assert_eq!((old.live_names(), old.removed().count()), (on_old, 0));
+        drop(old);
+        assert_eq!(run(&new_remote, 2)?, 0, "the new DB took the new drive");
+        assert_eq!(aside()?, 1);
+        Ok(())
     }
 
     /// The account's notes are on its status, its folders' untouched: a row of the drive that

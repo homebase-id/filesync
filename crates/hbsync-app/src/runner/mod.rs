@@ -72,6 +72,10 @@ pub enum RunnerError {
     Panicked,
     #[error(transparent)]
     Folder(#[from] RootError),
+    /// The account's DB synced with a drive deleted and made again since (another time on its
+    /// marker): set aside before anything syncs ([`Unusable::OtherDrive`]).
+    #[error("this computer's sync records are of a Filesync drive deleted and made again since")]
+    OtherDrive,
 }
 
 impl RunnerError {
@@ -85,6 +89,7 @@ impl RunnerError {
             RunnerError::Io(e) => ErrorClass::of_io(e),
             RunnerError::Panicked => ErrorClass::Bug,
             RunnerError::Folder(e) => e.class(),
+            RunnerError::OtherDrive => ErrorClass::NeedsUser,
         }
     }
 
@@ -95,6 +100,7 @@ impl RunnerError {
             RunnerError::State(e) => e.unusable(),
             RunnerError::Folder(e) => e.unusable(),
             RunnerError::Engine(e) => e.unusable(),
+            RunnerError::OtherDrive => Some(Unusable::OtherDrive),
             _ => None,
         }
     }

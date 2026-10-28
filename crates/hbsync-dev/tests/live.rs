@@ -80,8 +80,7 @@ fn the_drive_has_one_marker() -> R {
         .map(|_| {
             std::thread::spawn(|| {
                 live_remote()
-                    .map_err(|e| e.to_string())?
-                    .made()
+                    .map(|remote| remote.made())
                     .map_err(|e| e.to_string())
             })
         })
@@ -93,7 +92,7 @@ fn the_drive_has_one_marker() -> R {
     made.dedup();
     assert_eq!(made.len(), 1, "{made:?}");
     let remote = live_remote()?;
-    assert_eq!(remote.made()?, made[0]);
+    assert_eq!(remote.made(), made[0]);
     // Its creation time on the identity, Unix ms.
     assert!(made[0] > 1_700_000_000_000, "{made:?}");
     println!("the drive was made at {}", made[0]);

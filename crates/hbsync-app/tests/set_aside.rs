@@ -12,10 +12,8 @@ use hbsync_app::folders::{self, Taken};
 use hbsync_app::setup::{self, check_state};
 use hbsync_app::{Command, Identity, Paths, Root, Runner, RunnerConfig, State};
 use hbsync_engine::Drive;
-use hbsync_engine::root::SyncRoot;
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 use hbsync_state::Unusable;
-use hbsync_types::NodeId;
 
 type E = Box<dyn std::error::Error + Send + Sync>;
 type R = Result<(), E>;
@@ -171,42 +169,6 @@ fn the_daemon_sets_an_unusable_db_aside_and_adopts_the_folder() -> R {
         assert_eq!(server.live_names(), on_drive, "{why:?}");
         assert_eq!(server.removed().count(), 0, "{why:?}: nothing deleted");
     }
-    Ok(())
-}
-
-/// A drive deleted and made again (its marker made again, nothing of the old one on it): the
-/// DB that synced with the old one is set aside before anything syncs, as the daemon does once
-/// connected, and the folder set up again: its files stay here and go up to the new drive.
-/// Read against the new drive, the old DB would take them as deleted there.
-#[test]
-fn a_drive_made_again_keeps_the_files_here_and_sends_them_up() -> R {
-    let Synced {
-        server,
-        root,
-        db,
-        files: synced,
-        _dir,
-    } = synced()?;
-    assert!(
-        !SyncRoot::other_drive(&db, ID, 1)?,
-        "one knowing no drive takes it"
-    );
-    assert!(!SyncRoot::other_drive(&db, ID, 1)?, "the same drive");
-    assert!(SyncRoot::other_drive(&db, ID, 2)?, "another drive");
-
-    let made_again = FakeServer::new(ServerConfig::default());
-    let folders = [(root.as_path(), NodeId::ROOT)];
-    let set = SyncRoot::ready(&db, ID, &folders, Some(Unusable::OtherDrive))?.ok_or("kept")?;
-    assert_eq!(set_aside(&db)?, vec![set.to.clone()], "kept");
-    assert!(
-        !SyncRoot::other_drive(&db, ID, 2)?,
-        "the new DB takes the new drive"
-    );
-    let (uploads, _) = sync_once(&made_again, &root, &db)?;
-    assert_eq!(uploads, 3, "every file up");
-    assert_eq!(files(&root)?, synced, "nothing deleted here");
-    let old = server.lock().map_err(|_| "poisoned")?.live_names();
-    assert_eq!(made_again.lock().map_err(|_| "poisoned")?.live_names(), old);
     Ok(())
 }
 

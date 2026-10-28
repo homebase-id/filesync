@@ -148,9 +148,9 @@ pub fn set_aside(why: Unusable) -> String {
         Unusable::TooOld => "were from an older version of Filesync",
         Unusable::Corrupt => "were damaged",
         Unusable::OtherDrive => {
-            return "Filesync's drive on your Homebase cloud was made again since this computer \
-                    last synced. Nothing here was deleted: this computer's sync records of the \
-                    old one were set aside, and the folder is set up again. Its files go up to \
+            return "Filesync's drive on your Homebase cloud was made again or emptied since \
+                    this computer last synced. Nothing here was deleted: this computer's sync \
+                    records were set aside, and the folder is set up again. Its files go up to \
                     your Homebase cloud; those already there aren't copied twice."
                 .to_owned();
         }

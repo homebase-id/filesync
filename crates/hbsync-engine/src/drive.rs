@@ -476,6 +476,24 @@ impl Drive {
         })
     }
 
+    /// Whether the account's DB synced with another drive than the one made at `made` (its
+    /// marker's time, node schema "The drive's marker"): one deleted and made again, the same
+    /// alias, nothing of the old one on it. Then the DB must be set aside
+    /// ([`hbsync_state::Unusable::OtherDrive`]) before anything syncs: read against the new
+    /// drive, what it knows would look deleted there. A DB that knows no drive yet (new, set up
+    /// again, or from before the marker) takes this one.
+    pub fn other_drive(&self, made: i64) -> Result<bool, StateError> {
+        let made = made.to_string();
+        self.account()
+            .write(|s| match s.account_kv(keys::DRIVE_MADE)? {
+                Some(known) => Ok(known != made),
+                None => {
+                    s.account().set_account_kv(keys::DRIVE_MADE, &made)?;
+                    Ok(false)
+                }
+            })
+    }
+
     /// Restores these items of Recently deleted (each with what was deleted with it); the
     /// next syncs bring them back. Returns how many items came back.
     /// The user's to ask for: it reads the feed first, whatever the notifications say. A write

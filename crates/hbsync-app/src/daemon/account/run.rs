@@ -9,7 +9,6 @@ use std::sync::mpsc::{Receiver, channel};
 use std::time::{Duration, Instant};
 
 use hbsync_engine::Drive;
-use hbsync_engine::root::SyncRoot;
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::{Client, HomebaseError};
 use hbsync_remote::ErrorClass;
@@ -32,7 +31,7 @@ pub(super) enum Readying<'a> {
     /// As it starts ([`ready_account`]), its folders among these (the config's).
     Start(&'a [Root]),
     /// As it was found unusable while the account ran ([`heal_account`], its folders those it
-    /// syncs): checked, or with why, set aside unchecked.
+    /// syncs): checked, or with why, set aside unchecked (one of another drive until it is).
     Heal(Option<Unusable>),
 }
 
@@ -110,15 +109,9 @@ impl Account {
             return Ok(());
         };
         let client = Client::new(&creds)?;
-        let Some((remote, made)) = self.connect(&client, stop, requests, &mut msgs) else {
+        let Some(remote) = self.connect(&client, stop, requests, &mut msgs) else {
             return Ok(());
         };
-        if self
-            .on_drive(paths, made, stop, requests, &mut msgs)?
-            .is_none()
-        {
-            return Ok(());
-        }
         // The notifications' events reach this thread's channel through a thread of their own,
         // which ends with them.
         let (tx, events) = channel();
@@ -157,9 +150,14 @@ impl Account {
         loop {
             let readied = match &mut readying {
                 Readying::Start(roots) => ready_account(&self.db, &self.identity, roots),
-                // Set aside unchecked once: what is there at a later try is checked.
+                // Set aside unchecked once: what is there at a later try is checked. One of
+                // another drive passes a check: set aside unchecked until it is.
                 Readying::Heal(found) => {
-                    heal_account(paths, &self.identity, &self.folders(), found.take())
+                    let why = match found {
+                        Some(Unusable::OtherDrive) => *found,
+                        _ => found.take(),
+                    };
+                    heal_account(paths, &self.identity, &self.folders(), why)
                 }
             };
             let e = match readied {
@@ -189,48 +187,6 @@ impl Account {
         }
     }
 
-    /// Readies its state DB for the drive made at `made` (its marker's time) before anything
-    /// syncs: one that synced with another drive (deleted and made again: the same alias,
-    /// nothing of the old one on it) is set aside and its folders set up again, told once, as a
-    /// damaged one is ([`SyncRoot::other_drive`]). Read against the new drive, what it knows
-    /// would look deleted there, and be deleted here. `None` when it stops first.
-    fn on_drive(
-        &self,
-        paths: &Paths,
-        made: i64,
-        stop: &AtomicBool,
-        requests: &Receiver<Msg>,
-        msgs: &mut Vec<Msg>,
-    ) -> Result<Option<()>, DaemonError> {
-        let mut backoff = Backoff::new();
-        loop {
-            match SyncRoot::other_drive(&self.db, &self.identity, made) {
-                Ok(false) => return Ok(Some(())),
-                Ok(true) => {
-                    tracing::warn!(
-                        "{}: its drive was made again since this computer synced with it",
-                        self.identity
-                    );
-                    // Nothing else has it open while it is set aside.
-                    self.ready.store(false, Ordering::SeqCst);
-                    *lock(&self.reader) = None;
-                    let found = Readying::Heal(Some(Unusable::OtherDrive));
-                    if self.ready_db(paths, found, stop, requests, msgs)?.is_none() {
-                        return Ok(None);
-                    }
-                    // The new DB takes the drive at the next look.
-                }
-                Err(e) => {
-                    tracing::error!("{e}: {} waits for it", self.identity);
-                    self.show_waiting(State::Failing, e.to_string());
-                    if self.wait(backoff.after(e.class(), None), stop, requests, msgs) {
-                        return Ok(None);
-                    }
-                }
-            }
-        }
-    }
-
     /// Syncs its folders on the account's parts, which `open` makes from its DB, until it
     /// should stop. A DB found unusable as it syncs (a runner ended for it) is looked at with
     /// every folder stopped and every part closed: first checked, as at a start (a passing
@@ -251,24 +207,50 @@ impl Account {
         // After a heal, the config as it is then: the runners start with its settings.
         let mut now: Option<Config> = None;
         loop {
-            let parts = open(&self.db)?;
+            let parts = match open(&self.db) {
+                // Synced with a drive made again since: set aside before anything syncs,
+                // whatever was set aside before in this run (read against the new drive, what
+                // it knows would be deleted here).
+                Err(e) if e.unusable() == Some(Unusable::OtherDrive) => {
+                    tracing::warn!("{}: {e}", self.identity);
+                    match self.heal(paths, Some(Unusable::OtherDrive), stop, requests, msgs)? {
+                        Some(set) => healed |= set,
+                        None => return Ok(()),
+                    }
+                    now = Config::now(paths);
+                    continue;
+                }
+                opened => opened?,
+            };
             let config = now.as_ref().unwrap_or(config);
             let found = self.serve(paths, config, requests, stop, msgs, parts, !healed)?;
             let Some(why) = found.filter(|_| !self.stopping(stop)) else {
                 return Ok(());
             };
-            // Nothing else has it open now: the answers' connection is closed, and not
-            // opened again until it is ready.
-            self.ready.store(false, Ordering::SeqCst);
-            *lock(&self.reader) = None;
             let force = checked.then_some(why);
             checked = true;
-            match self.ready_db(paths, Readying::Heal(force), stop, requests, msgs)? {
+            match self.heal(paths, force, stop, requests, msgs)? {
                 Some(set) => healed = set,
                 None => return Ok(()),
             }
             now = Config::now(paths);
         }
+    }
+
+    /// Readies its DB, which nothing of it has open any more, as found unusable while it ran
+    /// ([`Readying::Heal`]): the answers' connection is closed, and not opened again until it is
+    /// ready. Whether it set one aside; `None` when it stops first.
+    fn heal(
+        &self,
+        paths: &Paths,
+        found: Option<Unusable>,
+        stop: &AtomicBool,
+        requests: &Receiver<Msg>,
+        msgs: &mut Vec<Msg>,
+    ) -> Result<Option<bool>, DaemonError> {
+        self.ready.store(false, Ordering::SeqCst);
+        *lock(&self.reader) = None;
+        self.ready_db(paths, Readying::Heal(found), stop, requests, msgs)
     }
 
     /// Syncs its folders on `parts` until it should stop, or until a runner ended as its DB
@@ -640,7 +622,7 @@ impl Account {
         stop: &AtomicBool,
         rx: &Receiver<Msg>,
         early: &mut Vec<Msg>,
-    ) -> Option<Result<(HomebaseRemote, i64), HomebaseError>> {
+    ) -> Option<Result<HomebaseRemote, HomebaseError>> {
         if self.stopping(stop) {
             return None;
         }
@@ -648,9 +630,7 @@ impl Account {
         let spawned = std::thread::Builder::new()
             .name("hbsync-connect".into())
             .spawn(move || {
-                // When the drive was made: once per connection.
-                let tried = HomebaseRemote::connect(trying)
-                    .and_then(|remote| remote.made().map(|made| (remote, made)));
+                let tried = HomebaseRemote::connect(trying);
                 let _ = to_account.send(Msg::Connected(Box::new(tried)));
             });
         if let Err(e) = spawned {
@@ -668,19 +648,19 @@ impl Account {
         None
     }
 
-    /// The drive and when it was made, once the identity answers (finding them takes two
-    /// requests, four where the drive gets its marker); `None` when stopped first.
+    /// The drive, once the identity answers (finding it and when it was made takes two requests,
+    /// four where it gets its marker); `None` when stopped first.
     fn connect(
         &self,
         client: &Client,
         stop: &AtomicBool,
         rx: &Receiver<Msg>,
         early: &mut Vec<Msg>,
-    ) -> Option<(Arc<HomebaseRemote>, i64)> {
+    ) -> Option<Arc<HomebaseRemote>> {
         let mut backoff = Backoff::new();
         loop {
             match self.try_connect(client, stop, rx, early)? {
-                Ok((remote, made)) => return Some((Arc::new(remote), made)),
+                Ok(r) => return Some(Arc::new(r)),
                 Err(e) => {
                     let class = e.class();
                     // Refused: the credentials won't work sooner; a login starts it over.
