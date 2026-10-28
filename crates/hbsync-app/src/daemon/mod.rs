@@ -147,6 +147,10 @@ pub fn run(paths: &Paths, stop: Stop) -> Result<(), DaemonError> {
             root.folder.display()
         );
     }
+    tracing::info!(
+        "the I/O each sync logs is the process's: {}",
+        hbsync_platform::io::COUNTS
+    );
     let watchers = Arc::new(watch::Watchers::new(Arc::clone(&daemon.changed)));
     {
         let (weak, watchers) = (Arc::downgrade(&daemon), Arc::clone(&watchers));

@@ -7,6 +7,7 @@ mod errors;
 pub mod fnv;
 pub mod fskind;
 pub mod host;
+pub mod io;
 pub mod journal;
 pub mod listdir;
 pub mod meta;
