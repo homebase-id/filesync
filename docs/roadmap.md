@@ -43,10 +43,13 @@ In this order:
 
 - **Idle wakeups, the rest:** the daemon's and the tray's 2 a second (zbus's `blocking-1`) are
   gone with blocking pinned to 1.6.2 (0.10.1 on the user's Linux desktop, idle: the daemon 2.08
-  a second before, 0.07 after; the tray 2.05, 0.15). Left: the daemon's notification thread
-  wakes about once every 13 s, and the tray about 9 times a minute over its threads (the main
-  one, the menu's, the status poll's once a minute). Re-measure on Windows too, where 9.7 of the
-  10 a second were notify's watcher thread (fixed in a patched copy, `vendor/notify/PATCHED.md`).
+  a second before, 0.07 after; the tray 2.05, 0.15 while its menu's times changed, 2 a minute
+  idle). Windows 0.10.2 (windows-bench, 2026-10-28): the daemon 0.32 a second (10.2 on 0.9.1:
+  notify's watcher, patched in `vendor/notify`); the tray 0.09, but 64–90 a second for good after
+  the cursor rested on its icon (tray-icon's leave timer never stopped: patched in
+  `vendor/tray-icon`). Left: the daemon's notification thread, its ping every 30 s and the pong
+  (about 4 a minute): longer only if no proxy in front of an identity closes a connection quiet
+  for a minute.
 - **Idle syncs that read a lot on Windows:** two syncs with nothing to do read 3.5 GB (4.6 s
   CPU) and 460 MB (0.5 s) in a 4.4 h idle run (windows-bench, 2026-10-27; 127,000 files, a
   100 MB state DB). Since 0.10.2 every sync logs what asked for it, a start-up's catch-up and

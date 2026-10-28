@@ -60,3 +60,4 @@ strip = "symbols"
 # changed; drop this once upstream has it.
 [patch.crates-io]
 notify = { path = "vendor/notify" }
+tray-icon = { path = "vendor/tray-icon" }
