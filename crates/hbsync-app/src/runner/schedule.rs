@@ -75,8 +75,6 @@ pub(crate) enum Why {
     Resumed,
     /// Work left unfinished, tried again (a sync's, a put back's).
     Retry,
-    /// A failed sync, tried again.
-    Failed,
 }
 
 impl Why {
@@ -92,7 +90,6 @@ impl Why {
             Why::Online => "back online",
             Why::Resumed => "resumed",
             Why::Retry => "unfinished work",
-            Why::Failed => "after a failure",
         }
     }
 }
@@ -104,6 +101,10 @@ pub(crate) struct Whys(std::collections::BTreeSet<Why>);
 impl Whys {
     fn add(&mut self, why: Why) {
         self.0.insert(why);
+    }
+
+    fn is_empty(&self) -> bool {
+        self.0.is_empty()
     }
 }
 
@@ -137,9 +138,7 @@ pub(crate) struct Schedule {
     /// How often what is local is looked at (`RunnerConfig::look`).
     look: Duration,
     next_look: Instant,
-    /// Something asked for a sync since the last one.
-    wanted: bool,
-    /// What did, since the last sync began.
+    /// What asked for a sync since the last one ended (none: no sync wanted).
     why: Whys,
     /// The next sync reads the feed first, whatever the notifications say: it was asked for
     /// (sync now, a resume, a wake-up).
@@ -161,7 +160,6 @@ impl Schedule {
         Schedule {
             look,
             next_look: now + look,
-            wanted: true,
             why: Whys([Why::Start].into()),
             read: false,
             not_before: now,
@@ -174,7 +172,6 @@ impl Schedule {
 
     /// Something changed (here, or in this folder's part of the drive): a sync when allowed.
     pub(crate) fn want(&mut self, why: Why) {
-        self.wanted = true;
         self.why.add(why);
     }
 
@@ -186,11 +183,11 @@ impl Schedule {
         self.not_before = now;
     }
 
-    /// What asked for the sync beginning now (`now`), forgotten for the next: unfinished work's
-    /// retry when nothing else did.
-    pub(crate) fn take_why(&mut self, now: Instant) -> Whys {
-        let mut why = std::mem::take(&mut self.why);
-        if why == Whys::default() && self.retry_due(now) {
+    /// What asked for the sync beginning now (`now`): unfinished work's retry when nothing else
+    /// did. Kept until a sync ends ([`Schedule::synced`]), so a failed one is asked for again.
+    pub(crate) fn why(&self, now: Instant) -> Whys {
+        let mut why = self.why.clone();
+        if why.is_empty() && self.retry_due(now) {
             why.add(Why::Retry);
         }
         why
@@ -255,7 +252,7 @@ impl Schedule {
     /// Whether to sync now: wanted (or unfinished work's retry has come), not paused, not
     /// backing off.
     pub(crate) fn due(&self, now: Instant) -> bool {
-        !self.paused && (self.wanted || self.retry_due(now)) && now >= self.not_before
+        !self.paused && (!self.why.is_empty() || self.retry_due(now)) && now >= self.not_before
     }
 
     /// Not now: tried again at the next look (the folder gone, rules that can't be read: both
@@ -274,12 +271,12 @@ impl Schedule {
         match outcome {
             Synced::Stopped => {}
             Synced::Done => {
-                self.wanted = false;
+                self.why = Whys::default();
                 self.retry = None;
                 self.retry_backoff = Backoff::new();
             }
             Synced::Unfinished { progressed } => {
-                self.wanted = false;
+                self.why = Whys::default();
                 if progressed {
                     self.retry_backoff = Backoff::new();
                 }
@@ -295,7 +292,7 @@ impl Schedule {
         let sync = match self.paused {
             true => None,
             false => {
-                let wanted = self.wanted.then_some(now);
+                let wanted = (!self.why.is_empty()).then_some(now);
                 let earliest = wanted.into_iter().chain(self.retry).min();
                 earliest.map(|at| at.max(self.not_before))
             }
@@ -327,29 +324,32 @@ mod tests {
         Duration::from_millis(n)
     }
 
-    /// A sync says what asked for it, each once: the start, then what came since the sync
-    /// before; a failure's or unfinished work's retry when nothing else did.
+    /// A sync says what asked for it: the start, then what came since the sync before ended;
+    /// unfinished work's retry when nothing else did. A sync that fails keeps them.
     #[test]
     fn a_sync_says_what_asked_for_it() {
         let t0 = Instant::now();
         let mut s = Schedule::new(t0, LOOK, false);
-        assert_eq!(s.take_why(t0).to_string(), "start");
+        assert_eq!(s.why(t0).to_string(), "start");
         s.synced(t0, Synced::Unfinished { progressed: false });
+        assert_eq!(s.why(t0).to_string(), "nothing", "told once");
         for why in [Why::Local, Why::Drive, Why::Local] {
             s.want(why);
         }
         assert_eq!(
-            s.take_why(t0).to_string(),
+            s.why(t0).to_string(),
             "a change here, a change on the drive"
         );
-        assert_eq!(s.take_why(t0).to_string(), "nothing", "told once");
-        assert_eq!(s.take_why(t0 + ms(10_000)).to_string(), "unfinished work");
-        s.want(Why::Failed);
-        s.woke(t0);
-        assert_eq!(s.take_why(t0).to_string(), "a wake-up, after a failure");
-        // Any other backing off isn't a failed sync.
         s.failed(t0, ErrorClass::Transient, None);
-        assert_eq!(s.take_why(t0).to_string(), "nothing");
+        assert_eq!(
+            s.why(t0).to_string(),
+            "a change here, a change on the drive",
+            "a failed sync's, asked for again"
+        );
+        s.synced(t0, Synced::Unfinished { progressed: false });
+        assert_eq!(s.why(t0 + ms(10_000)).to_string(), "unfinished work");
+        s.woke(t0);
+        assert_eq!(s.why(t0).to_string(), "a wake-up");
     }
 
     #[test]

@@ -36,12 +36,8 @@ pub const COUNTS: &str = "nothing (not counted here)";
 
 /// This process's counters now; `None` where the OS doesn't say. One small read of
 /// `/proc/self/io` on Linux, one call elsewhere.
-pub fn counted() -> Option<Io> {
-    os_counted()
-}
-
 #[cfg(target_os = "linux")]
-fn os_counted() -> Option<Io> {
+pub fn counted() -> Option<Io> {
     let text = std::fs::read_to_string("/proc/self/io").ok()?;
     let field = |name: &str| {
         text.lines()
@@ -56,7 +52,7 @@ fn os_counted() -> Option<Io> {
 }
 
 #[cfg(windows)]
-fn os_counted() -> Option<Io> {
+pub fn counted() -> Option<Io> {
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcess, GetProcessIoCounters, IO_COUNTERS,
     };
@@ -71,7 +67,7 @@ fn os_counted() -> Option<Io> {
 }
 
 #[cfg(target_os = "macos")]
-fn os_counted() -> Option<Io> {
+pub fn counted() -> Option<Io> {
     let mut info: libc::rusage_info_v2 = unsafe { std::mem::zeroed() };
     // SAFETY: this process's id, and a buffer of the flavour's size it writes.
     let ok = unsafe {
@@ -89,7 +85,7 @@ fn os_counted() -> Option<Io> {
 }
 
 #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
-fn os_counted() -> Option<Io> {
+pub fn counted() -> Option<Io> {
     None
 }
 
