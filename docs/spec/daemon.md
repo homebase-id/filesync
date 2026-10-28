@@ -409,9 +409,9 @@ included (service managers restart it then).
   client can't read (not encrypted, another key, no content hash) is noted too. So is what a
   scan of the folder skips that the user may want to know: a folder it can't read (what is in
   it isn't synced), a name Homebase can't hold, a device or socket; one note a reason
-  with a few of its paths, each item once (again once a whole scan found it fixed). A link
-  isn't a problem: links aren't synced by design (as junk and ignored items aren't), so they
-  are only logged, once each. A
+  with a few of its paths, each item once a run of the daemon (again once a whole scan found it
+  fixed). A link isn't a problem: links aren't synced by design (as junk and ignored items
+  aren't), so they are only logged, each named, once a run. A
   sync that stops (refused, the drive out of reach) still tells the conflicts and failures it
   had come to. What is the account's is noted on the account (its status's `recent`), not on a
   folder: a restore or an emptying of Recently deleted that fails (it was answered before it

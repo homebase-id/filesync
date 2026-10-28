@@ -1072,12 +1072,15 @@ impl Runner {
     }
 
     /// Tells what a scan skipped and the user may want to know (a folder it can't read, a
-    /// name or kind it can't sync), each once.
+    /// name or kind it can't sync), each once; links, skipped by design, only in the log.
     /// `whole`: the scan walked the whole folder, so what it didn't skip is no longer skipped
     /// (told again if it is again).
     fn tell_scan(&mut self, scan: &hbsync_local::ScanReport, whole: bool) {
-        let notes = report::scan_notes(scan, &mut self.scan_told, whole);
-        self.tell(notes);
+        let told = report::scan_notes(scan, &mut self.scan_told, whole);
+        if !told.links.is_empty() {
+            tracing::info!("not synced, as links aren't: {}", told.links.join(", "));
+        }
+        self.tell(told.notes);
     }
 
     /// Tells the conflicts and failures of a sync that then failed (`partial`).
