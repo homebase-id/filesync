@@ -18,7 +18,7 @@ leave the patch unused). The change in `src/platform_impl/windows/mod.rs`, marke
   locked screen, the icon in a closed overflow area, explorer restarting): those count as left.
   While the cursor rests on the icon, the timer still fires (as upstream's does).
 
-Proposed upstream as the same change (tauri-apps/tray-icon, branch
+Proposed upstream as the same change: https://github.com/tauri-apps/tray-icon/pull/393 (branch
 `Seifert69:fix-windows-leave-timer`).
 
 A path crate isn't covered by cargo-deny's advisory and yank checks: look at upstream
