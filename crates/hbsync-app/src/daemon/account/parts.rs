@@ -62,7 +62,7 @@ impl AccountParts {
     }
 }
 
-/// The account's drive on `remote`, made at `made` (its marker's time), from its DB at `db`:
+/// The account's drive on `remote`, made at `made` (its creation time), from its DB at `db`:
 /// refused if the DB synced with another ([`RunnerError::OtherDrive`]), taken by one that knows
 /// none yet.
 pub(super) fn drive_made(

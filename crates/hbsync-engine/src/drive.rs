@@ -477,11 +477,11 @@ impl Drive {
     }
 
     /// Whether the account's DB synced with another drive than the one made at `made` (its
-    /// marker's time, node schema "The drive's marker"): one deleted and made again, the same
-    /// alias, nothing of the old one on it. Then the DB must be set aside
+    /// creation time on the identity): one deleted and made again, the same alias, nothing of
+    /// the old one on it. Then the DB must be set aside
     /// ([`hbsync_state::Unusable::OtherDrive`]) before anything syncs: read against the new
     /// drive, what it knows would look deleted there. A DB that knows no drive yet (new, set up
-    /// again, or from before the marker) takes this one.
+    /// again, or from an earlier version) takes this one.
     pub fn other_drive(&self, made: i64) -> Result<bool, StateError> {
         let made = made.to_string();
         self.account()

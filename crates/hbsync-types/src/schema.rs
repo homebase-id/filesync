@@ -10,10 +10,6 @@ use crate::{NodeKind, Tag, Tags};
 pub const FILE_TYPE_FOLDER: i32 = 7101;
 /// `appData.fileType` of a file node (provisional, see the spec).
 pub const FILE_TYPE_FILE: i32 = 7102;
-/// `appData.fileType` of the drive's marker, not a node (the spec, "The drive's marker").
-pub const FILE_TYPE_MARKER: i32 = 7103;
-/// The `uniqueId` of the drive's marker: the drive holds one at most.
-pub const MARKER_ID: uuid::Uuid = uuid::uuid!("34f57652-5082-4f24-9246-e3ca8b991373");
 /// The one payload key of a file node.
 pub const PAYLOAD_KEY: &str = "sync_data";
 /// The current schema version.

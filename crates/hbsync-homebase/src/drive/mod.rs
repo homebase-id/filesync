@@ -15,7 +15,7 @@ use hbsync_remote::{
     Answers, ChangesPage, Deletes, ErrorClass, ForGood, Holds, NodeMeta, Paced, Planned, RefsPage,
     Remote, RemoteBody, RemoteError, RemoteHeader, Result, Upload,
 };
-use hbsync_types::schema::{ARCHIVAL_REMOVED, MARKER_ID, NodeContent, PAYLOAD_KEY};
+use hbsync_types::schema::{ARCHIVAL_REMOVED, NodeContent, PAYLOAD_KEY};
 use hbsync_types::{
     ContentHash, Doomed, NodeId, RemoteFileId, RemoteRef, Target, VersionTag, Written,
 };
@@ -55,7 +55,7 @@ pub struct TargetDrive {
 pub struct HomebaseRemote {
     client: Client,
     drive: TargetDrive,
-    /// When the drive was made, as its marker said ([`HomebaseRemote::made`]).
+    /// When the drive was made ([`HomebaseRemote::made`]).
     made: i64,
 }
 
@@ -63,6 +63,8 @@ pub struct HomebaseRemote {
 #[serde(rename_all = "camelCase")]
 struct DriveAnswer {
     target_drive: TargetDrive,
+    /// When the drive was made, Unix ms (the identity's clock).
+    created: i64,
 }
 
 /// A create's or update's answer (`CreateFileResult`, `UpdateFileResult`): the version written
@@ -165,8 +167,7 @@ fn refused(what: &str, code: &str) -> RemoteError {
 }
 
 impl HomebaseRemote {
-    /// Finds the Filesync drive on the client's identity, and when it was made (its marker,
-    /// made if it has none): two requests, four where the marker is made.
+    /// Finds the Filesync drive on the client's identity.
     pub fn connect(client: Client) -> Result<Self, HomebaseError> {
         let answer: DriveAnswer = client.get(
             &format!(
@@ -176,13 +177,17 @@ impl HomebaseRemote {
             ),
             &[],
         )?;
-        let mut remote = HomebaseRemote {
+        Ok(HomebaseRemote {
             client,
             drive: answer.target_drive,
-            made: 0,
-        };
-        remote.made = remote.find_made()?;
-        Ok(remote)
+            made: answer.created,
+        })
+    }
+
+    /// When the drive was made, as the identity said as it was found: Unix ms, its clock. A
+    /// drive deleted and made again has the same alias and slugs, and another time.
+    pub fn made(&self) -> i64 {
+        self.made
     }
 
     pub fn drive(&self) -> TargetDrive {
@@ -208,59 +213,6 @@ impl HomebaseRemote {
         self.client
             .get(&format!("{}/header", self.file(file_id)), &[])
             .map_err(remote_error)
-    }
-
-    /// When the drive was made, as its marker said as it connected (node schema, "The drive's
-    /// marker"): the marker's creation time on the identity, Unix ms.
-    pub fn made(&self) -> i64 {
-        self.made
-    }
-
-    /// When the drive was made, as its marker says; a drive without one gets one now. Of two
-    /// computers making it at once, the second finds the first's, whatever its own write was
-    /// answered (odin-core checks the `uniqueId` before it inserts: a race may end in the
-    /// table's constraint, not `existingFileWithUniqueId`). One request where it is there;
-    /// three where it is made.
-    fn find_made(&self) -> Result<i64, HomebaseError> {
-        if let Some(made) = self.marker()? {
-            return Ok(made);
-        }
-        let key = KeyHeader::random()?;
-        let transfer_iv = sealed::strong()?;
-        let parts = header_parts(
-            wire::instructions(&transfer_iv, None, false),
-            wire::marker_metadata(self.client.key(), &transfer_iv, &key),
-        );
-        let written = self.send(UploadMethod::Post, &self.files(), parts);
-        match (self.marker()?, written) {
-            (Some(made), _) => Ok(made),
-            (None, Err(e)) => Err(e),
-            (None, Ok(_)) => Err(HomebaseError::Protocol(
-                "the drive's marker isn't there once made".into(),
-            )),
-        }
-    }
-
-    /// The drive's marker's creation time, if the identity has one.
-    fn marker(&self) -> Result<Option<i64>, HomebaseError> {
-        let path = format!("{}/by-uid/{}/header", self.files(), MARKER_ID.simple());
-        match self.client.get::<wire::MarkerHeader>(&path, &[]) {
-            Ok(header) => Ok(Some(header.meta.created)),
-            Err(e) if matches!(drive_error(&e), Some(RemoteError::NotFound)) => Ok(None),
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Sends one multipart upload of `parts`.
-    fn send(
-        &self,
-        method: UploadMethod,
-        path: &str,
-        parts: Vec<Part<'_>>,
-    ) -> Result<WriteResult, HomebaseError> {
-        let boundary = Uuid::new_v4().simple().to_string();
-        self.client
-            .upload(method, path, Multipart::new(boundary, parts))
     }
 
     /// Creates a file, or with `target` updates that file at its version (the key from its
@@ -315,7 +267,14 @@ impl HomebaseRemote {
             target.is_some(),
         );
         let metadata = wire::metadata(meta, version, self.client.key(), &transfer_iv, &key);
-        let mut parts = header_parts(instructions, metadata);
+        let mut parts = vec![
+            Part::bytes(
+                "instructions",
+                "application/json",
+                instructions.to_string().into_bytes(),
+            ),
+            Part::bytes("metadata", wire::CONTENT_TYPE, metadata),
+        ];
         if let Some(s) = &mut sending {
             let hash_part = s.hash_part(&key);
             parts.push(Part::reader(
@@ -337,11 +296,15 @@ impl HomebaseRemote {
             None => (UploadMethod::Post, self.files()),
             Some(at) => (UploadMethod::Patch, self.file(at.file_id)),
         };
+        let boundary = Uuid::new_v4().simple().to_string();
         let WriteResult {
             file_id,
             new_version_tag,
             updated,
-        } = self.send(method, &path, parts).map_err(remote_error)?;
+        } = self
+            .client
+            .upload(method, &path, Multipart::new(boundary, parts))
+            .map_err(remote_error)?;
         Ok(Written {
             target: Target {
                 at: RemoteRef {
@@ -814,26 +777,6 @@ fn remote_error(e: HomebaseError) -> RemoteError {
         e @ (HomebaseError::Protocol(_) | HomebaseError::Crypto(_) | HomebaseError::Json(_)) => {
             RemoteError::Fatal(e.to_string())
         }
-    }
-}
-
-/// The first parts of an upload: its `instructions` and the header (`metadata`).
-fn header_parts<'a>(instructions: serde_json::Value, metadata: Vec<u8>) -> Vec<Part<'a>> {
-    vec![
-        Part::bytes(
-            "instructions",
-            "application/json",
-            instructions.to_string().into_bytes(),
-        ),
-        Part::bytes("metadata", wire::CONTENT_TYPE, metadata),
-    ]
-}
-
-/// The trait's error for `e`, if it is an error answer.
-fn drive_error(e: &HomebaseError) -> Option<RemoteError> {
-    match e {
-        HomebaseError::Api { what, error } => Some(api_error(what, error)),
-        _ => None,
     }
 }
 

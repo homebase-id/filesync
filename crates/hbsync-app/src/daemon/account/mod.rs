@@ -815,8 +815,8 @@ mod tests {
         checked
     }
 
-    /// The drive deleted and made again while the computer was off (another time on its
-    /// marker, nothing of the old drive on it): as the account starts again, its DB is set
+    /// The drive deleted and made again while the computer was off (another creation time,
+    /// nothing of the old drive on it): as the account starts again, its DB is set
     /// aside before anything syncs, told once, and the folder set up again: nothing here is
     /// deleted, its files go up to the new drive, the old drive is left as it was.
     #[test]

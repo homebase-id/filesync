@@ -76,14 +76,14 @@ told as an error, and tried again as the daemon starts again).
 A DB of a drive made again is set aside too. A drive deleted and made again has the same alias
 and slugs, nothing of the old one on it: read against it, what the DB knows would look deleted
 there and be deleted here, one file at a time, which the mass-delete guard (it holds this
-computer's own removals) doesn't see. So the drive's marker (node schema, "The drive's marker")
-is read once as the account connects (one request more; two more where the drive gets it), and
-its time kept in the DB (`remote.drive_made`); the account's DB is bound to the drive where it
+computer's own removals) doesn't see. So when the drive was made (`created` in the drive
+answer, which the account reads once as it connects: no request more) is kept in the DB
+(`remote.drive_made`); the account's DB is bound to the drive where it
 opens with it (its `Drive`, after any setting aside too), and one that knows another time is set
 aside before anything syncs, whatever was set aside before in that run, as
 `state.db.other-drive-<Unix time>`, and its folders set up again as above: their files go up to
-the new drive, told once. A DB that knows no drive yet (new, set up again, or from before the
-marker) takes the one it finds. A drive made again while the account stays connected is found at
+the new drive, told once. A DB that knows no drive yet (new, set up again, or from an earlier version)
+takes the one it finds. A drive made again while the account stays connected is found at
 its next connect (a login, or the daemon's start).
 
 The recovery rule (data safety): setting a DB aside never deletes a file, here or on the drive:

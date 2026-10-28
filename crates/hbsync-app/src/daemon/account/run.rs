@@ -648,8 +648,8 @@ impl Account {
         None
     }
 
-    /// The drive, once the identity answers (finding it and when it was made takes two requests,
-    /// four where it gets its marker); `None` when stopped first.
+    /// The drive, once the identity answers (finding it takes a request); `None` when stopped
+    /// first.
     fn connect(
         &self,
         client: &Client,

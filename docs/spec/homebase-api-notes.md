@@ -45,8 +45,13 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   sends its fixed app id: registration needs one, and the same id on every device is harmless.
 - **Addressing by slug** **[verified, tried]**: once registered, the client finds its drive
   with `GET /api/v2/apps/filesync/drives/filesync` (`V2AppDriveController.cs`); the answer
-  carries `targetDrive {alias, type}`, `driveSlug`, `driveTypeSlug`, `appId`, `attributes`.
-  File routes still take the alias.
+  carries `targetDrive {alias, type}`, `driveSlug`, `driveTypeSlug`, `appId`, `attributes`, and
+  `created` (Unix ms, when the drive was made: the `Drives` row's, odin-core PR pending). File
+  routes still take the alias.
+- **A drive made again** **[verified]**: its id is the alias the app asks for
+  (`DriveManager.CreateDriveAsync`), fixed in `app.rs`, so a drive deleted and made again has the
+  same alias and slugs; only its `created` differs. The client keeps it per account DB and sets
+  a DB that knows another aside (`daemon.md`).
 - **Registration flow** **[verified, tried]**: an unregistered app is sent to
   `/owner/appreg`, which creates the requested drives and registers the app, then returns to
   the authorize URL (`YouAuthUnifiedController.cs:155-162` sets `return`), so the flow resumes

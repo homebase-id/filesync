@@ -72,8 +72,8 @@ pub enum RunnerError {
     Panicked,
     #[error(transparent)]
     Folder(#[from] RootError),
-    /// The account's DB synced with a drive deleted and made again since (another time on its
-    /// marker): set aside before anything syncs ([`Unusable::OtherDrive`]).
+    /// The account's DB synced with a drive deleted and made again since (another creation
+    /// time): set aside before anything syncs ([`Unusable::OtherDrive`]).
     #[error("this computer's sync records are of a Filesync drive deleted and made again since")]
     OtherDrive,
 }

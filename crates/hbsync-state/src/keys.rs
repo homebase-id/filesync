@@ -27,9 +27,9 @@ pub(crate) const REMOVED_SEQ: AccountKey = AccountKey("deleted.seq");
 pub(crate) const DB_ID: AccountKey = AccountKey("db.id");
 /// Which login the stored file tokens are sealed under (a fingerprint of its key).
 pub const TOKENS_SEALED_BY: AccountKey = AccountKey("remote.tokens_sealed_by");
-/// When the drive this DB syncs with was made, as its marker says (Unix ms, the server's clock;
-/// node schema, "The drive's marker"): a drive found with another is another drive, and the DB
-/// is set aside ([`crate::Unusable::OtherDrive`]).
+/// When the drive this DB syncs with was made (Unix ms, the server's clock): a drive found with
+/// another time is another drive, made again, and the DB is set aside
+/// ([`crate::Unusable::OtherDrive`]).
 pub const DRIVE_MADE: AccountKey = AccountKey("remote.drive_made");
 /// Why the DB this one replaced was set aside (`too-old`, `corrupt`, `other-drive`): one made so sets the
 /// account's folders up again as it starts, whichever it didn't have yet.

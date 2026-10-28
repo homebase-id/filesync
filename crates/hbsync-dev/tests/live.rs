@@ -69,33 +69,16 @@ fn a_missing_file_is_not_found() -> R {
     Ok(())
 }
 
-/// The drive has one marker (node schema, "The drive's marker"): computers asking at once, on
-/// a drive without one (the first run on an identity), find the one the first made; asked
-/// again, the same time.
+/// The drive answer says when the drive was made (the identity's clock), the same on every
+/// connection: what tells it from one deleted and made again.
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE)"]
-fn the_drive_has_one_marker() -> R {
+fn the_drive_says_when_it_was_made() -> R {
     let _drive = beside_others();
-    let asking: Vec<_> = (0..4)
-        .map(|_| {
-            std::thread::spawn(|| {
-                live_remote()
-                    .map(|remote| remote.made())
-                    .map_err(|e| e.to_string())
-            })
-        })
-        .collect();
-    let mut made = Vec::new();
-    for asked in asking {
-        made.push(asked.join().map_err(|_| "panicked")??);
-    }
-    made.dedup();
-    assert_eq!(made.len(), 1, "{made:?}");
-    let remote = live_remote()?;
-    assert_eq!(remote.made(), made[0]);
-    // Its creation time on the identity, Unix ms.
-    assert!(made[0] > 1_700_000_000_000, "{made:?}");
-    println!("the drive was made at {}", made[0]);
+    let made = live_remote()?.made();
+    assert_eq!(live_remote()?.made(), made);
+    assert!(made > 1_600_000_000_000, "{made}");
+    println!("the drive was made at {made}");
     Ok(())
 }
 
