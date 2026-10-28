@@ -46,9 +46,10 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
 - **Addressing by slug** **[verified, tried]**: once registered, the client finds its drive
   with `GET /api/v2/apps/filesync/drives/filesync` (`V2AppDriveController.cs`); the answer
   carries `targetDrive {alias, type}`, `driveSlug`, `driveTypeSlug`, `appId`, `attributes`.
-  File routes still take the alias. It is to carry `created` too (Unix ms, when the drive was
-  made: the `Drives` row's `created`, **[verified]** `TableDrivesCRUD`), which odin-core doesn't
-  send yet (odin-core #2038, pending; its shape **[inferred]**).
+  File routes still take the alias. It carries `created` too (Unix ms, when the drive was
+  made: the `Drives` row's `created`, **[verified]** `TableDrivesCRUD`), from odin-core v0.1.973
+  (PR #2042, #2038; **[verified]** live on frodo). Compare it for a change, not for order: two hosts
+  that made versions of one drive (after an identity move) need not agree on the time.
 - **A drive made again** **[verified]**: its id is the alias the app asks for
   (`DriveManager.CreateDriveAsync`), fixed in `app.rs`, so a drive deleted and made again has the
   same alias and slugs. Of what the client sees, only `created` differs (its storage key does
