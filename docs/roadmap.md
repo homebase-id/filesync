@@ -45,7 +45,7 @@ In this order:
   gone with blocking pinned to 1.6.2 (0.10.1 on the user's Linux desktop, idle: the daemon 2.08
   a second before, 0.07 after; the tray 2.05, 0.15 while its menu's times changed, 2 a minute
   idle). Windows 0.10.2 (windows-bench, 2026-10-28): the daemon 0.32 a second (10.2 on 0.9.1:
-  notify's watcher, patched in `vendor/notify`); the tray 0.09, but 64–90 a second for good after
+  notify's watcher, patched in `vendor/notify`); the tray 0.09, but 89–94 a second for good after
   the cursor rested on its icon (tray-icon's leave timer never stopped: patched in
   `vendor/tray-icon`). Left: the daemon's notification thread, its ping every 30 s and the pong
   (about 4 a minute): longer only if no proxy in front of an identity closes a connection quiet
