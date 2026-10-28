@@ -9,6 +9,22 @@ macOS and Linux, with the tray, the daemon and the CLI, role folders, filters, R
 deleted and signed installers that update themselves; a state DB too old or damaged to use is
 set aside and the folder set up again on its own.
 
+## Waiting on odin-core
+
+- **A drive made again tells itself apart by its creation time** (#319, a draft until
+  odin-core #2038 is deployed: the drive answer's `created`). A computer that synced the old
+  drive then sets its records aside and merges its folders with the new one, instead of taking
+  its files as deleted there. Merge it once the server has it (no fallback).
+- **An upload whose uniqueId the server already has** (waits for a fix in odin-core first;
+  #295; found in the first sync of 309 GB on 0.9.0, where six files of 11–20 GB lost their
+  answer and one was sent twice). The
+  server answers 4105 (odin-core #2019) right after the metadata, while the payload is still
+  being sent: react at once (stop sending, treat the file as already there), as the server
+  closes the connection after about 5 seconds, so a 20 GB file isn't sent twice. Then, and
+  after any upload that ended without an answer, look the file up by its uniqueId
+  (`getByUniqueId`) before sending it again. (The lost answers go away on the server's side:
+  it will answer 200 once it has the file, before moving it to long-term storage.)
+
 ## Small fixes
 
 - **A removed folder waiting for its name lets what its removal took along go** (potential):
@@ -21,12 +37,6 @@ set aside and the folder set up again on its own.
 - **Requests in flight cancellable on stop** (later): a stop waits up to 15 s for them, then
   holds the state DBs and exits (#307); cancelling the transfers and requests at once would
   make a stop immediate and the cut rarer.
-- **A drive made again under computers that synced the old one** (for the user to decide):
-  setup gives the app its drive back only on a computer that never synced with the identity,
-  as the new drive has the old one's alias and type. A computer that did is refused there, and
-  one whose daemon runs meets the new, empty drive with the old drive's state. Needs a way to
-  tell the drives apart (an id of our own on the drive, say), then the state set aside and the
-  folders merged again.
 
 ## Performance (found comparing with Dropbox, 2026-10-26)
 
@@ -56,15 +66,6 @@ Later, together (not urgent):
 
 ## Next
 
-- **An upload whose uniqueId the server already has** (waits for a fix in odin-core first;
-  #295; found in the first sync of 309 GB on 0.9.0, where six files of 11–20 GB lost their
-  answer and one was sent twice). The
-  server answers 4105 (odin-core #2019) right after the metadata, while the payload is still
-  being sent: react at once (stop sending, treat the file as already there), as the server
-  closes the connection after about 5 seconds, so a 20 GB file isn't sent twice. Then, and
-  after any upload that ended without an answer, look the file up by its uniqueId
-  (`getByUniqueId`) before sending it again. (The lost answers go away on the server's side:
-  it will answer 200 once it has the file, before moving it to long-term storage.)
 - **Previous versions**: an overwritten file's earlier versions kept on the drive for 30
   days, as Recently deleted keeps deleted ones, with a list and *Restore* in the tray and the
   file browser. It is the protection against ransomware and broken apps: a file encrypted or
