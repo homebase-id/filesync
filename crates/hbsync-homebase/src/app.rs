@@ -146,6 +146,22 @@ pub(crate) fn permission_request(friendly_name: &str, return_url: &str) -> serde
     })
 }
 
+/// The owner app's page that gives the installed app more (`/owner/appupdate`, odin-js
+/// `ExtendAppPermissions.tsx`), asked for [`SYNC_DRIVE`] again: a drive the app asks for as its
+/// own is made there when it is missing, owned by the app; one that exists is only granted
+/// (`ensureAppOwnedDrives` and `ensureDrive`, verified). The browser comes back to `return_url`,
+/// with `status=canceled` when the owner says no. For [`HomebaseError::NoDrive`].
+pub fn restore_drive_url(identity: &str, return_url: &str) -> String {
+    let query = crate::query(&[
+        ("appId", &APP_ID.simple().to_string()),
+        ("d", &json!([drive_request(&SYNC_DRIVE)]).to_string()),
+        // No circle grants asked for (a missing `cd` reads the same there, verified).
+        ("cd", "[]"),
+        ("return", return_url),
+    ]);
+    format!("https://{identity}/owner/appupdate?{query}")
+}
+
 /// The app's circle on the identity, by its slug: the one installing the app created, the one an
 /// earlier version created (circles got slugs from their names: "Filesync" is `filesync`), or a
 /// new one if there is none. `circles/create` with a slug the app holds returns that circle and
@@ -184,6 +200,33 @@ mod tests {
         assert_eq!(drives[0]["ds"], "filesync");
         assert_eq!(drives[0]["p"], 3);
         assert_eq!(request["appId"], "03ae1a49cdae483f9da7fedc0e8f20b9");
+        Ok(())
+    }
+
+    /// Asked for again, the drive is the one registration asks for, as the app's own (`n`, `ds`):
+    /// what makes the owner app create it.
+    #[test]
+    fn restoring_asks_for_the_registered_drive() -> Result<(), Box<dyn std::error::Error>> {
+        let url = restore_drive_url("anna.example.com", "http://localhost:1/back?x=1");
+        let (page, query) = url.split_once('?').ok_or("no query")?;
+        assert_eq!(page, "https://anna.example.com/owner/appupdate");
+        let params: std::collections::HashMap<&str, String> = query
+            .split('&')
+            .filter_map(|kv| kv.split_once('='))
+            .map(|(k, v)| {
+                (
+                    k,
+                    percent_encoding::percent_decode_str(v)
+                        .decode_utf8_lossy()
+                        .into(),
+                )
+            })
+            .collect();
+        assert_eq!(params["appId"], "03ae1a49cdae483f9da7fedc0e8f20b9");
+        assert_eq!(params["return"], "http://localhost:1/back?x=1");
+        assert_eq!(params["cd"], "[]");
+        let registered = permission_request("laptop", "http://localhost:1/cb");
+        assert_eq!(params["d"], registered["d"].as_str().ok_or("no d")?);
         Ok(())
     }
 

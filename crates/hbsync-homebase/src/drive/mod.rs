@@ -163,16 +163,20 @@ fn refused(what: &str, code: &str) -> RemoteError {
 }
 
 impl HomebaseRemote {
-    /// Finds the Filesync drive on the client's identity.
+    /// Finds the Filesync drive on the client's identity: [`HomebaseError::NoDrive`] when the
+    /// identity says nothing answers at its address.
     pub fn connect(client: Client) -> Result<Self, HomebaseError> {
-        let answer: DriveAnswer = client.get(
-            &format!(
-                "/api/v2/apps/{}/drives/{}",
-                app::APP_SLUG,
-                app::SYNC_DRIVE.slug
-            ),
-            &[],
-        )?;
+        let route = format!(
+            "/api/v2/apps/{}/drives/{}",
+            app::APP_SLUG,
+            app::SYNC_DRIVE.slug
+        );
+        let answer: DriveAnswer = client.get(&route, &[]).map_err(|e| match e {
+            HomebaseError::Api { error, .. } if no_drive(&error) => {
+                HomebaseError::NoDrive(client.identity().to_owned())
+            }
+            e => e,
+        })?;
         Ok(HomebaseRemote {
             client,
             drive: answer.target_drive,
@@ -755,6 +759,17 @@ fn code_error(code: &str) -> Option<RemoteError> {
     Some(mapped)
 }
 
+/// The identity's own answer that nothing is at a drive's address: no such drive on the app (or
+/// no such app, which the identity doesn't tell apart; verified in odin-core's
+/// `V2AppDriveController.GetAppDrive`).
+fn no_drive(error: &ApiError) -> bool {
+    error.from_identity
+        && error
+            .code
+            .as_deref()
+            .is_some_and(|c| c.eq_ignore_ascii_case("invalidDrive"))
+}
+
 /// How a Homebase answer maps onto the trait's errors (`homebase-api-notes.md`, Errors).
 fn remote_error(e: HomebaseError) -> RemoteError {
     match e {
@@ -763,9 +778,10 @@ fn remote_error(e: HomebaseError) -> RemoteError {
         HomebaseError::Io(e) if source_ended(&e) => RemoteError::HashMismatch,
         HomebaseError::Io(e) => RemoteError::Io(e),
         HomebaseError::Api { what, error } => api_error(&what, &error),
-        e @ (HomebaseError::Protocol(_) | HomebaseError::Crypto(_) | HomebaseError::Json(_)) => {
-            RemoteError::Fatal(e.to_string())
-        }
+        e @ (HomebaseError::NoDrive(_)
+        | HomebaseError::Protocol(_)
+        | HomebaseError::Crypto(_)
+        | HomebaseError::Json(_)) => RemoteError::Fatal(e.to_string()),
     }
 }
 
@@ -821,9 +837,10 @@ impl HomebaseError {
             HomebaseError::Io(e) if source_ended(e) => ErrorClass::Stale,
             HomebaseError::Io(e) => ErrorClass::of_io(e),
             HomebaseError::Api { what, error } => api_error(what, error).class(),
-            HomebaseError::Protocol(_) | HomebaseError::Crypto(_) | HomebaseError::Json(_) => {
-                ErrorClass::Refused
-            }
+            HomebaseError::NoDrive(_)
+            | HomebaseError::Protocol(_)
+            | HomebaseError::Crypto(_)
+            | HomebaseError::Json(_) => ErrorClass::Refused,
         }
     }
 }
@@ -844,6 +861,26 @@ mod tests {
                 retry_after: None,
             },
         }
+    }
+
+    /// Only the identity's own `invalidDrive` says the drive is gone: a page in front of it
+    /// saying so, or another refusal, doesn't.
+    #[test]
+    fn only_the_identitys_invalid_drive_is_no_drive() {
+        let error = |status, code: &str, from_identity| ApiError {
+            status,
+            code: Some(code.into()),
+            title: String::new(),
+            from_identity,
+            retry_after: None,
+        };
+        assert!(no_drive(&error(400, "invalidDrive", true)));
+        assert!(!no_drive(&error(400, "invalidDrive", false)));
+        assert!(!no_drive(&error(400, "fileNotFound", true)));
+        assert_eq!(
+            HomebaseError::NoDrive("anna.example.com".into()).class(),
+            ErrorClass::Refused
+        );
     }
 
     /// An error's class is the class of the drive's error for it, so the account's connect

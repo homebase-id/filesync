@@ -198,15 +198,11 @@ fn run(command: Command) -> Res<ExitCode> {
                 };
             request.start = !no_start;
             request.at_logon = !no_autostart;
-            let mut authorize = |identity: &str, device: &str| {
-                println!("Opening your browser to authorize this computer on {identity}...");
-                setup::authorize(identity, device, browser.as_deref(), |url| {
-                    println!("If it doesn't open, visit:\n{url}\n");
-                })
+            let mut owner = setup::InBrowser {
+                browser: browser.as_deref(),
+                say: &|line| println!("{line}"),
             };
-            setup::set_up(&paths, &request, &mut authorize, &mut |line| {
-                println!("{line}")
-            })?;
+            setup::set_up(&paths, &request, &mut owner, &mut |line| println!("{line}"))?;
         }
         Command::Status { json } => match daemon::status(&paths)? {
             Some(s) if json => println!("{}", serde_json::to_string_pretty(&s)?),

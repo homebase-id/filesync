@@ -21,6 +21,12 @@ set aside and the folder set up again on its own.
 - **Requests in flight cancellable on stop** (later): a stop waits up to 15 s for them, then
   holds the state DBs and exits (#307); cancelling the transfers and requests at once would
   make a stop immediate and the cut rarer.
+- **A drive made again under computers that synced the old one** (for the user to decide):
+  setup gives the app its drive back only on a computer that never synced with the identity,
+  as the new drive has the old one's alias and type. A computer that did is refused there, and
+  one whose daemon runs meets the new, empty drive with the old drive's state. Needs a way to
+  tell the drives apart (an id of our own on the drive, say), then the state set aside and the
+  folders merged again.
 
 ## Performance (found comparing with Dropbox, 2026-10-26)
 
