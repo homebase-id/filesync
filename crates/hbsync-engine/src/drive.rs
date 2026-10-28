@@ -481,17 +481,28 @@ impl Drive {
     /// the old one on it. Then the DB must be set aside
     /// ([`hbsync_state::Unusable::OtherDrive`]) before anything syncs: read against the new
     /// drive, what it knows would look deleted there. A DB that knows no drive yet (new, set up
-    /// again, or from an earlier version) takes this one.
+    /// again, or from an earlier version) takes this one, unless it read its drive before this
+    /// one was made ([`keys::READ_AT`]).
     pub fn other_drive(&self, made: i64) -> Result<bool, StateError> {
-        let made = made.to_string();
-        self.account()
-            .write(|s| match s.account_kv(keys::DRIVE_MADE)? {
-                Some(known) => Ok(known != made),
-                None => {
-                    s.account().set_account_kv(keys::DRIVE_MADE, &made)?;
-                    Ok(false)
-                }
-            })
+        let (known, read_at) = self.account().read(|s| {
+            let read_at = s
+                .account_kv(keys::READ_AT)?
+                .and_then(|v| v.parse::<i64>().ok());
+            Ok((s.account_kv(keys::DRIVE_MADE)?, read_at))
+        })?;
+        match known {
+            Some(known) => Ok(known != made.to_string()),
+            // One from an earlier version knows when it last read its drive (the server's
+            // clock): a drive made after that is another.
+            None if read_at.is_some_and(|at| at < made) => Ok(true),
+            None => {
+                self.account().write(|s| {
+                    s.account()
+                        .set_account_kv(keys::DRIVE_MADE, &made.to_string())
+                })?;
+                Ok(false)
+            }
+        }
     }
 
     /// Restores these items of Recently deleted (each with what was deleted with it); the

@@ -831,6 +831,30 @@ fn a_new_login_forgets_the_tokens() -> R {
     Ok(())
 }
 
+/// The DB takes the first drive it opens with; one made at another time is another drive. One
+/// from an earlier version (no drive known) that read its drive before this one was made knows
+/// it is another; one that read it later takes it.
+#[test]
+fn a_drive_made_again_is_another_drive() -> R {
+    let dir = tempfile::tempdir()?;
+    let (opened, _remote) = drive(dir.path())?;
+    assert!(!opened.other_drive(1_000)?, "the first one is taken");
+    assert!(!opened.other_drive(1_000)?, "the same drive");
+    assert!(opened.other_drive(2_000)?, "made at another time");
+
+    for (read_at, other) in [(1_500, true), (2_500, false)] {
+        let dir = tempfile::tempdir()?;
+        let (opened, _remote) = drive(dir.path())?;
+        StateDb::open_account(&dir.path().join("state.db"))?.write(|s| {
+            s.account()
+                .set_account_kv(hbsync_state::keys::READ_AT, &read_at.to_string())
+        })?;
+        assert_eq!(opened.other_drive(2_000)?, other, "read at {read_at}");
+        assert_eq!(opened.other_drive(2_000)?, other, "again: {read_at}");
+    }
+    Ok(())
+}
+
 /// A role folder this device makes takes its place out of Recently deleted, as any folder the
 /// executor makes does: one there that couldn't come back (deleted for good meanwhile) isn't
 /// left beside the new one.

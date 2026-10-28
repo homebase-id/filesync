@@ -31,7 +31,7 @@ pub(super) enum Readying<'a> {
     /// As it starts ([`ready_account`]), its folders among these (the config's).
     Start(&'a [Root]),
     /// As it was found unusable while the account ran ([`heal_account`], its folders those it
-    /// syncs): checked, or with why, set aside unchecked (one of another drive until it is).
+    /// syncs): checked, or with why, set aside unchecked.
     Heal(Option<Unusable>),
 }
 
@@ -150,14 +150,9 @@ impl Account {
         loop {
             let readied = match &mut readying {
                 Readying::Start(roots) => ready_account(&self.db, &self.identity, roots),
-                // Set aside unchecked once: what is there at a later try is checked. One of
-                // another drive passes a check: set aside unchecked until it is.
+                // Set aside unchecked once: what is there at a later try is checked.
                 Readying::Heal(found) => {
-                    let why = match found {
-                        Some(Unusable::OtherDrive) => *found,
-                        _ => found.take(),
-                    };
-                    heal_account(paths, &self.identity, &self.folders(), why)
+                    heal_account(paths, &self.identity, &self.folders(), found.take())
                 }
             };
             let e = match readied {
@@ -204,6 +199,8 @@ impl Account {
     ) -> Result<(), DaemonError> {
         // Found unusable and checked; set aside.
         let (mut checked, mut healed) = (false, false);
+        // Between tries at setting aside a DB of another drive.
+        let mut other_drive = Backoff::new();
         // After a heal, the config as it is then: the runners start with its settings.
         let mut now: Option<Config> = None;
         loop {
@@ -211,10 +208,19 @@ impl Account {
                 // Synced with a drive made again since: set aside before anything syncs,
                 // whatever was set aside before in this run (read against the new drive, what
                 // it knows would be deleted here).
+                // Not the run's one heal of a damaged DB: a new one takes the drive, and isn't
+                // set aside for it again. One that wasn't set aside (a try that failed after
+                // a check found nothing wrong with it) is opened again after a pause.
                 Err(e) if e.unusable() == Some(Unusable::OtherDrive) => {
                     tracing::warn!("{}: {e}", self.identity);
                     match self.heal(paths, Some(Unusable::OtherDrive), stop, requests, msgs)? {
-                        Some(set) => healed |= set,
+                        Some(true) => {}
+                        Some(false) => {
+                            let wait_for = other_drive.after(ErrorClass::LocalFault, None);
+                            if self.wait(wait_for, stop, requests, msgs) {
+                                return Ok(());
+                            }
+                        }
                         None => return Ok(()),
                     }
                     now = Config::now(paths);

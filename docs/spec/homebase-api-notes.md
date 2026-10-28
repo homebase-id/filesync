@@ -45,12 +45,14 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   sends its fixed app id: registration needs one, and the same id on every device is harmless.
 - **Addressing by slug** **[verified, tried]**: once registered, the client finds its drive
   with `GET /api/v2/apps/filesync/drives/filesync` (`V2AppDriveController.cs`); the answer
-  carries `targetDrive {alias, type}`, `driveSlug`, `driveTypeSlug`, `appId`, `attributes`, and
-  `created` (Unix ms, when the drive was made: the `Drives` row's, odin-core PR pending). File
-  routes still take the alias.
+  carries `targetDrive {alias, type}`, `driveSlug`, `driveTypeSlug`, `appId`, `attributes`.
+  File routes still take the alias. It is to carry `created` too (Unix ms, when the drive was
+  made: the `Drives` row's `created`, **[verified]** `TableDrivesCRUD`), which odin-core doesn't
+  send yet (an odin-core change, pending; its shape **[inferred]**).
 - **A drive made again** **[verified]**: its id is the alias the app asks for
   (`DriveManager.CreateDriveAsync`), fixed in `app.rs`, so a drive deleted and made again has the
-  same alias and slugs; only its `created` differs. The client keeps it per account DB and sets
+  same alias and slugs. Of what the client sees, only `created` differs (its storage key does
+  too, which the client never sees). The client keeps it per account DB and sets
   a DB that knows another aside (`daemon.md`).
 - **Registration flow** **[verified, tried]**: an unregistered app is sent to
   `/owner/appreg`, which creates the requested drives and registers the app, then returns to
