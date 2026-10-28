@@ -23,6 +23,13 @@ Otherwise:
 | logs | `<state>/logs` | `~/Library/Logs/Homebase Filesync` | `<state>\logs` |
 | control socket | `$XDG_RUNTIME_DIR/hbsync`, else `<state>` | same as config | a named pipe |
 
+The daemon's log has a line for every sync (info): what asked for it (a change here or on the
+drive, a walk of the folder, asked, a wake-up, a retry, …), how long it took, what it did, and
+what the process read and wrote during it and since the sync before. Those are the OS's counters
+for the whole process (`hbsync_platform::io`): on Linux every read and write call (files,
+sockets, cache hits), on Windows every I/O operation (files, network, devices), on macOS the
+storage's reads and writes. What an idle sync costs, and why it ran, can be read there.
+
 Each account has one state DB, `<state>/accounts/<identity>/state.db` (the identity in lower
 case, a port's `:` as `_`), for every folder it syncs on this computer: the drive's side (its
 mirror, Recently deleted) once, each folder's own rows (what it has, what was agreed) keyed by

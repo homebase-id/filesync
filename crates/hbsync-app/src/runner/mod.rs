@@ -31,6 +31,7 @@ use hbsync_engine::root::{RootError, SyncRoot};
 use hbsync_engine::{Drive, Engine, EngineConfig, EngineError, SyncReport};
 use hbsync_local::journal::Tier;
 use hbsync_local::{Bell, Filter, FilterError, LocalObserver};
+use hbsync_platform::io::Io;
 use hbsync_remote::ErrorClass;
 use hbsync_state::{StateError, Unusable};
 use hbsync_types::NodeId;
@@ -45,7 +46,7 @@ mod schedule;
 
 pub(crate) use report::add_notes;
 pub(crate) use schedule::{Backoff, shown};
-use schedule::{Schedule, Synced};
+use schedule::{Schedule, Synced, Why, Whys};
 
 /// While the identity refuses this computer, how often a folder asks again (one sync).
 const DENIED_LOOK: Duration = Duration::from_secs(3600);
@@ -354,6 +355,8 @@ pub struct Runner {
     probing: bool,
     /// The folder without a live watcher: told, asked for again, caught up on.
     unwatched: Unwatched,
+    /// What the process had read and written as the last sync ended ([`hbsync_platform::io`]).
+    io_after: Option<Io>,
 }
 
 /// A folder without a live watcher ([`Runner::watcher_is`]): its changes are found by the
@@ -454,6 +457,7 @@ impl Runner {
             retry_refused: false,
             probing: false,
             unwatched: Unwatched::default(),
+            io_after: None,
         };
         let thread = std::thread::Builder::new()
             .name("hbsync-runner".into())
@@ -596,7 +600,7 @@ impl Runner {
                         return Ok(());
                     }
                     Msg::Command(command) => self.command(command, &mut schedule, &mut check_rules),
-                    Msg::Answered => schedule.asked(Instant::now()),
+                    Msg::Answered => schedule.asked(Instant::now(), Why::Asked),
                     // Taken below.
                     Msg::Drive | Msg::Local => {}
                 }
@@ -608,7 +612,7 @@ impl Runner {
             if let Some(p) = &mut parts {
                 // A change in this folder's part of the drive.
                 if p.drive_changed.swap(false, Ordering::SeqCst) {
-                    schedule.want();
+                    schedule.want(Why::Drive);
                 }
                 let observing = observe_after.is_none_or(|at| Instant::now() >= at);
                 match observing.then(|| p.engine.observe(&mut p.observer, Duration::ZERO)) {
@@ -617,7 +621,7 @@ impl Runner {
                         if let Some(scan) = scan {
                             self.tell_scan(&scan, false);
                             if scan.dirty > 0 {
-                                schedule.want();
+                                schedule.want(Why::Local);
                             }
                         }
                     }
@@ -669,7 +673,7 @@ impl Runner {
                     held.again = true;
                     held.shown = None;
                     self.cfg.changed.raise();
-                    schedule.asked(now);
+                    schedule.asked(now, Why::Asked);
                 }
             }
             if rules_at.is_some_and(|at| now >= at) {
@@ -697,7 +701,7 @@ impl Runner {
                                 self.unwatched.catch_up = false;
                                 self.tell_scan(&scan, true);
                                 if scan.dirty > 0 {
-                                    schedule.want();
+                                    schedule.want(Why::Scan);
                                 }
                             }
                             Err(e) if self.ends_for(e.unusable()) => return Err(e.into()),
@@ -714,7 +718,7 @@ impl Runner {
             {
                 tracing::info!("the ignore rules changed: starting over");
                 parts = None;
-                schedule.want();
+                schedule.want(Why::Rules);
             }
             if !schedule.due(now) {
                 continue;
@@ -829,6 +833,8 @@ impl Runner {
             // This sync pulls what woke it so far.
             p.drive_changed.store(false, Ordering::SeqCst);
             let began = Instant::now();
+            let why = schedule.take_why(began);
+            let io_before = hbsync_platform::io::counted();
             // Before showing it syncs: the last sync's numbers aren't this one's.
             self.progress.reset();
             self.set(|s| {
@@ -864,7 +870,12 @@ impl Runner {
                         Synced::Done
                     };
                     schedule.synced(Instant::now(), outcome);
-                    match self.record(&mut p.engine, &report, began.elapsed()) {
+                    let took = Sync {
+                        took: began.elapsed(),
+                        why,
+                        io_before,
+                    };
+                    match self.record(&mut p.engine, &report, took) {
                         Err(e) if self.ends_for(e.unusable()) => return Err(e.into()),
                         Err(e) => {
                             let class = e.class();
@@ -903,7 +914,7 @@ impl Runner {
     fn command(&mut self, command: Command, schedule: &mut Schedule, check_rules: &mut bool) {
         match command {
             Command::SyncNow => {
-                schedule.asked(Instant::now());
+                schedule.asked(Instant::now(), Why::Asked);
                 *check_rules = true;
                 // The user may have made room on the drive, changed what it refused, or let
                 // this computer in again.
@@ -1101,8 +1112,9 @@ impl Runner {
         &mut self,
         engine: &mut Engine,
         report: &SyncReport,
-        took: Duration,
+        sync: Sync,
     ) -> Result<(), StateError> {
+        let took = sync.took;
         let notes = self.notes_of(engine, report)?;
         let notes = self.told.fresh(notes);
         let token = report::held_token(&report.held);
@@ -1120,15 +1132,37 @@ impl Runner {
         kept.token = token;
         // Shown again: one answer each time, but one taken during this sync still waits.
         kept.answered = kept.answer.is_some();
-        if report.ops_done > 0 || !notes.is_empty() {
-            tracing::info!(
-                "synced in {took:.1?}: {} done, {} remote changes, {} adopted, {} pending",
-                report.ops_done,
-                report.feed.live + report.feed.deleted,
-                report.adopted,
-                report.pending
-            );
-        }
+        // Every sync, what asked for it and what it read: what an idle one costs, and why it
+        // ran at all.
+        let io_after = hbsync_platform::io::counted();
+        let io = match (sync.io_before, io_after) {
+            (Some(before), Some(after)) => {
+                let during = after.since(before);
+                let between = self.io_after.map(|last| before.since(last));
+                format!(
+                    "; the process read {}, wrote {}{}",
+                    crate::words::bytes(during.read),
+                    crate::words::bytes(during.written),
+                    between.map_or(String::new(), |b| format!(
+                        " (since the last sync: read {}, wrote {})",
+                        crate::words::bytes(b.read),
+                        crate::words::bytes(b.written)
+                    ))
+                )
+            }
+            _ => String::new(),
+        };
+        self.io_after = io_after;
+        tracing::info!(
+            "synced in {took:.1?} ({}): done {}, remote changes {}, feed pages {}, adopted {}, \
+             pending {}{io}",
+            sync.why,
+            report.ops_done,
+            report.feed.live + report.feed.deleted,
+            report.feed.pages,
+            report.adopted,
+            report.pending
+        );
         for note in &notes {
             tracing::warn!("{note}");
         }
@@ -1143,6 +1177,14 @@ impl Runner {
         drop(kept);
         Ok(())
     }
+}
+
+/// A sync that ended, for its log line: how long it took, what asked for it, and what the
+/// process had read and written as it began.
+struct Sync {
+    took: Duration,
+    why: Whys,
+    io_before: Option<Io>,
 }
 
 /// The note for a folder without a live watcher (`why`), its changes found every `look`.
