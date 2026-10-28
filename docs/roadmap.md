@@ -9,8 +9,27 @@ macOS and Linux, with the tray, the daemon and the CLI, role folders, filters, R
 deleted and signed installers that update themselves; a state DB too old or damaged to use is
 set aside and the folder set up again on its own.
 
+## Waiting on odin-core
+
+- **A drive made again tells itself apart by its creation time** (#319, a draft until
+  odin-core #2038 is deployed: the drive answer's `created`). A computer that synced the old
+  drive then sets its records aside and merges its folders with the new one, instead of taking
+  its files as deleted there. Merge it once the server has it (no fallback).
+- **An upload whose uniqueId the server already has** (#295; found in the first sync of
+  309 GB on 0.9.0, where six files of 11–20 GB lost their answer and one was sent twice). The
+  server answers 4105 (odin-core #2019) right after the metadata, while the payload is still
+  being sent: react at once (stop sending, treat the file as already there), as the server
+  closes the connection after about 5 seconds, so a 20 GB file isn't sent twice. Then, and
+  after any upload that ended without an answer, look the file up by its uniqueId
+  (`getByUniqueId`) before sending it again. (The lost answers go away on the server's side:
+  it will answer 200 once it has the file, before moving it to long-term storage.)
+
 ## Small fixes
 
+- **A link isn't a sync problem** (first): links aren't synced (not followed, not stored), so
+  the tray counts them as a sync problem after every start, one that never clears (34 links in
+  the user's folder: an old git project's, a `node_modules`'). Show them once as not synced
+  here, as an ignored item is, not as a problem.
 - **A removed folder waiting for its name lets what its removal took along go** (potential):
   a folder deleted part way elsewhere, restored here, whose name is taken waits for the name,
   but the files its removal took along (live, unchanged here) go to Recently deleted on their
@@ -21,12 +40,6 @@ set aside and the folder set up again on its own.
 - **Requests in flight cancellable on stop** (later): a stop waits up to 15 s for them, then
   holds the state DBs and exits (#307); cancelling the transfers and requests at once would
   make a stop immediate and the cut rarer.
-- **A drive made again under computers that synced the old one** (for the user to decide):
-  setup gives the app its drive back only on a computer that never synced with the identity,
-  as the new drive has the old one's alias and type. A computer that did is refused there, and
-  one whose daemon runs meets the new, empty drive with the old drive's state. Needs a way to
-  tell the drives apart (an id of our own on the drive, say), then the state set aside and the
-  folders merged again.
 
 ## Performance (found comparing with Dropbox, 2026-10-26)
 
@@ -56,15 +69,6 @@ Later, together (not urgent):
 
 ## Next
 
-- **An upload whose uniqueId the server already has** (waits for a fix in odin-core first;
-  #295; found in the first sync of 309 GB on 0.9.0, where six files of 11–20 GB lost their
-  answer and one was sent twice). The
-  server answers 4105 (odin-core #2019) right after the metadata, while the payload is still
-  being sent: react at once (stop sending, treat the file as already there), as the server
-  closes the connection after about 5 seconds, so a 20 GB file isn't sent twice. Then, and
-  after any upload that ended without an answer, look the file up by its uniqueId
-  (`getByUniqueId`) before sending it again. (The lost answers go away on the server's side:
-  it will answer 200 once it has the file, before moving it to long-term storage.)
 - **Previous versions**: an overwritten file's earlier versions kept on the drive for 30
   days, as Recently deleted keeps deleted ones, with a list and *Restore* in the tray and the
   file browser. It is the protection against ransomware and broken apps: a file encrypted or
@@ -77,6 +81,15 @@ Later, together (not urgent):
 
 ## Ideas and things to weigh
 
+- **Sync links as links** (idea, 2026-10-28): a file type of its own for a link (a node that
+  says "this is a link, not a file"), holding its target as the OS that made it wrote it
+  (relative or absolute), and made again as a link on the other computers, as Dropbox does.
+  What a link is differs per OS and file system: symbolic links on Linux and macOS; on Windows
+  symbolic links (NTFS only, and only with Developer Mode or an elevated process), junctions and
+  `.lnk` shortcuts; none on FAT or exFAT. Where one can't be made, it stays on the drive only.
+  Hard links aren't links in this sense: each name is an ordinary file and syncs as one (two
+  copies elsewhere). Costs a node kind in the schema, the file browser showing it, and a rule
+  for a target outside the folder or broken.
 - **`.gitignore` inside git repos** (for consideration, 2026-10-23): inside a folder with
   `.git`, honour its `.gitignore` files with git's rules (per folder, `!` included), so a repo
   can live in a synced folder without its build output and temp files; ignored items stay on
