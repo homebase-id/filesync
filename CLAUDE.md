@@ -25,7 +25,7 @@ a client registration per computer, so two computers sharing one token don't hea
 The feed needs odin-core with PR #1973 (merged as 4eb50e5db, after v0.1.962; #1909): a server
 without it can keep an answer from before a write and hide that write for up to 2 h. Connecting
 needs the drive answer's `created` (when the drive was made: a drive deleted and made again is
-told apart by it), an odin-core change not made yet: a server without it can't be connected to,
+told apart by it), an odin-core change not made yet (odin-core #2038): a server without it can't be connected to,
 so this client waits for it. Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
 sync semantics §10): built-in junk, and per-device ignore rules in `.hbsync/ignore` (gitignore
 syntax, picked up a second after an edit, within a minute without a watcher); an ignored item

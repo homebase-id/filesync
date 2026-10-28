@@ -48,7 +48,7 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   carries `targetDrive {alias, type}`, `driveSlug`, `driveTypeSlug`, `appId`, `attributes`.
   File routes still take the alias. It is to carry `created` too (Unix ms, when the drive was
   made: the `Drives` row's `created`, **[verified]** `TableDrivesCRUD`), which odin-core doesn't
-  send yet (an odin-core change, pending; its shape **[inferred]**).
+  send yet (odin-core #2038, pending; its shape **[inferred]**).
 - **A drive made again** **[verified]**: its id is the alias the app asks for
   (`DriveManager.CreateDriveAsync`), fixed in `app.rs`, so a drive deleted and made again has the
   same alias and slugs. Of what the client sees, only `created` differs (its storage key does
