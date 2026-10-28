@@ -81,11 +81,15 @@ Later, together (not urgent):
 
 ## Ideas and things to weigh
 
-- **Sync links as links** (idea, 2026-10-28): store a link's target (as it is written,
-  relative or absolute) in a node of its own, and make the link again on the other computers,
-  as Dropbox does. Costs a node kind in the schema (and the file browser showing it), a rule
-  for a target outside the folder or broken, and on Windows the right to make links (Developer
-  Mode or an elevated process); where it can't be made, the link stays on the drive only.
+- **Sync links as links** (idea, 2026-10-28): a file type of its own for a link (a node that
+  says "this is a link, not a file"), holding its target as the OS that made it wrote it
+  (relative or absolute), and made again as a link on the other computers, as Dropbox does.
+  What a link is differs per OS and file system: symbolic links on Linux and macOS; on Windows
+  symbolic links (NTFS only, and only with Developer Mode or an elevated process), junctions and
+  `.lnk` shortcuts; none on FAT or exFAT. Where one can't be made, it stays on the drive only.
+  Hard links aren't links in this sense: each name is an ordinary file and syncs as one (two
+  copies elsewhere). Costs a node kind in the schema, the file browser showing it, and a rule
+  for a target outside the folder or broken.
 - **`.gitignore` inside git repos** (for consideration, 2026-10-23): inside a folder with
   `.git`, honour its `.gitignore` files with git's rules (per folder, `!` included), so a repo
   can live in a synced folder without its build output and temp files; ignored items stay on
