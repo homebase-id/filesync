@@ -155,6 +155,9 @@ pub enum Unusable {
 }
 
 impl Unusable {
+    /// Every reason, as a DB set aside for it is named ([`Unusable::name`]).
+    pub const ALL: [Unusable; 3] = [Unusable::TooOld, Unusable::Corrupt, Unusable::OtherDrive];
+
     /// Its name in the name of a file set aside for it.
     pub fn name(self) -> &'static str {
         match self {

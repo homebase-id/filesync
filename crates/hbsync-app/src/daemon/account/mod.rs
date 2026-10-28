@@ -671,84 +671,141 @@ mod tests {
         Ok(())
     }
 
+    /// An account started on a thread as the daemon starts one: its DB readied, then synced on
+    /// the parts `open` makes of it (no notifications), until stopped.
+    struct Started {
+        account: Arc<Account>,
+        stop: Arc<AtomicBool>,
+        thread: std::thread::JoinHandle<Result<(), crate::daemon::DaemonError>>,
+    }
+
+    impl Started {
+        fn new(
+            paths: &Paths,
+            root: Root,
+            open: impl Fn(&Path) -> Result<Arc<Drive>, crate::runner::RunnerError> + Send + 'static,
+        ) -> Started {
+            use super::feed::{Notifications, Puller};
+
+            let (account, requests) = Account::new(paths, &root, None, Arc::default());
+            let stop = Arc::new(AtomicBool::new(false));
+            let (running, paths, stopping) =
+                (Arc::clone(&account), paths.clone(), Arc::clone(&stop));
+            let thread = std::thread::spawn(move || {
+                let mut msgs = Vec::new();
+                let roots = [root];
+                let start = super::run::Readying::Start(&roots);
+                running.ready_db(&paths, start, &stopping, &requests, &mut msgs)?;
+                let config = crate::Config::default();
+                running.sync(&paths, &config, &requests, &stopping, &mut msgs, |db| {
+                    let drive = open(db)?;
+                    let puller = Puller::spawn(Arc::clone(&drive));
+                    Ok(AccountParts {
+                        drive,
+                        notifier: Err(std::io::Error::other("none here")),
+                        notifications: Notifications::new(puller, std::time::Instant::now()),
+                    })
+                })
+            });
+            Started {
+                account,
+                stop,
+                thread,
+            }
+        }
+
+        /// Waits up to 30 s for its first folder to be `done`.
+        fn wait(
+            &self,
+            what: &str,
+            done: &dyn Fn(&AccountStatus, &FolderStatus) -> bool,
+        ) -> Result<(), String> {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            loop {
+                let (status, folders) = self.account.status();
+                if folders.first().is_some_and(|f| done(&status, f)) {
+                    return Ok(());
+                }
+                if std::time::Instant::now() > until {
+                    return Err(format!("timed out: {what}: {status:?} {folders:?}"));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+        }
+
+        /// How often it told that its DB was set aside for `why`.
+        fn told(&self, why: hbsync_state::Unusable) -> usize {
+            let set_aside = words::set_aside(why);
+            let (status, _) = self.account.status();
+            status.recent.iter().filter(|n| n.text == set_aside).count()
+        }
+
+        /// Stops it, whatever `checked` found: nothing runs on into the other tests.
+        fn stop<T>(self, checked: T) -> Result<T, Box<dyn std::error::Error>> {
+            self.stop.store(true, Ordering::SeqCst);
+            self.account.wake();
+            self.thread.join().map_err(|_| "panicked")??;
+            Ok(checked)
+        }
+    }
+
+    /// Its folder synced, idle, nothing pending.
+    fn synced(_: &AccountStatus, f: &FolderStatus) -> bool {
+        f.state == State::Idle && f.last_sync.is_some() && f.pending == 0
+    }
+
+    /// How many DBs were set aside beside `db` for `why`.
+    fn set_aside(db: &Path, why: hbsync_state::Unusable) -> std::io::Result<usize> {
+        let prefix = format!("state.db.{}-", why.name());
+        let dir = std::fs::read_dir(db.parent().unwrap_or(db))?;
+        Ok(dir
+            .flatten()
+            .filter(|e| {
+                let name = e.file_name().to_string_lossy().into_owned();
+                name.starts_with(&prefix) && !name.ends_with("-wal") && !name.ends_with("-shm")
+            })
+            .count())
+    }
+
+    /// A home with the main folder of `identity` set up in its DB, holding `files`: its paths,
+    /// the folder and the DB.
+    fn set_up(
+        home: &Path,
+        identity: &Identity,
+        files: &[(&str, &str)],
+    ) -> Result<(Paths, PathBuf, PathBuf), Box<dyn std::error::Error>> {
+        let paths = Paths::under(home);
+        let folder = home.join("Homebase");
+        for (name, text) in files {
+            let path = folder.join(name);
+            std::fs::create_dir_all(path.parent().ok_or("no parent")?)?;
+            std::fs::write(path, text)?;
+        }
+        let db = paths.account_db(identity);
+        std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
+        hbsync_engine::root::SyncRoot::create(&db, identity, &folder)?;
+        Ok((paths, folder, db))
+    }
+
     /// Its DB damaged while the account runs (SQLite answers that it is malformed): its folder's
     /// runner ends, the account stops its parts, sets the DB aside, tells it once, and syncs on
     /// in a new one, the folder adopted (nothing sent, nothing deleted). Damaged again, it isn't
     /// set aside again: the folder fails, starting again after a pause.
     #[test]
     fn a_db_damaged_while_running_is_set_aside_once() -> Result<(), Box<dyn std::error::Error>> {
-        use std::time::{Duration, Instant};
-
-        use super::feed::{Notifications, Puller};
-        use crate::Config;
+        use hbsync_state::Unusable::Corrupt;
 
         let home = tempfile::tempdir()?;
-        let home_dir = home.path().canonicalize()?;
-        let paths = Paths::under(&home_dir);
         let identity: Identity = "a.example".into();
-        let folder = home_dir.join("Homebase");
-        std::fs::create_dir_all(&folder)?;
-        std::fs::write(folder.join("a.txt"), "a")?;
-        let root = Root::main(&identity, &folder);
-        let db = paths.account_db(&identity);
-        std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
-        hbsync_engine::root::SyncRoot::create(&db, &identity, &folder)?;
+        let (paths, folder, db) =
+            set_up(&home.path().canonicalize()?, &identity, &[("a.txt", "a")])?;
         let server = FakeServer::new(ServerConfig::default());
         let remote = FakeRemote::new(server.clone());
 
-        let (account, requests) = Account::new(&paths, &root, None, Arc::default());
-        let stop = Arc::new(AtomicBool::new(false));
-        let running = {
-            let (account, paths, stop, remote) = (
-                Arc::clone(&account),
-                paths.clone(),
-                Arc::clone(&stop),
-                remote.clone(),
-            );
-            let identity = identity.clone();
-            std::thread::spawn(move || {
-                let mut msgs = Vec::new();
-                let roots = [root];
-                let start = super::run::Readying::Start(&roots);
-                account.ready_db(&paths, start, &stop, &requests, &mut msgs)?;
-                account.sync(
-                    &paths,
-                    &Config::default(),
-                    &requests,
-                    &stop,
-                    &mut msgs,
-                    |db| {
-                        let drive = Drive::open(db, &identity, Arc::new(remote.clone()))?;
-                        let puller = Puller::spawn(Arc::clone(&drive));
-                        Ok(AccountParts {
-                            drive,
-                            notifier: Err(std::io::Error::other("none here")),
-                            notifications: Notifications::new(puller, Instant::now()),
-                        })
-                    },
-                )
-            })
-        };
-        let wait = |what: &str, done: &dyn Fn(&AccountStatus, &FolderStatus) -> bool| {
-            let until = Instant::now() + Duration::from_secs(30);
-            loop {
-                let (status, folders) = account.status();
-                if folders.first().is_some_and(|f| done(&status, f)) {
-                    return Ok(());
-                }
-                if Instant::now() > until {
-                    return Err(format!("timed out: {what}: {status:?} {folders:?}"));
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-        };
-        let synced = |_: &AccountStatus, f: &FolderStatus| {
-            f.state == State::Idle && f.last_sync.is_some() && f.pending == 0
-        };
-        let told = |s: &AccountStatus| {
-            let set_aside = words::set_aside(hbsync_state::Unusable::Corrupt);
-            s.recent.iter().filter(|n| n.text == set_aside).count()
-        };
+        let opening = (identity.clone(), remote.clone());
+        let started = Started::new(&paths, Root::main(&identity, &folder), move |db| {
+            Ok(Drive::open(db, &opening.0, Arc::new(opening.1.clone()))?)
+        });
         // Its table's root page past the file's end: SQLite answers that the DB is malformed,
         // on every connection, once each reads the schema again.
         let damage = || -> Result<(), Box<dyn std::error::Error>> {
@@ -762,32 +819,23 @@ mod tests {
             Ok(())
         };
         let sync_now = || -> Result<(), Box<dyn std::error::Error>> {
-            account
+            started
+                .account
                 .runner(&folder)
                 .ok_or("no runner")??
                 .send(Command::SyncNow);
             Ok(())
         };
-        let aside = || -> std::io::Result<usize> {
-            let named = |e: &std::fs::DirEntry| {
-                let name = e.file_name().to_string_lossy().into_owned();
-                name.starts_with("state.db.corrupt-")
-                    && !name.ends_with("-wal")
-                    && !name.ends_with("-shm")
-            };
-            let dir = std::fs::read_dir(db.parent().unwrap_or(&db))?;
-            Ok(dir.flatten().filter(named).count())
-        };
 
         let checks = || -> Result<(), Box<dyn std::error::Error>> {
-            wait("the first sync", &synced)?;
+            started.wait("the first sync", &synced)?;
             let uploads = remote.faults().uploads;
             damage()?;
             sync_now()?;
-            wait("set aside and synced again", &|s, f| {
-                told(s) == 1 && synced(s, f)
+            started.wait("set aside and synced again", &|s, f| {
+                synced(s, f) && started.told(Corrupt) == 1
             })?;
-            assert_eq!(aside()?, 1, "kept");
+            assert_eq!(set_aside(&db, Corrupt)?, 1, "kept");
             hbsync_engine::root::SyncRoot::find(&db, &identity, &folder)?;
             assert_eq!(
                 remote.faults().uploads,
@@ -798,115 +846,47 @@ mod tests {
 
             damage()?;
             sync_now()?;
-            wait("failing", &|_, f| {
+            started.wait("failing", &|_, f| {
                 f.state == State::Failing
                     && f.error.as_deref().is_some_and(|e| e.contains("malformed"))
             })?;
-            std::thread::sleep(Duration::from_millis(300));
-            let (status, _) = account.status();
-            assert_eq!((told(&status), aside()?), (1, 1), "set aside once a run");
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            assert_eq!(
+                (started.told(Corrupt), set_aside(&db, Corrupt)?),
+                (1, 1),
+                "set aside once a run"
+            );
             Ok(())
         };
         let checked = checks();
-        // Stopped whatever the checks found: nothing runs on into the other tests.
-        stop.store(true, Ordering::SeqCst);
-        account.wake();
-        running.join().map_err(|_| "panicked")??;
-        checked
+        started.stop(checked)?
     }
 
     /// The drive deleted and made again while the computer was off (another creation time,
-    /// nothing of the old drive on it): as the account starts again, its DB is set
-    /// aside before anything syncs, told once, and the folder set up again: nothing here is
-    /// deleted, its files go up to the new drive, the old drive is left as it was.
+    /// nothing of the old drive on it): as the account starts again, its DB is set aside before
+    /// anything syncs, told once, and the folder set up again: nothing here is deleted, its
+    /// files go up to the new drive, the old drive is left as it was.
     #[test]
     fn a_db_of_a_drive_made_again_is_set_aside_before_anything_syncs()
     -> Result<(), Box<dyn std::error::Error>> {
-        use std::time::{Duration, Instant};
-
-        use super::feed::{Notifications, Puller};
-        use crate::Config;
+        use hbsync_state::Unusable::OtherDrive;
 
         let home = tempfile::tempdir()?;
-        let home_dir = home.path().canonicalize()?;
-        let paths = Paths::under(&home_dir);
         let identity: Identity = "a.example".into();
-        let folder = home_dir.join("Homebase");
-        std::fs::create_dir_all(folder.join("sub"))?;
-        std::fs::write(folder.join("a.txt"), "a")?;
-        std::fs::write(folder.join("sub/b.txt"), "b")?;
-        let db = paths.account_db(&identity);
-        std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
-        hbsync_engine::root::SyncRoot::create(&db, &identity, &folder)?;
-        let other_drive = words::set_aside(hbsync_state::Unusable::OtherDrive);
+        let files = [("a.txt", "a"), ("sub/b.txt", "b")];
+        let (paths, folder, db) = set_up(&home.path().canonicalize()?, &identity, &files)?;
 
         // The account started on `remote`'s drive, made at `made`, until its folder synced:
         // how often it told that the DB was set aside.
         let run = |remote: &FakeRemote, made: i64| -> Result<usize, Box<dyn std::error::Error>> {
-            let root = Root::main(&identity, &folder);
-            let (account, requests) = Account::new(&paths, &root, None, Arc::default());
-            let stop = Arc::new(AtomicBool::new(false));
-            let running = {
-                let (account, paths, stop) =
-                    (Arc::clone(&account), paths.clone(), Arc::clone(&stop));
-                let (identity, remote) = (identity.clone(), remote.clone());
-                std::thread::spawn(move || {
-                    let mut msgs = Vec::new();
-                    let roots = [root];
-                    let start = super::run::Readying::Start(&roots);
-                    account.ready_db(&paths, start, &stop, &requests, &mut msgs)?;
-                    account.sync(
-                        &paths,
-                        &Config::default(),
-                        &requests,
-                        &stop,
-                        &mut msgs,
-                        |db| {
-                            let drive =
-                                parts::drive_made(&identity, Arc::new(remote.clone()), made, db)?;
-                            let puller = Puller::spawn(Arc::clone(&drive));
-                            Ok(AccountParts {
-                                drive,
-                                notifier: Err(std::io::Error::other("none here")),
-                                notifications: Notifications::new(puller, Instant::now()),
-                            })
-                        },
-                    )
-                })
-            };
-            let until = Instant::now() + Duration::from_secs(30);
-            let synced = loop {
-                let (status, folders) = account.status();
-                if folders.first().is_some_and(|f| {
-                    f.state == State::Idle && f.last_sync.is_some() && f.pending == 0
-                }) {
-                    break Ok(status
-                        .recent
-                        .iter()
-                        .filter(|n| n.text == other_drive)
-                        .count());
-                }
-                if Instant::now() > until {
-                    break Err(format!("timed out: {status:?} {folders:?}"));
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            };
-            stop.store(true, Ordering::SeqCst);
-            account.wake();
-            running.join().map_err(|_| "panicked")??;
-            Ok(synced?)
-        };
-        let aside = || -> std::io::Result<usize> {
-            let dir = std::fs::read_dir(db.parent().unwrap_or(&db))?;
-            Ok(dir
-                .flatten()
-                .filter(|e| {
-                    let name = e.file_name().to_string_lossy().into_owned();
-                    name.starts_with("state.db.other-drive-")
-                        && !name.ends_with("-wal")
-                        && !name.ends_with("-shm")
-                })
-                .count())
+            let opening = (identity.clone(), remote.clone());
+            let started = Started::new(&paths, Root::main(&identity, &folder), move |db| {
+                parts::drive_made(&opening.0, Arc::new(opening.1.clone()), made, db)
+            });
+            let checked = started
+                .wait("synced", &synced)
+                .map(|()| started.told(OtherDrive));
+            Ok(started.stop(checked)??)
         };
 
         let old = FakeServer::new(ServerConfig::default());
@@ -918,9 +898,10 @@ mod tests {
         let made_again = FakeServer::new(ServerConfig::default());
         let new_remote = FakeRemote::new(made_again.clone());
         assert_eq!(run(&new_remote, 2)?, 1, "told once");
-        assert_eq!(aside()?, 1, "kept");
-        assert_eq!(std::fs::read_to_string(folder.join("a.txt"))?, "a");
-        assert_eq!(std::fs::read_to_string(folder.join("sub/b.txt"))?, "b");
+        assert_eq!(set_aside(&db, OtherDrive)?, 1, "kept");
+        for (name, text) in files {
+            assert_eq!(std::fs::read_to_string(folder.join(name))?, text);
+        }
         assert_eq!(new_remote.faults().uploads, 2, "every file up");
         assert_eq!(
             made_again.lock().map_err(|_| "poisoned")?.live_names(),
@@ -930,7 +911,7 @@ mod tests {
         assert_eq!((old.live_names(), old.removed().count()), (on_old, 0));
         drop(old);
         assert_eq!(run(&new_remote, 2)?, 0, "the new DB took the new drive");
-        assert_eq!(aside()?, 1);
+        assert_eq!(set_aside(&db, OtherDrive)?, 1);
         Ok(())
     }
 

@@ -45,8 +45,9 @@ impl AccountParts {
 
     /// Only the drive of [`AccountParts::open`], for a sync that doesn't listen. A DB that
     /// synced with a drive made at another time than `remote`'s is refused
-    /// ([`RunnerError::OtherDrive`]): the daemon's account sets it aside; `hbsync-sync` stops. The files' tokens it kept for
-    /// another login are forgotten: they don't open under `remote`'s.
+    /// ([`RunnerError::OtherDrive`]): the daemon's account sets it aside; `hbsync-sync` stops.
+    /// The files' tokens it kept for another login are forgotten: they don't open under
+    /// `remote`'s.
     pub fn open_drive(
         identity: &str,
         remote: Arc<HomebaseRemote>,

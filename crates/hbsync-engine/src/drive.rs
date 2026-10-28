@@ -485,13 +485,13 @@ impl Drive {
     /// one was made ([`keys::READ_AT`]).
     pub fn other_drive(&self, made: i64) -> Result<bool, StateError> {
         let (known, read_at) = self.account().read(|s| {
-            let read_at = s
-                .account_kv(keys::READ_AT)?
-                .and_then(|v| v.parse::<i64>().ok());
-            Ok((s.account_kv(keys::DRIVE_MADE)?, read_at))
+            let time = |key| -> Result<_, StateError> {
+                Ok(s.account_kv(key)?.and_then(|v| v.parse::<i64>().ok()))
+            };
+            Ok((time(keys::DRIVE_MADE)?, time(keys::READ_AT)?))
         })?;
         match known {
-            Some(known) => Ok(known != made.to_string()),
+            Some(known) => Ok(known != made),
             // One from an earlier version knows when it last read its drive (the server's
             // clock): a drive made after that is another.
             None if read_at.is_some_and(|at| at < made) => Ok(true),
