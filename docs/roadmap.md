@@ -15,9 +15,8 @@ set aside and the folder set up again on its own.
   odin-core #2038 is deployed: the drive answer's `created`). A computer that synced the old
   drive then sets its records aside and merges its folders with the new one, instead of taking
   its files as deleted there. Merge it once the server has it (no fallback).
-- **An upload whose uniqueId the server already has** (waits for a fix in odin-core first;
-  #295; found in the first sync of 309 GB on 0.9.0, where six files of 11–20 GB lost their
-  answer and one was sent twice). The
+- **An upload whose uniqueId the server already has** (#295; found in the first sync of
+  309 GB on 0.9.0, where six files of 11–20 GB lost their answer and one was sent twice). The
   server answers 4105 (odin-core #2019) right after the metadata, while the payload is still
   being sent: react at once (stop sending, treat the file as already there), as the server
   closes the connection after about 5 seconds, so a 20 GB file isn't sent twice. Then, and
