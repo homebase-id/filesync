@@ -355,8 +355,6 @@ pub struct Runner {
     probing: bool,
     /// The folder without a live watcher: told, asked for again, caught up on.
     unwatched: Unwatched,
-    /// What the process had read and written as the last sync ended ([`hbsync_platform::io`]).
-    io_after: Option<Io>,
 }
 
 /// A folder without a live watcher ([`Runner::watcher_is`]): its changes are found by the
@@ -457,7 +455,6 @@ impl Runner {
             retry_refused: false,
             probing: false,
             unwatched: Unwatched::default(),
-            io_after: None,
         };
         let thread = std::thread::Builder::new()
             .name("hbsync-runner".into())
@@ -566,10 +563,11 @@ impl Runner {
         // A put back that failed: when it runs once more, and the nodes it was answered for.
         let mut put_back_again: Option<(Instant, Arc<[NodeId]>)> = None;
         tracing::info!(
-            "syncing {} with {}{}",
+            "syncing {} with {}{} (the I/O logged: {})",
             self.cfg.folder.display(),
             self.cfg.identity,
-            if schedule.paused() { " (paused)" } else { "" }
+            if schedule.paused() { " (paused)" } else { "" },
+            hbsync_platform::io::COUNTS
         );
         loop {
             // Until something happens, or time alone changes something.
@@ -673,7 +671,7 @@ impl Runner {
                     held.again = true;
                     held.shown = None;
                     self.cfg.changed.raise();
-                    schedule.asked(now, Why::Asked);
+                    schedule.asked(now, Why::Retry);
                 }
             }
             if rules_at.is_some_and(|at| now >= at) {
@@ -723,6 +721,8 @@ impl Runner {
             if !schedule.due(now) {
                 continue;
             }
+            // Before what this sync does first (an answer's put back, opening the folder).
+            let io_before = hbsync_platform::io::counted();
             // The identity refused this computer: not asked again until the user acts or the
             // notifications connect (`Drive::deny`); a look now and then, asking nothing.
             // An hour on, one sync asks again (a 403 for one write needn't hold the account for
@@ -834,7 +834,8 @@ impl Runner {
             p.drive_changed.store(false, Ordering::SeqCst);
             let began = Instant::now();
             let why = schedule.take_why(began);
-            let io_before = hbsync_platform::io::counted();
+            // A start-up's catch-up, which can walk the whole folder.
+            let mut catch_up = None;
             // Before showing it syncs: the last sync's numbers aren't this one's.
             self.progress.reset();
             self.set(|s| {
@@ -850,10 +851,12 @@ impl Runner {
                 p.engine.sync(&today, read)
             } else {
                 p.engine.start_up(&mut p.observer, &today).map(|r| {
-                    self.tell_scan(
-                        &r.local.report,
-                        matches!(r.local.tier, Tier::FullWalk { .. }),
-                    );
+                    let whole = matches!(r.local.tier, Tier::FullWalk { .. });
+                    self.tell_scan(&r.local.report, whole);
+                    catch_up = Some(match r.local.tier {
+                        Tier::Journal { dirs } => format!("start-up, {dirs} folders rescanned"),
+                        Tier::FullWalk { reason } => format!("start-up, a full walk: {reason}"),
+                    });
                     r.sync
                 })
             };
@@ -870,12 +873,22 @@ impl Runner {
                         Synced::Done
                     };
                     schedule.synced(Instant::now(), outcome);
-                    let took = Sync {
+                    let ended = Ended {
                         took: began.elapsed(),
                         why,
+                        catch_up,
                         io_before,
                     };
-                    match self.record(&mut p.engine, &report, took) {
+                    let done = format!(
+                        "done {}, remote changes {}, feed pages {}, adopted {}, pending {}",
+                        report.ops_done,
+                        report.feed.live + report.feed.deleted,
+                        report.feed.pages,
+                        report.adopted,
+                        report.pending
+                    );
+                    self.log_sync("synced", &done, &ended);
+                    match self.record(&mut p.engine, &report, ended.took) {
                         Err(e) if self.ends_for(e.unusable()) => return Err(e.into()),
                         Err(e) => {
                             let class = e.class();
@@ -885,6 +898,14 @@ impl Runner {
                     }
                 }
                 Err(e) => {
+                    let ended = Ended {
+                        took: began.elapsed(),
+                        why,
+                        catch_up,
+                        io_before,
+                    };
+                    self.log_sync("failed", &e.to_string(), &ended);
+                    schedule.want(Why::Failed);
                     // What it did before is told all the same (a conflict copy made).
                     if let Some(partial) = p.engine.take_unreported()
                         && let Err(e) = self.tell_unreported(&mut p.engine, &partial)
@@ -1107,14 +1128,41 @@ impl Runner {
         report::notes(engine, report, &skips)
     }
 
+    /// Logs a sync that ended (`how`: synced or failed, and `what` it did or why it failed), at
+    /// info, every one: what asked for it, and what the process read and wrote during it and
+    /// since the last sync of any folder ended. What an idle sync costs, and why it ran. About
+    /// 300 bytes of log a sync.
+    fn log_sync(&self, how: &str, what: &str, ended: &Ended) {
+        let io_after = hbsync_platform::io::counted();
+        let io = match (ended.io_before, io_after) {
+            (Some(before), Some(after)) => {
+                let last = lock(&LAST_IO).replace(after);
+                let since = last.map_or(String::new(), |last| {
+                    format!(" (since the last sync: {})", io_words(before.since(last)))
+                });
+                format!("; the process {}{since}", io_words(after.since(before)))
+            }
+            _ => String::new(),
+        };
+        let catch_up = ended
+            .catch_up
+            .as_deref()
+            .map_or(String::new(), |c| format!(", {c}"));
+        tracing::info!(
+            "{}: {how} in {:.1?} ({}{catch_up}): {what}{io}",
+            self.cfg.folder.display(),
+            ended.took,
+            ended.why,
+        );
+    }
+
     /// Publishes a finished sync.
     fn record(
         &mut self,
         engine: &mut Engine,
         report: &SyncReport,
-        sync: Sync,
+        took: Duration,
     ) -> Result<(), StateError> {
-        let took = sync.took;
         let notes = self.notes_of(engine, report)?;
         let notes = self.told.fresh(notes);
         let token = report::held_token(&report.held);
@@ -1132,37 +1180,6 @@ impl Runner {
         kept.token = token;
         // Shown again: one answer each time, but one taken during this sync still waits.
         kept.answered = kept.answer.is_some();
-        // Every sync, what asked for it and what it read: what an idle one costs, and why it
-        // ran at all.
-        let io_after = hbsync_platform::io::counted();
-        let io = match (sync.io_before, io_after) {
-            (Some(before), Some(after)) => {
-                let during = after.since(before);
-                let between = self.io_after.map(|last| before.since(last));
-                format!(
-                    "; the process read {}, wrote {}{}",
-                    crate::words::bytes(during.read),
-                    crate::words::bytes(during.written),
-                    between.map_or(String::new(), |b| format!(
-                        " (since the last sync: read {}, wrote {})",
-                        crate::words::bytes(b.read),
-                        crate::words::bytes(b.written)
-                    ))
-                )
-            }
-            _ => String::new(),
-        };
-        self.io_after = io_after;
-        tracing::info!(
-            "synced in {took:.1?} ({}): done {}, remote changes {}, feed pages {}, adopted {}, \
-             pending {}{io}",
-            sync.why,
-            report.ops_done,
-            report.feed.live + report.feed.deleted,
-            report.feed.pages,
-            report.adopted,
-            report.pending
-        );
         for note in &notes {
             tracing::warn!("{note}");
         }
@@ -1179,12 +1196,30 @@ impl Runner {
     }
 }
 
-/// A sync that ended, for its log line: how long it took, what asked for it, and what the
-/// process had read and written as it began.
-struct Sync {
+/// A sync that ended, for its log line: how long it took, what asked for it, a start-up's
+/// catch-up, and what the process had read and written as it began.
+struct Ended {
     took: Duration,
     why: Whys,
+    catch_up: Option<String>,
     io_before: Option<Io>,
+}
+
+/// What the process had read and written as the last sync of any folder ended: the I/O
+/// counters are the process's, so one mark for all of them.
+static LAST_IO: Mutex<Option<Io>> = Mutex::new(None);
+
+/// "read 1.2 MB, wrote 40 kB", with Windows' other I/O where there was some.
+fn io_words(io: Io) -> String {
+    let other = match io.other {
+        0 => String::new(),
+        n => format!(", other I/O {}", crate::words::bytes(n)),
+    };
+    format!(
+        "read {}, wrote {}{other}",
+        crate::words::bytes(io.read),
+        crate::words::bytes(io.written)
+    )
 }
 
 /// The note for a folder without a live watcher (`why`), its changes found every `look`.

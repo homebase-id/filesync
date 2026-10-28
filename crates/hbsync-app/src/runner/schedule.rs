@@ -54,8 +54,8 @@ pub(crate) fn shown(class: ErrorClass) -> State {
     }
 }
 
-/// What asked for a sync, told in its log line ([`Schedule::take_why`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// What asked for a sync, told in its log line ([`Schedule::take_why`]), in this order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Why {
     /// The folder started.
     Start,
@@ -73,27 +73,13 @@ pub(crate) enum Why {
     /// The drive could be reached again.
     Online,
     Resumed,
-    /// Work a sync left unfinished, tried again.
+    /// Work left unfinished, tried again (a sync's, a put back's).
     Retry,
     /// A failed sync, tried again.
     Failed,
 }
 
 impl Why {
-    const ALL: [Why; 11] = [
-        Why::Start,
-        Why::Local,
-        Why::Drive,
-        Why::Scan,
-        Why::Rules,
-        Why::Asked,
-        Why::Woke,
-        Why::Online,
-        Why::Resumed,
-        Why::Retry,
-        Why::Failed,
-    ];
-
     fn word(self) -> &'static str {
         match self {
             Why::Start => "start",
@@ -109,28 +95,21 @@ impl Why {
             Why::Failed => "after a failure",
         }
     }
-
-    fn bit(self) -> u16 {
-        1 << self as u16
-    }
 }
 
 /// What asked for a sync since the last one began: "a change here, a change on the drive".
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct Whys(u16);
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct Whys(std::collections::BTreeSet<Why>);
 
 impl Whys {
     fn add(&mut self, why: Why) {
-        self.0 |= why.bit();
+        self.0.insert(why);
     }
 }
 
 impl std::fmt::Display for Whys {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let mut words = Why::ALL
-            .iter()
-            .filter(|w| self.0 & w.bit() != 0)
-            .map(|w| w.word());
+        let mut words = self.0.iter().map(|w| w.word());
         match words.next() {
             None => f.write_str("nothing"),
             Some(first) => {
@@ -183,7 +162,7 @@ impl Schedule {
             look,
             next_look: now + look,
             wanted: true,
-            why: Whys(Why::Start.bit()),
+            why: Whys([Why::Start].into()),
             read: false,
             not_before: now,
             paused,
@@ -211,10 +190,15 @@ impl Schedule {
     /// retry when nothing else did.
     pub(crate) fn take_why(&mut self, now: Instant) -> Whys {
         let mut why = std::mem::take(&mut self.why);
-        if why == Whys::default() && self.retry.is_some_and(|at| now >= at) {
+        if why == Whys::default() && self.retry_due(now) {
             why.add(Why::Retry);
         }
         why
+    }
+
+    /// Whether unfinished work's retry has come.
+    fn retry_due(&self, now: Instant) -> bool {
+        self.retry.is_some_and(|at| now >= at)
     }
 
     /// Whether the sync starting now reads the feed first whatever the notifications say.
@@ -271,8 +255,7 @@ impl Schedule {
     /// Whether to sync now: wanted (or unfinished work's retry has come), not paused, not
     /// backing off.
     pub(crate) fn due(&self, now: Instant) -> bool {
-        let retry = self.retry.is_some_and(|at| now >= at);
-        !self.paused && (self.wanted || retry) && now >= self.not_before
+        !self.paused && (self.wanted || self.retry_due(now)) && now >= self.not_before
     }
 
     /// Not now: tried again at the next look (the folder gone, rules that can't be read: both
@@ -330,7 +313,6 @@ impl Schedule {
     ) -> Duration {
         let wait = self.backoff.after(class, retry_after);
         self.not_before = now + wait;
-        self.why.add(Why::Failed);
         wait
     }
 }
@@ -362,9 +344,12 @@ mod tests {
         );
         assert_eq!(s.take_why(t0).to_string(), "nothing", "told once");
         assert_eq!(s.take_why(t0 + ms(10_000)).to_string(), "unfinished work");
-        s.failed(t0, ErrorClass::Transient, None);
+        s.want(Why::Failed);
         s.woke(t0);
         assert_eq!(s.take_why(t0).to_string(), "a wake-up, after a failure");
+        // Any other backing off isn't a failed sync.
+        s.failed(t0, ErrorClass::Transient, None);
+        assert_eq!(s.take_why(t0).to_string(), "nothing");
     }
 
     #[test]

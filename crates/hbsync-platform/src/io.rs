@@ -7,6 +7,9 @@
 pub struct Io {
     pub read: u64,
     pub written: u64,
+    /// Bytes of other I/O, which Windows counts apart: directory listings, the change
+    /// journal, device control. 0 elsewhere.
+    pub other: u64,
 }
 
 impl Io {
@@ -15,6 +18,7 @@ impl Io {
         Io {
             read: self.read.saturating_sub(earlier.read),
             written: self.written.saturating_sub(earlier.written),
+            other: self.other.saturating_sub(earlier.other),
         }
     }
 }
@@ -23,7 +27,8 @@ impl Io {
 #[cfg(target_os = "linux")]
 pub const COUNTS: &str = "every read and write call: files, sockets, pipes, cache hits too";
 #[cfg(windows)]
-pub const COUNTS: &str = "every read and write operation: files, network, devices";
+pub const COUNTS: &str =
+    "read and write operations (files, network); other: listings, the journal, device control";
 #[cfg(target_os = "macos")]
 pub const COUNTS: &str = "the storage's reads and writes: not the cache, not the network";
 #[cfg(not(any(target_os = "linux", windows, target_os = "macos")))]
@@ -46,6 +51,7 @@ fn os_counted() -> Option<Io> {
     Some(Io {
         read: field("rchar")?,
         written: field("wchar")?,
+        other: 0,
     })
 }
 
@@ -60,6 +66,7 @@ fn os_counted() -> Option<Io> {
     (ok != 0).then_some(Io {
         read: counters.ReadTransferCount,
         written: counters.WriteTransferCount,
+        other: counters.OtherTransferCount,
     })
 }
 
@@ -77,6 +84,7 @@ fn os_counted() -> Option<Io> {
     (ok == 0).then_some(Io {
         read: info.ri_diskio_bytesread,
         written: info.ri_diskio_byteswritten,
+        other: 0,
     })
 }
 
@@ -106,7 +114,11 @@ mod tests {
             assert!(done.read >= 64 * 1024, "{done:?}");
             assert!(done.written >= 64 * 1024, "{done:?}");
         }
-        assert_eq!(before.since(after), Io::default(), "never negative");
+        assert!(
+            after.read >= before.read && after.written >= before.written,
+            "{before:?} {after:?}"
+        );
+        assert!(after.other >= before.other, "{before:?} {after:?}");
         Ok(())
     }
 }
