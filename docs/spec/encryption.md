@@ -139,14 +139,15 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
 ### A private drive (zero knowledge)
 A new drive is made private from the start: the app's drive request asks for it (`sm:
 "selectiveShare"`), and the owner's browser makes its key, which the server never sees
-(**[verified]** in odin-core `filesync-selective-share` and odin-js `drive-private-models`, not
-merged yet; odin-core `docs/zero-knowledge-drive-api-plan.md`, step 4). An older owner console
+(**[verified]** in odin-core #2046 and odin-js #1013, in production from odin-core v0.1.974;
+odin-core `docs/zero-knowledge-drive-api-plan.md`, step 4). An older owner console
 ignores `sm` and makes a shared drive, which syncs as one **[inferred]**: it reads only the keys
 it knows. A drive made before can be made private in the owner console (step 3):
 it keeps its key, so no file is encrypted again: each key header is relabelled `zkDrive`, the
 same 48 bytes **[verified]** (odin-core, 3.3). This client reads which the drive is from the
-drive (its grant in the security context: `isZeroKnowledge`, and its locked key), never from
-what it asked for, and once private it stays so. The cost on a private drive is one more
+drive (its grant in the security context: `isZeroKnowledge`, and its locked key; where the
+context leaves the grant out, the drive's answer: `sharingModel`), never from what it asked
+for, and once private it stays so. The cost on a private drive is one more
 request per download (below), which every new user now pays: passing the file's token and its
 payload IV to the download would save it (a follow-up). What changes for this client:
 - **The key.** Logging in asks for the app's zero-knowledge key (`zk_app_key=1`); the token
@@ -175,6 +176,12 @@ payload IV to the download would save it (a follow-up). What changes for this cl
   again) rather than reading files it can't see as deleted. A file that can't be read is never
   taken as gone (a header read refused is "can't tell", §8b). The tray asks such a login to log
   in again already before the drive is made private.
+- **A grant the server leaves out.** odin-core up to v0.1.974 lists no drive grants in the
+  security context for an app that asks for no permission keys, as this one (odin-core #2047,
+  **[verified]** live). Then the drive's answer (`sharingModel`, one more request) says whether
+  it is private: a shared drive syncs as before; a private one stops this computer, as a login
+  without the key does (log in again) or, for a login holding it, until the server is updated
+  (signing in again can't help), retried by itself. Nothing is read or written as shared.
 
 ## What it doesn't do
 - **Authentication of its own:** CBC has none. The content hash is the check, after
