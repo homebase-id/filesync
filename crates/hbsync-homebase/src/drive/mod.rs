@@ -92,7 +92,7 @@ impl KeyState {
         known_private: bool,
     ) -> Result<Self, HomebaseError> {
         let context: serde_json::Value = client.get("/api/v2/auth/context", &[])?;
-        let grant = drive_grant(&context, drive)?;
+        let grant = drive_grant(&context, drive);
         let key = match grant.locked {
             Some(locked) => Some(unlock_drive_key(client, locked)?),
             None => None,
@@ -138,7 +138,7 @@ fn unlock_drive_key(client: &Client, locked: &str) -> Result<Key, HomebaseError>
 }
 
 /// The app's grant on a drive, as the security context gives it.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Default, PartialEq, Eq)]
 struct Grant<'a> {
     /// The drive is private (`isZeroKnowledge`), whether its key is locked for the app or not.
     zero_knowledge: bool,
@@ -148,13 +148,14 @@ struct Grant<'a> {
 
 /// In the security context (`GET /api/v2/auth/context`, odin-core `RedactedOdinContext`), the
 /// app's grant on `drive` (`RedactedDriveGrant`, `docs/zero-knowledge-drive-api-plan.md`, 3.5
-/// and 4.2). Read leniently: no other grant's shape matters. A context without the grant is the
-/// server's to explain, not a sign-in's to fix.
-fn drive_grant<'a>(
-    context: &'a serde_json::Value,
-    drive: &TargetDrive,
-) -> Result<Grant<'a>, HomebaseError> {
-    let grant = context["permissionContext"]["permissionGroups"]
+/// and 4.2). Read leniently: no other grant's shape matters. A context without the grant reads
+/// as a shared drive, as before private drives: odin-core leaves every grant out for an app that
+/// asks for no permission keys, as Filesync does (`PermissionGroup.Redacted`, a bug). A private
+/// drive read that way is still never read or written as shared: its headers are locked with the
+/// drive's key and the server refuses a write without it, and either asks for the key again
+/// ([`HomebaseRemote::drive_key`]).
+fn drive_grant<'a>(context: &'a serde_json::Value, drive: &TargetDrive) -> Grant<'a> {
+    let Some(grant) = context["permissionContext"]["permissionGroups"]
         .as_array()
         .into_iter()
         .flatten()
@@ -164,13 +165,14 @@ fn drive_grant<'a>(
             serde_json::from_value::<TargetDrive>(g["permissionedDrive"]["drive"].clone())
                 .is_ok_and(|d| d == *drive)
         })
-        .ok_or_else(|| {
-            HomebaseError::Protocol("the security context grants no Filesync drive".into())
-        })?;
-    Ok(Grant {
+    else {
+        tracing::debug!("the security context lists no grant on the drive");
+        return Grant::default();
+    };
+    Grant {
         zero_knowledge: grant["isZeroKnowledge"].as_bool().unwrap_or(false),
         locked: grant["zkAppKeyEncryptedStorageKey"].as_str(),
-    })
+    }
 }
 
 #[derive(Deserialize)]
@@ -1113,20 +1115,26 @@ mod tests {
             ] } })
         };
         let found = |c: serde_json::Value| {
-            drive_grant(&c, &drive).map(|g| (g.zero_knowledge, g.locked.map(str::to_owned)))
+            let g = drive_grant(&c, &drive);
+            Some((g.zero_knowledge, g.locked.map(str::to_owned)))
         };
         let private = context(vec![
             grant(3, true, Some("other")),
             grant(1, true, Some("ours")),
         ]);
-        assert_eq!(found(private).ok(), Some((true, Some("ours".into()))));
+        assert_eq!(found(private), Some((true, Some("ours".into()))));
         // Private, its key not locked for the app yet.
         let no_copy = context(vec![grant(1, true, None)]);
-        assert_eq!(found(no_copy).ok(), Some((true, None)));
+        assert_eq!(found(no_copy), Some((true, None)));
         let shared = context(vec![grant(1, false, None)]);
-        assert_eq!(found(shared).ok(), Some((false, None)));
-        // No grant on the drive at all: the server's to explain, not "shared".
-        assert!(drive_grant(&json!({}), &drive).is_err());
+        assert_eq!(found(shared), Some((false, None)));
+        // No grant listed (odin-core's bug for an app without permission keys): shared, as
+        // before private drives.
+        assert_eq!(
+            found(context(vec![grant(3, true, Some("other"))])),
+            Some((false, None))
+        );
+        assert_eq!(found(json!({})), Some((false, None)));
     }
 
     /// An error answer of the identity itself.

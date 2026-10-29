@@ -61,9 +61,13 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   A drive request's `sm` (`collaborative`, `private`, `selectiveShare`; absent: collaborative)
   makes a new drive so; the app drive answer carries `sharingModel`, and the security context's
   drive grant `isZeroKnowledge`, set whether the app's copy of the key is there or not (odin-core
-  branch `filesync-selective-share`, odin-js `drive-private-models`, step 4; **[verified]** in
-  code, not merged yet). The app's locked copy can lag behind: private with no copy means sign
-  in again.
+  #2046, odin-js #1013, step 4; **[verified]** in code, in production from odin-core v0.1.974).
+  The app's locked copy can lag behind: private with no copy means sign in again. Up to
+  v0.1.974 the security context lists **no** drive grants for an app that asks for no
+  permission keys, as Filesync (`PermissionGroup.Redacted` returns an empty list when the
+  group's `PermissionSet` is null; access checks use the real grants, so the drive answers;
+  **[verified]** live on frodo, cause from true-zero): the client reads a missing grant as a
+  shared drive, and a private one then as a drive without its key.
   How this client uses it: `encryption.md`.
 - **A drive made again** **[verified]**: its id is the alias the app asks for
   (`DriveManager.CreateDriveAsync`), fixed in `app.rs`, so a drive deleted and made again has the
