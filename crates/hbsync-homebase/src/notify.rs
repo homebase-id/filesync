@@ -165,6 +165,8 @@ impl Drop for Notifier {
 struct Control {
     stop: AtomicBool,
     reconnect: AtomicBool,
+    /// A connection was made before: the drive's key was read before the first.
+    connected_before: AtomicBool,
     /// The open connection's socket (a clone of it), while there is one.
     socket: Mutex<Option<TcpStream>>,
     /// Wakes a backoff's wait.
@@ -357,6 +359,9 @@ fn session(
                 let event = match notification(client, text.as_str()) {
                     Notification::Handshake if !*connected => {
                         *connected = true;
+                        if control.connected_before.swap(true, Ordering::SeqCst) {
+                            client.connected();
+                        }
                         Event::Connected
                     }
                     Notification::Changed(change) => Event::Changed(change),

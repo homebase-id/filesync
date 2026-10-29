@@ -6,6 +6,7 @@
 
 use std::io::{Read, Write};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -165,9 +166,14 @@ pub struct Client {
     /// The client auth token (CAT), base64.
     token: String,
     key: Key,
+    /// The app's zero-knowledge key, if this login was handed one.
+    zk_app_key: Option<Key>,
     /// [`Credentials::login_id`] of the credentials it was made with.
     login: String,
     connections: Arc<Connections>,
+    /// How often the notifications connected again ([`Client::connected`]), shared by its
+    /// clones.
+    connects: Arc<AtomicU64>,
 }
 
 impl std::fmt::Debug for Client {
@@ -191,8 +197,10 @@ impl Client {
             identity: credentials.identity.clone(),
             token: credentials.client_auth_token.clone(),
             key: credentials.shared_secret_key()?,
+            zk_app_key: credentials.zk_key()?,
             login: credentials.login_id(),
             connections: Arc::new(connections(REUSED_WITHIN)),
+            connects: Arc::default(),
         })
     }
 
@@ -208,6 +216,23 @@ impl Client {
     /// The shared secret: the key of every envelope and of upload metadata.
     pub(crate) fn key(&self) -> &Key {
         &self.key
+    }
+
+    /// The notifications connected again: what the identity grants may have changed since.
+    /// Making a drive private closes every connection granted it (odin-core), so the drive's
+    /// key is read again after one ([`crate::HomebaseRemote`]).
+    pub(crate) fn connected(&self) {
+        self.connects.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// How often the notifications connected again.
+    pub(crate) fn connects(&self) -> u64 {
+        self.connects.load(Ordering::SeqCst)
+    }
+
+    /// The app's zero-knowledge key: it opens the drive's key on a private drive.
+    pub(crate) fn zk_key(&self) -> Option<&Key> {
+        self.zk_app_key.as_ref()
     }
 
     /// The client auth token, base64.

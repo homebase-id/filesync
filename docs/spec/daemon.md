@@ -156,7 +156,9 @@ daemon's own writes (a pause, a folder) are refused.
 ## Credentials
 
 In the OS keychain, service `Homebase Filesync`, account = identity, value = the credentials
-JSON (identity, client auth token, shared secret):
+JSON (identity, client auth token, shared secret, and the app's zero-knowledge key: it opens the
+drive's key once the drive is private, `encryption.md`; a login from before this client asked
+for it has none, and the tray and `hbsync status` ask it to log in again):
 
 - macOS: Keychain Services, the login keychain, which Migration Assistant carries to a new Mac
   (keeping the item on this Mac, `AfterFirstUnlockThisDeviceOnly`, needs the data protection
@@ -195,7 +197,8 @@ says so when it couldn't reach the keychain to remove the credentials there.
       be read. None: it says so and the account ends;
    3. connects to the identity, retrying with the same backoff while it can't be reached
       (`offline`, at least as long as its `Retry-After` says); a refusal (the device revoked)
-      shows as `denied` and is asked again hourly (new credentials start it over at once). Meanwhile `pause` and `resume` work
+      shows as `denied` and is asked again hourly (new credentials start it over at once), as
+      does a private drive this login holds no key for (`encryption.md`). Meanwhile `pause` and `resume` work
       (kept in the config); other requests are refused;
    4. opens the account's `Drive` and the notification socket, and runs a sync loop
       (`Runner`) for each of its folders until a stop request, SIGTERM or SIGINT. It passes the

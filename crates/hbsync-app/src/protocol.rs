@@ -309,6 +309,10 @@ pub struct AccountStatus {
     pub hints: Hints,
     /// Why the credentials aren't in the keychain.
     pub credentials_warning: Option<String>,
+    /// The login is from before this client asked for the app's zero-knowledge key: once the
+    /// drive is made private, this computer can't read it till it logs in again. Asked now.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub login_without_key: bool,
     /// The account's own notes, newest last: a request of Recently deleted that failed, a file
     /// on the drive this client can't read. Its folders' are theirs ([`FolderStatus::recent`]).
     pub recent: Vec<Note>,
@@ -325,6 +329,7 @@ impl AccountStatus {
             identity: identity.clone(),
             hints: Hints::Off,
             credentials_warning: None,
+            login_without_key: false,
             recent: Vec::new(),
             notes_added: 0,
             emptying: None,

@@ -53,7 +53,9 @@ impl Drop for KeyHeader {
 }
 
 /// A key header encrypted with a shared secret, as the JSON of a file header carries it
-/// (`sharedSecretEncryptedKeyHeader`) and an upload sends it (`encryptedKeyHeader`).
+/// (`sharedSecretEncryptedKeyHeader`) and an upload sends it (`encryptedKeyHeader`); on a
+/// private (zero-knowledge) drive, encrypted the same way with the drive's key instead (its
+/// type `zkDrive`: odin-core `docs/zero-knowledge-drive-api-plan.md`, decision 3).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SealedKeyHeader {
@@ -61,6 +63,9 @@ pub struct SealedKeyHeader {
     pub iv: String,
     #[serde(default)]
     pub encrypted_aes_key: String,
+    /// `aes` (11), `sealed` (12) or `zkDrive` (13), by name or number.
+    #[serde(default, rename = "type")]
+    pub kind: Value,
 }
 
 impl SealedKeyHeader {
@@ -75,6 +80,11 @@ impl SealedKeyHeader {
         }
         Self::from_token(&FileToken(bytes[..SEALED_LEN].into()))
             .ok_or_else(|| crypto("a key header that isn't one"))
+    }
+
+    /// Locked with the drive's key, not the shared secret.
+    pub(crate) fn locked_with_drive_key(&self) -> bool {
+        self.kind == "zkDrive" || self.kind == 13
     }
 
     /// As sync keeps it, a file's token: the wrap IV, then the encrypted IV and key. `None` if
@@ -94,6 +104,7 @@ impl SealedKeyHeader {
         (bytes.len() == SEALED_LEN).then(|| SealedKeyHeader {
             iv: STANDARD.encode(&bytes[..BLOCK]),
             encrypted_aes_key: STANDARD.encode(&bytes[BLOCK..]),
+            kind: Value::Null,
         })
     }
 }
@@ -129,6 +140,14 @@ impl KeyHeader {
             "iv": STANDARD.encode(wrap_iv),
             "encryptedAesKey": STANDARD.encode(sealed),
         })
+    }
+
+    /// `iv || key`, AES-CBC under a private drive's key with the header IV, as an upload to it
+    /// sends it (`zkDrive`): the server stores it as it is.
+    pub(crate) fn lock(&self, drive_key: &Key) -> Value {
+        let mut locked = self.seal(drive_key, &self.iv);
+        locked["type"] = json!("zkDrive");
+        locked
     }
 
     /// The token the server will give for this key header once written: it seals it under
@@ -479,6 +498,32 @@ impl Write for Decrypting<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// odin-core's vector of a key header locked with a drive's key
+    /// (`ClientLockedKeyHeaderVectorTests`, js-lib `SecurityHelpers.test.ts`).
+    #[test]
+    fn a_key_header_locks_with_the_drive_key_as_odin_core_does() -> Result<(), HomebaseError> {
+        let drive_key: Key = std::array::from_fn(|i| i as u8);
+        let kh = KeyHeader {
+            iv: std::array::from_fn(|i| 0x10 + i as u8),
+            key: std::array::from_fn(|i| 0x20 + i as u8),
+        };
+        let locked = kh.lock(&drive_key);
+        assert_eq!(locked["type"], "zkDrive");
+        assert_eq!(locked["iv"], "EBESExQVFhcYGRobHB0eHw==");
+        assert_eq!(
+            locked["encryptedAesKey"],
+            "xqE7N4ePW4JvT4FiocjYeQeFPxlO+hclYcV072RPhmMJbAd9FxFTFUuXv4ql/85L"
+        );
+        let sealed: SealedKeyHeader = serde_json::from_value(locked)?;
+        assert!(sealed.locked_with_drive_key());
+        assert_eq!(KeyHeader::open(&sealed, &drive_key)?, kh);
+        let numbered: SealedKeyHeader = serde_json::from_value(json!({ "type": 13 }))?;
+        assert!(numbered.locked_with_drive_key());
+        let aes: SealedKeyHeader = serde_json::from_value(json!({ "type": "aes" }))?;
+        assert!(!aes.locked_with_drive_key());
+        Ok(())
+    }
 
     fn sample(n: usize) -> Vec<u8> {
         (0..n).map(|i| (i * 7 + i / 251) as u8).collect()

@@ -96,9 +96,23 @@ Everything comes from the node's HomebaseFile; nothing is stored beside it.
   payload's hash algorithm.
 - There are no thumbnails, and folders have no size or item count.
 
+## A private drive (zero knowledge)
+The owner can make the Filesync drive private, as Vault (odin-core
+`docs/zero-knowledge-drive-api-plan.md`, step 3). The nodes stay the same; only the file key's
+lock changes (`encryption.md`, "A private drive"):
+- Every key header is `type: "zkDrive"` (13): the same 48 bytes as an `aes` one, under the
+  drive's key instead of the shared secret. Open it with the drive's key (from the security
+  context, opened with the app's zero-knowledge key).
+- Payload answers carry no key header: decrypt with the file's key and the payload's own IV
+  (`payloads[].iv`).
+- A write locks the new key header with the drive's key and sends it as `zkDrive`, the header
+  IV as its `iv`; the server refuses `aes` there (`driveIsZeroKnowledge`).
+- A device without the key sees none of the drive's files and can't write: treat that as "can't
+  read", never as the files being gone.
+
 ## Downloading
 - Fetch payload `sync_data` and decrypt it with the file's key (AES-CBC, the same as other
-  encrypted payloads).
+  encrypted payloads; on a private drive with the payload's IV, above).
 - Range reads work: start one block before the range, for videos and resuming.
 - Check the hash: the payload descriptor's `hash.contentHash` is the plaintext hash, encrypted
   with the file key and IV = payload IV XOR `0xAA…AA`. `hash.algorithm` is `blake3` (written by
@@ -107,7 +121,8 @@ Everything comes from the node's HomebaseFile; nothing is stored beside it.
 
 ## Uploading (new file or folder)
 - `uniqueId` = a new random GUID, `groupId` = the parent folder's node id, and always
-  `isEncrypted: true` with a new random key.
+  `isEncrypted: true` with a new random key (on a private drive locked with the drive's key,
+  above).
 - Files need a `sync_data` payload (`application/octet-stream`) with a random IV and both hashes:
   - `storedHash` over the ciphertext;
   - `contentHash` over the plaintext, encrypted as above;

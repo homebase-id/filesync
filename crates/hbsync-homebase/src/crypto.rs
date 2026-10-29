@@ -1,9 +1,12 @@
 //! The cryptography of talking to Homebase: the YouAuth key exchange (P-384 ECDH, then
 //! HKDF-SHA256 to a 16-byte key) and the shared-secret envelope (AES-128-CBC, PKCS#7), both as
 //! odin-core does them (verified in `EccKeyData.GetEcdhSharedSecret`, `HashUtil.Hkdf`,
-//! `AesCbc`, `SharedSecretEncryptedPayload`).
+//! `AesCbc`, `SharedSecretEncryptedPayload`); and the zero-knowledge keys' two forms, a value
+//! locked with a key and one sealed to a public key (odin-core `docs/owner-keys.md`, `ZkSeal`).
 
 use aes::Aes128;
+use aes_gcm::aead::Aead;
+use aes_gcm::{Aes128Gcm, KeyInit};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use cbc::cipher::block_padding::Pkcs7;
@@ -11,6 +14,7 @@ use cbc::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use p384::elliptic_curve::sec1::ToSec1Point;
 use p384::{PublicKey, SecretKey};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::HomebaseError;
 
@@ -98,13 +102,60 @@ impl Exchange {
         sec1.extend_from_slice(&coord(&jwk.x)?);
         sec1.extend_from_slice(&coord(&jwk.y)?);
         let peer = PublicKey::from_sec1_bytes(&sec1).map_err(|_| bad("not on the curve"))?;
+        self.agree(&peer, Some(salt), b"")
+    }
+
+    /// A value sealed to this key (`ZkSeal` v1): base64 of `0x01`, the key id (4), a throwaway
+    /// P-384 public key (97, uncompressed), a 12-byte IV, then AES-GCM's ciphertext and tag,
+    /// under HKDF-SHA256 of the ECDH secret with no salt and the info `homebase-zk-seal`.
+    pub(crate) fn unseal(&self, sealed_b64: &str) -> Result<Zeroizing<Vec<u8>>, HomebaseError> {
+        let bad = |what: &str| HomebaseError::Protocol(format!("sealed value: {what}"));
+        let bytes = STANDARD.decode(sealed_b64).map_err(|_| bad("not base64"))?;
+        if bytes.len() < 1 + 4 + 97 + 12 + 16 || bytes[0] != 1 {
+            return Err(bad("not a seal of version 1"));
+        }
+        let throwaway =
+            PublicKey::from_sec1_bytes(&bytes[5..102]).map_err(|_| bad("not a P-384 key"))?;
+        let key = self.agree(&throwaway, None, b"homebase-zk-seal")?;
+        gcm_open(&key, &bytes[102..114], &bytes[114..])
+    }
+
+    /// ECDH with `peer`, the x coordinate at its full 48 bytes, then HKDF-SHA256 to 16 bytes.
+    fn agree(
+        &self,
+        peer: &PublicKey,
+        salt: Option<&[u8]>,
+        info: &[u8],
+    ) -> Result<Key, HomebaseError> {
         let shared = p384::ecdh::diffie_hellman(self.secret.to_nonzero_scalar(), peer.as_affine());
         let mut key = [0u8; 16];
-        hkdf::Hkdf::<sha2::Sha256>::new(Some(salt), shared.raw_secret_bytes())
-            .expand(&[], &mut key)
+        hkdf::Hkdf::<sha2::Sha256>::new(salt, shared.raw_secret_bytes())
+            .expand(info, &mut key)
             .map_err(|_| HomebaseError::Crypto("HKDF output length".into()))?;
         Ok(key)
     }
+}
+
+/// A value locked with `key` (`zkLock`): base64 of a 12-byte IV, then AES-GCM's ciphertext
+/// and tag. One that isn't that shape is the server's to fix ([`HomebaseError::Protocol`]);
+/// one that doesn't open is under another key ([`HomebaseError::Crypto`]).
+pub(crate) fn zk_unlock(key: &Key, locked_b64: &str) -> Result<Zeroizing<Vec<u8>>, HomebaseError> {
+    let bad = |what: &str| HomebaseError::Protocol(format!("locked value: {what}"));
+    let bytes = STANDARD.decode(locked_b64).map_err(|_| bad("not base64"))?;
+    if bytes.len() < 12 + 16 {
+        return Err(bad("too short"));
+    }
+    gcm_open(key, &bytes[..12], &bytes[12..])
+}
+
+fn gcm_open(key: &Key, iv: &[u8], sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>, HomebaseError> {
+    let nonce = iv
+        .try_into()
+        .map_err(|_| HomebaseError::Protocol("AES-GCM: the IV isn't 12 bytes".into()))?;
+    Aes128Gcm::new(key.into())
+        .decrypt(nonce, sealed)
+        .map(Zeroizing::new)
+        .map_err(|_| HomebaseError::Crypto("AES-GCM: wrong key or damaged data".into()))
 }
 
 pub(crate) fn aes_cbc_encrypt(key: &Key, iv: &[u8; 16], data: &[u8]) -> Vec<u8> {
@@ -159,6 +210,48 @@ mod tests {
         let kb = b.derive(&a.public_jwk_base64url(), &salt)?;
         assert_eq!(ka, kb);
         assert_ne!(ka, a.derive(&b.public_jwk_base64url(), &random::<16>()?)?);
+        Ok(())
+    }
+
+    /// odin-core's vector, sealed by the browser (`RecoveryPhraseTests.TheSharedSealVectorOpens`,
+    /// js-lib `ZeroKnowledgeKeys.test.ts`).
+    #[test]
+    fn the_shared_seal_vector_opens() -> Result<(), HomebaseError> {
+        let pkcs8 = STANDARD.decode(
+            "MIG2AgEAMBAGByqGSM49AgEGBSuBBAAiBIGeMIGbAgEBBDAdIBNZdX4cc2HkbmyjAsYLgBCJOD4PKl+19MNegdIFHBNvBHXjKKPd1U43jVFC4W2hZANiAAQh7s8LrEkJbWspBmjbFT45ZclVZc9go3WGP86OB1nf16QB+2o3yNTYCg0YJ4Atpknyf0xxJGe5a/LTuILGNwlUaPDmFSyzZ4ALW18WutsGr8ItoW2/V6/fK5tpF8iT70k=",
+        ).map_err(|_| HomebaseError::Crypto("vector".into()))?;
+        // The private scalar: the 48 bytes after the SEC1 key's `04 30`.
+        let at = pkcs8
+            .windows(2)
+            .position(|w| w == [0x04, 0x30])
+            .ok_or_else(|| HomebaseError::Crypto("vector".into()))?
+            + 2;
+        let secret = SecretKey::from_slice(&pkcs8[at..at + 48])
+            .map_err(|_| HomebaseError::Crypto("vector".into()))?;
+        let sealed = "AYGsbtYEJzx9/APLDFRU02ky+GZwV8b3H7z+kwGsq61keI1Spr1TwEe4xemX1gXqt4ebsODaFTM9CTX1ZzYz8AEOKmwRfyCxFiAYyUY9XK31wB7oShI/GiQX6RjUGj2KekD+/f9GXM+hXaDl9UqGteiAsqESPMoIVY4iVeGO3GC/P2Dy4Igq2MsVPmZeNSxogKR0ZeC+rPTMjyeOkbM=";
+        assert_eq!(
+            Exchange { secret }.unseal(sealed)?.as_slice(),
+            b"correct horse battery staple"
+        );
+        assert!(Exchange::new()?.unseal(sealed).is_err());
+        Ok(())
+    }
+
+    /// odin-core's vector of a locked value (`ZeroKnowledgeKeysTests.TheSharedVectorOpens`: the
+    /// zero-knowledge master key under the second password key).
+    #[test]
+    fn the_shared_lock_vector_opens() -> Result<(), HomebaseError> {
+        let key: Key = STANDARD
+            .decode("+pL3zwkIcDcDpYKkLbVc4A==")
+            .ok()
+            .and_then(|k| k.try_into().ok())
+            .ok_or_else(|| HomebaseError::Crypto("vector".into()))?;
+        let locked = "ICEiIyQlJicoKSorjWGICGzIuJPS3SPnEBWvlaM3EZ0jd9msGp8vJrhDYXA=";
+        assert_eq!(
+            STANDARD.encode(zk_unlock(&key, locked)?),
+            "EBESExQVFhcYGRobHB0eHw=="
+        );
+        assert!(zk_unlock(&[0; 16], locked).is_err());
         Ok(())
     }
 
