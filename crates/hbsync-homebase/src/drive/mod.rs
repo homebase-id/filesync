@@ -24,6 +24,7 @@ use serde::Deserialize;
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::app::SharingModel;
 use crate::client::{Client, Fetched, UploadMethod};
 use crate::crypto::{Key, zk_unlock};
 use crate::drive::sealed::{
@@ -71,9 +72,43 @@ pub struct HomebaseRemote {
     drive_key: DriveKey,
 }
 
-/// A private drive's key while this computer holds it, and when it was last read: at how
-/// many of the notifications' reconnects ([`Client::connects`]).
-struct DriveKey(Mutex<(u64, Option<Key>)>);
+/// What this computer knows of the drive's privacy: whether it is private, its key while this
+/// computer holds it, and when that was read: at how many of the notifications' reconnects
+/// ([`Client::connects`]).
+#[derive(Clone, Copy)]
+struct KeyState {
+    read_at: u64,
+    private: bool,
+    key: Option<Key>,
+}
+
+impl KeyState {
+    /// Read from the identity (two requests): a private drive is one its answer says is, or
+    /// whose key is locked for the app.
+    fn read(client: &Client, answer: &DriveAnswer, read_at: u64) -> Result<Self, HomebaseError> {
+        let key = drive_key_of(client, &answer.target_drive)?;
+        Ok(KeyState {
+            read_at,
+            private: answer
+                .sharing_model
+                .is_some_and(SharingModel::zero_knowledge)
+                || key.is_some(),
+            key,
+        })
+    }
+
+    /// The key to open and lock with: none on a shared drive. A private drive without one (a
+    /// login without the app's key, or the drive's key not locked for the app yet) refuses this
+    /// computer: log in again, never read as shared.
+    fn key(&self) -> Result<Option<Key>, HomebaseError> {
+        match (self.private, self.key) {
+            (true, None) => Err(HomebaseError::Denied(PRIVATE.into())),
+            (_, key) => Ok(key),
+        }
+    }
+}
+
+struct DriveKey(Mutex<KeyState>);
 
 impl std::fmt::Debug for DriveKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -81,12 +116,11 @@ impl std::fmt::Debug for DriveKey {
     }
 }
 
-/// The drive's key if it is private, opened with the app's zero-knowledge key (one request);
-/// `None` if it isn't. A private drive this login can't open refuses this computer: log in
-/// again.
+/// The drive's key if it is locked for the app (a private drive's), opened with the app's
+/// zero-knowledge key (one request). A key this login can't open refuses this computer.
 fn drive_key_of(client: &Client, drive: &TargetDrive) -> Result<Option<Key>, HomebaseError> {
     let context: serde_json::Value = client.get("/api/v2/auth/context", &[])?;
-    let Some(locked) = locked_drive_key(&context, drive) else {
+    let Some(locked) = locked_drive_key(&context, drive)? else {
         return Ok(None);
     };
     let denied = || HomebaseError::Denied(PRIVATE.into());
@@ -102,20 +136,28 @@ fn drive_key_of(client: &Client, drive: &TargetDrive) -> Result<Option<Key>, Hom
 }
 
 /// In the security context (`GET /api/v2/auth/context`, odin-core `RedactedOdinContext`), the
-/// grant of `drive`'s key locked with the app's zero-knowledge key: set on a private drive
-/// (`zkAppKeyEncryptedStorageKey`, `docs/zero-knowledge-drive-api-plan.md`, 3.5). Read
-/// leniently: no other grant's shape matters.
-fn locked_drive_key<'a>(context: &'a serde_json::Value, drive: &TargetDrive) -> Option<&'a str> {
-    context["permissionContext"]["permissionGroups"]
-        .as_array()?
-        .iter()
+/// app's grant on `drive` and on it the drive's key locked with the app's zero-knowledge key:
+/// set on a private drive (`zkAppKeyEncryptedStorageKey`, `docs/zero-knowledge-drive-api-plan.md`,
+/// 3.5). Read leniently: no other grant's shape matters. A context without the grant is the
+/// server's to explain, not a sign-in's to fix.
+fn locked_drive_key<'a>(
+    context: &'a serde_json::Value,
+    drive: &TargetDrive,
+) -> Result<Option<&'a str>, HomebaseError> {
+    let grant = context["permissionContext"]["permissionGroups"]
+        .as_array()
+        .into_iter()
+        .flatten()
         .filter_map(|g| g["driveGrants"].as_array())
         .flatten()
-        .filter(|g| {
+        .find(|g| {
             serde_json::from_value::<TargetDrive>(g["permissionedDrive"]["drive"].clone())
                 .is_ok_and(|d| d == *drive)
         })
-        .find_map(|g| g["zkAppKeyEncryptedStorageKey"].as_str())
+        .ok_or_else(|| {
+            HomebaseError::Protocol("the security context grants no Filesync drive".into())
+        })?;
+    Ok(grant["zkAppKeyEncryptedStorageKey"].as_str())
 }
 
 #[derive(Deserialize)]
@@ -124,17 +166,25 @@ struct DriveAnswer {
     target_drive: TargetDrive,
     /// When the drive was made, Unix ms (the identity's clock).
     created: i64,
-    /// How it is shared (`DriveSharingModel`, by name or number): private or selective share
-    /// is zero knowledge.
+    /// How it is shared; absent from a server before odin-core step 4.
     #[serde(default)]
-    sharing_model: serde_json::Value,
+    sharing_model: Option<SharingModel>,
 }
 
-impl DriveAnswer {
-    fn zero_knowledge(&self) -> bool {
-        let m = &self.sharing_model;
-        m == "private" || m == "selectiveShare" || m == 1 || m == 2
-    }
+/// The drive's answer (`GET /api/v2/apps/filesync/drives/filesync`): [`HomebaseError::NoDrive`]
+/// when the identity says nothing answers at its address.
+fn drive_answer(client: &Client) -> Result<DriveAnswer, HomebaseError> {
+    let route = format!(
+        "/api/v2/apps/{}/drives/{}",
+        app::APP_SLUG,
+        app::SYNC_DRIVE.slug
+    );
+    client.get(&route, &[]).map_err(|e| match e {
+        HomebaseError::Api { error, .. } if no_drive(&error) => {
+            HomebaseError::NoDrive(client.identity().to_owned())
+        }
+        e => e,
+    })
 }
 
 /// A create's or update's answer (`CreateFileResult`, `UpdateFileResult`): the version written
@@ -240,54 +290,36 @@ impl HomebaseRemote {
     /// Finds the Filesync drive on the client's identity: [`HomebaseError::NoDrive`] when the
     /// identity says nothing answers at its address.
     pub fn connect(client: Client) -> Result<Self, HomebaseError> {
-        let route = format!(
-            "/api/v2/apps/{}/drives/{}",
-            app::APP_SLUG,
-            app::SYNC_DRIVE.slug
-        );
-        let answer: DriveAnswer = client.get(&route, &[]).map_err(|e| match e {
-            HomebaseError::Api { error, .. } if no_drive(&error) => {
-                HomebaseError::NoDrive(client.identity().to_owned())
-            }
-            e => e,
-        })?;
-        let read = (
-            client.connects(),
-            drive_key_of(&client, &answer.target_drive)?,
-        );
-        // A private drive whose key isn't locked for the app yet (a grant the owner's browser
-        // hasn't seen): a sign-in fills it in. Never taken for a shared drive.
-        if answer.zero_knowledge() && read.1.is_none() {
-            return Err(HomebaseError::Denied(PRIVATE.into()));
-        }
+        let answer = drive_answer(&client)?;
+        let state = KeyState::read(&client, &answer, client.connects())?;
+        state.key()?;
         Ok(HomebaseRemote {
             client,
             drive: answer.target_drive,
             made: answer.created,
-            drive_key: DriveKey(Mutex::new(read)),
+            drive_key: DriveKey(Mutex::new(state)),
         })
     }
 
-    /// The private drive's key, if it is private. Read again (one request) once the
+    /// The private drive's key; none on a shared drive. Read again (two requests) once the
     /// notifications connected since (making a drive private closes them), or when `needed`
-    /// (a file locked with it) and none is held. A private drive whose key this login can't
-    /// open refuses this computer ([`RemoteError::Denied`]): it stops, rather than read the
-    /// files hidden from it as gone.
+    /// (a file locked with it, or a write the drive refused for its key header) on a drive not
+    /// known to be private: that it is stays known (there is no way back). A private drive
+    /// whose key this computer doesn't hold refuses it ([`RemoteError::Denied`]): it stops,
+    /// rather than read the files hidden from it as gone.
     fn drive_key(&self, needed: bool) -> Result<Option<Key>> {
         let connects = self.client.connects();
-        // Held while it is read: whoever needs it then waits for that one request.
+        // Held while it is read: whoever needs it then waits for that one read.
         let mut state = self.drive_key.0.lock().unwrap_or_else(|e| e.into_inner());
-        let (read_at, held) = *state;
-        if read_at == connects && (held.is_some() || !needed) {
-            return Ok(held);
+        if state.read_at != connects || (needed && !state.private) {
+            let answer = drive_answer(&self.client).map_err(remote_error)?;
+            let read = KeyState::read(&self.client, &answer, connects).map_err(remote_error)?;
+            *state = KeyState {
+                private: read.private || state.private || needed,
+                ..read
+            };
         }
-        let read = drive_key_of(&self.client, &self.drive).map_err(remote_error)?;
-        *state = (connects, read);
-        match read {
-            // Locked with the drive's key, which isn't locked for the app (yet).
-            None if needed => Err(RemoteError::Denied(PRIVATE.into())),
-            read => Ok(read),
-        }
+        state.key().map_err(remote_error)
     }
 
     /// `header` as a [`RemoteHeader`], opened with the drive's key when a live node's is locked
@@ -1032,10 +1064,11 @@ impl HomebaseError {
 mod tests {
     use super::*;
 
-    /// A drive answer says zero knowledge by name or number; absent (an older server) or
-    /// collaborative, it doesn't.
+    /// A drive answer says zero knowledge by its model's name; absent (an older server),
+    /// collaborative or one this client doesn't know, it doesn't.
     #[test]
-    fn the_drive_answer_says_whether_the_drive_is_zero_knowledge() -> Result<(), serde_json::Error> {
+    fn the_drive_answer_says_whether_the_drive_is_zero_knowledge() -> Result<(), serde_json::Error>
+    {
         let answer = |model: serde_json::Value| -> Result<DriveAnswer, serde_json::Error> {
             let mut a = json!({
                 "targetDrive": { "alias": Uuid::nil(), "type": Uuid::nil() },
@@ -1046,13 +1079,30 @@ mod tests {
             }
             serde_json::from_value(a)
         };
-        for model in [json!("selectiveShare"), json!("private"), json!(1), json!(2)] {
-            assert!(answer(model.clone())?.zero_knowledge(), "{model}");
+        let private = |a: DriveAnswer| a.sharing_model.is_some_and(SharingModel::zero_knowledge);
+        for model in [json!("selectiveShare"), json!("private")] {
+            assert!(private(answer(model.clone())?), "{model}");
         }
-        for model in [json!(null), json!("collaborative"), json!(0), json!("unclassified")] {
-            assert!(!answer(model.clone())?.zero_knowledge(), "{model}");
+        for model in [json!(null), json!("collaborative"), json!("somethingNew")] {
+            assert!(!private(answer(model.clone())?), "{model}");
         }
         Ok(())
+    }
+
+    /// A private drive without its key refuses this computer; a shared one needs none.
+    #[test]
+    fn a_private_drive_without_its_key_asks_to_log_in_again() {
+        let state = |private: bool, key: Option<Key>| KeyState {
+            read_at: 0,
+            private,
+            key,
+        };
+        assert!(matches!(
+            state(true, None).key(),
+            Err(HomebaseError::Denied(_))
+        ));
+        assert_eq!(state(false, None).key().ok(), Some(None));
+        assert_eq!(state(true, Some([1; 16])).key().ok(), Some(Some([1; 16])));
     }
 
     /// The drive's locked key is found on its own grant, whatever shape the others have; a
@@ -1080,10 +1130,11 @@ mod tests {
             ] } })
         };
         let private = context(vec![grant(3, Some("other")), grant(1, Some("ours"))]);
-        assert_eq!(locked_drive_key(&private, &drive), Some("ours"));
+        assert_eq!(locked_drive_key(&private, &drive).ok(), Some(Some("ours")));
         let shared = context(vec![grant(1, None)]);
-        assert_eq!(locked_drive_key(&shared, &drive), None);
-        assert_eq!(locked_drive_key(&json!({}), &drive), None);
+        assert_eq!(locked_drive_key(&shared, &drive).ok(), Some(None));
+        // No grant on the drive at all: the server's to explain, not "shared".
+        assert!(locked_drive_key(&json!({}), &drive).is_err());
     }
 
     /// An error answer of the identity itself.
@@ -1427,7 +1478,11 @@ mod tests {
                 drive_type: Uuid::nil(),
             },
             made: 0,
-            drive_key: DriveKey(Mutex::new((0, None))),
+            drive_key: DriveKey(Mutex::new(KeyState {
+                read_at: 0,
+                private: false,
+                key: None,
+            })),
         };
         let size = MAX_FILE + 1;
         let meta = NodeMeta {

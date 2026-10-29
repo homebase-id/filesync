@@ -138,13 +138,17 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
 
 ### A private drive (zero knowledge)
 A new drive is made private from the start: the app's drive request asks for it (`sm:
-"selectiveShare"`), and the owner's browser makes its key, which the server never sees (odin-core
-`docs/zero-knowledge-drive-api-plan.md`, step 4; an older owner console makes a shared drive,
-which syncs as one). A drive made before can be made private in the owner console (step 3):
+"selectiveShare"`), and the owner's browser makes its key, which the server never sees
+(**[verified]** in odin-core `filesync-selective-share` and odin-js `drive-private-models`, not
+merged yet; odin-core `docs/zero-knowledge-drive-api-plan.md`, step 4). An older owner console
+ignores `sm` and makes a shared drive, which syncs as one **[inferred]**: it reads only the keys
+it knows. A drive made before can be made private in the owner console (step 3):
 it keeps its key, so no file is encrypted again: each key header is relabelled `zkDrive`, the
 same 48 bytes **[verified]** (odin-core, 3.3). This client reads which the drive is from the
 drive (its locked key in the security context, and the drive answer's `sharingModel`), never
-from what it asked for. What changes for this client:
+from what it asked for, and once private it stays so. The cost on a private drive is one more
+request per download (below), which every new user now pays: passing the file's token and its
+payload IV to the download would save it (a follow-up). What changes for this client:
 - **The key.** Logging in asks for the app's zero-knowledge key (`zk_app_key=1`); the token
   answer carries it sealed to the login's P-384 key (`ZkSeal` v1: ECDH, HKDF-SHA256 with no salt
   and the info `homebase-zk-seal`, AES-128-GCM), kept with the credentials. On a private drive

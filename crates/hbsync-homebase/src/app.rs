@@ -13,6 +13,7 @@
 //! kind afterwards (verified in odin-js `useApp.ts` / `DriveProvider.ts`). Until then the
 //! client sends hashes on every upload anyway, and the drive is only recognised by its type.
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::{Uuid, uuid};
 
@@ -41,9 +42,26 @@ pub(crate) struct DriveSpec {
     pub type_slug: &'static str,
     /// Read = 1, Write = 2.
     pub permission: u32,
-    /// How the drive is made, when it is (`sm`: `collaborative`, `private` or `selectiveShare`,
-    /// odin-core `DriveSharingModel`); a drive that exists stays as it is.
-    pub sharing_model: &'static str,
+    /// How the drive is made, when it is (`sm`); a drive that exists stays as it is.
+    pub sharing_model: SharingModel,
+}
+
+/// How a drive is shared (odin-core `DriveSharingModel`, camelCase in JSON **[verified]**):
+/// private and selective share are zero knowledge (`encryption.md`, "A private drive").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum SharingModel {
+    Collaborative,
+    Private,
+    SelectiveShare,
+    #[serde(other)]
+    Unclassified,
+}
+
+impl SharingModel {
+    pub(crate) fn zero_knowledge(self) -> bool {
+        matches!(self, SharingModel::Private | SharingModel::SelectiveShare)
+    }
 }
 
 /// The drive the sync folder mirrors.
@@ -57,7 +75,7 @@ pub(crate) const SYNC_DRIVE: DriveSpec = DriveSpec {
     permission: 3,
     // Private from the start: only the owner's devices hold its key (encryption.md, "A
     // private drive"). An older console ignores it and makes a shared one, which syncs too.
-    sharing_model: "selectiveShare",
+    sharing_model: SharingModel::SelectiveShare,
 };
 
 /// A circle the app owns.
