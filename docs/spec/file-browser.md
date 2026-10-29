@@ -97,9 +97,12 @@ Everything comes from the node's HomebaseFile; nothing is stored beside it.
 - There are no thumbnails, and folders have no size or item count.
 
 ## A private drive (zero knowledge)
-The owner can make the Filesync drive private, as Vault (odin-core
-`docs/zero-knowledge-drive-api-plan.md`, step 3). The nodes stay the same; only the file key's
-lock changes (`encryption.md`, "A private drive"):
+A new Filesync drive is made private (`selectiveShare`): installing the app asks for it with
+`sm: "selectiveShare"` in the drive request, which an install from Chat must send the same as
+the desktop (filesync `app.rs`, `drive_request`). One made before can be made private, as Vault
+(odin-core `docs/zero-knowledge-drive-api-plan.md`, steps 3 and 4). Read which it is from the
+drive (`sharingModel` in the app drive answer), never from the request. The nodes stay the same;
+only the file key's lock changes (`encryption.md`, "A private drive"):
 - Every key header is `type: "zkDrive"` (13): the same 48 bytes as an `aes` one, under the
   drive's key instead of the shared secret. Open it with the drive's key (from the security
   context, opened with the app's zero-knowledge key).

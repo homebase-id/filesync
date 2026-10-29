@@ -58,6 +58,11 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   responses carry no `SharedSecretEncryptedHeader64`. A device not handed the key sees none of
   the drive's encrypted files (`ZkDriveFiles.VisibleTo`: left out of queries, refused by id) and
   can't write (`driveIsZeroKnowledge`, 9012). Converting keeps `created` (true-zero, from code).
+  A drive request's `sm` (`collaborative`, `private`, `selectiveShare`; absent: collaborative)
+  makes a new drive so, and the app drive answer carries `sharingModel` (odin-core branch
+  `filesync-selective-share`, odin-js `drive-private-models`, step 4; **[verified]** in code, not
+  merged yet). The app's locked copy of the key can lag behind the model: private with no copy
+  means sign in again.
   How this client uses it: `encryption.md`.
 - **A drive made again** **[verified]**: its id is the alias the app asks for
   (`DriveManager.CreateDriveAsync`), fixed in `app.rs`, so a drive deleted and made again has the

@@ -38,7 +38,8 @@ pub mod wire;
 use wire::Keys;
 
 /// Why a private drive refuses this computer: it wasn't handed the app's zero-knowledge key
-/// (a login from before it asked for one), or the key it was handed opens the drive's no more.
+/// (a login from before it asked for one), the key it was handed opens the drive's no more, or
+/// the drive's key isn't locked for the app yet: a sign-in sets each right.
 const PRIVATE: &str = "the Filesync drive on your Homebase cloud is private now, and this \
                        computer doesn't hold its key";
 
@@ -123,6 +124,17 @@ struct DriveAnswer {
     target_drive: TargetDrive,
     /// When the drive was made, Unix ms (the identity's clock).
     created: i64,
+    /// How it is shared (`DriveSharingModel`, by name or number): private or selective share
+    /// is zero knowledge.
+    #[serde(default)]
+    sharing_model: serde_json::Value,
+}
+
+impl DriveAnswer {
+    fn zero_knowledge(&self) -> bool {
+        let m = &self.sharing_model;
+        m == "private" || m == "selectiveShare" || m == 1 || m == 2
+    }
 }
 
 /// A create's or update's answer (`CreateFileResult`, `UpdateFileResult`): the version written
@@ -243,6 +255,11 @@ impl HomebaseRemote {
             client.connects(),
             drive_key_of(&client, &answer.target_drive)?,
         );
+        // A private drive whose key isn't locked for the app yet (a grant the owner's browser
+        // hasn't seen): a sign-in fills it in. Never taken for a shared drive.
+        if answer.zero_knowledge() && read.1.is_none() {
+            return Err(HomebaseError::Denied(PRIVATE.into()));
+        }
         Ok(HomebaseRemote {
             client,
             drive: answer.target_drive,
@@ -267,9 +284,8 @@ impl HomebaseRemote {
         let read = drive_key_of(&self.client, &self.drive).map_err(remote_error)?;
         *state = (connects, read);
         match read {
-            None if needed => Err(RemoteError::Fatal(
-                "a file locked with the drive's key, on a drive that isn't private".into(),
-            )),
+            // Locked with the drive's key, which isn't locked for the app (yet).
+            None if needed => Err(RemoteError::Denied(PRIVATE.into())),
             read => Ok(read),
         }
     }
@@ -1015,6 +1031,29 @@ impl HomebaseError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A drive answer says zero knowledge by name or number; absent (an older server) or
+    /// collaborative, it doesn't.
+    #[test]
+    fn the_drive_answer_says_whether_the_drive_is_zero_knowledge() -> Result<(), serde_json::Error> {
+        let answer = |model: serde_json::Value| -> Result<DriveAnswer, serde_json::Error> {
+            let mut a = json!({
+                "targetDrive": { "alias": Uuid::nil(), "type": Uuid::nil() },
+                "created": 1,
+            });
+            if !model.is_null() {
+                a["sharingModel"] = model;
+            }
+            serde_json::from_value(a)
+        };
+        for model in [json!("selectiveShare"), json!("private"), json!(1), json!(2)] {
+            assert!(answer(model.clone())?.zero_knowledge(), "{model}");
+        }
+        for model in [json!(null), json!("collaborative"), json!(0), json!("unclassified")] {
+            assert!(!answer(model.clone())?.zero_knowledge(), "{model}");
+        }
+        Ok(())
+    }
 
     /// The drive's locked key is found on its own grant, whatever shape the others have; a
     /// drive that isn't private has none.

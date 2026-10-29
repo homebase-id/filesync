@@ -41,6 +41,9 @@ pub(crate) struct DriveSpec {
     pub type_slug: &'static str,
     /// Read = 1, Write = 2.
     pub permission: u32,
+    /// How the drive is made, when it is (`sm`: `collaborative`, `private` or `selectiveShare`,
+    /// odin-core `DriveSharingModel`); a drive that exists stays as it is.
+    pub sharing_model: &'static str,
 }
 
 /// The drive the sync folder mirrors.
@@ -52,6 +55,9 @@ pub(crate) const SYNC_DRIVE: DriveSpec = DriveSpec {
     slug: "filesync",
     type_slug: "filesync",
     permission: 3,
+    // Private from the start: only the owner's devices hold its key (encryption.md, "A
+    // private drive"). An older console ignores it and makes a shared one, which syncs too.
+    sharing_model: "selectiveShare",
 };
 
 /// A circle the app owns.
@@ -87,6 +93,7 @@ pub(crate) fn drive_request(drive: &DriveSpec) -> serde_json::Value {
         "p": drive.permission,
         "ds": drive.slug,
         "ts": drive.type_slug,
+        "sm": drive.sharing_model,
     })
 }
 
@@ -198,6 +205,7 @@ mod tests {
         let drives: serde_json::Value =
             serde_json::from_str(request["d"].as_str().unwrap_or_default())?;
         assert_eq!(drives[0]["ds"], "filesync");
+        assert_eq!(drives[0]["sm"], "selectiveShare");
         assert_eq!(drives[0]["p"], 3);
         assert_eq!(request["appId"], "03ae1a49cdae483f9da7fedc0e8f20b9");
         Ok(())
