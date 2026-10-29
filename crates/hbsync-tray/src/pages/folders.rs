@@ -24,13 +24,13 @@ impl Server {
             Ok(c) => c.unwrap_or_default(),
             Err(e) => {
                 return format!(
-                    "<h1>Folders</h1><p class=error>{}</p>",
+                    "<h1>Set up this computer</h1><p class=error>{}</p>",
                     escape(&e.to_string())
                 );
             }
         };
         let Some(main) = config.root().ok().flatten() else {
-            return "<h1>Folders</h1><p>Log in to Homebase first.</p>".into();
+            return "<h1>Set up this computer</h1><p>Log in to Homebase first.</p>".into();
         };
         let identity = &main.identity;
         let home = folders::home();
@@ -94,7 +94,7 @@ impl Server {
             .collect();
         let said = said.map_or(String::new(), |s| format!("<p>{}</p>", escape(s)));
         format!(
-            "<h1>Folders</h1>{said}\
+            "<h1>Set up this computer</h1>{said}\
              <p>Besides your Homebase folder, Filesync can sync your own folders where they are, \
              with {identity}. A folder another device syncs already is joined: identical files \
              are kept once, a file that differs is kept twice.</p>\

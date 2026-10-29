@@ -248,7 +248,7 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
             Action::RecentlyDeleted,
             "Recently deleted…".into(),
         ));
-        items.push(Item::Action(Action::Folders, "Folders…".into()));
+        items.push(Item::Action(Action::Folders, "Set up this computer…".into()));
         // Refused, or a login from before private drives: asked before the drive is made one.
         if s.state == State::Denied || view.daemon.login_without_key(&s.identity) {
             items.push(Item::Action(Action::LogInAgain, "Log in again…".into()));
