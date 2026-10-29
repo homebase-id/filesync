@@ -343,6 +343,30 @@ pub fn check_state(
     Ok((running, set_aside))
 }
 
+/// Signs this computer in again on `identity`, through `owner` (the browser): a new login,
+/// kept, and a running daemon's account started over with it. Nothing else changes: the folder,
+/// the drive and starting at logon stay as they are. For a login from before private drives,
+/// which holds no zero-knowledge key ([`Credentials::without_zk_key`]); a refused login goes
+/// through [`set_up`], which asks again as it finds it refused. The old login isn't revoked:
+/// the owner sees it in the app's list. The files' tokens, sealed under the old login, are read
+/// again as files are next written (one header read each, once).
+pub fn sign_in_again(
+    paths: &Paths,
+    identity: &Identity,
+    owner: &mut dyn Owner,
+) -> crate::Result<()> {
+    let device = Config::load(&paths.config_file())?
+        .unwrap_or_default()
+        .device_name();
+    let creds = owner.authorize(identity, &device)?;
+    CredentialStore::open(paths).save(&creds)?;
+    match control::start_over(paths, identity) {
+        // Not running: it reads the new login when it starts.
+        Err(e) if e.is::<control::NotRunning>() => Ok(()),
+        other => other,
+    }
+}
+
 /// What to set up, as [`plan`] makes it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetUp {

@@ -51,6 +51,15 @@ enum Command {
         #[arg(long)]
         no_autostart: bool,
     },
+    /// Signs this computer in again (you approve in the browser): for a login from before
+    /// private drives, which `hbsync status` names. The folders stay as they are.
+    Login {
+        /// The identity [default: the one set up].
+        identity: Option<String>,
+        /// The browser to open the authorize page with.
+        #[arg(long, value_name = "COMMAND")]
+        browser: Option<String>,
+    },
     /// Syncs one of your own folders where this computer keeps it (documents, pictures,
     /// music, videos, downloads) with the drive's folder of that kind: joined if another device
     /// syncs it already (identical files are adopted, not copied), made if not.
@@ -368,6 +377,16 @@ fn run(command: Command) -> Res<ExitCode> {
                 root.identity
             );
         }
+        Command::Login { identity, browser } => {
+            let config = Config::load(&paths.config_file())?.unwrap_or_default();
+            let identity = config.identity(identity.as_deref())?;
+            let mut owner = setup::InBrowser {
+                browser: browser.as_deref(),
+                say: &|line| println!("{line}"),
+            };
+            setup::sign_in_again(&paths, &identity, &mut owner)?;
+            println!("Signed in again on {identity}.");
+        }
         Command::Add {
             role,
             identity,
@@ -539,7 +558,7 @@ fn print_status(status: &DaemonStatus) {
         // A login from before private drives: asked before the drive is made one.
         let login = a.login_without_key.then(|| {
             format!(
-                "login: from before private drives: `hbsync setup {}` signs in again",
+                "login: from before private drives: `hbsync login {}` signs in again",
                 a.identity
             )
         });

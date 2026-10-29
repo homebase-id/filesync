@@ -293,11 +293,17 @@ impl App {
                 os::open(self.pages.url("setup"));
             }
             Action::LogInAgain => {
+                // A refused login is set up again (which asks for the drive too); one from
+                // before private drives, still accepted, has only the login replaced.
+                let mut page = "setup";
                 if let Some(s) = self.status() {
+                    if s.state != State::Denied && self.daemon.login_without_key(&s.identity) {
+                        page = "login";
+                    }
                     let (identity, folder) = (s.identity.clone(), s.path.clone());
                     self.pages.prepare_setup(&identity, Some(folder));
                 }
-                os::open(self.pages.url("setup"));
+                os::open(self.pages.url(page));
             }
             Action::OpenFolder => {
                 let folder = match self.status() {

@@ -133,14 +133,53 @@ impl Server {
             }
         };
 
+        let paths = self.paths.clone();
+        let identity = request.identity.to_string();
+        Some(self.run_login(identity, move |owner| {
+            setup::set_up(&paths, &request, owner, &mut |line| {
+                tracing::info!("{line}")
+            })
+            .map(|()| {
+                format!(
+                    "{} syncs with {}.",
+                    request.folder.display(),
+                    request.identity
+                )
+            })
+            .map_err(|e| e.to_string())
+        }))
+    }
+
+    /// Signs this computer in again on the identity the tray prepared (a login from before
+    /// private drives: only the login is replaced). The browser goes to the identity's approval
+    /// page, or the outcome.
+    pub(super) fn start_login(&self) -> String {
+        let identity = lock(&self.pages.shared).identity.clone();
+        let paths = self.paths.clone();
+        self.run_login(identity.clone(), move |owner| {
+            setup::sign_in_again(&paths, &hbsync_app::Identity::new(&identity), owner)
+                .map(|()| format!("This computer is signed in again on {identity}."))
+                .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Runs `login` (through the browser) on a thread of its own, one login at a time: the page
+    /// that follows along shows it, starting over gives it up. Returns where the browser goes:
+    /// the identity's approval page, or (failed early, or a login already going on) the page
+    /// that follows along.
+    fn run_login(
+        &self,
+        identity: String,
+        login: impl FnOnce(&mut InTray) -> Result<String, String> + Send + 'static,
+    ) -> String {
         let cancel = {
             let mut s = lock(&self.pages.shared);
             // A second submit (a double click) joins the login in progress.
             if s.phase == Phase::Connecting {
-                return Some(self.pages.url("setup/done"));
+                return self.pages.url("setup/done");
             }
             s.clear_form();
-            s.identity = request.identity.to_string();
+            s.identity = identity;
             s.phase = Phase::Connecting;
             let cancel = Arc::new(AtomicBool::new(false));
             s.cancel = Some(Arc::clone(&cancel));
@@ -148,28 +187,17 @@ impl Server {
         };
         (self.send)(Event::Wake);
         let (url_tx, url_rx) = mpsc::channel::<String>();
-        let (paths, pages, send) = (self.paths.clone(), self.pages.clone(), self.send.clone());
+        let (pages, send) = (self.pages.clone(), self.send.clone());
         let mut owner = InTray {
             first: Some(url_tx),
             cancel: Arc::clone(&cancel),
             pages: self.pages.clone(),
         };
         std::thread::spawn(move || {
-            let result = setup::set_up(&paths, &request, &mut owner, &mut |line| {
-                tracing::info!("{line}");
-            });
-            let result = result
-                .map(|()| {
-                    format!(
-                        "{} syncs with {}.",
-                        request.folder.display(),
-                        request.identity
-                    )
-                })
-                .map_err(|e| e.to_string());
+            let result = login(&mut owner);
             match &result {
-                Ok(done) => tracing::info!("set up: {done}"),
-                Err(e) => tracing::warn!("setting up failed: {e}"),
+                Ok(done) => tracing::info!("logged in: {done}"),
+                Err(e) => tracing::warn!("logging in failed: {e}"),
             }
             // Unless given up (started over): then a later login's page is showing.
             if !cancel.load(Ordering::Relaxed) {
@@ -180,11 +208,9 @@ impl Server {
             send(Event::Wake);
         });
         // The approval page, or (already authorized, or failed early) the outcome.
-        Some(
-            url_rx
-                .recv_timeout(Duration::from_secs(60))
-                .unwrap_or_else(|_| self.pages.url("setup/done")),
-        )
+        url_rx
+            .recv_timeout(Duration::from_secs(60))
+            .unwrap_or_else(|_| self.pages.url("setup/done"))
     }
 
     pub(super) fn done_page(&self) -> String {

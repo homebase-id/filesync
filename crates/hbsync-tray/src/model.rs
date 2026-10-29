@@ -50,6 +50,11 @@ impl Daemon {
             .or_else(|| s.main_folder())
     }
 
+    /// The account `identity` is signed in with a login from before private drives.
+    pub fn login_without_key(&self, identity: &hbsync_app::Identity) -> bool {
+        self.account(identity).is_some_and(|a| a.login_without_key)
+    }
+
     /// The status of the account `identity`.
     pub fn account(&self, identity: &hbsync_app::Identity) -> Option<&AccountStatus> {
         let Daemon::Running(s) = self else {
@@ -245,12 +250,7 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
         ));
         items.push(Item::Action(Action::Folders, "Folders…".into()));
         // Refused, or a login from before private drives: asked before the drive is made one.
-        if s.state == State::Denied
-            || view
-                .daemon
-                .account(&s.identity)
-                .is_some_and(|a| a.login_without_key)
-        {
+        if s.state == State::Denied || view.daemon.login_without_key(&s.identity) {
             items.push(Item::Action(Action::LogInAgain, "Log in again…".into()));
         }
         items.push(Item::Separator);

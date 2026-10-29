@@ -188,6 +188,8 @@ impl Server {
                 redirect(&mut stream, &self.pages.url("setup/done"))
             }
             ("GET", "setup") => self.html(&mut stream, self.setup_page()),
+            // Signing in again (the tray opens it), unless a login goes on already.
+            ("GET", "login") => redirect(&mut stream, &self.start_login()),
             ("POST", "setup/folder") => {
                 self.choose_folder(&request.form);
                 redirect(&mut stream, &self.pages.url("setup"))
