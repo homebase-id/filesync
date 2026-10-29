@@ -642,7 +642,7 @@ Linux (rfd's, without GTK) needs `zenity`, which KDE doesn't install.
   runs ("Emptying Recently deleted: 3,000 of 22,367"), Open Homebase folder, Browse files online (chat's web app on the
   identity, opened on its Filesync mini-app: `https://<identity>/apps/chat/#filesync`),
   Recently synced (the last 10; clicking one shows it
-  in the file manager), Problems (the main folder's notes and its account's, newest first), Review N deletions…, Recently deleted…, Folders…, Log
+  in the file manager), Problems (the main folder's notes and its account's, newest first), Review N deletions…, Recently deleted…, Set up this computer…, Log
   in again… (refused), Pause syncing (1 h, 8 h, 24 h, until resumed) or Resume, Sync now, Start
   at login, Open logs, Log out, Quit (keep syncing in the background, or stop syncing too).
   Syncing stopped: Start syncing, Open Homebase folder, Start at login, Open logs, Quit.

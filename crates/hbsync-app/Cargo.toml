@@ -48,6 +48,8 @@ libc = "0.2"
 
 [target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
 zbus-secret-service-keyring-store = { version = "1", features = ["crypto-rust"] }
+# Its errors: which ones a session opened again may not have (`secrets::broken`).
+secret-service = "5"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 # The secret service's, already: systemd's scopes (`unit`).

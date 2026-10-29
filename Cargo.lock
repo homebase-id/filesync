@@ -1612,6 +1612,7 @@ dependencies = [
  "objc2-foundation",
  "percent-encoding",
  "rusqlite",
+ "secret-service",
  "serde",
  "serde_json",
  "tempfile",
