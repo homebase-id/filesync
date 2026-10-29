@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 
 use hbsync_homebase::{Credentials, HomebaseError};
 use keyring_core::{CredentialStore as Keychain, Error as KeychainError};
@@ -221,7 +221,7 @@ impl CredentialStore {
         call: impl Fn(&keyring_core::Entry) -> keyring_core::Result<T>,
     ) -> Result<keyring_core::Result<T>, String> {
         let keychain = self.keychain.as_ref().map_err(Clone::clone)?;
-        let mut keychain = keychain.lock().unwrap_or_else(PoisonError::into_inner);
+        let mut keychain = crate::sync::lock(keychain);
         let modifiers: HashMap<&str, &str> = MODIFIERS.iter().copied().collect();
         let mut tries = 1;
         loop {
@@ -231,9 +231,10 @@ impl CredentialStore {
             {
                 Err(e) if broken(&e) && tries < TRIES => {
                     tracing::info!("keychain: {e}; opening it again");
-                    match opened(self.open) {
+                    // Refused, it counts as a try all the same.
+                    match (self.open)() {
                         Ok(again) => *keychain = again,
-                        Err(e) => tracing::warn!("keychain: {e}"),
+                        Err(e) => tracing::info!("keychain: {e}"),
                     }
                     tries += 1;
                 }
@@ -243,8 +244,8 @@ impl CredentialStore {
     }
 }
 
-/// The keychain `open` opens, [`TRIES`] times at most while it opens broken, or why it can't
-/// be.
+/// The keychain `open` opens, [`TRIES`] times at most while it opens broken (refused), or why
+/// it can't be.
 fn opened(open: Open) -> Result<Arc<Keychain>, String> {
     let mut tries = 1;
     loop {
@@ -260,27 +261,26 @@ fn opened(open: Open) -> Result<Arc<Keychain>, String> {
 /// ("client public key size is invalid": secret-service sends a key with a leading zero byte
 /// short) and gets about one in 125 wrong (measured: 16 and 24 of 3,000): every call on it
 /// fails to decrypt, or reads garbage, until it is opened again. Elsewhere none is retried (a
-/// macOS failure may be the user's no to a prompt).
+/// macOS failure may be the user's no to a prompt). Its errors are secret-service's as the
+/// store's version of it has them: deny.toml refuses a second version.
+#[cfg(all(unix, not(target_os = "macos")))]
 fn broken(e: &KeychainError) -> bool {
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        use secret_service::Error as Session;
-        match e {
-            KeychainError::BadEncoding(_) => true,
-            KeychainError::PlatformFailure(e) => {
-                matches!(
-                    e.downcast_ref(),
-                    Some(Session::Crypto(_) | Session::Zbus(_))
-                )
-            }
-            _ => false,
+    use secret_service::Error as Session;
+    match e {
+        KeychainError::BadEncoding(_) => true,
+        KeychainError::PlatformFailure(e) => {
+            matches!(
+                e.downcast_ref(),
+                Some(Session::Crypto(_) | Session::Zbus(_))
+            )
         }
+        _ => false,
     }
-    #[cfg(not(all(unix, not(target_os = "macos"))))]
-    {
-        let _ = e;
-        false
-    }
+}
+
+#[cfg(not(all(unix, not(target_os = "macos"))))]
+fn broken(_: &KeychainError) -> bool {
+    false
 }
 
 fn os_keychain() -> keyring_core::Result<Arc<Keychain>> {
@@ -406,7 +406,7 @@ mod tests {
 
     /// A keychain as KDE's Secret Service gives it: its first opening is refused, and every
     /// other one after is a broken session (a write stores garbage; a read fails to decrypt,
-    /// or reads garbage). Per test thread.
+    /// or, every other such session, reads garbage). Per test thread.
     #[cfg(all(unix, not(target_os = "macos")))]
     mod flaky {
         use std::any::Any;
@@ -429,19 +429,22 @@ mod tests {
                 0 => Err(Error::PlatformFailure(Box::new(Session::Zbus(
                     zbus::Error::Failure("client public key size is invalid".into()),
                 )))),
-                n => Ok(Arc::new(Store { broken: n % 2 == 1 })),
+                n => Ok(Arc::new(Store {
+                    broken: (n % 2 == 1).then_some(n % 4 == 3),
+                })),
             }
         }
 
+        /// Broken: `Some`, whether it reads garbage (else its reads fail to decrypt).
         #[derive(Debug)]
         struct Store {
-            broken: bool,
+            broken: Option<bool>,
         }
 
         #[derive(Debug)]
         struct Cred {
             user: String,
-            broken: bool,
+            broken: Option<bool>,
         }
 
         impl CredentialStoreApi for Store {
@@ -465,8 +468,8 @@ mod tests {
         impl CredentialApi for Cred {
             fn set_secret(&self, secret: &[u8]) -> Result<()> {
                 let stored = match self.broken {
-                    true => vec![0xff; secret.len()],
-                    false => secret.to_vec(),
+                    Some(_) => vec![0xff; secret.len()],
+                    None => secret.to_vec(),
                 };
                 SECRETS.with_borrow_mut(|s| s.insert(self.user.clone(), stored));
                 Ok(())
@@ -475,12 +478,12 @@ mod tests {
                 let stored = SECRETS.with_borrow(|s| s.get(&self.user).cloned());
                 match (stored, self.broken) {
                     (None, _) => Err(Error::NoEntry),
-                    // Decrypted with the wrong key: its padding fails, or it is garbage.
-                    (Some(stored), true) if stored.len() % 2 == 0 => Ok(vec![0xff; 3]),
-                    (Some(_), true) => Err(Error::PlatformFailure(Box::new(Session::Crypto(
-                        "message decryption failed",
-                    )))),
-                    (Some(stored), false) => Ok(stored),
+                    // Decrypted with the wrong key: garbage, or its padding fails.
+                    (Some(_), Some(true)) => Ok(vec![0xff; 3]),
+                    (Some(_), Some(false)) => Err(Error::PlatformFailure(Box::new(
+                        Session::Crypto("message decryption failed"),
+                    ))),
+                    (Some(stored), None) => Ok(stored),
                 }
             }
             fn delete_credential(&self) -> Result<()> {
@@ -513,30 +516,18 @@ mod tests {
             dir: dir.path().join("credentials"),
         };
         let identity = Identity::new("a.example");
-        for creds in [sized(&identity, 0), sized(&identity, 1)] {
-            // Refused, then broken: what it stored is garbage, read back failing.
-            let first = store();
-            assert_eq!(first.save(&creds)?, Location::Keychain);
-            assert!(!first.file(&identity).exists());
-            // Another process, on a broken session first.
-            let (back, at) = store().load(&identity)?.expect("saved");
-            assert!(same(&back, &creds));
-            assert_eq!(at, Location::Keychain);
-        }
+        let creds = sample(&identity);
+        // Refused, then broken: what it stored is garbage, its read back failing to decrypt.
+        let first = store();
+        assert_eq!(first.save(&creds)?, Location::Keychain);
+        assert!(!first.file(&identity).exists());
+        // Another process, on a broken session reading garbage first.
+        let (back, at) = store().load(&identity)?.expect("saved");
+        assert!(same(&back, &creds));
+        assert_eq!(at, Location::Keychain);
         assert_eq!(store().delete(&identity)?, None);
         assert!(store().load(&identity)?.is_none());
         Ok(())
-    }
-
-    /// [`sample`] with an even (`parity` 0) or odd (1) length as JSON: a broken session reads
-    /// the one as garbage, and fails to decrypt the other ([`flaky`]).
-    #[cfg(all(unix, not(target_os = "macos")))]
-    fn sized(identity: &str, parity: usize) -> Credentials {
-        let mut creds = sample(identity);
-        if serde_json::to_string(&creds).map_or(0, |j| j.len()) % 2 != parity {
-            creds.client_auth_token.push('A');
-        }
-        creds
     }
 
     /// Writes to the real keychain, so only on CI runners (`CI` is set). macOS and Windows
