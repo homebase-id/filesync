@@ -8,7 +8,9 @@
 //! 2. The identity redirects to our localhost callback with its own public key and a salt.
 //! 3. Both sides derive the exchange key; we prove it with its SHA-256 at
 //!    `POST /api/owner/v1/youauth/token` and get the client auth token and the shared secret,
-//!    AES-CBC encrypted under the exchange key.
+//!    AES-CBC encrypted under the exchange key, and the app's zero-knowledge key, sealed to our
+//!    public key (asked for with `zk_app_key=1`: odin-core
+//!    `docs/zero-knowledge-drive-api-plan.md`, 3.5).
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -30,6 +32,10 @@ pub struct Credentials {
     pub client_auth_token: String,
     /// The shared secret, base64: the key of every request and response envelope.
     pub shared_secret: String,
+    /// The app's zero-knowledge key (AppZkK), base64: it opens the drive's key once the drive is
+    /// private (zero knowledge). `None` for a login from before this client asked for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zk_app_key: Option<String>,
 }
 
 impl std::fmt::Debug for Credentials {
@@ -57,6 +63,21 @@ impl Credentials {
             .ok()
             .and_then(|k| k.try_into().ok())
             .ok_or_else(|| HomebaseError::Protocol("the shared secret isn't 16 bytes".into()))
+    }
+
+    pub(crate) fn zk_app_key(&self) -> Result<Option<Key>, HomebaseError> {
+        self.zk_app_key
+            .as_deref()
+            .map(|k| {
+                STANDARD
+                    .decode(k)
+                    .ok()
+                    .and_then(|k| k.try_into().ok())
+                    .ok_or_else(|| {
+                        HomebaseError::Protocol("the zero-knowledge key isn't 16 bytes".into())
+                    })
+            })
+            .transpose()
     }
 
     pub fn load(path: &Path) -> Result<Option<Self>, HomebaseError> {
@@ -103,6 +124,7 @@ pub fn begin(
         ("client_type", "app"),
         ("client_info", friendly_name),
         ("public_key", &exchange.public_jwk_base64url()),
+        ("zk_app_key", "1"),
         ("permission_request", &request.to_string()),
         ("state", &state),
         ("redirect_uri", redirect_uri),
@@ -174,6 +196,10 @@ impl Pending {
                 &answer.base64_shared_secret_cipher,
                 &answer.base64_shared_secret_iv,
             )?,
+            zk_app_key: answer
+                .zk_app_key
+                .map(|sealed| self.exchange.unseal(&sealed).map(|k| STANDARD.encode(k)))
+                .transpose()?,
         })
     }
 }
@@ -187,6 +213,9 @@ struct TokenResponse {
     base64_client_auth_token_iv: String,
     #[serde(default)]
     cipher: Option<String>,
+    /// The app's zero-knowledge key, sealed to our public key (`ZkSeal`).
+    #[serde(default)]
+    zk_app_key: Option<String>,
 }
 
 #[cfg(test)]
@@ -201,6 +230,7 @@ mod tests {
             identity: "a.example".into(),
             client_auth_token: "cat".into(),
             shared_secret: secret.into(),
+            zk_app_key: None,
         };
         assert_eq!(
             creds("AAAAAAAAAAAAAAAAAAAAAA==").login_id(),

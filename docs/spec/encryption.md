@@ -50,6 +50,9 @@ about the server: `homebase-api-notes.md`, "Encrypted files".
   they can read the same files: the format is odin-js's byte for byte (the golden
   vectors below) **[verified]**, and chat-kmp's code uses the same layout **[verified in its
   code, not run]**. Neither app shows the sync drive yet.
+- Once the owner makes the drive private (zero knowledge, below), the server holds no key that
+  opens it at all, even in memory: only the owner's browser and the devices that hold the app's
+  zero-knowledge key do.
 
 ## The format
 
@@ -62,6 +65,7 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
 | Key header | `iv` (16 random bytes) and `key` (16 random bytes), both "strong": not every group of four bytes the same |
 | Sent key header (`encryptedKeyHeader`) | `{encryptionVersion: 1, type: "aes", iv: transferIv, encryptedAesKey: CBC(sharedSecret, transferIv, iv ‖ key)}` |
 | Received key header (`sharedSecretEncryptedKeyHeader`) | the same shape; opened with the shared secret |
+| On a private drive (`type: "zkDrive"`, sent and received) | `{encryptionVersion: 1, type: "zkDrive", iv: headerIv, encryptedAesKey: CBC(driveKey, headerIv, iv ‖ key)}`: under the drive's key, with the header's own IV as the wrap IV (odin-core's vector, `sealed.rs`) |
 | `SharedSecretEncryptedHeader64` (payload responses) | base64 of IV (16) ‖ encrypted `iv ‖ key` (48) ‖ version (4, little-endian); its `iv` is the payload's |
 | `fileMetadata.isEncrypted` | `true` |
 | `appData.content` | `CBC(key, headerIv, node JSON)` |
@@ -117,6 +121,7 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
   signed 64-bit `BytesWritten`, **[verified]** `PayloadDescriptor.cs`): every download of it
   would fail, in full.
 - A tombstone's key header isn't read: one that doesn't parse (null fields, say) is ignored.
+- A key header of type `zkDrive` opens with the drive's key (below), then the same way.
 - Payload range `p0..p1` (plaintext offsets, `p1` at most the plaintext size): fetch
   ciphertext from the block before `p0`'s block, or from 0, where the payload IV is the block
   before, up to `p1` rounded up to a block. Decrypt and keep `p0..p1`.
@@ -130,6 +135,32 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
 - The extent comes in one request, streamed. A body that goes 60 s without a byte ends the
   call (the client's idle timeout, `client.rs`), and the download resumes from what it
   has.
+
+### A private drive (zero knowledge)
+The owner can make the drive private in the owner console (odin-core
+`docs/zero-knowledge-drive-api-plan.md`, step 3). The drive keeps its key, so no file is
+encrypted again: each key header is relabelled `zkDrive`, the same 48 bytes **[verified]**
+(odin-core, 3.3). What changes for this client:
+- **The key.** Logging in asks for the app's zero-knowledge key (`zk_app_key=1`); the token
+  answer carries it sealed to the login's P-384 key (`ZkSeal` v1: ECDH, HKDF-SHA256 with no salt
+  and the info `homebase-zk-seal`, AES-128-GCM), kept with the credentials. On a private drive
+  the security context (`GET /api/v2/auth/context`) carries the drive's key locked with it
+  (`zkAppKeyEncryptedStorageKey`, AES-128-GCM: a 12-byte IV, the ciphertext, the tag). Both are
+  checked against odin-core's vectors (`crypto.rs`).
+- **When.** Connecting reads the security context (one request). A drive made private while
+  connected shows itself by a `zkDrive` key header, or a write refused with
+  `driveIsZeroKnowledge`: the key is fetched then, and the write sent again.
+- **Reads.** A `zkDrive` key header opens with the drive's key; its token is then sealed under
+  the shared secret like any other, so the tokens of a drive made private still open, and
+  nothing is synced again. Payload responses carry no key header there: the payload key is the
+  file's key with the payload's IV, from the file's header (one more request per read).
+- **Writes.** The key header is locked with the drive's key and sent as `zkDrive`; the server
+  refuses any other on a private drive.
+- **Without the key** (a login from before this client asked for it): the server leaves the
+  drive's files out of every answer, and refuses writes. This computer stops (refused: log in
+  again) rather than reading files it can't see as deleted. A file that can't be read is never
+  taken as gone (a header read refused is "can't tell", §8b). The tray asks such a login to log
+  in again already before the drive is made private.
 
 ## What it doesn't do
 - **Authentication of its own:** CBC has none. The content hash is the check, after

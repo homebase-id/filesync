@@ -244,7 +244,13 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
             "Recently deleted…".into(),
         ));
         items.push(Item::Action(Action::Folders, "Folders…".into()));
-        if s.state == State::Denied {
+        // Refused, or a login from before private drives: asked before the drive is made one.
+        if s.state == State::Denied
+            || view
+                .daemon
+                .account(&s.identity)
+                .is_some_and(|a| a.login_without_key)
+        {
             items.push(Item::Action(Action::LogInAgain, "Log in again…".into()));
         }
         items.push(Item::Separator);
@@ -642,6 +648,23 @@ mod tests {
         let d = running(status(State::Denied));
         let v = view(&d, &[]);
         assert_eq!(look(&v), Look::Attention);
+        assert!(actions(&menu(&v)).contains(&Action::LogInAgain));
+    }
+
+    /// A login from before private drives is asked to log in again while it still syncs.
+    #[test]
+    fn a_login_without_the_zero_knowledge_key_offers_logging_in_again() {
+        let synced = running(status(State::Idle));
+        assert!(!actions(&menu(&view(&synced, &[]))).contains(&Action::LogInAgain));
+        let Daemon::Running(mut s) = synced else {
+            unreachable!()
+        };
+        let mut account = AccountStatus::new(&"anna.example.com".into());
+        account.login_without_key = true;
+        s.accounts.push(account);
+        let d = Daemon::Running(s);
+        let v = view(&d, &[]);
+        assert_eq!(look(&v), Look::UpToDate);
         assert!(actions(&menu(&v)).contains(&Action::LogInAgain));
     }
 

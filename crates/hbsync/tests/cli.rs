@@ -42,6 +42,7 @@ impl Home {
             identity: identity.into(),
             client_auth_token: "Y2F0".into(),
             shared_secret: "AAECAwQFBgcICQoLDA0ODw==".into(),
+            zk_app_key: None,
         };
         creds.save(&self.credentials_of(identity))?;
         Ok(folder)

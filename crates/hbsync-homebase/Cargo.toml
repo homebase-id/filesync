@@ -10,6 +10,8 @@ publish.workspace = true
 [dependencies]
 # zeroize: key schedules and chaining state are wiped when dropped.
 aes = { version = "0.9.3", features = ["zeroize"] }
+# AES-GCM: the zero-knowledge keys (zkLock, ZkSeal).
+aes-gcm = { version = "0.11.1", default-features = false, features = ["aes", "alloc", "zeroize"] }
 base64 = "0.23.1"
 cbc = { version = "0.2.1", features = ["alloc", "zeroize"] }
 getrandom = "0.3"

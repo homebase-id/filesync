@@ -9,6 +9,7 @@ use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Mutex;
 
 use hbsync_fileio::{HashAlgorithm, Hasher};
 use hbsync_remote::{
@@ -24,6 +25,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::client::{Client, Fetched, UploadMethod};
+use crate::crypto::{Key, zk_unlock};
 use crate::drive::sealed::{
     CipherRange, Decrypting, Encrypting, KeyHeader, SealedKeyHeader, sealed_len,
 };
@@ -32,6 +34,13 @@ use crate::{ApiError, HomebaseError, app};
 
 pub mod sealed;
 pub mod wire;
+
+use wire::Keys;
+
+/// Why a private drive refuses this computer: it wasn't handed the app's zero-knowledge key
+/// (a login from before it asked for one), or the key it was handed opens the drive's no more.
+const PRIVATE: &str = "the Filesync drive on your Homebase cloud is private now, and this \
+                       computer doesn't hold its key";
 
 /// The largest file uploaded: 50 GiB. Not the server's limit (odin-core counts an upload's
 /// bytes in 64 bits since PR #1932, #1893, **[verified]**), a sanity cap for one upload: it has no resume, so
@@ -57,6 +66,77 @@ pub struct HomebaseRemote {
     drive: TargetDrive,
     /// When the drive was made ([`HomebaseRemote::made`]).
     made: i64,
+    /// The drive's key, once the drive is private ([`HomebaseRemote::drive_key`]).
+    drive_key: DriveKey,
+}
+
+/// A private drive's key, while this computer holds it.
+#[derive(Default)]
+struct DriveKey(Mutex<Option<Key>>);
+
+impl std::fmt::Debug for DriveKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DriveKey(..)")
+    }
+}
+
+/// The security context (`GET /api/v2/auth/context`, odin-core `RedactedOdinContext`): the
+/// drives the app is granted, and on a private drive its key locked with the app's
+/// zero-knowledge key (`zkAppKeyEncryptedStorageKey`, `docs/zero-knowledge-drive-api-plan.md`,
+/// 3.5).
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Context {
+    permission_context: Option<Permissions>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Permissions {
+    #[serde(default)]
+    permission_groups: Vec<Group>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Group {
+    #[serde(default)]
+    drive_grants: Vec<Grant>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Grant {
+    permissioned_drive: PermissionedDrive,
+    zk_app_key_encrypted_storage_key: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PermissionedDrive {
+    drive: TargetDrive,
+}
+
+/// The drive's key if it is private, opened with the app's zero-knowledge key (one request);
+/// `None` if it isn't. A private drive this login can't open refuses this computer: log in
+/// again.
+fn drive_key_of(client: &Client, drive: &TargetDrive) -> Result<Option<Key>, HomebaseError> {
+    let context: Context = client.get("/api/v2/auth/context", &[])?;
+    let locked = context
+        .permission_context
+        .into_iter()
+        .flat_map(|p| p.permission_groups)
+        .flat_map(|g| g.drive_grants)
+        .filter(|g| g.permissioned_drive.drive == *drive)
+        .find_map(|g| g.zk_app_key_encrypted_storage_key);
+    let Some(locked) = locked else {
+        return Ok(None);
+    };
+    let denied = || HomebaseError::Denied(PRIVATE.into());
+    let app_key = client.zk_app_key().ok_or_else(denied)?;
+    let key = zk_unlock(app_key, &locked).map_err(|_| denied())?;
+    key.try_into()
+        .map(Some)
+        .map_err(|_| HomebaseError::Protocol("the drive's key isn't 16 bytes".into()))
 }
 
 #[derive(Deserialize)]
@@ -181,11 +261,62 @@ impl HomebaseRemote {
             }
             e => e,
         })?;
+        let drive_key = drive_key_of(&client, &answer.target_drive)?;
         Ok(HomebaseRemote {
             client,
             drive: answer.target_drive,
             made: answer.created,
+            drive_key: DriveKey(Mutex::new(drive_key)),
         })
+    }
+
+    /// The private drive's key: the one held, or when `needed` and none is (the drive was made
+    /// private since this connected), fetched. A private drive whose key this login can't open
+    /// refuses this computer ([`RemoteError::Denied`]).
+    fn drive_key(&self, needed: bool) -> Result<Option<Key>> {
+        let mut held = self.drive_key.0.lock().unwrap_or_else(|e| e.into_inner());
+        if held.is_none() && needed {
+            let key = drive_key_of(&self.client, &self.drive).map_err(remote_error)?;
+            *held = Some(key.ok_or_else(|| {
+                RemoteError::Fatal(
+                    "a file locked with the drive's key, on a drive that isn't private".into(),
+                )
+            })?);
+        }
+        Ok(*held)
+    }
+
+    /// `header` as a [`RemoteHeader`], opened with the drive's key when locked with it.
+    fn to_remote(
+        &self,
+        header: wire::FileHeader,
+    ) -> Result<std::result::Result<RemoteHeader, String>> {
+        let drive = self.drive_key(header.locked_with_drive_key())?;
+        Ok(wire::to_remote(header, self.keys(drive.as_ref())))
+    }
+
+    fn keys<'a>(&'a self, drive: Option<&'a Key>) -> Keys<'a> {
+        Keys {
+            shared: self.client.key(),
+            drive,
+        }
+    }
+
+    /// A write's error: one the drive refused for its key header's kind was made private since
+    /// this connected; with its key fetched (or this computer refused), it is written again.
+    fn write_error(&self, e: HomebaseError) -> RemoteError {
+        if let HomebaseError::Api { error, .. } = &e
+            && error
+                .code
+                .as_deref()
+                .is_some_and(|c| c.eq_ignore_ascii_case("driveIsZeroKnowledge"))
+        {
+            return match self.drive_key(true) {
+                Ok(_) => RemoteError::Transient(format!("{e}: the drive was made private")),
+                Err(e) => e,
+            };
+        }
+        remote_error(e)
     }
 
     /// When the drive was made, as the identity said as it was found: Unix ms, its clock. A
@@ -270,7 +401,8 @@ impl HomebaseRemote {
             sending.as_ref().map(|s| &s.descriptor),
             target.is_some(),
         );
-        let metadata = wire::metadata(meta, version, self.client.key(), &transfer_iv, &key);
+        let drive = self.drive_key(false)?;
+        let metadata = wire::metadata(meta, version, self.keys(drive.as_ref()), &transfer_iv, &key);
         let mut parts = vec![
             Part::bytes(
                 "instructions",
@@ -308,7 +440,7 @@ impl HomebaseRemote {
         } = self
             .client
             .upload(method, &path, Multipart::new(boundary, parts))
-            .map_err(remote_error)?;
+            .map_err(|e| self.write_error(e))?;
         Ok(Written {
             target: Target {
                 at: RemoteRef {
@@ -373,7 +505,13 @@ impl HomebaseRemote {
             .and_then(|sealed| KeyHeader::open(&sealed, shared).ok());
         let key = match opened {
             Some(key) => key,
-            None => self.current(target.at)?.key(shared).map_err(remote_error)?,
+            None => {
+                let header = self.current(target.at)?;
+                let drive = self.drive_key(header.locked_with_drive_key())?;
+                header
+                    .key(self.keys(drive.as_ref()))
+                    .map_err(remote_error)?
+            }
         };
         key.with_new_iv().map_err(remote_error)
     }
@@ -390,6 +528,23 @@ impl HomebaseRemote {
             } => Ok(size),
             _ => Err(RemoteError::NotFound),
         }
+    }
+
+    /// A private drive's payload key: the file key from its header, with the payload's IV. A
+    /// header read after the payload was written over has another IV: the bytes then don't
+    /// match their hash, and the download is tried again.
+    fn payload_key(&self, file_id: RemoteFileId) -> Result<KeyHeader> {
+        let header = self.raw_header(file_id)?;
+        let drive = self.drive_key(true)?;
+        let key = header
+            .key(self.keys(drive.as_ref()))
+            .map_err(remote_error)?;
+        let payload = header
+            .file_metadata
+            .sync_payload()
+            .ok_or_else(|| RemoteError::Fatal(format!("file {}: no payload", file_id.0)))?;
+        let iv = wire::payload_iv(payload).map_err(RemoteError::Fatal)?;
+        Ok(KeyHeader { iv, key: key.key })
     }
 
     /// Stored bytes `range` of the payload at `path`: one request.
@@ -494,10 +649,11 @@ impl Remote for HomebaseRemote {
         let mut entries = Vec::with_capacity(page.search_results.len());
         let mut skipped = Vec::new();
         for row in &page.search_results {
-            match serde_json::from_str::<wire::FileHeader>(row.get())
-                .map_err(|e| format!("unreadable header: {e}"))
-                .and_then(|h| wire::to_remote(h, self.client.key()))
-            {
+            let read = match serde_json::from_str::<wire::FileHeader>(row.get()) {
+                Ok(h) => self.to_remote(h)?,
+                Err(e) => Err(format!("unreadable header: {e}")),
+            };
+            match read {
                 Ok(header) => entries.push(header),
                 Err(why) => skipped.push(wire::skipped_row(row.get(), why)),
             }
@@ -541,7 +697,8 @@ impl Remote for HomebaseRemote {
     }
 
     fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader> {
-        wire::to_remote(self.raw_header(file_id)?, self.client.key()).map_err(RemoteError::Fatal)
+        self.to_remote(self.raw_header(file_id)?)?
+            .map_err(RemoteError::Fatal)
     }
 
     /// One `groupId` query a page at a time (any type, active files only): a removed file is
@@ -698,17 +855,19 @@ impl Remote for HomebaseRemote {
         let at = CipherRange::of(&range);
         // One request, streamed: the client's idle timeout catches a stalled one.
         let mut response = self.fetch(&path, at.fetch.clone()).map_err(remote_error)?;
-        let sealed = match (response.encrypted, response.key_header.as_deref()) {
-            (true, Some(sealed)) => sealed,
+        let key = match (response.encrypted, response.key_header.as_deref()) {
+            // A payload's key header carries the payload's IV.
+            (true, Some(sealed)) => SealedKeyHeader::from_base64(sealed)
+                .and_then(|s| KeyHeader::open(&s, self.client.key()))
+                .map_err(remote_error)?,
+            // A private drive's file comes without one: the file key is in its header, with
+            // the payload's IV (one more request).
+            (true, None) if self.drive_key(false)?.is_some() => self.payload_key(file_id)?,
             (true, None) => {
                 return Err(RemoteError::Fatal(format!("{path}: encrypted, but no key")));
             }
             (false, _) => return Err(RemoteError::Fatal(format!("{path}: not encrypted"))),
         };
-        // A payload's key header carries the payload's IV.
-        let key = SealedKeyHeader::from_base64(sealed)
-            .and_then(|s| KeyHeader::open(&s, self.client.key()))
-            .map_err(remote_error)?;
         // A range past the stored payload is cut short at its end (odin-core #1921).
         let end = at.fetch.end.min(response.size);
         let first_iv = (!at.iv_first).then_some(&key.iv);
@@ -1192,6 +1351,7 @@ mod tests {
             identity: "unreachable.invalid".into(),
             client_auth_token: "AAAA".into(),
             shared_secret: "AAAAAAAAAAAAAAAAAAAAAA==".into(),
+            zk_app_key: None,
         };
         let remote = HomebaseRemote {
             client: Client::new(&credentials)?,
@@ -1200,6 +1360,7 @@ mod tests {
                 drive_type: Uuid::nil(),
             },
             made: 0,
+            drive_key: DriveKey::default(),
         };
         let size = MAX_FILE + 1;
         let meta = NodeMeta {

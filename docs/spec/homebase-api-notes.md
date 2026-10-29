@@ -50,6 +50,15 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   made: the `Drives` row's `created`, **[verified]** `TableDrivesCRUD`), from odin-core v0.1.973
   (PR #2042, #2038; **[verified]** live on frodo). Compare it for a change, not for order: two hosts
   that made versions of one drive (after an identity move) need not agree on the time.
+- **A private (zero-knowledge) drive** (odin-core v0.1.973, `docs/zero-knowledge-drive-api-plan.md`
+  step 3; **[verified]** in code, not yet tried on a converted Filesync drive): the authorize
+  request's `zk_app_key=1` gets the token answer a `zkAppKey` (`ZkSeal` v1 to the request's
+  `public_key`); the security context's drive grant carries `zkAppKeyEncryptedStorageKey`
+  (`RedactedDriveGrant`); key headers are `zkDrive` (13) under the drive's key; payload
+  responses carry no `SharedSecretEncryptedHeader64`. A device not handed the key sees none of
+  the drive's encrypted files (`ZkDriveFiles.VisibleTo`: left out of queries, refused by id) and
+  can't write (`driveIsZeroKnowledge`, 9012). Converting keeps `created` (true-zero, from code).
+  How this client uses it: `encryption.md`.
 - **A drive made again** **[verified]**: its id is the alias the app asks for
   (`DriveManager.CreateDriveAsync`), fixed in `app.rs`, so a drive deleted and made again has the
   same alias and slugs. Of what the client sees, only `created` differs (its storage key does

@@ -256,6 +256,7 @@ mod tests {
             identity: identity.to_owned(),
             client_auth_token: "Y2F0".to_owned(),
             shared_secret: "AAECAwQFBgcICQoLDA0ODw==".to_owned(),
+            zk_app_key: None,
         }
     }
 

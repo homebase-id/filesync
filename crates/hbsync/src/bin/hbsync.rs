@@ -532,10 +532,14 @@ fn print_status(status: &DaemonStatus) {
                 "notifications: refused ({why}), asked again later; meanwhile the drive is read every {every} min"
             )),
         };
-        let credentials = a
-            .credentials_warning
-            .as_ref()
-            .map(|w| format!("credentials: {w}"));
+        let credentials = match (&a.credentials_warning, a.login_without_key) {
+            (_, true) => Some(format!(
+                "credentials: from before private drives: `hbsync setup {}` signs in again",
+                a.identity
+            )),
+            (Some(w), false) => Some(format!("credentials: {w}")),
+            (None, false) => None,
+        };
         // Recently deleted being deleted for good, in the background.
         let emptying = a.emptying.as_ref().map(words::emptying_status);
         if hints.is_none() && credentials.is_none() && emptying.is_none() && a.recent.is_empty() {

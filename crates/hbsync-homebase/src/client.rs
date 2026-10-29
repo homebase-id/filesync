@@ -165,6 +165,8 @@ pub struct Client {
     /// The client auth token (CAT), base64.
     token: String,
     key: Key,
+    /// The app's zero-knowledge key, if this login was handed one.
+    zk_app_key: Option<Key>,
     /// [`Credentials::login_id`] of the credentials it was made with.
     login: String,
     connections: Arc<Connections>,
@@ -191,6 +193,7 @@ impl Client {
             identity: credentials.identity.clone(),
             token: credentials.client_auth_token.clone(),
             key: credentials.shared_secret_key()?,
+            zk_app_key: credentials.zk_app_key()?,
             login: credentials.login_id(),
             connections: Arc::new(connections(REUSED_WITHIN)),
         })
@@ -208,6 +211,11 @@ impl Client {
     /// The shared secret: the key of every envelope and of upload metadata.
     pub(crate) fn key(&self) -> &Key {
         &self.key
+    }
+
+    /// The app's zero-knowledge key: it opens the drive's key on a private drive.
+    pub(crate) fn zk_app_key(&self) -> Option<&Key> {
+        self.zk_app_key.as_ref()
     }
 
     /// The client auth token, base64.
