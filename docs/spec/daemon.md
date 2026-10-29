@@ -303,8 +303,8 @@ included (service managers restart it then).
   be hours. Windows keeps the key on the computer; macOS Migration Assistant carries the
   login keychain to a new Mac; a Linux keyring copied to another computer carries it. So a
   migrated Mac, a copied keyring or a credentials file copied by hand can cause it. Nothing
-  detects it: log in again on the second computer (`hbsync logout`, then `hbsync setup`),
-  which registers it as a computer of its own.
+  detects it: log in again on the second computer (`hbsync login`), which registers it as a
+  computer of its own.
 - **When the feed is read**, and only then:
   - at a folder's start (and once more if its local catch-up, a walk, took long);
   - when the notifications connect (again): the account pulls, as changes made meanwhile
@@ -751,6 +751,7 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 | `hbsync put-back [--yes]` | shows the deletions to review and puts them back (sync semantics §7) |
 | `hbsync start`, `stop` | `stop` stops syncing on this computer until `start` (or the tray's Start syncing), also across logins: neither the tray nor the service manager starts the daemon meanwhile |
 | `hbsync autostart [on\|off]` | |
+| `hbsync login [IDENTITY]` | signs this computer in again in the browser (also the tray's Log in again, for a login from before private drives); the daemon's account starts over with the new login; the folders, the drive and autostart stay as they are; the old login isn't revoked |
 | `hbsync logout` | stops the daemon, forgets the credentials, autostart off; the folder stays |
 | `hbsync unlink` | stops the daemon, removes the folder from the config, autostart off; its files, `.hbsync` and the account's DB stay, so setting it up again resumes |
 | `hbsync deleted [-n N]` | Recently deleted, newest first, with node ids |

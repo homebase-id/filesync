@@ -614,7 +614,7 @@ impl Account {
             let warning = format!("kept in {} (no keychain: {why})", path.display());
             self.set_status(|s| s.credentials_warning = Some(warning));
         }
-        let without_key = creds.zk_app_key.is_none();
+        let without_key = creds.without_zk_key();
         self.set_status(|s| s.login_without_key = without_key);
         Ok(Some(creds))
     }

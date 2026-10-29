@@ -57,6 +57,12 @@ impl Credentials {
         )
     }
 
+    /// A login from before this client asked for the app's zero-knowledge key: once the drive
+    /// is private it can't read it, and signing in again replaces it.
+    pub fn without_zk_key(&self) -> bool {
+        self.zk_app_key.is_none()
+    }
+
     pub(crate) fn shared_secret_key(&self) -> Result<Key, HomebaseError> {
         key16(&self.shared_secret, "the shared secret")
     }
