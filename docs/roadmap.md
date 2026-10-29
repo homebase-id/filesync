@@ -4,7 +4,7 @@ Open work first, in order: what to fix, what to build next, then later and conti
 What is built is under **=== DONE ===** at the end, by layer, as it was planned bottom-up.
 Decisions referenced here are in [foundations.md](foundations.md).
 
-Status (2026-10-29): v0.10.5 is released. It syncs folders with a live Homebase on Windows,
+Status (2026-10-29): v0.10.6 is released. It syncs folders with a live Homebase on Windows,
 macOS and Linux, with the tray, the daemon and the CLI, role folders, filters, Recently
 deleted and signed installers that update themselves; a state DB too old or damaged to use is
 set aside and the folder set up again on its own.
