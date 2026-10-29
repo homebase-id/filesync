@@ -285,18 +285,6 @@ impl App {
         self.daemon.status()
     }
 
-    /// "Log in again" replaces only the login: one from before private drives, still accepted
-    /// (a refused one is set up again, which asks for its drive too).
-    fn only_the_login(&self) -> bool {
-        self.status().is_some_and(|s| {
-            s.state != State::Denied
-                && self
-                    .daemon
-                    .account(&s.identity)
-                    .is_some_and(|a| a.login_without_key)
-        })
-    }
-
     fn act(&mut self, action: Action) -> bool {
         tracing::info!("menu: {action:?}");
         match action {
@@ -304,34 +292,18 @@ impl App {
                 self.pages.prepare_setup("", None);
                 os::open(self.pages.url("setup"));
             }
-            // A login from before private drives, still accepted: only the login is replaced.
-            Action::LogInAgain if self.only_the_login() => {
-                if let Some(s) = self.status() {
-                    let (paths, identity) = (self.paths.clone(), s.identity.clone());
-                    std::thread::spawn(move || {
-                        let log = |line: &str| tracing::info!("{line}");
-                        let mut owner = hbsync_app::setup::InBrowser {
-                            browser: None,
-                            say: &log,
-                        };
-                        let signed = hbsync_app::setup::sign_in_again(
-                            &paths,
-                            &identity,
-                            &mut owner,
-                            &mut |line| tracing::info!("{line}"),
-                        );
-                        if let Err(e) = signed {
-                            tracing::warn!("signing in again failed: {e}");
-                        }
-                    });
-                }
-            }
             Action::LogInAgain => {
+                // A refused login is set up again (which asks for the drive too); one from
+                // before private drives, still accepted, has only the login replaced.
+                let mut page = "setup";
                 if let Some(s) = self.status() {
+                    if s.state != State::Denied && self.daemon.login_without_key(&s.identity) {
+                        page = "login";
+                    }
                     let (identity, folder) = (s.identity.clone(), s.path.clone());
                     self.pages.prepare_setup(&identity, Some(folder));
                 }
-                os::open(self.pages.url("setup"));
+                os::open(self.pages.url(page));
             }
             Action::OpenFolder => {
                 let folder = match self.status() {

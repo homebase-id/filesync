@@ -354,18 +354,17 @@ pub fn sign_in_again(
     paths: &Paths,
     identity: &Identity,
     owner: &mut dyn Owner,
-    say: &mut dyn FnMut(&str),
 ) -> crate::Result<()> {
     let device = Config::load(&paths.config_file())?
         .unwrap_or_default()
         .device_name();
     let creds = owner.authorize(identity, &device)?;
     CredentialStore::open(paths).save(&creds)?;
-    if control::running(paths)? {
-        control::start_over(paths, identity)?;
+    match control::start_over(paths, identity) {
+        // Not running: it reads the new login when it starts.
+        Err(e) if e.is::<control::NotRunning>() => Ok(()),
+        other => other,
     }
-    say(&format!("Signed in again on {identity}."));
-    Ok(())
 }
 
 /// What to set up, as [`plan`] makes it.

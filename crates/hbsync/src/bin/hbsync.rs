@@ -384,9 +384,8 @@ fn run(command: Command) -> Res<ExitCode> {
                 browser: browser.as_deref(),
                 say: &|line| println!("{line}"),
             };
-            setup::sign_in_again(&paths, &identity, &mut owner, &mut |line| {
-                println!("{line}")
-            })?;
+            setup::sign_in_again(&paths, &identity, &mut owner)?;
+            println!("Signed in again on {identity}.");
         }
         Command::Add {
             role,
