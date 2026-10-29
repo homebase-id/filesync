@@ -14,6 +14,7 @@ use cbc::cipher::{BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use p384::elliptic_curve::sec1::ToSec1Point;
 use p384::{PublicKey, SecretKey};
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 use crate::HomebaseError;
 
@@ -107,8 +108,8 @@ impl Exchange {
     /// A value sealed to this key (`ZkSeal` v1): base64 of `0x01`, the key id (4), a throwaway
     /// P-384 public key (97, uncompressed), a 12-byte IV, then AES-GCM's ciphertext and tag,
     /// under HKDF-SHA256 of the ECDH secret with no salt and the info `homebase-zk-seal`.
-    pub(crate) fn unseal(&self, sealed_b64: &str) -> Result<Vec<u8>, HomebaseError> {
-        let bad = |what: &str| HomebaseError::Crypto(format!("sealed value: {what}"));
+    pub(crate) fn unseal(&self, sealed_b64: &str) -> Result<Zeroizing<Vec<u8>>, HomebaseError> {
+        let bad = |what: &str| HomebaseError::Protocol(format!("sealed value: {what}"));
         let bytes = STANDARD.decode(sealed_b64).map_err(|_| bad("not base64"))?;
         if bytes.len() < 1 + 4 + 97 + 12 + 16 || bytes[0] != 1 {
             return Err(bad("not a seal of version 1"));
@@ -136,23 +137,24 @@ impl Exchange {
 }
 
 /// A value locked with `key` (`zkLock`): base64 of a 12-byte IV, then AES-GCM's ciphertext
-/// and tag.
-pub(crate) fn zk_unlock(key: &Key, locked_b64: &str) -> Result<Vec<u8>, HomebaseError> {
-    let bytes = STANDARD
-        .decode(locked_b64)
-        .map_err(|_| HomebaseError::Crypto("locked value: not base64".into()))?;
+/// and tag. One that isn't that shape is the server's to fix ([`HomebaseError::Protocol`]);
+/// one that doesn't open is under another key ([`HomebaseError::Crypto`]).
+pub(crate) fn zk_unlock(key: &Key, locked_b64: &str) -> Result<Zeroizing<Vec<u8>>, HomebaseError> {
+    let bad = |what: &str| HomebaseError::Protocol(format!("locked value: {what}"));
+    let bytes = STANDARD.decode(locked_b64).map_err(|_| bad("not base64"))?;
     if bytes.len() < 12 + 16 {
-        return Err(HomebaseError::Crypto("locked value: too short".into()));
+        return Err(bad("too short"));
     }
     gcm_open(key, &bytes[..12], &bytes[12..])
 }
 
-fn gcm_open(key: &Key, iv: &[u8], sealed: &[u8]) -> Result<Vec<u8>, HomebaseError> {
+fn gcm_open(key: &Key, iv: &[u8], sealed: &[u8]) -> Result<Zeroizing<Vec<u8>>, HomebaseError> {
     let nonce = iv
         .try_into()
-        .map_err(|_| HomebaseError::Crypto("AES-GCM: the IV isn't 12 bytes".into()))?;
+        .map_err(|_| HomebaseError::Protocol("AES-GCM: the IV isn't 12 bytes".into()))?;
     Aes128Gcm::new(key.into())
         .decrypt(nonce, sealed)
+        .map(Zeroizing::new)
         .map_err(|_| HomebaseError::Crypto("AES-GCM: wrong key or damaged data".into()))
 }
 
@@ -228,7 +230,7 @@ mod tests {
             .map_err(|_| HomebaseError::Crypto("vector".into()))?;
         let sealed = "AYGsbtYEJzx9/APLDFRU02ky+GZwV8b3H7z+kwGsq61keI1Spr1TwEe4xemX1gXqt4ebsODaFTM9CTX1ZzYz8AEOKmwRfyCxFiAYyUY9XK31wB7oShI/GiQX6RjUGj2KekD+/f9GXM+hXaDl9UqGteiAsqESPMoIVY4iVeGO3GC/P2Dy4Igq2MsVPmZeNSxogKR0ZeC+rPTMjyeOkbM=";
         assert_eq!(
-            Exchange { secret }.unseal(sealed)?,
+            Exchange { secret }.unseal(sealed)?.as_slice(),
             b"correct horse battery staple"
         );
         assert!(Exchange::new()?.unseal(sealed).is_err());

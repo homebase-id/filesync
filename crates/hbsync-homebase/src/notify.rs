@@ -357,6 +357,7 @@ fn session(
                 let event = match notification(client, text.as_str()) {
                     Notification::Handshake if !*connected => {
                         *connected = true;
+                        client.connected();
                         Event::Connected
                     }
                     Notification::Changed(change) => Event::Changed(change),

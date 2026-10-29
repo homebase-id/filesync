@@ -58,25 +58,14 @@ impl Credentials {
     }
 
     pub(crate) fn shared_secret_key(&self) -> Result<Key, HomebaseError> {
-        STANDARD
-            .decode(&self.shared_secret)
-            .ok()
-            .and_then(|k| k.try_into().ok())
-            .ok_or_else(|| HomebaseError::Protocol("the shared secret isn't 16 bytes".into()))
+        key16(&self.shared_secret, "the shared secret")
     }
 
-    pub(crate) fn zk_app_key(&self) -> Result<Option<Key>, HomebaseError> {
+    /// The app's zero-knowledge key, if this login was handed one.
+    pub(crate) fn zk_key(&self) -> Result<Option<Key>, HomebaseError> {
         self.zk_app_key
             .as_deref()
-            .map(|k| {
-                STANDARD
-                    .decode(k)
-                    .ok()
-                    .and_then(|k| k.try_into().ok())
-                    .ok_or_else(|| {
-                        HomebaseError::Protocol("the zero-knowledge key isn't 16 bytes".into())
-                    })
-            })
+            .map(|k| key16(k, "the zero-knowledge key"))
             .transpose()
     }
 
@@ -95,6 +84,15 @@ impl Credentials {
         hbsync_fileio::write_atomic(path, &serde_json::to_vec_pretty(self)?)?;
         Ok(())
     }
+}
+
+/// `what`, base64 of a 16-byte key.
+fn key16(b64: &str, what: &str) -> Result<Key, HomebaseError> {
+    STANDARD
+        .decode(b64)
+        .ok()
+        .and_then(|k| k.try_into().ok())
+        .ok_or_else(|| HomebaseError::Protocol(format!("{what} isn't 16 bytes")))
 }
 
 /// A YouAuth flow waiting for the identity's answer, which comes back to `redirect_uri` (a
@@ -186,6 +184,18 @@ impl Pending {
             )?;
             Ok(STANDARD.encode(plain))
         };
+        // Asked for: a login without it couldn't read the drive once it is private.
+        let sealed = answer.zk_app_key.as_deref().ok_or_else(|| {
+            HomebaseError::Protocol(
+                "the identity didn't hand over the app's zero-knowledge key".into(),
+            )
+        })?;
+        let zk_app_key = self.exchange.unseal(sealed)?;
+        if zk_app_key.len() != 16 {
+            return Err(HomebaseError::Protocol(
+                "the app's zero-knowledge key isn't 16 bytes".into(),
+            ));
+        }
         Ok(Credentials {
             identity: self.identity.clone(),
             client_auth_token: open(
@@ -196,10 +206,7 @@ impl Pending {
                 &answer.base64_shared_secret_cipher,
                 &answer.base64_shared_secret_iv,
             )?,
-            zk_app_key: answer
-                .zk_app_key
-                .map(|sealed| self.exchange.unseal(&sealed).map(|k| STANDARD.encode(k)))
-                .transpose()?,
+            zk_app_key: Some(STANDARD.encode(zk_app_key)),
         })
     }
 }

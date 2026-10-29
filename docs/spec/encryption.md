@@ -147,13 +147,17 @@ encrypted again: each key header is relabelled `zkDrive`, the same 48 bytes **[v
   the security context (`GET /api/v2/auth/context`) carries the drive's key locked with it
   (`zkAppKeyEncryptedStorageKey`, AES-128-GCM: a 12-byte IV, the ciphertext, the tag). Both are
   checked against odin-core's vectors (`crypto.rs`).
-- **When.** Connecting reads the security context (one request). A drive made private while
-  connected shows itself by a `zkDrive` key header, or a write refused with
-  `driveIsZeroKnowledge`: the key is fetched then, and the write sent again.
+- **When.** Connecting reads the security context (one request), and so does the first feed
+  read after the notifications connect again: making a drive private closes every socket
+  granted it (odin-core), so a computer with the key has it before its next read or write, and
+  one without stops at once. A `zkDrive` key header met without the key, or a write refused
+  with `driveIsZeroKnowledge`, fetches it too (the write is sent again; one under way when the
+  drive was made private is sent whole first, as the server checks the key header at its end).
 - **Reads.** A `zkDrive` key header opens with the drive's key; its token is then sealed under
   the shared secret like any other, so the tokens of a drive made private still open, and
   nothing is synced again. Payload responses carry no key header there: the payload key is the
-  file's key with the payload's IV, from the file's header (one more request per read).
+  file's key with the payload's IV, from the file's header, read first (one more request per
+  read; it gives the size too).
 - **Writes.** The key header is locked with the drive's key and sent as `zkDrive`; the server
   refuses any other on a private drive.
 - **Without the key** (a login from before this client asked for it): the server leaves the

@@ -440,6 +440,13 @@ impl FileHeader {
             .as_ref()
             .is_some_and(SealedKeyHeader::locked_with_drive_key)
     }
+
+    /// A live node's, locked with the drive's key: [`to_remote`] opens it with that.
+    pub(crate) fn needs_drive_key(&self) -> bool {
+        self.file_state == "active"
+            && node_type(self.file_metadata.app_data.file_type)
+            && self.locked_with_drive_key()
+    }
 }
 
 impl FileMetadata {

@@ -532,22 +532,35 @@ fn print_status(status: &DaemonStatus) {
                 "notifications: refused ({why}), asked again later; meanwhile the drive is read every {every} min"
             )),
         };
-        let credentials = match (&a.credentials_warning, a.login_without_key) {
-            (_, true) => Some(format!(
-                "credentials: from before private drives: `hbsync setup {}` signs in again",
+        let credentials = a
+            .credentials_warning
+            .as_ref()
+            .map(|w| format!("credentials: {w}"));
+        // A login from before private drives: asked before the drive is made one.
+        let login = a.login_without_key.then(|| {
+            format!(
+                "login: from before private drives: `hbsync setup {}` signs in again",
                 a.identity
-            )),
-            (Some(w), false) => Some(format!("credentials: {w}")),
-            (None, false) => None,
-        };
+            )
+        });
         // Recently deleted being deleted for good, in the background.
         let emptying = a.emptying.as_ref().map(words::emptying_status);
-        if hints.is_none() && credentials.is_none() && emptying.is_none() && a.recent.is_empty() {
+        if hints.is_none()
+            && credentials.is_none()
+            && login.is_none()
+            && emptying.is_none()
+            && a.recent.is_empty()
+        {
             continue;
         }
         // Under its own heading: not read as the last folder's.
         println!("Account {}:", a.identity);
-        for line in emptying.iter().chain(&hints).chain(&credentials) {
+        for line in emptying
+            .iter()
+            .chain(&hints)
+            .chain(&credentials)
+            .chain(&login)
+        {
             println!("  {line}");
         }
         // The account's own: Recently deleted's requests, files on the drive that don't read.

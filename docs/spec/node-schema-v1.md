@@ -351,6 +351,9 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-10-29: on a private (zero-knowledge) drive a node's key header is `zkDrive`, under the
+  drive's key, and payload answers carry no key header (`encryption.md`, "A private drive").
+  The node is the same.
 - 2026-10-26: deleting for good may stop part way (between batches); it then runs no later
   pass, so a folder never goes before what is in it. The node is the same.
 - 2026-10-23: a computer reads a node with `v > 1` as a row it can't read (it never wrote over
