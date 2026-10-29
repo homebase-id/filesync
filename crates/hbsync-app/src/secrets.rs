@@ -24,10 +24,8 @@ const MODIFIERS: &[(&str, &str)] = if cfg!(windows) {
     &[]
 };
 
-/// How many times the keychain is opened, and a call on it tried, before its failure counts.
-/// On Linux each opening agrees a session key with the Secret Service, and KDE's (ksecretd)
-/// refuses or gets wrong about one in a hundred (measured: 40 of 3,000): every call on that
-/// opening fails, or reads and writes garbage, until it is opened again.
+/// How many times the keychain is opened, and a call on it tried, while it fails as a broken
+/// session ([`broken`]).
 const TRIES: usize = 4;
 
 /// Opens the keychain: [`os_keychain`], but in tests.
@@ -74,7 +72,7 @@ impl CredentialStore {
         let keychain = if files_only {
             Err("HBSYNC_CREDENTIALS=file".to_owned())
         } else {
-            opened(os_keychain)
+            opened(os_keychain).map(Mutex::new)
         };
         CredentialStore {
             keychain,
@@ -123,11 +121,12 @@ impl CredentialStore {
         let json = serde_json::to_string(creds).map_err(HomebaseError::from)?;
         let saved = self.call(&identity, |entry| {
             entry.set_password(&json)?;
-            // Read back: a session whose key the Secret Service got wrong stores garbage.
-            match entry.get_password()? == json {
-                true => Ok(()),
-                false => Err(KeychainError::PlatformFailure("read back changed".into())),
+            // Read back where a session can be broken: it may have stored garbage, and its read
+            // fails. One more call per save (at a login).
+            if cfg!(all(unix, not(target_os = "macos"))) {
+                entry.get_password()?;
             }
+            Ok(())
         });
         let why = match saved {
             Ok(Ok(())) => {
@@ -214,8 +213,8 @@ impl CredentialStore {
         }
     }
 
-    /// `call` on `identity`'s keychain entry; `Err` when there is no keychain. A platform
-    /// failure is tried again on the keychain opened again, [`TRIES`] times in all.
+    /// `call` on `identity`'s keychain entry; `Err` when there is no keychain. A broken session
+    /// ([`broken`]) is tried again on the keychain opened again, [`TRIES`] times in all.
     fn call<T>(
         &self,
         identity: &Identity,
@@ -230,10 +229,11 @@ impl CredentialStore {
                 .build(SERVICE, identity, Some(&modifiers))
                 .and_then(|entry| call(&entry))
             {
-                Err(KeychainError::PlatformFailure(e)) if tries < TRIES => {
+                Err(e) if broken(&e) && tries < TRIES => {
                     tracing::info!("keychain: {e}; opening it again");
-                    if let Ok(again) = (self.open)() {
-                        *keychain = again;
+                    match opened(self.open) {
+                        Ok(again) => *keychain = again,
+                        Err(e) => tracing::warn!("keychain: {e}"),
                     }
                     tries += 1;
                 }
@@ -243,14 +243,43 @@ impl CredentialStore {
     }
 }
 
-/// The keychain `open` opens, [`TRIES`] times at most, or why it can't be.
-fn opened(open: Open) -> Result<Mutex<Arc<Keychain>>, String> {
+/// The keychain `open` opens, [`TRIES`] times at most while it opens broken, or why it can't
+/// be.
+fn opened(open: Open) -> Result<Arc<Keychain>, String> {
     let mut tries = 1;
     loop {
         match open() {
-            Err(KeychainError::PlatformFailure(_)) if tries < TRIES => tries += 1,
-            done => return done.map(Mutex::new).map_err(|e| e.to_string()),
+            Err(e) if broken(&e) && tries < TRIES => tries += 1,
+            done => return done.map_err(|e| e.to_string()),
         }
+    }
+}
+
+/// Whether `e` may be a broken session, one opened again may not be. On Linux each opening
+/// agrees a session key with the Secret Service, and KDE's (ksecretd) refuses about one in 200
+/// ("client public key size is invalid": secret-service sends a key with a leading zero byte
+/// short) and gets about one in 125 wrong (measured: 16 and 24 of 3,000): every call on it
+/// fails to decrypt, or reads garbage, until it is opened again. Elsewhere none is retried (a
+/// macOS failure may be the user's no to a prompt).
+fn broken(e: &KeychainError) -> bool {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use secret_service::Error as Session;
+        match e {
+            KeychainError::BadEncoding(_) => true,
+            KeychainError::PlatformFailure(e) => {
+                matches!(
+                    e.downcast_ref(),
+                    Some(Session::Crypto(_) | Session::Zbus(_))
+                )
+            }
+            _ => false,
+        }
+    }
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    {
+        let _ = e;
+        false
     }
 }
 
@@ -376,45 +405,43 @@ mod tests {
     }
 
     /// A keychain as KDE's Secret Service gives it: its first opening is refused, and every
-    /// other one after is a session whose key the two sides disagree on (writes store garbage,
-    /// reads fail).
+    /// other one after is a broken session (a write stores garbage; a read fails to decrypt,
+    /// or reads garbage). Per test thread.
+    #[cfg(all(unix, not(target_os = "macos")))]
     mod flaky {
         use std::any::Any;
+        use std::cell::{Cell, RefCell};
         use std::collections::HashMap;
-        use std::sync::atomic::{AtomicUsize, Ordering};
-        use std::sync::{Arc, Mutex};
+        use std::sync::Arc;
 
         use keyring_core::api::{CredentialApi, CredentialStoreApi};
         use keyring_core::{Credential, CredentialStore, Entry, Error, Result};
+        use secret_service::Error as Session;
 
-        static OPENED: AtomicUsize = AtomicUsize::new(0);
-        static SECRETS: Mutex<Vec<(String, Vec<u8>)>> = Mutex::new(Vec::new());
+        thread_local! {
+            static OPENED: Cell<usize> = const { Cell::new(0) };
+            static SECRETS: RefCell<HashMap<String, Vec<u8>>> = RefCell::new(HashMap::new());
+        }
 
-        /// Opens the keychain: refused the first time, a garbling session every other time.
+        /// Opens the keychain: refused the first time, broken every other time.
         pub(super) fn open() -> Result<Arc<CredentialStore>> {
-            match OPENED.fetch_add(1, Ordering::Relaxed) {
-                0 => Err(Error::PlatformFailure(
-                    "client public key size is invalid".into(),
-                )),
-                n => Ok(Arc::new(Store {
-                    garbles: n % 2 == 1,
-                })),
+            match OPENED.replace(OPENED.get() + 1) {
+                0 => Err(Error::PlatformFailure(Box::new(Session::Zbus(
+                    zbus::Error::Failure("client public key size is invalid".into()),
+                )))),
+                n => Ok(Arc::new(Store { broken: n % 2 == 1 })),
             }
         }
 
         #[derive(Debug)]
         struct Store {
-            garbles: bool,
+            broken: bool,
         }
 
         #[derive(Debug)]
         struct Cred {
             user: String,
-            garbles: bool,
-        }
-
-        fn failed() -> Error {
-            Error::PlatformFailure("message decryption failed".into())
+            broken: bool,
         }
 
         impl CredentialStoreApi for Store {
@@ -427,7 +454,7 @@ mod tests {
             fn build(&self, _: &str, user: &str, _: Option<&HashMap<&str, &str>>) -> Result<Entry> {
                 Ok(Entry::new_with_credential(Arc::new(Cred {
                     user: user.into(),
-                    garbles: self.garbles,
+                    broken: self.broken,
                 })))
             }
             fn as_any(&self) -> &dyn Any {
@@ -437,26 +464,27 @@ mod tests {
 
         impl CredentialApi for Cred {
             fn set_secret(&self, secret: &[u8]) -> Result<()> {
-                let mut stored = secret.to_vec();
-                if self.garbles {
-                    stored.reverse();
-                }
-                let mut secrets = SECRETS.lock().map_err(|_| failed())?;
-                secrets.retain(|(user, _)| *user != self.user);
-                secrets.push((self.user.clone(), stored));
+                let stored = match self.broken {
+                    true => vec![0xff; secret.len()],
+                    false => secret.to_vec(),
+                };
+                SECRETS.with_borrow_mut(|s| s.insert(self.user.clone(), stored));
                 Ok(())
             }
             fn get_secret(&self) -> Result<Vec<u8>> {
-                if self.garbles {
-                    return Err(failed());
+                let stored = SECRETS.with_borrow(|s| s.get(&self.user).cloned());
+                match (stored, self.broken) {
+                    (None, _) => Err(Error::NoEntry),
+                    // Decrypted with the wrong key: its padding fails, or it is garbage.
+                    (Some(stored), true) if stored.len() % 2 == 0 => Ok(vec![0xff; 3]),
+                    (Some(_), true) => Err(Error::PlatformFailure(Box::new(Session::Crypto(
+                        "message decryption failed",
+                    )))),
+                    (Some(stored), false) => Ok(stored),
                 }
-                let secrets = SECRETS.lock().map_err(|_| failed())?;
-                let found = secrets.iter().find(|(user, _)| *user == self.user);
-                found.map(|(_, s)| s.clone()).ok_or(Error::NoEntry)
             }
             fn delete_credential(&self) -> Result<()> {
-                let mut secrets = SECRETS.lock().map_err(|_| failed())?;
-                secrets.retain(|(user, _)| *user != self.user);
+                SECRETS.with_borrow_mut(|s| s.remove(&self.user));
                 Ok(())
             }
             fn get_credential(&self) -> Result<Option<Arc<Credential>>> {
@@ -471,30 +499,44 @@ mod tests {
         }
     }
 
-    /// A keychain refused at first, and opened as a session that garbles, is opened again: the
-    /// credentials are kept there, and read back by another process meeting the same.
+    /// A keychain refused at first, and opened as a broken session, is opened again: the
+    /// credentials are kept there (not in the file), and read back by another process meeting
+    /// the same.
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[test]
-    fn a_flaky_keychain_is_opened_again() -> Result<(), CredentialError> {
+    fn a_broken_keychain_session_is_opened_again() -> Result<(), CredentialError> {
         let dir = tempfile::tempdir().map_err(HomebaseError::from)?;
-        let store = |dir: &Path| CredentialStore {
-            keychain: opened(flaky::open),
+        let store = || CredentialStore {
+            keychain: opened(flaky::open).map(Mutex::new),
             open: flaky::open,
             files_only: false,
-            dir: dir.join("credentials"),
+            dir: dir.path().join("credentials"),
         };
         let identity = Identity::new("a.example");
-        let creds = sample(&identity);
-        // Refused, then a garbling session: what it stored is read back changed.
-        let first = store(dir.path());
-        assert_eq!(first.save(&creds)?, Location::Keychain);
-        assert!(!first.file(&identity).exists());
-        // Another process, on a garbling session first.
-        let (back, at) = store(dir.path()).load(&identity)?.expect("saved");
-        assert!(same(&back, &creds));
-        assert_eq!(at, Location::Keychain);
-        assert_eq!(store(dir.path()).delete(&identity)?, None);
-        assert!(store(dir.path()).load(&identity)?.is_none());
+        for creds in [sized(&identity, 0), sized(&identity, 1)] {
+            // Refused, then broken: what it stored is garbage, read back failing.
+            let first = store();
+            assert_eq!(first.save(&creds)?, Location::Keychain);
+            assert!(!first.file(&identity).exists());
+            // Another process, on a broken session first.
+            let (back, at) = store().load(&identity)?.expect("saved");
+            assert!(same(&back, &creds));
+            assert_eq!(at, Location::Keychain);
+        }
+        assert_eq!(store().delete(&identity)?, None);
+        assert!(store().load(&identity)?.is_none());
         Ok(())
+    }
+
+    /// [`sample`] with an even (`parity` 0) or odd (1) length as JSON: a broken session reads
+    /// the one as garbage, and fails to decrypt the other ([`flaky`]).
+    #[cfg(all(unix, not(target_os = "macos")))]
+    fn sized(identity: &str, parity: usize) -> Credentials {
+        let mut creds = sample(identity);
+        if serde_json::to_string(&creds).map_or(0, |j| j.len()) % 2 != parity {
+            creds.client_auth_token.push('A');
+        }
+        creds
     }
 
     /// Writes to the real keychain, so only on CI runners (`CI` is set). macOS and Windows

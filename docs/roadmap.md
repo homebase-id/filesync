@@ -211,7 +211,7 @@ chat-kmp test against; hash golden vectors from odin-core #1895),
   Downloads where they are, one state DB per account
 - Recently deleted for 30 days, restore, held deletions to review
 - The tray (2026-10-11 on): status and progress, recently synced, problems, timed pause,
-  logging in, held deletes, Recently deleted, the Folders page, notifications, the folder's
+  logging in, held deletes, Recently deleted, Set up this computer, notifications, the folder's
   icon and shortcut
 - Packaging ([spec/packaging.md](spec/packaging.md), `RELEASING.md`): Conveyor installers that
   update themselves (MSIX, Mac apps and `.dmg`, `.deb` with its apt repository), an `.rpm`, a
