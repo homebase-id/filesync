@@ -10,6 +10,7 @@ use std::io::{Read, Write};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use hbsync_fileio::{HashAlgorithm, Hasher};
 use hbsync_remote::{
@@ -44,9 +45,8 @@ const PRIVATE: &str = "the Filesync drive on your Homebase cloud is private now,
                        computer doesn't hold its key";
 
 /// Why a private drive can't be opened by a login that holds the app's zero-knowledge key: the
-/// security context lists no grant on it, so not the drive's key locked for the app either
-/// (odin-core `PermissionGroup.Redacted` for an app without permission keys, fixed in odin-core
-/// #2047). Signing in again doesn't help; tried again by itself.
+/// security context lists no grant on it ([`drive_grant`]). Signing in again doesn't help;
+/// tried again by itself.
 const UNLISTED: &str = "your Homebase cloud doesn't hand Filesync its private drive's key: it \
                         needs an update of Homebase (odin-core #2047)";
 
@@ -86,15 +86,16 @@ struct KeyState {
     read_at: u64,
     private: bool,
     key: Option<Key>,
-    /// The security context listed no grant on the drive while this login holds the app's key:
-    /// a private drive's key is the server's to hand over ([`UNLISTED`]), not a sign-in's.
+    /// The security context listed no grant on the drive while this login holds the app's key
+    /// ([`UNLISTED`]).
     unlisted: bool,
 }
 
 impl KeyState {
     /// Read from the security context (one request): a private drive is one the app's grant
     /// says is, or whose key is locked for the app; one known to be private stays so (there is
-    /// no way back). Without the grant listed, the drive's own answer says (one more request).
+    /// no way back). Without the grant listed, the drive's own answer says: one more request
+    /// per read on a drive not known to be private, while servers leave it out (#2047).
     fn read(
         client: &Client,
         drive: &TargetDrive,
@@ -102,27 +103,26 @@ impl KeyState {
         known_private: bool,
     ) -> Result<Self, HomebaseError> {
         let context: serde_json::Value = client.get("/api/v2/auth/context", &[])?;
-        let (grant, unlisted) = match drive_grant(&context, drive) {
-            Some(grant) => (grant, false),
+        let grant = drive_grant(&context, drive);
+        let zero_knowledge = match &grant {
+            Some(grant) => grant.zero_knowledge,
             None => {
-                tracing::warn!(
-                    "the security context lists no grant on the Filesync drive (odin-core \
-                     #2047): whether it is private read from the drive"
-                );
-                let grant = Grant {
-                    zero_knowledge: drive_answer(client)?.private(),
-                    locked: None,
-                };
-                (grant, client.zk_key().is_some())
+                static WARNED: AtomicBool = AtomicBool::new(false);
+                if !WARNED.swap(true, Ordering::Relaxed) {
+                    tracing::warn!("the security context lists no grant on the Filesync drive");
+                }
+                // Not asked again once known.
+                known_private || drive_answer(client)?.private()
             }
         };
-        let key = match grant.locked {
-            Some(locked) => Some(unlock_drive_key(client, locked)?),
-            None => None,
-        };
+        let unlisted = grant.is_none() && client.zk_key().is_some();
+        let key = grant
+            .and_then(|g| g.locked)
+            .map(|locked| unlock_drive_key(client, locked))
+            .transpose()?;
         Ok(KeyState {
             read_at,
-            private: known_private || grant.zero_knowledge || key.is_some(),
+            private: known_private || zero_knowledge || key.is_some(),
             key,
             unlisted,
         })
@@ -174,10 +174,9 @@ struct Grant<'a> {
 
 /// In the security context (`GET /api/v2/auth/context`, odin-core `RedactedOdinContext`), the
 /// app's grant on `drive` (`RedactedDriveGrant`, `docs/zero-knowledge-drive-api-plan.md`, 3.5
-/// and 4.2). Read leniently: no other grant's shape matters. None when it isn't listed: odin-core
-/// up to v0.1.974 lists no drive grants for an app that asks for no permission keys, as Filesync
-/// (`PermissionGroup.Redacted`; access checks use the real grants, so the drive answers;
-/// **[verified]** in odin-core's code and live on frodo; fixed in odin-core #2047).
+/// and 4.2). Read leniently: no other grant's shape matters. None when it isn't listed, as for
+/// any app without permission keys up to odin-core v0.1.974 (odin-core #2047,
+/// `docs/spec/homebase-api-notes.md`).
 fn drive_grant<'a>(context: &'a serde_json::Value, drive: &TargetDrive) -> Option<Grant<'a>> {
     let grant = context["permissionContext"]["permissionGroups"]
         .as_array()
@@ -337,7 +336,12 @@ impl HomebaseRemote {
     /// identity says nothing answers at its address.
     pub fn connect(client: Client) -> Result<Self, HomebaseError> {
         let answer = drive_answer(&client)?;
-        let state = KeyState::read(&client, &answer.target_drive, client.connects(), false)?;
+        let state = KeyState::read(
+            &client,
+            &answer.target_drive,
+            client.connects(),
+            answer.private(),
+        )?;
         state.key()?;
         Ok(HomebaseRemote {
             client,
