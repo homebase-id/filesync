@@ -144,15 +144,10 @@ impl KeyHeader {
 
     /// `iv || key`, AES-CBC under a private drive's key with the header IV, as an upload to it
     /// sends it (`zkDrive`): the server stores it as it is.
-    /// The same bytes as its token under that key ([`KeyHeader::token`]).
     pub(crate) fn lock(&self, drive_key: &Key) -> Value {
-        let locked = self.token(drive_key).0;
-        json!({
-            "encryptionVersion": 1,
-            "type": "zkDrive",
-            "iv": STANDARD.encode(&locked[..BLOCK]),
-            "encryptedAesKey": STANDARD.encode(&locked[BLOCK..]),
-        })
+        let mut locked = self.seal(drive_key, &self.iv);
+        locked["type"] = json!("zkDrive");
+        locked
     }
 
     /// The token the server will give for this key header once written: it seals it under

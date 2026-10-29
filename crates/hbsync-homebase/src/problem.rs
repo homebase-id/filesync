@@ -53,6 +53,7 @@ const KNOWN_CODES: &[(u32, &str)] = &[
     (4176, "invalidPayloadHash"),
     (4177, "payloadHashRequired"),
     (4178, "payloadHashMissing"),
+    (9012, "driveIsZeroKnowledge"),
 ];
 
 #[derive(Deserialize)]

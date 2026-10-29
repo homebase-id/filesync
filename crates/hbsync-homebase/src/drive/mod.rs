@@ -10,7 +10,6 @@ use std::io::{Read, Write};
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use hbsync_fileio::{HashAlgorithm, Hasher};
 use hbsync_remote::{
@@ -71,18 +70,9 @@ pub struct HomebaseRemote {
     drive_key: DriveKey,
 }
 
-/// A private drive's key, while this computer holds it, and when it was last read: the
-/// notifications' connects then ([`Client::connects`]).
-struct DriveKey {
-    held: Mutex<Option<Key>>,
-    read_at: AtomicU64,
-}
-
-impl DriveKey {
-    fn held(&self) -> std::sync::MutexGuard<'_, Option<Key>> {
-        self.held.lock().unwrap_or_else(|e| e.into_inner())
-    }
-}
+/// A private drive's key while this computer holds it, and when it was last read: at how
+/// many of the notifications' reconnects ([`Client::connects`]).
+struct DriveKey(Mutex<(u64, Option<Key>)>);
 
 impl std::fmt::Debug for DriveKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -249,16 +239,15 @@ impl HomebaseRemote {
             }
             e => e,
         })?;
-        let read_at = client.connects();
-        let drive_key = drive_key_of(&client, &answer.target_drive)?;
+        let read = (
+            client.connects(),
+            drive_key_of(&client, &answer.target_drive)?,
+        );
         Ok(HomebaseRemote {
             client,
             drive: answer.target_drive,
             made: answer.created,
-            drive_key: DriveKey {
-                held: Mutex::new(drive_key),
-                read_at: AtomicU64::new(read_at),
-            },
+            drive_key: DriveKey(Mutex::new(read)),
         })
     }
 
@@ -269,15 +258,14 @@ impl HomebaseRemote {
     /// files hidden from it as gone.
     fn drive_key(&self, needed: bool) -> Result<Option<Key>> {
         let connects = self.client.connects();
-        let held = *self.drive_key.held();
-        if self.drive_key.read_at.load(Ordering::SeqCst) == connects && (held.is_some() || !needed)
-        {
+        // Held while it is read: whoever needs it then waits for that one request.
+        let mut state = self.drive_key.0.lock().unwrap_or_else(|e| e.into_inner());
+        let (read_at, held) = *state;
+        if read_at == connects && (held.is_some() || !needed) {
             return Ok(held);
         }
-        // Read without holding the key: what uses it doesn't wait on the request.
         let read = drive_key_of(&self.client, &self.drive).map_err(remote_error)?;
-        *self.drive_key.held() = read;
-        self.drive_key.read_at.store(connects, Ordering::SeqCst);
+        *state = (connects, read);
         match read {
             None if needed => Err(RemoteError::Fatal(
                 "a file locked with the drive's key, on a drive that isn't private".into(),
@@ -307,10 +295,7 @@ impl HomebaseRemote {
     /// this connected; with its key fetched (or this computer refused), it is written again.
     fn write_error(&self, e: HomebaseError) -> RemoteError {
         if let HomebaseError::Api { error, .. } = &e
-            && error
-                .code
-                .as_deref()
-                .is_some_and(|c| c.eq_ignore_ascii_case("driveIsZeroKnowledge"))
+            && error.is("driveIsZeroKnowledge")
         {
             return match self.drive_key(true) {
                 Ok(_) => RemoteError::Transient(format!("{e}: the drive was made private")),
@@ -511,7 +496,7 @@ impl HomebaseRemote {
             Some(key) => key,
             None => {
                 let header = self.current(target.at)?;
-                let drive = self.drive_key(header.locked_with_drive_key())?;
+                let drive = self.drive_key(header.needs_drive_key())?;
                 header
                     .key(self.keys(drive.as_ref()))
                     .map_err(remote_error)?
@@ -534,35 +519,24 @@ impl HomebaseRemote {
         }
     }
 
-    /// A private drive's payload key, the file key from its header with the payload's IV,
-    /// and the file's size. A header read after the payload was written over has another IV:
-    /// the bytes then don't match their hash, and the download is tried again.
-    fn payload_key(&self, file_id: RemoteFileId) -> Result<(KeyHeader, u64)> {
+    /// A private drive's payload key: the file key from its header, with the payload's IV. A
+    /// header read after the payload was written over has another IV: the bytes then don't
+    /// match their hash, and the download is tried again.
+    fn payload_key(&self, file_id: RemoteFileId) -> Result<KeyHeader> {
         let header = self.raw_header(file_id)?;
         if header.file_state == "deleted" {
             return Err(RemoteError::Deleted);
         }
         let drive = self.drive_key(header.needs_drive_key())?;
-        let keys = self.keys(drive.as_ref());
-        let key = header.key(keys).map_err(remote_error)?;
+        let key = header
+            .key(self.keys(drive.as_ref()))
+            .map_err(remote_error)?;
         let iv = header
             .file_metadata
             .sync_payload()
             .ok_or_else(|| RemoteError::StaleRange(format!("file {}: no payload now", file_id.0)))
             .and_then(|p| wire::payload_iv(p).map_err(RemoteError::Fatal))?;
-        match wire::to_remote(header, keys)
-            .map_err(RemoteError::Fatal)?
-            .body
-        {
-            RemoteBody::Live {
-                payload: Some(_),
-                content: NodeContent {
-                    size: Some(size), ..
-                },
-                ..
-            } => Ok((KeyHeader { iv, key: key.key }, size)),
-            _ => Err(RemoteError::NotFound),
-        }
+        Ok(KeyHeader { iv, key: key.key })
     }
 
     /// Stored bytes `range` of the payload at `path`: one request.
@@ -861,20 +835,19 @@ impl Remote for HomebaseRemote {
         range: Option<Range<u64>>,
         sink: &mut dyn Write,
     ) -> Result<u64> {
-        // A private drive's payload comes without its key: the file's header is read first
-        // (one request, before the payload's holds a connection), and says the size too.
-        let private = match self.drive_key(false)? {
-            Some(_) => Some(self.payload_key(file_id)?),
-            None => None,
-        };
-        let range = match (range, &private) {
-            (Some(r), _) => r,
-            (None, Some((_, size))) => 0..*size,
-            (None, None) => 0..self.payload_size(file_id)?,
+        let range = match range {
+            Some(r) => r,
+            None => 0..self.payload_size(file_id)?,
         };
         if range.is_empty() {
             return Ok(0);
         }
+        // A private drive's payload comes without its key: the file's header is read first
+        // (one request, before the payload's holds a connection).
+        let private = match self.drive_key(false)? {
+            Some(_) => Some(self.payload_key(file_id)?),
+            None => None,
+        };
         let len = range.end - range.start;
         let path = format!("{}/payload/{PAYLOAD_KEY}", self.file(file_id));
         let at = CipherRange::of(&range);
@@ -886,9 +859,9 @@ impl Remote for HomebaseRemote {
                 .and_then(|s| KeyHeader::open(&s, self.client.key()))
                 .map_err(remote_error)?,
             (true, None) => match private {
-                Some((key, _)) => key,
+                Some(key) => key,
                 // Made private since: its key is fetched with the header.
-                None => self.payload_key(file_id)?.0,
+                None => self.payload_key(file_id)?,
             },
             (false, _) => return Err(RemoteError::Fatal(format!("{path}: not encrypted"))),
         };
@@ -1415,10 +1388,7 @@ mod tests {
                 drive_type: Uuid::nil(),
             },
             made: 0,
-            drive_key: DriveKey {
-                held: Mutex::new(None),
-                read_at: AtomicU64::new(0),
-            },
+            drive_key: DriveKey(Mutex::new((0, None))),
         };
         let size = MAX_FILE + 1;
         let meta = NodeMeta {

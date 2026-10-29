@@ -171,7 +171,8 @@ pub struct Client {
     /// [`Credentials::login_id`] of the credentials it was made with.
     login: String,
     connections: Arc<Connections>,
-    /// How often the notifications connected ([`Client::connected`]), shared by its clones.
+    /// How often the notifications connected again ([`Client::connected`]), shared by its
+    /// clones.
     connects: Arc<AtomicU64>,
 }
 
@@ -217,14 +218,14 @@ impl Client {
         &self.key
     }
 
-    /// The notifications connected (again): what the identity grants may have changed since.
+    /// The notifications connected again: what the identity grants may have changed since.
     /// Making a drive private closes every connection granted it (odin-core), so the drive's
     /// key is read again after one ([`crate::HomebaseRemote`]).
     pub(crate) fn connected(&self) {
         self.connects.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// How often the notifications connected.
+    /// How often the notifications connected again.
     pub(crate) fn connects(&self) -> u64 {
         self.connects.load(Ordering::SeqCst)
     }
