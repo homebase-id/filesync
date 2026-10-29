@@ -101,8 +101,9 @@ A new Filesync drive is made private (`selectiveShare`): installing the app asks
 `sm: "selectiveShare"` in the drive request, which an install from Chat must send the same as
 the desktop (filesync `app.rs`, `drive_request`). One made before can be made private, as Vault
 (odin-core `docs/zero-knowledge-drive-api-plan.md`, steps 3 and 4). Read which it is from the
-drive (`sharingModel` in the app drive answer), never from the request. A private drive whose
-security context has no `zkAppKeyEncryptedStorageKey` for the app means its key isn't locked
+drive (`isZeroKnowledge` on the app's grant in the security context, which also carries the
+key), never from the request. A private drive whose grant has no
+`zkAppKeyEncryptedStorageKey` means its key isn't locked
 for the app yet (another app's install made the drive): ask to sign in again, which fills it in;
 never show it as shared or empty (odin-core plan, 4.2; **[verified]** in odin-core's and
 odin-js's branches, not merged yet). The nodes stay the same;

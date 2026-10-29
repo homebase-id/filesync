@@ -13,7 +13,7 @@
 //! kind afterwards (verified in odin-js `useApp.ts` / `DriveProvider.ts`). Until then the
 //! client sends hashes on every upload anyway, and the drive is only recognised by its type.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::{Value, json};
 use uuid::{Uuid, uuid};
 
@@ -46,22 +46,14 @@ pub(crate) struct DriveSpec {
     pub sharing_model: SharingModel,
 }
 
-/// How a drive is shared (odin-core `DriveSharingModel`, camelCase in JSON **[verified]**):
-/// private and selective share are zero knowledge (`encryption.md`, "A private drive").
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// How a drive is made (odin-core `DriveSharingModel`, camelCase in JSON **[verified]**): the
+/// drive request's `sm`. Private and selective share are zero knowledge (`encryption.md`, "A
+/// private drive"); which a drive is, is read from the drive, never from the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum SharingModel {
-    Collaborative,
-    Private,
+    /// Only the owner's devices and apps hold the key (shares later): Filesync's.
     SelectiveShare,
-    #[serde(other)]
-    Unclassified,
-}
-
-impl SharingModel {
-    pub(crate) fn zero_knowledge(self) -> bool {
-        matches!(self, SharingModel::Private | SharingModel::SelectiveShare)
-    }
 }
 
 /// The drive the sync folder mirrors.
