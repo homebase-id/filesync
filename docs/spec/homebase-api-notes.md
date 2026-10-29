@@ -67,7 +67,8 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   permission keys, as Filesync (`PermissionGroup.Redacted` returns an empty list when the
   group's `PermissionSet` is null; access checks use the real grants, so the drive answers;
   **[verified]** live on frodo, cause from true-zero): the client reads a missing grant as a
-  shared drive, and a private one then as a drive without its key.
+  drive whose privacy the drive's answer (`sharingModel`) tells (`encryption.md`); fixed in
+  odin-core #2047 (tracking: filesync #335).
   How this client uses it: `encryption.md`.
 - **A drive made again** **[verified]**: its id is the alias the app asks for
   (`DriveManager.CreateDriveAsync`), fixed in `app.rs`, so a drive deleted and made again has the
