@@ -26,6 +26,9 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+    // Closed by an update with no tray running (quit, syncing on), it comes back by itself.
+    #[cfg(windows)]
+    hbsync_app::install::restart_after_update("");
     let stop = Stop::default();
     #[cfg(unix)]
     {

@@ -51,7 +51,8 @@ pub enum Event {
 pub type Sender = Arc<dyn Fn(Event) + Send + Sync>;
 
 const PROGRAM: &str = autostart::TRAY;
-/// The argument a tray restarting into its update passes the new one.
+/// The argument a tray restarting into its update passes the new one; on Windows, the one
+/// Windows starts after an update closed the tray (`install::restart_after_update`).
 const RESTARTED: &str = "--restarted";
 /// A notification of one kind at most this often.
 const NOTIFY_EVERY: Duration = Duration::from_secs(60);
@@ -75,7 +76,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let _lock = match InstanceLock::acquire_for(&paths, PROGRAM) {
+    let _lock = match lock(&paths) {
         Ok(lock) => lock,
         // Started again (at logon, by hand): the one running is enough.
         Err(e @ LockError::Held { .. }) => {
@@ -88,6 +89,9 @@ fn main() -> ExitCode {
         }
     };
     tracing::info!("{PROGRAM} {} started", hbsync_app::VERSION);
+    // Closed by an update, it comes back as if it had restarted into it.
+    #[cfg(windows)]
+    hbsync_app::install::restart_after_update(RESTARTED);
     // Restarted into an update: the children of the tray before, the daemon say, are ours.
     #[cfg(target_os = "linux")]
     hbsync_app::adopt_children();
@@ -126,6 +130,21 @@ fn main() -> ExitCode {
         Err(e) => {
             tracing::error!("{e}");
             ExitCode::FAILURE
+        }
+    }
+}
+
+/// Takes the tray's lock. Restarted, it waits a little for the one before to let go: Windows
+/// may release a closed process's lock a moment late.
+fn lock(paths: &Paths) -> Result<InstanceLock, LockError> {
+    let restarted = std::env::args_os().any(|a| a == RESTARTED);
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        match InstanceLock::acquire_for(paths, PROGRAM) {
+            Err(LockError::Held { .. }) if restarted && Instant::now() < until => {
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            taken => return taken,
         }
     }
 }
@@ -380,6 +399,8 @@ impl App {
                 let _ = self.wake.send(poll::Poke::Look);
             }
             Action::Quit | Action::QuitAndStop => {
+                #[cfg(windows)]
+                hbsync_app::install::no_restart_after_update();
                 // The icon goes at once; the watcher quits after a start in flight (the daemon
                 // may first finish a transfer).
                 self.tray = None;

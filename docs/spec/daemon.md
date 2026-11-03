@@ -611,6 +611,10 @@ to start. It asks nothing otherwise, as nothing was stopped on purpose:
 - after an update, or a crash, the daemon was stopped without the mark, and is started again;
 - a tray restarting into its update (*Restart to finish the update*, `--restarted`) leaves the
   daemon as it was and doesn't tell a stop again.
+- on Windows, the package's background update closes the tray and the daemon; each asked Windows
+  to start it again after an update (`install::restart_after_update`), the tray with
+  `--restarted`: it starts the daemon as after a crash, and doesn't tell a stop again. Quitting
+  the tray takes its request back.
 
 A stop is this computer's, for this user (the mark is in the local state folder): other
 computers, and another user's Filesync on this one, keep syncing. It lasts until syncing is
