@@ -2,6 +2,7 @@
 //! what came of it.
 
 use super::*;
+use hbsync_app::APP_NAME;
 
 impl Pages {
     /// The picker [`Event::PickFolder`] opened closed, with the folder chosen, if any. Taken
@@ -71,7 +72,7 @@ impl Server {
         // ahead of *Change…* (which opened the folder picker instead).
         format!(
             "<h1>Connect to your Homebase</h1>\
-             <p>Homebase Drive keeps a folder on this computer in sync with your Homebase, \
+             <p>{APP_NAME} keeps a folder on this computer in sync with your Homebase, \
              encrypted.</p>{error}\
              <form method=post action=\"{setup}\">\
              <button class=enter tabindex=-1 aria-hidden=true>Continue</button>\
@@ -220,13 +221,13 @@ impl Server {
             Phase::Connecting => format!(
                 "<meta http-equiv=refresh content=2>\
                  <h1>Connecting…</h1><p>Approve on your Homebase, in the page that opened: \
-                 this computer, and Homebase Drive's storage if it asks. This page follows along.</p>\
+                 this computer, and its drive, Filesync, if it asks. This page follows along.</p>\
                  <form method=post action=\"{}\"><p class=small>A typo in the address, or the \
                  page closed? <button class=secondary>Start over</button></p></form>",
                 self.pages.url("setup/again")
             ),
             Phase::Done(Ok(what)) => format!(
-                "<h1>Connected</h1><p>{}</p><p>The Homebase Drive icon in your tray shows what it \
+                "<h1>Connected</h1><p>{}</p><p>The {APP_NAME} icon in your tray shows what it \
                  does. You can close this page.</p>",
                 escape(what)
             ),

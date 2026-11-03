@@ -2,7 +2,7 @@
 
 # Homebase Drive
 
-Keeps a folder on your computer in sync with your [Homebase](https://homebase.id) drive, on
+Keeps a folder on your computer in sync with your [Homebase](https://homebase.id) cloud, on
 Windows, macOS and Linux. Like Dropbox, but the files live on your own Homebase.
 
 ## Getting started

@@ -17,6 +17,8 @@
 //! can (not on Windows).
 
 use std::io;
+
+use crate::APP_NAME;
 use std::path::{Path, PathBuf};
 
 /// The app identity (as in the packages; chat is `id.homebase.feed`), and the daemon's launchd
@@ -159,7 +161,7 @@ pub fn desktop_entry(tray: &Path, env: &[(String, String)]) -> String {
     format!(
         "[Desktop Entry]\n\
          Type=Application\n\
-         Name=Homebase Drive\n\
+         Name={APP_NAME}\n\
          Comment=Keeps your Homebase folder in sync\n\
          Exec={exec}\n\
          Icon={ICON}\n\
@@ -187,7 +189,7 @@ pub fn systemd_unit(daemon: &Path, env: &[(String, String)]) -> String {
     let exec = quote(&daemon.display().to_string()).replace('$', "$$");
     format!(
         "[Unit]\n\
-         Description=Homebase Drive\n\
+         Description={APP_NAME}\n\
          \n\
          [Service]\n\
          ExecStart={}\n\
@@ -643,6 +645,11 @@ mod tests {
         ] {
             assert!(conf.contains(&line), "conveyor.conf lacks {line}");
         }
+        // The package's desktop entry and ours (the same file name) show one name.
+        if cfg!(target_os = "linux") {
+            let name = format!("desktop-file.\"Desktop Entry\".Name = \"{APP_NAME}\"");
+            assert!(conf.contains(&name), "conveyor.conf lacks {name}");
+        }
     }
 
     fn env() -> Vec<(String, String)> {
@@ -717,7 +724,7 @@ mod tests {
         let icon = data
             .path()
             .join("icons/hicolor/256x256/apps/homebase-filesync.png");
-        assert!(std::fs::read_to_string(&entry)?.contains("Name=Homebase Drive\n"));
+        assert!(std::fs::read_to_string(&entry)?.contains(&format!("Name={APP_NAME}\n")));
         assert_eq!(std::fs::read(&icon)?, b"png");
         let written = std::fs::metadata(&entry)?.modified()?;
         std::thread::sleep(std::time::Duration::from_millis(20));

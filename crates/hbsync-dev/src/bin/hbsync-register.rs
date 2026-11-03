@@ -44,7 +44,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 None => hbsync_platform::host::device_name(),
                 Some(c) => format!("{} ({c})", hbsync_platform::host::device_name()),
             };
-            println!("Opening the browser to authorize Homebase Filesync on {identity}...");
+            println!("Opening the browser to authorize Homebase Drive on {identity}...");
             let creds = setup::authorize(&identity, &device, browser.as_deref(), |url| {
                 println!("If it doesn't open, visit:\n{url}\n");
             })?;

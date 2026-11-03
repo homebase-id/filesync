@@ -629,4 +629,4 @@ jobs:
           candidate=()
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then candidate=(--prerelease); fi
           gh release create "$GITHUB_REF_NAME" assets/* --draft --verify-tag "${candidate[@]}" \
-            --title "Homebase Filesync ${GITHUB_REF_NAME#v}" --notes-file .github/release/notes.md
+            --title "Homebase Drive ${GITHUB_REF_NAME#v}" --notes-file .github/release/notes.md

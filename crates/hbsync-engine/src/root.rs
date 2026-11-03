@@ -15,7 +15,7 @@ use hbsync_types::activity::Synced;
 #[derive(Debug, thiserror::Error)]
 pub enum RootError {
     /// No marker: the folder is gone, not mounted, or was never set up.
-    #[error("{0} has no Homebase Drive marker: it is gone, not mounted, or not set up")]
+    #[error("{0} has no sync folder marker: it is gone, not mounted, or not set up")]
     NoMarker(PathBuf),
     #[error("{folder} is synced with {theirs}, not {ours}")]
     OtherIdentity {

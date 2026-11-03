@@ -2,6 +2,7 @@
 //! logging this device in (the YouAuth exchange, [`hbsync_homebase::youauth`]), and giving the
 //! app its drive again.
 
+use crate::APP_NAME;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -79,7 +80,7 @@ impl Callback {
     /// Answers the browser that came back: sent on to `return_to` (with `?error=<why>` on
     /// failure), else a line of text. A browser gone meanwhile (the tab closed) changes
     /// nothing: the owner's answer came.
-    fn answer(&self, stream: &mut TcpStream, outcome: Result<&str, String>) {
+    fn answer(&self, stream: &mut TcpStream, outcome: Result<String, String>) {
         let answered = match (&self.return_to, outcome) {
             (Some(url), Ok(_)) => local_http::redirect(stream, url),
             (Some(url), Err(why)) => {
@@ -142,8 +143,10 @@ impl Login {
         let (mut stream, request) = self.back.wait(timeout, cancel)?;
         let result = self.pending.complete(&request.query);
         let outcome = match &result {
-            Ok(_) => Ok("Homebase Drive is connected. You can close this window."),
-            Err(e) => Err(format!("Homebase Drive could not connect: {e}")),
+            Ok(_) => Ok(format!(
+                "{APP_NAME} is connected. You can close this window."
+            )),
+            Err(e) => Err(format!("{APP_NAME} could not connect: {e}")),
         };
         self.back.answer(&mut stream, outcome);
         result
@@ -197,9 +200,11 @@ impl DriveRestore {
         // Given comes back without a status; cancelled (or anything else) with one.
         let given = !request.query.contains_key("status");
         let outcome = if given {
-            Ok("Homebase Drive goes on setting up. You can close this window.")
+            Ok(format!(
+                "{APP_NAME} goes on setting up. You can close this window."
+            ))
         } else {
-            Err("Homebase Drive didn't get its storage back.".to_owned())
+            Err(format!("{APP_NAME} didn't get its drive back."))
         };
         self.back.answer(&mut stream, outcome);
         Ok(given)

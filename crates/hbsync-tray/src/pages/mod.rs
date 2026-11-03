@@ -2,6 +2,7 @@
 //! the folder (the identity's approval happens in the browser anyway), and reviewing held
 //! deletes. Every path starts with a random secret, so only the tray's own links reach them.
 
+use hbsync_app::APP_NAME;
 use std::collections::HashMap;
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -253,9 +254,9 @@ fn frame(icon: &str, body: &str) -> String {
     format!(
         "<!doctype html><html lang=en><meta charset=utf-8>\
          <meta name=viewport content=\"width=device-width, initial-scale=1\">\
-         <title>Homebase Drive</title><link rel=icon href=\"{icon}\">\
+         <title>{APP_NAME}</title><link rel=icon href=\"{icon}\">\
          <style>{STYLE}</style>\
-         <header><img src=\"{icon}\" alt=\"\"><span>Homebase Drive</span></header>\
+         <header><img src=\"{icon}\" alt=\"\"><span>{APP_NAME}</span></header>\
          <main>{body}</main></html>"
     )
 }

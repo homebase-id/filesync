@@ -1,5 +1,6 @@
 //! The Homebase Filesync command line: sets syncing up and controls the daemon (`hbsyncd`).
 
+use hbsync_app::APP_NAME;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -21,7 +22,7 @@ type Res<T> = hbsync_app::Result<T>;
 #[command(
     name = "hbsync",
     version = hbsync_app::VERSION,
-    about = "Homebase Drive: keeps a folder in sync with your Homebase identity"
+    about = format!("{APP_NAME}: keeps a folder in sync with your Homebase identity")
 )]
 struct Cli {
     #[command(subcommand)]
@@ -360,7 +361,7 @@ fn run(command: Command) -> Res<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             };
             if out.autostart_was_on {
-                println!("Homebase Drive no longer starts at logon.");
+                println!("{APP_NAME} no longer starts at logon.");
             }
             if let Some(why) = out.keychain_unreachable {
                 println!(
@@ -410,7 +411,7 @@ fn run(command: Command) -> Res<ExitCode> {
             }
             match taken {
                 Taken::Now => println!("{what}."),
-                Taken::AtStart => println!("{what} once Homebase Drive runs (`hbsync start`)."),
+                Taken::AtStart => println!("{what} once {APP_NAME} runs (`hbsync start`)."),
             }
         }
         Command::Remove { role, identity } => {
@@ -432,7 +433,7 @@ fn run(command: Command) -> Res<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             };
             if out.autostart_was_on {
-                println!("Homebase Drive no longer starts at logon.");
+                println!("{APP_NAME} no longer starts at logon.");
             }
             for root in out.roots {
                 println!(
@@ -443,15 +444,15 @@ fn run(command: Command) -> Res<ExitCode> {
             }
         }
         Command::Autostart { state } => match state {
-            None if autostart::installed()? => println!("Homebase Drive starts at logon."),
-            None => println!("Homebase Drive doesn't start at logon."),
+            None if autostart::installed()? => println!("{APP_NAME} starts at logon."),
+            None => println!("{APP_NAME} doesn't start at logon."),
             Some(OnOff::On) => {
                 autostart::install(&autostart::logon_program()?)?;
-                println!("Homebase Drive starts at logon.");
+                println!("{APP_NAME} starts at logon.");
             }
             Some(OnOff::Off) => {
                 autostart::uninstall()?;
-                println!("Homebase Drive no longer starts at logon.");
+                println!("{APP_NAME} no longer starts at logon.");
             }
         },
         Command::Log => println!("{}", paths.logs.display()),
@@ -588,7 +589,7 @@ fn print_status(status: &DaemonStatus) {
 }
 
 fn print_folder(s: &FolderStatus) {
-    println!("Homebase Drive: {}", words::status_line(s, words::now()));
+    println!("{APP_NAME}: {}", words::status_line(s, words::now()));
     let who = match s.role {
         Some(role) => format!("{}'s {}", s.identity, role.name()),
         None => s.identity.to_string(),

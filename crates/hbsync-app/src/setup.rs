@@ -2,6 +2,7 @@
 //! browser), then a first look at the sync drive and, best effort, the app's circle (found by its
 //! slug on every setup; nothing uses it yet).
 
+use crate::APP_NAME;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -44,7 +45,7 @@ pub fn authorize(
 /// the caller takes the browser to `authorize_url` and waits with `finish`
 /// ([`APPROVAL_TIMEOUT`]).
 pub fn begin(identity: &str, device: &str) -> Result<crate::login::Login, HomebaseError> {
-    crate::login::begin(identity, &format!("Homebase Drive on {device}"))
+    crate::login::begin(identity, &format!("{APP_NAME} on {device}"))
 }
 
 /// Starts asking the owner of `identity` to give the app its drive again: the caller takes the
@@ -92,7 +93,7 @@ impl Owner for InBrowser<'_> {
 
     fn restore_drive(&mut self, identity: &str) -> Result<bool, HomebaseError> {
         (self.say)(&format!(
-            "Opening your browser to give Homebase Drive its storage back on {identity}..."
+            "Opening your browser to give {APP_NAME} its drive back on {identity}..."
         ));
         let restore = begin_restore(identity)?;
         self.visit(restore.url());
@@ -447,9 +448,9 @@ pub fn set_up(
                     control::start_over(paths, identity)?;
                 }
                 return Err(Refusal::No(format!(
-                    "Homebase Drive's storage isn't at its address on {identity} (deleted, or \
-                     another app's), and this computer synced with it before: Homebase Drive \
-                     doesn't make a new one by itself, as this computer would take the empty new drive for every \
+                    "The Filesync drive isn't at its address on {identity} (deleted, or another \
+                     app's), and this computer synced with it before: {APP_NAME} doesn't make a \
+                     new one by itself, as this computer would take the empty new drive for every \
                      file deleted. No drive was made"
                 ))
                 .into());
@@ -462,7 +463,7 @@ pub fn set_up(
             // app only grants one that exists).
             prepare(&creds).map_err(|e| match e {
                 HomebaseError::NoDrive(_) => crate::Error::from(Refusal::No(format!(
-                    "Homebase Drive's storage still isn't on {identity}: if your Homebase lists a drive \
+                    "The Filesync drive still isn't on {identity}: if your Homebase lists a drive \
                      named Filesync under another app, delete it there if it is empty, and try \
                      again"
                 ))),
@@ -498,9 +499,9 @@ pub fn set_up(
         } else {
             // Set up all the same: syncing doesn't depend on it, and it can be turned on later.
             match autostart::logon_program().and_then(|p| autostart::install(&p)) {
-                Ok(()) => {
-                    say("Homebase Drive starts at logon (`hbsync autostart off` stops that).")
-                }
+                Ok(()) => say(&format!(
+                    "{APP_NAME} starts at logon (`hbsync autostart off` stops that)."
+                )),
                 Err(e) => say(&format!("Not starting at logon: {e}.")),
             }
         }
@@ -531,11 +532,11 @@ fn give_drive_back(
     say: &mut dyn FnMut(&str),
 ) -> crate::Result<()> {
     say(&format!(
-        "Homebase Drive's storage isn't on {identity}: asking your Homebase to give it back."
+        "The Filesync drive isn't on {identity}: asking your Homebase to give it back."
     ));
     if !owner.restore_drive(identity)? {
         return Err(Refusal::No(format!(
-            "Homebase Drive needs its storage on {identity}: approve giving it back to set up"
+            "{APP_NAME} needs its drive, Filesync, on {identity}: approve giving it back to set up"
         ))
         .into());
     }

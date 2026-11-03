@@ -22,7 +22,16 @@ use crate::drive::{HomebaseRemote, TargetDrive};
 
 /// The app's id on every identity. Never change it: it is how an identity recognises the app.
 pub(crate) const APP_ID: Uuid = uuid!("03ae1a49-cdae-483f-9da7-fedc0e8f20b9");
-pub const APP_NAME: &str = "Homebase Drive";
+/// The product's name where people read it: Homebase Drive, but Homebase Filesync on a Mac, whose
+/// app keeps that name (its bundle is named after it: `docs/spec/packaging.md`, "The name shown").
+pub const APP_NAME: &str = if cfg!(target_os = "macos") {
+    "Homebase Filesync"
+} else {
+    "Homebase Drive"
+};
+/// The app's name on an identity, as registering it says: the Homebase app registers it so too
+/// (chat-kmp `AppConfig.kt`, `filesyncAppRegistration`), and whichever registers first names it.
+const REGISTERED_NAME: &str = "Homebase Filesync";
 pub(crate) const APP_SLUG: &str = "filesync";
 
 /// The identity's files in the browser: chat's web app on the identity, opened on its Filesync
@@ -150,7 +159,7 @@ pub(crate) fn circle_request(drive: TargetDrive) -> serde_json::Value {
 /// `friendly_name` names this device in the owner's list of the app's clients.
 pub(crate) fn permission_request(friendly_name: &str, return_url: &str) -> serde_json::Value {
     json!({
-        "n": APP_NAME,
+        "n": REGISTERED_NAME,
         "appId": APP_ID.simple().to_string(),
         "as": APP_SLUG,
         "fn": friendly_name,
