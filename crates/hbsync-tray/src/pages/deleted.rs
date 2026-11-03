@@ -1,6 +1,5 @@
 //! Reviewing held deletes, and Recently deleted: its items, restoring and emptying them.
 
-use hbsync_app::APP_NAME;
 use hbsync_app::protocol::{DeletedAccount, DeletedList};
 use hbsync_app::{HeldAnswer, State};
 

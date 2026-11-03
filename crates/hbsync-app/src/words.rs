@@ -151,10 +151,7 @@ pub fn set_aside(why: Unusable) -> String {
         )
     };
     match why {
-        Unusable::TooOld => set_aside(&format!(
-            "were from an older version of {}",
-            crate::APP_NAME
-        )),
+        Unusable::TooOld => set_aside("were from an older version"),
         Unusable::Corrupt => set_aside("were damaged"),
         Unusable::OtherDrive => "The Filesync drive on your Homebase cloud was deleted and made \
                                  again since this computer last synced. Nothing here was \

@@ -2,7 +2,6 @@
 //! the folder (the identity's approval happens in the browser anyway), and reviewing held
 //! deletes. Every path starts with a random secret, so only the tray's own links reach them.
 
-use hbsync_app::APP_NAME;
 use std::collections::HashMap;
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
@@ -11,12 +10,12 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use hbsync_app::FolderStatus;
 use hbsync_app::control;
 use hbsync_app::local_http::{escape, read_request, redirect, respond};
 use hbsync_app::protocol::AccountControl;
 use hbsync_app::setup::{self, Refusal};
 use hbsync_app::words;
+use hbsync_app::{APP_NAME, FolderStatus};
 use hbsync_app::{Config, Paths};
 
 use crate::{Event, Sender};

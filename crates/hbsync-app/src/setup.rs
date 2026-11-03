@@ -2,7 +2,6 @@
 //! browser), then a first look at the sync drive and, best effort, the app's circle (found by its
 //! slug on every setup; nothing uses it yet).
 
-use crate::APP_NAME;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -19,7 +18,7 @@ use hbsync_types::Role;
 
 use crate::config::ConfigLock;
 use crate::paths::home;
-use crate::{Config, CredentialStore, Identity, Location, Paths, autostart};
+use crate::{APP_NAME, Config, CredentialStore, Identity, Location, Paths, autostart};
 use crate::{control, folders};
 
 /// How long the owner has to approve in the browser.
@@ -536,7 +535,7 @@ fn give_drive_back(
     ));
     if !owner.restore_drive(identity)? {
         return Err(Refusal::No(format!(
-            "{APP_NAME} needs its drive, Filesync, on {identity}: approve giving it back to set up"
+            "{APP_NAME} needs the Filesync drive on {identity}: approve giving it back to set up"
         ))
         .into());
     }

@@ -1,7 +1,6 @@
 //! Choosing which of the user's own folders sync (Documents, Pictures, …): each where this
 //! computer keeps it, how much it holds, and why it can't be added if it can't.
 
-use hbsync_app::APP_NAME;
 use std::path::Path;
 use std::time::Instant;
 

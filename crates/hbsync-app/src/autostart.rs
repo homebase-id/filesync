@@ -17,9 +17,9 @@
 //! can (not on Windows).
 
 use std::io;
+use std::path::{Path, PathBuf};
 
 use crate::APP_NAME;
-use std::path::{Path, PathBuf};
 
 /// The app identity (as in the packages; chat is `id.homebase.feed`), and the daemon's launchd
 /// label (the tray's adds `.tray`).
@@ -645,10 +645,13 @@ mod tests {
         ] {
             assert!(conf.contains(&line), "conveyor.conf lacks {line}");
         }
-        // The package's desktop entry and ours (the same file name) show one name.
-        if cfg!(target_os = "linux") {
-            let name = format!("desktop-file.\"Desktop Entry\".Name = \"{APP_NAME}\"");
-            assert!(conf.contains(&name), "conveyor.conf lacks {name}");
+        // The names shown: the packages' (Windows, Linux, the download page) and the Mac app's.
+        use hbsync_homebase::app::{MAC_NAME, SHOWN_NAME};
+        for line in [
+            format!("site.display-name = \"{SHOWN_NAME}\""),
+            format!("display-name = \"{MAC_NAME}\""),
+        ] {
+            assert!(conf.contains(&line), "conveyor.conf lacks {line}");
         }
     }
 

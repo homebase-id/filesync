@@ -2,7 +2,6 @@
 //! what came of it.
 
 use super::*;
-use hbsync_app::APP_NAME;
 
 impl Pages {
     /// The picker [`Event::PickFolder`] opened closed, with the folder chosen, if any. Taken
@@ -221,7 +220,7 @@ impl Server {
             Phase::Connecting => format!(
                 "<meta http-equiv=refresh content=2>\
                  <h1>Connecting…</h1><p>Approve on your Homebase, in the page that opened: \
-                 this computer, and its drive, Filesync, if it asks. This page follows along.</p>\
+                 this computer, and the Filesync drive if it asks. This page follows along.</p>\
                  <form method=post action=\"{}\"><p class=small>A typo in the address, or the \
                  page closed? <button class=secondary>Start over</button></p></form>",
                 self.pages.url("setup/again")

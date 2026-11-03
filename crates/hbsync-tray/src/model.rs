@@ -1,12 +1,11 @@
 //! What the tray shows, worked out from what the daemon says: the icon's look, the tooltip and
 //! the menu, as plain data (no GUI), so it can be tested.
 
-use hbsync_app::APP_NAME;
 use std::path::{Path, PathBuf};
 
 use hbsync_app::protocol::{AccountStatus, Note, RecentItem};
 use hbsync_app::words;
-use hbsync_app::{DaemonStatus, FolderStatus, State};
+use hbsync_app::{APP_NAME, DaemonStatus, FolderStatus, State};
 use hbsync_types::activity::{Synced, SyncedKind};
 
 /// Entries of the recently synced list in the menu.

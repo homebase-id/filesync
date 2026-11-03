@@ -22,12 +22,17 @@ use crate::drive::{HomebaseRemote, TargetDrive};
 
 /// The app's id on every identity. Never change it: it is how an identity recognises the app.
 pub(crate) const APP_ID: Uuid = uuid!("03ae1a49-cdae-483f-9da7-fedc0e8f20b9");
-/// The product's name where people read it: Homebase Drive, but Homebase Filesync on a Mac, whose
-/// app keeps that name (its bundle is named after it: `docs/spec/packaging.md`, "The name shown").
+/// The product's name where people read it (`docs/spec/packaging.md`, "The name shown"): the
+/// packages' `site.display-name`.
+pub const SHOWN_NAME: &str = "Homebase Drive";
+/// The Mac app's name, which it keeps: its bundle is named after it (the packages'
+/// `display-name`).
+pub const MAC_NAME: &str = "Homebase Filesync";
+/// The name this program shows: [`SHOWN_NAME`], or [`MAC_NAME`] on a Mac.
 pub const APP_NAME: &str = if cfg!(target_os = "macos") {
-    "Homebase Filesync"
+    MAC_NAME
 } else {
-    "Homebase Drive"
+    SHOWN_NAME
 };
 /// The app's name on an identity, as registering it says: the Homebase app registers it so too
 /// (chat-kmp `AppConfig.kt`, `filesyncAppRegistration`), and whichever registers first names it.

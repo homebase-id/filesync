@@ -1,6 +1,5 @@
 //! The Homebase Filesync command line: sets syncing up and controls the daemon (`hbsyncd`).
 
-use hbsync_app::APP_NAME;
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -12,7 +11,9 @@ use hbsync_app::folders::{self, Taken};
 use hbsync_app::protocol::{
     DaemonControl, DaemonStatus, DeletedItem, FolderStatus, Hints, Note, Pause,
 };
-use hbsync_app::{Config, HeldAnswer, Paths, State, autostart, control as daemon, setup, words};
+use hbsync_app::{
+    APP_NAME, Config, HeldAnswer, Paths, State, autostart, control as daemon, setup, words,
+};
 use hbsync_local::STATE_DIR;
 use hbsync_types::Role;
 
