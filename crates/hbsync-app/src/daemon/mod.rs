@@ -202,6 +202,9 @@ fn claim(
         return Err(DaemonError::Stopped);
     }
     let lock = InstanceLock::acquire(paths)?;
+    // Closed by an update with no tray running (quit, syncing on), it comes back by itself.
+    #[cfg(windows)]
+    crate::install::restart_after_update();
     let config = match held.load()? {
         Some(config) if !config.roots.is_empty() => config,
         other => {

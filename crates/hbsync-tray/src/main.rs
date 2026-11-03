@@ -51,9 +51,6 @@ pub enum Event {
 pub type Sender = Arc<dyn Fn(Event) + Send + Sync>;
 
 const PROGRAM: &str = autostart::TRAY;
-/// The argument a tray restarting into its update passes the new one; on Windows, the one
-/// Windows starts after an update closed the tray (`install::restart_after_update`).
-const RESTARTED: &str = "--restarted";
 /// A notification of one kind at most this often.
 const NOTIFY_EVERY: Duration = Duration::from_secs(60);
 
@@ -76,7 +73,7 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let _lock = match lock(&paths) {
+    let _lock = match InstanceLock::acquire_for(&paths, PROGRAM) {
         Ok(lock) => lock,
         // Started again (at logon, by hand): the one running is enough.
         Err(e @ LockError::Held { .. }) => {
@@ -91,7 +88,7 @@ fn main() -> ExitCode {
     tracing::info!("{PROGRAM} {} started", hbsync_app::VERSION);
     // Closed by an update, it comes back as if it had restarted into it.
     #[cfg(windows)]
-    hbsync_app::install::restart_after_update(RESTARTED);
+    hbsync_app::install::restart_after_update();
     // Restarted into an update: the children of the tray before, the daemon say, are ours.
     #[cfg(target_os = "linux")]
     hbsync_app::adopt_children();
@@ -120,7 +117,7 @@ fn main() -> ExitCode {
             tracing::info!("restarting into {}", exe.display());
             drop(_flush);
             let e = std::os::unix::process::CommandExt::exec(
-                std::process::Command::new(&exe).arg(RESTARTED),
+                std::process::Command::new(&exe).arg(hbsync_app::install::RESTARTED),
             );
             eprintln!("{PROGRAM}: can't restart into {}: {e}", exe.display());
             ExitCode::FAILURE
@@ -130,21 +127,6 @@ fn main() -> ExitCode {
         Err(e) => {
             tracing::error!("{e}");
             ExitCode::FAILURE
-        }
-    }
-}
-
-/// Takes the tray's lock. Restarted, it waits a little for the one before to let go: Windows
-/// may release a closed process's lock a moment late.
-fn lock(paths: &Paths) -> Result<InstanceLock, LockError> {
-    let restarted = std::env::args_os().any(|a| a == RESTARTED);
-    let until = Instant::now() + Duration::from_secs(10);
-    loop {
-        match InstanceLock::acquire_for(paths, PROGRAM) {
-            Err(LockError::Held { .. }) if restarted && Instant::now() < until => {
-                std::thread::sleep(Duration::from_millis(500));
-            }
-            taken => return taken,
         }
     }
 }
@@ -168,7 +150,7 @@ struct App {
     /// The folder given its icon and shortcut ([`shell`]) by this run.
     decorated: Option<PathBuf>,
     /// A stop found at the watcher's first look is told; not after restarting into an update
-    /// ([`RESTARTED`]).
+    /// ([`hbsync_app::install::RESTARTED`]).
     tell_stopped: bool,
 }
 
@@ -222,7 +204,7 @@ impl App {
             shown: Shown::default(),
             notified: HashMap::new(),
             decorated: None,
-            tell_stopped: !std::env::args_os().any(|a| a == RESTARTED),
+            tell_stopped: !hbsync_app::install::restarted(),
         })
     }
 
