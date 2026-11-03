@@ -1,6 +1,6 @@
 <p align="center"><img src="crates/hbsync-tray/assets/app-icon.svg" width="96" alt=""></p>
 
-# Homebase Filesync
+# Homebase Drive
 
 Keeps a folder on your computer in sync with your [Homebase](https://homebase.id) drive, on
 Windows, macOS and Linux. Like Dropbox, but the files live on your own Homebase.
@@ -18,11 +18,12 @@ Windows, macOS and Linux. Like Dropbox, but the files live on your own Homebase.
      `.aarch64`; `sudo zypper install` on openSUSE). Updates by hand, for now.
    - **Other Linux, servers**: `homebase-filesync-*-linux-amd64.tar.gz` (or `-aarch64`), static
      programs. Updates by hand.
-2. **Start Homebase Filesync.** Installing doesn't start it, and it has no window, only an icon:
-   - **Windows**: open **Homebase Filesync** from the Start menu. Its icon is in the
+2. **Start Homebase Drive.** Installing doesn't start it, and it has no window, only an icon:
+   - **Windows**: open **Homebase Drive** from the Start menu. Its icon is in the
      notification area at the right of the taskbar (behind the **^** arrow at first).
-   - **macOS**: open **Homebase Filesync** from Applications. Its icon is in the menu bar.
-   - **Linux**: open **Homebase Filesync** from the app menu (Activities on Ubuntu), or run
+   - **macOS**: open **Homebase Filesync** from Applications (the Mac app keeps that name).
+     Its icon is in the menu bar.
+   - **Linux**: open **Homebase Drive** from the app menu (Activities on Ubuntu), or run
      `setsid homebase-filesync` in a terminal (from the tarball:
      `setsid homebase-filesync-*/bin/homebase-filesync`). Its icon is in the top bar or panel;
      GNOME needs the AppIndicator extension, which Ubuntu has.
@@ -90,10 +91,10 @@ Good to know:
 - **Barely there.** When idle, it waits on the OS's file events and on your Homebase's
   notification socket instead of polling, and writes nothing to disk.
 
-  Side by side on one six-year-old Linux desktop (Intel i7-8700K, October 2026), Filesync 0.9
+  Side by side on one six-year-old Linux desktop (Intel i7-8700K, October 2026), Homebase Drive 0.9
   and Dropbox 274 each syncing the same folder: 127,000 files, 309 GB.
 
-  | | Homebase Filesync | Dropbox |
+  | | Homebase Drive | Dropbox |
   |---|---|---|
   | Encrypted before it leaves your computer | **Yes** | No |
   | **Idle, overnight (8.4 hours)** | | |
@@ -117,11 +118,11 @@ Good to know:
   Idle, that's 27 times less CPU and 8 times less memory; while syncing, 14 times less memory
   and less than half the CPU and disk writes. A laptop's battery barely notices it.
 
-  On a Windows laptop (AMD Ryzen 9 6900HX, Windows 10, October 2026), Filesync 0.9.1 and
+  On a Windows laptop (AMD Ryzen 9 6900HX, Windows 10, October 2026), Homebase Drive 0.9.1 and
   Dropbox 276 each syncing the same 127,000 files (288 GB). Memory is Task Manager's (the
   private working set); Dropbox there is eight processes and a service.
 
-  | | Homebase Filesync | Dropbox |
+  | | Homebase Drive | Dropbox |
   |---|---|---|
   | **Idle (4.4 hours)** | | |
   | CPU | **7 s** | 68 s |
@@ -143,13 +144,13 @@ Good to know:
   serving a request from one of them. It uses
   Homebase's own format, so your other Homebase apps can open the files. The cipher handles
   about 1 GB/s encrypting and 2.8 GB/s decrypting, more than any internet link. Dropbox, by
-  default, encrypts files once they reach its servers, with keys Dropbox holds. With Filesync,
+  default, encrypts files once they reach its servers, with keys Dropbox holds. With Homebase Drive,
   the files are encrypted before they leave your computer, and the keys stay with your own
   Homebase, not with a company. More: [docs/spec/encryption.md](docs/spec/encryption.md).
 
   Privacy, from each vendor's own terms (October 2026):
 
-  | | Homebase Filesync | Dropbox | Google Drive | OneDrive |
+  | | Homebase Drive | Dropbox | Google Drive | OneDrive |
   |---|---|---|---|---|
   | Encrypted before it leaves your computer | ✅ Yes | ❌ No[^e2e] | ❌ No[^e2e] | ❌ No |
   | Vendor holds the key to your files | ✅ No[^key] | ❌ Yes | ❌ Yes | ❌ Yes |

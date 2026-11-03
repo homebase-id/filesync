@@ -178,12 +178,12 @@ pub(crate) fn status_line(view: &View) -> String {
 }
 
 pub(crate) fn tooltip(view: &View) -> String {
-    format!("Homebase Filesync · {}", status_line(view))
+    format!("Homebase Drive · {}", status_line(view))
 }
 
 pub(crate) fn menu(view: &View) -> Vec<Item> {
     let mut items = vec![Item::Label(format!(
-        "Homebase Filesync {}",
+        "Homebase Drive {}",
         hbsync_app::VERSION
     ))];
     if view.updated {
@@ -298,13 +298,13 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
 }
 
 fn quit() -> Item {
-    Item::Action(Action::Quit, "Quit Homebase Filesync".into())
+    Item::Action(Action::Quit, "Quit Homebase Drive".into())
 }
 
 /// Quitting while the daemon runs (or is being started) asks whether it goes on.
 fn quit_or_stop() -> Item {
     Item::Submenu(
-        "Quit Homebase Filesync".into(),
+        "Quit Homebase Drive".into(),
         vec![
             Item::Action(Action::Quit, "Keep syncing in the background".into()),
             Item::Action(Action::QuitAndStop, "Stop syncing too".into()),
@@ -516,7 +516,7 @@ mod tests {
     #[test]
     fn quitting_asks_whether_to_keep_syncing() {
         let quit = Item::Submenu(
-            "Quit Homebase Filesync".into(),
+            "Quit Homebase Drive".into(),
             vec![
                 Item::Action(Action::Quit, "Keep syncing in the background".into()),
                 Item::Action(Action::QuitAndStop, "Stop syncing too".into()),

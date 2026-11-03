@@ -159,7 +159,7 @@ pub fn desktop_entry(tray: &Path, env: &[(String, String)]) -> String {
     format!(
         "[Desktop Entry]\n\
          Type=Application\n\
-         Name=Homebase Filesync\n\
+         Name=Homebase Drive\n\
          Comment=Keeps your Homebase folder in sync\n\
          Exec={exec}\n\
          Icon={ICON}\n\
@@ -187,7 +187,7 @@ pub fn systemd_unit(daemon: &Path, env: &[(String, String)]) -> String {
     let exec = quote(&daemon.display().to_string()).replace('$', "$$");
     format!(
         "[Unit]\n\
-         Description=Homebase Filesync\n\
+         Description=Homebase Drive\n\
          \n\
          [Service]\n\
          ExecStart={}\n\
@@ -717,7 +717,7 @@ mod tests {
         let icon = data
             .path()
             .join("icons/hicolor/256x256/apps/homebase-filesync.png");
-        assert!(std::fs::read_to_string(&entry)?.contains("Name=Homebase Filesync\n"));
+        assert!(std::fs::read_to_string(&entry)?.contains("Name=Homebase Drive\n"));
         assert_eq!(std::fs::read(&icon)?, b"png");
         let written = std::fs::metadata(&entry)?.modified()?;
         std::thread::sleep(std::time::Duration::from_millis(20));

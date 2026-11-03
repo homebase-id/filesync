@@ -34,6 +34,17 @@ makes the "site" (packages, update feeds, a download page), signs it and uploads
   packaged app's sync roots, which the tray does before it registers one (Explorer's
   navigation pane).
 
+**The name shown** (2026-11-03): the product is called Homebase Drive where people read it (the
+tray, its pages, the command line's messages, Windows' Start menu and Apps through
+`manifests.msix.display-name`, the Linux launcher and package description). Everything an
+installed copy depends on keeps "Filesync": `app.display-name` (it names the Mac app's bundle,
+and renaming that under an installed copy breaks start at login), `fsname` (the MSIX identity
+`HomebaseFilesync`, its application id and startup task come from it: checked by building the
+MSIX with another display name), the rdns name, the packages' and programs' names, the
+settings folders, the keychain entry, the `Run` value, and the drive's and circle's names and
+the ids on the identity (the Homebase app's registration of Filesync must match those). The
+app's name there (`APP_NAME`) is Homebase Drive for new installs.
+
 ## What the spike taught
 
 - **The programs' names.** Conveyor's Windows package needs the main exe named after the app

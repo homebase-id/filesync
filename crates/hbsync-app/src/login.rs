@@ -142,8 +142,8 @@ impl Login {
         let (mut stream, request) = self.back.wait(timeout, cancel)?;
         let result = self.pending.complete(&request.query);
         let outcome = match &result {
-            Ok(_) => Ok("Homebase Filesync is connected. You can close this window."),
-            Err(e) => Err(format!("Homebase Filesync could not connect: {e}")),
+            Ok(_) => Ok("Homebase Drive is connected. You can close this window."),
+            Err(e) => Err(format!("Homebase Drive could not connect: {e}")),
         };
         self.back.answer(&mut stream, outcome);
         result
@@ -197,9 +197,9 @@ impl DriveRestore {
         // Given comes back without a status; cancelled (or anything else) with one.
         let given = !request.query.contains_key("status");
         let outcome = if given {
-            Ok("Homebase Filesync goes on setting up. You can close this window.")
+            Ok("Homebase Drive goes on setting up. You can close this window.")
         } else {
-            Err("Homebase Filesync didn't get its drive back.".to_owned())
+            Err("Homebase Drive didn't get its storage back.".to_owned())
         };
         self.back.answer(&mut stream, outcome);
         Ok(given)

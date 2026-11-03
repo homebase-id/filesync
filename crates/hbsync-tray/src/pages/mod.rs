@@ -253,9 +253,9 @@ fn frame(icon: &str, body: &str) -> String {
     format!(
         "<!doctype html><html lang=en><meta charset=utf-8>\
          <meta name=viewport content=\"width=device-width, initial-scale=1\">\
-         <title>Homebase Filesync</title><link rel=icon href=\"{icon}\">\
+         <title>Homebase Drive</title><link rel=icon href=\"{icon}\">\
          <style>{STYLE}</style>\
-         <header><img src=\"{icon}\" alt=\"\"><span>Homebase Filesync</span></header>\
+         <header><img src=\"{icon}\" alt=\"\"><span>Homebase Drive</span></header>\
          <main>{body}</main></html>"
     )
 }

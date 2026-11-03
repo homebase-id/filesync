@@ -1,4 +1,4 @@
-Homebase Filesync keeps a folder on your computer in sync with your Homebase: a tray app (the
+Homebase Drive keeps a folder on your computer in sync with your Homebase: a tray app (the
 menu bar on macOS), a per-user daemon that syncs (`hbsyncd`) and a command line (`hbsync`).
 
 ## Install
@@ -13,7 +13,7 @@ menu bar on macOS), a per-user daemon that syncs (`hbsyncd`) and a command line 
 | **Other Linux, servers** | `homebase-filesync-*-linux-amd64.tar.gz` (or `-aarch64`; static programs) | by hand |
 | **Windows command line** | `homebase-filesync-*-windows-amd64.zip` (or `-aarch64`): the MSIX can't put `hbsync` on the PATH | by hand |
 
-Then start **Homebase Filesync** and choose **Log in to Homebase…**: a page opens in your browser
+Then start **Homebase Drive** (on a Mac, **Homebase Filesync**) and choose **Log in to Homebase…**: a page opens in your browser
 for your Homebase address and the folder (`~/Homebase` unless you change it), and your Homebase
 asks you to approve this computer. Or from a terminal: `hbsync setup <identity>`.
 

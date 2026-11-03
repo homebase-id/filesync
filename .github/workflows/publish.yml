@@ -52,4 +52,4 @@ jobs:
           NOTES: ${{ github.event.release.html_url }}
         run: |
           gh release create "$TAG" assets/* --repo homebase-id/filesync-release-production \
-            --title "Homebase Filesync ${TAG#v}" --notes "Release notes: $NOTES" --latest
+            --title "Homebase Drive ${TAG#v}" --notes "Release notes: $NOTES" --latest

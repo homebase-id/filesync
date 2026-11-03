@@ -595,7 +595,7 @@ thread of its own), asks once more after an action, shows the status again once 
 menu's relative times; and looks whether its program was replaced on disk), and while the daemon
 isn't running looks every second (every ten while nothing is set up or syncing is stopped).
 
-**Starting and stopping.** *Quit Homebase Filesync* asks, as a submenu, whether to **keep
+**Starting and stopping.** *Quit Homebase Drive* asks, as a submenu, whether to **keep
 syncing in the background** (the daemon goes on without the tray) or **stop syncing too**; with
 nothing running (not set up, stopped, failing to start) it just quits. Stopping syncing (that
 choice, or `hbsync stop`) leaves a mark, `<state>/stopped`, before it asks the daemon to stop
@@ -722,7 +722,7 @@ On Linux the tray also lists itself among the desktop's applications each time i
 (unless `HBSYNC_HOME` is set): the same entry in `~/.local/share/applications/` and its icon in
 `~/.local/share/icons/hicolor/256x256/apps/homebase-filesync.png`, rewritten only when they
 changed; an autostart entry is brought up to date with it. Started from there or at logon, the
-session gives it a systemd unit of its own (System Monitor shows Homebase Filesync, the daemon
+session gives it a systemd unit of its own (System Monitor shows Homebase Drive, the daemon
 below it). Started from a terminal on a desktop, the tray, and the daemon a terminal starts
 (`hbsync setup`, `start`), move into a scope of the app's as the desktop's launchers do: the
 user's service manager makes `app-id.homebase.filesync-<random>.scope` for the running process

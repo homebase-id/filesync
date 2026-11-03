@@ -17,7 +17,7 @@ Recommends:     xdg-desktop-portal
 %global __strip /bin/true
 
 %description
-Homebase Filesync keeps a folder on this computer in sync with your Homebase drive: a tray
+Homebase Drive keeps a folder on this computer in sync with your Homebase drive: a tray
 app, a per-user daemon (hbsyncd) and a command line (hbsync).
 
 %install

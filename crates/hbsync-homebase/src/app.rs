@@ -22,7 +22,7 @@ use crate::drive::{HomebaseRemote, TargetDrive};
 
 /// The app's id on every identity. Never change it: it is how an identity recognises the app.
 pub(crate) const APP_ID: Uuid = uuid!("03ae1a49-cdae-483f-9da7-fedc0e8f20b9");
-pub const APP_NAME: &str = "Homebase Filesync";
+pub const APP_NAME: &str = "Homebase Drive";
 pub(crate) const APP_SLUG: &str = "filesync";
 
 /// The identity's files in the browser: chat's web app on the identity, opened on its Filesync
