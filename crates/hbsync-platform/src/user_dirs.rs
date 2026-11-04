@@ -1,4 +1,4 @@
-//! The user's own folders (Documents, Pictures, …) where this OS keeps them, and whether another
+//! The user's own folders (Desktop, Documents, …) where this OS keeps them, and whether another
 //! sync app holds one already: two apps syncing one folder fight over every change.
 //!
 //! Windows asks the shell for its Known Folders (moved ones included); macOS has them in the
@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 /// One of the user's own folders.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UserDir {
+    Desktop,
     Documents,
     Pictures,
     Music,
@@ -67,6 +68,7 @@ fn home() -> Option<PathBuf> {
 #[cfg_attr(windows, allow(dead_code))]
 fn english(dir: UserDir) -> &'static str {
     match dir {
+        UserDir::Desktop => "Desktop",
         UserDir::Documents => "Documents",
         UserDir::Pictures => "Pictures",
         UserDir::Music => "Music",
@@ -81,6 +83,7 @@ fn english(dir: UserDir) -> &'static str {
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn xdg_dir(text: &str, dir: UserDir, home: &Path) -> Option<PathBuf> {
     let key = match dir {
+        UserDir::Desktop => "XDG_DESKTOP_DIR",
         UserDir::Documents => "XDG_DOCUMENTS_DIR",
         UserDir::Pictures => "XDG_PICTURES_DIR",
         UserDir::Music => "XDG_MUSIC_DIR",
@@ -162,12 +165,13 @@ mod imp {
 
     use windows_sys::Win32::System::Com::CoTaskMemFree;
     use windows_sys::Win32::UI::Shell::{
-        FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music, FOLDERID_Pictures, FOLDERID_Videos,
-        KF_FLAG_DEFAULT, SHGetKnownFolderPath,
+        FOLDERID_Desktop, FOLDERID_Documents, FOLDERID_Downloads, FOLDERID_Music,
+        FOLDERID_Pictures, FOLDERID_Videos, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
     };
 
     pub(super) fn user_dir(dir: UserDir) -> Option<PathBuf> {
         let id = match dir {
+            UserDir::Desktop => FOLDERID_Desktop,
             UserDir::Documents => FOLDERID_Documents,
             UserDir::Pictures => FOLDERID_Pictures,
             UserDir::Music => FOLDERID_Music,
@@ -221,6 +225,10 @@ mod tests {
             xdg_dir(text, UserDir::Pictures, home),
             Some(PathBuf::from("/data/Bilder"))
         );
+        assert_eq!(
+            xdg_dir(text, UserDir::Desktop, home),
+            Some(PathBuf::from("/home/u/Schreibtisch"))
+        );
         assert_eq!(xdg_dir(text, UserDir::Music, home), None);
         // The home folder itself: XDG's "none" (user_dir drops it).
         assert_eq!(
@@ -251,6 +259,7 @@ mod tests {
     fn this_computer_has_its_folders() {
         // Whatever the machine: no panic, and never the home folder itself.
         for dir in [
+            UserDir::Desktop,
             UserDir::Documents,
             UserDir::Pictures,
             UserDir::Music,

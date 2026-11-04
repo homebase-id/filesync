@@ -16,6 +16,7 @@ use crate::NodeId;
 )]
 #[serde(into = "&'static str", try_from = "String")]
 pub enum Role {
+    Desktop,
     Documents,
     Pictures,
     Music,
@@ -24,7 +25,8 @@ pub enum Role {
 }
 
 impl Role {
-    pub const ALL: [Role; 5] = [
+    pub const ALL: [Role; 6] = [
+        Role::Desktop,
         Role::Documents,
         Role::Pictures,
         Role::Music,
@@ -35,6 +37,7 @@ impl Role {
     /// Its folder's node id on every drive.
     pub const fn node(self) -> NodeId {
         NodeId(Uuid::from_u128(match self {
+            Role::Desktop => 0xe7b4f49b_5f90_47bb_8d97_c2dd23eef439,
             Role::Documents => 0x0274575b_c2cf_4ac7_b39b_d56b2c121b75,
             Role::Pictures => 0xc2c9af9b_4873_48d8_a8ff_4779802f038f,
             Role::Music => 0x0f4cd8f9_a914_476d_86d0_b1d1a5215a85,
@@ -51,6 +54,7 @@ impl Role {
     /// Its folder's name on the drive when a device creates it.
     pub const fn name(self) -> &'static str {
         match self {
+            Role::Desktop => "Desktop",
             Role::Documents => "Documents",
             Role::Pictures => "Pictures",
             Role::Music => "Music",
@@ -63,6 +67,7 @@ impl Role {
     pub const fn user_dir(self) -> hbsync_platform::user_dirs::UserDir {
         use hbsync_platform::user_dirs::UserDir;
         match self {
+            Role::Desktop => UserDir::Desktop,
             Role::Documents => UserDir::Documents,
             Role::Pictures => UserDir::Pictures,
             Role::Music => UserDir::Music,
@@ -74,11 +79,22 @@ impl Role {
     /// How config files and the command line name it.
     pub const fn key(self) -> &'static str {
         match self {
+            Role::Desktop => "desktop",
             Role::Documents => "documents",
             Role::Pictures => "pictures",
             Role::Music => "music",
             Role::Videos => "videos",
             Role::Downloads => "downloads",
+        }
+    }
+
+    /// What its folder keeps on each device, never synced (gitignore syntax, as the user's
+    /// rules; sync semantics §10): Linux launchers on the desktop, which run what they say when
+    /// opened, and would come executable from another device, trusted without being asked.
+    pub const fn kept(self) -> &'static [&'static str] {
+        match self {
+            Role::Desktop => &["/*.desktop"],
+            _ => &[],
         }
     }
 }
@@ -132,6 +148,6 @@ mod tests {
             assert_eq!(role.name().parse::<Role>(), Ok(role));
         }
         assert_eq!(Role::of(NodeId::ROOT), None);
-        assert!("desktop".parse::<Role>().is_err());
+        assert!("desk".parse::<Role>().is_err());
     }
 }

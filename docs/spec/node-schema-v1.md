@@ -36,6 +36,7 @@ the same on every drive: devices that add one join it.
 
 | Role | `uniqueId` | Name when created | Suggested icon (Fluent UI System Icons, MIT) |
 |---|---|---|---|
+| Desktop | `e7b4f49b-5f90-47bb-8d97-c2dd23eef439` | `Desktop` | Desktop |
 | Documents | `0274575b-c2cf-4ac7-b39b-d56b2c121b75` | `Documents` | Folder Document |
 | Pictures | `c2c9af9b-4873-48d8-a8ff-4779802f038f` | `Pictures` | Image |
 | Music | `0f4cd8f9-a914-476d-86d0-b1d1a5215a85` | `Music` | Music Note 2 |
@@ -351,6 +352,8 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-11-04: a sixth role folder, Desktop (`e7b4f49b-5f90-47bb-8d97-c2dd23eef439`). Computers
+  keep Linux launchers (`*.desktop`) at its top on their own device (sync semantics §10).
 - 2026-10-29: on a private (zero-knowledge) drive a node's key header is `zkDrive`, under the
   drive's key, and payload answers carry no key header (`encryption.md`, "A private drive").
   The node is the same.

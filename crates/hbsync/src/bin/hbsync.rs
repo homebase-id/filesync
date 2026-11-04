@@ -62,9 +62,9 @@ enum Command {
         #[arg(long, value_name = "COMMAND")]
         browser: Option<String>,
     },
-    /// Syncs one of your own folders where this computer keeps it (documents, pictures,
-    /// music, videos, downloads) with the drive's folder of that kind: joined if another device
-    /// syncs it already (identical files are adopted, not copied), made if not.
+    /// Syncs one of your own folders where this computer keeps it (desktop, documents,
+    /// pictures, music, videos, downloads) with the drive's folder of that kind: joined if
+    /// another device syncs it already (identical files are adopted, not copied), made if not.
     Add {
         #[arg(value_parser = parse_role)]
         role: Role,

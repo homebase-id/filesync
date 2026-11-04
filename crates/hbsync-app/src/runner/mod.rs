@@ -403,7 +403,7 @@ impl Parts {
     /// fingerprints differ (sync semantics §10).
     fn rules_changed(&self, root: &Path) -> bool {
         let folder = &self.engine.config().folder;
-        Filter::load(root, folder.case_insensitive)
+        Filter::load(root, folder.case_insensitive, folder.filter.kept())
             .map_or(true, |f| f.fingerprint() != folder.filter.fingerprint())
     }
 }
@@ -520,7 +520,8 @@ impl Runner {
         let mut cfg = EngineConfig::new(root, &self.cfg.device);
         cfg.guard.min = self.cfg.mass_delete.min_files;
         cfg.guard.fraction = self.cfg.mass_delete.fraction;
-        cfg.folder.filter = Arc::new(Filter::load(root, cfg.folder.case_insensitive)?);
+        let kept = self.cfg.role.map_or(&[][..], |r| r.kept());
+        cfg.folder.filter = Arc::new(Filter::load(root, cfg.folder.case_insensitive, kept)?);
         if let Some(tweak) = self.cfg.tweak {
             tweak(&mut cfg);
         }

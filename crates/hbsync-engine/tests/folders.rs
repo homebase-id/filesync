@@ -581,3 +581,69 @@ fn an_engine_on_another_drives_db_is_refused() -> R {
     assert!(Engine::open(&sync_root, ours, config(&root)).is_ok());
     Ok(())
 }
+
+/// A role new in this version (Desktop) was synced into the main folder by an older one, which
+/// didn't know it: a plain folder at the top to that version. After the update the main folder
+/// leaves it out (§12): the copy here goes and the drive keeps its role folder as it was;
+/// what was changed here meanwhile is detached, kept as a plain folder, not lost.
+#[test]
+fn a_role_an_older_version_synced_into_the_main_folder_leaves_it() -> R {
+    use hbsync_engine::scope::Scope;
+    for edited in [false, true] {
+        let server = server_with_documents()?;
+        let dir = tempfile::tempdir()?;
+        let base = dir.path().canonicalize()?;
+        let main_root = base.join("Homebase");
+        std::fs::create_dir_all(main_root.join(hbsync_local::STATE_DIR))?;
+        let db = base.join("state.db");
+        let drive = Drive::new(
+            StateDb::open_account(&db)?,
+            Arc::new(FakeRemote::new(server.clone())),
+        );
+        // The older version: Documents unknown to it.
+        let mut cfg = config(&main_root);
+        let mut older = Scope::main();
+        older.outside.remove(&Role::Documents.node());
+        cfg.folder.scope = Arc::new(older);
+        let mut engine = Engine::new(StateDb::open(&db)?, drive.clone(), cfg)?;
+        engine.apply_filter_change()?;
+        sync(&mut engine)?;
+        assert_eq!(files(&main_root), ["Documents/cv.txt", "notes.txt"]);
+        drop(engine);
+        if edited {
+            std::fs::write(main_root.join("Documents/cv.txt"), b"cv, edited")?;
+        }
+
+        let mut engine = Engine::new(StateDb::open(&db)?, drive, config(&main_root))?;
+        engine.apply_filter_change()?;
+        sync(&mut engine)?;
+        let srv = server.lock().map_err(|_| "poisoned")?;
+        let in_role: Vec<_> = srv
+            .live()
+            .filter(|h| h.parent == Role::Documents.node())
+            .collect();
+        assert_eq!(in_role.len(), 1, "the role folder keeps its file");
+        assert!(srv.live().any(|h| h.node() == Some(Role::Documents.node())));
+        let plain: Vec<_> = srv
+            .live()
+            .filter(|h| h.parent.is_root() && h.node() != Some(Role::Documents.node()))
+            .filter_map(|h| match &h.body {
+                RemoteBody::Live { content, .. } => Some(content.name.clone()),
+                _ => None,
+            })
+            .collect();
+        drop(srv);
+        if edited {
+            assert_eq!(files(&main_root), ["Documents/cv.txt", "notes.txt"]);
+            assert_eq!(
+                std::fs::read(main_root.join("Documents/cv.txt"))?,
+                b"cv, edited"
+            );
+            assert_eq!(plain.len(), 2, "notes.txt and the detached copy: {plain:?}");
+        } else {
+            assert_eq!(files(&main_root), ["notes.txt"]);
+            assert_eq!(plain, ["notes.txt"]);
+        }
+    }
+    Ok(())
+}

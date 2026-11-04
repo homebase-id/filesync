@@ -832,6 +832,13 @@ on its own.
   here (an unclosed `{`) stops the folder too. A rules file that can't be read (not a typo:
   its rules are unknown) stops the folder's sync till it can.
 
+A role folder may have rules of its own, kept as the user's are, ahead of them (a user's
+negation brings an item back): the Desktop keeps Linux launchers at its top (`/*.desktop`).
+A launcher runs what it says when opened, and one from another device would arrive executable
+(`x`), which Linux desktops take as trusted without asking; on another computer it would point
+at programs that may not be there. Windows shortcuts (`.lnk`) and macOS aliases sync, as
+OneDrive and iCloud sync them.
+
 An item inside a filtered folder is filtered too.
 
 **Rules:**
@@ -977,9 +984,9 @@ Apart from these and the crash case above, no tag add or removal is lost.
 
 ## 12. Scopes
 A device syncs the main folder (`~/Homebase`) and, if the user chooses, **role folders** where
-they are: Documents, Pictures, Music, Videos, Downloads (node schema, "Role folders"). Each
-local folder has an engine of its own, scoped to a part of the drive; they share the account's
-state DB (one mirror, one feed) and keep their own base and local rows:
+they are: Desktop, Documents, Pictures, Music, Videos, Downloads (node schema, "Role
+folders"). Each local folder has an engine of its own, scoped to a part of the drive; they
+share the account's state DB (one mirror, one feed) and keep their own base and local rows:
 - the main folder's scope is the drive's top **without the role folders**, on every device,
   whether it syncs them or not: a role folder appears only where it is synced in place, never
   inside `~/Homebase`;
@@ -1001,9 +1008,12 @@ first.
 
 What lies outside an engine's scope is masked as filtered nodes are (§10): never downloaded,
 never changed or deleted remotely. It is never *leaving* (§10, rule 1): another engine or device
-syncs it. A role folder at the top that the engine holds nothing of isn't planned at all; no
-version ever synced one into the main folder, so a device holds one only through a bug, and
-then lets go of it as of anything masked. A role folder moved into a folder (against the node
+syncs it. A role folder at the top that the engine holds nothing of isn't planned at all. A device
+holds one in its main folder only when a version that didn't know the role synced it there
+(Desktop, before 0.10.10: a plain folder to it), or through a bug; it then lets go of it as
+of anything masked: the copy here goes, the drive's is left as it is, and what was changed
+here meanwhile is detached and kept as a plain folder (`tests/folders.rs`,
+`a_role_an_older_version_synced_into_the_main_folder_leaves_it`). A role folder moved into a folder (against the node
 schema's rules) is masked there and keeps that folder alive (§6.3).
 
 A role folder holds no name for the scope: a plain folder of the same name at the top keeps it

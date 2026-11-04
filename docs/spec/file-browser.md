@@ -37,7 +37,8 @@ Every file and folder is one Homebase file:
     download it, and what is in a folder with `v` > 1 waits there.
 
 ## Role folders
-Five top-level folders have fixed node ids, the same on every drive: Documents
+Six top-level folders have fixed node ids, the same on every drive: Desktop
+`e7b4f49b-5f90-47bb-8d97-c2dd23eef439` (from 2026-11-04), Documents
 `0274575b-c2cf-4ac7-b39b-d56b2c121b75`, Pictures `c2c9af9b-4873-48d8-a8ff-4779802f038f`, Music
 `0f4cd8f9-a914-476d-86d0-b1d1a5215a85`, Videos `b133291b-9309-46c5-9bfd-ac6c81669049`, Downloads
 `5290e709-bc6d-4e12-827e-96d6dd006403` (node schema, "Role folders"). A computer syncs each one in
@@ -140,8 +141,8 @@ only the file key's lock changes (`encryption.md`, "A private drive"):
   only when the platform knows the real creation time (a photo's capture date), never the upload
   time.
 - Names: Unicode NFC, at most 255 UTF-8 bytes, no `/` or NUL, not `.` or `..`.
-- `.hbsync` at the top or directly in a role folder (Documents, Pictures, Music, Videos,
-  Downloads), in any case (`.HBSYNC`, `.HbSync`), is reserved: each synced folder's root holds
+- `.hbsync` at the top or directly in a role folder (Desktop, Documents, Pictures, Music,
+  Videos, Downloads), in any case (`.HBSYNC`, `.HbSync`), is reserved: each synced folder's root holds
   the computer's own state folder there, which the computers never sync. Don't create, rename,
   upload or restore anything to it there: number around it (`.hbsync (1)`, `.hbsync (restored)`). One that
   already exists (another writer's) is listed with a note that it won't sync to computers.
