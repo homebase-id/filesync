@@ -14,6 +14,8 @@ pub mod local_http;
 pub mod lock;
 pub mod logging;
 mod login;
+#[cfg(target_os = "macos")]
+mod mac_keychain;
 pub mod paths;
 pub mod protocol;
 mod reap;
@@ -40,6 +42,8 @@ pub use reap::adopt_children;
 pub use reap::reap;
 pub use runner::{Command, Handle, Runner, RunnerConfig};
 pub use secrets::CredentialError;
+#[cfg(target_os = "macos")]
+pub use secrets::share_credentials;
 pub(crate) use secrets::{CredentialStore, Location};
 
 use std::time::{SystemTime, UNIX_EPOCH};

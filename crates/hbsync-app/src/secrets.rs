@@ -119,6 +119,13 @@ impl CredentialStore {
         let identity = Identity::new(&creds.identity);
         let file = self.file(&identity);
         let json = serde_json::to_string(creds).map_err(HomebaseError::from)?;
+        // On macOS readable by all of this app's programs without asking (`mac_keychain`).
+        #[cfg(target_os = "macos")]
+        let saved = self.keychain.as_ref().map_err(Clone::clone).map(|_| {
+            crate::mac_keychain::save(SERVICE, &identity, json.as_bytes())
+                .map_err(|e| KeychainError::PlatformFailure(Box::new(e)))
+        });
+        #[cfg(not(target_os = "macos"))]
         let saved = self.call(&identity, |entry| {
             entry.set_password(&json)?;
             // Read back where a session can be broken: it may have stored garbage, and its read
@@ -240,6 +247,32 @@ impl CredentialStore {
                 }
                 done => return Ok(done),
             }
+        }
+    }
+}
+
+/// macOS: makes the keychain entries of the identities set up here, saved by an earlier
+/// version for the program that saved them alone, readable by all of this app's programs
+/// without asking (`mac_keychain::share`). Never asks; the tray, at its start, before the
+/// daemon reads them.
+#[cfg(target_os = "macos")]
+pub fn share_credentials(paths: &Paths) {
+    if std::env::var_os("HBSYNC_CREDENTIALS").is_some_and(|v| v == "file") {
+        return;
+    }
+    let config = match crate::Config::load(&paths.config_file()) {
+        Ok(Some(config)) => config,
+        Ok(None) => return,
+        Err(e) => return tracing::info!("keychain entries not looked at: {e}"),
+    };
+    let mut identities: Vec<&Identity> = config.roots.iter().map(|r| &r.identity).collect();
+    identities.sort();
+    identities.dedup();
+    for identity in identities {
+        match crate::mac_keychain::share(SERVICE, identity) {
+            Ok(true) => tracing::info!("keychain: {identity}'s entry shared with hbsyncd"),
+            Ok(false) => {}
+            Err(e) => tracing::info!("keychain: {identity}'s entry not shared: {e}"),
         }
     }
 }
