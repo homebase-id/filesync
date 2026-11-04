@@ -230,6 +230,8 @@ mod tests {
     #[link(name = "Security", kind = "framework")]
     unsafe extern "C" {
         static kSecReturnRef: CFStringRef;
+        static kSecACLAuthorizationDecrypt: CFStringRef;
+        fn SecACLCopyAuthorizations(acl: CFTypeRef) -> CFArrayRef;
         fn SecKeychainItemCopyAccess(item: CFTypeRef, access: *mut SecAccessRef) -> OSStatus;
         fn SecAccessCopyACLList(access: SecAccessRef, list: *mut CFArrayRef) -> OSStatus;
         fn SecACLCopyContents(
@@ -240,9 +242,10 @@ mod tests {
         ) -> OSStatus;
     }
 
-    /// How many programs each of the entry's access list's entries names (`None`: any program),
-    /// read without asking.
-    fn trusted_counts(service: &str, account: &str) -> Result<Vec<Option<usize>>, Error> {
+    /// How many programs each of the entry's access list's entries that let its secret be read
+    /// names (`None`: any program), read without asking. (The others, adding to the keychain
+    /// say, are any program's.)
+    fn readers(service: &str, account: &str) -> Result<Vec<Option<usize>>, Error> {
         let mut query = query(service, account);
         query.add(
             &key(unsafe { kSecReturnRef }),
@@ -260,7 +263,15 @@ mod tests {
         check(unsafe { SecAccessCopyACLList(access.as_CFTypeRef() as SecAccessRef, &mut list) })?;
         let list: CFArray<CFType> = unsafe { CFArray::wrap_under_create_rule(list) };
         let mut counts = Vec::new();
+        let decrypt = key(unsafe { kSecACLAuthorizationDecrypt });
         for acl in list.iter() {
+            // SAFETY: a list we own (copy rule), wrapped to be released.
+            let rights: CFArray<CFType> = unsafe {
+                CFArray::wrap_under_create_rule(SecACLCopyAuthorizations(acl.as_CFTypeRef()))
+            };
+            if !rights.iter().any(|r| *r == decrypt) {
+                continue;
+            }
             let (mut apps, mut description, mut prompt) =
                 (std::ptr::null(), std::ptr::null(), 0u16);
             check(unsafe {
@@ -276,9 +287,9 @@ mod tests {
         Ok(counts)
     }
 
-    /// Run on CI's Mac (its login keychain): an entry is saved with an access list naming the
-    /// programs given (each program is asked about by macOS only when it isn't on it; one
-    /// signed by another team, Apple's own tools say, is asked about anyway: its partition
+    /// Run on CI's Mac (its login keychain): an entry is saved with its secret readable by the
+    /// programs given, and no other (macOS asks about a program only when it isn't on the list;
+    /// one signed by another team, Apple's own tools say, is asked about anyway: its partition
     /// differs); saved again it is replaced, still shared, and isn't shared again.
     #[test]
     fn the_entry_names_the_programs_that_read_it() -> Result<(), Box<dyn std::error::Error>> {
@@ -291,9 +302,7 @@ mod tests {
         let programs = [me, Path::new("/bin/ls").to_path_buf()];
 
         save_for(service, &account, b"secret one", &programs)?;
-        let counts = trusted_counts(service, &account)?;
-        assert!(counts.contains(&Some(2)), "{counts:?}");
-        assert!(!counts.contains(&None), "never any program: {counts:?}");
+        assert_eq!(readers(service, &account)?, [Some(2)]);
         assert_eq!(comment(service, &account)?.as_deref(), Some(SHARED));
         assert_eq!(read(service, &account)?, b"secret one");
         // Saved again: replaced, still shared.
