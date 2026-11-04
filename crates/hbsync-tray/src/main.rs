@@ -51,8 +51,6 @@ pub enum Event {
 pub type Sender = Arc<dyn Fn(Event) + Send + Sync>;
 
 const PROGRAM: &str = autostart::TRAY;
-/// The argument a tray restarting into its update passes the new one.
-const RESTARTED: &str = "--restarted";
 /// A notification of one kind at most this often.
 const NOTIFY_EVERY: Duration = Duration::from_secs(60);
 
@@ -88,6 +86,9 @@ fn main() -> ExitCode {
         }
     };
     tracing::info!("{PROGRAM} {} started", hbsync_app::VERSION);
+    // Closed by an update, it comes back as if it had restarted into it.
+    #[cfg(windows)]
+    hbsync_app::install::restart_after_update();
     // Restarted into an update: the children of the tray before, the daemon say, are ours.
     #[cfg(target_os = "linux")]
     hbsync_app::adopt_children();
@@ -116,7 +117,7 @@ fn main() -> ExitCode {
             tracing::info!("restarting into {}", exe.display());
             drop(_flush);
             let e = std::os::unix::process::CommandExt::exec(
-                std::process::Command::new(&exe).arg(RESTARTED),
+                std::process::Command::new(&exe).arg(hbsync_app::install::RESTARTED),
             );
             eprintln!("{PROGRAM}: can't restart into {}: {e}", exe.display());
             ExitCode::FAILURE
@@ -149,7 +150,7 @@ struct App {
     /// The folder given its icon and shortcut ([`shell`]) by this run.
     decorated: Option<PathBuf>,
     /// A stop found at the watcher's first look is told; not after restarting into an update
-    /// ([`RESTARTED`]).
+    /// ([`hbsync_app::install::RESTARTED`]).
     tell_stopped: bool,
 }
 
@@ -203,7 +204,7 @@ impl App {
             shown: Shown::default(),
             notified: HashMap::new(),
             decorated: None,
-            tell_stopped: !std::env::args_os().any(|a| a == RESTARTED),
+            tell_stopped: !hbsync_app::install::restarted(),
         })
     }
 
@@ -380,6 +381,8 @@ impl App {
                 let _ = self.wake.send(poll::Poke::Look);
             }
             Action::Quit | Action::QuitAndStop => {
+                #[cfg(windows)]
+                hbsync_app::install::no_restart_after_update();
                 // The icon goes at once; the watcher quits after a start in flight (the daemon
                 // may first finish a transfer).
                 self.tray = None;

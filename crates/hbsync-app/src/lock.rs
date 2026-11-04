@@ -33,11 +33,23 @@ impl InstanceLock {
         Self::acquire_for(paths, DAEMON)
     }
 
-    /// Takes the lock of `program`, or says which process has it.
+    /// Takes the lock of `program`, or says which process has it. Started again after an update
+    /// closed it (Windows: [`crate::install::restart_after_update`]), it waits a little for the
+    /// closed one's, which Windows may release a moment late.
     pub fn acquire_for(paths: &Paths, program: &'static str) -> Result<InstanceLock, LockError> {
-        let Some(file) = try_lock(paths, program)? else {
-            let pid = pid(paths, program);
-            return Err(LockError::Held { program, pid });
+        let wait_until = (cfg!(windows) && crate::install::restarted())
+            .then(|| std::time::Instant::now() + std::time::Duration::from_secs(10));
+        let file = loop {
+            match try_lock(paths, program)? {
+                Some(file) => break file,
+                None if wait_until.is_some_and(|until| std::time::Instant::now() < until) => {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                }
+                None => {
+                    let pid = pid(paths, program);
+                    return Err(LockError::Held { program, pid });
+                }
+            }
         };
         // Beside the lock file: Windows doesn't let others read a locked file.
         std::fs::write(pid_path(paths, program), std::process::id().to_string())?;

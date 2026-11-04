@@ -24,6 +24,59 @@ pub enum Install {
     Plain,
 }
 
+/// The argument of a program started again into its update: the tray restarting itself
+/// (Linux), or a program Windows starts after an update closed it ([`restart_after_update`]).
+pub const RESTARTED: &str = "--restarted";
+
+/// Whether this program was started with [`RESTARTED`].
+pub fn restarted() -> bool {
+    std::env::args_os().any(|a| a == RESTARTED)
+}
+
+/// Asks Windows to start this program again, with [`RESTARTED`], once an update of its package
+/// closed it: the `.appinstaller`'s background update closes the package's running programs and,
+/// without this, they stay closed until the next logon. Only for the package's programs: Windows
+/// would start a private instance's (`HBSYNC_HOME`) without its environment, as the real one.
+#[cfg(windows)]
+pub fn restart_after_update() {
+    if matches!(Install::current(), Install::Msix { .. }) && !crate::control::dev_home() {
+        register_restart(RESTARTED);
+    }
+}
+
+/// Not after a crash, a hang or a reboot (the startup task starts the tray at logon). Windows
+/// honours it only for a program that ran 60 seconds or more.
+#[cfg(windows)]
+const AFTER_AN_UPDATE: u32 = {
+    use windows_sys::Win32::System::Recovery::{
+        RESTART_NO_CRASH, RESTART_NO_HANG, RESTART_NO_REBOOT,
+    };
+    RESTART_NO_CRASH | RESTART_NO_HANG | RESTART_NO_REBOOT
+};
+
+#[cfg(windows)]
+fn register_restart(args: &str) {
+    let args: Vec<u16> = args.encode_utf16().chain(Some(0)).collect();
+    // SAFETY: a NUL-terminated string, which Windows copies.
+    let result = unsafe {
+        windows_sys::Win32::System::Recovery::RegisterApplicationRestart(
+            args.as_ptr(),
+            AFTER_AN_UPDATE,
+        )
+    };
+    if result < 0 {
+        tracing::warn!("not started again after an update: HRESULT {result:#x}");
+    }
+}
+
+/// Takes back [`restart_after_update`]: quitting on purpose, an update closing the program
+/// meanwhile mustn't start it again.
+#[cfg(windows)]
+pub fn no_restart_after_update() {
+    // SAFETY: no arguments; it only forgets this process's registration.
+    unsafe { windows_sys::Win32::System::Recovery::UnregisterApplicationRestart() };
+}
+
 /// This program's path with symlinks resolved (a CLI linked onto the PATH still finds its app),
 /// found once. Not resolved on Windows: its canonical form (`\\?\`) isn't wanted, and there
 /// are no such links.
@@ -169,6 +222,32 @@ fn package_family() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Windows keeps what the program asked for: these arguments, after an update only.
+    #[cfg(windows)]
+    #[test]
+    fn windows_is_asked_to_start_it_again_after_an_update() {
+        use windows_sys::Win32::System::Recovery::GetApplicationRestartSettings;
+        use windows_sys::Win32::System::Threading::GetCurrentProcess;
+        let settings = || {
+            let (mut text, mut len, mut flags) = (vec![0u16; 64], 64u32, 0u32);
+            // SAFETY: `text` holds `len` characters.
+            let read = unsafe {
+                GetApplicationRestartSettings(
+                    GetCurrentProcess(),
+                    text.as_mut_ptr(),
+                    &mut len,
+                    &mut flags,
+                )
+            };
+            (read == 0).then(|| (String::from_utf16_lossy(&text[..len as usize - 1]), flags))
+        };
+        // A test runs outside the package: registered as the package's programs are.
+        register_restart(RESTARTED);
+        assert_eq!(settings(), Some((RESTARTED.to_owned(), AFTER_AN_UPDATE)));
+        no_restart_after_update();
+        assert_eq!(settings(), None);
+    }
 
     #[test]
     fn told_from_the_path() {
