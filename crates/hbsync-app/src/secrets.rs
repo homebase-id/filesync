@@ -68,7 +68,7 @@ impl CredentialStore {
     /// The OS keychain, with files in the config folder as the fallback.
     /// `HBSYNC_CREDENTIALS=file` uses the files only (tests, development).
     pub(crate) fn open(paths: &Paths) -> CredentialStore {
-        let files_only = std::env::var_os("HBSYNC_CREDENTIALS").is_some_and(|v| v == "file");
+        let files_only = files_only();
         let keychain = if files_only {
             Err("HBSYNC_CREDENTIALS=file".to_owned())
         } else {
@@ -119,21 +119,24 @@ impl CredentialStore {
         let identity = Identity::new(&creds.identity);
         let file = self.file(&identity);
         let json = serde_json::to_string(creds).map_err(HomebaseError::from)?;
-        // On macOS readable by all of this app's programs without asking (`mac_keychain`).
-        #[cfg(target_os = "macos")]
-        let saved = self.keychain.as_ref().map_err(Clone::clone).map(|_| {
-            crate::mac_keychain::save(SERVICE, &identity, json.as_bytes())
-                .map_err(|e| KeychainError::PlatformFailure(Box::new(e)))
-        });
-        #[cfg(not(target_os = "macos"))]
         let saved = self.call(&identity, |entry| {
-            entry.set_password(&json)?;
-            // Read back where a session can be broken: it may have stored garbage, and its read
-            // fails. One more call per save (at a login).
-            if cfg!(all(unix, not(target_os = "macos"))) {
-                entry.get_password()?;
+            // On macOS readable by all of this app's programs without asking (`mac_keychain`).
+            #[cfg(target_os = "macos")]
+            {
+                let _ = entry;
+                crate::mac_keychain::save(SERVICE, &identity, json.as_bytes())
+                    .map_err(apple_native_keyring_store::keychain::decode_error)
             }
-            Ok(())
+            #[cfg(not(target_os = "macos"))]
+            {
+                entry.set_password(&json)?;
+                // Read back where a session can be broken: it may have stored garbage, and its
+                // read fails. One more call per save (at a login).
+                if cfg!(unix) {
+                    entry.get_password()?;
+                }
+                Ok(())
+            }
         });
         let why = match saved {
             Ok(Ok(())) => {
@@ -257,7 +260,7 @@ impl CredentialStore {
 /// daemon reads them.
 #[cfg(target_os = "macos")]
 pub fn share_credentials(paths: &Paths) {
-    if std::env::var_os("HBSYNC_CREDENTIALS").is_some_and(|v| v == "file") {
+    if files_only() {
         return;
     }
     let config = match crate::Config::load(&paths.config_file()) {
@@ -265,16 +268,18 @@ pub fn share_credentials(paths: &Paths) {
         Ok(None) => return,
         Err(e) => return tracing::info!("keychain entries not looked at: {e}"),
     };
-    let mut identities: Vec<&Identity> = config.roots.iter().map(|r| &r.identity).collect();
-    identities.sort();
-    identities.dedup();
-    for identity in identities {
+    for identity in config.identities() {
         match crate::mac_keychain::share(SERVICE, identity) {
             Ok(true) => tracing::info!("keychain: {identity}'s entry shared with hbsyncd"),
             Ok(false) => {}
             Err(e) => tracing::info!("keychain: {identity}'s entry not shared: {e}"),
         }
     }
+}
+
+/// `HBSYNC_CREDENTIALS=file`: files only, no keychain (tests, development).
+fn files_only() -> bool {
+    std::env::var_os("HBSYNC_CREDENTIALS").is_some_and(|v| v == "file")
 }
 
 /// The keychain `open` opens, [`TRIES`] times at most while it opens broken (refused), or why
