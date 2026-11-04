@@ -582,8 +582,7 @@ fn an_engine_on_another_drives_db_is_refused() -> R {
     Ok(())
 }
 
-/// One folder of an account on its own: the main folder (`role` `None`) or a role folder, with
-/// `cfg` adjusted first.
+/// An account's main folder on its own, its engine opened with `cfg` adjusted first.
 struct Alone {
     _dir: tempfile::TempDir,
     root: PathBuf,
@@ -615,15 +614,9 @@ impl Alone {
 
     fn engine(
         &self,
-        role: Option<Role>,
         tweak: impl FnOnce(&mut EngineConfig),
     ) -> Result<Engine, Box<dyn std::error::Error>> {
-        let mut db = StateDb::open(&self.db)?;
-        if let Some(role) = role {
-            let path = self.root.to_string_lossy();
-            let folder = db.write(|s| s.account().add_folder(role.node(), &path, "m"))?;
-            db = StateDb::open_folder(&self.db, folder)?;
-        }
+        let db = StateDb::open(&self.db)?;
         let mut cfg = config(&self.root);
         tweak(&mut cfg);
         let mut engine = Engine::new(db, self.drive.clone(), cfg)?;
@@ -643,7 +636,7 @@ fn a_role_an_older_version_synced_into_the_main_folder_leaves_it() -> R {
         let server = server_with_documents()?;
         let main = Alone::new(&server, "Homebase")?;
         // The older version: Documents unknown to it.
-        let mut older = main.engine(None, |cfg| {
+        let mut older = main.engine(|cfg| {
             let mut scope = Scope::main();
             scope.outside.remove(&Role::Documents.node());
             cfg.folder.scope = Arc::new(scope);
@@ -655,7 +648,7 @@ fn a_role_an_older_version_synced_into_the_main_folder_leaves_it() -> R {
             std::fs::write(main.root.join("Documents/cv.txt"), b"cv, edited")?;
         }
 
-        sync(&mut main.engine(None, |_| {})?)?;
+        sync(&mut main.engine(|_| {})?)?;
         let docs = Role::Documents.node();
         let listing = drive_listing(&server);
         let at = |parent: NodeId| listing.iter().filter(|(_, p)| *p == parent).count();
