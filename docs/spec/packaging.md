@@ -34,6 +34,21 @@ makes the "site" (packages, update feeds, a download page), signs it and uploads
   packaged app's sync roots, which the tray does before it registers one (Explorer's
   navigation pane).
 
+**The name shown** (2026-11-03): the product is called Homebase Drive (`SHOWN_NAME`,
+`site.display-name`) where people read it: the tray, its pages and the command line's messages
+(`APP_NAME`), Windows' Start menu and Apps (`manifests.msix.display-name`), the Linux launcher
+and package description, the download page. On a Mac the app and everything it says keep
+Homebase Filesync (`MAC_NAME`, `display-name`): the bundle is named after `display-name`, and
+renaming it under an installed copy breaks start at login. AppStream's metainfo (GNOME
+Software, Discover) also keeps it: Conveyor makes it from `display-name`. Nothing else an
+installed copy depends on changes: `fsname` (the MSIX identity `HomebaseFilesync`, its
+application id and startup task come from it: checked by building the MSIX with another
+display name), the rdns name, the packages' and programs' names, the settings folders, the
+keychain entry, the `Run` value, and the app's, drive's and circle's names and ids on the
+identity (the Homebase app's registration of Filesync must match those; messages call the
+drive "the Filesync drive", as the owner's pages do). A test checks both names against
+`packaging/conveyor.conf`.
+
 ## What the spike taught
 
 - **The programs' names.** Conveyor's Windows package needs the main exe named after the app

@@ -19,6 +19,8 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+use crate::APP_NAME;
+
 /// The app identity (as in the packages; chat is `id.homebase.feed`), and the daemon's launchd
 /// label (the tray's adds `.tray`).
 pub const LABEL: &str = "id.homebase.filesync";
@@ -159,7 +161,7 @@ pub fn desktop_entry(tray: &Path, env: &[(String, String)]) -> String {
     format!(
         "[Desktop Entry]\n\
          Type=Application\n\
-         Name=Homebase Filesync\n\
+         Name={APP_NAME}\n\
          Comment=Keeps your Homebase folder in sync\n\
          Exec={exec}\n\
          Icon={ICON}\n\
@@ -187,7 +189,7 @@ pub fn systemd_unit(daemon: &Path, env: &[(String, String)]) -> String {
     let exec = quote(&daemon.display().to_string()).replace('$', "$$");
     format!(
         "[Unit]\n\
-         Description=Homebase Filesync\n\
+         Description={APP_NAME}\n\
          \n\
          [Service]\n\
          ExecStart={}\n\
@@ -643,6 +645,14 @@ mod tests {
         ] {
             assert!(conf.contains(&line), "conveyor.conf lacks {line}");
         }
+        // The names shown: the packages' (Windows, Linux, the download page) and the Mac app's.
+        use hbsync_homebase::app::{MAC_NAME, SHOWN_NAME};
+        for line in [
+            format!("site.display-name = \"{SHOWN_NAME}\""),
+            format!("display-name = \"{MAC_NAME}\""),
+        ] {
+            assert!(conf.contains(&line), "conveyor.conf lacks {line}");
+        }
     }
 
     fn env() -> Vec<(String, String)> {
@@ -717,7 +727,7 @@ mod tests {
         let icon = data
             .path()
             .join("icons/hicolor/256x256/apps/homebase-filesync.png");
-        assert!(std::fs::read_to_string(&entry)?.contains("Name=Homebase Filesync\n"));
+        assert!(std::fs::read_to_string(&entry)?.contains(&format!("Name={APP_NAME}\n")));
         assert_eq!(std::fs::read(&icon)?, b"png");
         let written = std::fs::metadata(&entry)?.modified()?;
         std::thread::sleep(std::time::Duration::from_millis(20));

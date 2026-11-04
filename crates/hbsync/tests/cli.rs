@@ -133,7 +133,7 @@ fn the_daemon_answers_while_offline_and_stops() -> R {
     assert!(account["credentials_warning"].is_string(), "{status}");
     let out = home.hbsync(&["status"])?;
     assert!(
-        text(&out).contains("Homebase Filesync: Offline"),
+        text(&out).contains(&format!("{}: Offline", hbsync_app::APP_NAME)),
         "{}",
         text(&out)
     );

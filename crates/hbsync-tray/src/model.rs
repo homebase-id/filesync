@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use hbsync_app::protocol::{AccountStatus, Note, RecentItem};
 use hbsync_app::words;
-use hbsync_app::{DaemonStatus, FolderStatus, State};
+use hbsync_app::{APP_NAME, DaemonStatus, FolderStatus, State};
 use hbsync_types::activity::{Synced, SyncedKind};
 
 /// Entries of the recently synced list in the menu.
@@ -178,14 +178,11 @@ pub(crate) fn status_line(view: &View) -> String {
 }
 
 pub(crate) fn tooltip(view: &View) -> String {
-    format!("Homebase Filesync · {}", status_line(view))
+    format!("{APP_NAME} · {}", status_line(view))
 }
 
 pub(crate) fn menu(view: &View) -> Vec<Item> {
-    let mut items = vec![Item::Label(format!(
-        "Homebase Filesync {}",
-        hbsync_app::VERSION
-    ))];
+    let mut items = vec![Item::Label(format!("{APP_NAME} {}", hbsync_app::VERSION))];
     if view.updated {
         items.push(Item::Action(
             Action::Restart,
@@ -298,13 +295,13 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
 }
 
 fn quit() -> Item {
-    Item::Action(Action::Quit, "Quit Homebase Filesync".into())
+    Item::Action(Action::Quit, format!("Quit {APP_NAME}"))
 }
 
 /// Quitting while the daemon runs (or is being started) asks whether it goes on.
 fn quit_or_stop() -> Item {
     Item::Submenu(
-        "Quit Homebase Filesync".into(),
+        format!("Quit {APP_NAME}"),
         vec![
             Item::Action(Action::Quit, "Keep syncing in the background".into()),
             Item::Action(Action::QuitAndStop, "Stop syncing too".into()),
@@ -516,7 +513,7 @@ mod tests {
     #[test]
     fn quitting_asks_whether_to_keep_syncing() {
         let quit = Item::Submenu(
-            "Quit Homebase Filesync".into(),
+            format!("Quit {APP_NAME}"),
             vec![
                 Item::Action(Action::Quit, "Keep syncing in the background".into()),
                 Item::Action(Action::QuitAndStop, "Stop syncing too".into()),

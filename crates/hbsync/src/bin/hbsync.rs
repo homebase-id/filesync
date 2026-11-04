@@ -11,7 +11,9 @@ use hbsync_app::folders::{self, Taken};
 use hbsync_app::protocol::{
     DaemonControl, DaemonStatus, DeletedItem, FolderStatus, Hints, Note, Pause,
 };
-use hbsync_app::{Config, HeldAnswer, Paths, State, autostart, control as daemon, setup, words};
+use hbsync_app::{
+    APP_NAME, Config, HeldAnswer, Paths, State, autostart, control as daemon, setup, words,
+};
 use hbsync_local::STATE_DIR;
 use hbsync_types::Role;
 
@@ -21,7 +23,7 @@ type Res<T> = hbsync_app::Result<T>;
 #[command(
     name = "hbsync",
     version = hbsync_app::VERSION,
-    about = "Homebase Filesync: keeps a folder in sync with your Homebase identity"
+    about = format!("{APP_NAME}: keeps a folder in sync with your Homebase identity")
 )]
 struct Cli {
     #[command(subcommand)]
@@ -360,7 +362,7 @@ fn run(command: Command) -> Res<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             };
             if out.autostart_was_on {
-                println!("Filesync no longer starts at logon.");
+                println!("{APP_NAME} no longer starts at logon.");
             }
             if let Some(why) = out.keychain_unreachable {
                 println!(
@@ -410,7 +412,7 @@ fn run(command: Command) -> Res<ExitCode> {
             }
             match taken {
                 Taken::Now => println!("{what}."),
-                Taken::AtStart => println!("{what} once Filesync runs (`hbsync start`)."),
+                Taken::AtStart => println!("{what} once {APP_NAME} runs (`hbsync start`)."),
             }
         }
         Command::Remove { role, identity } => {
@@ -432,7 +434,7 @@ fn run(command: Command) -> Res<ExitCode> {
                 return Ok(ExitCode::SUCCESS);
             };
             if out.autostart_was_on {
-                println!("Filesync no longer starts at logon.");
+                println!("{APP_NAME} no longer starts at logon.");
             }
             for root in out.roots {
                 println!(
@@ -443,15 +445,15 @@ fn run(command: Command) -> Res<ExitCode> {
             }
         }
         Command::Autostart { state } => match state {
-            None if autostart::installed()? => println!("Filesync starts at logon."),
-            None => println!("Filesync doesn't start at logon."),
+            None if autostart::installed()? => println!("{APP_NAME} starts at logon."),
+            None => println!("{APP_NAME} doesn't start at logon."),
             Some(OnOff::On) => {
                 autostart::install(&autostart::logon_program()?)?;
-                println!("Filesync starts at logon.");
+                println!("{APP_NAME} starts at logon.");
             }
             Some(OnOff::Off) => {
                 autostart::uninstall()?;
-                println!("Filesync no longer starts at logon.");
+                println!("{APP_NAME} no longer starts at logon.");
             }
         },
         Command::Log => println!("{}", paths.logs.display()),
@@ -588,7 +590,7 @@ fn print_status(status: &DaemonStatus) {
 }
 
 fn print_folder(s: &FolderStatus) {
-    println!("Homebase Filesync: {}", words::status_line(s, words::now()));
+    println!("{APP_NAME}: {}", words::status_line(s, words::now()));
     let who = match s.role {
         Some(role) => format!("{}'s {}", s.identity, role.name()),
         None => s.identity.to_string(),

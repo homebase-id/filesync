@@ -47,7 +47,7 @@ const PRIVATE: &str = "the Filesync drive on your Homebase cloud is private now,
 /// Why a private drive can't be opened by a login that holds the app's zero-knowledge key: the
 /// security context lists no grant on it ([`drive_grant`]). Signing in again doesn't help;
 /// tried again by itself.
-const UNLISTED: &str = "your Homebase cloud doesn't hand Filesync its private drive's key: it \
+const UNLISTED: &str = "your Homebase cloud doesn't hand this app its private drive's key: it \
                         needs an update of Homebase (odin-core #2047)";
 
 /// The largest file uploaded: 50 GiB. Not the server's limit (odin-core counts an upload's

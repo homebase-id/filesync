@@ -98,8 +98,9 @@ pub fn redirect(stream: &mut TcpStream, url: &str) -> io::Result<()> {
 /// A plain page saying `text`, escaped.
 pub fn message(stream: &mut TcpStream, status: u16, text: &str) -> io::Result<()> {
     let body = format!(
-        "<!doctype html><meta charset=utf-8><title>Homebase Filesync</title>\
+        "<!doctype html><meta charset=utf-8><title>{}</title>\
          <p style=\"font:16px system-ui;margin:3em\">{}</p>",
+        crate::APP_NAME,
         escape(text)
     );
     respond(stream, status, "text/html; charset=utf-8", body.as_bytes())

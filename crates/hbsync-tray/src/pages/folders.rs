@@ -95,7 +95,7 @@ impl Server {
         let said = said.map_or(String::new(), |s| format!("<p>{}</p>", escape(s)));
         format!(
             "<h1>Set up this computer</h1>{said}\
-             <p>Besides your Homebase folder, Filesync can sync your own folders where they are, \
+             <p>Besides your Homebase folder, {APP_NAME} can sync your own folders where they are, \
              with {identity}. A folder another device syncs already is joined: identical files \
              are kept once, a file that differs is kept twice.</p>\
              <ul class=deleted>{rows}</ul>",
@@ -131,7 +131,7 @@ impl Server {
                 let said = match taken {
                     Taken::Now => format!("{} syncs now.", role.name()),
                     Taken::AtStart => {
-                        format!("{} is set up: it syncs once Filesync runs.", role.name())
+                        format!("{} is set up: it syncs once {APP_NAME} runs.", role.name())
                     }
                 };
                 return Ok(match set_aside {

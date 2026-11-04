@@ -10,12 +10,12 @@ use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use hbsync_app::FolderStatus;
 use hbsync_app::control;
 use hbsync_app::local_http::{escape, read_request, redirect, respond};
 use hbsync_app::protocol::AccountControl;
 use hbsync_app::setup::{self, Refusal};
 use hbsync_app::words;
+use hbsync_app::{APP_NAME, FolderStatus};
 use hbsync_app::{Config, Paths};
 
 use crate::{Event, Sender};
@@ -253,9 +253,9 @@ fn frame(icon: &str, body: &str) -> String {
     format!(
         "<!doctype html><html lang=en><meta charset=utf-8>\
          <meta name=viewport content=\"width=device-width, initial-scale=1\">\
-         <title>Homebase Filesync</title><link rel=icon href=\"{icon}\">\
+         <title>{APP_NAME}</title><link rel=icon href=\"{icon}\">\
          <style>{STYLE}</style>\
-         <header><img src=\"{icon}\" alt=\"\"><span>Homebase Filesync</span></header>\
+         <header><img src=\"{icon}\" alt=\"\"><span>{APP_NAME}</span></header>\
          <main>{body}</main></html>"
     )
 }

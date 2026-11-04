@@ -71,7 +71,7 @@ pub enum StateError {
     #[error("state DB schema version {found} is newer than this client ({supported})")]
     TooNew { found: u32, supported: u32 },
     /// From before 0.7: not upgraded, set aside instead ([`StateError::unusable`]).
-    #[error("state DB schema version {found} is from a Filesync before 0.7 and isn't upgraded")]
+    #[error("state DB schema version {found} is from a version before 0.7 and isn't upgraded")]
     TooOld { found: u32 },
     /// The file itself is bad: a page or its schema ([`StateDb::check_file`]).
     #[error("state DB file is damaged: {0}")]

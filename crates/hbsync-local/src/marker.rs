@@ -42,7 +42,7 @@ impl Marker {
             (Some(identity), Some(id)) => Ok(Some(Marker { identity, id })),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidData,
-                format!("{}: not a Filesync folder marker", root.display()),
+                format!("{}: not a sync folder marker", root.display()),
             )),
         }
     }

@@ -12,7 +12,7 @@ impl Server {
     pub(super) fn deletions_page(&self) -> String {
         let s = lock(&self.pages.shared);
         let Some(status) = &s.status else {
-            return "<h1>Deletions</h1><p>Filesync isn't running.</p>".into();
+            return format!("<h1>Deletions</h1><p>{APP_NAME} isn't running.</p>");
         };
         let Some(held) = &status.held_deletes else {
             return "<h1>Deletions</h1><p>No deletions to review.</p>".into();
@@ -33,7 +33,7 @@ impl Server {
         };
         format!(
             "<h1>{} deletions to review</h1>\
-             <p>Filesync holds back deletions this large until you answer. In \
+             <p>{APP_NAME} holds back deletions this large until you answer. In \
              <code>{folder}</code>:</p>{what}\
              <ul>{examples}{more}</ul>\
              <form method=post action=\"{url}\">\
@@ -41,7 +41,7 @@ impl Server {
              <button name=answer value=delete>Delete</button> \
              <button name=answer value=put_back>Put them back</button></form>\
              <p class=small>Not sure? Leave this page. Nothing changes, here or on Homebase, \
-             until you answer. Filesync reminds you until you do.</p>",
+             until you answer. {APP_NAME} reminds you until you do.</p>",
             held.total(),
             folder = escape(&status.path.display().to_string()),
             url = self.pages.url("deletions"),
@@ -54,7 +54,9 @@ impl Server {
     pub(super) fn deleted_page(&self) -> String {
         let list = match control::deleted(&self.paths, MAX_DELETED) {
             Ok(Some(list)) => list,
-            Ok(None) => return "<h1>Recently deleted</h1><p>Filesync isn't running.</p>".into(),
+            Ok(None) => {
+                return format!("<h1>Recently deleted</h1><p>{APP_NAME} isn't running.</p>");
+            }
             Err(e) => {
                 return format!(
                     "<h1>Recently deleted</h1><p class=error>{}</p>",
@@ -153,7 +155,7 @@ impl Server {
         match control::empty_listed(&self.paths, &listed) {
             Ok(()) => {
                 (self.send)(Event::Wake);
-                words::emptying(stays, "the Filesync menu")
+                words::emptying(stays, &format!("the {APP_NAME} menu"))
             }
             Err(e) => {
                 (self.send)(Event::Wake);
