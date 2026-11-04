@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 use hbsync_local::{CatchUp, Debounce, LocalObserver, ScanOptions, ScanReport, rescan_dirs, scan};
 use hbsync_remote::Remote;
 use hbsync_state::{DirtyCursor, Mark, StateDb, StateError, keys};
+use hbsync_types::NodeId;
 use hbsync_types::activity::Synced;
-use hbsync_types::{NodeId, Role};
 
 use crate::activity::{self, Counters};
 use crate::adopt::adopt;
@@ -232,8 +232,7 @@ impl Engine {
     /// state DB's) decides which part of the drive it syncs: `cfg`'s scope is kept only when
     /// it has that top. A top that can't be read fails the open: no other part of the drive
     /// stands in for it (a role folder run as the main folder would see its files gone from
-    /// the drive, and the main folder's coming into it). It decides what the folder keeps here
-    /// at its top too ([`Role::local_only`]).
+    /// the drive, and the main folder's coming into it).
     pub fn new(
         mut db: StateDb,
         drive: Arc<Drive>,
@@ -242,10 +241,6 @@ impl Engine {
         let top = db.read(|s| Ok(s.coords()?.top))?;
         if cfg.folder.scope.top != top {
             cfg.folder.scope = Arc::new(Scope::of(top));
-        }
-        let local_only = Role::of(top).map(Role::local_only).unwrap_or_default();
-        if cfg.folder.filter.local_only_endings() != local_only {
-            cfg.folder.filter = Arc::new((*cfg.folder.filter).clone().local_only(local_only));
         }
         let scan_opts = cfg.folder.scan_options();
         let remote = cfg.folder.scope.remote(drive.shared_remote());

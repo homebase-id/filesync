@@ -18,17 +18,6 @@ pub enum UserDir {
     Downloads,
 }
 
-impl UserDir {
-    pub const ALL: [UserDir; 6] = [
-        UserDir::Desktop,
-        UserDir::Documents,
-        UserDir::Pictures,
-        UserDir::Music,
-        UserDir::Videos,
-        UserDir::Downloads,
-    ];
-}
-
 /// Another app that syncs a folder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Owner {
@@ -146,8 +135,8 @@ mod imp {
     }
 
     /// OneDrive's folders under `~/Library/CloudStorage`, and iCloud Drive's own. (iCloud's
-    /// Desktop & Documents, which keeps `~/Documents` in iCloud Drive, isn't told apart from a
-    /// folder the user named Documents there: not detected.)
+    /// Desktop & Documents, which keeps `~/Desktop` and `~/Documents` in iCloud Drive, isn't told
+    /// apart from folders the user named so there: not detected.)
     pub(super) fn synced_roots() -> Vec<(Owner, PathBuf)> {
         let Some(home) = home() else {
             return Vec::new();
@@ -269,7 +258,14 @@ mod tests {
     #[test]
     fn this_computer_has_its_folders() {
         // Whatever the machine: no panic, and never the home folder itself.
-        for dir in UserDir::ALL {
+        for dir in [
+            UserDir::Desktop,
+            UserDir::Documents,
+            UserDir::Pictures,
+            UserDir::Music,
+            UserDir::Videos,
+            UserDir::Downloads,
+        ] {
             assert_ne!(user_dir(dir), home(), "{dir:?}");
         }
     }

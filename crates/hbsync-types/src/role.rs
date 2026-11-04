@@ -87,16 +87,6 @@ impl Role {
             Role::Downloads => "downloads",
         }
     }
-
-    /// Name endings its folder keeps on each device at its top, never synced (sync semantics
-    /// §10): Linux launchers on the desktop, which run what they say when opened, and would
-    /// come executable from another device, trusted without being asked.
-    pub const fn local_only(self) -> &'static [&'static str] {
-        match self {
-            Role::Desktop => &[".desktop"],
-            _ => &[],
-        }
-    }
 }
 
 impl fmt::Display for Role {

@@ -399,10 +399,12 @@ struct Parts {
 }
 
 impl Parts {
-    /// Whether the ignore rules on disk differ from the ones in use (or can't be read) (sync
-    /// semantics §10).
+    /// Whether the ignore rules on disk differ from the ones in use (or can't be read): their
+    /// fingerprints differ (sync semantics §10).
     fn rules_changed(&self, root: &Path) -> bool {
-        self.engine.config().folder.filter.changed_on_disk(root)
+        let folder = &self.engine.config().folder;
+        Filter::load(root, folder.case_insensitive)
+            .map_or(true, |f| f.fingerprint() != folder.filter.fingerprint())
     }
 }
 

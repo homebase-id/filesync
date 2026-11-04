@@ -352,8 +352,7 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
-- 2026-11-04: a sixth role folder, Desktop (`e7b4f49b-5f90-47bb-8d97-c2dd23eef439`). Computers
-  keep Linux launchers (`*.desktop`) at its top on their own device (sync semantics §10).
+- 2026-11-04: a sixth role folder, Desktop (`e7b4f49b-5f90-47bb-8d97-c2dd23eef439`).
 - 2026-10-29: on a private (zero-knowledge) drive a node's key header is `zkDrive`, under the
   drive's key, and payload answers carry no key header (`encryption.md`, "A private drive").
   The node is the same.
