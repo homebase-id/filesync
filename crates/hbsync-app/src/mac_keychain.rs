@@ -11,7 +11,7 @@
 //! a provisioning profile.
 
 use std::ffi::{CString, c_char, c_void};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use core_foundation::array::CFArray;
 use core_foundation::base::{CFType, CFTypeRef, OSStatus, TCFType};
@@ -223,6 +223,8 @@ pub(crate) fn share(service: &str, account: &str) -> Result<bool, Error> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
     /// Run on CI's Mac (its login keychain): an entry saved for `/usr/bin/security` too is read
