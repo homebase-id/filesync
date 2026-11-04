@@ -371,7 +371,11 @@ mod tests {
         })?;
         let page = request(&pages.url("folders"), "GET", "")?;
         for role in hbsync_types::Role::ALL {
-            assert!(page.contains(role.name()), "{role:?}: {page}");
+            assert_eq!(
+                page.contains(role.name()),
+                role.offered(),
+                "{role:?}: {page}"
+            );
         }
         assert!(page.contains("Not recommended"), "Downloads");
         // Only roles it knows; nothing set up on this computer's real folders here.

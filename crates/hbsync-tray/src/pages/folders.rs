@@ -37,6 +37,7 @@ impl Server {
         let count_until = Instant::now() + COUNT_FOR;
         let rows: String = Role::ALL
             .into_iter()
+            .filter(|r| r.offered())
             .map(|role| {
                 let synced = config.folder(identity, Some(role));
                 let (path, action) = match synced {

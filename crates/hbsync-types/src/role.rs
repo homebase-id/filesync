@@ -46,6 +46,13 @@ impl Role {
         }))
     }
 
+    /// Whether a device may add it. Desktop not yet: a version that doesn't know a role takes
+    /// its folder for a plain one and syncs it into its main folder (sync semantics §12), so a
+    /// new role is known in one release (kept out of the main folder) and offered in the next.
+    pub const fn offered(self) -> bool {
+        !matches!(self, Role::Desktop)
+    }
+
     /// The role whose folder `node` is.
     pub fn of(node: NodeId) -> Option<Role> {
         Role::ALL.into_iter().find(|r| r.node() == node)
