@@ -227,45 +227,77 @@ mod tests {
 
     use super::*;
 
-    /// Run on CI's Mac (its login keychain): an entry saved for `/usr/bin/security` too is read
-    /// by it, another program, without asking; it is shared once, and not made again after.
+    #[link(name = "Security", kind = "framework")]
+    unsafe extern "C" {
+        static kSecReturnRef: CFStringRef;
+        fn SecKeychainItemCopyAccess(item: CFTypeRef, access: *mut SecAccessRef) -> OSStatus;
+        fn SecAccessCopyACLList(access: SecAccessRef, list: *mut CFArrayRef) -> OSStatus;
+        fn SecACLCopyContents(
+            acl: CFTypeRef,
+            apps: *mut CFArrayRef,
+            description: *mut CFStringRef,
+            prompt: *mut u16,
+        ) -> OSStatus;
+    }
+
+    /// How many programs each of the entry's access list's entries names (`None`: any program),
+    /// read without asking.
+    fn trusted_counts(service: &str, account: &str) -> Result<Vec<Option<usize>>, Error> {
+        let mut query = query(service, account);
+        query.add(
+            &key(unsafe { kSecReturnRef }),
+            &CFBoolean::true_value().as_CFType(),
+        );
+        let mut item: CFTypeRef = std::ptr::null();
+        // SAFETY: valid CF objects; each out pointer receives a reference we own (copy rule),
+        // wrapped to be released.
+        check(unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), &mut item) })?;
+        let item = unsafe { CFType::wrap_under_create_rule(item) };
+        let mut access: SecAccessRef = std::ptr::null_mut();
+        check(unsafe { SecKeychainItemCopyAccess(item.as_CFTypeRef(), &mut access) })?;
+        let access = unsafe { CFType::wrap_under_create_rule(access as CFTypeRef) };
+        let mut list: CFArrayRef = std::ptr::null();
+        check(unsafe { SecAccessCopyACLList(access.as_CFTypeRef() as SecAccessRef, &mut list) })?;
+        let list: CFArray<CFType> = unsafe { CFArray::wrap_under_create_rule(list) };
+        let mut counts = Vec::new();
+        for acl in list.iter() {
+            let (mut apps, mut description, mut prompt) =
+                (std::ptr::null(), std::ptr::null(), 0u16);
+            check(unsafe {
+                SecACLCopyContents(acl.as_CFTypeRef(), &mut apps, &mut description, &mut prompt)
+            })?;
+            if !description.is_null() {
+                drop(unsafe { CFString::wrap_under_create_rule(description) });
+            }
+            counts.push((!apps.is_null()).then(|| {
+                unsafe { CFArray::<CFType>::wrap_under_create_rule(apps) }.len() as usize
+            }));
+        }
+        Ok(counts)
+    }
+
+    /// Run on CI's Mac (its login keychain): an entry is saved with an access list naming the
+    /// programs given (each program is asked about by macOS only when it isn't on it; one
+    /// signed by another team, Apple's own tools say, is asked about anyway: its partition
+    /// differs); saved again it is replaced, still shared, and isn't shared again.
     #[test]
-    fn another_program_reads_the_entry_without_asking() -> Result<(), Box<dyn std::error::Error>> {
+    fn the_entry_names_the_programs_that_read_it() -> Result<(), Box<dyn std::error::Error>> {
         if std::env::var_os("CI").is_none() {
             return Ok(());
         }
         let service = "Homebase Filesync test";
         let account = format!("acl-{}.example", std::process::id());
-        let security = Path::new("/usr/bin/security");
         let me = crate::install::current_exe()?.to_path_buf();
-        let read_by_security = || {
-            std::process::Command::new(security)
-                .args(["find-generic-password", "-s", service, "-a", &account, "-w"])
-                .stdin(std::process::Stdio::null())
-                .output()
-        };
+        let programs = [me, Path::new("/bin/ls").to_path_buf()];
 
-        save_for(
-            service,
-            &account,
-            b"secret one",
-            &[me.clone(), security.to_path_buf()],
-        )?;
-        let out = read_by_security()?;
-        assert!(
-            out.status.success(),
-            "{}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "secret one");
+        save_for(service, &account, b"secret one", &programs)?;
+        let counts = trusted_counts(service, &account)?;
+        assert!(counts.contains(&Some(2)), "{counts:?}");
+        assert!(!counts.contains(&None), "never any program: {counts:?}");
         assert_eq!(comment(service, &account)?.as_deref(), Some(SHARED));
+        assert_eq!(read(service, &account)?, b"secret one");
         // Saved again: replaced, still shared.
-        save_for(
-            service,
-            &account,
-            b"secret two",
-            &[me, security.to_path_buf()],
-        )?;
+        save_for(service, &account, b"secret two", &programs)?;
         assert_eq!(read(service, &account)?, b"secret two");
         assert!(!share(service, &account)?, "shared already");
 
