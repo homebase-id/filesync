@@ -166,8 +166,9 @@ pub struct Filter {
     rules: Gitignore,
     /// The rules as written, for the fingerprint.
     text: String,
-    /// The rules the folder keeps on each device whatever the user's say (before them).
-    kept: &'static [&'static str],
+    /// Name endings kept on this device at the top whatever the rules say (a role folder's:
+    /// [`Filter::local_only`]).
+    local_only: &'static [&'static str],
     case_insensitive: bool,
     /// Lines that aren't valid rules, in order.
     skipped: Vec<SkippedRule>,
@@ -178,7 +179,7 @@ impl Default for Filter {
         Filter {
             rules: Gitignore::empty(),
             text: String::new(),
-            kept: &[],
+            local_only: &[],
             case_insensitive: false,
             skipped: Vec::new(),
         }
@@ -188,20 +189,15 @@ impl Default for Filter {
 impl Filter {
     /// The user's rules from `.hbsync/ignore` under `root`, if the file exists; built-ins only
     /// otherwise. A line that isn't a valid rule is skipped ([`Filter::skipped`]); a file that
-    /// can't be read is an error: its rules are unknown, not mistyped. `kept`: rules of the
-    /// folder's own (a role folder's, `Role::kept`), ahead of the user's, who may negate them.
-    pub fn load(
-        root: &Path,
-        case_insensitive: bool,
-        kept: &'static [&'static str],
-    ) -> Result<Self, FilterError> {
+    /// can't be read is an error: its rules are unknown, not mistyped.
+    pub fn load(root: &Path, case_insensitive: bool) -> Result<Self, FilterError> {
         let path = crate::layout::ignore_file(root);
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
             Err(source) => return Err(FilterError::Read { path, source }),
         };
-        Self::with_kept(&text, case_insensitive, kept)
+        Self::from_rules(&text, case_insensitive)
     }
 
     /// The built-ins plus `text` (gitignore syntax, paths relative to the sync root). A line
@@ -209,24 +205,12 @@ impl Filter {
     /// those meant as negations (starting with `!`, after any indent) are an error, naming
     /// them all ([`FilterError::Negation`]): skipped, they would ignore what they keep synced.
     pub fn from_rules(text: &str, case_insensitive: bool) -> Result<Self, FilterError> {
-        Self::with_kept(text, case_insensitive, &[])
-    }
-
-    /// [`Filter::from_rules`] with the folder's own rules ahead of `text` ([`Filter::load`]).
-    pub fn with_kept(
-        text: &str,
-        case_insensitive: bool,
-        kept: &'static [&'static str],
-    ) -> Result<Self, FilterError> {
         let failed = |e: ignore::Error| FilterError::Rules {
             message: e.to_string(),
         };
         let mut builder = GitignoreBuilder::new("");
         // Never fails (its `Result` is a leftover of the `ignore` crate's).
         let _ = builder.case_insensitive(case_insensitive);
-        for rule in kept {
-            builder.add_line(None, rule).map_err(failed)?;
-        }
         let mut skipped = Vec::new();
         // Negations that don't parse (indented too: meant as ones), with why the first doesn't.
         let mut negations: Option<(Vec<usize>, String)> = None;
@@ -252,10 +236,35 @@ impl Filter {
         Ok(Filter {
             rules,
             text: text.to_owned(),
-            kept,
+            local_only: &[],
             case_insensitive,
             skipped,
         })
+    }
+
+    /// This filter, with items at the top whose names end in one of `endings` (in any case)
+    /// kept on this device, [`Verdict::Ignored`], whatever the rules say: a role folder's own
+    /// (`Role::local_only`).
+    pub fn local_only(self, endings: &'static [&'static str]) -> Self {
+        Filter {
+            local_only: endings,
+            ..self
+        }
+    }
+
+    /// The endings [`Filter::local_only`] set.
+    pub fn local_only_endings(&self) -> &'static [&'static str] {
+        self.local_only
+    }
+
+    /// Whether the rules in `.hbsync/ignore` under `root` differ from this filter's (or can't
+    /// be read): read and compared as text, nothing built.
+    pub fn changed_on_disk(&self, root: &Path) -> bool {
+        match std::fs::read_to_string(crate::layout::ignore_file(root)) {
+            Ok(text) => text != self.text,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => !self.text.is_empty(),
+            Err(_) => true,
+        }
     }
 
     /// The lines of the rules that aren't valid rules, skipped.
@@ -265,24 +274,22 @@ impl Filter {
 
     /// The number of user rules (negations included).
     pub fn rule_count(&self) -> usize {
-        self.rules.num_ignores() as usize + self.rules.num_whitelists() as usize - self.kept.len()
+        self.rules.num_ignores() as usize + self.rules.num_whitelists() as usize
     }
 
     /// Changes whenever the filter would decide differently: other rules, another junk list,
-    /// another case sensitivity, other rules of the folder's own (written only when there are
-    /// some: a folder without keeps the fingerprint it had before they existed, and isn't
-    /// walked again for them).
+    /// another case sensitivity, other endings kept here (written only when there are some: a
+    /// folder without keeps the fingerprint it had before they existed, and isn't walked again).
     pub fn fingerprint(&self) -> String {
-        let kept: String = self.kept.iter().map(|r| format!("kept {r}; ")).collect();
-        format!(
-            "junk {JUNK_VERSION}; {kept}case-insensitive {}; rules:\n{}",
+        let mut print = format!("junk {JUNK_VERSION}; ");
+        for ending in self.local_only {
+            print.push_str(&format!("local only *{ending}; "));
+        }
+        print.push_str(&format!(
+            "case-insensitive {}; rules:\n{}",
             self.case_insensitive, self.text
-        )
-    }
-
-    /// The folder's own rules it was made with ([`Filter::load`]).
-    pub fn kept(&self) -> &'static [&'static str] {
-        self.kept
+        ));
+        print
     }
 
     /// The verdict on the entry `name` in `folder` (its `/`-separated path, `""` for the root),
@@ -343,6 +350,8 @@ impl Filter {
             Some(Verdict::Excluded)
         } else if is_junk(name) {
             Some(Verdict::Junk)
+        } else if at_root && self.local_only.iter().any(|e| ends(name, e)) {
+            Some(Verdict::Ignored)
         } else {
             None
         }
@@ -546,38 +555,53 @@ mod tests {
                 .fingerprint()
         );
         assert_eq!(a.fingerprint(), rules("*.log\n").fingerprint());
-        // As written before folders had rules of their own: a folder without any isn't walked
-        // again after the update.
+        // As written before folders had endings of their own: a folder without any isn't
+        // walked again after the update.
         assert_eq!(
             a.fingerprint(),
             format!("junk {JUNK_VERSION}; case-insensitive false; rules:\n*.log\n")
         );
-        let kept = Filter::with_kept("*.log\n", false, &["/*.desktop"]).expect("valid");
-        assert_ne!(a.fingerprint(), kept.fingerprint());
+        assert_ne!(
+            a.fingerprint(),
+            a.clone().local_only(&[".desktop"]).fingerprint()
+        );
     }
 
-    /// A folder's own rules (the Desktop's launchers) keep what they match on this device,
-    /// as the user's do; the user may negate them, and they aren't counted as the user's.
+    /// A role folder's own endings (the Desktop's launchers) keep what ends so at its top on
+    /// this device, in any case, whatever the rules say; below the top they sync.
     #[test]
-    fn a_folders_own_rules_keep_its_items_here() {
-        let f = Filter::with_kept("", false, &["/*.desktop"]).expect("valid");
+    fn a_folders_own_endings_keep_its_items_at_the_top_here() {
+        let f = rules("!*.desktop\n").local_only(&[".desktop"]);
         assert_eq!(f.names(["firefox.desktop"], false), Verdict::Ignored);
+        assert_eq!(f.names(["Firefox.DESKTOP"], false), Verdict::Ignored);
+        assert_eq!(f.in_folder("", "firefox.desktop", false), Verdict::Ignored);
         assert_eq!(f.names(["proj", "app.desktop"], false), Verdict::Sync);
+        assert_eq!(f.in_folder("proj", "app.desktop", false), Verdict::Sync);
         assert_eq!(f.names(["notes.txt"], false), Verdict::Sync);
-        assert_eq!(f.rule_count(), 0);
-        assert_eq!(f.kept(), ["/*.desktop"]);
-        let f = Filter::with_kept("!/mine.desktop\n", false, &["/*.desktop"]).expect("valid");
-        assert_eq!(f.names(["mine.desktop"], false), Verdict::Sync);
-        assert_eq!(f.names(["other.desktop"], false), Verdict::Ignored);
         assert_eq!(f.rule_count(), 1);
-        // Every role's own rules are rules.
-        for role in hbsync_types::Role::ALL {
-            let f = Filter::with_kept("", false, role.kept()).expect("valid");
-            assert_eq!(
-                f.names(["x.desktop"], false).is_sync(),
-                role.kept().is_empty()
-            );
-        }
+    }
+
+    #[test]
+    fn changed_on_disk_compares_the_rules_file() -> Result<(), FilterError> {
+        let dir = tempfile::tempdir().map_err(|source| FilterError::Read {
+            path: PathBuf::new(),
+            source,
+        })?;
+        let f = Filter::load(dir.path(), false)?.local_only(&[".desktop"]);
+        assert!(!f.changed_on_disk(dir.path()));
+        let write = |text: &str| {
+            std::fs::create_dir_all(crate::layout::state_dir(dir.path()))
+                .and_then(|()| std::fs::write(crate::layout::ignore_file(dir.path()), text))
+                .map_err(|source| FilterError::Read {
+                    path: PathBuf::new(),
+                    source,
+                })
+        };
+        write("*.log\n")?;
+        assert!(f.changed_on_disk(dir.path()));
+        let f = Filter::load(dir.path(), false)?;
+        assert!(!f.changed_on_disk(dir.path()));
+        Ok(())
     }
 
     #[test]
@@ -586,7 +610,7 @@ mod tests {
             path: PathBuf::new(),
             source,
         })?;
-        assert_eq!(Filter::load(dir.path(), false, &[])?.rule_count(), 0);
+        assert_eq!(Filter::load(dir.path(), false)?.rule_count(), 0);
         let state = crate::layout::state_dir(dir.path());
         std::fs::create_dir_all(&state)
             .and_then(|()| std::fs::write(crate::layout::ignore_file(dir.path()), "*.log\n"))
@@ -594,7 +618,7 @@ mod tests {
                 path: state.clone(),
                 source,
             })?;
-        let f = Filter::load(dir.path(), false, &[])?;
+        let f = Filter::load(dir.path(), false)?;
         assert_eq!(f.path(&rel("a.log"), false), Verdict::Ignored);
         Ok(())
     }

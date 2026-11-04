@@ -18,6 +18,17 @@ pub enum UserDir {
     Downloads,
 }
 
+impl UserDir {
+    pub const ALL: [UserDir; 6] = [
+        UserDir::Desktop,
+        UserDir::Documents,
+        UserDir::Pictures,
+        UserDir::Music,
+        UserDir::Videos,
+        UserDir::Downloads,
+    ];
+}
+
 /// Another app that syncs a folder.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Owner {
@@ -258,14 +269,7 @@ mod tests {
     #[test]
     fn this_computer_has_its_folders() {
         // Whatever the machine: no panic, and never the home folder itself.
-        for dir in [
-            UserDir::Desktop,
-            UserDir::Documents,
-            UserDir::Pictures,
-            UserDir::Music,
-            UserDir::Videos,
-            UserDir::Downloads,
-        ] {
+        for dir in UserDir::ALL {
             assert_ne!(user_dir(dir), home(), "{dir:?}");
         }
     }

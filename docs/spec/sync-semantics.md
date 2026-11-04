@@ -832,12 +832,13 @@ on its own.
   here (an unclosed `{`) stops the folder too. A rules file that can't be read (not a typo:
   its rules are unknown) stops the folder's sync till it can.
 
-A role folder may have rules of its own, kept as the user's are, ahead of them (a user's
-negation brings an item back): the Desktop keeps Linux launchers at its top (`/*.desktop`).
-A launcher runs what it says when opened, and one from another device would arrive executable
-(`x`), which Linux desktops take as trusted without asking; on another computer it would point
-at programs that may not be there. Windows shortcuts (`.lnk`) and macOS aliases sync, as
-OneDrive and iCloud sync them.
+A role folder may keep items at its top on each device by their names' endings, as ignored
+items are kept, whatever the user's rules say (`Role::local_only`, set by the engine from the
+folder's top): the Desktop keeps Linux launchers (`*.desktop`, in any case) there. A launcher
+runs what it says when opened, and one from another device would arrive executable (`x`),
+which Linux desktops take as trusted without asking; on another computer it would point at
+programs that may not be there. Below the top they sync as anything does. Windows shortcuts
+(`.lnk`) and macOS aliases sync, as OneDrive and iCloud sync them.
 
 An item inside a filtered folder is filtered too.
 

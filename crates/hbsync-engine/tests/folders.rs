@@ -582,6 +582,56 @@ fn an_engine_on_another_drives_db_is_refused() -> R {
     Ok(())
 }
 
+/// One folder of an account on its own: the main folder (`role` `None`) or a role folder, with
+/// `cfg` adjusted first.
+struct Alone {
+    _dir: tempfile::TempDir,
+    root: PathBuf,
+    db: PathBuf,
+    drive: Arc<Drive>,
+}
+
+impl Alone {
+    fn new(
+        server: &Arc<Mutex<FakeServer>>,
+        name: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let base = dir.path().canonicalize()?;
+        let root = base.join(name);
+        std::fs::create_dir_all(root.join(hbsync_local::STATE_DIR))?;
+        let db = base.join("state.db");
+        let drive = Drive::new(
+            StateDb::open_account(&db)?,
+            Arc::new(FakeRemote::new(server.clone())),
+        );
+        Ok(Alone {
+            _dir: dir,
+            root,
+            db,
+            drive,
+        })
+    }
+
+    fn engine(
+        &self,
+        role: Option<Role>,
+        tweak: impl FnOnce(&mut EngineConfig),
+    ) -> Result<Engine, Box<dyn std::error::Error>> {
+        let mut db = StateDb::open(&self.db)?;
+        if let Some(role) = role {
+            let path = self.root.to_string_lossy();
+            let folder = db.write(|s| s.account().add_folder(role.node(), &path, "m"))?;
+            db = StateDb::open_folder(&self.db, folder)?;
+        }
+        let mut cfg = config(&self.root);
+        tweak(&mut cfg);
+        let mut engine = Engine::new(db, self.drive.clone(), cfg)?;
+        engine.apply_filter_change()?;
+        Ok(engine)
+    }
+}
+
 /// A role new in this version (Desktop) was synced into the main folder by an older one, which
 /// didn't know it: a plain folder at the top to that version. After the update the main folder
 /// leaves it out (§12): the copy here goes and the drive keeps its role folder as it was;
@@ -591,59 +641,86 @@ fn a_role_an_older_version_synced_into_the_main_folder_leaves_it() -> R {
     use hbsync_engine::scope::Scope;
     for edited in [false, true] {
         let server = server_with_documents()?;
-        let dir = tempfile::tempdir()?;
-        let base = dir.path().canonicalize()?;
-        let main_root = base.join("Homebase");
-        std::fs::create_dir_all(main_root.join(hbsync_local::STATE_DIR))?;
-        let db = base.join("state.db");
-        let drive = Drive::new(
-            StateDb::open_account(&db)?,
-            Arc::new(FakeRemote::new(server.clone())),
-        );
+        let main = Alone::new(&server, "Homebase")?;
         // The older version: Documents unknown to it.
-        let mut cfg = config(&main_root);
-        let mut older = Scope::main();
-        older.outside.remove(&Role::Documents.node());
-        cfg.folder.scope = Arc::new(older);
-        let mut engine = Engine::new(StateDb::open(&db)?, drive.clone(), cfg)?;
-        engine.apply_filter_change()?;
-        sync(&mut engine)?;
-        assert_eq!(files(&main_root), ["Documents/cv.txt", "notes.txt"]);
-        drop(engine);
+        let mut older = main.engine(None, |cfg| {
+            let mut scope = Scope::main();
+            scope.outside.remove(&Role::Documents.node());
+            cfg.folder.scope = Arc::new(scope);
+        })?;
+        sync(&mut older)?;
+        assert_eq!(files(&main.root), ["Documents/cv.txt", "notes.txt"]);
+        drop(older);
         if edited {
-            std::fs::write(main_root.join("Documents/cv.txt"), b"cv, edited")?;
+            std::fs::write(main.root.join("Documents/cv.txt"), b"cv, edited")?;
         }
 
-        let mut engine = Engine::new(StateDb::open(&db)?, drive, config(&main_root))?;
-        engine.apply_filter_change()?;
-        sync(&mut engine)?;
-        let srv = server.lock().map_err(|_| "poisoned")?;
-        let in_role: Vec<_> = srv
-            .live()
-            .filter(|h| h.parent == Role::Documents.node())
-            .collect();
-        assert_eq!(in_role.len(), 1, "the role folder keeps its file");
-        assert!(srv.live().any(|h| h.node() == Some(Role::Documents.node())));
-        let plain: Vec<_> = srv
-            .live()
-            .filter(|h| h.parent.is_root() && h.node() != Some(Role::Documents.node()))
-            .filter_map(|h| match &h.body {
-                RemoteBody::Live { content, .. } => Some(content.name.clone()),
-                _ => None,
-            })
-            .collect();
-        drop(srv);
+        sync(&mut main.engine(None, |_| {})?)?;
+        let docs = Role::Documents.node();
+        let listing = drive_listing(&server);
+        let at = |parent: NodeId| listing.iter().filter(|(_, p)| *p == parent).count();
+        assert_eq!(at(docs), 1, "the role folder keeps its file: {listing:?}");
         if edited {
-            assert_eq!(files(&main_root), ["Documents/cv.txt", "notes.txt"]);
+            assert_eq!(files(&main.root), ["Documents/cv.txt", "notes.txt"]);
             assert_eq!(
-                std::fs::read(main_root.join("Documents/cv.txt"))?,
+                std::fs::read(main.root.join("Documents/cv.txt"))?,
                 b"cv, edited"
             );
-            assert_eq!(plain.len(), 2, "notes.txt and the detached copy: {plain:?}");
+            // The role folder, notes.txt and the detached copy.
+            assert_eq!(at(NodeId::ROOT), 3, "{listing:?}");
         } else {
-            assert_eq!(files(&main_root), ["notes.txt"]);
-            assert_eq!(plain, ["notes.txt"]);
+            assert_eq!(files(&main.root), ["notes.txt"]);
+            assert_eq!(at(NodeId::ROOT), 2, "{listing:?}");
         }
     }
+    Ok(())
+}
+
+/// The Desktop keeps Linux launchers at its top on each device (§10): one here isn't uploaded,
+/// one on the drive isn't downloaded; below the top they sync as anything does.
+#[test]
+fn the_desktop_keeps_its_launchers_here() -> R {
+    let server = FakeServer::new(ServerConfig::default());
+    {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        let desktop = NodeMeta {
+            node: Role::Desktop.node(),
+            ..hbsync_remote::contract::folder("Desktop", NodeId::ROOT)
+        };
+        srv.create(&desktop, None)?;
+        srv.seed_file(
+            Role::Desktop.node(),
+            "other.desktop",
+            b"[Desktop Entry]",
+            HashAlgorithm::Blake3,
+        )?;
+        srv.seed_file(
+            Role::Desktop.node(),
+            "notes.txt",
+            b"n",
+            HashAlgorithm::Blake3,
+        )?;
+    }
+    let desktop = Alone::new(&server, "Desktop")?;
+    std::fs::write(desktop.root.join("mine.desktop"), b"[Desktop Entry]")?;
+    std::fs::create_dir_all(desktop.root.join("proj"))?;
+    std::fs::write(desktop.root.join("proj/app.desktop"), b"[Desktop Entry]")?;
+    // Whatever the engine was given: the folder's top decides.
+    sync(&mut desktop.engine(Some(Role::Desktop), |_| {})?)?;
+    assert_eq!(
+        files(&desktop.root),
+        ["mine.desktop", "notes.txt", "proj/app.desktop"]
+    );
+    let names: Vec<String> = drive_listing(&server).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(
+        names,
+        [
+            "Desktop",
+            "app.desktop",
+            "notes.txt",
+            "other.desktop",
+            "proj"
+        ]
+    );
     Ok(())
 }

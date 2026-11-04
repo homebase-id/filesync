@@ -51,11 +51,8 @@ impl Client {
             if !ignore.exists() {
                 fs::write(&ignore, &rules)?;
             }
-            cfg.folder.filter = Arc::new(Filter::load(
-                &cfg.folder.root,
-                cfg.folder.case_insensitive,
-                &[],
-            )?);
+            cfg.folder.filter =
+                Arc::new(Filter::load(&cfg.folder.root, cfg.folder.case_insensitive)?);
             Ok(())
         };
         Ok(Client(

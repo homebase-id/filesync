@@ -399,12 +399,10 @@ struct Parts {
 }
 
 impl Parts {
-    /// Whether the ignore rules on disk differ from the ones in use (or can't be read): their
-    /// fingerprints differ (sync semantics §10).
+    /// Whether the ignore rules on disk differ from the ones in use (or can't be read) (sync
+    /// semantics §10).
     fn rules_changed(&self, root: &Path) -> bool {
-        let folder = &self.engine.config().folder;
-        Filter::load(root, folder.case_insensitive, folder.filter.kept())
-            .map_or(true, |f| f.fingerprint() != folder.filter.fingerprint())
+        self.engine.config().folder.filter.changed_on_disk(root)
     }
 }
 
@@ -520,8 +518,7 @@ impl Runner {
         let mut cfg = EngineConfig::new(root, &self.cfg.device);
         cfg.guard.min = self.cfg.mass_delete.min_files;
         cfg.guard.fraction = self.cfg.mass_delete.fraction;
-        let kept = self.cfg.role.map_or(&[][..], |r| r.kept());
-        cfg.folder.filter = Arc::new(Filter::load(root, cfg.folder.case_insensitive, kept)?);
+        cfg.folder.filter = Arc::new(Filter::load(root, cfg.folder.case_insensitive)?);
         if let Some(tweak) = self.cfg.tweak {
             tweak(&mut cfg);
         }

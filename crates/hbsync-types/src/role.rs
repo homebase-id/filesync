@@ -88,12 +88,12 @@ impl Role {
         }
     }
 
-    /// What its folder keeps on each device, never synced (gitignore syntax, as the user's
-    /// rules; sync semantics §10): Linux launchers on the desktop, which run what they say when
-    /// opened, and would come executable from another device, trusted without being asked.
-    pub const fn kept(self) -> &'static [&'static str] {
+    /// Name endings its folder keeps on each device at its top, never synced (sync semantics
+    /// §10): Linux launchers on the desktop, which run what they say when opened, and would
+    /// come executable from another device, trusted without being asked.
+    pub const fn local_only(self) -> &'static [&'static str] {
         match self {
-            Role::Desktop => &["/*.desktop"],
+            Role::Desktop => &[".desktop"],
             _ => &[],
         }
     }
