@@ -38,6 +38,10 @@ use security_framework_sys::keychain_item::{SecItemAdd, SecKeychainItemDelete};
 /// (by the keychain, for the program that made the entry), or without one of them (not found).
 const SHARED: &str = "Homebase Filesync: the app, hbsyncd and hbsync";
 
+/// The description of one naming only some of them (one wasn't found): made again at the
+/// tray's next start.
+const PARTLY: &str = "Homebase Filesync";
+
 /// The programs that may read the entry, as this install has them ([`crate::install`]).
 const PROGRAMS: [&str; 3] = [crate::autostart::TRAY, crate::lock::DAEMON, "hbsync"];
 
@@ -176,7 +180,7 @@ fn access(programs: &[PathBuf], all: bool) -> Result<(SecAccess, bool), Error> {
     }
     let shared = all && trusted.len() == programs.len();
     let trusted = CFArray::from_CFTypes(&trusted);
-    let description = CFString::new(if shared { SHARED } else { "Homebase Filesync" });
+    let description = CFString::new(if shared { SHARED } else { PARTLY });
     let mut access: SecAccessRef = std::ptr::null_mut();
     // SAFETY: valid CF objects; `access` receives a reference we own (create rule).
     check(unsafe {
@@ -298,7 +302,7 @@ mod tests {
         let shared = share(service, &account).map_err(|f| f.error)?;
         assert_eq!(shared, all);
         let item = entry(&keychain, service, &account)?.ok_or("no entry")?;
-        let description = if all { SHARED } else { "Homebase Filesync" };
+        let description = if all { SHARED } else { PARTLY };
         assert_eq!(
             readers(&item)?,
             [(description.to_owned(), Some(programs.len()))]
