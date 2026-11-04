@@ -1,10 +1,11 @@
 //! The macOS keychain entry of a login, readable by all three of this app's programs: the tray,
 //! which saves it at a login, the daemon (`hbsyncd`), which reads it at every start, and the
 //! command line (`hbsync`). The login keychain lets the program that made an entry read it and
-//! asks the user for every other one: the daemon, at every logon. So the entry is made with an
-//! access list naming the three ([`save`]); one made before, by one program alone, is made again
-//! so by the tray as it starts ([`share`]), without asking: one the tray can't read without
-//! asking is left as it is.
+//! asks the user for every other one: the daemon, at every logon. So the entry's access list is
+//! set to name the three ([`share`]): after each save, and by the tray as it starts for one an
+//! earlier version saved. The list is changed in place: the secret is never read, rewritten or
+//! deleted for it, and a program that may not change it (one that didn't make the entry) leaves
+//! it as it is, without asking.
 //!
 //! The access list is the older keychain's (`SecAccess`, deprecated but working): the newer
 //! data protection keychain shares entries by an access group, which takes an entitlement and
@@ -13,26 +14,20 @@
 use std::ffi::{CString, c_char, c_void};
 use std::path::PathBuf;
 
-use core_foundation::array::CFArray;
+use core_foundation::array::{CFArray, CFArrayRef};
 use core_foundation::base::{CFType, CFTypeRef, OSStatus, TCFType};
-use core_foundation::boolean::CFBoolean;
-use core_foundation::data::CFData;
-use core_foundation::dictionary::{CFDictionary, CFMutableDictionary};
 use core_foundation::string::{CFString, CFStringRef};
-use core_foundation_sys::array::CFArrayRef;
 use security_framework::base::Error;
+use security_framework::item::{ItemClass, ItemSearchOptions, Reference, SearchResult};
 use security_framework::os::macos::access::SecAccess;
-use security_framework::os::macos::keychain::SecKeychain;
-use security_framework::passwords::{self, PasswordOptions};
-use security_framework_sys::base::{SecAccessRef, errSecItemNotFound, errSecSuccess};
-use security_framework_sys::item::{
-    kSecAttrAccount, kSecAttrComment, kSecAttrService, kSecClass, kSecClassGenericPassword,
-    kSecReturnAttributes, kSecValueData,
+use security_framework::os::macos::keychain::{SecKeychain, SecPreferencesDomain};
+use security_framework::os::macos::keychain_item::SecKeychainItem;
+use security_framework_sys::base::{
+    SecAccessRef, SecKeychainItemRef, errSecItemNotFound, errSecSuccess,
 };
-use security_framework_sys::keychain_item::{SecItemAdd, SecItemCopyMatching};
 
-/// Written on an entry whose access list names all three programs: one without it was made
-/// before, or without one of them (a program not found), and is made again by [`share`].
+/// The description of an access list naming all three programs: one without it was set before
+/// (by the keychain, for the program that made the entry), or without one of them (not found).
 const SHARED: &str = "Homebase Filesync: the app, hbsyncd and hbsync";
 
 /// The programs that may read the entry, as this install has them ([`crate::install`]).
@@ -43,7 +38,7 @@ type SecTrustedApplicationRef = *mut c_void;
 
 #[link(name = "Security", kind = "framework")]
 unsafe extern "C" {
-    static kSecAttrAccess: CFStringRef;
+    static kSecACLAuthorizationDecrypt: CFStringRef;
     fn SecTrustedApplicationCreateFromPath(
         path: *const c_char,
         app: *mut SecTrustedApplicationRef,
@@ -52,6 +47,16 @@ unsafe extern "C" {
         descriptor: CFStringRef,
         trusted: CFArrayRef,
         access: *mut SecAccessRef,
+    ) -> OSStatus;
+    fn SecKeychainItemCopyAccess(item: SecKeychainItemRef, access: *mut SecAccessRef) -> OSStatus;
+    fn SecKeychainItemSetAccess(item: SecKeychainItemRef, access: SecAccessRef) -> OSStatus;
+    fn SecAccessCopyACLList(access: SecAccessRef, list: *mut CFArrayRef) -> OSStatus;
+    fn SecACLCopyAuthorizations(acl: CFTypeRef) -> CFArrayRef;
+    fn SecACLCopyContents(
+        acl: CFTypeRef,
+        apps: *mut CFArrayRef,
+        description: *mut CFStringRef,
+        prompt: *mut u16,
     ) -> OSStatus;
 }
 
@@ -63,28 +68,59 @@ fn check(status: OSStatus) -> Result<(), Error> {
     }
 }
 
-/// The entry's query: the generic password of `service` and `account`.
-fn query(service: &str, account: &str) -> CFMutableDictionary<CFType, CFType> {
-    let mut query = CFMutableDictionary::new();
-    query.add(
-        &key(unsafe { kSecClass }),
-        &key(unsafe { kSecClassGenericPassword }),
-    );
-    query.add(
-        &key(unsafe { kSecAttrService }),
-        &CFString::new(service).as_CFType(),
-    );
-    query.add(
-        &key(unsafe { kSecAttrAccount }),
-        &CFString::new(account).as_CFType(),
-    );
-    query
+/// The entry of `service` and `account` in the keychain the keyring store keeps it in (the
+/// user's default), `None` without one. Its attributes only: the secret isn't read.
+fn entry(service: &str, account: &str) -> Result<Option<SecKeychainItem>, Error> {
+    let keychain = SecKeychain::default_for_domain(SecPreferencesDomain::User)?;
+    let found = ItemSearchOptions::new()
+        .keychains(&[keychain])
+        .class(ItemClass::generic_password())
+        .service(service)
+        .account(account)
+        .load_refs(true)
+        .search();
+    match found {
+        Err(e) if e.code() == errSecItemNotFound => Ok(None),
+        Err(e) => Err(e),
+        Ok(found) => Ok(found.into_iter().find_map(|r| match r {
+            SearchResult::Ref(Reference::KeychainItem(item)) => Some(item),
+            _ => None,
+        })),
+    }
 }
 
-/// One of the framework's constant keys (or values), valid for the program's life.
-fn key(k: CFStringRef) -> CFType {
+/// The entries of `item`'s access list that let its secret be read: each one's description and
+/// how many programs it names (`None`: any program). Read without asking.
+fn readers(item: &SecKeychainItem) -> Result<Vec<(String, Option<usize>)>, Error> {
+    let mut access: SecAccessRef = std::ptr::null_mut();
+    // SAFETY: a valid item; each out pointer receives a reference we own (copy or create rule),
+    // wrapped to be released.
+    check(unsafe { SecKeychainItemCopyAccess(item.as_concrete_TypeRef(), &mut access) })?;
+    let access = unsafe { SecAccess::wrap_under_create_rule(access) };
+    let mut list: CFArrayRef = std::ptr::null();
+    check(unsafe { SecAccessCopyACLList(access.as_concrete_TypeRef(), &mut list) })?;
+    let list: CFArray<CFType> = unsafe { CFArray::wrap_under_create_rule(list) };
     // SAFETY: a constant CFString of the framework's.
-    unsafe { CFString::wrap_under_get_rule(k) }.as_CFType()
+    let decrypt = unsafe { CFString::wrap_under_get_rule(kSecACLAuthorizationDecrypt) }.as_CFType();
+    let mut readers = Vec::new();
+    for acl in list.iter() {
+        let rights: CFArray<CFType> = unsafe {
+            CFArray::wrap_under_create_rule(SecACLCopyAuthorizations(acl.as_CFTypeRef()))
+        };
+        if !rights.iter().any(|r| *r == decrypt) {
+            continue;
+        }
+        let (mut apps, mut description, mut prompt) = (std::ptr::null(), std::ptr::null(), 0u16);
+        check(unsafe {
+            SecACLCopyContents(acl.as_CFTypeRef(), &mut apps, &mut description, &mut prompt)
+        })?;
+        let description = (!description.is_null())
+            .then(|| unsafe { CFString::wrap_under_create_rule(description) }.to_string());
+        let apps = (!apps.is_null())
+            .then(|| unsafe { CFArray::<CFType>::wrap_under_create_rule(apps) }.len() as usize);
+        readers.push((description.unwrap_or_default(), apps));
+    }
+    Ok(readers)
 }
 
 /// The programs of this install, and this one; whether all three were found.
@@ -103,10 +139,10 @@ fn programs() -> (Vec<PathBuf>, bool) {
     (found, all)
 }
 
-/// An access list letting `programs` read the entry without asking (each by its code signature,
-/// so an update of the app keeps it), and whether it names them all (one that can't be named
-/// is left out).
-fn access(label: &str, programs: &[PathBuf]) -> Result<(SecAccess, bool), Error> {
+/// Sets `item`'s access list to let `programs` read it without asking (each by its code
+/// signature, so an update of the app keeps it; one that can't be named is left out),
+/// described as [`SHARED`] if they are `all` and each is on it. Returns whether it is.
+fn share_with(item: &SecKeychainItem, programs: &[PathBuf], all: bool) -> Result<bool, Error> {
     let mut trusted = Vec::new();
     for path in programs {
         let Ok(c) = CString::new(path.as_os_str().as_encoded_bytes()) else {
@@ -122,217 +158,83 @@ fn access(label: &str, programs: &[PathBuf]) -> Result<(SecAccess, bool), Error>
             Err(e) => tracing::info!("keychain: {} can't be trusted: {e}", path.display()),
         }
     }
-    let all = trusted.len() == programs.len();
+    let shared = all && trusted.len() == programs.len();
     let trusted = CFArray::from_CFTypes(&trusted);
-    let label = CFString::new(label);
+    let description = CFString::new(if shared { SHARED } else { "Homebase Filesync" });
     let mut access: SecAccessRef = std::ptr::null_mut();
     // SAFETY: valid CF objects; `access` receives a reference we own (create rule).
     check(unsafe {
         SecAccessCreate(
-            label.as_concrete_TypeRef(),
+            description.as_concrete_TypeRef(),
             trusted.as_concrete_TypeRef(),
             &mut access,
         )
     })?;
-    Ok((unsafe { SecAccess::wrap_under_create_rule(access) }, all))
+    let access = unsafe { SecAccess::wrap_under_create_rule(access) };
+    // SAFETY: a valid item and access list.
+    check(unsafe {
+        SecKeychainItemSetAccess(item.as_concrete_TypeRef(), access.as_concrete_TypeRef())
+    })?;
+    Ok(shared)
 }
 
-/// Saves `secret` as the entry of `service` and `account`, readable by this app's programs
-/// without asking: the entry before, if any, is deleted first (an entry's access list is set
-/// as it is made).
-pub(crate) fn save(service: &str, account: &str, secret: &[u8]) -> Result<(), Error> {
-    let (programs, all) = programs();
-    save_for(service, account, secret, &programs, all)
-}
-
-/// [`save`] for `programs`, marked [`SHARED`] if they are `all` and each made it onto the list.
-fn save_for(
-    service: &str,
-    account: &str,
-    secret: &[u8],
-    programs: &[PathBuf],
-    all: bool,
-) -> Result<(), Error> {
-    delete(service, account)?;
-    let (access, named) = access(service, programs)?;
-    let mut item = query(service, account);
-    item.add(
-        &key(unsafe { kSecValueData }),
-        &CFData::from_buffer(secret).as_CFType(),
-    );
-    item.add(&key(unsafe { kSecAttrAccess }), &access.as_CFType());
-    if all && named {
-        item.add(
-            &key(unsafe { kSecAttrComment }),
-            &CFString::new(SHARED).as_CFType(),
-        );
-    }
-    // SAFETY: a valid dictionary; no result asked for.
-    check(unsafe { SecItemAdd(item.as_concrete_TypeRef(), std::ptr::null_mut()) })
-}
-
-/// Deletes the entry; none there is fine.
-fn delete(service: &str, account: &str) -> Result<(), Error> {
-    match passwords::delete_generic_password(service, account) {
-        Err(e) if e.code() == errSecItemNotFound => Ok(()),
-        done => done,
-    }
-}
-
-/// Whether the entry is [`SHARED`], `None` without one (its attributes only: read without
-/// asking for the secret).
-fn shared(service: &str, account: &str) -> Result<Option<bool>, Error> {
-    let mut query = query(service, account);
-    query.add(
-        &key(unsafe { kSecReturnAttributes }),
-        &CFBoolean::true_value().as_CFType(),
-    );
-    let mut found: CFTypeRef = std::ptr::null();
-    // SAFETY: a valid dictionary; `found` receives a reference we own (copy rule).
-    match unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), &mut found) } {
-        s if s == errSecItemNotFound => return Ok(None),
-        s => check(s)?,
-    }
-    let attributes: CFDictionary<CFType, CFType> =
-        unsafe { CFDictionary::wrap_under_create_rule(found as _) };
-    let comment = attributes
-        .find(key(unsafe { kSecAttrComment }))
-        .and_then(|c| c.downcast::<CFString>());
-    Ok(Some(comment.is_some_and(|c| c == SHARED)))
-}
-
-/// The entry's secret.
-fn read(service: &str, account: &str) -> Result<Vec<u8>, Error> {
-    passwords::generic_password(PasswordOptions::new_generic_password(service, account))
-}
-
-/// Makes an entry saved before (by one program alone) again so that this app's programs read
-/// it without asking. Never asks: an entry this program can't look at, read and delete so is
-/// left as it is (`errSecInteractionNotAllowed`). Returns whether it was made again.
+/// Lets this app's programs read the entry of `service` and `account` without asking, if its
+/// access list doesn't already: the list is set in place. Never asks: the keychain's prompts
+/// are off while it runs (for the whole process: called where no other thread uses the
+/// keychain), and a program that may not change the list without asking leaves it
+/// (`errSecInteractionNotAllowed`). Returns whether the list was set naming all three.
+/// Costs one keychain query when the entry is shared already.
 pub(crate) fn share(service: &str, account: &str) -> Result<bool, Error> {
     let _quiet = SecKeychain::disable_user_interaction()?;
-    if shared(service, account)? != Some(false) {
+    let Some(item) = entry(service, account)? else {
+        return Ok(false);
+    };
+    if readers(&item)?.iter().any(|(d, _)| d == SHARED) {
         return Ok(false);
     }
-    let secret = read(service, account)?;
-    save(service, account, &secret)?;
-    Ok(true)
+    let (programs, all) = programs();
+    share_with(&item, &programs, all)
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::Path;
 
-    use security_framework_sys::item::kSecReturnRef;
+    use security_framework::passwords;
 
     use super::*;
 
-    const SERVICE: &str = "Homebase Filesync test";
-
-    #[link(name = "Security", kind = "framework")]
-    unsafe extern "C" {
-        static kSecACLAuthorizationDecrypt: CFStringRef;
-        fn SecACLCopyAuthorizations(acl: CFTypeRef) -> CFArrayRef;
-        fn SecKeychainItemCopyAccess(item: CFTypeRef, access: *mut SecAccessRef) -> OSStatus;
-        fn SecAccessCopyACLList(access: SecAccessRef, list: *mut CFArrayRef) -> OSStatus;
-        fn SecACLCopyContents(
-            acl: CFTypeRef,
-            apps: *mut CFArrayRef,
-            description: *mut CFStringRef,
-            prompt: *mut u16,
-        ) -> OSStatus;
-    }
-
-    /// How many programs each of the entry's access list's entries that let its secret be read
-    /// names (`None`: any program), read without asking. (The others, adding to the keychain
-    /// say, are any program's.)
-    fn readers(service: &str, account: &str) -> Result<Vec<Option<usize>>, Error> {
-        let mut query = query(service, account);
-        query.add(
-            &key(unsafe { kSecReturnRef }),
-            &CFBoolean::true_value().as_CFType(),
-        );
-        let mut item: CFTypeRef = std::ptr::null();
-        // SAFETY: valid CF objects; each out pointer receives a reference we own (copy rule),
-        // wrapped to be released.
-        check(unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), &mut item) })?;
-        let item = unsafe { CFType::wrap_under_create_rule(item) };
-        let mut access: SecAccessRef = std::ptr::null_mut();
-        check(unsafe { SecKeychainItemCopyAccess(item.as_CFTypeRef(), &mut access) })?;
-        let access = unsafe { SecAccess::wrap_under_create_rule(access) };
-        let mut list: CFArrayRef = std::ptr::null();
-        check(unsafe { SecAccessCopyACLList(access.as_concrete_TypeRef(), &mut list) })?;
-        let list: CFArray<CFType> = unsafe { CFArray::wrap_under_create_rule(list) };
-        let mut counts = Vec::new();
-        let decrypt = key(unsafe { kSecACLAuthorizationDecrypt });
-        for acl in list.iter() {
-            // SAFETY: a list we own (copy rule), wrapped to be released.
-            let rights: CFArray<CFType> = unsafe {
-                CFArray::wrap_under_create_rule(SecACLCopyAuthorizations(acl.as_CFTypeRef()))
-            };
-            if !rights.iter().any(|r| *r == decrypt) {
-                continue;
-            }
-            let (mut apps, mut description, mut prompt) =
-                (std::ptr::null(), std::ptr::null(), 0u16);
-            check(unsafe {
-                SecACLCopyContents(acl.as_CFTypeRef(), &mut apps, &mut description, &mut prompt)
-            })?;
-            if !description.is_null() {
-                drop(unsafe { CFString::wrap_under_create_rule(description) });
-            }
-            counts.push((!apps.is_null()).then(|| {
-                unsafe { CFArray::<CFType>::wrap_under_create_rule(apps) }.len() as usize
-            }));
-        }
-        Ok(counts)
-    }
-
-    /// Run on CI's Mac (its login keychain): an entry is saved with its secret readable by the
-    /// programs given, and no other (macOS asks about a program only when it isn't on the list;
-    /// one signed by another team, Apple's own tools say, is asked about anyway: its partition
-    /// differs); saved again it is replaced, still shared, and isn't shared again.
+    /// Run on CI's Mac (its login keychain). An entry made as the keyring store makes it (this
+    /// program's alone) gets an access list letting the programs given read its secret, and no
+    /// other: macOS asks about a program only when it isn't on it (one signed by another team,
+    /// Apple's own tools say, is asked about anyway: its partition differs). The secret is
+    /// untouched, and an entry shared already isn't changed again.
     #[test]
-    fn the_entry_names_the_programs_that_read_it() -> Result<(), Box<dyn std::error::Error>> {
+    fn the_entry_is_shared_with_the_programs_in_place() -> Result<(), Box<dyn std::error::Error>> {
         if std::env::var_os("CI").is_none() {
             return Ok(());
         }
-        let service = SERVICE;
+        let service = "Homebase Filesync test";
         let account = format!("acl-{}.example", std::process::id());
+        let keychain = SecKeychain::default_for_domain(SecPreferencesDomain::User)?;
+        keychain.set_generic_password(service, &account, b"from before")?;
+        let item = entry(service, &account)?.ok_or("no entry")?;
+        assert!(readers(&item)?.iter().all(|(d, _)| d != SHARED));
+
         let me = crate::install::current_exe()?.to_path_buf();
         let programs = [me, Path::new("/bin/ls").to_path_buf()];
-
-        save_for(service, &account, b"secret one", &programs, true)?;
-        assert_eq!(readers(service, &account)?, [Some(2)]);
-        assert_eq!(shared(service, &account)?, Some(true));
-        assert_eq!(read(service, &account)?, b"secret one");
-        // Saved again: replaced, still shared.
-        save_for(service, &account, b"secret two", &programs, true)?;
-        assert_eq!(read(service, &account)?, b"secret two");
+        assert!(share_with(&item, &programs, true)?);
+        let item = entry(service, &account)?.ok_or("no entry")?;
+        assert_eq!(readers(&item)?, [(SHARED.to_owned(), Some(2))]);
+        assert_eq!(
+            passwords::get_generic_password(service, &account)?,
+            b"from before"
+        );
         assert!(!share(service, &account)?, "shared already");
 
-        delete(service, &account)?;
-        assert_eq!(shared(service, &account)?, None);
+        passwords::delete_generic_password(service, &account)?;
+        assert!(entry(service, &account)?.is_none());
         assert!(!share(service, &account)?, "nothing to share");
-        Ok(())
-    }
-
-    /// An entry made the way earlier versions made it (the keyring store's, this program's
-    /// alone) is made again shared, by the program that made it, without asking.
-    #[test]
-    fn an_earlier_entry_is_shared() -> Result<(), Box<dyn std::error::Error>> {
-        if std::env::var_os("CI").is_none() {
-            return Ok(());
-        }
-        let service = SERVICE;
-        let account = format!("earlier-{}.example", std::process::id());
-        SecKeychain::default()?.set_generic_password(service, &account, b"from before")?;
-        assert_eq!(shared(service, &account)?, Some(false));
-        assert!(share(service, &account)?);
-        // Shared, or not marked so when the test's folder lacks one of the three programs.
-        assert_eq!(shared(service, &account)?, Some(programs().1));
-        assert_eq!(read(service, &account)?, b"from before");
-        delete(service, &account)?;
         Ok(())
     }
 }

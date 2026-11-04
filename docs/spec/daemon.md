@@ -164,11 +164,12 @@ for it has none, and the tray and `hbsync status` ask it to log in again):
   (keeping the item on this Mac, `AfterFirstUnlockThisDeviceOnly`, needs the data protection
   keychain, and that a provisioning profile and keychain-access-groups entitlement the app
   doesn't have). The login keychain lets only the program that made an entry read it without
-  asking, so the entry is made with an access list naming the tray, `hbsyncd` and `hbsync` (by
-  their code signatures, which an update keeps; `mac_keychain.rs`). One made before by one of
-  them alone (versions up to 0.10.9: the daemon asked for the login password at every logon)
-  is made again so by the tray as it starts, before it starts the daemon, if it can read it
-  without asking;
+  asking, so the entry's access list is set to name the tray, `hbsyncd` and `hbsync` (by their
+  code signatures, which an update keeps; `mac_keychain.rs`), in place: after each save, and by
+  the tray as it starts, before it starts the daemon, for one an earlier version saved (up to
+  0.10.9 the daemon asked for the login password at every logon). The secret isn't touched for
+  it; a program that may not change the list without asking (an entry `hbsync setup` made, for
+  the tray) leaves it;
 - Windows: Credential Manager, with `CRED_PERSIST_LOCAL_MACHINE` persistence: a roaming
   profile doesn't carry it to another computer (an entry written before, roaming, is written
   again so when read);

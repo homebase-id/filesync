@@ -33,7 +33,6 @@ uuid.workspace = true
 apple-native-keyring-store = { version = "1", features = ["keychain"] }
 # The keychain entry's access list (mac_keychain.rs): the versions the keyring store uses.
 core-foundation = "0.10"
-core-foundation-sys = "0.8"
 security-framework = "3"
 security-framework-sys = "2"
 # The folder's icon in Finder.

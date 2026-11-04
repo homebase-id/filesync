@@ -120,24 +120,22 @@ impl CredentialStore {
         let file = self.file(&identity);
         let json = serde_json::to_string(creds).map_err(HomebaseError::from)?;
         let saved = self.call(&identity, |entry| {
-            // On macOS readable by all of this app's programs without asking (`mac_keychain`).
-            #[cfg(target_os = "macos")]
-            {
-                let _ = entry;
-                crate::mac_keychain::save(SERVICE, &identity, json.as_bytes())
-                    .map_err(apple_native_keyring_store::keychain::decode_error)
+            entry.set_password(&json)?;
+            // Read back where a session can be broken: it may have stored garbage, and its read
+            // fails. One more call per save (at a login).
+            if cfg!(all(unix, not(target_os = "macos"))) {
+                entry.get_password()?;
             }
-            #[cfg(not(target_os = "macos"))]
-            {
-                entry.set_password(&json)?;
-                // Read back where a session can be broken: it may have stored garbage, and its
-                // read fails. One more call per save (at a login).
-                if cfg!(unix) {
-                    entry.get_password()?;
-                }
-                Ok(())
-            }
+            Ok(())
         });
+        // On macOS readable by all of this app's programs without asking: saved, the entry is
+        // usable whatever this says.
+        #[cfg(target_os = "macos")]
+        if let Ok(Ok(())) = &saved
+            && let Err(e) = crate::mac_keychain::share(SERVICE, &identity)
+        {
+            tracing::info!("keychain: {identity}'s entry not shared with hbsyncd: {e}");
+        }
         let why = match saved {
             Ok(Ok(())) => {
                 remove(&file)?;
@@ -254,10 +252,10 @@ impl CredentialStore {
     }
 }
 
-/// macOS: makes the keychain entries of the identities set up here, saved by an earlier
-/// version for the program that saved them alone, readable by all of this app's programs
-/// without asking (`mac_keychain::share`). Never asks; the tray, at its start, before the
-/// daemon reads them.
+/// macOS: lets all of this app's programs read the keychain entries of the identities set up
+/// here without asking, where an earlier version saved them for the program that saved them
+/// alone (`mac_keychain::share`). Never asks; the tray, at its start, before the daemon reads
+/// them. Costs a config read and a keychain query per identity at each start.
 #[cfg(target_os = "macos")]
 pub fn share_credentials(paths: &Paths) {
     if files_only() {
@@ -270,7 +268,9 @@ pub fn share_credentials(paths: &Paths) {
     };
     for identity in config.identities() {
         match crate::mac_keychain::share(SERVICE, identity) {
-            Ok(true) => tracing::info!("keychain: {identity}'s entry shared with hbsyncd"),
+            Ok(true) => {
+                tracing::info!("keychain: {identity}'s entry shared with hbsyncd and hbsync")
+            }
             Ok(false) => {}
             Err(e) => tracing::info!("keychain: {identity}'s entry not shared: {e}"),
         }
