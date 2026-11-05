@@ -31,6 +31,10 @@ uuid.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1", features = ["keychain"] }
+# The keychain entry's access list (mac_keychain.rs): the versions the keyring store uses.
+core-foundation = "0.10"
+security-framework = "3"
+security-framework-sys = "2"
 # The folder's icon in Finder.
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSImage", "NSWorkspace"] }

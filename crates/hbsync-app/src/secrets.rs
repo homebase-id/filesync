@@ -68,7 +68,7 @@ impl CredentialStore {
     /// The OS keychain, with files in the config folder as the fallback.
     /// `HBSYNC_CREDENTIALS=file` uses the files only (tests, development).
     pub(crate) fn open(paths: &Paths) -> CredentialStore {
-        let files_only = std::env::var_os("HBSYNC_CREDENTIALS").is_some_and(|v| v == "file");
+        let files_only = files_only();
         let keychain = if files_only {
             Err("HBSYNC_CREDENTIALS=file".to_owned())
         } else {
@@ -130,6 +130,11 @@ impl CredentialStore {
         });
         let why = match saved {
             Ok(Ok(())) => {
+                // On macOS readable by all of this app's programs without asking.
+                #[cfg(target_os = "macos")]
+                if let Some(location) = self.share(&identity)? {
+                    return Ok(location);
+                }
                 remove(&file)?;
                 return Ok(Location::Keychain);
             }
@@ -195,6 +200,35 @@ impl CredentialStore {
         Ok(Credentials::load(path)?)
     }
 
+    /// macOS: lets all of this app's programs read `identity`'s keychain entry without asking
+    /// (`mac_keychain::share`). Where the entry couldn't be made again nor put back, the
+    /// credentials go to the file, and that is where they are; `None` otherwise.
+    #[cfg(target_os = "macos")]
+    fn share(&self, identity: &Identity) -> Result<Option<Location>, CredentialError> {
+        match crate::mac_keychain::share(SERVICE, identity) {
+            Ok(true) => {
+                tracing::info!("keychain: {identity}'s entry shared with hbsyncd and hbsync")
+            }
+            Ok(false) => {}
+            Err(crate::mac_keychain::Failed { error, lost: None }) => {
+                tracing::info!("keychain: {identity}'s entry not shared: {error}");
+            }
+            Err(crate::mac_keychain::Failed {
+                error,
+                lost: Some(secret),
+            }) => {
+                let creds: Credentials =
+                    serde_json::from_slice(&secret).map_err(CredentialError::Corrupt)?;
+                let path = self.file(identity);
+                save_private(&creds, &path)?;
+                let why = format!("keychain entry not made again: {error}");
+                tracing::warn!("{why}; the credentials are in {}", path.display());
+                return Ok(Some(Location::File { path, why }));
+            }
+        }
+        Ok(None)
+    }
+
     /// Forgets the credentials for `identity`, wherever they are. Returns why the keychain
     /// couldn't be looked at, if it couldn't (it may still hold them: say so).
     pub(crate) fn delete(&self, identity: &Identity) -> Result<Option<String>, CredentialError> {
@@ -242,6 +276,33 @@ impl CredentialStore {
             }
         }
     }
+}
+
+/// macOS: lets all of this app's programs read the keychain entries of the identities set up
+/// here without asking, where an earlier version saved them for the program that saved them
+/// alone ([`CredentialStore::share`]). Never asks; the tray, at its start, before the daemon
+/// reads them. Costs a config read and a keychain query per identity at each start.
+#[cfg(target_os = "macos")]
+pub fn share_credentials(paths: &Paths) {
+    if files_only() {
+        return;
+    }
+    let config = match crate::Config::load(&paths.config_file()) {
+        Ok(Some(config)) => config,
+        Ok(None) => return,
+        Err(e) => return tracing::info!("keychain entries not looked at: {e}"),
+    };
+    let store = CredentialStore::open(paths);
+    for identity in config.identities() {
+        if let Err(e) = store.share(identity) {
+            tracing::warn!("keychain: {identity}'s entry: {e}");
+        }
+    }
+}
+
+/// `HBSYNC_CREDENTIALS=file`: files only, no keychain (tests, development).
+fn files_only() -> bool {
+    std::env::var_os("HBSYNC_CREDENTIALS").is_some_and(|v| v == "file")
 }
 
 /// The keychain `open` opens, [`TRIES`] times at most while it opens broken (refused), or why

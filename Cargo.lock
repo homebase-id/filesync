@@ -1594,6 +1594,7 @@ version = "0.10.9"
 dependencies = [
  "apple-native-keyring-store",
  "blocking",
+ "core-foundation",
  "form_urlencoded",
  "hbsync-app",
  "hbsync-engine",
@@ -1613,6 +1614,8 @@ dependencies = [
  "percent-encoding",
  "rusqlite",
  "secret-service",
+ "security-framework",
+ "security-framework-sys",
  "serde",
  "serde_json",
  "tempfile",

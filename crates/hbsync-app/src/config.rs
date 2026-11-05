@@ -181,11 +181,17 @@ impl Config {
             .find(|r| r.identity == *identity && r.role == role)
     }
 
-    /// The identity a command is for: `given` if it is set up here, else the only one set up.
-    pub fn identity(&self, given: Option<&str>) -> Result<Identity, String> {
+    /// The identities set up here, each once, in order.
+    pub fn identities(&self) -> Vec<&Identity> {
         let mut set_up: Vec<&Identity> = self.roots.iter().map(|r| &r.identity).collect();
         set_up.sort_unstable();
         set_up.dedup();
+        set_up
+    }
+
+    /// The identity a command is for: `given` if it is set up here, else the only one set up.
+    pub fn identity(&self, given: Option<&str>) -> Result<Identity, String> {
+        let set_up = self.identities();
         if let Some(given) = given {
             let identity = Identity::new(given);
             return match set_up.contains(&&identity) {

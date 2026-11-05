@@ -95,6 +95,10 @@ fn main() -> ExitCode {
     // Started from a terminal, say: listed as itself, not as the terminal.
     #[cfg(target_os = "linux")]
     hbsync_app::unit::move_to_scope(std::process::id());
+    // Before the daemon starts and reads them: entries an earlier version saved for the tray
+    // alone, which made macOS ask for the daemon at every logon.
+    #[cfg(target_os = "macos")]
+    hbsync_app::share_credentials(&paths);
     os::name_notifications();
     if let Some(why) = hbsync_app::install::Install::current().not_settled() {
         os::notify(APP_NAME.into(), format!("To start at login, {why}."));
