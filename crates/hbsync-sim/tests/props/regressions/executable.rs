@@ -35,3 +35,29 @@ fn regression_a_conflict_copy_whose_download_goes_stale_keeps_the_file() {
         panic!("{e}");
     }
 }
+
+/// Seed b81d0596: a Linux client holds a launcher its user made executable, with no base for
+/// it (crashes), and a tag to write on it, which waits for a base it founds against the drive's
+/// version. The simulator read the item's bit raw (executable) against the drive's (not), so
+/// it founded none and the write waited forever; the executor reads the item as its view
+/// does, the bit it doesn't hold the drive's (§1).
+#[test]
+fn regression_a_launcher_s_tag_write_founds_its_base() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(4, CreateFile { parent: 0, name: 0 }),
+        act(4, Launcher { node: 0, name: 0 }),
+        act(4, Tag { node: 0, tag: 12 }),
+        act(4, Chmod { file: 0 }),
+        Event::Crash { client: 0 },
+        Event::Plan { client: 4 },
+        act(4, CreateFile { parent: 0, name: 0 }),
+        Event::Crash { client: 4 },
+        act(4, Delete { node: 13 }),
+        act(4, Tag { node: 0, tag: 0 }),
+    ];
+    if let Err(e) = run(5, &events) {
+        panic!("{e}");
+    }
+}

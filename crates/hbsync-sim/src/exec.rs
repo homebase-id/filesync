@@ -1218,7 +1218,16 @@ impl Sim {
                 // No base to record what it writes, and none it founds: it waits (the
                 // executor's `tags_recorded`).
                 let here = at_place(client, node, &state);
-                let founds = |r: &NodeState| Agreement::of(&here, r, false).founds_base(false);
+                // Read as the executor's view reads it against that version: what this client
+                // doesn't hold (a launcher's bit, tags) is the drive's.
+                let founds = |r: &NodeState| {
+                    let seen = NodeState {
+                        tags: held_tags(client, Some(r), node, &here.tags),
+                        content: seen_content(client, Some(r), node, &here),
+                        ..here.clone()
+                    };
+                    Agreement::of(&seen, r, false).founds_base(false)
+                };
                 if !client.base.contains(node)
                     && !(verdict(client, node).is_sync() && remote.as_ref().is_some_and(founds))
                 {
