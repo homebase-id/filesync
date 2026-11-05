@@ -19,6 +19,16 @@ changes). Attributes:
 
 The **root** is implicit: it has the fixed id from the node schema and is never stored as a node.
 
+**The executable bit.** Where a device has none (Windows), or doesn't sync it, the device keeps
+the drive's `x`: it never sets it on disk nor reads it back, and an edit sends the base's `x`
+on. On Linux a launcher (a name ending in `.desktop`, any case) is such a file: file managers
+start an executable launcher on a double-click, under whatever name and icon it gives itself,
+so its bit is the user's trust in it, given on that computer. A launcher arrives not executable
+(a download, and a move from the drive that renames an executable file into a launcher, which
+takes the bit off), and the user's own `chmod +x` stays on that computer: a launcher made here
+goes up with `x` false, and the drive's `x` stays whatever another device set. Launchers that
+an earlier version put in place executable stay so.
+
 **Three trees.** For every sync root the client keeps three views keyed by node id:
 - **Base**: the last state both sides agreed on. Written only after an operation succeeds.
   Tags count one by one: one both sides agree on (both hold it, or both lack it) takes that

@@ -4,6 +4,8 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
+use crate::Os;
+
 /// Identifies a file on one machine, stable across renames inside a volume.
 ///
 /// Unix: `(st_dev, st_ino)`. Windows: `(VolumeSerialNumber, FILE_ID_128)` from `FILE_ID_INFO`,
@@ -64,6 +66,24 @@ impl Fingerprint {
     /// size and mtime agree. A rename changes ctime on most systems, so ctime can't count.
     pub fn same_after_rename(&self, meta: &LocalMeta) -> bool {
         self.size == meta.size && self.mtime_ns == meta.mtime_ns
+    }
+}
+
+/// Whether the executable bit of a file named `name` syncs on `os`. Windows has none. On Linux a
+/// launcher's (`*.desktop`, any case) bit is the user's trust in it: file managers start an
+/// executable launcher on a double-click, under whatever name and icon it gives itself. So it is
+/// neither taken from the drive nor sent to it: a launcher arrives not executable, and the
+/// drive's bit is kept as it is (sync semantics §1).
+pub fn syncs_executable(os: Os, name: &str) -> bool {
+    const LAUNCHER: &str = ".desktop";
+    match os {
+        Os::Windows => false,
+        Os::MacOs => true,
+        Os::Linux => !name
+            .len()
+            .checked_sub(LAUNCHER.len())
+            .and_then(|at| name.get(at..))
+            .is_some_and(|end| end.eq_ignore_ascii_case(LAUNCHER)),
     }
 }
 
@@ -278,6 +298,24 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link)?;
         assert_eq!(stat(&link)?.kind, EntryKind::Symlink);
         Ok(())
+    }
+
+    #[test]
+    fn a_launcher_keeps_its_bit_on_linux_only() {
+        for name in ["app.desktop", "App.DESKTOP", ".desktop"] {
+            assert!(!syncs_executable(Os::Linux, name), "{name}");
+            assert!(syncs_executable(Os::MacOs, name), "{name}");
+        }
+        for name in [
+            "app.sh",
+            "desktop",
+            "app.desktop.txt",
+            "€.desktopx",
+            "€abcdefg",
+        ] {
+            assert!(syncs_executable(Os::Linux, name), "{name}");
+        }
+        assert!(!syncs_executable(Os::Windows, "app.sh"));
     }
 
     #[cfg(unix)]

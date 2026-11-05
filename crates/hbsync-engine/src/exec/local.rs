@@ -371,6 +371,13 @@ impl Executor<'_> {
         if let Err(e) = self.disk.rename(self.db, &row.path, &target)? {
             return Ok(io_outcome(e));
         }
+        // An executable file named a launcher from the drive isn't left one (sync semantics §1).
+        if row.executable == Some(true) && !syncs_executable(self.folder.os, name) {
+            let at = target.to_native(self.disk.root());
+            if let Err(e) = ops::set_executable(&at, false) {
+                tracing::warn!("{} stays executable: {e}", at.display());
+            }
+        }
         let refreshed = self.renamed(&row, &target);
         // A move takes the item's tags along: it writes none.
         self.finish(&[Settle::placed(node, drive, TagWrite::Nothing)], |s| {
