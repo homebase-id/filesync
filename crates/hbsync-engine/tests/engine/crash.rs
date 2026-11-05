@@ -1,6 +1,8 @@
 //! Crashes and power cuts at every step: what recovery finds and finishes.
 
 use super::*;
+use hbsync_platform::RelPath;
+use hbsync_types::ContentState;
 
 #[test]
 fn restart_after_an_interrupted_sync_converges() -> R {
@@ -86,13 +88,8 @@ fn a_placement_whose_commit_failed_is_kept(
     names: &[&str],
 ) -> R {
     let server = server();
-    let faults = Arc::new(hbsync_engine::exec::Faults::default());
     let mut a = Client::new(&server, "a")?;
-    let failing = Arc::clone(&faults);
-    let mut b = Client::with_config(&server, "b", move |c| {
-        c.batch = 1;
-        c.exec.hooks.faults = Arc::clone(&failing);
-    })?;
+    let (mut b, faults) = Client::with_faults(&server, "b", |c| c.batch = 1)?;
     setup(&a)?;
     a.sync()?;
     b.sync()?;
@@ -254,31 +251,7 @@ fn crash_right_after_a_fork_rename_survives_a_folder_rename() -> R {
 /// base's bytes before the next run, the node's absence here doesn't read as a delete.
 #[test]
 fn a_fork_completed_by_recovery_keeps_the_file_the_drive_changed_back() -> R {
-    let server = server();
-    let mut a = Client::new(&server, "a")?;
-    let mut b = Client::with_config(&server, "b", |c| {
-        c.exec.hooks.crash_at = Some(CrashPoint::AfterForkRename)
-    })?;
-    a.write("notes.txt", "base")?;
-    a.sync()?;
-    b.sync()?;
-    a.write("notes.txt", "a's edit")?;
-    a.sync()?;
-    b.write("notes.txt", "b's edit")?;
-    assert!(b.sync().is_err(), "b stops right after the conflict rename");
-    a.write("notes.txt", "base")?;
-    a.sync()?;
-    let remote = Box::new(b.remote.clone());
-    b.restart_with(remote, |c| c.exec.hooks.crash_at = None)?;
-    b.sync()?;
-    a.sync()?;
-    assert_eq!(a.tree_text(""), b.tree_text(""));
-    assert_eq!(b.read_text("notes.txt")?, "base");
-    assert_eq!(
-        b.read_text("notes (conflict b 2026-10-08).txt")?,
-        "b's edit"
-    );
-    Ok(())
+    fork_cut_short_then_the_drive_changed_back(false)
 }
 
 /// A fork cut short by a crash whose item the scan no longer finds (the user deleted the copy
@@ -286,28 +259,35 @@ fn a_fork_completed_by_recovery_keeps_the_file_the_drive_changed_back() -> R {
 /// the fork's, not a delete, though the drive is back at the base's bytes.
 #[test]
 fn a_fork_whose_copy_is_gone_before_recovery_keeps_the_drive_s_file() -> R {
+    fork_cut_short_then_the_drive_changed_back(true)
+}
+
+/// b stops right after its conflict rename; the drive goes back to the base's bytes, and the
+/// user deletes the copy first if `copy_gone`; then b runs again.
+fn fork_cut_short_then_the_drive_changed_back(copy_gone: bool) -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
     let mut b = Client::with_config(&server, "b", |c| {
         c.exec.hooks.crash_at = Some(CrashPoint::AfterForkRename)
     })?;
-    a.write("notes.txt", "base")?;
-    a.sync()?;
-    b.sync()?;
-    a.write("notes.txt", "a's edit")?;
-    a.sync()?;
-    b.write("notes.txt", "b's edit")?;
+    conflicted(&mut a, &mut b, "notes.txt")?;
     assert!(b.sync().is_err(), "b stops right after the conflict rename");
-    fs::remove_file(b.root.join("notes (conflict b 2026-10-08).txt"))?;
+    let copy = "notes (conflict b 2026-10-08).txt";
+    if copy_gone {
+        fs::remove_file(b.root.join(copy))?;
+    }
     a.write("notes.txt", "base")?;
     a.sync()?;
     let remote = Box::new(b.remote.clone());
     b.restart_with(remote, |c| c.exec.hooks.crash_at = None)?;
     b.sync()?;
     a.sync()?;
+    assert_eq!(a.tree_text(""), b.tree_text(""));
     assert_eq!(a.read_text("notes.txt")?, "base");
     assert_eq!(b.read_text("notes.txt")?, "base");
-    assert_eq!(a.tree_text(""), b.tree_text(""));
+    if !copy_gone {
+        assert_eq!(b.read_text(copy)?, "mine");
+    }
     Ok(())
 }
 
@@ -318,18 +298,9 @@ fn a_fork_whose_copy_is_gone_before_recovery_keeps_the_drive_s_file() -> R {
 #[test]
 fn a_wanted_download_recovered_after_its_base_moved_is_no_edit() -> R {
     let server = server();
-    let faults = Arc::new(hbsync_engine::exec::Faults::default());
     let mut a = Client::new(&server, "a")?;
-    let failing = Arc::clone(&faults);
-    let mut b = Client::with_config(&server, "b", move |c| {
-        c.exec.hooks.faults = Arc::clone(&failing);
-    })?;
-    a.write("f.txt", "base")?;
-    a.sync()?;
-    b.sync()?;
-    a.write("f.txt", "theirs")?;
-    a.sync()?;
-    b.write("f.txt", "mine")?;
+    let (mut b, faults) = Client::with_faults(&server, "b", |_| {})?;
+    conflicted(&mut a, &mut b, "f.txt")?;
     faults.fail(FailPoint::Commit, usize::MAX);
     b.engine.scan_local()?;
     assert!(b.engine.sync_once("2026-10-08").is_err(), "the run stops");
@@ -340,15 +311,12 @@ fn a_wanted_download_recovered_after_its_base_moved_is_no_edit() -> R {
     a.sync()?;
     let folder = Some(b.engine.db().folder());
     b.engine.drive().pull(folder)?;
-    let mirror = b.engine.db().read(|s| {
-        Ok(s.mirror_children(hbsync_types::NodeId::ROOT)?
-            .into_iter()
-            .find(|m| m.name == "f.txt"))
-    })?;
-    let mirror = mirror.ok_or("f.txt not on the drive")?;
+    let node = node_named(&server, "f.txt");
+    let mirror = b.engine.db().read(|s| s.get_mirror(node))?;
+    let mirror = mirror.ok_or("f.txt not in the mirror")?;
     b.engine.db().write(|s| {
-        let mut base = s.get_base(mirror.node)?.expect("a base");
-        assert_eq!(base.content_state, hbsync_types::ContentState::Wanted);
+        let mut base = s.get_base(node)?.expect("a base");
+        assert_eq!(base.content_state, ContentState::Wanted);
         base.state = mirror.state().expect("a file");
         base.remote = mirror.remote_ref();
         s.folder().put_base(&base)
@@ -373,29 +341,22 @@ fn a_wanted_download_recovered_after_its_base_moved_is_no_edit() -> R {
 /// leaves that preference alone: the node isn't made wanted, so nothing comes down.
 #[test]
 fn a_fork_record_over_an_online_only_base_keeps_it() -> R {
-    use hbsync_platform::RelPath;
     let server = server();
     let mut a = Client::new(&server, "a")?;
     let mut b = Client::new(&server, "b")?;
     a.write("notes.txt", "base")?;
     a.sync()?;
     b.sync()?;
-    let from = RelPath::new("notes.txt")?;
-    let node = b
-        .engine
-        .db()
-        .read(|s| s.get_local(&from))?
-        .ok_or("no row")?
-        .node;
+    let node = node_named(&server, "notes.txt");
     // Online-only here: its item gone by design; then a fork record a crash left.
     fs::remove_file(b.root.join("notes.txt"))?;
     let to = RelPath::new("notes (conflict b 2026-10-08).txt")?;
     b.engine.db().write(|s| {
         let mut base = s.get_base(node)?.expect("a base");
-        base.content_state = hbsync_types::ContentState::OnlineOnly;
+        base.content_state = ContentState::OnlineOnly;
         s.folder().put_base(&base)?;
         s.folder().delete_local(node)?;
-        s.folder().put_fork(node, hbsync_types::NodeId::new(), &to)
+        s.folder().put_fork(node, NodeId::new(), &to)
     })?;
     b.sync()?;
     assert!(!b.root.join("notes.txt").exists(), "{:?}", b.tree_text(""));
@@ -403,7 +364,7 @@ fn a_fork_record_over_an_online_only_base_keeps_it() -> R {
         .engine
         .db()
         .read(|s| Ok(s.get_base(node)?.map(|b| b.content_state)))?;
-    assert_eq!(state, Some(hbsync_types::ContentState::OnlineOnly));
+    assert_eq!(state, Some(ContentState::OnlineOnly));
     Ok(())
 }
 
@@ -443,7 +404,6 @@ fn parked_item_in_a_folder_the_user_renamed_is_put_back_there() -> R {
 
 #[test]
 fn crash_right_after_a_fork_rename_is_completed_not_published() -> R {
-    use hbsync_platform::RelPath;
     let server = server();
     let mut a = Client::new(&server, "a")?;
     let mut b = Client::new(&server, "b")?;

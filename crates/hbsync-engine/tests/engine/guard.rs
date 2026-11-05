@@ -1143,13 +1143,10 @@ fn a_confirmation_outlives_a_sync_that_failed_at_its_start() -> R {
 #[test]
 fn wanted_files_are_not_counted_as_deletes() -> R {
     let server = server();
-    let faults = Arc::new(hbsync_engine::exec::Faults::default());
     let mut a = Client::new(&server, "a")?;
-    let failing = Arc::clone(&faults);
-    let mut b = Client::with_config(&server, "b", move |cfg| {
+    let (mut b, faults) = Client::with_faults(&server, "b", |cfg| {
         cfg.guard.min = 2;
         cfg.guard.fraction = 0.0;
-        cfg.exec.hooks.faults = Arc::clone(&failing);
     })?;
     for i in 0..3 {
         a.write(&format!("f{i}.txt"), "base")?;

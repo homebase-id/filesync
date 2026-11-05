@@ -19,7 +19,7 @@ use hbsync_types::{NodeId, RemoteFileId, RemoteRef, Target};
 #[path = "../common/mod.rs"]
 mod common;
 
-use common::{Client, server};
+use common::{Client, conflicted, node_named, server};
 
 type R = Result<(), Box<dyn std::error::Error>>;
 

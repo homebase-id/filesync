@@ -212,6 +212,24 @@ impl ContentState {
     pub fn keeps_absence(self) -> bool {
         matches!(self, ContentState::OnlineOnly | ContentState::Wanted)
     }
+
+    /// The state once the node's item went into a conflict copy (sync semantics §5): wanted,
+    /// unless it keeps its absence already. A pin isn't kept (pins aren't set by anything yet).
+    pub fn after_fork(self) -> ContentState {
+        if self.keeps_absence() {
+            self
+        } else {
+            ContentState::Wanted
+        }
+    }
+
+    /// The state once an item is placed here again: a wanted one is an ordinary local one.
+    pub fn placed(self) -> ContentState {
+        match self {
+            ContentState::Wanted => ContentState::Local,
+            other => other,
+        }
+    }
 }
 
 /// The synced attributes of a file's content.

@@ -176,16 +176,11 @@ mod tests {
     /// The content states [`GONE_LOCALLY`] leaves out are those that keep a file's absence.
     #[test]
     fn gone_locally_leaves_out_the_states_that_keep_absence() {
-        let kept: Vec<String> = [
-            ContentState::Local,
-            ContentState::Pinned,
-            ContentState::OnlineOnly,
-            ContentState::Wanted,
-        ]
-        .into_iter()
-        .filter(|s| s.keeps_absence())
-        .map(|s| codec::content_state_to(s).to_string())
-        .collect();
+        let kept: Vec<String> = (0..)
+            .map_while(|v| codec::content_state_from(v).ok())
+            .filter(|s| s.keeps_absence())
+            .map(|s| codec::content_state_to(s).to_string())
+            .collect();
         assert!(
             GONE_LOCALLY.contains(&format!("NOT IN ({})", kept.join(", "))),
             "{GONE_LOCALLY}"

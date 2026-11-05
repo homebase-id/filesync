@@ -92,6 +92,24 @@ pub enum Acts<'a> {
     Stale,
 }
 
+impl DriveVersion {
+    /// The base's version a write that acted on this one settles by, the base now at `base_at`
+    /// in content state `state` (`None`: no base): a wanted base (§5) holds no agreement to
+    /// keep (it only followed the drive while no item was here), so it reads as the one the
+    /// plan saw, and what is placed settles against this version however it moved. The
+    /// executor's settle and the simulator's decide by it.
+    pub fn base_now(
+        &self,
+        base_at: Option<VersionTag>,
+        state: Option<ContentState>,
+    ) -> Option<VersionTag> {
+        match state {
+            Some(ContentState::Wanted) => self.base_at,
+            _ => base_at,
+        }
+    }
+}
+
 /// The tags a write settles from: the base's (`base`, its content state `state`), or where the
 /// base is wanted (§5) the drive's (`remote`): its item, which held the base's tags, went into
 /// a conflict copy, and nothing here holds the node's tags but what a write put on its new

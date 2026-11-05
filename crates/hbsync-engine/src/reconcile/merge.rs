@@ -124,10 +124,7 @@ impl Reconciler<'_> {
     }
 
     pub(super) fn content_state(&self, node: NodeId) -> ContentState {
-        self.input
-            .base_extra
-            .get(&node)
-            .map_or(ContentState::Local, |e| e.content_state)
+        self.input.content_state(node)
     }
 
     /// The local state, with what the local side can't express filled in from the base: an

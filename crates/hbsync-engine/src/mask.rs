@@ -111,12 +111,7 @@ impl Masks {
         // wanted (its item gone into a conflict copy, §5) has nothing here to keep or bring
         // back: it is masked as one never synced here.
         let mut filtered_base = self::masked(&input.base, filter);
-        filtered_base.retain(|n| {
-            input
-                .base_extra
-                .get(n)
-                .is_none_or(|e| e.content_state != ContentState::Wanted)
-        });
+        filtered_base.retain(|n| input.content_state(*n) != ContentState::Wanted);
         let brought_back: HashSet<NodeId> = masked
             .iter()
             .copied()

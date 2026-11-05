@@ -1297,9 +1297,8 @@ fn regression_a_conflict_copy_leaves_no_base_tag_behind_through_recovery() {
 
 /// A conflict copy keeps the node's base for what the run still writes of the node (§5): client
 /// 0 removes a tag with its edit while client 1 edits the file; client 0 forks its edit into a
-/// copy and writes the tag's removal up onto client 1's version. Merged against the base, the
-/// removal stands; merged against none (a fork that deleted the base), the drive's tag read as
-/// added there, and stayed.
+/// copy and writes the tag's removal up onto client 1's version, merged against the base: the
+/// removal stands.
 #[test]
 fn regression_a_tag_removed_with_a_conflicting_edit_is_removed_on_the_drive() {
     use Action::*;

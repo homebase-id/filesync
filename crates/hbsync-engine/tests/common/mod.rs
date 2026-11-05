@@ -8,6 +8,7 @@ use std::ops::{Deref, DerefMut};
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 
+use hbsync_engine::exec::Faults;
 use hbsync_engine::testkit::TestClient;
 use hbsync_engine::{EngineConfig, SyncReport};
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
@@ -54,6 +55,21 @@ impl Client {
         })?))
     }
 
+    /// [`Client::with_config`] with test faults, which the test sets as it goes.
+    pub(crate) fn with_faults(
+        server: &Arc<Mutex<FakeServer>>,
+        name: &str,
+        tweak: impl Fn(&mut EngineConfig) + 'static,
+    ) -> Res<(Self, Arc<Faults>)> {
+        let faults = Arc::new(Faults::default());
+        let failing = Arc::clone(&faults);
+        let client = Self::with_config(server, name, move |cfg| {
+            cfg.exec.hooks.faults = Arc::clone(&failing);
+            tweak(cfg);
+        })?;
+        Ok((client, faults))
+    }
+
     /// Scan, then sync until idle. The report accumulates every pass.
     pub(crate) fn sync(&mut self) -> Res<SyncReport> {
         self.0.sync_until_idle("2026-10-08", true, || {})
@@ -71,6 +87,25 @@ impl Client {
         let drive = self.engine.drive();
         drive.announcing_from(drive.connection());
     }
+}
+
+/// `path` synced on `a` and `b` as "base", then edited on both: "theirs" on `a`, synced, and
+/// "mine" on `b`, not yet: `b`'s next sync meets the conflict.
+pub(crate) fn conflicted(a: &mut Client, b: &mut Client, path: &str) -> Res<()> {
+    a.write(path, "base")?;
+    a.sync()?;
+    b.sync()?;
+    a.write(path, "theirs")?;
+    a.sync()?;
+    b.write(path, "mine")?;
+    Ok(())
+}
+
+/// The node of the file named `name` on the server, live or removed.
+pub(crate) fn node_named(server: &Arc<Mutex<FakeServer>>, name: &str) -> hbsync_types::NodeId {
+    header_named(server, name)
+        .node()
+        .expect("found by its name")
 }
 
 /// The header of the file named `name` on the server, live or removed.

@@ -188,12 +188,8 @@ fn a_clash_in_a_large_folder_takes_a_name_free_in_all_of_it() -> R {
 #[test]
 fn downloads_wait_for_their_bytes_to_be_durable() -> R {
     let server = server();
-    let faults = Arc::new(hbsync_engine::exec::Faults::default());
     let mut a = Client::new(&server, "a")?;
-    let failing = Arc::clone(&faults);
-    let mut b = Client::with_config(&server, "b", move |c| {
-        c.exec.hooks.faults = Arc::clone(&failing);
-    })?;
+    let (mut b, faults) = Client::with_faults(&server, "b", |_| {})?;
     for i in 0..20 {
         a.write(&format!("d/f{i}"), format!("{i}"))?;
     }
@@ -474,19 +470,15 @@ fn two_computers_with_the_same_conflict_make_their_own_copies() -> R {
     Ok(())
 }
 
-/// A conflict copy's download, planned with it, acts on no base (the fork took it, §5): it
-/// settles in its own run: the fork, the download and the copy's upload, nothing after.
+/// A conflict copy's download, planned with it, settles in its own run against the version it
+/// acted on (the node's base is wanted, §5): the fork, the download and the copy's upload,
+/// nothing after.
 #[test]
 fn a_conflict_copy_s_download_settles_in_its_run() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
     let mut b = Client::new(&server, "b")?;
-    a.write("f.txt", "base")?;
-    a.sync()?;
-    b.sync()?;
-    a.write("f.txt", "theirs")?;
-    a.sync()?;
-    b.write("f.txt", "mine")?;
+    conflicted(&mut a, &mut b, "f.txt")?;
     let report = b.sync()?;
     assert!(report.failed.is_empty(), "{report:?}");
     assert_eq!(report.ops_done, 3, "{report:?}");
@@ -500,18 +492,9 @@ fn a_conflict_copy_s_download_settles_in_its_run() -> R {
 #[test]
 fn a_wanted_node_adopts_its_bytes_put_back_by_hand() -> R {
     let server = server();
-    let faults = Arc::new(hbsync_engine::exec::Faults::default());
     let mut a = Client::new(&server, "a")?;
-    let failing = Arc::clone(&faults);
-    let mut b = Client::with_config(&server, "b", move |c| {
-        c.exec.hooks.faults = Arc::clone(&failing);
-    })?;
-    a.write("f.txt", "base")?;
-    a.sync()?;
-    b.sync()?;
-    a.write("f.txt", "theirs")?;
-    a.sync()?;
-    b.write("f.txt", "mine")?;
+    let (mut b, faults) = Client::with_faults(&server, "b", |_| {})?;
+    conflicted(&mut a, &mut b, "f.txt")?;
     faults.fail(FailPoint::Barrier, usize::MAX);
     b.sync()?;
     assert!(!b.root.join("f.txt").exists(), "{:?}", b.tree_text(""));
@@ -528,25 +511,15 @@ fn a_wanted_node_adopts_its_bytes_put_back_by_hand() -> R {
 
 /// A wanted file (its item gone into a conflict copy, its download not in yet, §5) doesn't hold
 /// up its folder's delete here: the folder goes whole, its file with it, the drive's version
-/// unchanged since. (Read as here, it kept the deleted folder alive, made again with the file,
-/// its other files deleted on the drive.)
+/// unchanged since.
 #[test]
 fn a_folder_deleted_here_takes_its_wanted_file_along() -> R {
     let server = server();
-    let faults = Arc::new(hbsync_engine::exec::Faults::default());
     let mut a = Client::new(&server, "a")?;
-    let failing = Arc::clone(&faults);
-    let mut b = Client::with_config(&server, "b", move |c| {
-        c.exec.hooks.faults = Arc::clone(&failing);
-    })?;
-    a.write("d/f.txt", "base")?;
+    let (mut b, faults) = Client::with_faults(&server, "b", |_| {})?;
     a.write("d/g.txt", "g")?;
     a.write("keep.txt", "k")?;
-    a.sync()?;
-    b.sync()?;
-    a.write("d/f.txt", "theirs")?;
-    a.sync()?;
-    b.write("d/f.txt", "mine")?;
+    conflicted(&mut a, &mut b, "d/f.txt")?;
     faults.fail(FailPoint::Barrier, usize::MAX);
     b.sync()?;
     // The drive goes back to the base's bytes; b's user deletes the folder.
@@ -569,12 +542,7 @@ fn a_conflict_s_download_deleted_here_goes_from_the_drive() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
     let mut b = Client::new(&server, "b")?;
-    a.write("f.txt", "base")?;
-    a.sync()?;
-    b.sync()?;
-    a.write("f.txt", "theirs")?;
-    a.sync()?;
-    b.write("f.txt", "mine")?;
+    conflicted(&mut a, &mut b, "f.txt")?;
     b.sync()?;
     assert_eq!(b.read_text("f.txt")?, "theirs");
     fs::remove_file(b.root.join("f.txt"))?;
@@ -586,24 +554,13 @@ fn a_conflict_s_download_deleted_here_goes_from_the_drive() -> R {
 }
 
 /// A conflict copy leaves the node's base wanted (§5): its download, gone stale as the drive
-/// changed back to the base's bytes before it ran, never reads as a delete here. (It kept the
-/// base as it was: the next plan read the node's absence as this device deleting it, and the
-/// drive's file went to Recently deleted, though no one deleted it.)
+/// changed back to the base's bytes before it ran, never reads as a delete here.
 #[test]
 fn a_conflict_copy_whose_download_goes_stale_keeps_the_file() -> R {
     let server = server();
-    let faults = Arc::new(hbsync_engine::exec::Faults::default());
     let mut a = Client::new(&server, "a")?;
-    let failing = Arc::clone(&faults);
-    let mut b = Client::with_config(&server, "b", move |c| {
-        c.exec.hooks.faults = Arc::clone(&failing);
-    })?;
-    a.write("f.txt", "base")?;
-    a.sync()?;
-    b.sync()?;
-    a.write("f.txt", "theirs")?;
-    a.sync()?;
-    b.write("f.txt", "mine")?;
+    let (mut b, faults) = Client::with_faults(&server, "b", |_| {})?;
+    conflicted(&mut a, &mut b, "f.txt")?;
     // b makes its conflict copy, but the drive's version doesn't come down yet.
     faults.fail(FailPoint::Barrier, usize::MAX);
     b.sync()?;

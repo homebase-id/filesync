@@ -135,6 +135,15 @@ impl Default for Options {
     }
 }
 
+impl Input {
+    /// `node`'s content state (local where it has no base).
+    pub(crate) fn content_state(&self, node: NodeId) -> ContentState {
+        self.base_extra
+            .get(&node)
+            .map_or(ContentState::Local, |e| e.content_state)
+    }
+}
+
 /// Everything the reconciler looks at. Trees contain the dirty nodes (where they exist on
 /// that side) plus the context the shell loaded: their ancestors and the siblings in affected
 /// folders. Nodes not in `dirty` are taken as unchanged context.

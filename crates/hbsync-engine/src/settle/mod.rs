@@ -5,7 +5,7 @@ use hbsync_namemap::{to_local, to_remote};
 use hbsync_platform::name::NameIssue;
 use hbsync_platform::{Fingerprint, Os, RelPath};
 use hbsync_state::{BaseRow, FolderTx, MirrorRow, Placing, PlannedBase, ReadTx, StateError};
-use hbsync_types::{ContentHash, ContentState, NodeId, NodeKind, NodeState, RemoteRef};
+use hbsync_types::{ContentHash, NodeId, NodeKind, NodeState, RemoteRef};
 
 pub(crate) mod rules;
 
@@ -198,20 +198,11 @@ pub(crate) fn settle_with(
     let at = base.as_ref().map(|b| b.remote);
     let ours = how.ours.filter(|o| at == Some(*o));
     let drive = how.against.drive();
-    // A wanted base (§5) holds no agreement to keep: it only followed the drive while no item
-    // was here, so what is placed settles against the version it acted on, however it moved.
-    let wanted = base
-        .as_ref()
-        .is_some_and(|b| b.content_state == ContentState::Wanted);
+    let state = base.as_ref().map(|b| b.content_state);
     // A local write's version of the drive its content, place and version settle against
     // (`None` in it: the base moved), with the tags of the version it acted on.
     let acted = drive.map(|d| {
-        let base_at = if wanted {
-            d.base_at
-        } else {
-            at.map(|r| r.version)
-        };
-        d.settles_against(base_at, ours, |o| {
+        d.settles_against(d.base_now(at.map(|r| r.version), state), ours, |o| {
             let m = mirror.as_ref().filter(|m| m.remote_ref() == o)?;
             Some((m.state()?, o))
         })
@@ -330,10 +321,7 @@ fn settled(
     let mut row = base.unwrap_or_else(|| BaseRow::new(how.node, remote.clone(), at));
     row.state = state;
     row.remote = at;
-    // An item is here again.
-    if row.content_state == ContentState::Wanted {
-        row.content_state = ContentState::Local;
-    }
+    row.content_state = row.content_state.placed();
     if agreed.place {
         row.local_name = recorded_name(&local.row.path, &remote.name, os);
     }
