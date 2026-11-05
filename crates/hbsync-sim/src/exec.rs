@@ -1162,7 +1162,9 @@ impl Sim {
                 client.local.remove(node);
                 client.local.insert(new_node, NodeState { name, ..state });
                 // The node's base is wanted (§5), as the executor's.
-                if let Some(e) = client.extra.get_mut(&node) {
+                if let Some(e) = client.extra.get_mut(&node)
+                    && !e.content_state.keeps_absence()
+                {
                     e.content_state = ContentState::Wanted;
                     e.local_hash = None;
                 }
@@ -2126,6 +2128,13 @@ impl Sim {
             .filter(|_| client.base.contains(node));
         let ours = ours.filter(|o| base_at == Some(*o));
         let drive = against.drive();
+        // A wanted base settles what is placed against the version it acted on, however it
+        // moved (the executor's).
+        let wanted_base = client.base.contains(node)
+            && client
+                .extra
+                .get(&node)
+                .is_some_and(|e| e.content_state == ContentState::Wanted);
         // The executor's compare and set. The mirror it reads here is the drive as it is now
         // (another folder's engine may have pulled it), where the run's downloads and order
         // guards read the plan's snapshot with its own writes (no pull mid-run): both happen in
@@ -2134,6 +2143,7 @@ impl Sim {
             // The node's file id is the version's: ours is at another version of it.
             let ours = ours.map(|version| RemoteRef { version, ..d.at });
             let mirror = |o| server.clone().zip(remote_ref).filter(|(_, at)| *at == o);
+            let base_at = if wanted_base { d.base_at } else { base_at };
             d.settles_against(base_at, ours, mirror)
                 .map(|(r, at)| (r, at.version))
         });
@@ -2151,7 +2161,7 @@ impl Sim {
         let wanted = client
             .extra
             .get(&node)
-            .is_some_and(|e| e.content_state == ContentState::Wanted);
+            .is_some_and(|e| e.content_state.keeps_absence());
         // A parked node is at its original place, as the executor's `local_node` reads it.
         let local = client
             .local

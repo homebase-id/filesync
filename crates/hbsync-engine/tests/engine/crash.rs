@@ -311,6 +311,102 @@ fn a_fork_whose_copy_is_gone_before_recovery_keeps_the_drive_s_file() -> R {
     Ok(())
 }
 
+/// A conflict's download put in place whose commit was lost, recovered after the node's wanted
+/// base moved on (it follows the drive, §5): the item is the drive's version it was placed
+/// from, an ordinary base again, never read as an edit here (a second conflict copy, or the
+/// drive's own bytes sent up again).
+#[test]
+fn a_wanted_download_recovered_after_its_base_moved_is_no_edit() -> R {
+    let server = server();
+    let faults = Arc::new(hbsync_engine::exec::Faults::default());
+    let mut a = Client::new(&server, "a")?;
+    let failing = Arc::clone(&faults);
+    let mut b = Client::with_config(&server, "b", move |c| {
+        c.exec.hooks.faults = Arc::clone(&failing);
+    })?;
+    a.write("f.txt", "base")?;
+    a.sync()?;
+    b.sync()?;
+    a.write("f.txt", "theirs")?;
+    a.sync()?;
+    b.write("f.txt", "mine")?;
+    faults.fail(FailPoint::Commit, usize::MAX);
+    b.engine.scan_local()?;
+    assert!(b.engine.sync_once("2026-10-08").is_err(), "the run stops");
+    faults.fail(FailPoint::Commit, 0);
+    // a edits again; the wanted base followed the drive meanwhile (as a write of the node
+    // settles it while no item is here): it is at that version now.
+    a.write("f.txt", "theirs, again")?;
+    a.sync()?;
+    let folder = Some(b.engine.db().folder());
+    b.engine.drive().pull(folder)?;
+    let mirror = b.engine.db().read(|s| {
+        Ok(s.mirror_children(hbsync_types::NodeId::ROOT)?
+            .into_iter()
+            .find(|m| m.name == "f.txt"))
+    })?;
+    let mirror = mirror.ok_or("f.txt not on the drive")?;
+    b.engine.db().write(|s| {
+        let mut base = s.get_base(mirror.node)?.expect("a base");
+        assert_eq!(base.content_state, hbsync_types::ContentState::Wanted);
+        base.state = mirror.state().expect("a file");
+        base.remote = mirror.remote_ref();
+        s.folder().put_base(&base)
+    })?;
+    let report = b.sync()?;
+    assert!(report.conflicts.is_empty(), "{report:?}");
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.read_text("f.txt")?, "theirs, again");
+    assert_eq!(b.read_text("f.txt")?, "theirs, again");
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    let copies = b
+        .tree_text("")
+        .iter()
+        .filter(|e| e.contains("conflict"))
+        .count();
+    assert_eq!(copies, 1, "{:?}", b.tree_text(""));
+    Ok(())
+}
+
+/// A fork record a crash left for a node whose base is online-only (no local bytes by design)
+/// leaves that preference alone: the node isn't made wanted, so nothing comes down.
+#[test]
+fn a_fork_record_over_an_online_only_base_keeps_it() -> R {
+    use hbsync_platform::RelPath;
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("notes.txt", "base")?;
+    a.sync()?;
+    b.sync()?;
+    let from = RelPath::new("notes.txt")?;
+    let node = b
+        .engine
+        .db()
+        .read(|s| s.get_local(&from))?
+        .ok_or("no row")?
+        .node;
+    // Online-only here: its item gone by design; then a fork record a crash left.
+    fs::remove_file(b.root.join("notes.txt"))?;
+    let to = RelPath::new("notes (conflict b 2026-10-08).txt")?;
+    b.engine.db().write(|s| {
+        let mut base = s.get_base(node)?.expect("a base");
+        base.content_state = hbsync_types::ContentState::OnlineOnly;
+        s.folder().put_base(&base)?;
+        s.folder().delete_local(node)?;
+        s.folder().put_fork(node, hbsync_types::NodeId::new(), &to)
+    })?;
+    b.sync()?;
+    assert!(!b.root.join("notes.txt").exists(), "{:?}", b.tree_text(""));
+    let state = b
+        .engine
+        .db()
+        .read(|s| Ok(s.get_base(node)?.map(|b| b.content_state)))?;
+    assert_eq!(state, Some(hbsync_types::ContentState::OnlineOnly));
+    Ok(())
+}
+
 #[test]
 fn parked_item_in_a_folder_the_user_renamed_is_put_back_there() -> R {
     let server = server();

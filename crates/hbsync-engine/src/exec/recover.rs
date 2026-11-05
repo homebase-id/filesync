@@ -257,8 +257,12 @@ pub(super) fn complete_fork(
 /// What a fork leaves once `node`'s item went into the copy `new_node` (or went otherwise): the
 /// record goes, and `node`'s base is wanted (§5): its absence here never reads as a delete, and
 /// the drive's version comes down. The base stays for what the run still writes of the node.
+/// One that keeps its absence already (online-only: no bytes here by design) stays as it is; a
+/// pinned one is wanted, its pin not kept (pins aren't set by anything yet).
 fn forked(s: FolderTx<'_>, node: NodeId, new_node: NodeId) -> Result<(), StateError> {
-    if let Some(mut base) = s.get_base(node)? {
+    if let Some(mut base) = s.get_base(node)?
+        && !base.content_state.keeps_absence()
+    {
         base.content_state = ContentState::Wanted;
         base.local_hash = None;
         s.put_base(&base)?;

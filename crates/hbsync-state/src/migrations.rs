@@ -64,7 +64,7 @@ const SCHEMA: &str = r#"
         executable     INTEGER NOT NULL DEFAULT 0,
         remote_file_id BLOB NOT NULL,                 -- finds the node of a tombstone
         version_tag    BLOB NOT NULL,                 -- the version agreed on (conflict ids)
-        content_state  INTEGER NOT NULL DEFAULT 0,    -- 0 local, 1 pinned, 2 online-only
+        content_state  INTEGER NOT NULL DEFAULT 0,    -- 0 local, 1 pinned, 2 online-only, 3 wanted
         local_name     TEXT,                          -- recorded local spelling, if any
         local_hash     BLOB,                          -- hash of the local bytes then
         tags           TEXT,                          -- Finder tags (JSON, node schema `tags`); NULL: none

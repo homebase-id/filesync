@@ -132,18 +132,17 @@ impl Reconciler<'_> {
 
     /// The local state, with what the local side can't express filled in from the base: an
     /// online-only file has no local bytes but is still there, and so is one whose item went
-    /// into a conflict copy (wanted, §5): its absence isn't a delete.
+    /// into a conflict copy (wanted, §5): its absence isn't a delete. While its folder is here:
+    /// one deleted here takes it along, as it would its item.
     pub(super) fn local_state(&self, node: NodeId) -> Option<NodeState> {
         let i = self.input;
         match i.local.get(node) {
             Some(l) => Some(l.clone()),
-            None if matches!(
-                self.content_state(node),
-                ContentState::OnlineOnly | ContentState::Wanted
-            ) =>
-            {
-                i.base.get(node).cloned()
-            }
+            None if self.content_state(node).keeps_absence() => i
+                .base
+                .get(node)
+                .filter(|b| b.parent.is_root() || i.local.contains(b.parent))
+                .cloned(),
             None => None,
         }
     }

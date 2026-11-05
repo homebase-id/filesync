@@ -4,9 +4,10 @@
 
 use super::*;
 
-/// A dirty node `d` with base `b` is a synced file gone locally (online-only files have no
-/// local copy by design), or gone remotely: what the mass-delete guard counts.
-const GONE_LOCALLY: &str = "b.kind = 0 AND b.content_state != 2 \
+/// A dirty node `d` with base `b` is a synced file gone locally (but where the base keeps its
+/// absence, [`ContentState::keeps_absence`]: online-only, 2, no local copy by design; wanted, 3,
+/// its item gone into a conflict copy), or gone remotely: what the mass-delete guard counts.
+const GONE_LOCALLY: &str = "b.kind = 0 AND b.content_state NOT IN (2, 3) \
     AND NOT EXISTS (SELECT 1 FROM local l WHERE l.folder = $F AND l.id = d.id)";
 const GONE_REMOTELY: &str = "b.kind = 0 AND NOT EXISTS (SELECT 1 FROM remote m WHERE m.id = d.id)";
 
@@ -165,5 +166,29 @@ impl FolderTx<'_> {
         Ok(self
             .prep("DELETE FROM held_deletes WHERE folder = $F")?
             .execute([])?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The content states [`GONE_LOCALLY`] leaves out are those that keep a file's absence.
+    #[test]
+    fn gone_locally_leaves_out_the_states_that_keep_absence() {
+        let kept: Vec<String> = [
+            ContentState::Local,
+            ContentState::Pinned,
+            ContentState::OnlineOnly,
+            ContentState::Wanted,
+        ]
+        .into_iter()
+        .filter(|s| s.keeps_absence())
+        .map(|s| codec::content_state_to(s).to_string())
+        .collect();
+        assert!(
+            GONE_LOCALLY.contains(&format!("NOT IN ({})", kept.join(", "))),
+            "{GONE_LOCALLY}"
+        );
     }
 }

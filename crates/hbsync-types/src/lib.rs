@@ -206,6 +206,14 @@ pub enum ContentState {
     Wanted,
 }
 
+impl ContentState {
+    /// Whether a missing local file is kept as it is (no local bytes by design, or none yet),
+    /// never read as a delete: online-only and wanted.
+    pub fn keeps_absence(self) -> bool {
+        matches!(self, ContentState::OnlineOnly | ContentState::Wanted)
+    }
+}
+
 /// The synced attributes of a file's content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FileContent {

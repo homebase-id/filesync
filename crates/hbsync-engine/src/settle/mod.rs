@@ -198,10 +198,20 @@ pub(crate) fn settle_with(
     let at = base.as_ref().map(|b| b.remote);
     let ours = how.ours.filter(|o| at == Some(*o));
     let drive = how.against.drive();
+    // A wanted base (§5) holds no agreement to keep: it only followed the drive while no item
+    // was here, so what is placed settles against the version it acted on, however it moved.
+    let wanted = base
+        .as_ref()
+        .is_some_and(|b| b.content_state == ContentState::Wanted);
     // A local write's version of the drive its content, place and version settle against
     // (`None` in it: the base moved), with the tags of the version it acted on.
     let acted = drive.map(|d| {
-        d.settles_against(at.map(|r| r.version), ours, |o| {
+        let base_at = if wanted {
+            d.base_at
+        } else {
+            at.map(|r| r.version)
+        };
+        d.settles_against(base_at, ours, |o| {
             let m = mirror.as_ref().filter(|m| m.remote_ref() == o)?;
             Some((m.state()?, o))
         })
@@ -219,12 +229,9 @@ pub(crate) fn settle_with(
             // No local bytes by design, or none yet (wanted, its item gone into a conflict
             // copy, §5): the base follows the remote.
             Some(m)
-                if base.as_ref().is_some_and(|b| {
-                    matches!(
-                        b.content_state,
-                        ContentState::OnlineOnly | ContentState::Wanted
-                    )
-                }) =>
+                if base
+                    .as_ref()
+                    .is_some_and(|b| b.content_state.keeps_absence()) =>
             {
                 if let (Some(mut b), Some(r)) = (base, m.state()) {
                     b.state = r;

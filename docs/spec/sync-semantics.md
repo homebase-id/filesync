@@ -163,9 +163,14 @@ When both sides edited a file to different content:
   nothing here, read as a delete: the drive's file went to Recently deleted, though no one
   deleted it. The base stays for the run's other writes of the node (a move, its tags), which
   merge against it; while wanted it follows the drive's versions, a write that puts an item
-  here settles its tags from the drive's (the item that held the base's went into the copy),
-  and from then on it is an ordinary base. A wanted node may be adopted (the drive's bytes put
-  back here by hand), and at a place this device filters it is masked, never leaving.
+  here settles against the version it acted on however the base moved, its tags from the
+  drive's (the item that held the base's went into the copy), and from then on it is an
+  ordinary base. A wanted node may be adopted (the drive's bytes put back here by hand), at a
+  place this device filters it is masked, never leaving, and the mass-delete guard doesn't
+  count it (§7). Its absence is kept only while its folder is here: a folder deleted here
+  takes it along, as it would its item. A recovery that finds neither the item nor the copy
+  (the user deleted one of them before the run) can't tell whether the rename happened: it
+  takes the node as forked, and the drive's version comes back.
 - The copy's node id comes from the node, the local bytes (hash and executable bit), the base
   version and the computer (its state DB's own id for the account): planned again on that
   computer, it is the same copy. Each computer makes its own copy: two computers with the same

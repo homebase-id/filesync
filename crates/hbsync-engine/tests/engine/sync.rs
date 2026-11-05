@@ -526,6 +526,42 @@ fn a_wanted_node_adopts_its_bytes_put_back_by_hand() -> R {
     Ok(())
 }
 
+/// A wanted file (its item gone into a conflict copy, its download not in yet, §5) doesn't hold
+/// up its folder's delete here: the folder goes whole, its file with it, the drive's version
+/// unchanged since. (Read as here, it kept the deleted folder alive, made again with the file,
+/// its other files deleted on the drive.)
+#[test]
+fn a_folder_deleted_here_takes_its_wanted_file_along() -> R {
+    let server = server();
+    let faults = Arc::new(hbsync_engine::exec::Faults::default());
+    let mut a = Client::new(&server, "a")?;
+    let failing = Arc::clone(&faults);
+    let mut b = Client::with_config(&server, "b", move |c| {
+        c.exec.hooks.faults = Arc::clone(&failing);
+    })?;
+    a.write("d/f.txt", "base")?;
+    a.write("d/g.txt", "g")?;
+    a.write("keep.txt", "k")?;
+    a.sync()?;
+    b.sync()?;
+    a.write("d/f.txt", "theirs")?;
+    a.sync()?;
+    b.write("d/f.txt", "mine")?;
+    faults.fail(FailPoint::Barrier, usize::MAX);
+    b.sync()?;
+    // The drive goes back to the base's bytes; b's user deletes the folder.
+    a.write("d/f.txt", "base")?;
+    a.sync()?;
+    fs::remove_dir_all(b.root.join("d"))?;
+    faults.fail(FailPoint::Barrier, 0);
+    b.sync()?;
+    a.sync()?;
+    assert!(!a.root.join("d").exists(), "{:?}", a.tree_text(""));
+    assert!(!b.root.join("d").exists(), "{:?}", b.tree_text(""));
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    Ok(())
+}
+
 /// The drive's version a conflict brought down is here again like any synced file (its base no
 /// longer wanted, §5): deleting it here deletes it on the drive.
 #[test]

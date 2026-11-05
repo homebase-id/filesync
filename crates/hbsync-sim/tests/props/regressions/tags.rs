@@ -1299,7 +1299,7 @@ fn regression_a_conflict_copy_leaves_no_base_tag_behind_through_recovery() {
 /// 0 removes a tag with its edit while client 1 edits the file; client 0 forks its edit into a
 /// copy and writes the tag's removal up onto client 1's version. Merged against the base, the
 /// removal stands; merged against none (a fork that deleted the base), the drive's tag read as
-/// added there, and stayed. The oracle counts lost adds, not lost removals: checked here.
+/// added there, and stayed.
 #[test]
 fn regression_a_tag_removed_with_a_conflicting_edit_is_removed_on_the_drive() {
     use Action::*;
@@ -1321,6 +1321,8 @@ fn regression_a_tag_removed_with_a_conflicting_edit_is_removed_on_the_drive() {
     events.extend([Event::Step { client: 0 }; 4]);
     let mut sim = Sim::new(2);
     sim.run(&events);
+    // The oracle checks a removal on the item it was made on (here the copy): the original's
+    // is checked here.
     assert_eq!(
         sim.server_tags("a"),
         Some(vec![]),
