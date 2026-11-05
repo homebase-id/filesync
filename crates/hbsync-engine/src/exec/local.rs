@@ -372,11 +372,13 @@ impl Executor<'_> {
             return Ok(io_outcome(e));
         }
         // A new name that changes whether this device holds the bit (a launcher's on Linux)
-        // gives the file what it holds now: none for a launcher, else the drive's (§1).
+        // gives the file what it holds now: none for a launcher, else the drive's (§1). The
+        // name it had is its own, a parked one's at its place, as the view reads it.
         let os = self.folder.os;
         let held = |n: &str| holds_executable(os, n);
-        if row.kind == NodeKind::File && row.path.name().is_some_and(|old| held(old) != held(name))
-        {
+        let place = self.db.read(|s| view::parked_place(s, &row))?;
+        let had = place.as_ref().unwrap_or(&row.path).name();
+        if row.kind == NodeKind::File && had.is_some_and(|old| held(old) != held(name)) {
             let drive_x = match drive {
                 Some(d) => d.state.content.map(|c| c.executable),
                 None => self

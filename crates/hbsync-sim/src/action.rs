@@ -125,6 +125,15 @@ pub enum Action {
     EditTaken {
         pick: usize,
     },
+    /// The user flips a file's executable bit (`chmod`); nothing on Windows, which has none.
+    Chmod {
+        file: usize,
+    },
+    /// The user renames an item in its folder to a launcher's name ([`LAUNCHERS`]), if free.
+    Launcher {
+        node: usize,
+        name: usize,
+    },
     /// The user adds a tag of [`TAGS`] to an item, or removes it, as far as the client's OS
     /// lets them.
     Tag {
@@ -250,6 +259,10 @@ pub(crate) const NAMES: &[&str] = &[
     "LLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLLL.txt",
     "lllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll.TXT",
 ];
+
+/// Launchers' names, whose executable bit a Linux client doesn't hold (sync semantics §1):
+/// [`Action::Launcher`] gives them. (Not in [`NAMES`], which scripted runs pick by index.)
+pub(crate) const LAUNCHERS: &[&str] = &["e.desktop", "E.DESKTOP"];
 
 /// For unit tests: client `client` does `action`.
 #[cfg(test)]

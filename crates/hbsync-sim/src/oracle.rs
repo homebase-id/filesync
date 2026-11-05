@@ -6,8 +6,8 @@ use std::fmt::Debug;
 
 use hbsync_engine::tree::{Tree, Violation};
 use hbsync_local::Filter;
-use hbsync_platform::Os;
 use hbsync_platform::name::check_remote_name;
+use hbsync_platform::{Os, holds_executable};
 use hbsync_types::{
     ContentHash, FileContent, NodeId, NodeKind, NodeState, RECOVERED_NAME, Role, Tags, VersionTag,
 };
@@ -67,6 +67,9 @@ pub(crate) struct Ledger {
     plan_taken: BTreeMap<usize, BTreeSet<(NodeId, VersionTag)>>,
     /// The first node that went to Recently deleted though no one deleted it.
     wrongly_removed: Option<String>,
+    /// The first upload that changed the drive's executable bit of a file whose bit or name no
+    /// user changed on that device (sync semantics §1: a bit set elsewhere was lost).
+    x_unasked: Option<String>,
     /// What users did to tags, and what became of it.
     pub(crate) tags: TagBook,
     /// The first answer of a client's write the store recorded wrongly: left out alone, or
@@ -291,6 +294,11 @@ impl Ledger {
         });
     }
 
+    /// An upload changed the drive's executable bit: `what`, if no user asked for it.
+    pub(crate) fn x_sent(&mut self, what: impl FnOnce() -> Option<String>) {
+        first(&mut self.x_unasked, what);
+    }
+
     /// Whether row `row` of Recently deleted went there rightly ([`Ledger::row_removed`]): only
     /// then may its blob go for good.
     pub(crate) fn removed_rightly(&self, row: &(NodeId, VersionTag)) -> bool {
@@ -382,6 +390,9 @@ impl Sim {
             }
         }
         // Recently deleted holds only what a user deleted, or a folder's removal took along.
+        if let Some(what) = &ledger.x_unasked {
+            return Err(format!("{what}: a bit no user changed there"));
+        }
         if let Some(what) = &ledger.wrongly_removed {
             return Err(format!(
                 "{what} went to Recently deleted, though no one deleted it"
@@ -402,6 +413,19 @@ impl Sim {
         // Orphans some client leaves, its place there one it doesn't sync (§6.3, §10).
         let mut left_somewhere: BTreeSet<NodeId> = BTreeSet::new();
         for (c, client) in self.clients.iter().enumerate() {
+            // A launcher whose bit the client doesn't hold is executable only as the user made
+            // it here (§1): never as it came from the drive.
+            let unasked = client.local.iter().find(|(n, s)| {
+                s.content.is_some_and(|c| c.executable)
+                    && !holds_executable(client.os, &s.name)
+                    && !client.trusted.contains(n)
+            });
+            if let Some((n, s)) = unasked {
+                return Err(format!(
+                    "{}: {n:?} ({}) is executable, though the user never made it so",
+                    client.name, s.name
+                ));
+            }
             let mut visible = client.local.clone();
             for n in filtered(&client.local, &client.filter) {
                 if let Some(blob) = visible
@@ -1060,13 +1084,24 @@ fn filtered(tree: &Tree, filter: &Filter) -> Vec<NodeId> {
         .collect()
 }
 
-/// `tree` with each item's tags as `os` holds them: what the other side has of what it can't
-/// hold doesn't count.
+/// `tree` with each item's tags, and each file's executable bit, as `os` holds them: what the
+/// other side has of what it can't hold doesn't count.
 fn held_by(tree: &Tree, os: Os) -> Tree {
     let mut held = tree.clone();
     for (n, s) in tree.iter() {
         let tags = s.tags.held_by(os);
-        held.insert(n, NodeState { tags, ..s.clone() });
+        let content = s.content.map(|c| FileContent {
+            executable: c.executable && holds_executable(os, &s.name),
+            ..c
+        });
+        held.insert(
+            n,
+            NodeState {
+                tags,
+                content,
+                ..s.clone()
+            },
+        );
     }
     held
 }
@@ -1100,8 +1135,12 @@ pub(crate) fn view_with(tree: &Tree, blobs: &HashMap<ContentHash, u64>) -> Vec<S
                 })
                 .unwrap_or_default();
             let tags = tag_names(&s.tags);
+            let x = match s.content.is_some_and(|c| c.executable) {
+                true => " +x",
+                false => "",
+            };
             format!(
-                "{path} {:?} {content} {} {tags:?}",
+                "{path} {:?} {content}{x} {} {tags:?}",
                 s.kind,
                 &id.0.simple().to_string()[24..]
             )

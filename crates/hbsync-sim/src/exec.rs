@@ -17,7 +17,7 @@ use hbsync_engine::reconcile::{
 };
 use hbsync_engine::tree::{Tree, first_free_by, numbered_names};
 use hbsync_local::layout::parked_name;
-use hbsync_platform::Os;
+use hbsync_platform::{Os, holds_executable};
 use hbsync_state::{Answer, RemovedRow, StateDb, StateError};
 use hbsync_types::{
     ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
@@ -168,8 +168,10 @@ impl Sim {
                 );
             }
         }
-        // What the client can't hold of the tags is the drive's, as the engine's view has it.
+        // What the client can't hold of the tags and the executable bit is the drive's, as the
+        // engine's view has it.
         see_held_tags(client, &mut local_view, &remote);
+        see_held_executable(client, &mut local_view, &remote);
         // Of the items the scan reports (as the engine's view marks its rows).
         let local_unhashed = client
             .unhashed_now()
@@ -1245,7 +1247,7 @@ impl Sim {
                             return Skip;
                         };
                         let content = server.state.content;
-                        if mirror.content != content {
+                        if !same_bytes(mirror.content, content) {
                             return Skip;
                         }
                         // What it acts on, as the executor decides it: the version the plan
@@ -1303,6 +1305,13 @@ impl Sim {
                 self.replace_aside(c, node, parent, &name);
                 let client = &mut self.clients[c];
                 let tags = tags.held_by(client.os);
+                // The bit set either way: what the client holds of the drive's (§1).
+                let held = holds_executable(client.os, &name);
+                let content = content.map(|c| FileContent {
+                    executable: held && c.executable,
+                    ..c
+                });
+                client.trusted.remove(&node);
                 client.local.insert(
                     node,
                     NodeState {
@@ -1317,7 +1326,10 @@ impl Sim {
                 Done
             }
             Op::LocalMove {
-                node, parent, name, ..
+                node,
+                parent,
+                name,
+                drive,
             } => {
                 let client = &mut self.clients[c];
                 let Some(state) = client.local.get(node).cloned() else {
@@ -1332,11 +1344,32 @@ impl Sim {
                 {
                     return Retry;
                 }
+                // A new name that changes whether the client holds the bit gives the file what
+                // it holds now: none for a launcher, else the drive's (the executor's, §1). The
+                // name it had is its own, a parked one's at its place.
+                let held = |n: &str| holds_executable(client.os, n);
+                let had = at_place(client, node, &state).name;
+                let mut content = state.content;
+                if let Some(c) = content.as_mut()
+                    && held(&had) != held(&name)
+                {
+                    let drive_x = match &drive {
+                        Some(d) => d.state.content.map(|c| c.executable),
+                        None => client
+                            .planned_remote
+                            .get(node)
+                            .and_then(|r| r.content)
+                            .map(|c| c.executable),
+                    };
+                    c.executable = held(&name) && drive_x == Some(true);
+                    client.trusted.remove(&node);
+                }
                 client.local.insert(
                     node,
                     NodeState {
                         parent,
                         name,
+                        content,
                         ..state
                     },
                 );
@@ -1375,15 +1408,12 @@ impl Sim {
                 }
                 let client = &self.clients[c];
                 // The local node must still be there, as planned (the executor reads it).
-                let Some(local) = client.local.get(node) else {
-                    return Skip;
-                };
-                if !unchanged(client, node) {
+                if !client.local.contains(node) || !unchanged(client, node) {
                     return Skip;
                 }
                 let content = match kind {
                     NodeKind::Folder => None,
-                    NodeKind::File => local.content,
+                    NodeKind::File => sent_content(client, node),
                 };
                 if kind == NodeKind::File && client.send_hash.contains(&node) {
                     self.ledger.sent_on_send += 1;
@@ -1425,7 +1455,7 @@ impl Sim {
                 tags,
                 ..
             } => {
-                let local_content = self.clients[c].local.get(node).and_then(|s| s.content);
+                let local_content = sent_content(&self.clients[c], node);
                 // Over a version this client never had (taken along by a folder's delete):
                 // that one stays, and this version becomes a new item (as the executor
                 // detaches it).
@@ -1455,6 +1485,17 @@ impl Sim {
                     let Some(content) = local_content else {
                         return Skip;
                     };
+                    let was = server.state.content.map(|c| c.executable);
+                    let client = &self.clients[c];
+                    let asked = client.user_x.contains(&node);
+                    self.ledger.x_sent(|| {
+                        (was.is_some_and(|x| x != content.executable) && !asked).then(|| {
+                            format!(
+                                "{} sent {node:?} executable {}",
+                                client.name, content.executable
+                            )
+                        })
+                    });
                     server.state.content = Some(content);
                 }
                 server.state.parent = coords.to_drive(parent);
@@ -1755,7 +1796,7 @@ impl Sim {
                 let base = self.clients[c].base.get(n);
                 let verified = base.is_some_and(|b| {
                     b.kind == state.kind
-                        && (state.kind == NodeKind::Folder || b.content == state.content)
+                        && (state.kind == NodeKind::Folder || same_bytes(b.content, state.content))
                 });
                 let name = &self.clients[c].name;
                 self.ledger.deleted_unverified(|| {
@@ -1793,7 +1834,7 @@ impl Sim {
             }
             client.base.get(n).is_some_and(|b| {
                 b.kind == state.kind
-                    && (state.kind == NodeKind::Folder || b.content == state.content)
+                    && (state.kind == NodeKind::Folder || same_bytes(b.content, state.content))
             })
         });
         if !unchanged {
@@ -1836,7 +1877,7 @@ impl Sim {
             return;
         };
         let held = client.aside.get(&node).and_then(|t| t.get(node));
-        if held.is_some_and(|s| s.content == name) {
+        if held.is_some_and(|s| same_bytes(s.content, name)) {
             client.aside.remove(&node);
             client.replaced.remove(&node);
         }
@@ -1860,9 +1901,9 @@ impl Sim {
             return;
         };
         let base = client.base.get(node).map(|b| b.content);
-        let committed = base.is_some_and(|b| b != name);
-        let unchanged = old.content == name;
-        let synced = base == Some(name);
+        let committed = base.is_some_and(|b| !same_bytes(b, name));
+        let unchanged = same_bytes(old.content, name);
+        let synced = base.is_some_and(|b| same_bytes(b, name));
         self.note(|_| {
             format!("  c{c} recovers {node:?}'s old version: committed {committed}, unchanged {unchanged}, synced {synced}")
         });
@@ -2094,9 +2135,13 @@ impl Sim {
             .local
             .get(node)
             .filter(|_| verdict(client, node).is_sync())
-            .map(|l| NodeState {
-                tags: held_tags(client, reference.as_ref(), node, &l.tags),
-                ..at_place(client, node, l)
+            .map(|l| {
+                let here = at_place(client, node, l);
+                NodeState {
+                    tags: held_tags(client, reference.as_ref(), node, &l.tags),
+                    content: seen_content(client, reference.as_ref(), node, &here),
+                    ..here
+                }
             });
         // What the write left, as the item reads, and what was there, read alike but for a tag
         // the OS can't hold at all (the item never held that: the write leaves the drive's), as
@@ -2264,6 +2309,67 @@ fn filled_tags(
     Tags::fill(read, &reference, client.os)
 }
 
+/// Whether two contents are the same bytes, as the executor compares an item with a version
+/// (by hash: the bit isn't the bytes).
+pub(crate) fn same_bytes(a: Option<FileContent>, b: Option<FileContent>) -> bool {
+    a.map(|c| c.hash) == b.map(|c| c.hash)
+}
+
+/// The content the client sees of its file `node` (`state`, at its place): the executable bit
+/// on disk where the client holds it by its name, else the drive's (`remote`), else the
+/// base's (the engine's `view::executable`, §1).
+fn seen_content(
+    client: &Client,
+    remote: Option<&NodeState>,
+    node: NodeId,
+    state: &NodeState,
+) -> Option<FileContent> {
+    let mut content = state.content?;
+    if !holds_executable(client.os, &state.name) {
+        let drive = remote.and_then(|r| r.content).map(|c| c.executable);
+        let base = || {
+            client
+                .base
+                .get(node)
+                .and_then(|b| b.content)
+                .map(|c| c.executable)
+        };
+        content.executable = drive.or_else(base).unwrap_or(false);
+    }
+    Some(content)
+}
+
+/// The content an upload of the client's file `node` sends: as the client sees it, at its
+/// place, against the executor's mirror (the executor's `prepare_upload`).
+fn sent_content(client: &Client, node: NodeId) -> Option<FileContent> {
+    let state = at_place(client, node, client.local.get(node)?);
+    seen_content(client, client.planned_remote.get(node), node, &state)
+}
+
+/// Gives each file of `view` (a client's local tree, at its places) the executable bit the
+/// client sees on it.
+fn see_held_executable(client: &Client, view: &mut Tree, remote: &Tree) {
+    let changed: Vec<(NodeId, NodeState)> = view
+        .iter()
+        .filter(|(_, s)| s.content.is_some())
+        .filter_map(|(n, state)| {
+            let content = seen_content(client, remote.get(n), n, state);
+            (content != state.content).then(|| {
+                (
+                    n,
+                    NodeState {
+                        content,
+                        ..state.clone()
+                    },
+                )
+            })
+        })
+        .collect();
+    for (n, state) in changed {
+        view.insert(n, state);
+    }
+}
+
 /// Gives each item of `view` (a client's local tree) the tags the client sees on it.
 fn see_held_tags(client: &Client, view: &mut Tree, remote: &Tree) {
     let changed: Vec<(NodeId, NodeState)> = view
@@ -2334,7 +2440,7 @@ pub(crate) fn refusal_key(client: &Client, op: &Op) -> String {
 /// The local file `op` sends from `client`'s item, if it uploads.
 fn uploaded(client: &Client, op: &Op) -> Option<hbsync_types::FileContent> {
     op.uploads()
-        .then(|| client.local.get(op.node()).and_then(|s| s.content))
+        .then(|| sent_content(client, op.node()))
         .flatten()
 }
 

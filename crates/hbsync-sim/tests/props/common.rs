@@ -31,6 +31,17 @@ pub(crate) fn action() -> impl Strategy<Value = Action> + Clone {
     ]
 }
 
+/// The users' actions, with executable bits flipped and launchers named more often (sync
+/// semantics §1: a Linux client doesn't hold a launcher's bit, Windows none).
+pub(crate) fn executable_action() -> impl Strategy<Value = Action> + Clone {
+    let i = || 0usize..16;
+    prop_oneof![
+        4 => action(),
+        2 => i().prop_map(|file| Action::Chmod { file }),
+        2 => (i(), i()).prop_map(|(node, name)| Action::Launcher { node, name }),
+    ]
+}
+
 /// The users' actions, with another device's change of a node pulled between a local
 /// operation's check and its commit ([`Action::PullMidLocal`]) now and then.
 pub(crate) fn pulling_action() -> impl Strategy<Value = Action> + Clone {

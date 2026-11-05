@@ -303,9 +303,22 @@ fn a_launcher_never_arrives_executable_on_linux() -> R {
     synced.insert("run.desktop".to_owned(), true);
     assert_eq!(drive()?, synced);
 
+    // The drive swaps a launcher's name with a script's: the launcher, parked out of the
+    // script's way under a temporary name, takes the drive's bit as a script; the script, as a
+    // launcher, loses it. Nothing goes back up.
+    on_drive("run.desktop", &|c| c.name = "swap".into())?;
+    on_drive("mac.sh", &|c| c.name = "run.desktop".into())?;
+    on_drive("swap", &|c| c.name = "mac.sh".into())?;
+    // (Back as they were, each with the other's name, in one plan on b.)
+    assert_clean(&b.sync()?);
+    assert!(executable(&b, "mac.sh")?);
+    assert!(!executable(&b, "run.desktop")?);
+    assert_clean(&b.sync()?);
+    assert_eq!(drive()?, synced);
+
     // Set up over the same launcher, plain: adopted, without a conflict copy.
     let mut c = Client::with_config(&server, "c", |_| {})?;
-    c.write("run.desktop", launcher)?;
+    c.write("run.desktop", b"[Desktop Entry]\nExec=false\n")?;
     assert_clean(&c.sync()?);
     assert_eq!(drive()?, synced);
     assert!(!executable(&c, "run.desktop")?);

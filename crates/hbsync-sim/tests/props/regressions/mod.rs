@@ -2,6 +2,7 @@
 
 mod crash;
 mod deleted;
+mod executable;
 mod names;
 mod roles;
 mod tags;

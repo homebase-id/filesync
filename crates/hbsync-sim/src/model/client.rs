@@ -138,6 +138,14 @@ pub(crate) struct Client {
     /// Another device changes the node of the next local operation of a kind between its
     /// check and its commit ([`crate::Action::PullMidLocal`]: `on`, `change`).
     pub(crate) pull_mid_local: Option<(usize, usize)>,
+    /// Files executable as the user made them here, or moved or named them so
+    /// ([`crate::Action::Chmod`], [`crate::Action::Launcher`], a move), till the executor writes
+    /// their bit: the only launchers a disk that doesn't hold their bit may hold executable
+    /// (sync semantics §1).
+    pub(crate) trusted: HashSet<NodeId>,
+    /// Files whose bit, or name, a user changed here ([`crate::Action::Chmod`], a move): only
+    /// an upload of one of them may change the drive's bit.
+    pub(crate) user_x: HashSet<NodeId>,
 }
 
 impl Client {
@@ -212,6 +220,8 @@ impl Client {
             syncs: 0,
             meanwhile: None,
             pull_mid_local: None,
+            trusted: HashSet::new(),
+            user_x: HashSet::new(),
         }
     }
 
@@ -261,6 +271,11 @@ pub(crate) fn rekey_client(client: &mut Client, node: NodeId, new: NodeId) {
     rekey(&mut client.planned_local, node, new);
     if client.send_hash.remove(&node) {
         client.send_hash.insert(new);
+    }
+    for set in [&mut client.trusted, &mut client.user_x] {
+        if set.remove(&node) {
+            set.insert(new);
+        }
     }
     for (parent, _) in client.parked.values_mut() {
         if *parent == node {

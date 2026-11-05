@@ -331,7 +331,9 @@ impl Sim {
     /// Whether the item record `p` places is at its place with the record's bytes.
     pub(crate) fn record_there(&self, c: usize, node: NodeId, p: &Placement) -> bool {
         self.clients[c].local.get(node).is_some_and(|l| {
-            l.parent == p.parent && l.name == p.name && l.content == p.record.state.content
+            l.parent == p.parent
+                && l.name == p.name
+                && crate::exec::same_bytes(l.content, p.record.state.content)
         })
     }
 
