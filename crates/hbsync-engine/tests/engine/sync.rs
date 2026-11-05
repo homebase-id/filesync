@@ -474,6 +474,68 @@ fn two_computers_with_the_same_conflict_make_their_own_copies() -> R {
     Ok(())
 }
 
+/// A conflict copy's download, planned with it, acts on no base (the fork took it, §5): it
+/// settles in its own run: the fork, the download and the copy's upload, nothing after.
+#[test]
+fn a_conflict_copy_s_download_settles_in_its_run() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("f.txt", "base")?;
+    a.sync()?;
+    b.sync()?;
+    a.write("f.txt", "theirs")?;
+    a.sync()?;
+    b.write("f.txt", "mine")?;
+    let report = b.sync()?;
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(report.ops_done, 3, "{report:?}");
+    assert_eq!(b.read_text("f.txt")?, "theirs");
+    Ok(())
+}
+
+/// A conflict copy takes the node's base with it (§5): its download, gone stale as the drive
+/// changed back to the base's bytes before it ran, never reads as a delete here. (It kept the
+/// base: the next plan read the node's absence as this device deleting it, and the drive's
+/// file went to Recently deleted, though no one deleted it.)
+#[test]
+fn a_conflict_copy_whose_download_goes_stale_keeps_the_file() -> R {
+    let server = server();
+    let faults = Arc::new(hbsync_engine::exec::Faults::default());
+    let mut a = Client::new(&server, "a")?;
+    let failing = Arc::clone(&faults);
+    let mut b = Client::with_config(&server, "b", move |c| {
+        c.exec.hooks.faults = Arc::clone(&failing);
+    })?;
+    a.write("f.txt", "base")?;
+    a.sync()?;
+    b.sync()?;
+    a.write("f.txt", "theirs")?;
+    a.sync()?;
+    b.write("f.txt", "mine")?;
+    // b makes its conflict copy, but the drive's version doesn't come down yet.
+    faults.fail(FailPoint::Barrier, usize::MAX);
+    b.sync()?;
+    assert!(!b.root.join("f.txt").exists(), "{:?}", b.tree_text(""));
+    // The drive goes back to the base's bytes before it does.
+    a.write("f.txt", "base")?;
+    a.sync()?;
+    faults.fail(FailPoint::Barrier, 0);
+    let report = b.sync()?;
+    assert!(report.failed.is_empty(), "{report:?}");
+    a.sync()?;
+    assert_eq!(b.read_text("f.txt")?, "base");
+    assert_eq!(a.read_text("f.txt")?, "base");
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    let copies = b
+        .tree_text("")
+        .iter()
+        .filter(|e| e.ends_with("= mine"))
+        .count();
+    assert_eq!(copies, 1, "{:?}", b.tree_text(""));
+    Ok(())
+}
+
 #[test]
 fn adopting_a_copy_of_a_sha256_file_downloads_nothing() -> R {
     let server = server();

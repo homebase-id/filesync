@@ -250,6 +250,37 @@ fn crash_right_after_a_fork_rename_survives_a_folder_rename() -> R {
     Ok(())
 }
 
+/// A fork its recovery completes takes the node's base with it too (§5): the drive back at the
+/// base's bytes before the next run, the node's absence here doesn't read as a delete.
+#[test]
+fn a_fork_completed_by_recovery_keeps_the_file_the_drive_changed_back() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::with_config(&server, "b", |c| {
+        c.exec.hooks.crash_at = Some(CrashPoint::AfterForkRename)
+    })?;
+    a.write("notes.txt", "base")?;
+    a.sync()?;
+    b.sync()?;
+    a.write("notes.txt", "a's edit")?;
+    a.sync()?;
+    b.write("notes.txt", "b's edit")?;
+    assert!(b.sync().is_err(), "b stops right after the conflict rename");
+    a.write("notes.txt", "base")?;
+    a.sync()?;
+    let remote = Box::new(b.remote.clone());
+    b.restart_with(remote, |c| c.exec.hooks.crash_at = None)?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    assert_eq!(b.read_text("notes.txt")?, "base");
+    assert_eq!(
+        b.read_text("notes (conflict b 2026-10-08).txt")?,
+        "b's edit"
+    );
+    Ok(())
+}
+
 #[test]
 fn parked_item_in_a_folder_the_user_renamed_is_put_back_there() -> R {
     let server = server();

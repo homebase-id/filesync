@@ -155,6 +155,11 @@ When both sides edited a file to different content:
 - The local version is renamed in place to `<stem> (conflict <device> <YYYY-MM-DD>)<ext>` and
   becomes a new node that is uploaded normally.
 - No bytes are ever dropped: the local bytes are moved by rename, never re-written.
+- The node's base goes with its item, in the fork's commit (and in its crash recovery): the
+  node isn't here any more, so its absence never reads as a delete here, and the remote
+  version comes down as new. Kept, a download gone stale (the drive changed back to the base's
+  bytes or bit before it ran) left the drive as the base and nothing here, read as a delete:
+  the drive's file went to Recently deleted, though no one deleted it.
 - The copy's node id comes from the node, the local bytes (hash and executable bit), the base
   version and the computer (its state DB's own id for the account): planned again on that
   computer, it is the same copy. Each computer makes its own copy: two computers with the same
@@ -971,9 +976,10 @@ That loses a removal, not a tag.
 - *Own removal in flight*: a tag added back while this device's removal of it is still on its
   way. The removal's write settles the base on what both sides hold after it, so the add then
   reads as the drive's removal, and goes.
-- *A new item keeps the base's tags*: an item replaced by a download (its own copy went into a
-  conflict copy) keeps in its base the old item's tags the write didn't touch. A tag neither
-  side holds any more then reads as this device's removal, and is sent over a later add.
+- *A new item keeps the base's tags*: an item put in place by a download where the node's base
+  outlived its own item keeps in its base the old item's tags the write didn't touch. A tag
+  neither side holds any more then reads as this device's removal, and is sent over a later
+  add. (A conflict copy no longer leads here: it takes the node's base with it, §5.)
 - *Added back to the base*: a tag removed and added back here matches the base, so nothing goes
   up; where the drive dropped it meanwhile (another device's delete, the node made again
   without it), the drive's state comes down over the add.

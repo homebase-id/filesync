@@ -1156,6 +1156,9 @@ impl Sim {
                 }
                 client.local.remove(node);
                 client.local.insert(new_node, NodeState { name, ..state });
+                // The node's base goes with it (§5), as the executor's.
+                client.base.remove(node);
+                client.extra.remove(&node);
                 rekey_marks(client, node, new_node);
                 self.ledger.tags.forked(c, node);
                 self.retrack(c, node, new_node);

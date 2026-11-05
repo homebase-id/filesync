@@ -872,13 +872,13 @@ fn regression_a_tag_written_before_a_base_isnt_an_add_on_the_renaming_side() {
         .unwrap_or_else(|e| panic!("{e}"));
 }
 
-/// Seed 0a9df7c6, a known limit (the user's call: not now): c0's edit loses to c1's, which
-/// also removed Red, so c0 forks its item into a conflict copy and downloads c1's version as
-/// a new item. Its base keeps Red, which neither the new item nor the drive holds, and when c1
-/// adds Red again, c0 reads the item's lack of it as its own removal and sends it over the
-/// add. The oracle names it rather than passing it silently.
+/// Seed 0a9df7c6, once a known limit: c0's edit loses to c1's, which also removed Red, so c0
+/// forks its item into a conflict copy and downloads c1's version as a new item. Its base kept
+/// Red, which neither the new item nor the drive held, and when c1 added Red again, c0 read
+/// the item's lack of it as its own removal and sent it over the add. The fork takes the
+/// node's base with it now (§5): the add stands, and no limit is met.
 #[test]
-fn regression_a_new_item_keeping_a_base_tag_is_a_known_limit() {
+fn regression_a_conflict_copy_leaves_no_base_tag_behind() {
     use Action::*;
     let act = |client, action| Event::Act { client, action };
     let events = [
@@ -922,12 +922,7 @@ fn regression_a_new_item_keeping_a_base_tag_is_a_known_limit() {
         act(1, Tag { node: 0, tag: 12 }),
     ];
     let limits = known_limits_of(2, &events);
-    // That case alone.
-    assert_eq!(limits.len(), 1, "{limits:?}");
-    assert!(
-        limits[0].starts_with("NewItemKeepsBaseTag") && limits[0].ends_with(" Red"),
-        "{limits:?}"
-    );
+    assert!(limits.is_empty(), "{limits:?}");
 }
 
 /// Seed f9ca4128, a known limit (the in-flight family, the user's call: not now): c1's plan
@@ -1254,14 +1249,14 @@ fn regression_a_tag_added_back_to_the_base_is_a_known_limit() {
     );
 }
 
-/// Seed 4c8098b5, the known limit of seed 0a9df7c6 (the user's call: not now) met through a
-/// lost commit: client 1 forks its edited `a` into a conflict copy and downloads the drive's
-/// version (Red removed) as a new item, and the download's commit fails: recovery settles its
-/// record, and the base keeps Red, which neither the new item nor the drive holds. Client 0's
-/// add of Red, made before, then reads on client 1 as its removal, and goes. The oracle names
-/// the limit on recovery's path too, as on the commit's.
+/// Seed 4c8098b5, seed 0a9df7c6's case through a lost commit: client 1 forks its edited `a`
+/// into a conflict copy and downloads the drive's version (Red removed) as a new item, and the
+/// download's commit fails: recovery settles its record. The base kept Red, which neither the
+/// new item nor the drive held, and client 0's add of Red, made before, then read on client 1
+/// as its removal, and went. The fork takes the node's base with it now (§5): on recovery's
+/// path too, the add stands.
 #[test]
-fn regression_a_new_item_keeping_a_base_tag_through_recovery_is_a_known_limit() {
+fn regression_a_conflict_copy_leaves_no_base_tag_behind_through_recovery() {
     use Action::*;
     let act = |client, action| Event::Act { client, action };
     let events = [
@@ -1296,10 +1291,5 @@ fn regression_a_new_item_keeping_a_base_tag_through_recovery_is_a_known_limit() 
         Event::Step { client: 1 },
     ];
     let limits = known_limits_of(3, &events);
-    // That case alone.
-    assert_eq!(limits.len(), 1, "{limits:?}");
-    assert!(
-        limits[0].starts_with("NewItemKeepsBaseTag") && limits[0].ends_with(" Red"),
-        "{limits:?}"
-    );
+    assert!(limits.is_empty(), "{limits:?}");
 }

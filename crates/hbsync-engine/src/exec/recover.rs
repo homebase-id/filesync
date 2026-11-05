@@ -241,13 +241,16 @@ fn discard_old(
     ))
 }
 
-/// The DB half of a fork: the original's row leaves, the copy's row arrives, the record goes.
+/// The DB half of a fork: the original's row leaves, the copy's row arrives, the record goes,
+/// and so does the original's base (§5): the node isn't here any more, so its absence never
+/// reads as a delete here, and its drive's version comes down as new.
 pub(super) fn complete_fork(
     s: FolderTx<'_>,
     node: NodeId,
     moved: &LocalRow,
 ) -> Result<(), StateError> {
     s.delete_local(node)?;
+    s.delete_base(node)?;
     s.put_local(moved)?;
     s.delete_parked(node)?;
     s.delete_fork(node)?;
@@ -268,6 +271,7 @@ pub(super) fn recover_forks(db: &mut StateDb, root: &Path) -> Result<(), StateEr
         if row.path.name() == Some(copy_name.as_str()) {
             db.write(|s| {
                 s.folder().rekey_local(node, new_node)?;
+                s.folder().delete_base(node)?;
                 s.folder().delete_parked(node)?;
                 s.folder().delete_fork(node)?;
                 s.folder().mark_dirty(new_node)?;

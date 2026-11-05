@@ -11,7 +11,6 @@ use hbsync_sim::{Action, Event};
 /// drive, to Recently deleted, though no one deleted it. A fork leaves the node's base as it
 /// was; an edit undone elsewhere (the same bytes again) would do the same.
 #[test]
-#[ignore = "known engine flaw: a fork's download gone stale removes the node (conflict copies)"]
 fn regression_a_conflict_copy_whose_download_goes_stale_keeps_the_file() {
     use Action::*;
     let act = |client, action| Event::Act { client, action };
