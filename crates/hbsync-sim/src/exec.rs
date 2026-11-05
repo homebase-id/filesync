@@ -10,7 +10,7 @@ use std::sync::Arc;
 use hbsync_engine::Against;
 use hbsync_engine::mask::masked;
 use hbsync_engine::pages::subtree_any_side;
-use hbsync_engine::plan::{Acts, Met, TagWrite, not_reached, tags_written};
+use hbsync_engine::plan::{Acts, Met, TagWrite, not_reached, prior_tags, tags_written};
 use hbsync_engine::reconcile::{
     Agreement, BaseExtra, DeleteGuard, DriveVersion, Guarding, Input, Masking, Op, Options,
     Removed, reconcile_with_known,
@@ -861,7 +861,12 @@ impl Sim {
                 Some(d) => Against::placed(Some(d)),
                 None => against,
             };
-            let at = self.settle_against(c, node, against, op.is_transfer() && !landed, tags, ours);
+            // A fork settles its copy only (above): the node's base stays as it is, wanted (the
+            // executor's).
+            let at = match op {
+                Op::LocalFork { .. } => None,
+                _ => self.settle_against(c, node, against, op.is_transfer() && !landed, tags, ours),
+            };
             if let Some(at) = at {
                 self.clients[c].run_settled.insert(node, at);
             }
@@ -1156,9 +1161,11 @@ impl Sim {
                 }
                 client.local.remove(node);
                 client.local.insert(new_node, NodeState { name, ..state });
-                // The node's base goes with it (§5), as the executor's.
-                client.base.remove(node);
-                client.extra.remove(&node);
+                // The node's base is wanted (§5), as the executor's.
+                if let Some(e) = client.extra.get_mut(&node) {
+                    e.content_state = ContentState::Wanted;
+                    e.local_hash = None;
+                }
                 rekey_marks(client, node, new_node);
                 self.ledger.tags.forked(c, node);
                 self.retrack(c, node, new_node);
@@ -2141,6 +2148,10 @@ impl Sim {
             None => server.clone().zip(live),
         };
         let client = &mut self.clients[c];
+        let wanted = client
+            .extra
+            .get(&node)
+            .is_some_and(|e| e.content_state == ContentState::Wanted);
         // A parked node is at its original place, as the executor's `local_node` reads it.
         let local = client
             .local
@@ -2174,10 +2185,21 @@ impl Sim {
                 client.drop_base(node);
                 None
             }
+            // None here yet (wanted, §5): the base follows the drive, as the executor's.
+            (None, _) if wanted && client.base.contains(node) => {
+                let (r, version) = server.zip(live)?;
+                client.base.insert(node, r);
+                if let Some(e) = client.extra.get_mut(&node) {
+                    e.version = Some(version);
+                }
+                Some(version)
+            }
             // The base moved otherwise: only the tags settle.
             (Some(l), None) if base_moved => {
                 if let (Some(b), Some(d)) = (client.base.get(node).cloned(), drive) {
-                    let tags = tags.settle(&b.tags, &l.tags, &d.state.tags);
+                    let state = client.extra.get(&node).map(|e| e.content_state);
+                    let prior = prior_tags(state.unwrap_or_default(), &b.tags, &d.state.tags);
+                    let tags = tags.settle(prior, &l.tags, &d.state.tags);
                     client.base.insert(node, NodeState { tags, ..b });
                 }
                 None
@@ -2185,15 +2207,20 @@ impl Sim {
             (Some(l), Some((r, version))) => {
                 let agreed = Agreement::of(&l, &r, same_bytes);
                 let base = client.base.get(node).cloned();
-                let prior = base.as_ref().map(|b| b.tags.clone()).unwrap_or_default();
+                let state = client.extra.get(&node).map(|e| e.content_state);
+                let prior = base
+                    .as_ref()
+                    .map(|b| prior_tags(state.unwrap_or_default(), &b.tags, &r.tags).clone())
+                    .unwrap_or_default();
                 let settled = agreed.settle(base, &l, &r, against.placed_from());
                 if let Some(mut b) = settled {
                     b.tags = tags.settle(&prior, &l.tags, &r.tags);
-                    // The base is at this version now, whatever was agreed.
+                    // The base is at this version now, whatever was agreed, with an item here.
                     if agreed.content {
                         client.extra.insert(node, extra(&l, Some(version)));
                     } else if let Some(e) = client.extra.get_mut(&node) {
                         e.version = Some(version);
+                        e.content_state = ContentState::Local;
                     }
                     client.base.insert(node, b);
                     return Some(version);

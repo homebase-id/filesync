@@ -3,13 +3,13 @@
 use crate::common::*;
 use hbsync_sim::{Action, Event};
 
-/// A known engine flaw, not of the bit's rule (on main too): client 4 edits a file while a Mac
-/// (client 0) marks it executable; client 4's plan forks its edit into a conflict copy and is
-/// to download the node again, but the Mac takes the mark off before that download runs, so
-/// it goes stale. The drive is then as the node's base again, with no item of the node here
-/// (the fork took it): the next plan reads that as a delete here and removes the file from the
-/// drive, to Recently deleted, though no one deleted it. A fork leaves the node's base as it
-/// was; an edit undone elsewhere (the same bytes again) would do the same.
+/// Client 4 edits a file while a Mac (client 0) marks it executable; client 4's plan forks its
+/// edit into a conflict copy and is to download the node again, but the Mac takes the mark off
+/// before that download runs, so it goes stale. The drive is then as the node's base again,
+/// with no item of the node here (the fork took it). The fork left the base as it was, and the
+/// next plan read that as a delete here: the file went to Recently deleted, though no one
+/// deleted it (on main too; an edit undone elsewhere did the same). The fork marks the base
+/// wanted now (§5): the node's absence isn't a delete, and the drive's version comes down.
 #[test]
 fn regression_a_conflict_copy_whose_download_goes_stale_keeps_the_file() {
     use Action::*;

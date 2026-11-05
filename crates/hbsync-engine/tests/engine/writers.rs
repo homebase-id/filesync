@@ -109,6 +109,102 @@ fn tags_sync_between_folders() -> R {
     Ok(())
 }
 
+/// A conflict copy keeps the node's base for the run's remote writes (§5): this device's removal
+/// of a tag, made with its edit, still reaches the drive's version that won the edits (the
+/// remote write merges its tags against the base, not against none, which read the drive's tag
+/// as added there and kept it). The conflict's download comes in the same run.
+#[test]
+fn a_tag_removed_with_a_conflicting_edit_is_removed_on_the_drive() -> R {
+    use hbsync_platform::tags::{self, Tag, Tags};
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("f.txt", "base")?;
+    if !tags::CAN_TAG || tags::write(&a.root.join("f.txt"), &Tags::default())?.is_none() {
+        eprintln!("no tags here; skipped");
+        return Ok(());
+    }
+    let tick = || std::thread::sleep(std::time::Duration::from_millis(20));
+    tags::write(&a.root.join("f.txt"), &Tags::new([Tag::new("Red", 0)]))?;
+    a.sync()?;
+    b.sync()?;
+    b.write("f.txt", "b's edit")?;
+    b.sync()?;
+    tick();
+    a.write("f.txt", "a's edit")?;
+    tags::write(&a.root.join("f.txt"), &Tags::default())?;
+    let report = a.sync()?;
+    assert!(report.failed.is_empty(), "{report:?}");
+    // The fork, the tag write, the download and the copy's upload: the download acts on the
+    // version the run's own tag write made (the bytes the same), never stale.
+    assert!(report.skipped.is_empty(), "{report:?}");
+    assert_eq!(report.ops_done, 4, "{report:?}");
+    let srv = server.lock().map_err(|_| "poisoned")?;
+    let tagged: Vec<String> = srv
+        .live()
+        .filter_map(|h| match &h.body {
+            hbsync_remote::RemoteBody::Live { content, .. } if content.name == "f.txt" => Some(
+                content
+                    .tags()
+                    .iter()
+                    .map(|t| t.name.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .flatten()
+        .collect();
+    assert!(tagged.is_empty(), "{tagged:?}");
+    drop(srv);
+    assert_eq!(a.read_text("f.txt")?, "b's edit");
+    Ok(())
+}
+
+/// The drive's version a conflict brings down settles its tags from the drive's, not from the
+/// item that went into the copy (§5): a tag that item held and the drive dropped isn't kept in
+/// the base, so another device adding it again later is not met as this device's removal.
+#[test]
+fn a_tag_the_conflict_copy_took_doesn_t_undo_a_later_add() -> R {
+    use hbsync_platform::tags::{self, Tag, Tags};
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("f.txt", "base")?;
+    if !tags::CAN_TAG || tags::write(&a.root.join("f.txt"), &Tags::default())?.is_none() {
+        eprintln!("no tags here; skipped");
+        return Ok(());
+    }
+    let tick = || std::thread::sleep(std::time::Duration::from_millis(20));
+    let red = Tags::new([Tag::new("Red", 0)]);
+    tags::write(&a.root.join("f.txt"), &red)?;
+    a.sync()?;
+    b.sync()?;
+    // b drops Red with its edit; a's edit keeps it: a forks and takes b's version.
+    tick();
+    b.write("f.txt", "b's edit")?;
+    tags::write(&b.root.join("f.txt"), &Tags::default())?;
+    b.sync()?;
+    a.write("f.txt", "a's edit")?;
+    a.sync()?;
+    assert_eq!(a.read_text("f.txt")?, "b's edit");
+    // b adds Red again.
+    tick();
+    tags::write(&b.root.join("f.txt"), &red)?;
+    b.sync()?;
+    a.sync()?;
+    b.sync()?;
+    let held = |c: &Client| -> Vec<String> {
+        tags::read(&c.root.join("f.txt"))
+            .unwrap_or_default()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect()
+    };
+    assert_eq!(held(&b), ["Red"]);
+    assert_eq!(held(&a), ["Red"]);
+    Ok(())
+}
+
 /// A copy proven equal only across hash algorithms gets its base though the tags differ (the
 /// drive's are tagged, the local copy isn't): no conflict copy, and the tags come down.
 #[test]

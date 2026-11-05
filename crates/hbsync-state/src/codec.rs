@@ -49,6 +49,7 @@ pub(crate) fn content_state_to(s: ContentState) -> i64 {
         ContentState::Local => 0,
         ContentState::Pinned => 1,
         ContentState::OnlineOnly => 2,
+        ContentState::Wanted => 3,
     }
 }
 
@@ -57,6 +58,7 @@ pub(crate) fn content_state_from(v: i64) -> Result<ContentState> {
         0 => Ok(ContentState::Local),
         1 => Ok(ContentState::Pinned),
         2 => Ok(ContentState::OnlineOnly),
+        3 => Ok(ContentState::Wanted),
         _ => Err(StateError::Corrupt(format!("bad content state {v}"))),
     }
 }

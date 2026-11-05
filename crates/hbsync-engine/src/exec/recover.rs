@@ -5,6 +5,7 @@ use super::local::went;
 use super::park::unpark;
 use super::*;
 use crate::adopt;
+use hbsync_types::ContentState;
 
 /// Puts right what a crash or a power cut left behind, from the executor's write-ahead records
 /// and its temporary names, once the scan has seen the disk and before planning: conflict
@@ -241,20 +242,30 @@ fn discard_old(
     ))
 }
 
-/// The DB half of a fork: the original's row leaves, the copy's row arrives, the record goes,
-/// and so does the original's base (§5): the node isn't here any more, so its absence never
-/// reads as a delete here, and its drive's version comes down as new.
+/// The DB half of a fork: the original's row leaves, the copy's row arrives, and the rest
+/// ([`forked`]).
 pub(super) fn complete_fork(
     s: FolderTx<'_>,
     node: NodeId,
     moved: &LocalRow,
 ) -> Result<(), StateError> {
     s.delete_local(node)?;
-    s.delete_base(node)?;
     s.put_local(moved)?;
+    forked(s, node, moved.node)
+}
+
+/// What a fork leaves once `node`'s item went into the copy `new_node` (or went otherwise): the
+/// record goes, and `node`'s base is wanted (§5): its absence here never reads as a delete, and
+/// the drive's version comes down. The base stays for what the run still writes of the node.
+fn forked(s: FolderTx<'_>, node: NodeId, new_node: NodeId) -> Result<(), StateError> {
+    if let Some(mut base) = s.get_base(node)? {
+        base.content_state = ContentState::Wanted;
+        base.local_hash = None;
+        s.put_base(&base)?;
+    }
     s.delete_parked(node)?;
     s.delete_fork(node)?;
-    s.mark_dirty(moved.node)?;
+    s.mark_dirty(new_node)?;
     s.mark_dirty(node)
 }
 
@@ -265,17 +276,15 @@ pub(super) fn complete_fork(
 pub(super) fn recover_forks(db: &mut StateDb, root: &Path) -> Result<(), StateError> {
     for (node, new_node, copy_name) in db.read(|s| s.all_forks())? {
         let Some(row) = db.read(|s| s.local_by_node(node))? else {
-            db.write(|s| s.folder().delete_fork(node))?;
+            // The item is gone (the copy deleted before this run, or never followed): the
+            // fork's absence of it, not a delete.
+            db.write(|s| forked(s.folder(), node, new_node))?;
             continue;
         };
         if row.path.name() == Some(copy_name.as_str()) {
             db.write(|s| {
                 s.folder().rekey_local(node, new_node)?;
-                s.folder().delete_base(node)?;
-                s.folder().delete_parked(node)?;
-                s.folder().delete_fork(node)?;
-                s.folder().mark_dirty(new_node)?;
-                s.folder().mark_dirty(node)
+                forked(s.folder(), node, new_node)
             })?;
         } else if hbsync_platform::stat(&row.path.to_native(root))
             .is_ok_and(|meta| meta.file_id == row.fingerprint.file_id)

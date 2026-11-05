@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 
 use hbsync_platform::Os;
-use hbsync_types::{ContentHash, NodeState, RemoteRef, Tags, VersionTag};
+use hbsync_types::{ContentHash, ContentState, NodeState, RemoteRef, Tags, VersionTag};
 
 /// A version of a node on the drive: what it holds, and which version it is; for a local
 /// write, also the version of the base the plan saw (`None`: none), which its commit checks
@@ -90,6 +90,17 @@ pub enum Acts<'a> {
     Mirror,
     /// Neither: the drive moved on since the plan.
     Stale,
+}
+
+/// The tags a write settles from: the base's (`base`, its content state `state`), or where the
+/// base is wanted (§5) the drive's (`remote`): its item, which held the base's tags, went into
+/// a conflict copy, and nothing here holds the node's tags but what a write put on its new
+/// item. The executor's settle and the simulator's read them alike.
+pub fn prior_tags<'a>(state: ContentState, base: &'a Tags, remote: &'a Tags) -> &'a Tags {
+    match state {
+        ContentState::Wanted => remote,
+        _ => base,
+    }
 }
 
 /// What a tag write left (`written`) and what the item held before it (`before`), read as the

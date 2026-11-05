@@ -464,6 +464,9 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE dirty_new RENAME TO dirty;
     CREATE TRIGGER dirty_gone AFTER DELETE ON dirty
         BEGIN INSERT INTO gone VALUES (old.id); END;",
+    // 26: a base's content state 3 (wanted: its item went into a conflict copy), which an
+    // older client can't read: it refuses the DB as newer than its own.
+    "-- base.content_state 3",
 ];
 
 /// The version this client makes and reads.

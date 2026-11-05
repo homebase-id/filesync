@@ -81,8 +81,9 @@ a row of Recently deleted *holds* what is in it, and a node holds its name (a na
 the node that has it).
 
 **Content state** (per file node, local only, never synced): `local` (default; may be evicted),
-`pinned` (always kept locally), `online-only` (no local bytes). A missing local file is a delete
-only when the base says the bytes were local.
+`pinned` (always kept locally), `online-only` (no local bytes), `wanted` (no item here yet: its
+item went into a conflict copy, §5; the drive's version comes down). A missing local file is a
+delete only when the base says the bytes were local.
 
 ## 2. Change classification
 
@@ -155,11 +156,16 @@ When both sides edited a file to different content:
 - The local version is renamed in place to `<stem> (conflict <device> <YYYY-MM-DD>)<ext>` and
   becomes a new node that is uploaded normally.
 - No bytes are ever dropped: the local bytes are moved by rename, never re-written.
-- The node's base goes with its item, in the fork's commit (and in its crash recovery): the
-  node isn't here any more, so its absence never reads as a delete here, and the remote
-  version comes down as new. Kept, a download gone stale (the drive changed back to the base's
-  bytes or bit before it ran) left the drive as the base and nothing here, read as a delete:
-  the drive's file went to Recently deleted, though no one deleted it.
+- The node's base is marked *wanted* in the fork's commit (and in its crash recovery, also
+  where the scan no longer finds the item): the node has no item here, its absence never reads
+  as a delete, and the drive's version comes down. Left as it was, a download gone stale (the
+  drive changed back to the base's bytes or bit before it ran) left the drive as the base and
+  nothing here, read as a delete: the drive's file went to Recently deleted, though no one
+  deleted it. The base stays for the run's other writes of the node (a move, its tags), which
+  merge against it; while wanted it follows the drive's versions, a write that puts an item
+  here settles its tags from the drive's (the item that held the base's went into the copy),
+  and from then on it is an ordinary base. A wanted node may be adopted (the drive's bytes put
+  back here by hand), and at a place this device filters it is masked, never leaving.
 - The copy's node id comes from the node, the local bytes (hash and executable bit), the base
   version and the computer (its state DB's own id for the account): planned again on that
   computer, it is the same copy. Each computer makes its own copy: two computers with the same
@@ -979,7 +985,8 @@ That loses a removal, not a tag.
 - *A new item keeps the base's tags*: an item put in place by a download where the node's base
   outlived its own item keeps in its base the old item's tags the write didn't touch. A tag
   neither side holds any more then reads as this device's removal, and is sent over a later
-  add. (A conflict copy no longer leads here: it takes the node's base with it, §5.)
+  add. (A conflict copy no longer leads here: its wanted base settles from the drive's tags,
+  §5.)
 - *Added back to the base*: a tag removed and added back here matches the base, so nothing goes
   up; where the drive dropped it meanwhile (another device's delete, the node made again
   without it), the drive's state comes down over the add.

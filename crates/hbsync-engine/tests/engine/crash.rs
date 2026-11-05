@@ -250,7 +250,7 @@ fn crash_right_after_a_fork_rename_survives_a_folder_rename() -> R {
     Ok(())
 }
 
-/// A fork its recovery completes takes the node's base with it too (§5): the drive back at the
+/// A fork its recovery completes leaves the node's base wanted too (§5): the drive back at the
 /// base's bytes before the next run, the node's absence here doesn't read as a delete.
 #[test]
 fn a_fork_completed_by_recovery_keeps_the_file_the_drive_changed_back() -> R {
@@ -278,6 +278,36 @@ fn a_fork_completed_by_recovery_keeps_the_file_the_drive_changed_back() -> R {
         b.read_text("notes (conflict b 2026-10-08).txt")?,
         "b's edit"
     );
+    Ok(())
+}
+
+/// A fork cut short by a crash whose item the scan no longer finds (the user deleted the copy
+/// before the next run) leaves the node's item to come back from the drive: its absence here is
+/// the fork's, not a delete, though the drive is back at the base's bytes.
+#[test]
+fn a_fork_whose_copy_is_gone_before_recovery_keeps_the_drive_s_file() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::with_config(&server, "b", |c| {
+        c.exec.hooks.crash_at = Some(CrashPoint::AfterForkRename)
+    })?;
+    a.write("notes.txt", "base")?;
+    a.sync()?;
+    b.sync()?;
+    a.write("notes.txt", "a's edit")?;
+    a.sync()?;
+    b.write("notes.txt", "b's edit")?;
+    assert!(b.sync().is_err(), "b stops right after the conflict rename");
+    fs::remove_file(b.root.join("notes (conflict b 2026-10-08).txt"))?;
+    a.write("notes.txt", "base")?;
+    a.sync()?;
+    let remote = Box::new(b.remote.clone());
+    b.restart_with(remote, |c| c.exec.hooks.crash_at = None)?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.read_text("notes.txt")?, "base");
+    assert_eq!(b.read_text("notes.txt")?, "base");
+    assert_eq!(a.tree_text(""), b.tree_text(""));
     Ok(())
 }
 

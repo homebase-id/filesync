@@ -875,8 +875,9 @@ fn regression_a_tag_written_before_a_base_isnt_an_add_on_the_renaming_side() {
 /// Seed 0a9df7c6, once a known limit: c0's edit loses to c1's, which also removed Red, so c0
 /// forks its item into a conflict copy and downloads c1's version as a new item. Its base kept
 /// Red, which neither the new item nor the drive held, and when c1 added Red again, c0 read
-/// the item's lack of it as its own removal and sent it over the add. The fork takes the
-/// node's base with it now (§5): the add stands, and no limit is met.
+/// the item's lack of it as its own removal and sent it over the add. The fork marks the
+/// base wanted now (§5), and the download settles its tags from the drive's: the add stands,
+/// and no limit is met.
 #[test]
 fn regression_a_conflict_copy_leaves_no_base_tag_behind() {
     use Action::*;
@@ -1253,8 +1254,8 @@ fn regression_a_tag_added_back_to_the_base_is_a_known_limit() {
 /// into a conflict copy and downloads the drive's version (Red removed) as a new item, and the
 /// download's commit fails: recovery settles its record. The base kept Red, which neither the
 /// new item nor the drive held, and client 0's add of Red, made before, then read on client 1
-/// as its removal, and went. The fork takes the node's base with it now (§5): on recovery's
-/// path too, the add stands.
+/// as its removal, and went. The fork marks the base wanted now (§5), and the commit settles
+/// its tags from the drive's: on recovery's path too, the add stands.
 #[test]
 fn regression_a_conflict_copy_leaves_no_base_tag_behind_through_recovery() {
     use Action::*;
@@ -1292,4 +1293,40 @@ fn regression_a_conflict_copy_leaves_no_base_tag_behind_through_recovery() {
     ];
     let limits = known_limits_of(3, &events);
     assert!(limits.is_empty(), "{limits:?}");
+}
+
+/// A conflict copy keeps the node's base for what the run still writes of the node (§5): client
+/// 0 removes a tag with its edit while client 1 edits the file; client 0 forks its edit into a
+/// copy and writes the tag's removal up onto client 1's version. Merged against the base, the
+/// removal stands; merged against none (a fork that deleted the base), the drive's tag read as
+/// added there, and stayed. The oracle counts lost adds, not lost removals: checked here.
+#[test]
+fn regression_a_tag_removed_with_a_conflicting_edit_is_removed_on_the_drive() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let mut events = vec![
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(0, Tag { node: 0, tag: 0 }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        act(1, Edit { file: 0 }),
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        act(0, Tag { node: 0, tag: 0 }),
+        act(0, Edit { file: 0 }),
+        Event::Plan { client: 0 },
+    ];
+    events.extend([Event::Step { client: 0 }; 4]);
+    let mut sim = Sim::new(2);
+    sim.run(&events);
+    assert_eq!(
+        sim.server_tags("a"),
+        Some(vec![]),
+        "{:?}",
+        sim.server_paths()
+    );
+    assert!(sim.quiesce(30), "no convergence");
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
 }

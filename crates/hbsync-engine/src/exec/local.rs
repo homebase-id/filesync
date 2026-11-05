@@ -50,7 +50,8 @@ impl Executor<'_> {
         if self.crash_here(CrashPoint::AfterForkRename) {
             return Ok(Outcome::Retry("crash point reached".into()));
         }
-        self.finish(&[Settle::node(new_node), Settle::node(node)], |s| {
+        // The node's base stays as it is (wanted, §5), for the run's later writes of it.
+        self.finish(&[Settle::node(new_node)], |s| {
             complete_fork(s.folder(), node, &moved)
         })
     }

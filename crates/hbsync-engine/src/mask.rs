@@ -35,7 +35,7 @@ use std::convert::Infallible;
 
 use hbsync_local::Filter;
 use hbsync_platform::name::name_key;
-use hbsync_types::{NodeId, NodeKind};
+use hbsync_types::{ContentState, NodeId, NodeKind};
 
 use crate::id::derived_id;
 use crate::plan::Masking;
@@ -107,8 +107,16 @@ impl Masks {
             return Masks::default();
         }
         // A node synced at a place this device filters now, whose local item the user brought
-        // back into view (moved out of the ignored place), syncs as usual.
-        let filtered_base = self::masked(&input.base, filter);
+        // back into view (moved out of the ignored place), syncs as usual. One whose base is
+        // wanted (its item gone into a conflict copy, §5) has nothing here to keep or bring
+        // back: it is masked as one never synced here.
+        let mut filtered_base = self::masked(&input.base, filter);
+        filtered_base.retain(|n| {
+            input
+                .base_extra
+                .get(n)
+                .is_none_or(|e| e.content_state != ContentState::Wanted)
+        });
         let brought_back: HashSet<NodeId> = masked
             .iter()
             .copied()

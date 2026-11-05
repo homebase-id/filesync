@@ -11,7 +11,7 @@ pub(crate) mod rules;
 
 use crate::folder::FolderCtx;
 use crate::view;
-use rules::{Against, Agreement, DriveVersion, TagWrite, tags_written};
+use rules::{Against, Agreement, DriveVersion, TagWrite, prior_tags, tags_written};
 
 /// A node to settle after an operation, and what against.
 #[derive(Debug, Clone, Copy)]
@@ -216,11 +216,15 @@ pub(crate) fn settle_with(
             None => {
                 s.delete_base(node)?;
             }
-            // No local bytes by design: the base follows the remote.
+            // No local bytes by design, or none yet (wanted, its item gone into a conflict
+            // copy, §5): the base follows the remote.
             Some(m)
-                if base
-                    .as_ref()
-                    .is_some_and(|b| b.content_state == ContentState::OnlineOnly) =>
+                if base.as_ref().is_some_and(|b| {
+                    matches!(
+                        b.content_state,
+                        ContentState::OnlineOnly | ContentState::Wanted
+                    )
+                }) =>
             {
                 if let (Some(mut b), Some(r)) = (base, m.state()) {
                     b.state = r;
@@ -253,7 +257,11 @@ pub(crate) fn settle_with(
         Some(None) => {
             s.mark_dirty(node)?;
             if let (Some(mut b), Some(l), Some(d)) = (base, &local.state, drive) {
-                let tags = how.tags.settle(&b.state.tags, &l.tags, &d.state.tags);
+                let tags = how.tags.settle(
+                    prior_tags(b.content_state, &b.state.tags, &d.state.tags),
+                    &l.tags,
+                    &d.state.tags,
+                );
                 if tags != b.state.tags {
                     b.state.tags = tags;
                     s.put_base(&b)?;
@@ -303,7 +311,7 @@ fn settled(
     let agreed = agreement(local, l, remote, how.same_bytes, os);
     let prior = base
         .as_ref()
-        .map(|b| b.state.tags.clone())
+        .map(|b| prior_tags(b.content_state, &b.state.tags, &remote.tags).clone())
         .unwrap_or_default();
     let mut state = agreed.settle(
         base.as_ref().map(|b| b.state.clone()),
@@ -315,6 +323,10 @@ fn settled(
     let mut row = base.unwrap_or_else(|| BaseRow::new(how.node, remote.clone(), at));
     row.state = state;
     row.remote = at;
+    // An item is here again.
+    if row.content_state == ContentState::Wanted {
+        row.content_state = ContentState::Local;
+    }
     if agreed.place {
         row.local_name = recorded_name(&local.row.path, &remote.name, os);
     }

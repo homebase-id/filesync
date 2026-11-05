@@ -14,7 +14,7 @@ use crate::scope::Scope;
 use crate::tree::Tree;
 
 pub use crate::settle::rules::{
-    Acts, Against, Agreement, DriveVersion, TagWrite, not_reached, tags_written,
+    Acts, Against, Agreement, DriveVersion, TagWrite, not_reached, prior_tags, tags_written,
 };
 
 /// Per-node facts about the base that aren't part of [`NodeState`].

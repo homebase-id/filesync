@@ -494,10 +494,65 @@ fn a_conflict_copy_s_download_settles_in_its_run() -> R {
     Ok(())
 }
 
-/// A conflict copy takes the node's base with it (§5): its download, gone stale as the drive
+/// A node whose item went into a conflict copy, its download not in yet, is free to adopt: the
+/// drive's bytes put at its place here by hand become the node again (§5), with no second copy
+/// and nothing transferred.
+#[test]
+fn a_wanted_node_adopts_its_bytes_put_back_by_hand() -> R {
+    let server = server();
+    let faults = Arc::new(hbsync_engine::exec::Faults::default());
+    let mut a = Client::new(&server, "a")?;
+    let failing = Arc::clone(&faults);
+    let mut b = Client::with_config(&server, "b", move |c| {
+        c.exec.hooks.faults = Arc::clone(&failing);
+    })?;
+    a.write("f.txt", "base")?;
+    a.sync()?;
+    b.sync()?;
+    a.write("f.txt", "theirs")?;
+    a.sync()?;
+    b.write("f.txt", "mine")?;
+    faults.fail(FailPoint::Barrier, usize::MAX);
+    b.sync()?;
+    assert!(!b.root.join("f.txt").exists(), "{:?}", b.tree_text(""));
+    b.write("f.txt", "theirs")?;
+    faults.fail(FailPoint::Barrier, 0);
+    let report = b.sync()?;
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(report.adopted, 1, "{report:?}");
+    a.sync()?;
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    assert_eq!(b.tree_text("").len(), 2, "{:?}", b.tree_text(""));
+    Ok(())
+}
+
+/// The drive's version a conflict brought down is here again like any synced file (its base no
+/// longer wanted, §5): deleting it here deletes it on the drive.
+#[test]
+fn a_conflict_s_download_deleted_here_goes_from_the_drive() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("f.txt", "base")?;
+    a.sync()?;
+    b.sync()?;
+    a.write("f.txt", "theirs")?;
+    a.sync()?;
+    b.write("f.txt", "mine")?;
+    b.sync()?;
+    assert_eq!(b.read_text("f.txt")?, "theirs");
+    fs::remove_file(b.root.join("f.txt"))?;
+    b.sync()?;
+    a.sync()?;
+    assert!(!a.root.join("f.txt").exists(), "{:?}", a.tree_text(""));
+    assert!(!b.root.join("f.txt").exists(), "{:?}", b.tree_text(""));
+    Ok(())
+}
+
+/// A conflict copy leaves the node's base wanted (§5): its download, gone stale as the drive
 /// changed back to the base's bytes before it ran, never reads as a delete here. (It kept the
-/// base: the next plan read the node's absence as this device deleting it, and the drive's
-/// file went to Recently deleted, though no one deleted it.)
+/// base as it was: the next plan read the node's absence as this device deleting it, and the
+/// drive's file went to Recently deleted, though no one deleted it.)
 #[test]
 fn a_conflict_copy_whose_download_goes_stale_keeps_the_file() -> R {
     let server = server();

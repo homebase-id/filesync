@@ -201,6 +201,9 @@ pub enum ContentState {
     Pinned,
     /// No local bytes; a missing local file is not a delete.
     OnlineOnly,
+    /// No local item yet: this device's went into a conflict copy (sync semantics §5). A
+    /// missing local file is not a delete, and the drive's version comes down.
+    Wanted,
 }
 
 /// The synced attributes of a file's content.

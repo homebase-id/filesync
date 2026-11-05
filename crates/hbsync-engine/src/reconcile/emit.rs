@@ -116,16 +116,12 @@ impl Reconciler<'_> {
             }
 
             // Local side (a fork copy already exists locally). A local write carries the
-            // drive's version the plan saw: the base settles against it. A fork takes the
-            // node's base with it (§5): what follows it acts on none.
+            // drive's version the plan saw: the base settles against it.
             let drive = || {
                 Some(Box::new(DriveVersion {
                     state: i.remote.get(node)?.clone(),
                     at: *i.remote_refs.get(&node)?,
-                    base_at: match forked {
-                        Some(_) => None,
-                        None => i.base_extra.get(&node).and_then(|e| e.version),
-                    },
+                    base_at: i.base_extra.get(&node).and_then(|e| e.version),
                 }))
             };
             let mut local_ops = false;
