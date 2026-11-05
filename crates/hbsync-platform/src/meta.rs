@@ -5,6 +5,7 @@ use std::io;
 use std::path::Path;
 
 use crate::Os;
+use crate::name::ends_caseless;
 
 /// Identifies a file on one machine, stable across renames inside a volume.
 ///
@@ -74,16 +75,33 @@ impl Fingerprint {
 /// (`*.desktop`, any case) bit is the user's trust in it, given on that computer: file managers
 /// start an executable launcher on a double-click, under whatever name and icon it gives itself.
 pub fn holds_executable(os: Os, name: &str) -> bool {
-    const LAUNCHER: &str = ".desktop";
     match os {
         Os::Windows => false,
         Os::MacOs => true,
-        Os::Linux => !name
-            .len()
-            .checked_sub(LAUNCHER.len())
-            .and_then(|at| name.get(at..))
-            .is_some_and(|end| end.eq_ignore_ascii_case(LAUNCHER)),
+        Os::Linux => !ends_caseless(name, ".desktop"),
     }
+}
+
+/// The executable bit a file named `name` gets on disk on a device on `os`, of the drive's `x`:
+/// the drive's where the device holds it, else none (§1).
+pub fn executable_on_disk(os: Os, name: &str, x: bool) -> bool {
+    holds_executable(os, name) && x
+}
+
+/// A file's executable bit as synced from a device on `os`, the file named `name` there: the
+/// disk's (`read`) where the device holds it, else the drive's, else the agreed one (`base`),
+/// else none (§1).
+pub fn synced_executable(
+    os: Os,
+    name: &str,
+    read: Option<bool>,
+    drive: Option<bool>,
+    base: Option<bool>,
+) -> bool {
+    read.filter(|_| holds_executable(os, name))
+        .or(drive)
+        .or(base)
+        .unwrap_or(false)
 }
 
 /// Whether `stat`'s error says nothing can be at the path: not found, a file where a folder

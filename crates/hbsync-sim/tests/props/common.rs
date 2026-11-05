@@ -175,6 +175,24 @@ pub(crate) fn run(clients: usize, events: &[Event]) -> Result<(), TestCaseError>
     run_with(clients, None, |sim| sim, events)
 }
 
+/// Runs `events` on `clients` clients prepared by [`NARROW_SETUPS`]`[setup]`, each plan also
+/// made through the engine's views (`Sim::with_narrow_check`), then checks the outcome.
+pub(crate) fn run_narrow(
+    setup: usize,
+    clients: usize,
+    events: &[Event],
+) -> Result<(), TestCaseError> {
+    let (prepare, guard) = NARROW_SETUPS[setup];
+    let mut sim = prepare(Sim::new(clients)).with_narrow_check();
+    sim.guard = guard;
+    sim.run(events);
+    prop_assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        prop_assert!(false, "{}", e);
+    }
+    Ok(())
+}
+
 /// Runs `events` with the mass-delete guard at `guard` (its minimum), on a simulation `setup`
 /// prepares, then lets every client settle (confirming what the guard holds, with the guard
 /// on) and checks the outcome.

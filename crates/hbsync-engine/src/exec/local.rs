@@ -347,7 +347,14 @@ impl Executor<'_> {
         name: &str,
         drive: Option<&DriveVersion>,
     ) -> Step {
-        let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
+        let Some((row, place)) = self.db.read(|s| {
+            let Some(row) = s.local_by_node(node)? else {
+                return Ok(None);
+            };
+            let place = view::place(s, &row)?;
+            Ok(Some((row, place)))
+        })?
+        else {
             return Ok(Outcome::stale("gone"));
         };
         if !self.on_disk_unchanged(&row) {
@@ -373,12 +380,10 @@ impl Executor<'_> {
         }
         // A new name that changes whether this device holds the bit (a launcher's on Linux)
         // gives the file what it holds now: none for a launcher, else the drive's (§1). The
-        // name it had is its own, a parked one's at its place, as the view reads it.
+        // name it had is the one at its place, as the view reads it.
         let os = self.folder.os;
         let held = |n: &str| holds_executable(os, n);
-        let place = self.db.read(|s| view::parked_place(s, &row))?;
-        let had = place.as_ref().unwrap_or(&row.path).name();
-        if row.kind == NodeKind::File && had.is_some_and(|old| held(old) != held(name)) {
+        if row.kind == NodeKind::File && place.name().is_some_and(|old| held(old) != held(name)) {
             let drive_x = match drive {
                 Some(d) => d.state.content.map(|c| c.executable),
                 None => self
@@ -388,7 +393,8 @@ impl Executor<'_> {
                     .map(|f| f.executable),
             };
             let at = target.to_native(self.disk.root());
-            if let Err(e) = ops::set_executable(&at, held(name) && drive_x == Some(true)) {
+            let x = executable_on_disk(os, name, drive_x == Some(true));
+            if let Err(e) = ops::set_executable(&at, x) {
                 tracing::warn!(
                     "{}: the executable bit isn't set as synced: {e}",
                     at.display()

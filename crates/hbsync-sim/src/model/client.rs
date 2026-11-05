@@ -264,6 +264,16 @@ pub(crate) fn verdict_in(tree: &Tree, filter: &Filter, node: NodeId) -> Verdict 
     filter.names(path, is_dir)
 }
 
+/// Moves the user's marks on the client's item `node` ([`Client::trusted`], [`Client::user_x`])
+/// to `new`.
+pub(crate) fn rekey_marks(client: &mut Client, node: NodeId, new: NodeId) {
+    for set in [&mut client.trusted, &mut client.user_x] {
+        if set.remove(&node) {
+            set.insert(new);
+        }
+    }
+}
+
 /// Gives the client's local item `node` the id `new`: in its tree, in the tree its plan was
 /// made from, and in the parking records of its children.
 pub(crate) fn rekey_client(client: &mut Client, node: NodeId, new: NodeId) {
@@ -272,11 +282,7 @@ pub(crate) fn rekey_client(client: &mut Client, node: NodeId, new: NodeId) {
     if client.send_hash.remove(&node) {
         client.send_hash.insert(new);
     }
-    for set in [&mut client.trusted, &mut client.user_x] {
-        if set.remove(&node) {
-            set.insert(new);
-        }
-    }
+    rekey_marks(client, node, new);
     for (parent, _) in client.parked.values_mut() {
         if *parent == node {
             *parent = new;

@@ -16,7 +16,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use hbsync_local::layout::parked_name;
 use hbsync_namemap::{sibling_hash, to_remote};
-use hbsync_platform::{Os, RelPath, holds_executable};
+use hbsync_platform::{Os, RelPath, synced_executable};
 use hbsync_state::{BaseRow, LocalRow, MirrorRow, ReadTx, StateDb, StateError};
 use hbsync_types::{ContentHash, FileContent, NodeId, NodeKind, NodeState, RECOVERED_NAME, Tags};
 
@@ -80,8 +80,7 @@ fn local_state(
     drive: Option<&Reference>,
 ) -> Result<Option<NodeState>, StateError> {
     let base = s.get_base(row.node)?;
-    // A parked node counts as being at its original place.
-    let path = parked_place(s, row)?.unwrap_or_else(|| row.path.clone());
+    let path = place(s, row)?;
     let Some(local_name) = path.name() else {
         return Ok(None);
     };
@@ -97,12 +96,11 @@ fn local_state(
         },
     };
     // What this device can't hold of the tags is the drive's (else the agreed) (§11).
-    let reference = match drive {
-        Some(d) => d.tags.clone(),
-        None => base
-            .as_ref()
-            .map(|b| b.state.tags.clone())
-            .unwrap_or_default(),
+    let none = Tags::default();
+    let reference = match (drive, &base) {
+        (Some(d), _) => &d.tags,
+        (None, Some(b)) => &b.state.tags,
+        (None, None) => &none,
     };
     Ok(Some(NodeState {
         parent,
@@ -122,7 +120,7 @@ fn local_state(
                 base.as_ref(),
             ),
         )?,
-        tags: Tags::fill(row.tags.as_ref(), &reference, os),
+        tags: Tags::fill(row.tags.as_ref(), reference, os),
     }))
 }
 
@@ -183,8 +181,8 @@ fn free_to_send(
         && s.get_parked(row.node)?.is_none())
 }
 
-/// A local file's executable bit as synced, the file named `name` here: the disk's where this
-/// device holds it ([`holds_executable`]), else the drive's `drive`, else the agreed one (§1).
+/// A local file's executable bit as synced, the file named `name` here: [`synced_executable`]
+/// of the disk's, the drive's `drive` and the agreed one (§1).
 pub(crate) fn executable(
     row: &LocalRow,
     name: &str,
@@ -192,11 +190,8 @@ pub(crate) fn executable(
     drive: Option<bool>,
     base: Option<&BaseRow>,
 ) -> bool {
-    row.executable
-        .filter(|_| holds_executable(os, name))
-        .or(drive)
-        .or_else(|| base.and_then(|b| b.state.content).map(|c| c.executable))
-        .unwrap_or(false)
+    let agreed = base.and_then(|b| b.state.content).map(|c| c.executable);
+    synced_executable(os, name, row.executable, drive, agreed)
 }
 
 /// The synced content of a local file of content `hash`.
@@ -217,13 +212,19 @@ fn local_content(row: &LocalRow, hash: ContentHash, executable: bool) -> Option<
 /// name (the user renamed it, and the record is void). Parking never leaves the folder, so the
 /// place follows the folder (or the item) wherever it is moved meanwhile.
 pub(crate) fn parked_place(s: &ReadTx<'_>, row: &LocalRow) -> Result<Option<RelPath>, StateError> {
-    let Some(name) = s.get_parked(row.node)? else {
-        return Ok(None);
-    };
     if row.path.name() != Some(parked_name(row.node).as_str()) {
         return Ok(None);
     }
+    let Some(name) = s.get_parked(row.node)? else {
+        return Ok(None);
+    };
     Ok(row.path.parent().unwrap_or_default().join(&name).ok())
+}
+
+/// Where `row` counts as being: a parked node at its original place ([`parked_place`]), else
+/// where it is.
+pub(crate) fn place(s: &ReadTx<'_>, row: &LocalRow) -> Result<RelPath, StateError> {
+    Ok(parked_place(s, row)?.unwrap_or_else(|| row.path.clone()))
 }
 
 /// Loads everything the reconciler needs for `dirty`, with every child of each folder involved,

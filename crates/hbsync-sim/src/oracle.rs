@@ -7,7 +7,7 @@ use std::fmt::Debug;
 use hbsync_engine::tree::{Tree, Violation};
 use hbsync_local::Filter;
 use hbsync_platform::name::check_remote_name;
-use hbsync_platform::{Os, holds_executable};
+use hbsync_platform::{Os, executable_on_disk, holds_executable};
 use hbsync_types::{
     ContentHash, FileContent, NodeId, NodeKind, NodeState, RECOVERED_NAME, Role, Tags, VersionTag,
 };
@@ -1091,7 +1091,7 @@ fn held_by(tree: &Tree, os: Os) -> Tree {
     for (n, s) in tree.iter() {
         let tags = s.tags.held_by(os);
         let content = s.content.map(|c| FileContent {
-            executable: c.executable && holds_executable(os, &s.name),
+            executable: executable_on_disk(os, &s.name, c.executable),
             ..c
         });
         held.insert(
@@ -1135,9 +1135,10 @@ pub(crate) fn view_with(tree: &Tree, blobs: &HashMap<ContentHash, u64>) -> Vec<S
                 })
                 .unwrap_or_default();
             let tags = tag_names(&s.tags);
-            let x = match s.content.is_some_and(|c| c.executable) {
-                true => " +x",
-                false => "",
+            let x = if s.content.is_some_and(|c| c.executable) {
+                " +x"
+            } else {
+                ""
             };
             format!(
                 "{path} {:?} {content}{x} {} {tags:?}",

@@ -326,14 +326,7 @@ proptest! {
         setup in 0..NARROW_SETUPS.len(),
         events in proptest::collection::vec(any_event(5), 0..80),
     ) {
-        let (prepare, guard) = NARROW_SETUPS[setup];
-        let mut sim = prepare(Sim::new(3)).with_narrow_check();
-        sim.guard = guard;
-        sim.run(&events);
-        prop_assert!(sim.quiesce(30), "no convergence");
-        if let Err(e) = sim.check() {
-            prop_assert!(false, "{}", e);
-        }
+        run_narrow(setup, 3, &events)?;
     }
 }
 
@@ -397,14 +390,7 @@ proptest! {
         setup in 0..NARROW_SETUPS.len(),
         events in proptest::collection::vec(writing_event(5), 0..80),
     ) {
-        let (prepare, guard) = NARROW_SETUPS[setup];
-        let mut sim = prepare(Sim::new(3)).with_narrow_check();
-        sim.guard = guard;
-        sim.run(&events);
-        prop_assert!(sim.quiesce(30), "no convergence");
-        if let Err(e) = sim.check() {
-            prop_assert!(false, "{}", e);
-        }
+        run_narrow(setup, 3, &events)?;
     }
 }
 
@@ -423,14 +409,7 @@ proptest! {
         setup in 0..NARROW_SETUPS.len(),
         events in proptest::collection::vec(events_of(5, executable_action()), 0..80),
     ) {
-        let (prepare, guard) = NARROW_SETUPS[setup];
-        let mut sim = prepare(Sim::new(5)).with_narrow_check();
-        sim.guard = guard;
-        sim.run(&events);
-        prop_assert!(sim.quiesce(30), "no convergence");
-        if let Err(e) = sim.check() {
-            prop_assert!(false, "{}", e);
-        }
+        run_narrow(setup, 5, &events)?;
     }
 }
 

@@ -189,7 +189,7 @@ impl Executor<'_> {
             size: file.size,
             mtime_ms: file.mtime_ms,
             // Set either way: a partial kept for a retry may have been made for a name that held it.
-            executable: Some(holds_executable(self.folder.os, name) && file.executable),
+            executable: Some(executable_on_disk(self.folder.os, name, file.executable)),
             tmp_dir: layout::tmp_dir(&self.folder.root),
             key: download_key(node, &expected),
             local_algorithm: self.folder.algorithm,
@@ -231,13 +231,9 @@ impl Executor<'_> {
                         .as_ref()
                         .and_then(|m| m.file.as_ref())
                         .map(|f| f.executable);
-                    // By its own name, a parked one's at its place, as the view reads it.
-                    let place = view::parked_place(s, row)?;
-                    let name = place
-                        .as_ref()
-                        .unwrap_or(&row.path)
-                        .name()
-                        .unwrap_or_default();
+                    // By its name at its place, as the view reads it.
+                    let place = view::place(s, row)?;
+                    let name = place.name().unwrap_or_default();
                     let x = view::executable(row, name, os, drive, base.as_ref());
                     view::file_content(s, row, base.as_ref(), parent, x)?
                 }

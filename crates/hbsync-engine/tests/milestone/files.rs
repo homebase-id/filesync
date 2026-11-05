@@ -165,38 +165,13 @@ fn executable_bit_syncs() -> R {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_launcher_never_arrives_executable_on_linux() -> R {
-    use hbsync_remote::{NodeMeta, RemoteBody, Upload};
+    use hbsync_remote::{NodeMeta, RemoteBody};
+    use hbsync_types::NodeId;
     use hbsync_types::schema::NodeContent;
-    use hbsync_types::{NodeId, NodeKind};
     use std::collections::BTreeMap;
     use std::os::unix::fs::PermissionsExt;
 
     let server = server();
-    // A Mac marked a launcher executable.
-    let launcher = b"[Desktop Entry]\nExec=true\n";
-    server.lock().map_err(|_| "poisoned")?.create(
-        &NodeMeta {
-            node: NodeId::new(),
-            parent: NodeId::ROOT,
-            kind: NodeKind::File,
-            content: NodeContent::file(
-                "mac.desktop",
-                1_700_000_000_000,
-                launcher.len() as u64,
-                true,
-            ),
-            removed: false,
-        },
-        Some(Upload {
-            hash: hbsync_remote::Planned::Known(hbsync_fileio::hash_bytes(
-                launcher,
-                hbsync_fileio::HashAlgorithm::Blake3,
-            )),
-            size: launcher.len() as u64,
-            reader: &mut std::io::Cursor::new(&launcher[..]),
-            pace: None,
-        }),
-    )?;
     // Another writer's change to the header of the file named `name`.
     let on_drive = |name: &str, change: &dyn Fn(&mut NodeContent)| -> R {
         let mut srv = server.lock().map_err(|_| "poisoned")?;
@@ -205,22 +180,32 @@ fn a_launcher_never_arrives_executable_on_linux() -> R {
             .find(|h| matches!(&h.body, RemoteBody::Live { content, .. } if content.name == name))
             .cloned()
             .ok_or("not on the drive")?;
-        if let RemoteBody::Live {
+        let RemoteBody::Live {
             node, mut content, ..
         } = h.body
-        {
-            change(&mut content);
-            let meta = NodeMeta {
-                node,
-                parent: h.parent,
-                kind: h.kind,
-                content,
-                removed: false,
-            };
-            srv.update(h.file_id, h.version, &meta, None)?;
-        }
+        else {
+            return Err("live".into());
+        };
+        change(&mut content);
+        let meta = NodeMeta {
+            node,
+            parent: h.parent,
+            kind: h.kind,
+            content,
+            removed: false,
+        };
+        srv.update(h.file_id, h.version, &meta, None)?;
         Ok(())
     };
+    // A Mac marked a launcher executable.
+    let launcher = b"[Desktop Entry]\nExec=true\n";
+    server.lock().map_err(|_| "poisoned")?.seed_file(
+        NodeId::ROOT,
+        "mac.desktop",
+        launcher,
+        hbsync_fileio::HashAlgorithm::Blake3,
+    )?;
+    on_drive("mac.desktop", &|c| c.x = true)?;
     let drive = || -> Result<BTreeMap<String, bool>, Box<dyn std::error::Error>> {
         let srv = server.lock().map_err(|_| "poisoned")?;
         Ok(srv
@@ -276,7 +261,10 @@ fn a_launcher_never_arrives_executable_on_linux() -> R {
 
     // A launcher renamed into a script takes the drive's bit here, which stays on the drive.
     on_drive("mac.desktop", &|c| c.name = "mac.sh".into())?;
-    assert_clean(&b.sync()?);
+    let report = b.sync()?;
+    assert_clean(&report);
+    // The move alone: the bit it set is recorded as set, not read back as the user's change.
+    assert_eq!(report.ops_done, 1, "{report:?}");
     assert!(executable(&b, "mac.sh")?);
     assert_clean(&b.sync()?);
     // So does one the user trusted here, the drive's bit off: it isn't executable any more.

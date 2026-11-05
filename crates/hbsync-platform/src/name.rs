@@ -163,6 +163,17 @@ pub fn is_windows_reserved(name: &str) -> bool {
     }
 }
 
+/// Whether `name` starts with `p`, ASCII case aside.
+pub fn starts_caseless(name: &str, p: &str) -> bool {
+    name.len() >= p.len() && name.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes())
+}
+
+/// Whether `name` ends with `s`, ASCII case aside.
+pub fn ends_caseless(name: &str, s: &str) -> bool {
+    name.len() >= s.len()
+        && name.as_bytes()[name.len() - s.len()..].eq_ignore_ascii_case(s.as_bytes())
+}
+
 /// Splits a name into stem and extension the way conflict names need it:
 /// `"a.tar.gz"` → (`"a.tar"`, `".gz"`), `".bashrc"` → (`".bashrc"`, `""`).
 pub fn split_extension(name: &str) -> (&str, &str) {

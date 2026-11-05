@@ -116,7 +116,7 @@ fn rows_of(s: &ReadTx<'_>, nodes: &[NodeId]) -> Result<Vec<(LocalRow, RelPath)>,
     let mut rows = Vec::new();
     for &node in nodes {
         if let Some(row) = s.local_by_node(node)? {
-            let shown = view::parked_place(s, &row)?.unwrap_or_else(|| row.path.clone());
+            let shown = view::place(s, &row)?;
             rows.push((row, shown));
         }
     }

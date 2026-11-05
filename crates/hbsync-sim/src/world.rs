@@ -508,8 +508,8 @@ impl Sim {
                 self.retrack(c, node, new);
                 self.ledger.tags.moved(c, to, new);
                 // The user's move: their mark goes along.
-                self.clients[c].trusted.remove(&new);
-                self.clients[c].user_x.remove(&new);
+                self.clients[c].trusted.remove(&node);
+                self.clients[c].user_x.remove(&node);
                 self.user_named(to, new);
             }
             Action::ListDeleted => {
@@ -665,14 +665,9 @@ impl Sim {
                     return;
                 };
                 content.executable = !content.executable;
-                let executable = content.executable;
                 self.clients[c].local.insert(node, state);
-                self.clients[c].user_x.insert(node);
-                if executable {
-                    self.user_named(c, node);
-                } else {
-                    self.clients[c].trusted.remove(&node);
-                }
+                self.clients[c].trusted.remove(&node);
+                self.user_named(c, node);
             }
             Action::Delete { node } => {
                 if all.is_empty() {
@@ -1256,7 +1251,6 @@ impl Sim {
         }
     }
 
-    /// Item `node` of client `c` is `new` from now on: the tags added to it there go along.
     /// The user's own action left client `c`'s file `node` as it is: executable, it is so as
     /// the user has it ([`Client::trusted`]).
     ///
@@ -1273,14 +1267,9 @@ impl Sim {
         }
     }
 
+    /// Item `node` of client `c` is `new` from now on: the tags added to it there go along.
     pub(crate) fn retrack(&mut self, c: usize, node: NodeId, new: NodeId) {
         self.ledger.tags.retrack(c, node, new);
-        let client = &mut self.clients[c];
-        for set in [&mut client.trusted, &mut client.user_x] {
-            if set.remove(&node) {
-                set.insert(new);
-            }
-        }
     }
 }
 

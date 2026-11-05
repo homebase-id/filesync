@@ -17,7 +17,7 @@ use hbsync_engine::reconcile::{
 };
 use hbsync_engine::tree::{Tree, first_free_by, numbered_names};
 use hbsync_local::layout::parked_name;
-use hbsync_platform::{Os, holds_executable};
+use hbsync_platform::{Os, executable_on_disk, holds_executable, synced_executable};
 use hbsync_state::{Answer, RemovedRow, StateDb, StateError};
 use hbsync_types::{
     ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
@@ -26,7 +26,7 @@ use hbsync_types::{
 
 use crate::Sim;
 use crate::action::NAMES;
-use crate::model::client::{Client, keeps_in, rekey_client, verdict};
+use crate::model::client::{Client, keeps_in, rekey_client, rekey_marks, verdict};
 use crate::model::server::{ServerNode, time};
 use crate::oracle::{PlanSeen, Planned, What, view_with};
 
@@ -170,8 +170,7 @@ impl Sim {
         }
         // What the client can't hold of the tags and the executable bit is the drive's, as the
         // engine's view has it.
-        see_held_tags(client, &mut local_view, &remote);
-        see_held_executable(client, &mut local_view, &remote);
+        see_held(client, &mut local_view, &remote);
         // Of the items the scan reports (as the engine's view marks its rows).
         let local_unhashed = client
             .unhashed_now()
@@ -1157,6 +1156,7 @@ impl Sim {
                 }
                 client.local.remove(node);
                 client.local.insert(new_node, NodeState { name, ..state });
+                rekey_marks(client, node, new_node);
                 self.ledger.tags.forked(c, node);
                 self.retrack(c, node, new_node);
                 Done
@@ -1306,9 +1306,8 @@ impl Sim {
                 let client = &mut self.clients[c];
                 let tags = tags.held_by(client.os);
                 // The bit set either way: what the client holds of the drive's (§1).
-                let held = holds_executable(client.os, &name);
                 let content = content.map(|c| FileContent {
-                    executable: held && c.executable,
+                    executable: executable_on_disk(client.os, &name, c.executable),
                     ..c
                 });
                 client.trusted.remove(&node);
@@ -1361,7 +1360,7 @@ impl Sim {
                             .and_then(|r| r.content)
                             .map(|c| c.executable),
                     };
-                    c.executable = held(&name) && drive_x == Some(true);
+                    c.executable = executable_on_disk(client.os, &name, drive_x == Some(true));
                     client.trusted.remove(&node);
                 }
                 client.local.insert(
@@ -2325,17 +2324,14 @@ fn seen_content(
     state: &NodeState,
 ) -> Option<FileContent> {
     let mut content = state.content?;
-    if !holds_executable(client.os, &state.name) {
-        let drive = remote.and_then(|r| r.content).map(|c| c.executable);
-        let base = || {
-            client
-                .base
-                .get(node)
-                .and_then(|b| b.content)
-                .map(|c| c.executable)
-        };
-        content.executable = drive.or_else(base).unwrap_or(false);
-    }
+    let x = |s: Option<&NodeState>| s.and_then(|s| s.content).map(|c| c.executable);
+    content.executable = synced_executable(
+        client.os,
+        &state.name,
+        Some(content.executable),
+        x(remote),
+        x(client.base.get(node)),
+    );
     Some(content)
 }
 
@@ -2346,41 +2342,20 @@ fn sent_content(client: &Client, node: NodeId) -> Option<FileContent> {
     seen_content(client, client.planned_remote.get(node), node, &state)
 }
 
-/// Gives each file of `view` (a client's local tree, at its places) the executable bit the
-/// client sees on it.
-fn see_held_executable(client: &Client, view: &mut Tree, remote: &Tree) {
-    let changed: Vec<(NodeId, NodeState)> = view
-        .iter()
-        .filter(|(_, s)| s.content.is_some())
-        .filter_map(|(n, state)| {
-            let content = seen_content(client, remote.get(n), n, state);
-            (content != state.content).then(|| {
-                (
-                    n,
-                    NodeState {
-                        content,
-                        ..state.clone()
-                    },
-                )
-            })
-        })
-        .collect();
-    for (n, state) in changed {
-        view.insert(n, state);
-    }
-}
-
-/// Gives each item of `view` (a client's local tree) the tags the client sees on it.
-fn see_held_tags(client: &Client, view: &mut Tree, remote: &Tree) {
+/// Gives each item of `view` (a client's local tree, at its places) the tags and a file's
+/// executable bit the client sees on it.
+fn see_held(client: &Client, view: &mut Tree, remote: &Tree) {
     let changed: Vec<(NodeId, NodeState)> = view
         .iter()
         .filter_map(|(n, state)| {
             let tags = held_tags(client, remote.get(n), n, &state.tags);
-            (tags != state.tags).then(|| {
+            let content = seen_content(client, remote.get(n), n, state);
+            (tags != state.tags || content != state.content).then(|| {
                 (
                     n,
                     NodeState {
                         tags,
+                        content,
                         ..state.clone()
                     },
                 )
