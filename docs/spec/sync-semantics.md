@@ -1003,12 +1003,12 @@ What lies outside an engine's scope is masked as filtered nodes are (§10): neve
 never changed or deleted remotely. It is never *leaving* (§10, rule 1): another engine or device
 syncs it. A role folder at the top that the engine holds nothing of isn't planned at all. A
 device holds one in its main folder only when a version that didn't know the role synced it
-there (Desktop, before 0.10.10: a plain folder to it), or through a bug; it then lets go of it
+there (Desktop, before 0.10.11: a plain folder to it), or through a bug; it then lets go of it
 as of anything masked: the copy here goes, the drive's is left as it is, and what was changed
 here meanwhile is detached and kept as a plain folder (`tests/folders.rs`,
 `a_role_an_older_version_synced_into_the_main_folder_leaves_it`). So a new role is known in
 one release and offered in the next (`Role::offered`), once the computers have that one:
-Desktop, known from 0.10.10. A role folder moved into a folder (against the node
+Desktop, known from 0.10.11. A role folder moved into a folder (against the node
 schema's rules) is masked there and keeps that folder alive (§6.3).
 
 A role folder holds no name for the scope: a plain folder of the same name at the top keeps it
