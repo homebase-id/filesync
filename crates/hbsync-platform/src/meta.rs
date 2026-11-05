@@ -69,12 +69,11 @@ impl Fingerprint {
     }
 }
 
-/// Whether the executable bit of a file named `name` syncs on `os`. Windows has none. On Linux a
-/// launcher's (`*.desktop`, any case) bit is the user's trust in it: file managers start an
-/// executable launcher on a double-click, under whatever name and icon it gives itself. So it is
-/// neither taken from the drive nor sent to it: a launcher arrives not executable, and the
-/// drive's bit is kept as it is (sync semantics §1).
-pub fn syncs_executable(os: Os, name: &str) -> bool {
+/// Whether a device on `os` holds the executable bit of a file named `name`; where it doesn't,
+/// it keeps the drive's (sync semantics §1). Windows has none. On Linux a launcher's
+/// (`*.desktop`, any case) bit is the user's trust in it, given on that computer: file managers
+/// start an executable launcher on a double-click, under whatever name and icon it gives itself.
+pub fn holds_executable(os: Os, name: &str) -> bool {
     const LAUNCHER: &str = ".desktop";
     match os {
         Os::Windows => false,
@@ -303,8 +302,8 @@ mod tests {
     #[test]
     fn a_launcher_keeps_its_bit_on_linux_only() {
         for name in ["app.desktop", "App.DESKTOP", ".desktop"] {
-            assert!(!syncs_executable(Os::Linux, name), "{name}");
-            assert!(syncs_executable(Os::MacOs, name), "{name}");
+            assert!(!holds_executable(Os::Linux, name), "{name}");
+            assert!(holds_executable(Os::MacOs, name), "{name}");
         }
         for name in [
             "app.sh",
@@ -313,9 +312,9 @@ mod tests {
             "€.desktopx",
             "€abcdefg",
         ] {
-            assert!(syncs_executable(Os::Linux, name), "{name}");
+            assert!(holds_executable(Os::Linux, name), "{name}");
         }
-        assert!(!syncs_executable(Os::Windows, "app.sh"));
+        assert!(!holds_executable(Os::Windows, "app.sh"));
     }
 
     #[cfg(unix)]

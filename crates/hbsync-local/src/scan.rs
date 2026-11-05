@@ -22,9 +22,7 @@ use std::time::{Duration, SystemTime};
 
 use hbsync_fileio::{FileIoError, HashAlgorithm, hash_file};
 use hbsync_platform::meta::system_time_ns;
-use hbsync_platform::{
-    EntryKind, FileId, FsFamily, LocalMeta, Os, RelPath, syncs_executable, tags,
-};
+use hbsync_platform::{EntryKind, FileId, FsFamily, LocalMeta, RelPath, tags};
 use hbsync_state::{LocalRow, StateDb, StateError};
 use hbsync_types::{ContentHash, NodeId, NodeKind, Tags};
 
@@ -648,7 +646,7 @@ fn moved_onto(
 fn differs(row: &LocalRow, meta: &LocalMeta, opts: &ScanOptions) -> bool {
     kind_of(meta) != row.kind
         || row.fingerprint != meta.fingerprint()
-        || (row.kind == NodeKind::File && executable(&row.path, meta).is_some_and(|x| row.executable != Some(x)))
+        || (row.kind == NodeKind::File && meta.executable.is_some() && meta.executable != row.executable)
         // A file that couldn't be hashed last time gets another try (not one to be hashed on
         // send), and so do tags.
         || (row.kind == NodeKind::File && row.hash.is_none() && !sends_hash(row, opts))
@@ -894,7 +892,8 @@ fn resolve(
             content_changed = new.hash.is_none() || new.hash != row.hash;
         }
         let x_changed = row.kind == NodeKind::File
-            && executable(&row.path, &meta).is_some_and(|x| row.executable != Some(x));
+            && meta.executable.is_some()
+            && meta.executable != row.executable;
         if content_changed || x_changed || tags_changed {
             report.modified += 1;
             plan.dirty.push(row.node);
@@ -1133,15 +1132,6 @@ fn tags_changed(old: &Option<Tags>, new: &Option<Tags>) -> bool {
 }
 
 /// The row of the item at `path` the scan keeps, as `node`, with what was read of it.
-/// The executable bit a file's row records: `None` where the OS has none or it isn't synced
-/// ([`syncs_executable`]), so the synced value is kept.
-pub fn executable(path: &RelPath, meta: &LocalMeta) -> Option<bool> {
-    meta.executable.filter(|_| {
-        path.name()
-            .is_none_or(|name| syncs_executable(Os::current(), name))
-    })
-}
-
 pub fn row_from(
     path: &RelPath,
     node: NodeId,
@@ -1157,7 +1147,7 @@ pub fn row_from(
         fingerprint: meta.fingerprint(),
         // The x bit is synced for files only; a folder's search bit means nothing remotely.
         executable: if kind == NodeKind::File {
-            executable(path, meta)
+            meta.executable
         } else {
             None
         },

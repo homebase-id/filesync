@@ -371,11 +371,26 @@ impl Executor<'_> {
         if let Err(e) = self.disk.rename(self.db, &row.path, &target)? {
             return Ok(io_outcome(e));
         }
-        // An executable file named a launcher from the drive isn't left one (sync semantics §1).
-        if row.executable == Some(true) && !syncs_executable(self.folder.os, name) {
+        // A new name that changes whether this device holds the bit (a launcher's on Linux)
+        // gives the file what it holds now: none for a launcher, else the drive's (§1).
+        let os = self.folder.os;
+        let held = |n: &str| holds_executable(os, n);
+        if row.kind == NodeKind::File && row.path.name().is_some_and(|old| held(old) != held(name))
+        {
+            let drive_x = match drive {
+                Some(d) => d.state.content.map(|c| c.executable),
+                None => self
+                    .db
+                    .read(|s| s.get_mirror(node))?
+                    .and_then(|m| m.file)
+                    .map(|f| f.executable),
+            };
             let at = target.to_native(self.disk.root());
-            if let Err(e) = ops::set_executable(&at, false) {
-                tracing::warn!("{} stays executable: {e}", at.display());
+            if let Err(e) = ops::set_executable(&at, held(name) && drive_x == Some(true)) {
+                tracing::warn!(
+                    "{}: the executable bit isn't set as synced: {e}",
+                    at.display()
+                );
             }
         }
         let refreshed = self.renamed(&row, &target);

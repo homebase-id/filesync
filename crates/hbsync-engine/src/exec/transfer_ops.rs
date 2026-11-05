@@ -188,7 +188,8 @@ impl Executor<'_> {
             expected,
             size: file.size,
             mtime_ms: file.mtime_ms,
-            executable: syncs_executable(self.folder.os, name).then_some(file.executable),
+            // Set either way: a partial kept for a retry may have been made for a name that held it.
+            executable: Some(holds_executable(self.folder.os, name) && file.executable),
             tmp_dir: layout::tmp_dir(&self.folder.root),
             key: download_key(node, &expected),
             local_algorithm: self.folder.algorithm,
@@ -217,13 +218,26 @@ impl Executor<'_> {
         if self.heard.full && kind == NodeKind::File {
             return Err(Outcome::waiting("the drive is out of storage"));
         }
+        let os = self.folder.os;
         let (row, mirror, base, file) = self.db.read(|s| {
-            let (row, base) = (s.local_by_node(node)?, s.get_base(node)?);
+            let (row, base, mirror) = (
+                s.local_by_node(node)?,
+                s.get_base(node)?,
+                s.get_mirror(node)?,
+            );
             let file = match (&row, s.local_parent(node)?) {
-                (Some(row), Some(parent)) => view::file_content(s, row, base.as_ref(), parent)?,
+                (Some(row), Some(parent)) => {
+                    let drive = mirror
+                        .as_ref()
+                        .and_then(|m| m.file.as_ref())
+                        .map(|f| f.executable);
+                    let name = row.path.name().unwrap_or_default();
+                    let x = view::executable(row, name, os, drive, base.as_ref());
+                    view::file_content(s, row, base.as_ref(), parent, x)?
+                }
                 _ => None,
             };
-            Ok((row, s.get_mirror(node)?, base, file))
+            Ok((row, mirror, base, file))
         })?;
         let Some(row) = row else {
             return Err(Outcome::stale("gone locally"));
@@ -601,7 +615,7 @@ impl Executor<'_> {
                 node,
                 kind: NodeKind::File,
                 fingerprint: meta.fingerprint(),
-                executable: hbsync_local::scan::executable(&target, &meta),
+                executable: meta.executable,
                 hash: Some(local_hash),
                 tags,
                 send_hash: false,

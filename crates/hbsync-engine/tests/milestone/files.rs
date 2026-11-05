@@ -156,10 +156,12 @@ fn executable_bit_syncs() -> R {
     Ok(())
 }
 
-/// On Linux a launcher's (`*.desktop`) executable bit is neither taken from the drive nor sent
-/// to it: one another computer marked executable arrives plain, and the drive keeps its bit
-/// through an edit here; one made executable here goes up plain; a script the drive renames into
-/// a launcher stops being executable here. Other files' bits sync as ever.
+/// On Linux a device doesn't hold a launcher's (`*.desktop`) executable bit: it keeps the
+/// drive's (sync semantics §1). One another computer marked executable arrives plain, and the
+/// drive keeps its bit through an edit here; one made executable here goes up plain; the drive
+/// flipping only the bit fetches nothing; a launcher the drive renames into a script takes the
+/// drive's bit, and a script renamed into a launcher loses it here; a computer set up over the
+/// same launcher, plain, adopts it. Other files' bits sync as ever.
 #[cfg(target_os = "linux")]
 #[test]
 fn a_launcher_never_arrives_executable_on_linux() -> R {
@@ -195,10 +197,29 @@ fn a_launcher_never_arrives_executable_on_linux() -> R {
             pace: None,
         }),
     )?;
-    let mut a = Client::with_config(&server, "a", |_| {})?;
-    let mut b = Client::with_config(&server, "b", |_| {})?;
-    let executable = |c: &Client, name: &str| -> std::io::Result<bool> {
-        Ok(fs::metadata(c.root.join(name))?.permissions().mode() & 0o111 != 0)
+    // Another writer's change to the header of the file named `name`.
+    let on_drive = |name: &str, change: &dyn Fn(&mut NodeContent)| -> R {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        let h = srv
+            .live()
+            .find(|h| matches!(&h.body, RemoteBody::Live { content, .. } if content.name == name))
+            .cloned()
+            .ok_or("not on the drive")?;
+        if let RemoteBody::Live {
+            node, mut content, ..
+        } = h.body
+        {
+            change(&mut content);
+            let meta = NodeMeta {
+                node,
+                parent: h.parent,
+                kind: h.kind,
+                content,
+                removed: false,
+            };
+            srv.update(h.file_id, h.version, &meta, None)?;
+        }
+        Ok(())
     };
     let drive = || -> Result<BTreeMap<String, bool>, Box<dyn std::error::Error>> {
         let srv = server.lock().map_err(|_| "poisoned")?;
@@ -210,6 +231,11 @@ fn a_launcher_never_arrives_executable_on_linux() -> R {
             })
             .collect())
     };
+    let executable = |c: &Client, name: &str| -> std::io::Result<bool> {
+        Ok(fs::metadata(c.root.join(name))?.permissions().mode() & 0o111 != 0)
+    };
+    let mut a = Client::with_config(&server, "a", |_| {})?;
+    let mut b = Client::with_config(&server, "b", |_| {})?;
     for name in ["run.sh", "mine.desktop"] {
         a.write(name, launcher)?;
         fs::set_permissions(a.root.join(name), fs::Permissions::from_mode(0o755))?;
@@ -219,7 +245,7 @@ fn a_launcher_never_arrives_executable_on_linux() -> R {
     assert!(!executable(&b, "mac.desktop")?);
     assert!(!executable(&b, "mine.desktop")?);
     assert!(executable(&b, "run.sh")?);
-    let synced = BTreeMap::from([
+    let mut synced = BTreeMap::from([
         ("mac.desktop".to_owned(), true),
         ("mine.desktop".to_owned(), false),
         ("run.sh".to_owned(), true),
@@ -237,13 +263,52 @@ fn a_launcher_never_arrives_executable_on_linux() -> R {
     assert_eq!(drive()?, synced);
     assert!(executable(&b, "mine.desktop")?);
 
+    // The drive flips only the bit: nothing is fetched, nothing sent back.
+    let served = b.remote.faults().served;
+    on_drive("mac.desktop", &|c| c.x = false)?;
+    assert_clean(&b.sync()?);
+    assert_clean(&b.sync()?);
+    assert_eq!(b.remote.faults().served, served);
+    on_drive("mac.desktop", &|c| c.x = true)?;
+    assert_clean(&b.sync()?);
+    assert_eq!(b.remote.faults().served, served);
+    assert_eq!(drive()?, synced);
+
+    // A launcher renamed into a script takes the drive's bit here, which stays on the drive.
+    on_drive("mac.desktop", &|c| c.name = "mac.sh".into())?;
+    assert_clean(&b.sync()?);
+    assert!(executable(&b, "mac.sh")?);
+    assert_clean(&b.sync()?);
+    // So does one the user trusted here, the drive's bit off: it isn't executable any more.
+    on_drive("mine.desktop", &|c| c.name = "mine.sh".into())?;
+    assert_clean(&b.sync()?);
+    assert!(!executable(&b, "mine.sh")?);
+    assert_clean(&b.sync()?);
+    for (from, to, x) in [
+        ("mac.desktop", "mac.sh", true),
+        ("mine.desktop", "mine.sh", false),
+    ] {
+        synced.remove(from);
+        synced.insert(to.to_owned(), x);
+    }
+    assert_eq!(drive()?, synced);
+
     // A script renamed into a launcher: the drive keeps its bit, the other computer drops it.
     fs::rename(a.root.join("run.sh"), a.root.join("run.desktop"))?;
     assert_clean(&a.sync()?);
     assert_clean(&b.sync()?);
     assert!(!executable(&b, "run.desktop")?);
     assert!(executable(&a, "run.desktop")?);
-    assert_eq!(drive()?.get("run.desktop"), Some(&true));
+    synced.remove("run.sh");
+    synced.insert("run.desktop".to_owned(), true);
+    assert_eq!(drive()?, synced);
+
+    // Set up over the same launcher, plain: adopted, without a conflict copy.
+    let mut c = Client::with_config(&server, "c", |_| {})?;
+    c.write("run.desktop", launcher)?;
+    assert_clean(&c.sync()?);
+    assert_eq!(drive()?, synced);
+    assert!(!executable(&c, "run.desktop")?);
     Ok(())
 }
 

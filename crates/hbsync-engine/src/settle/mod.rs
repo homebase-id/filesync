@@ -206,10 +206,10 @@ pub(crate) fn settle_with(
             Some((m.state()?, o))
         })
     });
-    // What the local tags read as, against the tags they're judged against.
+    // What the local tags and bit read as, against what they're judged against.
     let reference = match drive {
-        Some(d) => Some(d.state.tags.clone()),
-        None => mirror.as_ref().map(|m| m.tags()),
+        Some(d) => Some(view::Reference::of(&d.state)),
+        None => mirror.as_ref().map(view::Reference::of_mirror),
     };
     let Some(local) = view::local_node(&s, node, os, reference.as_ref())? else {
         match mirror {
@@ -236,7 +236,7 @@ pub(crate) fn settle_with(
     // What the write left, as the item reads (what this device can't hold is the drive's), and
     // what was there, read alike, but for a tag this device can't hold at all: the item never
     // held that, so the write leaves the drive's value of it, as the base records.
-    let reference = reference.unwrap_or_default();
+    let reference = reference.map(|r| r.tags).unwrap_or_default();
     let filled = match how.tags {
         TagWrite::Wrote { before, written } => Some(tags_written(before, written, &reference, os)),
         _ => None,
@@ -363,7 +363,7 @@ pub(crate) fn tags_recorded(
     let Some(remote) = remote else {
         return Ok(false);
     };
-    let Some(local) = view::local_node(s, node, os, Some(&remote.tags))? else {
+    let Some(local) = view::local_node(s, node, os, Some(&view::Reference::of(&remote)))? else {
         return Ok(false);
     };
     Ok(local
