@@ -2141,3 +2141,54 @@ fn regression_a_paged_delete_past_the_guard_is_held() {
         panic!("{e}");
     }
 }
+
+/// Seed e88adb19 (`clients_planning_in_small_pages_converge_without_loss`, pages of 3, two
+/// clients), found while checking the Desktops branch and failing on main as well: client 1
+/// diverges after a stopped delete, the purge, a stopped emptying, ignore rules toggled and a
+/// restore. Open, in the paged flow: pinned for a fix of its own.
+#[test]
+#[ignore = "open: a client planning in pages diverges after a stopped delete and a restore"]
+fn regression_paged_clients_converge_after_a_stopped_delete_and_a_restore() {
+    use hbsync_sim::Action::{
+        CreateFile, CreateFolder, DeleteStopped, EmptyStopped, Meanwhile, Purge, Restore,
+        ToggleIgnore,
+    };
+    let act = |client, action| Event::Act { client, action };
+    let (plan, step) = (
+        |client| Event::Plan { client },
+        |client| Event::Step { client },
+    );
+    let events = [
+        act(
+            0,
+            CreateFolder {
+                parent: 0,
+                name: 13,
+            },
+        ),
+        act(0, CreateFolder { parent: 0, name: 0 }),
+        plan(2),
+        step(0),
+        act(1, CreateFile { parent: 0, name: 5 }),
+        act(1, ToggleIgnore),
+        step(0),
+        act(0, EmptyStopped { done: 0 }),
+        act(0, DeleteStopped { pick: 8, done: 6 }),
+        act(0, Purge),
+        act(2, Meanwhile { op: 0 }),
+        act(0, ToggleIgnore),
+        plan(0),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        plan(1),
+        step(2),
+        step(0),
+        act(0, Restore { node: 0 }),
+        step(1),
+        plan(1),
+        step(1),
+    ];
+    let events: Vec<Event> = events.into_iter().map(|e| on_clients(e, 2)).collect();
+    if let Err(e) = run_with(2, None, |sim| sim.with_small_pages(3), &events) {
+        panic!("{e}");
+    }
+}
