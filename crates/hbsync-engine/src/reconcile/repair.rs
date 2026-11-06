@@ -689,8 +689,7 @@ impl Reconciler<'_> {
                 // and an orphan moving in, or Recovered files or Desktops made beside a folder
                 // of its name, loses to what is there.
                 group.sort_by_key(|n| {
-                    let fixed = [NodeId::RECOVERED, NodeId::DESKTOPS].contains(n);
-                    let arriving = self.adopted.contains(n) || fixed;
+                    let arriving = self.adopted.contains(n) || n.is_fixed_folder();
                     (!self.deferred.contains(n), arriving, *n)
                 });
                 // The folder's path here, for the filter (`None`: not connected), read once

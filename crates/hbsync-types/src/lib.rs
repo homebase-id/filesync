@@ -75,6 +75,12 @@ impl NodeId {
     pub fn is_root(self) -> bool {
         self == Self::ROOT
     }
+
+    /// Whether this is one of the fixed folders the drive may hold: Recovered files, Desktops,
+    /// or a role folder (never a file).
+    pub fn is_fixed_folder(self) -> bool {
+        self == Self::RECOVERED || self == Self::DESKTOPS || Role::of(self).is_some()
+    }
 }
 
 impl Default for NodeId {

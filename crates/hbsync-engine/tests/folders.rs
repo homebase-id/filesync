@@ -523,24 +523,24 @@ fn remove_documents(server: &Arc<Mutex<FakeServer>>) -> R {
     remove_alone(server, Role::Documents.node())
 }
 
-/// Moves `node` alone to Recently deleted on the server (what is in it stays live: a delete
-/// stopped half way).
+/// Moves the folder `folder` alone to Recently deleted on the server (what is in it stays live:
+/// a delete stopped half way).
 fn remove_alone(server: &Arc<Mutex<FakeServer>>, folder: NodeId) -> R {
     let mut srv = server.lock().map_err(|_| "poisoned")?;
-    let docs = srv
+    let header = srv
         .live()
         .find(|h| matches!(&h.body, RemoteBody::Live { node, .. } if *node == folder))
         .cloned()
         .ok_or("not live")?;
-    if let RemoteBody::Live { node, content, .. } = docs.body {
+    if let RemoteBody::Live { node, content, .. } = header.body {
         let meta = hbsync_remote::contract::removed(&NodeMeta {
             node,
-            parent: docs.parent,
-            kind: docs.kind,
+            parent: header.parent,
+            kind: header.kind,
             content,
             removed: false,
         });
-        srv.update(docs.file_id, docs.version, &meta, None)?;
+        srv.update(header.file_id, header.version, &meta, None)?;
     }
     Ok(())
 }
@@ -645,18 +645,29 @@ impl DeskPc {
         let path = self.desk_root.to_string_lossy().into_owned();
         let folder = StateDb::open_account(&self.db)?
             .write(|s| s.account().add_folder(top, FolderKind::Desktop, &path, "d"))?;
+        let mut desk = self.open_desktop(folder)?;
+        if let Some(name) = name {
+            desk.name_desktop(name)?;
+        }
+        self.desk = Some(desk);
+        Ok(())
+    }
+
+    /// The engine of this computer's Desktop, folder `folder` of its DB, as start-up opens a new
+    /// one: it plans what the drive holds in its part.
+    fn open_desktop(&self, folder: i64) -> Result<Engine, Box<dyn std::error::Error>> {
         let mut desk = Engine::new(
             StateDb::open_folder(&self.db, folder)?,
             self.drive.clone(),
             config(&self.desk_root),
         )?;
-        if let Some(name) = name {
-            desk.name_desktop(name)?;
-        }
-        // As start-up does: a new folder plans what the drive holds in its part.
         desk.apply_filter_change()?;
-        self.desk = Some(desk);
-        Ok(())
+        Ok(desk)
+    }
+
+    /// This computer's Desktop's engine, once added.
+    fn desk(&mut self) -> Result<&mut Engine, Box<dyn std::error::Error>> {
+        Ok(self.desk.as_mut().ok_or("no Desktop added")?)
     }
 
     fn sync(&mut self) -> R {
@@ -850,7 +861,7 @@ fn a_rename_that_finds_the_desktop_gone_brings_it_back() -> R {
         ["Laptop"],
         "back before anything syncs into it"
     );
-    let desk = a.desk.as_mut().ok_or("desk")?;
+    let desk = a.desk()?;
     desk.name_desktop("New laptop")?;
     a.sync()?;
     assert_eq!(desktops(&server), ["New laptop"]);
@@ -895,7 +906,7 @@ fn a_desktop_syncs_before_the_main_folder_does() -> R {
     a.sync()?;
     a.add_desktop(NodeId::new(), "Laptop")?;
     std::fs::write(a.desk_root.join("a.txt"), b"a")?;
-    sync(a.desk.as_mut().ok_or("desk")?)?;
+    sync(a.desk()?)?;
     assert_eq!(desktops(&server), ["Laptop"]);
     let synced = sync(&mut a.main)?.synced;
     assert!(
@@ -953,13 +964,7 @@ fn a_desktop_added_during_a_main_sync_is_left_out_from_its_next_round() -> R {
     );
 
     let folder = added.lock().map_err(|_| "lock")?.ok_or("added")?;
-    let mut desk = Engine::new(
-        StateDb::open_folder(&again.db, folder)?,
-        again.drive.clone(),
-        config(&again.desk_root),
-    )?;
-    desk.apply_filter_change()?;
-    sync(&mut desk)?;
+    sync(&mut again.open_desktop(folder)?)?;
     assert_eq!(files(&again.desk_root), ["a.txt"]);
     assert!(
         files(&again.main_root).is_empty(),
@@ -1008,7 +1013,7 @@ fn a_folder_of_an_unknown_kind_doesnt_open() -> R {
     let raw = rusqlite::Connection::open(&a.db)?;
     raw.execute("UPDATE folders SET kind = 9 WHERE kind = 2", [])?;
     drop(raw);
-    let folder = a.desk.as_mut().ok_or("desk")?.db().folder();
+    let folder = a.desk()?.db().folder();
     let opened = Engine::new(
         StateDb::open_folder(&a.db, folder)?,
         a.drive.clone(),
@@ -1044,7 +1049,10 @@ fn a_restore_into_a_desktop_never_takes_the_state_folder_s_name() -> R {
     };
     b.drive.restore(&[removed])?;
     let names: Vec<String> = drive_listing(&server).into_iter().map(|(n, _)| n).collect();
-    assert!(names.contains(&".hbsync (restored)".to_owned()), "{names:?}");
+    assert!(
+        names.contains(&".hbsync (restored)".to_owned()),
+        "{names:?}"
+    );
     assert!(!names.contains(&".hbsync".to_owned()), "{names:?}");
     Ok(())
 }

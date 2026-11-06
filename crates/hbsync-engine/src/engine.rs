@@ -153,19 +153,24 @@ impl SyncReport {
 /// alone once more at the end of the sync, to see that its view doesn't reach them.
 const LEFTOVERS_MAX: usize = 1_000;
 
+/// What a folder holds of the drive (sync semantics §12), from its kind as set up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    Main,
+    Role(Role),
+    Desktop,
+}
+
 /// The name a computer's Desktop folder takes from `name` (the computer's): in NFC, one the
 /// drive takes (not empty, `.` or `..`, no `/` or NUL, 255 bytes at most), not this client's
-/// own (`.hbsync…`, any case) and none the built-in filter leaves out (junk, §10, as a file
-/// or a folder: other computers wouldn't show it); else `Computer`.
+/// own (`.hbsync…`, any case) and not junk (§10: other computers wouldn't show it); else
+/// `Computer`.
 pub(crate) fn desktop_name(name: &str) -> String {
     use hbsync_platform::name::{check_remote_name, nfc, starts_caseless};
     let name = nfc(name.trim());
-    let synced = || {
-        let filter = hbsync_local::Filter::default();
-        !hbsync_local::is_junk(&name) && filter.in_folder("Desktops", &name, true).is_sync()
-    };
+    let ours = starts_caseless(&name, hbsync_local::STATE_DIR);
     match check_remote_name(&name) {
-        Ok(()) if !starts_caseless(&name, hbsync_local::STATE_DIR) && synced() => name,
+        Ok(()) if !ours && !hbsync_local::is_junk(&name) => name,
         _ => "Computer".into(),
     }
 }
@@ -237,8 +242,8 @@ pub struct Engine {
     unreported: Option<SyncReport>,
     /// The folder's refusals ([`crate::refused`]).
     refusals: FolderRefusals,
-    /// What the folder is, as set up ([`FolderKind`]).
-    kind: FolderKind,
+    /// What the folder holds of the drive, as set up ([`FolderKind`]).
+    part: Part,
     /// The main folder's scope as configured, before what this device's other folders hold
     /// is left out of it too ([`Engine::follow_folders`]).
     given: Arc<Scope>,
@@ -276,19 +281,20 @@ impl Engine {
         drive: Arc<Drive>,
         mut cfg: EngineConfig,
     ) -> Result<Self, StateError> {
-        let id = db.folder();
-        let (top, kind) = db.read(|s| {
-            let kind = s
-                .folders()?
-                .into_iter()
-                .find(|f| f.id == id)
-                .and_then(|f| f.kind);
-            Ok((s.coords()?.top, kind))
-        })?;
-        // A kind a newer client set up: not synced as any this one knows.
-        let kind = kind.ok_or_else(|| {
-            StateError::Conflict("a folder of a kind this version doesn't sync".into())
-        })?;
+        let (top, kind) =
+            db.read(|s| Ok((s.coords()?.top, s.this_folder()?.and_then(|f| f.kind))))?;
+        // A kind a newer client set up (or one that doesn't fit its top): not synced as any
+        // this one knows.
+        let part = match (kind, Role::of(top)) {
+            (Some(FolderKind::Main), _) if top.is_root() => Part::Main,
+            (Some(FolderKind::Role), Some(role)) => Part::Role(role),
+            (Some(FolderKind::Desktop), None) if !top.is_root() => Part::Desktop,
+            _ => {
+                return Err(StateError::Conflict(
+                    "a folder of a kind this version doesn't sync".into(),
+                ));
+            }
+        };
         if cfg.folder.scope.top != top {
             cfg.folder.scope = Arc::new(Scope::of(top));
         }
@@ -310,7 +316,7 @@ impl Engine {
             refusals: FolderRefusals::default(),
             waited: Waited::default(),
             unreported: None,
-            kind,
+            part,
             given,
         };
         engine.follow_folders()?;
@@ -345,7 +351,7 @@ impl Engine {
     /// the drive takes: [`desktop_name`]), from its next sync on; a rename made elsewhere
     /// stands until it changes. Nothing for another folder.
     pub fn name_desktop(&mut self, name: &str) -> Result<(), StateError> {
-        if self.kind != FolderKind::Desktop {
+        if self.part != Part::Desktop {
             return Ok(());
         }
         let name = desktop_name(name);
@@ -355,27 +361,30 @@ impl Engine {
 
     /// The main folder leaves out what this device's other folders hold (its own Desktop's
     /// folder: §12), as they are in the DB now: a folder added or removed since changes its
-    /// scope, planned as any new scope ([`Engine::apply_filter_change`]). Read at every round
+    /// scope, planned as any new scope ([`new_scope`]). Read at every round
     /// (one small read): a Desktop added while a sync runs is left out from its next round,
     /// so the main folder never copies the computer's own Desktop in; one not running takes
     /// it first thing when it starts.
     fn follow_folders(&mut self) -> Result<(), StateError> {
-        if self.kind != FolderKind::Main {
+        if self.part != Part::Main {
             return Ok(());
         }
         let tops: Vec<NodeId> = self.db.read(|s| {
             Ok(s.folders()?
-                .into_iter()
+                .iter()
                 .filter(|f| f.kind != Some(FolderKind::Main))
                 .map(|f| f.top)
                 .collect())
         })?;
-        let mut scope = (*self.given).clone();
-        scope.outside.extend(tops);
-        if scope == *self.cfg.folder.scope {
+        let outside: std::collections::BTreeSet<NodeId> =
+            self.given.outside.iter().copied().chain(tops).collect();
+        if outside == self.cfg.folder.scope.outside {
             return Ok(());
         }
-        self.cfg.folder.scope = Arc::new(scope);
+        self.cfg.folder.scope = Arc::new(Scope {
+            top: NodeId::ROOT,
+            outside,
+        });
         self.db.write(|s| new_scope(s, &self.cfg.folder.scope))
     }
 
@@ -568,12 +577,12 @@ impl Engine {
         pulled: Pull,
         report: &mut SyncReport,
     ) -> Result<(), EngineError> {
-        // What a delete or a download left aside (a crash, an item that couldn't be put back or
-        // read) is decided first, what it puts back read again where it is now. A listing of an
-        // empty folder where nothing is.
         // The main folder leaves out what a folder added since holds, and takes back what one
         // removed held (and again at every round).
         self.follow_folders()?;
+        // What a delete or a download left aside (a crash, an item that couldn't be put back or
+        // read) is decided first, what it puts back read again where it is now. A listing of an
+        // empty folder where nothing is.
         let aside = recover_aside(&mut self.db, &self.cfg.folder)?;
         report.left_aside = aside.unknown;
         if !aside.rescan.is_empty() {
@@ -594,11 +603,10 @@ impl Engine {
         };
         // A role folder's top on the drive, or this device's Desktop's: joined, restored, or
         // made.
-        let top = self.cfg.folder.scope.top;
-        match (self.kind, Role::of(top)) {
-            (FolderKind::Role, Some(role)) => self.drive.ensure_role(role)?,
-            (FolderKind::Desktop, _) => self.ensure_desktop(top)?,
-            _ => {}
+        match self.part {
+            Part::Role(role) => self.drive.ensure_role(role)?,
+            Part::Desktop => self.ensure_desktop(self.cfg.folder.scope.top)?,
+            Part::Main => {}
         }
         report.adopted = adopt(&mut self.db, &self.cfg.folder)?;
         // What an earlier run held, or one the user answered since, is planned again.

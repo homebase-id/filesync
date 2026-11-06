@@ -7,7 +7,6 @@
 
 use hbsync_remote::{ChangeRef, NodeMeta, RemoteBody, RemoteHeader, Skipped};
 use hbsync_state::{AccountTx, Answer, Answered, MirrorRow, RemovedRow, StateError};
-use hbsync_types::Role;
 use hbsync_types::{ContentHash, FileToken, NodeId, NodeKind, Written};
 
 // ---- facts the feed brings ----
@@ -80,8 +79,7 @@ pub fn apply(s: AccountTx<'_>, header: &RemoteHeader) -> Result<Applied, StateEr
 fn misplaced(header: &RemoteHeader) -> Option<String> {
     let node = header.node()?;
     let (kind, file) = (header.kind, header.file_id);
-    let folder_only =
-        [NodeId::RECOVERED, NodeId::DESKTOPS].contains(&node) || Role::of(node).is_some();
+    let folder_only = node.is_fixed_folder();
     if node.is_root() || node == NodeId::OUTSIDE {
         Some(format!("{file:?}: node id {node:?} is never a node"))
     } else if header.parent == NodeId::OUTSIDE {
@@ -204,7 +202,7 @@ mod tests {
     use hbsync_remote::PayloadInfo;
     use hbsync_state::StateDb;
     use hbsync_types::schema::NodeContent;
-    use hbsync_types::{RemoteFileId, Uuid, VersionTag};
+    use hbsync_types::{RemoteFileId, Role, Uuid, VersionTag};
 
     use super::*;
 

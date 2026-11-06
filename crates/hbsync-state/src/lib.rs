@@ -572,7 +572,7 @@ impl StateDb {
     pub fn open_folder(path: &Path, folder: i64) -> Result<Self> {
         let mut db = Self::setup(Connection::open(path)?, Some(path))?;
         db.folder = folder;
-        if !db.read(|s| Ok(s.folders()?.iter().any(|f| f.id == folder)))? {
+        if db.read(|s| s.this_folder())?.is_none() {
             return Err(StateError::Conflict(format!(
                 "no folder {folder} in this DB"
             )));

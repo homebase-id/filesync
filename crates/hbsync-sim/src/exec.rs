@@ -161,14 +161,7 @@ impl Sim {
     /// in `parent` on the drive; `name` where none is.
     fn free_name(&self, parent: NodeId, name: &str, node: NodeId) -> String {
         let tree = self.server.tree();
-        let names =
-            std::iter::once(name.to_owned()).chain(hbsync_engine::tree::numbered_names(name));
-        hbsync_engine::tree::first_free_by(
-            names,
-            |n| tree.child_named(parent, n, Some(node)).is_none(),
-            |_| true,
-        )
-        .unwrap_or_else(|| name.to_owned())
+        hbsync_engine::tree::free_name(name, |n| tree.child_named(parent, n, Some(node)).is_none())
     }
 
     /// Client `c` starts a sync: recovers, unparks, and plans from the server as its folder sees
@@ -177,9 +170,13 @@ impl Sim {
         if !self.clients[c].added {
             return;
         }
-        // The main folder leaves out what the computer's folders added since hold.
-        let added = std::mem::take(&mut self.clients[c].tops_added);
-        self.clients[c].own_tops.extend(added);
+        // The main folder leaves out what the computer's other folders added hold (the engine
+        // reads them at every round).
+        let tops = (self.computers.iter())
+            .filter(|(main, other)| *main == c && self.clients[*other].added)
+            .map(|(_, other)| self.clients[*other].coords.top)
+            .collect();
+        self.clients[c].own_tops = tops;
         self.clients[c].run_filter = Arc::clone(&self.clients[c].filter);
         // A new run: what the last one fetched and didn't put in place is gone (its temporary
         // file is fetched again, for what the drive holds then); a lost commit is recovered.
@@ -193,7 +190,9 @@ impl Sim {
         let top = self.clients[c].coords.top;
         match self.clients[c].kind {
             FolderKind::Desktop => self.ensure_desktop(c),
-            FolderKind::Role => drop(self.ensure_folder(top, NodeId::ROOT, |_| NAMES[0].into())),
+            FolderKind::Role => {
+                let _ = self.ensure_folder(top, NodeId::ROOT, |_| NAMES[0].into());
+            }
             FolderKind::Main => {}
         }
         // Nothing is synced into a top that isn't on the drive: the engine's sync fails.
