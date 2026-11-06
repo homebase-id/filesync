@@ -866,20 +866,20 @@ fn a_restore_comes_back_folder_first_and_by_free_names() {
     );
 }
 
-/// At the top of a sync root (the drive's, a role folder's) the state folder's name is taken in
-/// any case: each computer's own `.hbsync` is there. Elsewhere it is a name as any.
+/// At the top of a sync root (the drive's, a role folder's, a Desktop's) the state folder's name
+/// is taken in any case: each computer's own `.hbsync` is there. Elsewhere it is a name as any.
 #[test]
 fn the_state_folder_name_is_taken_at_a_sync_roots_top() {
     let docs = hbsync_types::Role::Documents.node();
     let folder = NodeId::new();
     for top in [NodeId::ROOT, docs] {
-        let mut taken = HashMap::from([(top, taken_in(top, ["a"]))]);
+        let mut taken = HashMap::from([(top, taken_in(true, ["a"]))]);
         assert_eq!(
             take_restored_name(&mut taken, top, ".HBSYNC"),
             Some(".HBSYNC (restored)".to_owned())
         );
     }
-    let mut taken = HashMap::from([(folder, taken_in(folder, ["a"]))]);
+    let mut taken = HashMap::from([(folder, taken_in(false, ["a"]))]);
     assert_eq!(
         take_restored_name(&mut taken, folder, ".hbsync"),
         Some(".hbsync".to_owned())

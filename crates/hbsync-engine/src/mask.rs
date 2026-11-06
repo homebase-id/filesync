@@ -35,7 +35,7 @@ use std::convert::Infallible;
 
 use hbsync_local::Filter;
 use hbsync_platform::name::name_key;
-use hbsync_types::{ContentState, NodeId, NodeKind};
+use hbsync_types::{ContentState, NodeId, NodeKind, Role};
 
 use crate::id::derived_id;
 use crate::plan::Masking;
@@ -97,11 +97,13 @@ impl FilterMasks {
             &with_removed
         };
         let mut outside = scope.out_of_scope(paths);
-        // A folder the scope leaves out that this folder still holds from before (a Desktop
-        // added since, deleted on the drive meanwhile: the plan doesn't see it there) is left
+        // A Desktop's folder the scope leaves out that this folder still holds from before
+        // (added since, deleted on the drive meanwhile: the plan doesn't see it there) is left
         // out all the same: let go or detached as any masked node, never written back under
-        // its id.
-        let held = |n: &&NodeId| input.base.contains(**n) || input.local.contains(**n);
+        // its id. (Not a role folder: its rules stay as they are.)
+        let held = |n: &&NodeId| {
+            Role::of(**n).is_none() && (input.base.contains(**n) || input.local.contains(**n))
+        };
         outside.extend(scope.outside.iter().filter(held));
         // The filter's masks, on what the scope keeps; the rules below are the filter's (§10).
         let mut masked: HashSet<NodeId> = masked(&input.remote, filter)
@@ -179,21 +181,16 @@ impl Masks {
         if masked.is_empty() && outside.is_empty() && brought_back.is_empty() {
             return Masks::default();
         }
-        // The names the filter's masks hold stay taken; a role folder holds none for the scope:
+        // The names the filter's masks hold stay taken, and so does a Desktop's folder the
+        // scope leaves out, where it sits in a folder the scope syncs (the computer's own in
+        // Desktops): another item there takes another. A role folder holds none for the scope:
         // a plain folder of the same name keeps it (two at the top, told apart by id).
+        let desktops = scope.outside.iter().filter(|t| {
+            Role::of(**t).is_none() && input.remote.get(**t).is_some_and(|s| !s.parent.is_root())
+        });
         let mut names: HashMap<NodeId, HashSet<String>> = HashMap::new();
-        for m in &masked {
+        for m in masked.iter().chain(desktops) {
             if let Some(state) = input.remote.get(*m) {
-                names
-                    .entry(state.parent)
-                    .or_default()
-                    .insert(name_key(&state.name));
-            }
-        }
-        // What a scope leaves out holds its name where it sits in a folder the scope syncs (a
-        // computer's own Desktop in Desktops): another item there takes another.
-        for top in &scope.outside {
-            if let Some(state) = input.remote.get(*top).filter(|s| !s.parent.is_root()) {
                 names
                     .entry(state.parent)
                     .or_default()

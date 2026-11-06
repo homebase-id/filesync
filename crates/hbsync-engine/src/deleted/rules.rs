@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use hbsync_platform::name::name_key;
 use hbsync_remote::Holds;
 use hbsync_state::RemovedRow;
-use hbsync_types::{NodeId, NodeKind, RemoteRef, Role};
+use hbsync_types::{NodeId, NodeKind, RemoteRef};
 
 use crate::tree::restored_names;
 
@@ -104,9 +104,9 @@ pub fn restore_wave<'r, R>(
     let mut rest = Vec::new();
     for row in wave {
         let (parent, name) = place(row);
-        // A sync root's top holds the state folder's name even where it went for good (a role
-        // folder made again later takes its id).
-        let free = (!live.contains(&parent) && !is_sync_top(parent))
+        // A sync root's top holds the state folder's name even where it isn't live (a role
+        // folder made again later takes its id; a Desktop coming back with it).
+        let free = (!live.contains(&parent) && !holds_state_dir(taken, parent))
             || taken_at(taken, parent).insert(name_key(name));
         if free {
             asked.push(row)
@@ -117,27 +117,31 @@ pub fn restore_wave<'r, R>(
     Some(RestoreWave { asked, rest, later })
 }
 
-/// The name keys a restore finds taken in live folder `parent`, from the names of what is in it
-/// on the drive (`names`); at the top of a sync root (the drive's, a role folder's) also the
-/// state folder's, in any case or spelling (`.hbsync`): each computer's own folder there, which
-/// no computer syncs, so a row removed under that name comes back under a numbered one. The
-/// engine's restore and the simulator's share it.
-pub fn taken_in<'a>(parent: NodeId, names: impl IntoIterator<Item = &'a str>) -> HashSet<String> {
-    let reserved = is_sync_top(parent).then(|| hbsync_local::state_dir_key().to_owned());
+/// The name keys a restore finds taken in folder `parent`, from the names of what is in it on
+/// the drive (`names`); at the top of a sync root (`top`: the drive's, a role folder's, a
+/// Desktop's, [`crate::along::is_sync_top`]) also the state folder's, in any case or spelling
+/// (`.hbsync`): each computer's own folder there, which no computer syncs, so a row removed
+/// under that name comes back under a numbered one. The engine's restore and the simulator's
+/// share it.
+pub fn taken_in<'a>(top: bool, names: impl IntoIterator<Item = &'a str>) -> HashSet<String> {
+    let reserved = top.then(|| hbsync_local::state_dir_key().to_owned());
     names.into_iter().map(name_key).chain(reserved).collect()
 }
 
-/// Whether `node` is the top of a sync root: the drive's, or a role folder's (§12).
-fn is_sync_top(node: NodeId) -> bool {
-    node.is_root() || Role::of(node).is_some()
+/// Whether the names taken in `parent` hold the state folder's: it is a sync root's top.
+fn holds_state_dir(taken: &HashMap<NodeId, HashSet<String>>, parent: NodeId) -> bool {
+    taken
+        .get(&parent)
+        .is_some_and(|names| names.contains(hbsync_local::state_dir_key()))
+        || crate::along::is_sync_top(parent, None)
 }
 
 /// The name keys taken in `parent`: none yet but the reserved ones ([`taken_in`]) where it holds
-/// nothing known.
+/// nothing known (one gone for good: a top by its id only).
 fn taken_at(taken: &mut HashMap<NodeId, HashSet<String>>, parent: NodeId) -> &mut HashSet<String> {
     taken
         .entry(parent)
-        .or_insert_with(|| taken_in(parent, std::iter::empty()))
+        .or_insert_with(|| taken_in(crate::along::is_sync_top(parent, None), std::iter::empty()))
 }
 
 /// The name a restored row that can't take its own (`name`) in `parent` comes back under: the

@@ -1017,3 +1017,34 @@ fn a_folder_of_an_unknown_kind_doesnt_open() -> R {
     assert!(opened.is_err());
     Ok(())
 }
+
+/// A computer's Desktop folder is a sync root's top, as the drive's and a role folder's: a
+/// restore into it never takes the state folder's name (`.hbsync`, the computer's own there).
+#[test]
+fn a_restore_into_a_desktop_never_takes_the_state_folder_s_name() -> R {
+    let server = FakeServer::new(ServerConfig::default());
+    let mut a = DeskPc::new(&server, Some((NodeId::new(), "Laptop")))?;
+    a.sync()?;
+    let mut b = DeskPc::new(&server, None)?;
+    b.sync()?;
+    let state = b.main_root.join("Desktops/Laptop/.hbsync");
+    std::fs::create_dir_all(&state)?;
+    std::fs::write(state.join("x.txt"), b"x")?;
+    b.sync()?;
+    std::fs::remove_dir_all(&state)?;
+    b.sync()?;
+    let removed = {
+        let srv = server.lock().map_err(|_| "poisoned")?;
+        srv.removed()
+            .find_map(|h| match &h.body {
+                RemoteBody::Live { node, content, .. } if content.name == ".hbsync" => Some(*node),
+                _ => None,
+            })
+            .ok_or("in Recently deleted")?
+    };
+    b.drive.restore(&[removed])?;
+    let names: Vec<String> = drive_listing(&server).into_iter().map(|(n, _)| n).collect();
+    assert!(names.contains(&".hbsync (restored)".to_owned()), "{names:?}");
+    assert!(!names.contains(&".hbsync".to_owned()), "{names:?}");
+    Ok(())
+}

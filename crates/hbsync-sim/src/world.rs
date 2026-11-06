@@ -1328,6 +1328,9 @@ impl deleted::RestoreSource for RestoreFrom<'_> {
             .map(|n| n.state.name.clone())
             .collect())
     }
+    fn parent_of(&mut self, node: NodeId) -> Result<Option<NodeId>, Infallible> {
+        Ok(self.0.live.get(&node).map(|n| n.state.parent))
+    }
     fn place(row: &Row) -> (NodeId, NodeId) {
         (row.node, row.parent)
     }
