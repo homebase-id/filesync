@@ -1,5 +1,6 @@
 //! The sync loop for one sync root.
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,8 +9,8 @@ use std::time::{Duration, Instant};
 use hbsync_local::{CatchUp, Debounce, LocalObserver, ScanOptions, ScanReport, rescan_dirs, scan};
 use hbsync_remote::Remote;
 use hbsync_state::{DirtyCursor, Mark, StateDb, StateError, keys};
-use hbsync_types::NodeId;
 use hbsync_types::activity::Synced;
+use hbsync_types::{NodeId, Role};
 
 use crate::activity::{self, Counters};
 use crate::adopt::adopt;
@@ -153,6 +154,22 @@ impl SyncReport {
 /// alone once more at the end of the sync, to see that its view doesn't reach them.
 const LEFTOVERS_MAX: usize = 1_000;
 
+/// Records `scope` as the folder's, if it is new (§12). A new scope changes what is in view
+/// remotely only: no walk. The folders it or the last one left out are planned again from
+/// their tops, which brings what is in them: what this device holds there goes, what comes
+/// into view comes.
+fn new_scope(s: &hbsync_state::Store<'_>, scope: &Scope) -> Result<(), StateError> {
+    let fingerprint = scope.fingerprint();
+    let last = s.get_kv(keys::SCOPE)?;
+    if last.as_deref() != Some(fingerprint.as_str()) {
+        let last = last.as_deref().map(Scope::outside_of).unwrap_or_default();
+        last.union(&scope.outside)
+            .try_for_each(|n| s.folder().mark_dirty(*n))?;
+        s.folder().set_kv(keys::SCOPE, &fingerprint)?;
+    }
+    Ok(())
+}
+
 /// The state DB as [`crate::pages::OwnPages`] reads it: a read transaction a query.
 struct DbPages<'a>(&'a mut StateDb);
 
@@ -204,6 +221,9 @@ pub struct Engine {
     unreported: Option<SyncReport>,
     /// The folder's refusals ([`crate::refused`]).
     refusals: FolderRefusals,
+    /// The main folder's: the drive's nodes this device's other folders hold, which it leaves
+    /// out ([`Engine::follow_folders`]).
+    other_tops: BTreeSet<NodeId>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -244,7 +264,7 @@ impl Engine {
         }
         let scan_opts = cfg.folder.scan_options();
         let remote = cfg.folder.scope.remote(drive.shared_remote());
-        Ok(Engine {
+        let mut engine = Engine {
             db,
             drive,
             remote,
@@ -259,7 +279,73 @@ impl Engine {
             refusals: FolderRefusals::default(),
             waited: Waited::default(),
             unreported: None,
-        })
+            other_tops: BTreeSet::new(),
+        };
+        engine.follow_folders()?;
+        Ok(engine)
+    }
+
+    /// This device's Desktop's folder on the drive, `top`, made, restored or joined
+    /// ([`Drive::ensure_desktop`]), named as the computer is ([`keys::DESKTOP_NAME`]; this
+    /// folder's own name until it is set). A name that changed since it was last given is given
+    /// again.
+    fn ensure_desktop(&mut self, top: NodeId) -> Result<(), EngineError> {
+        let (name, named) = self.db.read(|s| {
+            Ok((
+                s.get_kv(keys::DESKTOP_NAME)?,
+                s.get_kv(keys::DESKTOP_NAMED)?,
+            ))
+        })?;
+        let name = name.unwrap_or_else(|| {
+            let root = &self.cfg.folder.root;
+            root.file_name()
+                .map_or_else(|| "Desktop".into(), |n| n.to_string_lossy().into_owned())
+        });
+        let rename = named.as_deref() != Some(name.as_str());
+        self.drive.ensure_desktop(top, &name, rename)?;
+        if rename {
+            self.db
+                .write(|s| s.folder().set_kv(keys::DESKTOP_NAMED, &name))?;
+        }
+        Ok(())
+    }
+
+    /// Names this device's Desktop's folder on the drive `name` (the computer's), from its next
+    /// sync on; a rename made elsewhere stands until it changes. Nothing for another folder.
+    pub fn name_desktop(&mut self, name: &str) -> Result<(), StateError> {
+        let top = self.cfg.folder.scope.top;
+        if top.is_root() || Role::of(top).is_some() {
+            return Ok(());
+        }
+        self.db
+            .write(|s| s.folder().set_kv(keys::DESKTOP_NAME, name))
+    }
+
+    /// The main folder leaves out what this device's other folders hold (its own Desktop's
+    /// folder: §12), as they are in the DB now: a folder added or removed since changes its
+    /// scope, planned as any new scope ([`Engine::apply_filter_change`]).
+    fn follow_folders(&mut self) -> Result<(), StateError> {
+        if !self.cfg.folder.scope.top.is_root() {
+            return Ok(());
+        }
+        let tops: BTreeSet<NodeId> = self.db.read(|s| {
+            Ok(s.folders()?
+                .into_iter()
+                .map(|f| f.top)
+                .filter(|t| !t.is_root())
+                .collect())
+        })?;
+        if tops == self.other_tops {
+            return Ok(());
+        }
+        let mut scope = (*self.cfg.folder.scope).clone();
+        // A role folder is left out whatever this device syncs.
+        let gone = |n: &NodeId| self.other_tops.contains(n) && Role::of(*n).is_none();
+        scope.outside.retain(|n| !gone(n));
+        scope.outside.extend(tops.iter().copied());
+        self.other_tops = tops;
+        self.cfg.folder.scope = Arc::new(scope);
+        self.db.write(|s| new_scope(s, &self.cfg.folder.scope))
     }
 
     /// How far the current sync is (started over at each sync), to show while it runs.
@@ -371,18 +457,8 @@ impl Engine {
     /// the new fingerprint, so a crash can't skip it.
     pub fn apply_filter_change(&mut self) -> Result<bool, StateError> {
         let fingerprint = self.cfg.folder.filter.fingerprint();
-        let scope = self.cfg.folder.scope.fingerprint();
         self.db.write(|s| {
-            // A new scope (§12) changes what is in view remotely only: no walk. The folders it
-            // or the last one left out are planned again from their tops, which brings what
-            // is in them: what this device holds there goes, what comes into view comes.
-            let last = s.get_kv(keys::SCOPE)?;
-            if last.as_deref() != Some(scope.as_str()) {
-                let last = last.as_deref().map(Scope::outside_of).unwrap_or_default();
-                last.union(&self.cfg.folder.scope.outside)
-                    .try_for_each(|n| s.folder().mark_dirty(*n))?;
-                s.folder().set_kv(keys::SCOPE, &scope)?;
-            }
+            new_scope(s, &self.cfg.folder.scope)?;
             if s.get_kv(keys::FILTER)?.as_deref() == Some(fingerprint.as_str()) {
                 return Ok(false);
             }
@@ -464,6 +540,9 @@ impl Engine {
         // What a delete or a download left aside (a crash, an item that couldn't be put back or
         // read) is decided first, what it puts back read again where it is now. A listing of an
         // empty folder where nothing is.
+        // The main folder leaves out what a folder added since holds, and takes back what one
+        // removed held.
+        self.follow_folders()?;
         let aside = recover_aside(&mut self.db, &self.cfg.folder)?;
         report.left_aside = aside.unknown;
         if !aside.rescan.is_empty() {
@@ -482,9 +561,13 @@ impl Engine {
             Pull::Now => self.drive.pull(folder)?,
             Pull::IfBehind => self.drive.catch_up(folder)?,
         };
-        // A role folder's top on the drive: joined, restored, or made.
-        if let Some(role) = hbsync_types::Role::of(self.cfg.folder.scope.top) {
+        // A role folder's top on the drive, or this device's Desktop's: joined, restored, or
+        // made.
+        let top = self.cfg.folder.scope.top;
+        if let Some(role) = Role::of(top) {
             self.drive.ensure_role(role)?;
+        } else if !top.is_root() {
+            self.ensure_desktop(top)?;
         }
         report.adopted = adopt(&mut self.db, &self.cfg.folder)?;
         // What an earlier run held, or one the user answered since, is planned again.

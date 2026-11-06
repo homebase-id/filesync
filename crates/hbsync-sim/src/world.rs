@@ -58,13 +58,15 @@ impl Sim {
     }
 
     /// Whether drive node `node` is known to lie outside client `c`'s folder's part of the
-    /// drive: in the role folder for the main folder, under the drive's top elsewhere for the
-    /// role folder. A node whose place isn't known (a gap, or a cycle a sync's moves make for a
+    /// drive: in a folder it leaves out (a role folder, its computer's Desktop) for the main
+    /// folder, under the drive's top elsewhere for another folder. A node whose place isn't known (a gap, or a cycle a sync's moves make for a
     /// moment) isn't.
     pub(crate) fn known_outside(&self, c: usize, node: NodeId) -> bool {
-        match self.clients[c].coords.top {
-            top if top.is_root() => self.server.in_role_folder(node),
-            _ => self.server.place(node) == End::Top,
+        let client = &self.clients[c];
+        match client.coords.top {
+            top if top.is_root() => (client.scope().outside.iter())
+                .any(|&out| self.server.place_below(node, out) == End::At(out)),
+            top => self.server.place_below(node, top) == End::Top,
         }
     }
 
@@ -470,6 +472,12 @@ impl Sim {
                 self.clients[c].pull_mid_local = Some((on, change));
             }
             Action::DeleteRoleFolder => self.delete_role_folder(),
+            Action::RenameComputer { name } => {
+                let client = &mut self.clients[c];
+                if client.is_desktop() {
+                    client.desktop_name = NAMES[name % NAMES.len()].to_owned();
+                }
+            }
             Action::DeleteStopped { pick, done } => self.delete_stopped(pick, done),
             Action::DeleteOutright { pick } => self.delete_outright(pick),
             Action::IntoFile { pick, file } => self.move_into_file(pick, file),

@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use hbsync_remote::{Answers, BATCH_FILES, Holds, Remote, RemoteError};
 use hbsync_state::{MirrorRow, ReadTx, RemovedRow, StateError};
-use hbsync_types::{Doomed, NodeId, NodeKind, RemoteFileId, RemoteRef, Role, Target};
+use hbsync_types::{Doomed, NodeId, NodeKind, RemoteFileId, RemoteRef, Target};
 
 use crate::error::EngineError;
 use crate::gone;
@@ -172,7 +172,7 @@ impl AccountOps<'_> {
             live.values().map(|m| (m.node, m.parent, m.kind)),
             |f| removed.get(&f).copied(),
             |n| live[&n].changed_at,
-            |n| Role::of(n).is_some(),
+            |n| crate::along::kept_by_purge(n, live[&n].parent),
         );
         // The folders it takes from, as the drive has them now: one restored or written since
         // takes nothing.
