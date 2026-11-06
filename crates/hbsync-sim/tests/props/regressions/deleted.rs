@@ -2051,8 +2051,7 @@ fn regression_a_removal_after_a_restore_elsewhere_is_not_the_plans() {
 /// down yet (its base wanted, §5), and then its folder goes from here (a move, an ignore
 /// rule). That version of the file was never here: no one here deleted it, and it stays on the
 /// drive, keeping its folder there. (Read as gone with its folder, it went to Recently
-/// deleted.) The engine test `a_folder_deleted_here_takes_its_wanted_file_along` holds the
-/// other rule, ignored until the user decides.
+/// deleted.) The engine test `a_folder_deleted_here_keeps_its_wanted_file` holds it too.
 #[test]
 fn regression_a_folder_deleted_here_keeps_its_wanted_file() {
     use Action::*;

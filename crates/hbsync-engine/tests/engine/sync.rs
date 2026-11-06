@@ -509,15 +509,11 @@ fn a_wanted_node_adopts_its_bytes_put_back_by_hand() -> R {
     Ok(())
 }
 
-/// A wanted file (its item gone into a conflict copy, its download not in yet, §5) doesn't hold
-/// up its folder's delete here: the folder goes whole, its file with it, the drive's version
-/// unchanged since. Open: the simulator's oracle holds that this sends the drive's file to
-/// Recently deleted though no user here deleted it (that version was never here), and a
-/// folder deleted here keeps it now (seed 1c2bf6e2, `regression_a_folder_deleted_here_keeps_
-/// its_wanted_file`); which rule holds is the user's call.
+/// A wanted file (its item gone into a conflict copy, its download not in yet, §5) is kept when
+/// its folder is deleted here: the drive's version was never here to delete. The folder's other
+/// files go, and it is made again with that file.
 #[test]
-#[ignore = "open decision: a folder deleted here takes its wanted file along, or keeps it"]
-fn a_folder_deleted_here_takes_its_wanted_file_along() -> R {
+fn a_folder_deleted_here_keeps_its_wanted_file() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
     let (mut b, faults) = Client::with_faults(&server, "b", |_| {})?;
@@ -533,8 +529,10 @@ fn a_folder_deleted_here_takes_its_wanted_file_along() -> R {
     faults.fail(FailPoint::Barrier, 0);
     b.sync()?;
     a.sync()?;
-    assert!(!a.root.join("d").exists(), "{:?}", a.tree_text(""));
-    assert!(!b.root.join("d").exists(), "{:?}", b.tree_text(""));
+    for c in [&a, &b] {
+        assert_eq!(c.read_text("d/f.txt")?, "base", "{:?}", c.tree_text(""));
+        assert!(!c.root.join("d/g.txt").exists(), "{:?}", c.tree_text(""));
+    }
     assert_eq!(a.tree_text(""), b.tree_text(""));
     Ok(())
 }
