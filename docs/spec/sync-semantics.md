@@ -1033,7 +1033,9 @@ first.
 
 What lies outside an engine's scope is masked as filtered nodes are (§10): never downloaded,
 never changed or deleted remotely. It is never *leaving* (§10, rule 1): another engine or device
-syncs it. A role folder at the top that the engine holds nothing of isn't planned at all; no
+syncs it. What a delete took along is judged on the drive as it is, what is masked included: a
+node a folder leaves out (its computer's own Desktop in Desktops) written after the delete
+keeps the folders above it there too. A role folder at the top that the engine holds nothing of isn't planned at all; no
 version ever synced one into the main folder, so a device holds one only through a bug, and
 then lets go of it as of anything masked. A role folder moved into a folder (against the node
 schema's rules) is masked there and keeps that folder alive (§6.3).
