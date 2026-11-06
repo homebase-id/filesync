@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 use hbsync_platform::RelPath;
-use hbsync_platform::name::name_key;
+use hbsync_platform::name::{ends_caseless, name_key, starts_caseless};
 
 /// Bumped whenever the built-in junk list changes, so a changed list counts as a rule change.
 const JUNK_VERSION: u32 = 3;
@@ -69,15 +69,6 @@ const JUNK: &[Pat] = &[
     Pat::Suffix(".download"),
 ];
 
-fn starts(name: &str, p: &str) -> bool {
-    name.len() >= p.len() && name.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes())
-}
-
-fn ends(name: &str, s: &str) -> bool {
-    name.len() >= s.len()
-        && name.as_bytes()[name.len() - s.len()..].eq_ignore_ascii_case(s.as_bytes())
-}
-
 /// The state folder's ([`crate::STATE_DIR`]) name key (`name_key`): its name in any case or
 /// spelling.
 pub fn state_dir_key() -> &'static str {
@@ -96,9 +87,11 @@ pub fn is_state_dir(name: &str) -> bool {
 pub fn is_junk(name: &str) -> bool {
     JUNK.iter().any(|pat| match *pat {
         Pat::Name(n) => name.eq_ignore_ascii_case(n),
-        Pat::Prefix(p) => starts(name, p),
-        Pat::Suffix(s) => ends(name, s),
-        Pat::Both(p, s) => name.len() >= p.len() + s.len() && starts(name, p) && ends(name, s),
+        Pat::Prefix(p) => starts_caseless(name, p),
+        Pat::Suffix(s) => ends_caseless(name, s),
+        Pat::Both(p, s) => {
+            name.len() >= p.len() + s.len() && starts_caseless(name, p) && ends_caseless(name, s)
+        }
     })
 }
 

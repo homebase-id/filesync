@@ -19,7 +19,7 @@ use hbsync_types::{
 };
 
 use crate::Sim;
-use crate::action::{Action, JUNK, JUNK_FOLDER, NAMES, TAGS};
+use crate::action::{Action, JUNK, JUNK_FOLDER, LAUNCHERS, NAMES, TAGS};
 use crate::model::client::{Client, ignoring_d};
 use crate::model::server::{Server, ServerNode};
 use crate::oracle::Seen;
@@ -507,6 +507,10 @@ impl Sim {
                 );
                 self.retrack(c, node, new);
                 self.ledger.tags.moved(c, to, new);
+                // The user's move: their mark goes along.
+                self.clients[c].trusted.remove(&node);
+                self.clients[c].user_x.remove(&node);
+                self.user_named(to, new);
             }
             Action::ListDeleted => {
                 let rows = self.server.removed.iter().map(Server::at).collect();
@@ -604,7 +608,12 @@ impl Sim {
                 let node = files[file % files.len()];
                 let mut state = local.get(node).cloned().unwrap_or_else(|| unreachable!());
                 self.ledger.blob_superseded(state.content);
-                state.content = Some(self.new_blob());
+                // An app saving it keeps its mode.
+                let executable = state.content.is_some_and(|c| c.executable);
+                state.content = Some(FileContent {
+                    executable,
+                    ..self.new_blob()
+                });
                 self.clients[c].local.insert(node, state);
                 // Being written, or locked: not hashed, and not sent before it is.
                 if matches!(action, Action::EditWriting { .. } | Action::Lock { .. }) {
@@ -630,6 +639,35 @@ impl Sim {
                 state.parent = parent;
                 state.name = name.to_owned();
                 self.clients[c].local.insert(node, state);
+                self.user_named(c, node);
+            }
+            Action::Launcher { node, name } => {
+                if all.is_empty() {
+                    return;
+                }
+                let node = all[node % all.len()];
+                let name = LAUNCHERS[name % LAUNCHERS.len()];
+                let mut state = local.get(node).cloned().unwrap_or_else(|| unreachable!());
+                if !name_free(local, state.parent, name, Some(node)) {
+                    return;
+                }
+                state.name = name.to_owned();
+                self.clients[c].local.insert(node, state);
+                self.user_named(c, node);
+            }
+            Action::Chmod { file } => {
+                if files.is_empty() || self.clients[c].os == Os::Windows {
+                    return;
+                }
+                let node = files[file % files.len()];
+                let mut state = local.get(node).cloned().unwrap_or_else(|| unreachable!());
+                let Some(content) = state.content.as_mut() else {
+                    return;
+                };
+                content.executable = !content.executable;
+                self.clients[c].local.insert(node, state);
+                self.clients[c].trusted.remove(&node);
+                self.user_named(c, node);
             }
             Action::Delete { node } => {
                 if all.is_empty() {
@@ -1210,6 +1248,22 @@ impl Sim {
             if self.ledger.removed_rightly(&(n, gone.remote.version)) {
                 self.ledger.blob_superseded(gone.state.content);
             }
+        }
+    }
+
+    /// The user's own action left client `c`'s file `node` as it is: executable, it is so as
+    /// the user has it ([`Client::trusted`]).
+    ///
+    /// [`Client::trusted`]: crate::model::client::Client::trusted
+    fn user_named(&mut self, c: usize, node: NodeId) {
+        let client = &mut self.clients[c];
+        client.user_x.insert(node);
+        if client
+            .local
+            .get(node)
+            .is_some_and(|s| s.content.is_some_and(|c| c.executable))
+        {
+            client.trusted.insert(node);
         }
     }
 

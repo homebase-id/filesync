@@ -1137,3 +1137,41 @@ fn a_confirmation_outlives_a_sync_that_failed_at_its_start() -> R {
     );
     Ok(())
 }
+
+/// Files whose items went into conflict copies, their downloads not in yet (wanted, §5), are not
+/// deleted here: the guard counts only the real delete beside them, and doesn't hold it.
+#[test]
+fn wanted_files_are_not_counted_as_deletes() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let (mut b, faults) = Client::with_faults(&server, "b", |cfg| {
+        cfg.guard.min = 2;
+        cfg.guard.fraction = 0.0;
+    })?;
+    for i in 0..3 {
+        a.write(&format!("f{i}.txt"), "base")?;
+    }
+    for i in 0..5 {
+        a.write(&format!("k{i}.txt"), "keep")?;
+    }
+    a.sync()?;
+    b.sync()?;
+    a.write("f0.txt", "theirs")?;
+    a.write("f1.txt", "theirs")?;
+    a.sync()?;
+    b.write("f0.txt", "mine")?;
+    b.write("f1.txt", "mine")?;
+    // b forks both, their downloads not in yet; then deletes f2.
+    faults.fail(FailPoint::Barrier, usize::MAX);
+    b.sync()?;
+    fs::remove_file(b.root.join("f2.txt"))?;
+    let report = b.sync()?;
+    assert!(report.held.is_empty(), "{report:?}");
+    faults.fail(FailPoint::Barrier, 0);
+    b.sync()?;
+    a.sync()?;
+    assert!(!a.root.join("f2.txt").exists(), "{:?}", a.tree_text(""));
+    assert_eq!(b.read_text("f0.txt")?, "theirs");
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    Ok(())
+}

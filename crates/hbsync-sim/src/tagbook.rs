@@ -21,10 +21,11 @@ pub(crate) enum Limit {
     /// write settles the base on what both sides hold after it, so once it lands the add reads
     /// as the drive's removal, and goes (sync semantics §1; the in-flight undo design).
     OwnRemovalInFlight,
-    /// Another client put a new item where its node had none (a download after its item went
-    /// into a conflict copy): the base keeps the old item's tags the write didn't touch, so a
-    /// tag neither side holds any more reads as that client's removal, and is sent over a later
-    /// add (sync semantics §1; branch r6-fresh-tags, seed 0a9df7c6).
+    /// Another client put a new item where its node had none, its base kept (not a conflict
+    /// copy's: its wanted base settles from the drive's tags): the base keeps the old item's
+    /// tags the write didn't touch, so a tag neither side holds any more reads as that client's
+    /// removal, and is sent over a later add (sync semantics §1; branch r6-fresh-tags, seed
+    /// 0a9df7c6).
     NewItemKeepsBaseTag,
     /// A removal made while the remover's own plan still writes the tag (onto the item, or up
     /// with a remote write): the write, planned before, lands over it, and the tag comes back

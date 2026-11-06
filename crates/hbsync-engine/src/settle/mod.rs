@@ -5,13 +5,13 @@ use hbsync_namemap::{to_local, to_remote};
 use hbsync_platform::name::NameIssue;
 use hbsync_platform::{Fingerprint, Os, RelPath};
 use hbsync_state::{BaseRow, FolderTx, MirrorRow, Placing, PlannedBase, ReadTx, StateError};
-use hbsync_types::{ContentHash, ContentState, NodeId, NodeKind, NodeState, RemoteRef};
+use hbsync_types::{ContentHash, NodeId, NodeKind, NodeState, RemoteRef};
 
 pub(crate) mod rules;
 
 use crate::folder::FolderCtx;
 use crate::view;
-use rules::{Against, Agreement, DriveVersion, TagWrite, tags_written};
+use rules::{Against, Agreement, DriveVersion, TagWrite, prior_tags, tags_written};
 
 /// A node to settle after an operation, and what against.
 #[derive(Debug, Clone, Copy)]
@@ -198,29 +198,31 @@ pub(crate) fn settle_with(
     let at = base.as_ref().map(|b| b.remote);
     let ours = how.ours.filter(|o| at == Some(*o));
     let drive = how.against.drive();
+    let state = base.as_ref().map(|b| b.content_state);
     // A local write's version of the drive its content, place and version settle against
     // (`None` in it: the base moved), with the tags of the version it acted on.
     let acted = drive.map(|d| {
-        d.settles_against(at.map(|r| r.version), ours, |o| {
+        d.settles_against(d.base_now(at.map(|r| r.version), state), ours, |o| {
             let m = mirror.as_ref().filter(|m| m.remote_ref() == o)?;
             Some((m.state()?, o))
         })
     });
-    // What the local tags read as, against the tags they're judged against.
+    // What the local tags and bit read as, against what they're judged against.
     let reference = match drive {
-        Some(d) => Some(d.state.tags.clone()),
-        None => mirror.as_ref().map(|m| m.tags()),
+        Some(d) => Some(view::Reference::of(&d.state)),
+        None => mirror.as_ref().map(view::Reference::of_mirror),
     };
     let Some(local) = view::local_node(&s, node, os, reference.as_ref())? else {
         match mirror {
             None => {
                 s.delete_base(node)?;
             }
-            // No local bytes by design: the base follows the remote.
+            // No local bytes by design, or none yet (wanted, its item gone into a conflict
+            // copy, §5): the base follows the remote.
             Some(m)
                 if base
                     .as_ref()
-                    .is_some_and(|b| b.content_state == ContentState::OnlineOnly) =>
+                    .is_some_and(|b| b.content_state.keeps_absence()) =>
             {
                 if let (Some(mut b), Some(r)) = (base, m.state()) {
                     b.state = r;
@@ -236,7 +238,7 @@ pub(crate) fn settle_with(
     // What the write left, as the item reads (what this device can't hold is the drive's), and
     // what was there, read alike, but for a tag this device can't hold at all: the item never
     // held that, so the write leaves the drive's value of it, as the base records.
-    let reference = reference.unwrap_or_default();
+    let reference = reference.map(|r| r.tags).unwrap_or_default();
     let filled = match how.tags {
         TagWrite::Wrote { before, written } => Some(tags_written(before, written, &reference, os)),
         _ => None,
@@ -253,7 +255,11 @@ pub(crate) fn settle_with(
         Some(None) => {
             s.mark_dirty(node)?;
             if let (Some(mut b), Some(l), Some(d)) = (base, &local.state, drive) {
-                let tags = how.tags.settle(&b.state.tags, &l.tags, &d.state.tags);
+                let tags = how.tags.settle(
+                    prior_tags(b.content_state, &b.state.tags, &d.state.tags),
+                    &l.tags,
+                    &d.state.tags,
+                );
                 if tags != b.state.tags {
                     b.state.tags = tags;
                     s.put_base(&b)?;
@@ -303,7 +309,7 @@ fn settled(
     let agreed = agreement(local, l, remote, how.same_bytes, os);
     let prior = base
         .as_ref()
-        .map(|b| b.state.tags.clone())
+        .map(|b| prior_tags(b.content_state, &b.state.tags, &remote.tags).clone())
         .unwrap_or_default();
     let mut state = agreed.settle(
         base.as_ref().map(|b| b.state.clone()),
@@ -315,6 +321,7 @@ fn settled(
     let mut row = base.unwrap_or_else(|| BaseRow::new(how.node, remote.clone(), at));
     row.state = state;
     row.remote = at;
+    row.content_state = row.content_state.placed();
     if agreed.place {
         row.local_name = recorded_name(&local.row.path, &remote.name, os);
     }
@@ -363,7 +370,7 @@ pub(crate) fn tags_recorded(
     let Some(remote) = remote else {
         return Ok(false);
     };
-    let Some(local) = view::local_node(s, node, os, Some(&remote.tags))? else {
+    let Some(local) = view::local_node(s, node, os, Some(&view::Reference::of(&remote)))? else {
         return Ok(false);
     };
     Ok(local

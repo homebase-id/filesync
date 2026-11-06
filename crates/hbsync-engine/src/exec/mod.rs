@@ -25,7 +25,7 @@ use std::time::Duration;
 
 use hbsync_fileio::FileIoError;
 use hbsync_platform::name::name_key;
-use hbsync_platform::{EntryKind, Os, RelPath, ops, tags};
+use hbsync_platform::{EntryKind, RelPath, executable_on_disk, holds_executable, ops, tags};
 use hbsync_remote::{NodeMeta, Remote, RemoteError};
 use hbsync_state::{
     Answer, Answered, BaseRow, FolderTx, LocalRow, MirrorRow, Placing, ReadTx, Refused, StateDb,
@@ -840,6 +840,7 @@ fn renamed_row(root: &Path, old: &LocalRow, path: &RelPath) -> Option<LocalRow> 
     (old.kind == NodeKind::File && old.fingerprint.same_after_rename(&meta)).then(|| LocalRow {
         path: path.clone(),
         fingerprint: meta.fingerprint(),
+        executable: meta.executable.or(old.executable),
         ..old.clone()
     })
 }

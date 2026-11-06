@@ -260,3 +260,43 @@ fn regression_what_is_in_a_removed_folder_of_a_role_folder_is_never_the_main_fol
         panic!("{e}");
     }
 }
+
+/// Seed 8509c672: client 0's Documents forks its file `d` into a conflict copy, its download
+/// not run yet, and the user's ignore rule then takes in `d`'s place. A wanted base (§5) has
+/// nothing here to keep: it read as leaving (an ordinary local delete) though no item had gone,
+/// and the drive's `d` was planned down onto a name an ignored item holds, forever. Masked as
+/// a node never synced here, it stays on the drive and out of this folder.
+#[test]
+fn regression_a_wanted_node_at_an_ignored_place_is_masked() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(3, CreateFile { parent: 0, name: 0 }),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(3, Meanwhile { op: 5 }),
+        Event::Plan { client: 3 },
+        Event::Step { client: 3 },
+        act(
+            3,
+            Move {
+                node: 0,
+                parent: 0,
+                name: 13,
+            },
+        ),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        Event::Plan { client: 0 },
+        Event::Plan { client: 0 },
+        act(3, Edit { file: 0 }),
+        Event::Plan { client: 0 },
+        Event::Plan { client: 3 },
+        Event::Step { client: 3 },
+        act(3, ToggleIgnore),
+        Event::Step { client: 3 },
+        Event::Step { client: 3 },
+    ];
+    if let Err(e) = run_with(3, None, Sim::with_role_device, &events) {
+        panic!("{e}");
+    }
+}

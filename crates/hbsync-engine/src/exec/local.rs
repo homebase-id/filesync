@@ -50,7 +50,8 @@ impl Executor<'_> {
         if self.crash_here(CrashPoint::AfterForkRename) {
             return Ok(Outcome::Retry("crash point reached".into()));
         }
-        self.finish(&[Settle::node(new_node), Settle::node(node)], |s| {
+        // The node's base stays as it is (wanted, §5), for the run's later writes of it.
+        self.finish(&[Settle::node(new_node)], |s| {
             complete_fork(s.folder(), node, &moved)
         })
     }
@@ -347,7 +348,14 @@ impl Executor<'_> {
         name: &str,
         drive: Option<&DriveVersion>,
     ) -> Step {
-        let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
+        let Some((row, place)) = self.db.read(|s| {
+            let Some(row) = s.local_by_node(node)? else {
+                return Ok(None);
+            };
+            let place = view::place(s, &row)?;
+            Ok(Some((row, place)))
+        })?
+        else {
             return Ok(Outcome::stale("gone"));
         };
         if !self.on_disk_unchanged(&row) {
@@ -370,6 +378,29 @@ impl Executor<'_> {
         }
         if let Err(e) = self.disk.rename(self.db, &row.path, &target)? {
             return Ok(io_outcome(e));
+        }
+        // A new name that changes whether this device holds the bit (a launcher's on Linux)
+        // gives the file what it holds now: none for a launcher, else the drive's (§1). The
+        // name it had is the one at its place, as the view reads it.
+        let os = self.folder.os;
+        let held = |n: &str| holds_executable(os, n);
+        if row.kind == NodeKind::File && place.name().is_some_and(|old| held(old) != held(name)) {
+            let drive_x = match drive {
+                Some(d) => d.state.content.map(|c| c.executable),
+                None => self
+                    .db
+                    .read(|s| s.get_mirror(node))?
+                    .and_then(|m| m.file)
+                    .map(|f| f.executable),
+            };
+            let at = target.to_native(self.disk.root());
+            let x = executable_on_disk(os, name, drive_x == Some(true));
+            if let Err(e) = ops::set_executable(&at, x) {
+                tracing::warn!(
+                    "{}: the executable bit isn't set as synced: {e}",
+                    at.display()
+                );
+            }
         }
         let refreshed = self.renamed(&row, &target);
         // A move takes the item's tags along: it writes none.

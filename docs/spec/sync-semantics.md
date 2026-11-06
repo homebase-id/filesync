@@ -19,6 +19,18 @@ changes). Attributes:
 
 The **root** is implicit: it has the fixed id from the node schema and is never stored as a node.
 
+**The executable bit.** Where a device doesn't hold a file's `x` (Windows never does), it
+follows the drive's, as with tags (§11): it never reads the bit back from disk, an edit sends
+the drive's `x` on (the base's if the drive has no row, else false), and a change of `x` alone
+on the drive changes nothing there. On Linux a launcher (a name ending in `.desktop`, any case)
+is such a file: file managers start an executable launcher on a double-click, under whatever
+name and icon it gives itself, so its bit is the user's trust in it, given on that computer. A
+launcher arrives not executable, and the user's own `chmod +x` stays on that computer: a
+launcher made here goes up with `x` false, and the drive's `x` stays whatever another device
+set. A move that changes whether the bit is held gives the file what it holds now: a file
+renamed into a launcher loses its bit, a launcher renamed into another name takes the drive's.
+Launchers that an earlier version put in place executable stay so.
+
 **Three trees.** For every sync root the client keeps three views keyed by node id:
 - **Base**: the last state both sides agreed on. Written only after an operation succeeds.
   Tags count one by one: one both sides agree on (both hold it, or both lack it) takes that
@@ -69,8 +81,9 @@ a row of Recently deleted *holds* what is in it, and a node holds its name (a na
 the node that has it).
 
 **Content state** (per file node, local only, never synced): `local` (default; may be evicted),
-`pinned` (always kept locally), `online-only` (no local bytes). A missing local file is a delete
-only when the base says the bytes were local.
+`pinned` (always kept locally), `online-only` (no local bytes), `wanted` (no item here yet: its
+item went into a conflict copy, §5; the drive's version comes down). A missing local file is a
+delete only when the base says the bytes were local.
 
 ## 2. Change classification
 
@@ -143,6 +156,22 @@ When both sides edited a file to different content:
 - The local version is renamed in place to `<stem> (conflict <device> <YYYY-MM-DD>)<ext>` and
   becomes a new node that is uploaded normally.
 - No bytes are ever dropped: the local bytes are moved by rename, never re-written.
+- The fork marks the node's base *wanted* (in its commit, and in its crash recovery): the node
+  has no item here, and the drive's version comes down.
+  - *Absence*: its missing item never reads as a delete here, not even with its folder: a
+    folder deleted here keeps it (and is made again with it), as it would a change of the
+    drive's it hasn't seen (§6.3): the drive's version was never here to delete.
+  - *Settling*: the base stays for the run's other writes of the node (a move, its tags), which
+    merge against it, and follows the drive's versions while no item is here. A write that puts
+    an item here settles against the version it acted on however the base moved, its tags from
+    the drive's (the item that held the base's went into the copy); from then on it is an
+    ordinary base.
+  - *Elsewhere*: a wanted node may be adopted (the drive's bytes put back here by hand), is
+    masked at a place this device filters (never leaving, §10), and isn't counted by the
+    mass-delete guard (§7).
+  - *Recovery*: one that finds neither the item nor the copy (the user deleted one of them
+    before the run) can't tell whether the rename happened: it takes the node as forked, and
+    the drive's version comes back.
 - The copy's node id comes from the node, the local bytes (hash and executable bit), the base
   version and the computer (its state DB's own id for the account): planned again on that
   computer, it is the same copy. Each computer makes its own copy: two computers with the same
@@ -959,9 +988,11 @@ That loses a removal, not a tag.
 - *Own removal in flight*: a tag added back while this device's removal of it is still on its
   way. The removal's write settles the base on what both sides hold after it, so the add then
   reads as the drive's removal, and goes.
-- *A new item keeps the base's tags*: an item replaced by a download (its own copy went into a
-  conflict copy) keeps in its base the old item's tags the write didn't touch. A tag neither
-  side holds any more then reads as this device's removal, and is sent over a later add.
+- *A new item keeps the base's tags*: an item put in place by a download where the node's base
+  outlived its own item keeps in its base the old item's tags the write didn't touch. A tag
+  neither side holds any more then reads as this device's removal, and is sent over a later
+  add. (A conflict copy no longer leads here: its wanted base settles from the drive's tags,
+  §5.)
 - *Added back to the base*: a tag removed and added back here matches the base, so nothing goes
   up; where the drive dropped it meanwhile (another device's delete, the node made again
   without it), the drive's state comes down over the add.

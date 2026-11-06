@@ -339,7 +339,10 @@ fn local_row(client: &Client, node: NodeId, state: &NodeState, path: RelPath) ->
                 file: node.0.as_u128(),
             },
         },
-        executable: content.map(|c| c.executable),
+        // The scan reads no bit on Windows.
+        executable: content
+            .map(|c| c.executable)
+            .filter(|_| client.os != Os::Windows),
         hash: content
             .filter(|_| !client.unhashed_now().any(|n| n == node) && !send_hash)
             .map(|c| c.hash),

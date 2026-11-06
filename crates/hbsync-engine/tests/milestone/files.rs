@@ -156,6 +156,163 @@ fn executable_bit_syncs() -> R {
     Ok(())
 }
 
+/// On Linux a device doesn't hold a launcher's (`*.desktop`) executable bit: it keeps the
+/// drive's (sync semantics §1). One another computer marked executable arrives plain, and the
+/// drive keeps its bit through an edit here; one made executable here goes up plain; the drive
+/// flipping only the bit fetches nothing; a launcher the drive renames into a script takes the
+/// drive's bit, and a script renamed into a launcher loses it here; a computer set up over the
+/// same launcher, plain, adopts it. Other files' bits sync as ever.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_launcher_never_arrives_executable_on_linux() -> R {
+    use hbsync_remote::{NodeMeta, RemoteBody};
+    use hbsync_types::NodeId;
+    use hbsync_types::schema::NodeContent;
+    use std::collections::BTreeMap;
+    use std::os::unix::fs::PermissionsExt;
+
+    let server = server();
+    // Another writer's change to the header of the file named `name`.
+    let on_drive = |name: &str, change: &dyn Fn(&mut NodeContent)| -> R {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        let h = srv
+            .live()
+            .find(|h| matches!(&h.body, RemoteBody::Live { content, .. } if content.name == name))
+            .cloned()
+            .ok_or("not on the drive")?;
+        let RemoteBody::Live {
+            node, mut content, ..
+        } = h.body
+        else {
+            return Err("live".into());
+        };
+        change(&mut content);
+        let meta = NodeMeta {
+            node,
+            parent: h.parent,
+            kind: h.kind,
+            content,
+            removed: false,
+        };
+        srv.update(h.file_id, h.version, &meta, None)?;
+        Ok(())
+    };
+    // A Mac marked a launcher executable.
+    let launcher = b"[Desktop Entry]\nExec=true\n";
+    server.lock().map_err(|_| "poisoned")?.seed_file(
+        NodeId::ROOT,
+        "mac.desktop",
+        launcher,
+        hbsync_fileio::HashAlgorithm::Blake3,
+    )?;
+    on_drive("mac.desktop", &|c| c.x = true)?;
+    let drive = || -> Result<BTreeMap<String, bool>, Box<dyn std::error::Error>> {
+        let srv = server.lock().map_err(|_| "poisoned")?;
+        Ok(srv
+            .live()
+            .filter_map(|h| match &h.body {
+                RemoteBody::Live { content, .. } => Some((content.name.clone(), content.x)),
+                _ => None,
+            })
+            .collect())
+    };
+    let executable = |c: &Client, name: &str| -> std::io::Result<bool> {
+        Ok(fs::metadata(c.root.join(name))?.permissions().mode() & 0o111 != 0)
+    };
+    let mut a = Client::with_config(&server, "a", |_| {})?;
+    let mut b = Client::with_config(&server, "b", |_| {})?;
+    for name in ["run.sh", "mine.desktop"] {
+        a.write(name, launcher)?;
+        fs::set_permissions(a.root.join(name), fs::Permissions::from_mode(0o755))?;
+    }
+    assert_clean(&a.sync()?);
+    assert_clean(&b.sync()?);
+    assert!(!executable(&b, "mac.desktop")?);
+    assert!(!executable(&b, "mine.desktop")?);
+    assert!(executable(&b, "run.sh")?);
+    let mut synced = BTreeMap::from([
+        ("mac.desktop".to_owned(), true),
+        ("mine.desktop".to_owned(), false),
+        ("run.sh".to_owned(), true),
+    ]);
+    assert_eq!(drive()?, synced);
+
+    // Nothing to send for the bit it left off, nor after an edit; the user's own mark stays here.
+    assert_clean(&b.sync()?);
+    b.write("mac.desktop", b"[Desktop Entry]\nExec=false\n")?;
+    fs::set_permissions(
+        b.root.join("mine.desktop"),
+        fs::Permissions::from_mode(0o755),
+    )?;
+    assert_clean(&b.sync()?);
+    assert_eq!(drive()?, synced);
+    assert!(executable(&b, "mine.desktop")?);
+
+    // The drive flips only the bit: nothing is fetched, nothing sent back.
+    let served = b.remote.faults().served;
+    on_drive("mac.desktop", &|c| c.x = false)?;
+    assert_clean(&b.sync()?);
+    assert_clean(&b.sync()?);
+    assert_eq!(b.remote.faults().served, served);
+    on_drive("mac.desktop", &|c| c.x = true)?;
+    assert_clean(&b.sync()?);
+    assert_eq!(b.remote.faults().served, served);
+    assert_eq!(drive()?, synced);
+
+    // A launcher renamed into a script takes the drive's bit here, which stays on the drive.
+    on_drive("mac.desktop", &|c| c.name = "mac.sh".into())?;
+    let report = b.sync()?;
+    assert_clean(&report);
+    // The move alone: the bit it set is recorded as set, not read back as the user's change.
+    assert_eq!(report.ops_done, 1, "{report:?}");
+    assert!(executable(&b, "mac.sh")?);
+    assert_clean(&b.sync()?);
+    // So does one the user trusted here, the drive's bit off: it isn't executable any more.
+    on_drive("mine.desktop", &|c| c.name = "mine.sh".into())?;
+    assert_clean(&b.sync()?);
+    assert!(!executable(&b, "mine.sh")?);
+    assert_clean(&b.sync()?);
+    for (from, to, x) in [
+        ("mac.desktop", "mac.sh", true),
+        ("mine.desktop", "mine.sh", false),
+    ] {
+        synced.remove(from);
+        synced.insert(to.to_owned(), x);
+    }
+    assert_eq!(drive()?, synced);
+
+    // A script renamed into a launcher: the drive keeps its bit, the other computer drops it.
+    fs::rename(a.root.join("run.sh"), a.root.join("run.desktop"))?;
+    assert_clean(&a.sync()?);
+    assert_clean(&b.sync()?);
+    assert!(!executable(&b, "run.desktop")?);
+    assert!(executable(&a, "run.desktop")?);
+    synced.remove("run.sh");
+    synced.insert("run.desktop".to_owned(), true);
+    assert_eq!(drive()?, synced);
+
+    // The drive swaps a launcher's name with a script's: the launcher, parked out of the
+    // script's way under a temporary name, takes the drive's bit as a script; the script, as a
+    // launcher, loses it. Nothing goes back up.
+    on_drive("run.desktop", &|c| c.name = "swap".into())?;
+    on_drive("mac.sh", &|c| c.name = "run.desktop".into())?;
+    on_drive("swap", &|c| c.name = "mac.sh".into())?;
+    // (Back as they were, each with the other's name, in one plan on b.)
+    assert_clean(&b.sync()?);
+    assert!(executable(&b, "mac.sh")?);
+    assert!(!executable(&b, "run.desktop")?);
+    assert_clean(&b.sync()?);
+    assert_eq!(drive()?, synced);
+
+    // Set up over the same launcher, plain: adopted, without a conflict copy.
+    let mut c = Client::with_config(&server, "c", |_| {})?;
+    c.write("run.desktop", b"[Desktop Entry]\nExec=false\n")?;
+    assert_clean(&c.sync()?);
+    assert_eq!(drive()?, synced);
+    assert!(!executable(&c, "run.desktop")?);
+    Ok(())
+}
+
 /// Another writer's folder named as this client's state folder in another case (`.HBSYNC`), at
 /// the top, with an `ignore` file in it: on a volume that ignores case, that is the state
 /// folder itself. The client never takes it for the drive's folder, nor puts what is in it

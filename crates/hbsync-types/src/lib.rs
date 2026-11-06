@@ -201,6 +201,35 @@ pub enum ContentState {
     Pinned,
     /// No local bytes; a missing local file is not a delete.
     OnlineOnly,
+    /// No local item yet: this device's went into a conflict copy (sync semantics §5). A
+    /// missing local file is not a delete, and the drive's version comes down.
+    Wanted,
+}
+
+impl ContentState {
+    /// Whether a missing local file is kept as it is (no local bytes by design, or none yet),
+    /// never read as a delete: online-only and wanted.
+    pub fn keeps_absence(self) -> bool {
+        matches!(self, ContentState::OnlineOnly | ContentState::Wanted)
+    }
+
+    /// The state once the node's item went into a conflict copy (sync semantics §5): wanted,
+    /// unless it keeps its absence already. A pin isn't kept (pins aren't set by anything yet).
+    pub fn after_fork(self) -> ContentState {
+        if self.keeps_absence() {
+            self
+        } else {
+            ContentState::Wanted
+        }
+    }
+
+    /// The state once an item is placed here again: a wanted one is an ordinary local one.
+    pub fn placed(self) -> ContentState {
+        match self {
+            ContentState::Wanted => ContentState::Local,
+            other => other,
+        }
+    }
 }
 
 /// The synced attributes of a file's content.

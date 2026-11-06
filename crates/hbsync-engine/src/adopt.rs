@@ -21,7 +21,7 @@ use hbsync_namemap::to_remote;
 use hbsync_platform::RelPath;
 use hbsync_platform::name::name_key;
 use hbsync_state::{FolderTx, LocalRow, MirrorRow, StateDb, StateError};
-use hbsync_types::{ContentHash, NodeId, NodeKind};
+use hbsync_types::{ContentHash, ContentState, NodeId, NodeKind};
 
 use crate::folder::FolderCtx;
 use crate::settle::{Settle, settle, spells};
@@ -187,9 +187,13 @@ fn find_match(
         if remote.kind != row.kind || claimed.contains(&remote.node) {
             continue;
         }
-        // Only a remote node that has no local copy and no history yet.
+        // Only a remote node that has no local copy and no history yet, or none but a wanted
+        // base (its item gone into a conflict copy, §5: not here).
         let taken = db.read(|s| {
-            Ok(s.get_base(remote.node)?.is_some() || s.local_by_node(remote.node)?.is_some())
+            let history = s
+                .get_base(remote.node)?
+                .is_some_and(|b| b.content_state != ContentState::Wanted);
+            Ok(history || s.local_by_node(remote.node)?.is_some())
         })?;
         if taken {
             continue;

@@ -16,7 +16,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use hbsync_local::layout::parked_name;
 use hbsync_namemap::{sibling_hash, to_remote};
-use hbsync_platform::{Os, RelPath};
+use hbsync_platform::{Os, RelPath, synced_executable};
 use hbsync_state::{BaseRow, LocalRow, MirrorRow, ReadTx, StateDb, StateError};
 use hbsync_types::{ContentHash, FileContent, NodeId, NodeKind, NodeState, RECOVERED_NAME, Tags};
 
@@ -34,18 +34,42 @@ pub(crate) struct LocalNode {
     pub state: Option<NodeState>,
 }
 
-/// Reads one node's local state. `remote_tags`: the drive's tags of the node, if it is there
-/// (what this device can't hold of them stands).
+/// What the drive holds of a node that this device may not hold itself, to read the local item
+/// against: its tags (§11) and a file's executable bit (§1).
+#[derive(Debug, Clone)]
+pub(crate) struct Reference {
+    pub tags: Tags,
+    pub executable: Option<bool>,
+}
+
+impl Reference {
+    pub(crate) fn of(state: &NodeState) -> Self {
+        Reference {
+            tags: state.tags.clone(),
+            executable: state.content.map(|c| c.executable),
+        }
+    }
+
+    pub(crate) fn of_mirror(m: &MirrorRow) -> Self {
+        Reference {
+            tags: m.tags(),
+            executable: m.file.as_ref().map(|f| f.executable),
+        }
+    }
+}
+
+/// Reads one node's local state. `drive`: what the drive holds of the node, if it is there
+/// (what this device can't hold of it stands).
 pub(crate) fn local_node(
     s: &ReadTx<'_>,
     node: NodeId,
     os: Os,
-    remote_tags: Option<&Tags>,
+    drive: Option<&Reference>,
 ) -> Result<Option<LocalNode>, StateError> {
     let Some(row) = s.local_by_node(node)? else {
         return Ok(None);
     };
-    let state = local_state(s, &row, os, remote_tags)?;
+    let state = local_state(s, &row, os, drive)?;
     Ok(Some(LocalNode { row, state }))
 }
 
@@ -53,11 +77,10 @@ fn local_state(
     s: &ReadTx<'_>,
     row: &LocalRow,
     os: Os,
-    remote_tags: Option<&Tags>,
+    drive: Option<&Reference>,
 ) -> Result<Option<NodeState>, StateError> {
     let base = s.get_base(row.node)?;
-    // A parked node counts as being at its original place.
-    let path = parked_place(s, row)?.unwrap_or_else(|| row.path.clone());
+    let path = place(s, row)?;
     let Some(local_name) = path.name() else {
         return Ok(None);
     };
@@ -73,39 +96,51 @@ fn local_state(
         },
     };
     // What this device can't hold of the tags is the drive's (else the agreed) (§11).
-    let reference = match remote_tags {
-        Some(t) => t.clone(),
-        None => base
-            .as_ref()
-            .map(|b| b.state.tags.clone())
-            .unwrap_or_default(),
+    let none = Tags::default();
+    let reference = match (drive, &base) {
+        (Some(d), _) => &d.tags,
+        (None, Some(b)) => &b.state.tags,
+        (None, None) => &none,
     };
     Ok(Some(NodeState {
         parent,
         name,
         kind: row.kind,
         // An unhashed file is reported without content; the caller defers it.
-        content: file_content(s, row, base.as_ref(), parent)?,
-        tags: Tags::fill(row.tags.as_ref(), &reference, os),
+        content: file_content(
+            s,
+            row,
+            base.as_ref(),
+            parent,
+            executable(
+                row,
+                local_name,
+                os,
+                drive.and_then(|d| d.executable),
+                base.as_ref(),
+            ),
+        )?,
+        tags: Tags::fill(row.tags.as_ref(), reference, os),
     }))
 }
 
 /// The synced content of a local file, as the planner and the upload read it: `None` for
 /// folders and files not hashed yet; [`ContentHash::ON_SEND`] for a file hashed on send while
-/// nothing can be compared with it ([`free_to_send`]). Where the OS has no x bit, the base's
-/// value is kept.
+/// nothing can be compared with it ([`free_to_send`]). `executable`: its bit as synced
+/// ([`executable`]).
 pub(crate) fn file_content(
     s: &ReadTx<'_>,
     row: &LocalRow,
     base: Option<&BaseRow>,
     parent: NodeId,
+    executable: bool,
 ) -> Result<Option<FileContent>, StateError> {
     let hash = match row.hash {
         Some(h) => Some(h),
         None if free_to_send(s, row, base, parent)? => Some(ContentHash::ON_SEND),
         None => None,
     };
-    Ok(hash.and_then(|h| local_content(row, h, base)))
+    Ok(hash.and_then(|h| local_content(row, h, executable)))
 }
 
 /// Of `nodes`, the files left to be hashed on send that aren't free to be sent so
@@ -146,9 +181,21 @@ fn free_to_send(
         && s.get_parked(row.node)?.is_none())
 }
 
-/// The synced content of a local file of content `hash`. Where the OS has no x bit, the base's
-/// value is kept.
-fn local_content(row: &LocalRow, hash: ContentHash, base: Option<&BaseRow>) -> Option<FileContent> {
+/// A local file's executable bit as synced, the file named `name` here: [`synced_executable`]
+/// of the disk's, the drive's `drive` and the agreed one (§1).
+pub(crate) fn executable(
+    row: &LocalRow,
+    name: &str,
+    os: Os,
+    drive: Option<bool>,
+    base: Option<&BaseRow>,
+) -> bool {
+    let agreed = base.and_then(|b| b.state.content).map(|c| c.executable);
+    synced_executable(os, name, row.executable, drive, agreed)
+}
+
+/// The synced content of a local file of content `hash`.
+fn local_content(row: &LocalRow, hash: ContentHash, executable: bool) -> Option<FileContent> {
     if row.kind != NodeKind::File {
         return None;
     }
@@ -156,10 +203,7 @@ fn local_content(row: &LocalRow, hash: ContentHash, base: Option<&BaseRow>) -> O
         hash,
         size: row.fingerprint.size,
         mtime_ms: row.fingerprint.mtime_ns.div_euclid(1_000_000),
-        executable: row.executable.unwrap_or_else(|| {
-            base.and_then(|b| b.state.content)
-                .is_some_and(|c| c.executable)
-        }),
+        executable,
     })
 }
 
@@ -168,13 +212,19 @@ fn local_content(row: &LocalRow, hash: ContentHash, base: Option<&BaseRow>) -> O
 /// name (the user renamed it, and the record is void). Parking never leaves the folder, so the
 /// place follows the folder (or the item) wherever it is moved meanwhile.
 pub(crate) fn parked_place(s: &ReadTx<'_>, row: &LocalRow) -> Result<Option<RelPath>, StateError> {
-    let Some(name) = s.get_parked(row.node)? else {
-        return Ok(None);
-    };
     if row.path.name() != Some(parked_name(row.node).as_str()) {
         return Ok(None);
     }
+    let Some(name) = s.get_parked(row.node)? else {
+        return Ok(None);
+    };
     Ok(row.path.parent().unwrap_or_default().join(&name).ok())
+}
+
+/// Where `row` counts as being: a parked node at its original place ([`parked_place`]), else
+/// where it is.
+pub(crate) fn place(s: &ReadTx<'_>, row: &LocalRow) -> Result<RelPath, StateError> {
+    Ok(parked_place(s, row)?.unwrap_or_else(|| row.path.clone()))
 }
 
 /// Loads everything the reconciler needs for `dirty`, with every child of each folder involved,
@@ -757,14 +807,14 @@ impl Builder<'_, '_> {
 
     fn add_local(&mut self, row: LocalRow) -> Result<(), StateError> {
         let node = row.node;
-        // The drive's tags, from the mirror row loaded already, or else read for them alone
-        // (loading it here would skip its ancestors).
-        let remote_tags = match self.input.remote.get(node) {
-            Some(r) => Some(r.tags.clone()),
+        // What the drive holds of it, from the mirror row loaded already, or else read for that
+        // alone (loading it here would skip its ancestors).
+        let drive = match self.input.remote.get(node) {
+            Some(r) => Some(Reference::of(r)),
             None if self.mirror_done.contains(&node) => None,
-            None => self.s.get_mirror(node)?.map(|m| m.tags()),
+            None => self.s.get_mirror(node)?.map(|m| Reference::of_mirror(&m)),
         };
-        match local_state(self.s, &row, self.os, remote_tags.as_ref())? {
+        match local_state(self.s, &row, self.os, drive.as_ref())? {
             Some(state) => {
                 if state.kind == NodeKind::File && state.content.is_none() {
                     self.input.local_unhashed.insert(node);

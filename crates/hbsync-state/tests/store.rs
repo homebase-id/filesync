@@ -86,6 +86,14 @@ fn base_round_trip() -> R {
         assert_eq!((s.base_count()?, s.base_file_count()?), (2, 1));
         Ok(())
     })?;
+    // A wanted base (its item gone into a conflict copy) reads back as one.
+    let wanted = BaseRow {
+        content_state: ContentState::Wanted,
+        local_hash: None,
+        ..file.clone()
+    };
+    db.write(|s| s.folder().put_base(&wanted))?;
+    assert_eq!(db.read(|s| s.get_base(file.node))?, Some(wanted));
     db.write(|s| s.folder().delete_base(file.node))?;
     db.read(|s| s.get_base(file.node))?
         .map_or(Ok(()), |_| panic!("deleted"))
@@ -472,7 +480,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 25);
+    assert_eq!(db.schema_version()?, 26);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -1342,7 +1350,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 25);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 26);
     Ok(())
 }
 

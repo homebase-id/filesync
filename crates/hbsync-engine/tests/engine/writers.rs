@@ -1,13 +1,39 @@
 //! Tags, and what other writers put on the drive (newer versions, unreadable ones).
 
 use super::*;
+use hbsync_platform::tags::{self, Tag, Tags};
+
+/// The names of the tags the item at `rel` holds on `c`.
+fn names(c: &Client, rel: &str) -> Vec<String> {
+    tags::read(&c.root.join(rel))
+        .unwrap_or_default()
+        .iter()
+        .map(|t| t.name.clone())
+        .collect()
+}
+
+/// A pause, so the next change of an item reads as one (its change time moves).
+fn tick() {
+    std::thread::sleep(std::time::Duration::from_millis(20));
+}
+
+/// The drive's tags of the file named `name`, as `name:colour`.
+fn drive_tags(server: &Arc<Mutex<hbsync_remote::fake::FakeServer>>, name: &str) -> Vec<String> {
+    match common::header_named(server, name).body {
+        hbsync_remote::RemoteBody::Live { content, .. } => content
+            .tags()
+            .iter()
+            .map(|t| format!("{}:{}", t.name, t.colour))
+            .collect(),
+        hbsync_remote::RemoteBody::Deleted => Vec::new(),
+    }
+}
 
 /// Finder tags go both ways between two folders, on files and folders, and a download that
 /// replaces a file keeps them. (Linux holds no colours; how they are kept for the Macs is the
 /// simulator's.)
 #[test]
 fn tags_sync_between_folders() -> R {
-    use hbsync_platform::tags::{self, Tag, Tags};
     let server = server();
     let mut a = Client::new(&server, "a")?;
     let mut b = Client::new(&server, "b")?;
@@ -16,31 +42,6 @@ fn tags_sync_between_folders() -> R {
         eprintln!("no tags here; skipped");
         return Ok(());
     }
-    let names = |c: &Client, rel: &str| -> Vec<String> {
-        tags::read(&c.root.join(rel))
-            .unwrap_or_default()
-            .iter()
-            .map(|t| t.name.clone())
-            .collect()
-    };
-    let tick = || std::thread::sleep(std::time::Duration::from_millis(20));
-    let drive_tags = |name: &str| -> Result<Vec<String>, Box<dyn std::error::Error>> {
-        let srv = server.lock().map_err(|_| "poisoned")?;
-        let content = srv
-            .live()
-            .find_map(|h| match &h.body {
-                hbsync_remote::RemoteBody::Live { content, .. } if content.name == name => {
-                    Some(content.clone())
-                }
-                _ => None,
-            })
-            .ok_or("not on the drive")?;
-        Ok(content
-            .tags()
-            .iter()
-            .map(|t| format!("{}:{}", t.name, t.colour))
-            .collect())
-    };
     let red = if cfg!(target_os = "macos") {
         "Red:6"
     } else {
@@ -60,7 +61,7 @@ fn tags_sync_between_folders() -> R {
     b.sync()?;
     assert_eq!(names(&b, "Docs/report.txt"), ["Red"]);
     assert_eq!(names(&b, "Docs"), ["Work"]);
-    assert_eq!(drive_tags("report.txt")?, [red]);
+    assert_eq!(drive_tags(&server, "report.txt"), [red]);
 
     // b adds one.
     tick();
@@ -70,7 +71,7 @@ fn tags_sync_between_folders() -> R {
     )?;
     b.sync()?;
     a.sync()?;
-    assert_eq!(drive_tags("report.txt")?, [red, "Todo:0"]);
+    assert_eq!(drive_tags(&server, "report.txt"), [red, "Todo:0"]);
     assert_eq!(names(&a, "Docs/report.txt"), ["Red", "Todo"]);
 
     // A new version from a replaces b's file: the tags stay.
@@ -102,10 +103,78 @@ fn tags_sync_between_folders() -> R {
     b.sync()?;
     a.sync()?;
     assert_eq!(names(&a, "Docs/report.txt"), ["Todo"]);
-    assert_eq!(drive_tags("report.txt")?, ["Todo:0"]);
+    assert_eq!(drive_tags(&server, "report.txt"), ["Todo:0"]);
     // Nothing left to do on either side.
     assert!(a.engine.sync_once("2026-10-08")?.is_idle());
     assert!(b.engine.sync_once("2026-10-08")?.is_idle());
+    Ok(())
+}
+
+/// A conflict copy keeps the node's base for the run's remote writes (§5): this device's removal
+/// of a tag, made with its edit, reaches the drive's version that won the edits (the remote
+/// write merges its tags against the base). The conflict's download comes in the same run.
+#[test]
+fn a_tag_removed_with_a_conflicting_edit_is_removed_on_the_drive() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("f.txt", "base")?;
+    if !tags::CAN_TAG || tags::write(&a.root.join("f.txt"), &Tags::default())?.is_none() {
+        eprintln!("no tags here; skipped");
+        return Ok(());
+    }
+    tags::write(&a.root.join("f.txt"), &Tags::new([Tag::new("Red", 0)]))?;
+    a.sync()?;
+    b.sync()?;
+    b.write("f.txt", "b's edit")?;
+    b.sync()?;
+    tick();
+    a.write("f.txt", "a's edit")?;
+    tags::write(&a.root.join("f.txt"), &Tags::default())?;
+    let report = a.sync()?;
+    assert!(report.failed.is_empty(), "{report:?}");
+    // The fork, the tag write, the download and the copy's upload: the download acts on the
+    // version the run's own tag write made (the bytes the same), never stale.
+    assert!(report.skipped.is_empty(), "{report:?}");
+    assert_eq!(report.ops_done, 4, "{report:?}");
+    assert!(drive_tags(&server, "f.txt").is_empty());
+    assert_eq!(a.read_text("f.txt")?, "b's edit");
+    Ok(())
+}
+
+/// The drive's version a conflict brings down settles its tags from the drive's, not from the
+/// item that went into the copy (§5): a tag that item held and the drive dropped isn't kept in
+/// the base, so another device adding it again later is not met as this device's removal.
+#[test]
+fn a_tag_the_conflict_copy_took_doesn_t_undo_a_later_add() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("f.txt", "base")?;
+    if !tags::CAN_TAG || tags::write(&a.root.join("f.txt"), &Tags::default())?.is_none() {
+        eprintln!("no tags here; skipped");
+        return Ok(());
+    }
+    let red = Tags::new([Tag::new("Red", 0)]);
+    tags::write(&a.root.join("f.txt"), &red)?;
+    a.sync()?;
+    b.sync()?;
+    // b drops Red with its edit; a's edit keeps it: a forks and takes b's version.
+    tick();
+    b.write("f.txt", "b's edit")?;
+    tags::write(&b.root.join("f.txt"), &Tags::default())?;
+    b.sync()?;
+    a.write("f.txt", "a's edit")?;
+    a.sync()?;
+    assert_eq!(a.read_text("f.txt")?, "b's edit");
+    // b adds Red again.
+    tick();
+    tags::write(&b.root.join("f.txt"), &red)?;
+    b.sync()?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(names(&b, "f.txt"), ["Red"]);
+    assert_eq!(names(&a, "f.txt"), ["Red"]);
     Ok(())
 }
 
@@ -113,7 +182,6 @@ fn tags_sync_between_folders() -> R {
 /// drive's are tagged, the local copy isn't): no conflict copy, and the tags come down.
 #[test]
 fn adopting_a_sha256_copy_whose_tags_differ_keeps_one_file() -> R {
-    use hbsync_platform::tags::{self, Tag, Tags};
     let server = server();
     {
         let mut srv = server.lock().map_err(|_| "poisoned")?;
@@ -141,12 +209,7 @@ fn adopting_a_sha256_copy_whose_tags_differ_keeps_one_file() -> R {
     assert!(report.conflicts.is_empty(), "{:?}", report.conflicts);
     assert_eq!(b.tree_text(""), ["photo.jpg = photo bytes"]);
     if tags::CAN_TAG && tags::read(&b.root.join("photo.jpg")).is_some() {
-        let names: Vec<String> = tags::read(&b.root.join("photo.jpg"))
-            .unwrap_or_default()
-            .iter()
-            .map(|t| t.name.clone())
-            .collect();
-        assert_eq!(names, ["Blue"]);
+        assert_eq!(names(&b, "photo.jpg"), ["Blue"]);
     }
     assert!(b.engine.sync_once("2026-10-08")?.is_idle());
     Ok(())

@@ -2046,3 +2046,53 @@ fn regression_a_removal_after_a_restore_elsewhere_is_not_the_plans() {
         panic!("{e}");
     }
 }
+
+/// Seed 1c2bf6e2: client 2 forks its edited file into a conflict copy, the drive's version not
+/// down yet (its base wanted, §5), and then its folder goes from here (a move, an ignore
+/// rule). That version of the file was never here: no one here deleted it, and it stays on the
+/// drive, keeping its folder there. (Read as gone with its folder, it went to Recently
+/// deleted.) The engine test `a_folder_deleted_here_keeps_its_wanted_file` holds it too.
+#[test]
+fn regression_a_folder_deleted_here_keeps_its_wanted_file() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(0, CreateFile { parent: 0, name: 2 }),
+        act(2, CreateFolder { parent: 0, name: 1 }),
+        Event::Plan { client: 2 },
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        act(0, Edit { file: 0 }),
+        Event::Step { client: 2 },
+        Event::Plan { client: 2 },
+        Event::Step { client: 2 },
+        act(
+            2,
+            Move {
+                node: 6,
+                parent: 2,
+                name: 6,
+            },
+        ),
+        act(2, Edit { file: 0 }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        Event::Step { client: 0 },
+        Event::Plan { client: 2 },
+        Event::Step { client: 2 },
+        act(
+            2,
+            Move {
+                node: 2,
+                parent: 1,
+                name: 13,
+            },
+        ),
+        act(2, ToggleIgnore),
+        Event::Step { client: 2 },
+        Event::Step { client: 2 },
+    ];
+    if let Err(e) = run(3, &events) {
+        panic!("{e}");
+    }
+}

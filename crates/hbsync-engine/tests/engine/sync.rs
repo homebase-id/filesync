@@ -188,12 +188,8 @@ fn a_clash_in_a_large_folder_takes_a_name_free_in_all_of_it() -> R {
 #[test]
 fn downloads_wait_for_their_bytes_to_be_durable() -> R {
     let server = server();
-    let faults = Arc::new(hbsync_engine::exec::Faults::default());
     let mut a = Client::new(&server, "a")?;
-    let failing = Arc::clone(&faults);
-    let mut b = Client::with_config(&server, "b", move |c| {
-        c.exec.hooks.faults = Arc::clone(&failing);
-    })?;
+    let (mut b, faults) = Client::with_faults(&server, "b", |_| {})?;
     for i in 0..20 {
         a.write(&format!("d/f{i}"), format!("{i}"))?;
     }
@@ -471,6 +467,122 @@ fn two_computers_with_the_same_conflict_make_their_own_copies() -> R {
         "{:?}",
         server.live_names()
     );
+    Ok(())
+}
+
+/// A conflict copy's download, planned with it, settles in its own run against the version it
+/// acted on (the node's base is wanted, §5): the fork, the download and the copy's upload,
+/// nothing after.
+#[test]
+fn a_conflict_copy_s_download_settles_in_its_run() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    conflicted(&mut a, &mut b, "f.txt")?;
+    let report = b.sync()?;
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(report.ops_done, 3, "{report:?}");
+    assert_eq!(b.read_text("f.txt")?, "theirs");
+    Ok(())
+}
+
+/// A node whose item went into a conflict copy, its download not in yet, is free to adopt: the
+/// drive's bytes put at its place here by hand become the node again (§5), with no second copy
+/// and nothing transferred.
+#[test]
+fn a_wanted_node_adopts_its_bytes_put_back_by_hand() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let (mut b, faults) = Client::with_faults(&server, "b", |_| {})?;
+    conflicted(&mut a, &mut b, "f.txt")?;
+    faults.fail(FailPoint::Barrier, usize::MAX);
+    b.sync()?;
+    assert!(!b.root.join("f.txt").exists(), "{:?}", b.tree_text(""));
+    b.write("f.txt", "theirs")?;
+    faults.fail(FailPoint::Barrier, 0);
+    let report = b.sync()?;
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(report.adopted, 1, "{report:?}");
+    a.sync()?;
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    assert_eq!(b.tree_text("").len(), 2, "{:?}", b.tree_text(""));
+    Ok(())
+}
+
+/// A wanted file (its item gone into a conflict copy, its download not in yet, §5) is kept when
+/// its folder is deleted here: the drive's version was never here to delete. The folder's other
+/// files go, and it is made again with that file.
+#[test]
+fn a_folder_deleted_here_keeps_its_wanted_file() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let (mut b, faults) = Client::with_faults(&server, "b", |_| {})?;
+    a.write("d/g.txt", "g")?;
+    a.write("keep.txt", "k")?;
+    conflicted(&mut a, &mut b, "d/f.txt")?;
+    faults.fail(FailPoint::Barrier, usize::MAX);
+    b.sync()?;
+    // The drive goes back to the base's bytes; b's user deletes the folder.
+    a.write("d/f.txt", "base")?;
+    a.sync()?;
+    fs::remove_dir_all(b.root.join("d"))?;
+    faults.fail(FailPoint::Barrier, 0);
+    b.sync()?;
+    a.sync()?;
+    for c in [&a, &b] {
+        assert_eq!(c.read_text("d/f.txt")?, "base", "{:?}", c.tree_text(""));
+        assert!(!c.root.join("d/g.txt").exists(), "{:?}", c.tree_text(""));
+    }
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    Ok(())
+}
+
+/// The drive's version a conflict brought down is here again like any synced file (its base no
+/// longer wanted, §5): deleting it here deletes it on the drive.
+#[test]
+fn a_conflict_s_download_deleted_here_goes_from_the_drive() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    conflicted(&mut a, &mut b, "f.txt")?;
+    b.sync()?;
+    assert_eq!(b.read_text("f.txt")?, "theirs");
+    fs::remove_file(b.root.join("f.txt"))?;
+    b.sync()?;
+    a.sync()?;
+    assert!(!a.root.join("f.txt").exists(), "{:?}", a.tree_text(""));
+    assert!(!b.root.join("f.txt").exists(), "{:?}", b.tree_text(""));
+    Ok(())
+}
+
+/// A conflict copy leaves the node's base wanted (§5): its download, gone stale as the drive
+/// changed back to the base's bytes before it ran, never reads as a delete here.
+#[test]
+fn a_conflict_copy_whose_download_goes_stale_keeps_the_file() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let (mut b, faults) = Client::with_faults(&server, "b", |_| {})?;
+    conflicted(&mut a, &mut b, "f.txt")?;
+    // b makes its conflict copy, but the drive's version doesn't come down yet.
+    faults.fail(FailPoint::Barrier, usize::MAX);
+    b.sync()?;
+    assert!(!b.root.join("f.txt").exists(), "{:?}", b.tree_text(""));
+    // The drive goes back to the base's bytes before it does.
+    a.write("f.txt", "base")?;
+    a.sync()?;
+    faults.fail(FailPoint::Barrier, 0);
+    let report = b.sync()?;
+    assert!(report.failed.is_empty(), "{report:?}");
+    a.sync()?;
+    assert_eq!(b.read_text("f.txt")?, "base");
+    assert_eq!(a.read_text("f.txt")?, "base");
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    let copies = b
+        .tree_text("")
+        .iter()
+        .filter(|e| e.ends_with("= mine"))
+        .count();
+    assert_eq!(copies, 1, "{:?}", b.tree_text(""));
     Ok(())
 }
 

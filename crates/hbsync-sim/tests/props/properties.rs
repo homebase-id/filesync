@@ -20,6 +20,17 @@ proptest! {
         run(3, &events)?;
     }
 
+    /// Executable bits (sync semantics §1): each client that holds a file's bit ends with the
+    /// drive's, and a launcher on a Linux client (which doesn't hold its bit, as Windows holds
+    /// none) is executable only as its user made it there, never as it came from the drive;
+    /// with crashes, the clients converge without loss. Five clients: two of them Linux.
+    #[test]
+    fn executable_bits_converge(
+        events in proptest::collection::vec(with_crashes(5, events_of(5, executable_action())), 0..120)
+    ) {
+        run(5, &events)?;
+    }
+
     /// Another device's change of a node (an edit, a removal, a restore) is pulled between a
     /// local operation's check and its commit (`Action::PullMidLocal`): the commit is against
     /// the drive as it is then, the change is still planned, and the clients converge without
@@ -315,14 +326,7 @@ proptest! {
         setup in 0..NARROW_SETUPS.len(),
         events in proptest::collection::vec(any_event(5), 0..80),
     ) {
-        let (prepare, guard) = NARROW_SETUPS[setup];
-        let mut sim = prepare(Sim::new(3)).with_narrow_check();
-        sim.guard = guard;
-        sim.run(&events);
-        prop_assert!(sim.quiesce(30), "no convergence");
-        if let Err(e) = sim.check() {
-            prop_assert!(false, "{}", e);
-        }
+        run_narrow(setup, 3, &events)?;
     }
 }
 
@@ -386,14 +390,26 @@ proptest! {
         setup in 0..NARROW_SETUPS.len(),
         events in proptest::collection::vec(writing_event(5), 0..80),
     ) {
-        let (prepare, guard) = NARROW_SETUPS[setup];
-        let mut sim = prepare(Sim::new(3)).with_narrow_check();
-        sim.guard = guard;
-        sim.run(&events);
-        prop_assert!(sim.quiesce(30), "no convergence");
-        if let Err(e) = sim.check() {
-            prop_assert!(false, "{}", e);
-        }
+        run_narrow(setup, 3, &events)?;
+    }
+}
+
+proptest! {
+    // A hundredth of the cases, at least one, as the narrow property's.
+    #![proptest_config(ProptestConfig {
+        cases: (cases() / 100).max(1),
+        ..ProptestConfig::default()
+    })]
+
+    /// [`executable_bits_converge`] with its plans made through the engine's views as well
+    /// ([`the_engines_planning_path_plans_as_the_sim`]): the bit a client sees on its files,
+    /// the disk's or the drive's, is the engine's.
+    #[test]
+    fn executable_bits_plan_alike_on_the_engines_path(
+        setup in 0..NARROW_SETUPS.len(),
+        events in proptest::collection::vec(events_of(5, executable_action()), 0..80),
+    ) {
+        run_narrow(setup, 5, &events)?;
     }
 }
 

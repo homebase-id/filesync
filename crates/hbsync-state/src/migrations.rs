@@ -64,7 +64,7 @@ const SCHEMA: &str = r#"
         executable     INTEGER NOT NULL DEFAULT 0,
         remote_file_id BLOB NOT NULL,                 -- finds the node of a tombstone
         version_tag    BLOB NOT NULL,                 -- the version agreed on (conflict ids)
-        content_state  INTEGER NOT NULL DEFAULT 0,    -- 0 local, 1 pinned, 2 online-only
+        content_state  INTEGER NOT NULL DEFAULT 0,    -- 0 local, 1 pinned, 2 online-only, 3 wanted
         local_name     TEXT,                          -- recorded local spelling, if any
         local_hash     BLOB,                          -- hash of the local bytes then
         tags           TEXT,                          -- Finder tags (JSON, node schema `tags`); NULL: none
@@ -464,6 +464,9 @@ const MIGRATIONS: &[&str] = &[
     ALTER TABLE dirty_new RENAME TO dirty;
     CREATE TRIGGER dirty_gone AFTER DELETE ON dirty
         BEGIN INSERT INTO gone VALUES (old.id); END;",
+    // 26: a base's content state 3 (wanted: its item went into a conflict copy), which an
+    // older client can't read: it refuses the DB as newer than its own.
+    "-- base.content_state 3",
 ];
 
 /// The version this client makes and reads.

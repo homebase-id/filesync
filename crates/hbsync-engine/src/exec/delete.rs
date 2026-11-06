@@ -305,9 +305,7 @@ pub(super) fn return_from_aside(
     row: &LocalRow,
 ) -> Result<Option<RelPath>, StateError> {
     let is_dir = row.kind == NodeKind::Folder;
-    let place = db
-        .read(|s| view::parked_place(s, row))?
-        .unwrap_or_else(|| row.path.clone());
+    let place = db.read(|s| view::place(s, row))?;
     let to = return_to(db, disk, folder, aside, &place, Some(row.node), is_dir)?;
     if to.as_ref().is_some_and(|to| to != &row.path) {
         db.write(|s| s.folder().delete_parked(row.node))?;
