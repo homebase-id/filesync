@@ -112,6 +112,8 @@ impl Sim {
         } else {
             let name = name(self);
             self.server.put(node, NodeState::folder(parent, &name));
+            // Made again after it went for good: a delete that won settles its tags.
+            self.restored_on_drive(node);
         }
     }
 

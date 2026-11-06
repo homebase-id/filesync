@@ -100,3 +100,58 @@ fn a_shared_desktop_is_on_both_computers() {
     assert_eq!(sim.local_paths(0), ["Desktops"]);
     assert_eq!(sim.local_paths(1), ["Desktops"]);
 }
+
+/// Seed a7c289f1: c1 moves Desktops into a new folder, which another device deletes as it
+/// lands; then the Desktop's computer gives its folder in Desktops its name (a write after that
+/// delete). The owner's main folder, which leaves its own Desktop out, took Desktops as gone
+/// with the folder (written before the delete) and removed it from the drive: what this folder
+/// leaves out kept no folder above it from a delete. A node written after the delete keeps its
+/// folders, whichever folder of a computer syncs it.
+#[test]
+fn regression_a_desktop_written_after_a_delete_keeps_desktops() {
+    use hbsync_sim::Action::{CreateFolder, Meanwhile, Move};
+    let events = [
+        act(1, Meanwhile { op: 0 }),
+        Event::Plan { client: 3 },
+        act(1, CreateFolder { parent: 0, name: 0 }),
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        act(
+            1,
+            Move {
+                node: 1,
+                parent: 3,
+                name: 0,
+            },
+        ),
+        act(2, Meanwhile { op: 0 }),
+    ];
+    if let Err(e) = crate::common::run_with(3, None, Sim::with_shared_desktop, &events) {
+        panic!("{e}");
+    }
+}
+
+/// Seed c7b8d080: c1 tags Desktops, another device deletes it as the tag lands, and c0 empties
+/// Recently deleted: Desktops goes for good, and the Desktops' computers make it again, a new
+/// folder of the same id. The delete settled the tag: it isn't owed on the new one.
+#[test]
+fn regression_desktops_made_again_owes_no_tag_of_the_old_one() {
+    use hbsync_sim::Action::{CreateFile, EmptyListed, ListDeleted, Meanwhile, Tag};
+    let events = [
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(1, Meanwhile { op: 0 }),
+        Event::Plan { client: 4 },
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        act(1, Tag { node: 0, tag: 0 }),
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        Event::Plan { client: 2 },
+        Event::Step { client: 2 },
+        act(0, ListDeleted),
+        act(0, EmptyListed),
+    ];
+    if let Err(e) = crate::common::run_with(3, None, Sim::with_desktop_devices, &events) {
+        panic!("{e}");
+    }
+}
