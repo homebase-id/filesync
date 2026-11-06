@@ -172,9 +172,14 @@ impl Sim {
                 .iter()
                 .any(|(f, kids)| f == n || kids.contains(n))
         };
+        // Nor Desktops, or a computer's Desktop's folder: one in a file can't come back from
+        // Recently deleted, and its computer's syncs wait for it (as a role folder's would).
+        let top =
+            |n: &NodeId| *n == NodeId::DESKTOPS || self.clients.iter().any(|c| c.coords.top == *n);
         let free = |n: &NodeId| {
             *n != NodeId::RECOVERED
                 && Role::of(*n).is_none()
+                && !top(n)
                 && !server.in_role_folder(*n)
                 && !newer(n)
         };
