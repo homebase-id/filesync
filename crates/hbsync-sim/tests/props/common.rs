@@ -40,6 +40,14 @@ pub(crate) fn desktop_action() -> impl Strategy<Value = Action> + Clone {
     ]
 }
 
+/// [`desktop_action`], with a Desktop added now and then ([`Action::AddDesktop`]).
+pub(crate) fn adding_desktop_action() -> impl Strategy<Value = Action> + Clone {
+    prop_oneof![
+        12 => desktop_action(),
+        1 => Just(Action::AddDesktop),
+    ]
+}
+
 /// The users' actions, with executable bits flipped and launchers named more often (sync
 /// semantics §1: a Linux client doesn't hold a launcher's bit, Windows none).
 pub(crate) fn executable_action() -> impl Strategy<Value = Action> + Clone {

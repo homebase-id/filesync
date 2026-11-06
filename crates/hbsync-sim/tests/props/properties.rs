@@ -152,6 +152,18 @@ proptest! {
         run_with(3, None, Sim::with_desktop_devices, &events)?;
     }
 
+    /// A computer's Desktop from before is on the drive, in every main folder; the computer
+    /// adds it again mid-run, its user having made files on it meanwhile: it joins its folder
+    /// (adopting what is alike), and its main folder, which held a copy (or was fetching
+    /// one), leaves it out from its next plan: nothing lost, nothing in both folders of the
+    /// computer once quiet.
+    #[test]
+    fn a_desktop_added_mid_run_converges_without_loss(
+        events in proptest::collection::vec(events_of(4, adding_desktop_action()), 0..120)
+    ) {
+        run_with(3, None, Sim::with_desktop_to_add, &events)?;
+    }
+
     /// Two computers sync one Desktop (the user said the second is the first again): they
     /// share it, merging what both hold, and neither main folder shows it.
     #[test]

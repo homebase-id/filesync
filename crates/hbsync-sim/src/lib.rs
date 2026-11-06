@@ -50,7 +50,7 @@ use hbsync_engine::tree::Tree;
 use hbsync_local::Filter;
 use hbsync_platform::Os;
 use hbsync_state::Coords;
-use hbsync_types::{NodeId, NodeKind, NodeState, Role, Uuid};
+use hbsync_types::{DESKTOPS_NAME, NodeId, NodeKind, NodeState, Role, Uuid};
 
 use crate::action::NAMES;
 use crate::exec::extra;
@@ -261,6 +261,29 @@ impl Sim {
     pub fn with_shared_desktop(mut self) -> Self {
         let top = self.ids.fresh();
         self.with_desktop_on(0, top).with_desktop_on(1, top)
+    }
+
+    /// Desktops on the drive holds client 0's computer's Desktop from before (set up again since,
+    /// say), with a file in it, which every main folder syncs; that computer adds its Desktop
+    /// again later ([`Action::AddDesktop`], one more client, last), its user having made files
+    /// on it meanwhile: it joins its folder, and its main folder leaves it out from its next plan.
+    pub fn with_desktop_to_add(mut self) -> Self {
+        let top = self.ids.fresh();
+        self.server.put(
+            NodeId::DESKTOPS,
+            NodeState::folder(NodeId::ROOT, DESKTOPS_NAME),
+        );
+        self.server
+            .put(top, NodeState::folder(NodeId::DESKTOPS, "c0"));
+        let file = NodeState::file(top, NAMES[3], self.new_blob());
+        let id = self.ids.fresh();
+        self.server.put(id, file);
+        let mut sim = self.with_desktop_on(0, top);
+        let desk = sim.clients.len() - 1;
+        sim.clients[desk].added = false;
+        sim.clients[desk].desktop_named = Some("c0".into());
+        sim.clients[0].own_tops.remove(&top);
+        sim
     }
 
     /// Client `main`'s computer syncs its Desktop too, whose folder on the drive is `top`: one
@@ -610,6 +633,23 @@ impl Sim {
         for client in &mut self.clients {
             client.locked.clear();
         }
+        // A Desktop not added yet is added before the clients settle: then everything syncs.
+        while self.add_desktop() {}
+    }
+
+    /// The user adds the first Desktop not added yet ([`Action::AddDesktop`]): it syncs from
+    /// now on, and its computer's main folder leaves it out from its next plan. Whether there
+    /// was one.
+    pub(crate) fn add_desktop(&mut self) -> bool {
+        let Some(c) = self.clients.iter().position(|c| !c.added) else {
+            return false;
+        };
+        self.clients[c].added = true;
+        let top = self.clients[c].coords.top;
+        if let Some(&(main, _)) = self.computers.iter().find(|(_, d)| *d == c) {
+            self.clients[main].tops_added.insert(top);
+        }
+        true
     }
 
     fn all_settled(&mut self) -> bool {

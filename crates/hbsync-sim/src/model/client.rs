@@ -151,6 +151,12 @@ pub(crate) struct Client {
     pub(crate) own_tops: BTreeSet<NodeId>,
     /// What the folder is: the main folder, a role folder, a Desktop.
     pub(crate) kind: hbsync_state::FolderKind,
+    /// Whether the user added the folder: one not yet ([`crate::Action::AddDesktop`]) holds
+    /// what its user made there, and syncs nothing.
+    pub(crate) added: bool,
+    /// A main folder's: the tops of the computer's folders added since its last plan, which it
+    /// leaves out from its next (the engine reads them at every round).
+    pub(crate) tops_added: BTreeSet<NodeId>,
     /// A Desktop's: the name its folder on the drive is to have (its computer's), and the one
     /// last given it ([`crate::Action::RenameComputer`]; the engine's `DESKTOP_NAME(D)`).
     pub(crate) desktop_name: String,
@@ -237,6 +243,8 @@ impl Client {
             } else {
                 hbsync_state::FolderKind::Role
             },
+            added: true,
+            tops_added: BTreeSet::new(),
             desktop_name: String::new(),
             desktop_named: None,
         }

@@ -477,6 +477,9 @@ impl Sim {
                 self.clients[c].pull_mid_local = Some((on, change));
             }
             Action::DeleteRoleFolder => self.delete_role_folder(),
+            Action::AddDesktop => {
+                self.add_desktop();
+            }
             Action::RenameComputer { name } => {
                 let client = &mut self.clients[c];
                 if client.is_desktop() {
