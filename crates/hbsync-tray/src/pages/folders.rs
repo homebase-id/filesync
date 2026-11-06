@@ -1,4 +1,4 @@
-//! Choosing which of the user's own folders sync (Documents, Pictures, …): each where this
+//! Choosing which of the user's own folders sync (Desktop, Documents, …): each where this
 //! computer keeps it, how much it holds, and why it can't be added if it can't.
 
 use std::path::Path;
@@ -15,7 +15,7 @@ const COUNT_FOR: Duration = Duration::from_secs(2);
 
 /// Whether macOS asks before an app reads `role`'s folder: not read before the user chose it.
 fn asks_first(role: Role) -> bool {
-    cfg!(target_os = "macos") && matches!(role, Role::Documents | Role::Downloads)
+    cfg!(target_os = "macos") && matches!(role, Role::Desktop | Role::Documents | Role::Downloads)
 }
 
 impl Server {
@@ -37,6 +37,7 @@ impl Server {
         let count_until = Instant::now() + COUNT_FOR;
         let rows: String = Role::ALL
             .into_iter()
+            .filter(|r| r.offered())
             .map(|role| {
                 let synced = config.folder(identity, Some(role));
                 let (path, action) = match synced {
@@ -123,8 +124,9 @@ impl Server {
             let identity = config.root()?.ok_or("not logged in")?.identity.clone();
             if add {
                 let folder = setup::role_folder(role)?;
-                // Read here, now: macOS asks for access to a protected folder (Documents,
-                // Downloads) while the user is at this page, not later out of the blue.
+                // Read here, now: macOS asks for access to a protected folder (Desktop,
+                // Documents, Downloads) while the user is at this page, not later out of the
+                // blue.
                 std::fs::read_dir(&folder)?;
                 let (taken, set_aside) =
                     folders::add_synced(&self.paths, &identity, &folder, Some(role))?;

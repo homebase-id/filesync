@@ -581,3 +581,90 @@ fn an_engine_on_another_drives_db_is_refused() -> R {
     assert!(Engine::open(&sync_root, ours, config(&root)).is_ok());
     Ok(())
 }
+
+/// An account's main folder on its own, its engine opened with `cfg` adjusted first.
+struct Alone {
+    _dir: tempfile::TempDir,
+    root: PathBuf,
+    db: PathBuf,
+    drive: Arc<Drive>,
+}
+
+impl Alone {
+    fn new(
+        server: &Arc<Mutex<FakeServer>>,
+        name: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let base = dir.path().canonicalize()?;
+        let root = base.join(name);
+        std::fs::create_dir_all(root.join(hbsync_local::STATE_DIR))?;
+        let db = base.join("state.db");
+        let drive = Drive::new(
+            StateDb::open_account(&db)?,
+            Arc::new(FakeRemote::new(server.clone())),
+        );
+        Ok(Alone {
+            _dir: dir,
+            root,
+            db,
+            drive,
+        })
+    }
+
+    fn engine(
+        &self,
+        tweak: impl FnOnce(&mut EngineConfig),
+    ) -> Result<Engine, Box<dyn std::error::Error>> {
+        let db = StateDb::open(&self.db)?;
+        let mut cfg = config(&self.root);
+        tweak(&mut cfg);
+        let mut engine = Engine::new(db, self.drive.clone(), cfg)?;
+        engine.apply_filter_change()?;
+        Ok(engine)
+    }
+}
+
+/// A role new in this version (Desktop) was synced into the main folder by an older one, which
+/// didn't know it: a plain folder at the top to that version. After the update the main folder
+/// leaves it out (§12): the copy here goes and the drive keeps its role folder as it was;
+/// what was changed here meanwhile is detached, kept as a plain folder, not lost.
+#[test]
+fn a_role_an_older_version_synced_into_the_main_folder_leaves_it() -> R {
+    use hbsync_engine::scope::Scope;
+    for edited in [false, true] {
+        let server = server_with_documents()?;
+        let main = Alone::new(&server, "Homebase")?;
+        // The older version: Documents unknown to it.
+        let mut older = main.engine(|cfg| {
+            let mut scope = Scope::main();
+            scope.outside.remove(&Role::Documents.node());
+            cfg.folder.scope = Arc::new(scope);
+        })?;
+        sync(&mut older)?;
+        assert_eq!(files(&main.root), ["Documents/cv.txt", "notes.txt"]);
+        drop(older);
+        if edited {
+            std::fs::write(main.root.join("Documents/cv.txt"), b"cv, edited")?;
+        }
+
+        sync(&mut main.engine(|_| {})?)?;
+        let docs = Role::Documents.node();
+        let listing = drive_listing(&server);
+        let at = |parent: NodeId| listing.iter().filter(|(_, p)| *p == parent).count();
+        assert_eq!(at(docs), 1, "the role folder keeps its file: {listing:?}");
+        if edited {
+            assert_eq!(files(&main.root), ["Documents/cv.txt", "notes.txt"]);
+            assert_eq!(
+                std::fs::read(main.root.join("Documents/cv.txt"))?,
+                b"cv, edited"
+            );
+            // The role folder, notes.txt and the detached copy.
+            assert_eq!(at(NodeId::ROOT), 3, "{listing:?}");
+        } else {
+            assert_eq!(files(&main.root), ["notes.txt"]);
+            assert_eq!(at(NodeId::ROOT), 2, "{listing:?}");
+        }
+    }
+    Ok(())
+}

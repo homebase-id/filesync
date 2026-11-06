@@ -16,6 +16,7 @@ use crate::NodeId;
 )]
 #[serde(into = "&'static str", try_from = "String")]
 pub enum Role {
+    Desktop,
     Documents,
     Pictures,
     Music,
@@ -24,7 +25,8 @@ pub enum Role {
 }
 
 impl Role {
-    pub const ALL: [Role; 5] = [
+    pub const ALL: [Role; 6] = [
+        Role::Desktop,
         Role::Documents,
         Role::Pictures,
         Role::Music,
@@ -35,12 +37,20 @@ impl Role {
     /// Its folder's node id on every drive.
     pub const fn node(self) -> NodeId {
         NodeId(Uuid::from_u128(match self {
+            Role::Desktop => 0xe7b4f49b_5f90_47bb_8d97_c2dd23eef439,
             Role::Documents => 0x0274575b_c2cf_4ac7_b39b_d56b2c121b75,
             Role::Pictures => 0xc2c9af9b_4873_48d8_a8ff_4779802f038f,
             Role::Music => 0x0f4cd8f9_a914_476d_86d0_b1d1a5215a85,
             Role::Videos => 0xb133291b_9309_46c5_9bfd_ac6c81669049,
             Role::Downloads => 0x5290e709_bc6d_4e12_827e_96d6dd006403,
         }))
+    }
+
+    /// Whether a device may add it. Desktop not yet: a version that doesn't know a role takes
+    /// its folder for a plain one and syncs it into its main folder (sync semantics §12), so a
+    /// new role is known in one release (kept out of the main folder) and offered in the next.
+    pub const fn offered(self) -> bool {
+        !matches!(self, Role::Desktop)
     }
 
     /// The role whose folder `node` is.
@@ -51,6 +61,7 @@ impl Role {
     /// Its folder's name on the drive when a device creates it.
     pub const fn name(self) -> &'static str {
         match self {
+            Role::Desktop => "Desktop",
             Role::Documents => "Documents",
             Role::Pictures => "Pictures",
             Role::Music => "Music",
@@ -63,6 +74,7 @@ impl Role {
     pub const fn user_dir(self) -> hbsync_platform::user_dirs::UserDir {
         use hbsync_platform::user_dirs::UserDir;
         match self {
+            Role::Desktop => UserDir::Desktop,
             Role::Documents => UserDir::Documents,
             Role::Pictures => UserDir::Pictures,
             Role::Music => UserDir::Music,
@@ -74,6 +86,7 @@ impl Role {
     /// How config files and the command line name it.
     pub const fn key(self) -> &'static str {
         match self {
+            Role::Desktop => "desktop",
             Role::Documents => "documents",
             Role::Pictures => "pictures",
             Role::Music => "music",
@@ -132,6 +145,6 @@ mod tests {
             assert_eq!(role.name().parse::<Role>(), Ok(role));
         }
         assert_eq!(Role::of(NodeId::ROOT), None);
-        assert!("desktop".parse::<Role>().is_err());
+        assert!("desk".parse::<Role>().is_err());
     }
 }

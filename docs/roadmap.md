@@ -208,7 +208,7 @@ chat-kmp test against; hash golden vectors from odin-core #1895),
 - Config and OS keychain
 - Filters (sync semantics §10): built-in junk, per-device rules in `.hbsync/ignore`
 - Role folders (2026-10-14, sync semantics §12): Documents, Pictures, Music, Videos and
-  Downloads where they are, one state DB per account
+  Downloads where they are, one state DB per account; Desktop too (2026-11-04)
 - Recently deleted for 30 days, restore, held deletions to review
 - The tray (2026-10-11 on): status and progress, recently synced, problems, timed pause,
   logging in, held deletes, Recently deleted, Set up this computer, notifications, the folder's

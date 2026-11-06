@@ -24,7 +24,8 @@ use crate::{Config, Error, Identity, Paths, Root};
 ///   identity;
 /// - one that holds, or sits in, another synced folder;
 /// - another identity's (its marker says whose it is);
-/// - one another app syncs (OneDrive, iCloud), unless it is this identity's already.
+/// - one another app syncs (OneDrive, iCloud), unless it is this identity's already;
+/// - a role not offered yet ([`Role::offered`]).
 ///
 /// It reads the folder's marker only, never lists the folder (macOS asks the user before a
 /// folder like Documents is read).
@@ -35,6 +36,12 @@ pub fn check(
     role: Option<Role>,
     home: Option<&Path>,
 ) -> Result<bool, String> {
+    if let Some(role) = role.filter(|r| !r.offered()) {
+        return Err(format!(
+            "{} can be synced from the next version on",
+            role.name()
+        ));
+    }
     if let Some(why) = refuse_folder(path, home) {
         return Err(why);
     }
@@ -435,6 +442,23 @@ mod tests {
         assert!(
             add(&paths, &"a.example".into(), &other, None, false).is_err(),
             "one main folder per identity"
+        );
+
+        let desktop = home.path().join("Desktop");
+        std::fs::create_dir_all(&desktop)?;
+        let refused = add(
+            &paths,
+            &"a.example".into(),
+            &desktop,
+            Some(Role::Desktop),
+            false,
+        )
+        .err()
+        .map(|e| e.to_string())
+        .unwrap_or_default();
+        assert!(
+            refused.contains("next version"),
+            "not offered yet: {refused}"
         );
 
         let inside = folder.join("Documents");
