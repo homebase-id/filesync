@@ -172,7 +172,7 @@ impl AccountOps<'_> {
             live.values().map(|m| (m.node, m.parent, m.kind)),
             |f| removed.get(&f).copied(),
             |n| live[&n].changed_at,
-            |n| crate::along::kept_by_purge(n, live[&n].parent),
+            |n| crate::along::kept_by_purge(n, live[&n].parent, live[&n].kind),
         );
         // The folders it takes from, as the drive has them now: one restored or written since
         // takes nothing.

@@ -155,3 +155,28 @@ fn regression_desktops_made_again_owes_no_tag_of_the_old_one() {
         panic!("{e}");
     }
 }
+
+/// Another device deletes Desktops and stops before what is in it (the computers' folders
+/// stay live in it): the Desktops' computers bring Desktops back, though their own folders are
+/// live, and nothing is lost.
+#[test]
+fn desktops_deleted_alone_comes_back() {
+    let mut sim = desktops();
+    sim.run(&[
+        act(3, Action::CreateFile { parent: 0, name: 0 }),
+        act(4, Action::CreateFile { parent: 0, name: 1 }),
+    ]);
+    assert!(sim.quiesce(30), "converges");
+    let pick = sim
+        .stopped_pick(hbsync_types::NodeId::DESKTOPS)
+        .expect("Desktops");
+    sim.run(&[act(2, Action::DeleteStopped { pick, done: 0 })]);
+    assert!(sim.quiesce(30), "converges");
+    sim.check().expect("check");
+    assert!(!sim.is_removed(hbsync_types::NodeId::DESKTOPS));
+    assert_eq!(sim.local_paths(3), ["a"]);
+    assert_eq!(
+        sim.local_paths(0),
+        ["Desktops", "Desktops/c1", "Desktops/c1/b"]
+    );
+}

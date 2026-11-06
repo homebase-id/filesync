@@ -55,15 +55,17 @@ A top-level folder with the fixed node id `475d49e0-c0b4-4cbc-8090-2f2cb1e9dc69`
 when made (node schema, "Desktops"). Each folder in it is one computer's Desktop, synced with that
 computer's own Desktop; the computers show the other computers' Desktops in their main folder.
 - Recognise it by `uniqueId`, never by name: show it with a desktop icon (Fluent "Desktop"),
-  perhaps beside the role folders. A plain folder with the same name is listed too.
+  perhaps beside the role folders. A plain folder with the same name is listed too (the
+  computers name Desktops `Desktops (conflict 1)` beside one).
 - Each folder in it is an ordinary folder: list, open, upload into it, edit, rename or delete what
   is in it, as any other; it reaches that computer's Desktop.
 - Never create Desktops or a computer's folder in it: the computers make them. Restore one that
   is in Recently deleted.
 - Deleting Desktops, or a computer's folder in it, lasts only while no computer syncs that
   Desktop: one that does brings it back, with what was in it, at its next sync. Say so before
-  deleting one (a computer no longer used can go for good). Moving a computer's folder out of
-  Desktops changes nothing for that computer, which knows it by its id.
+  deleting one (a computer no longer used can go for good). A computer's folder moved out of
+  Desktops is still synced by that computer, which knows it by its id; but the purge keeps only
+  folders in Desktops (below), so don't move one out.
 
 ## Recovered files
 A top-level folder with the fixed node id `fa4646cb-2df0-4f18-a3c6-1fc2b2f6ac4b`, named

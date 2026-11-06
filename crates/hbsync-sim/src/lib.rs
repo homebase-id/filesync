@@ -274,6 +274,7 @@ impl Sim {
             Coords { top },
         );
         desk.computer = first.computer.clone();
+        desk.kind = hbsync_state::FolderKind::Desktop;
         desk.desktop_name = first.name.clone();
         self.clients[main].own_tops.insert(top);
         self.clients.push(desk);

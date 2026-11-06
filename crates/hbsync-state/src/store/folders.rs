@@ -75,20 +75,22 @@ impl ReadTx<'_> {
         if let Some(known) = self.folders.borrow().as_ref() {
             return Ok(known.clone());
         }
-        let mut stmt = self.prep("SELECT id, top, path, marker FROM folders ORDER BY id")?;
+        let mut stmt = self.prep("SELECT id, top, path, marker, kind FROM folders ORDER BY id")?;
         let rows = stmt.query_map([], |r| {
             Ok((
                 r.get::<_, i64>(0)?,
                 r.get::<_, Vec<u8>>(1)?,
                 r.get(2)?,
                 r.get(3)?,
+                r.get::<_, i64>(4)?,
             ))
         })?;
         rows.map(|r| {
-            let (id, top, path, marker) = r?;
+            let (id, top, path, marker, kind) = r?;
             Ok(FolderRow {
                 id,
                 top: codec::node(&top)?,
+                kind: FolderKind::from_code(kind),
                 path,
                 marker,
             })
@@ -139,14 +141,21 @@ impl ReadTx<'_> {
 }
 
 impl AccountTx<'_> {
-    /// Registers a folder holding the drive's node `top`; its id.
-    pub fn add_folder(&self, top: NodeId, path: &str, marker: &str) -> Result<i64> {
+    /// Registers a folder of `kind` holding the drive's node `top`; its id.
+    pub fn add_folder(
+        &self,
+        top: NodeId,
+        kind: FolderKind,
+        path: &str,
+        marker: &str,
+    ) -> Result<i64> {
         self.folders.take();
         self.places.borrow_mut().clear();
         self.prep(
-            "INSERT INTO folders (top, path, marker, added_at) VALUES (?1, ?2, ?3, unixepoch())",
+            "INSERT INTO folders (top, kind, path, marker, added_at) \
+             VALUES (?1, ?2, ?3, ?4, unixepoch())",
         )?
-        .execute(params![top.0.as_bytes(), path, marker])?;
+        .execute(params![top.0.as_bytes(), kind.code(), path, marker])?;
         Ok(self.conn.last_insert_rowid())
     }
 

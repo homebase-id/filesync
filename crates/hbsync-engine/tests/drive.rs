@@ -9,7 +9,7 @@ use hbsync_engine::Drive;
 use hbsync_remote::contract::doomed;
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 use hbsync_remote::{NodeMeta, Remote};
-use hbsync_state::StateDb;
+use hbsync_state::{FolderKind, StateDb};
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{NodeId, NodeKind, Role};
 
@@ -543,7 +543,10 @@ fn a_pull_that_fails_partway_wakes_what_it_took() -> R {
         whole: std::sync::atomic::AtomicUsize::new(0),
     });
     let mut account = StateDb::open_account(&dir.path().join("state.db"))?;
-    let main = account.write(|s| s.account().add_folder(NodeId::ROOT, "/h/Homebase", "m1"))?;
+    let main = account.write(|s| {
+        s.account()
+            .add_folder(NodeId::ROOT, FolderKind::Main, "/h/Homebase", "m1")
+    })?;
     drop(account);
     let drive = Drive::new(
         StateDb::open_account(&dir.path().join("state.db"))?,
@@ -776,8 +779,10 @@ fn a_change_wakes_the_folders_it_concerns() -> R {
     let docs_top = Role::Documents.node();
     let (main_id, docs_id) = StateDb::open_account(&dir.path().join("state.db"))?.write(|s| {
         Ok((
-            s.account().add_folder(NodeId::ROOT, "/h/Homebase", "m1")?,
-            s.account().add_folder(docs_top, "/h/Documents", "m2")?,
+            s.account()
+                .add_folder(NodeId::ROOT, FolderKind::Main, "/h/Homebase", "m1")?,
+            s.account()
+                .add_folder(docs_top, FolderKind::Role, "/h/Documents", "m2")?,
         ))
     })?;
     let (main, docs) = (drive.subscribe(main_id), drive.subscribe(docs_id));

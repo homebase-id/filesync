@@ -1,6 +1,5 @@
 //! The sync loop for one sync root.
 
-use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -8,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use hbsync_local::{CatchUp, Debounce, LocalObserver, ScanOptions, ScanReport, rescan_dirs, scan};
 use hbsync_remote::Remote;
-use hbsync_state::{DirtyCursor, Mark, StateDb, StateError, keys};
+use hbsync_state::{DirtyCursor, FolderKind, Mark, StateDb, StateError, keys};
 use hbsync_types::activity::Synced;
 use hbsync_types::{NodeId, Role};
 
@@ -154,6 +153,18 @@ impl SyncReport {
 /// alone once more at the end of the sync, to see that its view doesn't reach them.
 const LEFTOVERS_MAX: usize = 1_000;
 
+/// The name a computer's Desktop folder takes from `name` (the computer's): in NFC, one the
+/// drive takes (not empty, `.` or `..`, no `/` or NUL, 255 bytes at most) and not this
+/// client's own (`.hbsync…`, any case); else `Computer`.
+pub(crate) fn desktop_name(name: &str) -> String {
+    use hbsync_platform::name::{check_remote_name, nfc, starts_caseless};
+    let name = nfc(name.trim());
+    match check_remote_name(&name) {
+        Ok(()) if !starts_caseless(&name, hbsync_local::STATE_DIR) => name,
+        _ => "Computer".into(),
+    }
+}
+
 /// Records `scope` as the folder's, if it is new (§12). A new scope changes what is in view
 /// remotely only: no walk. The folders it or the last one left out are planned again from
 /// their tops, which brings what is in them: what this device holds there goes, what comes
@@ -221,9 +232,11 @@ pub struct Engine {
     unreported: Option<SyncReport>,
     /// The folder's refusals ([`crate::refused`]).
     refusals: FolderRefusals,
-    /// The main folder's: the drive's nodes this device's other folders hold, which it leaves
-    /// out ([`Engine::follow_folders`]).
-    other_tops: BTreeSet<NodeId>,
+    /// What the folder is, as set up ([`FolderKind`]).
+    kind: FolderKind,
+    /// The main folder's scope as configured, before what this device's other folders hold
+    /// is left out of it too ([`Engine::follow_folders`]).
+    given: Arc<Scope>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -258,10 +271,23 @@ impl Engine {
         drive: Arc<Drive>,
         mut cfg: EngineConfig,
     ) -> Result<Self, StateError> {
-        let top = db.read(|s| Ok(s.coords()?.top))?;
+        let id = db.folder();
+        let (top, kind) = db.read(|s| {
+            let kind = s
+                .folders()?
+                .into_iter()
+                .find(|f| f.id == id)
+                .and_then(|f| f.kind);
+            Ok((s.coords()?.top, kind))
+        })?;
+        // A kind a newer client set up: not synced as any this one knows.
+        let kind = kind.ok_or_else(|| {
+            StateError::Conflict("a folder of a kind this version doesn't sync".into())
+        })?;
         if cfg.folder.scope.top != top {
             cfg.folder.scope = Arc::new(Scope::of(top));
         }
+        let given = Arc::clone(&cfg.folder.scope);
         let scan_opts = cfg.folder.scan_options();
         let remote = cfg.folder.scope.remote(drive.shared_remote());
         let mut engine = Engine {
@@ -279,16 +305,18 @@ impl Engine {
             refusals: FolderRefusals::default(),
             waited: Waited::default(),
             unreported: None,
-            other_tops: BTreeSet::new(),
+            kind,
+            given,
         };
         engine.follow_folders()?;
         Ok(engine)
     }
 
     /// This device's Desktop's folder on the drive, `top`, made, restored or joined
-    /// ([`Drive::ensure_desktop`]), named as the computer is ([`keys::DESKTOP_NAME`]; this
-    /// folder's own name until it is set). A name that changed since it was last given is given
-    /// again.
+    /// ([`Drive::ensure_desktop`]), named as the computer is ([`keys::DESKTOP_NAME`], set by
+    /// [`Engine::name_desktop`]; made under this folder's own name until then, and never
+    /// renamed without it). A name not yet given the folder is given at the next sync on which
+    /// the rename lands.
     fn ensure_desktop(&mut self, top: NodeId) -> Result<(), EngineError> {
         let (name, named) = self.db.read(|s| {
             Ok((
@@ -296,56 +324,82 @@ impl Engine {
                 s.get_kv(keys::DESKTOP_NAMED)?,
             ))
         })?;
+        let rename = name.is_some() && name != named;
         let name = name.unwrap_or_else(|| {
             let root = &self.cfg.folder.root;
-            root.file_name()
-                .map_or_else(|| "Desktop".into(), |n| n.to_string_lossy().into_owned())
+            desktop_name(&root.file_name().unwrap_or_default().to_string_lossy())
         });
-        let rename = named.as_deref() != Some(name.as_str());
-        self.drive.ensure_desktop(top, &name, rename)?;
-        if rename {
+        if self.drive.ensure_desktop(top, &name, rename)? && rename {
             self.db
                 .write(|s| s.folder().set_kv(keys::DESKTOP_NAMED, &name))?;
         }
         Ok(())
     }
 
-    /// Names this device's Desktop's folder on the drive `name` (the computer's), from its next
-    /// sync on; a rename made elsewhere stands until it changes. Nothing for another folder.
+    /// Names this device's Desktop's folder on the drive after the computer (`name`, made one
+    /// the drive takes: [`desktop_name`]), from its next sync on; a rename made elsewhere
+    /// stands until it changes. Nothing for another folder.
     pub fn name_desktop(&mut self, name: &str) -> Result<(), StateError> {
-        let top = self.cfg.folder.scope.top;
-        if top.is_root() || Role::of(top).is_some() {
+        if self.kind != FolderKind::Desktop {
             return Ok(());
         }
+        let name = desktop_name(name);
         self.db
-            .write(|s| s.folder().set_kv(keys::DESKTOP_NAME, name))
+            .write(|s| s.folder().set_kv(keys::DESKTOP_NAME, &name))
     }
 
     /// The main folder leaves out what this device's other folders hold (its own Desktop's
     /// folder: §12), as they are in the DB now: a folder added or removed since changes its
-    /// scope, planned as any new scope ([`Engine::apply_filter_change`]).
+    /// scope, planned as any new scope ([`Engine::apply_filter_change`]). What it leaves out is
+    /// the account's to read ([`keys::MAIN_LEAVES_OUT`]): a Desktop syncs only once it is in it,
+    /// and every folder is woken when it changes.
     fn follow_folders(&mut self) -> Result<(), StateError> {
-        if !self.cfg.folder.scope.top.is_root() {
+        if self.kind != FolderKind::Main {
             return Ok(());
         }
-        let tops: BTreeSet<NodeId> = self.db.read(|s| {
-            Ok(s.folders()?
+        let (tops, told) = self.db.read(|s| {
+            let tops: Vec<NodeId> = s
+                .folders()?
                 .into_iter()
+                .filter(|f| f.kind != Some(FolderKind::Main))
                 .map(|f| f.top)
-                .filter(|t| !t.is_root())
-                .collect())
+                .collect();
+            Ok((tops, s.account_kv(keys::MAIN_LEAVES_OUT)?))
         })?;
-        if tops == self.other_tops {
+        let mut scope = (*self.given).clone();
+        scope.outside.extend(tops);
+        let fingerprint = scope.fingerprint();
+        // Planned again only for a change of the device's folders (a first scope is start-up's).
+        let changed = scope != *self.cfg.folder.scope;
+        if !changed && told.as_deref() == Some(fingerprint.as_str()) {
             return Ok(());
         }
-        let mut scope = (*self.cfg.folder.scope).clone();
-        // A role folder is left out whatever this device syncs.
-        let gone = |n: &NodeId| self.other_tops.contains(n) && Role::of(*n).is_none();
-        scope.outside.retain(|n| !gone(n));
-        scope.outside.extend(tops.iter().copied());
-        self.other_tops = tops;
-        self.cfg.folder.scope = Arc::new(scope);
-        self.db.write(|s| new_scope(s, &self.cfg.folder.scope))
+        if changed {
+            self.cfg.folder.scope = Arc::new(scope);
+        }
+        self.db.write(|s| {
+            if changed {
+                new_scope(s, &self.cfg.folder.scope)?;
+            }
+            s.account()
+                .set_account_kv(keys::MAIN_LEAVES_OUT, &fingerprint)
+        })?;
+        self.drive.wake_all();
+        Ok(())
+    }
+
+    /// Whether this device's main folder leaves the Desktop `top` out (its scope as last
+    /// taken, [`keys::MAIN_LEAVES_OUT`]): till then the Desktop syncs nothing, so the main
+    /// folder never copies this computer's own Desktop in. Without a main folder, it does.
+    fn main_leaves_out(&mut self, top: NodeId) -> Result<bool, StateError> {
+        self.db.read(|s| {
+            let main = s
+                .folders()?
+                .iter()
+                .any(|f| f.kind == Some(FolderKind::Main));
+            let out = s.account_kv(keys::MAIN_LEAVES_OUT)?;
+            Ok(!main || out.is_some_and(|o| Scope::outside_of(&o).contains(&top)))
+        })
     }
 
     /// How far the current sync is (started over at each sync), to show while it runs.
@@ -541,8 +595,16 @@ impl Engine {
         // read) is decided first, what it puts back read again where it is now. A listing of an
         // empty folder where nothing is.
         // The main folder leaves out what a folder added since holds, and takes back what one
-        // removed held.
+        // removed held. A Desktop waits for it to: nothing of it is made, joined or sent
+        // till then (the main folder would copy it in meanwhile).
         self.follow_folders()?;
+        let top = self.cfg.folder.scope.top;
+        if self.kind == FolderKind::Desktop && !self.main_leaves_out(top)? {
+            self.drive.wake_all();
+            return Err(EngineError::Remote(hbsync_remote::RemoteError::Transient(
+                "waiting for the main folder to leave this Desktop out".into(),
+            )));
+        }
         let aside = recover_aside(&mut self.db, &self.cfg.folder)?;
         report.left_aside = aside.unknown;
         if !aside.rescan.is_empty() {
@@ -564,10 +626,10 @@ impl Engine {
         // A role folder's top on the drive, or this device's Desktop's: joined, restored, or
         // made.
         let top = self.cfg.folder.scope.top;
-        if let Some(role) = Role::of(top) {
-            self.drive.ensure_role(role)?;
-        } else if !top.is_root() {
-            self.ensure_desktop(top)?;
+        match (self.kind, Role::of(top)) {
+            (FolderKind::Role, Some(role)) => self.drive.ensure_role(role)?,
+            (FolderKind::Desktop, _) => self.ensure_desktop(top)?,
+            _ => {}
         }
         report.adopted = adopt(&mut self.db, &self.cfg.folder)?;
         // What an earlier run held, or one the user answered since, is planned again.
@@ -1008,4 +1070,29 @@ enum Pull {
     Now,
     /// Only if the account's picture isn't [`Drive::current`].
     IfBehind,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::desktop_name;
+
+    /// A computer's name the drive takes is kept, in NFC; any other gives `Computer`.
+    #[test]
+    fn a_desktop_is_named_as_the_drive_takes_it() {
+        assert_eq!(desktop_name(" Work PC "), "Work PC");
+        assert_eq!(desktop_name("Cafe\u{301}"), "Caf\u{e9}");
+        for bad in [
+            "",
+            " ",
+            ".",
+            "..",
+            "a/b",
+            "a\0b",
+            ".hbsync",
+            ".HBSYNC-x",
+            &"x".repeat(256),
+        ] {
+            assert_eq!(desktop_name(bad), "Computer", "{bad:?}");
+        }
+    }
 }

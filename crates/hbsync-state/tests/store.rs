@@ -1,6 +1,6 @@
 use hbsync_platform::{FileId, Fingerprint, RelPath};
 use hbsync_state::testkit::RawPicture;
-use hbsync_state::{BaseRow, LocalRow, StateDb, StateError, keys};
+use hbsync_state::{BaseRow, FolderKind, LocalRow, StateDb, StateError, keys};
 use hbsync_types::{
     ContentState, FileContent, FileToken, HashAlgorithm, NodeId, NodeKind, NodeState, RemoteFileId,
     Tag, Tags, Uuid, VersionTag,
@@ -480,7 +480,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 26);
+    assert_eq!(db.schema_version()?, 27);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -1350,7 +1350,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 26);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 27);
     Ok(())
 }
 
@@ -1363,7 +1363,10 @@ fn folders_keep_their_own_rows() -> R {
     let db_path = dir.path().join("state.db");
     let mut main = StateDb::open(&db_path)?;
     let docs_top = NodeId::new();
-    let docs = main.write(|s| s.account().add_folder(docs_top, "/home/a/Documents", "m2"))?;
+    let docs = main.write(|s| {
+        s.account()
+            .add_folder(docs_top, FolderKind::Role, "/home/a/Documents", "m2")
+    })?;
     let mut docs_db = StateDb::open_folder(&db_path, docs)?;
     assert_eq!(
         (main.folder(), docs_db.folder()),
@@ -1440,8 +1443,10 @@ fn drive_changes_fan_out_to_the_folders_they_concern() -> R {
     let (docs_top, pics_top) = (NodeId::new(), NodeId::new());
     let (docs, pics) = main.write(|s| {
         Ok((
-            s.account().add_folder(docs_top, "/d", "m2")?,
-            s.account().add_folder(pics_top, "/p", "m3")?,
+            s.account()
+                .add_folder(docs_top, FolderKind::Role, "/d", "m2")?,
+            s.account()
+                .add_folder(pics_top, FolderKind::Role, "/p", "m3")?,
         ))
     })?;
     let mut docs_db = StateDb::open_folder(&db_path, docs)?;
@@ -1551,7 +1556,7 @@ fn a_role_folder_sees_its_top_as_the_root() -> R {
     let db_path = dir.path().join("state.db");
     let mut main = StateDb::open(&db_path)?;
     let top = NodeId::new();
-    let docs = main.write(|s| s.account().add_folder(top, "/d", "m2"))?;
+    let docs = main.write(|s| s.account().add_folder(top, FolderKind::Role, "/d", "m2"))?;
     let mut docs_db = StateDb::open_folder(&db_path, docs)?;
     let row = |node, parent, name: &str| MirrorRow {
         file_id: RemoteFileId(Uuid::new_v4()),

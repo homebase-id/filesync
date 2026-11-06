@@ -387,8 +387,40 @@ pub struct FolderRow {
     pub id: i64,
     /// The drive's node the folder holds: the drive's root for the main folder.
     pub top: NodeId,
+    /// What it is; `None`: a kind a newer client wrote, which this one doesn't sync.
+    pub kind: Option<FolderKind>,
     pub path: String,
     pub marker: String,
+}
+
+/// What a folder of the account is (sync semantics §12), as stored with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FolderKind {
+    /// The main folder: the drive's root.
+    Main,
+    /// A role folder (Documents and the others): its fixed folder at the drive's top.
+    Role,
+    /// This computer's Desktop: its own folder in Desktops.
+    Desktop,
+}
+
+impl FolderKind {
+    pub(crate) fn code(self) -> i64 {
+        match self {
+            FolderKind::Main => 0,
+            FolderKind::Role => 1,
+            FolderKind::Desktop => 2,
+        }
+    }
+
+    pub(crate) fn from_code(code: i64) -> Option<FolderKind> {
+        match code {
+            0 => Some(FolderKind::Main),
+            1 => Some(FolderKind::Role),
+            2 => Some(FolderKind::Desktop),
+            _ => None,
+        }
+    }
 }
 
 const BASE_SELECT: &str = "SELECT n.uuid, p.uuid, b.name, b.kind, b.hash, b.size, b.mtime_ms, \
