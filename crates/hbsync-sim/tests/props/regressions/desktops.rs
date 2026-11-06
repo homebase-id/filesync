@@ -208,3 +208,33 @@ fn a_desktop_added_again_joins_and_leaves_the_main_folder() {
         ]
     );
 }
+
+/// Seed 92e2c340: client 2 deletes client 0's old Desktop folder (in Desktops) while client 0's
+/// main folder holds a new file in its copy; then the Desktop is added. The main folder, which
+/// leaves it out now, didn't see it (gone from the drive) and created it again under its own
+/// id with the file: a write outside its part of the drive. A folder it leaves out that it
+/// still holds is left out all the same (detached with the new file, under a new id).
+#[test]
+fn regression_a_desktop_deleted_elsewhere_isnt_written_back_by_the_main_folder() {
+    use hbsync_sim::Action::{CreateFile, Delete};
+    let events = [
+        Event::Plan { client: 0 },
+        Event::Plan { client: 2 },
+        act(2, CreateFile { parent: 0, name: 5 }),
+        Event::Step { client: 2 },
+        act(2, CreateFile { parent: 0, name: 0 }),
+        Event::Step { client: 0 },
+        Event::Step { client: 2 },
+        Event::Step { client: 0 },
+        Event::Step { client: 2 },
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(2, Delete { node: 5 }),
+        Event::Plan { client: 2 },
+        Event::Step { client: 2 },
+        Event::Step { client: 2 },
+        Event::Step { client: 2 },
+    ];
+    if let Err(e) = crate::common::run_with(3, None, Sim::with_desktop_to_add, &events) {
+        panic!("{e}");
+    }
+}
