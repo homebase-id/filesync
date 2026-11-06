@@ -1059,14 +1059,12 @@ newer version set up isn't synced. The main folder's scope leaves this computer'
 folder out too, wherever it is on the drive, and nothing else of Desktops: every main folder
 shows the *other* computers' Desktops in `~/Homebase/Desktops/<computer>`, synced both ways,
 and a computer's own one is masked there, holding its name (another item there takes another)
-and keeping Desktops alive on it. The main folder follows the device's folders at each sync: a
-Desktop added leaves the main folder, which lets go of what it held of it (masked, as above: a
-change made there meanwhile is kept, detached, in a folder of its own beside it), and one
-removed comes back into it. The main folder reads the device's folders at every round of its
-syncs (one small read): a Desktop added while it syncs is left out from its next round, and one
-not running takes it first thing when it starts. The Desktop syncs at once; the main folder
-never downloads the computer's own Desktop after it is added (what it held of it already is let
-go, as above). Before every sync of a Desktop, after reading the drive, Desktops comes back
+and keeping Desktops alive on it (also where the drive lacks it). The main folder reads the
+device's folders at every round of its syncs (one small read): a Desktop added leaves it from
+its next round (one not running takes it first thing when it starts), and it lets go of what it
+held of it (masked, as above: a change made there meanwhile is kept, detached, in a folder of
+its own beside it); one removed comes back into it. The Desktop syncs at once. Before every
+sync of a Desktop, after reading the drive, Desktops comes back
 from Recently deleted (with what was deleted with it) or is made at the top whenever it isn't
 live, even with the computer's folder live in it (a delete stopped half way); then the
 computer's folder must be live: it comes back, or is made in Desktops under the computer's
@@ -1079,7 +1077,8 @@ folder's own name, and a folder there already keeps its name. The folder takes a
 when it changes (a rename of its node where it is, under the first free name), again at a
 later sync if the rename didn't land; a rename made elsewhere stands until then. The purge
 keeps a folder in Desktops (a computer's Desktop) that Desktops' delete took along, as it keeps
-a role folder: its computer brings Desktops back with it. No device knows the other
+a role folder: its computer brings Desktops back with it; and a restore into it never takes
+`.hbsync`, as at any sync root's top. No device knows the other
 computers' Desktops by id, so the purge knows them by place: one moved out of Desktops isn't
 kept so.
 

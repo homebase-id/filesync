@@ -140,7 +140,8 @@ impl SyncRoot {
             for old in s.folders()?.into_iter().filter(|f| f.top == top) {
                 s.account().remove_folder(old.id)?;
             }
-            s.account().add_folder(top, kind_of(top), &text, &marker.id)
+            s.account()
+                .add_folder(top, FolderKind::for_top(top), &text, &marker.id)
         })?;
         std::fs::create_dir_all(layout::state_dir(path))?;
         marker.write(path)?;
@@ -337,17 +338,6 @@ impl SyncRoot {
     /// The drive's node the folder holds: the drive's root for the main folder.
     pub fn top(&self) -> NodeId {
         self.top
-    }
-}
-
-/// The kind of a folder set up to hold the drive's node `top`: the main folder the root's, a
-/// role folder its fixed folder's, a Desktop any other (its computer's folder in Desktops). Only
-/// where a folder is set up: its kind is kept with it, and read from there.
-fn kind_of(top: NodeId) -> FolderKind {
-    match top {
-        t if t.is_root() => FolderKind::Main,
-        t if hbsync_types::Role::of(t).is_some() => FolderKind::Role,
-        _ => FolderKind::Desktop,
     }
 }
 

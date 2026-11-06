@@ -223,8 +223,9 @@ of this schema may define some of them.)
   doesn't. A node whose parent is removed brings the parent back first, and one whose parent is gone for good comes back as it was, an orphan
   the computers move into Recovered files (see above). If a folder
   doesn't come back (changed meanwhile), what is in it stays removed. A name a live sibling took
-  meanwhile gets ` (restored)`; so does `.hbsync`, in any case, at the top of the drive or of a
-  role folder (each computer's own state folder there, never synced).
+  meanwhile gets ` (restored)`; so does `.hbsync`, in any case, at the top of the drive, of a
+  role folder or of a computer's Desktop (a folder in Desktops): each computer's own state folder
+  there, never synced.
 - **The purge**, the one rule for deleting for good (a user emptying Recently deleted follows
   it too, but for 3.). Any client runs it (the mobile browser too, at its own pace: most people
   rarely open a desktop app), by the server's clock: its `queryTime` against each `updated`.

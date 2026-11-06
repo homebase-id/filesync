@@ -2,7 +2,6 @@
 //! change feed (pulled once for all of them), and what is the whole drive's rather than a
 //! folder's: Recently deleted, restoring and emptying it, the purge.
 
-use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, channel};
@@ -10,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use hbsync_remote::{ChangeRef, ErrorClass, NodeMeta, Remote, RemoteError, Skipped};
-use hbsync_state::{Answer, StateDb, StateError, keys};
+use hbsync_state::{Answer, MirrorRow, StateDb, StateError, keys};
 
 use hbsync_platform::name::name_key;
 use hbsync_types::schema::NodeContent;
@@ -439,10 +438,26 @@ impl Drive {
         name: &str,
         rename: bool,
     ) -> Result<bool, EngineError> {
-        self.ensure_folder(NodeId::DESKTOPS, NodeId::ROOT, || {
-            self.free_name(NodeId::ROOT, hbsync_types::DESKTOPS_NAME, NodeId::DESKTOPS)
+        // As things mostly are, in one read: both there.
+        let (desktops, row) = self.account().read(|s| {
+            Ok((
+                s.get_mirror(NodeId::DESKTOPS)?.is_some(),
+                s.get_mirror(top)?,
+            ))
         })?;
-        let named = rename && self.is_live(top)? && self.rename_to(top, name)?;
+        if !desktops {
+            self.ensure_folder(NodeId::DESKTOPS, NodeId::ROOT, || {
+                self.free_name(NodeId::ROOT, hbsync_types::DESKTOPS_NAME, NodeId::DESKTOPS)
+            })?;
+        }
+        let there = row.is_some();
+        let named = match row {
+            Some(row) if rename => self.rename_to(row, name)?,
+            _ => false,
+        };
+        if there && named == rename {
+            return Ok(named);
+        }
         let made = self.ensure_folder(top, NodeId::DESKTOPS, || {
             self.free_name(NodeId::DESKTOPS, name, top)
         })?;
@@ -454,31 +469,32 @@ impl Drive {
         self.account().read(|s| Ok(s.get_mirror(node)?.is_some()))
     }
 
-    /// The first of `name`'s numbered names ([`crate::tree::first_free`]) no node but `node`
-    /// has in `parent` on the drive; `name` itself where none is free.
+    /// `name`, or the first of its numbered names ([`crate::tree::free_name`]), that no node but
+    /// `node` has in `parent` on the drive.
     fn free_name(&self, parent: NodeId, name: &str, node: NodeId) -> Result<String, StateError> {
-        let taken: HashSet<String> = self.account().read(|s| {
-            Ok(s.mirror_children(parent)?
-                .into_iter()
-                .filter(|m| m.node != node)
-                .map(|m| name_key(&m.name))
-                .collect())
-        })?;
-        let names = std::iter::once(name.to_owned()).chain(crate::tree::numbered_names(name));
-        Ok(
-            crate::tree::first_free_by(names, |n| !taken.contains(&name_key(n)), |_| true)
-                .unwrap_or_else(|| name.to_owned()),
-        )
+        self.account().read(|s| {
+            let mut failed = None;
+            let free = crate::tree::free_name(name, |n| {
+                let key = name_key(n);
+                match s.mirror_named(parent, hbsync_namemap::sibling_hash(n)) {
+                    Ok(rows) => !rows
+                        .iter()
+                        .any(|m| m.node != node && name_key(&m.name) == key),
+                    Err(e) => {
+                        failed.get_or_insert(e);
+                        false
+                    }
+                }
+            });
+            failed.map_or(Ok(free), Err)
+        })
     }
 
-    /// Gives the drive's folder `node` the name `name` (or the first free one after it) where
-    /// it is: a metadata update at the version the mirror has. Whether it has that name now: a
+    /// Gives the drive's folder `row` the name `name` (or the first free one after it) where it
+    /// is: a metadata update at the version the mirror has. Whether it has that name now: a
     /// folder changed meanwhile (renamed, moved, removed elsewhere) is read, and left as it is.
-    fn rename_to(&self, node: NodeId, name: &str) -> Result<bool, EngineError> {
-        let Some(row) = self.account().read(|s| s.get_mirror(node))? else {
-            return Ok(false);
-        };
-        let name = self.free_name(row.parent, name, node)?;
+    fn rename_to(&self, row: MirrorRow, name: &str) -> Result<bool, EngineError> {
+        let name = self.free_name(row.parent, name, row.node)?;
         if row.name == name {
             return Ok(true);
         }

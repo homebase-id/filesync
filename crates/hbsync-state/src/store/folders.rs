@@ -16,9 +16,7 @@ impl ReadTx<'_> {
         let c = if self.folder == crate::NO_FOLDER {
             Coords::MAIN
         } else {
-            self.folder_list()?
-                .iter()
-                .find(|f| f.id == self.folder)
+            self.this_folder()?
                 .map(|f| Coords { top: f.top })
                 .ok_or_else(|| {
                     StateError::Conflict(format!("no folder {} in this DB", self.folder))
@@ -64,6 +62,15 @@ impl ReadTx<'_> {
             parent: c.to_drive(row.parent),
             ..row.clone()
         }))
+    }
+
+    /// The folder this handle sees (`None`: the account's handle, or one the DB lacks).
+    pub fn this_folder(&self) -> Result<Option<FolderRow>> {
+        Ok(self
+            .folder_list()?
+            .iter()
+            .find(|f| f.id == self.folder)
+            .cloned())
     }
 
     pub fn folders(&self) -> Result<Vec<FolderRow>> {

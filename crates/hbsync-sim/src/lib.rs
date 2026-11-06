@@ -279,45 +279,38 @@ impl Sim {
         let id = self.ids.fresh();
         self.server.put(id, file);
         let mut sim = self.with_desktop_on(0, top);
-        let desk = sim.clients.len() - 1;
-        sim.clients[desk].added = false;
-        sim.clients[desk].desktop_named = Some("c0".into());
-        sim.clients[0].own_tops.remove(&top);
+        let desk = sim.clients.last_mut().expect("added");
+        desk.added = false;
+        desk.desktop_named = Some("c0".into());
         sim
     }
 
     /// Client `main`'s computer syncs its Desktop too, whose folder on the drive is `top`: one
     /// more client, last, in its coordinates; its main folder leaves `top` out.
-    fn with_desktop_on(mut self, main: usize, top: NodeId) -> Self {
+    fn with_desktop_on(self, main: usize, top: NodeId) -> Self {
+        let mut sim = self.with_folder_on(main, "desk", top);
+        let name = sim.clients[main].name.clone();
+        sim.clients.last_mut().expect("added").desktop_name = name;
+        sim
+    }
+
+    /// Client `main`'s computer syncs Documents too: one more client, last, in its coordinates.
+    fn with_documents_on(self, main: usize) -> Self {
+        self.with_folder_on(main, "docs", Role::Documents.node())
+    }
+
+    /// Client `main`'s computer syncs the drive's folder `top` too, where it is: one more
+    /// client, last, in its coordinates, named after the main one with `suffix`.
+    fn with_folder_on(mut self, main: usize, suffix: &str, top: NodeId) -> Self {
         let first = &self.clients[main];
-        let mut desk = Client::new(
-            format!("{}-desk", first.name),
+        let mut other = Client::new(
+            format!("{}-{suffix}", first.name),
             first.os,
             Filter::default(),
             Coords { top },
         );
-        desk.computer = first.computer.clone();
-        desk.kind = hbsync_state::FolderKind::Desktop;
-        desk.desktop_name = first.name.clone();
-        self.clients[main].own_tops.insert(top);
-        self.clients.push(desk);
-        self.computers.push((main, self.clients.len() - 1));
-        self
-    }
-
-    /// Client `main`'s computer syncs Documents too: one more client, last, in its coordinates.
-    fn with_documents_on(mut self, main: usize) -> Self {
-        let first = &self.clients[main];
-        let mut docs = Client::new(
-            format!("{}-docs", first.name),
-            first.os,
-            Filter::default(),
-            Coords {
-                top: Role::Documents.node(),
-            },
-        );
-        docs.computer = first.computer.clone();
-        self.clients.push(docs);
+        other.computer = first.computer.clone();
+        self.clients.push(other);
         self.computers.push((main, self.clients.len() - 1));
         self
     }
@@ -487,24 +480,12 @@ impl Sim {
 
     /// For scripted tests: the paths of client `c`'s items, sorted.
     pub fn local_paths(&self, c: usize) -> Vec<String> {
-        let tree = &self.clients[c].local;
-        let mut paths: Vec<String> = tree
-            .ids()
-            .filter_map(|n| tree.path(n).map(|p| p.join("/")))
-            .collect();
-        paths.sort();
-        paths
+        sorted_paths(&self.clients[c].local)
     }
 
     /// The paths of the server's live nodes, sorted.
     pub fn server_paths(&self) -> Vec<String> {
-        let tree = self.server.tree();
-        let mut paths: Vec<String> = tree
-            .ids()
-            .filter_map(|n| tree.path(n).map(|p| p.join("/")))
-            .collect();
-        paths.sort();
-        paths
+        sorted_paths(&self.server.tree())
     }
 
     /// For scripted tests: what [`Action::DeleteStopped`]'s `pick` is to pick folder `node`.
@@ -645,10 +626,6 @@ impl Sim {
             return false;
         };
         self.clients[c].added = true;
-        let top = self.clients[c].coords.top;
-        if let Some(&(main, _)) = self.computers.iter().find(|(_, d)| *d == c) {
-            self.clients[main].tops_added.insert(top);
-        }
         true
     }
 
@@ -680,4 +657,14 @@ fn tags_at(tree: &Tree, path: &str) -> Option<Vec<String>> {
 fn at_path(tree: &Tree, path: &str) -> Option<NodeId> {
     tree.ids()
         .find(|n| tree.path(*n).is_some_and(|p| p.join("/") == path))
+}
+
+/// The paths of what `tree` holds, sorted.
+fn sorted_paths(tree: &Tree) -> Vec<String> {
+    let mut paths: Vec<String> = tree
+        .ids()
+        .filter_map(|n| tree.path(n).map(|p| p.join("/")))
+        .collect();
+    paths.sort();
+    paths
 }

@@ -59,8 +59,8 @@ impl Sim {
 
     /// Whether drive node `node` is known to lie outside client `c`'s folder's part of the
     /// drive: in a folder it leaves out (a role folder, its computer's Desktop) for the main
-    /// folder, under the drive's top elsewhere for another folder. A node whose place isn't known (a gap, or a cycle a sync's moves make for a
-    /// moment) isn't.
+    /// folder, under the drive's top elsewhere for another folder. A node whose place isn't
+    /// known (a gap, or a cycle a sync's moves make for a moment) isn't.
     pub(crate) fn known_outside(&self, c: usize, node: NodeId) -> bool {
         let client = &self.clients[c];
         match client.coords.top {
@@ -172,17 +172,11 @@ impl Sim {
                 .iter()
                 .any(|(f, kids)| f == n || kids.contains(n))
         };
-        // Nor Desktops, or a computer's Desktop's folder: one in a file can't come back from
-        // Recently deleted, and its computer's syncs wait for it (as a role folder's would).
-        let top =
-            |n: &NodeId| *n == NodeId::DESKTOPS || self.clients.iter().any(|c| c.coords.top == *n);
-        let free = |n: &NodeId| {
-            *n != NodeId::RECOVERED
-                && Role::of(*n).is_none()
-                && !top(n)
-                && !server.in_role_folder(*n)
-                && !newer(n)
-        };
+        // Nor a computer's Desktop's folder: one in a file can't come back from Recently
+        // deleted, and its computer's syncs wait for it (as a fixed folder's would).
+        let top = |n: &NodeId| self.clients.iter().any(|c| c.coords.top == *n);
+        let free =
+            |n: &NodeId| !n.is_fixed_folder() && !top(n) && !server.in_role_folder(*n) && !newer(n);
         let nodes = server.live.keys().filter(|n| free(n)).copied().collect();
         let files = server
             .live

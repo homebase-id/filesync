@@ -56,7 +56,8 @@ pub(crate) struct Masks {
     pub brought_back: HashSet<NodeId>,
     /// The name keys masked nodes hold, per folder: still taken remotely.
     pub names: HashMap<NodeId, HashSet<String>>,
-    /// The nodes the filter masks (the rest of `masked` is outside the scope).
+    /// The nodes the filter masks (the rest of `masked` is outside the scope), kept only where
+    /// the input holds something removed (what a delete took along is read without them).
     pub filtered: HashSet<NodeId>,
     /// Local items that become new nodes: old id → new id.
     pub detached: BTreeMap<NodeId, NodeId>,
@@ -197,7 +198,11 @@ impl Masks {
                     .insert(name_key(&state.name));
             }
         }
-        let filtered = masked.clone();
+        // What a delete took along is read without them (only where something is removed).
+        let filtered = match input.removed.is_empty() {
+            true => HashSet::new(),
+            false => masked.clone(),
+        };
         masked.extend(outside);
         if masked.is_empty() {
             return Masks {
