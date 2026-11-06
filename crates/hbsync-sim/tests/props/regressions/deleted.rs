@@ -2096,3 +2096,48 @@ fn regression_a_folder_deleted_here_keeps_its_wanted_file() {
         panic!("{e}");
     }
 }
+
+/// Seed 1c41b132 (`guarded_clients_in_pages_hold_the_whole_delete`, pages of 2, the guard at
+/// 1), found while checking the Desktops branch and failing on main as well: client 0 deletes 1
+/// remote and 1 local file unconfirmed past the guard's limit, after moves, a junk folder and
+/// two writes another device changed meanwhile. Open, in the guard's paged flow: pinned for a
+/// fix of its own.
+#[test]
+#[ignore = "open: a paged delete past the guard's limit goes through unconfirmed"]
+fn regression_a_paged_delete_past_the_guard_is_held() {
+    use hbsync_sim::Action::{CreateFile, CreateFolder, CreateJunkFolder, Delete, Meanwhile, Move};
+    let act = |action| Event::Act { client: 0, action };
+    let (plan, step) = (Event::Plan { client: 0 }, Event::Step { client: 0 });
+    let events = [
+        act(CreateFile { parent: 0, name: 2 }),
+        plan,
+        step,
+        act(Move {
+            node: 0,
+            parent: 0,
+            name: 3,
+        }),
+        act(CreateFolder { parent: 0, name: 5 }),
+        plan,
+        step,
+        plan,
+        act(CreateFile { parent: 2, name: 0 }),
+        act(Meanwhile { op: 1 }),
+        plan,
+        act(CreateJunkFolder { parent: 0 }),
+        step,
+        act(Meanwhile { op: 0 }),
+        act(Delete { node: 5 }),
+        plan,
+        act(Move {
+            node: 0,
+            parent: 2,
+            name: 6,
+        }),
+        plan,
+        step,
+    ];
+    if let Err(e) = run_with(2, Some(1), |sim| sim.with_small_pages(2), &events) {
+        panic!("{e}");
+    }
+}
