@@ -58,7 +58,7 @@ impl Sim {
             }
             // The nodes the engine keeps dirty, and every other one of the rest, by the planning
             // round.
-            let differs = engine_dirty(input, plan);
+            let differs = engine_dirty(client, input, plan);
             let some: Vec<NodeId> = all
                 .iter()
                 .copied()
@@ -106,7 +106,7 @@ impl Sim {
         let checked = (|| -> Result<Option<String>, StateError> {
             let mut db = self.fill(c, input)?;
             // The nodes the engine keeps dirty: those marked, and those the plan has work for.
-            let dirty: Vec<NodeId> = engine_dirty(input, plan).into_iter().collect();
+            let dirty: Vec<NodeId> = engine_dirty(client, input, plan).into_iter().collect();
             // The store's marks are those: filling it marks what it writes (a pull's rows), and
             // a mark the page doesn't hold reads as another page's (§6.5).
             db.write(|s| {
@@ -394,10 +394,18 @@ pub(crate) fn marked_dirty(input: &Input) -> BTreeSet<NodeId> {
         .collect()
 }
 
-/// The nodes of `input` dirty as the engine keeps them, `plan` made from it: those its scan
-/// and feed marked ([`marked_dirty`]), and those the plan has work for (a node a plan didn't
-/// settle stays dirty).
-fn engine_dirty(input: &Input, plan: &Plan) -> BTreeSet<NodeId> {
+/// The nodes marked dirty as the engine keeps them, `input` read for `client`'s plan: those its
+/// scan and feed marked ([`marked_dirty`]), and in pages what its rounds keep marked
+/// (`Pages::marks`, empty otherwise).
+pub(crate) fn kept_dirty(client: &Client, input: &Input) -> BTreeSet<NodeId> {
+    let mut dirty = marked_dirty(input);
+    dirty.extend(client.pages.borrow().marks.iter().copied());
+    dirty
+}
+
+/// The nodes dirty as the engine keeps them, `plan` made from `input`: those marked
+/// ([`kept_dirty`]), and those the plan has work for (a node a plan didn't settle stays dirty).
+fn engine_dirty(client: &Client, input: &Input, plan: &Plan) -> BTreeSet<NodeId> {
     let work: BTreeSet<NodeId> = plan
         .ops
         .iter()
@@ -406,7 +414,7 @@ fn engine_dirty(input: &Input, plan: &Plan) -> BTreeSet<NodeId> {
         .chain(plan.deferred.iter().copied())
         .chain(plan.held.iter().map(|op| op.node()))
         .collect();
-    let mut dirty = marked_dirty(input);
+    let mut dirty = kept_dirty(client, input);
     dirty.extend(input.dirty.iter().filter(|n| work.contains(n)));
     dirty
 }
