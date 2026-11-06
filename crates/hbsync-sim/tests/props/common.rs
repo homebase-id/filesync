@@ -31,6 +31,15 @@ pub(crate) fn action() -> impl Strategy<Value = Action> + Clone {
     ]
 }
 
+/// The users' actions, with computers renamed (their Desktops' folders follow: §12) now and
+/// then.
+pub(crate) fn desktop_action() -> impl Strategy<Value = Action> + Clone {
+    prop_oneof![
+        8 => action(),
+        1 => (0usize..16).prop_map(|name| Action::RenameComputer { name }),
+    ]
+}
+
 /// The users' actions, with executable bits flipped and launchers named more often (sync
 /// semantics §1: a Linux client doesn't hold a launcher's bit, Windows none).
 pub(crate) fn executable_action() -> impl Strategy<Value = Action> + Clone {

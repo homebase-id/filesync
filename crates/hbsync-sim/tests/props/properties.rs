@@ -138,6 +138,29 @@ proptest! {
         run_with(3, None, Sim::with_new_role_devices, &events)?;
     }
 
+    /// Two computers add their Desktops, which the drive doesn't have yet: the first to sync
+    /// makes Desktops, each its own folder in it, named as the computer (renamed with it); each
+    /// main folder shows the other computer's Desktop, never its own, while the users work in
+    /// every folder (in the other computer's Desktop through the main folder too: moving,
+    /// deleting it, or Desktops) and move files between the folders of a computer (§12): each
+    /// folder converges to its part of the drive and writes nowhere else, a Desktop deleted
+    /// elsewhere comes back while its computer syncs it, nothing is lost.
+    #[test]
+    fn desktop_devices_converge_without_loss(
+        events in proptest::collection::vec(events_of(5, desktop_action()), 0..120)
+    ) {
+        run_with(3, None, Sim::with_desktop_devices, &events)?;
+    }
+
+    /// Two computers sync one Desktop (the user said the second is the first again): they
+    /// share it, merging what both hold, and neither main folder shows it.
+    #[test]
+    fn a_shared_desktop_converges_without_loss(
+        events in proptest::collection::vec(events_of(5, desktop_action()), 0..120)
+    ) {
+        run_with(3, None, Sim::with_shared_desktop, &events)?;
+    }
+
     /// Another device deletes a folder and stops half way, never to come back (any folder,
     /// Documents and what is in it too, beside a computer syncing it), while the users work and
     /// the daily purge runs: the purge removes what the delete took along, once the folder is

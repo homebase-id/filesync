@@ -137,7 +137,7 @@ impl Server {
                 .map(|(n, l)| (*n, l.state.parent, l.state.kind)),
             |f| removed.get(&f).copied(),
             |n| self.live.get(&n).map(|l| time(l.remote.version)),
-            |n| Role::of(n).is_some(), // as the engine keeps them
+            |n| hbsync_engine::along::kept_by_purge(n, self.live[&n].state.parent),
         )
         .into_iter()
         .flatten()
@@ -231,9 +231,14 @@ impl Server {
     /// Where a walk up from `node` ends: at the role folder (`End::At` it) for the role folder
     /// and what lies in it, at the drive's top for the rest of what reaches it.
     pub(crate) fn place(&self, node: NodeId) -> End {
-        let docs = Role::Documents.node();
+        self.place_below(node, Role::Documents.node())
+    }
+
+    /// Where a walk up from `node` ends: at `top` (`End::At` it) for `top` and what lies in it,
+    /// at the drive's top for the rest of what reaches it.
+    pub(crate) fn place_below(&self, node: NodeId, top: NodeId) -> End {
         let Ok(up) = hbsync_engine::walk::up::<_, Infallible>(node, |at| {
-            Ok((at != docs)
+            Ok((at != top)
                 .then(|| self.live.get(&at).map(|n| ((), n.state.parent)))
                 .flatten())
         });

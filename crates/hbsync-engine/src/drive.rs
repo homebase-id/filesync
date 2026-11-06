@@ -2,6 +2,7 @@
 //! change feed (pulled once for all of them), and what is the whole drive's rather than a
 //! folder's: Recently deleted, restoring and emptying it, the purge.
 
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, channel};
@@ -11,8 +12,9 @@ use std::time::{Duration, Instant};
 use hbsync_remote::{ChangeRef, ErrorClass, NodeMeta, Remote, RemoteError, Skipped};
 use hbsync_state::{Answer, StateDb, StateError, keys};
 
+use hbsync_platform::name::name_key;
 use hbsync_types::schema::NodeContent;
-use hbsync_types::{NodeId, NodeKind, Role};
+use hbsync_types::{NodeId, NodeKind, Role, VersionTag, Written};
 
 use crate::deleted;
 use crate::error::EngineError;
@@ -420,31 +422,94 @@ impl Drive {
     /// device syncing it gets there first). Before every sync of the role's folder: nothing may
     /// be synced into a folder that isn't on the drive, where it would land in Recently deleted.
     pub fn ensure_role(&self, role: Role) -> Result<(), EngineError> {
-        let top = role.node();
-        let live = |drive: &Drive| -> Result<bool, StateError> {
-            drive.account().read(|s| Ok(s.get_mirror(top)?.is_some()))
+        self.ensure_folder(role.node(), NodeId::ROOT, || Ok(role.name().to_owned()))
+    }
+
+    /// [`Drive::ensure_role`] for a computer's Desktop, whose folder on the drive is `top`, in
+    /// Desktops ([`NodeId::DESKTOPS`], made or restored first): made there under `name`, or the
+    /// first free name after it. With `rename` (the computer's name changed), a folder that is
+    /// there takes `name` too, as far as it is free where the folder is.
+    pub fn ensure_desktop(&self, top: NodeId, name: &str, rename: bool) -> Result<(), EngineError> {
+        if !self.is_live(top)? {
+            self.ensure_folder(NodeId::DESKTOPS, NodeId::ROOT, || {
+                Ok(hbsync_types::DESKTOPS_NAME.to_owned())
+            })?;
+            self.ensure_folder(top, NodeId::DESKTOPS, || {
+                self.free_name(NodeId::DESKTOPS, name, top)
+            })?;
+        } else if rename {
+            self.rename_to(top, name)?;
+        }
+        Ok(())
+    }
+
+    /// Whether the mirror holds `node` live.
+    fn is_live(&self, node: NodeId) -> Result<bool, StateError> {
+        self.account().read(|s| Ok(s.get_mirror(node)?.is_some()))
+    }
+
+    /// The first of `name`'s numbered names ([`crate::tree::first_free`]) no node but `node`
+    /// has in `parent` on the drive; `name` itself where none is free.
+    fn free_name(&self, parent: NodeId, name: &str, node: NodeId) -> Result<String, StateError> {
+        let taken: HashSet<String> = self.account().read(|s| {
+            Ok(s.mirror_children(parent)?
+                .into_iter()
+                .filter(|m| m.node != node)
+                .map(|m| name_key(&m.name))
+                .collect())
+        })?;
+        let names = std::iter::once(name.to_owned()).chain(crate::tree::numbered_names(name));
+        Ok(
+            crate::tree::first_free_by(names, |n| !taken.contains(&name_key(n)), |_| true)
+                .unwrap_or_else(|| name.to_owned()),
+        )
+    }
+
+    /// Gives the drive's folder `node` the name `name` (or the first free one after it) where
+    /// it is: a metadata update at the version the mirror has. Nothing if it has that name.
+    fn rename_to(&self, node: NodeId, name: &str) -> Result<(), EngineError> {
+        let Some(row) = self.account().read(|s| s.get_mirror(node))? else {
+            return Ok(());
         };
-        if live(self)? {
+        let name = self.free_name(row.parent, name, node)?;
+        if row.name == name {
             return Ok(());
         }
-        if self.restore(&[top])? == 0 {
+        let meta = mirror::meta_at(&row, row.parent, &name, false);
+        match self.remote().update(&row.target(), &meta, None) {
+            Ok(written) => self.record_written(Some(row.version), &meta, written)?,
+            // Changed meanwhile (renamed, moved, removed elsewhere): read it, and leave it.
+            Err(RemoteError::VersionMismatch | RemoteError::NotFound | RemoteError::Deleted) => {
+                self.pull(None)?;
+            }
+            Err(e) => return Err(EngineError::Remote(e)),
+        }
+        Ok(())
+    }
+
+    /// Makes sure the drive has the folder `node`, just pulled: kept if it is there, back from
+    /// Recently deleted (with what was deleted with it), else made in `parent` under the name
+    /// `name` gives (whichever device gets there first).
+    fn ensure_folder(
+        &self,
+        node: NodeId,
+        parent: NodeId,
+        name: impl FnOnce() -> Result<String, StateError>,
+    ) -> Result<(), EngineError> {
+        if self.is_live(node)? {
+            return Ok(());
+        }
+        if self.restore(&[node])? == 0 {
             let meta = NodeMeta {
-                node: top,
-                parent: NodeId::ROOT,
+                node,
+                parent,
                 kind: NodeKind::Folder,
-                content: NodeContent::folder(role.name()),
+                content: NodeContent::folder(&name()?),
                 removed: false,
             };
             match self.remote().create(&meta, None) {
                 // Recorded from the answer, as the executor records its writes.
-                Ok(written) => {
-                    let answer = Answer::live(None, mirror::written(&meta, None, written));
-                    let mut db = self.account();
-                    // As the executor records a folder it made.
-                    let behind = db.write(|s| mirror::answered(s.account(), &[answer]))?;
-                    self.absorb(DriveNews { behind, full: None });
-                    self.wake_touched(&mut db, None);
-                }
+                Ok(written) => self.record_written(None, &meta, written)?,
                 // Another device made it (or deleted it) meanwhile: read it.
                 Err(RemoteError::AlreadyExists) => {
                     self.pull(None)?;
@@ -452,12 +517,27 @@ impl Drive {
                 Err(e) => return Err(EngineError::Remote(e)),
             }
         }
-        if !live(self)? {
+        if !self.is_live(node)? {
             return Err(EngineError::Remote(RemoteError::Transient(format!(
-                "{} isn't on the drive yet",
-                role.name()
+                "folder {node} isn't on the drive yet"
             ))));
         }
+        Ok(())
+    }
+
+    /// Records this device's write of `meta` over `expected` (`None`: one it made), as the
+    /// executor records its writes.
+    fn record_written(
+        &self,
+        expected: Option<VersionTag>,
+        meta: &NodeMeta,
+        written: Written,
+    ) -> Result<(), StateError> {
+        let answer = Answer::live(expected, mirror::written(meta, None, written));
+        let mut db = self.account();
+        let behind = db.write(|s| mirror::answered(s.account(), &[answer]))?;
+        self.absorb(DriveNews { behind, full: None });
+        self.wake_touched(&mut db, None);
         Ok(())
     }
 

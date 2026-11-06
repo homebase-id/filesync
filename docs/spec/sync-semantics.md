@@ -1016,12 +1016,13 @@ Apart from these and the crash case above, no tag add or removal is lost.
 
 ## 12. Scopes
 A device syncs the main folder (`~/Homebase`) and, if the user chooses, **role folders** where
-they are: Documents, Pictures, Music, Videos, Downloads (node schema, "Role folders"). Each
+they are: Documents, Pictures, Music, Videos, Downloads (node schema, "Role folders"), and its
+Desktop (below). Each
 local folder has an engine of its own, scoped to a part of the drive; they share the account's
 state DB (one mirror, one feed) and keep their own base and local rows:
 - the main folder's scope is the drive's top **without the role folders**, on every device,
   whether it syncs them or not: a role folder appears only where it is synced in place, never
-  inside `~/Homebase`;
+  inside `~/Homebase`; nor this device's own Desktop's folder (below);
 - a role folder's scope is what lies in that folder. Its engine sees the folder as its root
   and the rest of the drive as one folder at its top that it leaves out; what it writes at its
   root goes into the role folder. A node whose place isn't known (its folder gone from the
@@ -1044,6 +1045,26 @@ syncs it. A role folder at the top that the engine holds nothing of isn't planne
 version ever synced one into the main folder, so a device holds one only through a bug, and
 then lets go of it as of anything masked. A role folder moved into a folder (against the node
 schema's rules) is masked there and keeps that folder alive (§6.3).
+
+**Desktops.** A computer's Desktop is synced where it is too, but into a folder of its own,
+never mixed with another computer's: each computer that adds its Desktop has a folder in
+**Desktops** (a folder at the drive's top with a fixed id, node schema "Desktops"), with an id
+of its own, made when the computer first adds it (or one of those there, if the user says the
+computer is that one again). Its engine's scope is what lies in that folder, as a role
+folder's. The main folder's scope leaves this computer's own Desktop folder out too, wherever
+it is on the drive, and nothing else of Desktops: every main folder shows the *other*
+computers' Desktops in `~/Homebase/Desktops/<computer>`, synced both ways, and a computer's
+own one is masked there (so Desktops is kept alive on it, holding the others'). The main
+folder follows the device's folders at each sync: a Desktop added leaves the main folder,
+which lets go of what it held of it (masked, as above: a change made there meanwhile is kept,
+detached, in a folder of its own beside it), and one removed comes back into it. Before every sync of a Desktop, after reading the
+drive, its folder must be on the drive: if it isn't, Desktops comes back from Recently deleted
+(with what was deleted with it) or is made at the top, then the computer's folder comes back
+or is made in Desktops under the computer's name (the first free one: `PC (conflict 1)`). The
+folder takes the computer's name again when that changes (a rename of its node where it is,
+under the first free name); a rename made elsewhere stands until then. The purge keeps a
+computer's folder that Desktops' delete took along, as it keeps a role folder: its computer
+brings Desktops back with it.
 
 A role folder holds no name for the scope: a plain folder of the same name at the top keeps it
 (two at the top, told apart by their ids). A new scope plans the folders it, or the last one,

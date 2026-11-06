@@ -5,10 +5,18 @@
 
 use std::collections::{HashMap, HashSet};
 
-use hbsync_types::{NodeId, NodeKind};
+use hbsync_types::{NodeId, NodeKind, Role};
 
 /// A live node as the rule reads it: its id, its folder, and its kind.
 pub type Live = (NodeId, NodeId, NodeKind);
+
+/// Whether the purge keeps live node `node`, in folder `parent`, though a delete took it along
+/// ([`taken_levels`]'s `keep`): a folder a computer syncs where it is, which it brings back
+/// with what was deleted with it at its next sync: a role folder, or a computer's Desktop (a
+/// folder in Desktops). The engine's purge and the simulator's share it.
+pub fn kept_by_purge(node: NodeId, parent: NodeId) -> bool {
+    Role::of(node).is_some() || parent == NodeId::DESKTOPS
+}
 
 /// Of the live nodes `live`, those the removal of a folder took along: below a removed folder
 /// (`removed` gives a removed node's kind and its removal's time, the server's), directly or

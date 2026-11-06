@@ -20,8 +20,8 @@ use hbsync_local::layout::parked_name;
 use hbsync_platform::{Os, executable_on_disk, holds_executable, synced_executable};
 use hbsync_state::{Answer, RemovedRow, StateDb, StateError};
 use hbsync_types::{
-    ContentHash, ContentState, FileContent, NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef,
-    Role, Tags, VersionTag,
+    ContentHash, ContentState, DESKTOPS_NAME, FileContent, NodeId, NodeKind, NodeState,
+    RemoteFileId, RemoteRef, Role, Tags, VersionTag,
 };
 
 use crate::Sim;
@@ -113,6 +113,63 @@ impl Sim {
         }
     }
 
+    /// The drive's folder `node`, made in `parent` under `name` unless it is live or comes
+    /// back from Recently deleted (as the engine's `Drive::ensure_folder`).
+    fn ensure_folder(&mut self, node: NodeId, parent: NodeId, name: impl FnOnce(&Self) -> String) {
+        if self.server.live.contains_key(&node) {
+            return;
+        }
+        // One that doesn't come back (no free name) waits, as the engine's sync fails.
+        if self.server.removed.contains_key(&node) {
+            self.restore_with(node);
+        } else {
+            let name = name(self);
+            self.server.put(node, NodeState::folder(parent, &name));
+        }
+    }
+
+    /// Client `c`'s Desktop's folder on the drive, made or restored in Desktops; one that is
+    /// there takes its computer's name where that changed since it was last given, as far as
+    /// it is free there (as the engine's `Drive::ensure_desktop`).
+    fn ensure_desktop(&mut self, c: usize) {
+        let top = self.clients[c].coords.top;
+        let name = self.clients[c].desktop_name.clone();
+        let rename = self.clients[c].desktop_named.as_deref() != Some(name.as_str());
+        if !self.server.live.contains_key(&top) {
+            self.ensure_folder(NodeId::DESKTOPS, NodeId::ROOT, |_| DESKTOPS_NAME.into());
+            if !self.server.live.contains_key(&NodeId::DESKTOPS) {
+                return;
+            }
+            self.ensure_folder(top, NodeId::DESKTOPS, |sim| {
+                sim.free_name(NodeId::DESKTOPS, &name, top)
+            });
+        } else if rename {
+            let parent = self.server.live[&top].state.parent;
+            let free = self.free_name(parent, &name, top);
+            let version = VersionTag(self.server.uuid());
+            let n = self.server.live.get_mut(&top).expect("live");
+            if n.state.name != free {
+                n.state.name = free;
+                n.remote.version = version;
+            }
+        }
+        self.clients[c].desktop_named = Some(name);
+    }
+
+    /// The first of `name`'s numbered names (`name` itself first) no live node but `node` has
+    /// in `parent` on the drive; `name` where none is.
+    fn free_name(&self, parent: NodeId, name: &str, node: NodeId) -> String {
+        let tree = self.server.tree();
+        let names =
+            std::iter::once(name.to_owned()).chain(hbsync_engine::tree::numbered_names(name));
+        hbsync_engine::tree::first_free_by(
+            names,
+            |n| tree.child_named(parent, n, Some(node)).is_none(),
+            |_| true,
+        )
+        .unwrap_or_else(|| name.to_owned())
+    }
+
     /// Client `c` starts a sync: recovers, unparks, and plans from the server as its folder sees
     /// it, as the engine's sync does (its view's input, then `reconcile_with_known`).
     pub(crate) fn plan(&mut self, c: usize) {
@@ -129,15 +186,13 @@ impl Sim {
         // A role folder that isn't on the drive comes back from Recently deleted with what was
         // deleted with it (node schema: in it, removed no earlier than it; not what was restored
         // from it since and deleted again elsewhere), or is made, by the first of its devices to
-        // sync (as `Drive::ensure_role`), named like the users' items.
+        // sync (as `Drive::ensure_role`), named like the users' items. A Desktop's folder so
+        // too, in Desktops, made or restored first (as `Drive::ensure_desktop`).
         let top = self.clients[c].coords.top;
-        if !top.is_root() && !self.server.live.contains_key(&top) {
-            if self.server.removed.contains_key(&top) {
-                self.restore_with(top);
-            } else {
-                self.server
-                    .put(top, NodeState::folder(NodeId::ROOT, NAMES[0]));
-            }
+        if self.clients[c].is_desktop() {
+            self.ensure_desktop(c);
+        } else if !top.is_root() {
+            self.ensure_folder(top, NodeId::ROOT, |_| NAMES[0].into());
         }
         self.unpark(c);
         self.release_filtered(c);
@@ -1198,10 +1253,8 @@ impl Sim {
     fn planned_writable(&self, c: usize, node: NodeId) -> bool {
         let client = &self.clients[c];
         let main = client.coords.top.is_root();
-        let left_out = |n: NodeId| match main {
-            true => n == Role::Documents.node(),
-            false => n == NodeId::OUTSIDE,
-        };
+        let outside = client.scope().outside;
+        let left_out = |n: NodeId| outside.contains(&n);
         // Where the plan saw it, whatever the plan's own writes did since; a node the plan made
         // itself is where it made it.
         let parent = |n: NodeId| {

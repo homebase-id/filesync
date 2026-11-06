@@ -247,6 +247,40 @@ impl Sim {
         self.with_documents_on(0).with_documents_on(1)
     }
 
+    /// No Desktops on the drive; client 0's and client 1's computers each add their Desktop, a
+    /// folder of its own in Desktops (one more client each, last): the first to sync makes
+    /// Desktops, each makes its own folder; every main folder shows the other computer's,
+    /// never its own (§12).
+    pub fn with_desktop_devices(mut self) -> Self {
+        let (first, second) = (self.ids.fresh(), self.ids.fresh());
+        self.with_desktop_on(0, first).with_desktop_on(1, second)
+    }
+
+    /// [`Sim::with_desktop_devices`], both computers syncing one Desktop (the user said the
+    /// second is the first again): they share it, as with a role folder.
+    pub fn with_shared_desktop(mut self) -> Self {
+        let top = self.ids.fresh();
+        self.with_desktop_on(0, top).with_desktop_on(1, top)
+    }
+
+    /// Client `main`'s computer syncs its Desktop too, whose folder on the drive is `top`: one
+    /// more client, last, in its coordinates; its main folder leaves `top` out.
+    fn with_desktop_on(mut self, main: usize, top: NodeId) -> Self {
+        let first = &self.clients[main];
+        let mut desk = Client::new(
+            format!("{}-desk", first.name),
+            first.os,
+            Filter::default(),
+            Coords { top },
+        );
+        desk.computer = first.computer.clone();
+        desk.desktop_name = first.name.clone();
+        self.clients[main].own_tops.insert(top);
+        self.clients.push(desk);
+        self.computers.push((main, self.clients.len() - 1));
+        self
+    }
+
     /// Client `main`'s computer syncs Documents too: one more client, last, in its coordinates.
     fn with_documents_on(mut self, main: usize) -> Self {
         let first = &self.clients[main];
@@ -425,6 +459,17 @@ impl Sim {
                         .is_some_and(|(_, f, fk)| *fk == NodeKind::Folder && at < f)
             })
             .count()
+    }
+
+    /// For scripted tests: the paths of client `c`'s items, sorted.
+    pub fn local_paths(&self, c: usize) -> Vec<String> {
+        let tree = &self.clients[c].local;
+        let mut paths: Vec<String> = tree
+            .ids()
+            .filter_map(|n| tree.path(n).map(|p| p.join("/")))
+            .collect();
+        paths.sort();
+        paths
     }
 
     /// The paths of the server's live nodes, sorted.
