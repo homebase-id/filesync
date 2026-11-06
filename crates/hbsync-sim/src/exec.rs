@@ -241,8 +241,10 @@ impl Sim {
         }
         // The guard's totals over the whole dirty set, as the engine counts them
         // (`pending_file_deletes`): synced files gone here and gone there, but those confirmed;
-        // and of them, those outside the page (for the oracle). Not the engine's files a
-        // removed folder took along (`taken_files`): see `narrow::marked_dirty`.
+        // and of them, those outside the page (for the oracle). Of the engine's files a removed
+        // folder took along (`taken_files`), those this device removes from the drive, on the
+        // gone here side; not those on the gone there side, which `narrow::marked_dirty` leaves
+        // unmarked.
         let (mut pending, mut outside) = ((0, 0), (0, 0));
         let confirmed_at = |n: NodeId| {
             !client.confirmed.is_empty()
@@ -253,9 +255,8 @@ impl Sim {
                         .iter()
                         .any(|a| client.confirmed.contains(a)))
         };
-        let counted = |n: NodeId| {
-            input.base.get(n).is_some_and(|s| s.kind == NodeKind::File) && !confirmed_at(n)
-        };
+        let synced_file = |n: NodeId| input.base.get(n).is_some_and(|s| s.kind == NodeKind::File);
+        let counted = |n: NodeId| synced_file(n) && !confirmed_at(n);
         for &n in all.iter().filter(|n| counted(**n)) {
             let here = usize::from(!input.local.contains(n));
             let there = usize::from(!input.remote.contains(n));
@@ -264,11 +265,33 @@ impl Sim {
                 outside = (outside.0 + here, outside.1 + there);
             }
         }
+        let taken = hbsync_engine::reconcile::taken_along(&input);
+        if !all.is_empty() {
+            // Counted above already (dirty, gone here), or confirmed: a confirmation covers its
+            // own node only, while dirty (`confirmed_file_deletes`).
+            let counted_or_confirmed = |n: NodeId| {
+                all.contains(&n)
+                    && ((synced_file(n) && !input.local.contains(n))
+                        || client.confirmed.contains(&n))
+            };
+            let removes = |n: NodeId| {
+                input
+                    .remote
+                    .get(n)
+                    .is_some_and(|s| s.kind == NodeKind::File)
+                    && (synced_file(n) || (!input.base.contains(n) && all.contains(&n)))
+            };
+            for &n in &taken {
+                if removes(n) && !counted_or_confirmed(n) {
+                    pending.0 += 1;
+                    outside.0 += usize::from(!input.dirty.contains(&n));
+                }
+            }
+        }
         let confirmed = Arc::new(client.confirmed.clone());
         // Held as every synced file: until answered, by the engine's rule (it keeps
         // `guard.wiped` so), over what its store has: the mirror (the plan's view of the drive)
         // and what the scanner reports here.
-        let taken = hbsync_engine::reconcile::taken_along(&input);
         let sides = crate::world::ModelSides {
             base: &client.base,
             local: &input.local,
