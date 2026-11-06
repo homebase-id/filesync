@@ -18,6 +18,9 @@ pub mod schema;
 /// The name [`NodeId::RECOVERED`] gets when a device makes it; the user may rename it.
 pub const RECOVERED_NAME: &str = "Recovered files";
 
+/// The name [`NodeId::DESKTOPS`] gets when a device makes it; the user may rename it.
+pub const DESKTOPS_NAME: &str = "Desktops";
+
 /// Now, in Unix milliseconds.
 pub fn unix_now_ms() -> i64 {
     std::time::SystemTime::now()
@@ -59,6 +62,11 @@ impl NodeId {
     /// so devices that adopt at once share one.
     pub const RECOVERED: NodeId = NodeId(Uuid::from_u128(0xfa4646cb_2df0_4f18_a3c6_1fc2b2f6ac4b));
 
+    /// The folder at the drive's top that holds each computer's Desktop, a folder per computer
+    /// (node schema, "Desktops"), named [`DESKTOPS_NAME`] when made. Fixed, the same on every
+    /// drive, so computers adding their Desktops at once share one.
+    pub const DESKTOPS: NodeId = NodeId(Uuid::from_u128(0x475d49e0_c0b4_4cbc_8090_2f2cb1e9dc69));
+
     /// A fresh id. UUIDv7 keeps DB index inserts roughly sequential.
     pub fn new() -> Self {
         NodeId(Uuid::now_v7())
@@ -66,6 +74,12 @@ impl NodeId {
 
     pub fn is_root(self) -> bool {
         self == Self::ROOT
+    }
+
+    /// Whether this is one of the fixed folders the drive may hold: Recovered files, Desktops,
+    /// or a role folder (never a file).
+    pub fn is_fixed_folder(self) -> bool {
+        self == Self::RECOVERED || self == Self::DESKTOPS || Role::of(self).is_some()
     }
 }
 
@@ -322,6 +336,18 @@ mod tests {
         );
         assert!(Role::of(NodeId::RECOVERED).is_none());
         assert!(![NodeId::ROOT, NodeId::OUTSIDE].contains(&NodeId::RECOVERED));
+    }
+
+    /// On every drive: the node schema names it, and other clients know the folder by it.
+    #[test]
+    fn desktops_id_matches_spec() {
+        assert_eq!(
+            NodeId::DESKTOPS.0.to_string(),
+            "475d49e0-c0b4-4cbc-8090-2f2cb1e9dc69"
+        );
+        assert!(Role::of(NodeId::DESKTOPS).is_none());
+        let fixed = [NodeId::ROOT, NodeId::OUTSIDE, NodeId::RECOVERED];
+        assert!(!fixed.contains(&NodeId::DESKTOPS));
     }
 
     #[test]

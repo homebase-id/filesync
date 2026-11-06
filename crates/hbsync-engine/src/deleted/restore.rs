@@ -328,6 +328,8 @@ pub trait RestoreSource {
     fn is_live(&mut self, node: NodeId) -> Result<bool, Self::Error>;
     /// The names of what is live in `folder`.
     fn names_in(&mut self, folder: NodeId) -> Result<Vec<String>, Self::Error>;
+    /// The folder live node `node` is in.
+    fn parent_of(&mut self, node: NodeId) -> Result<Option<NodeId>, Self::Error>;
     /// A row's node and its folder.
     fn place(row: &Self::Row) -> (NodeId, NodeId);
 }
@@ -398,8 +400,14 @@ pub fn plan_restore_from<S: RestoreSource>(
         } else if !parent.is_root() && !seen.contains(&parent) {
             continue;
         }
+        // Its own folder: as it comes back, or as it is.
+        let above = match rows.iter().find(|r| S::place(r).0 == parent) {
+            Some(r) => Some(S::place(r).1),
+            None => source.parent_of(parent)?,
+        };
+        let top = crate::along::is_sync_top(parent, above);
         let names = source.names_in(parent)?;
-        taken.insert(parent, taken_in(parent, names.iter().map(String::as_str)));
+        taken.insert(parent, taken_in(top, names.iter().map(String::as_str)));
     }
     Ok(Some(RestorePlan { rows, live, taken }))
 }
@@ -434,6 +442,9 @@ impl RestoreSource for Store<'_, '_> {
             .into_iter()
             .map(|m| m.name)
             .collect())
+    }
+    fn parent_of(&mut self, node: NodeId) -> Result<Option<NodeId>, StateError> {
+        Ok(self.0.get_mirror(node)?.map(|m| m.parent))
     }
     fn place(row: &RemovedRow) -> (NodeId, NodeId) {
         (row.row.node, row.row.parent)

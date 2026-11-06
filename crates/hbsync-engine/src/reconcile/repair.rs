@@ -686,10 +686,10 @@ impl Reconciler<'_> {
                 uncovered |= part;
                 // The lowest id keeps the name, except that a deferred node (a file still
                 // being written) is never renamed: it wins, and is left alone if it loses;
-                // and an orphan moving in, or Recovered files made beside a folder of its
-                // name, loses to what is there.
+                // and an orphan moving in, or Recovered files or Desktops made beside a folder
+                // of its name, loses to what is there.
                 group.sort_by_key(|n| {
-                    let arriving = self.adopted.contains(n) || *n == NodeId::RECOVERED;
+                    let arriving = self.adopted.contains(n) || n.is_fixed_folder();
                     (!self.deferred.contains(n), arriving, *n)
                 });
                 // The folder's path here, for the filter (`None`: not connected), read once

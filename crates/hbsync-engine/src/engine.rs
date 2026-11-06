@@ -7,9 +7,9 @@ use std::time::{Duration, Instant};
 
 use hbsync_local::{CatchUp, Debounce, LocalObserver, ScanOptions, ScanReport, rescan_dirs, scan};
 use hbsync_remote::Remote;
-use hbsync_state::{DirtyCursor, Mark, StateDb, StateError, keys};
-use hbsync_types::NodeId;
+use hbsync_state::{DirtyCursor, FolderKind, Mark, StateDb, StateError, keys};
 use hbsync_types::activity::Synced;
+use hbsync_types::{NodeId, Role};
 
 use crate::activity::{self, Counters};
 use crate::adopt::adopt;
@@ -153,6 +153,44 @@ impl SyncReport {
 /// alone once more at the end of the sync, to see that its view doesn't reach them.
 const LEFTOVERS_MAX: usize = 1_000;
 
+/// What a folder holds of the drive (sync semantics §12), from its kind as set up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    Main,
+    Role(Role),
+    Desktop,
+}
+
+/// The name a computer's Desktop folder takes from `name` (the computer's): in NFC, one the
+/// drive takes (not empty, `.` or `..`, no `/` or NUL, 255 bytes at most), not this client's
+/// own (`.hbsync…`, any case) and not junk (§10: other computers wouldn't show it); else
+/// `Computer`.
+pub(crate) fn desktop_name(name: &str) -> String {
+    use hbsync_platform::name::{check_remote_name, nfc, starts_caseless};
+    let name = nfc(name.trim());
+    let ours = starts_caseless(&name, hbsync_local::STATE_DIR);
+    match check_remote_name(&name) {
+        Ok(()) if !ours && !hbsync_local::is_junk(&name) => name,
+        _ => "Computer".into(),
+    }
+}
+
+/// Records `scope` as the folder's, if it is new (§12). A new scope changes what is in view
+/// remotely only: no walk. The folders it or the last one left out are planned again from
+/// their tops, which brings what is in them: what this device holds there goes, what comes
+/// into view comes.
+fn new_scope(s: &hbsync_state::Store<'_>, scope: &Scope) -> Result<(), StateError> {
+    let fingerprint = scope.fingerprint();
+    let last = s.get_kv(keys::SCOPE)?;
+    if last.as_deref() != Some(fingerprint.as_str()) {
+        let last = last.as_deref().map(Scope::outside_of).unwrap_or_default();
+        last.union(&scope.outside)
+            .try_for_each(|n| s.folder().mark_dirty(*n))?;
+        s.folder().set_kv(keys::SCOPE, &fingerprint)?;
+    }
+    Ok(())
+}
+
 /// The state DB as [`crate::pages::OwnPages`] reads it: a read transaction a query.
 struct DbPages<'a>(&'a mut StateDb);
 
@@ -204,6 +242,11 @@ pub struct Engine {
     unreported: Option<SyncReport>,
     /// The folder's refusals ([`crate::refused`]).
     refusals: FolderRefusals,
+    /// What the folder holds of the drive, as set up ([`FolderKind`]).
+    part: Part,
+    /// The main folder's scope as configured, before what this device's other folders hold
+    /// is left out of it too ([`Engine::follow_folders`]).
+    given: Arc<Scope>,
 }
 
 impl std::fmt::Debug for Engine {
@@ -238,13 +281,27 @@ impl Engine {
         drive: Arc<Drive>,
         mut cfg: EngineConfig,
     ) -> Result<Self, StateError> {
-        let top = db.read(|s| Ok(s.coords()?.top))?;
+        let (top, kind) =
+            db.read(|s| Ok((s.coords()?.top, s.this_folder()?.and_then(|f| f.kind))))?;
+        // A kind a newer client set up (or one that doesn't fit its top): not synced as any
+        // this one knows.
+        let part = match (kind, Role::of(top)) {
+            (Some(FolderKind::Main), _) if top.is_root() => Part::Main,
+            (Some(FolderKind::Role), Some(role)) => Part::Role(role),
+            (Some(FolderKind::Desktop), None) if !top.is_root() => Part::Desktop,
+            _ => {
+                return Err(StateError::Conflict(
+                    "a folder of a kind this version doesn't sync".into(),
+                ));
+            }
+        };
         if cfg.folder.scope.top != top {
             cfg.folder.scope = Arc::new(Scope::of(top));
         }
+        let given = Arc::clone(&cfg.folder.scope);
         let scan_opts = cfg.folder.scan_options();
         let remote = cfg.folder.scope.remote(drive.shared_remote());
-        Ok(Engine {
+        let mut engine = Engine {
             db,
             drive,
             remote,
@@ -259,7 +316,76 @@ impl Engine {
             refusals: FolderRefusals::default(),
             waited: Waited::default(),
             unreported: None,
-        })
+            part,
+            given,
+        };
+        engine.follow_folders()?;
+        Ok(engine)
+    }
+
+    /// This device's Desktop's folder on the drive, `top`, made, restored or joined
+    /// ([`Drive::ensure_desktop`]), named as the computer is ([`keys::DESKTOP_NAME`], set by
+    /// [`Engine::name_desktop`]; made under this folder's own name until then, and never
+    /// renamed without it). A name not yet given the folder is given at the next sync on which
+    /// the rename lands.
+    fn ensure_desktop(&mut self, top: NodeId) -> Result<(), EngineError> {
+        let (name, named) = self.db.read(|s| {
+            Ok((
+                s.get_kv(keys::DESKTOP_NAME)?,
+                s.get_kv(keys::DESKTOP_NAMED)?,
+            ))
+        })?;
+        let rename = name.is_some() && name != named;
+        let name = name.unwrap_or_else(|| {
+            let root = &self.cfg.folder.root;
+            desktop_name(&root.file_name().unwrap_or_default().to_string_lossy())
+        });
+        if self.drive.ensure_desktop(top, &name, rename)? && rename {
+            self.db
+                .write(|s| s.folder().set_kv(keys::DESKTOP_NAMED, &name))?;
+        }
+        Ok(())
+    }
+
+    /// Names this device's Desktop's folder on the drive after the computer (`name`, made one
+    /// the drive takes: [`desktop_name`]), from its next sync on; a rename made elsewhere
+    /// stands until it changes. Nothing for another folder.
+    pub fn name_desktop(&mut self, name: &str) -> Result<(), StateError> {
+        if self.part != Part::Desktop {
+            return Ok(());
+        }
+        let name = desktop_name(name);
+        self.db
+            .write(|s| s.folder().set_kv(keys::DESKTOP_NAME, &name))
+    }
+
+    /// The main folder leaves out what this device's other folders hold (its own Desktop's
+    /// folder: §12), as they are in the DB now: a folder added or removed since changes its
+    /// scope, planned as any new scope ([`new_scope`]). Read at every round
+    /// (one small read): a Desktop added while a sync runs is left out from its next round,
+    /// so the main folder never copies the computer's own Desktop in; one not running takes
+    /// it first thing when it starts.
+    fn follow_folders(&mut self) -> Result<(), StateError> {
+        if self.part != Part::Main {
+            return Ok(());
+        }
+        let tops: Vec<NodeId> = self.db.read(|s| {
+            Ok(s.folders()?
+                .iter()
+                .filter(|f| f.kind != Some(FolderKind::Main))
+                .map(|f| f.top)
+                .collect())
+        })?;
+        let outside: std::collections::BTreeSet<NodeId> =
+            self.given.outside.iter().copied().chain(tops).collect();
+        if outside == self.cfg.folder.scope.outside {
+            return Ok(());
+        }
+        self.cfg.folder.scope = Arc::new(Scope {
+            top: NodeId::ROOT,
+            outside,
+        });
+        self.db.write(|s| new_scope(s, &self.cfg.folder.scope))
     }
 
     /// How far the current sync is (started over at each sync), to show while it runs.
@@ -371,18 +497,8 @@ impl Engine {
     /// the new fingerprint, so a crash can't skip it.
     pub fn apply_filter_change(&mut self) -> Result<bool, StateError> {
         let fingerprint = self.cfg.folder.filter.fingerprint();
-        let scope = self.cfg.folder.scope.fingerprint();
         self.db.write(|s| {
-            // A new scope (§12) changes what is in view remotely only: no walk. The folders it
-            // or the last one left out are planned again from their tops, which brings what
-            // is in them: what this device holds there goes, what comes into view comes.
-            let last = s.get_kv(keys::SCOPE)?;
-            if last.as_deref() != Some(scope.as_str()) {
-                let last = last.as_deref().map(Scope::outside_of).unwrap_or_default();
-                last.union(&self.cfg.folder.scope.outside)
-                    .try_for_each(|n| s.folder().mark_dirty(*n))?;
-                s.folder().set_kv(keys::SCOPE, &scope)?;
-            }
+            new_scope(s, &self.cfg.folder.scope)?;
             if s.get_kv(keys::FILTER)?.as_deref() == Some(fingerprint.as_str()) {
                 return Ok(false);
             }
@@ -461,6 +577,9 @@ impl Engine {
         pulled: Pull,
         report: &mut SyncReport,
     ) -> Result<(), EngineError> {
+        // The main folder leaves out what a folder added since holds, and takes back what one
+        // removed held (and again at every round).
+        self.follow_folders()?;
         // What a delete or a download left aside (a crash, an item that couldn't be put back or
         // read) is decided first, what it puts back read again where it is now. A listing of an
         // empty folder where nothing is.
@@ -482,9 +601,12 @@ impl Engine {
             Pull::Now => self.drive.pull(folder)?,
             Pull::IfBehind => self.drive.catch_up(folder)?,
         };
-        // A role folder's top on the drive: joined, restored, or made.
-        if let Some(role) = hbsync_types::Role::of(self.cfg.folder.scope.top) {
-            self.drive.ensure_role(role)?;
+        // A role folder's top on the drive, or this device's Desktop's: joined, restored, or
+        // made.
+        match self.part {
+            Part::Role(role) => self.drive.ensure_role(role)?,
+            Part::Desktop => self.ensure_desktop(self.cfg.folder.scope.top)?,
+            Part::Main => {}
         }
         report.adopted = adopt(&mut self.db, &self.cfg.folder)?;
         // What an earlier run held, or one the user answered since, is planned again.
@@ -563,6 +685,7 @@ impl Engine {
         // too, each as a page of its own (§6.5), or when the sync stops (round limit, a stop).
         let mut ending = false;
         loop {
+            self.follow_folders()?;
             let stop = report.stopped || self.stop.load(Ordering::Relaxed);
             let go = rounds < self.cfg.max_rounds && !stop;
             if ending && (!go || self.own_pages.is_empty()) {
@@ -925,4 +1048,35 @@ enum Pull {
     Now,
     /// Only if the account's picture isn't [`Drive::current`].
     IfBehind,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::desktop_name;
+
+    /// A computer's name the drive takes and the built-in filter syncs is kept, in NFC; any
+    /// other gives `Computer`.
+    #[test]
+    fn a_desktop_is_named_as_the_drive_takes_it() {
+        assert_eq!(desktop_name(" Work PC "), "Work PC");
+        assert_eq!(desktop_name("Cafe\u{301}"), "Caf\u{e9}");
+        for bad in [
+            "",
+            " ",
+            ".",
+            "..",
+            "a/b",
+            "a\0b",
+            ".hbsync",
+            ".HBSYNC-x",
+            &"x".repeat(256),
+            // Junk to the built-in filter, as files or folders.
+            "x.part",
+            "~$lab",
+            "Thumbs.db",
+            "$RECYCLE.BIN",
+        ] {
+            assert_eq!(desktop_name(bad), "Computer", "{bad:?}");
+        }
+    }
 }

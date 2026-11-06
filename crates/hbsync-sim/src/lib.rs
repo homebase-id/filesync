@@ -50,7 +50,7 @@ use hbsync_engine::tree::Tree;
 use hbsync_local::Filter;
 use hbsync_platform::Os;
 use hbsync_state::Coords;
-use hbsync_types::{NodeId, NodeKind, NodeState, Role, Uuid};
+use hbsync_types::{DESKTOPS_NAME, NodeId, NodeKind, NodeState, Role, Uuid};
 
 use crate::action::NAMES;
 use crate::exec::extra;
@@ -247,19 +247,70 @@ impl Sim {
         self.with_documents_on(0).with_documents_on(1)
     }
 
+    /// No Desktops on the drive; client 0's and client 1's computers each add their Desktop, a
+    /// folder of its own in Desktops (one more client each, last): the first to sync makes
+    /// Desktops, each makes its own folder; every main folder shows the other computer's,
+    /// never its own (§12).
+    pub fn with_desktop_devices(mut self) -> Self {
+        let (first, second) = (self.ids.fresh(), self.ids.fresh());
+        self.with_desktop_on(0, first).with_desktop_on(1, second)
+    }
+
+    /// [`Sim::with_desktop_devices`], both computers syncing one Desktop (the user said the
+    /// second is the first again): they share it, as with a role folder.
+    pub fn with_shared_desktop(mut self) -> Self {
+        let top = self.ids.fresh();
+        self.with_desktop_on(0, top).with_desktop_on(1, top)
+    }
+
+    /// Desktops on the drive holds client 0's computer's Desktop from before (set up again since,
+    /// say), with a file in it, which every main folder syncs; that computer adds its Desktop
+    /// again later ([`Action::AddDesktop`], one more client, last), its user having made files
+    /// on it meanwhile: it joins its folder, and its main folder leaves it out from its next plan.
+    pub fn with_desktop_to_add(mut self) -> Self {
+        let top = self.ids.fresh();
+        self.server.put(
+            NodeId::DESKTOPS,
+            NodeState::folder(NodeId::ROOT, DESKTOPS_NAME),
+        );
+        self.server
+            .put(top, NodeState::folder(NodeId::DESKTOPS, "c0"));
+        let file = NodeState::file(top, NAMES[3], self.new_blob());
+        let id = self.ids.fresh();
+        self.server.put(id, file);
+        let mut sim = self.with_desktop_on(0, top);
+        let desk = sim.clients.last_mut().expect("added");
+        desk.added = false;
+        desk.desktop_named = Some("c0".into());
+        sim
+    }
+
+    /// Client `main`'s computer syncs its Desktop too, whose folder on the drive is `top`: one
+    /// more client, last, in its coordinates; its main folder leaves `top` out.
+    fn with_desktop_on(self, main: usize, top: NodeId) -> Self {
+        let mut sim = self.with_folder_on(main, "desk", top);
+        let name = sim.clients[main].name.clone();
+        sim.clients.last_mut().expect("added").desktop_name = name;
+        sim
+    }
+
     /// Client `main`'s computer syncs Documents too: one more client, last, in its coordinates.
-    fn with_documents_on(mut self, main: usize) -> Self {
+    fn with_documents_on(self, main: usize) -> Self {
+        self.with_folder_on(main, "docs", Role::Documents.node())
+    }
+
+    /// Client `main`'s computer syncs the drive's folder `top` too, where it is: one more
+    /// client, last, in its coordinates, named after the main one with `suffix`.
+    fn with_folder_on(mut self, main: usize, suffix: &str, top: NodeId) -> Self {
         let first = &self.clients[main];
-        let mut docs = Client::new(
-            format!("{}-docs", first.name),
+        let mut other = Client::new(
+            format!("{}-{suffix}", first.name),
             first.os,
             Filter::default(),
-            Coords {
-                top: Role::Documents.node(),
-            },
+            Coords { top },
         );
-        docs.computer = first.computer.clone();
-        self.clients.push(docs);
+        other.computer = first.computer.clone();
+        self.clients.push(other);
         self.computers.push((main, self.clients.len() - 1));
         self
     }
@@ -427,15 +478,14 @@ impl Sim {
             .count()
     }
 
+    /// For scripted tests: the paths of client `c`'s items, sorted.
+    pub fn local_paths(&self, c: usize) -> Vec<String> {
+        sorted_paths(&self.clients[c].local)
+    }
+
     /// The paths of the server's live nodes, sorted.
     pub fn server_paths(&self) -> Vec<String> {
-        let tree = self.server.tree();
-        let mut paths: Vec<String> = tree
-            .ids()
-            .filter_map(|n| tree.path(n).map(|p| p.join("/")))
-            .collect();
-        paths.sort();
-        paths
+        sorted_paths(&self.server.tree())
     }
 
     /// For scripted tests: what [`Action::DeleteStopped`]'s `pick` is to pick folder `node`.
@@ -564,6 +614,19 @@ impl Sim {
         for client in &mut self.clients {
             client.locked.clear();
         }
+        // A Desktop not added yet is added before the clients settle: then everything syncs.
+        while self.add_desktop() {}
+    }
+
+    /// The user adds the first Desktop not added yet ([`Action::AddDesktop`]): it syncs from
+    /// now on, and its computer's main folder leaves it out from its next plan. Whether there
+    /// was one.
+    pub(crate) fn add_desktop(&mut self) -> bool {
+        let Some(c) = self.clients.iter().position(|c| !c.added) else {
+            return false;
+        };
+        self.clients[c].added = true;
+        true
     }
 
     fn all_settled(&mut self) -> bool {
@@ -594,4 +657,14 @@ fn tags_at(tree: &Tree, path: &str) -> Option<Vec<String>> {
 fn at_path(tree: &Tree, path: &str) -> Option<NodeId> {
     tree.ids()
         .find(|n| tree.path(*n).is_some_and(|p| p.join("/") == path))
+}
+
+/// The paths of what `tree` holds, sorted.
+fn sorted_paths(tree: &Tree) -> Vec<String> {
+    let mut paths: Vec<String> = tree
+        .ids()
+        .filter_map(|n| tree.path(n).map(|p| p.join("/")))
+        .collect();
+    paths.sort();
+    paths
 }

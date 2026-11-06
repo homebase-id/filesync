@@ -7,7 +7,7 @@
 //!
 //! [`Sim::with_narrow_check`]: crate::Sim::with_narrow_check
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::Arc;
 
 use hbsync_engine::FolderCtx;
@@ -378,7 +378,7 @@ pub(crate) fn mirror_row(node: NodeId, state: &NodeState, at: RemoteRef) -> Mirr
 /// before the removal took it along is read as unmarked too: the engine plans it once more, to
 /// nothing.)
 pub(crate) fn marked_dirty(input: &Input) -> BTreeSet<NodeId> {
-    let taken = hbsync_engine::reconcile::taken_along(input);
+    let taken = hbsync_engine::reconcile::taken_along(input, &HashSet::new());
     input
         .dirty
         .iter()

@@ -35,7 +35,7 @@ use std::convert::Infallible;
 
 use hbsync_local::Filter;
 use hbsync_platform::name::name_key;
-use hbsync_types::{ContentState, NodeId, NodeKind};
+use hbsync_types::{ContentState, NodeId, NodeKind, Role};
 
 use crate::id::derived_id;
 use crate::plan::Masking;
@@ -56,6 +56,9 @@ pub(crate) struct Masks {
     pub brought_back: HashSet<NodeId>,
     /// The name keys masked nodes hold, per folder: still taken remotely.
     pub names: HashMap<NodeId, HashSet<String>>,
+    /// The nodes the filter masks (the rest of `masked` is outside the scope), kept only where
+    /// the input holds something removed (what a delete took along is read without them).
+    pub filtered: HashSet<NodeId>,
     /// Local items that become new nodes: old id → new id.
     pub detached: BTreeMap<NodeId, NodeId>,
     /// `detached` the other way round: a new id's old one.
@@ -66,19 +69,21 @@ pub(crate) struct Masks {
     pub input: Option<Input>,
 }
 
-impl Masks {
-    /// The id the store knows `node` by: a detached item's old id (§10), else its own.
-    pub(crate) fn store_id(&self, node: NodeId) -> NodeId {
-        self.stored.get(&node).copied().unwrap_or(node)
-    }
+/// The filter's masks of one plan, apart from the scope's ([`Masks::of`]): the reconciler and
+/// the pages ([`crate::pages::dirty_elsewhere`]) read what a delete took along without them
+/// alike.
+pub(crate) struct FilterMasks {
+    /// Remote nodes (and folders in Recently deleted) the filter masks, of what the scope
+    /// keeps: not those brought back, nor those leaving.
+    pub masked: HashSet<NodeId>,
+    /// What lies outside the scope.
+    pub outside: HashSet<NodeId>,
+    /// Nodes at a filtered place whose local item the user brought back into view.
+    pub brought_back: HashSet<NodeId>,
+}
 
-    pub(crate) fn of(
-        input: &Input,
-        masking: Masking<'_>,
-        computer: &str,
-        taken: &HashSet<NodeId>,
-    ) -> Masks {
-        let Masking { filter, scope } = masking;
+impl FilterMasks {
+    pub(crate) fn of(input: &Input, filter: &Filter, scope: &Scope) -> FilterMasks {
         // Where a node is: through the folders in Recently deleted too (a node in one is where
         // that folder was).
         let with_removed;
@@ -92,7 +97,15 @@ impl Masks {
             with_removed = tree;
             &with_removed
         };
-        let outside = scope.out_of_scope(paths);
+        let mut outside = scope.out_of_scope(paths);
+        // A Desktop's folder the scope leaves out that this folder still holds from before
+        // (added since, deleted on the drive meanwhile: the plan doesn't see it there) is left
+        // out all the same: let go or detached as any masked node, never written back under
+        // its id. (Not a role folder: its rules stay as they are.)
+        let held = |n: &&NodeId| {
+            Role::of(**n).is_none() && (input.base.contains(**n) || input.local.contains(**n))
+        };
+        outside.extend(scope.outside.iter().filter(held));
         // The filter's masks, on what the scope keeps; the rules below are the filter's (§10).
         let mut masked: HashSet<NodeId> = masked(&input.remote, filter)
             .into_iter()
@@ -103,8 +116,12 @@ impl Masks {
             let filtered = self::masked(paths, filter);
             masked.extend(input.removed.keys().filter(|n| filtered.contains(n)));
         }
-        if masked.is_empty() && outside.is_empty() {
-            return Masks::default();
+        if masked.is_empty() {
+            return FilterMasks {
+                masked,
+                outside,
+                brought_back: HashSet::new(),
+            };
         }
         // A node synced at a place this device filters now, whose local item the user brought
         // back into view (moved out of the ignored place), syncs as usual. One whose base is
@@ -136,10 +153,44 @@ impl Masks {
         // Leaving is an ordinary local delete: the scanner no longer reports the item.
         let leaving = only_whole_folders(&input.remote, leaving);
         masked.retain(|m| !leaving.contains(m));
-        // The names the filter's masks hold stay taken; a role folder holds none for the scope:
+        FilterMasks {
+            masked,
+            outside,
+            brought_back,
+        }
+    }
+}
+
+impl Masks {
+    /// The id the store knows `node` by: a detached item's old id (§10), else its own.
+    pub(crate) fn store_id(&self, node: NodeId) -> NodeId {
+        self.stored.get(&node).copied().unwrap_or(node)
+    }
+
+    pub(crate) fn of(
+        input: &Input,
+        masking: Masking<'_>,
+        computer: &str,
+        taken: &HashSet<NodeId>,
+    ) -> Masks {
+        let Masking { filter, scope } = masking;
+        let FilterMasks {
+            mut masked,
+            outside,
+            brought_back,
+        } = FilterMasks::of(input, filter, scope);
+        if masked.is_empty() && outside.is_empty() && brought_back.is_empty() {
+            return Masks::default();
+        }
+        // The names the filter's masks hold stay taken, and so does a Desktop's folder the
+        // scope leaves out, where it sits in a folder the scope syncs (the computer's own in
+        // Desktops): another item there takes another. A role folder holds none for the scope:
         // a plain folder of the same name keeps it (two at the top, told apart by id).
+        let desktops = scope.outside.iter().filter(|t| {
+            Role::of(**t).is_none() && input.remote.get(**t).is_some_and(|s| !s.parent.is_root())
+        });
         let mut names: HashMap<NodeId, HashSet<String>> = HashMap::new();
-        for m in &masked {
+        for m in masked.iter().chain(desktops) {
             if let Some(state) = input.remote.get(*m) {
                 names
                     .entry(state.parent)
@@ -147,6 +198,11 @@ impl Masks {
                     .insert(name_key(&state.name));
             }
         }
+        // What a delete took along is read without them (only where something is removed).
+        let filtered = match input.removed.is_empty() {
+            true => HashSet::new(),
+            false => masked.clone(),
+        };
         masked.extend(outside);
         if masked.is_empty() {
             return Masks {
@@ -266,6 +322,7 @@ impl Masks {
             keep_alive,
             brought_back,
             names,
+            filtered,
             stored: detached.iter().map(|(old, new)| (*new, *old)).collect(),
             detached,
             input: Some(view),

@@ -50,6 +50,23 @@ place, from its own Documents folder and so on, never inside the main folder.
 - Deleting one while a computer syncs it doesn't last: that computer brings it back, with what
   was in it, at its next sync. Say so before deleting one; don't upload into a deleted one.
 
+## Desktops
+A top-level folder with the fixed node id `475d49e0-c0b4-4cbc-8090-2f2cb1e9dc69`, named `Desktops`
+when made (node schema, "Desktops"). Each folder in it is one computer's Desktop, synced with that
+computer's own Desktop; the computers show the other computers' Desktops in their main folder.
+- Recognise it by `uniqueId`, never by name: show it with a desktop icon (Fluent "Desktop"),
+  perhaps beside the role folders. A plain folder with the same name is listed too (the
+  computers name Desktops `Desktops (conflict 1)` beside one).
+- Each folder in it is an ordinary folder: list, open, upload into it, edit, rename or delete what
+  is in it, as any other; it reaches that computer's Desktop.
+- Never create Desktops or a computer's folder in it: the computers make them. Restore one that
+  is in Recently deleted.
+- Deleting Desktops, or a computer's folder in it, lasts only while no computer syncs that
+  Desktop: one that does brings it back, with what was in it, at its next sync. Say so before
+  deleting one (a computer no longer used can go for good). A computer's folder moved out of
+  Desktops is still synced by that computer, which knows it by its id; but the purge keeps only
+  folders in Desktops (below), so don't move one out.
+
 ## Recovered files
 A top-level folder with the fixed node id `fa4646cb-2df0-4f18-a3c6-1fc2b2f6ac4b`, named
 `Recovered files` when made (node schema, "Recovered files"). The desktop computers move into it
@@ -140,8 +157,9 @@ only the file key's lock changes (`encryption.md`, "A private drive"):
   only when the platform knows the real creation time (a photo's capture date), never the upload
   time.
 - Names: Unicode NFC, at most 255 UTF-8 bytes, no `/` or NUL, not `.` or `..`.
-- `.hbsync` at the top or directly in a role folder (Documents, Pictures, Music, Videos,
-  Downloads), in any case (`.HBSYNC`, `.HbSync`), is reserved: each synced folder's root holds
+- `.hbsync` at the top, directly in a role folder (Documents, Pictures, Music, Videos,
+  Downloads) or directly in a computer's folder in Desktops, in any case (`.HBSYNC`, `.HbSync`), is
+  reserved: each synced folder's root holds
   the computer's own state folder there, which the computers never sync. Don't create, rename,
   upload or restore anything to it there: number around it (`.hbsync (1)`, `.hbsync (restored)`). One that
   already exists (another writer's) is listed with a note that it won't sync to computers.
@@ -236,7 +254,8 @@ filesync's own rules are in its node schema ("Recently deleted") and the engine'
     (removed more than 30 days ago), the live nodes below its removed folders (directly or through live
     folders) that the delete took along: written no later than the removal of the nearest removed folder
     above (`updated` of the version you have, against the folder's). Skip a node whose `updated` you don't
-    know, one written after, and a role folder, the live folders above them, and everything in those
+    know, one written after, a role folder and a folder directly in Desktops (a computer's Desktop),
+    the live folders above them, and everything in those
     folders: remove a node only where the folder it is in is removed already or by you (node schema,
     "The purge", 2.: "what is in a folder one of them keeps"; filesync's `along::taken_levels`). Read the
     header of each

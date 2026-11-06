@@ -1,8 +1,9 @@
 //! Which part of the drive an engine syncs (sync semantics §12). The main folder syncs the
-//! drive without the role folders, on every device whether it syncs them or not; they are
-//! synced where they are, each by an engine of its own, which sees its top as its root and
-//! the rest of the drive as one folder it leaves out ([`NodeId::OUTSIDE`]; the state DB
-//! translates, [`hbsync_state::Coords`], and so does [`ScopedRemote`] for what it writes).
+//! drive without the role folders, on every device whether it syncs them or not, and without
+//! the device's own Desktop; they are synced where they are, each by an engine of its own,
+//! which sees its top as its root and the rest of the drive as one folder it leaves out
+//! ([`NodeId::OUTSIDE`]; the state DB translates, [`hbsync_state::Coords`], and so does
+//! [`ScopedRemote`] for what it writes).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::convert::Infallible;
@@ -36,7 +37,16 @@ impl Scope {
         }
     }
 
-    /// A folder holding the drive's node `top` (a role folder), and nothing else.
+    /// This scope, leaving out the drive's nodes `tops` too: the main folder's on a device
+    /// whose other folders hold them (its own Desktop's folder, wherever it is on the drive).
+    pub fn with_tops(&self, tops: impl IntoIterator<Item = NodeId>) -> Scope {
+        Scope {
+            top: self.top,
+            outside: self.outside.iter().copied().chain(tops).collect(),
+        }
+    }
+
+    /// A folder holding the drive's node `top` (a role folder, a Desktop), and nothing else.
     pub(crate) fn below(top: NodeId) -> Scope {
         Scope {
             top,
@@ -44,12 +54,18 @@ impl Scope {
         }
     }
 
-    /// The scope of a folder whose top is `top`: the main folder's, or a role folder's.
-    pub fn of(top: NodeId) -> Scope {
+    /// The scope of a folder whose top is `top`, on a device whose other folders hold `tops`:
+    /// the main folder's ([`Scope::with_tops`]), or a role folder's or a Desktop's.
+    pub fn on_device(top: NodeId, tops: impl IntoIterator<Item = NodeId>) -> Scope {
         match top {
-            t if t.is_root() => Scope::main(),
+            t if t.is_root() => Scope::main().with_tops(tops),
             t => Scope::below(t),
         }
+    }
+
+    /// [`Scope::on_device`] on a device with no other folder but role folders.
+    pub fn of(top: NodeId) -> Scope {
+        Scope::on_device(top, [])
     }
 
     /// `remote` as this engine writes to it: a node at its root is at its top.
