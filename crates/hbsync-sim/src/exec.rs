@@ -210,11 +210,12 @@ impl Sim {
             .chain(remote.ids())
             .collect();
         let mut piece = false;
-        // What the engine's scan and feed mark dirty, for pages and the guard's totals (what an
-        // earlier plan left unsettled, which the engine keeps marked too, the narrow checks add:
+        // What the engine's scan and feed mark dirty, for pages and the guard's totals, and in
+        // pages the marks its rounds keep (`Pages::marks`: what an earlier plan left unsettled,
+        // a clash's loser it was sent for; the narrow checks add a plan's own:
         // `narrow::engine_dirty`).
         let all: BTreeSet<NodeId> = match self.faults.page_size.is_some() || self.guard.is_some() {
-            true => crate::narrow::marked_dirty(&input),
+            true => crate::narrow::kept_dirty(client, &input),
             false => BTreeSet::new(),
         };
         // In pages, as the engine: the next page of the sweep over what is dirty, what else is
@@ -344,11 +345,21 @@ impl Sim {
         };
         let plan = reconcile_with_known(&input, &opts, masking, known);
         if self.faults.page_size.is_some() {
-            client
-                .pages
-                .borrow_mut()
-                .own
-                .add(&plan.waits_for_pages, &plan.waits_together);
+            let mut pages = client.pages.borrow_mut();
+            pages.own.add(&plan.waits_for_pages, &plan.waits_together);
+            // As the engine's round: the page's marks read clean go, the rest of them stay; what
+            // its held deletes take out of the dirty set (`held::out_of_dirty`) goes too, as at
+            // the end of the engine's sweep (the model of the held: `client.held`).
+            let clean: HashSet<NodeId> = plan.clean.iter().copied().collect();
+            let page: Vec<NodeId> = input.dirty.iter().copied().collect();
+            let (_, out) = hbsync_engine::held::out_of_dirty(&plan, &page);
+            for n in page {
+                if clean.contains(&n) || out.contains(&n) {
+                    pages.marks.remove(&n);
+                } else {
+                    pages.marks.insert(n);
+                }
+            }
         }
         // Every fourth plan (each costs a state DB and three more plans), until a difference
         // is found (it is reported).
@@ -450,6 +461,13 @@ impl Sim {
             false => Vec::new(),
         };
         let client = &mut self.clients[c];
+        // A clash's loser outside the page the run is sent to rename is marked, as the engine
+        // marks it with the clearing.
+        if self.faults.page_size.is_some() {
+            let page: Vec<NodeId> = input.dirty.iter().copied().collect();
+            let sent = hbsync_engine::pages::clash_losers_sent(&plan.conflicts, &page, &ops);
+            client.pages.get_mut().marks.extend(sent);
+        }
         client.blocked = refused
             .into_iter()
             .map(|op| (op, true))

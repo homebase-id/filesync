@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashSet};
 use hbsync_local::Filter;
 use hbsync_types::{NodeId, NodeKind};
 
-use crate::plan::Input;
+use crate::plan::{Conflict, Input, Op};
 use crate::scope::Scope;
 use crate::tree::Tree;
 
@@ -75,6 +75,28 @@ pub fn dirty_elsewhere<P: Pending>(
     input.going = going;
     input.going_above = going_above;
     Ok(())
+}
+
+/// A name clash's losers outside the page (`page`) that a round's run is sent to rename (`ops`,
+/// once refusals are taken out): planned for the winner's sake, they have no mark of their own,
+/// and are marked with the clearing of what the round read clean, so a run stopped before the
+/// rename (a pause, a crash) leaves them to the next.
+pub fn clash_losers_sent(conflicts: &[Conflict], page: &[NodeId], ops: &[Op]) -> Vec<NodeId> {
+    let losers: Vec<NodeId> = conflicts
+        .iter()
+        .filter_map(|c| match c {
+            Conflict::NameClash { node } => Some(*node),
+            _ => None,
+        })
+        .filter(|n| !page.contains(n))
+        .collect();
+    if losers.is_empty() {
+        return losers;
+    }
+    ops.iter()
+        .map(Op::node)
+        .filter(|n| losers.contains(n))
+        .collect()
 }
 
 /// Whether dirty folder `node` may go, on a side or from the folder's view (`hidden`: what its

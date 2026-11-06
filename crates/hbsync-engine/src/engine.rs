@@ -849,24 +849,29 @@ impl Engine {
         if let Some(after) = &self.cfg.after_plan {
             (after.0)();
         }
-        // Each mark as the page read it: one made since (another engine's pull, an
-        // announcement) may be of a change the plan didn't see, and stays.
-        let clean: std::collections::HashSet<NodeId> = plan.clean.iter().copied().collect();
-        self.db.write(|s| {
-            marks
-                .iter()
-                .filter(|m| clean.contains(&m.node))
-                .try_for_each(|m| s.folder().clear_mark(*m))
-        })?;
         // Held till answered: out of the dirty set at the end of the sync, if that is all.
         hold_out.add(&plan, &dirty, marks);
-        report.conflicts.extend(plan.conflicts);
         let mut ops = plan.ops;
         let case_insensitive = self.cfg.folder.case_insensitive;
         let (refusals, refused) = self
             .refusals
             .take(&mut self.db, &mut ops, case_insensitive)?;
         report.refused.extend(refused);
+        // Each mark as the page read it: one made since (another engine's pull, an
+        // announcement) may be of a change the plan didn't see, and stays. With the clearing,
+        // a clash's loser outside the page the run is sent to rename is marked
+        // ([`crate::pages::clash_losers_sent`]): one mark per loser, and a plan of it in a
+        // later round.
+        let clean: std::collections::HashSet<NodeId> = plan.clean.iter().copied().collect();
+        let sent = crate::pages::clash_losers_sent(&plan.conflicts, &dirty, &ops);
+        self.db.write(|s| {
+            marks
+                .iter()
+                .filter(|m| clean.contains(&m.node))
+                .try_for_each(|m| s.folder().clear_mark(*m))?;
+            sent.iter().try_for_each(|n| s.folder().mark_dirty(*n))
+        })?;
+        report.conflicts.extend(plan.conflicts);
         if ops.is_empty() {
             return Ok(Some(plan.held));
         }
