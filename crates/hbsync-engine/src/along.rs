@@ -10,14 +10,20 @@ use hbsync_types::{NodeId, NodeKind, Role};
 /// A live node as the rule reads it: its id, its folder, and its kind.
 pub type Live = (NodeId, NodeId, NodeKind);
 
+/// Whether `node`, in folder `parent` (`None`: not known), is the top of a folder a computer
+/// syncs where it is: the drive's root, a role folder, or a computer's Desktop. A Desktop is
+/// known by place (a folder in Desktops): no device knows the other computers' Desktops by
+/// their ids, so one moved out of Desktops isn't one here. The purge and the restore share it.
+pub fn is_sync_top(node: NodeId, parent: Option<NodeId>) -> bool {
+    node.is_root() || Role::of(node).is_some() || parent == Some(NodeId::DESKTOPS)
+}
+
 /// Whether the purge keeps live node `node`, a `kind` in folder `parent`, though a delete took
-/// it along ([`taken_levels`]'s `keep`): a folder a computer syncs where it is, which it brings
-/// back with what was deleted with it at its next sync: a role folder, or a computer's Desktop.
-/// Those are known by place (a folder in Desktops): no device knows the other computers'
-/// Desktops by their ids, so one moved out of Desktops isn't kept. The engine's purge and the
-/// simulator's share it.
+/// it along ([`taken_levels`]'s `keep`): a folder a computer syncs where it is
+/// ([`is_sync_top`]), which it brings back with what was deleted with it at its next sync. The
+/// engine's purge and the simulator's share it.
 pub fn kept_by_purge(node: NodeId, parent: NodeId, kind: NodeKind) -> bool {
-    Role::of(node).is_some() || (parent == NodeId::DESKTOPS && kind == NodeKind::Folder)
+    kind == NodeKind::Folder && is_sync_top(node, Some(parent))
 }
 
 /// Of the live nodes `live`, those the removal of a folder took along: below a removed folder
