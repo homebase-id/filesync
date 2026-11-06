@@ -96,7 +96,13 @@ impl FilterMasks {
             with_removed = tree;
             &with_removed
         };
-        let outside = scope.out_of_scope(paths);
+        let mut outside = scope.out_of_scope(paths);
+        // A folder the scope leaves out that this folder still holds from before (a Desktop
+        // added since, deleted on the drive meanwhile: the plan doesn't see it there) is left
+        // out all the same: let go or detached as any masked node, never written back under
+        // its id.
+        let held = |n: &&NodeId| input.base.contains(**n) || input.local.contains(**n);
+        outside.extend(scope.outside.iter().filter(held));
         // The filter's masks, on what the scope keeps; the rules below are the filter's (§10).
         let mut masked: HashSet<NodeId> = masked(&input.remote, filter)
             .into_iter()

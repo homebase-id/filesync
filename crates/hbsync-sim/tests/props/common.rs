@@ -290,6 +290,7 @@ pub(crate) const NARROW_SETUPS: &[Setup] = &[
     (Sim::with_new_role_devices, Some(1)),
     (|sim| sim, Some(2)),
     (Sim::with_desktop_devices, None),
+    (Sim::with_desktop_to_add, None),
 ];
 
 /// Events of every kind the properties make: the users' actions, deletes another device stops
