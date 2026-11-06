@@ -158,8 +158,9 @@ When both sides edited a file to different content:
 - No bytes are ever dropped: the local bytes are moved by rename, never re-written.
 - The fork marks the node's base *wanted* (in its commit, and in its crash recovery): the node
   has no item here, and the drive's version comes down.
-  - *Absence*: its missing item never reads as a delete here, while its folder is here: a
-    folder deleted here takes it along, as it would its item.
+  - *Absence*: its missing item never reads as a delete here, not even with its folder: a
+    folder deleted here keeps it (and is made again with it), as it would a change of the
+    drive's it hasn't seen (§6.3): the drive's version was never here to delete.
   - *Settling*: the base stays for the run's other writes of the node (a move, its tags), which
     merge against it, and follows the drive's versions while no item is here. A write that puts
     an item here settles against the version it acted on however the base moved, its tags from

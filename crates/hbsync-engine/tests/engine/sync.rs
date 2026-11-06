@@ -511,8 +511,12 @@ fn a_wanted_node_adopts_its_bytes_put_back_by_hand() -> R {
 
 /// A wanted file (its item gone into a conflict copy, its download not in yet, §5) doesn't hold
 /// up its folder's delete here: the folder goes whole, its file with it, the drive's version
-/// unchanged since.
+/// unchanged since. Open: the simulator's oracle holds that this sends the drive's file to
+/// Recently deleted though no user here deleted it (that version was never here), and a
+/// folder deleted here keeps it now (seed 1c2bf6e2, `regression_a_folder_deleted_here_keeps_
+/// its_wanted_file`); which rule holds is the user's call.
 #[test]
+#[ignore = "open decision: a folder deleted here takes its wanted file along, or keeps it"]
 fn a_folder_deleted_here_takes_its_wanted_file_along() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
