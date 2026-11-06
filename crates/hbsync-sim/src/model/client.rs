@@ -181,6 +181,8 @@ pub(crate) struct Client {
     /// A main folder's: the drive's nodes its computer's other folders hold (a Desktop's), left
     /// out of it as the role folders are (§12).
     pub(crate) own_tops: BTreeSet<NodeId>,
+    /// What the folder is: the main folder, a role folder, a Desktop.
+    pub(crate) kind: hbsync_state::FolderKind,
     /// A Desktop's: the name its folder on the drive is to have (its computer's), and the one
     /// last given it ([`crate::Action::RenameComputer`]; the engine's `DESKTOP_NAME(D)`).
     pub(crate) desktop_name: String,
@@ -262,6 +264,11 @@ impl Client {
             trusted: HashSet::new(),
             user_x: HashSet::new(),
             own_tops: BTreeSet::new(),
+            kind: if coords.top.is_root() {
+                hbsync_state::FolderKind::Main
+            } else {
+                hbsync_state::FolderKind::Role
+            },
             desktop_name: String::new(),
             desktop_named: None,
         }
@@ -280,8 +287,7 @@ impl Client {
 
     /// Whether the client's folder is a computer's Desktop (its top in Desktops when made).
     pub(crate) fn is_desktop(&self) -> bool {
-        let top = self.coords.top;
-        !top.is_root() && hbsync_types::Role::of(top).is_none()
+        self.kind == hbsync_state::FolderKind::Desktop
     }
 }
 

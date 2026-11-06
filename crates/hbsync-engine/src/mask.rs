@@ -56,6 +56,8 @@ pub(crate) struct Masks {
     pub brought_back: HashSet<NodeId>,
     /// The name keys masked nodes hold, per folder: still taken remotely.
     pub names: HashMap<NodeId, HashSet<String>>,
+    /// The nodes the filter masks (the rest of `masked` is outside the scope).
+    pub filtered: HashSet<NodeId>,
     /// Local items that become new nodes: old id → new id.
     pub detached: BTreeMap<NodeId, NodeId>,
     /// `detached` the other way round: a new id's old one.
@@ -147,6 +149,17 @@ impl Masks {
                     .insert(name_key(&state.name));
             }
         }
+        // What a scope leaves out holds its name where it sits in a folder the scope syncs (a
+        // computer's own Desktop in Desktops): another item there takes another.
+        for top in &scope.outside {
+            if let Some(state) = input.remote.get(*top).filter(|s| !s.parent.is_root()) {
+                names
+                    .entry(state.parent)
+                    .or_default()
+                    .insert(name_key(&state.name));
+            }
+        }
+        let filtered = masked.clone();
         masked.extend(outside);
         if masked.is_empty() {
             return Masks {
@@ -266,6 +279,7 @@ impl Masks {
             keep_alive,
             brought_back,
             names,
+            filtered,
             stored: detached.iter().map(|(old, new)| (*new, *old)).collect(),
             detached,
             input: Some(view),

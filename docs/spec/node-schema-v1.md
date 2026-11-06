@@ -85,7 +85,8 @@ that computer when its user adds its Desktop, and synced with that computer's ow
 
 - The id is the same on every drive, so computers adding their Desktops at once share one.
   Recognise it by its `uniqueId`, never by its name: the user may rename it, and a plain folder
-  may be called `Desktops` too (both are shown; a name clash at the top is settled as any).
+  may be called `Desktops` too (both are shown; in a name clash at the top Desktops is the one
+  renamed, `Desktops (conflict 1)`, as Recovered files is).
 - A computer's folder in it has a random id of its own (the computer's, for its Desktop), named
   as the computer when made (the first free name: `PC (conflict 1)`), and renamed by that
   computer when its name changes; a rename made elsewhere stands until then. Computers know
@@ -369,7 +370,9 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   Desktop). Never create Desktops or a computer's folder in it (that is the computers' job;
   restore one that is in Recently deleted). Deleting either lasts only if no computer syncs a
   Desktop there: one that does brings it back, with what was in it, at its next sync; say so
-  before deleting. Moving a computer's folder out of Desktops changes nothing for its computer.
+  before deleting. A computer's folder moved out of Desktops is still synced by its computer
+  (known by its id), but the purge keeps only folders in Desktops: moved out, a delete that
+  takes it along empties it for good after 30 days unless its computer brings it back first.
 - **Role folders** (see above): keep them at the top: never move one into a folder (a computer
   then leaves it out there), and never create one, under any parent (that is the computers'
   job; restore one that is in Recently deleted). Renaming one changes only the drive's name:

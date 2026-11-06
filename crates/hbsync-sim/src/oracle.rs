@@ -591,6 +591,11 @@ impl Sim {
         }) {
             return Err(format!("{}'s folder is gone though it syncs it", c.name));
         }
+        if self.clients.iter().any(|c| c.is_desktop())
+            && !self.server.live.contains_key(&NodeId::DESKTOPS)
+        {
+            return Err("Desktops is gone though a Desktop syncs".into());
+        }
         if let Some((_, bad)) = server
             .iter()
             .filter(|(_, s)| check_remote_name(&s.name).is_err() || s.name.starts_with(".hbsync-"))

@@ -10,12 +10,14 @@ use hbsync_types::{NodeId, NodeKind, Role};
 /// A live node as the rule reads it: its id, its folder, and its kind.
 pub type Live = (NodeId, NodeId, NodeKind);
 
-/// Whether the purge keeps live node `node`, in folder `parent`, though a delete took it along
-/// ([`taken_levels`]'s `keep`): a folder a computer syncs where it is, which it brings back
-/// with what was deleted with it at its next sync: a role folder, or a computer's Desktop (a
-/// folder in Desktops). The engine's purge and the simulator's share it.
-pub fn kept_by_purge(node: NodeId, parent: NodeId) -> bool {
-    Role::of(node).is_some() || parent == NodeId::DESKTOPS
+/// Whether the purge keeps live node `node`, a `kind` in folder `parent`, though a delete took
+/// it along ([`taken_levels`]'s `keep`): a folder a computer syncs where it is, which it brings
+/// back with what was deleted with it at its next sync: a role folder, or a computer's Desktop.
+/// Those are known by place (a folder in Desktops): no device knows the other computers'
+/// Desktops by their ids, so one moved out of Desktops isn't kept. The engine's purge and the
+/// simulator's share it.
+pub fn kept_by_purge(node: NodeId, parent: NodeId, kind: NodeKind) -> bool {
+    Role::of(node).is_some() || (parent == NodeId::DESKTOPS && kind == NodeKind::Folder)
 }
 
 /// Of the live nodes `live`, those the removal of a folder took along: below a removed folder
@@ -269,5 +271,20 @@ mod tests {
         };
         assert_eq!(levels(Some(10)), vec![vec![a], vec![b], vec![c]]);
         assert!(levels(None).is_empty());
+    }
+
+    /// The purge keeps a role folder, and a folder in Desktops (a computer's Desktop), though a
+    /// delete took it along: not a file there, nor a folder elsewhere.
+    #[test]
+    fn the_purge_keeps_role_folders_and_desktops() {
+        let [t, other] = ids();
+        assert!(kept_by_purge(
+            Role::Documents.node(),
+            other,
+            NodeKind::Folder
+        ));
+        assert!(kept_by_purge(t, NodeId::DESKTOPS, NodeKind::Folder));
+        assert!(!kept_by_purge(t, NodeId::DESKTOPS, NodeKind::File));
+        assert!(!kept_by_purge(t, other, NodeKind::Folder));
     }
 }

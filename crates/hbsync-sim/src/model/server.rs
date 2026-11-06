@@ -137,7 +137,10 @@ impl Server {
                 .map(|(n, l)| (*n, l.state.parent, l.state.kind)),
             |f| removed.get(&f).copied(),
             |n| self.live.get(&n).map(|l| time(l.remote.version)),
-            |n| hbsync_engine::along::kept_by_purge(n, self.live[&n].state.parent),
+            |n| {
+                let s = &self.live[&n].state;
+                hbsync_engine::along::kept_by_purge(n, s.parent, s.kind)
+            },
         )
         .into_iter()
         .flatten()

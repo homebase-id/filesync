@@ -18,7 +18,7 @@ use hbsync_engine::reconcile::{
 use hbsync_engine::tree::{Tree, first_free_by, numbered_names};
 use hbsync_local::layout::parked_name;
 use hbsync_platform::{Os, executable_on_disk, holds_executable, synced_executable};
-use hbsync_state::{Answer, RemovedRow, StateDb, StateError};
+use hbsync_state::{Answer, FolderKind, RemovedRow, StateDb, StateError};
 use hbsync_types::{
     ContentHash, ContentState, DESKTOPS_NAME, FileContent, NodeId, NodeKind, NodeState,
     RemoteFileId, RemoteRef, Role, Tags, VersionTag,
@@ -114,20 +114,26 @@ impl Sim {
     }
 
     /// The drive's folder `node`, made in `parent` under `name` unless it is live or comes
-    /// back from Recently deleted (as the engine's `Drive::ensure_folder`).
-    fn ensure_folder(&mut self, node: NodeId, parent: NodeId, name: impl FnOnce(&Self) -> String) {
+    /// back from Recently deleted (as the engine's `Drive::ensure_folder`). Whether it was made.
+    fn ensure_folder(
+        &mut self,
+        node: NodeId,
+        parent: NodeId,
+        name: impl FnOnce(&Self) -> String,
+    ) -> bool {
         if self.server.live.contains_key(&node) {
-            return;
+            return false;
         }
         // One that doesn't come back (no free name) waits, as the engine's sync fails.
         if self.server.removed.contains_key(&node) {
             self.restore_with(node);
-        } else {
-            let name = name(self);
-            self.server.put(node, NodeState::folder(parent, &name));
-            // Made again after it went for good: a delete that won settles its tags.
-            self.restored_on_drive(node);
+            return false;
         }
+        let name = name(self);
+        self.server.put(node, NodeState::folder(parent, &name));
+        // Made again after it went for good: a delete that won settles its tags.
+        self.restored_on_drive(node);
+        true
     }
 
     /// Client `c`'s Desktop's folder on the drive, made or restored in Desktops; one that is
@@ -137,16 +143,16 @@ impl Sim {
         let top = self.clients[c].coords.top;
         let name = self.clients[c].desktop_name.clone();
         let rename = self.clients[c].desktop_named.as_deref() != Some(name.as_str());
-        if !self.server.live.contains_key(&top) {
-            self.ensure_folder(NodeId::DESKTOPS, NodeId::ROOT, |_| DESKTOPS_NAME.into());
-            if !self.server.live.contains_key(&NodeId::DESKTOPS) {
-                return;
-            }
-            self.ensure_folder(top, NodeId::DESKTOPS, |sim| {
-                sim.free_name(NodeId::DESKTOPS, &name, top)
-            });
-        } else if rename {
-            let parent = self.server.live[&top].state.parent;
+        // Desktops first, whenever it isn't live (a delete of it stopped half way leaves the
+        // computer's folder live in it).
+        self.ensure_folder(NodeId::DESKTOPS, NodeId::ROOT, |sim| {
+            sim.free_name(NodeId::ROOT, DESKTOPS_NAME, NodeId::DESKTOPS)
+        });
+        if !self.server.live.contains_key(&NodeId::DESKTOPS) {
+            return;
+        }
+        let mut named = false;
+        if rename && let Some(parent) = self.server.live.get(&top).map(|n| n.state.parent) {
             let free = self.free_name(parent, &name, top);
             let version = VersionTag(self.server.uuid());
             let n = self.server.live.get_mut(&top).expect("live");
@@ -154,8 +160,14 @@ impl Sim {
                 n.state.name = free;
                 n.remote.version = version;
             }
+            named = true;
         }
-        self.clients[c].desktop_named = Some(name);
+        named |= self.ensure_folder(top, NodeId::DESKTOPS, |sim| {
+            sim.free_name(NodeId::DESKTOPS, &name, top)
+        });
+        if named {
+            self.clients[c].desktop_named = Some(name);
+        }
     }
 
     /// The first of `name`'s numbered names (`name` itself first) no live node but `node` has
@@ -191,10 +203,15 @@ impl Sim {
         // sync (as `Drive::ensure_role`), named like the users' items. A Desktop's folder so
         // too, in Desktops, made or restored first (as `Drive::ensure_desktop`).
         let top = self.clients[c].coords.top;
-        if self.clients[c].is_desktop() {
-            self.ensure_desktop(c);
-        } else if !top.is_root() {
-            self.ensure_folder(top, NodeId::ROOT, |_| NAMES[0].into());
+        match self.clients[c].kind {
+            FolderKind::Desktop => self.ensure_desktop(c),
+            FolderKind::Role => drop(self.ensure_folder(top, NodeId::ROOT, |_| NAMES[0].into())),
+            FolderKind::Main => {}
+        }
+        // Nothing is synced into a top that isn't on the drive: the engine's sync fails.
+        if !top.is_root() && !self.server.live.contains_key(&top) {
+            self.clients[c].plan.clear();
+            return;
         }
         self.unpark(c);
         self.release_filtered(c);
@@ -337,7 +354,7 @@ impl Sim {
             all.iter().copied().filter(|n| gone_here(*n)).collect(),
             all.iter().copied().filter(|n| gone_there(*n)).collect(),
         );
-        let taken = hbsync_engine::reconcile::taken_along(&input);
+        let taken = hbsync_engine::reconcile::taken_along(&input, &HashSet::new());
         // Of the taken-along files gone there, outside the page: see below, once planned.
         let mut taken_there: Vec<NodeId> = Vec::new();
         if !all.is_empty() {
@@ -742,7 +759,7 @@ impl Sim {
             changed_at,
             ..Default::default()
         };
-        hbsync_engine::reconcile::taken_along(&input)
+        hbsync_engine::reconcile::taken_along(&input, &HashSet::new())
     }
 
     /// Executes the next planned operation. Returns `false` if the plan is empty.
