@@ -187,11 +187,17 @@ impl Sim {
     /// Client `c` starts a sync: recovers, unparks, and plans from the server as its folder sees
     /// it, as the engine's sync does (its view's input, then `reconcile_with_known`).
     pub(crate) fn plan(&mut self, c: usize) {
+        if !self.clients[c].added {
+            return;
+        }
         // A run whose operations are left undone stopped (the engine's sync stopped: what its
         // sweep held stays dirty).
         if !self.clients[c].plan.is_empty() {
             self.clients[c].pages.get_mut().busy = true;
         }
+        // The main folder leaves out what the computer's folders added since hold.
+        let added = std::mem::take(&mut self.clients[c].tops_added);
+        self.clients[c].own_tops.extend(added);
         self.clients[c].run_filter = Arc::clone(&self.clients[c].filter);
         // A new run: what the last one fetched and didn't put in place is gone (its temporary
         // file is fetched again, for what the drive holds then); a lost commit is recovered.
@@ -764,6 +770,9 @@ impl Sim {
 
     /// Executes the next planned operation. Returns `false` if the plan is empty.
     pub(crate) fn step(&mut self, c: usize) -> bool {
+        if !self.clients[c].added {
+            return false;
+        }
         let Some((op, attempts)) = self.clients[c].plan.pop_front() else {
             return false;
         };

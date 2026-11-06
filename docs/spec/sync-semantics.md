@@ -1062,10 +1062,11 @@ and a computer's own one is masked there, holding its name (another item there t
 and keeping Desktops alive on it. The main folder follows the device's folders at each sync: a
 Desktop added leaves the main folder, which lets go of what it held of it (masked, as above: a
 change made there meanwhile is kept, detached, in a folder of its own beside it), and one
-removed comes back into it. A Desktop syncs nothing (makes, joins or sends nothing) till the
-main folder leaves it out, as the main folder last took its scope (which every folder of the
-device reads; it wakes them when it changes): never does the main folder copy the computer's
-own Desktop in. Before every sync of a Desktop, after reading the drive, Desktops comes back
+removed comes back into it. The main folder reads the device's folders at every round of its
+syncs (one small read): a Desktop added while it syncs is left out from its next round, and one
+not running takes it first thing when it starts. The Desktop syncs at once; the main folder
+never downloads the computer's own Desktop after it is added (what it held of it already is let
+go, as above). Before every sync of a Desktop, after reading the drive, Desktops comes back
 from Recently deleted (with what was deleted with it) or is made at the top whenever it isn't
 live, even with the computer's folder live in it (a delete stopped half way); then the
 computer's folder must be live: it comes back, or is made in Desktops under the computer's

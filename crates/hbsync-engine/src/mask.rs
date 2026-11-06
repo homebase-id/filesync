@@ -68,19 +68,21 @@ pub(crate) struct Masks {
     pub input: Option<Input>,
 }
 
-impl Masks {
-    /// The id the store knows `node` by: a detached item's old id (§10), else its own.
-    pub(crate) fn store_id(&self, node: NodeId) -> NodeId {
-        self.stored.get(&node).copied().unwrap_or(node)
-    }
+/// The filter's masks of one plan, apart from the scope's ([`Masks::of`]): the reconciler and
+/// the pages ([`crate::pages::dirty_elsewhere`]) read what a delete took along without them
+/// alike.
+pub(crate) struct FilterMasks {
+    /// Remote nodes (and folders in Recently deleted) the filter masks, of what the scope
+    /// keeps: not those brought back, nor those leaving.
+    pub masked: HashSet<NodeId>,
+    /// What lies outside the scope.
+    pub outside: HashSet<NodeId>,
+    /// Nodes at a filtered place whose local item the user brought back into view.
+    pub brought_back: HashSet<NodeId>,
+}
 
-    pub(crate) fn of(
-        input: &Input,
-        masking: Masking<'_>,
-        computer: &str,
-        taken: &HashSet<NodeId>,
-    ) -> Masks {
-        let Masking { filter, scope } = masking;
+impl FilterMasks {
+    pub(crate) fn of(input: &Input, filter: &Filter, scope: &Scope) -> FilterMasks {
         // Where a node is: through the folders in Recently deleted too (a node in one is where
         // that folder was).
         let with_removed;
@@ -105,8 +107,12 @@ impl Masks {
             let filtered = self::masked(paths, filter);
             masked.extend(input.removed.keys().filter(|n| filtered.contains(n)));
         }
-        if masked.is_empty() && outside.is_empty() {
-            return Masks::default();
+        if masked.is_empty() {
+            return FilterMasks {
+                masked,
+                outside,
+                brought_back: HashSet::new(),
+            };
         }
         // A node synced at a place this device filters now, whose local item the user brought
         // back into view (moved out of the ignored place), syncs as usual. One whose base is
@@ -138,6 +144,35 @@ impl Masks {
         // Leaving is an ordinary local delete: the scanner no longer reports the item.
         let leaving = only_whole_folders(&input.remote, leaving);
         masked.retain(|m| !leaving.contains(m));
+        FilterMasks {
+            masked,
+            outside,
+            brought_back,
+        }
+    }
+}
+
+impl Masks {
+    /// The id the store knows `node` by: a detached item's old id (§10), else its own.
+    pub(crate) fn store_id(&self, node: NodeId) -> NodeId {
+        self.stored.get(&node).copied().unwrap_or(node)
+    }
+
+    pub(crate) fn of(
+        input: &Input,
+        masking: Masking<'_>,
+        computer: &str,
+        taken: &HashSet<NodeId>,
+    ) -> Masks {
+        let Masking { filter, scope } = masking;
+        let FilterMasks {
+            mut masked,
+            outside,
+            brought_back,
+        } = FilterMasks::of(input, filter, scope);
+        if masked.is_empty() && outside.is_empty() && brought_back.is_empty() {
+            return Masks::default();
+        }
         // The names the filter's masks hold stay taken; a role folder holds none for the scope:
         // a plain folder of the same name keeps it (two at the top, told apart by id).
         let mut names: HashMap<NodeId, HashSet<String>> = HashMap::new();

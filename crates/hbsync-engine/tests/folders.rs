@@ -886,25 +886,85 @@ fn a_desktop_joined_without_a_name_keeps_its_own() -> R {
     Ok(())
 }
 
-/// A Desktop added while the main folder doesn't leave it out yet syncs nothing till it does:
-/// the main folder never copies the computer's own Desktop in.
+/// A Desktop added syncs at once, before the main folder syncs again: the main folder leaves
+/// it out from its next sync, and never copies the computer's own Desktop in.
 #[test]
-fn a_desktop_waits_for_the_main_folder() -> R {
+fn a_desktop_syncs_before_the_main_folder_does() -> R {
     let server = FakeServer::new(ServerConfig::default());
     let mut a = DeskPc::new(&server, None)?;
     a.sync()?;
     a.add_desktop(NodeId::new(), "Laptop")?;
     std::fs::write(a.desk_root.join("a.txt"), b"a")?;
-    let desk = a.desk.as_mut().ok_or("desk")?;
-    desk.scan_local()?;
-    assert!(desk.sync_once("2026-11-06").is_err(), "waits");
-    assert!(drive_listing(&server).is_empty(), "nothing made or sent");
-    a.sync()?;
-    assert_eq!(files(&a.desk_root), ["a.txt"]);
+    sync(a.desk.as_mut().ok_or("desk")?)?;
+    assert_eq!(desktops(&server), ["Laptop"]);
+    let synced = sync(&mut a.main)?.synced;
+    assert!(
+        synced.iter().all(|s| !s.path.ends_with("a.txt")),
+        "{synced:?}"
+    );
     assert!(files(&a.main_root).is_empty(), "{:?}", files(&a.main_root));
-    assert_eq!(
-        parent_on_server(&server, "a.txt").map(|p| p.is_root()),
-        Some(false)
+    Ok(())
+}
+
+/// A Desktop joined (the computer set up again) while the main folder's sync runs, holding
+/// its copy to download: the main folder leaves it out from its next round, so it never
+/// downloads the computer's own Desktop; the Desktop holds it.
+#[test]
+fn a_desktop_added_during_a_main_sync_is_left_out_from_its_next_round() -> R {
+    let server = FakeServer::new(ServerConfig::default());
+    let ta = NodeId::new();
+    let mut old = DeskPc::new(&server, Some((ta, "Laptop")))?;
+    std::fs::write(old.desk_root.join("a.txt"), b"a")?;
+    old.sync()?;
+    drop(old);
+
+    let mut again = DeskPc::new(&server, None)?;
+    let (db, path) = (
+        again.db.clone(),
+        again.desk_root.to_string_lossy().into_owned(),
+    );
+    let added: Arc<Mutex<Option<i64>>> = Arc::default();
+    let hook = {
+        let added = added.clone();
+        hbsync_engine::testkit::AfterPlan(Arc::new(move || {
+            let mut added = added.lock().expect("lock");
+            if added.is_none() {
+                let folder = StateDb::open_account(&db)
+                    .and_then(|mut a| {
+                        a.write(|s| s.account().add_folder(ta, FolderKind::Desktop, &path, "d"))
+                    })
+                    .expect("add");
+                *added = Some(folder);
+            }
+        }))
+    };
+    let mut cfg = config(&again.main_root);
+    cfg.after_counts = Some(hook);
+    again.main = Engine::new(StateDb::open(&again.db)?, again.drive.clone(), cfg)?;
+    let synced = sync(&mut again.main)?.synced;
+    assert!(
+        synced.iter().all(|s| !s.path.ends_with("a.txt")),
+        "{synced:?}"
+    );
+    assert!(
+        files(&again.main_root).is_empty(),
+        "{:?}",
+        files(&again.main_root)
+    );
+
+    let folder = added.lock().map_err(|_| "lock")?.ok_or("added")?;
+    let mut desk = Engine::new(
+        StateDb::open_folder(&again.db, folder)?,
+        again.drive.clone(),
+        config(&again.desk_root),
+    )?;
+    desk.apply_filter_change()?;
+    sync(&mut desk)?;
+    assert_eq!(files(&again.desk_root), ["a.txt"]);
+    assert!(
+        files(&again.main_root).is_empty(),
+        "{:?}",
+        files(&again.main_root)
     );
     Ok(())
 }

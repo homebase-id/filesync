@@ -180,3 +180,31 @@ fn desktops_deleted_alone_comes_back() {
         ["Desktops", "Desktops/c1", "Desktops/c1/b"]
     );
 }
+
+/// Client 0's computer adds its Desktop again while its main folder holds Desktops' copy of it,
+/// the user having made a file on the Desktop meanwhile: the Desktop joins its folder, the main
+/// folder lets go of its copy, and both files are on the Desktop only.
+#[test]
+fn a_desktop_added_again_joins_and_leaves_the_main_folder() {
+    let mut sim = Sim::new(3).with_desktop_to_add();
+    sim.run(&[
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        Event::Step { client: 0 },
+        act(3, Action::CreateFile { parent: 0, name: 1 }),
+        act(0, Action::AddDesktop),
+    ]);
+    assert!(sim.quiesce(30), "converges");
+    sim.check().expect("check");
+    assert_eq!(sim.local_paths(3), ["b", "c.txt"]);
+    assert_eq!(sim.local_paths(0), ["Desktops"]);
+    assert_eq!(
+        sim.local_paths(1),
+        [
+            "Desktops",
+            "Desktops/c0",
+            "Desktops/c0/b",
+            "Desktops/c0/c.txt"
+        ]
+    );
+}

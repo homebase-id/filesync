@@ -51,6 +51,3 @@ pub const DESKTOP_NAME: FolderKey = FolderKey("desktop.name");
 /// A Desktop's: the [`DESKTOP_NAME`] last given its folder on the drive. A rename made
 /// elsewhere stands until the computer's name changes.
 pub const DESKTOP_NAMED: FolderKey = FolderKey("desktop.named");
-/// What this device's main folder leaves out of the drive, as it last took it (its scope's
-/// fingerprint): a Desktop syncs once its folder is in it (sync semantics §12).
-pub const MAIN_LEAVES_OUT: AccountKey = AccountKey("scope.main_leaves_out");

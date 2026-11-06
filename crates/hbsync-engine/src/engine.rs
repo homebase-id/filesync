@@ -154,13 +154,18 @@ impl SyncReport {
 const LEFTOVERS_MAX: usize = 1_000;
 
 /// The name a computer's Desktop folder takes from `name` (the computer's): in NFC, one the
-/// drive takes (not empty, `.` or `..`, no `/` or NUL, 255 bytes at most) and not this
-/// client's own (`.hbsync…`, any case); else `Computer`.
+/// drive takes (not empty, `.` or `..`, no `/` or NUL, 255 bytes at most), not this client's
+/// own (`.hbsync…`, any case) and none the built-in filter leaves out (junk, §10, as a file
+/// or a folder: other computers wouldn't show it); else `Computer`.
 pub(crate) fn desktop_name(name: &str) -> String {
     use hbsync_platform::name::{check_remote_name, nfc, starts_caseless};
     let name = nfc(name.trim());
+    let synced = || {
+        let filter = hbsync_local::Filter::default();
+        !hbsync_local::is_junk(&name) && filter.in_folder("Desktops", &name, true).is_sync()
+    };
     match check_remote_name(&name) {
-        Ok(()) if !starts_caseless(&name, hbsync_local::STATE_DIR) => name,
+        Ok(()) if !starts_caseless(&name, hbsync_local::STATE_DIR) && synced() => name,
         _ => "Computer".into(),
     }
 }
@@ -350,56 +355,28 @@ impl Engine {
 
     /// The main folder leaves out what this device's other folders hold (its own Desktop's
     /// folder: §12), as they are in the DB now: a folder added or removed since changes its
-    /// scope, planned as any new scope ([`Engine::apply_filter_change`]). What it leaves out is
-    /// the account's to read ([`keys::MAIN_LEAVES_OUT`]): a Desktop syncs only once it is in it,
-    /// and every folder is woken when it changes.
+    /// scope, planned as any new scope ([`Engine::apply_filter_change`]). Read at every round
+    /// (one small read): a Desktop added while a sync runs is left out from its next round,
+    /// so the main folder never copies the computer's own Desktop in; one not running takes
+    /// it first thing when it starts.
     fn follow_folders(&mut self) -> Result<(), StateError> {
         if self.kind != FolderKind::Main {
             return Ok(());
         }
-        let (tops, told) = self.db.read(|s| {
-            let tops: Vec<NodeId> = s
-                .folders()?
+        let tops: Vec<NodeId> = self.db.read(|s| {
+            Ok(s.folders()?
                 .into_iter()
                 .filter(|f| f.kind != Some(FolderKind::Main))
                 .map(|f| f.top)
-                .collect();
-            Ok((tops, s.account_kv(keys::MAIN_LEAVES_OUT)?))
+                .collect())
         })?;
         let mut scope = (*self.given).clone();
         scope.outside.extend(tops);
-        let fingerprint = scope.fingerprint();
-        // Planned again only for a change of the device's folders (a first scope is start-up's).
-        let changed = scope != *self.cfg.folder.scope;
-        if !changed && told.as_deref() == Some(fingerprint.as_str()) {
+        if scope == *self.cfg.folder.scope {
             return Ok(());
         }
-        if changed {
-            self.cfg.folder.scope = Arc::new(scope);
-        }
-        self.db.write(|s| {
-            if changed {
-                new_scope(s, &self.cfg.folder.scope)?;
-            }
-            s.account()
-                .set_account_kv(keys::MAIN_LEAVES_OUT, &fingerprint)
-        })?;
-        self.drive.wake_all();
-        Ok(())
-    }
-
-    /// Whether this device's main folder leaves the Desktop `top` out (its scope as last
-    /// taken, [`keys::MAIN_LEAVES_OUT`]): till then the Desktop syncs nothing, so the main
-    /// folder never copies this computer's own Desktop in. Without a main folder, it does.
-    fn main_leaves_out(&mut self, top: NodeId) -> Result<bool, StateError> {
-        self.db.read(|s| {
-            let main = s
-                .folders()?
-                .iter()
-                .any(|f| f.kind == Some(FolderKind::Main));
-            let out = s.account_kv(keys::MAIN_LEAVES_OUT)?;
-            Ok(!main || out.is_some_and(|o| Scope::outside_of(&o).contains(&top)))
-        })
+        self.cfg.folder.scope = Arc::new(scope);
+        self.db.write(|s| new_scope(s, &self.cfg.folder.scope))
     }
 
     /// How far the current sync is (started over at each sync), to show while it runs.
@@ -595,16 +572,8 @@ impl Engine {
         // read) is decided first, what it puts back read again where it is now. A listing of an
         // empty folder where nothing is.
         // The main folder leaves out what a folder added since holds, and takes back what one
-        // removed held. A Desktop waits for it to: nothing of it is made, joined or sent
-        // till then (the main folder would copy it in meanwhile).
+        // removed held (and again at every round).
         self.follow_folders()?;
-        let top = self.cfg.folder.scope.top;
-        if self.kind == FolderKind::Desktop && !self.main_leaves_out(top)? {
-            self.drive.wake_all();
-            return Err(EngineError::Remote(hbsync_remote::RemoteError::Transient(
-                "waiting for the main folder to leave this Desktop out".into(),
-            )));
-        }
         let aside = recover_aside(&mut self.db, &self.cfg.folder)?;
         report.left_aside = aside.unknown;
         if !aside.rescan.is_empty() {
@@ -708,6 +677,7 @@ impl Engine {
         // too, each as a page of its own (§6.5), or when the sync stops (round limit, a stop).
         let mut ending = false;
         loop {
+            self.follow_folders()?;
             let stop = report.stopped || self.stop.load(Ordering::Relaxed);
             let go = rounds < self.cfg.max_rounds && !stop;
             if ending && (!go || self.own_pages.is_empty()) {
@@ -1081,7 +1051,8 @@ enum Pull {
 mod tests {
     use super::desktop_name;
 
-    /// A computer's name the drive takes is kept, in NFC; any other gives `Computer`.
+    /// A computer's name the drive takes and the built-in filter syncs is kept, in NFC; any
+    /// other gives `Computer`.
     #[test]
     fn a_desktop_is_named_as_the_drive_takes_it() {
         assert_eq!(desktop_name(" Work PC "), "Work PC");
@@ -1096,6 +1067,11 @@ mod tests {
             ".hbsync",
             ".HBSYNC-x",
             &"x".repeat(256),
+            // Junk to the built-in filter, as files or folders.
+            "x.part",
+            "~$lab",
+            "Thumbs.db",
+            "$RECYCLE.BIN",
         ] {
             assert_eq!(desktop_name(bad), "Computer", "{bad:?}");
         }
