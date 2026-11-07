@@ -496,7 +496,7 @@ pub fn set_up(
         control::start_over(paths, identity)?;
     }
     // A running daemon sets the folder up and starts syncing it, without a restart.
-    let (_, added) = crate::folders::add_synced(paths, &Root::main(identity, &folder))?;
+    let (_, added) = crate::folders::add_synced(paths, &Root::main(identity, &folder), None)?;
     if let Some(why) = set_aside.or(added) {
         say(&crate::words::set_aside(why));
     }

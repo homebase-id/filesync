@@ -401,53 +401,37 @@ fn run(command: Command) -> Res<ExitCode> {
             folder,
             name,
         } => {
+            let name = name
+                .map(|n| {
+                    hbsync_engine::valid_desktop_name(&n)
+                        .ok_or_else(|| format!("{n:?} can't name a folder on the drive"))
+                })
+                .transpose()?;
+            if name.is_some() && what != Own::Desktop {
+                return Err("--name is for the Desktop".into());
+            }
             let config = Config::load(&paths.config_file())?.unwrap_or_default();
             let identity = config.identity(identity.as_deref())?;
-            let name = match name.map(|n| (hbsync_engine::valid_desktop_name(&n), n)) {
-                None => None,
-                Some((Some(valid), _)) => Some(valid),
-                Some((None, given)) => {
-                    return Err(format!("{given:?} can't name a folder on the drive").into());
-                }
-            };
-            // The Desktop synced already: named anew where it is.
-            let synced = match what {
-                Own::Desktop => config.desktop(&identity),
-                Own::Role(_) => None,
-            };
-            // Refused (where setup refuses a folder, or another app syncs it) by the adding.
-            let folder = match (folder, what, synced) {
-                (Some(f), _, Some(synced)) if setup::resolve(&f) != synced.folder => {
-                    return Err(format!(
-                        "{identity}'s Desktop is synced with {} already: remove it first",
-                        synced.folder.display()
-                    )
-                    .into());
-                }
-                (_, _, Some(synced)) => synced.folder.clone(),
-                (Some(f), _, None) => setup::resolve(&f),
-                (None, Own::Role(role), None) => setup::role_folder(role)?,
+            // The Desktop synced already is named anew where it is; another folder is refused
+            // by the adding.
+            let folder = match (folder, what, what.synced(&config, &identity)) {
+                (Some(f), _, _) => setup::resolve(&f),
+                (None, Own::Desktop, Some(synced)) => synced.folder.clone(),
+                (None, Own::Role(role), _) => setup::role_folder(role)?,
                 (None, Own::Desktop, None) => setup::desktop_folder()?,
             };
             let root = match what {
-                Own::Role(_) if name.is_some() => {
-                    return Err("--name is for the Desktop".into());
-                }
                 Own::Role(role) => Root::role(&identity, &folder, role),
-                Own::Desktop => folders::desktop(&paths, &identity, &folder, name)?,
+                Own::Desktop => folders::desktop(&config, &paths, &identity, &folder)?,
             };
             let what = format!("{} syncs with {}", folder.display(), root.what());
-            let (taken, set_aside) = folders::add_synced(&paths, &root)?;
+            let (taken, set_aside) = folders::add_synced(&paths, &root, name.as_deref())?;
             if let Some(why) = set_aside {
                 println!("{}", words::set_aside(why));
             }
-            match (taken, &root.name) {
-                // Named anew: at its next sync, now.
-                (Taken::Now, Some(name)) if synced.is_some() => {
-                    daemon::daemon(&paths, DaemonControl::SyncNow)?;
-                    println!("{what}, named {name:?} on the drive.");
-                }
-                (Taken::Now, _) => println!("{what}."),
+            match (taken, name) {
+                (Taken::Now, Some(name)) => println!("{what}, named {name:?} on the drive."),
+                (Taken::Now, None) => println!("{what}."),
                 (Taken::AtStart, _) => {
                     println!("{what} once {APP_NAME} runs (`hbsync start`).")
                 }
@@ -456,16 +440,8 @@ fn run(command: Command) -> Res<ExitCode> {
         Command::Remove { what, identity } => {
             let config = Config::load(&paths.config_file())?.unwrap_or_default();
             let identity = config.identity(identity.as_deref())?;
-            let synced = match what {
-                Own::Role(role) => config.folder(&identity, Some(role)),
-                Own::Desktop => config.desktop(&identity),
-            };
-            let Some(root) = synced else {
-                let name = match what {
-                    Own::Role(role) => role.name(),
-                    Own::Desktop => "Desktop",
-                };
-                println!("{identity}'s {name} isn't synced here.");
+            let Some(root) = what.synced(&config, &identity) else {
+                println!("{identity}'s {} isn't synced here.", what.name());
                 return Ok(ExitCode::SUCCESS);
             };
             folders::remove_synced(&paths, &root.folder)?;
@@ -512,6 +488,24 @@ fn run(command: Command) -> Res<ExitCode> {
 enum Own {
     Role(Role),
     Desktop,
+}
+
+impl Own {
+    /// Its name, for people.
+    fn name(self) -> &'static str {
+        match self {
+            Own::Role(role) => role.name(),
+            Own::Desktop => "Desktop",
+        }
+    }
+
+    /// The folder `identity` syncs as it here, if it does.
+    fn synced<'c>(self, config: &'c Config, identity: &hbsync_app::Identity) -> Option<&'c Root> {
+        match self {
+            Own::Role(role) => config.folder(identity, Some(role)),
+            Own::Desktop => config.desktop(identity),
+        }
+    }
 }
 
 fn parse_folder(s: &str) -> Result<Own, String> {

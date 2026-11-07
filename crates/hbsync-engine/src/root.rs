@@ -68,6 +68,8 @@ pub struct SyncRoot {
     identity: String,
     folder: i64,
     top: NodeId,
+    /// What it is; `None`: a kind a newer client wrote.
+    kind: Option<FolderKind>,
 }
 
 impl SyncRoot {
@@ -113,6 +115,7 @@ impl SyncRoot {
             identity: identity.to_owned(),
             folder: folder.id,
             top: folder.top,
+            kind: folder.kind,
         };
         Ok((root, folder.path))
     }
@@ -151,6 +154,7 @@ impl SyncRoot {
             identity: identity.to_owned(),
             folder,
             top,
+            kind: Some(kind),
         })
     }
 
@@ -323,22 +327,15 @@ impl SyncRoot {
         Ok(StateDb::open_folder(&self.db, self.folder)?)
     }
 
-    /// Names this Desktop's folder on the drive `name` from its next sync on
-    /// ([`crate::Engine::name_desktop`], where nothing else writes its DB but its engine's
-    /// process). Nothing for another folder.
-    pub fn name_desktop(&self, name: &str) -> Result<(), RootError> {
-        let desktop = |s: &hbsync_state::ReadTx<'_>| -> Result<bool, StateError> {
-            Ok(s.this_folder()?.and_then(|f| f.kind) == Some(FolderKind::Desktop))
-        };
-        let name = crate::engine::desktop_name(name);
-        let mut db = self.state()?;
-        if !db.read(|s| desktop(s))? {
-            return Ok(());
-        }
-        if db.read(|s| s.get_kv(keys::DESKTOP_NAME))?.as_deref() != Some(name.as_str()) {
-            db.write(|s| s.folder().set_kv(keys::DESKTOP_NAME, &name))?;
-        }
-        Ok(())
+    /// Names this folder, a Desktop, on the drive from its next sync on: `name`, or with none
+    /// the computer's, `computer`, if it has no name yet. Whether that is a new name: its
+    /// running engine syncs to give it. Only for a Desktop (the caller knows its kind).
+    pub fn name_desktop(&self, name: Option<&str>, computer: &str) -> Result<bool, RootError> {
+        Ok(crate::engine::set_desktop_name(
+            &mut self.state()?,
+            name,
+            computer,
+        )?)
     }
 
     pub fn path(&self) -> &Path {
@@ -357,6 +354,11 @@ impl SyncRoot {
     /// The drive's node the folder holds: the drive's root for the main folder.
     pub fn top(&self) -> NodeId {
         self.top
+    }
+
+    /// What the folder is, as its DB keeps it; `None`: a kind a newer client wrote.
+    pub fn kind(&self) -> Option<FolderKind> {
+        self.kind
     }
 }
 

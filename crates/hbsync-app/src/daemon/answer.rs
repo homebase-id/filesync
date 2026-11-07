@@ -70,20 +70,25 @@ pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
             Reply::Done
         }
         Ask::Control(control) => self::control(control, accounts, daemon),
-        Ask::AddFolder { root } => done((|| {
+        Ask::AddFolder { root, name } => done((|| {
             // An account not running yet starts from its DB as at the daemon's start: one that
             // can't be used is set aside as the folder is added, and told once the account is
             // there.
             let idle = daemon.account_idle(&root.identity);
-            let set = crate::folders::add(&daemon.paths, &root, idle)?;
+            let added = crate::folders::add(&daemon.paths, &root, name.as_deref(), idle)?;
             daemon.add_folder(&root)?;
-            if let Some(set) = set
-                && let Some(a) = daemon
-                    .accounts()
-                    .iter()
-                    .find(|a| a.identity == root.identity)
-            {
+            let accounts = daemon.accounts();
+            let Some(a) = accounts.iter().find(|a| a.identity == root.identity) else {
+                return Ok(());
+            };
+            if let Some(set) = added.set_aside {
                 a.note(vec![words::set_aside(set.why)]);
+            }
+            // A Desktop synced already, named anew: its runner gives it the name now.
+            if added.named
+                && let Some(Ok(runner)) = a.runner(&root.folder)
+            {
+                runner.send(Command::SyncNow);
             }
             Ok(())
         })()),

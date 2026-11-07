@@ -122,7 +122,7 @@ impl Server {
                 // Downloads) while the user is at this page, not later out of the blue.
                 std::fs::read_dir(&folder)?;
                 let (taken, set_aside) =
-                    folders::add_synced(&self.paths, &Root::role(&identity, &folder, role))?;
+                    folders::add_synced(&self.paths, &Root::role(&identity, &folder, role), None)?;
                 let said = match taken {
                     Taken::Now => format!("{} syncs now.", role.name()),
                     Taken::AtStart => {

@@ -126,7 +126,6 @@ identity = "anna.example.com"
 folder = "/home/anna/Homebase"
 # role = "documents"            # a role folder (sync semantics §12); none for the main folder
 # desktop = "<uuid>"             # or this computer's Desktop: its own folder in Desktops
-# name = "Anna's laptop"         # that folder's name on the drive [default: device_name]
 ```
 
 Unknown keys are an error. An identity is read as the client keeps it, here and on the
@@ -531,7 +530,7 @@ account (its Recently deleted) or to one folder (its held deletes):
 {"protocol":11,"ask":{"recent":{"limit":10}}}
 {"protocol":11,"ask":{"deleted":{"limit":100}}}                    // the newest 100 deletes
 {"protocol":11,"ask":{"find_deleted":{"items":["Photos/2024","<node id>"]}}}
-{"protocol":11,"ask":{"add_folder":{"root":{"identity":"anna.example.com","folder":"/home/anna/Homebase"}}}}  // a [[roots]] entry: role, or desktop and name
+{"protocol":11,"ask":{"add_folder":{"root":{"identity":"anna.example.com","folder":"/home/anna/Homebase"}}}}  // a [[roots]] entry (role, or desktop); a Desktop also takes "name"
 {"protocol":11,"ask":{"remove_folder":{"path":"/home/anna/Homebase"}}}
 {"protocol":11,"ask":{"start_over":{"identity":"anna.example.com"}}}  // new credentials
 ```
@@ -551,8 +550,8 @@ Replies:
   notification connection (`hints`), a `credentials_warning`, its own notes (`recent`, with
   `notes_added`, as a folder's), and `emptying` while Recently deleted is being deleted for
   good (`done` of `total` items, `purge` when it is the daily purge; left out otherwise). A folder has its `identity`,
-  `path`, `role` (`null` for the main folder and the Desktop), `desktop` (this computer's
-  Desktop), `state`, `progress` (while `starting` or
+  `path`, `kind` (`"main"`, `{"role":"documents"}`, or this computer's Desktop,
+  `{"desktop":"<uuid>"}`), `state`, `progress` (while `starting` or
   `syncing`, once the sync has a plan; its totals grow as each batch of up to 20,000 items is
   planned), `paused_until`, `held_deletes`, and the counts `notes_added` and `synced_added`
   that tell a client what is new.
@@ -759,7 +758,7 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 |---|---|
 | `hbsync setup <identity> [--folder P] [--existing] [--browser CMD] [--no-start] [--no-autostart]` | authorizes this computer (the owner approves in the browser) unless it already is and the identity still accepts it, saving the credentials at once, prepares the folder (default `~/Homebase`; it must be new, empty, already this identity's, or `--existing` to merge its files with the drive), turns autostart on, and has the daemon add the folder (starting it when it isn't running; restarting it when it logged in again, so the new credentials are used). When the app is registered but its drive is gone (deleted in the owner app), the owner is asked in the browser to give it back, only on a computer that never synced with the identity |
 | `hbsync add <role> [--identity I] [--folder P]` | syncs one of the user's own folders (`documents`, `pictures`, `music`, `videos`, `downloads`) where the OS keeps it (Windows Known Folders, macOS home folders, XDG `user-dirs.dirs`), or at `--folder`, with the drive's role folder: joined if another device syncs it (identical files adopted), back from Recently deleted, or made. Refused where `setup` refuses a folder, inside or around another synced folder, when one of that role is synced already, and when OneDrive or iCloud syncs the folder. Without a running daemon it is set up for the next start |
-| `hbsync add desktop [--identity I] [--folder P] [--name N]` | syncs this computer's Desktop (where the OS keeps it, or at `--folder`) with a folder of its own in Desktops on the drive (sync semantics §12), named `N` there (default: the device name; made one the drive takes, else `Computer`); every other computer shows it in its main folder's `Desktops`. A Desktop synced here before (its marker known to the account's DB) keeps its folder on the drive. Refused as `add <role>` is, and when a Desktop is synced already; `--name` for a Desktop synced already names it anew (it is taken off and added again, keeping its folder). Its kind is kept with it in the config (`desktop = "<uuid>"`) and in the account's DB |
+| `hbsync add desktop [--identity I] [--folder P] [--name N]` | syncs this computer's Desktop (where the OS keeps it, or at `--folder`) with a folder of its own in Desktops on the drive (sync semantics §12), named `N` there (default: the device name, made one the drive takes, else `Computer`; a name the drive won't take is refused); every other computer shows it in its main folder's `Desktops`. A Desktop synced here before (its marker known to the account's DB) keeps its folder on the drive. Refused as `add <role>` is, and when a Desktop is synced already at another folder. For the Desktop synced already (without `--folder`), `--name` renames its folder on the drive where it is: a running daemon gives it the new name at once, by a sync of that folder; without `--name` it keeps the name it has. Its kind is kept with it in the config (`desktop = "<uuid>"`) and in the account's DB; its name in the account's DB alone |
 | `hbsync remove <role>`, `remove desktop` `[--identity I]` | stops syncing that role folder or the Desktop; its files and state stay (the Desktop's folder on the drive too), so adding it again resumes |
 | `hbsync status [--json]` | what the daemon does; exit status 3 when it isn't running |
 | `hbsync sync`, `pause [--for 1h]`, `resume` | a pause with `--for` ends by itself |

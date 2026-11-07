@@ -427,7 +427,7 @@ mod tests {
     fn a_role_folders_held_deletes_are_reviewed_from_the_menu() {
         let mut pictures =
             FolderStatus::new(&"anna.example.com".into(), Path::new("/home/anna/Pictures"));
-        pictures.role = Some(hbsync_types::Role::Pictures);
+        pictures.kind = hbsync_app::RootKind::Role(hbsync_types::Role::Pictures);
         pictures.held_deletes = Some(HeldDeletes {
             here: 0,
             remotely: 300,

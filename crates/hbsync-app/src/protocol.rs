@@ -10,11 +10,10 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use hbsync_types::NodeId;
-use hbsync_types::Role;
 use hbsync_types::activity::{Deleted, Synced};
 use serde::{Deserialize, Serialize};
 
-use crate::{Identity, Root};
+use crate::{Identity, Root, RootKind};
 
 pub use hbsync_types::activity::Progress;
 
@@ -62,9 +61,13 @@ pub enum Ask {
     FindDeleted {
         items: Vec<String>,
     },
-    /// Set the folder `root` up and sync it (`hbsync setup` has checked it).
+    /// Set the folder `root` up and sync it (`hbsync setup` has checked it). A Desktop is
+    /// named `name` on the drive (`None`: as it is, or the computer if it has no name yet);
+    /// one synced already is renamed where it is.
     AddFolder {
         root: Root,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     /// Stop syncing the folder at `path`; its files and state stay.
     RemoveFolder {
@@ -385,11 +388,9 @@ pub struct FolderStatus {
     /// The account the folder syncs with.
     pub identity: Identity,
     pub path: PathBuf,
-    /// The role folder it is; `None` for the main folder (the drive's root) and the Desktop.
-    pub role: Option<Role>,
-    /// Whether it is this computer's Desktop (its own folder in Desktops, sync semantics §12).
-    #[serde(default)]
-    pub desktop: bool,
+    /// What of the drive it holds: the main folder (the drive's root), a role folder, this
+    /// computer's Desktop (its own folder in Desktops, sync semantics §12).
+    pub kind: RootKind,
     pub state: State,
     /// Until when a pause lasts (Unix seconds); `None` while not paused or until resumed.
     pub paused_until: Option<u64>,
@@ -424,12 +425,12 @@ pub struct FolderStatus {
 impl FolderStatus {
     /// Whether it is the main folder (the drive's root).
     pub fn is_main(&self) -> bool {
-        self.role.is_none() && !self.desktop
+        self.kind == RootKind::Main
     }
 
-    /// What it is, for people ([`crate::config::folder_what`]).
+    /// What it is, for people ([`RootKind::what`]).
     pub fn what(&self) -> String {
-        crate::config::folder_what(&self.identity, self.desktop, self.role)
+        self.kind.what(&self.identity)
     }
 
     /// Starting to sync the main folder at `path` with `identity`.
@@ -437,8 +438,7 @@ impl FolderStatus {
         FolderStatus {
             identity: identity.clone(),
             path: path.to_path_buf(),
-            role: None,
-            desktop: false,
+            kind: RootKind::Main,
             state: State::Starting,
             paused_until: None,
             progress: None,
