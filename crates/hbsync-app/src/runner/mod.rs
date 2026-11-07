@@ -113,11 +113,8 @@ pub struct RunnerConfig {
     /// The account's state DB ([`crate::Paths::account_db`]).
     pub db: PathBuf,
     pub identity: Identity,
-    /// The role folder it is; `None` for the main folder and the Desktop.
-    pub role: Option<hbsync_types::Role>,
-    /// The Desktop's: its folder's name on the drive (the computer's, or the one given);
-    /// `None` for any other folder.
-    pub desktop: Option<String>,
+    /// What of the drive it holds (shown; the DB keeps it).
+    pub kind: crate::RootKind,
     /// Shown in conflict-copy names.
     pub device: String,
     pub mass_delete: MassDelete,
@@ -147,8 +144,7 @@ impl RunnerConfig {
             folder: folder.to_path_buf(),
             db: db.to_path_buf(),
             identity: identity.clone(),
-            role: None,
-            desktop: None,
+            kind: crate::RootKind::Main,
             device: device.to_owned(),
             mass_delete: MassDelete::default(),
             paused: None,
@@ -432,8 +428,7 @@ impl Runner {
         let (tx, rx) = channel();
         let stop = Arc::new(AtomicBool::new(cfg.paused.is_some()));
         let mut status = FolderStatus::new(&cfg.identity, &cfg.folder);
-        status.role = cfg.role;
-        status.desktop = cfg.desktop.is_some();
+        status.kind = cfg.kind;
         status.paused_until = cfg.paused.and_then(|p| p.until);
         let status = Arc::new(Mutex::new(status));
         let held = Arc::new(Mutex::new(Held::default()));
@@ -534,9 +529,6 @@ impl Runner {
         // through one folder.
         let sync_root = SyncRoot::open(&self.cfg.db, &self.cfg.identity, root)?;
         let mut engine = Engine::open(&sync_root, Arc::clone(&self.drive), cfg)?;
-        if let Some(name) = &self.cfg.desktop {
-            engine.name_desktop(name)?;
-        }
         engine.set_stop(Arc::clone(&self.stop));
         engine.set_progress(Arc::clone(&self.progress));
         let wakes = self.wakes.clone();

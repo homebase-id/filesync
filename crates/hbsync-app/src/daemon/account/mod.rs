@@ -545,8 +545,7 @@ impl Waiting {
     /// The status of its folder `root`, `paused` or waiting.
     fn status(&self, root: &Root, paused: Option<Pause>) -> FolderStatus {
         let mut folder = FolderStatus::new(&root.identity, &root.folder);
-        folder.role = root.role;
-        folder.desktop = root.desktop.is_some();
+        folder.kind = root.kind;
         folder.state = if paused.is_some() {
             State::Paused
         } else {
@@ -967,19 +966,20 @@ mod tests {
     fn a_waiting_folder_shows_its_role() {
         let paths = Paths::under(Path::new("/h"));
         let main = Root::main(&"a.example".into(), Path::new("/h/Homebase"));
-        let documents = Root {
-            role: Some(hbsync_types::Role::Documents),
-            ..Root::main(&"a.example".into(), Path::new("/h/Documents"))
-        };
+        let documents = Root::role(
+            &"a.example".into(),
+            Path::new("/h/Documents"),
+            hbsync_types::Role::Documents,
+        );
         let (account, _requests) = Account::new(&paths, &documents, None, Arc::default());
         account.add_folder(&main);
         let (_, folders) = account.status();
-        let shown: Vec<_> = folders.iter().map(|f| (f.path.as_path(), f.role)).collect();
+        let shown: Vec<_> = folders.iter().map(|f| (f.path.as_path(), f.kind)).collect();
         assert_eq!(
             shown,
             [
-                (documents.folder.as_path(), documents.role),
-                (main.folder.as_path(), None)
+                (documents.folder.as_path(), documents.kind),
+                (main.folder.as_path(), crate::RootKind::Main)
             ]
         );
         assert!(folders.iter().all(|f| f.state == State::Starting));

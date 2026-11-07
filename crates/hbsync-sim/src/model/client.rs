@@ -267,7 +267,7 @@ impl Client {
             trusted: HashSet::new(),
             user_x: HashSet::new(),
             own_tops: BTreeSet::new(),
-            kind: hbsync_state::FolderKind::for_top(coords.top),
+            kind: kind_for(coords.top),
             added: true,
             desktop_name: String::new(),
             desktop_named: None,
@@ -355,5 +355,16 @@ fn rekey(tree: &mut Tree, node: NodeId, new: NodeId) {
             state.parent = new;
             tree.insert(kid, state);
         }
+    }
+}
+
+/// The kind of a simulated folder holding the drive's node `top`: the main folder the root's, a
+/// role folder its fixed folder's, a Desktop any other (its computer's folder in Desktops).
+fn kind_for(top: NodeId) -> hbsync_state::FolderKind {
+    use hbsync_state::FolderKind;
+    match top {
+        t if t.is_root() => FolderKind::Main,
+        t if hbsync_types::Role::of(t).is_some() => FolderKind::Role,
+        _ => FolderKind::Desktop,
     }
 }

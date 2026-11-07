@@ -554,7 +554,7 @@ mod tests {
         );
         let root = crate::Root::main(&"anna.example.com".into(), Path::new("/home/anna/Homebase"));
         assert_eq!(
-            json(Ask::AddFolder { root })?,
+            json(Ask::AddFolder { root, name: None })?,
             r#"{"protocol":11,"ask":{"add_folder":{"root":{"identity":"anna.example.com","folder":"/home/anna/Homebase"}}}}"#
         );
         assert_eq!(serde_json::to_string(&Reply::Done)?, r#""done""#);

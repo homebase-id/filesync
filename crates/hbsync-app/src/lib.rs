@@ -30,7 +30,7 @@ mod sync_root;
 pub mod unit;
 pub mod words;
 
-pub use config::{Config, ConfigError, MassDelete, Root};
+pub use config::{Config, ConfigError, MassDelete, Root, RootKind};
 /// The days Recently deleted keeps an item: 30, on every client (not a setting).
 pub use hbsync_engine::time::KEEP_DAYS;
 pub use hbsync_homebase::app::{APP_NAME, files_online};

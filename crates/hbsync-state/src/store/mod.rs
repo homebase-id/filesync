@@ -405,17 +405,6 @@ pub enum FolderKind {
 }
 
 impl FolderKind {
-    /// The kind of a folder set up to hold the drive's node `top`: the main folder the root's, a
-    /// role folder its fixed folder's, a Desktop any other (its computer's folder in Desktops).
-    /// Only where a folder is set up: its kind is kept with it, and read from there.
-    pub fn for_top(top: NodeId) -> FolderKind {
-        match top {
-            t if t.is_root() => FolderKind::Main,
-            t if hbsync_types::Role::of(t).is_some() => FolderKind::Role,
-            _ => FolderKind::Desktop,
-        }
-    }
-
     pub(crate) fn code(self) -> i64 {
         match self {
             FolderKind::Main => 0,

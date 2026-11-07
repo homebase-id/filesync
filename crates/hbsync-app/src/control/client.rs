@@ -238,8 +238,9 @@ pub fn account(paths: &Paths, identity: &Identity, control: AccountControl) -> R
 }
 
 /// Has the daemon set the folder `root` up and sync it.
-pub fn add_folder(paths: &Paths, root: &crate::Root) -> Result<()> {
-    done(ask(paths, Ask::AddFolder { root: root.clone() }))
+pub fn add_folder(paths: &Paths, root: &crate::Root, name: Option<&str>) -> Result<()> {
+    let (root, name) = (root.clone(), name.map(str::to_owned));
+    done(ask(paths, Ask::AddFolder { root, name }))
 }
 
 /// Has the daemon stop syncing the folder at `path`; its files and state stay.

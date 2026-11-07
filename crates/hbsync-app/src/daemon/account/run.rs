@@ -556,9 +556,7 @@ impl Account {
         // The config's entry has the say, as when it was read for the account's start.
         let listed = config.roots.iter().find(|r| r.folder == root.folder);
         let root = listed.unwrap_or(root).clone();
-        cfg.role = root.role;
-        cfg.desktop = (root.desktop.is_some())
-            .then(|| root.name.clone().unwrap_or_else(|| config.device_name()));
+        cfg.kind = root.kind;
         cfg.paused = paused;
         cfg.end_if_unusable = heals;
         cfg.changed = Arc::clone(&self.changed);

@@ -1378,8 +1378,9 @@ fn a_watcher_that_stops_is_told_and_started_again() -> R {
 }
 
 /// A runner of the computer's Desktop (its kind kept with its folder) syncs it into a folder of
-/// its own in Desktops, named as the runner says (the computer's, or the one given), and shows
-/// itself as the Desktop.
+/// its own in Desktops, named as its DB says, and shows itself as the Desktop. Named anew while
+/// it runs, the folder takes the new name at the next sync, and keeps it when the runner opens
+/// the folder again (the runner keeps no name of its own).
 #[test]
 fn a_desktop_runner_syncs_its_own_folder_in_desktops_named_so() -> R {
     let server = server();
@@ -1389,27 +1390,50 @@ fn a_desktop_runner_syncs_its_own_folder_in_desktops_named_so() -> R {
     let top = hbsync_types::NodeId::new();
     let db = db_of(&root);
     let kind = hbsync_state::FolderKind::Desktop;
-    SyncRoot::create_for(&db, "test.example", &root, top, kind)?;
+    let desk = SyncRoot::create_for(&db, "test.example", &root, top, kind)?;
+    desk.name_desktop(Some("Laptop"), "pc")?;
     std::fs::write(root.join("note.txt"), "n")?;
     let mut cfg = RunnerConfig::new(&root, &db, &"test.example".into(), "pc");
-    cfg.desktop = Some("Laptop".into());
+    cfg.kind = hbsync_app::RootKind::Desktop(top);
     let drive = Drive::open(
         &cfg.db,
         &cfg.identity,
         Arc::new(FakeRemote::new(server.clone())),
     )?;
-    let (handle, thread) = Runner::spawn(cfg, Arc::clone(&drive))?;
-    let done = wait_until("the Desktop is on the drive", || {
+    let named = |name: &str| {
         let names = live_names(&server);
-        ["Desktops", "Laptop", "note.txt"]
+        ["Desktops", name, "note.txt"]
             .iter()
             .all(|n| names.iter().any(|m| m == n))
+    };
+    let (handle, thread) = Runner::spawn(cfg.clone(), Arc::clone(&drive))?;
+    let done = wait_until("the Desktop is on the drive", || named("Laptop")).and_then(|()| {
+        desk.name_desktop(Some("Work laptop"), "pc")?;
+        handle.send(Command::SyncNow);
+        wait_until("named anew", || named("Work laptop"))
     });
     let status = handle.status();
     handle.send(Command::Stop);
     let _ = thread.join();
     done?;
-    assert!(status.desktop && !status.is_main(), "{status:?}");
+    assert_eq!(
+        status.kind,
+        hbsync_app::RootKind::Desktop(top),
+        "{status:?}"
+    );
+    assert!(!status.is_main());
     assert_eq!(status.what(), "test.example's Desktop");
+
+    // Opened again: the name it has stands.
+    let (handle, thread) = Runner::spawn(cfg, drive)?;
+    let synced = wait_until("synced again", || handle.status().last_sync.is_some());
+    handle.send(Command::Stop);
+    let _ = thread.join();
+    synced?;
+    let names = live_names(&server);
+    assert!(
+        named("Work laptop") && !names.iter().any(|n| n == "Laptop"),
+        "{names:?}"
+    );
     Ok(())
 }
