@@ -33,6 +33,12 @@ pub fn check(config: &Config, root: &Root, home: Option<&Path>) -> Result<bool, 
     if let Some(why) = refuse_folder(path, home) {
         return Err(why);
     }
+    if !root.fits() {
+        return Err(format!(
+            "{} can't hold the drive's own folders",
+            root.what()
+        ));
+    }
     let main_elsewhere = |r: &&Root| r.is_main() && (r.folder != path || r.identity != *identity);
     if root.is_main()
         && let Some(main) = config.roots.iter().find(main_elsewhere)
@@ -41,6 +47,18 @@ pub fn check(config: &Config, root: &Root, home: Option<&Path>) -> Result<bool, 
             "already set up to sync {} with {}: unlink it first",
             main.folder.display(),
             main.identity
+        ));
+    }
+    // Listed already as something else: set up as that, it stays so.
+    if let Some(listed) = config.roots.iter().find(|r| r.folder == path)
+        && (listed.identity != *identity
+            || listed.kind() != root.kind()
+            || listed.top() != root.top())
+    {
+        return Err(format!(
+            "{} is synced as {} already: remove it first",
+            path.display(),
+            listed.what()
         ));
     }
     for other in config.roots.iter().filter(|r| r.folder != path) {
@@ -196,12 +214,17 @@ fn add_locked(
         true => ready_in_turn(&db, identity, &config.roots, None)?,
         false => None,
     };
-    SyncRoot::open_or_create_for(&db, identity, path, root.top(), root.kind())?;
-    held.update(|config| {
-        if !config.roots.iter().any(|r| r.folder == path) {
-            config.roots.push(root.clone());
-        }
-    })?;
+    let synced = SyncRoot::open_or_create_for(&db, identity, path, root.top(), root.kind())?;
+    // A Desktop listed already, named anew: its name, here and for its engine.
+    if let Some(name) = &root.name {
+        synced.name_desktop(name)?;
+    }
+    held.update(
+        |config| match config.roots.iter_mut().find(|r| r.folder == path) {
+            Some(listed) => listed.name.clone_from(&root.name),
+            None => config.roots.push(root.clone()),
+        },
+    )?;
     Ok(set)
 }
 
@@ -265,28 +288,43 @@ fn ready_in_turn(
     roots: &[Root],
     found: Option<Unusable>,
 ) -> Result<Option<SetAside>, RootError> {
+    // Never one whose top doesn't fit its kind (a hand-edited config): the DB would record it.
     let folders: Vec<(&Path, NodeId, FolderKind)> = roots
         .iter()
-        .filter(|r| r.identity == *identity)
+        .filter(|r| r.identity == *identity && r.fits())
         .map(|r| (r.folder.as_path(), r.top(), r.kind()))
         .collect();
     SyncRoot::ready(db, identity, &folders, found)
 }
 
-/// This computer's Desktop at `path` (resolved), for `identity`: synced before (its marker known
-/// to the account's DB, whatever the config lists), it keeps its folder in Desktops on the
-/// drive; else it gets one of its own, made at its first sync. Only reads the DB.
-pub fn desktop(paths: &Paths, identity: &Identity, path: &Path, name: Option<String>) -> Root {
-    let db = paths.account_db(identity);
-    let known = SyncRoot::find(&db, identity, path)
-        .ok()
-        .map(|known| known.top())
-        .filter(|top| !top.is_root() && Role::of(*top).is_none());
+/// This computer's Desktop at `path` (resolved), for `identity`, named `name` on the drive: as
+/// the config lists it, or synced before (its marker known to the account's DB), it keeps its
+/// folder in Desktops; else it gets one of its own, made at its first sync. Only reads the DB;
+/// one that can't be read is an error (a new folder in Desktops would be a second one).
+pub fn desktop(
+    paths: &Paths,
+    identity: &Identity,
+    path: &Path,
+    name: Option<String>,
+) -> Result<Root, Error> {
+    let config = Config::now(paths).unwrap_or_default();
+    let listed = config
+        .roots
+        .iter()
+        .find(|r| r.folder == path && r.identity == *identity);
+    let known = match listed.and_then(|r| r.desktop) {
+        Some(top) => Some(top),
+        None => match SyncRoot::find(&paths.account_db(identity), identity, path) {
+            Ok(found) => Some(found.top()).filter(|t| !t.is_root() && Role::of(*t).is_none()),
+            Err(RootError::NoMarker(_) | RootError::Unknown(_)) => None,
+            Err(e) => return Err(e.into()),
+        },
+    };
     let top = match known {
         Some(top) => top,
         None => NodeId::new(),
     };
-    Root::desktop(identity, path, top, name)
+    Ok(Root::desktop(identity, path, top, name))
 }
 
 /// Has the running daemon set the folder at `path` up and sync it ([`add`]), or sets it up for
@@ -524,7 +562,7 @@ mod tests {
             std::fs::create_dir_all(f)?;
         }
         add(&paths, &Root::main(&a, &main), false)?;
-        let root = desktop(&paths, &a, &desk, Some("Laptop".into()));
+        let root = desktop(&paths, &a, &desk, Some("Laptop".into()))?;
         add(&paths, &root, false)?;
         let config = Config::load(&paths.config_file())?.ok_or("no config")?;
         assert_eq!(config.desktop(&a), Some(&root));
@@ -544,21 +582,31 @@ mod tests {
             "{kinds:?}"
         );
 
-        let second = desktop(&paths, &a, &other, None);
+        let second = desktop(&paths, &a, &other, None)?;
         let why = check(&config, &second, None).expect_err("a second Desktop");
         assert!(why.contains("Desktop is synced"), "{why}");
         let inside = main.join("Desktop");
         std::fs::create_dir_all(&inside)?;
-        let why = check(
-            &config,
-            &desktop(&paths, &"b.example".into(), &inside, None),
-            None,
-        )
-        .expect_err("inside the main folder");
+        let b_desk = desktop(&paths, &"b.example".into(), &inside, None)?;
+        let why = check(&config, &b_desk, None).expect_err("inside the main folder");
         assert!(why.contains("one holds the other"), "{why}");
 
+        // Named anew where it is: listed once, its folder kept, the new name kept.
+        let renamed = desktop(&paths, &a, &desk, Some("Work laptop".into()))?;
+        assert_eq!(renamed.top(), root.top());
+        add(&paths, &renamed, false)?;
+        let config = Config::load(&paths.config_file())?.ok_or("no config")?;
+        assert_eq!(config.desktop(&a), Some(&renamed));
+        assert_eq!(config.roots.len(), 2);
+        // As something else at its path, or a Desktop holding the drive's own folder: refused.
+        let why = check(&config, &Root::role(&a, &desk, Role::Documents), None)
+            .expect_err("listed as the Desktop");
+        assert!(why.contains("synced as a.example's Desktop"), "{why}");
+        let fixed = Root::desktop(&a, &other, NodeId::DESKTOPS, None);
+        assert!(check(&config, &fixed, None).is_err(), "Desktops itself");
+
         remove(&paths, &desk)?;
-        let again = desktop(&paths, &a, &desk, None);
+        let again = desktop(&paths, &a, &desk, None)?;
         assert_eq!(again.top(), root.top(), "its folder in Desktops kept");
         Ok(())
     }

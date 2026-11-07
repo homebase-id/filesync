@@ -36,7 +36,7 @@ mod waiting;
 pub mod walk;
 
 pub use drive::Drive;
-pub use engine::{Engine, EngineConfig, StartupReport, SyncReport};
+pub use engine::{Engine, EngineConfig, StartupReport, SyncReport, valid_desktop_name};
 pub use error::EngineError;
 pub use folder::FolderCtx;
 pub use plan::{

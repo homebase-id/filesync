@@ -427,13 +427,9 @@ impl FolderStatus {
         self.role.is_none() && !self.desktop
     }
 
-    /// What it is, for people: the identity's main folder, its role folder, its Desktop.
+    /// What it is, for people ([`crate::config::folder_what`]).
     pub fn what(&self) -> String {
-        match (self.desktop, self.role) {
-            (true, _) => format!("{}'s Desktop", self.identity),
-            (false, Some(role)) => format!("{}'s {}", self.identity, role.name()),
-            (false, None) => self.identity.to_string(),
-        }
+        crate::config::folder_what(&self.identity, self.desktop, self.role)
     }
 
     /// Starting to sync the main folder at `path` with `identity`.

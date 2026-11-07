@@ -323,6 +323,24 @@ impl SyncRoot {
         Ok(StateDb::open_folder(&self.db, self.folder)?)
     }
 
+    /// Names this Desktop's folder on the drive `name` from its next sync on
+    /// ([`crate::Engine::name_desktop`], where nothing else writes its DB but its engine's
+    /// process). Nothing for another folder.
+    pub fn name_desktop(&self, name: &str) -> Result<(), RootError> {
+        let desktop = |s: &hbsync_state::ReadTx<'_>| -> Result<bool, StateError> {
+            Ok(s.this_folder()?.and_then(|f| f.kind) == Some(FolderKind::Desktop))
+        };
+        let name = crate::engine::desktop_name(name);
+        let mut db = self.state()?;
+        if !db.read(|s| desktop(s))? {
+            return Ok(());
+        }
+        if db.read(|s| s.get_kv(keys::DESKTOP_NAME))?.as_deref() != Some(name.as_str()) {
+            db.write(|s| s.folder().set_kv(keys::DESKTOP_NAME, &name))?;
+        }
+        Ok(())
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
