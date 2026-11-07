@@ -4485,9 +4485,10 @@ fn a_removal_took_along_g(
 
 /// A folder `r` removed on the drive took along folder `g` in it and the synced file in `g`,
 /// still live; a confirmed delete of `g` here covers that file, though `r` is above `g`, not in
-/// it: the guard counts it gone remotely ([`ReadTx::pending_file_deletes`]) and the confirmed
-/// delete takes it from that count. Before, only a removed folder in `g` was looked at, and
-/// the count stayed too high till the delete ran.
+/// it: the guard counts it gone remotely ([`ReadTx::pending_file_deletes`]), and removed from
+/// the drive by this device, and the confirmed delete takes it from the first count. Before,
+/// only a removed folder in `g` was looked at, and the count stayed too high till the delete
+/// ran.
 #[test]
 fn a_confirmed_delete_covers_what_a_removal_above_it_took_along() -> R {
     let mut h = Harness::new()?;
@@ -4500,14 +4501,57 @@ fn a_confirmed_delete_covers_what_a_removal_above_it_took_along() -> R {
         h.db.read(|s| Ok((s.pending_file_deletes()?, s.confirmed_file_deletes(g)?)))?;
     assert_eq!(
         pending,
-        (0, 1),
-        "the file taken along counts as gone remotely"
+        (1, 1),
+        "the file taken along counts as gone remotely, and as removed from the drive here"
     );
     assert_eq!(
         confirmed,
         Some((false, vec![file])),
         "the delete of g covers it"
     );
+    Ok(())
+}
+
+/// The synced file a removal took along, still live on the drive and here: this device removes
+/// it from the drive, counted with what is gone here (§7), and a confirmed delete of the file
+/// covers that.
+#[test]
+fn a_confirmed_removal_of_a_file_taken_along_covers_it() -> R {
+    let mut h = Harness::new()?;
+    let (_, _, file) = a_removal_took_along_g(&mut h)?;
+    h.db.write(|s| s.folder().mark_dirty(file))?;
+    let (pending, confirmed) =
+        h.db.read(|s| Ok((s.pending_file_deletes()?, s.confirmed_file_deletes(file)?)))?;
+    assert_eq!(pending, (1, 1));
+    assert_eq!(
+        confirmed,
+        Some((true, vec![file])),
+        "its removal from the drive"
+    );
+    Ok(())
+}
+
+/// The synced file a removal took along, deleted here too, its removal from the drive held out
+/// of the dirty set: counted once as gone here (by the held deletes), not again as taken along.
+#[test]
+fn a_held_removal_of_a_file_taken_along_counts_once() -> R {
+    let mut h = Harness::new()?;
+    let (_, g, file) = a_removal_took_along_g(&mut h)?;
+    let mark =
+        h.db.write(|s| {
+            s.folder().delete_local(file)?;
+            s.folder().mark_dirty(file)?;
+            s.folder().dirty_mark(file)
+        })?
+        .ok_or("no dirty mark")?;
+    h.db.write(|s| {
+        s.folder().hold_delete(mark)?;
+        s.folder().mark_dirty(g)
+    })?;
+    let (pending, held) =
+        h.db.read(|s| Ok((s.pending_file_deletes()?, s.held_file_deletes()?)))?;
+    assert_eq!(held, (1, 0), "held out of the dirty set, gone here");
+    assert_eq!(pending, (0, 1), "not again as taken along");
     Ok(())
 }
 
@@ -4586,8 +4630,9 @@ fn an_open_removal_counts_what_it_took_along() -> R {
         h.db.read(|s| Ok((s.pending_file_deletes()?, s.confirmed_file_deletes(folder)?)))?;
     assert_eq!(
         pending,
-        (0, 1),
-        "the file taken along counts as gone remotely, not what is in it"
+        (1, 1),
+        "the file taken along counts as gone remotely and as removed from the drive here, \
+         not what is in it"
     );
     assert_eq!(
         confirmed,

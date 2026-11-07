@@ -1175,3 +1175,40 @@ fn wanted_files_are_not_counted_as_deletes() -> R {
     assert_eq!(a.tree_text(""), b.tree_text(""));
     Ok(())
 }
+
+/// Another app removed folder `d` alone, its files left live on the drive (taken along, §6.3),
+/// while the user deleted a file here: this device removes all three from the drive, over the
+/// limit of two. Planned a node a page, they are weighed together as one plan of all would
+/// weigh them, held, and still held at the next sync (when the local delete of `d` took the
+/// bases of its files, held for the drive).
+#[test]
+fn what_a_removal_took_along_counts_with_deletes_here_over_pages() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| {
+        cfg.guard.min = 2;
+        cfg.batch = 1;
+    })?;
+    for name in [
+        "d/t0.txt", "d/t1.txt", "x.txt", "k0.txt", "k1.txt", "k2.txt", "k3.txt",
+    ] {
+        a.write(name, name)?;
+    }
+    a.sync()?;
+    fs::remove_file(a.root.join("x.txt"))?;
+    remove_on_drive(&server, &|name| name == "d")?;
+    a.engine.drive().pull(None)?;
+    let report = a.sync()?;
+    assert!(!report.held.is_empty(), "{report:?}");
+    let live = || Ok::<_, &str>(server.lock().map_err(|_| "poisoned")?.live_names());
+    for name in ["t0.txt", "t1.txt", "x.txt"] {
+        assert!(live()?.iter().any(|n| n == name), "{name} held: {report:?}");
+    }
+    let report = a.sync()?;
+    for name in ["t0.txt", "t1.txt", "x.txt"] {
+        assert!(
+            live()?.iter().any(|n| n == name),
+            "{name} still held: {report:?}"
+        );
+    }
+    Ok(())
+}

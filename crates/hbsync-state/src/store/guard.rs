@@ -11,6 +11,10 @@ const GONE_LOCALLY: &str = "b.kind = 0 AND b.content_state NOT IN (2, 3) \
     AND NOT EXISTS (SELECT 1 FROM local l WHERE l.folder = $F AND l.id = d.id)";
 const GONE_REMOTELY: &str = "b.kind = 0 AND NOT EXISTS (SELECT 1 FROM remote m WHERE m.id = d.id)";
 
+/// Node `d` is marked in this folder: dirty, or a held delete out of the dirty set.
+const MARKED: &str = "(EXISTS (SELECT 1 FROM dirty md WHERE md.folder = $F AND md.id = d.id) \
+    OR EXISTS (SELECT 1 FROM held_deletes mh WHERE mh.folder = $F AND mh.id = d.id))";
+
 /// Live node `m` was written by the time of removal `r` (`along::taken_along`): its time or the
 /// removal's not known yet (this device's own write, an open removal) counts as written before.
 const WRITTEN_BY_REMOVAL: &str =
@@ -41,29 +45,45 @@ impl ReadTx<'_> {
     }
 
     /// Synced files among the dirty nodes that are gone locally (and would be deleted
-    /// remotely), and those gone remotely (would be deleted locally). Online-only files have
-    /// no local copy by design and don't count. Used by the mass-delete guard, which must see
-    /// the whole delete, not one planning batch: with [`ReadTx::held_file_deletes`].
+    /// remotely), and those gone remotely (would be deleted locally), with what a folder's
+    /// removal took along ([`ReadTx::taken_files`]) on both sides. Online-only files have no
+    /// local copy by design and don't count. Used by the mass-delete guard, which must see the
+    /// whole delete, not one planning batch: with [`ReadTx::held_file_deletes`].
     pub fn pending_file_deletes(&self) -> Result<(u64, u64)> {
         // From the dirty set (CROSS JOIN keeps it outer): not a scan of every base row.
         let (here, there) = self.file_deletes("dirty d WHERE d.folder = $F")?;
-        Ok((here, there + self.taken_files()?))
+        let (taken_here, taken_there) = self.taken_files()?;
+        Ok((here + taken_here, there + taken_there))
     }
 
-    /// Synced files still live below a folder in Recently deleted that its removal took along
-    /// (a delete stopped half way, §6.3; the rule of `along::taken_along`: written no later
-    /// than the removal of the nearest removed folder above, or at a time not known yet),
-    /// dirty or not (a folder's removal marks only itself), gone remotely as the guard counts,
-    /// also where planned in pages apart from their folder. One query, nothing read while
-    /// nothing is dirty (no plan to judge): the removed folders, and what is live below them
-    /// (hardly ever any).
-    fn taken_files(&self) -> Result<u64> {
-        self.count(&format!(
-            "WITH RECURSIVE {} \
-             SELECT COUNT(DISTINCT t.id) FROM taken t JOIN base b ON b.folder = $F AND b.id = t.id \
-             WHERE b.kind = 0",
-            taken_along("EXISTS (SELECT 1 FROM dirty WHERE folder = $F)")
-        ))
+    /// Files still live below a folder in Recently deleted that its removal took along (a
+    /// delete stopped half way, §6.3; the rule of `along::taken_along`: written no later than
+    /// the removal of the nearest removed folder above, or at a time not known yet), dirty or
+    /// not (a folder's removal marks only itself), also where planned in pages apart from their
+    /// folder, as the guard counts them: (gone here, gone there).
+    /// - Gone here: those this device removes from the drive (finishing the removal), so pages
+    ///   weigh them with the files gone here as one plan would. That is a synced one, but one
+    ///   marked here ([`MARKED`]) and gone locally (counted already, here or in
+    ///   [`ReadTx::held_file_deletes`]); or one not synced but marked here (the feed marked it,
+    ///   or its base went with this device's delete of that folder while its removal from the
+    ///   drive was held). One never synced nor marked here, as what another folder's part of
+    ///   the drive holds, isn't.
+    /// - Gone there: the synced ones.
+    ///
+    /// One query, nothing read while nothing is dirty (no plan to judge): the removed folders,
+    /// and what is live below them (hardly ever any). Each node is taken once (one parent).
+    fn taken_files(&self) -> Result<(u64, u64)> {
+        static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            format!(
+                "WITH RECURSIVE {} \
+                 SELECT coalesce(sum(d.kind = 0 AND CASE WHEN b.id IS NULL THEN {MARKED} \
+                     ELSE b.kind = 0 AND NOT ({MARKED} AND coalesce({GONE_LOCALLY}, 0)) END), 0), \
+                   coalesce(sum(b.kind = 0), 0) \
+                 FROM taken d LEFT JOIN base b ON b.folder = $F AND b.id = d.id",
+                taken_along("EXISTS (SELECT 1 FROM dirty WHERE folder = $F)")
+            )
+        });
+        self.count2(&SQL)
     }
 
     /// [`ReadTx::pending_file_deletes`] of the nodes of held deletes out of the dirty set
@@ -78,22 +98,21 @@ impl ReadTx<'_> {
     /// Synced files among the nodes `from` (`<table> d WHERE ...`) that are gone locally, and
     /// those gone remotely, in one pass.
     fn file_deletes(&self, from: &str) -> Result<(u64, u64)> {
-        let sql = format!(
+        self.count2(&format!(
             "SELECT coalesce(sum({GONE_LOCALLY}), 0), coalesce(sum({GONE_REMOTELY}), 0) \
              FROM (SELECT d.id FROM {from}) d \
              CROSS JOIN base b ON b.folder = $F AND b.id = d.id"
-        );
-        Ok(self.prep(&sql)?.query_row([], |r| {
-            Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
-        })?)
+        ))
     }
 
     /// What a confirmed delete of dirty `node` covers of the
     /// [`pending_file_deletes`](Self::pending_file_deletes): whether `node` is a file gone
-    /// locally (deleted remotely, one node at a time), and the files gone remotely in its local
-    /// subtree (a delete takes everything below it with it): the dirty ones gone from the drive,
-    /// and the synced ones a folder's removal took along, still live there, whether that folder
-    /// is in `node` or above it (as `taken_files` counts them). `None` when `node` isn't dirty.
+    /// locally, or one a folder's removal took along that this device removes from the drive
+    /// (either deleted remotely, one node at a time; dirty, so marked: [`ReadTx::taken_files`]),
+    /// and the files gone remotely in its local subtree (a delete takes everything below
+    /// it with it): the dirty ones gone from the drive, and the synced ones a folder's removal
+    /// took along, still live there, whether that folder is in `node` or above it (as
+    /// `taken_files` counts them). `None` when `node` isn't dirty.
     pub fn confirmed_file_deletes(&self, node: NodeId) -> Result<Option<(bool, Vec<NodeId>)>> {
         static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             format!(
@@ -104,11 +123,13 @@ impl ReadTx<'_> {
                  up(id) AS (SELECT m.parent FROM remote m WHERE m.id = (SELECT id FROM top) \
                    UNION SELECT m.parent FROM remote m JOIN up ON m.id = up.id), {} \
                  SELECT n.uuid, k.id IS NOT NULL AND d.id = (SELECT id FROM top), \
-                   k.id IS NOT NULL AND coalesce({GONE_LOCALLY}, 0), \
+                   k.id IS NOT NULL AND (coalesce({GONE_LOCALLY}, 0) \
+                     OR coalesce(t.kind = 0 AND (b.id IS NULL OR b.kind = 0), 0)), \
                    coalesce(k.id IS NOT NULL AND {GONE_REMOTELY}, 0) \
-                     OR coalesce(b.kind = 0 AND EXISTS (SELECT 1 FROM taken t WHERE t.id = d.id), 0) \
+                     OR coalesce(b.kind = 0 AND t.id IS NOT NULL, 0) \
                  FROM (SELECT id FROM sub) d LEFT JOIN dirty k ON k.folder = $F AND k.id = d.id \
-                 JOIN nodes n ON n.id = d.id LEFT JOIN base b ON b.folder = $F AND b.id = d.id",
+                 JOIN nodes n ON n.id = d.id LEFT JOIN base b ON b.folder = $F AND b.id = d.id \
+                 LEFT JOIN taken t ON t.id = d.id",
                 // The removed folders in `node`, and the one above it on the drive (`up`: its
                 // live folders' parents, up to the first not live): its removal takes what is
                 // in `node` along too (only what is in `node` is kept, below).

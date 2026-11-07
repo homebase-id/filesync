@@ -564,6 +564,13 @@ impl<'a> ReadTx<'a> {
         let n: i64 = self.prep(sql)?.query_row([], |r| r.get(0))?;
         Ok(n as u64)
     }
+
+    /// Two counts in one row, as [`ReadTx::count`].
+    fn count2(&self, sql: &str) -> Result<(u64, u64)> {
+        Ok(self.prep(sql)?.query_row([], |r| {
+            Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)? as u64))
+        })?)
+    }
 }
 
 fn base_row(r: &Row<'_>) -> Result<BaseRow> {
