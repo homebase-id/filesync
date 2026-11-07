@@ -9,7 +9,7 @@ use crate::Paths;
 use crate::ipc::{self, IpcError};
 use crate::protocol::{
     AccountControl, Ask, Control, DaemonControl, DaemonStatus, DeletedAccount, DeletedItem,
-    DeletedList, DesktopFolder, FolderControl, RecentItem, Reply, Request,
+    DeletedList, FolderControl, RecentItem, Reply, Request,
 };
 
 /// Asks the daemon `what` over the control socket and waits for its reply.
@@ -241,15 +241,6 @@ pub fn account(paths: &Paths, identity: &Identity, control: AccountControl) -> R
 pub fn add_folder(paths: &Paths, root: &crate::Root, name: Option<&str>) -> Result<()> {
     let (root, name) = (root.clone(), name.map(str::to_owned));
     done(ask(paths, Ask::AddFolder { root, name }))
-}
-
-/// The folders in Desktops on `identity`'s drive, by name; `None` when the daemon isn't running.
-pub fn desktops(paths: &Paths, identity: &Identity) -> Result<Option<Vec<DesktopFolder>>> {
-    let identity = identity.clone();
-    match ask(paths, Ask::Desktops { identity }) {
-        Ok(Reply::Desktops(list)) => Ok(Some(list)),
-        other => unexpected(other),
-    }
 }
 
 /// Has the daemon stop syncing the folder at `path`; its files and state stay.

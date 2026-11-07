@@ -531,7 +531,6 @@ account (its Recently deleted) or to one folder (its held deletes):
 {"protocol":11,"ask":{"deleted":{"limit":100}}}                    // the newest 100 deletes
 {"protocol":11,"ask":{"find_deleted":{"items":["Photos/2024","<node id>"]}}}
 {"protocol":11,"ask":{"add_folder":{"root":{"identity":"anna.example.com","folder":"/home/anna/Homebase"}}}}  // a [[roots]] entry (role, or desktop); a Desktop also takes "name"
-{"protocol":11,"ask":{"desktops":{"identity":"anna.example.com"}}}    // the folders in Desktops, to join one
 {"protocol":11,"ask":{"remove_folder":{"path":"/home/anna/Homebase"}}}
 {"protocol":11,"ask":{"start_over":{"identity":"anna.example.com"}}}  // new credentials
 ```
@@ -581,8 +580,6 @@ Replies:
   since, whatever its server time, and nothing live; a listed folder holding either stays,
   emptied of what was listed in it. A listing of another DB, or a `seq` the account never gave,
   is refused in the reply (and again by the drive as it empties).
-- `{"desktops":[{"node":"<uuid>","name":"Laptop"},…]}`: for `desktops`, the folders in Desktops
-  on the identity's drive (the computers' Desktops, as the account's mirror has them), by name.
 - `{"found":[…]}`: for `find_deleted`, the items named (a node id, or the place `hbsync deleted`
   shows: a delete there before an item deleted with one, then the newest; a name shaped like a node id that isn't one is tried as a place),
   deleted on their own or along with a folder; refused naming the first one that isn't there.
@@ -673,12 +670,13 @@ Linux (rfd's, without GTK) needs `zenity`, which KDE doesn't install.
   computer keeps it, how many files and bytes it holds, counted for 2 s at most; Sync, or why
   it can't be: another app syncs it, a synced folder holds it; Stop syncing; Downloads marked
   not recommended; on macOS the folder is read once on Sync, so the system asks for access
-  while the user is there; the Desktop likewise: synced here before (the account's DB knows
-  its path), it syncs with its folder again; else a new folder in Desktops named as typed (the
-  computer's name to start with), or one of the folders there to join, listed by the daemon
-  (`desktops`), meant for this computer's from before, which keeps its name; synced, its
-  folder is renamed from the page as `hbsync add desktop --name` renames it, a rename made
-  elsewhere included) are
+  while the user is there; the Desktop likewise: synced here before (the account's DB has a
+  Desktop at its path), it syncs with its folder again; else a new folder in Desktops named as
+  typed (the computer's name to start with), or one of the folders there to join, meant for
+  this computer's from before, which keeps its name; synced, its folder's name on the drive is
+  shown and renamed from the page as `hbsync add desktop --name` renames it, a rename made
+  elsewhere included. The page reads the account's DB read-only for this, with or without the
+  daemon, and nothing in the Desktop before Sync) are
   pages the tray serves on `127.0.0.1`, on a random port, under a random path, and opens in the
   browser; the identity's approval returns there.
 - **Notifications:** a new problem note, deletions to review (held deletes), a refused login;

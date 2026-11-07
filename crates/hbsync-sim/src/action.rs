@@ -161,9 +161,10 @@ pub enum Action {
     ///
     /// [`Sim::with_desktop_to_add`]: crate::Sim::with_desktop_to_add
     AddDesktop,
-    /// The user renames the client's computer (to a name of [`NAMES`]): its Desktop's folder on
-    /// the drive takes it at its next sync, as far as it is free there (§12). Nothing on a
-    /// client that isn't a Desktop.
+    /// The user gives the client's computer's Desktop a name (of [`NAMES`]): its folder on the
+    /// drive takes it at its next sync, as far as it is free there, also over a rename made
+    /// elsewhere, the same name given again too (§12). Nothing on a client that isn't a
+    /// Desktop.
     RenameComputer {
         name: usize,
     },

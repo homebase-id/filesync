@@ -84,6 +84,47 @@ fn a_desktop_follows_its_computer_s_name() {
     assert!(sim.local_paths(1).iter().any(|p| p == "Desktops/c.txt/a"));
 }
 
+/// A Desktop's folder renamed on another computer keeps that name until its computer is given
+/// a name again: the same name as before too, which names it so again (the user asked).
+#[test]
+fn regression_the_same_name_given_again_wins_over_a_rename_elsewhere() {
+    let mut sim = desktops();
+    sim.run(&[
+        act(3, Action::CreateFile { parent: 0, name: 0 }),
+        act(3, Action::RenameComputer { name: 3 }),
+    ]);
+    assert!(sim.quiesce(30), "converges");
+    assert!(sim.server_paths().iter().any(|p| p == "Desktops/c.txt/a"));
+    // Renamed "d" on the third computer.
+    let node = sim.item(2, "Desktops/c.txt").expect("on c2");
+    let desktops = sim.item(2, "Desktops").expect("Desktops on c2");
+    let (node, parent) = (
+        sim.pick(2, node, false).expect("pick"),
+        sim.pick(2, desktops, true).expect("pick"),
+    );
+    sim.run(&[
+        act(
+            2,
+            Action::Move {
+                node,
+                parent,
+                name: 5,
+            },
+        ),
+        Event::Plan { client: 2 },
+    ]);
+    assert!(sim.quiesce(30), "converges");
+    assert!(
+        sim.server_paths().iter().any(|p| p == "Desktops/d/a"),
+        "stands"
+    );
+    sim.run(&[act(3, Action::RenameComputer { name: 3 })]);
+    assert!(sim.quiesce(30), "converges");
+    sim.check().expect("check");
+    let paths = sim.server_paths();
+    assert!(paths.iter().any(|p| p == "Desktops/c.txt/a"), "{paths:?}");
+}
+
 /// Two computers syncing one Desktop share it: what each holds is on both, and neither main
 /// folder shows it.
 #[test]

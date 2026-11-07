@@ -31,6 +31,8 @@ mod guard;
 mod kv;
 mod local;
 mod mirror;
+#[cfg(feature = "testkit")]
+pub use mirror::put_desktops;
 mod parked;
 mod picture;
 pub use picture::{Answer, Answered, Left};
