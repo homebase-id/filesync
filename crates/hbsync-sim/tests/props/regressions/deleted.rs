@@ -2193,3 +2193,48 @@ fn regression_paged_clients_converge_after_a_stopped_delete_and_a_restore() {
         panic!("{e}");
     }
 }
+
+/// Seed ba33fc36 (`clients_planning_in_small_pages_converge_without_loss`, pages of 1, two
+/// clients): client 0 uploads a few new files, then deletes them all before they are settled.
+/// The marks its rounds keep (`Pages::marks`) hold those nodes, gone from every side, till a
+/// round reads them clean; the simulator's sweep took as many pages as the sides hold nodes,
+/// so it ended on them and never reached the file client 1 uploaded meanwhile. A sweep's
+/// worth counts the kept marks too.
+#[test]
+fn regression_paged_clients_converge_after_a_stopped_delete_beside_new_files() {
+    use hbsync_sim::Action::{CreateFile, CreateFolder, Delete, DeleteStopped};
+    let act = |client, action| Event::Act { client, action };
+    let plan = |client| Event::Plan { client };
+    let events = [
+        act(1, CreateFile { parent: 0, name: 6 }),
+        act(0, CreateFolder { parent: 0, name: 0 }),
+        act(
+            0,
+            CreateFile {
+                parent: 6,
+                name: 13,
+            },
+        ),
+        plan(0),
+        act(0, CreateFile { parent: 2, name: 6 }),
+        Event::Step { client: 0 },
+        act(0, CreateFolder { parent: 0, name: 9 }),
+        act(0, DeleteStopped { pick: 0, done: 0 }),
+        act(0, CreateFile { parent: 4, name: 5 }),
+        act(0, CreateFile { parent: 0, name: 2 }),
+        act(
+            0,
+            CreateFile {
+                parent: 0,
+                name: 11,
+            },
+        ),
+        plan(2),
+        plan(0),
+        act(2, Delete { node: 7 }),
+    ];
+    let events: Vec<Event> = events.into_iter().map(|e| on_clients(e, 2)).collect();
+    if let Err(e) = run_with(2, None, |sim| sim.with_small_pages(1), &events) {
+        panic!("{e}");
+    }
+}

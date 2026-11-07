@@ -71,7 +71,12 @@ impl Sim {
             return false;
         };
         let client = &self.clients[c];
-        let nodes = client.base.len() + client.local.len() + self.server.live.len();
+        // The marks a round keeps may be of nodes no side holds any more (read clean once
+        // planned): a sweep's worth counts them too.
+        let nodes = client.base.len()
+            + client.local.len()
+            + self.server.live.len()
+            + client.pages.borrow().marks.len();
         // A sweep's worth of pages, and what they wait for, each a page of its own (a chain of
         // waits grows a page at a time; bounded: each such page is larger).
         let mut planned = 0;
