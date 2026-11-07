@@ -137,7 +137,7 @@ impl Default for Options {
 
 impl Input {
     /// `node`'s content state (local where it has no base).
-    pub(crate) fn content_state(&self, node: NodeId) -> ContentState {
+    pub fn content_state(&self, node: NodeId) -> ContentState {
         self.base_extra
             .get(&node)
             .map_or(ContentState::Local, |e| e.content_state)

@@ -29,7 +29,7 @@ impl Sim {
     /// Client `c`'s plan `plan`, made from `input` with `opts` and the ids it takes as known,
     /// checked against the engine's planning path over the same state (`round`: which of the
     /// nodes whose sides agree the narrow plan takes dirty), and its guard totals against the
-    /// store's with `dirty` the dirty set ([`counts_differ`]): what differs, if anything.
+    /// store's with `all_dirty` the dirty set ([`counts_differ`]): what differs, if anything.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn check_narrow(
         &self,
@@ -39,7 +39,7 @@ impl Sim {
         known: &dyn Fn(NodeId) -> bool,
         plan: &Plan,
         round: usize,
-        dirty: &BTreeSet<NodeId>,
+        all_dirty: &BTreeSet<NodeId>,
     ) -> Option<String> {
         let client = &self.clients[c];
         if !client.coords.top.is_root() {
@@ -84,7 +84,8 @@ impl Sim {
                     )));
                 }
             }
-            counts_differ(c, &mut db, opts, dirty)
+            set_dirty(&mut db, all_dirty.iter().copied())?;
+            counts_differ(c, &mut db, opts, all_dirty)
         })();
         checked.unwrap_or_else(|e| Some(format!("c{c}: the store failed: {e}")))
     }
@@ -93,6 +94,7 @@ impl Sim {
     /// views, then again with what the engine takes out of the dirty set till the user answers
     /// ([`hbsync_engine::held`]) out of it, it plans the same but those, unless its view
     /// reaches them (the engine then plans them again too): what differs, if anything.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn check_held(
         &self,
         c: usize,
@@ -100,7 +102,8 @@ impl Sim {
         opts: &Options,
         known: &dyn Fn(NodeId) -> bool,
         plan: &Plan,
-        dirty: &BTreeSet<NodeId>,
+        all_dirty: &BTreeSet<NodeId>,
+        count: bool,
     ) -> Option<String> {
         let client = &self.clients[c];
         if plan.held.is_empty() || !client.coords.top.is_root() {
@@ -109,15 +112,21 @@ impl Sim {
         let folder = self.folder_ctx(c);
         let checked = (|| -> Result<Option<String>, StateError> {
             let mut db = self.fill(c, input)?;
-            // The guard's totals first, over the simulator's dirty set (`counts_differ`).
-            if let Some(what) = counts_differ(c, &mut db, opts, dirty)? {
+            // The store's marks are the simulator's dirty set (filling it marks what it writes, a
+            // pull's rows): its guard totals first (`counts_differ`, unless compared already on
+            // this plan), then the rest the engine keeps dirty, what the plan has work for (a mark
+            // the page doesn't hold reads as another page's, §6.5).
+            set_dirty(&mut db, all_dirty.iter().copied())?;
+            if count && let Some(what) = counts_differ(c, &mut db, opts, all_dirty)? {
                 return Ok(Some(what));
             }
-            // The nodes the engine keeps dirty: those marked, and those the plan has work for.
             let dirty: Vec<NodeId> = engine_dirty(client, input, plan).into_iter().collect();
-            // The store's marks are those: filling it marks what it writes (a pull's rows), and
-            // a mark the page doesn't hold reads as another page's (§6.5).
-            set_dirty(&mut db, dirty.iter().copied())?;
+            db.write(|s| {
+                dirty
+                    .iter()
+                    .filter(|n| !all_dirty.contains(n))
+                    .try_for_each(|&n| s.folder().mark_dirty(n))
+            })?;
             let folder = &folder;
             let with = |opts: &Options| {
                 let opts = opts.clone();
@@ -298,29 +307,23 @@ fn set_dirty(db: &mut StateDb, nodes: impl IntoIterator<Item = NodeId>) -> Resul
     })
 }
 
-/// Client `c`'s guard totals as the simulator counted them (`opts.guarding.pending`, with
-/// `dirty` its dirty set), against the store's over the same state (`held::pending_counts`, in
-/// `db`, filled with its input, the dirty set made `dirty`): what differs, if anything. The
-/// store's rule is the engine's; the simulator's is a copy that mustn't drift. Only the
-/// counting rule: when the engine counts (a sync's start, again when another connection wrote,
-/// never below before) the simulator doesn't model. Held deletes out of the dirty set aren't
-/// in the store filled: the simulator counts them with what differs.
+/// Client `c`'s guard totals as the simulator counted them (`opts.guarding.pending`, the rule in
+/// `Sim::plan`) against the store's in `db`, its dirty set `all_dirty`: what differs, if anything.
 fn counts_differ(
     c: usize,
     db: &mut StateDb,
     opts: &Options,
-    dirty: &BTreeSet<NodeId>,
+    all_dirty: &BTreeSet<NodeId>,
 ) -> Result<Option<String>, StateError> {
-    if dirty.is_empty() {
+    if all_dirty.is_empty() {
         return Ok(None);
     }
-    set_dirty(db, dirty.iter().copied())?;
-    let store = db.read(|s| held::pending_counts(s, &opts.guarding.confirmed))?;
+    let store = db.read(|s| hbsync_engine::testkit::pending_counts(s, &opts.guarding.confirmed))?;
     let (here, there) = opts.guarding.pending;
     Ok((store != (here as u64, there as u64)).then(|| {
         format!(
             "c{c}: the guard's totals (gone here, gone there) are {:?} in the simulator, {store:?} \
-             in the store, over {dirty:?} dirty, {:?} confirmed",
+             in the store, over {all_dirty:?} dirty, {:?} confirmed",
             opts.guarding.pending, opts.guarding.confirmed
         )
     }))

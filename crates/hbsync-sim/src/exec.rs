@@ -259,57 +259,37 @@ impl Sim {
             );
         }
         // The guard's totals over the whole dirty set, as the engine's store counts them
-        // (`holding::guard_counts`, which `narrow::check_counts` holds this to), and of them
+        // (`holding::guard_counts`, which `narrow::counts_differ` holds this to), and of them
         // those outside the page (for the oracle):
         // - each dirty synced file gone here (but one whose base keeps its absence: online-only,
         //   wanted) or gone there (`pending_file_deletes`);
         // - what a folder's removal took along (`taken_files`): those this device removes from
         //   the drive on the gone here side, the synced ones on the gone there side;
         // - less what the dirty confirmed deletes cover (`confirmed_file_deletes`): the node
-        //   itself gone here, and of its subtree here what is gone there, each file once.
+        //   itself gone here, and of its subtree here what is gone there (taken along by a
+        //   removal in that subtree or above the node on the drive, if so), each file once.
         // Not modelled: the engine counts at a sync's start and again only when another
         // connection wrote, never below the counts before (`HeldDeletes::recount`); the
         // simulator counts afresh at each plan.
         let synced_file = |n: NodeId| input.base.get(n).is_some_and(|s| s.kind == NodeKind::File);
-        let keeps_absence = |n: NodeId| {
-            input
-                .base_extra
-                .get(&n)
-                .is_some_and(|e| e.content_state.keeps_absence())
+        let gone_here = |n: NodeId| {
+            synced_file(n) && !input.content_state(n).keeps_absence() && !input.local.contains(n)
         };
-        let gone_here = |n: NodeId| synced_file(n) && !keeps_absence(n) && !input.local.contains(n);
         let gone_there = |n: NodeId| synced_file(n) && !input.remote.contains(n);
-        let (mut here, mut there): (Vec<NodeId>, Vec<NodeId>) = (Vec::new(), Vec::new());
-        for &n in &all {
-            if gone_here(n) {
-                here.push(n);
-            }
-            if gone_there(n) {
-                there.push(n);
-            }
-        }
+        let (mut here, mut there): (Vec<NodeId>, Vec<NodeId>) = (
+            all.iter().copied().filter(|n| gone_here(*n)).collect(),
+            all.iter().copied().filter(|n| gone_there(*n)).collect(),
+        );
         let taken = hbsync_engine::reconcile::taken_along(&input);
         // Of the taken-along files gone there, outside the page: see below, once planned.
         let mut taken_there: Vec<NodeId> = Vec::new();
-        // The removed folder each taken-along node went with: its nearest in Recently deleted.
-        let taken_by: HashMap<NodeId, NodeId> = taken
-            .iter()
-            .filter_map(|&n| {
-                let r = input
-                    .remote
-                    .ancestors(n)
-                    .into_iter()
-                    .find(|a| input.removed.contains_key(a))?;
-                Some((n, r))
-            })
-            .collect();
         if !all.is_empty() {
             for &n in &taken {
-                let file = input
+                // A file on the drive, synced as a file or not synced (`taken_files`).
+                let removes = input
                     .remote
                     .get(n)
-                    .is_some_and(|s| s.kind == NodeKind::File);
-                let removes = file
+                    .is_some_and(|s| s.kind == NodeKind::File)
                     && match input.base.get(n) {
                         None => all.contains(&n),
                         Some(b) => b.kind == NodeKind::File && !(all.contains(&n) && gone_here(n)),
@@ -322,52 +302,35 @@ impl Sim {
                 }
             }
         }
-        // What the dirty confirmed deletes cover: each one's node gone here (or a file taken
-        // along by a removal in its subtree or above it on the drive), and what is gone there
-        // in its subtree here (dirty, or taken along so), each file once.
-        let (mut covered_here, mut covered_there) = (HashSet::new(), HashSet::new());
-        for &c in client.confirmed.iter().filter(|c| all.contains(c)) {
-            let sub: HashSet<NodeId> = input.local.subtree(c).into_iter().collect();
-            let up = input.remote.ancestors(c);
-            let taken_c = |n: NodeId| {
-                taken_by
-                    .get(&n)
-                    .is_some_and(|r| sub.contains(r) || up.contains(r))
+        // What the dirty confirmed deletes cover: each one's own node gone here; and gone there,
+        // what has one at or above it here (a taken-along file only where the removal that took
+        // it is in that one's subtree here or above it on the drive).
+        let confirmed_dirty = |n: &NodeId| client.confirmed.contains(n) && all.contains(n);
+        if client.confirmed.iter().any(confirmed_dirty) {
+            here.retain(|n| !confirmed_dirty(n));
+            let covering = |n: NodeId| {
+                std::iter::once(n)
+                    .chain(input.local.ancestors(n))
+                    .filter(confirmed_dirty)
+                    .collect::<Vec<NodeId>>()
             };
-            let file_on_drive = input
-                .remote
-                .get(c)
-                .is_some_and(|s| s.kind == NodeKind::File);
-            if gone_here(c)
-                || (taken_c(c)
-                    && file_on_drive
-                    && input.base.get(c).is_none_or(|b| b.kind == NodeKind::File))
-            {
-                covered_here.insert(c);
-            }
-            for &d in &sub {
-                if (all.contains(&d) && gone_there(d)) || (synced_file(d) && taken_c(d)) {
-                    covered_there.insert(d);
-                }
-            }
+            there.retain(|&n| covering(n).is_empty());
+            taken_there.retain(|&n| {
+                let Some(r) = hbsync_engine::reconcile::taken_by(&input, n) else {
+                    return true;
+                };
+                let removed_here = input.local.ancestors(r);
+                !covering(n).into_iter().any(|c| {
+                    r == c || removed_here.contains(&c) || input.remote.ancestors(c).contains(&r)
+                })
+            });
         }
-        let pending = (
-            here.len().saturating_sub(covered_here.len()),
-            (there.len() + taken_there.len()).saturating_sub(covered_there.len()),
-        );
+        let pending = (here.len(), there.len() + taken_there.len());
         let outside_page = |n: &&NodeId| !input.dirty.contains(*n);
         let mut outside = (
-            here.iter()
-                .filter(|n| !covered_here.contains(*n))
-                .filter(outside_page)
-                .count(),
-            there
-                .iter()
-                .filter(|n| !covered_there.contains(*n))
-                .filter(outside_page)
-                .count(),
+            here.iter().filter(outside_page).count(),
+            there.iter().filter(outside_page).count(),
         );
-        taken_there.retain(|n| !covered_there.contains(n));
         let confirmed = Arc::new(client.confirmed.clone());
         // Held as every synced file: until answered, by the engine's rule (it keeps
         // `guard.wiped` so), over what its store has: the mirror (the plan's view of the drive)
@@ -449,16 +412,18 @@ impl Sim {
         }
         // Every fourth plan (each costs a state DB and three more plans), until a difference
         // is found (it is reported).
+        let mut counted = false;
         if self.faults.narrow_check && !self.ledger.found_narrow_differs() {
             self.faults.narrow_rounds += 1;
             if self.faults.narrow_rounds.is_multiple_of(4) {
                 let round = self.faults.narrow_rounds / 4;
                 let what = self.check_narrow(c, &input, &opts, &known, &plan, round, &all);
                 self.ledger.narrow_differs(|| what);
+                counted = true;
             }
         }
         if self.faults.held_check && !self.ledger.found_narrow_differs() {
-            let what = self.check_held(c, &input, &opts, &known, &plan, &all);
+            let what = self.check_held(c, &input, &opts, &known, &plan, &all, !counted);
             self.ledger.narrow_differs(|| what);
         }
         // The files here not hashed yet (as the engine's view holds them: a row without a state

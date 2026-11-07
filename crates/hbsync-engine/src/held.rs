@@ -332,18 +332,6 @@ pub fn put_back_plan<S: Sides>(nodes: &[NodeId], sides: &S) -> Result<PutBack, S
     Ok(plan)
 }
 
-/// Tests: the guard's pending counts in `s` as a sweep's first read takes them
-/// (`holding::guard_counts`: the dirty set's synced files gone here and gone there, with what a
-/// folder's removal took along and the held deletes out of the dirty set, less what the
-/// `confirmed` deletes cover). The simulator's model of them is checked against this.
-#[cfg(feature = "testkit")]
-pub fn pending_counts(
-    s: &hbsync_state::ReadTx<'_>,
-    confirmed: &HashSet<NodeId>,
-) -> Result<(u64, u64), hbsync_state::StateError> {
-    Ok(crate::holding::guard_counts(s, confirmed, None, Some(0), false)?.pending)
-}
-
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
