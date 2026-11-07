@@ -464,6 +464,12 @@ impl Drive {
         Ok(named || made)
     }
 
+    /// The name the mirror has for `node`, live.
+    pub(crate) fn mirror_name(&self, node: NodeId) -> Result<Option<String>, StateError> {
+        self.account()
+            .read(|s| Ok(s.get_mirror(node)?.map(|m| m.name)))
+    }
+
     /// Whether the mirror holds `node` live.
     fn is_live(&self, node: NodeId) -> Result<bool, StateError> {
         self.account().read(|s| Ok(s.get_mirror(node)?.is_some()))

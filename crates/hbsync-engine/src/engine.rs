@@ -161,25 +161,45 @@ enum Part {
     Desktop,
 }
 
-/// Names a Desktop's folder on the drive ([`keys::DESKTOP_NAME`], the one owner of its name)
-/// from its next sync on: `name` ([`desktop_name`]), or with none the computer's, `computer`,
-/// if it has no name yet. A write only for a new name; whether it was one.
+/// Names a Desktop's folder on the drive ([`keys::DESKTOP_NAME`], the one owner of its name),
+/// from its next sync on; `there`, its name on the drive, if the mirror has it. With `name`
+/// ([`desktop_name`]): that one, also over a rename made elsewhere (asked for now). With none:
+/// the name it has; with none yet, `there` (a Desktop joining a folder there keeps its name),
+/// else the computer's, `computer`. Writes only what changes; whether the folder is to be
+/// named anew.
 pub(crate) fn set_desktop_name(
     db: &mut StateDb,
+    there: Option<String>,
     name: Option<&str>,
     computer: &str,
 ) -> Result<bool, StateError> {
     let now = db.read(|s| s.get_kv(keys::DESKTOP_NAME))?;
-    let name = match (name, &now) {
-        (Some(name), _) => desktop_name(name),
-        (None, None) => desktop_name(computer),
-        (None, Some(_)) => return Ok(false),
+    let (name, given) = match (name, now, there) {
+        (Some(name), now, there) => {
+            let name = desktop_name(name);
+            let anew = there.is_some_and(|there| there != name);
+            if now.as_deref() == Some(name.as_str()) && !anew {
+                return Ok(false);
+            }
+            // Not named so on the drive: given again, though it was the last name given.
+            if anew {
+                db.write(|s| s.folder().delete_kv(keys::DESKTOP_NAMED))?;
+            }
+            (name, false)
+        }
+        (None, Some(_), _) => return Ok(false),
+        (None, None, Some(there)) => (there, true),
+        (None, None, None) => (desktop_name(computer), false),
     };
-    if now.as_deref() == Some(name.as_str()) {
-        return Ok(false);
-    }
-    db.write(|s| s.folder().set_kv(keys::DESKTOP_NAME, &name))?;
-    Ok(true)
+    db.write(|s| {
+        let folder = s.folder();
+        folder.set_kv(keys::DESKTOP_NAME, &name)?;
+        if given {
+            folder.set_kv(keys::DESKTOP_NAMED, &name)?;
+        }
+        Ok(())
+    })?;
+    Ok(!given)
 }
 
 /// The name a computer's Desktop folder takes from `name` (the computer's): [`valid_desktop_name`],
@@ -375,7 +395,9 @@ impl Engine {
     /// rename made elsewhere stands until it changes. Nothing for another folder.
     pub fn name_desktop(&mut self, name: &str) -> Result<(), StateError> {
         if self.part == Part::Desktop {
-            set_desktop_name(&mut self.db, Some(name), name)?;
+            let top = self.cfg.folder.scope.top;
+            let there = self.drive.mirror_name(top)?;
+            set_desktop_name(&mut self.db, there, Some(name), name)?;
         }
         Ok(())
     }
