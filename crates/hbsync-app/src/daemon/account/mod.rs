@@ -29,8 +29,8 @@ use hbsync_types::activity::Deleted;
 use hbsync_types::{NodeId, unix_now};
 
 use crate::protocol::{
-    AccountControl, AccountStatus, DeletedAccount, DeletedItem, FolderStatus, Pause, RecentItem,
-    State,
+    AccountControl, AccountStatus, DeletedAccount, DeletedItem, DesktopFolder, FolderStatus, Pause,
+    RecentItem, State,
 };
 use crate::runner::{Command, Handle, add_notes};
 use crate::sync::{Wakeup, lock};
@@ -508,6 +508,13 @@ impl Account {
         self.try_read(f).ok()
     }
 
+    /// The folders in Desktops on its drive, by name ([`AccountReader::desktops`]).
+    pub(super) fn desktops(&self) -> Result<Vec<DesktopFolder>, String> {
+        let folders = self.try_read(|db| db.desktops())?;
+        let folder = |(node, name)| DesktopFolder { node, name };
+        Ok(folders.into_iter().map(folder).collect())
+    }
+
     /// [`Account::read`], saying why there is no answer.
     fn try_read<T>(
         &self,
@@ -668,6 +675,77 @@ mod tests {
         // In no folder here: placed so.
         assert!(items[0].place().starts_with("(on the drive) "), "{items:?}");
         assert_eq!((items.len(), summary.deletes, summary.items), (1, 1, 0));
+        Ok(())
+    }
+
+    /// The folders in Desktops are listed by name, as its DB's mirror has them: the folders
+    /// alone, none from elsewhere on the drive.
+    #[test]
+    fn the_desktops_are_listed_by_name() -> Result<(), Box<dyn std::error::Error>> {
+        use hbsync_state::{MirrorRow, StateDb};
+        use hbsync_types::{NodeId, NodeKind, RemoteFileId, Uuid, VersionTag};
+        let home = tempfile::tempdir()?;
+        let paths = Paths::under(home.path());
+        let root = Root::main(&"a.example".into(), &home.path().join("Homebase"));
+        let (account, _requests) = Account::new(&paths, &root, None, Arc::default());
+        account.ready.store(true, Ordering::SeqCst);
+        let db = paths.account_db(&"a.example".into());
+        std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
+        Drive::open(
+            &db,
+            "a.example",
+            Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default()))),
+        )?;
+        let row = |node, parent, name: &str, kind| MirrorRow {
+            file_id: RemoteFileId(Uuid::new_v4()),
+            version: VersionTag(Uuid::new_v4()),
+            node,
+            parent,
+            name: name.into(),
+            kind,
+            file: None,
+            content_extra: None,
+            token: None,
+            changed_at: Some(5),
+        };
+        let (work, laptop) = (NodeId::new(), NodeId::new());
+        StateDb::open_account(&db)?.write(|s| {
+            let a = s.account();
+            a.put_live(&row(
+                NodeId::DESKTOPS,
+                NodeId::ROOT,
+                "Desktops",
+                NodeKind::Folder,
+            ))?;
+            a.put_live(&row(work, NodeId::DESKTOPS, "Work", NodeKind::Folder))?;
+            a.put_live(&row(laptop, NodeId::DESKTOPS, "Laptop", NodeKind::Folder))?;
+            let file = hbsync_state::MirrorFile {
+                hash: hbsync_types::ContentHash {
+                    algorithm: hbsync_types::HashAlgorithm::Blake3,
+                    bytes: [1; 32],
+                },
+                size: 1,
+                mtime_ms: None,
+                executable: false,
+            };
+            let text = row(NodeId::new(), NodeId::DESKTOPS, "a.txt", NodeKind::File);
+            a.put_live(&MirrorRow {
+                file: Some(file),
+                ..text
+            })?;
+            a.put_live(&row(
+                NodeId::new(),
+                NodeId::ROOT,
+                "Photos",
+                NodeKind::Folder,
+            ))
+        })?;
+        let listed: Vec<_> = account
+            .desktops()?
+            .into_iter()
+            .map(|d| (d.node, d.name))
+            .collect();
+        assert_eq!(listed, [(laptop, "Laptop".into()), (work, "Work".into())]);
         Ok(())
     }
 

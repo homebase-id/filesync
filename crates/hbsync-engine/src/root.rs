@@ -476,6 +476,20 @@ impl AccountReader {
         self.db.read(|s| s.folders())
     }
 
+    /// The computers' Desktops' folders on the drive (the folders in Desktops, as the mirror
+    /// has them), by name.
+    pub fn desktops(&mut self) -> Result<Vec<(NodeId, String)>, StateError> {
+        let mut folders: Vec<_> = self
+            .db
+            .read(|s| s.mirror_children(NodeId::DESKTOPS))?
+            .into_iter()
+            .filter(|m| m.kind == hbsync_types::NodeKind::Folder)
+            .map(|m| (m.node, m.name))
+            .collect();
+        folders.sort_by(|a, b| a.1.cmp(&b.1));
+        Ok(folders)
+    }
+
     /// The newest `limit` entries of `folder`'s recently synced list.
     pub fn recent_synced(&mut self, folder: i64, limit: usize) -> Result<Vec<Synced>, StateError> {
         self.db.read_folder(folder, |s| s.recent_synced(limit))

@@ -92,6 +92,10 @@ pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
             }
             Ok(())
         })()),
+        Ask::Desktops { identity } => match accounts.iter().find(|a| a.identity == identity) {
+            Some(a) => a.desktops().map_or_else(Reply::Refused, Reply::Desktops),
+            None => Reply::Refused(format!("{identity} isn't syncing")),
+        },
         Ask::RemoveFolder { path } => done((|| {
             crate::folders::remove(&daemon.paths, &path)?;
             for a in accounts {
