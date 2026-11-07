@@ -4,6 +4,7 @@
 use super::*;
 use crate::gone;
 use crate::settle::rules::Acts;
+use hbsync_types::ContentHash;
 
 impl Executor<'_> {
     // ---- transfers: prepare (guards) and commit (placement, DB) around the worker pool ----
@@ -219,16 +220,22 @@ impl Executor<'_> {
             return Err(Outcome::waiting("the drive is out of storage"));
         }
         let os = self.folder.os;
-        let (row, mirror, base, file) = self.db.read(|s| {
+        let (row, mirror, removed, base, file) = self.db.read(|s| {
             let (row, base, mirror) = (
                 s.local_by_node(node)?,
                 s.get_base(node)?,
                 s.get_mirror(node)?,
             );
+            // A restore writes over the version in Recently deleted: the drive's.
+            let removed = match existing {
+                None => s.removed_by_node(node)?,
+                Some(_) => None,
+            };
             let file = match (&row, s.local_parent(node)?) {
                 (Some(row), Some(parent)) => {
                     let drive = mirror
                         .as_ref()
+                        .or(removed.as_ref().map(|r| &r.row))
                         .and_then(|m| m.file.as_ref())
                         .map(|f| f.executable);
                     // By its name at its place, as the view reads it.
@@ -239,7 +246,7 @@ impl Executor<'_> {
                 }
                 _ => None,
             };
-            Ok((row, mirror, base, file))
+            Ok((row, mirror, removed, base, file))
         })?;
         let Some(row) = row else {
             return Err(Outcome::stale("gone locally"));
@@ -259,19 +266,20 @@ impl Executor<'_> {
         };
         let size = file.size;
         let path = self.disk.abs(&row.path);
-        let removed = match existing {
-            None => self.db.read(|s| s.removed_by_node(node))?,
-            Some(_) => None,
-        };
-        // The version written over has bytes this device never had: edited elsewhere, then
-        // deleted (in Recently deleted, or taken along by a folder's delete, node schema):
-        // writing over it would lose it. It stays, and this version goes up as a new item.
+        // The version written over was edited elsewhere, then deleted (in Recently deleted, or
+        // taken along by a folder's delete, node schema): it stays, and this version goes up
+        // as a new item.
         let over = match existing {
             None => removed.as_ref().map(|r| &r.row),
             Some((file_id, _)) => mirror.as_ref().filter(|m| m.file_id == file_id),
         };
+        let agreed = base.as_ref().and_then(|b| b.state.content);
         if let Some(r) = over
-            && r.file.map(|f| f.hash) != base.as_ref().and_then(|b| b.state.content).map(|c| c.hash)
+            && never_had(
+                r.file.map(|f| (f.hash, f.executable)),
+                agreed.map(|c| (c.hash, c.executable)),
+                file.executable,
+            )
         {
             return Err(self.detach(node, NodeId::new()).unwrap_or_else(|o| o));
         }
@@ -481,7 +489,7 @@ impl Executor<'_> {
         &mut self,
         placement: Placement,
         done: hbsync_fileio::CompletedFile,
-        local_hash: hbsync_types::ContentHash,
+        local_hash: ContentHash,
     ) -> Step {
         let Placement {
             mut record,
@@ -653,6 +661,21 @@ impl Executor<'_> {
             self.report.rescan.push(to.parent().unwrap_or_default());
         }
         Ok(())
+    }
+}
+
+/// Whether an upload writing over version `over` (its bytes and executable bit) would lose what
+/// this device never had: bytes other than the agreed ones (`base`), or a bit changed elsewhere
+/// (not the agreed one) that the upload doesn't send (`sent`). The simulator's uploads ask this
+/// too.
+pub fn never_had(
+    over: Option<(ContentHash, bool)>,
+    base: Option<(ContentHash, bool)>,
+    sent: bool,
+) -> bool {
+    match (over, base) {
+        (Some((oh, ox)), Some((bh, bx))) => oh != bh || (ox != bx && ox != sent),
+        (over, base) => over.is_some() != base.is_some(),
     }
 }
 

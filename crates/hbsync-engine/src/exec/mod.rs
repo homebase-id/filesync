@@ -821,7 +821,7 @@ pub use recover::{
 };
 use recover::{complete_fork, download_key};
 use schedule::{Retried, Schedule};
-pub use transfer_ops::tags_lost;
+pub use transfer_ops::{never_had, tags_lost};
 
 /// Whether `meta` (from disk) is what `row` recorded: folders by kind and file id, files by
 /// their full fingerprint.

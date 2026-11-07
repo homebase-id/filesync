@@ -1409,23 +1409,12 @@ impl Sim {
                 // In Recently deleted: restored at its file id (an edit wins over the delete),
                 // unless it holds a version this client never had: that one stays, and this
                 // version becomes a new item (as the executor detaches it).
-                let file_id = self.server.removed.get(&node).map(|n| n.remote.file_id);
-                if let Some(r) = self.server.removed.get(&node)
-                    && kind == NodeKind::File
-                    && r.state.content.map(|c| c.hash)
-                        != self.clients[c]
-                            .base
-                            .get(node)
-                            .and_then(|b| b.content)
-                            .map(|c| c.hash)
-                {
-                    let client = &self.clients[c];
-                    if !client.local.contains(node) || !unchanged(client, node) {
-                        return Skip;
-                    }
-                    let new_node = self.ids.fresh();
-                    return self.execute(c, &Op::LocalDetach { node, new_node });
-                }
+                let (file_id, over) = self
+                    .server
+                    .removed
+                    .get(&node)
+                    .map(|r| (r.remote.file_id, r.state.clone()))
+                    .unzip();
                 let client = &self.clients[c];
                 // The local node must still be there, as planned (the executor reads it).
                 if !client.local.contains(node) || !unchanged(client, node) {
@@ -1433,14 +1422,22 @@ impl Sim {
                 }
                 let content = match kind {
                     NodeKind::Folder => None,
-                    NodeKind::File => sent_content(client, node),
+                    NodeKind::File => sent_content_over(client, node, over.as_ref()),
                 };
+                if let Some(over) = &over
+                    && never_had_over(client, node, over.content, content)
+                {
+                    let new_node = self.ids.fresh();
+                    return self.execute(c, &Op::LocalDetach { node, new_node });
+                }
                 if kind == NodeKind::File && client.send_hash.contains(&node) {
                     self.ledger.sent_on_send += 1;
                 }
+                let was = over.as_ref().and_then(|o| o.content).map(|c| c.executable);
+                self.x_sent(c, node, was, content);
                 // A restore keeps the tags the removed version has (the executor merges them).
-                let tags = match self.server.removed.get(&node) {
-                    Some(r) => self.merged_with_drive(c, node, &tags, &r.state.tags),
+                let tags = match &over {
+                    Some(o) => self.merged_with_drive(c, node, &tags, &o.tags),
                     None => tags,
                 };
                 let state = NodeState {
@@ -1479,11 +1476,10 @@ impl Sim {
                 // Over a version this client never had (taken along by a folder's delete):
                 // that one stays, and this version becomes a new item (as the executor
                 // detaches it).
-                let base_content = self.clients[c].base.get(node).and_then(|b| b.content);
                 if upload
                     && let Some(server) = self.server.live.get(&node)
                     && server.remote.version == expected
-                    && server.state.content.map(|c| c.hash) != base_content.map(|c| c.hash)
+                    && never_had_over(&self.clients[c], node, server.state.content, local_content)
                 {
                     let client = &self.clients[c];
                     if !client.local.contains(node) || !unchanged(client, node) {
@@ -1501,27 +1497,19 @@ impl Sim {
                 if server.remote.version != expected {
                     return Skip; // 4160
                 }
+                let mut was = None;
                 if upload {
                     let Some(content) = local_content else {
                         return Skip;
                     };
-                    let was = server.state.content.map(|c| c.executable);
-                    let client = &self.clients[c];
-                    let asked = client.user_x.contains(&node);
-                    self.ledger.x_sent(|| {
-                        (was.is_some_and(|x| x != content.executable) && !asked).then(|| {
-                            format!(
-                                "{} sent {node:?} executable {}",
-                                client.name, content.executable
-                            )
-                        })
-                    });
+                    was = server.state.content.map(|c| c.executable);
                     server.state.content = Some(content);
                 }
                 server.state.parent = coords.to_drive(parent);
                 server.state.name = name;
                 server.state.tags = tags;
                 server.remote.version = version;
+                self.x_sent(c, node, was, local_content);
                 self.record_remote(c, node);
                 Done
             }
@@ -2018,6 +2006,18 @@ impl Sim {
         }
     }
 
+    /// Client `c` sent file `node`'s `content` over a version with bit `was`: the ledger counts a
+    /// bit it changed though no user there asked for it.
+    fn x_sent(&mut self, c: usize, node: NodeId, was: Option<bool>, content: Option<FileContent>) {
+        let client = &self.clients[c];
+        let asked = client.user_x.contains(&node);
+        self.ledger.x_sent(|| {
+            let sent = content?.executable;
+            (was.is_some_and(|x| x != sent) && !asked)
+                .then(|| format!("{} sent {node:?} executable {sent}", client.name))
+        });
+    }
+
     /// The tags client `c`'s write of `node` sends over the drive's version with `drive`'s, as
     /// the executor's `merged_with_drive`: its own merged with that version's.
     fn merged_with_drive(&self, c: usize, node: NodeId, ours: &Tags, drive: &Tags) -> Tags {
@@ -2384,11 +2384,40 @@ fn seen_content(
     Some(content)
 }
 
+/// Whether an upload of the client's file `node` (`sent`) over a version with `over` would lose
+/// what the client never had (the executor's [`hbsync_engine::exec::never_had`]); nothing to
+/// send is no upload (the executor's stale "not hashed yet").
+fn never_had_over(
+    client: &Client,
+    node: NodeId,
+    over: Option<FileContent>,
+    sent: Option<FileContent>,
+) -> bool {
+    let pair = |c: FileContent| (c.hash, c.executable);
+    let base = client.base.get(node).and_then(|b| b.content).map(pair);
+    sent.is_some_and(|s| hbsync_engine::exec::never_had(over.map(pair), base, s.executable))
+}
+
 /// The content an upload of the client's file `node` sends: as the client sees it, at its
 /// place, against the executor's mirror (the executor's `prepare_upload`).
 fn sent_content(client: &Client, node: NodeId) -> Option<FileContent> {
+    sent_content_over(client, node, None)
+}
+
+/// [`sent_content`], a restore against the version in Recently deleted (`over`) where the
+/// mirror has none: the drive's, for a bit the client doesn't hold.
+fn sent_content_over(
+    client: &Client,
+    node: NodeId,
+    over: Option<&NodeState>,
+) -> Option<FileContent> {
     let state = at_place(client, node, client.local.get(node)?);
-    seen_content(client, client.planned_remote.get(node), node, &state)
+    seen_content(
+        client,
+        client.planned_remote.get(node).or(over),
+        node,
+        &state,
+    )
 }
 
 /// Gives each item of `view` (a client's local tree, at its places) the tags and a file's
