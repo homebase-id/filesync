@@ -72,11 +72,19 @@ impl Sim {
         };
         let client = &self.clients[c];
         // The marks a round keeps may be of nodes no side holds any more (read clean once
-        // planned): a sweep's worth counts them too.
-        let nodes = client.base.len()
-            + client.local.len()
-            + self.server.live.len()
-            + client.pages.borrow().marks.len();
+        // planned): a sweep's worth counts those too.
+        let gone = client
+            .pages
+            .borrow()
+            .marks
+            .iter()
+            .filter(|n| {
+                !client.base.contains(**n)
+                    && !client.local.contains(**n)
+                    && !self.server.live.contains_key(n)
+            })
+            .count();
+        let nodes = client.base.len() + client.local.len() + self.server.live.len() + gone;
         // A sweep's worth of pages, and what they wait for, each a page of its own (a chain of
         // waits grows a page at a time; bounded: each such page is larger).
         let mut planned = 0;
@@ -350,21 +358,11 @@ impl Sim {
         };
         let plan = reconcile_with_known(&input, &opts, masking, known);
         if self.faults.page_size.is_some() {
-            let mut pages = client.pages.borrow_mut();
-            pages.own.add(&plan.waits_for_pages, &plan.waits_together);
-            // As the engine's round: the page's marks read clean go, the rest of them stay; what
-            // its held deletes take out of the dirty set (`held::out_of_dirty`) goes too, as at
-            // the end of the engine's sweep (the model of the held: `client.held`).
-            let clean: HashSet<NodeId> = plan.clean.iter().copied().collect();
-            let page: Vec<NodeId> = input.dirty.iter().copied().collect();
-            let (_, out) = hbsync_engine::held::out_of_dirty(&plan, &page);
-            for n in page {
-                if clean.contains(&n) || out.contains(&n) {
-                    pages.marks.remove(&n);
-                } else {
-                    pages.marks.insert(n);
-                }
-            }
+            client
+                .pages
+                .borrow_mut()
+                .own
+                .add(&plan.waits_for_pages, &plan.waits_together);
         }
         // Every fourth plan (each costs a state DB and three more plans), until a difference
         // is found (it is reported).
@@ -466,12 +464,28 @@ impl Sim {
             false => Vec::new(),
         };
         let client = &mut self.clients[c];
-        // A clash's loser outside the page the run is sent to rename is marked, as the engine
-        // marks it with the clearing.
+        // As the engine's round, once its checks have read the marks: the page's marks read
+        // clean go, the rest of them stay; what its held deletes take out of the dirty set
+        // (`held::out_of_dirty`) goes too, as at the end of the engine's sweep (the model of the
+        // held: `client.held`); and a clash's loser outside the page its plan renames, but one
+        // refused, is marked (`pages::clash_losers_sent`).
         if self.faults.page_size.is_some() {
+            let marks = &mut client.pages.get_mut().marks;
+            let clean: HashSet<NodeId> = plan.clean.iter().copied().collect();
             let page: Vec<NodeId> = input.dirty.iter().copied().collect();
-            let sent = hbsync_engine::pages::clash_losers_sent(&plan.conflicts, &page, &ops);
-            client.pages.get_mut().marks.extend(sent);
+            let (_, out) = hbsync_engine::held::out_of_dirty(&plan, &page);
+            let sent = hbsync_engine::pages::clash_losers_sent(&plan.conflicts, &page, &plan.ops);
+            for n in page {
+                if clean.contains(&n) || out.contains(&n) {
+                    marks.remove(&n);
+                } else {
+                    marks.insert(n);
+                }
+            }
+            marks.extend(
+                sent.into_iter()
+                    .filter(|n| !refused.iter().any(|op| op.node() == *n)),
+            );
         }
         client.blocked = refused
             .into_iter()

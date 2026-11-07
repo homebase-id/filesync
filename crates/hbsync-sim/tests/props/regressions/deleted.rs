@@ -2195,11 +2195,12 @@ fn regression_paged_clients_converge_after_a_stopped_delete_and_a_restore() {
 }
 
 /// Seed ba33fc36 (`clients_planning_in_small_pages_converge_without_loss`, pages of 1, two
-/// clients): client 0 uploads a few new files, then deletes them all before they are settled.
-/// The marks its rounds keep (`Pages::marks`) hold those nodes, gone from every side, till a
-/// round reads them clean; the simulator's sweep took as many pages as the sides hold nodes,
-/// so it ended on them and never reached the file client 1 uploaded meanwhile. A sweep's
-/// worth counts the kept marks too.
+/// clients): client 0 plans the upload of a folder and the files in it, and before they run
+/// the folder goes (another device's stopped delete, then a delete), its files with it. The
+/// marks its rounds keep (`Pages::marks`) hold those nodes, gone from every side, till a round
+/// reads them clean; the simulator's sweep took as many pages as the sides hold nodes, so it
+/// ended on them and never reached client 1's file (made first, sent last). A sweep's worth
+/// counts the kept marks of nodes no side holds too.
 #[test]
 fn regression_paged_clients_converge_after_a_stopped_delete_beside_new_files() {
     use hbsync_sim::Action::{CreateFile, CreateFolder, Delete, DeleteStopped};

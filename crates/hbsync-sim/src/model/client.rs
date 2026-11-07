@@ -28,8 +28,8 @@ pub(crate) struct Pages {
     /// What pages of their own planned this sweep: not planned again in its pages.
     pub(crate) planned_own: BTreeSet<NodeId>,
     /// The marks the engine keeps beyond what its scan and feed mark (in pages only): a page's
-    /// nodes its round didn't read clean, and a clash's loser outside the page its run was sent
-    /// for, till a round reads them clean. Not modelled: the executor's own marks (a fork's or
+    /// nodes its round didn't read clean, and a clash's loser outside the page its plan renames
+    /// (one the drive refused not), till a round reads them clean. Not modelled: the executor's own marks (a fork's or
     /// a detach's ids, a skipped or stopped operation), which the simulator reads as what
     /// differs.
     pub(crate) marks: BTreeSet<NodeId>,

@@ -77,10 +77,10 @@ pub fn dirty_elsewhere<P: Pending>(
     Ok(())
 }
 
-/// A name clash's losers outside the page (`page`) that a round's run is sent to rename (`ops`,
-/// once refusals are taken out): planned for the winner's sake, they have no mark of their own,
-/// and are marked with the clearing of what the round read clean, so a run stopped before the
-/// rename (a pause, a crash) leaves them to the next.
+/// A name clash's losers outside the page (`page`) that a round's plan renames (`ops`): planned
+/// for the winner's sake, they have no mark of their own, and are marked with the clearing of
+/// what the round read clean (but those whose rename the drive refused), so a run stopped
+/// before the rename (a pause, a crash, a refusal it waits for) leaves them to the next.
 pub fn clash_losers_sent(conflicts: &[Conflict], page: &[NodeId], ops: &[Op]) -> Vec<NodeId> {
     let losers: Vec<NodeId> = conflicts
         .iter()

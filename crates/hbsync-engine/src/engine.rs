@@ -851,19 +851,20 @@ impl Engine {
         }
         // Held till answered: out of the dirty set at the end of the sync, if that is all.
         hold_out.add(&plan, &dirty, marks);
+        // A clash's loser outside the page its plan renames ([`crate::pages::clash_losers_sent`]),
+        // but one the drive refused (it waits for a change): marked with the clearing below.
+        let mut sent = crate::pages::clash_losers_sent(&plan.conflicts, &dirty, &plan.ops);
         let mut ops = plan.ops;
         let case_insensitive = self.cfg.folder.case_insensitive;
         let (refusals, refused) = self
             .refusals
             .take(&mut self.db, &mut ops, case_insensitive)?;
+        sent.retain(|n| !refused.iter().any(|(op, _)| op.node() == *n));
         report.refused.extend(refused);
         // Each mark as the page read it: one made since (another engine's pull, an
         // announcement) may be of a change the plan didn't see, and stays. With the clearing,
-        // a clash's loser outside the page the run is sent to rename is marked
-        // ([`crate::pages::clash_losers_sent`]): one mark per loser, and a plan of it in a
-        // later round.
+        // the losers sent are marked: one mark per loser, and a plan of it in a later round.
         let clean: std::collections::HashSet<NodeId> = plan.clean.iter().copied().collect();
-        let sent = crate::pages::clash_losers_sent(&plan.conflicts, &dirty, &ops);
         self.db.write(|s| {
             marks
                 .iter()
