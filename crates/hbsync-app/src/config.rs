@@ -12,11 +12,15 @@
 //! [[roots]]
 //! identity = "anna.example.com"
 //! folder = "/home/anna/Homebase"
+//! # role = "documents"           # a role folder: synced where it is (sync semantics §12)
+//! # desktop = "<uuid>"            # or this computer's Desktop: its own folder in Desktops
+//! # name = "Anna's laptop"        # that folder's name on the drive [default: device_name]
 //! ```
 
 use std::path::{Path, PathBuf};
 
-use hbsync_types::Role;
+use hbsync_state::FolderKind;
+use hbsync_types::{NodeId, Role};
 use serde::{Deserialize, Serialize};
 
 use crate::Identity;
@@ -67,6 +71,12 @@ pub struct Root {
     /// drive's root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<Role>,
+    /// This computer's Desktop (sync semantics §12): its own folder in Desktops on the drive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub desktop: Option<NodeId>,
+    /// A Desktop's: its folder's name on the drive; the computer's (`device_name`) when unset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 impl Root {
@@ -76,6 +86,58 @@ impl Root {
             identity: identity.clone(),
             folder: folder.to_path_buf(),
             role: None,
+            desktop: None,
+            name: None,
+        }
+    }
+
+    /// `role`'s folder at `folder`, synced with `identity`.
+    pub fn role(identity: &Identity, folder: &Path, role: Role) -> Root {
+        Root {
+            role: Some(role),
+            ..Root::main(identity, folder)
+        }
+    }
+
+    /// This computer's Desktop at `folder`, synced with `identity`'s folder `top` in Desktops,
+    /// named `name` there (`None`: as the computer).
+    pub fn desktop(identity: &Identity, folder: &Path, top: NodeId, name: Option<String>) -> Root {
+        Root {
+            desktop: Some(top),
+            name,
+            ..Root::main(identity, folder)
+        }
+    }
+
+    /// What it is.
+    pub fn kind(&self) -> FolderKind {
+        match (self.desktop, self.role) {
+            (Some(_), _) => FolderKind::Desktop,
+            (None, Some(_)) => FolderKind::Role,
+            (None, None) => FolderKind::Main,
+        }
+    }
+
+    /// Whether it is the main folder.
+    pub fn is_main(&self) -> bool {
+        self.kind() == FolderKind::Main
+    }
+
+    /// The drive's node it holds: the root, a role folder, its computer's Desktop's folder.
+    pub fn top(&self) -> NodeId {
+        match (self.desktop, self.role) {
+            (Some(top), _) => top,
+            (None, Some(role)) => role.node(),
+            (None, None) => NodeId::ROOT,
+        }
+    }
+
+    /// What it is, for people: the identity's main folder, its role folder, its Desktop.
+    pub fn what(&self) -> String {
+        match (self.desktop, self.role) {
+            (Some(_), _) => format!("{}'s Desktop", self.identity),
+            (None, Some(role)) => format!("{}'s {}", self.identity, role.name()),
+            (None, None) => self.identity.to_string(),
         }
     }
 }
@@ -176,9 +238,13 @@ impl Config {
 
     /// The folder `identity` syncs as `role` (`None`: its main folder), if it does.
     pub fn folder(&self, identity: &Identity, role: Option<Role>) -> Option<&Root> {
-        self.roots
-            .iter()
-            .find(|r| r.identity == *identity && r.role == role)
+        (self.roots.iter())
+            .find(|r| r.identity == *identity && r.desktop.is_none() && r.role == role)
+    }
+
+    /// The Desktop `identity` syncs here, if it does.
+    pub fn desktop(&self, identity: &Identity) -> Option<&Root> {
+        (self.roots.iter()).find(|r| r.identity == *identity && r.desktop.is_some())
     }
 
     /// The identities set up here, each once, in order.
@@ -217,7 +283,7 @@ impl Config {
 
     /// The main folder, if any (one at most, for now).
     pub fn root(&self) -> Result<Option<&Root>, ConfigError> {
-        let mains: Vec<&Root> = self.roots.iter().filter(|r| r.role.is_none()).collect();
+        let mains: Vec<&Root> = self.roots.iter().filter(|r| r.is_main()).collect();
         match mains.as_slice() {
             [] => Ok(None),
             [root] => Ok(Some(root)),

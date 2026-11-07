@@ -273,7 +273,7 @@ fn setup_sets_an_unusable_db_aside() -> R {
         let db = paths.account_db(&identity);
         std::fs::create_dir_all(&root)?;
         assert_eq!(
-            folders::add_synced(&paths, &identity, &root, None)?,
+            folders::add_synced(&paths, &Root::main(&identity, &root))?,
             (Taken::AtStart, None)
         );
         write_files(&root)?;
@@ -294,7 +294,7 @@ fn setup_sets_an_unusable_db_aside() -> R {
             assert_eq!(set?, (false, Some(why)));
         }
         assert_eq!(set_aside(&db)?.len(), 1, "{why:?}: kept");
-        folders::add_synced(&paths, &identity, &root, None)?;
+        folders::add_synced(&paths, &Root::main(&identity, &root))?;
         let (uploads, served) = sync_once(&server, &root, &db)?;
         assert_eq!(uploads, 0, "{why:?}");
         assert_eq!(
@@ -321,7 +321,7 @@ fn setup_after_a_set_aside_refuses_an_empty_mount_point() -> R {
         let root = setup::resolve(&home.path().join("Homebase"));
         let db = paths.account_db(&identity);
         std::fs::create_dir_all(&root)?;
-        folders::add_synced(&paths, &identity, &root, None)?;
+        folders::add_synced(&paths, &Root::main(&identity, &root))?;
         write_files(&root)?;
         sync_once(&server, &root, &db)?;
 
@@ -362,7 +362,7 @@ fn a_newer_db_is_refused_and_kept() -> R {
     let identity = Identity::new(ID);
     let root = setup::resolve(&home.path().join("Homebase"));
     std::fs::create_dir_all(&root)?;
-    folders::add_synced(&paths, &identity, &root, None)?;
+    folders::add_synced(&paths, &Root::main(&identity, &root))?;
     let db = paths.account_db(&identity);
     rusqlite::Connection::open(&db)?.pragma_update(None, "user_version", 9999)?;
     let before = std::fs::read(&db)?;

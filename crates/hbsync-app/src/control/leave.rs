@@ -63,7 +63,7 @@ pub fn unlink(paths: &Paths) -> Result<Option<Unlinked>> {
     };
     let autostart_was_on = autostart_off_unless_dev()?;
     // Only the main folder was decorated: a role folder's shortcuts are the user's own.
-    for root in roots.iter().filter(|r| r.role.is_none()) {
+    for root in roots.iter().filter(|r| r.is_main()) {
         crate::shell::undecorate(paths, &root.folder, &root.identity);
     }
     Ok(Some(Unlinked {

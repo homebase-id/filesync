@@ -203,8 +203,8 @@ impl Account {
     pub(super) fn main_folder(&self) -> Option<PathBuf> {
         let shown = lock(&self.shown);
         let main = match &shown.waiting {
-            Some(waiting) => waiting.roots.iter().find(|r| r.role.is_none()),
-            None => shown.shown().map(|r| &r.root).find(|r| r.role.is_none()),
+            Some(waiting) => waiting.roots.iter().find(|r| r.is_main()),
+            None => shown.shown().map(|r| &r.root).find(|r| r.is_main()),
         };
         main.map(|r| r.folder.clone())
     }
@@ -433,7 +433,7 @@ impl Account {
                         .into_iter()
                         .map(|synced| RecentItem {
                             folder: path.clone(),
-                            main: root.role.is_none(),
+                            main: root.is_main(),
                             synced,
                         }),
                 );
@@ -546,6 +546,7 @@ impl Waiting {
     fn status(&self, root: &Root, paused: Option<Pause>) -> FolderStatus {
         let mut folder = FolderStatus::new(&root.identity, &root.folder);
         folder.role = root.role;
+        folder.desktop = root.desktop.is_some();
         folder.state = if paused.is_some() {
             State::Paused
         } else {

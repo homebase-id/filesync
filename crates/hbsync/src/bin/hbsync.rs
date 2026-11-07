@@ -12,7 +12,7 @@ use hbsync_app::protocol::{
     DaemonControl, DaemonStatus, DeletedItem, FolderStatus, Hints, Note, Pause,
 };
 use hbsync_app::{
-    APP_NAME, Config, HeldAnswer, Paths, State, autostart, control as daemon, setup, words,
+    APP_NAME, Config, HeldAnswer, Paths, Root, State, autostart, control as daemon, setup, words,
 };
 use hbsync_local::STATE_DIR;
 use hbsync_types::Role;
@@ -64,22 +64,28 @@ enum Command {
     },
     /// Syncs one of your own folders where this computer keeps it (documents, pictures,
     /// music, videos, downloads) with the drive's folder of that kind: joined if another device
-    /// syncs it already (identical files are adopted, not copied), made if not.
+    /// syncs it already (identical files are adopted, not copied), made if not. `desktop` syncs
+    /// this computer's Desktop with a folder of its own in Desktops on the drive, which every
+    /// other computer shows in its main folder.
     Add {
-        #[arg(value_parser = parse_role)]
-        role: Role,
+        #[arg(value_parser = parse_folder)]
+        what: Own,
         /// The identity to sync it with [default: the one set up].
         #[arg(long)]
         identity: Option<String>,
         /// Where this computer keeps it, if not where the OS says.
         #[arg(long)]
         folder: Option<PathBuf>,
+        /// The Desktop's folder's name on the drive [default: the computer's]; given again for
+        /// a Desktop synced already, it renames its folder.
+        #[arg(long)]
+        name: Option<String>,
     },
     /// Stops syncing one of your own folders. Its files stay; adding it again picks up where it
     /// was.
     Remove {
-        #[arg(value_parser = parse_role)]
-        role: Role,
+        #[arg(value_parser = parse_folder)]
+        what: Own,
         /// The identity it syncs with [default: the one set up].
         #[arg(long)]
         identity: Option<String>,
@@ -390,23 +396,34 @@ fn run(command: Command) -> Res<ExitCode> {
             println!("Signed in again on {identity}.");
         }
         Command::Add {
-            role,
+            what,
             identity,
             folder,
+            name,
         } => {
             let config = Config::load(&paths.config_file())?.unwrap_or_default();
             let identity = config.identity(identity.as_deref())?;
             // Refused (where setup refuses a folder, or another app syncs it) by the adding.
-            let folder = match folder {
-                Some(f) => setup::resolve(&f),
-                None => setup::role_folder(role)?,
+            let folder = match (folder, what) {
+                (Some(f), _) => setup::resolve(&f),
+                (None, Own::Role(role)) => setup::role_folder(role)?,
+                (None, Own::Desktop) => setup::desktop_folder()?,
             };
-            let what = format!(
-                "{} syncs with {identity}'s {}",
-                folder.display(),
-                role.name()
-            );
-            let (taken, set_aside) = folders::add_synced(&paths, &identity, &folder, Some(role))?;
+            let root = match what {
+                Own::Role(_) if name.is_some() => {
+                    return Err("--name is for the Desktop".into());
+                }
+                Own::Role(role) => Root::role(&identity, &folder, role),
+                Own::Desktop => {
+                    // Named again: synced already, it starts over under the new name.
+                    if let Some(synced) = config.desktop(&identity).filter(|_| name.is_some()) {
+                        folders::remove_synced(&paths, &synced.folder.clone())?;
+                    }
+                    folders::desktop(&paths, &identity, &folder, name)
+                }
+            };
+            let what = format!("{} syncs with {}", folder.display(), root.what());
+            let (taken, set_aside) = folders::add_synced(&paths, &root)?;
             if let Some(why) = set_aside {
                 println!("{}", words::set_aside(why));
             }
@@ -415,11 +432,19 @@ fn run(command: Command) -> Res<ExitCode> {
                 Taken::AtStart => println!("{what} once {APP_NAME} runs (`hbsync start`)."),
             }
         }
-        Command::Remove { role, identity } => {
+        Command::Remove { what, identity } => {
             let config = Config::load(&paths.config_file())?.unwrap_or_default();
             let identity = config.identity(identity.as_deref())?;
-            let Some(root) = config.folder(&identity, Some(role)) else {
-                println!("{identity}'s {} isn't synced here.", role.name());
+            let synced = match what {
+                Own::Role(role) => config.folder(&identity, Some(role)),
+                Own::Desktop => config.desktop(&identity),
+            };
+            let Some(root) = synced else {
+                let name = match what {
+                    Own::Role(role) => role.name(),
+                    Own::Desktop => "Desktop",
+                };
+                println!("{identity}'s {name} isn't synced here.");
                 return Ok(ExitCode::SUCCESS);
             };
             folders::remove_synced(&paths, &root.folder)?;
@@ -461,8 +486,21 @@ fn run(command: Command) -> Res<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
-fn parse_role(s: &str) -> Result<Role, String> {
-    s.parse()
+/// One of the user's own folders `add` and `remove` take: a role folder, or the Desktop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Own {
+    Role(Role),
+    Desktop,
+}
+
+fn parse_folder(s: &str) -> Result<Own, String> {
+    match s {
+        "desktop" => Ok(Own::Desktop),
+        role => role
+            .parse()
+            .map(Own::Role)
+            .map_err(|e| format!("{e}, or desktop")),
+    }
 }
 
 /// Items of Recently deleted as `hbsync deleted` shows them: where, when deleted, how many
@@ -591,10 +629,7 @@ fn print_status(status: &DaemonStatus) {
 
 fn print_folder(s: &FolderStatus) {
     println!("{APP_NAME}: {}", words::status_line(s, words::now()));
-    let who = match s.role {
-        Some(role) => format!("{}'s {}", s.identity, role.name()),
-        None => s.identity.to_string(),
-    };
+    let who = s.what();
     println!("  {who} <-> {}", s.path.display());
     // The status line has the progress, the pause, the next try and a failure's problem.
     if let Some(e) = s.error.as_ref().filter(|_| s.state != State::Failing) {

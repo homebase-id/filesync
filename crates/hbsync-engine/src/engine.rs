@@ -355,6 +355,10 @@ impl Engine {
             return Ok(());
         }
         let name = desktop_name(name);
+        // As the folder starts, each time: a write only for a new name.
+        if self.db.read(|s| s.get_kv(keys::DESKTOP_NAME))?.as_deref() == Some(name.as_str()) {
+            return Ok(());
+        }
         self.db
             .write(|s| s.folder().set_kv(keys::DESKTOP_NAME, &name))
     }
