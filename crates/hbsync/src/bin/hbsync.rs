@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use hbsync_app::control::{running, start, stop_syncing};
 use hbsync_app::daemon::UNANNOUNCED_READ;
-use hbsync_app::folders::{self, Taken};
+use hbsync_app::folders::{self, Own, Taken};
 use hbsync_app::protocol::{
     DaemonControl, DaemonStatus, DeletedItem, FolderStatus, Hints, Note, Pause,
 };
@@ -15,7 +15,6 @@ use hbsync_app::{
     APP_NAME, Config, HeldAnswer, Paths, Root, State, autostart, control as daemon, setup, words,
 };
 use hbsync_local::STATE_DIR;
-use hbsync_types::Role;
 
 type Res<T> = hbsync_app::Result<T>;
 
@@ -68,7 +67,7 @@ enum Command {
     /// this computer's Desktop with a folder of its own in Desktops on the drive, which every
     /// other computer shows in its main folder.
     Add {
-        #[arg(value_parser = parse_folder)]
+        #[arg(value_parser = str::parse::<Own>)]
         what: Own,
         /// The identity to sync it with [default: the one set up].
         #[arg(long)]
@@ -84,7 +83,7 @@ enum Command {
     /// Stops syncing one of your own folders. Its files stay; adding it again picks up where it
     /// was.
     Remove {
-        #[arg(value_parser = parse_folder)]
+        #[arg(value_parser = str::parse::<Own>)]
         what: Own,
         /// The identity it syncs with [default: the one set up].
         #[arg(long)]
@@ -403,7 +402,7 @@ fn run(command: Command) -> Res<ExitCode> {
         } => {
             let name = name
                 .map(|n| {
-                    hbsync_engine::valid_desktop_name(&n)
+                    folders::valid_desktop_name(&n)
                         .ok_or_else(|| format!("{n:?} can't name a folder on the drive"))
                 })
                 .transpose()?;
@@ -481,41 +480,6 @@ fn run(command: Command) -> Res<ExitCode> {
         Command::Log => println!("{}", paths.logs.display()),
     }
     Ok(ExitCode::SUCCESS)
-}
-
-/// One of the user's own folders `add` and `remove` take: a role folder, or the Desktop.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Own {
-    Role(Role),
-    Desktop,
-}
-
-impl Own {
-    /// Its name, for people.
-    fn name(self) -> &'static str {
-        match self {
-            Own::Role(role) => role.name(),
-            Own::Desktop => "Desktop",
-        }
-    }
-
-    /// The folder `identity` syncs as it here, if it does.
-    fn synced<'c>(self, config: &'c Config, identity: &hbsync_app::Identity) -> Option<&'c Root> {
-        match self {
-            Own::Role(role) => config.folder(identity, Some(role)),
-            Own::Desktop => config.desktop(identity),
-        }
-    }
-}
-
-fn parse_folder(s: &str) -> Result<Own, String> {
-    match s {
-        "desktop" => Ok(Own::Desktop),
-        role => role
-            .parse()
-            .map(Own::Role)
-            .map_err(|e| format!("{e}, or desktop")),
-    }
 }
 
 /// Items of Recently deleted as `hbsync deleted` shows them: where, when deleted, how many

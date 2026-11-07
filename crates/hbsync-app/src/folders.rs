@@ -7,8 +7,10 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use hbsync_engine::root::{RootError, SetAside, SyncRoot};
-use hbsync_state::{FolderKind, Unusable};
-use hbsync_types::NodeId;
+pub use hbsync_engine::valid_desktop_name;
+use hbsync_state::FolderKind;
+pub use hbsync_state::Unusable;
+use hbsync_types::{NodeId, Role};
 
 use crate::config::ConfigLock;
 use crate::sync::lock;
@@ -246,6 +248,53 @@ fn add_locked(
     Ok(Added { set_aside, named })
 }
 
+/// One of the user's own folders, to add or remove: a role folder, or the Desktop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Own {
+    Role(Role),
+    Desktop,
+}
+
+impl Own {
+    /// Its name, for people.
+    pub fn name(self) -> &'static str {
+        match self {
+            Own::Role(role) => role.name(),
+            Own::Desktop => "Desktop",
+        }
+    }
+
+    /// Its key: a role's (`documents`), or `desktop`.
+    pub fn key(self) -> &'static str {
+        match self {
+            Own::Role(role) => role.key(),
+            Own::Desktop => "desktop",
+        }
+    }
+
+    /// The folder `identity` syncs as it here, if it does.
+    pub fn synced<'c>(self, config: &'c Config, identity: &Identity) -> Option<&'c Root> {
+        match self {
+            Own::Role(role) => config.folder(identity, Some(role)),
+            Own::Desktop => config.desktop(identity),
+        }
+    }
+}
+
+impl std::str::FromStr for Own {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Own, String> {
+        match s {
+            "desktop" => Ok(Own::Desktop),
+            role => role
+                .parse()
+                .map(Own::Role)
+                .map_err(|e| format!("{e}, or desktop")),
+        }
+    }
+}
+
 /// Who took a folder change: the running daemon (it syncs now), or the config (the daemon
 /// does when it starts).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -428,7 +477,6 @@ fn remove_locked(held: &ConfigLock, path: &Path) -> Result<Option<Root>, Error> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hbsync_types::Role;
 
     /// Junk (never synced) and the state folder in any case aren't files to merge.
     #[test]

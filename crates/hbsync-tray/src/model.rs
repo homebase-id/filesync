@@ -423,27 +423,56 @@ mod tests {
         out
     }
 
+    /// A role folder's held deletes, or the Desktop's, are reviewed from the menu as the main
+    /// folder's are; its failure is what the status line says.
     #[test]
-    fn a_role_folders_held_deletes_are_reviewed_from_the_menu() {
-        let mut pictures =
-            FolderStatus::new(&"anna.example.com".into(), Path::new("/home/anna/Pictures"));
-        pictures.kind = hbsync_app::RootKind::Role(hbsync_types::Role::Pictures);
-        pictures.held_deletes = Some(HeldDeletes {
-            here: 0,
-            remotely: 300,
-            examples: Vec::new(),
-            token: "t".into(),
-        });
-        let daemon = Daemon::Running(Box::new(DaemonStatus {
-            version: hbsync_app::VERSION.into(),
-            accounts: Vec::new(),
-            folders: vec![status(State::Idle), pictures],
-        }));
-        assert_eq!(
-            daemon.held_or_main().map(|f| f.path.clone()),
-            Some(PathBuf::from("/home/anna/Pictures"))
-        );
-        assert!(actions(&menu(&view(&daemon, &[]))).contains(&Action::ReviewDeletions));
+    fn a_role_folders_or_the_desktops_held_deletes_are_reviewed_from_the_menu() {
+        use hbsync_app::RootKind;
+        let kinds = [
+            (
+                "/home/anna/Pictures",
+                RootKind::Role(hbsync_types::Role::Pictures),
+            ),
+            (
+                "/home/anna/Desktop",
+                RootKind::Desktop(hbsync_types::NodeId::new()),
+            ),
+        ];
+        for (path, kind) in kinds {
+            let mut folder = FolderStatus::new(&"anna.example.com".into(), Path::new(path));
+            folder.kind = kind;
+            folder.held_deletes = Some(HeldDeletes {
+                here: 0,
+                remotely: 300,
+                examples: Vec::new(),
+                token: "t".into(),
+            });
+            let daemon = |folder: FolderStatus| {
+                Daemon::Running(Box::new(DaemonStatus {
+                    version: hbsync_app::VERSION.into(),
+                    accounts: Vec::new(),
+                    folders: vec![status(State::Idle), folder],
+                }))
+            };
+            let held = daemon(folder.clone());
+            assert_eq!(
+                held.held_or_main().map(|f| f.path.clone()),
+                Some(PathBuf::from(path))
+            );
+            assert!(actions(&menu(&view(&held, &[]))).contains(&Action::ReviewDeletions));
+            // The menu's own lines are the main folder's.
+            assert_eq!(held.status().map(|f| f.kind), Some(RootKind::Main));
+
+            folder.held_deletes = None;
+            folder.state = State::Failing;
+            folder.error = Some("disk full".into());
+            let failing = daemon(folder);
+            assert_eq!(
+                status_line(&view(&failing, &[])),
+                "Problem: disk full",
+                "{path}"
+            );
+        }
     }
 
     /// Emptying Recently deleted shows in the menu while it runs, under the status line.
