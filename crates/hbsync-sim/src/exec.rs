@@ -99,6 +99,10 @@ impl Sim {
                 return true;
             }
         }
+        // The sync's end, a sweep that did nothing: its held deletes leave the dirty set.
+        let pages = self.clients[c].pages.get_mut();
+        let out = std::mem::take(&mut pages.held_out);
+        pages.marks.retain(|n| !out.contains(n));
         false
     }
 
@@ -255,10 +259,11 @@ impl Sim {
         }
         // The guard's totals over the whole dirty set, as the engine counts them
         // (`pending_file_deletes`): synced files gone here and gone there, but those confirmed;
-        // and of them, those outside the page (for the oracle). Of the engine's files a removed
-        // folder took along (`taken_files`), those this device removes from the drive, on the
-        // gone here side; not those on the gone there side, which `narrow::marked_dirty` leaves
-        // unmarked.
+        // and of them, those outside the page (for the oracle). The engine's files a removed
+        // folder took along (`taken_files`): those this device removes from the drive on the
+        // gone here side, and the synced ones on the gone there side, but those a confirmed
+        // delete covers (`confirmed_file_deletes`: in the local subtree of a dirty confirmed
+        // node), each once.
         let (mut pending, mut outside) = ((0, 0), (0, 0));
         let confirmed_at = |n: NodeId| {
             !client.confirmed.is_empty()
@@ -295,7 +300,28 @@ impl Sim {
                     .is_some_and(|s| s.kind == NodeKind::File)
                     && (synced_file(n) || (!input.base.contains(n) && all.contains(&n)))
             };
+            // What a confirmed delete covers of what was taken along: below it here.
+            let covered = |n: NodeId| {
+                client
+                    .confirmed
+                    .iter()
+                    .any(|c| all.contains(c) && (n == *c || input.local.ancestors(n).contains(c)))
+            };
+            // Outside the page: neither in it nor in a folder of it here (whose delete takes it
+            // along in this plan).
+            let in_page = |n: NodeId| {
+                input.dirty.contains(&n)
+                    || input
+                        .local
+                        .ancestors(n)
+                        .iter()
+                        .any(|a| input.dirty.contains(a))
+            };
             for &n in &taken {
+                if synced_file(n) && !covered(n) {
+                    pending.1 += 1;
+                    outside.1 += usize::from(!in_page(n));
+                }
                 if removes(n) && !counted_or_confirmed(n) {
                     pending.0 += 1;
                     outside.0 += usize::from(!input.dirty.contains(&n));
@@ -466,23 +492,25 @@ impl Sim {
         let client = &mut self.clients[c];
         // As the engine's round, once its checks have read the marks: the page's marks read
         // clean go, the rest of them stay; what its held deletes take out of the dirty set
-        // (`held::out_of_dirty`) goes too, as at the end of the engine's sweep (the model of the
-        // held: `client.held`); and a clash's loser outside the page its plan renames, but one
-        // refused, is marked (`pages::clash_losers_sent`).
+        // (`held::out_of_dirty`) is kept for the sync's end (`Pages::held_out`, as the engine's
+        // `HoldOut::add`: what a page plans again is its own again); and a clash's loser outside
+        // the page its plan renames, but one refused, is marked (`pages::clash_losers_sent`).
         if self.faults.page_size.is_some() {
-            let marks = &mut client.pages.get_mut().marks;
+            let pages = client.pages.get_mut();
             let clean: HashSet<NodeId> = plan.clean.iter().copied().collect();
             let page: Vec<NodeId> = input.dirty.iter().copied().collect();
             let (_, out) = hbsync_engine::held::out_of_dirty(&plan, &page);
             let sent = hbsync_engine::pages::clash_losers_sent(&plan.conflicts, &page, &plan.ops);
+            pages.held_out.retain(|n| !input.dirty.contains(n));
+            pages.held_out.extend(out);
             for n in page {
-                if clean.contains(&n) || out.contains(&n) {
-                    marks.remove(&n);
+                if clean.contains(&n) {
+                    pages.marks.remove(&n);
                 } else {
-                    marks.insert(n);
+                    pages.marks.insert(n);
                 }
             }
-            marks.extend(
+            pages.marks.extend(
                 sent.into_iter()
                     .filter(|n| !refused.iter().any(|op| op.node() == *n)),
             );

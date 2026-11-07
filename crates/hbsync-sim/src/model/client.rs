@@ -33,6 +33,11 @@ pub(crate) struct Pages {
     /// a detach's ids, a skipped or stopped operation), which the simulator reads as what
     /// differs.
     pub(crate) marks: BTreeSet<NodeId>,
+    /// What this sync's held deletes take out of the dirty set (`held::out_of_dirty`), as the
+    /// engine's `HoldOut`: out of `marks` once a sweep did nothing (the sync's end). Not
+    /// modelled: the engine's limit on what else stays dirty (`LEFTOVERS_MAX`), and its plan of
+    /// the rest alone reaching them.
+    pub(crate) held_out: BTreeSet<NodeId>,
 }
 
 #[derive(Debug)]
