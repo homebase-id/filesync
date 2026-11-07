@@ -237,21 +237,10 @@ pub fn account(paths: &Paths, identity: &Identity, control: AccountControl) -> R
     )
 }
 
-/// Has the daemon set the folder at `path` up for `identity` and sync it.
-pub fn add_folder(
-    paths: &Paths,
-    identity: &Identity,
-    path: &std::path::Path,
-    role: Option<hbsync_types::Role>,
-) -> Result<()> {
-    done(ask(
-        paths,
-        Ask::AddFolder {
-            identity: identity.clone(),
-            path: path.to_path_buf(),
-            role,
-        },
-    ))
+/// Has the daemon set the folder `root` up and sync it.
+pub fn add_folder(paths: &Paths, root: &crate::Root, name: Option<&str>) -> Result<()> {
+    let (root, name) = (root.clone(), name.map(str::to_owned));
+    done(ask(paths, Ask::AddFolder { root, name }))
 }
 
 /// Has the daemon stop syncing the folder at `path`; its files and state stay.

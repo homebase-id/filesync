@@ -10,17 +10,16 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use hbsync_types::NodeId;
-use hbsync_types::Role;
 use hbsync_types::activity::{Deleted, Synced};
 use serde::{Deserialize, Serialize};
 
-use crate::Identity;
+use crate::{Identity, Root, RootKind};
 
 pub use hbsync_types::activity::Progress;
 
 /// The protocol version this build speaks: a daemon refuses a request in another (after an
 /// update, until it restarts).
-pub(crate) const PROTOCOL: u32 = 10;
+pub(crate) const PROTOCOL: u32 = 11;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
@@ -62,11 +61,13 @@ pub enum Ask {
     FindDeleted {
         items: Vec<String>,
     },
-    /// Set the folder at `path` up for `identity` and sync it (`hbsync setup` has checked it).
+    /// Set the folder `root` up and sync it (`hbsync setup` has checked it). A Desktop is
+    /// named `name` on the drive (`None`: as it is, or the computer if it has no name yet);
+    /// one synced already is renamed where it is.
     AddFolder {
-        identity: Identity,
-        path: PathBuf,
-        role: Option<Role>,
+        root: Root,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     /// Stop syncing the folder at `path`; its files and state stay.
     RemoveFolder {
@@ -298,7 +299,7 @@ impl DaemonStatus {
     pub fn main_folder(&self) -> Option<&FolderStatus> {
         self.folders
             .iter()
-            .find(|f| f.role.is_none())
+            .find(|f| f.is_main())
             .or(self.folders.first())
     }
 }
@@ -387,8 +388,9 @@ pub struct FolderStatus {
     /// The account the folder syncs with.
     pub identity: Identity,
     pub path: PathBuf,
-    /// The role folder it is; `None` for the main folder (the drive's root).
-    pub role: Option<Role>,
+    /// What of the drive it holds: the main folder (the drive's root), a role folder, this
+    /// computer's Desktop (its own folder in Desktops, sync semantics §12).
+    pub kind: RootKind,
     pub state: State,
     /// Until when a pause lasts (Unix seconds); `None` while not paused or until resumed.
     pub paused_until: Option<u64>,
@@ -421,12 +423,22 @@ pub struct FolderStatus {
 }
 
 impl FolderStatus {
+    /// Whether it is the main folder (the drive's root).
+    pub fn is_main(&self) -> bool {
+        self.kind == RootKind::Main
+    }
+
+    /// What it is, for people ([`RootKind::what`]).
+    pub fn what(&self) -> String {
+        self.kind.what(&self.identity)
+    }
+
     /// Starting to sync the main folder at `path` with `identity`.
     pub fn new(identity: &Identity, path: &Path) -> FolderStatus {
         FolderStatus {
             identity: identity.clone(),
             path: path.to_path_buf(),
-            role: None,
+            kind: RootKind::Main,
             state: State::Starting,
             paused_until: None,
             progress: None,

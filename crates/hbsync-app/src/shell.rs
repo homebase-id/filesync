@@ -64,14 +64,15 @@ fn icon_file(paths: &Paths, bytes: &[u8], ext: &str) -> std::io::Result<PathBuf>
 
 /// Gives `folder` (synced with `identity`) its icon and shortcut, unless it already has them.
 pub fn decorate(paths: &Paths, folder: &Path, identity: &Identity, icons: Icons<'_>) {
-    // Not for a folder no longer set up: a late call that lost the race with Log out.
+    // Not for a folder no longer set up (a late call that lost the race with Log out), nor
+    // for one that isn't the main folder (a role folder or the Desktop is the user's own).
     let configured = crate::Config::load(&paths.config_file())
         .ok()
         .flatten()
         .is_some_and(|c| {
             c.roots
                 .iter()
-                .any(|r| r.folder == folder && r.identity == *identity)
+                .any(|r| r.folder == folder && r.identity == *identity && r.is_main())
         });
     if !configured {
         return;

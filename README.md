@@ -58,7 +58,7 @@ menu (or run `hbsync start`), also after you log in again. Your other computers 
 | `hbsync deleted` | what's in Recently deleted |
 | `hbsync restore <path>` | bring an item back from Recently deleted, on every computer |
 | `hbsync empty-deleted [<path>]` | delete Recently deleted (or one item) for good |
-| `hbsync add documents` (`pictures`, …), `remove …` | sync one of your own folders too, or stop |
+| `hbsync add documents` (`pictures`, …, `desktop`), `remove …` | sync one of your own folders too, or stop (your Desktop gets a folder of its own, shown on your other computers) |
 | `hbsync start`, `stop` | start or stop syncing (the daemon) |
 | `hbsync log` | where the logs are |
 
