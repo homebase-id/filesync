@@ -938,3 +938,92 @@ fn a_file_saved_into_a_folder_aside_is_kept() -> R {
     assert!(nothing_kept(&b), "kept");
     Ok(())
 }
+
+/// b's synced file `d` loses a name clash to a folder `d` new on the drive (an older id: as a
+/// restore, or two computers' creates, leave it): renamed for the folder's sake, it has no mark
+/// of its own. The folder is made first (the file parked for it), and the run is stopped right
+/// after (a pause); the next run is stopped before it does anything. The loser was marked as the
+/// first run was sent to rename it, so the run after renames it. Before, the folder's mark was
+/// read clean and cleared, nothing was dirty, and the file was left parked under its temporary
+/// name for good, the drive holding two items `d`.
+#[test]
+fn a_clash_loser_whose_run_stopped_is_renamed_at_the_next() -> R {
+    clash_loser_after_stopped_runs("d", true)
+}
+
+/// As [`a_clash_loser_whose_run_stopped_is_renamed_at_the_next`], the file named `D`: on a
+/// volume that tells case apart nothing is parked (the folder's place is free), and the loser
+/// is renamed all the same.
+#[test]
+fn a_clash_loser_by_case_whose_run_stopped_is_renamed_at_the_next() -> R {
+    clash_loser_after_stopped_runs("D", false)
+}
+
+fn clash_loser_after_stopped_runs(file: &str, parks: bool) -> R {
+    use hbsync_engine::exec::Meanwhile;
+    use hbsync_engine::testkit::AfterPlan;
+    use hbsync_types::Uuid;
+
+    let server = server();
+    let stop = Arc::new(AtomicBool::new(false));
+    let (after_commit, after_plan) = (
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+    );
+    let mut b = Client::with_config(&server, "b", {
+        let (stop, after_commit, after_plan) = (
+            Arc::clone(&stop),
+            Arc::clone(&after_commit),
+            Arc::clone(&after_plan),
+        );
+        move |c| {
+            let (stop_c, once_c) = (Arc::clone(&stop), Arc::clone(&after_commit));
+            c.exec.hooks.before_commit = Some(Meanwhile(Arc::new(move |_| {
+                if once_c.swap(false, Ordering::SeqCst) {
+                    stop_c.store(true, Ordering::SeqCst);
+                }
+            })));
+            let (stop_p, once_p) = (Arc::clone(&stop), Arc::clone(&after_plan));
+            c.after_plan = Some(AfterPlan(Arc::new(move || {
+                if once_p.swap(false, Ordering::SeqCst) {
+                    stop_p.store(true, Ordering::SeqCst);
+                }
+            })));
+        }
+    })?;
+    b.engine.set_stop(Arc::clone(&stop));
+    b.write(file, "file")?;
+    b.sync()?;
+    let loser = node_named(&server, file);
+    {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        let folder = hbsync_remote::NodeMeta {
+            node: NodeId(Uuid::from_u128(1)),
+            ..hbsync_remote::contract::folder("d", NodeId::ROOT)
+        };
+        srv.create(&folder, None)?;
+    }
+    let parked = |b: &Client| {
+        b.root
+            .join(hbsync_local::layout::parked_name(loser))
+            .exists()
+    };
+    after_commit.store(true, Ordering::SeqCst);
+    assert!(b.sync()?.stopped, "stopped once the folder is made");
+    if parks {
+        assert!(parked(&b), "the file was parked: {:?}", b.tree_text(""));
+    }
+    stop.store(false, Ordering::SeqCst);
+    after_plan.store(true, Ordering::SeqCst);
+    assert!(b.sync()?.stopped, "stopped before the rename");
+    stop.store(false, Ordering::SeqCst);
+    b.sync()?;
+    assert!(!parked(&b), "{:?}", b.tree_text(""));
+    let renamed = format!("{file} (conflict 1)");
+    assert_eq!(b.read_text(&renamed)?, "file");
+    let names = server.lock().map_err(|_| "poisoned")?.live_names();
+    let mut expected = vec!["d".to_owned(), renamed];
+    expected.sort();
+    assert_eq!(names, expected);
+    Ok(())
+}
