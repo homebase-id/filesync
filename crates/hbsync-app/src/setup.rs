@@ -169,18 +169,21 @@ pub fn default_folder() -> crate::Result<PathBuf> {
         .ok_or_else(|| "no home folder (HOME unset): choose a folder".into())
 }
 
-/// Where this computer keeps `role`'s folder (resolved): what `hbsync add <role>` syncs.
+/// The folder of the user's own `role`, where the OS keeps it (resolved).
 pub fn role_folder(role: Role) -> crate::Result<PathBuf> {
-    hbsync_platform::user_dirs::user_dir(role.user_dir())
-        .map(|p| resolve(&p))
-        .ok_or_else(|| format!("this computer has no {} folder", role.name()).into())
+    user_folder(role.user_dir(), role.name())
 }
 
 /// This computer's Desktop, where the OS keeps it (resolved).
 pub fn desktop_folder() -> crate::Result<PathBuf> {
-    hbsync_platform::user_dirs::user_dir(hbsync_platform::user_dirs::UserDir::Desktop)
+    user_folder(hbsync_platform::user_dirs::UserDir::Desktop, "Desktop")
+}
+
+/// The user's own folder `dir` (`name` to people), where the OS keeps it (resolved).
+fn user_folder(dir: hbsync_platform::user_dirs::UserDir, name: &str) -> crate::Result<PathBuf> {
+    hbsync_platform::user_dirs::user_dir(dir)
         .map(|p| resolve(&p))
-        .ok_or_else(|| "this computer has no Desktop folder".into())
+        .ok_or_else(|| format!("this computer has no {name} folder").into())
 }
 
 /// `canonicalize`, without the `\\?\` it puts on Windows paths: kept in the config and shown

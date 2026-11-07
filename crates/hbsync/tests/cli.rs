@@ -357,19 +357,20 @@ fn the_desktop_is_added_named_and_removed_without_a_daemon() -> R {
     let out = home.hbsync(&["add", "papers"])?;
     assert!(text(&out).contains("desktop"), "{}", text(&out));
 
-    home.ok(&[
-        "add",
-        "desktop",
-        "--folder",
-        &desk_arg,
-        "--name",
-        "Work laptop",
-    ])?;
+    // Named anew where it is (no --folder: the one synced), its folder on the drive kept; a
+    // name the drive won't take, or another folder, refused.
+    home.ok(&["add", "desktop", "--name", "Work laptop"])?;
     let config = std::fs::read_to_string(home.path().join("config.toml"))?;
     assert!(
         config.contains("Work laptop") && config.contains(&top),
         "{config}"
     );
+    assert_eq!(config.matches("desktop = ").count(), 1, "{config}");
+    let out = home.hbsync(&["add", "desktop", "--name", "Work/laptop"])?;
+    assert!(!out.status.success(), "{}", text(&out));
+    let other_arg = other.to_string_lossy().into_owned();
+    let out = home.hbsync(&["add", "desktop", "--folder", &other_arg, "--name", "x"])?;
+    assert!(!out.status.success(), "another folder: {}", text(&out));
 
     let said = home.ok(&["remove", "desktop"])?;
     assert!(said.contains("no longer synced"), "{said}");

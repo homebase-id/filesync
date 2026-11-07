@@ -249,7 +249,9 @@ impl App {
                     );
                 }
                 self.notices(&daemon);
+                // The main folder only: a role folder or the Desktop is the user's own.
                 if let Some(s) = daemon.status()
+                    && s.is_main()
                     && self.decorated.as_ref() != Some(&s.path)
                     && s.path.is_dir()
                 {

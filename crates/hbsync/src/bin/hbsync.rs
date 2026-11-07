@@ -403,33 +403,54 @@ fn run(command: Command) -> Res<ExitCode> {
         } => {
             let config = Config::load(&paths.config_file())?.unwrap_or_default();
             let identity = config.identity(identity.as_deref())?;
+            let name = match name.map(|n| (hbsync_engine::valid_desktop_name(&n), n)) {
+                None => None,
+                Some((Some(valid), _)) => Some(valid),
+                Some((None, given)) => {
+                    return Err(format!("{given:?} can't name a folder on the drive").into());
+                }
+            };
+            // The Desktop synced already: named anew where it is.
+            let synced = match what {
+                Own::Desktop => config.desktop(&identity),
+                Own::Role(_) => None,
+            };
             // Refused (where setup refuses a folder, or another app syncs it) by the adding.
-            let folder = match (folder, what) {
-                (Some(f), _) => setup::resolve(&f),
-                (None, Own::Role(role)) => setup::role_folder(role)?,
-                (None, Own::Desktop) => setup::desktop_folder()?,
+            let folder = match (folder, what, synced) {
+                (Some(f), _, Some(synced)) if setup::resolve(&f) != synced.folder => {
+                    return Err(format!(
+                        "{identity}'s Desktop is synced with {} already: remove it first",
+                        synced.folder.display()
+                    )
+                    .into());
+                }
+                (_, _, Some(synced)) => synced.folder.clone(),
+                (Some(f), _, None) => setup::resolve(&f),
+                (None, Own::Role(role), None) => setup::role_folder(role)?,
+                (None, Own::Desktop, None) => setup::desktop_folder()?,
             };
             let root = match what {
                 Own::Role(_) if name.is_some() => {
                     return Err("--name is for the Desktop".into());
                 }
                 Own::Role(role) => Root::role(&identity, &folder, role),
-                Own::Desktop => {
-                    // Named again: synced already, it starts over under the new name.
-                    if let Some(synced) = config.desktop(&identity).filter(|_| name.is_some()) {
-                        folders::remove_synced(&paths, &synced.folder.clone())?;
-                    }
-                    folders::desktop(&paths, &identity, &folder, name)
-                }
+                Own::Desktop => folders::desktop(&paths, &identity, &folder, name)?,
             };
             let what = format!("{} syncs with {}", folder.display(), root.what());
             let (taken, set_aside) = folders::add_synced(&paths, &root)?;
             if let Some(why) = set_aside {
                 println!("{}", words::set_aside(why));
             }
-            match taken {
-                Taken::Now => println!("{what}."),
-                Taken::AtStart => println!("{what} once {APP_NAME} runs (`hbsync start`)."),
+            match (taken, &root.name) {
+                // Named anew: at its next sync, now.
+                (Taken::Now, Some(name)) if synced.is_some() => {
+                    daemon::daemon(&paths, DaemonControl::SyncNow)?;
+                    println!("{what}, named {name:?} on the drive.");
+                }
+                (Taken::Now, _) => println!("{what}."),
+                (Taken::AtStart, _) => {
+                    println!("{what} once {APP_NAME} runs (`hbsync start`).")
+                }
             }
         }
         Command::Remove { what, identity } => {

@@ -161,18 +161,20 @@ enum Part {
     Desktop,
 }
 
-/// The name a computer's Desktop folder takes from `name` (the computer's): in NFC, one the
-/// drive takes (not empty, `.` or `..`, no `/` or NUL, 255 bytes at most), not this client's
-/// own (`.hbsync…`, any case) and not junk (§10: other computers wouldn't show it); else
-/// `Computer`.
+/// The name a computer's Desktop folder takes from `name` (the computer's): [`valid_desktop_name`],
+/// else `Computer`.
 pub(crate) fn desktop_name(name: &str) -> String {
+    valid_desktop_name(name).unwrap_or_else(|| "Computer".into())
+}
+
+/// `name` as a computer's Desktop folder can have it: in NFC, one the drive takes (not empty,
+/// `.` or `..`, no `/` or NUL, 255 bytes at most), not this client's own (`.hbsync…`, any case)
+/// and not junk (§10: other computers wouldn't show it); `None` if it can't.
+pub fn valid_desktop_name(name: &str) -> Option<String> {
     use hbsync_platform::name::{check_remote_name, nfc, starts_caseless};
     let name = nfc(name.trim());
     let ours = starts_caseless(&name, hbsync_local::STATE_DIR);
-    match check_remote_name(&name) {
-        Ok(()) if !ours && !hbsync_local::is_junk(&name) => name,
-        _ => "Computer".into(),
-    }
+    (check_remote_name(&name).is_ok() && !ours && !hbsync_local::is_junk(&name)).then_some(name)
 }
 
 /// Records `scope` as the folder's, if it is new (§12). A new scope changes what is in view

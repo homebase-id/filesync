@@ -132,13 +132,25 @@ impl Root {
         }
     }
 
-    /// What it is, for people: the identity's main folder, its role folder, its Desktop.
+    /// Whether its top fits its kind: a Desktop's folder is no fixed folder of the drive (the
+    /// root, a role folder, Recovered files, Desktops), as a hand-edited config could have it.
+    pub fn fits(&self) -> bool {
+        self.desktop
+            .is_none_or(|top| !top.is_root() && !top.is_fixed_folder() && top != NodeId::OUTSIDE)
+    }
+
+    /// What it is, for people ([`folder_what`]).
     pub fn what(&self) -> String {
-        match (self.desktop, self.role) {
-            (Some(_), _) => format!("{}'s Desktop", self.identity),
-            (None, Some(role)) => format!("{}'s {}", self.identity, role.name()),
-            (None, None) => self.identity.to_string(),
-        }
+        folder_what(&self.identity, self.desktop.is_some(), self.role)
+    }
+}
+
+/// What a folder is, for people: `identity`'s main folder, its role folder, its Desktop.
+pub(crate) fn folder_what(identity: &Identity, desktop: bool, role: Option<Role>) -> String {
+    match (desktop, role) {
+        (true, _) => format!("{identity}'s Desktop"),
+        (false, Some(role)) => format!("{identity}'s {}", role.name()),
+        (false, None) => identity.to_string(),
     }
 }
 
