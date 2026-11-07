@@ -86,6 +86,58 @@ impl Sim {
         checked.unwrap_or_else(|e| Some(format!("c{c}: the store failed: {e}")))
     }
 
+    /// Client `c`'s guard totals as the simulator counts them (`opts.guarding.pending`), against
+    /// the store's over the same state (`held::pending_counts`: its input filled in, `all`
+    /// marked dirty, the confirmed deletes): what differs, if anything. The store's rule is
+    /// the engine's; the simulator's is a copy that mustn't drift. Held deletes out of the dirty
+    /// set aren't filled in: the simulator counts them with what differs.
+    pub(crate) fn check_counts(
+        &self,
+        c: usize,
+        input: &Input,
+        opts: &Options,
+        all: &BTreeSet<NodeId>,
+    ) -> Option<String> {
+        let client = &self.clients[c];
+        if all.is_empty() || !client.coords.top.is_root() {
+            return None;
+        }
+        // Not checked where the simulator's model is known to differ from the store's rule (gaps
+        // of its own, apart): a confirmation, which the simulator lets cover what is below the
+        // confirmed node on the base whether or not that node is dirty, where the store counts
+        // only a dirty one's, on each side by its own rule; and a file whose base keeps its
+        // absence (online-only, wanted), which the store doesn't count gone here.
+        if !opts.guarding.confirmed.is_empty()
+            || all.iter().any(|n| {
+                input
+                    .base_extra
+                    .get(n)
+                    .is_some_and(|e| e.content_state.keeps_absence())
+            })
+        {
+            return None;
+        }
+        let checked = (|| -> Result<Option<String>, StateError> {
+            let mut db = self.fill(c, input)?;
+            db.write(|s| {
+                for n in s.dirty_nodes(usize::MAX)? {
+                    s.folder().clear_dirty(n)?;
+                }
+                all.iter().try_for_each(|&n| s.folder().mark_dirty(n))
+            })?;
+            let store = db.read(|s| held::pending_counts(s, &opts.guarding.confirmed))?;
+            let (here, there) = opts.guarding.pending;
+            Ok((store != (here as u64, there as u64)).then(|| {
+                format!(
+                    "c{c}: the guard's totals (gone here, gone there) are {:?} in the simulator, \
+                     {store:?} in the store, over {all:?} dirty",
+                    opts.guarding.pending
+                )
+            }))
+        })();
+        checked.unwrap_or_else(|e| Some(format!("c{c}: the store failed: {e}")))
+    }
+
     /// Client `c`'s plan `plan` holds deletes (the guard's, §7): planned through the engine's
     /// views, then again with what the engine takes out of the dirty set till the user answers
     /// ([`hbsync_engine::held`]) out of it, it plans the same but those, unless its view

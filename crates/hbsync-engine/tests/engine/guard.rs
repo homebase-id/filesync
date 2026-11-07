@@ -1220,6 +1220,7 @@ fn what_a_removal_took_along_counts_with_deletes_here_over_pages() -> R {
 /// one plan of all would count them: the deletes here are held, and still held at the next sync.
 #[test]
 fn what_a_removal_took_along_counts_with_deletes_there_over_pages() -> R {
+    let files = ["d/t0.txt", "d/t1.txt", "x.txt"];
     for batch in [1, 2, 20_000] {
         let server = server();
         let mut a = Client::with_config(&server, "a", move |cfg| {
@@ -1227,7 +1228,7 @@ fn what_a_removal_took_along_counts_with_deletes_there_over_pages() -> R {
             cfg.batch = batch;
         })?;
         let mut b = Client::new(&server, "b")?;
-        for name in ["d/t0.txt", "d/t1.txt", "x.txt"] {
+        for name in files {
             a.write(name, name)?;
         }
         a.sync()?;
@@ -1238,7 +1239,7 @@ fn what_a_removal_took_along_counts_with_deletes_there_over_pages() -> R {
         a.engine.drive().pull(None)?;
         for sync in ["first", "next"] {
             let report = a.sync()?;
-            for name in ["d/t0.txt", "d/t1.txt", "x.txt"] {
+            for name in files {
                 assert!(
                     a.root.join(name).exists(),
                     "pages of {batch}, {sync} sync: {name} held: {report:?}"

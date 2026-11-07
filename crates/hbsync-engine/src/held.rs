@@ -332,6 +332,16 @@ pub fn put_back_plan<S: Sides>(nodes: &[NodeId], sides: &S) -> Result<PutBack, S
     Ok(plan)
 }
 
+/// The guard's pending counts as a sweep reads them from `s` (`holding::guard_counts`), with
+/// `confirmed` the confirmed deletes: (gone here, gone there). For the simulator, whose model of
+/// them is checked against this.
+pub fn pending_counts(
+    s: &hbsync_state::ReadTx<'_>,
+    confirmed: &HashSet<NodeId>,
+) -> Result<(u64, u64), hbsync_state::StateError> {
+    Ok(crate::holding::guard_counts(s, confirmed, None, Some(0), false)?.pending)
+}
+
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;

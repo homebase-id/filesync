@@ -28,10 +28,11 @@ pub(crate) struct Pages {
     /// What pages of their own planned this sweep: not planned again in its pages.
     pub(crate) planned_own: BTreeSet<NodeId>,
     /// The marks the engine keeps beyond what its scan and feed mark (in pages only): a page's
-    /// nodes its round didn't read clean, and a clash's loser outside the page its plan renames
-    /// (one the drive refused not), till a round reads them clean. Not modelled: the executor's own marks (a fork's or
-    /// a detach's ids, a skipped or stopped operation), which the simulator reads as what
-    /// differs.
+    /// nodes its round didn't read clean, and a clash's loser outside the page with an
+    /// operation left once refusals are taken out (`pages::losers_sent`: not one refused, nor
+    /// one waiting for a refused one), till a round reads them clean. Not modelled: the
+    /// executor's own marks (a fork's or a detach's ids, a skipped or stopped operation), which
+    /// the simulator reads as what differs.
     pub(crate) marks: BTreeSet<NodeId>,
     /// What this sweep's held deletes take out of the dirty set (`held::out_of_dirty`), as the
     /// engine's `HoldOut`: out of `marks` (into `out`) at the sweep's end if it did nothing and
@@ -42,10 +43,9 @@ pub(crate) struct Pages {
     /// What held deletes took out of the dirty set: dirty again once a round's view reaches it
     /// (`HeldDeletes::plan_again`).
     pub(crate) out: BTreeSet<NodeId>,
-    /// This sweep planned work.
-    pub(crate) progress: bool,
-    /// This sweep's run stopped with work left (a plan made again before its operations ran).
-    pub(crate) stopped: bool,
+    /// This sweep planned work, or its run stopped with work left (a plan made again before its
+    /// operations ran): its held deletes stay dirty.
+    pub(crate) busy: bool,
 }
 
 impl Pages {
@@ -54,11 +54,10 @@ impl Pages {
     /// as the engine's sync ends so; a new sweep starts with nothing.
     pub(crate) fn sweep_ended(&mut self) {
         let held_out = std::mem::take(&mut self.held_out);
-        if !std::mem::take(&mut self.progress) && !std::mem::take(&mut self.stopped) {
+        if !std::mem::take(&mut self.busy) {
             self.marks.retain(|n| !held_out.contains(n));
             self.out.extend(held_out);
         }
-        self.stopped = false;
     }
 }
 

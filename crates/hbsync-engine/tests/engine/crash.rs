@@ -970,26 +970,25 @@ fn clash_loser_after_stopped_runs(file: &str, parks: bool) -> R {
         Arc::new(AtomicBool::new(false)),
         Arc::new(AtomicBool::new(false)),
     );
-    let mut b = Client::with_config(&server, "b", {
-        let (stop, after_commit, after_plan) = (
-            Arc::clone(&stop),
-            Arc::clone(&after_commit),
-            Arc::clone(&after_plan),
-        );
-        move |c| {
-            let (stop_c, once_c) = (Arc::clone(&stop), Arc::clone(&after_commit));
-            c.exec.hooks.before_commit = Some(Meanwhile(Arc::new(move |_| {
-                if once_c.swap(false, Ordering::SeqCst) {
-                    stop_c.store(true, Ordering::SeqCst);
-                }
-            })));
-            let (stop_p, once_p) = (Arc::clone(&stop), Arc::clone(&after_plan));
-            c.after_plan = Some(AfterPlan(Arc::new(move || {
-                if once_p.swap(false, Ordering::SeqCst) {
-                    stop_p.store(true, Ordering::SeqCst);
-                }
-            })));
-        }
+    let commit_hook = {
+        let (stop, once) = (Arc::clone(&stop), Arc::clone(&after_commit));
+        Meanwhile(Arc::new(move |_| {
+            if once.swap(false, Ordering::SeqCst) {
+                stop.store(true, Ordering::SeqCst);
+            }
+        }))
+    };
+    let plan_hook = {
+        let (stop, once) = (Arc::clone(&stop), Arc::clone(&after_plan));
+        AfterPlan(Arc::new(move || {
+            if once.swap(false, Ordering::SeqCst) {
+                stop.store(true, Ordering::SeqCst);
+            }
+        }))
+    };
+    let mut b = Client::with_config(&server, "b", move |c| {
+        c.exec.hooks.before_commit = Some(commit_hook.clone());
+        c.after_plan = Some(plan_hook.clone());
     })?;
     b.engine.set_stop(Arc::clone(&stop));
     b.write(file, "file")?;

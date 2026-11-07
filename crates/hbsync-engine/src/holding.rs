@@ -394,7 +394,7 @@ impl HeldDeletes {
 pub(crate) struct Counts {
     /// Files pending deletion across the dirty set and the held deletes out of it, but the
     /// confirmed ones: (gone locally, gone remotely).
-    pending: (u64, u64),
+    pub(crate) pending: (u64, u64),
     /// The synced files; `None` when not counted (nothing was dirty).
     synced: Option<u64>,
     /// The confirmations whose deletes are still pending.
@@ -409,7 +409,7 @@ pub(crate) struct Counts {
 /// (read here when `None`); `synced`, the synced files as counted already for the sweep (kept:
 /// it judges all its pages by one), else counted here if `count` or anything is dirty (with
 /// nothing dirty there is nothing to weigh, and a sync with nothing new reads no table).
-fn guard_counts(
+pub(crate) fn guard_counts(
     s: &ReadTx<'_>,
     confirmed: &HashSet<NodeId>,
     held: Option<(u64, u64)>,
