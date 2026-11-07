@@ -89,7 +89,8 @@ that computer when its user adds its Desktop, and synced with that computer's ow
   renamed, `Desktops (conflict 1)`, as Recovered files is).
 - A computer's folder in it has a random id of its own (the computer's, for its Desktop), named
   as the computer when made (the first free name: `PC (conflict 1)`), and renamed by that
-  computer when its name changes; a rename made elsewhere stands until then. Computers know
+  computer when it is given a name; a rename made elsewhere stands until then, and a name given
+  again (the same one too) wins over it. A computer joining a folder there keeps its name. Computers know
   their own folder by its id, never by its name or its place.
 - Deleted (it, or a computer's folder in it), it comes back with what was in it at the next
   sync of a computer syncing that Desktop: restore it rather than create it.
@@ -382,6 +383,9 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-11-07: a computer's folder in Desktops is renamed whenever its computer is given a
+  name, the same one again too, over a rename made elsewhere; a computer joining a folder there
+  keeps its name. Nodes are the same.
 - 2026-11-06: Desktops, a folder at the top with the fixed node id
   `475d49e0-c0b4-4cbc-8090-2f2cb1e9dc69`, named `Desktops` when made, holding a folder per
   computer for its Desktop (a random id each, named as the computer). The purge keeps a

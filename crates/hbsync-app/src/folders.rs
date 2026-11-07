@@ -8,8 +8,10 @@ use std::sync::{Arc, Mutex};
 
 use hbsync_engine::root::{AccountReader, RootError, SetAside, SyncRoot};
 pub use hbsync_engine::valid_desktop_name;
-use hbsync_state::FolderKind;
 pub use hbsync_state::Unusable;
+#[cfg(feature = "testkit")]
+pub use hbsync_state::put_desktops;
+use hbsync_state::{FolderKind, StateError};
 use hbsync_types::{NodeId, Role};
 
 use crate::config::ConfigLock;
@@ -365,9 +367,11 @@ fn ready_in_turn(
 }
 
 /// This computer's Desktop at `path` (resolved), for `identity`: as `config` lists it, or
-/// synced before (its marker known to the account's DB as a Desktop), it keeps its folder in
-/// Desktops; else it gets one of its own, made at its first sync. Only reads the DB; one that
-/// can't be read is an error (a new folder in Desktops would be a second one).
+/// synced here before (the account's DB has a Desktop at its path, or one its marker names), it
+/// keeps its folder in Desktops; else it gets one of its own, made at its first sync. One the
+/// DB has at its path whose marker is gone joins its folder again (what it holds is adopted, as
+/// for a join: nothing is deleted). Only reads the DB; one that can't be read is an error (a
+/// new folder in Desktops would be a second one).
 pub fn desktop(
     config: &Config,
     paths: &Paths,
@@ -384,10 +388,18 @@ pub fn desktop(
     {
         return Ok(listed.clone());
     }
-    let top = match SyncRoot::find(&paths.account_db(identity), identity, path) {
-        Ok(found) if found.kind() == Some(FolderKind::Desktop) => found.top(),
-        Ok(_) | Err(RootError::NoMarker(_) | RootError::Unknown(_)) => NodeId::new(),
-        Err(e) => return Err(e.into()),
+    let db = paths.account_db(identity);
+    let at = match AccountReader::open(&db, identity)? {
+        Some(mut account) => desktop_at(&mut account, path)?,
+        None => None,
+    };
+    let top = match at {
+        Some(top) => top,
+        None => match SyncRoot::find(&db, identity, path) {
+            Ok(found) if found.kind() == Some(FolderKind::Desktop) => found.top(),
+            Ok(_) | Err(RootError::NoMarker(_) | RootError::Unknown(_)) => NodeId::new(),
+            Err(e) => return Err(e.into()),
+        },
     };
     Ok(Root::desktop(identity, path, top))
 }
@@ -397,24 +409,44 @@ pub fn checked_desktop_name(name: &str) -> Result<String, String> {
     valid_desktop_name(name).ok_or_else(|| format!("{name:?} can't name a folder on your Homebase"))
 }
 
-/// This computer's Desktop at `path` as `identity`'s DB knows it from before, found by its
-/// path alone (nothing in the folder is read: macOS asks before the Desktop is): its folder in
-/// Desktops on the drive, and the name it gives that folder, if any yet.
-pub fn desktop_before(
+/// The folder in Desktops of the Desktop the account's DB has synced at `path` on this device
+/// (found by its path alone: nothing in the folder is read, as macOS asks before the Desktop
+/// is), if any.
+fn desktop_at(db: &mut AccountReader, path: &Path) -> Result<Option<NodeId>, StateError> {
+    let found = db.folder_at(path)?;
+    Ok(found
+        .filter(|f| f.kind == Some(FolderKind::Desktop))
+        .map(|f| f.top))
+}
+
+/// What `identity`'s DB knows of the Desktops, read only (its daemon may be writing it), for
+/// this computer's Desktop at `path`.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct DesktopsSeen {
+    /// Synced here before ([`desktop`] takes its folder again): the name that folder has on the
+    /// drive (`None`: not there now; it comes back at its next sync).
+    pub before: Option<Option<String>>,
+    /// The folders in Desktops on the drive (the computers' Desktops), by name.
+    pub listed: Vec<(NodeId, String)>,
+}
+
+/// [`DesktopsSeen`] for this computer's Desktop at `path`: nothing in it is read.
+pub fn desktops_seen(
     paths: &Paths,
     identity: &Identity,
     path: &Path,
-) -> Result<Option<(NodeId, Option<String>)>, Error> {
+) -> Result<DesktopsSeen, Error> {
     let Some(mut db) = AccountReader::open(&paths.account_db(identity), identity)? else {
-        return Ok(None);
+        return Ok(DesktopsSeen::default());
     };
-    let text = path.to_string_lossy();
-    let found =
-        (db.folders()?.into_iter()).find(|f| f.path == text && f.kind == Some(FolderKind::Desktop));
-    let Some(found) = found else {
-        return Ok(None);
+    let before = match desktop_at(&mut db, path)? {
+        Some(top) => Some(db.name_of(top)?),
+        None => None,
     };
-    Ok(Some((found.top, db.desktop_name(found.id)?)))
+    Ok(DesktopsSeen {
+        before,
+        listed: db.desktops()?,
+    })
 }
 
 /// Has the running daemon set the folder at `path` up and sync it ([`add`]), or sets it up for
@@ -740,15 +772,17 @@ mod tests {
             Some(computer.as_deref().unwrap_or("Computer"))
         );
 
-        // Known from before by its path alone: its folder and name.
-        let top = root.kind.top();
-        let before = desktop_before(&paths, &a, &desk)?;
-        assert_eq!(before, Some((top, Some("Work laptop".into()))));
-        assert_eq!(desktop_before(&paths, &a, &other)?, None);
+        // Known from before by its path alone (its folder not on the drive yet: never synced).
+        assert_eq!(desktops_seen(&paths, &a, &desk)?.before, Some(None));
+        assert_eq!(desktops_seen(&paths, &a, &other)?.before, None);
 
         remove(&paths, &desk)?;
         let again = desktop(&config()?, &paths, &a, &desk)?;
         assert_eq!(again.kind, root.kind, "its folder in Desktops kept");
+        // Its marker gone: found by its path all the same, as the folders page finds it.
+        std::fs::remove_file(hbsync_local::layout::marker_file(&desk))?;
+        let again = desktop(&config()?, &paths, &a, &desk)?;
+        assert_eq!(again.kind, root.kind, "by its path");
         Ok(())
     }
 
@@ -757,8 +791,6 @@ mod tests {
     /// computer's (no rename at its first sync).
     #[test]
     fn a_desktop_joining_a_folder_keeps_its_name() -> Result<(), Error> {
-        use hbsync_state::{MirrorRow, StateDb};
-        use hbsync_types::{NodeKind, RemoteFileId, Uuid, VersionTag};
         let home = tempfile::tempdir()?;
         let paths = Paths::under(home.path());
         let c: Identity = "c.example".into();
@@ -767,27 +799,25 @@ mod tests {
         let db = paths.account_db(&c);
         std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
         let joined = NodeId::new();
-        let row = |node, parent, name: &str| MirrorRow {
-            file_id: RemoteFileId(Uuid::new_v4()),
-            version: VersionTag(Uuid::new_v4()),
-            node,
-            parent,
-            name: name.into(),
-            kind: NodeKind::Folder,
-            file: None,
-            content_extra: None,
-            token: None,
-            changed_at: Some(5),
-        };
-        StateDb::open_account(&db)?.write(|s| {
-            let a = s.account();
-            a.put_live(&row(NodeId::DESKTOPS, NodeId::ROOT, "Desktops"))?;
-            a.put_live(&row(joined, NodeId::DESKTOPS, "Old pc "))
-        })?;
+        hbsync_state::put_desktops(&db, &[(joined, "Old pc ")])?;
         let added = add(&paths, &Root::desktop(&c, &desk, joined), None, false)?;
         assert!(!added.named, "nothing to rename");
-        let before = desktop_before(&paths, &c, &desk)?;
-        assert_eq!(before, Some((joined, Some("Old pc ".into()))));
+        let name = |key| -> Result<Option<String>, Error> {
+            let found = SyncRoot::find(&db, &c, &desk)?;
+            Ok(hbsync_state::StateDb::open_folder(&db, found.folder())?.read(|s| s.get_kv(key))?)
+        };
+        // Given as it is there: no rename at the first sync.
+        assert_eq!(
+            name(hbsync_state::keys::DESKTOP_NAME)?.as_deref(),
+            Some("Old pc ")
+        );
+        assert_eq!(
+            name(hbsync_state::keys::DESKTOP_NAMED)?.as_deref(),
+            Some("Old pc ")
+        );
+        let seen = desktops_seen(&paths, &c, &desk)?;
+        assert_eq!(seen.before, Some(Some("Old pc ".into())));
+        assert_eq!(seen.listed, [(joined, "Old pc ".into())]);
         Ok(())
     }
 

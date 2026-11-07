@@ -69,10 +69,6 @@ pub enum Ask {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
-    /// The folders in Desktops on `identity`'s drive: the computers' Desktops, to join one.
-    Desktops {
-        identity: Identity,
-    },
     /// Stop syncing the folder at `path`; its files and state stay.
     RemoveFolder {
         path: PathBuf,
@@ -98,8 +94,6 @@ pub enum Reply {
     Deleted(DeletedList),
     /// The items asked for, in the order asked.
     Found(Vec<DeletedItem>),
-    /// The folders in Desktops, by name.
-    Desktops(Vec<DesktopFolder>),
     Done,
     Refused(String),
 }
@@ -203,14 +197,6 @@ pub enum FolderControl {
     /// semantics §7): what was deleted here comes down again, what was removed elsewhere is
     /// restored on the drive. `token` as for [`FolderControl::ConfirmDeletes`].
     PutBack { token: String },
-}
-
-/// A computer's Desktop's folder on the drive, in Desktops.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct DesktopFolder {
-    pub node: NodeId,
-    /// Its name on the drive.
-    pub name: String,
 }
 
 /// An entry of a folder's recently synced list.

@@ -384,9 +384,10 @@ mod tests {
         Ok(())
     }
 
-    /// The Desktop synced is shown with its folder's name to change and Stop syncing; renamed
-    /// from the page as `hbsync add desktop --name` renames it (a name the drive won't take
-    /// refused), with no daemon running it is named so at its start.
+    /// The Desktop synced is shown with its folder's name on the drive to change and Stop
+    /// syncing; renamed from the page as `hbsync add desktop --name` renames it (a name the
+    /// drive won't take refused, the name it has there already nothing to do), with no daemon
+    /// running it is named so at its start.
     #[test]
     fn the_desktop_is_renamed_from_the_folders_page() -> R {
         let dir = tempfile::tempdir()?;
@@ -400,8 +401,11 @@ mod tests {
         std::fs::create_dir_all(&paths.config)?;
         let add = |root, name| hbsync_app::folders::add(&paths, &root, name, false).map(drop);
         add(hbsync_app::Root::main(&a, &main), None).map_err(|e| e.to_string())?;
-        let root = hbsync_app::Root::desktop(&a, &desk, hbsync_types::NodeId::new());
-        add(root, Some("Laptop")).map_err(|e| e.to_string())?;
+        let top = hbsync_types::NodeId::new();
+        add(hbsync_app::Root::desktop(&a, &desk, top), Some("Laptop"))
+            .map_err(|e| e.to_string())?;
+        // Renamed on another computer, as the drive has it.
+        hbsync_app::folders::put_desktops(&paths.account_db(&a), &[(top, "Old laptop")])?;
 
         let page = request(&pages.url("folders"), "GET", "")?;
         assert!(
@@ -409,20 +413,14 @@ mod tests {
             "{page}"
         );
         assert!(page.contains(&desk.display().to_string()), "{page}");
+        assert!(page.contains("value=\"Old laptop\""), "{page}");
 
         let page = request(&pages.url("folders/rename"), "POST", "name=Work%2Flaptop")?;
         assert!(page.contains("can't name"), "{page}");
+        let page = request(&pages.url("folders/rename"), "POST", "name=Old+laptop")?;
+        assert!(page.contains("named Old laptop already"), "{page}");
         let page = request(&pages.url("folders/rename"), "POST", "name=Work+laptop")?;
         assert!(page.contains("named Work laptop once"), "{page}");
-        // Its name in the account's DB, shown in the field.
-        let before =
-            hbsync_app::folders::desktop_before(&paths, &a, &desk).map_err(|e| e.to_string())?;
-        assert_eq!(
-            before.and_then(|(_, name)| name).as_deref(),
-            Some("Work laptop")
-        );
-        let page = request(&pages.url("folders"), "GET", "")?;
-        assert!(page.contains("value=\"Work laptop\""), "{page}");
 
         let page = request(&pages.url("folders/remove"), "POST", "role=desktop")?;
         assert!(page.contains("Desktop is no longer synced"), "{page}");

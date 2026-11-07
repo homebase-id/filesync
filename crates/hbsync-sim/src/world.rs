@@ -475,9 +475,18 @@ impl Sim {
                 self.add_desktop();
             }
             Action::RenameComputer { name } => {
-                let client = &mut self.clients[c];
-                if client.is_desktop() {
-                    client.desktop_name = NAMES[name % NAMES.len()].to_owned();
+                if self.clients[c].is_desktop() {
+                    let name = NAMES[name % NAMES.len()].to_owned();
+                    // Not so named on the drive (renamed elsewhere; the account's mirror, kept
+                    // up by the feed, has it): given again, though it was the last name given
+                    // (the engine's `set_desktop_name`).
+                    let top = self.clients[c].coords.top;
+                    let there = self.server.live.get(&top).map(|n| &n.state.name);
+                    let client = &mut self.clients[c];
+                    if there.is_some_and(|there| *there != name) {
+                        client.desktop_named = None;
+                    }
+                    client.desktop_name = name;
                 }
             }
             Action::DeleteStopped { pick, done } => self.delete_stopped(pick, done),

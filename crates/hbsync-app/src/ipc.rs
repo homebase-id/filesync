@@ -400,7 +400,6 @@ mod tests {
                     }),
                     Ask::FindDeleted { .. } => Reply::Refused("not here".into()),
                     Ask::AddFolder { .. }
-                    | Ask::Desktops { .. }
                     | Ask::RemoveFolder { .. }
                     | Ask::StartOver { .. }
                     | Ask::Watch

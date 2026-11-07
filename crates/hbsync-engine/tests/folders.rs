@@ -601,6 +601,8 @@ struct DeskPc {
     drive: Arc<Drive>,
     main: Engine,
     desk: Option<Engine>,
+    /// Its Desktop as the app sets it up, named through it ([`SyncRoot::name_desktop`]).
+    desk_at: Option<SyncRoot>,
 }
 
 impl DeskPc {
@@ -629,6 +631,7 @@ impl DeskPc {
             drive,
             main,
             desk: None,
+            desk_at: None,
         };
         if let Some((top, name)) = desktop {
             pc.add_desktop(top, name)?;
@@ -643,14 +646,18 @@ impl DeskPc {
 
     /// [`DeskPc::add_desktop`], named so (`None`: no name given yet).
     fn add_desktop_as(&mut self, top: NodeId, name: Option<&str>) -> R {
-        let path = self.desk_root.to_string_lossy().into_owned();
-        let folder = StateDb::open_account(&self.db)?
-            .write(|s| s.account().add_folder(top, FolderKind::Desktop, &path, "d"))?;
-        let mut desk = self.open_desktop(folder)?;
+        let at = SyncRoot::create_for(
+            &self.db,
+            "t.example",
+            &self.desk_root,
+            top,
+            FolderKind::Desktop,
+        )?;
         if let Some(name) = name {
-            desk.name_desktop(name)?;
+            at.name_desktop(Some(name), name)?;
         }
-        self.desk = Some(desk);
+        self.desk = Some(self.open_desktop(at.folder())?);
+        self.desk_at = Some(at);
         Ok(())
     }
 
@@ -764,8 +771,14 @@ fn a_desktop_is_named_as_its_computer() -> R {
     b.sync()?;
     assert_eq!(desktops(&server), ["PC", "PC (conflict 1)"]);
 
-    let renamed = |pc: &mut DeskPc, name: &str| pc.desk.as_mut().map(|d| d.name_desktop(name));
-    renamed(&mut a, "Laptop").transpose()?;
+    let renamed = |pc: &mut DeskPc, name: &str| {
+        let at = pc
+            .desk_at
+            .as_ref()
+            .map(|d| d.name_desktop(Some(name), name));
+        at.transpose().map(drop)
+    };
+    renamed(&mut a, "Laptop")?;
     a.sync()?;
     assert_eq!(desktops(&server), ["Laptop", "PC (conflict 1)"]);
     // Renamed on another computer: it stands.
@@ -778,10 +791,10 @@ fn a_desktop_is_named_as_its_computer() -> R {
     a.sync()?;
     assert_eq!(desktops(&server), ["Old laptop", "PC (conflict 1)"]);
     // Given its name again here (the user asks for it): named so again.
-    renamed(&mut a, "Laptop").transpose()?;
+    renamed(&mut a, "Laptop")?;
     a.sync()?;
     assert_eq!(desktops(&server), ["Laptop", "PC (conflict 1)"]);
-    renamed(&mut a, "New laptop").transpose()?;
+    renamed(&mut a, "New laptop")?;
     a.sync()?;
     assert_eq!(desktops(&server), ["New laptop", "PC (conflict 1)"]);
     Ok(())
@@ -867,8 +880,8 @@ fn a_rename_that_finds_the_desktop_gone_brings_it_back() -> R {
         ["Laptop"],
         "back before anything syncs into it"
     );
-    let desk = a.desk()?;
-    desk.name_desktop("New laptop")?;
+    let at = a.desk_at.as_ref().ok_or("no Desktop added")?;
+    at.name_desktop(Some("New laptop"), "New laptop")?;
     a.sync()?;
     assert_eq!(desktops(&server), ["New laptop"]);
     Ok(())

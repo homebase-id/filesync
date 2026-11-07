@@ -202,8 +202,7 @@ impl SyncRoot {
         let Some(mut account) = AccountReader::open(db, identity)? else {
             return Ok(false);
         };
-        let text = path.to_string_lossy();
-        Ok(account.folders()?.iter().any(|f| f.path == text))
+        Ok(account.folder_at(path)?.is_some())
     }
 
     /// Readies `identity`'s DB at `db` as the account starts (its daemon's start, or setup's
@@ -327,21 +326,50 @@ impl SyncRoot {
         Ok(StateDb::open_folder(&self.db, self.folder)?)
     }
 
-    /// Names this folder, a Desktop, on the drive from its next sync on: `name` (over a rename
-    /// made elsewhere too), or with none the name it has, else its folder's on the drive, else
-    /// the computer's, `computer` ([`crate::engine::set_desktop_name`]). Whether the folder is
-    /// to be named anew: its running engine syncs to do it. Only for a Desktop (the caller
-    /// knows its kind).
+    /// Names this folder, a Desktop, on the drive ([`keys::DESKTOP_NAME`], the one owner of
+    /// its name) from its next sync on. With `name` (made one the drive takes): that one, also
+    /// over a rename made elsewhere (asked for now), the same name as before too. With none:
+    /// the name it has; with none yet, the one its folder has on the drive, as given already
+    /// (a Desktop joining a folder there keeps its name), else the computer's, `computer`.
+    /// Writes only what changes. Whether the folder is to be named anew: its running engine
+    /// syncs to do it. Only for a Desktop (the caller knows its kind).
     pub fn name_desktop(&self, name: Option<&str>, computer: &str) -> Result<bool, RootError> {
-        // Its name on the drive, as the account's mirror has it (not as this folder sees it).
+        let mut db = self.state()?;
+        let now = db.read(|s| s.get_kv(keys::DESKTOP_NAME))?;
+        if name.is_none() && now.is_some() {
+            return Ok(false);
+        }
+        // Its name on the drive, as the account's mirror has it (a folder's own view hides
+        // its top): read only when it matters.
         let there = match Reader::open(&self.db)? {
-            Some(mut db) => db.read(|s| Ok(s.get_mirror(self.top)?.map(|m| m.name)))?,
+            Some(db) => AccountReader { db }.name_of(self.top)?,
             None => None,
         };
-        let mut db = self.state()?;
-        Ok(crate::engine::set_desktop_name(
-            &mut db, there, name, computer,
-        )?)
+        let (name, as_there) = match (name, there) {
+            (Some(name), there) => {
+                let name = crate::engine::desktop_name(name);
+                let anew = there.is_some_and(|there| there != name);
+                if now.as_deref() == Some(name.as_str()) && !anew {
+                    return Ok(false);
+                }
+                // Not so named on the drive: given again, though it was the last name given.
+                if anew {
+                    db.write(|s| s.folder().delete_kv(keys::DESKTOP_NAMED))?;
+                }
+                (name, false)
+            }
+            (None, Some(there)) => (there, true),
+            (None, None) => (crate::engine::desktop_name(computer), false),
+        };
+        db.write(|s| {
+            let folder = s.folder();
+            folder.set_kv(keys::DESKTOP_NAME, &name)?;
+            if as_there {
+                folder.set_kv(keys::DESKTOP_NAMED, &name)?;
+            }
+            Ok(())
+        })?;
+        Ok(!as_there)
     }
 
     pub fn path(&self) -> &Path {
@@ -496,11 +524,16 @@ impl AccountReader {
         Ok(folders)
     }
 
-    /// The name the Desktop `folder` gives its folder on the drive, if it has one yet
-    /// ([`SyncRoot::name_desktop`]).
-    pub fn desktop_name(&mut self, folder: i64) -> Result<Option<String>, StateError> {
-        self.db
-            .read_folder(folder, |s| s.get_kv(keys::DESKTOP_NAME))
+    /// The folder synced at `path` on this device, as the DB has it (found by its path alone:
+    /// nothing in the folder is read).
+    pub fn folder_at(&mut self, path: &Path) -> Result<Option<FolderRow>, StateError> {
+        let text = path.to_string_lossy();
+        Ok(self.folders()?.into_iter().find(|f| f.path == text))
+    }
+
+    /// The name the drive's `node` has, live, as the mirror has it.
+    pub fn name_of(&mut self, node: NodeId) -> Result<Option<String>, StateError> {
+        self.db.read(|s| Ok(s.get_mirror(node)?.map(|m| m.name)))
     }
 
     /// The newest `limit` entries of `folder`'s recently synced list.
@@ -512,6 +545,46 @@ impl AccountReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The folders in Desktops are listed by name, as the mirror has them: the folders alone,
+    /// none from elsewhere on the drive; a node's name is read by its id, a folder by its path.
+    #[test]
+    fn the_desktops_are_listed_by_name() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let db = home.path().join("state.db");
+        let root = home.path().join("Homebase");
+        SyncRoot::create(&db, "a.example", &root)?;
+        let (work, laptop) = (NodeId::new(), NodeId::new());
+        hbsync_state::put_desktops(&db, &[(work, "Work"), (laptop, "Laptop")])?;
+        // A file in Desktops: no computer's Desktop.
+        let file = hbsync_state::MirrorRow {
+            file_id: hbsync_types::RemoteFileId(hbsync_types::Uuid::new_v4()),
+            version: hbsync_types::VersionTag(hbsync_types::Uuid::new_v4()),
+            node: NodeId::new(),
+            parent: NodeId::DESKTOPS,
+            name: "a.txt".into(),
+            kind: hbsync_types::NodeKind::File,
+            file: Some(hbsync_state::MirrorFile {
+                hash: hbsync_types::ContentHash {
+                    algorithm: hbsync_types::HashAlgorithm::Blake3,
+                    bytes: [1; 32],
+                },
+                size: 1,
+                mtime_ms: None,
+                executable: false,
+            }),
+            content_extra: None,
+            token: None,
+            changed_at: Some(5),
+        };
+        StateDb::open_account(&db)?.write(|s| s.account().put_live(&file))?;
+        let mut reader = AccountReader::open(&db, "a.example")?.ok_or("no DB")?;
+        let listed = reader.desktops()?;
+        assert_eq!(listed, [(laptop, "Laptop".into()), (work, "Work".into())]);
+        assert_eq!(reader.name_of(work)?.as_deref(), Some("Work"));
+        assert_eq!(reader.folder_at(&root)?.map(|f| f.top), Some(NodeId::ROOT));
+        Ok(())
+    }
 
     #[test]
     fn a_folder_is_found_through_its_marker() -> Result<(), Box<dyn std::error::Error>> {
