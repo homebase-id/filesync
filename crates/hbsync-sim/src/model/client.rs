@@ -33,11 +33,33 @@ pub(crate) struct Pages {
     /// a detach's ids, a skipped or stopped operation), which the simulator reads as what
     /// differs.
     pub(crate) marks: BTreeSet<NodeId>,
-    /// What this sync's held deletes take out of the dirty set (`held::out_of_dirty`), as the
-    /// engine's `HoldOut`: out of `marks` once a sweep did nothing (the sync's end). Not
-    /// modelled: the engine's limit on what else stays dirty (`LEFTOVERS_MAX`), and its plan of
-    /// the rest alone reaching them.
+    /// What this sweep's held deletes take out of the dirty set (`held::out_of_dirty`), as the
+    /// engine's `HoldOut`: out of `marks` (into `out`) at the sweep's end if it did nothing and
+    /// wasn't stopped (the sync's end); else dropped. Not modelled: the engine's limit on what
+    /// else stays dirty (`LEFTOVERS_MAX`), its plan of the rest alone reaching them, and a sync
+    /// that starts in the middle of a sweep (the simulator's sweeps run on across them).
     pub(crate) held_out: BTreeSet<NodeId>,
+    /// What held deletes took out of the dirty set: dirty again once a round's view reaches it
+    /// (`HeldDeletes::plan_again`).
+    pub(crate) out: BTreeSet<NodeId>,
+    /// This sweep planned work.
+    pub(crate) progress: bool,
+    /// This sweep's run stopped with work left (a plan made again before its operations ran).
+    pub(crate) stopped: bool,
+}
+
+impl Pages {
+    /// A sweep ended (its last page planned, and what its pages waited for): what its held
+    /// deletes take out of the dirty set leaves it if the sweep did nothing and wasn't stopped,
+    /// as the engine's sync ends so; a new sweep starts with nothing.
+    pub(crate) fn sweep_ended(&mut self) {
+        let held_out = std::mem::take(&mut self.held_out);
+        if !std::mem::take(&mut self.progress) && !std::mem::take(&mut self.stopped) {
+            self.marks.retain(|n| !held_out.contains(n));
+            self.out.extend(held_out);
+        }
+        self.stopped = false;
+    }
 }
 
 #[derive(Debug)]
