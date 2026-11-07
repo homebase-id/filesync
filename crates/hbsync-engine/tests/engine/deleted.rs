@@ -44,6 +44,27 @@ fn a_folder_that_isnt_removed_keeps_what_is_in_it() -> R {
     Ok(())
 }
 
+/// The bytes and bit of the file named `name`, live (`removed` false) or in Recently deleted.
+fn version_named(
+    server: &Arc<Mutex<hbsync_remote::fake::FakeServer>>,
+    name: &str,
+    removed: bool,
+) -> Result<(Vec<u8>, bool), Box<dyn std::error::Error>> {
+    let guard = server.lock().map_err(|_| "poisoned")?;
+    let named = |h: &hbsync_remote::RemoteHeader| match &h.body {
+        hbsync_remote::RemoteBody::Live { content, .. } if content.name == name => {
+            Some((h.file_id, content.x))
+        }
+        _ => None,
+    };
+    let found = match removed {
+        true => guard.removed().find_map(named),
+        false => guard.live().find_map(named),
+    };
+    let (file_id, x) = found.ok_or(format!("{name} not there (removed: {removed})"))?;
+    Ok((guard.payload(file_id)?.to_vec(), x))
+}
+
 /// A folder's removal took along a version another device never had (its own removal still
 /// on its way): that device's rename of its older copy doesn't write over it. The version stays,
 /// and goes with the folder into Recently deleted; the renamed copy goes up as a new item.
@@ -75,15 +96,115 @@ fn a_rename_doesnt_write_over_a_version_taken_along() -> R {
         .map(|i| i.path)
         .collect();
     assert!(removed.contains(&"Photos/x.txt".to_owned()), "{removed:?}");
-    let x = server
-        .lock()
-        .map_err(|_| "poisoned")?
-        .removed()
-        .find(|h| matches!(&h.body, hbsync_remote::RemoteBody::Live { content, .. } if content.name == "x.txt"))
-        .map(|h| h.file_id)
-        .ok_or("x.txt not in Recently deleted")?;
-    let bytes = server.lock().map_err(|_| "poisoned")?.payload(x)?;
-    assert_eq!(bytes.as_slice(), b"new", "the version taken along stays");
+    let (bytes, _) = version_named(&server, "x.txt", true)?;
+    assert_eq!(bytes, b"new", "the version taken along stays");
+    Ok(())
+}
+
+/// The same with only the executable bit: another device marked the file executable before the
+/// folder's removal took it along. An edit here, which never had that bit and sends its own,
+/// doesn't write over it: the version stays with the folder in Recently deleted, still
+/// executable, and the edit goes up as a new item (§4), its folder brought back.
+#[cfg(unix)]
+#[test]
+fn an_edit_doesnt_write_over_a_bit_taken_along() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("Photos/x.txt", "old")?;
+    a.sync()?;
+    b.sync()?;
+    fs::set_permissions(
+        a.root.join("Photos/x.txt"),
+        fs::Permissions::from_mode(0o755),
+    )?;
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("Photos"))?;
+    // The folder goes; the file's own removal keeps failing during this sync.
+    a.remote.faults().fail_writes_named = Some("x.txt".into());
+    a.sync()?;
+    a.remote.faults().fail_writes_named = None;
+    // b never had the bit: it edits its plain "old".
+    b.engine.scan_local()?;
+    b.write("Photos/x.txt", "edited")?;
+    b.sync()?;
+    a.sync()?;
+    b.sync()?;
+    // Detached beside the version still live at the time, under a conflict name.
+    assert_eq!(
+        b.tree_text(""),
+        ["Photos/", "Photos/x (conflict 1).txt = edited"]
+    );
+    assert_eq!(
+        version_named(&server, "x.txt", true)?,
+        (b"old".to_vec(), true),
+        "the version taken along keeps its bit"
+    );
+    Ok(())
+}
+
+/// A file another device marked executable, then deleted: an edit here restores it (an edit
+/// wins over the delete), but this device holds its bit and sends its own, which never had that
+/// one. The version stays in Recently deleted, still executable, and the edit goes up as a new
+/// item (§4).
+#[cfg(unix)]
+#[test]
+fn a_restore_doesnt_write_over_a_bit_it_never_had() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("x.txt", "old")?;
+    a.sync()?;
+    b.sync()?;
+    fs::set_permissions(a.root.join("x.txt"), fs::Permissions::from_mode(0o755))?;
+    a.sync()?;
+    fs::remove_file(a.root.join("x.txt"))?;
+    a.sync()?;
+    b.engine.scan_local()?;
+    b.write("x.txt", "edited")?;
+    b.sync()?;
+    assert_eq!(
+        version_named(&server, "x.txt", true)?,
+        (b"old".to_vec(), true)
+    );
+    assert_eq!(
+        version_named(&server, "x.txt", false)?,
+        (b"edited".to_vec(), false)
+    );
+    Ok(())
+}
+
+/// The same with a launcher on Linux, whose bit this device doesn't hold: it sends the drive's,
+/// the bit of the version in Recently deleted, so the edit restores that one at its id, still
+/// executable (§1): nothing to keep apart.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_restore_of_a_launcher_keeps_the_drive_s_bit() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let server = server();
+    // A Mac holds a launcher's bit.
+    let mut a = Client::with_config(&server, "a", |c| c.folder.os = hbsync_platform::Os::MacOs)?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("x.desktop", "old")?;
+    a.sync()?;
+    b.sync()?;
+    fs::set_permissions(a.root.join("x.desktop"), fs::Permissions::from_mode(0o755))?;
+    a.sync()?;
+    fs::remove_file(a.root.join("x.desktop"))?;
+    a.sync()?;
+    b.engine.scan_local()?;
+    b.write("x.desktop", "edited")?;
+    b.sync()?;
+    assert_eq!(
+        version_named(&server, "x.desktop", false)?,
+        (b"edited".to_vec(), true)
+    );
+    assert!(
+        version_named(&server, "x.desktop", true).is_err(),
+        "restored at its id"
+    );
     Ok(())
 }
 

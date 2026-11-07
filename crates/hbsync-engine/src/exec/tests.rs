@@ -4641,3 +4641,23 @@ fn an_open_removal_counts_what_it_took_along() -> R {
     );
     Ok(())
 }
+
+/// What an upload writing over a version would lose: bytes other than the agreed ones, or a bit
+/// changed elsewhere that the upload doesn't send (§1, §4). A bit the upload sends as the
+/// drive has it (a device that doesn't hold it), or one only this device changed, loses nothing.
+#[test]
+fn an_upload_over_a_bit_changed_elsewhere_never_had_it() {
+    use super::never_had;
+    let (a, b) = (h_content_hash(b"a"), h_content_hash(b"b"));
+    // Other bytes, whatever the bit.
+    assert!(never_had(Some((b, false)), Some((a, false)), false));
+    // Marked executable elsewhere; this upload sends it plain.
+    assert!(never_had(Some((a, true)), Some((a, false)), false));
+    // ... or sends it as the drive has it: nothing lost.
+    assert!(!never_had(Some((a, true)), Some((a, false)), true));
+    // The bit as agreed: this device's own change goes up.
+    assert!(!never_had(Some((a, false)), Some((a, false)), true));
+    // No agreed version: anything on the drive is one this device never had.
+    assert!(never_had(Some((a, false)), None, false));
+    assert!(!never_had(None, None, false));
+}

@@ -144,7 +144,7 @@ Per node, after classifying both sides:
 | moved | moved | same destination → no-op. Different → **remote wins**; the local move is reverted |
 | edited | moved | apply both: the content goes up, the move comes down (and vice versa) |
 | deleted | edited / moved | **edit wins**: the node is restored locally from the remote |
-| edited / moved | deleted | **edit wins**: the removed node is restored remotely with the local version (an update at its file id: node schema "Recently deleted"). If Recently deleted holds a version of the file this device never had (edited elsewhere, then deleted; or taken along by a folder's delete, §6.3), that one stays there and the local version goes up as a new node (detached in place) |
+| edited / moved | deleted | **edit wins**: the removed node is restored remotely with the local version (an update at its file id: node schema "Recently deleted"). If Recently deleted holds a version of the file this device never had (edited elsewhere, then deleted; or taken along by a folder's delete, §6.3): other bytes than agreed, or an executable bit changed elsewhere that this device doesn't send (§1), that one stays there and the local version goes up as a new node (detached in place) |
 | created | created | impossible for one node id; same-name clashes are handled by section 6 |
 
 A `moved` that only reverts a delete case is applied to the restored node.
