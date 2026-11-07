@@ -332,9 +332,11 @@ pub fn put_back_plan<S: Sides>(nodes: &[NodeId], sides: &S) -> Result<PutBack, S
     Ok(plan)
 }
 
-/// The guard's pending counts as a sweep reads them from `s` (`holding::guard_counts`), with
-/// `confirmed` the confirmed deletes: (gone here, gone there). For the simulator, whose model of
-/// them is checked against this.
+/// Tests: the guard's pending counts in `s` as a sweep's first read takes them
+/// (`holding::guard_counts`: the dirty set's synced files gone here and gone there, with what a
+/// folder's removal took along and the held deletes out of the dirty set, less what the
+/// `confirmed` deletes cover). The simulator's model of them is checked against this.
+#[cfg(feature = "testkit")]
 pub fn pending_counts(
     s: &hbsync_state::ReadTx<'_>,
     confirmed: &HashSet<NodeId>,

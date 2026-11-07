@@ -258,91 +258,116 @@ impl Sim {
                 &mut pending,
             );
         }
-        // The guard's totals over the whole dirty set, as the engine counts them
-        // (`pending_file_deletes`): synced files gone here and gone there, but those confirmed;
-        // and of them, those outside the page (for the oracle). The engine's files a removed
-        // folder took along (`taken_files`): those this device removes from the drive on the
-        // gone here side, and the synced ones on the gone there side, but those a confirmed
-        // delete covers (`confirmed_file_deletes`: in the local subtree of a dirty confirmed
-        // node), each once.
-        let (mut pending, mut outside) = ((0, 0), (0, 0));
-        let confirmed_at = |n: NodeId| {
-            !client.confirmed.is_empty()
-                && (client.confirmed.contains(&n)
-                    || input
-                        .base
-                        .ancestors(n)
-                        .iter()
-                        .any(|a| client.confirmed.contains(a)))
-        };
+        // The guard's totals over the whole dirty set, as the engine's store counts them
+        // (`holding::guard_counts`, which `narrow::check_counts` holds this to), and of them
+        // those outside the page (for the oracle):
+        // - each dirty synced file gone here (but one whose base keeps its absence: online-only,
+        //   wanted) or gone there (`pending_file_deletes`);
+        // - what a folder's removal took along (`taken_files`): those this device removes from
+        //   the drive on the gone here side, the synced ones on the gone there side;
+        // - less what the dirty confirmed deletes cover (`confirmed_file_deletes`): the node
+        //   itself gone here, and of its subtree here what is gone there, each file once.
+        // Not modelled: the engine counts at a sync's start and again only when another
+        // connection wrote, never below the counts before (`HeldDeletes::recount`); the
+        // simulator counts afresh at each plan.
         let synced_file = |n: NodeId| input.base.get(n).is_some_and(|s| s.kind == NodeKind::File);
-        let counted = |n: NodeId| synced_file(n) && !confirmed_at(n);
-        for &n in all.iter().filter(|n| counted(**n)) {
-            let here = usize::from(!input.local.contains(n));
-            let there = usize::from(!input.remote.contains(n));
-            pending = (pending.0 + here, pending.1 + there);
-            if !input.dirty.contains(&n) {
-                outside = (outside.0 + here, outside.1 + there);
+        let keeps_absence = |n: NodeId| {
+            input
+                .base_extra
+                .get(&n)
+                .is_some_and(|e| e.content_state.keeps_absence())
+        };
+        let gone_here = |n: NodeId| synced_file(n) && !keeps_absence(n) && !input.local.contains(n);
+        let gone_there = |n: NodeId| synced_file(n) && !input.remote.contains(n);
+        let (mut here, mut there): (Vec<NodeId>, Vec<NodeId>) = (Vec::new(), Vec::new());
+        for &n in &all {
+            if gone_here(n) {
+                here.push(n);
+            }
+            if gone_there(n) {
+                there.push(n);
             }
         }
         let taken = hbsync_engine::reconcile::taken_along(&input);
         // Of the taken-along files gone there, outside the page: see below, once planned.
         let mut taken_there: Vec<NodeId> = Vec::new();
+        // The removed folder each taken-along node went with: its nearest in Recently deleted.
+        let taken_by: HashMap<NodeId, NodeId> = taken
+            .iter()
+            .filter_map(|&n| {
+                let r = input
+                    .remote
+                    .ancestors(n)
+                    .into_iter()
+                    .find(|a| input.removed.contains_key(a))?;
+                Some((n, r))
+            })
+            .collect();
         if !all.is_empty() {
-            // Counted above already (dirty, gone here), or confirmed: a confirmation covers its
-            // own node only, while dirty (`confirmed_file_deletes`).
-            let counted_or_confirmed = |n: NodeId| {
-                all.contains(&n)
-                    && ((synced_file(n) && !input.local.contains(n))
-                        || client.confirmed.contains(&n))
-            };
-            let removes = |n: NodeId| {
-                input
+            for &n in &taken {
+                let file = input
                     .remote
                     .get(n)
-                    .is_some_and(|s| s.kind == NodeKind::File)
-                    && (synced_file(n) || (!input.base.contains(n) && all.contains(&n)))
-            };
-            // What a confirmed delete covers of what was taken along (`confirmed_file_deletes`):
-            // in the confirmed node's subtree here, taken along by the removal of a folder in
-            // that subtree, or above the node on the drive.
-            let confirmed_dirty: Vec<NodeId> = client
-                .confirmed
-                .iter()
-                .copied()
-                .filter(|c| all.contains(c))
-                .collect();
-            let covered = |n: NodeId| {
-                if confirmed_dirty.is_empty() {
-                    return false;
+                    .is_some_and(|s| s.kind == NodeKind::File);
+                let removes = file
+                    && match input.base.get(n) {
+                        None => all.contains(&n),
+                        Some(b) => b.kind == NodeKind::File && !(all.contains(&n) && gone_here(n)),
+                    };
+                if removes {
+                    here.push(n);
                 }
-                let above = input.remote.ancestors(n);
-                let Some(r) = above
-                    .iter()
-                    .copied()
-                    .find(|a| input.removed.contains_key(a))
-                else {
-                    return false;
-                };
-                let (here, removed_here) = (input.local.ancestors(n), input.local.ancestors(r));
-                confirmed_dirty.iter().any(|&c| {
-                    (n == c || here.contains(&c))
-                        && (r == c
-                            || removed_here.contains(&c)
-                            || input.remote.ancestors(c).contains(&r))
-                })
-            };
-            for &n in &taken {
-                if synced_file(n) && !covered(n) {
-                    pending.1 += 1;
+                if synced_file(n) {
                     taken_there.push(n);
-                }
-                if removes(n) && !counted_or_confirmed(n) {
-                    pending.0 += 1;
-                    outside.0 += usize::from(!input.dirty.contains(&n));
                 }
             }
         }
+        // What the dirty confirmed deletes cover: each one's node gone here (or a file taken
+        // along by a removal in its subtree or above it on the drive), and what is gone there
+        // in its subtree here (dirty, or taken along so), each file once.
+        let (mut covered_here, mut covered_there) = (HashSet::new(), HashSet::new());
+        for &c in client.confirmed.iter().filter(|c| all.contains(c)) {
+            let sub: HashSet<NodeId> = input.local.subtree(c).into_iter().collect();
+            let up = input.remote.ancestors(c);
+            let taken_c = |n: NodeId| {
+                taken_by
+                    .get(&n)
+                    .is_some_and(|r| sub.contains(r) || up.contains(r))
+            };
+            let file_on_drive = input
+                .remote
+                .get(c)
+                .is_some_and(|s| s.kind == NodeKind::File);
+            if gone_here(c)
+                || (taken_c(c)
+                    && file_on_drive
+                    && input.base.get(c).is_none_or(|b| b.kind == NodeKind::File))
+            {
+                covered_here.insert(c);
+            }
+            for &d in &sub {
+                if (all.contains(&d) && gone_there(d)) || (synced_file(d) && taken_c(d)) {
+                    covered_there.insert(d);
+                }
+            }
+        }
+        let pending = (
+            here.len().saturating_sub(covered_here.len()),
+            (there.len() + taken_there.len()).saturating_sub(covered_there.len()),
+        );
+        let outside_page = |n: &&NodeId| !input.dirty.contains(*n);
+        let mut outside = (
+            here.iter()
+                .filter(|n| !covered_here.contains(*n))
+                .filter(outside_page)
+                .count(),
+            there
+                .iter()
+                .filter(|n| !covered_there.contains(*n))
+                .filter(outside_page)
+                .count(),
+        );
+        taken_there.retain(|n| !covered_there.contains(n));
         let confirmed = Arc::new(client.confirmed.clone());
         // Held as every synced file: until answered, by the engine's rule (it keeps
         // `guard.wiped` so), over what its store has: the mirror (the plan's view of the drive)
@@ -428,16 +453,12 @@ impl Sim {
             self.faults.narrow_rounds += 1;
             if self.faults.narrow_rounds.is_multiple_of(4) {
                 let round = self.faults.narrow_rounds / 4;
-                let what = self
-                    .check_narrow(c, &input, &opts, &known, &plan, round)
-                    .or_else(|| self.check_counts(c, &input, &opts, &all));
+                let what = self.check_narrow(c, &input, &opts, &known, &plan, round, &all);
                 self.ledger.narrow_differs(|| what);
             }
         }
         if self.faults.held_check && !self.ledger.found_narrow_differs() {
-            let what = self
-                .check_held(c, &input, &opts, &known, &plan)
-                .or_else(|| self.check_counts(c, &input, &opts, &all));
+            let what = self.check_held(c, &input, &opts, &known, &plan, &all);
             self.ledger.narrow_differs(|| what);
         }
         // The files here not hashed yet (as the engine's view holds them: a row without a state
@@ -535,7 +556,6 @@ impl Sim {
         // the page the run is sent to rename (`pages::losers_sent`) is marked.
         if self.faults.page_size.is_some() {
             let pages = client.pages.get_mut();
-            pages.busy |= !plan.ops.is_empty();
             // Whether the view reached the held deletes out of the dirty set (`held::touches`).
             let reached = !pages.out.is_empty() && {
                 let out: HashSet<NodeId> = pages.out.iter().copied().collect();
@@ -745,6 +765,8 @@ impl Sim {
         let remote_write = outcome == Outcome::Done && writes_drive(&op);
         let outcome = if landed { Outcome::Done } else { outcome };
         if outcome == Outcome::Done {
+            // The sweep did something: its held deletes stay dirty (the engine's `progress`).
+            self.clients[c].pages.get_mut().busy = true;
             self.clients[c].refused.remove(&(node, op.kind()));
             let name = &self.clients[c].name;
             self.ledger

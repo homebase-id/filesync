@@ -28,7 +28,9 @@ use crate::model::client::Client;
 impl Sim {
     /// Client `c`'s plan `plan`, made from `input` with `opts` and the ids it takes as known,
     /// checked against the engine's planning path over the same state (`round`: which of the
-    /// nodes whose sides agree the narrow plan takes dirty): what differs, if anything.
+    /// nodes whose sides agree the narrow plan takes dirty), and its guard totals against the
+    /// store's with `dirty` the dirty set ([`counts_differ`]): what differs, if anything.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn check_narrow(
         &self,
         c: usize,
@@ -37,6 +39,7 @@ impl Sim {
         known: &dyn Fn(NodeId) -> bool,
         plan: &Plan,
         round: usize,
+        dirty: &BTreeSet<NodeId>,
     ) -> Option<String> {
         let client = &self.clients[c];
         if !client.coords.top.is_root() {
@@ -66,74 +69,22 @@ impl Sim {
                 .filter(|(i, n)| differs.contains(n) || (i + round).is_multiple_of(2))
                 .map(|(_, n)| n)
                 .collect();
-            if some.is_empty() {
-                return Ok(None);
+            if !some.is_empty() {
+                let narrow = view::plan_narrow(&mut db, &some, &folder, reconcile)?;
+                let full = match some.len() == all.len() {
+                    true => whole,
+                    false => {
+                        let full = db.read(|s| view::build_input(s, &some, &folder))?;
+                        reconcile(&full, &mut db)
+                    }
+                };
+                if narrow != full {
+                    return Ok(Some(format!(
+                        "c{c}: the narrow view plans otherwise than whole folders for {some:?}:\n  narrow: {narrow:?}\n  whole:  {full:?}"
+                    )));
+                }
             }
-            let narrow = view::plan_narrow(&mut db, &some, &folder, reconcile)?;
-            let full = match some.len() == all.len() {
-                true => whole,
-                false => {
-                    let full = db.read(|s| view::build_input(s, &some, &folder))?;
-                    reconcile(&full, &mut db)
-                }
-            };
-            Ok((narrow != full).then(|| {
-                format!(
-                    "c{c}: the narrow view plans otherwise than whole folders for {some:?}:\n  narrow: {narrow:?}\n  whole:  {full:?}"
-                )
-            }))
-        })();
-        checked.unwrap_or_else(|e| Some(format!("c{c}: the store failed: {e}")))
-    }
-
-    /// Client `c`'s guard totals as the simulator counts them (`opts.guarding.pending`), against
-    /// the store's over the same state (`held::pending_counts`: its input filled in, `all`
-    /// marked dirty, the confirmed deletes): what differs, if anything. The store's rule is
-    /// the engine's; the simulator's is a copy that mustn't drift. Held deletes out of the dirty
-    /// set aren't filled in: the simulator counts them with what differs.
-    pub(crate) fn check_counts(
-        &self,
-        c: usize,
-        input: &Input,
-        opts: &Options,
-        all: &BTreeSet<NodeId>,
-    ) -> Option<String> {
-        let client = &self.clients[c];
-        if all.is_empty() || !client.coords.top.is_root() {
-            return None;
-        }
-        // Not checked where the simulator's model is known to differ from the store's rule (gaps
-        // of its own, apart): a confirmation, which the simulator lets cover what is below the
-        // confirmed node on the base whether or not that node is dirty, where the store counts
-        // only a dirty one's, on each side by its own rule; and a file whose base keeps its
-        // absence (online-only, wanted), which the store doesn't count gone here.
-        if !opts.guarding.confirmed.is_empty()
-            || all.iter().any(|n| {
-                input
-                    .base_extra
-                    .get(n)
-                    .is_some_and(|e| e.content_state.keeps_absence())
-            })
-        {
-            return None;
-        }
-        let checked = (|| -> Result<Option<String>, StateError> {
-            let mut db = self.fill(c, input)?;
-            db.write(|s| {
-                for n in s.dirty_nodes(usize::MAX)? {
-                    s.folder().clear_dirty(n)?;
-                }
-                all.iter().try_for_each(|&n| s.folder().mark_dirty(n))
-            })?;
-            let store = db.read(|s| held::pending_counts(s, &opts.guarding.confirmed))?;
-            let (here, there) = opts.guarding.pending;
-            Ok((store != (here as u64, there as u64)).then(|| {
-                format!(
-                    "c{c}: the guard's totals (gone here, gone there) are {:?} in the simulator, \
-                     {store:?} in the store, over {all:?} dirty",
-                    opts.guarding.pending
-                )
-            }))
+            counts_differ(c, &mut db, opts, dirty)
         })();
         checked.unwrap_or_else(|e| Some(format!("c{c}: the store failed: {e}")))
     }
@@ -149,6 +100,7 @@ impl Sim {
         opts: &Options,
         known: &dyn Fn(NodeId) -> bool,
         plan: &Plan,
+        dirty: &BTreeSet<NodeId>,
     ) -> Option<String> {
         let client = &self.clients[c];
         if plan.held.is_empty() || !client.coords.top.is_root() {
@@ -157,16 +109,15 @@ impl Sim {
         let folder = self.folder_ctx(c);
         let checked = (|| -> Result<Option<String>, StateError> {
             let mut db = self.fill(c, input)?;
+            // The guard's totals first, over the simulator's dirty set (`counts_differ`).
+            if let Some(what) = counts_differ(c, &mut db, opts, dirty)? {
+                return Ok(Some(what));
+            }
             // The nodes the engine keeps dirty: those marked, and those the plan has work for.
             let dirty: Vec<NodeId> = engine_dirty(client, input, plan).into_iter().collect();
             // The store's marks are those: filling it marks what it writes (a pull's rows), and
             // a mark the page doesn't hold reads as another page's (§6.5).
-            db.write(|s| {
-                for n in s.dirty_nodes(usize::MAX)? {
-                    s.folder().clear_dirty(n)?;
-                }
-                dirty.iter().try_for_each(|&n| s.folder().mark_dirty(n))
-            })?;
+            set_dirty(&mut db, dirty.iter().copied())?;
             let folder = &folder;
             let with = |opts: &Options| {
                 let opts = opts.clone();
@@ -337,6 +288,42 @@ impl Sim {
             .node(node)
             .map_or(RemoteFileId(node.0), |(n, _)| n.remote.file_id)
     }
+}
+
+/// Makes `db`'s dirty set exactly `nodes`.
+fn set_dirty(db: &mut StateDb, nodes: impl IntoIterator<Item = NodeId>) -> Result<(), StateError> {
+    db.write(|s| {
+        s.folder().clear_all_dirty()?;
+        nodes.into_iter().try_for_each(|n| s.folder().mark_dirty(n))
+    })
+}
+
+/// Client `c`'s guard totals as the simulator counted them (`opts.guarding.pending`, with
+/// `dirty` its dirty set), against the store's over the same state (`held::pending_counts`, in
+/// `db`, filled with its input, the dirty set made `dirty`): what differs, if anything. The
+/// store's rule is the engine's; the simulator's is a copy that mustn't drift. Only the
+/// counting rule: when the engine counts (a sync's start, again when another connection wrote,
+/// never below before) the simulator doesn't model. Held deletes out of the dirty set aren't
+/// in the store filled: the simulator counts them with what differs.
+fn counts_differ(
+    c: usize,
+    db: &mut StateDb,
+    opts: &Options,
+    dirty: &BTreeSet<NodeId>,
+) -> Result<Option<String>, StateError> {
+    if dirty.is_empty() {
+        return Ok(None);
+    }
+    set_dirty(db, dirty.iter().copied())?;
+    let store = db.read(|s| held::pending_counts(s, &opts.guarding.confirmed))?;
+    let (here, there) = opts.guarding.pending;
+    Ok((store != (here as u64, there as u64)).then(|| {
+        format!(
+            "c{c}: the guard's totals (gone here, gone there) are {:?} in the simulator, {store:?} \
+             in the store, over {dirty:?} dirty, {:?} confirmed",
+            opts.guarding.pending, opts.guarding.confirmed
+        )
+    }))
 }
 
 /// Where the sim's input `sim` and the engine's view `engine` differ, field by field (sorted:

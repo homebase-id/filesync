@@ -269,6 +269,14 @@ impl FolderTx<'_> {
         Ok(())
     }
 
+    /// Clears every dirty mark of the folder (tests: a store's dirty set made exactly some).
+    #[cfg(feature = "testkit")]
+    pub fn clear_all_dirty(&self) -> Result<()> {
+        self.prep("DELETE FROM dirty WHERE folder = $F")?
+            .execute([])?;
+        Ok(())
+    }
+
     pub fn clear_dirty(&self, node: NodeId) -> Result<()> {
         self.change(
             &format!("DELETE FROM dirty WHERE folder = $F AND id = {ID_OF}"),
