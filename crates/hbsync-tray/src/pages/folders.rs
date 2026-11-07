@@ -4,6 +4,7 @@
 use std::path::Path;
 use std::time::Instant;
 
+use hbsync_app::Root;
 use hbsync_app::folders::{self, Taken};
 use hbsync_types::Role;
 
@@ -50,14 +51,8 @@ impl Server {
                             format!("<p class=small>{}</p>", escape(&e.to_string())),
                         ),
                         Ok(path) => {
-                            let refused = folders::check(
-                                &config,
-                                identity,
-                                &path,
-                                Some(role),
-                                home.as_deref(),
-                            )
-                            .err();
+                            let root = Root::role(identity, &path, role);
+                            let refused = folders::check(&config, &root, home.as_deref()).err();
                             let action = match refused {
                                 Some(why) => format!("<p class=small>{}</p>", escape(&why)),
                                 None => self.button("folders/add", role, "Sync", false),
@@ -127,7 +122,7 @@ impl Server {
                 // Downloads) while the user is at this page, not later out of the blue.
                 std::fs::read_dir(&folder)?;
                 let (taken, set_aside) =
-                    folders::add_synced(&self.paths, &identity, &folder, Some(role))?;
+                    folders::add_synced(&self.paths, &Root::role(&identity, &folder, role))?;
                 let said = match taken {
                     Taken::Now => format!("{} syncs now.", role.name()),
                     Taken::AtStart => {

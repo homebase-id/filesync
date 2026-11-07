@@ -1376,3 +1376,40 @@ fn a_watcher_that_stops_is_told_and_started_again() -> R {
     assert_eq!(unwatched_notes(&a), 0);
     Ok(())
 }
+
+/// A runner of the computer's Desktop (its kind kept with its folder) syncs it into a folder of
+/// its own in Desktops, named as the runner says (the computer's, or the one given), and shows
+/// itself as the Desktop.
+#[test]
+fn a_desktop_runner_syncs_its_own_folder_in_desktops_named_so() -> R {
+    let server = server();
+    let dir = tempfile::tempdir()?;
+    let root = dir.path().canonicalize()?.join("Desktop");
+    std::fs::create_dir_all(&root)?;
+    let top = hbsync_types::NodeId::new();
+    let db = db_of(&root);
+    let kind = hbsync_state::FolderKind::Desktop;
+    SyncRoot::create_for(&db, "test.example", &root, top, kind)?;
+    std::fs::write(root.join("note.txt"), "n")?;
+    let mut cfg = RunnerConfig::new(&root, &db, &"test.example".into(), "pc");
+    cfg.desktop = Some("Laptop".into());
+    let drive = Drive::open(
+        &cfg.db,
+        &cfg.identity,
+        Arc::new(FakeRemote::new(server.clone())),
+    )?;
+    let (handle, thread) = Runner::spawn(cfg, Arc::clone(&drive))?;
+    let done = wait_until("the Desktop is on the drive", || {
+        let names = live_names(&server);
+        ["Desktops", "Laptop", "note.txt"]
+            .iter()
+            .all(|n| names.iter().any(|m| m == n))
+    });
+    let status = handle.status();
+    handle.send(Command::Stop);
+    let _ = thread.join();
+    done?;
+    assert!(status.desktop && !status.is_main(), "{status:?}");
+    assert_eq!(status.what(), "test.example's Desktop");
+    Ok(())
+}

@@ -308,6 +308,77 @@ fn a_role_folder_is_added_and_removed_without_a_daemon() -> R {
     Ok(())
 }
 
+/// The Desktop is added with a folder of its own on the drive, named as given; a second one,
+/// one inside the main folder, or a name for a role folder are refused; named again it keeps its
+/// folder on the drive; removed, it isn't synced any more.
+#[test]
+fn the_desktop_is_added_named_and_removed_without_a_daemon() -> R {
+    let home = Home::new()?;
+    let main = home.set_up()?;
+    let desk = home.path().join("Desk");
+    std::fs::create_dir_all(&desk)?;
+    let desk_arg = desk.to_string_lossy().into_owned();
+    let said = home.ok(&["add", "desktop", "--folder", &desk_arg, "--name", "Laptop"])?;
+    assert!(said.contains("Desktop"), "{said}");
+    let config = std::fs::read_to_string(home.path().join("config.toml"))?;
+    assert!(
+        config.contains("desktop = ") && config.contains("Laptop"),
+        "{config}"
+    );
+    let top = config
+        .lines()
+        .find(|l| l.starts_with("desktop = "))
+        .ok_or("no desktop line")?
+        .to_owned();
+
+    let other = home.path().join("Other desk");
+    std::fs::create_dir_all(&other)?;
+    let out = home.hbsync(&["add", "desktop", "--folder", &other.to_string_lossy()])?;
+    assert!(!out.status.success(), "one Desktop: {}", text(&out));
+    let inside = main.join("Desk");
+    std::fs::create_dir_all(&inside)?;
+    let out = home.hbsync(&["add", "desktop", "--folder", &inside.to_string_lossy()])?;
+    assert!(
+        !out.status.success(),
+        "inside the main folder: {}",
+        text(&out)
+    );
+    let docs = home.path().join("Docs");
+    std::fs::create_dir_all(&docs)?;
+    let out = home.hbsync(&[
+        "add",
+        "documents",
+        "--folder",
+        &docs.to_string_lossy(),
+        "--name",
+        "x",
+    ])?;
+    assert!(!out.status.success(), "a name for a role folder");
+    let out = home.hbsync(&["add", "papers"])?;
+    assert!(text(&out).contains("desktop"), "{}", text(&out));
+
+    home.ok(&[
+        "add",
+        "desktop",
+        "--folder",
+        &desk_arg,
+        "--name",
+        "Work laptop",
+    ])?;
+    let config = std::fs::read_to_string(home.path().join("config.toml"))?;
+    assert!(
+        config.contains("Work laptop") && config.contains(&top),
+        "{config}"
+    );
+
+    let said = home.ok(&["remove", "desktop"])?;
+    assert!(said.contains("no longer synced"), "{said}");
+    let config = std::fs::read_to_string(home.path().join("config.toml"))?;
+    assert!(!config.contains("desktop = "), "{config}");
+    assert!(home.ok(&["remove", "desktop"])?.contains("isn't synced"));
+    Ok(())
+}
+
 /// Adding a role folder with no daemon running readies the account's DB: one from before 0.7 is
 /// set aside, and that is said, as setup and the daemon say it.
 #[test]

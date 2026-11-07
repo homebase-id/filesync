@@ -436,6 +436,7 @@ impl DocsOnly {
             "t.example",
             &root,
             Role::Documents.node(),
+            FolderKind::Role,
         )?;
         let drive = Drive::open(&db, "t.example", Arc::new(FakeRemote::new(server.clone())))?;
         let engine = Engine::open(&sync_root, drive, config(&root))?;

@@ -120,7 +120,7 @@ impl SyncRoot {
     /// Sets the folder at `path` up in `identity`'s DB at `db` as the main folder, holding the
     /// drive's root ([`SyncRoot::create_for`]).
     pub fn create(db: &Path, identity: &str, path: &Path) -> Result<SyncRoot, RootError> {
-        Self::create_for(db, identity, path, NodeId::ROOT)
+        Self::create_for(db, identity, path, NodeId::ROOT, FolderKind::Main)
     }
 
     /// Sets the folder at `path` up in `identity`'s DB at `db`, holding the drive's node `top`
@@ -131,6 +131,7 @@ impl SyncRoot {
         identity: &str,
         path: &Path,
         top: NodeId,
+        kind: FolderKind,
     ) -> Result<SyncRoot, RootError> {
         let marker = Marker::new(identity);
         let mut account = Self::open_account(db, identity)?;
@@ -140,8 +141,7 @@ impl SyncRoot {
             for old in s.folders()?.into_iter().filter(|f| f.top == top) {
                 s.account().remove_folder(old.id)?;
             }
-            s.account()
-                .add_folder(top, FolderKind::for_top(top), &text, &marker.id)
+            s.account().add_folder(top, kind, &text, &marker.id)
         })?;
         std::fs::create_dir_all(layout::state_dir(path))?;
         marker.write(path)?;
@@ -157,7 +157,7 @@ impl SyncRoot {
     /// [`SyncRoot::open`], or [`SyncRoot::create`] when it has no marker or isn't known to the
     /// DB: the caller has checked that starting it over is wanted.
     pub fn open_or_create(db: &Path, identity: &str, path: &Path) -> Result<SyncRoot, RootError> {
-        Self::open_or_create_for(db, identity, path, NodeId::ROOT)
+        Self::open_or_create_for(db, identity, path, NodeId::ROOT, FolderKind::Main)
     }
 
     /// [`SyncRoot::open_or_create`] for a folder holding the drive's node `top`; one set up for
@@ -167,10 +167,11 @@ impl SyncRoot {
         identity: &str,
         path: &Path,
         top: NodeId,
+        kind: FolderKind,
     ) -> Result<SyncRoot, RootError> {
         match Self::open(db, identity, path) {
             Err(RootError::NoMarker(_) | RootError::Unknown(_)) => {
-                Self::create_for(db, identity, path, top)
+                Self::create_for(db, identity, path, top, kind)
             }
             Ok(found) if found.top != top => Err(RootError::OtherTop(path.to_path_buf())),
             other => other,
@@ -219,7 +220,7 @@ impl SyncRoot {
     pub fn ready(
         db: &Path,
         identity: &str,
-        folders: &[(&Path, NodeId)],
+        folders: &[(&Path, NodeId, FolderKind)],
         found: Option<Unusable>,
     ) -> Result<Option<SetAside>, RootError> {
         let checked = match found {
@@ -280,15 +281,15 @@ impl SyncRoot {
         account: &mut StateDb,
         db: &Path,
         identity: &str,
-        folders: &[(&Path, NodeId)],
+        folders: &[(&Path, NodeId, FolderKind)],
         known: &[FolderRow],
         replaced: bool,
     ) -> Result<(), RootError> {
         let mut waiting = false;
-        for &(path, top) in folders {
+        for &(path, top, kind) in folders {
             let again = match Self::check(path, identity) {
                 Ok(marker) if known.iter().any(|f| f.marker == marker.id) => continue,
-                Ok(_) => Self::create_for(db, identity, path, top).map(drop),
+                Ok(_) => Self::create_for(db, identity, path, top, kind).map(drop),
                 Err(e) => Err(e),
             };
             if let Err(e) = again {
@@ -518,7 +519,7 @@ mod tests {
         // Its folder not there yet (a disk not plugged in): set up at a later start.
         let away = home.path().join("unplugged");
         std::fs::rename(&root, &away)?;
-        let folders = [(root.as_path(), NodeId::ROOT)];
+        let folders = [(root.as_path(), NodeId::ROOT, FolderKind::Main)];
         let set = SyncRoot::ready(&db, anna, &folders, None)?.ok_or("not set aside")?;
         assert_eq!(set.why, Unusable::TooOld);
         let name = set.to.file_name().ok_or("name")?.to_string_lossy();
@@ -585,7 +586,7 @@ mod tests {
         conn.execute_batch("DROP TABLE remote")?;
         conn.pragma_update(None, "user_version", 13)?;
         drop(conn);
-        let folders = [(root.as_path(), NodeId::ROOT)];
+        let folders = [(root.as_path(), NodeId::ROOT, FolderKind::Main)];
         let set = SyncRoot::ready(&db, anna, &folders, None)?.ok_or("not set aside")?;
         assert_eq!(set.why, Unusable::Corrupt);
         SyncRoot::find(&db, anna, &root)?;
@@ -602,7 +603,7 @@ mod tests {
         let root = home.path().join("Homebase");
         std::fs::create_dir_all(&root)?;
         SyncRoot::create(&db, anna, &root)?;
-        let folders = [(root.as_path(), NodeId::ROOT)];
+        let folders = [(root.as_path(), NodeId::ROOT, FolderKind::Main)];
         assert_eq!(SyncRoot::ready(&db, anna, &folders, None)?, None, "whole");
         let found = Some(Unusable::Corrupt);
         let set = SyncRoot::ready(&db, anna, &folders, found)?.ok_or("not set aside")?;

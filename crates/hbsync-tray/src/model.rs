@@ -46,7 +46,7 @@ impl Daemon {
         s.folders
             .iter()
             .filter(|f| f.held_deletes.is_some())
-            .max_by_key(|f| f.role.is_none())
+            .max_by_key(|f| f.is_main())
             .or_else(|| s.main_folder())
     }
 
@@ -71,7 +71,7 @@ impl Daemon {
         };
         s.folders
             .iter()
-            .max_by_key(|f| (folder_look(f), f.role.is_none()))
+            .max_by_key(|f| (folder_look(f), f.is_main()))
     }
 }
 

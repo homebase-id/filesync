@@ -14,13 +14,13 @@ use hbsync_types::Role;
 use hbsync_types::activity::{Deleted, Synced};
 use serde::{Deserialize, Serialize};
 
-use crate::Identity;
+use crate::{Identity, Root};
 
 pub use hbsync_types::activity::Progress;
 
 /// The protocol version this build speaks: a daemon refuses a request in another (after an
 /// update, until it restarts).
-pub(crate) const PROTOCOL: u32 = 10;
+pub(crate) const PROTOCOL: u32 = 11;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
@@ -62,11 +62,9 @@ pub enum Ask {
     FindDeleted {
         items: Vec<String>,
     },
-    /// Set the folder at `path` up for `identity` and sync it (`hbsync setup` has checked it).
+    /// Set the folder `root` up and sync it (`hbsync setup` has checked it).
     AddFolder {
-        identity: Identity,
-        path: PathBuf,
-        role: Option<Role>,
+        root: Root,
     },
     /// Stop syncing the folder at `path`; its files and state stay.
     RemoveFolder {
@@ -298,7 +296,7 @@ impl DaemonStatus {
     pub fn main_folder(&self) -> Option<&FolderStatus> {
         self.folders
             .iter()
-            .find(|f| f.role.is_none())
+            .find(|f| f.is_main())
             .or(self.folders.first())
     }
 }
@@ -387,8 +385,11 @@ pub struct FolderStatus {
     /// The account the folder syncs with.
     pub identity: Identity,
     pub path: PathBuf,
-    /// The role folder it is; `None` for the main folder (the drive's root).
+    /// The role folder it is; `None` for the main folder (the drive's root) and the Desktop.
     pub role: Option<Role>,
+    /// Whether it is this computer's Desktop (its own folder in Desktops, sync semantics §12).
+    #[serde(default)]
+    pub desktop: bool,
     pub state: State,
     /// Until when a pause lasts (Unix seconds); `None` while not paused or until resumed.
     pub paused_until: Option<u64>,
@@ -421,12 +422,27 @@ pub struct FolderStatus {
 }
 
 impl FolderStatus {
+    /// Whether it is the main folder (the drive's root).
+    pub fn is_main(&self) -> bool {
+        self.role.is_none() && !self.desktop
+    }
+
+    /// What it is, for people: the identity's main folder, its role folder, its Desktop.
+    pub fn what(&self) -> String {
+        match (self.desktop, self.role) {
+            (true, _) => format!("{}'s Desktop", self.identity),
+            (false, Some(role)) => format!("{}'s {}", self.identity, role.name()),
+            (false, None) => self.identity.to_string(),
+        }
+    }
+
     /// Starting to sync the main folder at `path` with `identity`.
     pub fn new(identity: &Identity, path: &Path) -> FolderStatus {
         FolderStatus {
             identity: identity.clone(),
             path: path.to_path_buf(),
             role: None,
+            desktop: false,
             state: State::Starting,
             paused_until: None,
             progress: None,
