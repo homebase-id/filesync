@@ -65,8 +65,8 @@ zbus = "5.19"
 blocking = "=1.6.2"
 
 [features]
-# Counters the tests wait on (`testkit`).
-testkit = []
+# Counters the tests wait on, and the state DB's test writes (`testkit`).
+testkit = ["hbsync-state/testkit"]
 
 [dev-dependencies]
 hbsync-app = { path = ".", features = ["testkit"] }
