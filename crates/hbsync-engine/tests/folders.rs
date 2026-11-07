@@ -751,8 +751,9 @@ fn a_desktop_deleted_elsewhere_comes_back() -> R {
     Ok(())
 }
 
-/// The computer's Desktop folder on the drive follows the computer's name; a rename made
-/// elsewhere stands until that name changes again. A name taken in Desktops gets a number.
+/// The computer's Desktop folder on the drive follows the name given it; a rename made
+/// elsewhere stands until a name is given again (the same one too). A name taken in Desktops
+/// gets a number.
 #[test]
 fn a_desktop_is_named_as_its_computer() -> R {
     let server = FakeServer::new(ServerConfig::default());
@@ -776,6 +777,10 @@ fn a_desktop_is_named_as_its_computer() -> R {
     b.sync()?;
     a.sync()?;
     assert_eq!(desktops(&server), ["Old laptop", "PC (conflict 1)"]);
+    // Given its name again here (the user asks for it): named so again.
+    renamed(&mut a, "Laptop").transpose()?;
+    a.sync()?;
+    assert_eq!(desktops(&server), ["Laptop", "PC (conflict 1)"]);
     renamed(&mut a, "New laptop").transpose()?;
     a.sync()?;
     assert_eq!(desktops(&server), ["New laptop", "PC (conflict 1)"]);

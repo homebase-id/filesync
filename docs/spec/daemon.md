@@ -673,10 +673,12 @@ Linux (rfd's, without GTK) needs `zenity`, which KDE doesn't install.
   computer keeps it, how many files and bytes it holds, counted for 2 s at most; Sync, or why
   it can't be: another app syncs it, a synced folder holds it; Stop syncing; Downloads marked
   not recommended; on macOS the folder is read once on Sync, so the system asks for access
-  while the user is there; the Desktop likewise, with its folder's name in Desktops on the
-  drive: the computer's to start with, or one of the folders there to join, listed by the
-  daemon (`desktops`), meant for this computer's from before; synced, its folder is renamed
-  from the page as `hbsync add desktop --name` renames it) are
+  while the user is there; the Desktop likewise: synced here before (the account's DB knows
+  its path), it syncs with its folder again; else a new folder in Desktops named as typed (the
+  computer's name to start with), or one of the folders there to join, listed by the daemon
+  (`desktops`), meant for this computer's from before, which keeps its name; synced, its
+  folder is renamed from the page as `hbsync add desktop --name` renames it, a rename made
+  elsewhere included) are
   pages the tray serves on `127.0.0.1`, on a random port, under a random path, and opens in the
   browser; the identity's approval returns there.
 - **Notifications:** a new problem note, deletions to review (held deletes), a refused login;
@@ -764,7 +766,7 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 |---|---|
 | `hbsync setup <identity> [--folder P] [--existing] [--browser CMD] [--no-start] [--no-autostart]` | authorizes this computer (the owner approves in the browser) unless it already is and the identity still accepts it, saving the credentials at once, prepares the folder (default `~/Homebase`; it must be new, empty, already this identity's, or `--existing` to merge its files with the drive), turns autostart on, and has the daemon add the folder (starting it when it isn't running; restarting it when it logged in again, so the new credentials are used). When the app is registered but its drive is gone (deleted in the owner app), the owner is asked in the browser to give it back, only on a computer that never synced with the identity |
 | `hbsync add <role> [--identity I] [--folder P]` | syncs one of the user's own folders (`documents`, `pictures`, `music`, `videos`, `downloads`) where the OS keeps it (Windows Known Folders, macOS home folders, XDG `user-dirs.dirs`), or at `--folder`, with the drive's role folder: joined if another device syncs it (identical files adopted), back from Recently deleted, or made. Refused where `setup` refuses a folder, inside or around another synced folder, when one of that role is synced already, and when OneDrive or iCloud syncs the folder. Without a running daemon it is set up for the next start |
-| `hbsync add desktop [--identity I] [--folder P] [--name N]` | syncs this computer's Desktop (where the OS keeps it, or at `--folder`) with a folder of its own in Desktops on the drive (sync semantics §12), named `N` there (default: the device name, made one the drive takes, else `Computer`; a name the drive won't take is refused); every other computer shows it in its main folder's `Desktops`. A Desktop synced here before (its marker known to the account's DB) keeps its folder on the drive. Refused as `add <role>` is, and when a Desktop is synced already at another folder. For the Desktop synced already (without `--folder`), `--name` renames its folder on the drive where it is: a running daemon gives it the new name at once, by a sync of that folder; without `--name` it keeps the name it has. Its kind is kept with it in the config (`desktop = "<uuid>"`) and in the account's DB; its name in the account's DB alone |
+| `hbsync add desktop [--identity I] [--folder P] [--name N]` | syncs this computer's Desktop (where the OS keeps it, or at `--folder`) with a folder of its own in Desktops on the drive (sync semantics §12), named `N` there (default: the device name, made one the drive takes, else `Computer`; a name the drive won't take is refused); every other computer shows it in its main folder's `Desktops`. A Desktop synced here before (its marker known to the account's DB) keeps its folder on the drive. Refused as `add <role>` is, and when a Desktop is synced already at another folder. For the Desktop synced already (without `--folder`), `--name` renames its folder on the drive where it is, also back over a rename made elsewhere: a running daemon gives it the new name at once, by a sync of that folder; without `--name` it keeps the name it has. Its kind is kept with it in the config (`desktop = "<uuid>"`) and in the account's DB; its name in the account's DB alone |
 | `hbsync remove <role>`, `remove desktop` `[--identity I]` | stops syncing that role folder or the Desktop; its files and state stay (the Desktop's folder on the drive too), so adding it again resumes |
 | `hbsync status [--json]` | what the daemon does; exit status 3 when it isn't running |
 | `hbsync sync`, `pause [--for 1h]`, `resume` | a pause with `--for` ends by itself |

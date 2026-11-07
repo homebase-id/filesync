@@ -8,7 +8,7 @@ use std::time::Instant;
 
 use hbsync_app::folders::{self, Own, Taken};
 use hbsync_app::protocol::DesktopFolder;
-use hbsync_app::{Identity, Root, RootKind};
+use hbsync_app::{Identity, Root};
 use hbsync_types::{NodeId, Role};
 
 use super::*;
@@ -43,6 +43,8 @@ impl Server {
         let identity = &main.identity;
         let home = folders::home();
         let count_until = Instant::now() + COUNT_FOR;
+        // Counted first: the role folders after it may well use up the time.
+        let desktop = self.desktop_row(&config, identity, home.as_deref(), count_until);
         let rows: String = Role::ALL
             .into_iter()
             .map(|role| {
@@ -53,15 +55,12 @@ impl Server {
                         self.button("folders/remove", Own::Role(role), "Stop syncing", true),
                     ),
                     None => match setup::role_folder(role) {
-                        Err(e) => (
-                            None,
-                            format!("<p class=small>{}</p>", escape(&e.to_string())),
-                        ),
+                        Err(e) => (None, small(&e.to_string())),
                         Ok(path) => {
                             let root = Root::role(identity, &path, role);
                             let refused = folders::check(&config, &root, home.as_deref()).err();
                             let action = match refused {
-                                Some(why) => format!("<p class=small>{}</p>", escape(&why)),
+                                Some(why) => small(&why),
                                 None => self.button("folders/add", Own::Role(role), "Sync", false),
                             };
                             (Some(path), action)
@@ -84,7 +83,7 @@ impl Server {
                     state(synced.is_some())
                 )
             })
-            .chain([self.desktop_row(&config, identity, home.as_deref(), count_until)])
+            .chain([desktop])
             .collect();
         let said = said.map_or(String::new(), |s| format!("<p>{}</p>", escape(s)));
         format!(
@@ -98,7 +97,9 @@ impl Server {
     }
 
     /// The Desktop's row: synced, its folder's name on the drive to change; else how it would
-    /// sync (a folder of its own, named as the computer, or one in Desktops to join).
+    /// sync: with its folder in Desktops from before, as the account's DB knows it (found by
+    /// its path: nothing in the Desktop is read before the user chose it), or in a new one,
+    /// named as the computer to start with, or joining one there, as the daemon lists them.
     fn desktop_row(
         &self,
         config: &Config,
@@ -106,50 +107,54 @@ impl Server {
         home: Option<&Path>,
         count_until: Instant,
     ) -> String {
-        // From the daemon (its mirror of the drive); none while it doesn't run.
-        let listed = control::desktops(&self.paths, identity)
-            .ok()
-            .flatten()
-            .unwrap_or_default();
-        let named = |top: NodeId| listed.iter().find(|d| d.node == top).map(|d| &d.name);
         let url = |page| self.pages.url(page);
         let synced = config.desktop(identity);
         let (path, action) = match synced {
             Some(root) => {
-                let name = match root.kind {
-                    RootKind::Desktop(top) => named(top).map_or("", String::as_str),
-                    _ => "",
-                };
+                let before = folders::desktop_before(&self.paths, identity, &root.folder);
+                let name = before.ok().flatten().and_then(|(_, name)| name);
                 let rename = format!(
                     "<form method=post action=\"{}\"><label class=check>Its folder in Desktops \
                      on your Homebase:</label><input type=text name=name value=\"{}\" \
                      required><button class=secondary>Rename</button></form>",
                     url("folders/rename"),
-                    escape(name)
+                    escape(name.as_deref().unwrap_or_default())
                 );
                 let stop = self.button("folders/remove", Own::Desktop, "Stop syncing", true);
                 (Some(root.folder.clone()), format!("{rename}{stop}"))
             }
-            None => match setup::desktop_folder().and_then(|path| {
-                Ok((
-                    folders::desktop(config, &self.paths, identity, &path)?,
-                    path,
-                ))
-            }) {
+            None => match setup::desktop_folder() {
                 Err(e) => (None, small(&e.to_string())),
-                Ok((root, path)) => match folders::check(config, &root, home) {
-                    Err(why) => (Some(path), small(&why)),
-                    Ok(_) => {
-                        let form = desktop_form(&root, &listed, &config.device_name());
-                        let action = format!(
-                            "<form method=post action=\"{}\">\
-                             <input type=hidden name=role value=desktop>{form}\
-                             <button>Sync</button></form>",
-                            url("folders/add")
-                        );
-                        (Some(path), action)
-                    }
-                },
+                Ok(path) => {
+                    // A DB that can't be read now: as if new (adding it says what is wrong).
+                    let before = folders::desktop_before(&self.paths, identity, &path);
+                    let before = before.ok().flatten();
+                    let top = before.as_ref().map_or_else(NodeId::new, |(top, _)| *top);
+                    let action =
+                        match folders::check(config, &Root::desktop(identity, &path, top), home) {
+                            Err(why) => small(&why),
+                            Ok(_) => {
+                                let form = match before {
+                                    Some((_, name)) => again_form(name.as_deref()),
+                                    None => {
+                                        // From the daemon (its mirror of the drive); none while it
+                                        // doesn't run.
+                                        let listed = control::desktops(&self.paths, identity);
+                                        let listed = listed.ok().flatten().unwrap_or_default();
+                                        new_form(&listed, &config.device_name())
+                                    }
+                                };
+                                format!(
+                                    "<form method=post action=\"{}\">\
+                                 <input type=hidden name=role value={}>{form}\
+                                 <button>Sync</button></form>",
+                                    url("folders/add"),
+                                    Own::Desktop.key()
+                                )
+                            }
+                        };
+                    (Some(path), action)
+                }
             },
         };
         let place = path.as_deref().map_or(String::new(), |p| {
@@ -226,13 +231,18 @@ impl Server {
                 let node = node.map_err(|_| "no such folder in Desktops")?;
                 let listed = control::desktops(&self.paths, identity)?.unwrap_or_default();
                 let joined = listed.into_iter().find(|d| d.node == node);
-                let joined = joined.ok_or("that folder is no longer in Desktops")?;
-                // Its name kept: the folder joined isn't renamed.
-                (Root::desktop(identity, &folder, node), Some(joined.name))
+                joined.ok_or("that folder is no longer in Desktops")?;
+                // No name given: it keeps the one it has there.
+                (Root::desktop(identity, &folder, node), None)
             }
             None => {
                 let root = folders::desktop(config, &self.paths, identity, &folder)?;
-                (root, form.get("name").map(|n| valid_name(n)).transpose()?)
+                // None typed (or none asked, synced here before): as it is, or the computer's.
+                let name = form.get("name").filter(|n| !n.trim().is_empty());
+                (
+                    root,
+                    name.map(|n| folders::checked_desktop_name(n)).transpose()?,
+                )
             }
         };
         let taken = folders::add_synced(&self.paths, &root, name.as_deref())?;
@@ -248,7 +258,7 @@ impl Server {
             let Some(root) = config.desktop(&identity) else {
                 return Ok("Desktop isn't synced.".into());
             };
-            let name = valid_name(form.get("name").map_or("", String::as_str))?;
+            let name = folders::checked_desktop_name(form.get("name").map_or("", String::as_str))?;
             match folders::add_synced(&self.paths, root, Some(&name))?.0 {
                 Taken::Now => Ok(format!("Your Desktop's folder is named {name} now.")),
                 Taken::AtStart => Ok(format!(
@@ -259,12 +269,6 @@ impl Server {
         (self.send)(Event::Wake);
         result.unwrap_or_else(|e| e.to_string())
     }
-}
-
-/// `name` as a Desktop's folder can have it, or why not.
-fn valid_name(name: &str) -> hbsync_app::Result<String> {
-    folders::valid_desktop_name(name)
-        .ok_or_else(|| format!("{name:?} can't name a folder on your Homebase").into())
 }
 
 /// What to say once `what` is added (`taken`), and what readying the account's DB set aside.
@@ -279,23 +283,19 @@ fn added((taken, set_aside): (Taken, Option<folders::Unusable>), what: &str) -> 
     }
 }
 
-/// How the Desktop not synced yet would sync: with its folder in Desktops from before (it
-/// syncs here again), or in a new one named as typed (the computer's name to start with), or
-/// joining one listed there.
-fn desktop_form(root: &Root, listed: &[DesktopFolder], computer: &str) -> String {
-    let top = match root.kind {
-        RootKind::Desktop(top) => top,
-        _ => NodeId::ROOT,
-    };
-    if let Some(own) = listed.iter().find(|d| d.node == top) {
-        return format!(
-            "<p class=small>It syncs with its folder from before, {}, again.</p>",
-            escape(&own.name)
-        );
-    }
+/// How the Desktop synced here before syncs again: with its folder from before, `name`d.
+fn again_form(name: Option<&str>) -> String {
+    let name = name.map_or(" ".into(), |n| format!(", {}, ", escape(n)));
+    format!("<p class=small>It syncs with its folder from before{name}again.</p>")
+}
+
+/// How the Desktop new here would sync: in a new folder in Desktops named as typed (the
+/// computer's name to start with; none typed, the computer's as the drive takes it), or, with
+/// folders `listed` there, joining one of those.
+fn new_form(listed: &[DesktopFolder], computer: &str) -> String {
     let computer = folders::valid_desktop_name(computer).unwrap_or_default();
     let name = format!(
-        "<input type=text name=name value=\"{}\" required>",
+        "<input type=text name=name value=\"{}\">",
         escape(&computer)
     );
     if listed.is_empty() {
@@ -387,37 +387,32 @@ fn size(path: &Path, until: Instant) -> String {
 mod tests {
     use super::*;
 
-    /// The Desktop not synced yet: with its folder from before listed, it syncs there again;
-    /// else a new folder named as the computer (made one the drive takes), or, with folders in
-    /// Desktops, one of those to join.
+    /// The Desktop new here: a new folder named as the computer (made one the drive takes, or
+    /// left for the drive's default), or, with folders in Desktops, one of those to join; synced
+    /// here before: it syncs with its folder again, nothing to choose.
     #[test]
     fn the_desktop_form_offers_a_new_folder_or_one_to_join() {
-        let a: Identity = "a.example".into();
-        let mine = NodeId::new();
-        let root = Root::desktop(&a, Path::new("/home/a/Desktop"), mine);
         let other = DesktopFolder {
             node: NodeId::new(),
             name: "Old <laptop>".into(),
         };
-
-        let alone = desktop_form(&root, &[], "Anna's PC");
+        let alone = new_form(&[], "Anna's PC");
         assert!(alone.contains("value=\"Anna's PC\""), "{alone}");
-        assert!(!alone.contains("radio"), "nothing to join: {alone}");
+        assert!(
+            !alone.contains("radio") && !alone.contains("required"),
+            "{alone}"
+        );
 
-        let joins = desktop_form(&root, std::slice::from_ref(&other), "Anna's PC");
+        let joins = new_form(std::slice::from_ref(&other), "Anna's PC");
         assert!(joins.contains("name=join value=new checked"), "{joins}");
         assert!(joins.contains(&format!("value={}", other.node)), "{joins}");
         assert!(joins.contains("Old &lt;laptop&gt;"), "escaped: {joins}");
 
-        let own = DesktopFolder {
-            node: mine,
-            name: "Laptop".into(),
-        };
-        let again = desktop_form(&root, &[other, own], "Anna's PC");
+        let again = again_form(Some("Laptop"));
         assert!(again.contains("from before, Laptop, again"), "{again}");
-        assert!(!again.contains("radio"), "{again}");
+        assert!(!again.contains("input"), "{again}");
 
         // A computer's name the drive won't take: none typed for the user.
-        assert!(desktop_form(&root, &[], "a/b").contains("value=\"\""));
+        assert!(new_form(&[], "a/b").contains("value=\"\""));
     }
 }

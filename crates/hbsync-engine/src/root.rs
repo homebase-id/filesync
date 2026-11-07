@@ -327,14 +327,20 @@ impl SyncRoot {
         Ok(StateDb::open_folder(&self.db, self.folder)?)
     }
 
-    /// Names this folder, a Desktop, on the drive from its next sync on: `name`, or with none
-    /// the computer's, `computer`, if it has no name yet. Whether that is a new name: its
-    /// running engine syncs to give it. Only for a Desktop (the caller knows its kind).
+    /// Names this folder, a Desktop, on the drive from its next sync on: `name` (over a rename
+    /// made elsewhere too), or with none the name it has, else its folder's on the drive, else
+    /// the computer's, `computer` ([`crate::engine::set_desktop_name`]). Whether the folder is
+    /// to be named anew: its running engine syncs to do it. Only for a Desktop (the caller
+    /// knows its kind).
     pub fn name_desktop(&self, name: Option<&str>, computer: &str) -> Result<bool, RootError> {
+        // Its name on the drive, as the account's mirror has it (not as this folder sees it).
+        let there = match Reader::open(&self.db)? {
+            Some(mut db) => db.read(|s| Ok(s.get_mirror(self.top)?.map(|m| m.name)))?,
+            None => None,
+        };
+        let mut db = self.state()?;
         Ok(crate::engine::set_desktop_name(
-            &mut self.state()?,
-            name,
-            computer,
+            &mut db, there, name, computer,
         )?)
     }
 
@@ -488,6 +494,13 @@ impl AccountReader {
             .collect();
         folders.sort_by(|a, b| a.1.cmp(&b.1));
         Ok(folders)
+    }
+
+    /// The name the Desktop `folder` gives its folder on the drive, if it has one yet
+    /// ([`SyncRoot::name_desktop`]).
+    pub fn desktop_name(&mut self, folder: i64) -> Result<Option<String>, StateError> {
+        self.db
+            .read_folder(folder, |s| s.get_kv(keys::DESKTOP_NAME))
     }
 
     /// The newest `limit` entries of `folder`'s recently synced list.

@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use hbsync_engine::root::{RootError, SetAside, SyncRoot};
+use hbsync_engine::root::{AccountReader, RootError, SetAside, SyncRoot};
 pub use hbsync_engine::valid_desktop_name;
 use hbsync_state::FolderKind;
 pub use hbsync_state::Unusable;
@@ -392,6 +392,31 @@ pub fn desktop(
     Ok(Root::desktop(identity, path, top))
 }
 
+/// `name` as a Desktop's folder can have it ([`valid_desktop_name`]), or why not.
+pub fn checked_desktop_name(name: &str) -> Result<String, String> {
+    valid_desktop_name(name).ok_or_else(|| format!("{name:?} can't name a folder on your Homebase"))
+}
+
+/// This computer's Desktop at `path` as `identity`'s DB knows it from before, found by its
+/// path alone (nothing in the folder is read: macOS asks before the Desktop is): its folder in
+/// Desktops on the drive, and the name it gives that folder, if any yet.
+pub fn desktop_before(
+    paths: &Paths,
+    identity: &Identity,
+    path: &Path,
+) -> Result<Option<(NodeId, Option<String>)>, Error> {
+    let Some(mut db) = AccountReader::open(&paths.account_db(identity), identity)? else {
+        return Ok(None);
+    };
+    let text = path.to_string_lossy();
+    let found =
+        (db.folders()?.into_iter()).find(|f| f.path == text && f.kind == Some(FolderKind::Desktop));
+    let Some(found) = found else {
+        return Ok(None);
+    };
+    Ok(Some((found.top, db.desktop_name(found.id)?)))
+}
+
 /// Has the running daemon set the folder at `path` up and sync it ([`add`]), or sets it up for
 /// the daemon's start when none runs ([`changed`]). Why the account's DB was set aside here as
 /// it was readied, if it was, for the caller to tell ([`crate::words::set_aside`]); a running
@@ -715,9 +740,54 @@ mod tests {
             Some(computer.as_deref().unwrap_or("Computer"))
         );
 
+        // Known from before by its path alone: its folder and name.
+        let top = root.kind.top();
+        let before = desktop_before(&paths, &a, &desk)?;
+        assert_eq!(before, Some((top, Some("Work laptop".into()))));
+        assert_eq!(desktop_before(&paths, &a, &other)?, None);
+
         remove(&paths, &desk)?;
         let again = desktop(&config()?, &paths, &a, &desk)?;
         assert_eq!(again.kind, root.kind, "its folder in Desktops kept");
+        Ok(())
+    }
+
+    /// A Desktop joining a folder in Desktops without a name given keeps the folder's name as
+    /// the drive has it, as given already: not made one the drive takes anew, nor the
+    /// computer's (no rename at its first sync).
+    #[test]
+    fn a_desktop_joining_a_folder_keeps_its_name() -> Result<(), Error> {
+        use hbsync_state::{MirrorRow, StateDb};
+        use hbsync_types::{NodeKind, RemoteFileId, Uuid, VersionTag};
+        let home = tempfile::tempdir()?;
+        let paths = Paths::under(home.path());
+        let c: Identity = "c.example".into();
+        let desk = home.path().join("Desktop");
+        std::fs::create_dir_all(&desk)?;
+        let db = paths.account_db(&c);
+        std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
+        let joined = NodeId::new();
+        let row = |node, parent, name: &str| MirrorRow {
+            file_id: RemoteFileId(Uuid::new_v4()),
+            version: VersionTag(Uuid::new_v4()),
+            node,
+            parent,
+            name: name.into(),
+            kind: NodeKind::Folder,
+            file: None,
+            content_extra: None,
+            token: None,
+            changed_at: Some(5),
+        };
+        StateDb::open_account(&db)?.write(|s| {
+            let a = s.account();
+            a.put_live(&row(NodeId::DESKTOPS, NodeId::ROOT, "Desktops"))?;
+            a.put_live(&row(joined, NodeId::DESKTOPS, "Old pc "))
+        })?;
+        let added = add(&paths, &Root::desktop(&c, &desk, joined), None, false)?;
+        assert!(!added.named, "nothing to rename");
+        let before = desktop_before(&paths, &c, &desk)?;
+        assert_eq!(before, Some((joined, Some("Old pc ".into()))));
         Ok(())
     }
 

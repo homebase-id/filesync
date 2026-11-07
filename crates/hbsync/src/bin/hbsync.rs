@@ -67,7 +67,6 @@ enum Command {
     /// this computer's Desktop with a folder of its own in Desktops on the drive, which every
     /// other computer shows in its main folder.
     Add {
-        #[arg(value_parser = str::parse::<Own>)]
         what: Own,
         /// The identity to sync it with [default: the one set up].
         #[arg(long)]
@@ -83,7 +82,6 @@ enum Command {
     /// Stops syncing one of your own folders. Its files stay; adding it again picks up where it
     /// was.
     Remove {
-        #[arg(value_parser = str::parse::<Own>)]
         what: Own,
         /// The identity it syncs with [default: the one set up].
         #[arg(long)]
@@ -401,10 +399,7 @@ fn run(command: Command) -> Res<ExitCode> {
             name,
         } => {
             let name = name
-                .map(|n| {
-                    folders::valid_desktop_name(&n)
-                        .ok_or_else(|| format!("{n:?} can't name a folder on the drive"))
-                })
+                .map(|n| folders::checked_desktop_name(&n))
                 .transpose()?;
             if name.is_some() && what != Own::Desktop {
                 return Err("--name is for the Desktop".into());

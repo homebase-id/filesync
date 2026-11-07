@@ -1799,7 +1799,6 @@ dependencies = [
  "notify-rust",
  "png",
  "rfd",
- "rusqlite",
  "tao",
  "tempfile",
  "tracing",

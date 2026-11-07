@@ -414,14 +414,15 @@ mod tests {
         assert!(page.contains("can't name"), "{page}");
         let page = request(&pages.url("folders/rename"), "POST", "name=Work+laptop")?;
         assert!(page.contains("named Work laptop once"), "{page}");
-        // Its name in the account's DB.
-        let db = paths.account_db(&a);
-        let name: String = rusqlite::Connection::open(&db)?.query_row(
-            "SELECT value FROM folder_kv WHERE key = 'desktop.name'",
-            [],
-            |r| r.get(0),
-        )?;
-        assert_eq!(name, "Work laptop");
+        // Its name in the account's DB, shown in the field.
+        let before =
+            hbsync_app::folders::desktop_before(&paths, &a, &desk).map_err(|e| e.to_string())?;
+        assert_eq!(
+            before.and_then(|(_, name)| name).as_deref(),
+            Some("Work laptop")
+        );
+        let page = request(&pages.url("folders"), "GET", "")?;
+        assert!(page.contains("value=\"Work laptop\""), "{page}");
 
         let page = request(&pages.url("folders/remove"), "POST", "role=desktop")?;
         assert!(page.contains("Desktop is no longer synced"), "{page}");
