@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use hbsync_local::{Marker, layout};
 use hbsync_remote::ErrorClass;
-use hbsync_state::{FolderRow, Reader, StateDb, StateError, Unusable, keys};
+use hbsync_state::{FolderKind, FolderRow, Reader, StateDb, StateError, Unusable, keys};
 use hbsync_types::NodeId;
 use hbsync_types::activity::Synced;
 
@@ -140,7 +140,8 @@ impl SyncRoot {
             for old in s.folders()?.into_iter().filter(|f| f.top == top) {
                 s.account().remove_folder(old.id)?;
             }
-            s.account().add_folder(top, &text, &marker.id)
+            s.account()
+                .add_folder(top, FolderKind::for_top(top), &text, &marker.id)
         })?;
         std::fs::create_dir_all(layout::state_dir(path))?;
         marker.write(path)?;

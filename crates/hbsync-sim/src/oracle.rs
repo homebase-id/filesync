@@ -585,8 +585,16 @@ impl Sim {
         if docs.is_some_and(|s| s.parent != NodeId::ROOT) {
             return Err("the role folder left the top".into());
         }
-        if docs.is_none() && self.clients.iter().any(|c| !c.coords.top.is_root()) {
-            return Err("the role folder is gone though a device syncs it".into());
+        if let Some(c) = self.clients.iter().find(|c| {
+            let top = c.coords.top;
+            !top.is_root() && !self.server.live.contains_key(&top)
+        }) {
+            return Err(format!("{}'s folder is gone though it syncs it", c.name));
+        }
+        if self.clients.iter().any(|c| c.is_desktop())
+            && !self.server.live.contains_key(&NodeId::DESKTOPS)
+        {
+            return Err("Desktops is gone though a Desktop syncs".into());
         }
         if let Some((_, bad)) = server
             .iter()
@@ -660,7 +668,7 @@ impl Sim {
         drive: &Tree,
         taken: &BTreeSet<NodeId>,
     ) -> (Tree, BTreeSet<NodeId>) {
-        let coords = self.clients[c].coords;
+        let (coords, outside) = (self.clients[c].coords, self.clients[c].scope().outside);
         // A folder no client reads, while it is on the drive, and what is in it: what is in
         // it waits for it (`Action::NewerFolder`).
         let unread: BTreeSet<NodeId> = self.server.unreadable_on_drive().map(|(n, _)| *n).collect();
@@ -680,7 +688,7 @@ impl Sim {
                 up.extend(up_from(drive, parent).into_iter().skip(1));
             }
             let ours = match coords.top {
-                top if top.is_root() => !Role::ALL.iter().any(|r| up.contains(&r.node())),
+                top if top.is_root() => !outside.iter().any(|out| up.contains(out)),
                 top => *node != top && up.contains(&top),
             };
             let waits = up.iter().any(|a| unread.contains(a));

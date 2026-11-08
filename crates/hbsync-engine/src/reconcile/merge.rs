@@ -27,12 +27,14 @@ fn remote_change(i: &Input, node: NodeId) -> Change {
 /// device wrote, whose time it doesn't know, was. A folder's delete removes the folder first,
 /// then what is in it: until it has, they count as gone. One written after the removal is a
 /// change of its own, and keeps the folder alive (§6.3). A file takes nothing along.
-pub fn taken_along(i: &Input) -> HashSet<NodeId> {
+pub fn taken_along(i: &Input, left_out: &HashSet<NodeId>) -> HashSet<NodeId> {
     if i.removed.is_empty() {
         return HashSet::new();
     }
     crate::along::taken_along(
-        i.remote.iter().map(|(n, s)| (n, s.parent, s.kind)),
+        (i.remote.iter())
+            .filter(|(n, _)| !left_out.contains(n))
+            .map(|(n, s)| (n, s.parent, s.kind)),
         |n| i.removed.get(&n).map(|r| (r.state.kind, r.at)),
         |node| i.changed_at.get(&node).copied(),
     )

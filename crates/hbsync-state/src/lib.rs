@@ -57,9 +57,9 @@ use rusqlite::{Connection, TransactionBehavior};
 pub use coords::Coords;
 pub use reader::Reader;
 pub use store::{
-    AccountTx, Answer, Answered, BaseRow, DirtyCursor, FolderRow, FolderTx, GoneSuspect, Left,
-    LocalRow, MAX_DEPTH, Mark, MirrorFile, MirrorRow, Placing, PlannedBase, ReadTx, Recorded,
-    Refused, RemovedRow, Store,
+    AccountTx, Answer, Answered, BaseRow, DirtyCursor, FolderKind, FolderRow, FolderTx,
+    GoneSuspect, Left, LocalRow, MAX_DEPTH, Mark, MirrorFile, MirrorRow, Placing, PlannedBase,
+    ReadTx, Recorded, Refused, RemovedRow, Store,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -572,7 +572,7 @@ impl StateDb {
     pub fn open_folder(path: &Path, folder: i64) -> Result<Self> {
         let mut db = Self::setup(Connection::open(path)?, Some(path))?;
         db.folder = folder;
-        if !db.read(|s| Ok(s.folders()?.iter().any(|f| f.id == folder)))? {
+        if db.read(|s| s.this_folder())?.is_none() {
             return Err(StateError::Conflict(format!(
                 "no folder {folder} in this DB"
             )));
@@ -588,7 +588,8 @@ impl StateDb {
     fn first(mut db: StateDb) -> Result<Self> {
         db.write(|s| {
             if s.folders()?.is_empty() {
-                s.account().add_folder(hbsync_types::NodeId::ROOT, "", "")?;
+                s.account()
+                    .add_folder(hbsync_types::NodeId::ROOT, FolderKind::Main, "", "")?;
             }
             Ok(())
         })?;

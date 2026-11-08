@@ -48,7 +48,8 @@ const SCHEMA: &str = r#"
         top      BLOB NOT NULL UNIQUE,
         path     TEXT NOT NULL,
         marker   TEXT NOT NULL,
-        added_at INTEGER NOT NULL                     -- Unix seconds
+        added_at INTEGER NOT NULL,                    -- Unix seconds
+        kind     INTEGER NOT NULL DEFAULT 1           -- 0 main, 1 role, 2 Desktop
     );
 
     -- Per folder: the last state both sides agreed on (the three-way merge's ancestor).
@@ -467,6 +468,10 @@ const MIGRATIONS: &[&str] = &[
     // 26: a base's content state 3 (wanted: its item went into a conflict copy), which an
     // older client can't read: it refuses the DB as newer than its own.
     "-- base.content_state 3",
+    // 27: a folder's kind (0 main, 1 role, 2 Desktop): until now the main folder held the
+    // drive's root and every other folder a role folder.
+    "ALTER TABLE folders ADD COLUMN kind INTEGER NOT NULL DEFAULT 1;
+    UPDATE folders SET kind = 0 WHERE top = X'2a1c0d558ad3417ea5d742c3d0baba0e';",
 ];
 
 /// The version this client makes and reads.

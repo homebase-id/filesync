@@ -73,6 +73,27 @@ sync its place: one at a place every computer ignores stays as it is.
 - In a name clash at the top it is the one renamed (`Recovered files (conflict 1)`): a plain
   folder called `Recovered files` keeps its name, whatever the ids.
 
+## Desktops
+A folder at the top holding each computer's Desktop: one ordinary folder per computer, made by
+that computer when its user adds its Desktop, and synced with that computer's own Desktop only
+(sync semantics §12). Every other computer shows them as plain folders in its main folder
+(`~/Homebase/Desktops/<computer>`), synced both ways; a computer never shows its own there.
+
+| `uniqueId` | Name when created |
+|---|---|
+| `475d49e0-c0b4-4cbc-8090-2f2cb1e9dc69` | `Desktops` |
+
+- The id is the same on every drive, so computers adding their Desktops at once share one.
+  Recognise it by its `uniqueId`, never by its name: the user may rename it, and a plain folder
+  may be called `Desktops` too (both are shown; in a name clash at the top Desktops is the one
+  renamed, `Desktops (conflict 1)`, as Recovered files is).
+- A computer's folder in it has a random id of its own (the computer's, for its Desktop), named
+  as the computer when made (the first free name: `PC (conflict 1)`), and renamed by that
+  computer when its name changes; a rename made elsewhere stands until then. Computers know
+  their own folder by its id, never by its name or its place.
+- Deleted (it, or a computer's folder in it), it comes back with what was in it at the next
+  sync of a computer syncing that Desktop: restore it rather than create it.
+
 ## File header fields
 
 | Field | Folder | File |
@@ -139,7 +160,7 @@ of this schema may define some of them.)
   it as a row it can't read (below, and sync semantics §8a): kept as it is, never downloaded,
   and what is in it waits. So whoever designs v2: bump `v` on files only, never on folders,
   until every client reads v2 (a v2 folder hides everything in it from v1 clients), and never
-  on the fixed folders (the root, the role folders, Recovered files).
+  on the fixed folders (the root, the role folders, Recovered files, Desktops).
 - Content is capped by the server at 10,240 characters **[verified]**; with names capped at 255
   UTF-8 bytes by this client, v1 content stays far below it.
 
@@ -202,8 +223,9 @@ of this schema may define some of them.)
   doesn't. A node whose parent is removed brings the parent back first, and one whose parent is gone for good comes back as it was, an orphan
   the computers move into Recovered files (see above). If a folder
   doesn't come back (changed meanwhile), what is in it stays removed. A name a live sibling took
-  meanwhile gets ` (restored)`; so does `.hbsync`, in any case, at the top of the drive or of a
-  role folder (each computer's own state folder there, never synced).
+  meanwhile gets ` (restored)`; so does `.hbsync`, in any case, at the top of the drive, of a
+  role folder or of a computer's Desktop (a folder in Desktops): each computer's own state folder
+  there, never synced.
 - **The purge**, the one rule for deleting for good (a user emptying Recently deleted follows
   it too, but for 3.). Any client runs it (the mobile browser too, at its own pace: most people
   rarely open a desktop app), by the server's clock: its `queryTime` against each `updated`.
@@ -231,8 +253,9 @@ of this schema may define some of them.)
      a level at a time), it removes them with `update-archival-status-batch`, each at the
      version the client knows: one written since (`versionTagMismatch`), or gone, stays live,
      and so does what is in it. It leaves alone a node whose time the client doesn't know, a
-     node written after the removal (an edit, a folder moved in) and a role folder, the live
-     folders above them, and what is in a folder one of them keeps. A live folder it removes is
+     node written after the removal (an edit, a folder moved in), a role folder and a folder
+     directly in Desktops (a computer's Desktop), the live folders above them, and what is in a
+     folder one of them keeps. A live folder it removes is
      the nearest removed folder of what is in it from then on, so a node in it the client
      didn't know of (written since its last read, or one it doesn't read) would count as taken
      along by it: once the server's queries show what was written up to its last removal (1.1
@@ -343,6 +366,14 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   orphans into it is the computers' job; another client may leave it to them, as it may the
   purge's first step. One that does it follows the rules above: the fixed id, and a restore
   rather than a create when the folder is in Recently deleted.
+- **Desktops** (see above): show it as any folder, known by its `uniqueId`; each folder in it
+  is a computer's Desktop: open, edit, upload into it as any folder (it reaches that computer's
+  Desktop). Never create Desktops or a computer's folder in it (that is the computers' job;
+  restore one that is in Recently deleted). Deleting either lasts only if no computer syncs a
+  Desktop there: one that does brings it back, with what was in it, at its next sync; say so
+  before deleting. A computer's folder moved out of Desktops is still synced by its computer
+  (known by its id), but the purge keeps only folders in Desktops: moved out, a delete that
+  takes it along empties it for good after 30 days unless its computer brings it back first.
 - **Role folders** (see above): keep them at the top: never move one into a folder (a computer
   then leaves it out there), and never create one, under any parent (that is the computers'
   job; restore one that is in Recently deleted). Renaming one changes only the drive's name:
@@ -351,6 +382,11 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-11-06: Desktops, a folder at the top with the fixed node id
+  `475d49e0-c0b4-4cbc-8090-2f2cb1e9dc69`, named `Desktops` when made, holding a folder per
+  computer for its Desktop (a random id each, named as the computer). The purge keeps a
+  computer's folder there as it keeps a role folder. Nodes are the same; an older computer shows
+  Desktops as a plain folder.
 - 2026-10-29: on a private (zero-knowledge) drive a node's key header is `zkDrive`, under the
   drive's key, and payload answers carry no key header (`encryption.md`, "A private drive").
   The node is the same.

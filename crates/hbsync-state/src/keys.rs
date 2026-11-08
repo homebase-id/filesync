@@ -46,3 +46,8 @@ pub const SCOPE: FolderKey = FolderKey("scope.fingerprint");
 /// Nodes whose removal elsewhere the mass-delete guard held as every synced file, until the
 /// user answers (sync semantics §7): their ids, comma-separated.
 pub const WIPED: FolderKey = FolderKey("guard.wiped");
+/// A Desktop's: the name its computer's folder on the drive is to have (the computer's, §12).
+pub const DESKTOP_NAME: FolderKey = FolderKey("desktop.name");
+/// A Desktop's: the [`DESKTOP_NAME`] last given its folder on the drive. A rename made
+/// elsewhere stands until the computer's name changes.
+pub const DESKTOP_NAMED: FolderKey = FolderKey("desktop.named");

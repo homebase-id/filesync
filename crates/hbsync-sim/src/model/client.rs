@@ -178,6 +178,18 @@ pub(crate) struct Client {
     /// Files whose bit, or name, a user changed here ([`crate::Action::Chmod`], a move): only
     /// an upload of one of them may change the drive's bit.
     pub(crate) user_x: HashSet<NodeId>,
+    /// A main folder's: the drive's nodes its computer's other folders hold (a Desktop's), left
+    /// out of it as the role folders are (§12), as its last plan read them.
+    pub(crate) own_tops: BTreeSet<NodeId>,
+    /// What the folder is: the main folder, a role folder, a Desktop.
+    pub(crate) kind: hbsync_state::FolderKind,
+    /// Whether the user added the folder: one not yet ([`crate::Action::AddDesktop`]) holds
+    /// what its user made there, and syncs nothing.
+    pub(crate) added: bool,
+    /// A Desktop's: the name its folder on the drive is to have (its computer's), and the one
+    /// last given it ([`crate::Action::RenameComputer`]; the engine's `DESKTOP_NAME(D)`).
+    pub(crate) desktop_name: String,
+    pub(crate) desktop_named: Option<String>,
 }
 
 impl Client {
@@ -254,6 +266,11 @@ impl Client {
             pull_mid_local: None,
             trusted: HashSet::new(),
             user_x: HashSet::new(),
+            own_tops: BTreeSet::new(),
+            kind: hbsync_state::FolderKind::for_top(coords.top),
+            added: true,
+            desktop_name: String::new(),
+            desktop_named: None,
         }
     }
 
@@ -265,7 +282,12 @@ impl Client {
 
     /// The part of the drive the client's folder syncs.
     pub(crate) fn scope(&self) -> Scope {
-        Scope::of(self.coords.top)
+        Scope::on_device(self.coords.top, self.own_tops.iter().copied())
+    }
+
+    /// Whether the client's folder is a computer's Desktop (its top in Desktops when made).
+    pub(crate) fn is_desktop(&self) -> bool {
+        self.kind == hbsync_state::FolderKind::Desktop
     }
 }
 

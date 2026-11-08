@@ -192,7 +192,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    syncs (§10: one it ignores would leave the drive at the next scan), of the first hundred,
    as the executor's numbered names; else the smallest free one (simulator:
    `regression_a_clash_name_is_one_this_device_syncs`). Applies equally to
-   files and folders. Recovered files, and an orphan moving into it, lose a clash whatever the
+   files and folders. Recovered files and Desktops, and an orphan moving into Recovered
+   files, lose a clash whatever the
    ids (rule 3). A name that what waits for a hash holds (rule 3) isn't renamed or taken:
    the other node waits.
 2. **No cycles.** If merged moves form a cycle, revert the local moves taking part in it (the
@@ -1016,12 +1017,13 @@ Apart from these and the crash case above, no tag add or removal is lost.
 
 ## 12. Scopes
 A device syncs the main folder (`~/Homebase`) and, if the user chooses, **role folders** where
-they are: Documents, Pictures, Music, Videos, Downloads (node schema, "Role folders"). Each
+they are: Documents, Pictures, Music, Videos, Downloads (node schema, "Role folders"), and its
+Desktop (below). Each
 local folder has an engine of its own, scoped to a part of the drive; they share the account's
 state DB (one mirror, one feed) and keep their own base and local rows:
 - the main folder's scope is the drive's top **without the role folders**, on every device,
   whether it syncs them or not: a role folder appears only where it is synced in place, never
-  inside `~/Homebase`;
+  inside `~/Homebase`; nor this device's own Desktop's folder (below);
 - a role folder's scope is what lies in that folder. Its engine sees the folder as its root
   and the rest of the drive as one folder at its top that it leaves out; what it writes at its
   root goes into the role folder. A node whose place isn't known (its folder gone from the
@@ -1040,10 +1042,45 @@ first.
 
 What lies outside an engine's scope is masked as filtered nodes are (§10): never downloaded,
 never changed or deleted remotely. It is never *leaving* (§10, rule 1): another engine or device
-syncs it. A role folder at the top that the engine holds nothing of isn't planned at all; no
+syncs it. What a delete took along is judged on the drive as the filter leaves it (§10), what
+the scope leaves out included: a node outside the folder's scope (its computer's own Desktop
+in Desktops) written after the delete keeps the folders above it there too. A role folder at the top that the engine holds nothing of isn't planned at all; no
 version ever synced one into the main folder, so a device holds one only through a bug, and
 then lets go of it as of anything masked. A role folder moved into a folder (against the node
 schema's rules) is masked there and keeps that folder alive (§6.3).
+
+**Desktops.** A computer's Desktop is synced where it is too, but into a folder of its own,
+never mixed with another computer's: each computer that adds its Desktop has a folder in
+**Desktops** (a folder at the drive's top with a fixed id, node schema "Desktops"), with an id
+of its own, made when the computer first adds it (or one of those there, if the user says the
+computer is that one again). Its engine's scope is what lies in that folder, as a role
+folder's. Each folder of a device is kept with its kind (main, role, Desktop); one of a kind a
+newer version set up isn't synced. The main folder's scope leaves this computer's own Desktop
+folder out too, wherever it is on the drive, and nothing else of Desktops: every main folder
+shows the *other* computers' Desktops in `~/Homebase/Desktops/<computer>`, synced both ways,
+and a computer's own one is masked there, holding its name (another item there takes another)
+and keeping Desktops alive on it (also where the drive lacks it). The main folder reads the
+device's folders at every round of its syncs (one small read): a Desktop added leaves it from
+its next round (one not running takes it first thing when it starts), and it lets go of what it
+held of it (masked, as above: a change made there meanwhile is kept, detached, in a folder of
+its own beside it); one removed comes back into it. The Desktop syncs at once. Before every
+sync of a Desktop, after reading the drive, Desktops comes back
+from Recently deleted (with what was deleted with it) or is made at the top whenever it isn't
+live, even with the computer's folder live in it (a delete stopped half way); then the
+computer's folder must be live: it comes back, or is made in Desktops under the computer's
+name (the first free one: `PC (conflict 1)`); nothing syncs into one that isn't. Made beside a
+plain folder of its name, Desktops takes the first free one, and it loses a name clash at the
+top whatever the ids, as Recovered files (§6, rule 1). The computer's name is the one the app
+gives (made one the drive takes: NFC, not empty, `.`, `..` or `.hbsync…`, no `/` or NUL, 255
+bytes at most; else `Computer`); with none given yet, the folder is made under the local
+folder's own name, and a folder there already keeps its name. The folder takes a given name
+when it changes (a rename of its node where it is, under the first free name), again at a
+later sync if the rename didn't land; a rename made elsewhere stands until then. The purge
+keeps a folder in Desktops (a computer's Desktop) that Desktops' delete took along, as it keeps
+a role folder: its computer brings Desktops back with it; and a restore into it never takes
+`.hbsync`, as at any sync root's top. No device knows the other
+computers' Desktops by id, so the purge knows them by place: one moved out of Desktops isn't
+kept so.
 
 A role folder holds no name for the scope: a plain folder of the same name at the top keeps it
 (two at the top, told apart by their ids). A new scope plans the folders it, or the last one,

@@ -263,6 +263,15 @@ pub fn first_free<T, E>(
     Ok(filtered)
 }
 
+/// `name` if `is_free` says so, else the first of its numbered names ([`numbered_names`]) that is;
+/// `name` where none is. The drive's fixed folders take theirs so.
+pub fn free_name(name: &str, mut is_free: impl FnMut(&str) -> bool) -> String {
+    std::iter::once(name.to_owned())
+        .chain(numbered_names(name))
+        .find(|n| is_free(n))
+        .unwrap_or_else(|| name.to_owned())
+}
+
 /// How many numbered variants of a name are tried for a free one ([`numbered_names`]).
 pub const NUMBERED_TRIES: usize = 100;
 

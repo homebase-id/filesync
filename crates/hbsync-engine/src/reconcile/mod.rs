@@ -71,7 +71,9 @@ enum Origin {
 pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
     let masks = Masks::of(input, masking, &opts.computer, &opts.taken);
     let view = masks.input.as_ref().unwrap_or(input);
-    let taken = merge::taken_along(view);
+    // By the drive as the filter leaves it: a node outside this folder's scope (its computer's
+    // own Desktop in Desktops) written after a delete keeps the folders above it as any does.
+    let taken = merge::taken_along(input, &masks.filtered);
     // What would take a name one that waits for a hash holds waits too (§6.3), where it is,
     // with its folders: planned again with it waiting, till no more come.
     // Ends: in each plan again at least one node more waits.

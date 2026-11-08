@@ -9,7 +9,7 @@ use hbsync_engine::{Drive, Engine, EngineConfig, SyncReport};
 use hbsync_fileio::HashAlgorithm;
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 use hbsync_remote::{NodeMeta, RemoteBody};
-use hbsync_state::StateDb;
+use hbsync_state::{FolderKind, StateDb};
 use hbsync_types::{NodeId, Role};
 
 type R = Result<(), Box<dyn std::error::Error>>;
@@ -40,8 +40,12 @@ impl Computer {
         let db = base.join("state.db");
         let mut main_db = StateDb::open(&db)?;
         let docs = main_db.write(|s| {
-            s.account()
-                .add_folder(Role::Documents.node(), &docs_root.to_string_lossy(), "m")
+            s.account().add_folder(
+                Role::Documents.node(),
+                FolderKind::Role,
+                &docs_root.to_string_lossy(),
+                "m",
+            )
         })?;
         let drive = Drive::new(
             StateDb::open_account(&db)?,
@@ -516,23 +520,27 @@ fn documents_deleted_on_the_drive_comes_back_when_added_again() -> R {
 
 /// Moves Documents (the folder itself) to Recently deleted on the server.
 fn remove_documents(server: &Arc<Mutex<FakeServer>>) -> R {
+    remove_alone(server, Role::Documents.node())
+}
+
+/// Moves the folder `folder` alone to Recently deleted on the server (what is in it stays live:
+/// a delete stopped half way).
+fn remove_alone(server: &Arc<Mutex<FakeServer>>, folder: NodeId) -> R {
     let mut srv = server.lock().map_err(|_| "poisoned")?;
-    let docs = srv
+    let header = srv
         .live()
-        .find(
-            |h| matches!(&h.body, RemoteBody::Live { node, .. } if *node == Role::Documents.node()),
-        )
+        .find(|h| matches!(&h.body, RemoteBody::Live { node, .. } if *node == folder))
         .cloned()
-        .ok_or("no Documents")?;
-    if let RemoteBody::Live { node, content, .. } = docs.body {
+        .ok_or("not live")?;
+    if let RemoteBody::Live { node, content, .. } = header.body {
         let meta = hbsync_remote::contract::removed(&NodeMeta {
             node,
-            parent: docs.parent,
-            kind: docs.kind,
+            parent: header.parent,
+            kind: header.kind,
             content,
             removed: false,
         });
-        srv.update(docs.file_id, docs.version, &meta, None)?;
+        srv.update(header.file_id, header.version, &meta, None)?;
     }
     Ok(())
 }
@@ -579,5 +587,472 @@ fn an_engine_on_another_drives_db_is_refused() -> R {
     assert!(Engine::open(&sync_root, other, config(&root)).is_err());
     let ours = Drive::open(&db, "t.example", remote)?;
     assert!(Engine::open(&sync_root, ours, config(&root)).is_ok());
+    Ok(())
+}
+
+/// A computer syncing the main folder and, once added, its Desktop: a folder of its own in
+/// Desktops on the drive (sync semantics §12).
+struct DeskPc {
+    _dir: tempfile::TempDir,
+    db: PathBuf,
+    main_root: PathBuf,
+    desk_root: PathBuf,
+    drive: Arc<Drive>,
+    main: Engine,
+    desk: Option<Engine>,
+}
+
+impl DeskPc {
+    /// A computer whose Desktop is `top` on the drive, named `name`; `None`: none added yet.
+    fn new(
+        server: &Arc<Mutex<FakeServer>>,
+        desktop: Option<(NodeId, &str)>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let base = dir.path().canonicalize()?;
+        let (main_root, desk_root) = (base.join("Homebase"), base.join("Desktop"));
+        for root in [&main_root, &desk_root] {
+            std::fs::create_dir_all(root.join(hbsync_local::STATE_DIR))?;
+        }
+        let db = base.join("state.db");
+        let drive = Drive::new(
+            StateDb::open_account(&db)?,
+            Arc::new(FakeRemote::new(server.clone())),
+        );
+        let main = Engine::new(StateDb::open(&db)?, drive.clone(), config(&main_root))?;
+        let mut pc = DeskPc {
+            _dir: dir,
+            db,
+            main_root,
+            desk_root,
+            drive,
+            main,
+            desk: None,
+        };
+        if let Some((top, name)) = desktop {
+            pc.add_desktop(top, name)?;
+        }
+        Ok(pc)
+    }
+
+    /// The user adds this computer's Desktop, whose folder on the drive is (or is to be) `top`.
+    fn add_desktop(&mut self, top: NodeId, name: &str) -> R {
+        self.add_desktop_as(top, Some(name))
+    }
+
+    /// [`DeskPc::add_desktop`], named so (`None`: no name given yet).
+    fn add_desktop_as(&mut self, top: NodeId, name: Option<&str>) -> R {
+        let path = self.desk_root.to_string_lossy().into_owned();
+        let folder = StateDb::open_account(&self.db)?
+            .write(|s| s.account().add_folder(top, FolderKind::Desktop, &path, "d"))?;
+        let mut desk = self.open_desktop(folder)?;
+        if let Some(name) = name {
+            desk.name_desktop(name)?;
+        }
+        self.desk = Some(desk);
+        Ok(())
+    }
+
+    /// The engine of this computer's Desktop, folder `folder` of its DB, as start-up opens a new
+    /// one: it plans what the drive holds in its part.
+    fn open_desktop(&self, folder: i64) -> Result<Engine, Box<dyn std::error::Error>> {
+        let mut desk = Engine::new(
+            StateDb::open_folder(&self.db, folder)?,
+            self.drive.clone(),
+            config(&self.desk_root),
+        )?;
+        desk.apply_filter_change()?;
+        Ok(desk)
+    }
+
+    /// This computer's Desktop's engine, once added.
+    fn desk(&mut self) -> Result<&mut Engine, Box<dyn std::error::Error>> {
+        Ok(self.desk.as_mut().ok_or("no Desktop added")?)
+    }
+
+    fn sync(&mut self) -> R {
+        sync(&mut self.main)?;
+        if let Some(desk) = &mut self.desk {
+            sync(desk)?;
+            sync(&mut self.main)?;
+        }
+        Ok(())
+    }
+}
+
+/// The names of the live folders in Desktops on the drive, sorted.
+fn desktops(server: &Arc<Mutex<FakeServer>>) -> Vec<String> {
+    let mut names: Vec<String> = drive_listing(server)
+        .into_iter()
+        .filter(|(_, parent)| *parent == NodeId::DESKTOPS)
+        .map(|(name, _)| name)
+        .collect();
+    names.sort();
+    names
+}
+
+/// Each computer's Desktop syncs to a folder of its own in Desktops, made by the first to sync;
+/// the main folder shows the other computers' Desktops, never its own, and an edit there
+/// reaches the computer's Desktop.
+#[test]
+fn each_computer_s_desktop_is_its_own() -> R {
+    let server = FakeServer::new(ServerConfig::default());
+    let (ta, tb) = (NodeId::new(), NodeId::new());
+    let mut a = DeskPc::new(&server, Some((ta, "Laptop")))?;
+    let mut b = DeskPc::new(&server, Some((tb, "Work PC")))?;
+    std::fs::write(a.desk_root.join("a.lnk"), b"a")?;
+    std::fs::write(b.desk_root.join("b.lnk"), b"b")?;
+    a.sync()?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(desktops(&server), ["Laptop", "Work PC"]);
+    assert_eq!(files(&a.desk_root), ["a.lnk"]);
+    assert_eq!(files(&b.desk_root), ["b.lnk"]);
+    assert_eq!(files(&a.main_root), ["Desktops/Work PC/b.lnk"]);
+    assert_eq!(files(&b.main_root), ["Desktops/Laptop/a.lnk"]);
+
+    std::fs::write(
+        a.main_root.join("Desktops/Work PC/b.lnk"),
+        b"b, from the laptop",
+    )?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(
+        std::fs::read(b.desk_root.join("b.lnk"))?,
+        b"b, from the laptop"
+    );
+    assert_eq!(files(&b.main_root), ["Desktops/Laptop/a.lnk"]);
+    Ok(())
+}
+
+/// A computer's Desktop deleted elsewhere comes back at its next sync, with what was in it:
+/// nothing is deleted on its Desktop. So does Desktops, deleted with every Desktop in it.
+#[test]
+fn a_desktop_deleted_elsewhere_comes_back() -> R {
+    let server = FakeServer::new(ServerConfig::default());
+    let ta = NodeId::new();
+    let mut a = DeskPc::new(&server, Some((ta, "Laptop")))?;
+    let mut b = DeskPc::new(&server, None)?;
+    std::fs::write(a.desk_root.join("a.txt"), b"a")?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(files(&b.main_root), ["Desktops/Laptop/a.txt"]);
+    for gone in ["Desktops/Laptop", "Desktops"] {
+        std::fs::remove_dir_all(b.main_root.join(gone))?;
+        b.sync()?;
+        assert!(desktops(&server).is_empty(), "{gone}");
+        a.sync()?;
+        b.sync()?;
+        assert_eq!(files(&a.desk_root), ["a.txt"], "{gone}");
+        assert_eq!(files(&b.main_root), ["Desktops/Laptop/a.txt"], "{gone}");
+        assert_eq!(desktops(&server), ["Laptop"], "{gone}");
+    }
+    Ok(())
+}
+
+/// The computer's Desktop folder on the drive follows the computer's name; a rename made
+/// elsewhere stands until that name changes again. A name taken in Desktops gets a number.
+#[test]
+fn a_desktop_is_named_as_its_computer() -> R {
+    let server = FakeServer::new(ServerConfig::default());
+    let (ta, tb) = (NodeId::new(), NodeId::new());
+    let mut a = DeskPc::new(&server, Some((ta, "PC")))?;
+    a.sync()?;
+    let mut b = DeskPc::new(&server, Some((tb, "PC")))?;
+    b.sync()?;
+    assert_eq!(desktops(&server), ["PC", "PC (conflict 1)"]);
+
+    let renamed = |pc: &mut DeskPc, name: &str| pc.desk.as_mut().map(|d| d.name_desktop(name));
+    renamed(&mut a, "Laptop").transpose()?;
+    a.sync()?;
+    assert_eq!(desktops(&server), ["Laptop", "PC (conflict 1)"]);
+    // Renamed on another computer: it stands.
+    b.sync()?;
+    std::fs::rename(
+        b.main_root.join("Desktops/Laptop"),
+        b.main_root.join("Desktops/Old laptop"),
+    )?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(desktops(&server), ["Old laptop", "PC (conflict 1)"]);
+    renamed(&mut a, "New laptop").transpose()?;
+    a.sync()?;
+    assert_eq!(desktops(&server), ["New laptop", "PC (conflict 1)"]);
+    Ok(())
+}
+
+/// A computer set up again joins its old Desktop (the user picks it): what the main folder
+/// held of it there goes from the main folder, nothing deleted on the drive, and the Desktop
+/// holds it; an edit made there meanwhile is kept, detached.
+#[test]
+fn a_desktop_joined_again_leaves_the_main_folder() -> R {
+    for edited in [false, true] {
+        let server = FakeServer::new(ServerConfig::default());
+        let ta = NodeId::new();
+        let mut old = DeskPc::new(&server, Some((ta, "Laptop")))?;
+        std::fs::write(old.desk_root.join("a.txt"), b"a")?;
+        old.sync()?;
+        drop(old);
+
+        let mut again = DeskPc::new(&server, None)?;
+        again.sync()?;
+        assert_eq!(files(&again.main_root), ["Desktops/Laptop/a.txt"]);
+        if edited {
+            std::fs::write(again.main_root.join("Desktops/Laptop/a.txt"), b"a, edited")?;
+        }
+        again.add_desktop(ta, "Laptop")?;
+        again.sync()?;
+        assert_eq!(files(&again.desk_root), ["a.txt"]);
+        assert_eq!(std::fs::read(again.desk_root.join("a.txt"))?, b"a");
+        let kept = files(&again.main_root);
+        if edited {
+            // Detached with its folder: a folder of its own in Desktops.
+            assert_eq!(desktops(&server), ["Laptop", "Laptop (conflict 1)"]);
+            assert_eq!(kept.len(), 1, "{kept:?}");
+            let copy = again.main_root.join(&kept[0]);
+            assert_eq!(std::fs::read(copy)?, b"a, edited", "{kept:?}");
+        } else {
+            assert!(kept.is_empty(), "{kept:?}");
+            assert_eq!(desktops(&server), ["Laptop"]);
+            assert_eq!(parent_on_server(&server, "a.txt"), Some(ta));
+        }
+    }
+    Ok(())
+}
+
+/// Desktops in Recently deleted with a computer's Desktop still live in it (a delete stopped
+/// half way): that computer's next sync brings Desktops back, whatever its own folder.
+#[test]
+fn desktops_removed_alone_comes_back() -> R {
+    let server = FakeServer::new(ServerConfig::default());
+    let mut a = DeskPc::new(&server, Some((NodeId::new(), "Laptop")))?;
+    std::fs::write(a.desk_root.join("a.txt"), b"a")?;
+    a.sync()?;
+    remove_alone(&server, NodeId::DESKTOPS)?;
+    a.sync()?;
+    let live = drive_listing(&server);
+    assert!(
+        live.iter().any(|(n, p)| n == "Desktops" && p.is_root()),
+        "{live:?}"
+    );
+    assert_eq!(desktops(&server), ["Laptop"]);
+    assert_eq!(files(&a.desk_root), ["a.txt"]);
+    Ok(())
+}
+
+/// A rename of the computer's Desktop folder that finds it gone meanwhile (the mirror behind)
+/// brings it back before anything syncs into it; the name lands at a later sync.
+#[test]
+fn a_rename_that_finds_the_desktop_gone_brings_it_back() -> R {
+    let server = FakeServer::new(ServerConfig::default());
+    let ta = NodeId::new();
+    let mut a = DeskPc::new(&server, Some((ta, "Laptop")))?;
+    a.sync()?;
+    let mut b = DeskPc::new(&server, None)?;
+    b.sync()?;
+    std::fs::remove_dir_all(b.main_root.join("Desktops/Laptop"))?;
+    b.sync()?;
+    assert!(desktops(&server).is_empty());
+    // a's mirror still has it live.
+    let named = a.drive.ensure_desktop(ta, "New laptop", true)?;
+    assert!(!named, "the rename didn't land");
+    assert_eq!(
+        desktops(&server),
+        ["Laptop"],
+        "back before anything syncs into it"
+    );
+    let desk = a.desk()?;
+    desk.name_desktop("New laptop")?;
+    a.sync()?;
+    assert_eq!(desktops(&server), ["New laptop"]);
+    Ok(())
+}
+
+/// The computer's own Desktop folder holds its name in the main folder's Desktops, though the
+/// main folder leaves it out: a folder of that name made there takes another.
+#[test]
+fn the_own_desktop_holds_its_name_in_the_main_folder() -> R {
+    let server = FakeServer::new(ServerConfig::default());
+    let mut a = DeskPc::new(&server, Some((NodeId::new(), "Laptop")))?;
+    a.sync()?;
+    std::fs::create_dir_all(a.main_root.join("Desktops/Laptop"))?;
+    std::fs::write(a.main_root.join("Desktops/Laptop/b.txt"), b"b")?;
+    a.sync()?;
+    assert_eq!(desktops(&server), ["Laptop", "Laptop (conflict 1)"]);
+    Ok(())
+}
+
+/// A Desktop joined with no name given keeps the name it has on the drive.
+#[test]
+fn a_desktop_joined_without_a_name_keeps_its_own() -> R {
+    let server = FakeServer::new(ServerConfig::default());
+    let ta = NodeId::new();
+    let mut old = DeskPc::new(&server, Some((ta, "Laptop")))?;
+    old.sync()?;
+    drop(old);
+    let mut again = DeskPc::new(&server, None)?;
+    again.add_desktop_as(ta, None)?;
+    again.sync()?;
+    assert_eq!(desktops(&server), ["Laptop"]);
+    Ok(())
+}
+
+/// A Desktop added syncs at once, before the main folder syncs again: the main folder leaves
+/// it out from its next sync, and never copies the computer's own Desktop in.
+#[test]
+fn a_desktop_syncs_before_the_main_folder_does() -> R {
+    let server = FakeServer::new(ServerConfig::default());
+    let mut a = DeskPc::new(&server, None)?;
+    a.sync()?;
+    a.add_desktop(NodeId::new(), "Laptop")?;
+    std::fs::write(a.desk_root.join("a.txt"), b"a")?;
+    sync(a.desk()?)?;
+    assert_eq!(desktops(&server), ["Laptop"]);
+    let synced = sync(&mut a.main)?.synced;
+    assert!(
+        synced.iter().all(|s| !s.path.ends_with("a.txt")),
+        "{synced:?}"
+    );
+    assert!(files(&a.main_root).is_empty(), "{:?}", files(&a.main_root));
+    Ok(())
+}
+
+/// A Desktop joined (the computer set up again) while the main folder's sync runs, holding
+/// its copy to download: the main folder leaves it out from its next round, so it never
+/// downloads the computer's own Desktop; the Desktop holds it.
+#[test]
+fn a_desktop_added_during_a_main_sync_is_left_out_from_its_next_round() -> R {
+    let server = FakeServer::new(ServerConfig::default());
+    let ta = NodeId::new();
+    let mut old = DeskPc::new(&server, Some((ta, "Laptop")))?;
+    std::fs::write(old.desk_root.join("a.txt"), b"a")?;
+    old.sync()?;
+    drop(old);
+
+    let mut again = DeskPc::new(&server, None)?;
+    let (db, path) = (
+        again.db.clone(),
+        again.desk_root.to_string_lossy().into_owned(),
+    );
+    let added: Arc<Mutex<Option<i64>>> = Arc::default();
+    let hook = {
+        let added = added.clone();
+        hbsync_engine::testkit::AfterPlan(Arc::new(move || {
+            let mut added = added.lock().expect("lock");
+            if added.is_none() {
+                let folder = StateDb::open_account(&db)
+                    .and_then(|mut a| {
+                        a.write(|s| s.account().add_folder(ta, FolderKind::Desktop, &path, "d"))
+                    })
+                    .expect("add");
+                *added = Some(folder);
+            }
+        }))
+    };
+    let mut cfg = config(&again.main_root);
+    cfg.after_counts = Some(hook);
+    again.main = Engine::new(StateDb::open(&again.db)?, again.drive.clone(), cfg)?;
+    let synced = sync(&mut again.main)?.synced;
+    assert!(
+        synced.iter().all(|s| !s.path.ends_with("a.txt")),
+        "{synced:?}"
+    );
+    assert!(
+        files(&again.main_root).is_empty(),
+        "{:?}",
+        files(&again.main_root)
+    );
+
+    let folder = added.lock().map_err(|_| "lock")?.ok_or("added")?;
+    sync(&mut again.open_desktop(folder)?)?;
+    assert_eq!(files(&again.desk_root), ["a.txt"]);
+    assert!(
+        files(&again.main_root).is_empty(),
+        "{:?}",
+        files(&again.main_root)
+    );
+    Ok(())
+}
+
+/// A plain folder called Desktops at the top keeps its name: Desktops, made beside it, takes
+/// another (as Recovered files does).
+#[test]
+fn a_plain_desktops_folder_keeps_its_name() -> R {
+    let server = FakeServer::new(ServerConfig::default());
+    {
+        // Its id above Desktops': by ids alone, Desktops would keep the name.
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        let plain = NodeMeta {
+            node: NodeId(hbsync_types::Uuid::from_u128(u128::MAX)),
+            ..hbsync_remote::contract::folder("Desktops", NodeId::ROOT)
+        };
+        srv.create(&plain, None)?;
+        srv.seed_file(plain.node, "mine.txt", b"m", HashAlgorithm::Blake3)?;
+    }
+    let mut a = DeskPc::new(&server, None)?;
+    a.sync()?;
+    a.add_desktop(NodeId::new(), "Laptop")?;
+    a.sync()?;
+    let top: Vec<String> = drive_listing(&server)
+        .into_iter()
+        .filter(|(_, p)| p.is_root())
+        .map(|(n, _)| n)
+        .collect();
+    assert_eq!(top, ["Desktops", "Desktops (conflict 1)"]);
+    assert_eq!(parent_on_server(&server, "Laptop"), Some(NodeId::DESKTOPS));
+    assert_eq!(files(&a.main_root), ["Desktops/mine.txt"]);
+    Ok(())
+}
+
+/// A folder of a kind this version doesn't know (a newer one set it up) doesn't open.
+#[test]
+fn a_folder_of_an_unknown_kind_doesnt_open() -> R {
+    let server = FakeServer::new(ServerConfig::default());
+    let mut a = DeskPc::new(&server, None)?;
+    a.add_desktop(NodeId::new(), "Laptop")?;
+    let raw = rusqlite::Connection::open(&a.db)?;
+    raw.execute("UPDATE folders SET kind = 9 WHERE kind = 2", [])?;
+    drop(raw);
+    let folder = a.desk()?.db().folder();
+    let opened = Engine::new(
+        StateDb::open_folder(&a.db, folder)?,
+        a.drive.clone(),
+        config(&a.desk_root),
+    );
+    assert!(opened.is_err());
+    Ok(())
+}
+
+/// A computer's Desktop folder is a sync root's top, as the drive's and a role folder's: a
+/// restore into it never takes the state folder's name (`.hbsync`, the computer's own there).
+#[test]
+fn a_restore_into_a_desktop_never_takes_the_state_folder_s_name() -> R {
+    let server = FakeServer::new(ServerConfig::default());
+    let mut a = DeskPc::new(&server, Some((NodeId::new(), "Laptop")))?;
+    a.sync()?;
+    let mut b = DeskPc::new(&server, None)?;
+    b.sync()?;
+    let state = b.main_root.join("Desktops/Laptop/.hbsync");
+    std::fs::create_dir_all(&state)?;
+    std::fs::write(state.join("x.txt"), b"x")?;
+    b.sync()?;
+    std::fs::remove_dir_all(&state)?;
+    b.sync()?;
+    let removed = {
+        let srv = server.lock().map_err(|_| "poisoned")?;
+        srv.removed()
+            .find_map(|h| match &h.body {
+                RemoteBody::Live { node, content, .. } if content.name == ".hbsync" => Some(*node),
+                _ => None,
+            })
+            .ok_or("in Recently deleted")?
+    };
+    b.drive.restore(&[removed])?;
+    let names: Vec<String> = drive_listing(&server).into_iter().map(|(n, _)| n).collect();
+    assert!(
+        names.contains(&".hbsync (restored)".to_owned()),
+        "{names:?}"
+    );
+    assert!(!names.contains(&".hbsync".to_owned()), "{names:?}");
     Ok(())
 }

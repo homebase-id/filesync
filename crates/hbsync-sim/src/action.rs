@@ -156,6 +156,17 @@ pub enum Action {
     /// The phone deletes the role folder itself, with what is in it (to Recently deleted); a
     /// device syncing it brings it back (as `Drive::ensure_role`).
     DeleteRoleFolder,
+    /// The user adds a computer's Desktop not added yet ([`Sim::with_desktop_to_add`]): it syncs
+    /// from now on; its computer's main folder leaves it out from its next plan.
+    ///
+    /// [`Sim::with_desktop_to_add`]: crate::Sim::with_desktop_to_add
+    AddDesktop,
+    /// The user renames the client's computer (to a name of [`NAMES`]): its Desktop's folder on
+    /// the drive takes it at its next sync, as far as it is free there (§12). Nothing on a
+    /// client that isn't a Desktop.
+    RenameComputer {
+        name: usize,
+    },
     /// The user moves a file from one folder of the client's computer to the other, at its
     /// top ([`Sim::with_role_device`]): the scan of the other folder finds a new item. Nothing
     /// on a client with one folder.

@@ -7,7 +7,6 @@
 
 use hbsync_remote::{ChangeRef, NodeMeta, RemoteBody, RemoteHeader, Skipped};
 use hbsync_state::{AccountTx, Answer, Answered, MirrorRow, RemovedRow, StateError};
-use hbsync_types::Role;
 use hbsync_types::{ContentHash, FileToken, NodeId, NodeKind, Written};
 
 // ---- facts the feed brings ----
@@ -75,12 +74,12 @@ pub fn apply(s: AccountTx<'_>, header: &RemoteHeader) -> Result<Applied, StateEr
 }
 
 /// Why the live (or removed) node `header` brings uses a fixed id out of place, if it does:
-/// the root's or the rest of the drive's, which are never nodes, or a role folder's or
-/// Recovered files' on a file. Such a version is left out, as a row this client can't read.
+/// the root's or the rest of the drive's, which are never nodes, or a role folder's, Recovered
+/// files' or Desktops' on a file. Such a version is left out, as a row this client can't read.
 fn misplaced(header: &RemoteHeader) -> Option<String> {
     let node = header.node()?;
     let (kind, file) = (header.kind, header.file_id);
-    let folder_only = node == NodeId::RECOVERED || Role::of(node).is_some();
+    let folder_only = node.is_fixed_folder();
     if node.is_root() || node == NodeId::OUTSIDE {
         Some(format!("{file:?}: node id {node:?} is never a node"))
     } else if header.parent == NodeId::OUTSIDE {
@@ -203,7 +202,7 @@ mod tests {
     use hbsync_remote::PayloadInfo;
     use hbsync_state::StateDb;
     use hbsync_types::schema::NodeContent;
-    use hbsync_types::{RemoteFileId, Uuid, VersionTag};
+    use hbsync_types::{RemoteFileId, Role, Uuid, VersionTag};
 
     use super::*;
 
@@ -446,6 +445,7 @@ mod tests {
             folder(2, 2, NodeId::OUTSIDE, NodeId::ROOT),
             folder(3, 3, NodeId::new(), NodeId::OUTSIDE),
             file(4, 4, docs),
+            file(8, 8, NodeId::DESKTOPS),
         ] {
             assert!(refused(&mut db, &header)?, "{header:?}");
         }
@@ -465,6 +465,7 @@ mod tests {
         for header in [
             folder(6, 6, docs, NodeId::new()),
             folder(7, 7, NodeId::RECOVERED, NodeId::ROOT),
+            folder(9, 9, NodeId::DESKTOPS, NodeId::ROOT),
         ] {
             assert_eq!(db.write(|s| apply(s.account(), &header))?, Applied::Live);
         }
