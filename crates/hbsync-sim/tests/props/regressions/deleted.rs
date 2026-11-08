@@ -2273,3 +2273,57 @@ fn regression_a_paged_delete_of_every_file_with_one_taken_along_is_held() {
         panic!("{e}");
     }
 }
+
+/// Seed b5183698 (`guarded_clients_in_pages_hold_the_whole_delete`, pages of 1, the guard at
+/// 1): client 1 uploads a file `a` (its one synced file), which another device removes from
+/// the drive meanwhile. Client 0 makes folder F, and client 1 a file F of its own, which goes
+/// up as `F (conflict 1)`; before client 1 renames it so here, its user moves it into the
+/// folder F. Client 0 then removes F (empty on the drive). Client 1's plan moves the conflict
+/// file out of F to the top, as the drive has it, and deletes F; another page deletes `a`: one
+/// file, the one synced, not over the limit of 1, so followed unasked (§7). The oracle counted
+/// the moved file as deleted with F too (but a plan's moves run before its deletes): two
+/// removals of one synced file, and a breach.
+#[test]
+fn regression_a_file_moved_out_of_a_folder_deleted_in_the_same_plan_isnt_deleted_with_it() {
+    use hbsync_sim::Action::{CreateFile, CreateFolder, Meanwhile, Move, ToggleIgnore};
+    let act = |client, action| Event::Act { client, action };
+    let (plan, step) = (
+        |client| Event::Plan { client },
+        |client| Event::Step { client },
+    );
+    let events = [
+        act(0, CreateFolder { parent: 0, name: 6 }),
+        act(1, CreateFile { parent: 0, name: 8 }),
+        plan(1),
+        act(1, Meanwhile { op: 2 }),
+        act(0, ToggleIgnore),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        plan(0),
+        act(1, CreateFile { parent: 0, name: 6 }),
+        step(1),
+        step(0),
+        plan(1),
+        plan(1),
+        step(1),
+        step(1),
+        act(
+            0,
+            Move {
+                node: 14,
+                parent: 1,
+                name: 5,
+            },
+        ),
+        act(
+            1,
+            Move {
+                node: 8,
+                parent: 6,
+                name: 0,
+            },
+        ),
+    ];
+    if let Err(e) = run_with(2, Some(1), |sim| sim.with_small_pages(1), &events) {
+        panic!("{e}");
+    }
+}

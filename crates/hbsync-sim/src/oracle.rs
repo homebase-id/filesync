@@ -988,6 +988,35 @@ impl Ledger {
                 !confirmed.contains(&p.node)
                     && !base.ancestors(p.node).iter().any(|a| waits.contains(a))
             };
+            // A delete here doesn't take what the plan moves out of it first (its moves run
+            // before its deletes): a file the drive has elsewhere, or in a folder it has
+            // elsewhere. The guard's own count takes them (holding sooner); what went through
+            // is judged by what it deletes.
+            let moved_to: HashMap<NodeId, NodeId> = seen
+                .ops
+                .iter()
+                .filter_map(|p| match &p.what {
+                    What::LocalMove { parent, .. } => Some((p.node, *parent)),
+                    _ => None,
+                })
+                .collect();
+            let deleted_under = |node: NodeId| {
+                let subtree: HashSet<NodeId> = local.subtree(node).into_iter().collect();
+                let moved_out = |n: &NodeId| {
+                    *n != node
+                        && subtree.contains(n)
+                        && moved_to.get(n).is_some_and(|to| !subtree.contains(to))
+                };
+                subtree
+                    .iter()
+                    .filter(|n| local.get(**n).is_some_and(|s| s.kind == NodeKind::File))
+                    .filter(|n| {
+                        !std::iter::once(**n)
+                            .chain(local.ancestors(**n))
+                            .any(|a| moved_out(&a))
+                    })
+                    .count()
+            };
             for p in seen.ops.iter().filter(unconfirmed) {
                 match p.what {
                     What::RemoteDelete
@@ -996,7 +1025,7 @@ impl Ledger {
                         deleted += 1;
                         deleted_synced += usize::from(base.contains(p.node));
                     }
-                    What::LocalDelete { .. } => deleted_here += files_under(local, p.node),
+                    What::LocalDelete { .. } => deleted_here += deleted_under(p.node),
                     _ => {}
                 }
             }
