@@ -2,6 +2,7 @@
 //! what emptying deletes for good and in which order, and a restore's waves. The simulator
 //! shares the public ones.
 
+use std::cmp::Reverse;
 use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 
@@ -286,7 +287,8 @@ pub struct Holdings {
 /// (one its delete took along, or one written since) or a removed node not chosen stays, and
 /// so do the folders it is in. Files first, then each folder after the folders in it (a cycle
 /// of them in some order), by the links among the chosen alone, however deep. The rows are
-/// walked in node order: the same rows go in the same order whatever order they come in.
+/// walked in node order: the same rows (one per node) go in the same order whatever order they
+/// come in.
 pub(super) fn select(chosen: &[Chosen], holdings: &Holdings) -> Vec<NodeId> {
     passes(chosen, holdings).into_iter().flatten().collect()
 }
@@ -315,26 +317,30 @@ pub fn passes(chosen: &[Chosen], holdings: &Holdings) -> Vec<Vec<NodeId>> {
             }
         }
     }
-    // How many of them each is in, worked out once each, the rows walked in node order.
+    // How many of them each is in, worked out once each, the rows walked in node order. A row
+    // on the walk so far is marked `ON_PATH`: reached again, the walk went round a cycle.
+    const ON_PATH: usize = usize::MAX;
     let mut starts: Vec<NodeId> = links.keys().copied().collect();
-    starts.sort();
+    starts.sort_unstable();
     let mut depth: HashMap<NodeId, usize> = HashMap::new();
-    let (mut path, mut on_path) = (Vec::new(), HashSet::new());
-    for start in starts {
+    let mut path = Vec::new();
+    for &start in &starts {
         path.clear();
-        on_path.clear();
         let mut at = start;
         let mut d = loop {
-            if let Some(&known) = depth.get(&at) {
-                break known + 1;
+            match depth.get(&at) {
+                Some(&ON_PATH) => break 0,
+                Some(&known) => break known + 1,
+                None => {}
             }
             match links.get(&at) {
-                Some(&(parent, _)) if on_path.insert(at) => {
+                Some(&(parent, _)) => {
+                    depth.insert(at, ON_PATH);
                     path.push(at);
                     at = parent;
                 }
-                // Above them all, or round a cycle.
-                _ => break 0,
+                // Above them all.
+                None => break 0,
             }
         };
         for &n in path.iter().rev() {
@@ -342,21 +348,23 @@ pub fn passes(chosen: &[Chosen], holdings: &Holdings) -> Vec<Vec<NodeId>> {
             d += 1;
         }
     }
-    let level = |n: &NodeId| (links[n].1, std::cmp::Reverse(depth[n]));
-    let mut going: Vec<NodeId> = links
-        .keys()
-        .filter(|n| !stays.contains(*n))
-        .copied()
+    // By level (files, then folders the deepest first), in node order within one: each key
+    // worked out once, not at every comparison.
+    type Level = (bool, Reverse<usize>);
+    let mut going: Vec<(Level, NodeId)> = starts
+        .into_iter()
+        .filter(|n| !stays.contains(n))
+        .map(|n| ((links[&n].1, Reverse(depth[&n])), n))
         .collect();
-    going.sort_by_cached_key(|n| (level(n), *n));
+    going.sort_unstable();
     // Files are one pass, whatever their depth.
-    let pass = |n: &NodeId| match links[n].1 {
-        false => (false, std::cmp::Reverse(0)),
-        true => level(n),
+    let pass = |&((folder, depth), _): &(Level, NodeId)| match folder {
+        false => (false, Reverse(0)),
+        true => (true, depth),
     };
     going
         .chunk_by(|a, b| pass(a) == pass(b))
-        .map(<[NodeId]>::to_vec)
+        .map(|pass| pass.iter().map(|(_, n)| *n).collect())
         .collect()
 }
 

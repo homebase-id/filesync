@@ -465,8 +465,9 @@ fn emptying_a_chain_deeper_than_any_path() {
 }
 
 /// Emptying cycles (a folder in a file in it, two folders in each other, as another app may
-/// leave them) goes in one order: the rows are walked in node order, whatever order they come
-/// in and whichever row a hash map gives first. A stop between batches leaves the same rows.
+/// leave them) goes in one order, in the same passes, whatever order the rows come in: a stop
+/// between batches leaves the same rows. Files go first, and each node before the folder it
+/// is in, but for one link round each cycle.
 #[test]
 fn emptying_a_cycle_goes_in_the_same_order() {
     let id = |n: u128| NodeId(Uuid::from_u128(n));
@@ -486,18 +487,27 @@ fn emptying_a_cycle_goes_in_the_same_order() {
         row(z, y, false),
     ];
     let holdings = holdings_of(&chosen);
-    // The files at once; then x, walked first of its cycle (so in y), before y; `folder` (in
-    // `file`, walked first) at y's level.
-    let expected = [file, c, d, z, x, folder, y];
-    // Each order of the rows, rotated and reversed, a few times (each call seeds its maps
-    // afresh).
+    let first = passes(&chosen, &holdings);
+    let order = first.concat();
+    let at: HashMap<NodeId, usize> = order.iter().enumerate().map(|(i, n)| (*n, i)).collect();
+    assert_eq!(at.len(), chosen.len(), "{order:?}");
+    let files = chosen.iter().filter(|r| !r.folder).map(|r| at[&r.node]);
+    let folders = chosen.iter().filter(|r| r.folder).map(|r| at[&r.node]);
+    assert!(files.max() < folders.min(), "{order:?}");
+    let after_its_folder = chosen
+        .iter()
+        .filter(|r| at[&r.node] > at[&r.parent])
+        .count();
+    assert_eq!(after_its_folder, 2, "{order:?}");
+    // Each order of the rows, rotated and reversed, a few times over.
     for turn in 0..2 * chosen.len() {
         chosen.rotate_left(1);
         if turn == chosen.len() {
             chosen.reverse();
         }
         for _ in 0..8 {
-            assert_eq!(select(&chosen, &holdings), expected, "{chosen:?}");
+            assert_eq!(passes(&chosen, &holdings), first, "{chosen:?}");
+            assert_eq!(select(&chosen, &holdings), order, "{chosen:?}");
         }
     }
 }
