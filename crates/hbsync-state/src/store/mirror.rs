@@ -242,6 +242,32 @@ impl ReadTx<'_> {
 }
 
 /// The rest of the drive as a folder holding part of it sees it: one folder at its top.
+/// Tests: puts Desktops and a folder in it for each of `desktops` (its node and name) in the
+/// mirror of the account's DB at `db`, as the feed would.
+#[cfg(feature = "testkit")]
+pub fn put_desktops(db: &std::path::Path, desktops: &[(NodeId, &str)]) -> Result<()> {
+    let folder = |node, parent, name: &str| MirrorRow {
+        file_id: RemoteFileId(hbsync_types::Uuid::new_v4()),
+        version: VersionTag(hbsync_types::Uuid::new_v4()),
+        node,
+        parent,
+        name: name.into(),
+        kind: NodeKind::Folder,
+        file: None,
+        content_extra: None,
+        token: None,
+        changed_at: Some(5),
+    };
+    crate::StateDb::open_account(db)?.write(|s| {
+        let a = s.account();
+        a.put_live(&folder(NodeId::DESKTOPS, NodeId::ROOT, "Desktops"))?;
+        for (node, name) in desktops {
+            a.put_live(&folder(*node, NodeId::DESKTOPS, name))?;
+        }
+        Ok(())
+    })
+}
+
 fn outside_row() -> MirrorRow {
     MirrorRow {
         file_id: RemoteFileId(hbsync_types::Uuid::nil()),

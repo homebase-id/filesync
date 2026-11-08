@@ -1073,9 +1073,11 @@ plain folder of its name, Desktops takes the first free one, and it loses a name
 top whatever the ids, as Recovered files (§6, rule 1). The computer's name is the one the app
 gives (made one the drive takes: NFC, not empty, `.`, `..` or `.hbsync…`, no `/` or NUL, 255
 bytes at most; else `Computer`); with none given yet, the folder is made under the local
-folder's own name, and a folder there already keeps its name. The folder takes a given name
-when it changes (a rename of its node where it is, under the first free name), again at a
-later sync if the rename didn't land; a rename made elsewhere stands until then. The purge
+folder's own name, and a folder there already keeps its name (a computer joining a folder in
+Desktops takes the name it has there, as given). The folder takes a name when one is given (a
+rename of its node where it is, under the first free name), again at a later sync if the
+rename didn't land; a rename made elsewhere stands until a name is given again, the same name
+as before too (the user asked for it). The purge
 keeps a folder in Desktops (a computer's Desktop) that Desktops' delete took along, as it keeps
 a role folder: its computer brings Desktops back with it; and a restore into it never takes
 `.hbsync`, as at any sync root's top. No device knows the other

@@ -56,6 +56,8 @@ use rusqlite::{Connection, TransactionBehavior};
 
 pub use coords::Coords;
 pub use reader::Reader;
+#[cfg(feature = "testkit")]
+pub use store::put_desktops;
 pub use store::{
     AccountTx, Answer, Answered, BaseRow, DirtyCursor, FolderKind, FolderRow, FolderTx,
     GoneSuspect, Left, LocalRow, MAX_DEPTH, Mark, MirrorFile, MirrorRow, Placing, PlannedBase,
