@@ -37,6 +37,9 @@ pub(crate) struct Ledger {
     pub(crate) sent_on_send: usize,
     /// The first plan that deleted more than the guard allows without a confirmation.
     unguarded: Option<String>,
+    /// The first delete here a plan made that expects other than what its folder holds less
+    /// what the plan moves out of it first.
+    expects_differ: Option<String>,
     /// The first operation a client ran outside its folder's part of the drive.
     scope_breach: Option<String>,
     /// The first operation that moved, renamed or deleted a folder a file not hashed yet is
@@ -366,6 +369,9 @@ impl Sim {
         }
         if let Some(what) = &ledger.answer_undid {
             return Err(format!("a write's answer was recorded wrongly: {what}"));
+        }
+        if let Some(what) = &ledger.expects_differ {
+            return Err(what.clone());
         }
         if let Some(plan) = &ledger.unguarded {
             return Err(format!("a mass delete went through unconfirmed: {plan}"));
@@ -834,6 +840,11 @@ pub(crate) enum What {
     Detach {
         new_node: NodeId,
     },
+    /// The drive's version put in place of the item here, in folder `parent` (a move, where
+    /// that is another one).
+    LocalReplace {
+        parent: NodeId,
+    },
     Other,
 }
 
@@ -953,6 +964,55 @@ impl Ledger {
                 })
                 .map(|p| format!("{}: {:?} moves what waits for a hash", seen.client, p.op))
         });
+        // What a delete here expects to take, worked out on its own: its folder here less what
+        // the plan moves out of it first (a move, a download to another folder: they run before
+        // the deletes), each with what is below it. It takes that or nothing (anything else
+        // there makes it stale).
+        let moving: HashSet<NodeId> = seen
+            .ops
+            .iter()
+            .filter_map(|p| match &p.what {
+                What::LocalMove { parent, .. } | What::LocalReplace { parent } => local
+                    .get(p.node)
+                    .is_some_and(|l| l.parent != *parent)
+                    .then_some(p.node),
+                _ => None,
+            })
+            .collect();
+        let expects = |node: NodeId| -> Vec<NodeId> {
+            let mut kept: Vec<NodeId> = local
+                .subtree(node)
+                .into_iter()
+                .filter(|n| {
+                    !std::iter::once(*n)
+                        .chain(local.ancestors(*n))
+                        .take_while(|a| *a != node)
+                        .any(|a| moving.contains(&a))
+                })
+                .collect();
+            kept.sort();
+            kept
+        };
+        first(&mut self.expects_differ, || {
+            seen.ops
+                .iter()
+                .chain(seen.held)
+                .find_map(|p| match &p.what {
+                    What::LocalDelete { subtree } => {
+                        let mut planned = subtree.clone();
+                        planned.sort();
+                        let want = expects(p.node);
+                        (planned != want).then(|| {
+                            format!(
+                                "{}: {:?} expects {planned:?}, not what its folder holds less what \
+                             the plan moves out of it ({want:?})",
+                                seen.client, p.op
+                            )
+                        })
+                    }
+                    _ => None,
+                })
+        });
         // The guard's rule, checked independently: no plan deletes more files on a side than
         // the limit (or every file) without the user's confirmation.
         let Some(min) = guard else {
@@ -962,14 +1022,12 @@ impl Ledger {
         // Counted only until the first breach is kept.
         first(&mut self.unguarded, || {
             let trips = |n: usize| n > min || (synced_files > 0 && n >= synced_files && n > 1);
-            // The synced files a delete here takes: what it expects to find (it takes that or
-            // nothing: anything else there makes it stale), synced as files. Not what the plan
-            // moves out of it first; one not synced here is no removal from elsewhere (§7
-            // weighs the synced files), as one the drive has elsewhere.
-            let synced_in = |subtree: &[NodeId]| {
-                subtree
-                    .iter()
-                    .filter(|n| base.get(**n).is_some_and(|s| s.kind == NodeKind::File))
+            // The files a delete here takes, as the guard counts them (here, synced or not):
+            // what it expects to find, worked out above.
+            let files_in = |node: NodeId| {
+                expects(node)
+                    .into_iter()
+                    .filter(|n| local.get(*n).is_some_and(|s| s.kind == NodeKind::File))
                     .count()
             };
             // Remote deletes of files, and of them those synced here (a synced file gone here: the
@@ -1000,7 +1058,7 @@ impl Ledger {
                         deleted += 1;
                         deleted_synced += usize::from(base.contains(p.node));
                     }
-                    What::LocalDelete { ref subtree } => deleted_here += synced_in(subtree),
+                    What::LocalDelete { .. } => deleted_here += files_in(p.node),
                     _ => {}
                 }
             }
@@ -1018,7 +1076,7 @@ impl Ledger {
                     What::LocalDelete { subtree }
                         if !was_wiped(p.node) && !subtree.iter().any(|n| wiped.contains(n)) =>
                     {
-                        synced_in(subtree)
+                        files_in(p.node)
                     }
                     _ => 0,
                 })
@@ -1039,7 +1097,7 @@ impl Ledger {
                 .held
                 .iter()
                 .map(|p| match &p.what {
-                    What::LocalDelete { subtree } => synced_in(subtree),
+                    What::LocalDelete { .. } => files_in(p.node),
                     _ => 0,
                 })
                 .sum();
@@ -1076,7 +1134,7 @@ impl Ledger {
             let tripped = deleted > 0 && trips(here_all);
             (tripped || (deleted_here > 0 && every(there_all))).then(|| {
                 format!(
-                    "{} deletes {deleted} remote and deletes {deleted_here} local synced files \
+                    "{} deletes {deleted} remote and deletes {deleted_here} local files \
                      unconfirmed (limit {min}, {synced_files} synced): {:?}",
                     seen.client, seen.all_ops
                 )

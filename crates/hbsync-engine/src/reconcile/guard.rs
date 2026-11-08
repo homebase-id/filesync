@@ -123,6 +123,13 @@ impl Reconciler<'_> {
                 if let Some(takes) = takes(&op) {
                     self.plan.held_takes.insert(op.node(), takes);
                 }
+                // It covers its whole subtree here, also what the plan moves out of it.
+                if let Op::LocalDelete { node, subtree } = &op {
+                    let all = i.local.subtree(*node);
+                    if all.len() != subtree.len() {
+                        self.plan.held_covers.insert(*node, all);
+                    }
+                }
                 self.plan.held.push(op);
             } else {
                 self.plan.ops.push(op);

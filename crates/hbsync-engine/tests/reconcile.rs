@@ -2753,3 +2753,84 @@ fn what_a_removal_took_along_waits_with_its_folder_in_a_cycle_across_pages() {
         "{plan:#?}"
     );
 }
+
+/// §7, §8: a folder removed on the drive, a file in it moved out first (to the top) and a
+/// folder moved out with a file in it removed: the plan moves them out, deletes the file in the
+/// folder moved out (a delete of its own, after the move), and deletes the folder, which
+/// expects only what goes with it.
+#[test]
+fn a_folder_delete_expects_what_the_plan_moves_out_of_it_gone() {
+    let [d, a, b, g, x, k] = ids(6)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(d, folder(ROOT, "d"))
+        .synced(a, file(d, "a", "a"))
+        .synced(b, file(d, "b", "b"))
+        .synced(g, folder(d, "g"))
+        .synced(x, file(g, "x", "x"))
+        .synced(k, file(g, "k", "k"));
+    w.remote(d, None)
+        .remote(a, None)
+        .remote(x, None)
+        .remote(b, Some(file(ROOT, "b", "b")))
+        .remote(g, Some(folder(ROOT, "g")));
+    let plan = w.plan();
+    let mut gone = vec![d, a];
+    gone.sort();
+    let deletes: Vec<&Op> = plan
+        .ops
+        .iter()
+        .filter(|op| matches!(op, Op::LocalDelete { .. }))
+        .collect();
+    assert_eq!(
+        deletes,
+        [
+            &Op::LocalDelete {
+                node: x,
+                subtree: vec![x]
+            },
+            &Op::LocalDelete {
+                node: d,
+                subtree: gone
+            }
+        ],
+        "{:?}",
+        plan.ops
+    );
+    assert_eq!(kinds(&plan.ops), ["move", "move", "delete", "delete"]);
+}
+
+/// §7: a delete held as every synced file (`wiped`) of a folder a file moves out of first:
+/// held, it covers its whole subtree here, the file moving out too, so it stays in the dirty
+/// set while that move is planned (`held::out_of_dirty`, as before the delete expected less).
+#[test]
+fn a_held_delete_covers_what_the_plan_moves_out_of_it() {
+    let [d, a, b] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(d, folder(ROOT, "d"))
+        .synced(a, file(d, "a", "a"))
+        .synced(b, file(d, "b", "b"));
+    w.remote(d, None)
+        .remote(a, None)
+        .remote(b, Some(file(ROOT, "b", "b")));
+    w.opts.guarding.wiped = std::sync::Arc::new([d].into_iter().collect());
+    let plan = w.plan();
+    assert_eq!(kinds(&plan.ops), ["move"]);
+    let mut gone = vec![d, a];
+    gone.sort();
+    assert_eq!(
+        plan.held,
+        [Op::LocalDelete {
+            node: d,
+            subtree: gone
+        }]
+    );
+    let mut all = vec![d, a, b];
+    all.sort();
+    assert_eq!(plan.held_covers.get(&d), Some(&all));
+    let (out, nodes) = hbsync_engine::held::out_of_dirty(&plan, &[d, a, b]);
+    assert!(out.is_empty() && nodes.is_empty(), "{out:?} {nodes:?}");
+}

@@ -40,7 +40,10 @@ pub fn out_of_dirty<'p>(plan: &'p Plan, page: &[NodeId]) -> (Vec<&'p Op>, HashSe
         .collect();
     let covers = |op: &'p Op| {
         let subtree = match op {
-            Op::LocalDelete { subtree, .. } => &subtree[..],
+            Op::LocalDelete { node, subtree } => match plan.held_covers.get(node) {
+                Some(all) => &all[..],
+                None => &subtree[..],
+            },
             _ => &[],
         };
         std::iter::once(op.node()).chain(subtree.iter().copied())

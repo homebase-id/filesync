@@ -546,6 +546,10 @@ pub struct Plan {
     /// The files each of `held` takes, by its node, as the guard counted them: (removed from
     /// the drive, deleted here).
     pub held_takes: BTreeMap<NodeId, (usize, usize)>,
+    /// What each held delete here covers where that is more than what it expects to take:
+    /// its whole subtree here, with what the plan moves out of it first
+    /// ([`crate::held::out_of_dirty`]).
+    pub held_covers: BTreeMap<NodeId, Vec<NodeId>>,
     pub conflicts: Vec<Conflict>,
     /// Dirty nodes that need nothing (both sides and the base agree): the dirty flag can go.
     pub clean: Vec<NodeId>,

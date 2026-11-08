@@ -1628,9 +1628,12 @@ fn a_folder_removed_elsewhere_after_files_moved_out_goes_in_one_round() -> R {
 
 /// As above, but a move out can't run (a new file here took its place after the plan): the
 /// folder still holds it, which the delete doesn't expect. The delete goes stale and takes
-/// nothing: the file stays here, unchanged, for the next plan.
-#[test]
-fn a_move_out_that_fails_leaves_the_folders_delete_stale() -> R {
+/// nothing: the file stays here, unchanged, for the next plan. With `out_of_view`, the folder
+/// moves where this device doesn't sync it (§10) instead of being removed: a folder there
+/// holding an item this device syncs (the file, here as it was) isn't forgotten but detached
+/// (`mask.rs`), so no `Forget` takes the file either.
+fn a_move_out_fails(out_of_view: bool) -> R {
+    use hbsync_engine::reconcile::Op;
     use hbsync_engine::testkit::AfterPlan;
     let server = server();
     let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
@@ -1646,7 +1649,9 @@ fn a_move_out_that_fails_leaves_the_folders_delete_stale() -> R {
             }
         }))
     };
+    let ignore = ignoring("/ign/\n");
     let mut b = Client::with_config(&server, "b", move |cfg| {
+        ignore(cfg);
         cfg.guard.allow = true;
         cfg.max_rounds = 1;
         cfg.after_plan = Some(hook.clone());
@@ -1658,16 +1663,20 @@ fn a_move_out_that_fails_leaves_the_folders_delete_stale() -> R {
     a.sync()?;
     b.sync()?;
     fs::rename(a.root.join("d/f0.txt"), a.root.join("f0.txt"))?;
-    fs::remove_dir_all(a.root.join("d"))?;
+    if out_of_view {
+        fs::create_dir(a.root.join("ign"))?;
+        fs::rename(a.root.join("d"), a.root.join("ign/d"))?;
+    } else {
+        fs::remove_dir_all(a.root.join("d"))?;
+    }
     a.sync()?;
     b.engine.scan_local()?;
     armed.store(true, Ordering::SeqCst);
     let report = b.engine.sync("2026-10-08", true)?;
     let stale = report.skipped.iter().any(|(op, skip)| {
-        matches!(op, hbsync_engine::reconcile::Op::LocalDelete { .. })
-            && matches!(skip, hbsync_engine::exec::Skip::Stale(_))
+        matches!(op, Op::LocalDelete { .. }) && matches!(skip, hbsync_engine::exec::Skip::Stale(_))
     });
-    assert!(stale, "{report:?}");
+    assert_eq!(stale, !out_of_view, "{report:?}");
     assert_eq!(b.read_text("d/f0.txt")?, "0", "kept where it was");
     assert_eq!(b.read_text("f0.txt")?, "new here");
     // Then it settles, nothing lost.
@@ -1675,5 +1684,82 @@ fn a_move_out_that_fails_leaves_the_folders_delete_stale() -> R {
     let tree = b.tree_text("");
     assert!(tree.iter().any(|l| l.ends_with("= 0")), "{tree:?}");
     assert!(tree.iter().any(|l| l.ends_with("= new here")), "{tree:?}");
+    Ok(())
+}
+
+#[test]
+fn a_move_out_that_fails_leaves_the_folders_delete_stale() -> R {
+    a_move_out_fails(false)
+}
+
+#[test]
+fn a_move_out_of_a_folder_moved_out_of_view_that_fails_keeps_the_file() -> R {
+    a_move_out_fails(true)
+}
+
+/// Another device moves folder g, with `k` in it, out of d to the top, deletes `x` in g, and
+/// removes d. Here one plan moves g out, deletes `x` in g (after the move: a delete of its
+/// own, not taken with d), and deletes d, which expects what is left of it: all in one round.
+#[test]
+fn a_folder_moved_out_of_one_removed_elsewhere_keeps_its_own_deletes() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |cfg| {
+        cfg.guard.allow = true;
+        cfg.max_rounds = 1;
+    })?;
+    a.write("d/g/x.txt", "x")?;
+    a.write("d/g/k.txt", "k")?;
+    a.write("d/y.txt", "y")?;
+    a.sync()?;
+    b.sync()?;
+    fs::rename(a.root.join("d/g"), a.root.join("g"))?;
+    fs::remove_file(a.root.join("g/x.txt"))?;
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.sync()?;
+    b.engine.scan_local()?;
+    let report = b.engine.sync("2026-10-08", true)?;
+    assert!(report.skipped.is_empty(), "{report:?}");
+    assert_eq!(b.tree_text(""), ["g/", "g/k.txt = k"]);
+    Ok(())
+}
+
+/// The shapes above planned in pages of one: what a page keeps in a folder whose delete it
+/// plans (in another page, or waiting there) never leaves that delete stale round after
+/// round. The clients converge, every delete planned once.
+#[test]
+fn moves_out_of_folders_removed_elsewhere_converge_in_pages() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |cfg| {
+        cfg.guard.allow = true;
+        cfg.batch = 1;
+    })?;
+    a.write("d/g/x.txt", "x")?;
+    a.write("d/g/k.txt", "k")?;
+    a.write("d/y.txt", "y")?;
+    a.write("d/f0.txt", "0")?;
+    a.write("e/f1.txt", "1")?;
+    a.write("e/f2.txt", "2")?;
+    a.sync()?;
+    b.sync()?;
+    fs::rename(a.root.join("d/g"), a.root.join("g"))?;
+    fs::remove_file(a.root.join("g/x.txt"))?;
+    fs::rename(a.root.join("d/f0.txt"), a.root.join("f0.txt"))?;
+    fs::remove_dir_all(a.root.join("d"))?;
+    fs::rename(a.root.join("e/f1.txt"), a.root.join("f1.txt"))?;
+    fs::remove_dir_all(a.root.join("e"))?;
+    a.sync()?;
+    let report = b.sync()?;
+    let stale = report
+        .skipped
+        .iter()
+        .filter(|(op, _)| op.deletes_here().is_some())
+        .count();
+    assert_eq!(stale, 0, "{report:?}");
+    assert_eq!(
+        b.tree_text(""),
+        ["f0.txt = 0", "f1.txt = 1", "g/", "g/k.txt = k"]
+    );
     Ok(())
 }

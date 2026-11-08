@@ -133,11 +133,6 @@ impl Reconciler<'_> {
                         let op = if self.masks.masked.contains(&node) {
                             Op::Forget { node, subtree }
                         } else {
-                            // What the plan keeps of it isn't the delete's: moved out first
-                            // (moves run before deletes), it is gone from the folder by then.
-                            // A move that didn't run leaves it there, unexpected: the delete
-                            // goes stale and takes nothing.
-                            subtree.retain(|n| *n == node || self.merged.get(*n).is_none());
                             Op::LocalDelete { node, subtree }
                         };
                         deletes.push((depth(&i.local), op));
@@ -248,10 +243,45 @@ impl Reconciler<'_> {
         });
         moves.sort_by_key(Op::pooled);
         content.sort_by_key(Op::pooled);
+        // What this plan moves out of its folder here (a move, a download to another folder:
+        // they run before the deletes) leaves a folder it deletes with what is below it: that
+        // folder's delete expects the rest only. Where such a move doesn't run, the folder
+        // holds what its delete doesn't expect: it goes stale and takes nothing.
+        let moving: HashSet<NodeId> = moves
+            .iter()
+            .chain(&content)
+            .filter_map(|op| match op {
+                Op::LocalMove { node, parent, .. }
+                | Op::LocalDownload {
+                    node,
+                    parent,
+                    replace: true,
+                    ..
+                } if i.local.get(*node).is_some_and(|l| l.parent != *parent) => Some(*node),
+                _ => None,
+            })
+            .collect();
+        // Whether `n` leaves `top`'s folder with a move (its own, or a folder's it is in).
+        let leaves = |n: NodeId, top: NodeId| {
+            std::iter::once(n)
+                .chain(i.local.ancestors(n))
+                .take_while(|a| *a != top)
+                .any(|a| moving.contains(&a))
+        };
+        if !moving.is_empty() {
+            for (_, op) in &mut deletes {
+                if let Op::LocalDelete { node, subtree } | Op::Forget { node, subtree } = op {
+                    let top = *node;
+                    subtree.retain(|n| !leaves(*n, top));
+                }
+            }
+        }
         let deleted_here: HashSet<NodeId> = deletes
             .iter()
             .filter_map(|(_, op)| op.deletes_here())
             .collect();
+        // Only the topmost delete of a subtree is needed; but one in a folder moved out of it
+        // first is a delete of its own there.
         let deletes: Vec<Op> = deletes
             .into_iter()
             .map(|(_, op)| op)
@@ -260,6 +290,7 @@ impl Reconciler<'_> {
                     .local
                     .ancestors(node)
                     .iter()
+                    .take_while(|a| !moving.contains(a))
                     .any(|a| deleted_here.contains(a)),
                 None => true,
             })

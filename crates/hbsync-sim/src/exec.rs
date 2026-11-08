@@ -466,7 +466,7 @@ impl Sim {
         };
         let plan = reconcile_with_known(&input, &opts, masking, known);
         // A taken-along file gone there is outside the page unless it is in it, or this plan's
-        // delete here takes it.
+        // delete here takes it (what that expects: not what the plan moves out of it first).
         if !taken_there.is_empty() {
             let deleted: HashSet<NodeId> = plan
                 .ops
@@ -2881,6 +2881,11 @@ fn planned(ops: &[Op]) -> Vec<Planned<'_>> {
                 Op::LocalDetach { new_node, .. } => What::Detach {
                     new_node: *new_node,
                 },
+                Op::LocalDownload {
+                    parent,
+                    replace: true,
+                    ..
+                } => What::LocalReplace { parent: *parent },
                 _ => What::Other,
             };
             Planned {
