@@ -27,6 +27,38 @@ pub(crate) struct Pages {
     pub(crate) ended: bool,
     /// What pages of their own planned this sweep: not planned again in its pages.
     pub(crate) planned_own: BTreeSet<NodeId>,
+    /// The marks the engine keeps beyond what its scan and feed mark (in pages only): a page's
+    /// nodes its round didn't read clean, and a clash's loser outside the page with an
+    /// operation left once refusals are taken out (`pages::losers_sent`: not one refused, nor
+    /// one waiting for a refused one), till a round reads them clean. Not modelled: the
+    /// executor's own marks (a fork's or a detach's ids, a skipped or stopped operation), which
+    /// the simulator reads as what differs.
+    pub(crate) marks: BTreeSet<NodeId>,
+    /// What this sweep's held deletes take out of the dirty set (`held::out_of_dirty`), as the
+    /// engine's `HoldOut`: out of `marks` (into `out`) at the sweep's end if it did nothing and
+    /// wasn't stopped (the sync's end); else dropped. Not modelled: the engine's limit on what
+    /// else stays dirty (`LEFTOVERS_MAX`), its plan of the rest alone reaching them, and a sync
+    /// that starts in the middle of a sweep (the simulator's sweeps run on across them).
+    pub(crate) held_out: BTreeSet<NodeId>,
+    /// What held deletes took out of the dirty set: dirty again once a round's view reaches it
+    /// (`HeldDeletes::plan_again`).
+    pub(crate) out: BTreeSet<NodeId>,
+    /// This sweep planned work, or its run stopped with work left (a plan made again before its
+    /// operations ran): its held deletes stay dirty.
+    pub(crate) busy: bool,
+}
+
+impl Pages {
+    /// A sweep ended (its last page planned, and what its pages waited for): what its held
+    /// deletes take out of the dirty set leaves it if the sweep did nothing and wasn't stopped,
+    /// as the engine's sync ends so; a new sweep starts with nothing.
+    pub(crate) fn sweep_ended(&mut self) {
+        let held_out = std::mem::take(&mut self.held_out);
+        if !std::mem::take(&mut self.busy) {
+            self.marks.retain(|n| !held_out.contains(n));
+            self.out.extend(held_out);
+        }
+    }
 }
 
 #[derive(Debug)]

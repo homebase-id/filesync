@@ -235,3 +235,12 @@ fn walk(base: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
 pub fn a_minute_on(db: &mut hbsync_state::StateDb) -> Result<usize, hbsync_state::StateError> {
     db.write(|s| s.account().age_gone_suspects(crate::gone::CONFIRM_AFTER_MS))
 }
+
+/// The guard's pending counts in `s` as a sweep's first read takes them (the rule:
+/// `hbsync-sim`'s guard totals, held to this).
+pub fn pending_counts(
+    s: &hbsync_state::ReadTx<'_>,
+    confirmed: &std::collections::HashSet<hbsync_types::NodeId>,
+) -> Result<(u64, u64), hbsync_state::StateError> {
+    Ok(crate::holding::guard_counts(s, confirmed, None, Some(0), false)?.pending)
+}

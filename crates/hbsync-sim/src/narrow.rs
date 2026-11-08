@@ -28,7 +28,9 @@ use crate::model::client::Client;
 impl Sim {
     /// Client `c`'s plan `plan`, made from `input` with `opts` and the ids it takes as known,
     /// checked against the engine's planning path over the same state (`round`: which of the
-    /// nodes whose sides agree the narrow plan takes dirty): what differs, if anything.
+    /// nodes whose sides agree the narrow plan takes dirty), and its guard totals against the
+    /// store's with `all_dirty` the dirty set ([`counts_differ`]): what differs, if anything.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn check_narrow(
         &self,
         c: usize,
@@ -37,6 +39,7 @@ impl Sim {
         known: &dyn Fn(NodeId) -> bool,
         plan: &Plan,
         round: usize,
+        all_dirty: &BTreeSet<NodeId>,
     ) -> Option<String> {
         let client = &self.clients[c];
         if !client.coords.top.is_root() {
@@ -58,7 +61,7 @@ impl Sim {
             }
             // The nodes the engine keeps dirty, and every other one of the rest, by the planning
             // round.
-            let differs = engine_dirty(input, plan);
+            let differs = engine_dirty(client, input, plan);
             let some: Vec<NodeId> = all
                 .iter()
                 .copied()
@@ -66,22 +69,23 @@ impl Sim {
                 .filter(|(i, n)| differs.contains(n) || (i + round).is_multiple_of(2))
                 .map(|(_, n)| n)
                 .collect();
-            if some.is_empty() {
-                return Ok(None);
-            }
-            let narrow = view::plan_narrow(&mut db, &some, &folder, reconcile)?;
-            let full = match some.len() == all.len() {
-                true => whole,
-                false => {
-                    let full = db.read(|s| view::build_input(s, &some, &folder))?;
-                    reconcile(&full, &mut db)
+            if !some.is_empty() {
+                let narrow = view::plan_narrow(&mut db, &some, &folder, reconcile)?;
+                let full = match some.len() == all.len() {
+                    true => whole,
+                    false => {
+                        let full = db.read(|s| view::build_input(s, &some, &folder))?;
+                        reconcile(&full, &mut db)
+                    }
+                };
+                if narrow != full {
+                    return Ok(Some(format!(
+                        "c{c}: the narrow view plans otherwise than whole folders for {some:?}:\n  narrow: {narrow:?}\n  whole:  {full:?}"
+                    )));
                 }
-            };
-            Ok((narrow != full).then(|| {
-                format!(
-                    "c{c}: the narrow view plans otherwise than whole folders for {some:?}:\n  narrow: {narrow:?}\n  whole:  {full:?}"
-                )
-            }))
+            }
+            set_dirty(&mut db, all_dirty.iter().copied())?;
+            counts_differ(c, &mut db, opts, all_dirty)
         })();
         checked.unwrap_or_else(|e| Some(format!("c{c}: the store failed: {e}")))
     }
@@ -90,6 +94,7 @@ impl Sim {
     /// views, then again with what the engine takes out of the dirty set till the user answers
     /// ([`hbsync_engine::held`]) out of it, it plans the same but those, unless its view
     /// reaches them (the engine then plans them again too): what differs, if anything.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn check_held(
         &self,
         c: usize,
@@ -97,6 +102,8 @@ impl Sim {
         opts: &Options,
         known: &dyn Fn(NodeId) -> bool,
         plan: &Plan,
+        all_dirty: &BTreeSet<NodeId>,
+        count: bool,
     ) -> Option<String> {
         let client = &self.clients[c];
         if plan.held.is_empty() || !client.coords.top.is_root() {
@@ -105,15 +112,20 @@ impl Sim {
         let folder = self.folder_ctx(c);
         let checked = (|| -> Result<Option<String>, StateError> {
             let mut db = self.fill(c, input)?;
-            // The nodes the engine keeps dirty: those marked, and those the plan has work for.
-            let dirty: Vec<NodeId> = engine_dirty(input, plan).into_iter().collect();
-            // The store's marks are those: filling it marks what it writes (a pull's rows), and
-            // a mark the page doesn't hold reads as another page's (§6.5).
+            // The store's marks are the simulator's dirty set (filling it marks what it writes, a
+            // pull's rows): its guard totals first (`counts_differ`, unless compared already on
+            // this plan), then the rest the engine keeps dirty, what the plan has work for (a mark
+            // the page doesn't hold reads as another page's, §6.5).
+            set_dirty(&mut db, all_dirty.iter().copied())?;
+            if count && let Some(what) = counts_differ(c, &mut db, opts, all_dirty)? {
+                return Ok(Some(what));
+            }
+            let dirty: Vec<NodeId> = engine_dirty(client, input, plan).into_iter().collect();
             db.write(|s| {
-                for n in s.dirty_nodes(usize::MAX)? {
-                    s.folder().clear_dirty(n)?;
-                }
-                dirty.iter().try_for_each(|&n| s.folder().mark_dirty(n))
+                dirty
+                    .iter()
+                    .filter(|n| !all_dirty.contains(n))
+                    .try_for_each(|&n| s.folder().mark_dirty(n))
             })?;
             let folder = &folder;
             let with = |opts: &Options| {
@@ -287,6 +299,36 @@ impl Sim {
     }
 }
 
+/// Makes `db`'s dirty set exactly `nodes`.
+fn set_dirty(db: &mut StateDb, nodes: impl IntoIterator<Item = NodeId>) -> Result<(), StateError> {
+    db.write(|s| {
+        s.folder().clear_all_dirty()?;
+        nodes.into_iter().try_for_each(|n| s.folder().mark_dirty(n))
+    })
+}
+
+/// Client `c`'s guard totals as the simulator counted them (`opts.guarding.pending`, the rule in
+/// `Sim::plan`) against the store's in `db`, its dirty set `all_dirty`: what differs, if anything.
+fn counts_differ(
+    c: usize,
+    db: &mut StateDb,
+    opts: &Options,
+    all_dirty: &BTreeSet<NodeId>,
+) -> Result<Option<String>, StateError> {
+    if all_dirty.is_empty() {
+        return Ok(None);
+    }
+    let store = db.read(|s| hbsync_engine::testkit::pending_counts(s, &opts.guarding.confirmed))?;
+    let (here, there) = opts.guarding.pending;
+    Ok((store != (here as u64, there as u64)).then(|| {
+        format!(
+            "c{c}: the guard's totals (gone here, gone there) are {:?} in the simulator, {store:?} \
+             in the store, over {all_dirty:?} dirty, {:?} confirmed",
+            opts.guarding.pending, opts.guarding.confirmed
+        )
+    }))
+}
+
 /// Where the sim's input `sim` and the engine's view `engine` differ, field by field (sorted:
 /// the trees iterate in no set order).
 fn input_differences(sim: &Input, engine: &Input) -> String {
@@ -394,10 +436,18 @@ pub(crate) fn marked_dirty(input: &Input) -> BTreeSet<NodeId> {
         .collect()
 }
 
-/// The nodes of `input` dirty as the engine keeps them, `plan` made from it: those its scan
-/// and feed marked ([`marked_dirty`]), and those the plan has work for (a node a plan didn't
-/// settle stays dirty).
-fn engine_dirty(input: &Input, plan: &Plan) -> BTreeSet<NodeId> {
+/// The nodes marked dirty as the engine keeps them, `input` read for `client`'s plan: those its
+/// scan and feed marked ([`marked_dirty`]), and in pages what its rounds keep marked
+/// (`Pages::marks`, empty otherwise).
+pub(crate) fn kept_dirty(client: &Client, input: &Input) -> BTreeSet<NodeId> {
+    let mut dirty = marked_dirty(input);
+    dirty.extend(client.pages.borrow().marks.iter().copied());
+    dirty
+}
+
+/// The nodes dirty as the engine keeps them, `plan` made from `input`: those marked
+/// ([`kept_dirty`]), and those the plan has work for (a node a plan didn't settle stays dirty).
+fn engine_dirty(client: &Client, input: &Input, plan: &Plan) -> BTreeSet<NodeId> {
     let work: BTreeSet<NodeId> = plan
         .ops
         .iter()
@@ -406,7 +456,7 @@ fn engine_dirty(input: &Input, plan: &Plan) -> BTreeSet<NodeId> {
         .chain(plan.deferred.iter().copied())
         .chain(plan.held.iter().map(|op| op.node()))
         .collect();
-    let mut dirty = marked_dirty(input);
+    let mut dirty = kept_dirty(client, input);
     dirty.extend(input.dirty.iter().filter(|n| work.contains(n)));
     dirty
 }

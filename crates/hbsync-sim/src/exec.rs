@@ -71,7 +71,20 @@ impl Sim {
             return false;
         };
         let client = &self.clients[c];
-        let nodes = client.base.len() + client.local.len() + self.server.live.len();
+        // The marks a round keeps may be of nodes no side holds any more (read clean once
+        // planned): a sweep's worth counts those too.
+        let gone = client
+            .pages
+            .borrow()
+            .marks
+            .iter()
+            .filter(|n| {
+                !client.base.contains(**n)
+                    && !client.local.contains(**n)
+                    && !self.server.live.contains_key(n)
+            })
+            .count();
+        let nodes = client.base.len() + client.local.len() + self.server.live.len() + gone;
         // A sweep's worth of pages, and what they wait for, each a page of its own (a chain of
         // waits grows a page at a time; bounded: each such page is larger).
         let mut planned = 0;
@@ -103,6 +116,11 @@ impl Sim {
     /// Client `c` starts a sync: recovers, unparks, and plans from the server as its folder sees
     /// it, as the engine's sync does (its view's input, then `reconcile_with_known`).
     pub(crate) fn plan(&mut self, c: usize) {
+        // A run whose operations are left undone stopped (the engine's sync stopped: what its
+        // sweep held stays dirty).
+        if !self.clients[c].plan.is_empty() {
+            self.clients[c].pages.get_mut().busy = true;
+        }
         self.clients[c].run_filter = Arc::clone(&self.clients[c].filter);
         // A new run: what the last one fetched and didn't put in place is gone (its temporary
         // file is fetched again, for what the drive holds then); a lost commit is recovered.
@@ -210,11 +228,12 @@ impl Sim {
             .chain(remote.ids())
             .collect();
         let mut piece = false;
-        // What the engine's scan and feed mark dirty, for pages and the guard's totals (what an
-        // earlier plan left unsettled, which the engine keeps marked too, the narrow checks add:
+        // What the engine's scan and feed mark dirty, for pages and the guard's totals, and in
+        // pages the marks its rounds keep (`Pages::marks`: what an earlier plan left unsettled,
+        // a clash's loser it was sent for; the narrow checks add a plan's own:
         // `narrow::engine_dirty`).
         let all: BTreeSet<NodeId> = match self.faults.page_size.is_some() || self.guard.is_some() {
-            true => crate::narrow::marked_dirty(&input),
+            true => crate::narrow::kept_dirty(client, &input),
             false => BTreeSet::new(),
         };
         // In pages, as the engine: the next page of the sweep over what is dirty, what else is
@@ -239,55 +258,79 @@ impl Sim {
                 &mut pending,
             );
         }
-        // The guard's totals over the whole dirty set, as the engine counts them
-        // (`pending_file_deletes`): synced files gone here and gone there, but those confirmed;
-        // and of them, those outside the page (for the oracle). Of the engine's files a removed
-        // folder took along (`taken_files`), those this device removes from the drive, on the
-        // gone here side; not those on the gone there side, which `narrow::marked_dirty` leaves
-        // unmarked.
-        let (mut pending, mut outside) = ((0, 0), (0, 0));
-        let confirmed_at = |n: NodeId| {
-            !client.confirmed.is_empty()
-                && (client.confirmed.contains(&n)
-                    || input
-                        .base
-                        .ancestors(n)
-                        .iter()
-                        .any(|a| client.confirmed.contains(a)))
-        };
+        // The guard's totals over the whole dirty set, as the engine's store counts them
+        // (`holding::guard_counts`, which `narrow::counts_differ` holds this to), and of them
+        // those outside the page (for the oracle):
+        // - each dirty synced file gone here (but one whose base keeps its absence: online-only,
+        //   wanted) or gone there (`pending_file_deletes`);
+        // - what a folder's removal took along (`taken_files`): those this device removes from
+        //   the drive on the gone here side, the synced ones on the gone there side;
+        // - less what the dirty confirmed deletes cover (`confirmed_file_deletes`): the node
+        //   itself gone here, and of its subtree here what is gone there (taken along by a
+        //   removal in that subtree or above the node on the drive, if so), each file once.
+        // Not modelled: the engine counts at a sync's start and again only when another
+        // connection wrote, never below the counts before (`HeldDeletes::recount`); the
+        // simulator counts afresh at each plan.
         let synced_file = |n: NodeId| input.base.get(n).is_some_and(|s| s.kind == NodeKind::File);
-        let counted = |n: NodeId| synced_file(n) && !confirmed_at(n);
-        for &n in all.iter().filter(|n| counted(**n)) {
-            let here = usize::from(!input.local.contains(n));
-            let there = usize::from(!input.remote.contains(n));
-            pending = (pending.0 + here, pending.1 + there);
-            if !input.dirty.contains(&n) {
-                outside = (outside.0 + here, outside.1 + there);
-            }
-        }
+        let gone_here = |n: NodeId| {
+            synced_file(n) && !input.content_state(n).keeps_absence() && !input.local.contains(n)
+        };
+        let gone_there = |n: NodeId| synced_file(n) && !input.remote.contains(n);
+        let (mut here, mut there): (Vec<NodeId>, Vec<NodeId>) = (
+            all.iter().copied().filter(|n| gone_here(*n)).collect(),
+            all.iter().copied().filter(|n| gone_there(*n)).collect(),
+        );
         let taken = hbsync_engine::reconcile::taken_along(&input);
+        // Of the taken-along files gone there, outside the page: see below, once planned.
+        let mut taken_there: Vec<NodeId> = Vec::new();
         if !all.is_empty() {
-            // Counted above already (dirty, gone here), or confirmed: a confirmation covers its
-            // own node only, while dirty (`confirmed_file_deletes`).
-            let counted_or_confirmed = |n: NodeId| {
-                all.contains(&n)
-                    && ((synced_file(n) && !input.local.contains(n))
-                        || client.confirmed.contains(&n))
-            };
-            let removes = |n: NodeId| {
-                input
+            for &n in &taken {
+                // A file on the drive, synced as a file or not synced (`taken_files`).
+                let removes = input
                     .remote
                     .get(n)
                     .is_some_and(|s| s.kind == NodeKind::File)
-                    && (synced_file(n) || (!input.base.contains(n) && all.contains(&n)))
-            };
-            for &n in &taken {
-                if removes(n) && !counted_or_confirmed(n) {
-                    pending.0 += 1;
-                    outside.0 += usize::from(!input.dirty.contains(&n));
+                    && match input.base.get(n) {
+                        None => all.contains(&n),
+                        Some(b) => b.kind == NodeKind::File && !(all.contains(&n) && gone_here(n)),
+                    };
+                if removes {
+                    here.push(n);
+                }
+                if synced_file(n) {
+                    taken_there.push(n);
                 }
             }
         }
+        // What the dirty confirmed deletes cover: each one's own node gone here; and gone there,
+        // what has one at or above it here (a taken-along file only where the removal that took
+        // it is in that one's subtree here or above it on the drive).
+        let confirmed_dirty = |n: &NodeId| client.confirmed.contains(n) && all.contains(n);
+        if client.confirmed.iter().any(confirmed_dirty) {
+            here.retain(|n| !confirmed_dirty(n));
+            let covering = |n: NodeId| {
+                std::iter::once(n)
+                    .chain(input.local.ancestors(n))
+                    .filter(confirmed_dirty)
+                    .collect::<Vec<NodeId>>()
+            };
+            there.retain(|&n| covering(n).is_empty());
+            taken_there.retain(|&n| {
+                let Some(r) = hbsync_engine::reconcile::taken_by(&input, n) else {
+                    return true;
+                };
+                let removed_here = input.local.ancestors(r);
+                !covering(n).into_iter().any(|c| {
+                    r == c || removed_here.contains(&c) || input.remote.ancestors(c).contains(&r)
+                })
+            });
+        }
+        let pending = (here.len(), there.len() + taken_there.len());
+        let outside_page = |n: &&NodeId| !input.dirty.contains(*n);
+        let mut outside = (
+            here.iter().filter(outside_page).count(),
+            there.iter().filter(outside_page).count(),
+        );
         let confirmed = Arc::new(client.confirmed.clone());
         // Held as every synced file: until answered, by the engine's rule (it keeps
         // `guard.wiped` so), over what its store has: the mirror (the plan's view of the drive)
@@ -343,6 +386,23 @@ impl Sim {
             client.local.contains(id) || client.base.contains(id) || self.server.ever.contains(&id)
         };
         let plan = reconcile_with_known(&input, &opts, masking, known);
+        // A taken-along file gone there is outside the page unless it is in it, or this plan's
+        // delete here takes it.
+        if !taken_there.is_empty() {
+            let deleted: HashSet<NodeId> = plan
+                .ops
+                .iter()
+                .filter_map(|op| match op {
+                    Op::LocalDelete { subtree, .. } => Some(subtree.iter().copied()),
+                    _ => None,
+                })
+                .flatten()
+                .collect();
+            outside.1 += taken_there
+                .iter()
+                .filter(|n| !input.dirty.contains(n) && !deleted.contains(n))
+                .count();
+        }
         if self.faults.page_size.is_some() {
             client
                 .pages
@@ -352,16 +412,18 @@ impl Sim {
         }
         // Every fourth plan (each costs a state DB and three more plans), until a difference
         // is found (it is reported).
+        let mut counted = false;
         if self.faults.narrow_check && !self.ledger.found_narrow_differs() {
             self.faults.narrow_rounds += 1;
             if self.faults.narrow_rounds.is_multiple_of(4) {
                 let round = self.faults.narrow_rounds / 4;
-                let what = self.check_narrow(c, &input, &opts, &known, &plan, round);
+                let what = self.check_narrow(c, &input, &opts, &known, &plan, round, &all);
                 self.ledger.narrow_differs(|| what);
+                counted = true;
             }
         }
         if self.faults.held_check && !self.ledger.found_narrow_differs() {
-            let what = self.check_held(c, &input, &opts, &known, &plan);
+            let what = self.check_held(c, &input, &opts, &known, &plan, &all, !counted);
             self.ledger.narrow_differs(|| what);
         }
         // The files here not hashed yet (as the engine's view holds them: a row without a state
@@ -450,6 +512,42 @@ impl Sim {
             false => Vec::new(),
         };
         let client = &mut self.clients[c];
+        // As the engine's round, once its checks have read the marks, unless its view reached
+        // the held deletes out of the dirty set (`HeldDeletes::take_reached`: they are dirty
+        // again, `plan_again`, and the round changes no mark): the page's marks read clean go,
+        // the rest of them stay; what its held deletes take out of the dirty set
+        // (`held::out_of_dirty`) is kept for the sweep's end (`Pages::held_out`, as the engine's
+        // `HoldOut::add`: what a page plans again is its own again); and a clash's loser outside
+        // the page the run is sent to rename (`pages::losers_sent`) is marked.
+        if self.faults.page_size.is_some() {
+            let pages = client.pages.get_mut();
+            // Whether the view reached the held deletes out of the dirty set (`held::touches`).
+            let reached = !pages.out.is_empty() && {
+                let out: HashSet<NodeId> = pages.out.iter().copied().collect();
+                hbsync_engine::held::touches(&input, &out)
+            };
+            if reached {
+                let out = std::mem::take(&mut pages.out);
+                pages.marks.extend(out);
+            } else {
+                let clean: HashSet<NodeId> = plan.clean.iter().copied().collect();
+                let page: Vec<NodeId> = input.dirty.iter().copied().collect();
+                let (_, out) = hbsync_engine::held::out_of_dirty(&plan, &page);
+                let losers = hbsync_engine::pages::clash_losers(&plan.conflicts, &page);
+                pages.held_out.retain(|n| !input.dirty.contains(n));
+                pages.held_out.extend(out);
+                for n in page {
+                    if clean.contains(&n) {
+                        pages.marks.remove(&n);
+                    } else {
+                        pages.marks.insert(n);
+                    }
+                }
+                pages
+                    .marks
+                    .extend(hbsync_engine::pages::losers_sent(losers, &ops));
+            }
+        }
         client.blocked = refused
             .into_iter()
             .map(|op| (op, true))
@@ -632,6 +730,8 @@ impl Sim {
         let remote_write = outcome == Outcome::Done && writes_drive(&op);
         let outcome = if landed { Outcome::Done } else { outcome };
         if outcome == Outcome::Done {
+            // The sweep did something: its held deletes stay dirty (the engine's `progress`).
+            self.clients[c].pages.get_mut().busy = true;
             self.clients[c].refused.remove(&(node, op.kind()));
             let name = &self.clients[c].name;
             self.ledger
@@ -2593,6 +2693,7 @@ fn next_page(
         }
         pages.own.new_sweep();
         pages.planned_own.clear();
+        pages.sweep_ended();
     }
     loop {
         let read: Vec<NodeId> = match pages.after {

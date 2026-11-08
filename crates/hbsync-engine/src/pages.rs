@@ -8,7 +8,7 @@ use std::collections::{BTreeSet, HashSet};
 use hbsync_local::Filter;
 use hbsync_types::{NodeId, NodeKind};
 
-use crate::plan::Input;
+use crate::plan::{Conflict, Input, Op};
 use crate::scope::Scope;
 use crate::tree::Tree;
 
@@ -75,6 +75,38 @@ pub fn dirty_elsewhere<P: Pending>(
     input.going = going;
     input.going_above = going_above;
     Ok(())
+}
+
+/// A name clash's losers outside the page (`page`): planned for the winner's sake, they have no
+/// mark of their own. Those a round's run is sent to rename are marked with the clearing of what
+/// the round read clean ([`losers_sent`]), so a run stopped before the rename (a pause, a crash)
+/// leaves them to the next.
+pub fn clash_losers(conflicts: &[Conflict], page: &[NodeId]) -> HashSet<NodeId> {
+    let mut losers: HashSet<NodeId> = conflicts
+        .iter()
+        .filter_map(|c| match c {
+            Conflict::NameClash { node } => Some(*node),
+            _ => None,
+        })
+        .collect();
+    if !losers.is_empty() {
+        let page: HashSet<NodeId> = page.iter().copied().collect();
+        losers.retain(|n| !page.contains(n));
+    }
+    losers
+}
+
+/// Of `losers` ([`clash_losers`]), those the run is sent to rename: with an operation in `ops`,
+/// what is left once refusals are taken out (one refused, or waiting for a refused one, waits
+/// for a change), each once.
+pub fn losers_sent(mut losers: HashSet<NodeId>, ops: &[Op]) -> Vec<NodeId> {
+    if losers.is_empty() {
+        return Vec::new();
+    }
+    ops.iter()
+        .map(Op::node)
+        .filter(|n| losers.remove(n))
+        .collect()
 }
 
 /// Whether dirty folder `node` may go, on a side or from the folder's view (`hidden`: what its
@@ -323,4 +355,39 @@ pub fn subtree_any_side(trees: [&Tree; 3], folder: NodeId) -> BTreeSet<NodeId> {
         }
     }
     seen
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hbsync_types::Uuid;
+
+    fn id(n: u128) -> NodeId {
+        NodeId(Uuid::from_u128(n))
+    }
+
+    /// A loser is sent when one of its operations is left once refusals are taken out (one of
+    /// two refused: sent; all held back, refused or waiting for one: not), each once; one in
+    /// the page has its own mark.
+    #[test]
+    fn a_loser_is_sent_by_the_operations_left() {
+        let (page_node, both, one_left, none_left) = (id(1), id(2), id(3), id(4));
+        let conflicts: Vec<Conflict> = [page_node, both, one_left, none_left]
+            .into_iter()
+            .map(|node| Conflict::NameClash { node })
+            .collect();
+        let losers = clash_losers(&conflicts, &[page_node]);
+        assert_eq!(losers, [both, one_left, none_left].into_iter().collect());
+        let settle = |node| Op::Settle { node };
+        // `both` has two operations left, `one_left` one of its two, `none_left` none.
+        let left = [
+            settle(both),
+            settle(one_left),
+            settle(both),
+            settle(page_node),
+        ];
+        let mut sent = losers_sent(losers, &left);
+        sent.sort();
+        assert_eq!(sent, [both, one_left]);
+    }
 }

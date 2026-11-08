@@ -30,6 +30,7 @@ mod emit;
 mod guard;
 pub(crate) mod merge;
 pub use merge::taken_along;
+pub use waits::taken_by;
 mod repair;
 mod waits;
 

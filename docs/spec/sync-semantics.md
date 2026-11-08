@@ -655,7 +655,10 @@ expected fingerprint is treated as done.
   (§6.5), before the sweep ends. A sync ends after a full sweep in which nothing was done. A round clears only
   the marks it read with its page (a change of the drive's picture moves a mark's version on):
   a node another engine's pull or an announcement marks again meanwhile stays dirty, though it
-  was dirty already, and the change it brought is planned at the next sweep. The answer to a
+  was dirty already, and the change it brought is planned at the next sweep. A name clash's
+  loser the page didn't hold (planned for the winner's sake) is marked with the clearing when
+  the run is sent to rename it: a run stopped before the rename (a pause, a crash) leaves it
+  dirty for the next, though the round read the winner clean. The answer to a
   write of the folder's own run marks its node as the folder's own marks do, its version as
   it was: no round of the folder plans while its run writes (and a mark rewritten per write
   cost a page in the log each).

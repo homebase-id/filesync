@@ -1212,3 +1212,40 @@ fn what_a_removal_took_along_counts_with_deletes_here_over_pages() -> R {
     }
     Ok(())
 }
+
+/// Another app removed folder `d` alone, its files left live on the drive (taken along, §6.3),
+/// and another device deleted `x.txt`: gone there, the three are every synced file, over the
+/// limit of two (removals from elsewhere are held only so, §7). Planned a node a page, the files
+/// `d`'s removal took along are counted gone there with `x.txt` (the store's `taken_files`), as
+/// one plan of all would count them: the deletes here are held, and still held at the next sync.
+#[test]
+fn what_a_removal_took_along_counts_with_deletes_there_over_pages() -> R {
+    let files = ["d/t0.txt", "d/t1.txt", "x.txt"];
+    for batch in [1, 2, 20_000] {
+        let server = server();
+        let mut a = Client::with_config(&server, "a", move |cfg| {
+            cfg.guard.min = 2;
+            cfg.batch = batch;
+        })?;
+        let mut b = Client::new(&server, "b")?;
+        for name in files {
+            a.write(name, name)?;
+        }
+        a.sync()?;
+        b.sync()?;
+        fs::remove_file(b.root.join("x.txt"))?;
+        b.sync()?;
+        remove_on_drive(&server, &|name| name == "d")?;
+        a.engine.drive().pull(None)?;
+        for sync in ["first", "next"] {
+            let report = a.sync()?;
+            for name in files {
+                assert!(
+                    a.root.join(name).exists(),
+                    "pages of {batch}, {sync} sync: {name} held: {report:?}"
+                );
+            }
+        }
+    }
+    Ok(())
+}

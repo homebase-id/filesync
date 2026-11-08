@@ -2141,3 +2141,135 @@ fn regression_a_paged_delete_past_the_guard_is_held() {
         panic!("{e}");
     }
 }
+
+/// Seed e88adb19 (`clients_planning_in_small_pages_converge_without_loss`, pages of 3, two
+/// clients): a restored folder `d` and client 1's synced file `d` clash; the folder is made, the
+/// file parked for it, and a new plan comes before the file's rename. The simulator's pages read
+/// the dirty set as what differs only, so neither was dirty and the file stayed parked: the
+/// engine keeps the folder's mark (its round had work) till a round reads it clean, and that
+/// round renames the file. The simulator keeps the engine's marks now (`Pages::marks`).
+#[test]
+fn regression_paged_clients_converge_after_a_stopped_delete_and_a_restore() {
+    use hbsync_sim::Action::{
+        CreateFile, CreateFolder, DeleteStopped, EmptyStopped, Meanwhile, Purge, Restore,
+        ToggleIgnore,
+    };
+    let act = |client, action| Event::Act { client, action };
+    let (plan, step) = (
+        |client| Event::Plan { client },
+        |client| Event::Step { client },
+    );
+    let events = [
+        act(
+            0,
+            CreateFolder {
+                parent: 0,
+                name: 13,
+            },
+        ),
+        act(0, CreateFolder { parent: 0, name: 0 }),
+        plan(2),
+        step(0),
+        act(1, CreateFile { parent: 0, name: 5 }),
+        act(1, ToggleIgnore),
+        step(0),
+        act(0, EmptyStopped { done: 0 }),
+        act(0, DeleteStopped { pick: 8, done: 6 }),
+        act(0, Purge),
+        act(2, Meanwhile { op: 0 }),
+        act(0, ToggleIgnore),
+        plan(0),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        plan(1),
+        step(2),
+        step(0),
+        act(0, Restore { node: 0 }),
+        step(1),
+        plan(1),
+        step(1),
+    ];
+    let events: Vec<Event> = events.into_iter().map(|e| on_clients(e, 2)).collect();
+    if let Err(e) = run_with(2, None, |sim| sim.with_small_pages(3), &events) {
+        panic!("{e}");
+    }
+}
+
+/// Seed ba33fc36 (`clients_planning_in_small_pages_converge_without_loss`, pages of 1, two
+/// clients): client 0 plans the upload of a folder and the files in it, and before they run
+/// the folder goes (another device's stopped delete, then a delete), its files with it. The
+/// marks its rounds keep (`Pages::marks`) hold those nodes, gone from every side, till a round
+/// reads them clean; the simulator's sweep took as many pages as the sides hold nodes, so it
+/// ended on them and never reached client 1's file (made first, sent last). A sweep's worth
+/// counts the kept marks of nodes no side holds too.
+#[test]
+fn regression_paged_clients_converge_after_a_stopped_delete_beside_new_files() {
+    use hbsync_sim::Action::{CreateFile, CreateFolder, Delete, DeleteStopped};
+    let act = |client, action| Event::Act { client, action };
+    let plan = |client| Event::Plan { client };
+    let events = [
+        act(1, CreateFile { parent: 0, name: 6 }),
+        act(0, CreateFolder { parent: 0, name: 0 }),
+        act(
+            0,
+            CreateFile {
+                parent: 6,
+                name: 13,
+            },
+        ),
+        plan(0),
+        act(0, CreateFile { parent: 2, name: 6 }),
+        Event::Step { client: 0 },
+        act(0, CreateFolder { parent: 0, name: 9 }),
+        act(0, DeleteStopped { pick: 0, done: 0 }),
+        act(0, CreateFile { parent: 4, name: 5 }),
+        act(0, CreateFile { parent: 0, name: 2 }),
+        act(
+            0,
+            CreateFile {
+                parent: 0,
+                name: 11,
+            },
+        ),
+        plan(2),
+        plan(0),
+        act(2, Delete { node: 7 }),
+    ];
+    let events: Vec<Event> = events.into_iter().map(|e| on_clients(e, 2)).collect();
+    if let Err(e) = run_with(2, None, |sim| sim.with_small_pages(1), &events) {
+        panic!("{e}");
+    }
+}
+
+/// Seed 353b732e (`guarded_clients_in_pages_hold_the_whole_delete`, pages of 2, the guard at
+/// 1): client 1's folder goes from the drive, its file left live there (taken along), and
+/// client 0's own file goes there too: removals from elsewhere of every synced file, which the
+/// guard holds. Planned in pages, the simulator's model of the guard's totals didn't count the
+/// taken-along file gone there, as the engine's store does (`taken_files`), and let the delete
+/// through.
+#[test]
+fn regression_a_paged_delete_of_every_file_with_one_taken_along_is_held() {
+    use hbsync_sim::Action::{CreateFile, CreateFolder, CreateJunkFolder, Meanwhile};
+    let act = |client, action| Event::Act { client, action };
+    let (plan, step) = (
+        |client| Event::Plan { client },
+        |client| Event::Step { client },
+    );
+    let events = [
+        act(1, CreateFolder { parent: 0, name: 3 }),
+        act(1, CreateJunkFolder { parent: 0 }),
+        act(0, Meanwhile { op: 8 }),
+        act(1, CreateFile { parent: 9, name: 0 }),
+        act(1, Meanwhile { op: 0 }),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        plan(0),
+        plan(1),
+        step(1),
+        step(0),
+        step(1),
+        act(0, Meanwhile { op: 0 }),
+        plan(0),
+    ];
+    if let Err(e) = run_with(2, Some(1), |sim| sim.with_small_pages(2), &events) {
+        panic!("{e}");
+    }
+}

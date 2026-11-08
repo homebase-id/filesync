@@ -355,7 +355,7 @@ impl Reconciler<'_> {
 
 /// The removed folder whose removal on the drive took `node` along: the first folder above it
 /// there that isn't live, if it is in Recently deleted.
-fn taken_by(input: &Input, node: NodeId) -> Option<NodeId> {
+pub fn taken_by(input: &Input, node: NodeId) -> Option<NodeId> {
     let mut at = input.remote.get(node)?.parent;
     // Bounded: a cycle on the drive ends at a node met again.
     let mut seen = HashSet::from([node]);
