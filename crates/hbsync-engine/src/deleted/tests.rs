@@ -458,31 +458,45 @@ fn emptying_a_chain_deeper_than_any_path() {
     assert_eq!(select(&chosen, &holdings), [file]);
 }
 
-/// Emptying a cycle (a folder in a file in it, as another app may leave them) goes in the
-/// same order every time: where the cycle is entered follows the rows' order, not a hash
-/// map's, so a stop between batches leaves the same rows. Each call seeds its maps afresh.
+/// Emptying cycles (a folder in a file in it, two folders in each other, as another app may
+/// leave them) goes in one order, the rows' own: each cycle from its smallest node on, up its
+/// links, whatever order the rows come in and whichever row a hash map gives first. A stop
+/// between batches leaves the same rows.
 #[test]
 fn emptying_a_cycle_goes_in_the_same_order() {
-    let [folder, file, c, d] = [(); 4].map(|_| NodeId::new());
+    let id = |n: u128| NodeId(Uuid::from_u128(n));
+    let [file, folder, c, d, x, y, z] = [1, 2, 3, 4, 5, 6, 7].map(id);
     let row = |node, parent, folder| Chosen {
         node,
         parent,
         folder,
     };
-    let chosen = [
+    let mut chosen = vec![
         row(folder, file, true),
         row(file, folder, false),
         row(c, folder, false),
         row(d, folder, false),
+        row(x, y, true),
+        row(y, x, true),
+        row(z, y, false),
     ];
     let mut holdings = Holdings::default();
     for r in &chosen {
         *holdings.removed.entry(r.parent).or_default() += 1;
     }
-    let first = select(&chosen, &holdings);
-    assert_eq!(first.len(), 4);
-    for _ in 0..64 {
-        assert_eq!(select(&chosen, &holdings), first);
+    // The files at once; then x, the smallest of its cycle (in y), before y; `folder` (in
+    // `file`, which went) at y's level.
+    let expected = [file, c, d, z, x, folder, y];
+    // Each order of the rows, rotated and reversed, a few times (each call seeds its maps
+    // afresh).
+    for turn in 0..2 * chosen.len() {
+        chosen.rotate_left(1);
+        if turn == chosen.len() {
+            chosen.reverse();
+        }
+        for _ in 0..8 {
+            assert_eq!(select(&chosen, &holdings), expected, "{chosen:?}");
+        }
     }
 }
 

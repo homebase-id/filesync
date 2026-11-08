@@ -285,8 +285,8 @@ pub struct Holdings {
 /// order it deletes them. Only removed rows, never a live node: a folder holding a live node
 /// (one its delete took along, or one written since) or a removed node not chosen stays, and
 /// so do the folders it is in. Files first, then each folder after the folders in it (a cycle
-/// of them in some order, the same for rows in the same order), by the links among the chosen
-/// alone, however deep.
+/// of them from its smallest node on, up its links), by the links among the chosen alone,
+/// however deep. The same rows go in the same order, whatever order they come in.
 pub(super) fn select(chosen: &[Chosen], holdings: &Holdings) -> Vec<NodeId> {
     passes(chosen, holdings).into_iter().flatten().collect()
 }
@@ -315,11 +315,11 @@ pub fn passes(chosen: &[Chosen], holdings: &Holdings) -> Vec<Vec<NodeId>> {
             }
         }
     }
-    // How many of them each is in, worked out once each. Walked in `chosen`'s order, not the
-    // map's: where a cycle is entered decides its members' depths, so the same rows give the
-    // same order.
+    // How many of them each is in, worked out once each. A cycle counts from its smallest node,
+    // the deepest of it, whichever row the walk entered it by: the same rows go in the same
+    // order, whatever order they come in.
     let mut depth: HashMap<NodeId, usize> = HashMap::new();
-    for start in chosen.iter().map(|c| c.node) {
+    for &start in links.keys() {
         let (mut path, mut on_path) = (Vec::new(), HashSet::new());
         let mut at = start;
         let mut d = loop {
@@ -331,8 +331,19 @@ pub fn passes(chosen: &[Chosen], holdings: &Holdings) -> Vec<Vec<NodeId>> {
                     path.push(at);
                     at = parent;
                 }
-                // Above them all, or round a cycle.
-                _ => break 0,
+                // Round a cycle: from `at` on, the path is the cycle, each node in the one after.
+                Some(_) => {
+                    let from = path.iter().position(|n| *n == at).unwrap_or(0);
+                    let mut cycle = path.split_off(from);
+                    let smallest = (0..cycle.len()).min_by_key(|&i| cycle[i]).unwrap_or(0);
+                    cycle.rotate_left(smallest);
+                    for (i, n) in cycle.iter().enumerate() {
+                        depth.insert(*n, cycle.len() - 1 - i);
+                    }
+                    break depth[&at] + 1;
+                }
+                // Above them all.
+                None => break 0,
             }
         };
         for n in path.into_iter().rev() {

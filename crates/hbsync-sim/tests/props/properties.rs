@@ -448,15 +448,18 @@ proptest! {
     }
 }
 
-/// How many times [`a_run_replays_the_same`] runs its events. An order left to a hash map
-/// (its seed random per map) parts two runs only about half the time; eight runs miss it about
-/// once in a hundred.
+/// How many times [`a_run_replays_the_same`] runs its events. An order left to a hash map (its
+/// seed random per map) parts two runs only some of the time, about 2 in 5 for seed c2b9312c
+/// on main; sixteen runs aim to miss it less than once in a hundred (that seed: 0 misses in 100,
+/// 8 runs: 10). The cost: on a fortieth of the cases, 16 traced runs each, four times the old
+/// twice on a twentieth: 60,000 traced runs at 150k cases; 8,000 at 20k, about 4 minutes on
+/// one idle core (12 on a busy machine).
 const REPLAYS: usize = 16;
 
 proptest! {
-    // A twentieth of the cases, at least one: each runs [`REPLAYS`] times with the trace on.
+    // A fortieth of the cases, at least one: each runs [`REPLAYS`] times with the trace on.
     #![proptest_config(ProptestConfig {
-        cases: (cases() / 20).max(1),
+        cases: (cases() / 40).max(1),
         ..ProptestConfig::default()
     })]
 
