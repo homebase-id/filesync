@@ -427,6 +427,15 @@ fn a_chain_too_deep_ends_at_the_last_row_walked() -> Result<(), StateError> {
     Ok(())
 }
 
+/// What Recently deleted holds when `chosen` is all of it.
+fn holdings_of(chosen: &[Chosen]) -> Holdings {
+    let mut holdings = Holdings::default();
+    for c in chosen {
+        *holdings.removed.entry(c.parent).or_default() += 1;
+    }
+    holdings
+}
+
 /// Emptying orders and keeps by the links among what it empties alone, however deep: each
 /// folder after the folders in it, and a folder holding something that stays keeps every
 /// folder it is in.
@@ -447,10 +456,7 @@ fn emptying_a_chain_deeper_than_any_path() {
         parent: chain[0],
         folder: false,
     });
-    let mut holdings = Holdings::default();
-    for c in &chosen {
-        *holdings.removed.entry(c.parent).or_default() += 1;
-    }
+    let mut holdings = holdings_of(&chosen);
     let mut expected = vec![file];
     expected.extend(&chain);
     assert_eq!(select(&chosen, &holdings), expected);
@@ -459,9 +465,8 @@ fn emptying_a_chain_deeper_than_any_path() {
 }
 
 /// Emptying cycles (a folder in a file in it, two folders in each other, as another app may
-/// leave them) goes in one order, the rows' own: each cycle from its smallest node on, up its
-/// links, whatever order the rows come in and whichever row a hash map gives first. A stop
-/// between batches leaves the same rows.
+/// leave them) goes in one order: the rows are walked in node order, whatever order they come
+/// in and whichever row a hash map gives first. A stop between batches leaves the same rows.
 #[test]
 fn emptying_a_cycle_goes_in_the_same_order() {
     let id = |n: u128| NodeId(Uuid::from_u128(n));
@@ -480,12 +485,9 @@ fn emptying_a_cycle_goes_in_the_same_order() {
         row(y, x, true),
         row(z, y, false),
     ];
-    let mut holdings = Holdings::default();
-    for r in &chosen {
-        *holdings.removed.entry(r.parent).or_default() += 1;
-    }
-    // The files at once; then x, the smallest of its cycle (in y), before y; `folder` (in
-    // `file`, which went) at y's level.
+    let holdings = holdings_of(&chosen);
+    // The files at once; then x, walked first of its cycle (so in y), before y; `folder` (in
+    // `file`, walked first) at y's level.
     let expected = [file, c, d, z, x, folder, y];
     // Each order of the rows, rotated and reversed, a few times (each call seeds its maps
     // afresh).

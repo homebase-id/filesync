@@ -448,18 +448,10 @@ proptest! {
     }
 }
 
-/// How many times [`a_run_replays_the_same`] runs its events. An order left to a hash map (its
-/// seed random per map) parts two runs only some of the time, about 2 in 5 for seed c2b9312c
-/// on main; sixteen runs aim to miss it less than once in a hundred (that seed: 0 misses in 100,
-/// 8 runs: 10). The cost: on a fortieth of the cases, 16 traced runs each, four times the old
-/// twice on a twentieth: 60,000 traced runs at 150k cases; 8,000 at 20k, about 4 minutes on
-/// one idle core (12 on a busy machine).
-const REPLAYS: usize = 16;
-
 proptest! {
-    // A fortieth of the cases, at least one: each runs [`REPLAYS`] times with the trace on.
+    // A twentieth of the cases, at least one: each runs twice with the trace on.
     #![proptest_config(ProptestConfig {
-        cases: (cases() / 40).max(1),
+        cases: (cases() / 20).max(1),
         ..ProptestConfig::default()
     })]
 
@@ -481,14 +473,11 @@ proptest! {
             let paths = sim.server_paths();
             (settled, sim.trace, paths)
         };
-        let (settled, trace, paths) = replay();
-        for run in 1..REPLAYS {
-            let (again, retrace, repaths) = replay();
-            // Where the runs part, not both traces whole.
-            if let Some(at) = (0..trace.len().max(retrace.len())).find(|i| trace.get(*i) != retrace.get(*i)) {
-                prop_assert!(false, "run {run} parts from the first at trace line {at}:\n{:?}\n{:?}", trace.get(at), retrace.get(at));
-            }
-            prop_assert_eq!((settled, &paths), (again, &repaths));
+        let ((settled, trace, paths), (again, retrace, repaths)) = (replay(), replay());
+        // Where the two runs part, not both traces whole.
+        if let Some(at) = (0..trace.len().max(retrace.len())).find(|i| trace.get(*i) != retrace.get(*i)) {
+            prop_assert!(false, "the runs part at trace line {at}:\n{:?}\n{:?}", trace.get(at), retrace.get(at));
         }
+        prop_assert_eq!((settled, paths), (again, repaths));
     }
 }
