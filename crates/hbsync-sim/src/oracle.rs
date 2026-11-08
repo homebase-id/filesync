@@ -962,15 +962,14 @@ impl Ledger {
         // Counted only until the first breach is kept.
         first(&mut self.unguarded, || {
             let trips = |n: usize| n > min || (synced_files > 0 && n >= synced_files && n > 1);
-            // The synced files a delete here takes: what is in its folder here as the plan saw
-            // it (its moves out run first, but one that fails leaves its file to the delete),
-            // synced as files. One not synced here is no removal from elsewhere (§7 weighs the
-            // synced files), as one the drive has elsewhere that the plan moves out.
-            let synced_under = |node: NodeId| {
-                local
-                    .subtree(node)
-                    .into_iter()
-                    .filter(|n| base.get(*n).is_some_and(|s| s.kind == NodeKind::File))
+            // The synced files a delete here takes: what it expects to find (it takes that or
+            // nothing: anything else there makes it stale), synced as files. Not what the plan
+            // moves out of it first; one not synced here is no removal from elsewhere (§7
+            // weighs the synced files), as one the drive has elsewhere.
+            let synced_in = |subtree: &[NodeId]| {
+                subtree
+                    .iter()
+                    .filter(|n| base.get(**n).is_some_and(|s| s.kind == NodeKind::File))
                     .count()
             };
             // Remote deletes of files, and of them those synced here (a synced file gone here: the
@@ -1001,7 +1000,7 @@ impl Ledger {
                         deleted += 1;
                         deleted_synced += usize::from(base.contains(p.node));
                     }
-                    What::LocalDelete { .. } => deleted_here += synced_under(p.node),
+                    What::LocalDelete { ref subtree } => deleted_here += synced_in(subtree),
                     _ => {}
                 }
             }
@@ -1019,7 +1018,7 @@ impl Ledger {
                     What::LocalDelete { subtree }
                         if !was_wiped(p.node) && !subtree.iter().any(|n| wiped.contains(n)) =>
                     {
-                        synced_under(p.node)
+                        synced_in(subtree)
                     }
                     _ => 0,
                 })
@@ -1039,8 +1038,8 @@ impl Ledger {
             let held_all: usize = seen
                 .held
                 .iter()
-                .map(|p| match p.what {
-                    What::LocalDelete { .. } => synced_under(p.node),
+                .map(|p| match &p.what {
+                    What::LocalDelete { subtree } => synced_in(subtree),
                     _ => 0,
                 })
                 .sum();

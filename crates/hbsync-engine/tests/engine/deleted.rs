@@ -1594,3 +1594,86 @@ fn a_delete_that_stops_half_way_drops_the_bases_of_what_went() -> R {
     );
     Ok(())
 }
+
+/// Another device moves files out of d to the top and removes d: here one plan moves them out
+/// and deletes d, which expects only what goes. One round does it all: the delete doesn't go
+/// stale for what the moves took out (another round to plan it again).
+#[test]
+fn a_folder_removed_elsewhere_after_files_moved_out_goes_in_one_round() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |cfg| {
+        cfg.guard.allow = true;
+        cfg.max_rounds = 1;
+    })?;
+    for i in 0..3 {
+        a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
+    }
+    a.sync()?;
+    b.sync()?;
+    for i in 0..2 {
+        fs::rename(
+            a.root.join(format!("d/f{i}.txt")),
+            a.root.join(format!("f{i}.txt")),
+        )?;
+    }
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.sync()?;
+    b.engine.scan_local()?;
+    let report = b.engine.sync("2026-10-08", true)?;
+    assert!(report.skipped.is_empty(), "{report:?}");
+    assert_eq!(b.tree_text(""), ["f0.txt = 0", "f1.txt = 1"]);
+    Ok(())
+}
+
+/// As above, but a move out can't run (a new file here took its place after the plan): the
+/// folder still holds it, which the delete doesn't expect. The delete goes stale and takes
+/// nothing: the file stays here, unchanged, for the next plan.
+#[test]
+fn a_move_out_that_fails_leaves_the_folders_delete_stale() -> R {
+    use hbsync_engine::testkit::AfterPlan;
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    let armed = Arc::new(AtomicBool::new(false));
+    let root: Arc<Mutex<Option<std::path::PathBuf>>> = Arc::default();
+    let hook = {
+        let (armed, root) = (Arc::clone(&armed), Arc::clone(&root));
+        AfterPlan(Arc::new(move || {
+            if armed.swap(false, Ordering::SeqCst)
+                && let Some(root) = root.lock().ok().and_then(|r| r.clone())
+            {
+                fs::write(root.join("f0.txt"), "new here").expect("written");
+            }
+        }))
+    };
+    let mut b = Client::with_config(&server, "b", move |cfg| {
+        cfg.guard.allow = true;
+        cfg.max_rounds = 1;
+        cfg.after_plan = Some(hook.clone());
+    })?;
+    *root.lock().map_err(|_| "poisoned")? = Some(b.root.clone());
+    for i in 0..2 {
+        a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
+    }
+    a.sync()?;
+    b.sync()?;
+    fs::rename(a.root.join("d/f0.txt"), a.root.join("f0.txt"))?;
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.sync()?;
+    b.engine.scan_local()?;
+    armed.store(true, Ordering::SeqCst);
+    let report = b.engine.sync("2026-10-08", true)?;
+    let stale = report.skipped.iter().any(|(op, skip)| {
+        matches!(op, hbsync_engine::reconcile::Op::LocalDelete { .. })
+            && matches!(skip, hbsync_engine::exec::Skip::Stale(_))
+    });
+    assert!(stale, "{report:?}");
+    assert_eq!(b.read_text("d/f0.txt")?, "0", "kept where it was");
+    assert_eq!(b.read_text("f0.txt")?, "new here");
+    // Then it settles, nothing lost.
+    b.sync()?;
+    let tree = b.tree_text("");
+    assert!(tree.iter().any(|l| l.ends_with("= 0")), "{tree:?}");
+    assert!(tree.iter().any(|l| l.ends_with("= new here")), "{tree:?}");
+    Ok(())
+}

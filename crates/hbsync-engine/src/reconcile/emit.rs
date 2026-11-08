@@ -133,6 +133,11 @@ impl Reconciler<'_> {
                         let op = if self.masks.masked.contains(&node) {
                             Op::Forget { node, subtree }
                         } else {
+                            // What the plan keeps of it isn't the delete's: moved out first
+                            // (moves run before deletes), it is gone from the folder by then.
+                            // A move that didn't run leaves it there, unexpected: the delete
+                            // goes stale and takes nothing.
+                            subtree.retain(|n| *n == node || self.merged.get(*n).is_none());
                             Op::LocalDelete { node, subtree }
                         };
                         deletes.push((depth(&i.local), op));
