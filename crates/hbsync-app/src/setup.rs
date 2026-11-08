@@ -18,7 +18,7 @@ use hbsync_types::Role;
 
 use crate::config::ConfigLock;
 use crate::paths::home;
-use crate::{APP_NAME, Config, CredentialStore, Identity, Location, Paths, autostart};
+use crate::{APP_NAME, Config, CredentialStore, Identity, Location, Paths, Root, autostart};
 use crate::{control, folders};
 
 /// How long the owner has to approve in the browser.
@@ -169,11 +169,21 @@ pub fn default_folder() -> crate::Result<PathBuf> {
         .ok_or_else(|| "no home folder (HOME unset): choose a folder".into())
 }
 
-/// Where this computer keeps `role`'s folder (resolved): what `hbsync add <role>` syncs.
+/// The folder of the user's own `role`, where the OS keeps it (resolved).
 pub fn role_folder(role: Role) -> crate::Result<PathBuf> {
-    hbsync_platform::user_dirs::user_dir(role.user_dir())
+    user_folder(role.user_dir(), role.name())
+}
+
+/// This computer's Desktop, where the OS keeps it (resolved).
+pub fn desktop_folder() -> crate::Result<PathBuf> {
+    user_folder(hbsync_platform::user_dirs::UserDir::Desktop, "Desktop")
+}
+
+/// The user's own folder `dir` (`name` to people), where the OS keeps it (resolved).
+fn user_folder(dir: hbsync_platform::user_dirs::UserDir, name: &str) -> crate::Result<PathBuf> {
+    hbsync_platform::user_dirs::user_dir(dir)
         .map(|p| resolve(&p))
-        .ok_or_else(|| format!("this computer has no {} folder", role.name()).into())
+        .ok_or_else(|| format!("this computer has no {name} folder").into())
 }
 
 /// `canonicalize`, without the `\\?\` it puts on Windows paths: kept in the config and shown
@@ -259,8 +269,8 @@ pub fn plan(
     }
     let folder = resolve(folder);
     let home = home.map(resolve);
-    let ours =
-        folders::check(config, &identity, &folder, None, home.as_deref()).map_err(Refusal::No)?;
+    let ours = folders::check(config, &Root::main(&identity, &folder), home.as_deref())
+        .map_err(Refusal::No)?;
     // Synced with this identity before, it picks up where it was; with files in it, they
     // are uploaded and merged with the drive.
     let has_files = !ours
@@ -486,7 +496,7 @@ pub fn set_up(
         control::start_over(paths, identity)?;
     }
     // A running daemon sets the folder up and starts syncing it, without a restart.
-    let (_, added) = crate::folders::add_synced(paths, identity, &folder, None)?;
+    let (_, added) = crate::folders::add_synced(paths, &Root::main(identity, &folder), None)?;
     if let Some(why) = set_aside.or(added) {
         say(&crate::words::set_aside(why));
     }

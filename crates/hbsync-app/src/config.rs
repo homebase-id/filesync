@@ -12,11 +12,14 @@
 //! [[roots]]
 //! identity = "anna.example.com"
 //! folder = "/home/anna/Homebase"
+//! # role = "documents"           # a role folder: synced where it is (sync semantics §12)
+//! # desktop = "<uuid>"            # or this computer's Desktop: its own folder in Desktops
 //! ```
 
 use std::path::{Path, PathBuf};
 
-use hbsync_types::Role;
+use hbsync_state::FolderKind;
+use hbsync_types::{NodeId, Role};
 use serde::{Deserialize, Serialize};
 
 use crate::Identity;
@@ -58,15 +61,120 @@ const RETIRED_KEEP_DAYS: &str = "keep_deleted_days";
 
 /// A local folder synced with an identity's Filesync drive.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "RootKeys", into = "RootKeys")]
 pub struct Root {
     /// The identity's domain, e.g. `anna.example.com`.
     pub identity: Identity,
     pub folder: PathBuf,
-    /// The role folder it is (sync semantics §12); none for the main folder, which holds the
-    /// drive's root.
+    pub kind: RootKind,
+}
+
+/// What of the drive a synced folder holds (sync semantics §12).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RootKind {
+    /// The drive's root.
+    #[default]
+    Main,
+    /// A role folder: synced where it is.
+    Role(Role),
+    /// This computer's Desktop: its own folder in Desktops, this one (its name on the drive is
+    /// its DB's: [`hbsync_engine::root::SyncRoot::name_desktop`]).
+    Desktop(NodeId),
+}
+
+impl RootKind {
+    /// Its kind as the DB keeps it.
+    pub fn folder_kind(self) -> FolderKind {
+        match self {
+            RootKind::Main => FolderKind::Main,
+            RootKind::Role(_) => FolderKind::Role,
+            RootKind::Desktop(_) => FolderKind::Desktop,
+        }
+    }
+
+    /// The drive's node it holds: the root, a role folder, its computer's Desktop's folder.
+    pub fn top(self) -> NodeId {
+        match self {
+            RootKind::Main => NodeId::ROOT,
+            RootKind::Role(role) => role.node(),
+            RootKind::Desktop(top) => top,
+        }
+    }
+
+    /// The role folder it is, if it is one.
+    pub fn role(self) -> Option<Role> {
+        match self {
+            RootKind::Role(role) => Some(role),
+            _ => None,
+        }
+    }
+
+    /// Whether its top fits it: a Desktop's folder is no fixed folder of the drive (the root, a
+    /// role folder, Recovered files, Desktops), as a hand-edited config could have it.
+    pub fn fits(self) -> bool {
+        match self {
+            RootKind::Desktop(top) => {
+                !top.is_root() && !top.is_fixed_folder() && top != NodeId::OUTSIDE
+            }
+            _ => true,
+        }
+    }
+
+    /// What a folder of this kind syncing with `identity` is, for people: its main folder, its
+    /// role folder, its Desktop.
+    pub fn what(self, identity: &Identity) -> String {
+        match self {
+            RootKind::Main => identity.to_string(),
+            RootKind::Role(role) => format!("{identity}'s {}", role.name()),
+            RootKind::Desktop(_) => format!("{identity}'s Desktop"),
+        }
+    }
+}
+
+/// [`Root`] in the config, its kind as flat keys.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RootKeys {
+    identity: Identity,
+    folder: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub role: Option<Role>,
+    role: Option<Role>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    desktop: Option<NodeId>,
+}
+
+impl TryFrom<RootKeys> for Root {
+    type Error = String;
+
+    fn try_from(keys: RootKeys) -> Result<Root, String> {
+        let kind = match (keys.role, keys.desktop) {
+            (None, None) => RootKind::Main,
+            (Some(role), None) => RootKind::Role(role),
+            (None, Some(top)) => RootKind::Desktop(top),
+            (Some(_), Some(_)) => return Err("a folder is a role folder or the Desktop".into()),
+        };
+        Ok(Root {
+            identity: keys.identity,
+            folder: keys.folder,
+            kind,
+        })
+    }
+}
+
+impl From<Root> for RootKeys {
+    fn from(root: Root) -> RootKeys {
+        let desktop = match root.kind {
+            RootKind::Desktop(top) => Some(top),
+            _ => None,
+        };
+        RootKeys {
+            role: root.kind.role(),
+            desktop,
+            identity: root.identity,
+            folder: root.folder,
+        }
+    }
 }
 
 impl Root {
@@ -75,8 +183,34 @@ impl Root {
         Root {
             identity: identity.clone(),
             folder: folder.to_path_buf(),
-            role: None,
+            kind: RootKind::Main,
         }
+    }
+
+    /// `role`'s folder at `folder`, synced with `identity`.
+    pub fn role(identity: &Identity, folder: &Path, role: Role) -> Root {
+        Root {
+            kind: RootKind::Role(role),
+            ..Root::main(identity, folder)
+        }
+    }
+
+    /// This computer's Desktop at `folder`, synced with `identity`'s folder `top` in Desktops.
+    pub fn desktop(identity: &Identity, folder: &Path, top: NodeId) -> Root {
+        Root {
+            kind: RootKind::Desktop(top),
+            ..Root::main(identity, folder)
+        }
+    }
+
+    /// Whether it is the main folder.
+    pub fn is_main(&self) -> bool {
+        self.kind == RootKind::Main
+    }
+
+    /// What it is, for people ([`RootKind::what`]).
+    pub fn what(&self) -> String {
+        self.kind.what(&self.identity)
     }
 }
 
@@ -176,9 +310,14 @@ impl Config {
 
     /// The folder `identity` syncs as `role` (`None`: its main folder), if it does.
     pub fn folder(&self, identity: &Identity, role: Option<Role>) -> Option<&Root> {
-        self.roots
-            .iter()
-            .find(|r| r.identity == *identity && r.role == role)
+        let kind = role.map_or(RootKind::Main, RootKind::Role);
+        (self.roots.iter()).find(|r| r.identity == *identity && r.kind == kind)
+    }
+
+    /// The Desktop `identity` syncs here, if it does.
+    pub fn desktop(&self, identity: &Identity) -> Option<&Root> {
+        (self.roots.iter())
+            .find(|r| r.identity == *identity && matches!(r.kind, RootKind::Desktop(_)))
     }
 
     /// The identities set up here, each once, in order.
@@ -217,7 +356,7 @@ impl Config {
 
     /// The main folder, if any (one at most, for now).
     pub fn root(&self) -> Result<Option<&Root>, ConfigError> {
-        let mains: Vec<&Root> = self.roots.iter().filter(|r| r.role.is_none()).collect();
+        let mains: Vec<&Root> = self.roots.iter().filter(|r| r.is_main()).collect();
         match mains.as_slice() {
             [] => Ok(None),
             [root] => Ok(Some(root)),
@@ -328,13 +467,16 @@ mod tests {
             },
             roots: vec![
                 Root::main(&"anna.example.com".into(), Path::new("/home/anna/Homebase")),
-                Root {
-                    role: Some(Role::Documents),
-                    ..Root::main(
-                        &"anna.example.com".into(),
-                        Path::new("/home/anna/Documents"),
-                    )
-                },
+                Root::role(
+                    &"anna.example.com".into(),
+                    Path::new("/home/anna/Documents"),
+                    Role::Documents,
+                ),
+                Root::desktop(
+                    &"anna.example.com".into(),
+                    Path::new("/home/anna/Desktop"),
+                    NodeId::new(),
+                ),
             ],
         };
         config.save(&path).expect("ok");

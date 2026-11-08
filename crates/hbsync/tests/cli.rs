@@ -308,6 +308,89 @@ fn a_role_folder_is_added_and_removed_without_a_daemon() -> R {
     Ok(())
 }
 
+/// The Desktop is added with a folder of its own on the drive, named as given (its name in the
+/// account's DB, not the config); a second one, one inside the main folder, or a name for a
+/// role folder are refused; added again without a name it keeps its own; named again it keeps
+/// its folder on the drive; removed, it isn't synced any more.
+#[test]
+fn the_desktop_is_added_named_and_removed_without_a_daemon() -> R {
+    let home = Home::new()?;
+    let main = home.set_up()?;
+    let desk = home.path().join("Desk");
+    std::fs::create_dir_all(&desk)?;
+    let desk_arg = desk.to_string_lossy().into_owned();
+    let db = hbsync_app::Paths::under(home.path()).account_db(&IDENTITY.into());
+    let name = || -> Result<String, rusqlite::Error> {
+        rusqlite::Connection::open(&db)?.query_row(
+            "SELECT value FROM folder_kv WHERE key = 'desktop.name'",
+            [],
+            |r| r.get(0),
+        )
+    };
+    let said = home.ok(&["add", "desktop", "--folder", &desk_arg, "--name", "Laptop"])?;
+    assert!(said.contains("Desktop"), "{said}");
+    let config = std::fs::read_to_string(home.path().join("config.toml"))?;
+    assert!(
+        config.contains("desktop = ") && !config.contains("Laptop"),
+        "{config}"
+    );
+    assert_eq!(name()?, "Laptop");
+    let top = config
+        .lines()
+        .find(|l| l.starts_with("desktop = "))
+        .ok_or("no desktop line")?
+        .to_owned();
+
+    let other = home.path().join("Other desk");
+    std::fs::create_dir_all(&other)?;
+    let out = home.hbsync(&["add", "desktop", "--folder", &other.to_string_lossy()])?;
+    assert!(!out.status.success(), "one Desktop: {}", text(&out));
+    let inside = main.join("Desk");
+    std::fs::create_dir_all(&inside)?;
+    let out = home.hbsync(&["add", "desktop", "--folder", &inside.to_string_lossy()])?;
+    assert!(
+        !out.status.success(),
+        "inside the main folder: {}",
+        text(&out)
+    );
+    let docs = home.path().join("Docs");
+    std::fs::create_dir_all(&docs)?;
+    let out = home.hbsync(&[
+        "add",
+        "documents",
+        "--folder",
+        &docs.to_string_lossy(),
+        "--name",
+        "x",
+    ])?;
+    assert!(!out.status.success(), "a name for a role folder");
+    let out = home.hbsync(&["add", "papers"])?;
+    assert!(text(&out).contains("desktop"), "{}", text(&out));
+
+    // Added again without a name: its own kept. Named anew where it is (no --folder: the one
+    // synced), its folder on the drive kept; a name the drive won't take, or another folder,
+    // refused.
+    home.ok(&["add", "desktop"])?;
+    assert_eq!(name()?, "Laptop");
+    home.ok(&["add", "desktop", "--name", "Work laptop"])?;
+    assert_eq!(name()?, "Work laptop");
+    let config = std::fs::read_to_string(home.path().join("config.toml"))?;
+    assert!(config.contains(&top), "{config}");
+    assert_eq!(config.matches("desktop = ").count(), 1, "{config}");
+    let out = home.hbsync(&["add", "desktop", "--name", "Work/laptop"])?;
+    assert!(!out.status.success(), "{}", text(&out));
+    let other_arg = other.to_string_lossy().into_owned();
+    let out = home.hbsync(&["add", "desktop", "--folder", &other_arg, "--name", "x"])?;
+    assert!(!out.status.success(), "another folder: {}", text(&out));
+
+    let said = home.ok(&["remove", "desktop"])?;
+    assert!(said.contains("no longer synced"), "{said}");
+    let config = std::fs::read_to_string(home.path().join("config.toml"))?;
+    assert!(!config.contains("desktop = "), "{config}");
+    assert!(home.ok(&["remove", "desktop"])?.contains("isn't synced"));
+    Ok(())
+}
+
 /// Adding a role folder with no daemon running readies the account's DB: one from before 0.7 is
 /// set aside, and that is said, as setup and the daemon say it.
 #[test]
@@ -362,7 +445,7 @@ fn wait_for_folders(home: &Home, want: &[(&Path, Option<&str>)]) -> R {
             .iter()
             .map(|f| {
                 let path = PathBuf::from(f["path"].as_str().unwrap_or_default());
-                (path, f["role"].as_str().map(str::to_owned))
+                (path, f["kind"]["role"].as_str().map(str::to_owned))
             })
             .collect();
         let wanted: Vec<(PathBuf, Option<String>)> = want

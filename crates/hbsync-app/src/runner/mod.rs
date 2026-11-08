@@ -113,8 +113,8 @@ pub struct RunnerConfig {
     /// The account's state DB ([`crate::Paths::account_db`]).
     pub db: PathBuf,
     pub identity: Identity,
-    /// The role folder it is; `None` for the main folder.
-    pub role: Option<hbsync_types::Role>,
+    /// What of the drive it holds (shown; the DB keeps it).
+    pub kind: crate::RootKind,
     /// Shown in conflict-copy names.
     pub device: String,
     pub mass_delete: MassDelete,
@@ -144,7 +144,7 @@ impl RunnerConfig {
             folder: folder.to_path_buf(),
             db: db.to_path_buf(),
             identity: identity.clone(),
-            role: None,
+            kind: crate::RootKind::Main,
             device: device.to_owned(),
             mass_delete: MassDelete::default(),
             paused: None,
@@ -428,7 +428,7 @@ impl Runner {
         let (tx, rx) = channel();
         let stop = Arc::new(AtomicBool::new(cfg.paused.is_some()));
         let mut status = FolderStatus::new(&cfg.identity, &cfg.folder);
-        status.role = cfg.role;
+        status.kind = cfg.kind;
         status.paused_until = cfg.paused.and_then(|p| p.until);
         let status = Arc::new(Mutex::new(status));
         let held = Arc::new(Mutex::new(Held::default()));

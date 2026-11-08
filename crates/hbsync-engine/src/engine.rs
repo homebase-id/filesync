@@ -161,18 +161,41 @@ enum Part {
     Desktop,
 }
 
-/// The name a computer's Desktop folder takes from `name` (the computer's): in NFC, one the
-/// drive takes (not empty, `.` or `..`, no `/` or NUL, 255 bytes at most), not this client's
-/// own (`.hbsync…`, any case) and not junk (§10: other computers wouldn't show it); else
-/// `Computer`.
+/// Names a Desktop's folder on the drive ([`keys::DESKTOP_NAME`], the one owner of its name)
+/// from its next sync on: `name` ([`desktop_name`]), or with none the computer's, `computer`,
+/// if it has no name yet. A write only for a new name; whether it was one.
+pub(crate) fn set_desktop_name(
+    db: &mut StateDb,
+    name: Option<&str>,
+    computer: &str,
+) -> Result<bool, StateError> {
+    let now = db.read(|s| s.get_kv(keys::DESKTOP_NAME))?;
+    let name = match (name, &now) {
+        (Some(name), _) => desktop_name(name),
+        (None, None) => desktop_name(computer),
+        (None, Some(_)) => return Ok(false),
+    };
+    if now.as_deref() == Some(name.as_str()) {
+        return Ok(false);
+    }
+    db.write(|s| s.folder().set_kv(keys::DESKTOP_NAME, &name))?;
+    Ok(true)
+}
+
+/// The name a computer's Desktop folder takes from `name` (the computer's): [`valid_desktop_name`],
+/// else `Computer`.
 pub(crate) fn desktop_name(name: &str) -> String {
+    valid_desktop_name(name).unwrap_or_else(|| "Computer".into())
+}
+
+/// `name` as a computer's Desktop folder can have it: in NFC, one the drive takes (not empty,
+/// `.` or `..`, no `/` or NUL, 255 bytes at most), not this client's own (`.hbsync…`, any case)
+/// and not junk (§10: other computers wouldn't show it); `None` if it can't.
+pub fn valid_desktop_name(name: &str) -> Option<String> {
     use hbsync_platform::name::{check_remote_name, nfc, starts_caseless};
     let name = nfc(name.trim());
     let ours = starts_caseless(&name, hbsync_local::STATE_DIR);
-    match check_remote_name(&name) {
-        Ok(()) if !ours && !hbsync_local::is_junk(&name) => name,
-        _ => "Computer".into(),
-    }
+    (check_remote_name(&name).is_ok() && !ours && !hbsync_local::is_junk(&name)).then_some(name)
 }
 
 /// Records `scope` as the folder's, if it is new (§12). A new scope changes what is in view
@@ -324,9 +347,9 @@ impl Engine {
     }
 
     /// This device's Desktop's folder on the drive, `top`, made, restored or joined
-    /// ([`Drive::ensure_desktop`]), named as the computer is ([`keys::DESKTOP_NAME`], set by
-    /// [`Engine::name_desktop`]; made under this folder's own name until then, and never
-    /// renamed without it). A name not yet given the folder is given at the next sync on which
+    /// ([`Drive::ensure_desktop`]), named as its DB says ([`keys::DESKTOP_NAME`], set by
+    /// [`crate::root::SyncRoot::name_desktop`] as the folder is added, or [`Engine::name_desktop`];
+    /// made under this folder's own name until then, and never renamed without it). A name not yet given the folder is given at the next sync on which
     /// the rename lands.
     fn ensure_desktop(&mut self, top: NodeId) -> Result<(), EngineError> {
         let (name, named) = self.db.read(|s| {
@@ -348,15 +371,13 @@ impl Engine {
     }
 
     /// Names this device's Desktop's folder on the drive after the computer (`name`, made one
-    /// the drive takes: [`desktop_name`]), from its next sync on; a rename made elsewhere
-    /// stands until it changes. Nothing for another folder.
+    /// the drive takes: [`valid_desktop_name`], else `Computer`), from its next sync on; a
+    /// rename made elsewhere stands until it changes. Nothing for another folder.
     pub fn name_desktop(&mut self, name: &str) -> Result<(), StateError> {
-        if self.part != Part::Desktop {
-            return Ok(());
+        if self.part == Part::Desktop {
+            set_desktop_name(&mut self.db, Some(name), name)?;
         }
-        let name = desktop_name(name);
-        self.db
-            .write(|s| s.folder().set_kv(keys::DESKTOP_NAME, &name))
+        Ok(())
     }
 
     /// The main folder leaves out what this device's other folders hold (its own Desktop's
