@@ -285,7 +285,8 @@ pub struct Holdings {
 /// order it deletes them. Only removed rows, never a live node: a folder holding a live node
 /// (one its delete took along, or one written since) or a removed node not chosen stays, and
 /// so do the folders it is in. Files first, then each folder after the folders in it (a cycle
-/// of them in some order), by the links among the chosen alone, however deep.
+/// of them in some order, the same for rows in the same order), by the links among the chosen
+/// alone, however deep.
 pub(super) fn select(chosen: &[Chosen], holdings: &Holdings) -> Vec<NodeId> {
     passes(chosen, holdings).into_iter().flatten().collect()
 }
@@ -314,9 +315,11 @@ pub fn passes(chosen: &[Chosen], holdings: &Holdings) -> Vec<Vec<NodeId>> {
             }
         }
     }
-    // How many of them each is in, worked out once each.
+    // How many of them each is in, worked out once each. Walked in `chosen`'s order, not the
+    // map's: where a cycle is entered decides its members' depths, so the same rows give the
+    // same order.
     let mut depth: HashMap<NodeId, usize> = HashMap::new();
-    for &start in links.keys() {
+    for start in chosen.iter().map(|c| c.node) {
         let (mut path, mut on_path) = (Vec::new(), HashSet::new());
         let mut at = start;
         let mut d = loop {

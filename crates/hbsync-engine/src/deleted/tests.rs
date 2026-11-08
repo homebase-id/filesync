@@ -458,6 +458,34 @@ fn emptying_a_chain_deeper_than_any_path() {
     assert_eq!(select(&chosen, &holdings), [file]);
 }
 
+/// Emptying a cycle (a folder in a file in it, as another app may leave them) goes in the
+/// same order every time: where the cycle is entered follows the rows' order, not a hash
+/// map's, so a stop between batches leaves the same rows. Each call seeds its maps afresh.
+#[test]
+fn emptying_a_cycle_goes_in_the_same_order() {
+    let [folder, file, c, d] = [(); 4].map(|_| NodeId::new());
+    let row = |node, parent, folder| Chosen {
+        node,
+        parent,
+        folder,
+    };
+    let chosen = [
+        row(folder, file, true),
+        row(file, folder, false),
+        row(c, folder, false),
+        row(d, folder, false),
+    ];
+    let mut holdings = Holdings::default();
+    for r in &chosen {
+        *holdings.removed.entry(r.parent).or_default() += 1;
+    }
+    let first = select(&chosen, &holdings);
+    assert_eq!(first.len(), 4);
+    for _ in 0..64 {
+        assert_eq!(select(&chosen, &holdings), first);
+    }
+}
+
 /// Items picked by name are those rows alone, described and counted as the listing does
 /// them: a delete with its members, an item deleted with one with none.
 #[test]

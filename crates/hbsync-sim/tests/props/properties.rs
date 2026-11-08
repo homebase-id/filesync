@@ -448,8 +448,13 @@ proptest! {
     }
 }
 
+/// How many times [`a_run_replays_the_same`] runs its events. An order left to a hash map
+/// (its seed random per map) parts two runs only about half the time; eight runs miss it about
+/// once in a hundred.
+const REPLAYS: usize = 16;
+
 proptest! {
-    // A twentieth of the cases, at least one: each runs twice with the trace on.
+    // A twentieth of the cases, at least one: each runs [`REPLAYS`] times with the trace on.
     #![proptest_config(ProptestConfig {
         cases: (cases() / 20).max(1),
         ..ProptestConfig::default()
@@ -473,11 +478,14 @@ proptest! {
             let paths = sim.server_paths();
             (settled, sim.trace, paths)
         };
-        let ((settled, trace, paths), (again, retrace, repaths)) = (replay(), replay());
-        // Where the two runs part, not both traces whole.
-        if let Some(at) = (0..trace.len().max(retrace.len())).find(|i| trace.get(*i) != retrace.get(*i)) {
-            prop_assert!(false, "the runs part at trace line {at}:\n{:?}\n{:?}", trace.get(at), retrace.get(at));
+        let (settled, trace, paths) = replay();
+        for run in 1..REPLAYS {
+            let (again, retrace, repaths) = replay();
+            // Where the runs part, not both traces whole.
+            if let Some(at) = (0..trace.len().max(retrace.len())).find(|i| trace.get(*i) != retrace.get(*i)) {
+                prop_assert!(false, "run {run} parts from the first at trace line {at}:\n{:?}\n{:?}", trace.get(at), retrace.get(at));
+            }
+            prop_assert_eq!((settled, &paths), (again, &repaths));
         }
-        prop_assert_eq!((settled, paths), (again, repaths));
     }
 }
