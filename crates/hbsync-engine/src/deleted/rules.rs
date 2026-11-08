@@ -358,13 +358,13 @@ pub fn passes(chosen: &[Chosen], holdings: &Holdings) -> Vec<Vec<NodeId>> {
         .collect();
     going.sort_unstable();
     // Files are one pass, whatever their depth.
-    let pass = |&((folder, depth), _): &(Level, NodeId)| match folder {
+    let pass = |&((folder, deep), _): &(Level, NodeId)| match folder {
         false => (false, Reverse(0)),
-        true => (true, depth),
+        true => (true, deep),
     };
     going
         .chunk_by(|a, b| pass(a) == pass(b))
-        .map(|pass| pass.iter().map(|(_, n)| *n).collect())
+        .map(|run| run.iter().map(|(_, n)| *n).collect())
         .collect()
 }
 
