@@ -445,7 +445,7 @@ impl Sim {
                 settings: DeleteGuard {
                     min: self.guard.unwrap_or_default(),
                     fraction: 0.0,
-                    allow: self.guard.is_none(),
+                    allow: self.guard.is_none() || self.faults.engine_unguarded,
                 },
                 synced: synced_files,
                 confirmed: Arc::clone(&confirmed),

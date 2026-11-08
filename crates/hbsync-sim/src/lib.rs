@@ -417,6 +417,13 @@ impl Sim {
         self.faults.unlinks_before_crash = Some(n);
     }
 
+    /// For scripted tests: the engine's mass-delete guard lets every delete through, while the
+    /// oracle still judges each plan by [`Sim::guard`]: what it reports then is what the guard
+    /// must hold.
+    pub fn without_the_engines_guard(&mut self) {
+        self.faults.engine_unguarded = true;
+    }
+
     /// For scripted tests: the next tag write fails (where the OS keeps tags).
     pub fn fail_next_tag_write(&mut self) {
         self.faults.fail_tags_next = true;

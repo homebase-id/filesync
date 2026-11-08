@@ -2280,11 +2280,12 @@ fn regression_a_paged_delete_of_every_file_with_one_taken_along_is_held() {
 /// up as `F (conflict 1)`; before client 1 renames it so here, its user moves it into the
 /// folder F. Client 0 then removes F (empty on the drive). Client 1's plan moves the conflict
 /// file out of F to the top, as the drive has it, and deletes F; another page deletes `a`: one
-/// file, the one synced, not over the limit of 1, so followed unasked (§7). The oracle counted
-/// the moved file as deleted with F too (but a plan's moves run before its deletes): two
-/// removals of one synced file, and a breach.
+/// synced file, not over the limit of 1, so followed unasked (§7). The oracle counted the
+/// conflict file as a removal with F too: two removals of one synced file, and a breach. It is
+/// no removal, whether its move runs or fails (F's delete then takes it): not synced here, and
+/// live on the drive.
 #[test]
-fn regression_a_file_moved_out_of_a_folder_deleted_in_the_same_plan_isnt_deleted_with_it() {
+fn regression_a_file_not_synced_in_a_folder_removed_elsewhere_is_no_removal() {
     use hbsync_sim::Action::{CreateFile, CreateFolder, Meanwhile, Move, ToggleIgnore};
     let act = |client, action| Event::Act { client, action };
     let (plan, step) = (
@@ -2323,7 +2324,99 @@ fn regression_a_file_moved_out_of_a_folder_deleted_in_the_same_plan_isnt_deleted
             },
         ),
     ];
-    if let Err(e) = run_with(2, Some(1), |sim| sim.with_small_pages(1), &events) {
-        panic!("{e}");
+    let mut sim = Sim::new(2).with_small_pages(1);
+    sim.guard = Some(1);
+    sim.verbose = true;
+    sim.run(&events);
+    // The case: one plan of client 1 moves the file out of F, and deletes F as it was, the file
+    // in it.
+    let folder = "L".repeat(251) + ".txt";
+    let f = sim.item(1, &folder).expect("F here");
+    let moved = sim.item(1, &format!("{folder}/a")).expect("the file in F");
+    assert!(sim.quiesce(30), "no convergence");
+    let (moves, deletes) = (
+        format!("LocalMove {{ node: {moved:?}"),
+        format!("LocalDelete {{ node: {f:?}, subtree: "),
+    );
+    assert!(
+        sim.trace.iter().any(|line| line.starts_with("plan c1:")
+            && line.contains(&moves)
+            && line.split(&deletes).nth(1).is_some_and(|rest| rest
+                .split(']')
+                .next()
+                .is_some_and(|s| s.contains(&format!("{moved:?}"))))),
+        "no plan moving the file out of F and deleting F with it: {:#?}",
+        sim.trace
+    );
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Folder `b` holds synced files `a` and `c.txt`, all there is; another device moves `c.txt`
+/// out to the top and removes `b`. Client 1's plan moves `c.txt` out and deletes `b` as it was,
+/// `c.txt` in it: a move that fails leaves `c.txt` to the delete, so the guard counts it with
+/// `b`. That is every synced file, over the limit of 1: held. Without the engine's guard the
+/// oracle reports the delete.
+fn moved_out_then_removed(guarded: bool) -> Result<(), String> {
+    use hbsync_sim::Action::{CreateFile, CreateFolder, Delete, Move};
+    let act = |client, action| Event::Act { client, action };
+    let mut sim = Sim::new(2);
+    sim.guard = Some(1);
+    let top = sim.pick(0, NodeId::ROOT, true).expect("the top");
+    sim.run(&[act(
+        0,
+        CreateFolder {
+            parent: top,
+            name: 1,
+        },
+    )]);
+    let folder = sim.item(0, "b").expect("b");
+    let parent = sim.pick(0, folder, true).expect("b as a parent");
+    sim.run(&[
+        act(0, CreateFile { parent, name: 0 }),
+        act(0, CreateFile { parent, name: 3 }),
+    ]);
+    assert!(sim.quiesce(30), "no convergence");
+    let moved = sim.item(0, "b/c.txt").expect("c.txt");
+    let pick = sim.pick(0, moved, false).expect("c.txt");
+    let top = sim.pick(0, NodeId::ROOT, true).expect("the top");
+    sim.run(&[act(
+        0,
+        Move {
+            node: pick,
+            parent: top,
+            name: 3,
+        },
+    )]);
+    let folder_pick = sim.pick(0, folder, false).expect("b");
+    sim.run(&[act(0, Delete { node: folder_pick })]);
+    sim.run(&[Event::Plan { client: 0 }]);
+    while !sim.planned(0).is_empty() {
+        sim.run(&[Event::Step { client: 0 }]);
     }
+    if !guarded {
+        sim.without_the_engines_guard();
+    }
+    sim.run(&[Event::Plan { client: 1 }]);
+    assert!(
+        sim.planned(1).contains(&"LocalMove"),
+        "{:?}",
+        sim.planned(1)
+    );
+    // Held, or (without the engine's guard) planned after the move.
+    assert_eq!(sim.held(1) == [folder], guarded, "{:?}", sim.held(1));
+    assert_eq!(
+        sim.planned(1).ends_with(&["LocalDelete"]),
+        !guarded,
+        "{:?}",
+        sim.planned(1)
+    );
+    assert!(sim.quiesce(30), "no convergence");
+    sim.check()
+}
+
+#[test]
+fn a_synced_file_moved_out_of_a_folder_removed_elsewhere_counts_with_it() {
+    moved_out_then_removed(true).unwrap_or_else(|e| panic!("{e}"));
+    let breach = moved_out_then_removed(false).expect_err("the oracle reports the delete");
+    assert!(breach.contains("went through unconfirmed"), "{breach}");
 }

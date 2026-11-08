@@ -962,10 +962,15 @@ impl Ledger {
         // Counted only until the first breach is kept.
         first(&mut self.unguarded, || {
             let trips = |n: usize| n > min || (synced_files > 0 && n >= synced_files && n > 1);
-            let files_under = |tree: &Tree, node: NodeId| {
-                tree.subtree(node)
+            // The synced files a delete here takes: what is in its folder here as the plan saw
+            // it (its moves out run first, but one that fails leaves its file to the delete),
+            // synced as files. One not synced here is no removal from elsewhere (§7 weighs the
+            // synced files), as one the drive has elsewhere that the plan moves out.
+            let synced_under = |node: NodeId| {
+                local
+                    .subtree(node)
                     .into_iter()
-                    .filter(|n| tree.get(*n).is_some_and(|s| s.kind == NodeKind::File))
+                    .filter(|n| base.get(*n).is_some_and(|s| s.kind == NodeKind::File))
                     .count()
             };
             // Remote deletes of files, and of them those synced here (a synced file gone here: the
@@ -988,35 +993,6 @@ impl Ledger {
                 !confirmed.contains(&p.node)
                     && !base.ancestors(p.node).iter().any(|a| waits.contains(a))
             };
-            // A delete here doesn't take what the plan moves out of it first (its moves run
-            // before its deletes): a file the drive has elsewhere, or in a folder it has
-            // elsewhere. The guard's own count takes them (holding sooner); what went through
-            // is judged by what it deletes.
-            let moved_to: HashMap<NodeId, NodeId> = seen
-                .ops
-                .iter()
-                .filter_map(|p| match &p.what {
-                    What::LocalMove { parent, .. } => Some((p.node, *parent)),
-                    _ => None,
-                })
-                .collect();
-            let deleted_under = |node: NodeId| {
-                let subtree: HashSet<NodeId> = local.subtree(node).into_iter().collect();
-                let moved_out = |n: &NodeId| {
-                    *n != node
-                        && subtree.contains(n)
-                        && moved_to.get(n).is_some_and(|to| !subtree.contains(to))
-                };
-                subtree
-                    .iter()
-                    .filter(|n| local.get(**n).is_some_and(|s| s.kind == NodeKind::File))
-                    .filter(|n| {
-                        !std::iter::once(**n)
-                            .chain(local.ancestors(**n))
-                            .any(|a| moved_out(&a))
-                    })
-                    .count()
-            };
             for p in seen.ops.iter().filter(unconfirmed) {
                 match p.what {
                     What::RemoteDelete
@@ -1025,7 +1001,7 @@ impl Ledger {
                         deleted += 1;
                         deleted_synced += usize::from(base.contains(p.node));
                     }
-                    What::LocalDelete { .. } => deleted_here += deleted_under(p.node),
+                    What::LocalDelete { .. } => deleted_here += synced_under(p.node),
                     _ => {}
                 }
             }
@@ -1043,7 +1019,7 @@ impl Ledger {
                     What::LocalDelete { subtree }
                         if !was_wiped(p.node) && !subtree.iter().any(|n| wiped.contains(n)) =>
                     {
-                        files_under(local, p.node)
+                        synced_under(p.node)
                     }
                     _ => 0,
                 })
@@ -1064,7 +1040,7 @@ impl Ledger {
                 .held
                 .iter()
                 .map(|p| match p.what {
-                    What::LocalDelete { .. } => files_under(local, p.node),
+                    What::LocalDelete { .. } => synced_under(p.node),
                     _ => 0,
                 })
                 .sum();
@@ -1080,7 +1056,8 @@ impl Ledger {
             // synced file with a held wipe should have been held with it.
             if deleted_here > 0 && held_all > held_deleted_here && every(there_all) {
                 return Some(format!(
-                    "{} let {deleted_here} removals from elsewhere through that, with the {held_all}                      held, are every synced file ({synced_files})",
+                    "{} let {deleted_here} removals from elsewhere through that, with the {held_all} \
+                     held, are every synced file ({synced_files})",
                     seen.client
                 ));
             }
@@ -1100,7 +1077,7 @@ impl Ledger {
             let tripped = deleted > 0 && trips(here_all);
             (tripped || (deleted_here > 0 && every(there_all))).then(|| {
                 format!(
-                    "{} deletes {deleted} remote and deletes {deleted_here} local files \
+                    "{} deletes {deleted} remote and deletes {deleted_here} local synced files \
                      unconfirmed (limit {min}, {synced_files} synced): {:?}",
                     seen.client, seen.all_ops
                 )
