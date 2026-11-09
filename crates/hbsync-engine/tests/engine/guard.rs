@@ -1304,10 +1304,14 @@ fn a_wipe_stays_held_through_the_rounds_of_a_sync() -> R {
     }
     a.sync()?;
     b.sync()?;
+    // The new folders first: made after the removals, one could reuse a removed folder's inode
+    // and read as its rename.
+    for i in 0..3 {
+        a.write(&format!("n{i}/h.txt"), format!("h{i}"))?;
+    }
     fs::remove_dir_all(a.root.join("d"))?;
     for i in 0..3 {
         fs::remove_dir_all(a.root.join(format!("e{i}")))?;
-        a.write(&format!("n{i}/h.txt"), format!("h{i}"))?;
     }
     a.sync()?;
     b.engine.scan_local()?;

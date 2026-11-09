@@ -519,7 +519,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   is a move out of a folder removed elsewhere: the plan moves it out first, and the folder's
   delete expects only what goes, so a move that doesn't run leaves that delete stale, taking
   nothing; engine: `files_moved_out_of_a_folder_removed_elsewhere_dont_count_with_it`,
-  `a_move_out_that_fails_leaves_the_folders_delete_stale`). The count is the whole sync's,
+  `a_move_out_that_fails_leaves_the_folders_delete_stale`). A folder's delete counts every
+  file it takes here, synced or not: never fewer than the synced ones. The count is the whole sync's,
   not a page's (§6.5): with the page's removals it takes what other
   pages still have to remove, the dirty ones and the files in folders the drive removed that
   are still live here (taken along, by §6.3's rule; read while anything is dirty: a walk of
