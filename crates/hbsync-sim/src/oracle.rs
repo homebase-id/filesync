@@ -40,12 +40,6 @@ pub(crate) struct Ledger {
     /// The first delete here a plan made that expects other than what its folder holds less
     /// what the plan moves out of it first.
     expects_differ: Option<String>,
-    /// What each delete here expects to take, by client and delete node, as the oracle read
-    /// it in the last plan that made it ([`Ledger::plan_made`]).
-    delete_expects: HashMap<(String, NodeId), HashSet<NodeId>>,
-    /// The first delete here that took a file the plan's delete didn't expect (so the guard
-    /// didn't count it).
-    took_unexpected: Option<String>,
     /// The first operation a client ran outside its folder's part of the drive.
     scope_breach: Option<String>,
     /// The first operation that moved, renamed or deleted a folder a file not hashed yet is
@@ -314,23 +308,6 @@ impl Ledger {
         self.removed_rightly.contains(row)
     }
 
-    /// Client `client`'s delete here of `node` takes `files` (unlinked): each must be one its
-    /// plan's delete expected, as the oracle read it, so the guard counted it.
-    pub(crate) fn delete_takes(&mut self, client: &str, node: NodeId, files: &[NodeId]) {
-        first(&mut self.took_unexpected, || {
-            let expected = self.delete_expects.get(&(client.to_owned(), node));
-            files
-                .iter()
-                .find(|f| !expected.is_some_and(|e| e.contains(f)))
-                .map(|f| {
-                    format!(
-                        "{client}'s delete of {node:?} took {f:?}, which its plan didn't expect \
-                         ({expected:?}): the guard didn't count it"
-                    )
-                })
-        });
-    }
-
     /// The user of client `c` deleted its item `node` there (or moved it out of the folder, or
     /// a filter rule took it out), having seen it as `seen`.
     pub(crate) fn user_deleted(&mut self, c: usize, node: NodeId, seen: Seen) {
@@ -394,9 +371,6 @@ impl Sim {
             return Err(format!("a write's answer was recorded wrongly: {what}"));
         }
         if let Some(what) = &ledger.expects_differ {
-            return Err(what.clone());
-        }
-        if let Some(what) = &ledger.took_unexpected {
             return Err(what.clone());
         }
         if let Some(plan) = &ledger.unguarded {
@@ -1045,14 +1019,6 @@ impl Ledger {
                     _ => None,
                 })
         });
-        // Kept for what the deletes then take (`Ledger::delete_takes`): a delete runs from the
-        // last plan that made it (a later one may plan other pages meanwhile).
-        for (node, want) in &expected {
-            self.delete_expects.insert(
-                (seen.client.to_owned(), *node),
-                want.iter().copied().collect(),
-            );
-        }
         // The guard's rule, checked independently: no plan deletes more files on a side than
         // the limit (or every file) without the user's confirmation.
         let Some(min) = guard else {
@@ -1105,14 +1071,8 @@ impl Ledger {
             // Removals from elsewhere are followed, but every synced file over the limit.
             let every = |n: usize| synced_files > 0 && n >= synced_files && n > min;
             // Held before (sticky till answered) isn't judged again.
-            // In a folder held so, unless a folder below it the plan moves out of it first.
             let was_wiped = |n: NodeId| {
-                wiped.contains(&n)
-                    || base
-                        .ancestors(n)
-                        .iter()
-                        .find(|a| wiped.contains(a) || moving.contains(a))
-                        .is_some_and(|a| wiped.contains(a))
+                wiped.contains(&n) || base.ancestors(n).iter().any(|a| wiped.contains(a))
             };
             let held_deleted_here: usize = seen
                 .held

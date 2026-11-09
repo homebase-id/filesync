@@ -285,9 +285,7 @@ impl Reconciler<'_> {
                 }
                 let out: HashSet<NodeId> = tops.iter().flat_map(|m| i.local.subtree(*m)).collect();
                 subtree.retain(|n| !out.contains(n));
-                let mut tops = tops;
-                tops.sort();
-                self.plan.moves_out.insert(*node, tops);
+                self.plan.moves_out_of.insert(*node);
             }
         }
 
@@ -345,10 +343,7 @@ impl Reconciler<'_> {
 /// The nodes `ops` move out of their folder here: a move, or a download to another folder
 /// (`replace`: the drive's version in place of the item here). They run before the deletes,
 /// so a folder's delete here doesn't take them, nor what is below them.
-pub(super) fn moving_out<'o>(
-    ops: impl IntoIterator<Item = &'o Op>,
-    local: &Tree,
-) -> HashSet<NodeId> {
+fn moving_out<'o>(ops: impl IntoIterator<Item = &'o Op>, local: &Tree) -> HashSet<NodeId> {
     ops.into_iter()
         .filter_map(|op| match op {
             Op::LocalMove { node, parent, .. }

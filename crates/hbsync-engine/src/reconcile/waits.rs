@@ -318,17 +318,13 @@ impl Reconciler<'_> {
         if folders.is_empty() {
             return;
         }
-        // Each delete with the folder it is in, unless a folder below that one the plan moves
-        // out of it first (what is in that one leaves the folder).
-        let moving = super::emit::moving_out(&self.plan.ops, &i.local);
         let mut groups: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
         for node in self.plan.ops.iter().filter_map(Op::deletes) {
             if let Some(f) = i
                 .base
                 .ancestors(node)
                 .into_iter()
-                .find(|f| folders.contains(f) || moving.contains(f))
-                .filter(|f| folders.contains(f))
+                .find(|f| folders.contains(f))
             {
                 groups.entry(f).or_default().push(node);
             }

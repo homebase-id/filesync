@@ -102,23 +102,12 @@ impl Reconciler<'_> {
         // Once held so, a removal elsewhere stays held until the user answers, whatever the
         // count says since (one file of it back on the drive, a put back half done).
         let wiped = &self.opts.guarding.wiped;
+        let was_wiped = |node: NodeId| {
+            wiped.contains(&node) || i.base.ancestors(node).iter().any(|a| wiped.contains(a))
+        };
         if !hold_local && !hold_remote && wiped.is_empty() {
             return;
         }
-        // In a folder held so, unless a folder below that one the plan moves out of it first
-        // (what is in that one leaves the held folder; a held folder moved keeps what is in it).
-        let moving = match wiped.is_empty() {
-            true => HashSet::new(),
-            false => super::emit::moving_out(&self.plan.ops, &i.local),
-        };
-        let was_wiped = |node: NodeId| {
-            wiped.contains(&node)
-                || i.base
-                    .ancestors(node)
-                    .iter()
-                    .find(|a| wiped.contains(a) || moving.contains(a))
-                    .is_some_and(|a| wiped.contains(a))
-        };
         let ops = std::mem::take(&mut self.plan.ops);
         for op in ops {
             let held = !confirmed(&op)

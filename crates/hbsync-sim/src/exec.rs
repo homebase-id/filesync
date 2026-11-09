@@ -1598,7 +1598,7 @@ impl Sim {
                 );
                 Done
             }
-            Op::LocalDelete { node, subtree } => self.delete_here(c, node, &subtree, true),
+            Op::LocalDelete { node, subtree } => self.delete_here(c, node, &subtree),
             Op::RemoteCreate {
                 node,
                 parent,
@@ -1804,7 +1804,7 @@ impl Sim {
             }
             Op::Forget { node, subtree } => {
                 if !subtree.is_empty() {
-                    return self.delete_here(c, node, &subtree, false); // the bases go with it
+                    return self.delete_here(c, node, &subtree); // the bases go with it
                 }
                 let client = &mut self.clients[c];
                 // Still here, or its children's bases first, unless they are forgotten in this
@@ -1830,18 +1830,11 @@ impl Sim {
     /// it. In two steps: the item is moved aside ([`Outcome::Aside`]), then, at the next step,
     /// checked again there and unlinked ([`Sim::finish_delete`]); anything else found there puts
     /// it back. Junk goes along; ignored items stay, and so do the folders they sit in, released
-    /// (§10): those go item by item, at once. With `judged` (a delete here, not a forget), what
-    /// it takes is held to what the oracle read it to expect (`Ledger::delete_takes`).
-    fn delete_here(
-        &mut self,
-        c: usize,
-        node: NodeId,
-        expected: &[NodeId],
-        judged: bool,
-    ) -> Outcome {
+    /// (§10): those go item by item, at once.
+    fn delete_here(&mut self, c: usize, node: NodeId, expected: &[NodeId]) -> Outcome {
         use Outcome::Skip;
         if self.clients[c].aside.contains_key(&node) {
-            return self.finish_delete(c, node, expected, judged);
+            return self.finish_delete(c, node, expected);
         }
         let unchanged = |client: &Client, node: NodeId| {
             client.local.get(node) == client.planned_local.get(node)
@@ -1903,30 +1896,12 @@ impl Sim {
     /// checked against what the plan saw ([`Sim::aside_check`]) and unlinked, with the bases of
     /// `expected`, and the folders that stayed (holding ignored items) are released; anything
     /// else aside puts it all back, for the next plan.
-    fn finish_delete(
-        &mut self,
-        c: usize,
-        node: NodeId,
-        expected: &[NodeId],
-        judged: bool,
-    ) -> Outcome {
+    fn finish_delete(&mut self, c: usize, node: NodeId, expected: &[NodeId]) -> Outcome {
         let Some(hidden) = self.aside_check(c, node, expected) else {
             self.note(|_| format!("  c{c} {node:?} isn't as planned aside: returned"));
             self.return_from_aside(c, node);
             return Outcome::Skip;
         };
-        // The files a delete here takes are within what the guard judged it by (the oracle's
-        // own reading of what it expects, `Ledger::plan_made`): junk aside. (A forget, of what
-        // the drive keeps live out of view, isn't judged.)
-        if judged && let Some(aside) = self.clients[c].aside.get(&node) {
-            let files: Vec<NodeId> = aside
-                .iter()
-                .filter(|(n, s)| s.kind == NodeKind::File && !hidden.contains(n))
-                .map(|(n, _)| n)
-                .collect();
-            let name = self.clients[c].name.clone();
-            self.ledger.delete_takes(&name, node, &files);
-        }
         self.unlink_aside(c, node, &hidden, usize::MAX);
         // What stayed of what the plan saw: the folders holding ignored items. Released: a
         // temporary name (it carries the old id) gives way to a real one, deepest first, and

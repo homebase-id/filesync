@@ -2442,8 +2442,8 @@ fn a_folder_removed_elsewhere_counts_what_its_delete_takes() {
 /// Seed 243bb3f0 (`held_deletes_out_of_the_dirty_set_plan_alike_from_a_wipe`): folder `a`,
 /// held as every synced file on client 1, is restored and moved into a new folder on the
 /// drive, `c.txt` in it still removed. Client 1's plan moves `a`: a removal elsewhere in a
-/// held folder stays held, the folder moved or not. A delete inside a folder moved out of a
-/// held one goes on its own; a first take of that rule let this one through too.
+/// held folder stays held, whatever the plan moves (a first take that let deletes in a moved
+/// folder go on their own let this one through).
 #[test]
 fn regression_a_delete_in_a_held_folder_that_moves_stays_held() {
     use hbsync_sim::Action::*;

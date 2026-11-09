@@ -38,21 +38,21 @@ pub fn out_of_dirty<'p>(plan: &'p Plan, page: &[NodeId]) -> (Vec<&'p Op>, HashSe
         .chain(plan.waiting.iter().copied())
         .chain(plan.delete_waits.iter().copied())
         .collect();
-    // A held delete here covers what it expects, and what the plan moves out of it first
-    // (planned, so dirty: the delete stays with it, as one that took it would).
     let covers = |op: &'p Op| {
-        let (subtree, out) = match op {
-            Op::LocalDelete { node, subtree } => (
-                &subtree[..],
-                plan.moves_out.get(node).map_or(&[][..], |out| &out[..]),
-            ),
-            _ => (&[][..], &[][..]),
+        let subtree = match op {
+            Op::LocalDelete { subtree, .. } => &subtree[..],
+            _ => &[],
         };
-        std::iter::once(op.node()).chain(subtree.iter().chain(out).copied())
+        std::iter::once(op.node()).chain(subtree.iter().copied())
     };
+    // One the plan moves something out of first stays with that move, as when it expected it
+    // ([`Plan::moves_out_of`]).
     let mut ops = Vec::new();
     for op in &plan.held {
-        if page.contains(&op.node()) && !covers(op).any(|n| busy.contains(&n)) {
+        if page.contains(&op.node())
+            && !plan.moves_out_of.contains(&op.node())
+            && !covers(op).any(|n| busy.contains(&n))
+        {
             ops.push(op);
             nodes.extend(covers(op).filter(|n| page.contains(n)));
         }
