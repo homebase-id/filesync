@@ -45,8 +45,7 @@ pub fn out_of_dirty<'p>(plan: &'p Plan, page: &[NodeId]) -> (Vec<&'p Op>, HashSe
         };
         std::iter::once(op.node()).chain(subtree.iter().copied())
     };
-    // One the plan moves something out of first stays with that move, as when it expected it
-    // ([`Plan::moves_out_of`]).
+    // Nor one with a move out of it ([`Plan::moves_out_of`]).
     let mut ops = Vec::new();
     for op in &plan.held {
         if page.contains(&op.node())

@@ -2351,47 +2351,33 @@ fn regression_a_file_not_synced_in_a_folder_removed_elsewhere_is_no_removal() {
     sim.check().unwrap_or_else(|e| panic!("{e}"));
 }
 
-/// Folder `b` holds synced files `a` and `c.txt`, all there is. Another device moves `c.txt`
-/// out to the top and removes `b` (`move_out`), or removes `b` with both. Client 1's plan
-/// moves `c.txt` out first: `b`'s delete takes `a` alone, one of two synced files, followed
-/// unasked. Without the move it takes every synced file, over the limit of 1: held, and with
-/// the engine's guard off, the oracle reports the delete.
+/// Folder `b` holds synced files `b/c.txt` and `b/a/c.txt`, all there is
+/// ([`stopped_delete_setup`]). Another device moves `b/c.txt` out to the top and removes `b`
+/// (`move_out`), or removes `b` with both. Client 1's plan moves `c.txt` out first: `b`'s
+/// delete takes `b/a/c.txt` alone, one of two synced files, followed unasked. Without the move
+/// it takes every synced file, over the limit of 1: held, and with the engine's guard off, the
+/// oracle reports the delete.
 fn removed_elsewhere(move_out: bool, guarded: bool) -> Result<(), String> {
-    use hbsync_sim::Action::{CreateFile, CreateFolder, Delete, Move};
+    use hbsync_sim::Action::{Delete, Move};
     let act = |client, action| Event::Act { client, action };
-    let mut sim = Sim::new(2);
+    let (mut sim, [b, _, c, _]) = stopped_delete_setup();
     sim.guard = Some(1);
-    sim.verbose = true;
-    let top = sim.pick(0, NodeId::ROOT, true).expect("the top");
-    sim.run(&[act(
-        0,
-        CreateFolder {
-            parent: top,
-            name: 1,
-        },
-    )]);
-    let folder = sim.item(0, "b").expect("b");
-    let parent = sim.pick(0, folder, true).expect("b as a parent");
-    sim.run(&[
-        act(0, CreateFile { parent, name: 0 }),
-        act(0, CreateFile { parent, name: 3 }),
-    ]);
-    assert!(sim.quiesce(30), "no convergence");
-    let moved = sim.item(0, "b/c.txt").expect("c.txt");
     if move_out {
-        let pick = sim.pick(0, moved, false).expect("c.txt");
-        let top = sim.pick(0, NodeId::ROOT, true).expect("the top");
+        let (node, parent) = (
+            sim.pick(0, c, false).expect("b/c.txt"),
+            sim.pick(0, NodeId::ROOT, true).expect("the top"),
+        );
         sim.run(&[act(
             0,
             Move {
-                node: pick,
-                parent: top,
+                node,
+                parent,
                 name: 3,
             },
         )]);
     }
-    let folder_pick = sim.pick(0, folder, false).expect("b");
-    sim.run(&[act(0, Delete { node: folder_pick })]);
+    let node = sim.pick(0, b, false).expect("b");
+    sim.run(&[act(0, Delete { node })]);
     // Client 0's own delete of every synced file is held there too: its user confirms it.
     sim.run(&[Event::Plan { client: 0 }]);
     if !sim.held(0).is_empty() {
@@ -2405,27 +2391,14 @@ fn removed_elsewhere(move_out: bool, guarded: bool) -> Result<(), String> {
     }
     sim.run(&[Event::Plan { client: 1 }]);
     let held = !move_out && guarded;
-    assert_eq!(sim.held(1) == [folder], held, "{:?}", sim.held(1));
+    assert_eq!(sim.held(1) == [b], held, "{:?}", sim.held(1));
     let kinds: &[&str] = match (move_out, held) {
         (true, _) => &["LocalMove", "LocalDelete"],
         (false, true) => &[],
         (false, false) => &["LocalDelete"],
     };
+    // What each delete expects is checked against the oracle's own reading (`expects_differ`).
     assert_eq!(sim.planned(1), kinds);
-    // The delete expects `a` alone where `c.txt` moves out first.
-    let delete = format!("LocalDelete {{ node: {folder:?}, subtree: ");
-    let expects_moved = sim
-        .trace
-        .iter()
-        .rev()
-        .find(|l| l.starts_with("plan c1:"))
-        .is_some_and(|l| {
-            l.split(&delete)
-                .nth(1)
-                .and_then(|rest| rest.split(']').next())
-                .is_some_and(|s| s.contains(&format!("{moved:?}")))
-        });
-    assert_eq!(expects_moved, !move_out && !guarded, "{:#?}", sim.trace);
     assert!(sim.quiesce(30), "no convergence");
     sim.check()
 }
@@ -2433,7 +2406,6 @@ fn removed_elsewhere(move_out: bool, guarded: bool) -> Result<(), String> {
 #[test]
 fn a_folder_removed_elsewhere_counts_what_its_delete_takes() {
     removed_elsewhere(true, true).unwrap_or_else(|e| panic!("{e}"));
-    removed_elsewhere(true, false).unwrap_or_else(|e| panic!("{e}"));
     removed_elsewhere(false, true).unwrap_or_else(|e| panic!("{e}"));
     let breach = removed_elsewhere(false, false).expect_err("the oracle reports the delete");
     assert!(breach.contains("went through unconfirmed"), "{breach}");

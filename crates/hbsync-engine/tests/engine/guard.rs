@@ -1252,7 +1252,9 @@ fn what_a_removal_took_along_counts_with_deletes_there_over_pages() -> R {
 
 /// Another device moves three of the four files in d out to the top, then removes d: here, one
 /// plan moves them out and deletes d, which takes one file of four synced. Not every synced
-/// file, so followed unasked (§7): the files the plan moves out first don't count with d.
+/// file, so followed unasked (§7): the files the plan moves out first don't count with d. And
+/// d's delete expects only what goes, so one round does it all (it doesn't go stale for what
+/// the moves took out, another round to plan it again).
 #[test]
 fn files_moved_out_of_a_folder_removed_elsewhere_dont_count_with_it() -> R {
     let server = server();
@@ -1278,6 +1280,8 @@ fn files_moved_out_of_a_folder_removed_elsewhere_dont_count_with_it() -> R {
     b.engine.scan_local()?;
     let report = b.engine.sync("2026-10-08", true)?;
     assert!(report.held.is_empty(), "nothing held: {report:?}");
+    assert!(report.skipped.is_empty(), "{report:?}");
+    assert_eq!(b.tree_text(""), ["f0.txt = 0", "f1.txt = 1", "f2.txt = 2"]);
     Ok(())
 }
 

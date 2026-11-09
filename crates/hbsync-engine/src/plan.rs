@@ -547,11 +547,8 @@ pub struct Plan {
     /// The files each of `held` takes, by its node, as the guard counted them: (removed from
     /// the drive, deleted here).
     pub held_takes: BTreeMap<NodeId, (usize, usize)>,
-    /// The folders deleted here that the plan moves something out of first: their deletes
-    /// don't expect what moves out, nor what is below it. A held one of them stays in the
-    /// dirty set ([`crate::held::out_of_dirty`]): the move out is planned (its top has an
-    /// operation; what is below that usually has none of its own), and the delete stays with
-    /// it, as when it expected it.
+    /// The folders deleted here that the plan moves something out of first (not expected by
+    /// their deletes): a held one stays dirty with that move ([`crate::held::out_of_dirty`]).
     pub moves_out_of: BTreeSet<NodeId>,
     pub conflicts: Vec<Conflict>,
     /// Dirty nodes that need nothing (both sides and the base agree): the dirty flag can go.

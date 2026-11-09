@@ -2754,10 +2754,11 @@ fn what_a_removal_took_along_waits_with_its_folder_in_a_cycle_across_pages() {
     );
 }
 
-/// §7, §8: a folder removed on the drive, a file in it moved out first (to the top) and a
-/// folder moved out with a file in it removed: the plan moves them out, deletes the file in the
-/// folder moved out (a delete of its own, after the move), and deletes the folder, which
-/// expects only what goes with it.
+/// §7, §8: a folder removed on the drive; out of it first, to the top, a file moved and
+/// changed there (downloaded to its new folder: a move and an update in one), and a folder
+/// moved with a file in it removed. The plan moves them out, deletes that file in the folder
+/// moved out (a delete of its own, after the move), and deletes the folder, which expects only
+/// what goes with it.
 #[test]
 fn a_folder_delete_expects_what_the_plan_moves_out_of_it_gone() {
     let [d, a, b, g, x, k] = ids(6)[..] else {
@@ -2773,37 +2774,34 @@ fn a_folder_delete_expects_what_the_plan_moves_out_of_it_gone() {
     w.remote(d, None)
         .remote(a, None)
         .remote(x, None)
-        .remote(b, Some(file(ROOT, "b", "b")))
+        .remote(b, Some(file(ROOT, "b", "changed")))
         .remote(g, Some(folder(ROOT, "g")));
     let plan = w.plan();
-    let mut gone = vec![d, a];
-    gone.sort();
-    let deletes: Vec<&Op> = plan
-        .ops
-        .iter()
-        .filter(|op| matches!(op, Op::LocalDelete { .. }))
-        .collect();
     assert_eq!(
-        deletes,
-        [
-            &Op::LocalDelete {
-                node: x,
-                subtree: vec![x]
-            },
-            &Op::LocalDelete {
-                node: d,
-                subtree: gone
-            }
-        ],
+        kinds(&plan.ops),
+        ["move", "download-replace", "delete", "delete"],
         "{:?}",
         plan.ops
     );
-    assert_eq!(kinds(&plan.ops), ["move", "move", "delete", "delete"]);
+    assert_eq!(
+        plan.ops[2..],
+        [
+            Op::LocalDelete {
+                node: x,
+                subtree: vec![x]
+            },
+            Op::LocalDelete {
+                node: d,
+                subtree: vec![d, a]
+            }
+        ]
+    );
+    assert!(plan.moves_out_of.contains(&d));
 }
 
 /// §7: a delete held as every synced file (`wiped`) of a folder a file moves out of first:
-/// held, it covers what the plan moves out of it too, so it stays in the dirty set while that
-/// move is planned (`held::out_of_dirty`, as when the delete expected the file).
+/// held, it stays in the dirty set while that move is planned (`held::out_of_dirty`, as when
+/// the delete expected the file).
 #[test]
 fn a_held_delete_covers_what_the_plan_moves_out_of_it() {
     let [d, a, b] = ids(3)[..] else {
@@ -2819,13 +2817,11 @@ fn a_held_delete_covers_what_the_plan_moves_out_of_it() {
     w.opts.guarding.wiped = std::sync::Arc::new([d].into_iter().collect());
     let plan = w.plan();
     assert_eq!(kinds(&plan.ops), ["move"]);
-    let mut gone = vec![d, a];
-    gone.sort();
     assert_eq!(
         plan.held,
         [Op::LocalDelete {
             node: d,
-            subtree: gone
+            subtree: vec![d, a]
         }]
     );
     assert!(plan.moves_out_of.contains(&d));
@@ -2833,131 +2829,54 @@ fn a_held_delete_covers_what_the_plan_moves_out_of_it() {
     assert!(out.is_empty() && nodes.is_empty(), "{out:?} {nodes:?}");
 }
 
-/// §7: folder A held as every synced file (`wiped`); the drive moved folder M out of A and
-/// removed D in M. The plan moves M out first, and D's delete stays held with A: a removal
-/// elsewhere in a held folder stays held till answered, whatever moves meanwhile. Were it let
-/// through and M's move failed (or went stale), D would go under the held A, unasked. The plan
-/// after such a failed move is this one again (nothing changed here or on the drive): D held.
+/// §7: a removal elsewhere in a folder held as every synced file (`wiped`) stays held till
+/// answered, whatever the plan moves meanwhile, in it or out of it. Each shape: folder W held,
+/// folder M in it with X in it removed on the drive, and M (or W) moved there:
+/// - M moved out of W (W removed): let through, and M's move failed or went stale, X's delete
+///   would go under the held W, unasked (the plan after such a failed move is this one again:
+///   nothing changed here or on the drive);
+/// - M moved within W, from W/a to W/b;
+/// - W itself moved (restored elsewhere, say), M with it.
 #[test]
-fn a_delete_in_a_folder_moved_out_of_a_held_one_stays_held_with_it() {
-    let [a, f, m, d] = ids(4)[..] else {
-        unreachable!()
-    };
-    let mut w = World::default();
-    w.synced(a, folder(ROOT, "A"))
-        .synced(f, file(a, "f", "f"))
-        .synced(m, folder(a, "M"))
-        .synced(d, file(m, "D", "d"));
-    w.remote(a, None)
-        .remote(f, None)
-        .remote(d, None)
-        .remote(m, Some(folder(ROOT, "M")));
-    w.opts.guarding.wiped = std::sync::Arc::new([a].into_iter().collect());
-    let plan = w.plan();
-    let mut gone = vec![a, f];
-    gone.sort();
-    assert_eq!(kinds(&plan.ops), ["move"], "{:?}", plan.ops);
-    assert!(
-        plan.held.contains(&Op::LocalDelete {
-            node: a,
-            subtree: gone
-        }),
-        "{:?}",
-        plan.held
-    );
-    assert!(
-        plan.held.contains(&Op::LocalDelete {
-            node: d,
-            subtree: vec![d]
-        }),
-        "{:?}",
-        plan.held
-    );
-}
-
-/// §7: folder W held as every synced file (`wiped`), still on the drive (a removal in it
-/// followed elsewhere, say); there the drive moved folder M from W/a to W/b and removed X in
-/// M. The plan moves M within W, and X's delete stays held with W.
-#[test]
-fn a_delete_in_a_folder_moved_within_a_held_one_stays_held() {
-    let [wf, a, b, m, x, k] = ids(6)[..] else {
-        unreachable!()
-    };
-    let mut w = World::default();
-    w.synced(wf, folder(ROOT, "W"))
-        .synced(a, folder(wf, "a"))
-        .synced(b, folder(wf, "b"))
-        .synced(m, folder(a, "M"))
-        .synced(x, file(m, "X", "x"))
-        .synced(k, file(m, "k", "k"));
-    w.remote(m, Some(folder(b, "M"))).remote(x, None);
-    w.opts.guarding.wiped = std::sync::Arc::new([wf].into_iter().collect());
-    let plan = w.plan();
-    assert_eq!(kinds(&plan.ops), ["move"], "{:?}", plan.ops);
-    assert_eq!(
-        plan.held,
-        [Op::LocalDelete {
+fn a_delete_in_a_held_folder_stays_held_whatever_moves() {
+    #[derive(Debug)]
+    enum Shape {
+        OutOfHeld,
+        WithinHeld,
+        HeldMoves,
+    }
+    let mut let_through = Vec::new();
+    for shape in [Shape::OutOfHeld, Shape::WithinHeld, Shape::HeldMoves] {
+        let [p, wf, a, b, m, x, k] = ids(7)[..] else {
+            unreachable!()
+        };
+        let mut w = World::default();
+        w.synced(p, folder(ROOT, "P"))
+            .synced(wf, folder(ROOT, "W"))
+            .synced(a, folder(wf, "a"))
+            .synced(b, folder(wf, "b"))
+            .synced(m, folder(a, "M"))
+            .synced(x, file(m, "X", "x"))
+            .synced(k, file(m, "k", "k"));
+        w.remote(x, None);
+        match shape {
+            Shape::OutOfHeld => w
+                .remote(wf, None)
+                .remote(a, None)
+                .remote(b, None)
+                .remote(m, Some(folder(ROOT, "M"))),
+            Shape::WithinHeld => w.remote(m, Some(folder(b, "M"))),
+            Shape::HeldMoves => w.remote(wf, Some(folder(p, "W"))),
+        };
+        w.opts.guarding.wiped = std::sync::Arc::new([wf].into_iter().collect());
+        let plan = w.plan();
+        let held = plan.held.contains(&Op::LocalDelete {
             node: x,
-            subtree: vec![x]
-        }]
-    );
-}
-
-/// §7, §8: a file in a folder removed on the drive, moved out of it and changed there: the
-/// plan downloads it to its new folder (a move and an update in one), and the folder's delete
-/// doesn't expect it.
-#[test]
-fn a_folder_delete_expects_what_a_download_moves_out_of_it_gone() {
-    let [d, a, b] = ids(3)[..] else {
-        unreachable!()
-    };
-    let mut w = World::default();
-    w.synced(d, folder(ROOT, "d"))
-        .synced(a, file(d, "a", "a"))
-        .synced(b, file(d, "b", "b"));
-    w.remote(d, None)
-        .remote(a, None)
-        .remote(b, Some(file(ROOT, "b", "changed")));
-    let plan = w.plan();
-    assert_eq!(
-        kinds(&plan.ops),
-        ["download-replace", "delete"],
-        "{:?}",
-        plan.ops
-    );
-    let mut gone = vec![d, a];
-    gone.sort();
-    assert_eq!(
-        plan.ops.last(),
-        Some(&Op::LocalDelete {
-            node: d,
-            subtree: gone
-        })
-    );
-    assert!(plan.moves_out_of.contains(&d));
-}
-
-/// §7: folder A held as every synced file (`wiped`) and moved on the drive since (restored
-/// elsewhere, say): a removal elsewhere in A is still held with it, A's move or not.
-#[test]
-fn a_delete_in_a_held_folder_that_moves_stays_held() {
-    let [p, a, f, d] = ids(4)[..] else {
-        unreachable!()
-    };
-    let mut w = World::default();
-    w.synced(p, folder(ROOT, "P"))
-        .synced(a, folder(ROOT, "A"))
-        .synced(f, file(a, "f", "f"))
-        .synced(d, file(a, "D", "d"));
-    w.remote(a, Some(folder(p, "A"))).remote(d, None);
-    w.opts.guarding.wiped = std::sync::Arc::new([a].into_iter().collect());
-    let plan = w.plan();
-    assert_eq!(kinds(&plan.ops), ["move"], "{:?}", plan.ops);
-    assert_eq!(
-        plan.held,
-        [Op::LocalDelete {
-            node: d,
-            subtree: vec![d]
-        }]
-    );
+            subtree: vec![x],
+        });
+        if !held || plan.ops.iter().any(|op| op.deletes_here() == Some(x)) {
+            let_through.push(format!("{shape:?}: {:?} held {:?}", plan.ops, plan.held));
+        }
+    }
+    assert!(let_through.is_empty(), "{let_through:#?}");
 }

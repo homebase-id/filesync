@@ -518,8 +518,7 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   (a move elsewhere out of this device's view isn't a removal: the drive keeps it live; nor
   is a move out of a folder removed elsewhere: the plan moves it out first, and the folder's
   delete expects only what goes, so a move that doesn't run leaves that delete stale, taking
-  nothing; engine: `files_moved_out_of_a_folder_removed_elsewhere_dont_count_with_it`,
-  `a_move_out_that_fails_leaves_the_folders_delete_stale`). The
+  nothing). The
   count is the whole sync's, not a page's (§6.5): with the page's removals it takes what other
   pages still have to remove, the dirty ones and the files in folders the drive removed that
   are still live here (taken along, by §6.3's rule; read while anything is dirty: a walk of
@@ -559,7 +558,9 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   `hbsync_engine::held`); engine:
   `a_delete_here_is_held_and_put_back_brings_it_back`,
   `every_file_removed_elsewhere_is_held_and_put_back_restores_it`,
-  `a_confirmed_folder_delete_does_not_hold_other_deletes`.
+  `a_confirmed_folder_delete_does_not_hold_other_deletes`,
+  `files_moved_out_of_a_folder_removed_elsewhere_dont_count_with_it`,
+  `a_move_out_that_fails_leaves_the_folders_delete_stale`.
 - **Online-only files** are never deleted remotely just because they have no local bytes.
 
 ## 8. Operations

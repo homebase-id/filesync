@@ -12,6 +12,9 @@ impl Reconciler<'_> {
         let mut moves = Vec::new();
         let mut content = Vec::new();
         let mut deletes = Vec::new(); // (depth, op)
+        // The nodes whose item here a delete (or a forget) takes: their subtrees are filled in
+        // once only the topmost of them is left.
+        let mut gone_here: HashSet<NodeId> = HashSet::new();
         let mut settles = Vec::new();
 
         let scope: Vec<NodeId> = self.scope.iter().copied().collect();
@@ -128,13 +131,13 @@ impl Reconciler<'_> {
             if !fork_copies.contains(&node) {
                 match (&target, local_real.filter(|_| forked.is_none())) {
                     (None, Some(_)) => {
-                        let mut subtree = i.local.subtree(node);
-                        subtree.sort();
+                        let subtree = Vec::new(); // filled in below, for the topmost
                         let op = if self.masks.masked.contains(&node) {
                             Op::Forget { node, subtree }
                         } else {
                             Op::LocalDelete { node, subtree }
                         };
+                        gone_here.insert(node);
                         deletes.push((depth(&i.local), op));
                         local_ops = true;
                     }
@@ -245,47 +248,58 @@ impl Reconciler<'_> {
         content.sort_by_key(Op::pooled);
         // What this plan moves out of its folder here (a move, a download to another folder:
         // they run before the deletes) leaves a folder it deletes with what is below it.
-        let moving = moving_out(moves.iter().chain(&content), &i.local);
-        let deleted_here: HashSet<NodeId> = deletes
-            .iter()
-            .filter_map(|(_, op)| op.deletes_here())
-            .collect();
-        // Only the topmost delete of a subtree is needed; but one in a folder moved out of it
-        // first is a delete of its own there.
+        let moving = match gone_here.is_empty() {
+            true => HashSet::new(),
+            false => moving_out(moves.iter().chain(&content), &i.local),
+        };
+        // Only the topmost delete here of a subtree is needed; but one in a folder moved out
+        // of it first is a delete of its own there. Nearest first, a cycle cut off.
+        let below_another = |node: NodeId| {
+            let mut current = i.local.get(node).map(|s| s.parent);
+            let mut steps = 0;
+            while let Some(parent) = current.filter(|p| !p.is_root() && steps <= i.local.len()) {
+                if gone_here.contains(&parent) {
+                    return true;
+                }
+                if moving.contains(&parent) {
+                    return false;
+                }
+                steps += 1;
+                current = i.local.get(parent).map(|s| s.parent);
+            }
+            false
+        };
         let mut deletes: Vec<Op> = deletes
             .into_iter()
             .map(|(_, op)| op)
-            .filter(|op| match op.deletes_here() {
-                Some(node) => !i
-                    .local
-                    .ancestors(node)
-                    .iter()
-                    .find(|a| deleted_here.contains(a) || moving.contains(a))
-                    .is_some_and(|a| deleted_here.contains(a)),
-                None => true,
+            .filter(|op| match op {
+                Op::LocalDelete { node, .. } | Op::Forget { node, .. }
+                    if gone_here.contains(node) =>
+                {
+                    !below_another(*node)
+                }
+                _ => true,
             })
             .collect();
-        // A folder's delete here expects what goes: not what the plan moves out of it first,
-        // with what is below that. Where such a move doesn't run, the folder holds what its
-        // delete doesn't expect: it goes stale and takes nothing. (A folder forgotten, out of
-        // view, never holds such a node: one that holds an item this device syncs is detached,
-        // `mask.rs`.)
-        if !moving.is_empty() {
-            for op in &mut deletes {
-                let Op::LocalDelete { node, subtree } = op else {
-                    continue;
-                };
-                let tops: Vec<NodeId> = moving
-                    .iter()
-                    .copied()
-                    .filter(|m| m != node && subtree.binary_search(m).is_ok())
-                    .collect();
-                if tops.is_empty() {
-                    continue;
+        // What each takes here. A folder's delete expects what goes: not what the plan moves
+        // out of it first, with what is below that. Where such a move doesn't run, the folder
+        // holds what its delete doesn't expect: it goes stale and takes nothing. A forget, out
+        // of view, takes it all (a folder there never holds such a node: one that holds an
+        // item this device syncs is detached, `mask.rs`).
+        for op in &mut deletes {
+            match op {
+                Op::LocalDelete { node, subtree } => {
+                    let trimmed;
+                    (*subtree, trimmed) = subtree_staying(&i.local, *node, &moving);
+                    if trimmed {
+                        self.plan.moves_out_of.insert(*node);
+                    }
                 }
-                let out: HashSet<NodeId> = tops.iter().flat_map(|m| i.local.subtree(*m)).collect();
-                subtree.retain(|n| !out.contains(n));
-                self.plan.moves_out_of.insert(*node);
+                Op::Forget { node, subtree } if gone_here.contains(node) => {
+                    *subtree = i.local.subtree(*node);
+                    subtree.sort();
+                }
+                _ => {}
             }
         }
 
@@ -356,4 +370,26 @@ fn moving_out<'o>(ops: impl IntoIterator<Item = &'o Op>, local: &Tree) -> HashSe
             _ => None,
         })
         .collect()
+}
+
+/// `node` and what is below it in `tree`, sorted, but what `moving` holds below it, with what
+/// is below that; and whether anything was left out. Round a cycle, each node once.
+fn subtree_staying(tree: &Tree, node: NodeId, moving: &HashSet<NodeId>) -> (Vec<NodeId>, bool) {
+    let (mut out, mut seen, mut trimmed) = (Vec::new(), HashSet::new(), false);
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        if !seen.insert(n) {
+            continue;
+        }
+        if n != node && moving.contains(&n) {
+            trimmed = true;
+            continue;
+        }
+        if !n.is_root() {
+            out.push(n);
+        }
+        stack.extend(tree.children(n));
+    }
+    out.sort();
+    (out, trimmed)
 }

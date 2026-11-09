@@ -980,45 +980,38 @@ impl Ledger {
             })
             .collect();
         let expects = |node: NodeId| -> Vec<NodeId> {
-            let all = local.subtree(node);
-            let inside: HashSet<NodeId> = all.iter().copied().collect();
-            let out: HashSet<NodeId> = moving
+            let mut all = local.subtree(node);
+            all.sort();
+            let tops: Vec<NodeId> = moving
                 .iter()
-                .filter(|m| **m != node && inside.contains(m))
-                .flat_map(|m| local.subtree(*m))
+                .copied()
+                .filter(|m| *m != node && all.binary_search(m).is_ok())
                 .collect();
-            let mut kept: Vec<NodeId> = all.into_iter().filter(|n| !out.contains(n)).collect();
-            kept.sort();
-            kept
+            if !tops.is_empty() {
+                let mut out: Vec<NodeId> = tops.iter().flat_map(|m| local.subtree(*m)).collect();
+                out.sort();
+                all.retain(|n| out.binary_search(n).is_err());
+            }
+            all
         };
-        // Each delete's, once.
-        let expected: HashMap<NodeId, Vec<NodeId>> = seen
-            .ops
-            .iter()
-            .chain(seen.held)
-            .filter(|p| matches!(p.what, What::LocalDelete { .. }))
-            .map(|p| (p.node, expects(p.node)))
-            .collect();
-        first(&mut self.expects_differ, || {
-            seen.ops
-                .iter()
-                .chain(seen.held)
-                .find_map(|p| match &p.what {
-                    What::LocalDelete { subtree } => {
-                        let mut planned = subtree.clone();
-                        planned.sort();
-                        let want = &expected[&p.node];
-                        (&planned != want).then(|| {
-                            format!(
-                                "{}: {:?} expects {planned:?}, not what its folder holds less what \
-                             the plan moves out of it ({want:?})",
-                                seen.client, p.op
-                            )
-                        })
-                    }
-                    _ => None,
-                })
-        });
+        // Each delete's, once, compared with what it expects (sorted, as the plan keeps it).
+        let mut expected: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        let mut differ = None;
+        for p in seen.ops.iter().chain(seen.held) {
+            let What::LocalDelete { subtree } = &p.what else {
+                continue;
+            };
+            let want = expects(p.node);
+            if differ.is_none() && (!subtree.is_sorted() || *subtree != want) {
+                differ = Some(format!(
+                    "{}: {:?} expects {subtree:?}, not what its folder holds less what the \
+                     plan moves out of it ({want:?})",
+                    seen.client, p.op
+                ));
+            }
+            expected.insert(p.node, want);
+        }
+        first(&mut self.expects_differ, || differ);
         // The guard's rule, checked independently: no plan deletes more files on a side than
         // the limit (or every file) without the user's confirmation.
         let Some(min) = guard else {
@@ -1102,7 +1095,7 @@ impl Ledger {
             let held_all: usize = seen
                 .held
                 .iter()
-                .map(|p| match &p.what {
+                .map(|p| match p.what {
                     What::LocalDelete { .. } => files_in(p.node),
                     _ => 0,
                 })

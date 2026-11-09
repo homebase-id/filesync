@@ -1595,39 +1595,8 @@ fn a_delete_that_stops_half_way_drops_the_bases_of_what_went() -> R {
     Ok(())
 }
 
-/// Another device moves files out of d to the top and removes d: here one plan moves them out
-/// and deletes d, which expects only what goes. One round does it all: the delete doesn't go
-/// stale for what the moves took out (another round to plan it again).
-#[test]
-fn a_folder_removed_elsewhere_after_files_moved_out_goes_in_one_round() -> R {
-    let server = server();
-    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
-    let mut b = Client::with_config(&server, "b", |cfg| {
-        cfg.guard.allow = true;
-        cfg.max_rounds = 1;
-    })?;
-    for i in 0..3 {
-        a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
-    }
-    a.sync()?;
-    b.sync()?;
-    for i in 0..2 {
-        fs::rename(
-            a.root.join(format!("d/f{i}.txt")),
-            a.root.join(format!("f{i}.txt")),
-        )?;
-    }
-    fs::remove_dir_all(a.root.join("d"))?;
-    a.sync()?;
-    b.engine.scan_local()?;
-    let report = b.engine.sync("2026-10-08", true)?;
-    assert!(report.skipped.is_empty(), "{report:?}");
-    assert_eq!(b.tree_text(""), ["f0.txt = 0", "f1.txt = 1"]);
-    Ok(())
-}
-
-/// As above, but a move out can't run (a new file here took its place after the plan): the
-/// folder still holds it, which the delete doesn't expect. The delete goes stale and takes
+/// Another device moves a file out of d to the top and removes d, but here the move out can't
+/// run (a new file here took its place after the plan): the folder still holds it, which the delete doesn't expect. The delete goes stale and takes
 /// nothing: the file stays here, unchanged, for the next plan. With `out_of_view`, the folder
 /// moves where this device doesn't sync it (§10) instead of being removed: a folder there
 /// holding an item this device syncs (the file, here as it was) isn't forgotten but detached
