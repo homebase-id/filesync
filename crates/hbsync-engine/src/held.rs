@@ -38,15 +38,17 @@ pub fn out_of_dirty<'p>(plan: &'p Plan, page: &[NodeId]) -> (Vec<&'p Op>, HashSe
         .chain(plan.waiting.iter().copied())
         .chain(plan.delete_waits.iter().copied())
         .collect();
+    // A held delete here covers what it expects, and what the plan moves out of it first
+    // (planned, so dirty: the delete stays with it, as one that took it would).
     let covers = |op: &'p Op| {
-        let subtree = match op {
-            Op::LocalDelete { node, subtree } => match plan.held_covers.get(node) {
-                Some(all) => &all[..],
-                None => &subtree[..],
-            },
-            _ => &[],
+        let (subtree, out) = match op {
+            Op::LocalDelete { node, subtree } => (
+                &subtree[..],
+                plan.moves_out.get(node).map_or(&[][..], |out| &out[..]),
+            ),
+            _ => (&[][..], &[][..]),
         };
-        std::iter::once(op.node()).chain(subtree.iter().copied())
+        std::iter::once(op.node()).chain(subtree.iter().chain(out).copied())
     };
     let mut ops = Vec::new();
     for op in &plan.held {

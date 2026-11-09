@@ -244,45 +244,15 @@ impl Reconciler<'_> {
         moves.sort_by_key(Op::pooled);
         content.sort_by_key(Op::pooled);
         // What this plan moves out of its folder here (a move, a download to another folder:
-        // they run before the deletes) leaves a folder it deletes with what is below it: that
-        // folder's delete expects the rest only. Where such a move doesn't run, the folder
-        // holds what its delete doesn't expect: it goes stale and takes nothing.
-        let moving: HashSet<NodeId> = moves
-            .iter()
-            .chain(&content)
-            .filter_map(|op| match op {
-                Op::LocalMove { node, parent, .. }
-                | Op::LocalDownload {
-                    node,
-                    parent,
-                    replace: true,
-                    ..
-                } if i.local.get(*node).is_some_and(|l| l.parent != *parent) => Some(*node),
-                _ => None,
-            })
-            .collect();
-        // Whether `n` leaves `top`'s folder with a move (its own, or a folder's it is in).
-        let leaves = |n: NodeId, top: NodeId| {
-            std::iter::once(n)
-                .chain(i.local.ancestors(n))
-                .take_while(|a| *a != top)
-                .any(|a| moving.contains(&a))
-        };
-        if !moving.is_empty() {
-            for (_, op) in &mut deletes {
-                if let Op::LocalDelete { node, subtree } | Op::Forget { node, subtree } = op {
-                    let top = *node;
-                    subtree.retain(|n| !leaves(*n, top));
-                }
-            }
-        }
+        // they run before the deletes) leaves a folder it deletes with what is below it.
+        let moving = moving_out(moves.iter().chain(&content), &i.local);
         let deleted_here: HashSet<NodeId> = deletes
             .iter()
             .filter_map(|(_, op)| op.deletes_here())
             .collect();
         // Only the topmost delete of a subtree is needed; but one in a folder moved out of it
         // first is a delete of its own there.
-        let deletes: Vec<Op> = deletes
+        let mut deletes: Vec<Op> = deletes
             .into_iter()
             .map(|(_, op)| op)
             .filter(|op| match op.deletes_here() {
@@ -290,11 +260,36 @@ impl Reconciler<'_> {
                     .local
                     .ancestors(node)
                     .iter()
-                    .take_while(|a| !moving.contains(a))
-                    .any(|a| deleted_here.contains(a)),
+                    .find(|a| deleted_here.contains(a) || moving.contains(a))
+                    .is_some_and(|a| deleted_here.contains(a)),
                 None => true,
             })
             .collect();
+        // A folder's delete here expects what goes: not what the plan moves out of it first,
+        // with what is below that. Where such a move doesn't run, the folder holds what its
+        // delete doesn't expect: it goes stale and takes nothing. (A folder forgotten, out of
+        // view, never holds such a node: one that holds an item this device syncs is detached,
+        // `mask.rs`.)
+        if !moving.is_empty() {
+            for op in &mut deletes {
+                let Op::LocalDelete { node, subtree } = op else {
+                    continue;
+                };
+                let tops: Vec<NodeId> = moving
+                    .iter()
+                    .copied()
+                    .filter(|m| m != node && subtree.binary_search(m).is_ok())
+                    .collect();
+                if tops.is_empty() {
+                    continue;
+                }
+                let out: HashSet<NodeId> = tops.iter().flat_map(|m| i.local.subtree(*m)).collect();
+                subtree.retain(|n| !out.contains(n));
+                let mut tops = tops;
+                tops.sort();
+                self.plan.moves_out.insert(*node, tops);
+            }
+        }
 
         self.plan.ops.extend(
             self.masks
@@ -345,4 +340,25 @@ impl Reconciler<'_> {
         };
         self.input.base_extra.get(&node).and_then(|e| e.local_hash) != Some(l.hash)
     }
+}
+
+/// The nodes `ops` move out of their folder here: a move, or a download to another folder
+/// (`replace`: the drive's version in place of the item here). They run before the deletes,
+/// so a folder's delete here doesn't take them, nor what is below them.
+pub(super) fn moving_out<'o>(
+    ops: impl IntoIterator<Item = &'o Op>,
+    local: &Tree,
+) -> HashSet<NodeId> {
+    ops.into_iter()
+        .filter_map(|op| match op {
+            Op::LocalMove { node, parent, .. }
+            | Op::LocalDownload {
+                node,
+                parent,
+                replace: true,
+                ..
+            } if local.get(*node).is_some_and(|l| l.parent != *parent) => Some(*node),
+            _ => None,
+        })
+        .collect()
 }

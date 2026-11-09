@@ -307,6 +307,10 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
      live in it plans those again: they are orphans now, whichever of them changed.
 4. **Folder delete propagation** removes the folder on the drive first, then its descendants,
    top-down; here it deletes the topmost folder, its bases and its children's in one step (§7).
+   What the plan moves out of that folder first (a move, a download to another folder) is left
+   out of that step, with what is below it: a delete inside a folder moved out is a step of its
+   own there, after the move. Where such a move doesn't run, the folder holds what its delete
+   doesn't expect: the delete goes stale and takes nothing, for the next plan.
 5. **Planned in pages.** The engine plans its dirty set in pages of 20,000 nodes, in node id
    order (§8a). A node dirty in another page, or a held delete (§7), is left as it is: its
    change isn't merged in this plan, and no fix here moves, renames or adopts it.

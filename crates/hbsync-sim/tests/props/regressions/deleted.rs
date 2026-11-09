@@ -2438,3 +2438,58 @@ fn a_folder_removed_elsewhere_counts_what_its_delete_takes() {
     let breach = removed_elsewhere(false, false).expect_err("the oracle reports the delete");
     assert!(breach.contains("went through unconfirmed"), "{breach}");
 }
+
+/// Seed 243bb3f0 (`held_deletes_out_of_the_dirty_set_plan_alike_from_a_wipe`): folder `a`,
+/// held as every synced file on client 1, is restored and moved into a new folder on the
+/// drive, `c.txt` in it still removed. Client 1's plan moves `a`: a removal elsewhere in a
+/// held folder stays held, the folder moved or not. A delete inside a folder moved out of a
+/// held one goes on its own; a first take of that rule let this one through too.
+#[test]
+fn regression_a_delete_in_a_held_folder_that_moves_stays_held() {
+    use hbsync_sim::Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let (plan, step, confirm) = (
+        |client| Event::Plan { client },
+        |client| Event::Step { client },
+        |client| Event::Confirm { client },
+    );
+    let events = [
+        act(0, CreateJunkFolder { parent: 0 }),
+        act(0, Edit { file: 0 }),
+        act(0, Purge),
+        act(
+            1,
+            CreateFile {
+                parent: 14,
+                name: 6,
+            },
+        ),
+        plan(1),
+        confirm(1),
+        act(0, Purge),
+        plan(1),
+        step(1),
+        act(0, ListDeleted),
+        plan(0),
+        act(1, ToggleIgnore),
+        act(0, Restore { node: 0 }),
+        step(0),
+        act(0, CreateFolder { parent: 2, name: 1 }),
+        act(
+            0,
+            Move {
+                node: 0,
+                parent: 14,
+                name: 0,
+            },
+        ),
+    ];
+    if let Err(e) = run_with(
+        2,
+        Some(crate::common::WIPED_MIN),
+        |sim| crate::common::with_a_folder_wiped(sim.with_held_check()),
+        &events,
+    ) {
+        panic!("{e}");
+    }
+}

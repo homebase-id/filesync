@@ -2802,8 +2802,8 @@ fn a_folder_delete_expects_what_the_plan_moves_out_of_it_gone() {
 }
 
 /// §7: a delete held as every synced file (`wiped`) of a folder a file moves out of first:
-/// held, it covers its whole subtree here, the file moving out too, so it stays in the dirty
-/// set while that move is planned (`held::out_of_dirty`, as before the delete expected less).
+/// held, it covers what the plan moves out of it too, so it stays in the dirty set while that
+/// move is planned (`held::out_of_dirty`, as when the delete expected the file).
 #[test]
 fn a_held_delete_covers_what_the_plan_moves_out_of_it() {
     let [d, a, b] = ids(3)[..] else {
@@ -2828,9 +2828,105 @@ fn a_held_delete_covers_what_the_plan_moves_out_of_it() {
             subtree: gone
         }]
     );
-    let mut all = vec![d, a, b];
-    all.sort();
-    assert_eq!(plan.held_covers.get(&d), Some(&all));
+    assert_eq!(plan.moves_out.get(&d), Some(&vec![b]));
     let (out, nodes) = hbsync_engine::held::out_of_dirty(&plan, &[d, a, b]);
     assert!(out.is_empty() && nodes.is_empty(), "{out:?} {nodes:?}");
+}
+
+/// §7: folder A held as every synced file (`wiped`); the drive moved folder M out of A and
+/// removed D in M. The plan moves M out first: D's delete is in M then, not in A, so it isn't
+/// held with A (another delete to confirm), and goes.
+#[test]
+fn a_delete_in_a_folder_moved_out_of_a_held_one_isnt_held_with_it() {
+    let [a, f, m, d] = ids(4)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(a, folder(ROOT, "A"))
+        .synced(f, file(a, "f", "f"))
+        .synced(m, folder(a, "M"))
+        .synced(d, file(m, "D", "d"));
+    w.remote(a, None)
+        .remote(f, None)
+        .remote(d, None)
+        .remote(m, Some(folder(ROOT, "M")));
+    w.opts.guarding.wiped = std::sync::Arc::new([a].into_iter().collect());
+    let plan = w.plan();
+    let mut gone = vec![a, f];
+    gone.sort();
+    assert_eq!(
+        plan.held,
+        [Op::LocalDelete {
+            node: a,
+            subtree: gone
+        }]
+    );
+    assert_eq!(kinds(&plan.ops), ["move", "delete"], "{:?}", plan.ops);
+    assert!(
+        plan.ops.contains(&Op::LocalDelete {
+            node: d,
+            subtree: vec![d]
+        }),
+        "{:?}",
+        plan.ops
+    );
+}
+
+/// §7, §8: a file in a folder removed on the drive, moved out of it and changed there: the
+/// plan downloads it to its new folder (a move and an update in one), and the folder's delete
+/// doesn't expect it.
+#[test]
+fn a_folder_delete_expects_what_a_download_moves_out_of_it_gone() {
+    let [d, a, b] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(d, folder(ROOT, "d"))
+        .synced(a, file(d, "a", "a"))
+        .synced(b, file(d, "b", "b"));
+    w.remote(d, None)
+        .remote(a, None)
+        .remote(b, Some(file(ROOT, "b", "changed")));
+    let plan = w.plan();
+    assert_eq!(
+        kinds(&plan.ops),
+        ["download-replace", "delete"],
+        "{:?}",
+        plan.ops
+    );
+    let mut gone = vec![d, a];
+    gone.sort();
+    assert_eq!(
+        plan.ops.last(),
+        Some(&Op::LocalDelete {
+            node: d,
+            subtree: gone
+        })
+    );
+    assert_eq!(plan.moves_out.get(&d), Some(&vec![b]));
+}
+
+/// §7: folder A held as every synced file (`wiped`) and moved on the drive since (restored
+/// elsewhere, say): a removal elsewhere in A is still held with it, A's move or not.
+#[test]
+fn a_delete_in_a_held_folder_that_moves_stays_held() {
+    let [p, a, f, d] = ids(4)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(p, folder(ROOT, "P"))
+        .synced(a, folder(ROOT, "A"))
+        .synced(f, file(a, "f", "f"))
+        .synced(d, file(a, "D", "d"));
+    w.remote(a, Some(folder(p, "A"))).remote(d, None);
+    w.opts.guarding.wiped = std::sync::Arc::new([a].into_iter().collect());
+    let plan = w.plan();
+    assert_eq!(kinds(&plan.ops), ["move"], "{:?}", plan.ops);
+    assert_eq!(
+        plan.held,
+        [Op::LocalDelete {
+            node: d,
+            subtree: vec![d]
+        }]
+    );
 }
