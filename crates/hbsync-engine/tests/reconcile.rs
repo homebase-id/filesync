@@ -2870,11 +2870,23 @@ fn a_delete_in_a_held_folder_stays_held_whatever_moves() {
         };
         w.opts.guarding.wiped = std::sync::Arc::new([wf].into_iter().collect());
         let plan = w.plan();
-        let held = plan.held.contains(&Op::LocalDelete {
+        // X's delete, its own after M's move, and where W goes too, W's, which doesn't expect
+        // what M takes out of it.
+        let x_delete = Op::LocalDelete {
             node: x,
             subtree: vec![x],
-        });
-        if !held || plan.ops.iter().any(|op| op.deletes_here() == Some(x)) {
+        };
+        let held = match shape {
+            Shape::OutOfHeld => vec![
+                x_delete,
+                Op::LocalDelete {
+                    node: wf,
+                    subtree: vec![wf, a, b],
+                },
+            ],
+            Shape::WithinHeld | Shape::HeldMoves => vec![x_delete],
+        };
+        if plan.held != held || kinds(&plan.ops) != ["move"] {
             let_through.push(format!("{shape:?}: {:?} held {:?}", plan.ops, plan.held));
         }
     }

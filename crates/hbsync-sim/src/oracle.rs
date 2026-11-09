@@ -848,6 +848,25 @@ pub(crate) enum What {
     Other,
 }
 
+/// What a delete here of `node` expects to take, sorted, worked out on its own: `node` and what
+/// is below it here, but the subtrees here of what the plan moves out of it first (`moving`,
+/// below `node`); `node` itself always (round a cycle too).
+fn delete_expects(local: &Tree, node: NodeId, moving: &HashSet<NodeId>) -> Vec<NodeId> {
+    let mut all = local.subtree(node);
+    all.sort();
+    let tops: Vec<NodeId> = moving
+        .iter()
+        .copied()
+        .filter(|m| *m != node && all.binary_search(m).is_ok())
+        .collect();
+    if !tops.is_empty() {
+        let mut out: Vec<NodeId> = tops.iter().flat_map(|m| local.subtree(*m)).collect();
+        out.sort();
+        all.retain(|n| *n == node || out.binary_search(n).is_err());
+    }
+    all
+}
+
 /// A plan and what it was made from, for [`Ledger::plan_made`].
 pub(crate) struct PlanSeen<'a> {
     pub(crate) client: &'a str,
@@ -979,21 +998,7 @@ impl Ledger {
                 _ => None,
             })
             .collect();
-        let expects = |node: NodeId| -> Vec<NodeId> {
-            let mut all = local.subtree(node);
-            all.sort();
-            let tops: Vec<NodeId> = moving
-                .iter()
-                .copied()
-                .filter(|m| *m != node && all.binary_search(m).is_ok())
-                .collect();
-            if !tops.is_empty() {
-                let mut out: Vec<NodeId> = tops.iter().flat_map(|m| local.subtree(*m)).collect();
-                out.sort();
-                all.retain(|n| out.binary_search(n).is_err());
-            }
-            all
-        };
+        let expects = |node: NodeId| delete_expects(local, node, &moving);
         // Each delete's, once, compared with what it expects (sorted, as the plan keeps it).
         let mut expected: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
         let mut differ = None;
@@ -1264,6 +1269,21 @@ mod tests {
             file_id: remote.file_id,
             expected: remote.version,
         }
+    }
+
+    /// A delete here of D, in a cycle with M here (another writer's moves) that the plan moves
+    /// out: it expects D alone, never less.
+    #[test]
+    fn a_delete_in_a_cycle_with_what_moves_out_expects_itself() {
+        let (d, m, x) = (NodeId::new(), NodeId::new(), NodeId::new());
+        let mut local = Tree::new();
+        local.insert(d, NodeState::folder(m, "d"));
+        local.insert(m, NodeState::folder(d, "m"));
+        local.insert(x, NodeState::folder(m, "x"));
+        assert_eq!(delete_expects(&local, d, &HashSet::from([m])), [d]);
+        let mut all = vec![d, m, x];
+        all.sort();
+        assert_eq!(delete_expects(&local, d, &HashSet::new()), all);
     }
 
     /// A restore ends a delete: a tag removed after it counts, and coming back is reported. A

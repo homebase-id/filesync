@@ -236,14 +236,6 @@ impl Reconciler<'_> {
         // forgotten only after its children's deletes, on either side; only the topmost local
         // delete of a subtree is needed).
         creates.sort_by_key(|(d, op)| (op.is_transfer(), op.pooled(), *d, op.node()));
-        deletes.sort_by_key(|(d, op)| {
-            let depth = *d as i64;
-            (
-                !op.pooled(),
-                if op.pooled() { depth } else { -depth },
-                op.node(),
-            )
-        });
         moves.sort_by_key(Op::pooled);
         content.sort_by_key(Op::pooled);
         // What this plan moves out of its folder here (a move, a download to another folder:
@@ -252,35 +244,22 @@ impl Reconciler<'_> {
             true => HashSet::new(),
             false => moving_out(moves.iter().chain(&content), &i.local),
         };
-        // Only the topmost delete here of a subtree is needed; but one in a folder moved out
-        // of it first is a delete of its own there. Nearest first, a cycle cut off.
-        let below_another = |node: NodeId| {
-            let mut current = i.local.get(node).map(|s| s.parent);
-            let mut steps = 0;
-            while let Some(parent) = current.filter(|p| !p.is_root() && steps <= i.local.len()) {
-                if gone_here.contains(&parent) {
-                    return true;
-                }
-                if moving.contains(&parent) {
-                    return false;
-                }
-                steps += 1;
-                current = i.local.get(parent).map(|s| s.parent);
+        // Only the topmost delete here of a subtree is needed.
+        deletes.retain(|(_, op)| match op {
+            Op::LocalDelete { node, .. } | Op::Forget { node, .. } if gone_here.contains(node) => {
+                !below_another(&i.local, *node, &gone_here, &moving)
             }
-            false
-        };
-        let mut deletes: Vec<Op> = deletes
-            .into_iter()
-            .map(|(_, op)| op)
-            .filter(|op| match op {
-                Op::LocalDelete { node, .. } | Op::Forget { node, .. }
-                    if gone_here.contains(node) =>
-                {
-                    !below_another(*node)
-                }
-                _ => true,
-            })
-            .collect();
+            _ => true,
+        });
+        deletes.sort_by_key(|(d, op)| {
+            let depth = *d as i64;
+            (
+                !op.pooled(),
+                if op.pooled() { depth } else { -depth },
+                op.node(),
+            )
+        });
+        let mut deletes: Vec<Op> = deletes.into_iter().map(|(_, op)| op).collect();
         // What each takes here. A folder's delete expects what goes: not what the plan moves
         // out of it first, with what is below that. Where such a move doesn't run, the folder
         // holds what its delete doesn't expect: it goes stale and takes nothing. A forget, out
@@ -289,8 +268,13 @@ impl Reconciler<'_> {
         for op in &mut deletes {
             match op {
                 Op::LocalDelete { node, subtree } => {
-                    let trimmed;
-                    (*subtree, trimmed) = subtree_staying(&i.local, *node, &moving);
+                    let mut trimmed = false;
+                    *subtree = i.local.subtree_where(*node, |n| {
+                        let stays = !moving.contains(&n);
+                        trimmed |= !stays;
+                        stays
+                    });
+                    subtree.sort();
                     if trimmed {
                         self.plan.moves_out_of.insert(*node);
                     }
@@ -372,24 +356,68 @@ fn moving_out<'o>(ops: impl IntoIterator<Item = &'o Op>, local: &Tree) -> HashSe
         .collect()
 }
 
-/// `node` and what is below it in `tree`, sorted, but what `moving` holds below it, with what
-/// is below that; and whether anything was left out. Round a cycle, each node once.
-fn subtree_staying(tree: &Tree, node: NodeId, moving: &HashSet<NodeId>) -> (Vec<NodeId>, bool) {
-    let (mut out, mut seen, mut trimmed) = (Vec::new(), HashSet::new(), false);
-    let mut stack = vec![node];
-    while let Some(n) = stack.pop() {
-        if !seen.insert(n) {
-            continue;
-        }
-        if n != node && moving.contains(&n) {
-            trimmed = true;
-            continue;
-        }
-        if !n.is_root() {
-            out.push(n);
-        }
-        stack.extend(tree.children(n));
+/// Whether `node`, gone here, is in another node gone here (`gone`), whose delete takes it: not
+/// where the plan moves a folder between them out of that one first (`moving`), as its delete
+/// is one of its own there then. Nearest first; a cycle ends the walk after one lap, and
+/// `node` is never its own.
+fn below_another(
+    local: &Tree,
+    node: NodeId,
+    gone: &HashSet<NodeId>,
+    moving: &HashSet<NodeId>,
+) -> bool {
+    local
+        .ancestors_iter(node)
+        .find(|a| gone.contains(a) || moving.contains(a))
+        .is_some_and(|a| gone.contains(&a))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Another writer's moves made a cycle here, D in B and B in D, and D is gone: D's delete
+    /// is its own (the walk up ends back at D, which isn't its own folder). Where B is gone
+    /// too, each is in the other (both dropped, as before).
+    #[test]
+    fn a_delete_round_a_cycle_isnt_its_own_folders() {
+        let (d, b) = (NodeId::new(), NodeId::new());
+        let mut local = Tree::new();
+        local.insert(d, NodeState::folder(b, "D"));
+        local.insert(b, NodeState::folder(d, "B"));
+        let none = HashSet::new();
+        assert!(!below_another(&local, d, &HashSet::from([d]), &none));
+        let both = HashSet::from([d, b]);
+        assert!(below_another(&local, d, &both, &none));
+        assert!(below_another(&local, b, &both, &none));
     }
-    out.sort();
-    (out, trimmed)
+
+    /// Files gone in a folder that sits in a cycle (C1 in C2, C2 in C1): each walk up ends
+    /// after a lap, not a walk the size of the tree per file.
+    #[test]
+    fn walks_up_round_a_cycle_end_after_a_lap() {
+        let (c1, c2, f) = (NodeId::new(), NodeId::new(), NodeId::new());
+        let mut local = Tree::new();
+        local.insert(c1, NodeState::folder(c2, "c1"));
+        local.insert(c2, NodeState::folder(c1, "c2"));
+        local.insert(f, NodeState::folder(c1, "f"));
+        let files: Vec<NodeId> = (0..100_000).map(|_| NodeId::new()).collect();
+        for (i, n) in files.iter().enumerate() {
+            local.insert(*n, NodeState::folder(f, format!("{i}")));
+        }
+        let gone: HashSet<NodeId> = files.iter().copied().collect();
+        let start = std::time::Instant::now();
+        assert!(
+            !files
+                .iter()
+                .any(|n| below_another(&local, *n, &gone, &HashSet::new()))
+        );
+        // A few steps each: well under a second even unoptimized (a walk the size of the tree
+        // each would be 10^10 steps).
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(10),
+            "{:?}",
+            start.elapsed()
+        );
+    }
 }

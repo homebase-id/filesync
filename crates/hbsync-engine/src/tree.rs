@@ -14,6 +14,51 @@ pub struct Tree {
     children: HashMap<NodeId, BTreeSet<NodeId>>,
 }
 
+/// [`Tree::ancestors_iter`]: `node`'s parents, nearest first, one lap round a cycle at most.
+#[derive(Debug)]
+pub struct Ancestors<'t> {
+    tree: &'t Tree,
+    current: Option<NodeId>,
+    /// The first nodes seen (`node`, then its parents), up to `seen`; the rest in `far`.
+    near: [NodeId; Ancestors::NEAR],
+    seen: usize,
+    far: HashSet<NodeId>,
+}
+
+impl Ancestors<'_> {
+    /// How many nodes are kept seen without allocating: deeper than most trees.
+    const NEAR: usize = 32;
+
+    /// Whether `node` is new to the walk (and now seen).
+    fn first_visit(&mut self, node: NodeId) -> bool {
+        let near = self.seen.min(Self::NEAR);
+        if self.near[..near].contains(&node) || self.far.contains(&node) {
+            return false;
+        }
+        match self.seen < Self::NEAR {
+            true => self.near[self.seen] = node,
+            false => {
+                self.far.insert(node);
+            }
+        }
+        self.seen += 1;
+        true
+    }
+}
+
+impl Iterator for Ancestors<'_> {
+    type Item = NodeId;
+
+    fn next(&mut self) -> Option<NodeId> {
+        let parent = self.current.take()?;
+        if parent.is_root() || !self.first_visit(parent) {
+            return None;
+        }
+        self.current = self.tree.nodes.get(&parent).map(|s| s.parent);
+        Some(parent)
+    }
+}
+
 /// A broken invariant.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Violation {
@@ -101,17 +146,20 @@ impl Tree {
     /// `node`'s parents up to (excluding) the root, nearest first. Stops at a missing node and
     /// never loops: a cycle ends the walk.
     pub fn ancestors(&self, node: NodeId) -> Vec<NodeId> {
-        let mut out = Vec::new();
-        let mut seen = BTreeSet::from([node]);
-        let mut current = self.nodes.get(&node).map(|s| s.parent);
-        while let Some(parent) = current {
-            if parent.is_root() || !seen.insert(parent) {
-                break;
-            }
-            out.push(parent);
-            current = self.nodes.get(&parent).map(|s| s.parent);
+        self.ancestors_iter(node).collect()
+    }
+
+    /// [`Tree::ancestors`], one at a time: a cycle ends the walk at the first node seen again
+    /// (`node` itself among them), so one lap at most. Nothing allocated for the first
+    /// [`Ancestors::NEAR`] steps (a set after).
+    pub fn ancestors_iter(&self, node: NodeId) -> Ancestors<'_> {
+        Ancestors {
+            tree: self,
+            current: self.nodes.get(&node).map(|s| s.parent),
+            near: [node; Ancestors::NEAR],
+            seen: 1,
+            far: HashSet::new(),
         }
-        out
     }
 
     /// The names from the root down to `node`, or `None` if `node` isn't connected to the root
@@ -136,11 +184,17 @@ impl Tree {
     /// `node` and everything below it, parents before children; round a cycle (another
     /// writer's moves) each node once.
     pub fn subtree(&self, node: NodeId) -> Vec<NodeId> {
+        self.subtree_where(node, |_| true)
+    }
+
+    /// [`Tree::subtree`], but a node below `node` that `keep` refuses is left out with what is
+    /// below it (`node` itself is always in).
+    pub fn subtree_where(&self, node: NodeId, mut keep: impl FnMut(NodeId) -> bool) -> Vec<NodeId> {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
         let mut stack = vec![node];
         while let Some(n) = stack.pop() {
-            if !seen.insert(n) {
+            if !seen.insert(n) || (n != node && !keep(n)) {
                 continue;
             }
             if !n.is_root() {
@@ -357,6 +411,29 @@ mod tests {
         let mut below = t.subtree(a);
         below.sort();
         assert_eq!(below, [a, b, c]);
+        // Leaving b out round the cycle keeps a.
+        assert_eq!(t.subtree_where(a, |n| n != b), [a]);
+        // The walk up ends where it began, a lap at most.
+        assert_eq!(t.ancestors(a), [b]);
+        assert_eq!(t.ancestors(c), [b, a]);
+    }
+
+    /// A walk up past the steps kept without allocating still ends round a cycle, each node
+    /// once, and at the root.
+    #[test]
+    fn a_long_walk_up_ends() {
+        let chain = ids(100);
+        let mut t = Tree::new();
+        for w in chain.windows(2) {
+            t.insert(w[1], folder(w[0], "n"));
+        }
+        t.insert(chain[0], folder(NodeId::ROOT, "top"));
+        let up: Vec<NodeId> = chain[..99].iter().rev().copied().collect();
+        assert_eq!(t.ancestors(chain[99]), up);
+        // Closed into a cycle: the top's parent is the bottom.
+        t.insert(chain[0], folder(chain[99], "top"));
+        let round = t.ancestors(chain[99]);
+        assert_eq!(round, up, "a lap, then it ends");
     }
 
     #[test]

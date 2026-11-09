@@ -1596,11 +1596,12 @@ fn a_delete_that_stops_half_way_drops_the_bases_of_what_went() -> R {
 }
 
 /// Another device moves a file out of d to the top and removes d, but here the move out can't
-/// run (a new file here took its place after the plan): the folder still holds it, which the delete doesn't expect. The delete goes stale and takes
-/// nothing: the file stays here, unchanged, for the next plan. With `out_of_view`, the folder
-/// moves where this device doesn't sync it (§10) instead of being removed: a folder there
-/// holding an item this device syncs (the file, here as it was) isn't forgotten but detached
-/// (`mask.rs`), so no `Forget` takes the file either.
+/// run (a new file here took its place after the plan): the folder still holds it, which the
+/// delete doesn't expect. The delete goes stale and takes nothing: the file stays here,
+/// unchanged, for the next plan. With `out_of_view`, the folder moves where this device
+/// doesn't sync it (§10) instead of being removed: a folder there holding an item this device
+/// syncs (the file, here as it was) isn't forgotten but detached (`mask.rs`), so no `Forget`
+/// takes the file either.
 fn a_move_out_fails(out_of_view: bool) -> R {
     use hbsync_engine::reconcile::Op;
     use hbsync_engine::testkit::AfterPlan;
