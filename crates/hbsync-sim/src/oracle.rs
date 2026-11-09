@@ -849,22 +849,22 @@ pub(crate) enum What {
 }
 
 /// What a delete here of `node` expects to take, sorted, worked out on its own: `node` and what
-/// is below it here, but the subtrees here of what the plan moves out of it first (`moving`,
-/// below `node`); `node` itself always (round a cycle too).
+/// is below it here, but what the plan moves out of it first (`moving`, below `node`) with
+/// what is below that. Round a cycle (another writer's moves), each node once, `node` always.
 fn delete_expects(local: &Tree, node: NodeId, moving: &HashSet<NodeId>) -> Vec<NodeId> {
-    let mut all = local.subtree(node);
-    all.sort();
-    let tops: Vec<NodeId> = moving
-        .iter()
-        .copied()
-        .filter(|m| *m != node && all.binary_search(m).is_ok())
-        .collect();
-    if !tops.is_empty() {
-        let mut out: Vec<NodeId> = tops.iter().flat_map(|m| local.subtree(*m)).collect();
-        out.sort();
-        all.retain(|n| *n == node || out.binary_search(n).is_err());
+    let mut kept = vec![node];
+    let mut seen = HashSet::from([node]);
+    let mut next = vec![node];
+    while let Some(n) = next.pop() {
+        for child in local.children(n) {
+            if !moving.contains(&child) && seen.insert(child) {
+                kept.push(child);
+                next.push(child);
+            }
+        }
     }
-    all
+    kept.sort();
+    kept
 }
 
 /// A plan and what it was made from, for [`Ledger::plan_made`].
@@ -1284,6 +1284,12 @@ mod tests {
         let mut all = vec![d, m, x];
         all.sort();
         assert_eq!(delete_expects(&local, d, &HashSet::new()), all);
+        // With K in D too: D and K, M's way round the cycle back to D takes nothing of D's.
+        let k = NodeId::new();
+        local.insert(k, NodeState::folder(d, "k"));
+        let mut both = vec![d, k];
+        both.sort();
+        assert_eq!(delete_expects(&local, d, &HashSet::from([m])), both);
     }
 
     /// A restore ends a delete: a tag removed after it counts, and coming back is reported. A
