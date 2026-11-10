@@ -811,6 +811,7 @@ use disk::Disk;
 #[cfg(feature = "testkit")]
 pub use hooks::{Aside, Faults, Meanwhile};
 pub use hooks::{CrashPoint, FailPoint, Hooks};
+pub use local::holds_tags;
 pub(crate) use outcome::ExecReport;
 use outcome::{Outcome, Step, io_outcome, remote_outcome, rescan};
 pub use outcome::{Skip, Stopped};

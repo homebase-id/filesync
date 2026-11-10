@@ -853,7 +853,8 @@ impl Sim {
             let os = self.clients[c].os;
             // A folder made with none to write holds none, the write failing or not (the
             // executor's: it claims none).
-            let nothing = matches!(&op, Op::LocalMkdir { tags, .. } if tags.held_by(os).is_empty());
+            let nothing = matches!(&op, Op::LocalMkdir { tags, .. }
+                if !tags.iter().any(|t| hbsync_platform::tags::holds(t, os)));
             tag_failed = os != Os::Windows
                 && !nothing
                 && (std::mem::take(&mut self.faults.fail_tags_next)
@@ -1390,16 +1391,16 @@ impl Sim {
                 if !client.local.exists(parent) {
                     return Retry;
                 }
-                let tags = tags.held_by(client.os);
+                let held = tags.held_by(client.os);
                 // Made from Recently deleted, never synced here, with tags to write: restored,
                 // changed or purged since the plan, the version there may no longer hold them
                 // (the executor's).
-                let holds =
-                    |r: &ServerNode| tags.iter().all(|t| r.state.tags.get(&t.name) == Some(t));
                 if drive.is_none()
                     && !client.base.contains(node)
-                    && !tags.is_empty()
-                    && !self.server.removed.get(&node).is_some_and(holds)
+                    && !held.is_empty()
+                    && !self.server.removed.get(&node).is_some_and(|r| {
+                        hbsync_engine::exec::holds_tags(&tags, &r.state.tags, client.os)
+                    })
                 {
                     return Skip;
                 }
@@ -1409,7 +1410,7 @@ impl Sim {
                 client.local.insert(
                     node,
                     NodeState {
-                        tags,
+                        tags: held,
                         ..NodeState::folder(parent, name)
                     },
                 );

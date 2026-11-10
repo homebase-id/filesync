@@ -121,7 +121,8 @@ impl Executor<'_> {
         // Where the volume keeps no tags (this OS none), what it holds of them is never known:
         // it claims none, as a download does.
         let kept_tags = self.disk.tags_kept();
-        let none = tags.held_by(self.folder.os).is_empty();
+        let os = self.folder.os;
+        let none = !tags.iter().any(|t| hbsync_platform::tags::holds(t, os));
         // Made from Recently deleted, it settles against the version there (as read before the
         // write: a pull landing before the commit reads as one landing after it), what the tags
         // it writes come from. Restored, changed or purged since the plan, that version
@@ -130,13 +131,11 @@ impl Executor<'_> {
         // adding it, and a tag removed on the drive since came back. One with none to write
         // (Recovered files, made here), or a folder left by an interrupted run (taken over as
         // before), goes ahead.
-        if acted.is_none() && !synced_before && !adopt && kept_tags && !none {
-            let held = tags.held_by(self.folder.os);
-            let holds =
-                |v: &hbsync_types::NodeState| held.iter().all(|t| v.tags.get(&t.name) == Some(t));
-            if !removed.as_ref().is_some_and(|d| holds(&d.state)) {
-                return Ok(Outcome::stale("not as planned in Recently deleted"));
-            }
+        let holds = removed
+            .as_ref()
+            .is_some_and(|d| holds_tags(tags, &d.state.tags, os));
+        if acted.is_none() && !synced_before && !adopt && kept_tags && !none && !holds {
+            return Ok(Outcome::stale("not as planned in Recently deleted"));
         }
         let recorded_on = acted.clone().or_else(|| {
             let from = removed.clone().filter(|_| synced_before)?;
@@ -213,7 +212,7 @@ impl Executor<'_> {
             tags: self.disk.on_item_after(left, on_item_before),
             send_hash: false,
         };
-        let (os, folder) = (self.folder.os, self.folder);
+        let folder = self.folder;
         self.cfg.hooks.before_commit(self.db);
         let fails = self.fails(FailPoint::Commit);
         let committed = self.db.write(|s| {
@@ -634,4 +633,16 @@ fn forget(s: &Store<'_>, n: NodeId, node: NodeId) -> Result<(), StateError> {
     }
     s.folder().delete_base(n)?;
     Ok(())
+}
+
+/// Whether a folder made from Recently deleted with the `planned` tags may settle against the
+/// version there, tagged `there`, on `os`: each planned tag this OS can hold is there as planned,
+/// colour and all. Linux holds no colours, but a colour changed there since the plan still makes
+/// it wait: the restore that follows would send the planned colour over the new one. The
+/// simulator's folders made so ask this too.
+pub fn holds_tags(planned: &Tags, there: &Tags, os: hbsync_platform::Os) -> bool {
+    planned
+        .iter()
+        .filter(|t| hbsync_platform::tags::holds(t, os))
+        .all(|t| there.get(&t.name) == Some(t))
 }
