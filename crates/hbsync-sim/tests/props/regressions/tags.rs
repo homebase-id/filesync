@@ -1377,3 +1377,35 @@ fn regression_a_coloured_folder_is_made_from_recently_deleted_on_linux() {
         panic!("{e}");
     }
 }
+
+/// Seed 5317e937 (`a_pull_between_a_local_check_and_its_commit_loses_nothing`): client 0
+/// (macOS) tags a file Red, synced. Its user gives Red another colour, the plan sends it up,
+/// and before it does the user gives Red a third. The write, planned before, lands with the
+/// second colour; with both sides changed since the base, the merge takes the drive's, and the
+/// third colour is lost: the known limit of a tag write in flight, for a colour.
+#[test]
+fn regression_a_colour_given_while_its_own_tag_write_is_in_flight_is_a_known_limit() {
+    use Action::{Colour, CreateFile, Tag};
+    let act = |client, action| Event::Act { client, action };
+    let plan = |client| Event::Plan { client };
+    let step = |client| Event::Step { client };
+    let events = [
+        act(0, CreateFile { parent: 0, name: 0 }),
+        act(0, Tag { node: 0, tag: 12 }),
+        plan(0),
+        step(0),
+        act(0, Colour { node: 0, tag: 12 }),
+        plan(0),
+        act(0, Colour { node: 0, tag: 0 }),
+        step(0),
+    ];
+    let mut sim = Sim::new(3);
+    sim.run(&events);
+    assert!(sim.quiesce(30), "no convergence");
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    let limits = sim.tags_lost_to_known_limits();
+    assert!(
+        limits.iter().any(|l| l.starts_with("OwnTagWriteInFlight")),
+        "{limits:?}"
+    );
+}

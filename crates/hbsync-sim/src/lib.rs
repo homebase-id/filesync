@@ -202,8 +202,8 @@ impl Sim {
         &self.clients[c].held
     }
 
-    /// For scripted tests: the tag adds [`Sim::check`] found lost to a known limit of the
-    /// engine, as `"Limit node tag"`.
+    /// For scripted tests: the tag adds, removals and colours [`Sim::check`] found lost to a
+    /// known limit of the engine, as `"Limit node tag"`.
     pub fn tags_lost_to_known_limits(&self) -> Vec<String> {
         self.ledger
             .tags

@@ -280,6 +280,11 @@ impl Client {
         self.extra.remove(&node);
     }
 
+    /// The client's base's tag `name` of `node` (synced here), if it has one.
+    pub(crate) fn base_tag(&self, node: NodeId, name: &str) -> Option<&hbsync_types::Tag> {
+        self.base.get(node).and_then(|b| b.tags.get(name))
+    }
+
     /// The part of the drive the client's folder syncs.
     pub(crate) fn scope(&self) -> Scope {
         Scope::on_device(self.coords.top, self.own_tops.iter().copied())

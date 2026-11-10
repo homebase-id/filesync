@@ -875,7 +875,8 @@ impl Sim {
             if let Op::LocalDownload { tags, .. } = &op
                 && let Some(record) = &self.placed_from
                 && before_tags.as_ref().is_some_and(|held| {
-                    hbsync_engine::exec::tags_lost(held, tags, &record.state.tags)
+                    let os = self.clients[c].os;
+                    hbsync_engine::exec::tags_lost(held, tags, &record.state.tags, os)
                 })
             {
                 self.placed_from = None;
@@ -3010,6 +3011,57 @@ mod tests {
         assert_eq!(ops, ["RemoteTags", "LocalDownload"]);
         sim.fail_next_tag_write();
         while sim.step(0) {}
+        assert!(sim.quiesce(10));
+        sim.check().unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Folder a, tagged Red, synced on client 0 (macOS), 1 (Linux) and 2 (Windows). Client 0's
+    /// user gives Red another colour, which goes up; client 2's user deletes the folder, which
+    /// goes to Recently deleted in that colour. Client 1 then restores it with a write planned
+    /// before the recolour, Red as its plan saw it, over that version, its base settled against
+    /// it since (the case `Tags::merge_onto` names; the stale plan and base are set up here: no
+    /// event sequence was found that reaches them). Linux holds Red without its colour, so the
+    /// restore keeps the drive's colour, and the oracle owes client 0's recolour after it. (The
+    /// plan's colour went up: the recolour was lost.)
+    #[test]
+    fn a_linux_restore_keeps_a_colour_given_on_a_mac() {
+        let mut sim = Sim::new(3);
+        sim.run(&[
+            act(0, Action::CreateFolder { parent: 0, name: 0 }),
+            act(0, Action::Tag { node: 0, tag: 0 }), // Red, 6
+        ]);
+        assert!(sim.quiesce(10));
+        let folder = sim.item(0, "a").expect("the folder");
+        let red = |colour| Tags::new([hbsync_types::Tag::new("Red", colour)]);
+        sim.run(&[
+            act(0, Action::Colour { node: 0, tag: 0 }), // Red, 7
+            Event::Plan { client: 0 },
+            Event::Step { client: 0 },
+        ]);
+        assert_eq!(sim.server.live[&folder].state.tags, red(7));
+        sim.run(&[
+            act(2, Action::Delete { node: 0 }),
+            Event::Plan { client: 2 },
+            Event::Step { client: 2 },
+        ]);
+        assert_eq!(sim.server.removed[&folder].state.tags, red(7));
+        // Client 1's base settled against the version in Recently deleted; its plan's restore
+        // carries Red as before.
+        sim.plan(1);
+        let client = &mut sim.clients[1];
+        let mut base = client.base.get(folder).expect("synced").clone();
+        base.tags = red(7);
+        client.base.insert(folder, base);
+        let op = Op::RemoteCreate {
+            node: folder,
+            parent: NodeId::ROOT,
+            name: "a".into(),
+            kind: NodeKind::Folder,
+            tags: red(6),
+        };
+        assert_eq!(sim.execute(1, &op), Outcome::Done);
+        assert_eq!(sim.server.live[&folder].state.tags, red(7));
+        sim.clients[1].plan.clear();
         assert!(sim.quiesce(10));
         sim.check().unwrap_or_else(|e| panic!("{e}"));
     }

@@ -3850,15 +3850,134 @@ fn a_download_whose_tag_write_fails_keeps_a_tag_not_sent_up() -> R {
 }
 
 /// A tag a failed download write loses: one the item holds as the download was to write it,
-/// that the drive doesn't hold so (a colour changed here counts).
+/// that the drive doesn't hold so (a colour changed here counts, on macOS; Linux reads Red
+/// without its colour, and a tag is its name there).
 #[test]
 fn a_recoloured_tag_counts_as_not_sent_up() {
+    use super::transfer_ops::tags_lost;
     let (red3, red0, none) = (tags_of(&[("Red", 3)]), tags_of(&[("Red", 0)]), tags_of(&[]));
-    assert!(super::transfer_ops::tags_lost(&red3, &red3, &red0));
-    assert!(super::transfer_ops::tags_lost(&red3, &red3, &none));
-    assert!(!super::transfer_ops::tags_lost(&red3, &red3, &red3));
-    // Not to be written so (the drive's colour won): nothing lost.
-    assert!(!super::transfer_ops::tags_lost(&red3, &red0, &red0));
+    let odd = tags_of(&[("x\ny", 0)]); // a Finder tag macOS can't write
+    let (mac, linux) = (Os::MacOs, Os::Linux);
+    // (on the item, to write, on the drive, OS, lost, why)
+    let cases = [
+        (&red3, &red3, &red0, mac, true, "recoloured here"),
+        (&red3, &red3, &none, mac, true, "only the item has it"),
+        (&red3, &red3, &red3, mac, false, "the drive has it"),
+        (
+            &red3,
+            &red0,
+            &red0,
+            mac,
+            false,
+            "not to be written so: the drive's colour won",
+        ),
+        (
+            &odd,
+            &odd,
+            &none,
+            mac,
+            true,
+            "a tag macOS can't hold, the item's alone",
+        ),
+        (
+            &red0,
+            &red3,
+            &none,
+            linux,
+            true,
+            "only the item has it, by name",
+        ),
+        (
+            &red0,
+            &red0,
+            &red3,
+            linux,
+            false,
+            "the drive has it, in a colour",
+        ),
+        (&red0, &none, &none, linux, false, "not to be written"),
+    ];
+    for (on_item, to_write, drive, os, lost, why) in cases {
+        assert_eq!(
+            tags_lost(on_item, to_write, drive, os),
+            lost,
+            "{os:?}: {why}"
+        );
+    }
+}
+
+/// A folder synced here (its base tagged `base`, its item on disk), in Recently deleted tagged
+/// `there`, restored by a device on `os` with the tags its plan gave (`planned`): the tags the
+/// drive holds after.
+fn a_folder_restored_over(
+    os: Os,
+    base: &Tags,
+    planned: &Tags,
+    there: &Tags,
+) -> Result<Tags, Box<dyn std::error::Error>> {
+    let mut h = Harness::new()?;
+    h.folder.os = os;
+    let node = NodeId::new();
+    let meta = |removed: bool| NodeMeta {
+        node,
+        parent: NodeId::ROOT,
+        kind: NodeKind::Folder,
+        content: folder_a(there),
+        removed,
+    };
+    let at = {
+        let mut server = h.remote.server();
+        let at = server.create(&meta(false), None)?;
+        server.update(at.file_id, at.version, &meta(true), None)?
+    };
+    let row = MirrorRow::from_content(
+        at,
+        node,
+        NodeId::ROOT,
+        NodeKind::Folder,
+        &folder_a(there),
+        None,
+    );
+    h.db.write(|s| {
+        s.account().put_removed(&RemovedRow {
+            row,
+            removed_at: Some(1),
+        })?;
+        let state = NodeState {
+            tags: base.clone(),
+            ..NodeState::folder(NodeId::ROOT, "a")
+        };
+        s.folder().put_base(&BaseRow::new(node, state, at))
+    })?;
+    h.local_folder("a", node)?;
+    let report = h.run(vec![Op::RemoteCreate {
+        node,
+        parent: NodeId::ROOT,
+        name: "a".into(),
+        kind: NodeKind::Folder,
+        tags: planned.clone(),
+    }])?;
+    let header = h.remote.server().header(at.file_id)?;
+    let hbsync_remote::RemoteBody::Live { content, .. } = &header.body else {
+        return Err(format!("gone from the drive: {report:?}").into());
+    };
+    assert!(!header.removed, "not restored: {report:?}");
+    Ok(content.tags())
+}
+
+/// A restore over a version in Recently deleted whose Red has the base's colour (purple), the
+/// plan giving Red another (orange), as when the base settled against that version after the
+/// plan (a Mac's recolour back). Linux holds Red without its colour: the restore keeps the
+/// drive's (sync semantics §11: it never recolours a tag it can't see); it sent the plan's over
+/// it. macOS holds colours: its own, other than the base's, is a recolour here, and goes up.
+/// (Each OS's merge: `Tags::merge_onto`'s tests.)
+#[test]
+fn a_restore_from_linux_never_recolours_a_tag() -> R {
+    let (purple, orange) = (tags_of(&[("Red", 3)]), tags_of(&[("Red", 7)]));
+    let restored = |os| a_folder_restored_over(os, &purple, &orange, &purple);
+    assert_eq!(restored(Os::Linux)?, purple);
+    assert_eq!(restored(Os::MacOs)?, orange);
+    Ok(())
 }
 
 /// `holds_tags` on each OS: Red with a colour planned, there as planned, recoloured, or removed;

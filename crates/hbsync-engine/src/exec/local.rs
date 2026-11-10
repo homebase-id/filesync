@@ -638,8 +638,10 @@ fn forget(s: &Store<'_>, n: NodeId, node: NodeId) -> Result<(), StateError> {
 /// Whether a folder made from Recently deleted with the `planned` tags may settle against the
 /// version there, tagged `there`, on `os`: each planned tag this OS can hold is there as planned,
 /// colour and all. Linux holds no colours, but a colour changed there since the plan still makes
-/// it wait: the restore that follows would send the planned colour over the new one. The
-/// simulator's folders made so ask this too.
+/// it wait, a safe extra round: the restore that follows keeps that version's colour on Linux
+/// ([`Tags::merge_onto`]). The one place that compares colours Linux can't hold, on purpose
+/// (relaxing it is a later follow-up, the user's decision). The simulator's folders made so
+/// ask this too.
 pub fn holds_tags(planned: &Tags, there: &Tags, os: hbsync_platform::Os) -> bool {
     planned
         .iter()

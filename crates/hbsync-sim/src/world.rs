@@ -430,25 +430,17 @@ impl Sim {
                 match (action, had) {
                     (Action::Colour { .. }, Some(i)) if os == Os::MacOs => {
                         tags[i].colour = (tags[i].colour + 1) % 8;
+                        let seen = self.clients[c].base_tag(node, name).map(|t| t.colour);
+                        let in_flight = self.writes_tag(c, node, name);
+                        let colour = tags[i].colour;
+                        let book = &mut self.ledger.tags;
+                        book.recolour(c, node, name, colour, seen, in_flight);
                     }
                     (Action::Tag { .. }, Some(i)) => {
                         tags.remove(i);
-                        let synced = self.clients[c]
-                            .base
-                            .get(node)
-                            .is_some_and(|b| b.tags.get(name).is_some());
+                        let synced = self.clients[c].base_tag(node, name).is_some();
                         let now = synced.then(|| self.server.now());
-                        // The client's own plan still writes the tag (planned before).
-                        let carries = |t: &Tags| t.get(name).is_some();
-                        let in_flight = self.clients[c].plan.iter().any(|(op, _)| match op {
-                            Op::LocalTags { node: n, tags, .. }
-                            | Op::RemoteTags { node: n, tags, .. }
-                            | Op::RemoteUpdate { node: n, tags, .. }
-                            | Op::RemoteCreate { node: n, tags, .. }
-                            | Op::LocalDownload { node: n, tags, .. }
-                            | Op::LocalMkdir { node: n, tags, .. } => *n == node && carries(tags),
-                            _ => false,
-                        });
+                        let in_flight = self.writes_tag(c, node, name);
                         self.ledger.tags.remove(c, node, name, now, in_flight);
                     }
                     (Action::Tag { .. }, None) => {
@@ -1011,13 +1003,26 @@ impl Sim {
         self.ledger.tags.left(c, node);
     }
 
+    /// Whether client `c`'s own plan still writes tag `name` of `node` (planned before: onto
+    /// the item, or up), as it was then ([`Limit::OwnTagWriteInFlight`]).
+    fn writes_tag(&self, c: usize, node: NodeId, name: &str) -> bool {
+        self.clients[c].plan.iter().any(|(op, _)| match op {
+            Op::LocalTags { node: n, tags, .. }
+            | Op::RemoteTags { node: n, tags, .. }
+            | Op::RemoteUpdate { node: n, tags, .. }
+            | Op::RemoteCreate { node: n, tags, .. }
+            | Op::LocalDownload { node: n, tags, .. }
+            | Op::LocalMkdir { node: n, tags, .. } => *n == node && tags.get(name).is_some(),
+            _ => false,
+        })
+    }
+
     /// Whether a removal of tag `name` from `node` is under way that client `c`'s add may lose
     /// to: on another client, not sent up yet (its base has the tag, its item doesn't, or a
     /// plan of its still sends the removal), or on the drive while `c`'s base still has it;
     /// and the known limit it meets where the removal is `c`'s own, planned and still to
     /// write the node ([`Limit::OwnRemovalInFlight`]).
     fn removal_unseen(&self, c: usize, node: NodeId, name: &str) -> (bool, Option<Limit>) {
-        let has = |s: Option<&NodeState>| s.is_some_and(|s| s.tags.get(name).is_some());
         let lacks = |s: Option<&NodeState>| s.is_some_and(|s| s.tags.get(name).is_none());
         // A plan of a client's made from the removal, still to write it to the node.
         let planned = |client: &Client| {
@@ -1035,11 +1040,11 @@ impl Sim {
         let pending = self.clients.iter().enumerate().any(|(d, client)| {
             d != c
                 && express(&Tag::new(name, 0), client.os).is_some()
-                && has(client.base.get(node))
+                && client.base_tag(node, name).is_some()
                 && (lacks(client.local.get(node)) || planned(client))
         });
         let client = &self.clients[c];
-        let synced = has(client.base.get(node));
+        let synced = client.base_tag(node, name).is_some();
         // On the drive, live or in Recently deleted (a restore brings that version back).
         let server = &self.server;
         let stale = lacks(
@@ -1059,25 +1064,16 @@ impl Sim {
         (pending || (synced && stale), own)
     }
 
-    /// `node` is back on the drive (from Recently deleted, or made again after the purge).
+    /// `node` is back on the drive (from Recently deleted, or made again after the purge), with
+    /// the tags it had when removed: where a user deleted it, no longer deleted, so what users
+    /// do to its tags from now on counts. What they did before is settled by the delete: tag
+    /// removals (the version back has what it had), and tags added or recoloured are there
+    /// only if it holds them so; but for an add a client hasn't sent up and its item, synced
+    /// there, still holds: that client never saw the delete (one that did lost the item, and
+    /// the add with it), and sends the add up against the version back, as any add.
     pub(crate) fn restored_on_drive(&mut self, node: NodeId) {
-        let held = self
-            .server
-            .tags_at_removal
-            .get(&node)
-            .cloned()
-            .unwrap_or_default();
-        self.restored(node, &held);
-    }
-
-    /// `node` is back where a user deleted it (on the drive, or here where the delete lost)
-    /// with the tags named `held`: no longer deleted, so what users do to its tags from now on
-    /// counts. What they did before is settled by the delete: tag removals (the version back
-    /// has what it had), and tags added are there only if it holds them; but for an add a
-    /// client hasn't sent up and its item, synced there, still holds: that client never saw
-    /// the delete (one that did lost the item, and the add with it), and sends the add up
-    /// against the version back, as any add.
-    fn restored(&mut self, node: NodeId, held: &BTreeSet<String>) {
+        let none = Tags::default();
+        let held = self.server.tags_at_removal.get(&node).unwrap_or(&none);
         let clients = &self.clients;
         self.ledger.tags.restored(node, held, |(c, _, name)| {
             clients.get(*c).is_some_and(|client| {
