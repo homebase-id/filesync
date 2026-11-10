@@ -454,15 +454,16 @@ fn a_folder_made_before_its_tags_keeps_them_on_the_drive() -> R {
 
 /// A folder synced before, tagged Work, deleted here and on the drive (in Recently deleted,
 /// Work there too), made again here as it comes back for a child another device wrote into it
-/// (its RemoteCreate to follow): no drive version in the plan, none in the mirror. A crash after
-/// it is made and before its tags are written: its record (on the version in Recently deleted)
-/// lets recovery take the folder for the node, holding no tags, not known. Another device
-/// restores it, with Work: the next plan writes Work here, removes nothing from the drive, and
-/// never deletes the node there. Without a record, the scan found a new folder, which adoption
-/// doesn't pair with a node synced before: the node read as deleted here and went from the
-/// drive, its tags with it (sim seed e7972f95's family).
-#[test]
-fn a_folder_made_from_recently_deleted_keeps_its_record_through_a_crash() -> R {
+/// (its RemoteCreate to follow): no drive version in the plan, none live in the mirror. A crash
+/// after it is made and before its tags are written: its record (on the version in Recently
+/// deleted) lets recovery take the folder for the node, holding no tags, not known. Another
+/// device restores it, with Work: the next plan writes Work here, removes nothing from the
+/// drive, and never deletes the node there. Without a record, the scan found a new folder,
+/// which adoption doesn't pair with a node synced before: the node read as deleted here and
+/// went from the drive, its tags with it (sim seed e7972f95's family). `restored_before_run`:
+/// the restore is in the mirror before the run (a pull since the plan), and the record is on
+/// that version.
+fn a_folder_made_from_recently_deleted_keeps_its_record(restored_before_run: bool) -> R {
     let mut h = Harness::new()?;
     let node = NodeId::new();
     let work = Tags::new(vec![Tag::new("Work", 0)]);
@@ -479,11 +480,22 @@ fn a_folder_made_from_recently_deleted_keeps_its_record_through_a_crash() -> R {
         file_id: synced.file_id,
         ..removed_at
     });
+    let restored = row(RemoteRef {
+        file_id: synced.file_id,
+        version: some_version().version,
+    });
+    let made_of = match restored_before_run {
+        true => restored.remote_ref(),
+        false => in_rd.remote_ref(),
+    };
     h.db.write(|s| {
         s.account().put_removed(&RemovedRow {
             row: in_rd.clone(),
             removed_at: Some(1),
         })?;
+        if restored_before_run {
+            s.account().put_live(&restored)?;
+        }
         s.folder()
             .put_base(&BaseRow::new(node, state.clone(), synced))
     })?;
@@ -498,11 +510,7 @@ fn a_folder_made_from_recently_deleted_keeps_its_record_through_a_crash() -> R {
     assert!(crashed.is_err(), "the crash point wasn't reached");
     let records = h.records()?;
     assert_eq!(records.len(), 1, "a record before the folder is made");
-    assert_eq!(
-        records[0].base.remote,
-        in_rd.remote_ref(),
-        "on the version it is made of"
-    );
+    assert_eq!(records[0].base.remote, made_of, "on the version it acts on");
     assert_eq!(records[0].placed_tags, None, "it claims tags never written");
     // The scan finds the folder, new, without tags; recovery takes it for the node.
     let found = NodeId::new();
@@ -513,25 +521,18 @@ fn a_folder_made_from_recently_deleted_keeps_its_record_through_a_crash() -> R {
     let local = h.db.read(|s| s.local_by_node(node))?;
     assert!(local.is_some(), "the folder is the node's");
     let base = h.base(node)?.ok_or("its base")?;
-    assert_eq!(
-        base.remote,
-        in_rd.remote_ref(),
-        "settled where it was made from"
-    );
+    assert_eq!(base.remote, made_of, "settled where it was made from");
     // What the folder and that version both hold: none; where the volume keeps no tags, the
     // folder reads as the drive's.
     if tags_kept(&h.folder.root) {
         assert_eq!(base.state.tags, Tags::default(), "the folder holds none");
     }
-    // Another device restores it, with Work.
-    let restored = row(RemoteRef {
+    // Another device restores it (again), with Work.
+    let later = row(RemoteRef {
         file_id: synced.file_id,
         version: some_version().version,
     });
-    h.db.write(|s| {
-        s.account().delete_removed(node)?;
-        s.account().put_mirror(&restored)
-    })?;
+    h.db.write(|s| s.account().put_live(&later))?;
     let plan = plan_of(&mut h, &[node, found])?;
     assert!(
         !plan.ops.iter().any(|op| matches!(
@@ -551,6 +552,16 @@ fn a_folder_made_from_recently_deleted_keeps_its_record_through_a_crash() -> R {
         plan.ops
     );
     Ok(())
+}
+
+#[test]
+fn a_folder_made_from_recently_deleted_keeps_its_record_through_a_crash() -> R {
+    a_folder_made_from_recently_deleted_keeps_its_record(false)
+}
+
+#[test]
+fn a_folder_made_from_recently_deleted_and_restored_since_keeps_its_record_through_a_crash() -> R {
+    a_folder_made_from_recently_deleted_keeps_its_record(true)
 }
 
 /// The same, from a record that doesn't say which base its plan saw

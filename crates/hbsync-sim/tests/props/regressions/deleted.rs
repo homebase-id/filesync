@@ -1301,8 +1301,11 @@ fn regression_a_folder_made_from_recently_deleted_after_its_restore_waits() {
         Event::Step { client: 1 },
         act(0, Tag { node: 4, tag: 0 }),
     ];
-    let limits = known_limits_of(2, &events);
-    assert!(limits.is_empty(), "{limits:?}");
+    // Saved where client 1's run pulls; it waits either way.
+    for setup in pulled_or_not(|sim| sim) {
+        let limits = known_limits_with(2, setup, &events);
+        assert!(limits.is_empty(), "{limits:?}");
+    }
 }
 
 /// Client 1 deletes file `a` (or, `folder`, folder `b` holding `b/c.txt`); client 0 moves it

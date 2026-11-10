@@ -16,6 +16,11 @@ pub(crate) struct Faults {
     /// Local placements and tag writes so far: now and then a tag write fails (a volume
     /// refusing it), or a placement's commit (a commit write or a folder's stat failing).
     pub(crate) writes: u64,
+    /// Plans made so far: every other one's run reads its mirror as the drive is at each step,
+    /// pulls landing meanwhile (`Client::pulls`), unless `pulls` pins it
+    /// ([`crate::Sim::with_pulls`]).
+    pub(crate) plans: u64,
+    pub(crate) pulls: Option<bool>,
     /// For scripted tests: the next placement with a record fails its commit.
     pub(crate) fail_commit_next: bool,
     /// For scripted tests: the next tag write fails.

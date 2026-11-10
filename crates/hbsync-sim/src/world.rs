@@ -45,16 +45,22 @@ impl Sim {
 
     /// The server's state of `node` as client `c` sees it.
     pub(crate) fn server_state(&self, c: usize, node: NodeId) -> Option<NodeState> {
+        self.server_version(c, node).map(|(state, _)| state)
+    }
+
+    /// [`Sim::server_state`], with the version it is at.
+    pub(crate) fn server_version(&self, c: usize, node: NodeId) -> Option<(NodeState, RemoteRef)> {
         let coords = self.clients[c].coords;
         let n = self
             .server
             .live
             .get(&node)
             .filter(|_| !coords.hides(node) && !self.server.unreadable.contains_key(&node))?;
-        Some(NodeState {
+        let state = NodeState {
             parent: coords.from_drive(n.state.parent),
             ..n.state.clone()
-        })
+        };
+        Some((state, n.remote))
     }
 
     /// Whether drive node `node` is known to lie outside client `c`'s folder's part of the
