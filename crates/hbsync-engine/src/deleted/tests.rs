@@ -427,6 +427,15 @@ fn a_chain_too_deep_ends_at_the_last_row_walked() -> Result<(), StateError> {
     Ok(())
 }
 
+/// What Recently deleted holds when `chosen` is all of it.
+fn holdings_of(chosen: &[Chosen]) -> Holdings {
+    let mut holdings = Holdings::default();
+    for c in chosen {
+        *holdings.removed.entry(c.parent).or_default() += 1;
+    }
+    holdings
+}
+
 /// Emptying orders and keeps by the links among what it empties alone, however deep: each
 /// folder after the folders in it, and a folder holding something that stays keeps every
 /// folder it is in.
@@ -447,15 +456,60 @@ fn emptying_a_chain_deeper_than_any_path() {
         parent: chain[0],
         folder: false,
     });
-    let mut holdings = Holdings::default();
-    for c in &chosen {
-        *holdings.removed.entry(c.parent).or_default() += 1;
-    }
+    let mut holdings = holdings_of(&chosen);
     let mut expected = vec![file];
     expected.extend(&chain);
     assert_eq!(select(&chosen, &holdings), expected);
     holdings.live.insert(chain[0]);
     assert_eq!(select(&chosen, &holdings), [file]);
+}
+
+/// Emptying cycles (a folder in a file in it, two folders in each other, as another app may
+/// leave them) goes in one order, in the same passes, whatever order the rows come in: a stop
+/// between batches leaves the same rows. Files go first, and each node before the folder it
+/// is in, but for one link round each cycle.
+#[test]
+fn emptying_a_cycle_goes_in_the_same_order() {
+    let id = |n: u128| NodeId(Uuid::from_u128(n));
+    let [file, folder, c, d, x, y, z] = [1, 2, 3, 4, 5, 6, 7].map(id);
+    let row = |node, parent, folder| Chosen {
+        node,
+        parent,
+        folder,
+    };
+    let mut chosen = vec![
+        row(folder, file, true),
+        row(file, folder, false),
+        row(c, folder, false),
+        row(d, folder, false),
+        row(x, y, true),
+        row(y, x, true),
+        row(z, y, false),
+    ];
+    let holdings = holdings_of(&chosen);
+    let first = passes(&chosen, &holdings);
+    let order = first.concat();
+    let at: HashMap<NodeId, usize> = order.iter().enumerate().map(|(i, n)| (*n, i)).collect();
+    assert_eq!(at.len(), chosen.len(), "{order:?}");
+    let files = chosen.iter().filter(|r| !r.folder).map(|r| at[&r.node]);
+    let folders = chosen.iter().filter(|r| r.folder).map(|r| at[&r.node]);
+    assert!(files.max() < folders.min(), "{order:?}");
+    let after_its_folder = chosen
+        .iter()
+        .filter(|r| at[&r.node] > at[&r.parent])
+        .count();
+    assert_eq!(after_its_folder, 2, "{order:?}");
+    // Each order of the rows, rotated and reversed, a few times over.
+    for turn in 0..2 * chosen.len() {
+        chosen.rotate_left(1);
+        if turn == chosen.len() {
+            chosen.reverse();
+        }
+        for _ in 0..8 {
+            assert_eq!(passes(&chosen, &holdings), first, "{chosen:?}");
+            assert_eq!(select(&chosen, &holdings), order, "{chosen:?}");
+        }
+    }
 }
 
 /// Items picked by name are those rows alone, described and counted as the listing does
