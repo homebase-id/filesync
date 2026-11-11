@@ -12,7 +12,7 @@ mod os;
 mod pages;
 mod poll;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -151,6 +151,9 @@ struct App {
     restart: Option<PathBuf>,
     shown: Shown,
     notified: HashMap<&'static str, Instant>,
+    /// The folders told refused ([`State::Denied`]) since they last synced: told once, not again
+    /// as their tries come and go ([`refused_untold`]).
+    told_denied: HashSet<PathBuf>,
     /// The folder given its icon and shortcut ([`shell`]) by this run.
     decorated: Option<PathBuf>,
     /// A stop found at the watcher's first look is told; not after restarting into an update
@@ -207,6 +210,7 @@ impl App {
             restart: None,
             shown: Shown::default(),
             notified: HashMap::new(),
+            told_denied: HashSet::new(),
             decorated: None,
             tell_stopped: !hbsync_app::install::restarted(),
         })
@@ -415,18 +419,32 @@ impl App {
         for (kind, summary, body) in notices(&self.daemon, next) {
             self.notify_once(kind, summary, body);
         }
+        // Told only once shown: one held back (a notification of its kind a moment ago) is
+        // told at the next look.
+        let refused = refused_untold(next, &mut self.told_denied);
+        if !refused.is_empty()
+            && self.notify_once(
+                "denied",
+                "Log in again",
+                "Your Homebase no longer accepts this computer: log in again from the menu.".into(),
+            )
+        {
+            self.told_denied.extend(refused);
+        }
     }
 
-    fn notify_once(&mut self, kind: &'static str, summary: &str, body: String) {
+    /// Shows a notification of `kind`, unless one was shown a moment ago; whether it did.
+    fn notify_once(&mut self, kind: &'static str, summary: &str, body: String) -> bool {
         if self
             .notified
             .get(kind)
             .is_some_and(|at| at.elapsed() < NOTIFY_EVERY)
         {
-            return;
+            return false;
         }
         self.notified.insert(kind, Instant::now());
         os::notify(summary.into(), body);
+        true
     }
 
     /// Brings the icon, tooltip and menu up to date, changing only what changed.
@@ -499,7 +517,7 @@ impl App {
 }
 
 /// Notifications for what changed and needs the user, in any folder or account: a new
-/// conflict or failure, held deletes, a refused login.
+/// conflict or failure, held deletes. A refused login is told apart ([`refused_untold`]).
 fn notices(before: &Daemon, next: &Daemon) -> Vec<(&'static str, &'static str, String)> {
     let (Daemon::Running(before), Daemon::Running(now)) = (before, next) else {
         return Vec::new();
@@ -520,6 +538,26 @@ fn notices(before: &Daemon, next: &Daemon) -> Vec<(&'static str, &'static str, S
         }
     }
     out
+}
+
+/// The folders refused and not in `told`, which keeps those told until they sync (idle, nothing
+/// wrong) or go, all until nothing is set up or syncing stops; the caller adds those it told.
+fn refused_untold(next: &Daemon, told: &mut HashSet<PathBuf>) -> Vec<PathBuf> {
+    let now = match next {
+        Daemon::Running(now) => now,
+        Daemon::NotSetUp | Daemon::Stopped => {
+            told.clear();
+            return Vec::new();
+        }
+        Daemon::Starting(_) => return Vec::new(),
+    };
+    let synced = |f: &FolderStatus| f.state == State::Idle && f.error.is_none();
+    told.retain(|path| now.folders.iter().any(|f| f.path == *path && !synced(f)));
+    now.folders
+        .iter()
+        .filter(|f| f.state == State::Denied && !told.contains(&f.path))
+        .map(|f| f.path.clone())
+        .collect()
 }
 
 /// The notice for the notes added since the last look (`before` and `now` counted so far,
@@ -560,13 +598,6 @@ fn folder_notices(
                 "{} deletions to review, in the menu: nothing is deleted until you answer.",
                 held.total()
             ),
-        ));
-    }
-    if now.state == State::Denied && before.state != State::Denied {
-        out.push((
-            "denied",
-            "Log in again",
-            "Your Homebase no longer accepts this computer: log in again from the menu.".into(),
         ));
     }
     out
@@ -760,5 +791,61 @@ mod tests {
         assert_eq!(told.len(), 1, "{told:?}");
         assert_eq!(told[0].2, "Restoring failed (and 1 more)");
         assert!(notices(&now, &now).is_empty(), "nothing new");
+    }
+
+    /// A refused folder is told once, also as first seen: not again until it has synced (not
+    /// as its tries come and go), nor while held back; forgotten when gone or stopped, not
+    /// while the daemon is being started.
+    #[test]
+    fn a_refusal_is_told_once_until_the_folder_syncs_again() {
+        let daemon = |folders: &[(&str, State, Option<&str>)]| {
+            let folders = folders
+                .iter()
+                .map(|(path, state, error)| {
+                    let mut f =
+                        FolderStatus::new(&"anna.example.com".into(), std::path::Path::new(path));
+                    (f.state, f.error) = (*state, error.map(Into::into));
+                    f
+                })
+                .collect();
+            Daemon::Running(Box::new(hbsync_app::DaemonStatus {
+                version: hbsync_app::VERSION.into(),
+                accounts: Vec::new(),
+                folders,
+            }))
+        };
+        let one = |state, error| daemon(&[("/h/Homebase", state, error)]);
+        let told = &mut HashSet::new();
+        // As the tray does, the notification shown (or not).
+        let mut tell = |next: &Daemon, shown: bool| {
+            let refused = refused_untold(next, told);
+            if shown {
+                told.extend(refused.iter().cloned());
+            }
+            refused.len()
+        };
+        let denied = one(State::Denied, Some("refused"));
+        assert_eq!(tell(&denied, false), 1, "first seen, held back");
+        assert_eq!(tell(&denied, true), 1, "told at the next look");
+        assert_eq!(tell(&denied, true), 0);
+        // A runner's look an hour on; paused; resumed, what was wrong still shown.
+        for (state, error) in [
+            (State::Syncing, None),
+            (State::Paused, Some("refused")),
+            (State::Idle, Some("refused")),
+        ] {
+            assert_eq!(tell(&one(state, error), true), 0, "{state:?}");
+            assert_eq!(tell(&denied, true), 0, "after {state:?}");
+        }
+        assert_eq!(tell(&one(State::Idle, None), true), 0);
+        assert_eq!(tell(&denied, true), 1, "refused after it synced");
+
+        let other = daemon(&[("/h/Documents", State::Denied, Some("refused"))]);
+        assert_eq!(tell(&other, true), 1, "another folder");
+        assert_eq!(tell(&denied, true), 1, "set up again");
+        assert_eq!(tell(&Daemon::Starting(Some("timed out".into())), true), 0);
+        assert_eq!(tell(&denied, true), 0, "kept while being started");
+        assert_eq!(tell(&Daemon::Stopped, true), 0);
+        assert_eq!(tell(&denied, true), 1, "syncing stopped, then started");
     }
 }

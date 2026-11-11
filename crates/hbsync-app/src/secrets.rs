@@ -371,18 +371,20 @@ fn remove(path: &Path) -> Result<(), CredentialError> {
     crate::paths::remove_if_exists(path).map_err(|e| HomebaseError::from(e).into())
 }
 
+/// Credentials for `identity` that work nowhere, for tests.
+#[cfg(test)]
+pub(crate) fn sample(identity: &str) -> Credentials {
+    Credentials {
+        identity: identity.to_owned(),
+        client_auth_token: "Y2F0".to_owned(),
+        shared_secret: "AAECAwQFBgcICQoLDA0ODw==".to_owned(),
+        zk_app_key: None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn sample(identity: &str) -> Credentials {
-        Credentials {
-            identity: identity.to_owned(),
-            client_auth_token: "Y2F0".to_owned(),
-            shared_secret: "AAECAwQFBgcICQoLDA0ODw==".to_owned(),
-            zk_app_key: None,
-        }
-    }
 
     fn same(a: &Credentials, b: &Credentials) -> bool {
         (&a.identity, &a.client_auth_token, &a.shared_secret)

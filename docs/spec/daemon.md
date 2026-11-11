@@ -209,7 +209,8 @@ says so when it couldn't reach the keychain to remove the credentials there.
       (`offline`, at least as long as its `Retry-After` says); a refusal (the device revoked)
       shows as `denied` and is asked again hourly (new credentials start it over at once), as
       does a private drive this login holds no key for (`encryption.md`). Meanwhile `pause` and `resume` work
-      (kept in the config); other requests are refused;
+      (kept in the config); other requests are refused, Sync now saying why while it has the
+      account try at once, as a folder's Sync now does (a try under way is the one asked for);
    4. opens the account's `Drive` and the notification socket, and runs a sync loop
       (`Runner`) for each of its folders until a stop request, SIGTERM or SIGINT. It passes the
       notifications on to every folder's loop, reconnects the socket after a sleep, and has
@@ -679,9 +680,9 @@ Linux (rfd's, without GTK) needs `zenity`, which KDE doesn't install.
   daemon, and nothing in the Desktop before Sync) are
   pages the tray serves on `127.0.0.1`, on a random port, under a random path, and opens in the
   browser; the identity's approval returns there.
-- **Notifications:** a new problem note, deletions to review (held deletes), a refused login;
-  each kind at most once a
-  minute.
+- **Notifications:** a new problem note, deletions to review (held deletes), a refused login
+  (once per folder until it syncs again, also when the tray starts with it refused); each kind
+  at most once a minute.
 - **The folder:** the tray gives the main folder (not a role folder: it is the user's own) the
   Filesync icon (`desktop.ini` on Windows, Finder's custom
   icon on macOS, `.directory` and GIO metadata on Linux) and, on Linux, a shortcut (GTK

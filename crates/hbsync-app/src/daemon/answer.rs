@@ -191,7 +191,7 @@ fn control(control: Control, accounts: &[Arc<Account>], daemon: &Daemon) -> Repl
         Control::Daemon(DaemonControl::SyncNow) => {
             let mut not_running = Vec::new();
             for a in accounts {
-                if let Err(why) = a.send_all(&Command::SyncNow) {
+                if let Err(why) = a.sync_now() {
                     not_running.push(why);
                 }
             }
