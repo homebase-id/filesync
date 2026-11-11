@@ -319,6 +319,70 @@ fn regression_a_folder_made_again_and_moved_before_recovery_is_a_new_folder() {
         .unwrap_or_else(|e| panic!("{e}"));
 }
 
+/// c1 makes folder L and syncs it; c0 and c2 take it down, and c1 writes a and b into it. c0
+/// tags L Red; its write lands, and another device removes L (in Recently deleted, with Red).
+/// a goes up into it, so c2 plans to restore L, and c0, which deletes L here, to make it back
+/// from Recently deleted. c2's restore lands, then c0 dies once L is made, before its tags are
+/// written. The engine's write-ahead record is on the version its mirror holds: the one in
+/// Recently deleted, or the restored one once a pull brought it (the store moves a node in one
+/// write). The simulator read live nodes as the plan had them and Recently deleted as the
+/// drive has it now: finding L in neither, it kept no record, and the bare folder read as the
+/// user removing Red (`cc 75630607…`).
+#[test]
+fn regression_a_folder_made_back_and_restored_since_its_plan_keeps_its_record() {
+    use hbsync_sim::Action::*;
+    use hbsync_sim::Event::*;
+    let events = [
+        Act {
+            client: 1,
+            action: CreateFolder { parent: 0, name: 6 },
+        },
+        Plan { client: 1 },
+        Step { client: 1 },
+        Act {
+            client: 1,
+            action: CreateFile { parent: 0, name: 8 },
+        },
+        Act {
+            client: 1,
+            action: CreateFile { parent: 2, name: 1 },
+        },
+        Plan { client: 0 },
+        Step { client: 0 },
+        Plan { client: 2 },
+        Act {
+            client: 0,
+            action: Meanwhile { op: 0 },
+        },
+        Act {
+            client: 0,
+            action: Tag { node: 0, tag: 0 },
+        },
+        Plan { client: 1 },
+        Plan { client: 0 },
+        Step { client: 2 },
+        Act {
+            client: 0,
+            action: CreateJunk { parent: 0 },
+        },
+        Step { client: 0 },
+        Step { client: 1 },
+        Plan { client: 2 },
+        Act {
+            client: 0,
+            action: Delete { node: 6 },
+        },
+        Plan { client: 0 },
+        Step { client: 2 },
+        Crash { client: 0 },
+    ];
+    for setup in pulled_or_not(Sim::with_split_downloads) {
+        run_with(3, None, setup, &events)
+            .map_err(|e| e.to_string())
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+}
+
 /// c1 makes folder a, which clashes with the role folder a: its plan parks it under a temporary
 /// name to rename it. The user tags it Work; another device deletes the role folder outright,
 /// so the next plan creates c1's folder on the drive as a, with Work, while it is still parked.
@@ -518,9 +582,11 @@ fn regression_a_folder_made_from_recently_deleted_keeps_its_tags_through_a_crash
         plan(0),
         Event::Crash { client: 0 },
     ];
-    run_with(3, None, Sim::with_split_downloads, &events)
-        .map_err(|e| e.to_string())
-        .unwrap_or_else(|e| panic!("{e}"));
+    for setup in pulled_or_not(Sim::with_split_downloads) {
+        run_with(3, None, setup, &events)
+            .map_err(|e| e.to_string())
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
 }
 
 /// A new file hashed on send (sync semantics §3): the first crash comes before the upload's

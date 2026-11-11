@@ -77,21 +77,21 @@ impl Sim {
                     .map(Option::unwrap_or_default);
                 let fresh = !client.local.contains(node);
                 if self.execute(c, &op) == Outcome::Done
-                    && let Some(record) = self.placed_from.take()
+                    && let (Some(record), _) = self.take_read()
                 {
                     self.lose_commit(c, &op, record, prior, fresh);
                 }
             }
             // A folder is made in place, then the crash, before its tags are written. Only one
-            // synced before has the engine's write-ahead record, for the version it acts on: the
-            // plan's, else the mirror's as the executor reads it then, else the one in Recently
-            // deleted.
+            // synced before has the engine's write-ahead record, on the version its read before
+            // the write gives (`MkdirRead::record`).
             Some(op @ Op::LocalMkdir { node, .. }) => {
-                let record = self.mkdir_acts_on(c, node, &op);
                 let client = &self.clients[c];
                 let synced_before = client.base.contains(node);
                 let fresh = !client.local.contains(node);
-                if self.execute(c, &op) == Outcome::Done {
+                let outcome = self.execute(c, &op);
+                let record = self.take_read().1.record().cloned();
+                if outcome == Outcome::Done {
                     let client = &mut self.clients[c];
                     if let Some(mut state) = client.local.get(node).cloned() {
                         state.tags = Tags::default();
@@ -284,7 +284,7 @@ impl Sim {
                 format!("recover c{c} {node:?} there={there} {local:?}")
             });
             if there {
-                if !self.settle_record(c, node, &p) {
+                if !self.settle_record(c, node, &p, self.gone_for(c, node)) {
                     // Its node gone, its item not one the drive takes: it waits once (as a file
                     // not hashed yet), then is dropped.
                     if !p.waited {
@@ -339,12 +339,18 @@ impl Sim {
 
     /// Settles record `p`, its item there, as the commit would (the engine's
     /// `settle_placement`, recovery's and a retry's alike): where this client's mirror no
-    /// longer has its node ([`Sim::gone_for`]), at the record's version whatever the plan saw,
-    /// so the removal reaches the item. Returns whether it did: not where the node is gone and
-    /// the item isn't one the drive takes (the record stays).
-    pub(crate) fn settle_record(&mut self, c: usize, node: NodeId, p: &Placement) -> bool {
+    /// longer has its node (`gone`, as the caller read it: [`Sim::gone_for`]), at the record's
+    /// version whatever the plan saw, so the removal reaches the item. Returns whether it did:
+    /// not where the node is gone and the item isn't one the drive takes (the record stays).
+    pub(crate) fn settle_record(
+        &mut self,
+        c: usize,
+        node: NodeId,
+        p: &Placement,
+        gone: bool,
+    ) -> bool {
         let mut record = p.record.clone();
-        if self.gone_for(c, node) {
+        if gone {
             let client = &self.clients[c];
             if !client.local.contains(node) || !verdict(client, node).is_sync() {
                 return false;
@@ -372,7 +378,7 @@ impl Sim {
     /// reach first, by the one rule (`along::taken_along`, over the live folders between and
     /// what is in `node`; a version of its own writing has no time yet). A removed file takes
     /// nothing along.
-    fn gone_for(&self, c: usize, node: NodeId) -> bool {
+    pub(crate) fn gone_for(&self, c: usize, node: NodeId) -> bool {
         let client = &self.clients[c];
         let Some(state) = client.planned_remote.get(node) else {
             return true;
@@ -399,9 +405,10 @@ impl Sim {
             live.push((at, up.parent, up.kind));
             at = up.parent;
         }
-        let Some(&(kind, removal)) = client.planned_removed.get(&at) else {
+        let Some(r) = client.planned_removed.get(&at) else {
             return false;
         };
+        let (kind, removal) = (r.kind, r.at());
         // And what is in `node`, through folders (a later write in it keeps it).
         let folder = |kind| kind == hbsync_types::NodeKind::Folder;
         let mut below = if folder(state.kind) {
@@ -452,7 +459,8 @@ pub(crate) struct Placement {
 mod tests {
     use super::*;
     use crate::action::{Action, Event, act};
-    use hbsync_types::{NodeKind, NodeState};
+    use crate::model::server::ServerNode;
+    use hbsync_types::{NodeKind, NodeState, RemoteRef, VersionTag};
 
     /// A folder never synced, made again where a user's delete of it lost (the drive has it),
     /// and the client dies before its commit: it is back all the same (no longer deleted), as a
@@ -523,6 +531,131 @@ mod tests {
         assert!(sim.clients[0].placing.is_empty());
     }
 
+    /// The version client 0's base of `node` is at.
+    fn base_version(sim: &Sim, node: NodeId) -> Option<VersionTag> {
+        sim.clients[0].extra.get(&node).and_then(|e| e.version)
+    }
+
+    /// Folder `d` is in Recently deleted, and another device writes a file into it there:
+    /// client 0's plan makes `d` first, from there, its run pulling or not; then another device
+    /// restores `d`. Returns `d`'s versions in Recently deleted and restored.
+    fn written_into_and_restored(
+        sim: &mut Sim,
+        d: NodeId,
+        pulls: bool,
+    ) -> (ServerNode, ServerNode) {
+        let removed = sim.server.removed[&d].clone();
+        assert_eq!(crate::oracle::tag_names(&removed.state.tags), ["Red:6"]);
+        let blob = sim.new_blob();
+        let file = sim.ids.fresh();
+        sim.server.put(file, NodeState::file(d, "f", blob));
+        sim.plan(0);
+        sim.clients[0].pulls = pulls;
+        assert!(
+            matches!(
+                sim.clients[0].plan.front(),
+                Some((Op::LocalMkdir { node, drive: None, .. }, _)) if *node == d
+            ),
+            "made from Recently deleted first: {:?}",
+            sim.clients[0].plan
+        );
+        sim.restore_with(d);
+        let live = sim.server.live[&d].clone();
+        assert_ne!(live.remote, removed.remote, "restored as a new version");
+        (removed, live)
+    }
+
+    /// Folder `d`, synced on client 0 tagged Red, deleted there and on the drive, then
+    /// [`written_into_and_restored`].
+    fn made_back_and_restored(sim: &mut Sim, pulls: bool) -> (NodeId, ServerNode, ServerNode) {
+        sim.run(&[act(0, Action::CreateFolder { parent: 0, name: 5 })]); // d
+        let d = sim.item(0, "d").expect("made");
+        let it = sim.pick(0, d, false).expect("there");
+        sim.run(&[act(0, Action::Tag { node: it, tag: 0 })]); // Red
+        assert!(sim.quiesce(10));
+        let it = sim.pick(0, d, false).expect("there");
+        sim.run(&[act(0, Action::Delete { node: it })]);
+        sim.remove_live([d], true);
+        let (removed, live) = written_into_and_restored(sim, d, pulls);
+        (d, removed, live)
+    }
+
+    /// [`made_back_and_restored`], then a crash once the folder is made: the record is on what
+    /// the mirror reads, the version in Recently deleted the plan saw, or, pulls landing, the
+    /// restored one.
+    #[test]
+    fn a_folder_made_back_and_restored_since_its_plan_records_what_its_mirror_reads() {
+        for pulls in [false, true] {
+            let mut sim = Sim::new(1);
+            let (d, removed, live) = made_back_and_restored(&mut sim, pulls);
+            sim.crash(0);
+            let record = &sim.clients[0].placing.get(&d).expect("a record").record;
+            let read = if pulls { &live } else { &removed };
+            assert_eq!((record.at, &record.state), (read.remote, &read.state));
+            assert!(base_version(&sim, d).is_some(), "the base's version known");
+            assert_eq!(record.base_at, base_version(&sim, d));
+        }
+    }
+
+    /// [`made_back_and_restored`], the folder made in a step. A run that pulls finds it live, a
+    /// placement with a record, and settles its base at the restored version with what it
+    /// wrote, its commit failing or not. One that doesn't finds no live version to settle
+    /// against, and the base stays; where its tag write fails, it keeps no tag the folder lacks
+    /// and the version in Recently deleted its mirror reads holds.
+    #[test]
+    fn a_folder_made_back_settles_against_what_its_mirror_reads() {
+        // (pulls, its commit fails, its tag write fails, the base's tags then)
+        let rows: [(bool, bool, bool, &[&str]); 4] = [
+            (false, false, false, &["Red:6"]),
+            (false, false, true, &[]),
+            (true, false, false, &["Red:6"]),
+            (true, true, false, &["Red:6"]),
+        ];
+        for (pulls, fail_commit, fail_tags, tags) in rows {
+            let mut sim = Sim::new(1);
+            let (d, _, live) = made_back_and_restored(&mut sim, pulls);
+            let before = base_version(&sim, d);
+            sim.faults.fail_commit_next = fail_commit;
+            sim.faults.fail_tags_next = fail_tags;
+            assert!(sim.step(0));
+            assert!(sim.clients[0].local.contains(d), "made");
+            assert!(sim.clients[0].placing.is_empty(), "settled");
+            assert!(!sim.faults.fail_commit_next || !pulls, "its commit failed");
+            let at = if pulls {
+                Some(live.remote.version)
+            } else {
+                before
+            };
+            assert_eq!(base_version(&sim, d), at);
+            let base = sim.clients[0].base.get(d).expect("its base");
+            assert_eq!(crate::oracle::tag_names(&base.tags), tags);
+        }
+    }
+
+    /// A folder never synced here, tagged Red, then [`written_into_and_restored`]. A run that
+    /// doesn't pull makes it and settles it against the version in Recently deleted its mirror
+    /// still holds; one that does finds it gone from there, and it waits for the next plan.
+    #[test]
+    fn a_folder_made_from_recently_deleted_reads_its_mirror() {
+        for pulls in [false, true] {
+            let mut sim = Sim::new(1);
+            let d = sim.ids.fresh();
+            let red = Tags::new(vec![hbsync_types::Tag::new("Red", 6)]);
+            let folder = NodeState {
+                tags: red,
+                ..NodeState::folder(NodeId::ROOT, "d")
+            };
+            sim.server.put(d, folder);
+            sim.remove_live([d], true);
+            let (removed, _) = written_into_and_restored(&mut sim, d, pulls);
+            assert!(sim.step(0));
+            match pulls {
+                false => assert_eq!(base_version(&sim, d), Some(removed.remote.version)),
+                true => assert!(!sim.clients[0].local.contains(d), "it waits"),
+            }
+        }
+    }
+
     /// Recovery reads a node as gone from what this client's mirror holds, as the engine does:
     /// not from the server, which another device changed since; and a node in a folder in
     /// Recently deleted, written before the removal, as gone (taken along).
@@ -571,14 +704,18 @@ mod tests {
         let (mut sim, folder, file) = synced(1);
         assert!(!sim.gone_for(0, file));
         sim.clients[0].planned_remote.remove(folder);
-        sim.clients[0]
-            .planned_removed
-            .insert(folder, (NodeKind::Folder, i64::MAX));
+        // Removed late: after anything was written.
+        let late = VersionTag(hbsync_types::Uuid::from_u128(i64::MAX as u128));
+        let version = RemoteRef {
+            version: late,
+            ..sim.clients[0].planned_refs[&folder]
+        };
+        let removed = |kind| crate::model::client::SeenRemoved { kind, version };
+        let (as_folder, as_file) = (removed(NodeKind::Folder), removed(NodeKind::File));
+        sim.clients[0].planned_removed.insert(folder, as_folder);
         assert!(sim.gone_for(0, file));
         // A removed file takes nothing along.
-        sim.clients[0]
-            .planned_removed
-            .insert(folder, (NodeKind::File, i64::MAX));
+        sim.clients[0].planned_removed.insert(folder, as_file);
         assert!(!sim.gone_for(0, file));
     }
 }

@@ -523,7 +523,7 @@ impl Executor<'_> {
         if left.failed
             && !self.heard.tags_refused.contains(&node)
             && let Some(on_item) = current.as_ref().and_then(|r| r.tags.as_ref())
-            && tags_lost(on_item, &to_write, &record.base.state.tags)
+            && tags_lost(on_item, &to_write, &record.base.state.tags, self.folder.os)
         {
             done.keep_for_retry();
             return Ok(Outcome::Retry("its tags weren't written".into()));
@@ -680,9 +680,13 @@ pub fn never_had(
 }
 
 /// Whether a download whose tag write failed loses a tag: one the item there holds (`on_item`) as
-/// the download was to write it, that the drive doesn't hold so (a colour changed here too).
-pub fn tags_lost(on_item: &Tags, to_write: &Tags, drive: &Tags) -> bool {
+/// the download was to write it, that the drive doesn't hold so (a colour changed here too):
+/// each held [`alike`](hbsync_platform::tags::alike) (on Linux, by name).
+pub fn tags_lost(on_item: &Tags, to_write: &Tags, drive: &Tags, os: hbsync_platform::Os) -> bool {
+    let so = |other: Option<&hbsync_types::Tag>, t: &hbsync_types::Tag| {
+        other.is_some_and(|o| hbsync_platform::tags::alike(o, t, os))
+    };
     on_item
         .iter()
-        .any(|t| to_write.get(&t.name) == Some(t) && drive.get(&t.name) != Some(t))
+        .any(|t| so(to_write.get(&t.name), t) && !so(drive.get(&t.name), t))
 }

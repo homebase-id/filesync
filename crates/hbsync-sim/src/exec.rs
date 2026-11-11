@@ -26,40 +26,140 @@ use hbsync_types::{
 
 use crate::Sim;
 use crate::action::NAMES;
-use crate::model::client::{Client, keeps_in, rekey_client, rekey_marks, verdict};
+use crate::model::client::{Client, SeenRemoved, keeps_in, rekey_client, rekey_marks, verdict};
 use crate::model::server::{ServerNode, time};
 use crate::oracle::{PlanSeen, Planned, What, view_with};
 
+/// What an operation read of the drive before its write, for its commit (the executor's).
+#[derive(Debug, Clone)]
+pub(crate) enum Read {
+    /// The version the download just put in place acted on.
+    Download(DriveVersion),
+    Mkdir(MkdirRead),
+}
+
+/// What a folder made here reads of the drive before its write, at once, as the executor's
+/// `mkdir` reads its mirror: the planned version, else what its mirror holds of it (live or in
+/// Recently deleted), and whether that is live.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct MkdirRead {
+    version: Option<DriveVersion>,
+    planned: bool,
+    removed: bool,
+    synced_before: bool,
+    pub(crate) live: bool,
+}
+
+impl MkdirRead {
+    /// The version it acts on (the executor's `acted`): the plan's, else, for one synced here
+    /// before, the live one in its mirror.
+    pub(crate) fn acted(&self) -> Option<&DriveVersion> {
+        let acts = self.planned || self.synced_before && !self.removed;
+        self.version.as_ref().filter(|_| acts)
+    }
+
+    /// The version its write-ahead record is on (one synced here before): the one it acts on,
+    /// or the one in Recently deleted it is made again from (for recovery only).
+    pub(crate) fn record(&self) -> Option<&DriveVersion> {
+        let kept = self.planned || self.synced_before;
+        self.version.as_ref().filter(|_| kept)
+    }
+
+    /// With no drive version planned: the version in Recently deleted its mirror holds.
+    pub(crate) fn removed(&self) -> Option<&DriveVersion> {
+        self.version.as_ref().filter(|_| self.removed)
+    }
+}
+
 impl Sim {
-    /// The version a folder made here by `op` of client `c` acts on, which a folder synced
-    /// before keeps a write-ahead record of (the executor's): the plan's, else the mirror's,
-    /// else, nowhere live, the one in Recently deleted it is made again from (for recovery
-    /// only: its commit keeps its base).
-    pub(crate) fn mkdir_acts_on(&self, c: usize, node: NodeId, op: &Op) -> Option<DriveVersion> {
-        if let Some(d) = op.drive() {
-            return Some(d.clone());
-        }
-        let client = &self.clients[c];
-        if !client.base.contains(node) {
+    /// Node `node` of client `c`'s folder in the drive's Recently deleted, as its feed records
+    /// it, in the folder's coordinates: not one `outside` its part (`Scope::outside`), nor in a
+    /// version no client reads.
+    pub(crate) fn removed_as_seen(
+        &self,
+        c: usize,
+        node: NodeId,
+        outside: &BTreeSet<NodeId>,
+    ) -> Option<(NodeState, RemoteRef)> {
+        let coords = self.clients[c].coords;
+        let drive = coords.to_drive(node);
+        if outside.contains(&node) || self.server.unreadable.contains_key(&drive) {
             return None;
         }
-        let base_at = client.extra.get(&node).and_then(|e| e.version);
-        if let Some(state) = client.planned_remote.get(node) {
-            return Some(DriveVersion {
-                state: state.clone(),
-                at: *client.planned_refs.get(&node)?,
-                base_at,
-            });
+        let n = self.server.removed.get(&drive)?;
+        let state = NodeState {
+            parent: coords.from_drive(n.state.parent),
+            ..n.state.clone()
+        };
+        Some((state, n.remote))
+    }
+
+    /// What the operation just done read before its write ([`Read`]): a download's version, a
+    /// folder's [`MkdirRead`] (empty for anything else).
+    pub(crate) fn take_read(&mut self) -> (Option<DriveVersion>, MkdirRead) {
+        match self.read.take() {
+            Some(Read::Download(d)) => (Some(d), MkdirRead::default()),
+            Some(Read::Mkdir(m)) => (None, m),
+            None => (None, MkdirRead::default()),
         }
-        let coords = client.coords;
-        self.server.removed.get(&node).map(|r| DriveVersion {
-            state: NodeState {
-                parent: coords.from_drive(r.state.parent),
-                ..r.state.clone()
-            },
-            at: r.remote,
-            base_at,
-        })
+    }
+
+    /// What client `c`'s executor reads of `node` in its mirror: its state and version, and
+    /// whether that is in Recently deleted (the store holds a node live or there, never both).
+    /// A run that pulls ([`Client::pulls`]) reads the drive as it is; another the mirror as its
+    /// plan had it, with its own writes since.
+    pub(crate) fn mirror_read(&self, c: usize, node: NodeId) -> Option<(DriveVersion, bool)> {
+        let client = &self.clients[c];
+        let version = |(state, at)| DriveVersion {
+            state,
+            at,
+            base_at: None,
+        };
+        let live = match client.pulls {
+            false => (client.planned_remote.get(node).cloned())
+                .zip(client.planned_refs.get(&node).copied()),
+            true => self.server_version(c, node),
+        };
+        if let Some(live) = live {
+            return Some((version(live), false));
+        }
+        let removed = match client.pulls {
+            false => (client.planned_removed.get(&node))
+                .and_then(|r| Some((client.plan_saw.get(node)?.clone(), r.version))),
+            true => self.removed_as_seen(c, node, &client.scope().outside),
+        };
+        removed.map(|r| (version(r), true))
+    }
+
+    /// What a folder made here (`node`, its planned drive version `drive`) of client `c` reads
+    /// before its write ([`MkdirRead`]): its mirror once ([`Sim::mirror_read`]).
+    fn mkdir_read(&self, c: usize, node: NodeId, drive: Option<&DriveVersion>) -> MkdirRead {
+        let client = &self.clients[c];
+        let synced_before = client.base.contains(node);
+        if let Some(d) = drive {
+            let live = match client.pulls {
+                false => client.planned_remote.contains(node),
+                true => self.server_state(c, node).is_some(),
+            };
+            return MkdirRead {
+                version: Some(d.clone()),
+                planned: true,
+                removed: false,
+                synced_before,
+                live,
+            };
+        }
+        let Some((read, removed)) = self.mirror_read(c, node) else {
+            return MkdirRead::default();
+        };
+        let base_at = (client.extra.get(&node).and_then(|e| e.version)).filter(|_| synced_before);
+        MkdirRead {
+            version: Some(DriveVersion { base_at, ..read }),
+            planned: false,
+            removed,
+            synced_before,
+            live: !removed,
+        }
     }
 
     /// In pages ([`Sim::with_small_pages`]): client `c`'s plan ran out: its next pages are
@@ -299,7 +399,8 @@ impl Sim {
             .collect();
         // The folders in Recently deleted that live nodes are in, and the removed ones above
         // them, and the server's time of each live node's version, as the engine's view has them.
-        (input.removed, input.changed_at) = self.removed_seen(c, &remote);
+        let removed_refs;
+        (input.removed, input.changed_at, removed_refs) = self.removed_seen(c, &remote);
         input.dirty = client
             .base
             .ids()
@@ -668,11 +769,14 @@ impl Sim {
         client.planned_local = client.local.clone();
         client.planned_remote = remote;
         client.planned_refs = std::mem::take(&mut input.remote_refs).into_iter().collect();
-        client.planned_removed = input
-            .removed
-            .iter()
-            .map(|(f, r)| (*f, (r.state.kind, r.at)))
+        client.planned_removed = (input.removed.iter())
+            .map(|(f, r)| {
+                let (kind, version) = (r.state.kind, removed_refs[f]);
+                (*f, SeenRemoved { kind, version })
+            })
             .collect();
+        self.faults.plans += 1;
+        client.pulls = (self.faults.pulls).unwrap_or(self.faults.plans.is_multiple_of(2));
         client.planned_changed = std::mem::take(&mut input.changed_at).into_iter().collect();
         client.run_settled.clear();
         client.plan_saw = std::mem::take(&mut input.remote);
@@ -712,35 +816,29 @@ impl Sim {
 
     /// The folders in Recently deleted that the live nodes of `remote` (client `c`'s view of
     /// the drive) are in, and the removed ones above them, and the server's time of each live
-    /// node's version, as the engine's view has them.
+    /// node's version, as the engine's view has them; and each removed one's version there.
     pub(crate) fn removed_seen(
         &self,
         c: usize,
         remote: &Tree,
-    ) -> (HashMap<NodeId, Removed>, HashMap<NodeId, i64>) {
+    ) -> (
+        HashMap<NodeId, Removed>,
+        HashMap<NodeId, i64>,
+        HashMap<NodeId, RemoteRef>,
+    ) {
         let client = &self.clients[c];
-        let mut removed: HashMap<NodeId, Removed> = HashMap::new();
         let outside = client.scope().outside;
+        let mut removed: HashMap<NodeId, Removed> = HashMap::new();
+        let mut refs = HashMap::new();
         for mut folder in hbsync_engine::view::looked_up_removed(remote, client.coords.top) {
-            // Not one in a version no client reads: the feed records no row of it (only that
-            // it is there, unread), in Recently deleted or not.
             while !removed.contains_key(&folder)
-                && !outside.contains(&folder)
-                && !self
-                    .server
-                    .unreadable
-                    .contains_key(&client.coords.to_drive(folder))
-                && let Some(n) = self.server.removed.get(&client.coords.to_drive(folder))
+                && let Some((state, version)) = self.removed_as_seen(c, folder, &outside)
             {
-                let state = NodeState {
-                    parent: client.coords.from_drive(n.state.parent),
-                    ..n.state.clone()
-                };
-                let drive = client.coords.to_drive(folder);
-                // Known at once, the engine's own removal's too: the write's answer has it.
-                let at = self.server.removed_at[&drive];
                 let parent = state.parent;
+                // Known at once, the engine's own removal's too: the write's answer has it.
+                let at = time(version.version);
                 removed.insert(folder, Removed { at, state });
+                refs.insert(folder, version);
                 folder = parent;
             }
         }
@@ -751,13 +849,13 @@ impl Sim {
                 Some((id, time(n.remote.version)))
             })
             .collect();
-        (removed, changed_at)
+        (removed, changed_at, refs)
     }
 
     /// What the removals of folders took along of client `c`'s view of the drive `remote`, by
     /// the plan's rule (`reconcile::taken_along`).
     pub(crate) fn taken_seen(&self, c: usize, remote: &Tree) -> HashSet<NodeId> {
-        let (removed, changed_at) = self.removed_seen(c, remote);
+        let (removed, changed_at, _) = self.removed_seen(c, remote);
         let input = Input {
             remote: remote.clone(),
             removed,
@@ -799,6 +897,9 @@ impl Sim {
             None => None,
         };
         let outcome = self.execute(c, &op);
+        // What it read before its write, as the executor's (a pull landing before its commit
+        // changes nothing of it).
+        let (mut placed_from, read) = self.take_read();
         // Checked and done here, not committed yet: another device's change of the node may
         // be pulled now ([`Action::PullMidLocal`]).
         if outcome == Outcome::Done
@@ -853,13 +954,14 @@ impl Sim {
             let os = self.clients[c].os;
             // A folder made with none to write holds none, the write failing or not (the
             // executor's: it claims none).
-            let nothing = matches!(&op, Op::LocalMkdir { tags, .. } if tags.held_by(os).is_empty());
+            let nothing = matches!(&op, Op::LocalMkdir { tags, .. }
+                if !tags.iter().any(|t| hbsync_platform::tags::holds(t, os)));
             tag_failed = os != Os::Windows
                 && !nothing
                 && (std::mem::take(&mut self.faults.fail_tags_next)
                     || self.faults.writes % 13 == 7);
             let recorded = matches!(op, Op::LocalDownload { .. })
-                || matches!(op, Op::LocalMkdir { drive: Some(_), .. }) && synced_before;
+                || matches!(op, Op::LocalMkdir { .. }) && synced_before && read.acted().is_some();
             commit_failed = recorded
                 && (std::mem::take(&mut self.faults.fail_commit_next)
                     || self.faults.writes % 11 == 5);
@@ -872,12 +974,12 @@ impl Sim {
             // doesn't (the user's, not sent up yet) isn't put in place: the item stays as it
             // was, for a retry, the plan sending the tag up meanwhile (the executor's).
             if let Op::LocalDownload { tags, .. } = &op
-                && let Some(record) = &self.placed_from
+                && let Some(record) = &placed_from
                 && before_tags.as_ref().is_some_and(|held| {
-                    hbsync_engine::exec::tags_lost(held, tags, &record.state.tags)
+                    let os = self.clients[c].os;
+                    hbsync_engine::exec::tags_lost(held, tags, &record.state.tags, os)
                 })
             {
-                self.placed_from = None;
                 let client = &mut self.clients[c];
                 match local_before {
                     Some(state) => client.local.insert(node, state),
@@ -909,8 +1011,8 @@ impl Sim {
         }
         if commit_failed {
             let record = match &op {
-                Op::LocalDownload { .. } => self.placed_from.take(),
-                _ => op.drive().cloned(),
+                Op::LocalDownload { .. } => placed_from.take(),
+                _ => read.acted().cloned(),
             };
             if let Some(record) = record {
                 let client = &self.clients[c];
@@ -934,7 +1036,12 @@ impl Sim {
                     && self.record_there(c, node, &p)
                 {
                     self.clients[c].placing.remove(&node);
-                    if !self.settle_record(c, node, &p) {
+                    // Gone as its mirror reads: a folder's, as its step read it.
+                    let gone = match &op {
+                        Op::LocalMkdir { .. } if self.clients[c].pulls => !read.live,
+                        _ => self.gone_for(c, node),
+                    };
+                    if !self.settle_record(c, node, &p, gone) {
                         self.clients[c].placing.insert(node, p);
                     }
                     self.ops_executed += 1;
@@ -996,10 +1103,10 @@ impl Sim {
             ) {
                 self.placed_back(c, node);
             }
-            let record = self.placed_from.take();
+            let record = placed_from.take();
             let against = match &op {
                 Op::LocalDownload { .. } => Against::placed(record.as_ref()),
-                Op::LocalMkdir { .. } => Against::placed(op.drive()),
+                Op::LocalMkdir { .. } => Against::placed(read.acted()),
                 Op::LocalMove { .. } if moves => Against::placed(op.drive()),
                 _ => Against::acted(op.drive()),
             };
@@ -1025,7 +1132,7 @@ impl Sim {
                 _ if tag_failed => TagWrite::Unknown,
                 Op::LocalTags { .. } if windows => TagWrite::Nothing,
                 Op::LocalDownload { .. } if windows => TagWrite::Unknown,
-                Op::LocalMkdir { drive: None, .. } => TagWrite::Agreed,
+                Op::LocalMkdir { .. } if read.acted().is_none() => TagWrite::Agreed,
                 // Where the volume keeps no tags, the record claims none it wrote, and recovery
                 // reads that so: not known (the executor's `placed_tags`, from its record).
                 Op::LocalMkdir { .. } if windows => TagWrite::Unknown,
@@ -1036,17 +1143,9 @@ impl Sim {
             // A folder made from Recently deleted (restored, its RemoteCreate to follow) settles
             // against the version there, as any placement does: the base until the restore
             // settles, as the executor's.
-            let coords = self.clients[c].coords;
             let restored = match &op {
                 Op::LocalMkdir { drive: None, .. } if !self.clients[c].base.contains(node) => {
-                    self.server.removed.get(&node).map(|r| DriveVersion {
-                        state: NodeState {
-                            parent: coords.from_drive(r.state.parent),
-                            ..r.state.clone()
-                        },
-                        at: r.remote,
-                        base_at: None,
-                    })
+                    read.removed()
                 }
                 _ => None,
             };
@@ -1054,15 +1153,15 @@ impl Sim {
             // didn't reach it and the drive's last version holds (the executor's).
             if let Op::LocalMkdir { drive: None, .. } = &op
                 && tag_failed
-                && self.server_state(c, node).is_none()
+                && read.acted().is_none()
                 && let Some(b) = self.clients[c].base.get(node).cloned()
                 && let Some(held) = self.clients[c].local.get(node).map(|l| l.tags.clone())
             {
-                let last = self.server.removed.get(&node).map(|r| &r.state.tags);
+                let last = read.removed().map(|d| &d.state.tags);
                 let tags = not_reached(&b.tags, &held, last.unwrap_or(&b.tags));
                 self.clients[c].base.insert(node, NodeState { tags, ..b });
             }
-            let against = match &restored {
+            let against = match restored {
                 Some(d) => Against::placed(Some(d)),
                 None => against,
             };
@@ -1070,13 +1169,16 @@ impl Sim {
             // executor's).
             let at = match op {
                 Op::LocalFork { .. } => None,
+                // A folder made here with nothing to settle against, its mirror holding no live
+                // version of it: the base stays (the executor's settle finds no mirror row).
+                Op::LocalMkdir { drive: None, .. } if restored.is_none() && !read.live => None,
                 _ => self.settle_against(c, node, against, op.is_transfer() && !landed, tags, ours),
             };
             if let Some(at) = at {
                 self.clients[c].run_settled.insert(node, at);
             }
             if fresh && matches!(op, Op::LocalDownload { .. } | Op::LocalMkdir { .. }) {
-                let from = restored.as_ref().or(op.drive());
+                let from = restored.or(read.acted());
                 self.new_item_settled(c, node, from.map(|d| &d.state));
             }
             // Committed: the old version a download replaced goes, if still what it was.
@@ -1383,24 +1485,28 @@ impl Sim {
                 tags,
                 drive,
             } => {
-                let client = &mut self.clients[c];
+                let client = &self.clients[c];
                 if client.local.contains(node) {
                     return Skip;
                 }
                 if !client.local.exists(parent) {
                     return Retry;
                 }
-                let tags = tags.held_by(client.os);
+                let read = self.mkdir_read(c, node, drive.as_deref());
+                let client = &self.clients[c];
+                let held = tags.held_by(client.os);
                 // Made from Recently deleted, never synced here, with tags to write: restored,
-                // changed or purged since the plan, the version there may no longer hold them
-                // (the executor's).
-                let holds =
-                    |r: &ServerNode| tags.iter().all(|t| r.state.tags.get(&t.name) == Some(t));
-                if drive.is_none()
+                // changed or purged since the plan (as its mirror reads), the version there may
+                // no longer hold them (the executor's).
+                let waits = drive.is_none()
                     && !client.base.contains(node)
-                    && !tags.is_empty()
-                    && !self.server.removed.get(&node).is_some_and(holds)
-                {
+                    && !held.is_empty()
+                    && !read.removed().is_some_and(|d| {
+                        hbsync_engine::exec::holds_tags(&tags, &d.state.tags, client.os)
+                    });
+                self.read = Some(Read::Mkdir(read));
+                let client = &mut self.clients[c];
+                if waits {
                     return Skip;
                 }
                 if !park_occupant(client, parent, &name, None) {
@@ -1409,7 +1515,7 @@ impl Sim {
                 client.local.insert(
                     node,
                     NodeState {
-                        tags,
+                        tags: held,
                         ..NodeState::folder(parent, name)
                     },
                 );
@@ -1545,7 +1651,7 @@ impl Sim {
                         tags,
                     },
                 );
-                self.placed_from = Some(record);
+                self.read = Some(Read::Download(record));
                 Done
             }
             Op::LocalMove {
@@ -1761,6 +1867,13 @@ impl Sim {
                         client.removed_by_plan.entry(parent).or_insert(node);
                     }
                     self.clients[c].planned_remote.remove(node);
+                    // The write's answer puts it in the mirror's Recently deleted.
+                    let outside = self.clients[c].scope().outside;
+                    if let Some((state, version)) = self.removed_as_seen(c, node, &outside) {
+                        let kind = state.kind;
+                        (self.clients[c].planned_removed)
+                            .insert(node, SeenRemoved { kind, version });
+                    }
                     // Its tags go with it: a tag change loses to a delete (§11).
                     self.deleted_now(node);
                     Done
@@ -3016,6 +3129,57 @@ mod tests {
         assert_eq!(ops, ["RemoteTags", "LocalDownload"]);
         sim.fail_next_tag_write();
         while sim.step(0) {}
+        assert!(sim.quiesce(10));
+        sim.check().unwrap_or_else(|e| panic!("{e}"));
+    }
+
+    /// Folder a, tagged Red, synced on client 0 (macOS), 1 (Linux) and 2 (Windows). Client 0's
+    /// user gives Red another colour, which goes up; client 2's user deletes the folder, which
+    /// goes to Recently deleted in that colour. Client 1 then restores it with a write planned
+    /// before the recolour, Red as its plan saw it, over that version, its base settled against
+    /// it since (the case `Tags::merge_onto` names; the stale plan and base are set up here: no
+    /// event sequence was found that reaches them). Linux holds Red without its colour, so the
+    /// restore keeps the drive's colour, and the oracle owes client 0's recolour after it. (The
+    /// plan's colour went up: the recolour was lost.)
+    #[test]
+    fn a_linux_restore_keeps_a_colour_given_on_a_mac() {
+        let mut sim = Sim::new(3);
+        sim.run(&[
+            act(0, Action::CreateFolder { parent: 0, name: 0 }),
+            act(0, Action::Tag { node: 0, tag: 0 }), // Red, 6
+        ]);
+        assert!(sim.quiesce(10));
+        let folder = sim.item(0, "a").expect("the folder");
+        let red = |colour| Tags::new([hbsync_types::Tag::new("Red", colour)]);
+        sim.run(&[
+            act(0, Action::Colour { node: 0, tag: 0 }), // Red, 7
+            Event::Plan { client: 0 },
+            Event::Step { client: 0 },
+        ]);
+        assert_eq!(sim.server.live[&folder].state.tags, red(7));
+        sim.run(&[
+            act(2, Action::Delete { node: 0 }),
+            Event::Plan { client: 2 },
+            Event::Step { client: 2 },
+        ]);
+        assert_eq!(sim.server.removed[&folder].state.tags, red(7));
+        // Client 1's base settled against the version in Recently deleted; its plan's restore
+        // carries Red as before.
+        sim.plan(1);
+        let client = &mut sim.clients[1];
+        let mut base = client.base.get(folder).expect("synced").clone();
+        base.tags = red(7);
+        client.base.insert(folder, base);
+        let op = Op::RemoteCreate {
+            node: folder,
+            parent: NodeId::ROOT,
+            name: "a".into(),
+            kind: NodeKind::Folder,
+            tags: red(6),
+        };
+        assert_eq!(sim.execute(1, &op), Outcome::Done);
+        assert_eq!(sim.server.live[&folder].state.tags, red(7));
+        sim.clients[1].plan.clear();
         assert!(sim.quiesce(10));
         sim.check().unwrap_or_else(|e| panic!("{e}"));
     }

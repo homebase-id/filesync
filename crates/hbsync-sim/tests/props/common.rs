@@ -352,10 +352,25 @@ pub(crate) fn stopped_delete_setup() -> (Sim, [NodeId; 4]) {
     (sim, ids)
 }
 
+/// `setup`, once with every run pulling between its plan and its steps and once with none
+/// ([`Sim::with_pulls`]): for a case that reads the mirror as either.
+pub(crate) fn pulled_or_not(setup: impl Fn(Sim) -> Sim + Copy) -> [impl Fn(Sim) -> Sim; 2] {
+    [true, false].map(|pulls| move |sim| setup(sim).with_pulls(Some(pulls)))
+}
+
 /// Runs scripted `events` on `clients` clients, settles them and checks the outcome: the tag
 /// adds lost to a known limit of the engine, as [`Sim::tags_lost_to_known_limits`] names them.
 pub(crate) fn known_limits_of(clients: usize, events: &[Event]) -> Vec<String> {
-    let mut sim = Sim::new(clients);
+    known_limits_with(clients, |sim| sim, events)
+}
+
+/// [`known_limits_of`], the simulation set up by `setup`.
+pub(crate) fn known_limits_with(
+    clients: usize,
+    setup: impl Fn(Sim) -> Sim,
+    events: &[Event],
+) -> Vec<String> {
+    let mut sim = setup(Sim::new(clients));
     sim.run(events);
     assert!(sim.quiesce(30), "no convergence");
     sim.check().unwrap_or_else(|e| panic!("{e}"));
