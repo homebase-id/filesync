@@ -731,8 +731,22 @@ impl Sim {
     /// them now. The engine restores the items together, in one set of waves; here one item
     /// after the other, outermost first: the same rows come back (a restored name can differ
     /// where one item's restored name is another's own).
+    ///
+    /// As the runner takes the answer, for the held deletes the user was shown: refused when
+    /// nothing is held; else with the next sync, after the one in progress, which runs to its
+    /// end first (its plan, a delete aside unlinked against the bases it was planned with, and
+    /// in pages the rest of its sweep, as [`Sim::quiesce`] runs it). What a later page held
+    /// meanwhile stays held, shown again.
     pub(crate) fn put_back(&mut self, c: usize) {
         let held = std::mem::take(&mut self.clients[c].held);
+        if held.is_empty() {
+            return;
+        }
+        let mut rounds = 0;
+        while self.step(c) || (rounds < 64 && self.next_page_planned(c)) {
+            rounds += 1;
+        }
+        self.clients[c].held.retain(|n| !held.contains(n));
         // What it puts back, for the check after it: what was synced of the held, but not one
         // gone here and not live on the drive (removed there too: its state wins, §7). One a
         // crash left aside comes back at recovery, and the plan follows the drive.
