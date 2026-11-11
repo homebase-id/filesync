@@ -244,7 +244,9 @@ pub enum Event {
     },
     /// The user puts back the deletes the guard held in the client's last plan (sync semantics
     /// §7): deleted here, they come down again; removed elsewhere, they are restored on the
-    /// drive (or go up again, gone for good there).
+    /// drive (or go up again, gone for good there). As the runner takes it ([`Sim::put_back`]).
+    ///
+    /// [`Sim::put_back`]: crate::Sim::put_back
     PutBack {
         client: usize,
     },
