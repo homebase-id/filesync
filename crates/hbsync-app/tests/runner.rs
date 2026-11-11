@@ -105,6 +105,31 @@ impl Device {
         Notifications::new(self.puller(), now)
     }
 
+    /// Has the identity refuse this device (`key`: for want of the private drive's key, else
+    /// the login), and waits till it shows so.
+    fn refused(&self, key: bool) -> R {
+        {
+            let mut faults = self.remote.faults();
+            faults.denied = true;
+            faults.deny_key = key;
+        }
+        self.handle.send(Command::SyncNow);
+        wait_until("refused", || {
+            let s = self.status();
+            s.state == State::Denied && s.lacks_key == key
+        })
+    }
+
+    /// Asks for a sync, and what it showed once it reported (the folder's requests alone: it
+    /// shows syncing before its first).
+    fn sync_reported(&self) -> Result<FolderStatus, Box<dyn std::error::Error>> {
+        let asked = self.remote.faults().requests;
+        self.handle.send(Command::SyncNow);
+        wait_until("it asked", || self.remote.faults().requests > asked)?;
+        wait_until("it reported", || self.status().state != State::Syncing)?;
+        Ok(self.status())
+    }
+
     /// Waits until it is idle with nothing pending.
     fn wait_idle(&self) -> R {
         wait_until("idle", || {
@@ -1317,6 +1342,51 @@ fn a_refused_computer_asks_nothing_until_the_user_acts() -> R {
         on_server(&server, "one.txt") && on_server(&server, "two.txt")
     })?;
     assert!(a.drive.denied().is_none());
+    Ok(())
+}
+
+/// A refused folder shows the refusal and why (for want of the drive's key, or the login, as
+/// the identity last said), also through a sync that gets no answer (asked for while
+/// offline), and says it lacks the key only while it shows refused (not paused). A request in
+/// the account that goes well ends a refusal of the login (here the account's pull, which a
+/// folder's own may be covered by); a sync that goes well, either (it shows idle then).
+#[test]
+fn a_refusal_shows_until_a_request_goes_well() -> R {
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    a.wait_idle()?;
+    let offline = |key: Option<bool>| -> R {
+        a.remote.faults().fail_next = usize::MAX;
+        let s = a.sync_reported()?;
+        a.remote.faults().fail_next = 0;
+        let shown = key.map_or((State::Offline, false), |key| (State::Denied, key));
+        assert_eq!((s.state, s.lacks_key), shown, "{s:?}");
+        Ok(())
+    };
+    a.refused(true)?;
+    a.remote.faults().denied = false;
+    a.drive.pull(None)?;
+    offline(Some(true))?;
+    a.handle.send(Command::Pause(Pause::UNTIL_RESUMED));
+    wait_until("paused", || a.status().state == State::Paused)?;
+    assert!(!a.status().lacks_key, "not refused while paused");
+    a.handle.send(Command::Resume);
+    assert_eq!(
+        a.sync_reported()?.state,
+        State::Idle,
+        "synced, nothing to send"
+    );
+    offline(None)?;
+
+    a.refused(false)?;
+    let refused = a.status().error;
+    a.remote.faults().denied = false;
+    offline(Some(false))?;
+    assert_eq!(a.status().error, refused, "its reason");
+    a.drive.pull(None)?;
+    offline(None)?;
+    a.handle.send(Command::SyncNow);
+    wait_until("synced again", || a.status().state == State::Idle)?;
     Ok(())
 }
 

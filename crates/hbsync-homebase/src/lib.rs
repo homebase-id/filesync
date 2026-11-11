@@ -34,6 +34,10 @@ pub enum HomebaseError {
     /// The owner refused, or the credentials no longer work (401/403).
     #[error("denied: {0}")]
     Denied(String),
+    /// Refused as [`HomebaseError::Denied`] is, for want of a key: the drive is private, and
+    /// this login holds no key that opens it. A login asking for the app's key sets it right.
+    #[error("denied: {}", drive::PRIVATE)]
+    NoDriveKey,
     /// The identity has the app but no drive at its address (`invalidDrive`): deleted, say, or
     /// made by another app. The owner can give the app its drive again
     /// ([`app::restore_drive_url`]).

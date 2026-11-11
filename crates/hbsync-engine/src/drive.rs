@@ -8,7 +8,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-use hbsync_remote::{ChangeRef, ErrorClass, NodeMeta, Remote, RemoteError, Skipped};
+use hbsync_remote::{ChangeRef, NodeMeta, Refusal, Remote, RemoteError, Skipped};
 use hbsync_state::{Answer, MirrorRow, StateDb, StateError, keys};
 
 use hbsync_platform::name::name_key;
@@ -51,9 +51,9 @@ pub struct Drive {
     skipped_to: Mutex<Option<SkippedTo>>,
     /// The drive refused an upload, out of storage: until when uploads are held.
     full: Mutex<Option<Instant>>,
-    /// The identity refused this computer (401, 403), and why: nothing asks it again until
-    /// the user acts or the notifications connect ([`Drive::deny`]).
-    denied: Mutex<Option<String>>,
+    /// The identity's refusals of this computer (401, 403, the private drive's key): what holds
+    /// the account back, and what it shows ([`Refusals`]).
+    denied: Mutex<Refusals>,
     /// Whether the account's picture is current.
     freshness: Freshness,
     /// The server's clock at the last page of the feed read, Unix ms (0: none yet).
@@ -144,6 +144,52 @@ impl Freshness {
 impl std::fmt::Debug for Drive {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Drive").finish_non_exhaustive()
+    }
+}
+
+/// The identity's refusals of this computer, and why.
+#[derive(Default)]
+struct Refusals {
+    /// Nothing asks the drive again until the user acts or the notifications connect
+    /// ([`Drive::deny`]).
+    latch: Option<(String, Refusal)>,
+    /// The last one, shown through failures that would show offline until a request goes
+    /// well ([`Drive::refused`]); it outlives the latch (Sync now lifts that).
+    shown: Option<(String, Refusal)>,
+    /// How many there were: a success that began before the last doesn't end it.
+    count: u64,
+}
+
+impl Refusals {
+    /// [`Drive::deny`], held.
+    fn deny(&mut self, why: &str, refusal: Refusal) -> bool {
+        if self.latch.is_none() {
+            tracing::warn!(
+                "the identity refused this computer ({why}): asking no more until a login or Sync now"
+            );
+        }
+        self.count += 1;
+        self.shown = Some((why.to_owned(), refusal));
+        self.latch.replace((why.to_owned(), refusal)).is_none()
+    }
+
+    /// [`Drive::login_refused`], held: latched as by any refusal, but a refusal for want of the
+    /// drive's key shown stays (a refused login says nothing more of it).
+    fn login_refused(&mut self, why: &str) {
+        let key = matches!(self.shown, Some((_, Refusal::NoKey))).then(|| self.shown.take());
+        self.deny(why, Refusal::Credentials);
+        if let Some(shown) = key {
+            self.shown = shown;
+        }
+    }
+
+    /// A request that began after `since` refusals went well: the refusal shown ends, one for
+    /// want of the drive's key only when `key` (it used the key).
+    fn succeeded(&mut self, since: u64, key: bool) {
+        let ends = |r: &(String, Refusal)| key || r.1 == Refusal::Credentials;
+        if self.count == since && self.shown.as_ref().is_some_and(ends) {
+            self.shown = None;
+        }
     }
 }
 
@@ -239,39 +285,71 @@ impl Drive {
     /// its puller don't ask the drive again (each would be refused alike) until the user acts
     /// (Sync now, resume), the notifications connect again (the credentials work), or new
     /// credentials make a new drive. Whether it wasn't denied before.
-    pub fn deny(&self, why: &str) -> bool {
-        let mut denied = lock(&self.denied);
-        if denied.is_none() {
-            tracing::warn!(
-                "the identity refused this computer ({why}): asking no more until a login or Sync now"
-            );
-        }
-        denied.replace(why.to_owned()).is_none()
+    pub fn deny(&self, why: &str, refusal: Refusal) -> bool {
+        lock(&self.denied).deny(why, refusal)
     }
 
-    /// A failure of the account's work on the drive, of `class` (why: `e`): one the identity
-    /// refused latches the account ([`Drive::deny`]). Every pull, every operation of Recently
-    /// deleted ([`Drive::with_ops`]) and every folder's sync ([`crate::Engine`]) comes here as
-    /// it fails.
-    pub(crate) fn latch(&self, class: ErrorClass, e: &dyn std::fmt::Display) {
-        if class == ErrorClass::Denied {
-            self.deny(&e.to_string());
+    /// A failure of the account's work on the drive (why: `e`): one the identity refused
+    /// (`refusal`) latches the account ([`Drive::deny`]). Every pull, every operation of
+    /// Recently deleted ([`Drive::with_ops`]) and every folder's sync ([`crate::Engine`]) comes
+    /// here as it fails.
+    pub(crate) fn latch(&self, refusal: Option<Refusal>, e: &dyn std::fmt::Display) {
+        if let Some(refusal) = refusal {
+            self.deny(&e.to_string(), refusal);
         }
     }
 
     /// Why the identity refused this computer, while that holds ([`Drive::deny`]).
-    pub fn denied(&self) -> Option<String> {
-        lock(&self.denied).clone()
+    pub fn denied(&self) -> Option<(String, Refusal)> {
+        lock(&self.denied).latch.clone()
     }
 
     /// Whether the identity refuses this computer ([`Drive::deny`]).
     pub fn is_denied(&self) -> bool {
-        lock(&self.denied).is_some()
+        lock(&self.denied).latch.is_some()
     }
 
-    /// The drive is asked again ([`Drive::deny`]).
+    /// The drive is asked again ([`Drive::deny`]); the refusal stays shown till a request goes
+    /// well ([`Drive::refused`]).
     pub fn allow(&self) {
-        *lock(&self.denied) = None;
+        lock(&self.denied).latch = None;
+    }
+
+    /// The identity's last refusal of this computer, and why, until a request goes well since:
+    /// what the account's folders show through failures that would show offline (no answer,
+    /// a server in trouble), the identity's last word on the login.
+    pub fn refused(&self) -> Option<(String, Refusal)> {
+        lock(&self.denied).shown.clone()
+    }
+
+    /// The notifications connected, their try begun after `since` refusals
+    /// ([`Drive::refusals`]): the credentials work. The drive is asked again
+    /// ([`Drive::allow`]), and a refusal of the credentials shown since ends (not one for want
+    /// of the drive's key).
+    pub fn logged_in(&self, since: u64) {
+        let mut denied = lock(&self.denied);
+        denied.latch = None;
+        denied.succeeded(since, false);
+    }
+
+    /// The identity refused the login alone (`why`: the notifications' upgrade): the account
+    /// latches as [`Drive::deny`] has it, but a refusal for want of the private drive's key
+    /// shown stays as it is, which a refused login says nothing more of.
+    pub fn login_refused(&self, why: &str) {
+        lock(&self.denied).login_refused(why);
+    }
+
+    /// How many refusals there were so far: noted as a request begins, for
+    /// [`Drive::succeeded`] and [`Drive::logged_in`].
+    pub fn refusals(&self) -> u64 {
+        lock(&self.denied).count
+    }
+
+    /// A request that began after `since` refusals ([`Drive::refusals`]) went well: the
+    /// refusal shown ends, one for want of the drive's key only when `key` (a sync that went
+    /// well, its folder shown idle: never refused while it shows so).
+    pub(crate) fn succeeded(&self, since: u64, key: bool) {
+        lock(&self.denied).succeeded(since, key);
     }
 
     /// The drive refused an upload, out of storage: hold uploads in every folder for `hold`
@@ -306,8 +384,9 @@ impl Drive {
     ) -> Result<T, EngineError> {
         let (done, news) = deleted::AccountOps::run(&self.account, self.remote(), op);
         self.absorb(news);
+        // One that went well needn't have asked anything: it ends no refusal shown.
         if let Err(e) = &done {
-            self.latch(e.class(), e);
+            self.latch(e.refusal(), e);
         }
         done
     }
@@ -326,6 +405,7 @@ impl Drive {
         // Every ask so far came before this pull starts: it answers them all.
         let covers = self.asked.load(Ordering::SeqCst);
         let doubts = self.freshness.doubts();
+        let since = self.refusals();
         let pulled = {
             let mut reread = lock(&self.reread);
             feed::pull(|| self.account(), self.remote(), FEED_PAGES, &mut reread)
@@ -334,6 +414,8 @@ impl Drive {
             // What was in doubt when it started is answered; a doubt since isn't.
             Ok(report) => {
                 self.freshness.answered(doubts);
+                // The login works; the key, a slim page needn't show.
+                self.succeeded(since, false);
                 *answered = covers;
                 if let Some(now) = report.server_time {
                     self.server_time.store(now, Ordering::SeqCst);
@@ -341,7 +423,7 @@ impl Drive {
             }
             Err(e) => {
                 self.set_behind();
-                self.latch(e.class(), e);
+                self.latch(e.refusal(), e);
             }
         }
         // Still one at a time: what it touched is its to wake, the pages it committed before a
@@ -716,5 +798,66 @@ impl Drive {
                 .set_account_kv(keys::PURGED_AT, &now.to_string())
         })?;
         Ok(Some(gone))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A refusal shown outlives its latch, until a request that began after it goes well; one
+    /// for want of the drive's key only with one that read the drive.
+    #[test]
+    fn a_refusal_shows_until_a_request_goes_well() {
+        let mut r = Refusals::default();
+        let since = r.count;
+        r.deny("401", Refusal::Credentials);
+        r.latch = None;
+        r.succeeded(since, true);
+        assert!(r.shown.is_some(), "began before the refusal");
+        r.succeeded(r.count, false);
+        assert_eq!(r.shown, None, "the login works");
+
+        r.deny("no key", Refusal::NoKey);
+        r.succeeded(r.count, false);
+        assert!(r.shown.is_some(), "the login says nothing of the key");
+        r.succeeded(r.count, true);
+        assert_eq!(r.shown, None);
+    }
+
+    /// Recently deleted's work that went well without asking anything (nothing due) ends no
+    /// refusal shown.
+    #[test]
+    fn work_that_asked_nothing_ends_no_refusal() -> Result<(), Box<dyn std::error::Error>> {
+        use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
+        let home = tempfile::tempdir()?;
+        let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
+        let drive = Drive::open(&home.path().join("state.db"), "a.example", remote.clone())?;
+        drive.deny("401", Refusal::Credentials);
+        drive.allow();
+        let asked = remote.faults().requests;
+        assert_eq!(drive.ask_again()?, 0);
+        assert_eq!(remote.faults().requests, asked, "nothing asked");
+        assert!(drive.refused().is_some());
+        Ok(())
+    }
+
+    /// A refused login (the notifications') latches as any refusal, after Sync now lifted the
+    /// latch too; a refusal for want of the key shown stays so.
+    #[test]
+    fn a_refused_login_latches_and_leaves_a_refusal_for_the_key_shown() {
+        let mut r = Refusals::default();
+        r.deny("no key", Refusal::NoKey);
+        r.latch = None;
+        r.login_refused("403");
+        assert_eq!(
+            r.latch,
+            Some(("403".into(), Refusal::Credentials)),
+            "latched"
+        );
+        assert_eq!(r.shown, Some(("no key".into(), Refusal::NoKey)));
+        let mut r = Refusals::default();
+        r.login_refused("403");
+        assert_eq!(r.shown, Some(("403".into(), Refusal::Credentials)));
     }
 }

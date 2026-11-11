@@ -38,6 +38,10 @@ pub struct Notifications {
     connect_read: bool,
     /// While not connected: the next read of the drive.
     next_read: Instant,
+    /// The drive's refusals ([`Drive::refusals`]) when the notifications' try to connect began,
+    /// as far as the account sees it (they started, lost or were refused their connection, or
+    /// were told to reconnect): one since isn't ended by their connecting.
+    trying_since: u64,
 }
 
 /// Live changes kept while announcements gather (or the account is paused): more are read
@@ -48,6 +52,7 @@ impl Notifications {
     /// Not connected yet: the first read of the drive comes [`UNANNOUNCED_READ`] after `now`
     /// (the folders' start-up has just read it).
     pub fn new(puller: Puller, now: Instant) -> Self {
+        let trying_since = puller.drive.refusals();
         Notifications {
             puller,
             announced: Announced::default(),
@@ -56,7 +61,13 @@ impl Notifications {
             connected: None,
             connect_read: false,
             next_read: now + UNANNOUNCED_READ,
+            trying_since,
         }
+    }
+
+    /// The notifications are told to connect again.
+    pub fn reconnecting(&mut self) {
+        self.trying_since = self.puller.drive.refusals();
     }
 
     /// Takes `event` at `now`; the account's notification status when it changed.
@@ -64,7 +75,7 @@ impl Notifications {
         match event {
             Event::Connected => {
                 // The credentials work: what waited for a login asks the drive again.
-                self.puller.drive.allow();
+                self.puller.drive.logged_in(self.trying_since);
                 // Changes made while not connected weren't announced: the feed is read, now or
                 // at the resume, and it brings what was gathered too. Only once that read
                 // worked are the drive's changes taken as announced ([`Drive::current`]).
@@ -109,7 +120,7 @@ impl Notifications {
             Event::Refused(why) => {
                 tracing::warn!("notifications refused ({why}); asking again later");
                 // The identity refused the credentials: the folders and the puller don't ask.
-                self.puller.drive.deny(&why);
+                self.puller.drive.login_refused(&why);
                 self.disconnected(now);
                 Some(Hints::Refused(why))
             }
@@ -117,6 +128,7 @@ impl Notifications {
     }
 
     fn disconnected(&mut self, now: Instant) {
+        self.trying_since = self.puller.drive.refusals();
         // What was announced and not taken yet may be lost with it: behind.
         self.puller.drive.not_announcing();
         self.connect_read = false;
@@ -685,6 +697,40 @@ mod tests {
         let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
         let drive = Drive::open(&home.join("state.db"), "a.example", remote.clone())?;
         Ok((drive, remote))
+    }
+
+    /// A refused upgrade of the notifications (the login alone) latches the account, also
+    /// after Sync now lifted the latch, but leaves a refusal for want of the private drive's
+    /// key shown as it is. Connecting lets the drive be asked again, and ends a refusal of the
+    /// login shown, not one for the key, nor one that came after their try began.
+    #[test]
+    fn the_notifications_answer_for_the_login_alone() -> Result<(), Box<dyn std::error::Error>> {
+        use hbsync_remote::Refusal::{Credentials, NoKey};
+        let home = tempfile::tempdir()?;
+        let (drive, _remote) = fake_drive(home.path())?;
+        let mut n = Notifications::new(Puller::spawn(Arc::clone(&drive)), Instant::now());
+        let no_key = Some(("no key".to_owned(), NoKey));
+        drive.deny("no key", NoKey);
+        drive.allow();
+        n.event(Event::Refused("403".into()), Instant::now(), true);
+        assert!(drive.is_denied(), "latched");
+        assert_eq!(drive.refused(), no_key, "shown");
+        n.event(Event::Connected, Instant::now(), true);
+        assert_eq!(
+            (drive.denied(), drive.refused()),
+            (None, no_key),
+            "connected"
+        );
+        // Refused while their try was on its way: not ended by it.
+        n.event(Event::Lost("cut".into()), Instant::now(), true);
+        drive.deny("401", Credentials);
+        n.event(Event::Connected, Instant::now(), true);
+        let login = Some(("401".to_owned(), Credentials));
+        assert_eq!((drive.denied(), drive.refused()), (None, login), "since");
+        n.event(Event::Lost("cut".into()), Instant::now(), true);
+        n.event(Event::Connected, Instant::now(), true);
+        assert_eq!(drive.refused(), None);
+        Ok(())
     }
 
     /// The drive's changes count as announced only once the read after connecting worked: not

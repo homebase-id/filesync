@@ -1,7 +1,7 @@
 //! The engine's errors: a folder's sync, and the account's operations on its drive (Recently
 //! deleted, the purge, a role's folder).
 
-use hbsync_remote::{ErrorClass, RemoteError};
+use hbsync_remote::{ErrorClass, Refusal, RemoteError};
 use hbsync_state::StateError;
 
 use crate::exec::Stopped;
@@ -63,6 +63,16 @@ impl EngineError {
             {
                 e.retry_after()
             }
+            _ => None,
+        }
+    }
+
+    /// Why the identity refused this computer, if it did.
+    pub fn refusal(&self) -> Option<Refusal> {
+        match self {
+            EngineError::Remote(e) => e.refusal(),
+            EngineError::Feed(e) => e.refusal(),
+            EngineError::Stopped(Stopped::Denied(_, refusal)) => Some(*refusal),
             _ => None,
         }
     }

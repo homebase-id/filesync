@@ -202,15 +202,18 @@ says so when it couldn't reach the keychain to remove the credentials there.
    (`hbsync-app/src/daemon/account/`), which:
    1. opens its state DB, before any request: one only the user can set right (corrupt, from
       another version, another identity's) is shown on its folders (`failing`, with why) and
-      looked at again hourly or at a wake-up, asking nothing; the other accounts sync on;
-   2. reads the credentials, waiting (backoff 5 s doubling to 5 min) while the keychain can't
-      be read. None: it says so and the account ends;
+      looked at again hourly, at a wake-up or at Sync now, asking nothing; the other accounts
+      sync on;
+   2. reads the credentials, waiting (backoff 5 s doubling to 5 min, ended by a wake-up or
+      Sync now) while the keychain can't be read. None: it says so and the account ends;
    3. connects to the identity, retrying with the same backoff while it can't be reached
       (`offline`, at least as long as its `Retry-After` says); a refusal (the device revoked)
       shows as `denied` and is asked again hourly (new credentials start it over at once), as
-      does a private drive this login holds no key for (`encryption.md`). Meanwhile `pause` and `resume` work
-      (kept in the config); other requests are refused, Sync now saying why while it has the
-      account try at once, as a folder's Sync now does (a try under way is the one asked for);
+      does a private drive this login holds no key for (`encryption.md`; the folders' status
+      says which, `lacks_key`). Meanwhile `pause` and `resume` work (kept in the config);
+      other requests are refused. Sync now is refused too ("Trying again to connect to
+      <identity>…" once a try failed, else why it doesn't run), and has the account try at
+      once, as a folder's Sync now does;
    4. opens the account's `Drive` and the notification socket, and runs a sync loop
       (`Runner`) for each of its folders until a stop request, SIGTERM or SIGINT. It passes the
       notifications on to every folder's loop, reconnects the socket after a sleep, and has
@@ -219,6 +222,10 @@ says so when it couldn't reach the keychain to remove the credentials there.
       state DB while the folders' first syncs hold it). What a purge found not there once (a
       delete for good this device missed) that thread asks again a minute on, once (sync
       semantics §8b).
+
+   Sync now ends each wait of 1 to 3 (the DB, the keychain, connecting) and the wait before a
+   DB of another drive is set aside again, one try a click: one asked during a try brings
+   another right after it, one asked before it began adds nothing.
 
    One folder's loop failing is started again after a pause (from 5 s, doubling up to 5 min,
    reset after an hour without failing), the folder showing `failing` with its error
@@ -230,6 +237,17 @@ says so when it couldn't reach the keychain to remove the credentials there.
    the account for good), its puller reads nothing and wakes no folder, the daily purge waits. The notifications ask again
    after 5 min, doubling up to an hour: once they connect (the credentials work again), or the
    user asks (Sync now, resume), or new credentials start the account over, it syncs as before.
+   The notifications' refusal latches the account as any refusal does, but leaves a refusal for
+   want of the drive's key shown as it is.
+
+   **A refusal stays shown** (`denied`, why, `lacks_key`) through failures that would show
+   offline (no answer, a 5xx, a 503 or 429 with `Retry-After`): they don't change the
+   identity's last word on the login. The `Drive` keeps it beside its latch: Sync now lifts
+   the latch, not what is shown. A sync in the account that began after it and went well ends
+   it (the folder shows idle then: never refused at once); a pull that asked, or the
+   notifications connecting, end one of the login (not one for want of the key: the login
+   says nothing of it). A folder says it lacks the key only while it shows refused. While the
+   account connects, it keeps its own, until it connects.
 
 An account stopped by what only the user can fix ends alone; one failing otherwise stops the
 daemon (it is restarted whole).
@@ -505,7 +523,12 @@ included (service managers restart it then).
 
 `starting` (catching up, then the first sync, with its progress), `syncing`, `idle`, `paused`, `offline` (can't
 reach the identity), `failing` (another failure, or the folder gone), `denied` (the identity
-refused this device: `hbsync setup` again), `stopped`.
+refused this device: log in again, `hbsync setup`; `lacks_key` when the drive is private and
+this login holds no key that opens it), `stopped`. The status line of a `denied` folder (the
+tray's, `hbsync status`'s) says what to do: "Not syncing: log in again to get your private
+drive's key" (`lacks_key`), else "Not syncing: log in again to authorize this computer". A
+request of Recently deleted (a restore, emptying, the purge) the identity refused says the
+same in its note.
 
 ## Control socket
 
@@ -681,8 +704,11 @@ Linux (rfd's, without GTK) needs `zenity`, which KDE doesn't install.
   pages the tray serves on `127.0.0.1`, on a random port, under a random path, and opens in the
   browser; the identity's approval returns there.
 - **Notifications:** a new problem note, deletions to review (held deletes), a refused login
-  (once per folder until it syncs again, also when the tray starts with it refused); each kind
-  at most once a minute.
+  (once per folder and reason until it syncs again, also when the tray starts with it
+  refused; again when the reason changes, the private drive's key or the login; in the status
+  line's words, the private drive's key named when it is what's missing); each kind
+  at most once a minute. Sync now that the daemon refuses shows its reply ("Trying again to
+  connect to <identity>…" while the account waits to connect).
 - **The folder:** the tray gives the main folder (not a role folder: it is the user's own) the
   Filesync icon (`desktop.ini` on Windows, Finder's custom
   icon on macOS, `.directory` and GIO metadata on Linux) and, on Linux, a shortcut (GTK
@@ -763,7 +789,7 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 
 | | |
 |---|---|
-| `hbsync setup <identity> [--folder P] [--existing] [--browser CMD] [--no-start] [--no-autostart]` | authorizes this computer (the owner approves in the browser) unless it already is and the identity still accepts it, saving the credentials at once, prepares the folder (default `~/Homebase`; it must be new, empty, already this identity's, or `--existing` to merge its files with the drive), turns autostart on, and has the daemon add the folder (starting it when it isn't running; restarting it when it logged in again, so the new credentials are used). When the app is registered but its drive is gone (deleted in the owner app), the owner is asked in the browser to give it back, only on a computer that never synced with the identity |
+| `hbsync setup <identity> [--folder P] [--existing] [--browser CMD] [--no-start] [--no-autostart]` | authorizes this computer (the owner approves in the browser) unless it already is and the identity still accepts it (credentials it refuses are authorized again once; a login just made, or the new one, without the private drive's key fails saying so), saving the credentials at once, prepares the folder (default `~/Homebase`; it must be new, empty, already this identity's, or `--existing` to merge its files with the drive), turns autostart on, and has the daemon add the folder (starting it when it isn't running; restarting it when it logged in again, so the new credentials are used). When the app is registered but its drive is gone (deleted in the owner app), the owner is asked in the browser to give it back, only on a computer that never synced with the identity |
 | `hbsync add <role> [--identity I] [--folder P]` | syncs one of the user's own folders (`documents`, `pictures`, `music`, `videos`, `downloads`) where the OS keeps it (Windows Known Folders, macOS home folders, XDG `user-dirs.dirs`), or at `--folder`, with the drive's role folder: joined if another device syncs it (identical files adopted), back from Recently deleted, or made. Refused where `setup` refuses a folder, inside or around another synced folder, when one of that role is synced already, and when OneDrive or iCloud syncs the folder. Without a running daemon it is set up for the next start |
 | `hbsync add desktop [--identity I] [--folder P] [--name N]` | syncs this computer's Desktop (where the OS keeps it, or at `--folder`) with a folder of its own in Desktops on the drive (sync semantics §12), named `N` there (default: the device name, made one the drive takes, else `Computer`; a name the drive won't take is refused); every other computer shows it in its main folder's `Desktops`. A Desktop synced here before (its marker known to the account's DB) keeps its folder on the drive. Refused as `add <role>` is, and when a Desktop is synced already at another folder. For the Desktop synced already (without `--folder`), `--name` renames its folder on the drive where it is, also back over a rename made elsewhere: a running daemon gives it the new name at once, by a sync of that folder; without `--name` it keeps the name it has. Its kind is kept with it in the config (`desktop = "<uuid>"`) and in the account's DB; its name in the account's DB alone |
 | `hbsync remove <role>`, `remove desktop` `[--identity I]` | stops syncing that role folder or the Desktop; its files and state stay (the Desktop's folder on the drive too), so adding it again resumes |

@@ -32,7 +32,7 @@ use hbsync_engine::{Drive, Engine, EngineConfig, EngineError, SyncReport};
 use hbsync_local::journal::Tier;
 use hbsync_local::{Bell, Filter, FilterError, LocalObserver};
 use hbsync_platform::io::Io;
-use hbsync_remote::ErrorClass;
+use hbsync_remote::{ErrorClass, Refusal};
 use hbsync_state::{StateError, Unusable};
 use hbsync_types::NodeId;
 use hbsync_types::unix_now;
@@ -45,7 +45,7 @@ mod report;
 mod schedule;
 
 pub(crate) use report::add_notes;
-pub(crate) use schedule::{Backoff, shown};
+pub(crate) use schedule::{Backoff, Showing};
 use schedule::{Schedule, Synced, Why, Whys};
 
 /// While the identity refuses this computer, how often a folder asks again (one sync).
@@ -324,6 +324,8 @@ impl Handle {
         if self.stop.load(Ordering::Relaxed) && status.state != State::Stopped {
             status.state = State::Paused;
         }
+        // Only while it shows refused.
+        status.lacks_key &= status.state == State::Denied;
         let progress = self.progress.get();
         if matches!(status.state, State::Starting | State::Syncing) && progress.files_total > 0 {
             status.progress = Some(progress);
@@ -633,13 +635,8 @@ impl Runner {
                     // Kept (a busy DB, say): the folder backs off, as after a failed sync,
                     // instead of starting over, and doesn't take them again before then.
                     Some(Err(e)) => {
-                        let wait = self.backs_off(
-                            &mut schedule,
-                            "taking local changes",
-                            e.class(),
-                            &e,
-                            None,
-                        );
+                        let what = "taking local changes";
+                        let wait = self.backs_off(&mut schedule, what, e.class(), None, &e, None);
                         observe_after = Some(Instant::now() + wait);
                     }
                     None => {}
@@ -731,9 +728,12 @@ impl Runner {
             // An hour on, one sync asks again (a 403 for one write needn't hold the account for
             // good): refused again, it latches again.
             match (self.drive.denied(), std::mem::take(&mut self.probing)) {
-                (Some(why), false) => {
-                    let class = ErrorClass::Denied;
-                    self.backs_off(&mut schedule, "the sync", class, &why, Some(DENIED_LOOK));
+                (Some(latched), false) => {
+                    // The identity's answer, as shown (a refused login keeps one for want of
+                    // the key shown, [`Drive::login_refused`]).
+                    let (why, refusal) = self.drive.refused().unwrap_or(latched);
+                    let (class, look) = (ErrorClass::Denied, Some(DENIED_LOOK));
+                    self.backs_off(&mut schedule, "the sync", class, Some(refusal), &why, look);
                     self.probing = true;
                     continue;
                 }
@@ -755,7 +755,8 @@ impl Runner {
                     if lock(&self.held).clear() {
                         self.tell(vec![ANSWER_DROPPED_GONE.into()]);
                     }
-                    self.failing(State::Failing, GONE.into(), schedule.later(Instant::now()));
+                    let later = schedule.later(Instant::now());
+                    self.failing(Showing::failing(State::Failing, GONE.into()), later);
                     continue;
                 }
                 Err(e) => return Err(e.into()),
@@ -794,11 +795,8 @@ impl Runner {
                                 self.tell_rules(None);
                             }
                         }
-                        self.failing(
-                            State::Failing,
-                            e.to_string(),
-                            schedule.later(Instant::now()),
-                        );
+                        let later = schedule.later(Instant::now());
+                        self.failing(Showing::failing(State::Failing, e.to_string()), later);
                         continue;
                     }
                     Err(e) => return Err(e),
@@ -880,8 +878,8 @@ impl Runner {
                     match self.record(&mut p.engine, &report, took) {
                         Err(e) if self.ends_for(e.unusable()) => return Err(e.into()),
                         Err(e) => {
-                            let class = e.class();
-                            self.backs_off(&mut schedule, "recording the sync", class, &e, None);
+                            let (what, class) = ("recording the sync", e.class());
+                            self.backs_off(&mut schedule, what, class, None, &e, None);
                         }
                         Ok(()) => {}
                     }
@@ -897,7 +895,8 @@ impl Runner {
                     if self.ends_for(e.unusable()) {
                         return Err(e.into());
                     }
-                    self.backs_off(&mut schedule, "the sync", e.class(), &e, e.retry_after());
+                    let (class, refusal, after) = (e.class(), e.refusal(), e.retry_after());
+                    self.backs_off(&mut schedule, "the sync", class, refusal, &e, after);
                 }
             }
             if self.cfg.once {
@@ -959,27 +958,32 @@ impl Runner {
         }
     }
 
-    /// `what` failed with `e` (of `class`; the server said to ask again after `retry_after`):
-    /// the folder shows it and backs off.
+    /// `what` failed with `e`, of `class` (`refusal`: why the identity refused, if it did; the
+    /// server said to ask again after `retry_after`): the folder shows it (the account's
+    /// refusal through what would show offline, [`Drive::refused`]) and backs off.
     fn backs_off(
         &self,
         schedule: &mut Schedule,
         what: &str,
-        class: hbsync_remote::ErrorClass,
+        class: ErrorClass,
+        refusal: Option<Refusal>,
         e: &dyn std::fmt::Display,
         retry_after: Option<Duration>,
     ) -> Duration {
         let wait = schedule.failed(Instant::now(), class, retry_after);
         tracing::warn!("{what} failed ({e}); trying again in {wait:?}");
-        self.failing(schedule::shown(class), e.to_string(), wait);
+        let kept = self.drive.refused();
+        let showing = Showing::failed(class, refusal, e.to_string(), kept);
+        self.failing(showing, wait);
         wait
     }
 
-    /// Shows `why` nothing syncs (in `state`), until another try after `wait`.
-    fn failing(&self, state: State, why: String, wait: Duration) {
+    /// Shows why nothing syncs (`showing`), until another try after `wait`.
+    fn failing(&self, showing: Showing, wait: Duration) {
         self.set(|s| {
-            s.state = state;
-            s.error = Some(why);
+            s.state = showing.state;
+            s.error = Some(showing.why);
+            s.lacks_key = showing.lacks_key;
             s.retry_at = Some(unix_now() + wait.as_secs());
         });
     }

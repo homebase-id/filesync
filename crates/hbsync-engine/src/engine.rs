@@ -544,13 +544,19 @@ impl Engine {
         self.rescanned.clear();
         self.waited.new_pass();
         self.unreported = None;
+        let since = self.drive.refusals();
         match self.sync_into(date, pulled, &mut report) {
-            Ok(()) => Ok(report),
+            Ok(()) => {
+                // Gone well (the folder shows idle): the refusal shown ends, one for want of
+                // the key too ([`Drive::refused`]); a request that needs the key says so again.
+                self.drive.succeeded(since, true);
+                Ok(report)
+            }
             // What it did before is told all the same (its conflicts: their copies are made):
             // [`Engine::take_unreported`]. Kept only when there is something to tell.
             Err(e) => {
                 // Refused: the account asks nothing more until the user acts ([`Drive::deny`]).
-                self.drive.latch(e.class(), &e);
+                self.drive.latch(e.refusal(), &e);
                 let tell = !(report.conflicts.is_empty()
                     && report.failed.is_empty()
                     && report.skipped.is_empty()

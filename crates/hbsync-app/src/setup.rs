@@ -102,6 +102,49 @@ impl Owner for InBrowser<'_> {
     }
 }
 
+/// What `prepare` ([`prepare`]) finds with `creds`, authorized just now when `fresh`:
+/// credentials the identity refuses are authorized again by `again`, once (telling `say`). A
+/// login without the private drive's key, one just now or the new one, fails saying so: the
+/// login is kept, and a later one may get the key.
+fn prepared_or_again<P>(
+    identity: &Identity,
+    creds: &mut Credentials,
+    fresh: bool,
+    prepare: impl Fn(&Credentials) -> Result<P, HomebaseError>,
+    again: impl FnOnce() -> crate::Result<Credentials>,
+    say: &mut dyn FnMut(&str),
+) -> crate::Result<Result<P, HomebaseError>> {
+    let without_key = |prepared| without_key(identity, prepared);
+    let prepared = prepare(creds);
+    let why = match &prepared {
+        Err(HomebaseError::NoDriveKey) if fresh => return without_key(prepared),
+        Err(HomebaseError::Denied(why)) => why.clone(),
+        Err(e) if e.refusal().is_some() => e.to_string(),
+        _ => return Ok(prepared),
+    };
+    say(&format!(
+        "{identity} no longer accepts this computer's authorization ({why})."
+    ));
+    *creds = again()?;
+    without_key(prepare(creds))
+}
+
+/// `prepared` ([`prepare`]), but a login without the private drive's key fails saying so.
+fn without_key<P>(
+    identity: &Identity,
+    prepared: Result<P, HomebaseError>,
+) -> crate::Result<Result<P, HomebaseError>> {
+    match prepared {
+        Err(HomebaseError::NoDriveKey) => Err(Refusal::No(format!(
+            "{identity} authorized this computer, but your Homebase cloud didn't give it the key \
+             to the private Filesync drive, so it can't sync it yet. Log in again to try once \
+             more"
+        ))
+        .into()),
+        prepared => Ok(prepared),
+    }
+}
+
 /// What [`prepare`] found and did.
 #[derive(Debug)]
 pub struct Prepared<R = HomebaseRemote> {
@@ -134,7 +177,10 @@ fn prepared<R>(
     circle: impl FnOnce(&R) -> Result<uuid::Uuid, HomebaseError>,
 ) -> Result<Prepared<R>, HomebaseError> {
     let feed_entries = feed(&remote).map_err(|e| match e {
-        hbsync_remote::RemoteError::Denied(why) => HomebaseError::Denied(why),
+        hbsync_remote::RemoteError::Denied(_, hbsync_remote::Refusal::NoKey) => {
+            HomebaseError::NoDriveKey
+        }
+        hbsync_remote::RemoteError::Denied(why, _) => HomebaseError::Denied(why),
         e => HomebaseError::Protocol(format!("the sync drive's feed: {e}")),
     })?;
     let circle = circle(&remote)
@@ -427,27 +473,20 @@ pub fn set_up(
         authorized = true;
         Ok(creds)
     };
-    let mut creds = match store.load(identity)? {
+    let (mut creds, fresh) = match store.load(identity)? {
         Some((creds, _)) => {
             say(&format!(
                 "This computer is already authorized on {identity}."
             ));
-            creds
+            (creds, false)
         }
-        None => authorize(owner)?,
+        None => (authorize(owner)?, true),
     };
-    let prepared = match prepare(&creds) {
-        // Revoked since: authorize again.
-        Err(HomebaseError::Denied(why)) => {
-            say(&format!(
-                "{identity} no longer accepts this computer's authorization ({why})."
-            ));
-            store.delete(identity)?;
-            creds = authorize(owner)?;
-            prepare(&creds)
-        }
-        other => other,
+    let again = || {
+        store.delete(identity)?;
+        authorize(&mut *owner)
     };
+    let prepared = prepared_or_again(identity, &mut creds, fresh, prepare, again, say)?;
     match prepared {
         Err(HomebaseError::NoDrive(_)) => {
             // Every local refusal first: the new drive is for every computer.
@@ -469,8 +508,8 @@ pub fn set_up(
             check_state(paths, identity, &folder, checked.existing)?;
             give_drive_back(identity, owner, say)?;
             // Still not at its address: a drive with its ids that another app owns (the owner
-            // app only grants one that exists).
-            prepare(&creds).map_err(|e| match e {
+            // app only grants one that exists). Without the key, as above.
+            without_key(identity, prepare(&creds))?.map_err(|e| match e {
                 HomebaseError::NoDrive(_) => crate::Error::from(Refusal::No(format!(
                     "The Filesync drive still isn't on {identity}: if your Homebase lists a drive \
                      named Filesync under another app, delete it there if it is empty, and try \
@@ -556,6 +595,48 @@ fn give_drive_back(
 mod tests {
     use super::*;
 
+    /// Stored credentials the identity refuses for want of the private drive's key (or
+    /// revoked) are authorized again, once; credentials authorized just now aren't asked for a
+    /// second time, and without the key setup fails saying so.
+    #[test]
+    fn stored_credentials_refused_for_the_key_are_authorized_again() {
+        let identity: Identity = "a.example".into();
+        let creds = |token: &str| Credentials {
+            client_auth_token: token.into(),
+            ..crate::secrets::sample(identity.as_str())
+        };
+        // The old login is refused for the key; a new one isn't.
+        let prepare = |c: &Credentials| match c.client_auth_token.as_str() {
+            "new" => Ok(()),
+            "revoked" => Err(HomebaseError::Denied("401".into())),
+            _ => Err(HomebaseError::NoDriveKey),
+        };
+        let run = |token: &str, fresh: bool, then: &str| {
+            let (mut c, mut asked, mut said) = (creds(token), 0, Vec::new());
+            let again = || {
+                asked += 1;
+                Ok(creds(then))
+            };
+            let mut say = |line: &str| said.push(line.to_owned());
+            let got = prepared_or_again(&identity, &mut c, fresh, prepare, again, &mut say);
+            (got.map_err(|e| e.to_string()), asked, said)
+        };
+        let (got, asked, said) = run("old", false, "new");
+        assert!(matches!(got, Ok(Ok(()))), "{got:?}");
+        assert_eq!(asked, 1);
+        assert!(said[0].contains("doesn't hold its key"), "{said:?}");
+        // Revoked: authorized again, just now or not (as before).
+        assert_eq!(run("revoked", false, "new").1, 1);
+        assert_eq!(run("revoked", true, "new").1, 1);
+        // Without the key: just now, not asked again; else asked once. Said so either way.
+        let without_key = "didn't give it the key to the private Filesync drive";
+        for (fresh, times) in [(true, 0), (false, 1)] {
+            let (got, asked, _) = run("old", fresh, "keyless");
+            assert!(got.is_err_and(|e| e.contains(without_key)), "{fresh}");
+            assert_eq!(asked, times, "{fresh}");
+        }
+    }
+
     /// A refused circle fails nothing: setup goes on without it (and so keeps the credentials).
     /// Only a refused drive or feed is a revoked authorization.
     #[test]
@@ -575,7 +656,12 @@ mod tests {
         );
         let revoked = prepared(
             (),
-            |_| Err(hbsync_remote::RemoteError::Denied("401".into())),
+            |_| {
+                Err(hbsync_remote::RemoteError::Denied(
+                    "401".into(),
+                    hbsync_remote::Refusal::Credentials,
+                ))
+            },
             |_| Ok(uuid::Uuid::nil()),
         );
         assert!(

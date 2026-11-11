@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use hbsync_fileio::{HashAlgorithm, Hasher};
 use hbsync_remote::{
     Answers, ChangesPage, Deletes, ErrorClass, ForGood, Holds, NodeMeta, Paced, Planned, RefsPage,
-    Remote, RemoteBody, RemoteError, RemoteHeader, Result, Upload,
+    Refusal, Remote, RemoteBody, RemoteError, RemoteHeader, Result, Upload,
 };
 use hbsync_types::schema::{ARCHIVAL_REMOVED, NodeContent, PAYLOAD_KEY};
 use hbsync_types::{
@@ -40,8 +40,9 @@ use wire::Keys;
 
 /// Why a private drive refuses this computer: it wasn't handed the app's zero-knowledge key
 /// (a login from before it asked for one), the key it was handed opens the drive's no more, or
-/// the drive's key isn't locked for the app yet: a sign-in sets each right.
-const PRIVATE: &str = "the Filesync drive on your Homebase cloud is private now, and this \
+/// the drive's key isn't locked for the app yet: a sign-in sets each right
+/// ([`HomebaseError::NoDriveKey`]).
+pub(crate) const PRIVATE: &str = "the Filesync drive on your Homebase cloud is private now, and this \
                        computer doesn't hold its key";
 
 /// Why a private drive can't be opened by a login that holds the app's zero-knowledge key: the
@@ -135,7 +136,7 @@ impl KeyState {
     fn key(&self) -> Result<Option<Key>, HomebaseError> {
         match (self.private, self.key) {
             (true, None) if self.unlisted => Err(HomebaseError::Protocol(UNLISTED.into())),
-            (true, None) => Err(HomebaseError::Denied(PRIVATE.into())),
+            (true, None) => Err(HomebaseError::NoDriveKey),
             (_, key) => Ok(key),
         }
     }
@@ -152,11 +153,10 @@ impl std::fmt::Debug for DriveKey {
 /// The drive's key locked with the app's zero-knowledge key, opened. One this login can't open
 /// refuses this computer.
 fn unlock_drive_key(client: &Client, locked: &str) -> Result<Key, HomebaseError> {
-    let denied = || HomebaseError::Denied(PRIVATE.into());
-    let app_key = client.zk_key().ok_or_else(denied)?;
+    let app_key = client.zk_key().ok_or(HomebaseError::NoDriveKey)?;
     let key = zk_unlock(app_key, locked).map_err(|e| match e {
         // Locked with another key than this login's (another sign-in's won).
-        HomebaseError::Crypto(_) => denied(),
+        HomebaseError::Crypto(_) => HomebaseError::NoDriveKey,
         e => e,
     })?;
     <Key>::try_from(&key[..])
@@ -1032,18 +1032,35 @@ fn no_drive(error: &ApiError) -> bool {
             .is_some_and(|c| c.eq_ignore_ascii_case("invalidDrive"))
 }
 
-/// How a Homebase answer maps onto the trait's errors (`homebase-api-notes.md`, Errors).
+/// How a Homebase answer maps onto the trait's errors (`homebase-api-notes.md`, Errors):
+/// [`mapped`], a local I/O error kept as it is.
 fn remote_error(e: HomebaseError) -> RemoteError {
     match e {
-        HomebaseError::Network(why) => RemoteError::Transient(why),
-        HomebaseError::Denied(why) => RemoteError::Denied(why),
-        HomebaseError::Io(e) if source_ended(&e) => RemoteError::HashMismatch,
-        HomebaseError::Io(e) => RemoteError::Io(e),
-        HomebaseError::Api { what, error } => api_error(&what, &error),
+        HomebaseError::Io(e) if !source_ended(&e) => RemoteError::Io(e),
+        e => mapped(&e, true),
+    }
+}
+
+/// The one mapping of a Homebase answer onto the trait's errors, with its words when `words`
+/// (its class and refusal need none, [`HomebaseError::class`]); not for a local I/O error,
+/// which stays its own (rebuilt, it would lose its OS error code).
+fn mapped(e: &HomebaseError, words: bool) -> RemoteError {
+    let say = |why: &dyn Fn() -> String| if words { why() } else { String::new() };
+    match e {
+        HomebaseError::Network(why) => RemoteError::Transient(say(&|| why.clone())),
+        HomebaseError::Denied(why) => {
+            RemoteError::Denied(say(&|| why.clone()), Refusal::Credentials)
+        }
+        HomebaseError::NoDriveKey => RemoteError::Denied(say(&|| PRIVATE.into()), Refusal::NoKey),
+        // A source that ended early: the only I/O error that comes here.
+        HomebaseError::Io(_) => RemoteError::HashMismatch,
+        HomebaseError::Api { what, error } => {
+            api_error(error, || say(&|| format!("{what}: {error}")))
+        }
         e @ (HomebaseError::NoDrive(_)
         | HomebaseError::Protocol(_)
         | HomebaseError::Crypto(_)
-        | HomebaseError::Json(_)) => RemoteError::Fatal(e.to_string()),
+        | HomebaseError::Json(_)) => RemoteError::Fatal(say(&|| e.to_string())),
     }
 }
 
@@ -1052,9 +1069,8 @@ fn source_ended(e: &std::io::Error) -> bool {
     e.get_ref().is_some_and(|e| e.is::<SourceEnded>())
 }
 
-/// The trait's error for an error answer.
-fn api_error(what: &str, error: &ApiError) -> RemoteError {
-    let why = || format!("{what}: {error}");
+/// The trait's error for an error answer, `why` its words (the class needs none).
+fn api_error(error: &ApiError, why: impl Fn() -> String) -> RemoteError {
     let mapped = match error.code.as_deref().and_then(code_error) {
         Some(mapped) => mapped,
         None => match error.status {
@@ -1091,18 +1107,25 @@ impl HomebaseError {
         }
     }
 
+    /// Why the identity refused this computer, if it did.
+    pub fn refusal(&self) -> Option<Refusal> {
+        self.classified().1
+    }
+
     /// What it means ([`ErrorClass`]): as the drive's error for it would say.
     pub fn class(&self) -> ErrorClass {
+        self.classified().0
+    }
+
+    /// Its class and refusal, as the drive's error for it ([`remote_error`]) has them, without
+    /// its words.
+    fn classified(&self) -> (ErrorClass, Option<Refusal>) {
         match self {
-            HomebaseError::Network(_) => ErrorClass::Transient,
-            HomebaseError::Denied(_) => ErrorClass::Denied,
-            HomebaseError::Io(e) if source_ended(e) => ErrorClass::Stale,
-            HomebaseError::Io(e) => ErrorClass::of_io(e),
-            HomebaseError::Api { what, error } => api_error(what, error).class(),
-            HomebaseError::NoDrive(_)
-            | HomebaseError::Protocol(_)
-            | HomebaseError::Crypto(_)
-            | HomebaseError::Json(_) => ErrorClass::Refused,
+            HomebaseError::Io(e) if !source_ended(e) => (ErrorClass::of_io(e), None),
+            e => {
+                let mapped = mapped(e, false);
+                (mapped.class(), mapped.refusal())
+            }
         }
     }
 }
@@ -1119,10 +1142,15 @@ mod tests {
             key,
             ..KeyState::default()
         };
-        assert!(matches!(
-            state(true, None).key(),
-            Err(HomebaseError::Denied(_))
-        ));
+        // Told apart from other refusals, with the same words and class.
+        let lacking = state(true, None).key();
+        assert!(
+            matches!(lacking, Err(HomebaseError::NoDriveKey)),
+            "{lacking:?}"
+        );
+        let lacking = lacking.expect_err("refused");
+        assert_eq!(lacking.class(), ErrorClass::Denied);
+        assert_eq!(lacking.to_string(), format!("denied: {PRIVATE}"));
         // The grant left out by the server, for a login holding the app's key: the server's
         // to fix, not a sign-in's, and never read as shared.
         let unlisted = KeyState {
@@ -1235,6 +1263,10 @@ mod tests {
     /// from a page in front of the identity, is offline.
     #[test]
     fn an_errors_class_is_its_drive_errors() {
+        #[cfg(windows)]
+        const LOCKED: i32 = 32; // ERROR_SHARING_VIOLATION
+        #[cfg(not(windows))]
+        const LOCKED: i32 = 16; // EBUSY
         let mut proxy = api(404, None);
         if let HomebaseError::Api { error, .. } = &mut proxy {
             error.from_identity = false;
@@ -1243,6 +1275,10 @@ mod tests {
             [
                 HomebaseError::Network("cut".into()),
                 HomebaseError::Denied("401".into()),
+                HomebaseError::NoDriveKey,
+                HomebaseError::NoDrive("a.example".into()),
+                HomebaseError::Crypto("bad".into()),
+                HomebaseError::Json(serde_json::from_str::<u8>("x").expect_err("not json")),
                 api(503, None),
                 api(429, None),
                 api(404, None),
@@ -1252,15 +1288,26 @@ mod tests {
                 HomebaseError::Protocol("odd".into()),
                 HomebaseError::Io(std::io::Error::other(SourceEnded { missing: 1 })),
                 HomebaseError::Io(std::io::Error::other("disk")),
+                // Locked by another program: told by its OS error code alone.
+                HomebaseError::Io(std::io::Error::from_raw_os_error(LOCKED)),
             ]
         };
+        // Every variant: its class and refusal are those of the drive's error for it.
         for e in errors() {
-            let class = e.class();
-            assert_eq!(class, remote_error(e).class());
+            let said = (e.class(), e.refusal());
+            let remote = remote_error(e);
+            assert_eq!(said, (remote.class(), remote.refusal()), "{remote}");
         }
         assert_eq!(api(503, None).class(), ErrorClass::Transient);
         assert_eq!(proxy.class(), ErrorClass::Transient);
         assert_eq!(api(404, None).class(), ErrorClass::Gone);
+        // Why the identity refused this computer: typed.
+        let refusal = |e: HomebaseError| (e.refusal(), remote_error(e).refusal());
+        let key = Some(Refusal::NoKey);
+        assert_eq!(refusal(HomebaseError::NoDriveKey), (key, key));
+        let login = Some(Refusal::Credentials);
+        assert_eq!(refusal(HomebaseError::Denied("401".into())), (login, login));
+        assert_eq!(refusal(api(503, None)), (None, None));
     }
 
     /// A server that says when to ask again is waited for: a busy or paused one (429, 503)
@@ -1420,6 +1467,7 @@ mod tests {
             (api(400, Some("invalidUpload")), "Fatal"),
             (HomebaseError::Network("reset".into()), "Transient"),
             (HomebaseError::Denied("401".into()), "Denied"),
+            (HomebaseError::NoDriveKey, "Denied"),
             // The upload source: one that ended early changed; one that can't be read is local.
             (
                 HomebaseError::Io(std::io::Error::new(
@@ -1514,6 +1562,44 @@ mod tests {
         );
     }
 
+    /// The drive of an identity that can't be reached, what is known of its key as `state`
+    /// says (read at the client's start: not read again).
+    fn unreachable_remote(state: KeyState) -> Result<HomebaseRemote, HomebaseError> {
+        let credentials = crate::youauth::Credentials {
+            identity: "unreachable.invalid".into(),
+            client_auth_token: "AAAA".into(),
+            shared_secret: "AAAAAAAAAAAAAAAAAAAAAA==".into(),
+            zk_app_key: None,
+        };
+        Ok(HomebaseRemote {
+            client: Client::new(&credentials)?,
+            drive: TargetDrive {
+                alias: Uuid::nil(),
+                drive_type: Uuid::nil(),
+            },
+            made: 0,
+            drive_key: DriveKey(Mutex::new(state)),
+        })
+    }
+
+    /// A private drive whose key this login doesn't hold refuses this computer for want of the
+    /// key, typed so, as the folders' syncs see it; with the key there, it is read.
+    #[test]
+    fn a_missing_key_is_a_typed_refusal() -> Result<(), HomebaseError> {
+        let state = |key| KeyState {
+            private: true,
+            key,
+            ..KeyState::default()
+        };
+        let remote = unreachable_remote(state(None))?;
+        let refused = remote.drive_key(false).expect_err("refused");
+        assert_eq!(refused.refusal(), Some(Refusal::NoKey), "{refused}");
+        assert_eq!(refused.to_string(), format!("access denied: {PRIVATE}"));
+        *remote.drive_key.0.lock().unwrap_or_else(|e| e.into_inner()) = state(Some([1; 16]));
+        assert_eq!(remote.drive_key(false).ok(), Some(Some([1; 16])));
+        Ok(())
+    }
+
     /// A file over the limit is refused before any request, a create or an update: here the
     /// identity can't be reached, and nothing of the file is read.
     #[test]
@@ -1524,21 +1610,7 @@ mod tests {
                 panic!("a refused file is read");
             }
         }
-        let credentials = crate::youauth::Credentials {
-            identity: "unreachable.invalid".into(),
-            client_auth_token: "AAAA".into(),
-            shared_secret: "AAAAAAAAAAAAAAAAAAAAAA==".into(),
-            zk_app_key: None,
-        };
-        let remote = HomebaseRemote {
-            client: Client::new(&credentials)?,
-            drive: TargetDrive {
-                alias: Uuid::nil(),
-                drive_type: Uuid::nil(),
-            },
-            made: 0,
-            drive_key: DriveKey(Mutex::new(KeyState::default())),
-        };
+        let remote = unreachable_remote(KeyState::default())?;
         let size = MAX_FILE + 1;
         let meta = NodeMeta {
             node: hbsync_types::NodeId::new(),

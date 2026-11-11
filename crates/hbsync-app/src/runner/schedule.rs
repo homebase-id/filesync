@@ -5,7 +5,7 @@
 use std::time::{Duration, Instant};
 
 use hbsync_engine::policy::{Shown, policy};
-use hbsync_remote::ErrorClass;
+use hbsync_remote::{ErrorClass, Refusal};
 
 use crate::protocol::State;
 
@@ -51,6 +51,49 @@ pub(crate) fn shown(class: ErrorClass) -> State {
         Shown::Offline => State::Offline,
         Shown::Denied => State::Denied,
         Shown::Failing => State::Failing,
+    }
+}
+
+/// What a folder or an account shows while it fails ([`State`]), why, and whether the identity
+/// refused it for want of the private drive's key ([`FolderStatus::lacks_key`]).
+///
+/// [`FolderStatus::lacks_key`]: crate::protocol::FolderStatus::lacks_key
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Showing {
+    pub state: State,
+    pub why: String,
+    pub lacks_key: bool,
+}
+
+impl Showing {
+    /// After a failure of `class`, `why`: refused (`refusal`), or as its class shows; one that
+    /// would show offline (no answer, a server in trouble or busy) shows `kept` instead, the
+    /// identity's last refusal, while that is its last word on the login.
+    pub(crate) fn failed(
+        class: ErrorClass,
+        refusal: Option<Refusal>,
+        why: String,
+        kept: Option<(String, Refusal)>,
+    ) -> Showing {
+        let refused = |(why, refusal): (String, Refusal)| Showing {
+            state: State::Denied,
+            why,
+            lacks_key: refusal == Refusal::NoKey,
+        };
+        match (refusal, kept) {
+            (Some(refusal), _) => refused((why, refusal)),
+            (None, Some(kept)) if policy(class).shown == Shown::Offline => refused(kept),
+            _ => Showing::failing(shown(class), why),
+        }
+    }
+
+    /// Shows `why` in `state`, not refused.
+    pub(crate) fn failing(state: State, why: String) -> Showing {
+        Showing {
+            state,
+            why,
+            lacks_key: false,
+        }
     }
 }
 
@@ -558,8 +601,57 @@ mod tests {
             "disk",
         ))));
         assert_eq!(shown(disk.class()), State::Failing);
-        let denied = EngineError::Remote(RemoteError::Denied("401".into()));
+        let denied = EngineError::Remote(RemoteError::Denied(
+            "401".into(),
+            hbsync_remote::Refusal::Credentials,
+        ));
         assert_eq!(shown(denied.class()), State::Denied);
+    }
+
+    /// A refusal kept shows through what would show offline (a 503 with `Retry-After` too),
+    /// not through a fault of this computer's own nor another answer; and says whether for want
+    /// of the key.
+    #[test]
+    fn a_refusal_kept_shows_through_what_would_show_offline() {
+        use ErrorClass::{Denied, LocalFault, RateLimited, Refused as Odd, Transient};
+        let failed = |class, refusal, kept: Option<(&str, Refusal)>| {
+            let kept = kept.map(|(why, r)| (why.to_owned(), r));
+            let s = Showing::failed(class, refusal, "now".into(), kept);
+            (s.state, s.why, s.lacks_key)
+        };
+        let (login, key) = (Refusal::Credentials, Refusal::NoKey);
+        let shows = |state, why: &str, key| (state, why.to_owned(), key);
+        assert_eq!(
+            failed(Transient, None, None),
+            shows(State::Offline, "now", false)
+        );
+        assert_eq!(
+            failed(Denied, Some(key), None),
+            shows(State::Denied, "now", true)
+        );
+        let kept = Some(("401", login));
+        assert_eq!(
+            failed(Transient, None, kept),
+            shows(State::Denied, "401", false)
+        );
+        assert_eq!(
+            failed(RateLimited, None, kept),
+            shows(State::Denied, "401", false)
+        );
+        assert_eq!(
+            failed(LocalFault, None, kept),
+            shows(State::Failing, "now", false)
+        );
+        assert_eq!(failed(Odd, None, kept), shows(State::Failing, "now", false));
+        let kept = Some(("no key", key));
+        assert_eq!(
+            failed(Transient, None, kept),
+            shows(State::Denied, "no key", true)
+        );
+        assert_eq!(
+            failed(Denied, Some(login), kept),
+            shows(State::Denied, "now", false)
+        );
     }
 
     /// A sync asked for reads the feed first; one that failed leaves that for the next try,
