@@ -993,9 +993,10 @@ them, and a tag removed on the drive meanwhile came back. The plan's move or rem
 founds the base; where it runs first, the tags come down in the same run. A folder made here
 from Recently deleted (never synced here, its restore to follow) founds its base on the version
 there, as found before the write (a pull landing before its commit doesn't change what it settles
-against); where that no longer holds each tag it is to write that this device can hold, colour
-and all (Linux too, a safe extra round: its restore keeps that version's colour), as restored,
-changed or purged since the plan, it waits for the next plan.
+against); where that no longer holds each tag it is to write that this device can hold, as it
+holds it (on macOS in its colour; Linux, which holds none, settles against that version's colour
+and its restore keeps it), as restored, changed or purged since the plan, it waits for the next
+plan.
 
 **Limits.** Tag changes are seen through the change time: on a volume that keeps attributes
 elsewhere (exFAT's `._` files) or with one-second times (HFS+), a change can go unnoticed until

@@ -1409,3 +1409,97 @@ fn regression_a_colour_given_while_its_own_tag_write_is_in_flight_is_a_known_lim
         "{limits:?}"
     );
 }
+
+/// Client 0 (macOS) makes folder d, tagged Red with its colour, and a file in it; client 1
+/// (Linux) ignores d. Another device deletes d and stops, and the phone saves an edit of the file:
+/// d in Recently deleted, its file live. Client 1 stops ignoring d and plans it back for the
+/// file: made here from Recently deleted, then restored there. Before that runs, the other
+/// device restores d, client 0 gives Red another colour, and d is deleted the same way again.
+/// Linux holds Red without its colour: the folder is made in that plan, its base settled against
+/// the version there, and its restore keeps the drive's colour (sync semantics §11); no tag
+/// write follows. (Its check compared colours on Linux too, and the folder waited for the next
+/// plan.)
+#[test]
+fn regression_a_folder_recoloured_in_recently_deleted_is_made_on_linux_at_once() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let (plan, step) = (
+        |client| Event::Plan { client },
+        |client| Event::Step { client },
+    );
+    let red = |colour: u8| Some(vec![format!("Red:{colour}")]);
+    // Client 1 reads its mirror as the drive is when its step runs.
+    let mut sim = Sim::new(2).with_pulls(Some(true));
+    sim.run(&[act(0, CreateFolder { parent: 0, name: 5 })]);
+    let d = sim.item(0, "d").expect("d");
+    let (tag, file) = (
+        sim.pick(0, d, false).expect("d"),
+        sim.pick(0, d, true).expect("d"),
+    );
+    sim.run(&[
+        act(0, Tag { node: tag, tag: 0 }),
+        act(
+            0,
+            CreateFile {
+                parent: file,
+                name: 0,
+            },
+        ),
+    ]);
+    assert!(sim.quiesce(10));
+    assert_eq!(sim.server_tags("d"), red(6));
+    assert_eq!(sim.item(1, "d"), None, "client 1 ignores d");
+    // Deleted, stopping before the file, and the file edited there (on the phone): live, newer
+    // than the delete.
+    let delete = |sim: &mut Sim| {
+        let pick = sim.stopped_pick(d).expect("d live");
+        sim.run(&[
+            act(0, DeleteStopped { pick, done: 0 }),
+            act(0, EditTaken { pick: 0 }),
+        ]);
+    };
+    delete(&mut sim);
+    sim.run(&[act(1, ToggleIgnore), plan(1)]);
+    assert!(
+        sim.planned(1).contains(&"LocalMkdir"),
+        "{:?}",
+        sim.planned(1)
+    );
+    // Restored, recoloured on client 0, deleted again.
+    let synced = |sim: &mut Sim, action| {
+        sim.run(&[act(0, action), plan(0)]);
+        while !sim.planned(0).is_empty() {
+            sim.run(&[step(0)]);
+        }
+    };
+    let restore = sim.removed_pick(d).expect("d removed");
+    synced(&mut sim, Restore { node: restore });
+    let tag = sim.pick(0, d, false).expect("d");
+    synced(&mut sim, Colour { node: tag, tag: 0 });
+    delete(&mut sim);
+    assert_eq!(sim.removed_tags(d), vec!["Red:7".to_owned()]);
+    // Client 1's plan, as planned before: d made and restored in it, settled against the
+    // drive's colour; Linux holds Red without it.
+    for _ in 0..10 {
+        if sim.planned(1).is_empty() {
+            break;
+        }
+        sim.run(&[step(1)]);
+    }
+    assert!(sim.planned(1).is_empty(), "{:?}", sim.planned(1));
+    assert!(sim.item(1, "d").is_some(), "d made from the plan");
+    assert_eq!(sim.local_tags(1, "d"), red(0));
+    assert_eq!(sim.base_tags(1, d), red(7));
+    assert_eq!(sim.server_tags("d"), red(7));
+    assert!(sim.quiesce(30), "no convergence");
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    // Settled: no tag write either way (`quiesce` lets a plan that only skips pass).
+    sim.run(&[plan(1)]);
+    let planned = sim.planned(1);
+    assert!(
+        !planned.contains(&"LocalTags") && !planned.contains(&"RemoteTags"),
+        "{planned:?}"
+    );
+    assert_eq!(sim.local_tags(0, "d"), red(7));
+    assert_eq!(sim.local_tags(1, "d"), red(0));
+}

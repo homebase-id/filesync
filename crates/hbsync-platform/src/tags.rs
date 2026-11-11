@@ -77,6 +77,13 @@ impl Tags {
             .map(|i| &self.0[i])
     }
 
+    /// The tag here that `os` holds alike `tag`: of its name, and of its colour where `os` holds
+    /// colours ([`holds_colours`]).
+    pub fn get_alike(&self, tag: &Tag, os: Os) -> Option<&Tag> {
+        self.get(&tag.name)
+            .filter(|t| !holds_colours(os) || t.colour == tag.colour)
+    }
+
     /// Whether they are small enough to sync ([`MAX_BYTES`]).
     pub fn fits(&self) -> bool {
         self.0.iter().map(|t| t.name.len() + 16).sum::<usize>() <= MAX_BYTES
@@ -143,14 +150,14 @@ impl Tags {
 
     /// [`Tags::merge`] for a write over the drive's version (`remote`) by a device on `os`:
     /// what it can't hold of `local` is `remote`'s, a tag's colour on Linux too (a tag of
-    /// `local` held [`alike`] `remote`'s is `remote`'s). It never removes or recolours a tag
+    /// `local` held alike ([`Tags::get_alike`]) is `remote`'s). It never removes or recolours a tag
     /// it can't see, though `local` took those from the drive its plan saw, which may be older
     /// than the version written over (and the base settled against one in between).
     pub fn merge_onto(base: &Tags, local: &Tags, remote: &Tags, os: Os) -> Tags {
-        let held = local.iter().filter(|t| holds(t, os)).map(|t| match os {
-            Os::Linux => remote.get(&t.name).filter(|r| alike(r, t, os)).unwrap_or(t),
-            _ => t,
-        });
+        let held = local
+            .iter()
+            .filter(|t| holds(t, os))
+            .map(|t| remote.get_alike(t, os).unwrap_or(t));
         let unheld = remote.iter().filter(|t| !holds(t, os));
         Tags::merge(base, &Tags::new(held.chain(unheld).cloned()), remote)
     }
@@ -194,10 +201,9 @@ pub fn holds(tag: &Tag, os: Os) -> bool {
     }
 }
 
-/// Whether `os` holds `a` and `b` alike: one name, and one colour unless on Linux, which holds
-/// none.
-pub fn alike(a: &Tag, b: &Tag, os: Os) -> bool {
-    a.name == b.name && (os == Os::Linux || a.colour == b.colour)
+/// Whether `os` holds a tag's colour: Linux holds its name only.
+pub fn holds_colours(os: Os) -> bool {
+    os != Os::Linux
 }
 
 /// How `os` holds `tag`, as reading it back would give it: `None` if it can't.
@@ -205,9 +211,10 @@ pub fn express(tag: &Tag, os: Os) -> Option<Tag> {
     if !holds(tag, os) {
         return None;
     }
-    Some(match os {
-        Os::Linux => Tag::new(tag.name.clone(), 0),
-        _ => tag.clone(),
+    Some(if holds_colours(os) {
+        tag.clone()
+    } else {
+        Tag::new(tag.name.clone(), 0)
     })
 }
 
@@ -480,6 +487,24 @@ mod tests {
 
     fn tags(list: &[(&str, u8)]) -> Tags {
         Tags::new(list.iter().map(|(n, c)| Tag::new(*n, *c)))
+    }
+
+    /// `get_alike`: by name and colour on macOS, by name on Linux.
+    #[test]
+    fn get_alike_takes_the_colour_where_the_os_holds_one() {
+        let (red6, red2) = (Tag::new("Red", 6), Tag::new("Red", 2));
+        let there = tags(&[("Red", 6)]);
+        for os in [Os::MacOs, Os::Linux, Os::Windows] {
+            assert_eq!(there.get_alike(&red6, os), Some(&red6), "{os:?}");
+            assert_eq!(there.get_alike(&Tag::new("Blue", 6), os), None, "{os:?}");
+        }
+        assert_eq!(there.get_alike(&red2, Os::MacOs), None);
+        assert_eq!(there.get_alike(&red2, Os::Windows), None);
+        assert_eq!(
+            there.get_alike(&red2, Os::Linux),
+            Some(&red6),
+            "the one here"
+        );
     }
 
     #[test]
