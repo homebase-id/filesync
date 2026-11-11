@@ -910,7 +910,11 @@ An item inside a filtered folder is filtered too.
      **detached** (`LocalDetach`): it becomes a new node where it is and is created remotely
      like any new item. The old id is still live remotely, so it can't be created again. The
      masked folders it sits in are detached with it, as are masked folders holding anything
-     else this device syncs; their unchanged contents are deleted.
+     else this device syncs; their unchanged contents are deleted. What the plan moves out
+     of a folder the filter masks, to where the drive has it, doesn't keep that folder nor
+     the masked ones above it: a folder held for nothing else is deleted like an unchanged
+     copy, never made again on the drive, empty. One whose move waits, or that leaves a
+     conflict copy, keeps its folder detached; so does what lies outside the scope (§12).
 3. **Folders.** A remote folder with masked live children (that aren't leaving) counts as
    having a live child: a local delete of it deletes what this device saw, and the folder comes
    back here, empty.

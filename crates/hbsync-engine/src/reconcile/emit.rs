@@ -262,12 +262,14 @@ impl Reconciler<'_> {
         let mut deletes: Vec<Op> = deletes.into_iter().map(|(_, op)| op).collect();
         // What each takes here. A folder's delete expects what goes: not what the plan moves
         // out of it first, with what is below that. Where such a move doesn't run, the folder
-        // holds what its delete doesn't expect: it goes stale and takes nothing. A forget, out
-        // of view, takes it all (a folder there never holds such a node: one that holds an
-        // item this device syncs is detached, `mask.rs`).
+        // holds what its delete doesn't expect: it goes stale and takes nothing. So does a
+        // forget, out of view: a folder there holds an item this device syncs only where the
+        // plan moves it away (one that stays there is detached, `mask.rs`).
         for op in &mut deletes {
             match op {
-                Op::LocalDelete { node, subtree } => {
+                Op::LocalDelete { node, subtree } | Op::Forget { node, subtree }
+                    if gone_here.contains(node) =>
+                {
                     let mut trimmed = false;
                     *subtree = i.local.subtree_where(*node, |n| {
                         let stays = !moving.contains(&n);
@@ -278,10 +280,6 @@ impl Reconciler<'_> {
                     if trimmed {
                         self.plan.moves_out_of.insert(*node);
                     }
-                }
-                Op::Forget { node, subtree } if gone_here.contains(node) => {
-                    *subtree = i.local.subtree(*node);
-                    subtree.sort();
                 }
                 _ => {}
             }
@@ -343,16 +341,9 @@ impl Reconciler<'_> {
 /// so a folder's delete here doesn't take them, nor what is below them.
 fn moving_out<'o>(ops: impl IntoIterator<Item = &'o Op>, local: &Tree) -> HashSet<NodeId> {
     ops.into_iter()
-        .filter_map(|op| match op {
-            Op::LocalMove { node, parent, .. }
-            | Op::LocalDownload {
-                node,
-                parent,
-                replace: true,
-                ..
-            } if local.get(*node).is_some_and(|l| l.parent != *parent) => Some(*node),
-            _ => None,
-        })
+        .filter_map(Op::moves_here)
+        .filter(|(node, parent)| local.get(*node).is_some_and(|l| l.parent != *parent))
+        .map(|(node, _)| node)
         .collect()
 }
 

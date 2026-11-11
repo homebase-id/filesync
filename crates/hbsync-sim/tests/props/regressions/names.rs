@@ -1450,3 +1450,69 @@ fn regression_a_clash_name_is_one_this_device_syncs() {
         }
     }
 }
+
+/// c0 moves `b/c.txt` to the top, then `b` into `d`, which c1 (an odd one) ignores. c1 moves
+/// the file out of `b` and forgets `b`: nothing of it stays there. It used to detach `b` for the
+/// file it held, which left it empty, and make it at the top of the drive again, for every
+/// client (#356).
+#[test]
+fn regression_a_folder_moved_out_of_view_after_its_file_moved_out_stays_out() {
+    use Action::*;
+    let mut sim = Sim::new(2);
+    let act = |client, action| Event::Act { client, action };
+    let (a, b, c, d) = (0, 1, 3, 5); // NAMES: "a", "b", "c.txt", "d"
+    let root = sim.pick(0, NodeId::ROOT, true).expect("root");
+    sim.run(&[act(
+        0,
+        CreateFolder {
+            parent: root,
+            name: b,
+        },
+    )]);
+    let folder = sim.item(0, "b").expect("b");
+    let parent = sim.pick(0, folder, true).expect("b");
+    sim.run(&[
+        act(0, CreateFile { parent, name: c }),
+        act(0, CreateFile { parent, name: a }),
+    ]);
+    assert!(sim.quiesce(30), "no convergence");
+    assert_eq!(sim.local_paths(1), ["b", "b/a", "b/c.txt"]);
+
+    let file = sim.item(0, "b/c.txt").expect("b/c.txt");
+    let node = sim.pick(0, file, false).expect("b/c.txt");
+    let root = sim.pick(0, NodeId::ROOT, true).expect("root");
+    sim.run(&[
+        act(
+            0,
+            Move {
+                node,
+                parent: root,
+                name: c,
+            },
+        ),
+        act(
+            0,
+            CreateFolder {
+                parent: root,
+                name: d,
+            },
+        ),
+    ]);
+    let ignored = sim.item(0, "d").expect("d");
+    let node = sim.pick(0, folder, false).expect("b");
+    let parent = sim.pick(0, ignored, true).expect("d");
+    sim.run(&[act(
+        0,
+        Move {
+            node,
+            parent,
+            name: b,
+        },
+    )]);
+    assert!(sim.quiesce(30), "no convergence");
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+    assert_eq!(sim.server_paths(), ["c.txt", "d", "d/b", "d/b/a"]);
+    assert_eq!(sim.local_paths(1), ["c.txt"]);
+}
