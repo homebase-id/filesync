@@ -632,10 +632,8 @@ impl Sim {
             return Err(format!("lost blobs {lost:?}; present {present:?}"));
         }
         let held_at_removal = |node: NodeId, name: &str| {
-            self.server
-                .tags_at_removal
-                .get(&node)
-                .is_some_and(|t| t.contains(name))
+            let tags = self.server.tags_at_removal.get(&node)?;
+            tags.get(name).map(|t| t.colour)
         };
         self.ledger
             .tags

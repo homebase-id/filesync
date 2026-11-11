@@ -5,7 +5,9 @@ use std::convert::Infallible;
 
 use hbsync_engine::tree::Tree;
 use hbsync_engine::walk::End;
-use hbsync_types::{NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, Role, Uuid, VersionTag};
+use hbsync_types::{
+    NodeId, NodeKind, NodeState, RemoteFileId, RemoteRef, Role, Tags, Uuid, VersionTag,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ServerNode {
@@ -28,8 +30,9 @@ pub(crate) struct Server {
     /// what was removed apart from its folder is told whether it is still listed or not
     /// ([`crate::Sim::removed_files_apart`]).
     pub(crate) removals: BTreeMap<NodeId, (NodeId, i64, NodeKind)>,
-    /// The tags each node had when it was last removed: a restore keeps them (§11).
-    pub(crate) tags_at_removal: BTreeMap<NodeId, BTreeSet<String>>,
+    /// The tags each node had when it was last removed, colours too: a restore keeps them
+    /// (§11).
+    pub(crate) tags_at_removal: BTreeMap<NodeId, Tags>,
     next: u128,
     /// Every node that was ever live (the server doesn't check parents, like Homebase).
     pub(crate) ever: BTreeSet<NodeId>,
@@ -85,8 +88,7 @@ impl Server {
 
     /// Puts `node` in Recently deleted: a write, at its time.
     pub(crate) fn remove(&mut self, node: NodeId, mut n: ServerNode) {
-        let tags = n.state.tags.iter().map(|t| t.name.clone()).collect();
-        self.tags_at_removal.insert(node, tags);
+        self.tags_at_removal.insert(node, n.state.tags.clone());
         n.remote.version = VersionTag(self.uuid());
         self.removed_at.insert(node, time(n.remote.version));
         self.removals

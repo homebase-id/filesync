@@ -25,8 +25,9 @@ impl Executor<'_> {
         ours: &Tags,
         drive: &Tags,
     ) -> Tags {
-        let base = base.map(|b| b.state.tags.clone()).unwrap_or_default();
-        Tags::merge_onto(&base, ours, drive, self.folder.os)
+        let empty = Tags::default();
+        let base = base.map_or(&empty, |b| &b.state.tags);
+        Tags::merge_onto(base, ours, drive, self.folder.os)
     }
 
     // ---- remote operations: guards before the worker pool, the DB after ----
