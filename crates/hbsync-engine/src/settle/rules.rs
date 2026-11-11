@@ -127,12 +127,7 @@ pub fn prior_tags<'a>(state: ContentState, base: &'a Tags, remote: &'a Tags) -> 
 /// held it: the write leaves the drive's value of it). The executor's settle and the
 /// simulator's read them alike.
 pub fn tags_written(before: &Tags, written: &Tags, reference: &Tags, os: Os) -> (Tags, Tags) {
-    let holdable = Tags::new(
-        reference
-            .iter()
-            .filter(|t| hbsync_platform::tags::express(t, os).is_some())
-            .cloned(),
-    );
+    let holdable = reference.holdable_by(os);
     (
         Tags::fill(Some(before), &holdable, os),
         Tags::fill(Some(written), reference, os),

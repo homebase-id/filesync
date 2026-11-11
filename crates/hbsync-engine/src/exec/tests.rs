@@ -166,6 +166,18 @@ fn tags_kept(dir: &Path) -> bool {
             .is_some()
 }
 
+/// Tags of these names and colours.
+fn tags_of(tags: &[(&str, u8)]) -> Tags {
+    Tags::new(tags.iter().map(|(n, c)| Tag::new(*n, *c)))
+}
+
+/// Folder "a", tagged `tags`.
+fn folder_a(tags: &Tags) -> NodeContent {
+    let mut c = NodeContent::folder("a");
+    c.set_tags(tags);
+    c
+}
+
 fn some_version() -> RemoteRef {
     RemoteRef {
         file_id: hbsync_types::RemoteFileId(hbsync_types::Uuid::new_v4()),
@@ -3255,6 +3267,83 @@ fn a_folder_to_make_from_recently_deleted_changed_there_since_waits() -> R {
 fn a_folder_to_make_from_recently_deleted_as_planned_is_made() -> R {
     a_folder_to_make_from_recently_deleted(true, true)
 }
+/// A folder in Recently deleted on the drive, tagged `planned` when this device planned to make
+/// it here and restore it, and `there` by the time that runs (another device restored it,
+/// changed its tags and deleted it again): its LocalMkdir and RemoteCreate run. Made and restored
+/// as planned (`as_planned`), the folder is here, its base and the drive tagged as planned; else
+/// nothing is made, and the drive keeps `there` in Recently deleted.
+fn a_folder_made_and_restored(planned: &Tags, there: &Tags, as_planned: bool) -> R {
+    let mut h = Harness::new()?;
+    if !tags_kept(&h.folder.root) {
+        return Ok(()); // nothing to tag with here
+    }
+    let node = NodeId::new();
+    let meta = |tags: &Tags, removed: bool| NodeMeta {
+        node,
+        parent: NodeId::ROOT,
+        kind: NodeKind::Folder,
+        content: folder_a(tags),
+        removed,
+    };
+    let at = {
+        let mut server = h.remote.server();
+        let mut at = server.create(&meta(planned, false), None)?;
+        at = server.update(at.file_id, at.version, &meta(planned, true), None)?;
+        if there != planned {
+            at = server.update(at.file_id, at.version, &meta(there, false), None)?;
+            at = server.update(at.file_id, at.version, &meta(there, true), None)?;
+        }
+        at
+    };
+    let content = folder_a(there);
+    let row = MirrorRow::from_content(at, node, NodeId::ROOT, NodeKind::Folder, &content, None);
+    h.db.write(|s| {
+        s.account().put_removed(&RemovedRow {
+            row,
+            removed_at: Some(1),
+        })
+    })?;
+    let report = h.run(vec![
+        Op::LocalMkdir {
+            node,
+            parent: NodeId::ROOT,
+            name: "a".into(),
+            tags: planned.clone(),
+            drive: None,
+        },
+        Op::RemoteCreate {
+            node,
+            parent: NodeId::ROOT,
+            name: "a".into(),
+            kind: NodeKind::Folder,
+            tags: planned.clone(),
+        },
+    ])?;
+    assert_eq!(h.folder.root.join("a").is_dir(), as_planned, "{report:?}");
+    let base = h.base(node)?.map(|b| b.state.tags);
+    assert_eq!(base.as_ref(), as_planned.then_some(planned), "{report:?}");
+    let header = h.remote.server().header(at.file_id)?;
+    let hbsync_remote::RemoteBody::Live { content, .. } = &header.body else {
+        return Err("gone from the drive".into());
+    };
+    let drive = if as_planned { planned } else { there };
+    assert_eq!(&content.tags(), drive, "{report:?}");
+    assert_eq!(header.removed, !as_planned, "{report:?}");
+    Ok(())
+}
+
+/// Tagged Red with a colour, there as planned: made and restored (seed c22ef7a4).
+#[test]
+fn a_coloured_folder_made_and_restored_keeps_its_colour() -> R {
+    let red = tags_of(&[("Red", 6)]);
+    a_folder_made_and_restored(&red, &red, true)
+}
+
+/// Tagged Red with a colour when planned, recoloured there since: it waits.
+#[test]
+fn a_folder_recoloured_there_since_the_plan_waits() -> R {
+    a_folder_made_and_restored(&tags_of(&[("Red", 6)]), &tags_of(&[("Red", 2)]), false)
+}
 
 /// A folder in Recently deleted, tagged Work, made here as its restore begins: the check finds
 /// Work there and the folder is made with it. Before its commit, another device's restore
@@ -3337,11 +3426,6 @@ fn a_folder_made_back_whose_tag_write_fails(
     }
     let node = NodeId::new();
     let work = Tags::new(vec![Tag::new("Work", 0)]);
-    let content = |tags: &Tags| {
-        let mut c = NodeContent::folder("a");
-        c.set_tags(tags);
-        c
-    };
     let at = some_version();
     h.db.write(|s| {
         s.folder().put_base(&BaseRow::new(
@@ -3358,7 +3442,7 @@ fn a_folder_made_back_whose_tag_write_fails(
                 node,
                 NodeId::ROOT,
                 NodeKind::Folder,
-                &content(last),
+                &folder_a(last),
                 None,
             ),
             removed_at: Some(1),
@@ -3386,7 +3470,7 @@ fn a_folder_made_back_whose_tag_write_fails(
             node,
             NodeId::ROOT,
             NodeKind::Folder,
-            &content(restored),
+            &folder_a(restored),
             None,
         ))
     })?;
@@ -3769,13 +3853,28 @@ fn a_download_whose_tag_write_fails_keeps_a_tag_not_sent_up() -> R {
 /// that the drive doesn't hold so (a colour changed here counts).
 #[test]
 fn a_recoloured_tag_counts_as_not_sent_up() {
-    let tags = |t: &[(&str, u8)]| Tags::new(t.iter().map(|(n, c)| Tag::new(*n, *c)));
-    let (red3, red0, none) = (tags(&[("Red", 3)]), tags(&[("Red", 0)]), tags(&[]));
+    let (red3, red0, none) = (tags_of(&[("Red", 3)]), tags_of(&[("Red", 0)]), tags_of(&[]));
     assert!(super::transfer_ops::tags_lost(&red3, &red3, &red0));
     assert!(super::transfer_ops::tags_lost(&red3, &red3, &none));
     assert!(!super::transfer_ops::tags_lost(&red3, &red3, &red3));
     // Not to be written so (the drive's colour won): nothing lost.
     assert!(!super::transfer_ops::tags_lost(&red3, &red0, &red0));
+}
+
+/// `holds_tags` on each OS: Red with a colour planned, there as planned, recoloured, or removed;
+/// a tag Linux can't hold, removed.
+#[test]
+fn a_folder_from_recently_deleted_waits_for_a_colour_changed_there() {
+    let (red6, red2, none) = (tags_of(&[("Red", 6)]), tags_of(&[("Red", 2)]), tags_of(&[]));
+    for os in [Os::MacOs, Os::Linux] {
+        assert!(holds_tags(&red6, &red6, os), "{os:?}");
+        assert!(!holds_tags(&red6, &red2, os), "{os:?}: recoloured there");
+        assert!(!holds_tags(&red6, &none, os), "{os:?}: removed there");
+    }
+    assert!(holds_tags(&red6, &none, Os::Windows), "Windows holds none");
+    let comma = tags_of(&[("a,b", 4)]);
+    assert!(holds_tags(&comma, &none, Os::Linux), "Linux can't hold it");
+    assert!(!holds_tags(&comma, &none, Os::MacOs));
 }
 
 /// The same, its tag write failing: the folder holds none. It settles against the removed
