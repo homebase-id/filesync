@@ -412,6 +412,11 @@ impl Sim {
             .unwrap_or_default()
     }
 
+    /// For scripted tests: the tags (`name:colour`) of `node` in client `c`'s base, if it has one.
+    pub fn base_tags(&self, c: usize, node: NodeId) -> Option<Vec<String>> {
+        Some(tag_names(&self.clients[c].base.get(node)?.tags))
+    }
+
     /// For scripted tests: the next placement with a record fails its commit once its item is
     /// in place.
     pub fn fail_next_commit(&mut self) {

@@ -681,12 +681,9 @@ pub fn never_had(
 
 /// Whether a download whose tag write failed loses a tag: one the item there holds (`on_item`) as
 /// the download was to write it, that the drive doesn't hold so (a colour changed here too):
-/// each held [`alike`](hbsync_platform::tags::alike) (on Linux, by name).
+/// each held alike ([`get_alike`](hbsync_platform::tags::Tags::get_alike): on Linux, by name).
 pub fn tags_lost(on_item: &Tags, to_write: &Tags, drive: &Tags, os: hbsync_platform::Os) -> bool {
-    let so = |other: Option<&hbsync_types::Tag>, t: &hbsync_types::Tag| {
-        other.is_some_and(|o| hbsync_platform::tags::alike(o, t, os))
-    };
     on_item
         .iter()
-        .any(|t| so(to_write.get(&t.name), t) && !so(drive.get(&t.name), t))
+        .any(|t| to_write.get_alike(t, os).is_some() && drive.get_alike(t, os).is_none())
 }
