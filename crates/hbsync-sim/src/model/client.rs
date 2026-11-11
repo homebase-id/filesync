@@ -14,6 +14,21 @@ use hbsync_state::Coords;
 use hbsync_types::{NodeId, NodeKind, RemoteRef, VersionTag};
 
 use crate::crash::Placement;
+use crate::model::server::time;
+
+/// A node in Recently deleted as a client's mirror holds it (its state is `Client::plan_saw`'s).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct SeenRemoved {
+    pub(crate) kind: NodeKind,
+    pub(crate) version: RemoteRef,
+}
+
+impl SeenRemoved {
+    /// When it went there: the server's time, its version's (a removal is a write).
+    pub(crate) fn at(&self) -> i64 {
+        time(self.version.version)
+    }
+}
 
 /// Where a client's sweep over its nodes in pages is ([`crate::Sim::with_small_pages`]), as the
 /// engine's over its dirty set.
@@ -99,6 +114,10 @@ pub(crate) struct Client {
     /// did since, the folders it saw in Recently deleted included (§12: what is in a folder's
     /// part in Recently deleted is its own).
     pub(crate) plan_saw: Tree,
+    /// Pulls land between the pending plan and its steps (`Faults::plans`): the executor reads
+    /// its mirror as the drive is at each step; else as the plan had it, with this client's
+    /// own writes since ([`crate::Sim::mirror_read`]).
+    pub(crate) pulls: bool,
     pub(crate) filter: Arc<Filter>,
     /// The filter its pending plan runs with: a rule change counts from the next plan, as the
     /// executor holds one for its run.
@@ -134,10 +153,11 @@ pub(crate) struct Client {
     pub(crate) placing: BTreeMap<NodeId, Placement>,
     /// The version of each node `planned_remote` holds (the executor's mirror).
     pub(crate) planned_refs: BTreeMap<NodeId, RemoteRef>,
-    /// The nodes in Recently deleted above live nodes, with each one's kind and when it went
-    /// there, and the server's time of each live node's version, as the pending plan's input
-    /// had them (the mirror's view of what a folder's removal took along).
-    pub(crate) planned_removed: BTreeMap<NodeId, (NodeKind, i64)>,
+    /// The nodes in Recently deleted above live nodes, and the server's time of each live
+    /// node's version, as the pending plan's input had them, with what its own writes removed
+    /// since: the mirror's Recently deleted (and its view of what a folder's removal took
+    /// along).
+    pub(crate) planned_removed: BTreeMap<NodeId, SeenRemoved>,
     pub(crate) planned_changed: HashMap<NodeId, i64>,
     /// Where the pending plan's operations settled each node's base (the executor's): a later
     /// one's compare and set takes the base there as the one its plan saw.
@@ -238,6 +258,7 @@ impl Client {
             planned_remote: Tree::new(),
             pages: Default::default(),
             plan_saw: Tree::new(),
+            pulls: false,
             run_filter: Arc::new(filter.clone()),
             filter: Arc::new(filter),
             held: Vec::new(),
