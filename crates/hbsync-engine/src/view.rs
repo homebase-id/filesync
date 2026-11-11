@@ -6,7 +6,8 @@
 //!   there (name clashes): [`build_narrow`] reads those by their sibling hash, [`build_input`]
 //!   all children;
 //! - the children of a dirty folder that may go (live children keep it);
-//! - the full local subtree of a folder that is gone remotely (what a delete would take).
+//! - the full local subtree of a folder that is gone remotely (what its delete here would
+//!   take, but what the plan moves out of it first).
 //!
 //! The local side is translated from paths to the node model here: the parent is the node at
 //! the parent path, the name is the remote spelling (recorded mapping or [`to_remote`]), and a

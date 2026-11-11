@@ -546,7 +546,7 @@ impl Sim {
                 settings: DeleteGuard {
                     min: self.guard.unwrap_or_default(),
                     fraction: 0.0,
-                    allow: self.guard.is_none(),
+                    allow: self.guard.is_none() || self.faults.engine_unguarded,
                 },
                 synced: synced_files,
                 confirmed: Arc::clone(&confirmed),
@@ -567,7 +567,7 @@ impl Sim {
         };
         let plan = reconcile_with_known(&input, &opts, masking, known);
         // A taken-along file gone there is outside the page unless it is in it, or this plan's
-        // delete here takes it.
+        // delete here takes it (what that expects: not what the plan moves out of it first).
         if !taken_there.is_empty() {
             let deleted: HashSet<NodeId> = plan
                 .ops
@@ -954,7 +954,8 @@ impl Sim {
             let os = self.clients[c].os;
             // A folder made with none to write holds none, the write failing or not (the
             // executor's: it claims none).
-            let nothing = matches!(&op, Op::LocalMkdir { tags, .. } if tags.held_by(os).is_empty());
+            let nothing = matches!(&op, Op::LocalMkdir { tags, .. }
+                if !tags.iter().any(|t| hbsync_platform::tags::holds(t, os)));
             tag_failed = os != Os::Windows
                 && !nothing
                 && (std::mem::take(&mut self.faults.fail_tags_next)
@@ -1492,16 +1493,16 @@ impl Sim {
                 }
                 let read = self.mkdir_read(c, node, drive.as_deref());
                 let client = &self.clients[c];
-                let tags = tags.held_by(client.os);
+                let held = tags.held_by(client.os);
                 // Made from Recently deleted, never synced here, with tags to write: restored,
                 // changed or purged since the plan (as its mirror reads), the version there may
                 // no longer hold them (the executor's).
-                let holds =
-                    |d: &DriveVersion| tags.iter().all(|t| d.state.tags.get(&t.name) == Some(t));
                 let waits = drive.is_none()
                     && !client.base.contains(node)
-                    && !tags.is_empty()
-                    && !read.removed().is_some_and(holds);
+                    && !held.is_empty()
+                    && !read.removed().is_some_and(|d| {
+                        hbsync_engine::exec::holds_tags(&tags, &d.state.tags, client.os)
+                    });
                 self.read = Some(Read::Mkdir(read));
                 let client = &mut self.clients[c];
                 if waits {
@@ -1513,7 +1514,7 @@ impl Sim {
                 client.local.insert(
                     node,
                     NodeState {
-                        tags,
+                        tags: held,
                         ..NodeState::folder(parent, name)
                     },
                 );
@@ -2992,6 +2993,11 @@ fn planned(ops: &[Op]) -> Vec<Planned<'_>> {
                 Op::LocalDetach { new_node, .. } => What::Detach {
                     new_node: *new_node,
                 },
+                Op::LocalDownload {
+                    parent,
+                    replace: true,
+                    ..
+                } => What::LocalReplace { parent: *parent },
                 _ => What::Other,
             };
             Planned {

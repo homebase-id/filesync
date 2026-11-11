@@ -307,6 +307,10 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
      live in it plans those again: they are orphans now, whichever of them changed.
 4. **Folder delete propagation** removes the folder on the drive first, then its descendants,
    top-down; here it deletes the topmost folder, its bases and its children's in one step (§7).
+   What the plan moves out of that folder first (a move, a download to another folder) is left
+   out of that step, with what is below it: a delete inside a folder moved out is a step of its
+   own there, after the move. Where such a move doesn't run, the folder holds what its delete
+   doesn't expect: the delete goes stale and takes nothing, for the next plan.
 5. **Planned in pages.** The engine plans its dirty set in pages of 20,000 nodes, in node id
    order (§8a). A node dirty in another page, or a held delete (§7), is left as it is: its
    change isn't merged in this plan, and no fix here moves, renames or adopts it.
@@ -511,8 +515,13 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   followed here without asking: deleted here (checked, above), and the drive keeps them in Recently
   deleted for 30 days. One exception: removals that would take every synced file
   here at once, and more than the same `max(50, …)` (a broken device, a wiped drive), are held
-  (a move elsewhere out of this device's view isn't a removal: the drive keeps it live). The
-  count is the whole sync's, not a page's (§6.5): with the page's removals it takes what other
+  (a move elsewhere out of this device's view isn't a removal: the drive keeps it live; nor
+  is a move out of a folder removed elsewhere: the plan moves it out first, and the folder's
+  delete expects only what goes, so a move that doesn't run leaves that delete stale, taking
+  nothing; engine: `files_moved_out_of_a_folder_removed_elsewhere_dont_count_with_it`,
+  `a_move_out_that_fails_leaves_the_folders_delete_stale`). A folder's delete counts every
+  file it takes here, synced or not: never fewer than the synced ones. The count is the whole sync's,
+  not a page's (§6.5): with the page's removals it takes what other
   pages still have to remove, the dirty ones and the files in folders the drive removed that
   are still live here (taken along, by §6.3's rule; read while anything is dirty: a walk of
   Recently deleted's folders, 2 ms for 50,000 items), less those a confirmed delete here takes. So a wipe planned in pages
@@ -979,8 +988,9 @@ them, and a tag removed on the drive meanwhile came back. The plan's move or rem
 founds the base; where it runs first, the tags come down in the same run. A folder made here
 from Recently deleted (never synced here, its restore to follow) founds its base on the version
 there, as found before the write (a pull landing before its commit doesn't change what it settles
-against); where that no longer holds the tags it is to write (restored, changed or purged since
-the plan), it waits for the next plan.
+against); where that no longer holds each tag it is to write that this device can hold, colour
+and all (Linux too: its restore sends the planned colour), as restored, changed or purged since
+the plan, it waits for the next plan.
 
 **Limits.** Tag changes are seen through the change time: on a volume that keeps attributes
 elsewhere (exFAT's `._` files) or with one-second times (HFS+), a change can go unnoticed until

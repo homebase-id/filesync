@@ -1249,3 +1249,83 @@ fn what_a_removal_took_along_counts_with_deletes_there_over_pages() -> R {
     }
     Ok(())
 }
+
+/// Another device moves three of the four files in d out to the top, then removes d: here, one
+/// plan moves them out and deletes d, which takes one file of four synced. Not every synced
+/// file, so followed unasked (§7): the files the plan moves out first don't count with d. And
+/// d's delete expects only what goes, so one round does it all (it doesn't go stale for what
+/// the moves took out, another round to plan it again).
+#[test]
+fn files_moved_out_of_a_folder_removed_elsewhere_dont_count_with_it() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |cfg| {
+        cfg.guard.min = 2;
+        cfg.max_rounds = 1;
+    })?;
+    for i in 0..4 {
+        a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
+    }
+    a.sync()?;
+    b.sync()?;
+    for i in 0..3 {
+        fs::rename(
+            a.root.join(format!("d/f{i}.txt")),
+            a.root.join(format!("f{i}.txt")),
+        )?;
+    }
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.sync()?;
+    // One round: the plan as it is judged.
+    b.engine.scan_local()?;
+    let report = b.engine.sync("2026-10-08", true)?;
+    assert!(report.held.is_empty(), "nothing held: {report:?}");
+    assert!(report.skipped.is_empty(), "{report:?}");
+    assert_eq!(b.tree_text(""), ["f0.txt = 0", "f1.txt = 1", "f2.txt = 2"]);
+    Ok(())
+}
+
+/// Every synced file removed elsewhere (new files with it), planned in pages of one, round
+/// after round: held in the first round and in every round after it in the same sync (§7:
+/// held till answered), nothing of it deleted.
+#[test]
+fn a_wipe_stays_held_through_the_rounds_of_a_sync() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |cfg| {
+        cfg.guard.min = 2;
+        cfg.batch = 1;
+    })?;
+    for i in 0..4 {
+        a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
+    }
+    for i in 0..3 {
+        a.write(&format!("e{i}/g.txt"), format!("g{i}"))?;
+    }
+    a.sync()?;
+    b.sync()?;
+    // The new folders first: made after the removals, one could reuse a removed folder's inode
+    // and read as its rename.
+    for i in 0..3 {
+        a.write(&format!("n{i}/h.txt"), format!("h{i}"))?;
+    }
+    fs::remove_dir_all(a.root.join("d"))?;
+    for i in 0..3 {
+        fs::remove_dir_all(a.root.join(format!("e{i}")))?;
+    }
+    a.sync()?;
+    b.engine.scan_local()?;
+    let report = b.engine.sync("2026-10-08", true)?;
+    assert!(report.rounds > 1, "{report:?}");
+    assert!(!report.held.is_empty(), "{report:?}");
+    let tree = b.tree_text("");
+    for kept in [
+        "d/f0.txt = 0",
+        "d/f3.txt = 3",
+        "e0/g.txt = g0",
+        "e2/g.txt = g2",
+    ] {
+        assert!(tree.iter().any(|l| l == kept), "{kept}: {tree:?}");
+    }
+    Ok(())
+}

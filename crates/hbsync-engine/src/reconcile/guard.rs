@@ -42,12 +42,6 @@ impl Reconciler<'_> {
             return;
         }
         let i = self.input;
-        let files_under = |tree: &Tree, node: NodeId| {
-            tree.subtree(node)
-                .into_iter()
-                .filter(|n| tree.get(*n).is_some_and(|s| s.kind == NodeKind::File))
-                .count()
-        };
         // Deletes the user confirmed are theirs, and so is each of what was in a folder whose
         // delete they confirmed and that waits for a file in it not hashed yet (planned apart
         // meanwhile, §6.3): only the others are judged.
@@ -75,8 +69,15 @@ impl Reconciler<'_> {
                 Some((1, 0))
             }
             // A removal elsewhere: a move out of view (`Forget`) keeps the files live on
-            // the drive, so it isn't one.
-            Op::LocalDelete { node, .. } => Some((0, files_under(&i.local, *node))),
+            // the drive, so it isn't one. What it takes is what it expects: not what the plan
+            // moves out of it first.
+            Op::LocalDelete { subtree, .. } => Some((
+                0,
+                subtree
+                    .iter()
+                    .filter(|n| i.local.get(**n).is_some_and(|s| s.kind == NodeKind::File))
+                    .count(),
+            )),
             _ => None,
         };
         // With the held deletes out of the dirty set: counted as if planned with this one.

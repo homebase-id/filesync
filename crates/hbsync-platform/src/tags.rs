@@ -146,9 +146,8 @@ impl Tags {
     /// see, though `local` took those from the drive its plan saw, which may be older than the
     /// version written over (and the base settled against one in between).
     pub fn merge_onto(base: &Tags, local: &Tags, remote: &Tags, os: Os) -> Tags {
-        let held = |t: &&Tag| express(t, os).is_some();
-        let held = local.iter().filter(held);
-        let unheld = remote.iter().filter(|t| express(t, os).is_none());
+        let held = local.iter().filter(|t| holds(t, os));
+        let unheld = remote.iter().filter(|t| !holds(t, os));
         Tags::merge(base, &Tags::new(held.chain(unheld).cloned()), remote)
     }
 
@@ -167,22 +166,39 @@ impl Tags {
         Tags::new(kept.chain(read.iter()).cloned())
     }
 
-    /// The tags `os` can hold, as it holds them ([`express`]).
+    /// The tags `os` can hold, as it holds them ([`express`]): what reading them back gives.
     pub fn held_by(&self, os: Os) -> Tags {
         Tags(self.0.iter().filter_map(|t| express(t, os)).collect())
+    }
+
+    /// The tags `os` can hold ([`holds`]), as they are here: colour kept, as the drive holds
+    /// them, where [`Tags::held_by`] gives what reading them back gives.
+    pub fn holdable_by(&self, os: Os) -> Tags {
+        Tags(self.0.iter().filter(|t| holds(t, os)).cloned().collect())
     }
 }
 
 /// Whether this OS keeps tags at all.
 pub const CAN_TAG: bool = cfg!(any(target_os = "macos", target_os = "linux"));
 
+/// Whether `os` can hold `tag` at all (by its name: Linux holds it without its colour).
+pub fn holds(tag: &Tag, os: Os) -> bool {
+    match os {
+        Os::MacOs => !tag.name.contains('\n'),
+        Os::Linux => !tag.name.contains(','),
+        Os::Windows => false,
+    }
+}
+
 /// How `os` holds `tag`, as reading it back would give it: `None` if it can't.
 pub fn express(tag: &Tag, os: Os) -> Option<Tag> {
-    match os {
-        Os::MacOs if !tag.name.contains('\n') => Some(tag.clone()),
-        Os::Linux if !tag.name.contains(',') => Some(Tag::new(tag.name.clone(), 0)),
-        _ => None,
+    if !holds(tag, os) {
+        return None;
     }
+    Some(match os {
+        Os::Linux => Tag::new(tag.name.clone(), 0),
+        _ => tag.clone(),
+    })
 }
 
 /// The macOS attribute: a binary plist array of `"Name"` or `"Name\nColour"` strings.
