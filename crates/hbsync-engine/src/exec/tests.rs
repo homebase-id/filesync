@@ -379,6 +379,47 @@ fn a_record_it_cannot_settle(gone: bool) -> Result<(Harness, Placing), Box<dyn s
     Ok((h, record))
 }
 
+/// A folder out of view goes as an unchanged copy, expecting only what stays in it: the file
+/// the plan moves out of it first isn't expected (#356). Where that move didn't run, the folder
+/// holds what its forget doesn't expect: it goes stale and the file stays; once it ran, the
+/// folder goes.
+#[test]
+fn a_forget_whose_folder_still_holds_what_was_to_move_out_takes_nothing() -> R {
+    let mut h = Harness::new()?;
+    let (d, f, g) = (NodeId::new(), NodeId::new(), NodeId::new());
+    h.local_folder("d", d)?;
+    h.local_file("d/f", f, b"f")?;
+    h.local_file("d/g", g, b"g")?;
+    let mut expected = vec![d, g];
+    expected.sort();
+    let forget = Op::Forget {
+        node: d,
+        subtree: expected,
+    };
+    let report = h.run(vec![forget.clone()])?;
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|(op, why)| *op == forget && matches!(why, Skip::Stale(_))),
+        "{report:?}"
+    );
+    assert_eq!(fs::read(h.at("d/f")?)?, b"f");
+    assert_eq!(fs::read(h.at("d/g")?)?, b"g");
+
+    let moved = Op::LocalMove {
+        node: f,
+        parent: NodeId::ROOT,
+        name: "f".into(),
+        drive: None,
+    };
+    let report = h.run(vec![moved, forget])?;
+    assert!(report.skipped.is_empty(), "{report:?}");
+    assert_eq!(fs::read(h.at("f")?)?, b"f");
+    assert!(!h.at("d")?.exists());
+    Ok(())
+}
+
 /// The plan for `nodes` from what the DB holds now.
 fn plan_of(h: &mut Harness, nodes: &[NodeId]) -> Result<crate::plan::Plan, StateError> {
     let folder = FolderCtx {

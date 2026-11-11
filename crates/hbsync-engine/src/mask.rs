@@ -10,7 +10,13 @@
 //!   **detached**: it becomes a new node at its local place, created remotely like any new
 //!   local item, and the old base goes with the detach. So are the masked folders such an item
 //!   sits in, so it keeps its place, and the masked folders holding anything else this device
-//!   syncs.
+//!   syncs, but for what the plan moves out of a folder the filter masks: a folder held only
+//!   for that is deleted as an unchanged copy, not made again on the drive, empty. The plan
+//!   tells: made with every such folder detached first, it is made again with the items it
+//!   moves out of one holding none ([`Masks::moved_away`], [`Masks::sparing`]), and kept
+//!   where it still moves each of them out unforked ([`Masks::not_moved_away`]); one it
+//!   doesn't holds its folder again, for another round (`reconcile`). The folder's forget
+//!   expects only what stays in it: where a move didn't run, it goes stale.
 //!
 //! Detaching is a new identity rather than a resurrection: the node id is still live remotely
 //! (at the masked place), so it can't be created again.
@@ -38,7 +44,7 @@ use hbsync_platform::name::name_key;
 use hbsync_types::{ContentState, NodeId, NodeKind, Role};
 
 use crate::id::derived_id;
-use crate::plan::Masking;
+use crate::plan::{Masking, Op, Plan};
 use crate::reconcile::Input;
 use crate::scope::Scope;
 use crate::tree::Tree;
@@ -61,6 +67,9 @@ pub(crate) struct Masks {
     pub filtered: HashSet<NodeId>,
     /// Local items that become new nodes: old id → new id.
     pub detached: BTreeMap<NodeId, NodeId>,
+    /// The detached folders held for the filter's masks alone, outside the scope (§12) and in
+    /// no folder outside it: what moves away from one may spare it ([`Masks::moved_away`]).
+    by_filter: HashSet<NodeId>,
     /// `detached` the other way round: a new id's old one.
     stored: HashMap<NodeId, NodeId>,
     /// The input as the merge sees it, if anything is masked: masked nodes left out of the
@@ -203,7 +212,7 @@ impl Masks {
             true => HashSet::new(),
             false => masked.clone(),
         };
-        masked.extend(outside);
+        masked.extend(outside.iter().copied());
         if masked.is_empty() {
             return Masks {
                 brought_back,
@@ -215,48 +224,90 @@ impl Masks {
             .filter_map(|m| input.remote.get(*m).map(|s| s.parent))
             .filter(|p| !p.is_root() && !masked.contains(p))
             .collect();
+        let detach = to_detach(input, &masked, &HashMap::new());
+        // The scope's detached folders stay as they are (§12): not one outside it, nor one in a
+        // folder outside it.
+        let by_filter = (detach.iter().copied())
+            .filter(|n| {
+                input
+                    .local
+                    .get(*n)
+                    .is_some_and(|l| l.kind == NodeKind::Folder)
+                    && !outside.contains(n)
+                    && !input.local.ancestors_iter(*n).any(|a| outside.contains(&a))
+            })
+            .collect();
+        let masks = Masks {
+            masked,
+            keep_alive,
+            brought_back,
+            names,
+            filtered,
+            by_filter,
+            ..Masks::default()
+        };
+        masks.with_view(input, detach, computer, taken)
+    }
 
-        // What must stay here, and the masked folders it needs.
-        let mut detach: BTreeSet<NodeId> = BTreeSet::new();
-        for (node, local) in input.local.iter() {
-            let needs_place = if masked.contains(&node) {
-                let changed = match (input.base.get(node), local.kind) {
-                    (None, _) => true,
-                    (Some(_), NodeKind::Folder) => false,
-                    (Some(base), NodeKind::File) => match (base.content, local.content) {
-                        (Some(b), Some(l)) => {
-                            let base_bytes = input
-                                .base_extra
-                                .get(&node)
-                                .and_then(|e| e.local_hash)
-                                .unwrap_or(b.hash);
-                            base_bytes != l.hash || b.executable != l.executable
-                        }
-                        // Not hashed yet: it may hold anything.
-                        _ => true,
-                    },
-                };
-                if changed {
-                    detach.insert(node);
-                }
-                changed
-            } else {
-                masked.contains(&local.parent)
-            };
-            if needs_place {
-                // Up to the first masked folder already in: what is above it is in too.
-                for a in input.local.ancestors(node) {
-                    if masked.contains(&a) && input.local.contains(a) && !detach.insert(a) {
-                        break;
-                    }
-                }
-            }
-        }
+    /// These masks, where an item in `away` ([`Masks::moved_away`]) doesn't keep the masked
+    /// folder it is in here, nor the masked folders above that: `None` unless that detaches
+    /// fewer items than `first_detached` (no folder spared), and other ones than these masks
+    /// (planned so already): no view built.
+    pub(crate) fn sparing(
+        self,
+        input: &Input,
+        computer: &str,
+        taken: &HashSet<NodeId>,
+        away: &HashMap<NodeId, NodeId>,
+        first_detached: usize,
+    ) -> Option<Masks> {
+        let detach = to_detach(input, &self.masked, away);
+        let again = detach.iter().eq(self.detached.keys());
+        (detach.len() < first_detached && !again)
+            .then(|| self.with_view(input, detach, computer, taken))
+    }
+
+    /// These masks with `detach` detached, and the view of `input` with them: what doesn't
+    /// depend on what is detached taken from the last view, if there was one.
+    fn with_view(
+        mut self,
+        input: &Input,
+        detach: BTreeSet<NodeId>,
+        computer: &str,
+        taken: &HashSet<NodeId>,
+    ) -> Masks {
         let detached: BTreeMap<NodeId, NodeId> = detach
             .into_iter()
             .map(|n| (n, detach_id(n, computer, taken)))
             .collect();
-
+        let mut view = match self.input.take() {
+            Some(last) => last,
+            None => {
+                let mut remote = input.remote.clone();
+                for m in &self.masked {
+                    remote.remove(*m);
+                }
+                // Every field named: a new one is placed here, not left empty unseen. Those
+                // that depend on what is detached are set below.
+                Input {
+                    base: input.base.clone(),
+                    local: Tree::new(),
+                    remote,
+                    base_extra: input.base_extra.clone(),
+                    remote_refs: input.remote_refs.clone(),
+                    local_unhashed: HashSet::new(),
+                    dirty: BTreeSet::new(),
+                    remote_complete: input.remote_complete,
+                    unreadable: input.unreadable.clone(),
+                    removed: input.removed.clone(),
+                    changed_at: input.changed_at.clone(),
+                    coverage: input.coverage.clone(),
+                    dirty_elsewhere: HashSet::new(),
+                    going: HashSet::new(),
+                    going_above: HashSet::new(),
+                }
+            }
+        };
         let mut local = Tree::new();
         for (node, state) in input.local.iter() {
             let mut state = state.clone();
@@ -265,69 +316,145 @@ impl Masks {
             }
             local.insert(detached.get(&node).copied().unwrap_or(node), state);
         }
-        let mut remote = input.remote.clone();
-        for m in &masked {
-            remote.remove(*m);
-        }
         let mut dirty = input.dirty.clone();
         dirty.extend(detached.values().copied());
         dirty.extend(
-            masked
-                .iter()
-                .copied()
+            (self.masked.iter().copied())
                 .filter(|m| input.base.contains(*m) || input.local.contains(*m)),
         );
-        let local_unhashed = input
-            .local_unhashed
-            .iter()
-            .map(|n| detached.get(n).copied().unwrap_or(*n))
-            .collect();
+        let renamed = |nodes: &HashSet<NodeId>| -> HashSet<NodeId> {
+            (nodes.iter())
+                .map(|n| detached.get(n).copied().unwrap_or(*n))
+                .collect()
+        };
         // What another page plans, but what this view plans now (masked, or detached: a new
         // node in its place).
         let elsewhere = |nodes: &HashSet<NodeId>| -> HashSet<NodeId> {
-            nodes
-                .iter()
-                .copied()
+            (nodes.iter().copied())
                 .filter(|n| !dirty.contains(n) && !detached.contains_key(n))
                 .collect()
         };
-        let (dirty_elsewhere, going_above) = (
-            elsewhere(&input.dirty_elsewhere),
-            elsewhere(&input.going_above),
-        );
-        let going = input
-            .going
-            .iter()
-            .map(|n| detached.get(n).copied().unwrap_or(*n))
-            .collect();
-        let view = Input {
-            base: input.base.clone(),
-            local,
-            remote,
-            base_extra: input.base_extra.clone(),
-            remote_refs: input.remote_refs.clone(),
-            local_unhashed,
-            dirty,
-            remote_complete: input.remote_complete,
-            unreadable: input.unreadable.clone(),
-            removed: input.removed.clone(),
-            changed_at: input.changed_at.clone(),
-            coverage: input.coverage.clone(),
-            dirty_elsewhere,
-            going,
-            going_above,
+        view.dirty_elsewhere = elsewhere(&input.dirty_elsewhere);
+        view.going_above = elsewhere(&input.going_above);
+        view.local_unhashed = renamed(&input.local_unhashed);
+        view.going = renamed(&input.going);
+        view.local = local;
+        view.dirty = dirty;
+        self.stored = detached.iter().map(|(old, new)| (*new, *old)).collect();
+        self.detached = detached;
+        self.input = Some(view);
+        self
+    }
+
+    /// What `plan`, made with these masks, moves away from a folder the filter masks, detached
+    /// to hold it (§10): each item, and the folder it goes to. Such an item needs no place
+    /// there: planned again without it ([`Masks::sparing`]), the folder may not be needed
+    /// at all, and goes as an unchanged copy instead of coming back on the drive, empty. Not
+    /// one whose bytes fork into a conflict copy, which stays where the item is.
+    pub(crate) fn moved_away(&self, plan: &Plan) -> HashMap<NodeId, NodeId> {
+        let Some(view) = self.input.as_ref().filter(|_| !self.by_filter.is_empty()) else {
+            return HashMap::new();
         };
-        Masks {
-            masked,
-            keep_alive,
-            brought_back,
-            names,
-            filtered,
-            stored: detached.iter().map(|(old, new)| (*new, *old)).collect(),
-            detached,
-            input: Some(view),
+        let mut moves: HashMap<NodeId, NodeId> = (plan.ops.iter())
+            .filter_map(Op::moves_here)
+            .filter(|(node, to)| {
+                let from = view.local.get(*node).map(|l| l.parent);
+                let out_of = from.and_then(|f| self.stored.get(&f));
+                out_of.is_some_and(|f| self.by_filter.contains(f))
+                    && !self.stored.contains_key(to)
+                    && !self.masked.contains(to)
+            })
+            .collect();
+        if !moves.is_empty() {
+            let forked = forked(plan);
+            moves.retain(|node, _| !forked.contains(node));
+        }
+        moves
+    }
+
+    /// The items of `away` whose folder these masks don't detach that `plan`, made with them,
+    /// doesn't move where `away` says ([`Masks::moved_away`]), or forks: they keep their folder
+    /// after all.
+    pub(crate) fn not_moved_away(
+        &self,
+        input: &Input,
+        plan: &Plan,
+        away: &HashMap<NodeId, NodeId>,
+    ) -> Vec<NodeId> {
+        let moved: HashMap<NodeId, NodeId> = (plan.ops.iter())
+            .filter_map(Op::moves_here)
+            .filter(|(node, _)| away.contains_key(node))
+            .collect();
+        let forked = forked(plan);
+        (away.iter())
+            .filter(|(node, to)| {
+                input
+                    .local
+                    .get(**node)
+                    .is_some_and(|l| !self.detached.contains_key(&l.parent))
+                    && (moved.get(*node) != Some(*to) || forked.contains(*node))
+            })
+            .map(|(node, _)| *node)
+            .collect()
+    }
+}
+
+/// The items here that must stay, detached (§10), and the masked (`masked`) folders they need:
+/// a masked item changed here (or never synced), and the masked folders above it; the masked
+/// folders above an item this device syncs, but for one in `away`, which takes what is in it
+/// along.
+fn to_detach(
+    input: &Input,
+    masked: &HashSet<NodeId>,
+    away: &HashMap<NodeId, NodeId>,
+) -> BTreeSet<NodeId> {
+    let mut detach: BTreeSet<NodeId> = BTreeSet::new();
+    for (node, local) in input.local.iter() {
+        let needs_place = if masked.contains(&node) {
+            let changed = match (input.base.get(node), local.kind) {
+                (None, _) => true,
+                (Some(_), NodeKind::Folder) => false,
+                (Some(base), NodeKind::File) => match (base.content, local.content) {
+                    (Some(b), Some(l)) => {
+                        let base_bytes = input
+                            .base_extra
+                            .get(&node)
+                            .and_then(|e| e.local_hash)
+                            .unwrap_or(b.hash);
+                        base_bytes != l.hash || b.executable != l.executable
+                    }
+                    // Not hashed yet: it may hold anything.
+                    _ => true,
+                },
+            };
+            if changed {
+                detach.insert(node);
+            }
+            changed
+        } else {
+            masked.contains(&local.parent) && !away.contains_key(&node)
+        };
+        if needs_place {
+            // Up to the first masked folder already in: what is above it is in too. One that
+            // moves away takes what is in it along: the folders above it aren't needed.
+            for a in input.local.ancestors_iter(node) {
+                if away.contains_key(&a)
+                    || (masked.contains(&a) && input.local.contains(a) && !detach.insert(a))
+                {
+                    break;
+                }
+            }
         }
     }
+    detach
+}
+
+/// The items whose bytes `plan` forks into a conflict copy, which stays where the item is.
+fn forked(plan: &Plan) -> HashSet<NodeId> {
+    (plan.ops.iter())
+        .filter(|op| matches!(op, Op::LocalFork { .. }))
+        .map(Op::node)
+        .collect()
 }
 
 /// What this device doesn't sync of `remote`: what `filter` matches (see [`masked`]) and what
@@ -437,6 +564,135 @@ fn detach_id(node: NodeId, computer: &str, taken: &HashSet<NodeId>) -> NodeId {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hbsync_types::NodeState;
+
+    /// `proj` (`d`) holding the folder `f`, synced; the drive moved `f` to the top and `d` into
+    /// `build/`, which this device ignores.
+    fn moved_out() -> (Input, NodeId, NodeId) {
+        let (b, d, f) = (NodeId::new(), NodeId::new(), NodeId::new());
+        let mut input = Input::default();
+        let item = |parent| NodeState::folder(parent, "f");
+        for tree in [&mut input.base, &mut input.local] {
+            tree.insert(d, NodeState::folder(NodeId::ROOT, "proj"));
+            tree.insert(f, item(d));
+        }
+        input
+            .remote
+            .insert(b, NodeState::folder(NodeId::ROOT, "build"));
+        input.remote.insert(d, NodeState::folder(b, "proj"));
+        input.remote.insert(f, item(NodeId::ROOT));
+        input.dirty.extend([b, d, f]);
+        (input, d, f)
+    }
+
+    /// The masks of `input` ignoring `build/`, in `scope`.
+    fn masks_in(scope: &Scope, input: &Input) -> Masks {
+        let filter = Filter::from_rules("build/\n", false).expect("rules");
+        let masking = Masking {
+            filter: &filter,
+            scope,
+        };
+        Masks::of(input, masking, "c", &HashSet::new())
+    }
+
+    /// [`masks_in`] the main folder, planned again with `away` where that spares a folder.
+    fn sparing(input: &Input, away: &HashMap<NodeId, NodeId>) -> Option<Masks> {
+        let masks = masks_in(&Scope::main(), input);
+        let detached = masks.detached.len();
+        masks.sparing(input, "c", &HashSet::new(), away, detached)
+    }
+
+    fn moving(node: NodeId, parent: NodeId) -> Op {
+        Op::LocalMove {
+            node,
+            parent,
+            name: "f".into(),
+            drive: None,
+        }
+    }
+
+    fn plan(ops: Vec<Op>) -> Plan {
+        Plan {
+            ops,
+            ..Plan::default()
+        }
+    }
+
+    /// What moves away from a detached folder: to a place the drive has, not into another
+    /// detached folder, nor with a conflict copy left behind.
+    #[test]
+    fn what_moves_away_from_a_detached_folder() {
+        let (input, d, f) = moved_out();
+        let masks = masks_in(&Scope::main(), &input);
+        let new_d = masks.detached[&d];
+        let other = NodeId::new();
+        let away = |ops| masks.moved_away(&plan(ops));
+        assert_eq!(
+            away(vec![moving(f, NodeId::ROOT)]),
+            HashMap::from([(f, NodeId::ROOT)])
+        );
+        assert!(away(vec![moving(f, new_d)]).is_empty());
+        assert!(away(vec![]).is_empty());
+        let fork = Op::LocalFork {
+            node: f,
+            new_node: other,
+            name: "f (conflict).txt".into(),
+        };
+        assert!(away(vec![fork, moving(f, NodeId::ROOT)]).is_empty());
+        // Planned with it away, the folder isn't detached; with nothing away, none is spared
+        // and no view is built.
+        let away = HashMap::from([(f, NodeId::ROOT)]);
+        let spared = sparing(&input, &away).expect("spared");
+        assert!(spared.detached.is_empty());
+        assert!(sparing(&input, &HashMap::new()).is_none());
+        // Nor is a round that detaches what the last one did planned again.
+        assert!(
+            spared
+                .sparing(&input, "c", &HashSet::new(), &away, 1)
+                .is_none()
+        );
+    }
+
+    /// A folder the filter masks inside this computer's own Desktop folder, held in the main
+    /// folder (outside its scope, §12): what moves away from it spares neither, which stay
+    /// detached as before.
+    #[test]
+    fn what_moves_away_from_a_folder_in_one_outside_the_scope_spares_nothing() {
+        let (mut input, d, f) = moved_out();
+        let desk = NodeId::new();
+        let folder = NodeState::folder(NodeId::ROOT, "Desktop");
+        input.base.insert(desk, folder.clone());
+        input.local.insert(desk, folder.clone());
+        input.remote.insert(desk, folder);
+        let inside = NodeState::folder(desk, "proj");
+        input.base.insert(d, inside.clone());
+        input.local.insert(d, inside);
+        let scope = Scope::main().with_tops([desk]);
+        let masks = masks_in(&scope, &input);
+        assert!(masks.detached.contains_key(&d) && masks.detached.contains_key(&desk));
+        let moved = plan(vec![moving(f, NodeId::ROOT)]);
+        assert!(masks.moved_away(&moved).is_empty());
+    }
+
+    /// Planned again with an item away, the plan must move it where the first one did; else it
+    /// keeps its folder.
+    #[test]
+    fn an_item_away_that_the_plan_does_not_move_there_stayed() {
+        let (input, _, f) = moved_out();
+        let away = HashMap::from([(f, NodeId::ROOT)]);
+        let masks = sparing(&input, &away).expect("spared");
+        let stayed = |ops| masks.not_moved_away(&input, &plan(ops), &away);
+        assert!(stayed(vec![moving(f, NodeId::ROOT)]).is_empty());
+        assert_eq!(stayed(vec![]), [f]);
+        assert_eq!(stayed(vec![moving(f, NodeId::new())]), [f]);
+        // Moved there, but its bytes forked into a copy that stays where it is.
+        let fork = Op::LocalFork {
+            node: f,
+            new_node: NodeId::new(),
+            name: "f (conflict)".into(),
+        };
+        assert_eq!(stayed(vec![fork, moving(f, NodeId::ROOT)]), [f]);
+    }
 
     /// Detach ids are stored and on the drive: the hash must never change.
     #[test]

@@ -424,6 +424,21 @@ impl Op {
         )
     }
 
+    /// The node this op moves here, and the folder it goes to: a move, or a download that
+    /// replaces the item (in another folder, maybe).
+    pub(crate) fn moves_here(&self) -> Option<(NodeId, NodeId)> {
+        match self {
+            Op::LocalMove { node, parent, .. }
+            | Op::LocalDownload {
+                node,
+                parent,
+                replace: true,
+                ..
+            } => Some((*node, *parent)),
+            _ => None,
+        }
+    }
+
     /// The node whose local name this op gives up (it moves away, is deleted, forked, or
     /// replaced by a download that may land elsewhere). A target held by that node can be
     /// freed early by parking the node under a temporary name.

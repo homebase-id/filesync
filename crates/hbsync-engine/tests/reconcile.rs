@@ -954,14 +954,7 @@ fn a_file_still_being_written_keeps_its_name() {
     };
     let mut w = World::default();
     w.remote(first, Some(file(ROOT, "Report.txt", "theirs")));
-    w.local(
-        writing,
-        Some(NodeState {
-            content: None,
-            ..file(ROOT, "report.txt", "?")
-        }),
-    );
-    w.input.local_unhashed.insert(writing);
+    w.writing(writing, "report.txt");
     let plan = w.plan();
     // The remote file waits for the name; the local one isn't touched (§6.3).
     assert!(plan.ops.is_empty(), "{plan:#?}");
@@ -1161,6 +1154,239 @@ fn a_folder_moved_into_an_ignored_folder_goes_whole_unless_it_holds_news() {
             .iter()
             .any(|op| matches!(op, Op::Forget { node, .. } if *node == f))
     );
+}
+
+impl World {
+    /// This device ignoring `build/`.
+    fn ignoring_build() -> World {
+        World {
+            filter: ignoring("build/\n"),
+            ..World::default()
+        }
+    }
+
+    /// The drive moved folder `d` (`name`) into `build` (`b`), at the top.
+    fn moved_into_build(&mut self, b: NodeId, d: NodeId, name: &str) -> &mut Self {
+        self.remote(b, Some(folder(ROOT, "build")))
+            .remote(d, Some(folder(b, name)))
+    }
+
+    /// A file `name` at the top here still being written: not hashed yet (§6.3).
+    fn writing(&mut self, node: NodeId, name: &str) -> &mut Self {
+        self.local(
+            node,
+            Some(NodeState {
+                content: None,
+                ..file(ROOT, name, "?")
+            }),
+        );
+        self.input.local_unhashed.insert(node);
+        self
+    }
+}
+
+/// The items a plan detaches (§10).
+fn detached(plan: &hbsync_engine::Plan) -> Vec<NodeId> {
+    plan.ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::LocalDetach { node, .. } => Some(*node),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether a plan moves `node`'s item here to the top: a move, or a download of the drive's
+/// version there.
+fn moves_to_top(plan: &hbsync_engine::Plan, node: NodeId) -> bool {
+    plan.ops.iter().any(|op| match op {
+        Op::LocalMove {
+            node: n, parent, ..
+        }
+        | Op::LocalDownload {
+            node: n, parent, ..
+        } => *n == node && *parent == ROOT,
+        _ => false,
+    })
+}
+
+/// The forgets and deletes of a plan, by node, with what each expects to take here.
+fn deletes_here(plan: &hbsync_engine::Plan) -> Vec<(&'static str, NodeId, Vec<NodeId>)> {
+    plan.ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::Forget { node, subtree } => Some(("forget", *node, subtree.clone())),
+            Op::LocalDelete { node, subtree } => Some(("delete", *node, subtree.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Another device moved `f.txt` out of `proj` to the top, then `proj` into `build/`, which this
+/// device ignores: the file moves out here, unchanged, edited on the drive, edited here (not
+/// forked: the drive's bytes are as synced) or renamed in `proj` (a move/move: the drive's place
+/// wins). The folder goes whole, never detached and brought back empty (#356); its forget
+/// expects only what stays in it till then.
+#[test]
+fn a_folder_moved_into_an_ignored_folder_after_its_file_moved_out_goes_whole() {
+    let cases = [
+        ("unchanged", ("f.txt", "v1"), "v1", "move"),
+        (
+            "edited on the drive",
+            ("f.txt", "v1"),
+            "v2",
+            "download-replace",
+        ),
+        ("edited here", ("f.txt", "mine"), "v1", "move"),
+        ("renamed here", ("renamed.txt", "v1"), "v1", "move"),
+    ];
+    for (case, (here, bytes), drive, moving) in cases {
+        let [b, d, f, g] = ids(4)[..] else {
+            unreachable!()
+        };
+        let mut w = World::ignoring_build();
+        w.synced(d, folder(ROOT, "proj"))
+            .synced(f, file(d, "f.txt", "v1"))
+            .synced(g, file(d, "g.txt", "g"));
+        w.local(f, Some(file(d, here, bytes)));
+        w.moved_into_build(b, d, "proj")
+            .remote(f, Some(file(ROOT, "f.txt", drive)));
+        let plan = w.plan();
+        assert!(detached(&plan).is_empty(), "{case}: {plan:?}");
+        assert!(moves_to_top(&plan, f), "{case}: {plan:?}");
+        assert!(kinds(&plan.ops).contains(&moving), "{case}: {plan:?}");
+        assert_eq!(deletes_here(&plan), [("forget", d, vec![d, g])], "{case}");
+    }
+}
+
+/// As above, but the file was edited on both sides: its conflict copy stays where the file is,
+/// so the folder is kept for it, detached.
+#[test]
+fn a_folder_moved_into_an_ignored_folder_keeps_a_conflict_copy_of_what_moved_out() {
+    let [b, d, f] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::ignoring_build();
+    w.synced(d, folder(ROOT, "proj"))
+        .synced(f, file(d, "f.txt", "v1"));
+    w.local(f, Some(file(d, "f.txt", "mine")));
+    w.moved_into_build(b, d, "proj")
+        .remote(f, Some(file(ROOT, "f.txt", "theirs")));
+    let plan = w.plan();
+    let Some(&Op::LocalDetach { node, new_node }) = plan.ops.first() else {
+        panic!("{plan:?}")
+    };
+    assert_eq!(node, d);
+    assert!(
+        plan.ops.iter().any(|op| matches!(
+            op,
+            Op::RemoteCreate { node, parent: ROOT, .. } if *node == new_node
+        )),
+        "{plan:?}"
+    );
+}
+
+/// Nested folders out of view: `proj/sub/f.txt` moved to the top by another device, then `proj`
+/// into `build/`. Both folders go whole: `f` needs neither.
+#[test]
+fn nested_folders_moved_into_an_ignored_folder_go_whole_after_their_file_moved_out() {
+    let [b, d, sub, f, g] = ids(5)[..] else {
+        unreachable!()
+    };
+    let mut w = World::ignoring_build();
+    w.synced(d, folder(ROOT, "proj"))
+        .synced(sub, folder(d, "sub"))
+        .synced(f, file(sub, "f.txt", "v1"))
+        .synced(g, file(sub, "g.txt", "g"));
+    w.moved_into_build(b, d, "proj")
+        .remote(f, Some(file(ROOT, "f.txt", "v1")));
+    let plan = w.plan();
+    assert_eq!(kinds(&plan.ops), ["move", "forget+delete"], "{plan:?}");
+    assert_eq!(deletes_here(&plan), [("forget", d, vec![d, sub, g])]);
+}
+
+/// A folder moved out of one now out of view takes along what is in it: a file the drive moved
+/// into `build/` meanwhile, and one it deleted. Their own forget and delete stay (the folder's
+/// forget no longer covers them), each of what it holds here.
+#[test]
+fn what_a_folder_moved_out_of_one_out_of_view_holds_is_planned_on_its_own() {
+    let [b, d, e, x, y, g] = ids(6)[..] else {
+        unreachable!()
+    };
+    let mut w = World::ignoring_build();
+    w.synced(d, folder(ROOT, "proj"))
+        .synced(e, folder(d, "e"))
+        .synced(x, file(e, "x.txt", "x"))
+        .synced(y, file(e, "y.txt", "y"))
+        .synced(g, file(d, "g.txt", "g"));
+    w.moved_into_build(b, d, "proj")
+        .remote(x, Some(file(b, "x.txt", "x")))
+        .remote(e, Some(folder(ROOT, "e")))
+        .remote(y, None);
+    let plan = w.plan();
+    assert!(detached(&plan).is_empty(), "{plan:?}");
+    assert!(moves_to_top(&plan, e), "{plan:?}");
+    let mut got = deletes_here(&plan);
+    got.sort();
+    let want = [
+        ("delete", y, vec![y]),
+        ("forget", d, vec![d, g]),
+        ("forget", x, vec![x]),
+    ];
+    assert_eq!(got, want, "{plan:?}");
+}
+
+/// A folder moved out of one now out of view holds a file the drive moved into `build/` that
+/// was edited here: the file is detached where it is (in the folder that moves out), and that
+/// takes no masked folder above it along: `proj` goes whole.
+#[test]
+fn an_edited_file_in_a_folder_moved_out_keeps_no_folder_above_it() {
+    let [b, d, e, x, g] = ids(5)[..] else {
+        unreachable!()
+    };
+    let mut w = World::ignoring_build();
+    w.synced(d, folder(ROOT, "proj"))
+        .synced(e, folder(d, "e"))
+        .synced(x, file(e, "x.txt", "x"))
+        .synced(g, file(d, "g.txt", "g"));
+    w.local(x, Some(file(e, "x.txt", "mine")));
+    w.moved_into_build(b, d, "proj")
+        .remote(x, Some(file(b, "x.txt", "x")))
+        .remote(e, Some(folder(ROOT, "e")));
+    let plan = w.plan();
+    assert_eq!(detached(&plan), [x], "{plan:?}");
+    assert!(moves_to_top(&plan, e), "{plan:?}");
+    assert!(
+        plan.ops.iter().any(|op| matches!(
+            op,
+            Op::RemoteCreate { parent, .. } if *parent == e
+        )),
+        "{plan:?}"
+    );
+    assert_eq!(deletes_here(&plan), [("forget", d, vec![d, g])]);
+}
+
+/// Two folders out of view, a file moved out of each; one file can't move in this plan (a file
+/// still being written holds its name at the top, §6.3): its folder is kept for it, detached,
+/// and its forget never takes it; only the other folder goes whole.
+#[test]
+fn a_file_that_waits_to_move_out_keeps_only_its_own_folder() {
+    let [b, d1, f1, d2, f2, writing] = ids(6)[..] else {
+        unreachable!()
+    };
+    let mut w = World::ignoring_build();
+    w.synced(d1, folder(ROOT, "one"))
+        .synced(f1, file(d1, "f1.txt", "1"))
+        .synced(d2, folder(ROOT, "two"))
+        .synced(f2, file(d2, "f2.txt", "2"));
+    w.moved_into_build(b, d1, "one")
+        .remote(d2, Some(folder(b, "two")))
+        .remote(f1, Some(file(ROOT, "f1.txt", "1")))
+        .remote(f2, Some(file(ROOT, "f2.txt", "2")))
+        .writing(writing, "f1.txt");
+    let plan = w.plan();
+    assert_eq!(detached(&plan), [d1], "{plan:?}");
+    assert_eq!(deletes_here(&plan), [("forget", d2, vec![d2])], "{plan:?}");
 }
 
 #[test]

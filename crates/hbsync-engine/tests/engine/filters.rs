@@ -406,6 +406,101 @@ fn a_folder_moved_elsewhere_into_an_ignored_name_leaves_unasked() -> R {
     Ok(())
 }
 
+/// `c` moves `d/<item>` to the top, then `d` into `build/`.
+fn moved_into_build(c: &Client, item: &str) -> R {
+    fs::rename(c.root.join("d").join(item), c.root.join(item))?;
+    fs::create_dir(c.root.join("build"))?;
+    fs::rename(c.root.join("d"), c.root.join("build/d"))?;
+    Ok(())
+}
+
+/// Another device moves a file out of a folder, then the folder into a name this one ignores:
+/// here the file moves out and the folder goes (forgotten), as nothing of it stays. It used to
+/// be detached for the file it held, and came back on the drive empty, for every device (#356).
+#[test]
+fn a_folder_moved_into_an_ignored_name_after_its_file_moved_out_stays_out() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::with_config(&server, "b", ignoring("build/\n"))?;
+    a.write("d/f0.txt", "f")?;
+    a.write("d/g.txt", "g")?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["d/", "d/f0.txt = f", "d/g.txt = g"]);
+    moved_into_build(&a, "f0.txt")?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["f0.txt = f"]);
+    a.sync()?;
+    assert_eq!(
+        a.tree_text(""),
+        ["build/", "build/d/", "build/d/g.txt = g", "f0.txt = f"]
+    );
+    Ok(())
+}
+
+/// As above, but what moves out is a folder holding a file `b` made and hasn't sent yet: it
+/// goes with its folder, and the masked one is still forgotten.
+#[test]
+fn a_new_file_in_a_folder_moved_out_of_one_moved_into_an_ignored_name_goes_with_it() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::with_config(&server, "b", ignoring("build/\n"))?;
+    a.write("d/e/f0.txt", "f")?;
+    a.write("d/g.txt", "g")?;
+    a.sync()?;
+    b.sync()?;
+    b.write("d/e/new.txt", "n")?;
+    moved_into_build(&a, "e")?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["e/", "e/f0.txt = f", "e/new.txt = n"]);
+    a.sync()?;
+    assert_eq!(
+        a.tree_text(""),
+        [
+            "build/",
+            "build/d/",
+            "build/d/g.txt = g",
+            "e/",
+            "e/f0.txt = f",
+            "e/new.txt = n"
+        ]
+    );
+    Ok(())
+}
+
+/// As above, but `b` also made a file in the folder itself: that stays where `b` put it, so the
+/// folder is detached (a new folder on the drive), with only that file in it.
+#[test]
+fn a_folder_moved_into_an_ignored_name_keeps_what_stays_in_it_here() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::with_config(&server, "b", ignoring("build/\n"))?;
+    a.write("d/f0.txt", "f")?;
+    a.write("d/g.txt", "g")?;
+    a.sync()?;
+    b.sync()?;
+    b.write("d/mine.txt", "m")?;
+    moved_into_build(&a, "f0.txt")?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["d/", "d/mine.txt = m", "f0.txt = f"]);
+    a.sync()?;
+    assert_eq!(
+        a.tree_text(""),
+        [
+            "build/",
+            "build/d/",
+            "build/d/g.txt = g",
+            "d/",
+            "d/mine.txt = m",
+            "f0.txt = f"
+        ]
+    );
+    Ok(())
+}
+
 // ---- §12 scopes ----
 
 /// The role folder `role` on the drive, made by another device, with one file in it.

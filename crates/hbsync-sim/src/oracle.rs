@@ -824,8 +824,10 @@ pub(crate) enum What {
     LocalDelete {
         subtree: Vec<NodeId>,
     },
-    /// Another operation that deletes (a forget with something here).
-    DeletesHere,
+    /// A forget with something here (§10): deletes it as a [`What::LocalDelete`] would.
+    Forget {
+        subtree: Vec<NodeId>,
+    },
     LocalMove {
         parent: NodeId,
         name: String,
@@ -973,7 +975,7 @@ impl Ledger {
                             && match &p.what {
                                 What::RemoteDelete
                                 | What::LocalDelete { .. }
-                                | What::DeletesHere => true,
+                                | What::Forget { .. } => true,
                                 What::LocalMove { parent, name } => moved(local, parent, name),
                                 What::RemoteUpdate { parent, name } => moved(remote, parent, name),
                                 _ => false,
@@ -1001,7 +1003,7 @@ impl Ledger {
         let mut expected: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
         let mut differ = None;
         for p in seen.ops.iter().chain(seen.held) {
-            let What::LocalDelete { subtree } = &p.what else {
+            let (What::LocalDelete { subtree } | What::Forget { subtree }) = &p.what else {
                 continue;
             };
             let want = expects(p.node);

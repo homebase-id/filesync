@@ -2982,7 +2982,9 @@ fn planned(ops: &[Op]) -> Vec<Planned<'_>> {
                 Op::LocalDelete { subtree, .. } => What::LocalDelete {
                     subtree: subtree.clone(),
                 },
-                _ if op.deletes_here().is_some() => What::DeletesHere,
+                Op::Forget { subtree, .. } if !subtree.is_empty() => What::Forget {
+                    subtree: subtree.clone(),
+                },
                 Op::LocalMove { parent, name, .. } => What::LocalMove {
                     parent: *parent,
                     name: name.clone(),

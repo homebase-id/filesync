@@ -68,8 +68,56 @@ enum Origin {
     Base,
 }
 
+/// Plans again at most this often for what moves away from a masked folder (§10): a
+/// [`reconcile`] runs [`plan_with`] (each with its own rounds for names that wait) 1 +
+/// `AWAY_ROUNDS` times at most, and [`reconcile_with_known`] runs `reconcile` up to 9 times:
+/// 36 at worst; in practice once, twice where something moves away.
+const AWAY_ROUNDS: usize = 3;
+
 pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
     let masks = Masks::of(input, masking, &opts.computer, &opts.taken);
+    let first = plan_with(input, opts, masking, &masks);
+    // What this plan moves away from a masked folder, detached to hold it (§10, `mask.rs`):
+    // planned again without it holding the folder. Hardly ever.
+    let away = masks.moved_away(&first);
+    let detached = masks.detached.len();
+    spare_away(first, masks, away, |masks, away| {
+        let spared = masks.sparing(input, &opts.computer, &opts.taken, away, detached)?;
+        let plan = plan_with(input, opts, masking, &spared);
+        let stayed = spared.not_moved_away(input, &plan, away);
+        Some((plan, stayed, spared))
+    })
+}
+
+/// `first`, or the plan `replan` makes (from `state`) with the items `away` holding no folder,
+/// once it moves each of them away: the ones it returns hold theirs again, for the next round.
+/// `None`, or [`AWAY_ROUNDS`] spent: `first`.
+fn spare_away<P, S>(
+    first: P,
+    mut state: S,
+    mut away: HashMap<NodeId, NodeId>,
+    mut replan: impl FnMut(S, &HashMap<NodeId, NodeId>) -> Option<(P, Vec<NodeId>, S)>,
+) -> P {
+    for _ in 0..AWAY_ROUNDS {
+        if away.is_empty() {
+            break;
+        }
+        let Some((plan, stayed, next)) = replan(state, &away) else {
+            break;
+        };
+        if stayed.is_empty() {
+            return plan;
+        }
+        for node in stayed {
+            away.remove(&node);
+        }
+        state = next;
+    }
+    first
+}
+
+/// The plan of `input` with the masks `masks`.
+fn plan_with(input: &Input, opts: &Options, masking: Masking<'_>, masks: &Masks) -> Plan {
     let view = masks.input.as_ref().unwrap_or(input);
     // By the drive as the filter leaves it: a node outside this folder's scope (its computer's
     // own Desktop in Desktops) written after a delete keeps the folders above it as any does.
@@ -83,7 +131,7 @@ pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
     // once, only when something here has such a name (hardly ever).
     let mut kept = HashMap::new();
     let mut plan = loop {
-        let r = Reconciler::new(view, opts, masking, &masks, &waits, &kept, taken.clone());
+        let r = Reconciler::new(view, opts, masking, masks, &waits, &kept, taken.clone());
         let (mut plan, waiters, name_waits, placed) = r.run();
         waits.together.append(&mut plan.waits_together);
         waits.name_waits = name_waits;
@@ -125,7 +173,7 @@ pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
     plan.waits_together = together;
     // What the plan needs more of, from a narrow view (`Plan::uncovered`'s producers are
     // listed in `coverage`; `fix_names` adds its own).
-    coverage::masked_and_in_files(input, &masks, &mut plan);
+    coverage::masked_and_in_files(input, masks, &mut plan);
     plan
 }
 
@@ -343,6 +391,43 @@ pub fn reconcile_with_known(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Planned again with fewer items away each time one didn't move away: the one that didn't
+    /// goes, the rest stay; once the rounds are spent, the first plan stands.
+    #[test]
+    fn what_did_not_move_away_is_planned_again_without_it() {
+        let [a, b, c] = [NodeId::new(), NodeId::new(), NodeId::new()];
+        let away: HashMap<NodeId, NodeId> = [a, b, c].map(|n| (n, NodeId::ROOT)).into();
+        let mut asked: Vec<BTreeSet<NodeId>> = Vec::new();
+        let plan = spare_away("first", (), away.clone(), |(), away| {
+            asked.push(away.keys().copied().collect());
+            Some(match asked.len() {
+                1 => ("second", vec![b], ()),
+                _ => ("third", vec![], ()),
+            })
+        });
+        assert_eq!(plan, "third");
+        assert_eq!(asked, [BTreeSet::from([a, b, c]), BTreeSet::from([a, c])]);
+
+        // Never all moved away: the first plan, after the rounds.
+        let mut rounds = 0;
+        let mut left = vec![a, b, c, NodeId::new()];
+        let plan = spare_away("first", (), away.clone(), |(), _| {
+            rounds += 1;
+            Some(("again", vec![left.pop().expect("one more")], ()))
+        });
+        assert_eq!((plan, rounds), ("first", AWAY_ROUNDS));
+
+        // No folder spared, or nothing away: the first plan, asked once at most.
+        assert_eq!(spare_away("first", (), away, |(), _| None), "first");
+        let plan = spare_away(
+            "first",
+            (),
+            HashMap::new(),
+            |(), _| -> Option<(&str, _, ())> { panic!("nothing away") },
+        );
+        assert_eq!(plan, "first");
+    }
 
     /// Conflict copy ids are stored and on the drive: the same conflict on the same computer
     /// keeps its id, release after release.
