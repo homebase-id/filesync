@@ -1,20 +1,20 @@
-//! The oracle's tag bookkeeping ([`TagBook`], in the [`Ledger`]): what users did to tags, in
-//! the order they did it, and what became of it, and the rules the drive's tags are checked
-//! against in the end ([`TagBook::check`]).
+//! The oracle's tag bookkeeping ([`TagBook`], in the [`Ledger`]): what users did to tags (adds,
+//! removals, and colours changed on macOS), in the order they did it, and what became of it,
+//! and the rules the drive's tags are checked against in the end ([`TagBook::check`]).
 //!
 //! [`Ledger`]: crate::oracle::Ledger
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use hbsync_engine::tree::Tree;
-use hbsync_types::NodeId;
+use hbsync_types::{NodeId, Tags};
 
 /// A tag add: the client, the node, the tag's name.
 pub(crate) type Add = (usize, NodeId, String);
 
 /// A known limit of the engine's tag sync (sync semantics §11): three lose an add, two a
-/// removal (the tag comes back). Named, so each case stays visible (the user's call,
-/// 2026-10-21: not now). Each excuses only its own case.
+/// removal (the tag comes back), one of those a colour too. Named, so each case stays visible
+/// (the user's call, 2026-10-21: not now). Each excuses only its own case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Limit {
     /// An add made while the adding client's own removal of the tag is still to land: a remote
@@ -27,9 +27,10 @@ pub(crate) enum Limit {
     /// removal, and is sent over a later add (sync semantics §1; branch r6-fresh-tags, seed
     /// 0a9df7c6).
     NewItemKeepsBaseTag,
-    /// A removal made while the remover's own plan still writes the tag (onto the item, or up
-    /// with a remote write): the write, planned before, lands over it, and the tag comes back
-    /// (sync semantics §1; the in-flight undo design, seed f9ca4128).
+    /// A removal or a recolour made while the client's own plan still writes the tag (onto the
+    /// item, or up with a remote write): the write, planned before, lands over it, and the tag
+    /// comes back, or its colour before does (sync semantics §1; the in-flight undo design,
+    /// seed f9ca4128; for a colour, seed 5317e937).
     OwnTagWriteInFlight,
     /// A client adds back a tag its base holds (after removing it here): the item is as the
     /// base has it, so nothing goes up, and where the drive dropped the tag meanwhile (another
@@ -41,6 +42,16 @@ pub(crate) enum Limit {
     /// the add as on the drive, so the add goes up again, over another client's later removal
     /// (the in-flight family; seed bf84d30f).
     AnswerSuperseded,
+}
+
+/// A user's recolour of a tag ([`TagBook::recolour`]): when, with the known limit it met
+/// ([`Limit::OwnTagWriteInFlight`]); the colour; and the colour the client's base had then (what
+/// it had seen of the drive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Recolour {
+    made: Made,
+    colour: u8,
+    seen: u8,
 }
 
 /// When an add was made, among the users' tag changes, and whether a removal of the tag was
@@ -103,6 +114,9 @@ pub(crate) struct TagBook {
     /// Nodes a client's remote write landed on whose answer another device's change superseded
     /// ([`Limit::AnswerSuperseded`]).
     superseded: BTreeSet<Add>,
+    /// Tags a client's user gave another colour (macOS, [`crate::Action::Colour`]) where its
+    /// base has the tag: what is owed of them, [`TagBook::check_colours`].
+    recoloured: BTreeMap<Add, Recolour>,
     /// The adds the last check found lost to a known limit (for scripted tests).
     excused: std::cell::RefCell<Vec<(Limit, Add)>>,
 }
@@ -161,13 +175,39 @@ impl TagBook {
         }
     }
 
-    /// Client `c`'s adds to `node` are client `to`'s now (the item moved to another folder of
-    /// the computer, a new id there that its own create sends up).
+    /// The user of client `c` gave tag `name` of `node` the colour `colour`; `seen`: the
+    /// colour the client's base has the tag in, `None` where it doesn't have it (then nothing
+    /// is owed: [`TagBook::check_colours`]). `in_flight`: the client's own plan still writes
+    /// the tag ([`Limit::OwnTagWriteInFlight`]).
+    pub(crate) fn recolour(
+        &mut self,
+        c: usize,
+        node: NodeId,
+        name: &str,
+        colour: u8,
+        seen: Option<u8>,
+        in_flight: bool,
+    ) {
+        let at = self.next();
+        let add = (c, node, name.to_owned());
+        let Some(seen) = seen else {
+            self.recoloured.remove(&add);
+            return;
+        };
+        let made = Made {
+            at,
+            concurrent: false,
+            limit: in_flight.then_some(Limit::OwnTagWriteInFlight),
+        };
+        self.recoloured.insert(add, Recolour { made, colour, seen });
+    }
+
+    /// Client `c`'s adds and colours on `node` are client `to`'s now (the item moved to another
+    /// folder of the computer, a new id there that its own create sends up).
     pub(crate) fn moved(&mut self, c: usize, to: usize, node: NodeId) {
-        for from in mine(&self.added, c, node) {
-            let into = (to, from.1, from.2.clone());
-            move_key(&mut self.added, &from, into);
-        }
+        let into = |(_, n, t): &Add| (to, *n, t.clone());
+        rekey_mine(&mut self.added, c, node, into);
+        rekey_mine(&mut self.recoloured, c, node, into);
     }
 
     /// `node` left the drive (a delete won): it settles the tag removals made before it.
@@ -192,7 +232,8 @@ impl TagBook {
     /// where a delete loses, the drive's version comes back with it). An item made of the node
     /// here again later is not the one the user tagged, and doesn't take it along.
     pub(crate) fn left(&mut self, c: usize, node: NodeId) {
-        self.cleared.retain(|(by, n, _), _| (*by, *n) != (c, node));
+        drop_mine(&mut self.cleared, c, node);
+        drop_mine(&mut self.recoloured, c, node);
         for add in mine(&self.added, c, node) {
             if self.sent.contains_key(&add) {
                 self.detach(add);
@@ -223,28 +264,30 @@ impl TagBook {
     }
 
     /// `node` is back where a user deleted it (on the drive, or here where the delete lost)
-    /// with the tags named `held`: no longer deleted, so what users do to its tags from now on
+    /// with the tags `held`: no longer deleted, so what users do to its tags from now on
     /// counts. What they did before is settled by the delete: tag removals (the version back
-    /// has what it had), and tags added are there only if it holds them; but for an add
-    /// `pending` (a client hasn't sent it up, and its item, synced there, still holds it: that
-    /// client never saw the delete, and sends the add up against the version back, as any
-    /// add).
-    pub(crate) fn restored(
-        &mut self,
-        node: NodeId,
-        held: &BTreeSet<String>,
-        pending: impl Fn(&Add) -> bool,
-    ) {
+    /// has what it had), and tags added or recoloured are there only if it holds them so; but
+    /// for an add `pending` (a client hasn't sent it up, and its item, synced there, still
+    /// holds it: that client never saw the delete, and sends the add up against the version
+    /// back, as any add).
+    pub(crate) fn restored(&mut self, node: NodeId, held: &Tags, pending: impl Fn(&Add) -> bool) {
         if !self.deleted.remove(&node) {
             return;
         }
+        let holds = |name: &str| held.get(name).is_some();
         self.cleared.retain(|(_, n, _), _| *n != node);
         self.detached
-            .retain(|(_, n, name), _| *n != node || held.contains(name));
+            .retain(|(_, n, name), _| *n != node || holds(name));
         let sent = &self.sent;
         self.added.retain(|add, _| {
             let (_, n, name) = add;
-            *n != node || held.contains(name) || (!sent.contains_key(add) && pending(add))
+            *n != node || holds(name) || (!sent.contains_key(add) && pending(add))
+        });
+        self.recoloured.retain(|(_, n, name), recoloured| {
+            *n != node
+                || held
+                    .get(name)
+                    .is_some_and(|t| t.colour == recoloured.colour)
         });
     }
 
@@ -258,9 +301,9 @@ impl TagBook {
     /// sent under the new id: its own create sends them); removals there count for it after
     /// too.
     pub(crate) fn retrack(&mut self, c: usize, node: NodeId, new: NodeId) {
-        for add in mine(&self.added, c, node) {
-            move_key(&mut self.added, &add, (c, new, add.2.clone()));
-        }
+        let into = |(_, _, t): &Add| (c, new, t.clone());
+        rekey_mine(&mut self.added, c, node, into);
+        rekey_mine(&mut self.recoloured, c, node, into);
         for add in mine(&self.cleared, c, node) {
             // The item's removal is the new id's now: the old node no longer has it.
             if self.cleared_in_flight.remove(&add) {
@@ -340,21 +383,17 @@ impl TagBook {
         &self,
         server: &Tree,
         refused: &BTreeSet<NodeId>,
-        held_at_removal: impl Fn(NodeId, &str) -> bool,
+        held_at_removal: impl Fn(NodeId, &str) -> Option<u8>,
     ) -> Vec<(Add, Option<Limit>)> {
         let mut lost = Vec::new();
         // A tag change loses to a delete (§11), unless the removed version held the tag: then
         // what brings it back keeps it.
         for ((c, node, name), made, _) in self.adds() {
-            let removed_since = self
-                .removed
-                .iter()
-                .any(|((_, n, t), at)| n == node && t == name && *at > made.at);
             if let Some(s) = server.get(*node)
                 && !refused.contains(node)
                 && !made.concurrent
-                && !removed_since
-                && (!self.deleted.contains(node) || held_at_removal(*node, name))
+                && !self.removed_since(*node, name, made.at)
+                && (!self.deleted.contains(node) || held_at_removal(*node, name).is_some())
                 && s.tags.get(name).is_none()
             {
                 let new_item = self
@@ -368,6 +407,14 @@ impl TagBook {
             }
         }
         lost
+    }
+
+    /// Whether any client removed tag `name` from `node` after `at`, among the users' tag
+    /// changes.
+    fn removed_since(&self, node: NodeId, name: &str, at: u64) -> bool {
+        self.removed
+            .iter()
+            .any(|((_, n, t), when)| *n == node && t == name && *when > at)
     }
 
     /// Every add, detached or not, with when it was made and sent.
@@ -392,9 +439,9 @@ impl TagBook {
         &self,
         server: &Tree,
         refused: &BTreeSet<NodeId>,
-        held_at_removal: impl Fn(NodeId, &str) -> bool,
+        held_at_removal: impl Fn(NodeId, &str) -> Option<u8>,
     ) -> Result<(), String> {
-        let lost = self.lost(server, refused, held_at_removal);
+        let lost = self.lost(server, refused, &held_at_removal);
         *self.excused.borrow_mut() = lost
             .iter()
             .filter_map(|(add, limit)| limit.map(|l| (l, add.clone())))
@@ -437,6 +484,58 @@ impl TagBook {
                 ));
             }
         }
+        self.check_colours(server, refused, held_at_removal, &adds)
+    }
+
+    /// The drive's colours (`server`) against the users' recolours. A recolour is owed only
+    /// where the recolouring client's base had the tag (with no base to tell who changed it,
+    /// the merge takes the drive's colour). The last one of a tag stands, unless one of these
+    /// settled it:
+    /// - an add or removal of the tag made after it (anyone's; `adds`: every add);
+    /// - a delete whose removed version doesn't hold it so (`held_at_removal`: its colour
+    ///   there; a restore brings back what that version holds);
+    /// - another client's recolour of it made after it, or before it but not seen (not the
+    ///   colour the recolouring client's base had): the two race, and the merge takes the
+    ///   drive's.
+    ///
+    /// One its client's own tag write, planned before, landed over is excused
+    /// ([`Limit::OwnTagWriteInFlight`]). A tag the drive lacks is for the add and removal
+    /// checks. Nodes in `refused` are left as they are.
+    fn check_colours(
+        &self,
+        server: &Tree,
+        refused: &BTreeSet<NodeId>,
+        held_at_removal: impl Fn(NodeId, &str) -> Option<u8>,
+        adds: &[(&Add, &Made, Option<&i64>)],
+    ) -> Result<(), String> {
+        for (recoloured, recolour) in &self.recoloured {
+            let (by, node, name) = recoloured;
+            let Recolour { made, colour, seen } = *recolour;
+            let this = |n: &NodeId, t: &String| n == node && t == name;
+            let later = self.removed_since(*node, name, made.at)
+                || adds
+                    .iter()
+                    .any(|((_, n, t), added, _)| this(n, t) && added.at > made.at);
+            let raced = self.recoloured.iter().any(|((c, n, t), other)| {
+                c != by && this(n, t) && (other.made.at > made.at || other.colour != seen)
+            });
+            let deleted =
+                self.deleted.contains(node) && held_at_removal(*node, name) != Some(colour);
+            if later || raced || deleted || refused.contains(node) {
+                continue;
+            }
+            if let Some(tag) = server.get(*node).and_then(|s| s.tags.get(name))
+                && tag.colour != colour
+            {
+                if let Some(limit) = made.limit {
+                    self.excused.borrow_mut().push((limit, recoloured.clone()));
+                    continue;
+                }
+                return Err(format!(
+                    "colour {colour} of tag {name:?} of {node:?} lost: {tag:?}"
+                ));
+            }
+        }
         Ok(())
     }
 
@@ -464,10 +563,25 @@ impl TagBook {
 
 /// The keys of `map` of client `c`'s item `node`.
 fn mine<V>(map: &BTreeMap<Add, V>, c: usize, node: NodeId) -> Vec<Add> {
-    map.keys()
-        .filter(|(at, n, _)| (*at, *n) == (c, node))
-        .cloned()
+    map.range((c, node, String::new())..)
+        .take_while(|((at, n, _), _)| (*at, *n) == (c, node))
+        .map(|(add, _)| add.clone())
         .collect()
+}
+
+/// Moves the entries of `map` of client `c`'s item `node` to the keys `into` gives.
+fn rekey_mine<V>(map: &mut BTreeMap<Add, V>, c: usize, node: NodeId, into: impl Fn(&Add) -> Add) {
+    for from in mine(map, c, node) {
+        let to = into(&from);
+        move_key(map, &from, to);
+    }
+}
+
+/// Drops the entries of `map` of client `c`'s item `node`.
+fn drop_mine<V>(map: &mut BTreeMap<Add, V>, c: usize, node: NodeId) {
+    for add in mine(map, c, node) {
+        map.remove(&add);
+    }
 }
 
 /// Moves `from`'s entry in `map`, if it has one, to `into`.
@@ -496,7 +610,7 @@ mod tests {
     }
 
     fn check(book: &TagBook, server: &Tree) -> Result<(), String> {
-        book.check(server, &BTreeSet::new(), |_, _| false)
+        book.check(server, &BTreeSet::new(), |_, _| None)
     }
 
     /// F10: a removal made before an add doesn't excuse losing it; one made after does.
@@ -539,5 +653,88 @@ mod tests {
         book.add(1, node, "Red", false, None);
         book.detach((1, node, "Red".into()));
         assert!(check(&book, &drive(node, &["Red"])).is_ok(), "c1 added it");
+    }
+
+    /// The node the colour tests tag.
+    const NODE: NodeId = NodeId(hbsync_types::Uuid::from_u128(1));
+
+    /// The drive with [`NODE`] tagged Red in `colour`.
+    fn drive_tagged(colour: u8) -> Tree {
+        let mut tree = Tree::new();
+        let state = NodeState {
+            tags: Tags::new([Tag::new("Red", colour)]),
+            ..NodeState::folder(NodeId::ROOT, "a")
+        };
+        tree.insert(NODE, state);
+        tree
+    }
+
+    /// A recolour stands, unless a later add or removal of the tag (anyone's) settled it.
+    #[test]
+    fn a_recolour_stands_until_a_later_change_of_the_tag() {
+        let mut book = TagBook::default();
+        book.recolour(0, NODE, "Red", 7, Some(6), false);
+        assert!(check(&book, &drive_tagged(6)).is_err(), "lost");
+        assert!(check(&book, &drive_tagged(7)).is_ok());
+        // (Synced nowhere, so the removal itself isn't owed: only its order counts here.)
+        book.remove(1, NODE, "Red", None, false);
+        assert!(check(&book, &drive_tagged(6)).is_ok(), "removed since");
+        let mut book = TagBook::default();
+        book.recolour(0, NODE, "Red", 7, Some(6), false);
+        book.add(1, NODE, "Red", false, None);
+        assert!(check(&book, &drive_tagged(6)).is_ok(), "added since");
+        // A recolour where the base lacks the tag is owed nothing.
+        book.recolour(0, NODE, "Red", 1, None, false);
+        assert!(check(&book, &drive_tagged(6)).is_ok());
+    }
+
+    /// Two clients' recolours of one tag: one made after the other was seen (its client's base
+    /// had that colour) is owed; two made unseen race, and neither is.
+    #[test]
+    fn only_overlapping_recolours_race() {
+        let mut book = TagBook::default();
+        book.recolour(0, NODE, "Red", 7, Some(6), false);
+        book.recolour(3, NODE, "Red", 0, Some(7), false);
+        assert!(check(&book, &drive_tagged(7)).is_err(), "client 3's lost");
+        assert!(check(&book, &drive_tagged(0)).is_ok());
+        let mut book = TagBook::default();
+        book.recolour(0, NODE, "Red", 7, Some(6), false);
+        book.recolour(3, NODE, "Red", 0, Some(6), false);
+        for colour in [6, 7, 0] {
+            assert!(
+                check(&book, &drive_tagged(colour)).is_ok(),
+                "raced: {colour}"
+            );
+        }
+    }
+
+    /// A delete settles a recolour, unless the removed version holds it (a restore brings it
+    /// back).
+    #[test]
+    fn a_delete_settles_a_recolour_its_version_lacks() {
+        let mut book = TagBook::default();
+        book.recolour(0, NODE, "Red", 7, Some(6), false);
+        book.deleted(NODE);
+        let drive = drive_tagged(6);
+        let with = |held: Option<u8>| book.check(&drive, &BTreeSet::new(), |_, _| held);
+        assert!(with(None).is_ok(), "the removed version lacks Red");
+        assert!(
+            with(Some(6)).is_ok(),
+            "the removed version has Red as before"
+        );
+        assert!(
+            with(Some(7)).is_err(),
+            "the removed version has the recolour"
+        );
+    }
+
+    /// A recolour its client's own tag write, planned before, lands over is the known limit.
+    #[test]
+    fn a_recolour_under_its_own_tag_write_is_a_known_limit() {
+        let mut book = TagBook::default();
+        book.recolour(0, NODE, "Red", 7, Some(6), true);
+        assert!(check(&book, &drive_tagged(6)).is_ok());
+        let limit = (Limit::OwnTagWriteInFlight, (0, NODE, "Red".to_owned()));
+        assert_eq!(book.excused(), [limit]);
     }
 }

@@ -70,7 +70,8 @@ pub struct Guarding {
     /// Nodes whose deletes the user confirmed: neither counted by the guard nor held.
     pub confirmed: Arc<HashSet<NodeId>>,
     /// Nodes whose removal elsewhere the guard held as every synced file: held, with what is
-    /// under them, until the user answers, whatever the count since.
+    /// under them in the base (whatever the plan moves meanwhile, in it or out of it), until
+    /// the user answers, whatever the count since.
     pub wiped: Arc<HashSet<NodeId>>,
     /// Files pending deletion across the whole dirty set and the held deletes out of it, not
     /// just this plan's batch: (gone locally → remote deletes, gone remotely → local delete).
@@ -546,6 +547,9 @@ pub struct Plan {
     /// The files each of `held` takes, by its node, as the guard counted them: (removed from
     /// the drive, deleted here).
     pub held_takes: BTreeMap<NodeId, (usize, usize)>,
+    /// The folders deleted here that the plan moves something out of first (not expected by
+    /// their deletes): a held one stays dirty with that move ([`crate::held::out_of_dirty`]).
+    pub moves_out_of: BTreeSet<NodeId>,
     pub conflicts: Vec<Conflict>,
     /// Dirty nodes that need nothing (both sides and the base agree): the dirty flag can go.
     pub clean: Vec<NodeId>,

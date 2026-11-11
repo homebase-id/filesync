@@ -307,6 +307,10 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
      live in it plans those again: they are orphans now, whichever of them changed.
 4. **Folder delete propagation** removes the folder on the drive first, then its descendants,
    top-down; here it deletes the topmost folder, its bases and its children's in one step (§7).
+   What the plan moves out of that folder first (a move, a download to another folder) is left
+   out of that step, with what is below it: a delete inside a folder moved out is a step of its
+   own there, after the move. Where such a move doesn't run, the folder holds what its delete
+   doesn't expect: the delete goes stale and takes nothing, for the next plan.
 5. **Planned in pages.** The engine plans its dirty set in pages of 20,000 nodes, in node id
    order (§8a). A node dirty in another page, or a held delete (§7), is left as it is: its
    change isn't merged in this plan, and no fix here moves, renames or adopts it.
@@ -511,8 +515,13 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   followed here without asking: deleted here (checked, above), and the drive keeps them in Recently
   deleted for 30 days. One exception: removals that would take every synced file
   here at once, and more than the same `max(50, …)` (a broken device, a wiped drive), are held
-  (a move elsewhere out of this device's view isn't a removal: the drive keeps it live). The
-  count is the whole sync's, not a page's (§6.5): with the page's removals it takes what other
+  (a move elsewhere out of this device's view isn't a removal: the drive keeps it live; nor
+  is a move out of a folder removed elsewhere: the plan moves it out first, and the folder's
+  delete expects only what goes, so a move that doesn't run leaves that delete stale, taking
+  nothing; engine: `files_moved_out_of_a_folder_removed_elsewhere_dont_count_with_it`,
+  `a_move_out_that_fails_leaves_the_folders_delete_stale`). A folder's delete counts every
+  file it takes here, synced or not: never fewer than the synced ones. The count is the whole sync's,
+  not a page's (§6.5): with the page's removals it takes what other
   pages still have to remove, the dirty ones and the files in folders the drive removed that
   are still live here (taken along, by §6.3's rule; read while anything is dirty: a walk of
   Recently deleted's folders, 2 ms for 50,000 items), less those a confirmed delete here takes. So a wipe planned in pages
@@ -942,9 +951,10 @@ is in Recently deleted, with its tags); it never makes a conflict copy. A confli
 the local file's tags. Every write over a drive version merges that version's tags in (it may
 hold tags this device never saw): a restore from Recently deleted, bringing back a node a
 folder's removal took along (§6.3), any update; a version detached as a new item writes over
-none, and keeps the local tags. What the device can't hold it writes as that version has it:
-its plan took those from the drive it saw, which may be older (a restore planned while the
-node was deleted, sent after another device brought it back with a tag and deleted it again).
+none, and keeps the local tags. What the device can't hold it writes as that version has it,
+Linux's colours too: its plan took those from the drive it saw, which may be older (a restore
+planned while the node was deleted, sent after another device brought it back with a tag and
+deleted it again).
 
 **Local changes** are noticed by the change time a tag write moves (scan, watcher); the scan
 then reads the tags. Tags that couldn't be read are tried again at the next scan.
@@ -979,8 +989,9 @@ them, and a tag removed on the drive meanwhile came back. The plan's move or rem
 founds the base; where it runs first, the tags come down in the same run. A folder made here
 from Recently deleted (never synced here, its restore to follow) founds its base on the version
 there, as found before the write (a pull landing before its commit doesn't change what it settles
-against); where that no longer holds the tags it is to write (restored, changed or purged since
-the plan), it waits for the next plan.
+against); where that no longer holds each tag it is to write that this device can hold, colour
+and all (Linux too, a safe extra round: its restore keeps that version's colour), as restored,
+changed or purged since the plan, it waits for the next plan.
 
 **Limits.** Tag changes are seen through the change time: on a volume that keeps attributes
 elsewhere (exFAT's `._` files) or with one-second times (HFS+), a change can go unnoticed until
@@ -1008,12 +1019,17 @@ That loses a removal, not a tag.
 
 Two lose a removal (the tag comes back):
 - *Own tag write in flight*: a tag removed while this device's plan still writes it (onto the
-  item, or up): the write, planned before, lands over the removal.
+  item, or up): the write, planned before, lands over the removal. A colour given then is lost
+  the same way: both sides changed it since the base, and the merge takes the drive's.
 - *Answer superseded*: a write carrying a tag landed, but another device changed the node
   before its answer was recorded (§8a, Answers): the base never records the tag as on the
   drive, so it goes up again, over another device's later removal.
 
-Apart from these and the crash case above, no tag add or removal is lost.
+Apart from these and the crash case above, no tag add or removal is lost, nor a colour given
+to a tag the device's base holds, unless another device gave the tag a colour it hadn't seen
+(both changed it: the drive's wins). A colour given before the base holds the tag (a new item
+whose base isn't founded yet) is not promised: with no base to tell who changed it, the merge
+takes the drive's.
 
 ## 12. Scopes
 A device syncs the main folder (`~/Homebase`) and, if the user chooses, **role folders** where

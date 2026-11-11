@@ -16,10 +16,18 @@ pub(crate) struct Faults {
     /// Local placements and tag writes so far: now and then a tag write fails (a volume
     /// refusing it), or a placement's commit (a commit write or a folder's stat failing).
     pub(crate) writes: u64,
+    /// Plans made so far: every other one's run reads its mirror as the drive is at each step,
+    /// pulls landing meanwhile (`Client::pulls`), unless `pulls` pins it
+    /// ([`crate::Sim::with_pulls`]).
+    pub(crate) plans: u64,
+    pub(crate) pulls: Option<bool>,
     /// For scripted tests: the next placement with a record fails its commit.
     pub(crate) fail_commit_next: bool,
     /// For scripted tests: the next tag write fails.
     pub(crate) fail_tags_next: bool,
+    /// For scripted tests: the engine's guard lets everything through while the oracle still
+    /// judges each plan by [`crate::Sim::guard`] ([`crate::Sim::without_the_engines_guard`]).
+    pub(crate) engine_unguarded: bool,
     /// For scripted tests: how many items the next crash in a delete's unlinks lets go first
     /// (else as many as the crashes so far say, of the items plus one).
     pub(crate) unlinks_before_crash: Option<usize>,

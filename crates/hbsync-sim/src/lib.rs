@@ -59,7 +59,6 @@ use crate::ids::Ids;
 use crate::model::client::{Client, ignoring_d};
 use crate::model::server::Server;
 use crate::oracle::{Ledger, tag_names, view_with};
-use hbsync_engine::reconcile::DriveVersion;
 
 /// The simulation.
 #[derive(Debug)]
@@ -83,8 +82,8 @@ pub struct Sim {
     pub guard: Option<usize>,
     /// Clients that are two folders of one computer (the main folder, a role folder).
     computers: Vec<(usize, usize)>,
-    /// The version the download just put in place acted on, for its commit.
-    placed_from: Option<DriveVersion>,
+    /// What the operation just done read of the drive before its write, for its commit.
+    read: Option<exec::Read>,
     /// The faults it plays, and what they keep ([`Faults`]).
     faults: Faults,
 }
@@ -114,7 +113,7 @@ impl Sim {
             guard: None,
             computers: Vec::new(),
             faults: Faults::default(),
-            placed_from: None,
+            read: None,
         }
     }
 
@@ -123,6 +122,14 @@ impl Sim {
     /// commit of a file already in place, for recovery to settle.
     pub fn with_split_downloads(mut self) -> Self {
         self.faults.split_downloads = true;
+        self
+    }
+
+    /// Whether every run pulls between its plan and its steps (`Some(true)`), none does
+    /// (`Some(false)`), or every other one (`None`, the default): how a folder made here reads
+    /// its mirror (`Sim::mirror_read`).
+    pub fn with_pulls(mut self, pulls: Option<bool>) -> Self {
+        self.faults.pulls = pulls;
         self
     }
 
@@ -202,8 +209,8 @@ impl Sim {
         &self.clients[c].held
     }
 
-    /// For scripted tests: the tag adds [`Sim::check`] found lost to a known limit of the
-    /// engine, as `"Limit node tag"`.
+    /// For scripted tests: the tag adds, removals and colours [`Sim::check`] found lost to a
+    /// known limit of the engine, as `"Limit node tag"`.
     pub fn tags_lost_to_known_limits(&self) -> Vec<String> {
         self.ledger
             .tags
@@ -415,6 +422,13 @@ impl Sim {
     /// `n` of them.
     pub fn crash_after_unlinks(&mut self, n: usize) {
         self.faults.unlinks_before_crash = Some(n);
+    }
+
+    /// For scripted tests: the engine's mass-delete guard lets every delete through, while the
+    /// oracle still judges each plan by [`Sim::guard`]: what it reports then is what the guard
+    /// must hold.
+    pub fn without_the_engines_guard(&mut self) {
+        self.faults.engine_unguarded = true;
     }
 
     /// For scripted tests: the next tag write fails (where the OS keeps tags).

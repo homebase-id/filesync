@@ -142,13 +142,16 @@ impl Tags {
     }
 
     /// [`Tags::merge`] for a write over the drive's version (`remote`) by a device on `os`:
-    /// what it can't hold of `local` is `remote`'s. It never removes or recolours a tag it can't
-    /// see, though `local` took those from the drive its plan saw, which may be older than the
-    /// version written over (and the base settled against one in between).
+    /// what it can't hold of `local` is `remote`'s, a tag's colour on Linux too (a tag of
+    /// `local` held [`alike`] `remote`'s is `remote`'s). It never removes or recolours a tag
+    /// it can't see, though `local` took those from the drive its plan saw, which may be older
+    /// than the version written over (and the base settled against one in between).
     pub fn merge_onto(base: &Tags, local: &Tags, remote: &Tags, os: Os) -> Tags {
-        let held = |t: &&Tag| express(t, os).is_some();
-        let held = local.iter().filter(held);
-        let unheld = remote.iter().filter(|t| express(t, os).is_none());
+        let held = local.iter().filter(|t| holds(t, os)).map(|t| match os {
+            Os::Linux => remote.get(&t.name).filter(|r| alike(r, t, os)).unwrap_or(t),
+            _ => t,
+        });
+        let unheld = remote.iter().filter(|t| !holds(t, os));
         Tags::merge(base, &Tags::new(held.chain(unheld).cloned()), remote)
     }
 
@@ -167,22 +170,45 @@ impl Tags {
         Tags::new(kept.chain(read.iter()).cloned())
     }
 
-    /// The tags `os` can hold, as it holds them ([`express`]).
+    /// The tags `os` can hold, as it holds them ([`express`]): what reading them back gives.
     pub fn held_by(&self, os: Os) -> Tags {
         Tags(self.0.iter().filter_map(|t| express(t, os)).collect())
+    }
+
+    /// The tags `os` can hold ([`holds`]), as they are here: colour kept, as the drive holds
+    /// them, where [`Tags::held_by`] gives what reading them back gives.
+    pub fn holdable_by(&self, os: Os) -> Tags {
+        Tags(self.0.iter().filter(|t| holds(t, os)).cloned().collect())
     }
 }
 
 /// Whether this OS keeps tags at all.
 pub const CAN_TAG: bool = cfg!(any(target_os = "macos", target_os = "linux"));
 
+/// Whether `os` can hold `tag` at all (by its name: Linux holds it without its colour).
+pub fn holds(tag: &Tag, os: Os) -> bool {
+    match os {
+        Os::MacOs => !tag.name.contains('\n'),
+        Os::Linux => !tag.name.contains(','),
+        Os::Windows => false,
+    }
+}
+
+/// Whether `os` holds `a` and `b` alike: one name, and one colour unless on Linux, which holds
+/// none.
+pub fn alike(a: &Tag, b: &Tag, os: Os) -> bool {
+    a.name == b.name && (os == Os::Linux || a.colour == b.colour)
+}
+
 /// How `os` holds `tag`, as reading it back would give it: `None` if it can't.
 pub fn express(tag: &Tag, os: Os) -> Option<Tag> {
-    match os {
-        Os::MacOs if !tag.name.contains('\n') => Some(tag.clone()),
-        Os::Linux if !tag.name.contains(',') => Some(Tag::new(tag.name.clone(), 0)),
-        _ => None,
+    if !holds(tag, os) {
+        return None;
     }
+    Some(match os {
+        Os::Linux => Tag::new(tag.name.clone(), 0),
+        _ => tag.clone(),
+    })
 }
 
 /// The macOS attribute: a binary plist array of `"Name"` or `"Name\nColour"` strings.
@@ -560,6 +586,41 @@ mod tests {
             Tags::merge_onto(&base, &ours, &drive, Os::Linux),
             tags(&[("Work", 4), ("a,b", 0)])
         );
+    }
+
+    /// Linux holds a tag without its colour: one it writes over the drive takes the drive's
+    /// colour, whatever its plan had (a colour seen before, or none), even where the base
+    /// settled on the drive's since. macOS holds colours: its own differs from the base's, a
+    /// change here, and goes. Windows holds none.
+    #[test]
+    fn a_write_over_the_drive_never_recolours_a_tag_the_device_cant_see() {
+        let (purple, orange, plain) = (
+            tags(&[("Red", 3)]),
+            tags(&[("Red", 7)]),
+            tags(&[("Red", 0)]),
+        );
+        for ours in [&orange, &plain] {
+            assert_eq!(Tags::merge_onto(&purple, ours, &purple, Os::Linux), purple);
+            assert_eq!(Tags::merge_onto(&purple, ours, &purple, Os::MacOs), *ours);
+            assert_eq!(
+                Tags::merge_onto(&purple, ours, &purple, Os::Windows),
+                purple
+            );
+        }
+        // Added here and on the drive: the drive's colour, on every OS, as before.
+        let none = Tags::default();
+        for os in [Os::Linux, Os::MacOs] {
+            assert_eq!(Tags::merge_onto(&none, &plain, &purple, os), purple);
+        }
+        // A tag the drive lacks keeps the plan's colour; one removed there goes.
+        assert_eq!(Tags::merge_onto(&none, &orange, &none, Os::Linux), orange);
+        assert_eq!(Tags::merge_onto(&purple, &orange, &none, Os::Linux), none);
+        // Removed here: gone, the colour on the drive notwithstanding.
+        assert_eq!(Tags::merge_onto(&purple, &none, &orange, Os::Linux), none);
+        // Added here, next to a tag recoloured on the drive: the add goes up as Linux reads it.
+        let ours = tags(&[("Red", 7), ("Work", 0)]);
+        let both = tags(&[("Red", 3), ("Work", 0)]);
+        assert_eq!(Tags::merge_onto(&purple, &ours, &purple, Os::Linux), both);
     }
 
     #[test]

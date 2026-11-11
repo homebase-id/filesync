@@ -37,6 +37,9 @@ pub(crate) struct Ledger {
     pub(crate) sent_on_send: usize,
     /// The first plan that deleted more than the guard allows without a confirmation.
     unguarded: Option<String>,
+    /// The first delete here a plan made that expects other than what its folder holds less
+    /// what the plan moves out of it first.
+    expects_differ: Option<String>,
     /// The first operation a client ran outside its folder's part of the drive.
     scope_breach: Option<String>,
     /// The first operation that moved, renamed or deleted a folder a file not hashed yet is
@@ -367,6 +370,9 @@ impl Sim {
         if let Some(what) = &ledger.answer_undid {
             return Err(format!("a write's answer was recorded wrongly: {what}"));
         }
+        if let Some(what) = &ledger.expects_differ {
+            return Err(what.clone());
+        }
         if let Some(plan) = &ledger.unguarded {
             return Err(format!("a mass delete went through unconfirmed: {plan}"));
         }
@@ -626,10 +632,8 @@ impl Sim {
             return Err(format!("lost blobs {lost:?}; present {present:?}"));
         }
         let held_at_removal = |node: NodeId, name: &str| {
-            self.server
-                .tags_at_removal
-                .get(&node)
-                .is_some_and(|t| t.contains(name))
+            let tags = self.server.tags_at_removal.get(&node)?;
+            tags.get(name).map(|t| t.colour)
         };
         self.ledger
             .tags
@@ -834,7 +838,31 @@ pub(crate) enum What {
     Detach {
         new_node: NodeId,
     },
+    /// The drive's version put in place of the item here, in folder `parent` (a move, where
+    /// that is another one).
+    LocalReplace {
+        parent: NodeId,
+    },
     Other,
+}
+
+/// What a delete here of `node` expects to take, sorted, worked out on its own: `node` and what
+/// is below it here, but what the plan moves out of it first (`moving`, below `node`) with
+/// what is below that. Round a cycle (another writer's moves), each node once, `node` always.
+fn delete_expects(local: &Tree, node: NodeId, moving: &HashSet<NodeId>) -> Vec<NodeId> {
+    let mut kept = vec![node];
+    let mut seen = HashSet::from([node]);
+    let mut next = vec![node];
+    while let Some(n) = next.pop() {
+        for child in local.children(n) {
+            if !moving.contains(&child) && seen.insert(child) {
+                kept.push(child);
+                next.push(child);
+            }
+        }
+    }
+    kept.sort();
+    kept
 }
 
 /// A plan and what it was made from, for [`Ledger::plan_made`].
@@ -953,6 +981,40 @@ impl Ledger {
                 })
                 .map(|p| format!("{}: {:?} moves what waits for a hash", seen.client, p.op))
         });
+        // What a delete here expects to take, worked out on its own: its folder here less what
+        // the plan moves out of it first (a move, a download to another folder: they run before
+        // the deletes), each with what is below it. It takes that or nothing (anything else
+        // there makes it stale).
+        let moving: HashSet<NodeId> = seen
+            .ops
+            .iter()
+            .filter_map(|p| match &p.what {
+                What::LocalMove { parent, .. } | What::LocalReplace { parent } => local
+                    .get(p.node)
+                    .is_some_and(|l| l.parent != *parent)
+                    .then_some(p.node),
+                _ => None,
+            })
+            .collect();
+        let expects = |node: NodeId| delete_expects(local, node, &moving);
+        // Each delete's, once, compared with what it expects (sorted, as the plan keeps it).
+        let mut expected: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
+        let mut differ = None;
+        for p in seen.ops.iter().chain(seen.held) {
+            let What::LocalDelete { subtree } = &p.what else {
+                continue;
+            };
+            let want = expects(p.node);
+            if differ.is_none() && (!subtree.is_sorted() || *subtree != want) {
+                differ = Some(format!(
+                    "{}: {:?} expects {subtree:?}, not what its folder holds less what the \
+                     plan moves out of it ({want:?})",
+                    seen.client, p.op
+                ));
+            }
+            expected.insert(p.node, want);
+        }
+        first(&mut self.expects_differ, || differ);
         // The guard's rule, checked independently: no plan deletes more files on a side than
         // the limit (or every file) without the user's confirmation.
         let Some(min) = guard else {
@@ -962,10 +1024,12 @@ impl Ledger {
         // Counted only until the first breach is kept.
         first(&mut self.unguarded, || {
             let trips = |n: usize| n > min || (synced_files > 0 && n >= synced_files && n > 1);
-            let files_under = |tree: &Tree, node: NodeId| {
-                tree.subtree(node)
-                    .into_iter()
-                    .filter(|n| tree.get(*n).is_some_and(|s| s.kind == NodeKind::File))
+            // The files a delete here takes, as the guard counts them (here, synced or not):
+            // what it expects to find, worked out above.
+            let files_in = |node: NodeId| {
+                expected[&node]
+                    .iter()
+                    .filter(|n| local.get(**n).is_some_and(|s| s.kind == NodeKind::File))
                     .count()
             };
             // Remote deletes of files, and of them those synced here (a synced file gone here: the
@@ -996,7 +1060,7 @@ impl Ledger {
                         deleted += 1;
                         deleted_synced += usize::from(base.contains(p.node));
                     }
-                    What::LocalDelete { .. } => deleted_here += files_under(local, p.node),
+                    What::LocalDelete { .. } => deleted_here += files_in(p.node),
                     _ => {}
                 }
             }
@@ -1014,7 +1078,7 @@ impl Ledger {
                     What::LocalDelete { subtree }
                         if !was_wiped(p.node) && !subtree.iter().any(|n| wiped.contains(n)) =>
                     {
-                        files_under(local, p.node)
+                        files_in(p.node)
                     }
                     _ => 0,
                 })
@@ -1035,7 +1099,7 @@ impl Ledger {
                 .held
                 .iter()
                 .map(|p| match p.what {
-                    What::LocalDelete { .. } => files_under(local, p.node),
+                    What::LocalDelete { .. } => files_in(p.node),
                     _ => 0,
                 })
                 .sum();
@@ -1051,7 +1115,8 @@ impl Ledger {
             // synced file with a held wipe should have been held with it.
             if deleted_here > 0 && held_all > held_deleted_here && every(there_all) {
                 return Some(format!(
-                    "{} let {deleted_here} removals from elsewhere through that, with the {held_all}                      held, are every synced file ({synced_files})",
+                    "{} let {deleted_here} removals from elsewhere through that, with the {held_all} \
+                     held, are every synced file ({synced_files})",
                     seen.client
                 ));
             }
@@ -1202,6 +1267,27 @@ mod tests {
             file_id: remote.file_id,
             expected: remote.version,
         }
+    }
+
+    /// A delete here of D, in a cycle with M here (another writer's moves) that the plan moves
+    /// out: it expects D alone, never less.
+    #[test]
+    fn a_delete_in_a_cycle_with_what_moves_out_expects_itself() {
+        let (d, m, x) = (NodeId::new(), NodeId::new(), NodeId::new());
+        let mut local = Tree::new();
+        local.insert(d, NodeState::folder(m, "d"));
+        local.insert(m, NodeState::folder(d, "m"));
+        local.insert(x, NodeState::folder(m, "x"));
+        assert_eq!(delete_expects(&local, d, &HashSet::from([m])), [d]);
+        let mut all = vec![d, m, x];
+        all.sort();
+        assert_eq!(delete_expects(&local, d, &HashSet::new()), all);
+        // With K in D too: D and K, M's way round the cycle back to D takes nothing of D's.
+        let k = NodeId::new();
+        local.insert(k, NodeState::folder(d, "k"));
+        let mut both = vec![d, k];
+        both.sort();
+        assert_eq!(delete_expects(&local, d, &HashSet::from([m])), both);
     }
 
     /// A restore ends a delete: a tag removed after it counts, and coming back is reported. A

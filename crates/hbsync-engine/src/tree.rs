@@ -101,17 +101,22 @@ impl Tree {
     /// `node`'s parents up to (excluding) the root, nearest first. Stops at a missing node and
     /// never loops: a cycle ends the walk.
     pub fn ancestors(&self, node: NodeId) -> Vec<NodeId> {
-        let mut out = Vec::new();
-        let mut seen = BTreeSet::from([node]);
+        self.ancestors_iter(node).collect()
+    }
+
+    /// [`Tree::ancestors`], one at a time: a cycle ends the walk at the first node seen again
+    /// (`node` itself among them), so one lap at most.
+    pub fn ancestors_iter(&self, node: NodeId) -> impl Iterator<Item = NodeId> + '_ {
+        let mut seen = HashSet::from([node]);
         let mut current = self.nodes.get(&node).map(|s| s.parent);
-        while let Some(parent) = current {
+        std::iter::from_fn(move || {
+            let parent = current.take()?;
             if parent.is_root() || !seen.insert(parent) {
-                break;
+                return None;
             }
-            out.push(parent);
             current = self.nodes.get(&parent).map(|s| s.parent);
-        }
-        out
+            Some(parent)
+        })
     }
 
     /// The names from the root down to `node`, or `None` if `node` isn't connected to the root
@@ -136,11 +141,17 @@ impl Tree {
     /// `node` and everything below it, parents before children; round a cycle (another
     /// writer's moves) each node once.
     pub fn subtree(&self, node: NodeId) -> Vec<NodeId> {
+        self.subtree_where(node, |_| true)
+    }
+
+    /// [`Tree::subtree`], but a node below `node` that `keep` refuses is left out with what is
+    /// below it (`node` itself is always in).
+    pub fn subtree_where(&self, node: NodeId, mut keep: impl FnMut(NodeId) -> bool) -> Vec<NodeId> {
         let mut out = Vec::new();
         let mut seen = HashSet::new();
         let mut stack = vec![node];
         while let Some(n) = stack.pop() {
-            if !seen.insert(n) {
+            if !seen.insert(n) || (n != node && !keep(n)) {
                 continue;
             }
             if !n.is_root() {
@@ -357,6 +368,28 @@ mod tests {
         let mut below = t.subtree(a);
         below.sort();
         assert_eq!(below, [a, b, c]);
+        // Leaving b out round the cycle keeps a.
+        assert_eq!(t.subtree_where(a, |n| n != b), [a]);
+        // The walk up ends where it began, a lap at most.
+        assert_eq!(t.ancestors(a), [b]);
+        assert_eq!(t.ancestors(c), [b, a]);
+    }
+
+    /// A long walk up ends at the root, and round a cycle after a lap, each node once.
+    #[test]
+    fn a_long_walk_up_ends() {
+        let chain = ids(100);
+        let mut t = Tree::new();
+        for w in chain.windows(2) {
+            t.insert(w[1], folder(w[0], "n"));
+        }
+        t.insert(chain[0], folder(NodeId::ROOT, "top"));
+        let up: Vec<NodeId> = chain[..99].iter().rev().copied().collect();
+        assert_eq!(t.ancestors(chain[99]), up);
+        // Closed into a cycle: the top's parent is the bottom.
+        t.insert(chain[0], folder(chain[99], "top"));
+        let round = t.ancestors(chain[99]);
+        assert_eq!(round, up, "a lap, then it ends");
     }
 
     #[test]

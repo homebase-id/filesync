@@ -1301,8 +1301,11 @@ fn regression_a_folder_made_from_recently_deleted_after_its_restore_waits() {
         Event::Step { client: 1 },
         act(0, Tag { node: 4, tag: 0 }),
     ];
-    let limits = known_limits_of(2, &events);
-    assert!(limits.is_empty(), "{limits:?}");
+    // Saved where client 1's run pulls; it waits either way.
+    for setup in pulled_or_not(|sim| sim) {
+        let limits = known_limits_with(2, setup, &events);
+        assert!(limits.is_empty(), "{limits:?}");
+    }
 }
 
 /// Client 1 deletes file `a` (or, `folder`, folder `b` holding `b/c.txt`); client 0 moves it
@@ -2270,6 +2273,198 @@ fn regression_a_paged_delete_of_every_file_with_one_taken_along_is_held() {
         plan(0),
     ];
     if let Err(e) = run_with(2, Some(1), |sim| sim.with_small_pages(2), &events) {
+        panic!("{e}");
+    }
+}
+
+/// Seed b5183698 (`guarded_clients_in_pages_hold_the_whole_delete`, pages of 1, the guard at
+/// 1): client 1 uploads a file `a` (its one synced file), which another device removes from
+/// the drive meanwhile. Client 0 makes folder F, and client 1 a file F of its own, which goes
+/// up as `F (conflict 1)`; before client 1 renames it so here, its user moves it into the
+/// folder F. Client 0 then removes F (empty on the drive). Client 1's plan moves the conflict
+/// file out of F to the top, as the drive has it, and deletes F; another page deletes `a`: one
+/// synced file, not over the limit of 1, so followed unasked (§7). The oracle counted the
+/// conflict file as a removal with F too: two removals of one synced file, and a breach. F's
+/// delete doesn't expect it now (a move that fails leaves the delete stale), and it is no
+/// removal anyway: not synced here, and live on the drive.
+#[test]
+fn regression_a_file_not_synced_in_a_folder_removed_elsewhere_is_no_removal() {
+    use hbsync_sim::Action::{CreateFile, CreateFolder, Meanwhile, Move, ToggleIgnore};
+    let act = |client, action| Event::Act { client, action };
+    let (plan, step) = (
+        |client| Event::Plan { client },
+        |client| Event::Step { client },
+    );
+    let events = [
+        act(0, CreateFolder { parent: 0, name: 6 }),
+        act(1, CreateFile { parent: 0, name: 8 }),
+        plan(1),
+        act(1, Meanwhile { op: 2 }),
+        act(0, ToggleIgnore),
+        act(0, CreateFile { parent: 0, name: 0 }),
+        plan(0),
+        act(1, CreateFile { parent: 0, name: 6 }),
+        step(1),
+        step(0),
+        plan(1),
+        plan(1),
+        step(1),
+        step(1),
+        act(
+            0,
+            Move {
+                node: 14,
+                parent: 1,
+                name: 5,
+            },
+        ),
+        act(
+            1,
+            Move {
+                node: 8,
+                parent: 6,
+                name: 0,
+            },
+        ),
+    ];
+    let mut sim = Sim::new(2).with_small_pages(1);
+    sim.guard = Some(1);
+    sim.verbose = true;
+    sim.run(&events);
+    // The case: one plan of client 1 moves the file out of F and deletes F, which doesn't
+    // expect it.
+    let folder = "L".repeat(251) + ".txt";
+    let f = sim.item(1, &folder).expect("F here");
+    let moved = sim.item(1, &format!("{folder}/a")).expect("the file in F");
+    assert!(sim.quiesce(30), "no convergence");
+    let (moves, deletes) = (
+        format!("LocalMove {{ node: {moved:?}"),
+        format!("LocalDelete {{ node: {f:?}, subtree: "),
+    );
+    assert!(
+        sim.trace.iter().any(|line| line.starts_with("plan c1:")
+            && line.contains(&moves)
+            && line.split(&deletes).nth(1).is_some_and(|rest| rest
+                .split(']')
+                .next()
+                .is_some_and(|s| !s.contains(&format!("{moved:?}"))))),
+        "no plan moving the file out of F and deleting F without it: {:#?}",
+        sim.trace
+    );
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Folder `b` holds synced files `b/c.txt` and `b/a/c.txt`, all there is
+/// ([`stopped_delete_setup`]). Another device moves `b/c.txt` out to the top and removes `b`
+/// (`move_out`), or removes `b` with both. Client 1's plan moves `c.txt` out first: `b`'s
+/// delete takes `b/a/c.txt` alone, one of two synced files, followed unasked. Without the move
+/// it takes every synced file, over the limit of 1: held, and with the engine's guard off, the
+/// oracle reports the delete.
+fn removed_elsewhere(move_out: bool, guarded: bool) -> Result<(), String> {
+    use hbsync_sim::Action::{Delete, Move};
+    let act = |client, action| Event::Act { client, action };
+    let (mut sim, [b, _, c, _]) = stopped_delete_setup();
+    sim.guard = Some(1);
+    if move_out {
+        let (node, parent) = (
+            sim.pick(0, c, false).expect("b/c.txt"),
+            sim.pick(0, NodeId::ROOT, true).expect("the top"),
+        );
+        sim.run(&[act(
+            0,
+            Move {
+                node,
+                parent,
+                name: 3,
+            },
+        )]);
+    }
+    let node = sim.pick(0, b, false).expect("b");
+    sim.run(&[act(0, Delete { node })]);
+    // Client 0's own delete of every synced file is held there too: its user confirms it.
+    sim.run(&[Event::Plan { client: 0 }]);
+    if !sim.held(0).is_empty() {
+        sim.run(&[Event::Confirm { client: 0 }, Event::Plan { client: 0 }]);
+    }
+    while !sim.planned(0).is_empty() {
+        sim.run(&[Event::Step { client: 0 }]);
+    }
+    if !guarded {
+        sim.without_the_engines_guard();
+    }
+    sim.run(&[Event::Plan { client: 1 }]);
+    let held = !move_out && guarded;
+    assert_eq!(sim.held(1) == [b], held, "{:?}", sim.held(1));
+    let kinds: &[&str] = match (move_out, held) {
+        (true, _) => &["LocalMove", "LocalDelete"],
+        (false, true) => &[],
+        (false, false) => &["LocalDelete"],
+    };
+    // What each delete expects is checked against the oracle's own reading (`expects_differ`).
+    assert_eq!(sim.planned(1), kinds);
+    assert!(sim.quiesce(30), "no convergence");
+    sim.check()
+}
+
+#[test]
+fn a_folder_removed_elsewhere_counts_what_its_delete_takes() {
+    removed_elsewhere(true, true).unwrap_or_else(|e| panic!("{e}"));
+    removed_elsewhere(false, true).unwrap_or_else(|e| panic!("{e}"));
+    let breach = removed_elsewhere(false, false).expect_err("the oracle reports the delete");
+    assert!(breach.contains("went through unconfirmed"), "{breach}");
+}
+
+/// Seed 243bb3f0 (`held_deletes_out_of_the_dirty_set_plan_alike_from_a_wipe`): folder `a`,
+/// held as every synced file on client 1, is restored and moved into a new folder on the
+/// drive, `c.txt` in it still removed. Client 1's plan moves `a`: a removal elsewhere in a
+/// held folder stays held, whatever the plan moves (a first take that let deletes in a moved
+/// folder go on their own let this one through).
+#[test]
+fn regression_a_delete_in_a_held_folder_that_moves_stays_held() {
+    use hbsync_sim::Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let (plan, step, confirm) = (
+        |client| Event::Plan { client },
+        |client| Event::Step { client },
+        |client| Event::Confirm { client },
+    );
+    let events = [
+        act(0, CreateJunkFolder { parent: 0 }),
+        act(0, Edit { file: 0 }),
+        act(0, Purge),
+        act(
+            1,
+            CreateFile {
+                parent: 14,
+                name: 6,
+            },
+        ),
+        plan(1),
+        confirm(1),
+        act(0, Purge),
+        plan(1),
+        step(1),
+        act(0, ListDeleted),
+        plan(0),
+        act(1, ToggleIgnore),
+        act(0, Restore { node: 0 }),
+        step(0),
+        act(0, CreateFolder { parent: 2, name: 1 }),
+        act(
+            0,
+            Move {
+                node: 0,
+                parent: 14,
+                name: 0,
+            },
+        ),
+    ];
+    if let Err(e) = run_with(
+        2,
+        Some(crate::common::WIPED_MIN),
+        |sim| crate::common::with_a_folder_wiped(sim.with_held_check()),
+        &events,
+    ) {
         panic!("{e}");
     }
 }
