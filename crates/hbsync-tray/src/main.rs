@@ -12,7 +12,7 @@ mod os;
 mod pages;
 mod poll;
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -151,9 +151,10 @@ struct App {
     restart: Option<PathBuf>,
     shown: Shown,
     notified: HashMap<&'static str, Instant>,
-    /// The folders told refused ([`State::Denied`]) since they last synced: told once, not again
-    /// as their tries come and go ([`refused_untold`]).
-    told_denied: HashSet<PathBuf>,
+    /// The folders told refused ([`State::Denied`]) since they last synced, each with whether
+    /// for want of the private drive's key: told once a reason, not again as their tries come
+    /// and go ([`refused_untold`]).
+    told_denied: HashMap<PathBuf, bool>,
     /// The folder given its icon and shortcut ([`shell`]) by this run.
     decorated: Option<PathBuf>,
     /// A stop found at the watcher's first look is told; not after restarting into an update
@@ -210,7 +211,7 @@ impl App {
             restart: None,
             shown: Shown::default(),
             notified: HashMap::new(),
-            told_denied: HashSet::new(),
+            told_denied: HashMap::new(),
             decorated: None,
             tell_stopped: !hbsync_app::install::restarted(),
         })
@@ -422,14 +423,11 @@ impl App {
         // Told only once shown: one held back (a notification of its kind a moment ago) is
         // told at the next look.
         let refused = refused_untold(next, &mut self.told_denied);
-        if !refused.is_empty()
-            && self.notify_once(
-                "denied",
-                "Log in again",
-                "Your Homebase no longer accepts this computer: log in again from the menu.".into(),
-            )
-        {
-            self.told_denied.extend(refused);
+        for (kind, lacks_key, body, folders) in refused_notices(&refused) {
+            if self.notify_once(kind, "Log in again", body) {
+                let told = folders.into_iter().map(|path| (path, lacks_key));
+                self.told_denied.extend(told);
+            }
         }
     }
 
@@ -540,9 +538,14 @@ fn notices(before: &Daemon, next: &Daemon) -> Vec<(&'static str, &'static str, S
     out
 }
 
-/// The folders refused and not in `told`, which keeps those told until they sync (idle, nothing
-/// wrong) or go, all until nothing is set up or syncing stops; the caller adds those it told.
-fn refused_untold(next: &Daemon, told: &mut HashSet<PathBuf>) -> Vec<PathBuf> {
+/// The folders refused and not in `told` with their reason (whether for want of the private
+/// drive's key): `told` keeps those told until they sync (idle, nothing wrong), go, or are
+/// refused for the other reason (told again so), all until nothing is set up or syncing stops;
+/// the caller adds those it told.
+fn refused_untold<'a>(
+    next: &'a Daemon,
+    told: &mut HashMap<PathBuf, bool>,
+) -> Vec<&'a FolderStatus> {
     let now = match next {
         Daemon::Running(now) => now,
         Daemon::NotSetUp | Daemon::Stopped => {
@@ -552,11 +555,30 @@ fn refused_untold(next: &Daemon, told: &mut HashSet<PathBuf>) -> Vec<PathBuf> {
         Daemon::Starting(_) => return Vec::new(),
     };
     let synced = |f: &FolderStatus| f.state == State::Idle && f.error.is_none();
-    told.retain(|path| now.folders.iter().any(|f| f.path == *path && !synced(f)));
+    let kept = |f: &FolderStatus, key: bool| {
+        !synced(f) && (f.state != State::Denied || f.lacks_key == key)
+    };
+    told.retain(|path, key| now.folders.iter().any(|f| f.path == *path && kept(f, *key)));
     now.folders
         .iter()
-        .filter(|f| f.state == State::Denied && !told.contains(&f.path))
-        .map(|f| f.path.clone())
+        .filter(|f| f.state == State::Denied && told.get(&f.path) != Some(&f.lacks_key))
+        .collect()
+}
+
+/// The notifications for the folders `refused`: one for those refused for want of the
+/// private drive's key, one for the others, each in its words, of its own kind (each at most
+/// once a minute); with the folders each tells.
+fn refused_notices(refused: &[&FolderStatus]) -> Vec<(&'static str, bool, String, Vec<PathBuf>)> {
+    [("denied", false), ("denied-key", true)]
+        .into_iter()
+        .filter_map(|(kind, lacks_key)| {
+            let folders: Vec<PathBuf> = (refused.iter())
+                .filter(|f| f.lacks_key == lacks_key)
+                .map(|f| f.path.clone())
+                .collect();
+            let body = model::refused_notice(lacks_key);
+            (!folders.is_empty()).then_some((kind, lacks_key, body, folders))
+        })
         .collect()
 }
 
@@ -793,6 +815,40 @@ mod tests {
         assert!(notices(&now, &now).is_empty(), "nothing new");
     }
 
+    /// Folders refused for want of the key and for the login are told apart, each in its
+    /// words and of its own kind, each folder with the reason it was told.
+    #[test]
+    fn refusals_are_told_by_their_reason() {
+        let folder = |path: &str, lacks_key| {
+            let mut f = FolderStatus::new(&"anna.example.com".into(), std::path::Path::new(path));
+            (f.state, f.lacks_key) = (State::Denied, lacks_key);
+            f
+        };
+        let (main, documents) = (folder("/h/Homebase", true), folder("/h/Documents", false));
+        let told = refused_notices(&[&main, &documents]);
+        let said: Vec<_> = told
+            .iter()
+            .map(|(kind, key, body, folders)| (*kind, *key, body.clone(), folders.clone()))
+            .collect();
+        assert_eq!(
+            said,
+            [
+                (
+                    "denied",
+                    false,
+                    model::refused_notice(false),
+                    vec![documents.path]
+                ),
+                (
+                    "denied-key",
+                    true,
+                    model::refused_notice(true),
+                    vec![main.path]
+                ),
+            ]
+        );
+    }
+
     /// A refused folder is told once, also as first seen: not again until it has synced (not
     /// as its tries come and go), nor while held back; forgotten when gone or stopped, not
     /// while the daemon is being started.
@@ -815,12 +871,12 @@ mod tests {
             }))
         };
         let one = |state, error| daemon(&[("/h/Homebase", state, error)]);
-        let told = &mut HashSet::new();
+        let told = &mut HashMap::new();
         // As the tray does, the notification shown (or not).
         let mut tell = |next: &Daemon, shown: bool| {
             let refused = refused_untold(next, told);
             if shown {
-                told.extend(refused.iter().cloned());
+                told.extend(refused.iter().map(|f| (f.path.clone(), f.lacks_key)));
             }
             refused.len()
         };
@@ -839,6 +895,17 @@ mod tests {
         }
         assert_eq!(tell(&one(State::Idle, None), true), 0);
         assert_eq!(tell(&denied, true), 1, "refused after it synced");
+
+        // Refused for another reason: told again, in its words; and back.
+        let mut keyless = denied.clone();
+        if let Daemon::Running(s) = &mut keyless {
+            s.folders[0].lacks_key = true;
+        }
+        assert_eq!(tell(&keyless, true), 1, "now for the key");
+        assert_eq!(tell(&keyless, true), 0);
+        assert_eq!(tell(&one(State::Offline, Some("dns")), true), 0);
+        assert_eq!(tell(&keyless, true), 0, "the same reason after no answer");
+        assert_eq!(tell(&denied, true), 1, "the login again");
 
         let other = daemon(&[("/h/Documents", State::Denied, Some("refused"))]);
         assert_eq!(tell(&other, true), 1, "another folder");

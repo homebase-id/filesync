@@ -16,12 +16,13 @@
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 
 use hbsync_engine::deleted::Listed;
 use hbsync_engine::root::{AccountReader, RootError};
+use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::notify::Event;
 use hbsync_remote::Skipped;
 use hbsync_state::StateError;
@@ -74,6 +75,43 @@ pub(crate) struct Account {
     reader: Mutex<Option<AccountReader>>,
     /// Raised when its status (or its folders') may have changed.
     changed: Arc<Wakeup>,
+    /// Sync now asked before its folders run ([`Clicks`]).
+    clicks: Clicks,
+}
+
+/// Sync now asked while an account isn't running yet, counted: a wait to try again ends for a
+/// click since its try began ([`Clicks::begin_try`]), one try a click.
+#[derive(Default)]
+struct Clicks {
+    asked: AtomicU64,
+    /// Those a wait ended for.
+    served: AtomicU64,
+}
+
+/// When a try began, in clicks.
+#[derive(Debug, Clone, Copy)]
+struct Try(u64);
+
+impl Clicks {
+    fn click(&self) {
+        self.asked.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A try begins: clicks before it add nothing to the wait after it (it is the one asked
+    /// for).
+    fn begin_try(&self) -> Try {
+        Try(self.asked.load(Ordering::Relaxed))
+    }
+
+    /// Whether a click came since `tried` began that no wait ended for yet; one is taken.
+    fn clicked(&self, tried: Try) -> bool {
+        let asked = self.asked.load(Ordering::Relaxed);
+        let clicked = asked > tried.0.max(self.served.load(Ordering::Relaxed));
+        if clicked {
+            self.served.store(asked, Ordering::Relaxed);
+        }
+        clicked
+    }
 }
 
 /// The account's status, its pause and its folders.
@@ -100,6 +138,10 @@ struct Waiting {
     roots: Vec<Root>,
     state: State,
     error: Option<String>,
+    /// It waits to connect again (a try failed): Sync now has it try at once.
+    connecting: bool,
+    /// Refused for want of the private drive's key ([`FolderStatus::lacks_key`]).
+    lacks_key: bool,
 }
 
 impl Shown {
@@ -142,10 +184,11 @@ pub(crate) enum Msg {
     Woke,
     /// Look again: it is to end, the daemon stops, its pause changed, or a runner is ending.
     Wake,
-    /// Sync now was asked before its folders run: a wait to connect ends ([`Account::connect`]).
+    /// Sync now was asked before its folders run: a wait to try again (to connect, to ready its
+    /// DB, to read the keychain) ends.
     SyncNow,
     /// A try at connecting ended (its thread's answer, while the account connects).
-    Connected(Box<Result<hbsync_homebase::drive::HomebaseRemote, hbsync_homebase::HomebaseError>>),
+    Connected(Box<Result<HomebaseRemote, hbsync_homebase::HomebaseError>>),
 }
 
 /// What the account's thread is asked to do.
@@ -175,11 +218,7 @@ impl Account {
                 status: AccountStatus::new(identity),
                 rows_told: HashSet::new(),
                 pausing: Command::pausing(paused),
-                waiting: Some(Waiting {
-                    roots: vec![root.clone()],
-                    state: State::Starting,
-                    error: None,
-                }),
+                waiting: Some(Waiting::new(vec![root.clone()], None)),
                 runners: Vec::new(),
             }),
             requests,
@@ -188,6 +227,7 @@ impl Account {
             ready: AtomicBool::new(false),
             reader: Mutex::new(None),
             changed,
+            clicks: Clicks::default(),
         };
         (Arc::new(account), rx)
     }
@@ -261,12 +301,17 @@ impl Account {
         found.map(|r| Ok(r.handle.clone()))
     }
 
-    /// Syncs its folders now. Refused, saying why, before they run: a wait to connect again
-    /// then ends, the user may have set it right.
+    /// Syncs its folders now. Refused before they run, and the wait to try again (to connect,
+    /// to ready its DB, to read the keychain) then ends: the user may have set it right. The
+    /// refusal says it tries to connect again while it waits for that, else why it doesn't run.
     pub(super) fn sync_now(&self) -> Result<(), String> {
         let shown = lock(&self.shown);
-        if shown.waiting.is_some() {
+        if let Some(waiting) = &shown.waiting {
+            self.clicks.click();
             self.tell(Msg::SyncNow);
+            if waiting.connecting {
+                return Err(words::trying_to_connect(&self.identity));
+            }
         }
         shown.send(&self.identity, &Command::SyncNow)
     }
@@ -554,6 +599,17 @@ impl Account {
 }
 
 impl Waiting {
+    /// Its folders `roots` wait, starting (`why`, if anything is to be told).
+    fn new(roots: Vec<Root>, why: Option<String>) -> Waiting {
+        Waiting {
+            roots,
+            state: State::Starting,
+            error: why,
+            connecting: false,
+            lacks_key: false,
+        }
+    }
+
     /// The status of its folder `root`, `paused` or waiting.
     fn status(&self, root: &Root, paused: Option<Pause>) -> FolderStatus {
         let mut folder = FolderStatus::new(&root.identity, &root.folder);
@@ -565,6 +621,7 @@ impl Waiting {
         };
         folder.paused_until = paused.and_then(|p| p.until);
         folder.error.clone_from(&self.error);
+        folder.lacks_key = folder.state == State::Denied && self.lacks_key;
         folder
     }
 

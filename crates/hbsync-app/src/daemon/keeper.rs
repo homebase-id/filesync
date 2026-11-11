@@ -23,6 +23,7 @@ use hbsync_engine::{Drive, EngineError};
 use hbsync_types::NodeId;
 
 use crate::protocol::{AccountControl, Emptying};
+use crate::words;
 
 /// What the keeper is asked to do.
 enum Job {
@@ -468,8 +469,9 @@ fn failed(what: &str, e: &EngineError) -> String {
         hbsync_remote::ErrorClass::Transient | hbsync_remote::ErrorClass::RateLimited => {
             "Homebase can't be reached now: try again later"
         }
+        // As a refused folder says it ([`words::refused`]).
         hbsync_remote::ErrorClass::Denied => {
-            "Homebase no longer accepts this computer: log in again"
+            words::log_in_again(e.refusal() == Some(hbsync_remote::Refusal::NoKey))
         }
         hbsync_remote::ErrorClass::Full => {
             "the identity's storage is full: make room, then try again"
@@ -489,6 +491,18 @@ mod tests {
     use super::*;
 
     type R = Result<(), Box<dyn std::error::Error>>;
+
+    /// A request of Recently deleted the identity refused says what to do as a refused folder
+    /// does, for want of the private drive's key too.
+    #[test]
+    fn a_refused_request_says_what_a_refused_folder_says() {
+        use hbsync_remote::{Refusal, RemoteError};
+        let refused = |refusal| EngineError::Remote(RemoteError::Denied("401".into(), refusal));
+        for (refusal, key) in [(Refusal::Credentials, false), (Refusal::NoKey, true)] {
+            let said = failed(EMPTY, &refused(refusal));
+            assert!(said.ends_with(words::log_in_again(key)), "{said}");
+        }
+    }
 
     fn wait_for(what: &str, done: impl Fn() -> bool) -> R {
         let until = Instant::now() + Duration::from_secs(20);
@@ -581,7 +595,7 @@ mod tests {
             told[0].starts_with("Emptying Recently deleted failed"),
             "{told:?}"
         );
-        assert!(told[0].ends_with("log in again"), "{told:?}");
+        assert!(told[0].ends_with(words::log_in_again(false)), "{told:?}");
         Ok(())
     }
 

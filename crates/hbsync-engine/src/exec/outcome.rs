@@ -7,7 +7,7 @@ use std::io;
 use std::time::Duration;
 
 use hbsync_platform::RelPath;
-use hbsync_remote::{ErrorClass, RemoteError};
+use hbsync_remote::{ErrorClass, Refusal, RemoteError};
 use hbsync_state::StateError;
 use hbsync_types::activity::Synced;
 
@@ -40,9 +40,10 @@ pub(crate) struct ExecReport {
 /// Why a run stopped before its plan was done.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Stopped {
-    /// The remote refused access: nothing else can succeed until the user authorizes again.
+    /// The remote refused access, and why: nothing else can succeed until the user authorizes
+    /// again.
     #[error("access denied: {0}")]
-    Denied(String),
+    Denied(String, Refusal),
     /// Transient remote errors kept coming: the network or the server is down.
     #[error("remote unreachable: {0}")]
     Unreachable(String),
@@ -88,7 +89,8 @@ impl Outcome {
                 None => Outcome::Backoff(why),
             },
             InRun::Retry => Outcome::Retry(why),
-            InRun::Stop => Outcome::Stop(Stopped::Denied(why)),
+            // All a class says of a refusal: the remote's errors say which ([`remote_outcome`]).
+            InRun::Stop => Outcome::Stop(Stopped::Denied(why, Refusal::Credentials)),
             InRun::HoldUploads => Outcome::Full(after),
             // Only the state DB's errors end a run, and they come as themselves
             // (`From<StateError>`).
@@ -137,7 +139,7 @@ impl Stopped {
     /// What it means ([`ErrorClass`]).
     pub fn class(&self) -> ErrorClass {
         match self {
-            Stopped::Denied(_) => ErrorClass::Denied,
+            Stopped::Denied(..) => ErrorClass::Denied,
             Stopped::Unreachable(_) => ErrorClass::Transient,
             Stopped::Later(..) => ErrorClass::RateLimited,
             // Not an error: a run stopped on request ends well.
@@ -181,5 +183,8 @@ pub(super) fn io_outcome(e: io::Error) -> Outcome {
 }
 
 pub(super) fn remote_outcome(e: RemoteError) -> Outcome {
+    if let Some(refusal) = e.refusal() {
+        return Outcome::Stop(Stopped::Denied(e.to_string(), refusal));
+    }
     Outcome::of(e.class(), e.to_string(), e.retry_after())
 }

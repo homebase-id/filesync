@@ -609,11 +609,10 @@ fn print_folder(s: &FolderStatus) {
     if let Some(e) = s.error.as_ref().filter(|_| s.state != State::Failing) {
         println!("  problem: {e}");
     }
+    // The status line says to log in again, and why where it is known: here is how (as the
+    // tray's Log in again does it).
     if s.state == State::Denied {
-        println!(
-            "  authorize this computer again: hbsync setup {}",
-            s.identity
-        );
+        println!("  log in again: hbsync setup {}", s.identity);
     }
     if let Some(at) = s.retry_at.filter(|_| s.state != State::Offline) {
         println!("  next try {}", when(at));

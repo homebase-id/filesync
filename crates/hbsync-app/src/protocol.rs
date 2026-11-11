@@ -398,6 +398,10 @@ pub struct FolderStatus {
     pub progress: Option<Progress>,
     /// Why the last sync failed (states `Offline`, `Failing`, `Denied`).
     pub error: Option<String>,
+    /// Refused (`Denied`) for want of a key: the drive is private, and this login holds no key
+    /// that opens it. Logging in again gets it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lacks_key: bool,
     /// When the next attempt is after a failure (Unix seconds).
     pub retry_at: Option<u64>,
     pub last_sync: Option<LastSync>,
@@ -443,6 +447,7 @@ impl FolderStatus {
             paused_until: None,
             progress: None,
             error: None,
+            lacks_key: false,
             retry_at: None,
             last_sync: None,
             pending: 0,

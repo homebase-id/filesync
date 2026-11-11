@@ -125,7 +125,7 @@ impl Heard {
         ) && matches!(
             outcome,
             Outcome::Skip(Skip::Unsyncable(_) | Skip::Refused(_))
-                | Outcome::Stop(Stopped::Denied(_))
+                | Outcome::Stop(Stopped::Denied(..))
         ) {
             self.tags_refused.insert(op.node());
         }

@@ -293,6 +293,29 @@ pub(crate) fn progress(p: &Progress) -> String {
     )
 }
 
+/// Why a folder the identity refused ([`State::Denied`]) doesn't sync, and what to do
+/// ([`log_in_again`]). The status line's (the tray's and `hbsync status`'s) and the tray's
+/// notification's.
+pub fn refused(lacks_key: bool) -> String {
+    format!("Not syncing: {}", log_in_again(lacks_key))
+}
+
+/// What to do about a refusal of the identity: for want of the private drive's key
+/// (`lacks_key`, [`FolderStatus::lacks_key`]), or else. A refused folder's words
+/// ([`refused`]), and a refused request's of Recently deleted.
+pub fn log_in_again(lacks_key: bool) -> &'static str {
+    if lacks_key {
+        "log in again to get your private drive's key"
+    } else {
+        "log in again to authorize this computer"
+    }
+}
+
+/// The reply to Sync now while the account `identity` waits to connect again: it tries at once.
+pub fn trying_to_connect(identity: &crate::Identity) -> String {
+    format!("Trying again to connect to {identity}…")
+}
+
 /// What a folder's sync is doing, in one line: the tray's status line and the head of `hbsync status`.
 pub fn status_line(s: &FolderStatus, now: u64) -> String {
     match s.state {
@@ -321,7 +344,7 @@ pub fn status_line(s: &FolderStatus, now: u64) -> String {
             "Problem: {}",
             s.error.as_deref().unwrap_or("syncing failed")
         ),
-        State::Denied => "Homebase no longer accepts this computer".into(),
+        State::Denied => refused(s.lacks_key),
         State::Stopped => "Stopped".into(),
     }
 }
@@ -402,7 +425,8 @@ mod tests {
         );
     }
 
-    /// The CLI and the tray say the same: waiting items, a refusal, a failure.
+    /// The CLI and the tray say the same: waiting items, a refusal (what to do, and why where it
+    /// is known), a failure.
     #[test]
     fn status_lines() {
         let mut s = FolderStatus::new(
@@ -415,7 +439,13 @@ mod tests {
         s.state = State::Denied;
         assert_eq!(
             status_line(&s, 0),
-            "Homebase no longer accepts this computer"
+            "Not syncing: log in again to authorize this computer"
+        );
+        // The private drive's key missing: said so.
+        s.lacks_key = true;
+        assert_eq!(
+            status_line(&s, 0),
+            "Not syncing: log in again to get your private drive's key"
         );
         s.state = State::Failing;
         assert_eq!(status_line(&s, 0), "Problem: syncing failed");

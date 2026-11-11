@@ -16,12 +16,12 @@ use hbsync_state::Unusable;
 
 use super::parts::AccountParts;
 use super::runners::{Life, Running};
-use super::{Account, Msg, Request, Waiting};
+use super::{Account, Msg, Request, Try, Waiting};
 use crate::daemon::DaemonError;
 use crate::daemon::keeper::Keeper;
 use crate::folders::{heal_account, ready_account};
 use crate::protocol::{AccountStatus, Hints, Pause, State};
-use crate::runner::{Backoff, Command, Runner, RunnerConfig, RunnerError, shown};
+use crate::runner::{Backoff, Command, Runner, RunnerConfig, RunnerError, Showing};
 use crate::sync::{lock, wait_for};
 use crate::words;
 use crate::{Config, CredentialError, CredentialStore, Location, Paths, Root};
@@ -44,11 +44,14 @@ const PURGE_LOOK: Duration = Duration::from_secs(600);
 const CONFIG_AGAIN: Duration = Duration::from_secs(1);
 
 impl Account {
-    /// Shows that it waits in `to`, for `why`.
-    fn show_waiting(&self, to: State, why: String) {
+    /// Shows that it waits in `to`, for `why`; to connect again when `connecting`, refused for
+    /// want of the private drive's key when `lacks_key` ([`Waiting`]).
+    fn show(&self, to: State, why: Option<String>, connecting: bool, lacks_key: bool) {
         if let Some(waiting) = &mut lock(&self.shown).waiting {
             waiting.state = to;
-            waiting.error = Some(why);
+            waiting.error = why;
+            waiting.connecting = connecting;
+            waiting.lacks_key = lacks_key;
         }
         self.changed.raise();
     }
@@ -64,22 +67,23 @@ impl Account {
         stop.load(Ordering::Relaxed) || self.ended.load(Ordering::Relaxed)
     }
 
-    /// Waits `time` on `rx`, or less if it should stop, the machine woke up meanwhile or, when
-    /// `asks`, the user asked to sync now (a try then goes at once). Returns whether it should
-    /// stop. Requests and the like that come meanwhile are kept in `early`.
+    /// Waits `time` on `rx` to try again, or less if it should stop, the machine woke up or the
+    /// user asked to sync now since `tried` began ([`Clicks::clicked`]): a try then goes at
+    /// once. Returns whether it should stop. Requests and the like that come meanwhile are
+    /// kept in `early`.
     fn wait(
         &self,
         time: Duration,
-        asks: bool,
+        tried: Try,
         stop: &AtomicBool,
         rx: &Receiver<Msg>,
         early: &mut Vec<Msg>,
     ) -> bool {
         let until = Instant::now() + time;
-        while !self.stopping(stop) {
+        while !self.stopping(stop) && !self.clicks.clicked(tried) {
             match rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
                 Ok(Msg::Woke) | Err(_) => break,
-                Ok(Msg::SyncNow) if asks => break,
+                // Looked at again ([`Clicks::clicked`]).
                 Ok(Msg::Wake | Msg::SyncNow) => {}
                 Ok(msg) => early.push(msg),
             }
@@ -150,6 +154,7 @@ impl Account {
         let healing = matches!(readying, Readying::Heal(_));
         let mut backoff = Backoff::new();
         loop {
+            let tried = self.clicks.begin_try();
             let readied = match &mut readying {
                 Readying::Start(roots) => ready_account(&self.db, &self.identity, roots),
                 // Set aside unchecked once: what is there at a later try is checked.
@@ -177,8 +182,8 @@ impl Account {
                 NEEDS_USER_AGAIN
             };
             tracing::error!("{e}: {} waits for it to be set right", self.identity);
-            self.show_waiting(State::Failing, e.to_string());
-            if self.wait(wait_for, false, stop, requests, msgs) {
+            self.show(State::Failing, Some(e.to_string()), false, false);
+            if self.wait(wait_for, tried, stop, requests, msgs) {
                 return Ok(None);
             }
         }
@@ -215,11 +220,12 @@ impl Account {
                 // a check found nothing wrong with it) is opened again after a pause.
                 Err(e) if e.unusable() == Some(Unusable::OtherDrive) => {
                     tracing::warn!("{}: {e}", self.identity);
+                    let tried = self.clicks.begin_try();
                     match self.heal(paths, Some(Unusable::OtherDrive), stop, requests, msgs)? {
                         Some(true) => {}
                         Some(false) => {
                             let wait_for = other_drive.after(ErrorClass::LocalFault, None);
-                            if self.wait(wait_for, false, stop, requests, msgs) {
+                            if self.wait(wait_for, tried, stop, requests, msgs) {
                                 return Ok(());
                             }
                         }
@@ -364,6 +370,7 @@ impl Account {
                     Msg::Woke => {
                         if let Some(n) = &notifier {
                             n.reconnect();
+                            notifications.reconnecting();
                         }
                         let _ = lock(&self.shown).send(&self.identity, &Command::Woke);
                     }
@@ -436,11 +443,10 @@ impl Account {
                     // changes them.
                     tracing::error!("{}: its state DB can't be used: stopping", self.identity);
                     let roots = shown.shown().map(|r| r.root.clone());
-                    shown.waiting = Some(Waiting {
-                        roots: roots.chain(adding.drain(..)).collect(),
-                        state: State::Starting,
-                        error: Some("its state DB can't be used: it is being checked".into()),
-                    });
+                    shown.waiting = Some(Waiting::new(
+                        roots.chain(adding.drain(..)).collect(),
+                        Some("its state DB can't be used: it is being checked".into()),
+                    ));
                     heal = Some(why);
                     drop(shown);
                     self.changed.raise();
@@ -592,6 +598,7 @@ impl Account {
         let store = CredentialStore::open(paths);
         let mut backoff = Backoff::new();
         let (creds, location) = loop {
+            let tried = self.clicks.begin_try();
             match store.load(&self.identity) {
                 Ok(Some(found)) => break found,
                 Ok(None) => {
@@ -603,8 +610,9 @@ impl Account {
                 Err(CredentialError::Keychain(why)) => {
                     let wait_for = backoff.next();
                     tracing::warn!("can't read the keychain ({why}); trying again in {wait_for:?}");
-                    self.show_waiting(State::Failing, format!("can't read the keychain: {why}"));
-                    if self.wait(wait_for, false, stop, rx, early) {
+                    let why = format!("can't read the keychain: {why}");
+                    self.show(State::Failing, Some(why), false, false);
+                    if self.wait(wait_for, tried, stop, rx, early) {
                         return Ok(None);
                     }
                 }
@@ -650,7 +658,7 @@ impl Account {
         while !self.stopping(stop) {
             match rx.recv() {
                 Ok(Msg::Connected(tried)) => return Some(*tried),
-                // Sync now: the try under way is the one asked for.
+                // Sync now: counted ([`Clicks`]), for the wait after this try.
                 Ok(Msg::Wake | Msg::Woke | Msg::SyncNow) => {}
                 Ok(msg) => early.push(msg),
                 Err(_) => return None,
@@ -674,7 +682,8 @@ impl Account {
 
     /// [`Account::connect`] by `try_once`, until a try gets through. While it waits to try
     /// again, Sync now tries at once, as a folder's does: what a try asked for found counts as
-    /// any try's.
+    /// any try's. A refusal stays shown through tries that would show offline, till one goes
+    /// well ([`Showing::failed`]).
     fn connect_by<R>(
         &self,
         mut try_once: impl FnMut(&mut Vec<Msg>) -> Option<Result<R, HomebaseError>>,
@@ -683,9 +692,17 @@ impl Account {
         early: &mut Vec<Msg>,
     ) -> Option<R> {
         let mut backoff = Backoff::new();
+        // The last refusal.
+        let mut refused = None;
         loop {
+            let tried = self.clicks.begin_try();
             let e = match try_once(early)? {
-                Ok(r) => return Some(r),
+                Ok(r) => {
+                    // Connected: no longer refused, nor waiting to connect, while its folders
+                    // start (a check of its DB may come first).
+                    self.show(State::Starting, None, false, false);
+                    return Some(r);
+                }
                 Err(e) => e,
             };
             let class = e.class();
@@ -699,8 +716,13 @@ impl Account {
                 "can't connect to {} ({e}); trying again in {wait_for:?}",
                 self.identity
             );
-            self.show_waiting(shown(class), e.to_string());
-            if self.wait(wait_for, true, stop, rx, early) {
+            let refusal = e.refusal();
+            let showing = Showing::failed(class, refusal, e.to_string(), refused.clone());
+            if let Some(refusal) = refusal {
+                refused = Some((showing.why.clone(), refusal));
+            }
+            self.show(showing.state, Some(showing.why), true, showing.lacks_key);
+            if self.wait(wait_for, tried, stop, rx, early) {
                 return None;
             }
         }
@@ -709,6 +731,7 @@ impl Account {
 
 #[cfg(test)]
 mod tests {
+    use super::super::Clicks;
     use super::*;
 
     /// An account of `identity`, its folder in a temporary home.
@@ -720,31 +743,170 @@ mod tests {
         (home, account, rx)
     }
 
-    /// Sync now ends a wait to connect again, one try for one ask; the account's other waits
-    /// (its DB, the keychain) take it, and change nothing.
+    /// One try a click: a click before a try began adds nothing to the wait after it (that try
+    /// was the one asked for), one during it or the wait ends that wait; one a wait ended for
+    /// (a heal's, within the try) doesn't end the next too.
     #[test]
-    fn sync_now_ends_only_a_wait_to_connect() {
+    fn one_try_a_click() {
+        let clicks = Clicks::default();
+        clicks.click();
+        let tried = clicks.begin_try();
+        assert!(!clicks.clicked(tried), "before the try");
+        clicks.click();
+        assert!(clicks.clicked(tried), "during the try");
+        assert!(!clicks.clicked(tried), "taken");
+
+        let (_home, account, rx) = account("a.example");
+        let stop = AtomicBool::new(false);
+        let tried = account.clicks.begin_try();
+        let clicked = Arc::clone(&account);
+        let click = std::thread::spawn(move || clicked.sync_now());
+        let (long, began) = (Duration::from_secs(20), Instant::now());
+        assert!(!account.wait(long, tried, &stop, &rx, &mut Vec::new()));
+        assert!(began.elapsed() < long / 2, "waited it out");
+        click.join().expect("clicked").expect_err("not running yet");
+    }
+
+    /// Sync now asked during a slow try at connecting (taken by the try, as it waits for its
+    /// answer) ends the wait after it at once.
+    #[test]
+    fn sync_now_during_a_slow_try_tries_again_after_it() -> Result<(), Box<dyn std::error::Error>> {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let identity = format!("127.0.0.1:{}", listener.local_addr()?.port());
+        let (_home, account, rx) = account(&identity);
+        let client = Client::new(&crate::secrets::sample(&identity))?;
+        let stop = Arc::new(AtomicBool::new(false));
+        // Clicked while it holds the first try, then drops it: how long until the next try
+        // comes. The wait after a failed try is 5 s.
+        let (clicked, stopping) = (Arc::clone(&account), Arc::clone(&stop));
+        let server = std::thread::spawn(move || -> std::io::Result<Duration> {
+            let (first, _) = listener.accept()?;
+            let began = Instant::now();
+            let _ = clicked.sync_now();
+            drop(first);
+            let (_second, _) = listener.accept()?;
+            stopping.store(true, Ordering::Relaxed);
+            clicked.wake();
+            Ok(began.elapsed())
+        });
+        let connected = account.connect(&client, &stop, &rx, &mut Vec::new());
+        assert!(connected.is_none());
+        let between = server.join().map_err(|_| "panicked")??;
+        assert!(
+            between < Duration::from_secs(3),
+            "waited it out: {between:?}"
+        );
+        Ok(())
+    }
+
+    /// While its DB waits for the user (a newer version's: looked at again hourly), Sync now
+    /// looks again at once.
+    #[test]
+    fn sync_now_ends_the_wait_for_its_db() -> Result<(), Box<dyn std::error::Error>> {
+        let (home, account, rx) = account("a.example");
+        let db = Paths::under(home.path()).account_db(&"a.example".into());
+        std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
+        rusqlite::Connection::open(&db)?.pragma_update(None, "user_version", 9999)?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let readying = Arc::clone(&account);
+        let (paths, stopping) = (Paths::under(home.path()), Arc::clone(&stop));
+        let ready = std::thread::spawn(move || {
+            let mut msgs = Vec::new();
+            let readied =
+                readying.ready_db(&paths, Readying::Start(&[]), &stopping, &rx, &mut msgs);
+            readied.map_err(|e| e.to_string())
+        });
+        let shown = || account.status().1[0].clone();
+        let until = Instant::now() + Duration::from_secs(10);
+        while shown().state != State::Failing && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(
+            shown().error.is_some_and(|e| e.contains("newer")),
+            "{:?}",
+            shown()
+        );
+        // Set right by the user (here: gone, made again), then asked.
+        std::fs::remove_file(&db)?;
+        account.sync_now().expect_err("not running yet");
+        while !ready.is_finished() && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        stop.store(true, Ordering::Relaxed);
+        account.wake();
+        let readied = ready.join().map_err(|_| "panicked")??;
+        assert_eq!(readied, Some(false), "waited for the next look");
+        Ok(())
+    }
+
+    /// While it connects, a refusal shows, and why where the error tells it (the private
+    /// drive's key), through tries that would show offline (no answer, a 503), Sync now saying
+    /// it tries again; another answer shows as itself. Connected, it shows none of it.
+    #[test]
+    fn a_refusal_shows_until_it_connects() {
         let (_home, account, rx) = account("a.example");
         let (stop, mut early) = (AtomicBool::new(false), Vec::new());
-        let (long, short) = (Duration::from_secs(20), Duration::from_millis(200));
-        account.sync_now().expect_err("not running yet");
-        let began = Instant::now();
-        assert!(!account.wait(long, true, &stop, &rx, &mut early));
-        assert!(began.elapsed() < long / 2, "waited it out");
-        let began = Instant::now();
-        assert!(!account.wait(short, true, &stop, &rx, &mut early));
-        assert!(began.elapsed() >= short, "one try for one ask");
-
-        account.sync_now().expect_err("not running yet");
-        let began = Instant::now();
-        assert!(!account.wait(short, false, &stop, &rx, &mut early));
-        assert!(began.elapsed() >= short, "another wait");
-        assert!(rx.try_recv().is_err(), "taken");
-        assert!(early.is_empty(), "not kept for later");
+        let network = || Err(HomebaseError::Network("failed to lookup address".into()));
+        let busy = Err(HomebaseError::Api {
+            what: "drive".into(),
+            error: hbsync_homebase::ApiError {
+                status: 503,
+                code: None,
+                title: "busy".into(),
+                from_identity: true,
+                retry_after: None,
+            },
+        });
+        let mut answers = vec![
+            Err(HomebaseError::NoDriveKey),
+            network(),
+            Err(HomebaseError::Denied("401".into())),
+            busy,
+            Err(HomebaseError::Protocol("odd".into())),
+            network(),
+        ]
+        .into_iter();
+        // What each try found shown, and what Sync now said then (its click ends the wait).
+        let mut tries = Vec::new();
+        let tried = |_: &mut Vec<Msg>| {
+            let f = account.status().1[0].clone();
+            let said = account.sync_now().expect_err("not running yet");
+            tries.push((f.state, f.error, f.lacks_key, said));
+            Some(answers.next().unwrap_or(Ok(())))
+        };
+        assert_eq!(account.connect_by(tried, &stop, &rx, &mut early), Some(()));
+        let (key, login) = (HomebaseError::NoDriveKey.to_string(), "denied: 401");
+        let shown: Vec<_> = tries
+            .iter()
+            .map(|(state, error, key, _)| (*state, error.as_deref(), *key))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (State::Starting, None, false),
+                (State::Denied, Some(key.as_str()), true),
+                (State::Denied, Some(key.as_str()), true),
+                (State::Denied, Some(login), false),
+                (State::Denied, Some(login), false),
+                (State::Failing, Some("protocol: odd"), false),
+                (State::Denied, Some(login), false),
+            ]
+        );
+        let waiting = "not connected to a.example yet";
+        let trying = words::trying_to_connect(&"a.example".into());
+        assert_eq!(tries[0].3, waiting);
+        assert!(tries[1..].iter().all(|t| t.3 == trying), "{tries:?}");
+        let f = account.status().1[0].clone();
+        assert_eq!(
+            (f.state, f.error, f.lacks_key),
+            (State::Starting, None, false)
+        );
+        assert_eq!(account.sync_now().expect_err("not running yet"), waiting);
     }
 
     /// Refused, then asked to sync now: a try that gets no answer waits as briefly as any
-    /// that got none (offline, not refused for an hour), and the next try goes then.
+    /// that got none (not refused for an hour), and the next try goes then; meanwhile the
+    /// refusal stays shown.
     #[test]
     fn a_try_asked_for_while_refused_that_gets_no_answer_waits_briefly() {
         let (_home, account, rx) = account("a.example");
@@ -762,15 +924,18 @@ mod tests {
         ]
         .into_iter();
         let mut tries = Vec::new();
-        account.sync_now().expect_err("not running yet");
         let tried = |_: &mut Vec<Msg>| {
             let shown = account.status().1[0].state;
             tries.push((Instant::now(), shown));
+            // Asked as it is refused: the wait after ends.
+            if tries.len() == 1 {
+                let _ = account.sync_now();
+            }
             Some(answers.next().unwrap_or(Ok(())))
         };
         assert_eq!(account.connect_by(tried, &stop, &rx, &mut early), Some(()));
         let shown: Vec<_> = tries.iter().map(|(_, state)| *state).collect();
-        assert_eq!(shown, [State::Starting, State::Denied, State::Offline]);
+        assert_eq!(shown, [State::Starting, State::Denied, State::Denied]);
         assert!(
             tries[1].0 - tries[0].0 < Duration::from_secs(5),
             "asked at once"
@@ -781,10 +946,10 @@ mod tests {
         );
     }
 
-    /// Sync now while a try at connecting is under way adds nothing: that try is the one asked
-    /// for, and nothing is kept for later.
+    /// Sync now taken while a try at connecting is under way isn't kept as a message: it is
+    /// counted ([`Clicks`]).
     #[test]
-    fn sync_now_during_a_try_adds_nothing() -> Result<(), Box<dyn std::error::Error>> {
+    fn sync_now_during_a_try_is_not_kept() -> Result<(), Box<dyn std::error::Error>> {
         // A port nothing listens on: the try is refused at once.
         let port = std::net::TcpListener::bind("127.0.0.1:0")?
             .local_addr()?

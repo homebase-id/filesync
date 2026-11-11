@@ -37,7 +37,8 @@ use hbsync_types::{
 
 use crate::{
     Answers, BATCH_FILES, ChangeRef, ChangesPage, Deletes, ForGood, Holds, NodeMeta, PayloadInfo,
-    Planned, RefsPage, Remote, RemoteBody, RemoteError, RemoteHeader, Result, Skipped, Upload,
+    Planned, RefsPage, Refusal, Remote, RemoteBody, RemoteError, RemoteHeader, Result, Skipped,
+    Upload,
 };
 
 #[derive(Debug, Clone)]
@@ -756,6 +757,9 @@ pub struct Faults {
     pub fail_writes_named: Option<String>,
     /// Every request is refused with [`RemoteError::Denied`] (credentials revoked).
     pub denied: bool,
+    /// What `denied` refuses for: the drive private and this login without its key
+    /// ([`Refusal::NoKey`]), not the credentials.
+    pub deny_key: bool,
     /// Creates, updates and deletes are refused with [`RemoteError::Denied`] (the app lost
     /// write access to the drive); reads still work.
     pub deny_writes: bool,
@@ -862,7 +866,15 @@ impl FakeRemote {
             let mut f = self.faults();
             f.requests += 1;
             if f.denied {
-                return Err(RemoteError::Denied("injected: not authorized".into()));
+                let refusal = if f.deny_key {
+                    Refusal::NoKey
+                } else {
+                    Refusal::Credentials
+                };
+                return Err(RemoteError::Denied(
+                    "injected: not authorized".into(),
+                    refusal,
+                ));
             }
             let scripted = f.script.pop_front().unwrap_or(false);
             if scripted || f.fail_next > 0 {
@@ -892,7 +904,10 @@ impl FakeRemote {
     /// Fails a write to a node named `name` if that is injected.
     fn gate_name(&self, name: &str) -> Result<()> {
         if self.faults().deny_writes {
-            return Err(RemoteError::Denied("injected: no write access".into()));
+            return Err(RemoteError::Denied(
+                "injected: no write access".into(),
+                Refusal::Credentials,
+            ));
         }
         {
             let mut faults = self.faults();

@@ -378,6 +378,16 @@ impl std::fmt::Debug for Upload<'_> {
     }
 }
 
+/// Why the identity refused this computer ([`RemoteError::Denied`]); logging in again sets
+/// either right.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Refusal {
+    /// The credentials or the drive (401, 403): revoked, say.
+    Credentials,
+    /// The drive is private, and this login holds no key that opens it.
+    NoKey,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RemoteError {
     /// A live file with this node id exists (Homebase 4105): a retried create already landed.
@@ -386,7 +396,7 @@ pub enum RemoteError {
     /// The identity refused the credentials or the drive (401/403): stop syncing until the
     /// user re-authorizes; retrying changes nothing.
     #[error("access denied: {0}")]
-    Denied(String),
+    Denied(String, Refusal),
     /// The file changed since the given version (Homebase 4160).
     #[error("version mismatch")]
     VersionMismatch,
@@ -555,7 +565,7 @@ impl RemoteError {
         match self {
             RemoteError::Transient(_) => ErrorClass::Transient,
             RemoteError::Later { .. } => ErrorClass::RateLimited,
-            RemoteError::Denied(_) => ErrorClass::Denied,
+            RemoteError::Denied(..) => ErrorClass::Denied,
             RemoteError::Full { .. } => ErrorClass::Full,
             // The remote moved on, or rejected the bytes (changed mid-upload), or the file grew
             // shorter than its header said (a read past its end).
@@ -570,6 +580,14 @@ impl RemoteError {
             }
             // The local source or sink failed.
             RemoteError::Io(e) => ErrorClass::of_io(e),
+        }
+    }
+
+    /// Why the identity refused this computer, if it did.
+    pub fn refusal(&self) -> Option<Refusal> {
+        match self {
+            RemoteError::Denied(_, refusal) => Some(*refusal),
+            _ => None,
         }
     }
 
@@ -591,7 +609,7 @@ impl RemoteError {
     pub fn again(&self) -> RemoteError {
         match self {
             RemoteError::AlreadyExists => RemoteError::AlreadyExists,
-            RemoteError::Denied(why) => RemoteError::Denied(why.clone()),
+            RemoteError::Denied(why, refusal) => RemoteError::Denied(why.clone(), *refusal),
             RemoteError::VersionMismatch => RemoteError::VersionMismatch,
             RemoteError::NotFound => RemoteError::NotFound,
             RemoteError::Deleted => RemoteError::Deleted,

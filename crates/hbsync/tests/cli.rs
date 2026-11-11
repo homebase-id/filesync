@@ -137,10 +137,12 @@ fn the_daemon_answers_while_offline_and_stops() -> R {
         "{}",
         text(&out)
     );
-    // Syncing needs the identity; pausing doesn't, and is kept for when it starts.
+    // Syncing needs the identity (asked, it tries to connect again); pausing doesn't, and is
+    // kept for when it starts.
     let out = home.hbsync(&["sync"])?;
     assert!(!out.status.success());
-    assert!(text(&out).contains("not connected"), "{}", text(&out));
+    let trying = format!("Trying again to connect to {IDENTITY}…");
+    assert!(text(&out).contains(&trying), "{}", text(&out));
     let out = home.hbsync(&["pause"])?;
     assert!(out.status.success(), "{}", text(&out));
     let status: serde_json::Value =
@@ -561,7 +563,7 @@ fn unlink_while_a_daemon_starts_leaves_none_syncing() -> R {
 }
 
 /// While the account waits to connect again, `hbsync sync` (the tray's Sync now) has it try at
-/// once, not after the wait; it still says it isn't connected.
+/// once, not after the wait, and says so.
 #[test]
 fn sync_now_tries_to_connect_again_at_once() -> R {
     // Takes each connection and closes it: every try fails at once, as offline.
@@ -576,7 +578,8 @@ fn sync_now_tries_to_connect_again_at_once() -> R {
     // Its failure taken in; what else it connected meanwhile taken off.
     while accepted(&closing, Duration::from_millis(300))?.is_some() {}
     let out = home.hbsync(&["sync"])?;
-    assert!(text(&out).contains("not connected"), "{}", text(&out));
+    let trying = format!("Trying again to connect to {identity}…");
+    assert!(text(&out).contains(&trying), "{}", text(&out));
     let within = (first + Duration::from_millis(3500)).saturating_duration_since(Instant::now());
     assert!(
         accepted(&closing, within)?.is_some(),

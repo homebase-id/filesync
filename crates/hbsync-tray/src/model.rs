@@ -177,6 +177,15 @@ pub(crate) fn status_line(view: &View) -> String {
     }
 }
 
+/// The notification for folders refused ([`State::Denied`]) for want of the private drive's
+/// key (`lacks_key`), or for the login: what to do, and why.
+pub(crate) fn refused_notice(lacks_key: bool) -> String {
+    format!(
+        "{}. Log in again… is in the menu.",
+        words::refused(lacks_key)
+    )
+}
+
 pub(crate) fn tooltip(view: &View) -> String {
     format!("{APP_NAME} · {}", status_line(view))
 }
@@ -678,6 +687,23 @@ mod tests {
         let v = view(&d, &[]);
         assert_eq!(look(&v), Look::Attention);
         assert!(actions(&menu(&v)).contains(&Action::LogInAgain));
+    }
+
+    /// A refusal says what to do, in the status line and the notification alike, and why
+    /// where it is known: the private drive's key missing.
+    #[test]
+    fn a_refusal_says_to_log_in_again_and_why() {
+        let mut s = status(State::Denied);
+        s.error = Some("denied: 401".into());
+        let mut keyless = s.clone();
+        keyless.lacks_key = true;
+        let menu = ". Log in again… is in the menu.";
+        for (folder, key) in [(&s, false), (&keyless, true)] {
+            let d = running(folder.clone());
+            assert_eq!(status_line(&view(&d, &[])), words::refused(key));
+        }
+        assert_eq!(refused_notice(false), words::refused(false) + menu);
+        assert_eq!(refused_notice(true), words::refused(true) + menu);
     }
 
     /// A login from before private drives is asked to log in again while it still syncs.

@@ -28,6 +28,14 @@ pub enum FeedError {
 }
 
 impl FeedError {
+    /// Why the identity refused this computer, if it did.
+    pub fn refusal(&self) -> Option<hbsync_remote::Refusal> {
+        match self {
+            FeedError::Remote(e) => e.refusal(),
+            FeedError::State(_) => None,
+        }
+    }
+
     /// What it means ([`ErrorClass`]).
     pub fn class(&self) -> ErrorClass {
         match self {
