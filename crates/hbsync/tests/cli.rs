@@ -10,7 +10,7 @@ const IDENTITY: &str = "hbsync-test.invalid";
 
 mod common;
 
-use common::{Home, text};
+use common::{Home, accepted, text};
 
 impl Home {
     /// A config and credentials as `hbsync setup` leaves them, for an identity that can't be
@@ -560,6 +560,32 @@ fn unlink_while_a_daemon_starts_leaves_none_syncing() -> R {
     Ok(())
 }
 
+/// While the account waits to connect again, `hbsync sync` (the tray's Sync now) has it try at
+/// once, not after the wait; it still says it isn't connected.
+#[test]
+fn sync_now_tries_to_connect_again_at_once() -> R {
+    // Takes each connection and closes it: every try fails at once, as offline.
+    let closing = std::net::TcpListener::bind("127.0.0.1:0")?;
+    let identity = format!("127.0.0.1:{}", closing.local_addr()?.port());
+    let home = Home::new()?;
+    home.set_up_as(&identity)?;
+    home.ok(&["start"])?;
+    accepted(&closing, Duration::from_secs(30))?.ok_or("the daemon never tried")?;
+    // The next try is due 5 s on.
+    let first = Instant::now();
+    // Its failure taken in; what else it connected meanwhile taken off.
+    while accepted(&closing, Duration::from_millis(300))?.is_some() {}
+    let out = home.hbsync(&["sync"])?;
+    assert!(text(&out).contains("not connected"), "{}", text(&out));
+    let within = (first + Duration::from_millis(3500)).saturating_duration_since(Instant::now());
+    assert!(
+        accepted(&closing, within)?.is_some(),
+        "no try at once after Sync now"
+    );
+    home.ok(&["stop"])?;
+    Ok(())
+}
+
 /// An identity that takes the connection and never answers (a resolver or a server that
 /// hangs, as Windows' can for an unknown host): the account waits in its connect. Stopping
 /// the daemon doesn't wait for that try to time out.
@@ -571,18 +597,8 @@ fn the_daemon_stops_while_its_identity_doesnt_answer() -> R {
     home.set_up_as(&identity)?;
     home.ok(&["start"])?;
     // Its try came in, and hangs: taken, never read or answered.
-    silent.set_nonblocking(true)?;
-    let until = Instant::now() + Duration::from_secs(30);
-    let _held = loop {
-        match silent.accept() {
-            Ok((held, _)) => break held,
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                assert!(Instant::now() < until, "the daemon never tried to connect");
-                std::thread::sleep(Duration::from_millis(50));
-            }
-            Err(e) => return Err(e.into()),
-        }
-    };
+    let _held =
+        accepted(&silent, Duration::from_secs(30))?.ok_or("the daemon never tried to connect")?;
     let began = Instant::now();
     home.ok(&["stop"])?;
     assert!(

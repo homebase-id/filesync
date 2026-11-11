@@ -64,12 +64,13 @@ impl Account {
         stop.load(Ordering::Relaxed) || self.ended.load(Ordering::Relaxed)
     }
 
-    /// Waits `time` on `rx`, or less if it should stop or the machine woke up meanwhile (a
-    /// try then goes at once). Returns whether it should stop. Requests and the like that come
-    /// meanwhile are kept in `early`.
+    /// Waits `time` on `rx`, or less if it should stop, the machine woke up meanwhile or, when
+    /// `asks`, the user asked to sync now (a try then goes at once). Returns whether it should
+    /// stop. Requests and the like that come meanwhile are kept in `early`.
     fn wait(
         &self,
         time: Duration,
+        asks: bool,
         stop: &AtomicBool,
         rx: &Receiver<Msg>,
         early: &mut Vec<Msg>,
@@ -78,7 +79,8 @@ impl Account {
         while !self.stopping(stop) {
             match rx.recv_timeout(until.saturating_duration_since(Instant::now())) {
                 Ok(Msg::Woke) | Err(_) => break,
-                Ok(Msg::Wake) => {}
+                Ok(Msg::SyncNow) if asks => break,
+                Ok(Msg::Wake | Msg::SyncNow) => {}
                 Ok(msg) => early.push(msg),
             }
         }
@@ -176,7 +178,7 @@ impl Account {
             };
             tracing::error!("{e}: {} waits for it to be set right", self.identity);
             self.show_waiting(State::Failing, e.to_string());
-            if self.wait(wait_for, stop, requests, msgs) {
+            if self.wait(wait_for, false, stop, requests, msgs) {
                 return Ok(None);
             }
         }
@@ -217,7 +219,7 @@ impl Account {
                         Some(true) => {}
                         Some(false) => {
                             let wait_for = other_drive.after(ErrorClass::LocalFault, None);
-                            if self.wait(wait_for, stop, requests, msgs) {
+                            if self.wait(wait_for, false, stop, requests, msgs) {
                                 return Ok(());
                             }
                         }
@@ -391,6 +393,9 @@ impl Account {
                         }
                         changed = true;
                     }
+                    // Asked as its runners started (they sync at their start), or while its DB
+                    // was looked at: nothing to do.
+                    Msg::SyncNow => {}
                     // Looked at below.
                     Msg::Wake => {}
                 }
@@ -599,7 +604,7 @@ impl Account {
                     let wait_for = backoff.next();
                     tracing::warn!("can't read the keychain ({why}); trying again in {wait_for:?}");
                     self.show_waiting(State::Failing, format!("can't read the keychain: {why}"));
-                    if self.wait(wait_for, stop, rx, early) {
+                    if self.wait(wait_for, false, stop, rx, early) {
                         return Ok(None);
                     }
                 }
@@ -645,7 +650,8 @@ impl Account {
         while !self.stopping(stop) {
             match rx.recv() {
                 Ok(Msg::Connected(tried)) => return Some(*tried),
-                Ok(Msg::Wake | Msg::Woke) => {}
+                // Sync now: the try under way is the one asked for.
+                Ok(Msg::Wake | Msg::Woke | Msg::SyncNow) => {}
                 Ok(msg) => early.push(msg),
                 Err(_) => return None,
             }
@@ -662,28 +668,136 @@ impl Account {
         rx: &Receiver<Msg>,
         early: &mut Vec<Msg>,
     ) -> Option<Arc<HomebaseRemote>> {
+        let tried = |early: &mut Vec<Msg>| self.try_connect(client, stop, rx, early);
+        self.connect_by(tried, stop, rx, early).map(Arc::new)
+    }
+
+    /// [`Account::connect`] by `try_once`, until a try gets through. While it waits to try
+    /// again, Sync now tries at once, as a folder's does: what a try asked for found counts as
+    /// any try's.
+    fn connect_by<R>(
+        &self,
+        mut try_once: impl FnMut(&mut Vec<Msg>) -> Option<Result<R, HomebaseError>>,
+        stop: &AtomicBool,
+        rx: &Receiver<Msg>,
+        early: &mut Vec<Msg>,
+    ) -> Option<R> {
         let mut backoff = Backoff::new();
         loop {
-            match self.try_connect(client, stop, rx, early)? {
-                Ok(r) => return Some(Arc::new(r)),
-                Err(e) => {
-                    let class = e.class();
-                    // Refused: the credentials won't work sooner; a login starts it over.
-                    let asked = match class {
-                        ErrorClass::Denied => Some(NEEDS_USER_AGAIN),
-                        _ => e.retry_after(),
-                    };
-                    let wait_for = backoff.after(class, asked);
-                    tracing::warn!(
-                        "can't connect to {} ({e}); trying again in {wait_for:?}",
-                        self.identity
-                    );
-                    self.show_waiting(shown(class), e.to_string());
-                    if self.wait(wait_for, stop, rx, early) {
-                        return None;
-                    }
-                }
+            let e = match try_once(early)? {
+                Ok(r) => return Some(r),
+                Err(e) => e,
+            };
+            let class = e.class();
+            // Refused: the credentials won't work sooner; a login starts it over.
+            let asked = match class {
+                ErrorClass::Denied => Some(NEEDS_USER_AGAIN),
+                _ => e.retry_after(),
+            };
+            let wait_for = backoff.after(class, asked);
+            tracing::warn!(
+                "can't connect to {} ({e}); trying again in {wait_for:?}",
+                self.identity
+            );
+            self.show_waiting(shown(class), e.to_string());
+            if self.wait(wait_for, true, stop, rx, early) {
+                return None;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An account of `identity`, its folder in a temporary home.
+    fn account(identity: &str) -> (tempfile::TempDir, Arc<Account>, Receiver<Msg>) {
+        let home = tempfile::tempdir().expect("a temporary folder");
+        let paths = Paths::under(home.path());
+        let root = Root::main(&identity.into(), &home.path().join("Homebase"));
+        let (account, rx) = Account::new(&paths, &root, None, Arc::default());
+        (home, account, rx)
+    }
+
+    /// Sync now ends a wait to connect again, one try for one ask; the account's other waits
+    /// (its DB, the keychain) take it, and change nothing.
+    #[test]
+    fn sync_now_ends_only_a_wait_to_connect() {
+        let (_home, account, rx) = account("a.example");
+        let (stop, mut early) = (AtomicBool::new(false), Vec::new());
+        let (long, short) = (Duration::from_secs(20), Duration::from_millis(200));
+        account.sync_now().expect_err("not running yet");
+        let began = Instant::now();
+        assert!(!account.wait(long, true, &stop, &rx, &mut early));
+        assert!(began.elapsed() < long / 2, "waited it out");
+        let began = Instant::now();
+        assert!(!account.wait(short, true, &stop, &rx, &mut early));
+        assert!(began.elapsed() >= short, "one try for one ask");
+
+        account.sync_now().expect_err("not running yet");
+        let began = Instant::now();
+        assert!(!account.wait(short, false, &stop, &rx, &mut early));
+        assert!(began.elapsed() >= short, "another wait");
+        assert!(rx.try_recv().is_err(), "taken");
+        assert!(early.is_empty(), "not kept for later");
+    }
+
+    /// Refused, then asked to sync now: a try that gets no answer waits as briefly as any
+    /// that got none (offline, not refused for an hour), and the next try goes then.
+    #[test]
+    fn a_try_asked_for_while_refused_that_gets_no_answer_waits_briefly() {
+        let (_home, account, rx) = account("a.example");
+        let (stop, mut early) = (Arc::new(AtomicBool::new(false)), Vec::new());
+        // Not an hour, failing: stopped by then.
+        let (stopping, waking) = (Arc::clone(&stop), Arc::clone(&account));
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(60));
+            stopping.store(true, Ordering::Relaxed);
+            waking.wake();
+        });
+        let mut answers = vec![
+            Err(HomebaseError::Denied("the drive is private now".into())),
+            Err(HomebaseError::Network("failed to lookup address".into())),
+        ]
+        .into_iter();
+        let mut tries = Vec::new();
+        account.sync_now().expect_err("not running yet");
+        let tried = |_: &mut Vec<Msg>| {
+            let shown = account.status().1[0].state;
+            tries.push((Instant::now(), shown));
+            Some(answers.next().unwrap_or(Ok(())))
+        };
+        assert_eq!(account.connect_by(tried, &stop, &rx, &mut early), Some(()));
+        let shown: Vec<_> = tries.iter().map(|(_, state)| *state).collect();
+        assert_eq!(shown, [State::Starting, State::Denied, State::Offline]);
+        assert!(
+            tries[1].0 - tries[0].0 < Duration::from_secs(5),
+            "asked at once"
+        );
+        assert!(
+            tries[2].0 - tries[1].0 < Duration::from_secs(60),
+            "waited an hour"
+        );
+    }
+
+    /// Sync now while a try at connecting is under way adds nothing: that try is the one asked
+    /// for, and nothing is kept for later.
+    #[test]
+    fn sync_now_during_a_try_adds_nothing() -> Result<(), Box<dyn std::error::Error>> {
+        // A port nothing listens on: the try is refused at once.
+        let port = std::net::TcpListener::bind("127.0.0.1:0")?
+            .local_addr()?
+            .port();
+        let identity = format!("127.0.0.1:{port}");
+        let (_home, account, rx) = account(&identity);
+        let client = Client::new(&crate::secrets::sample(&identity))?;
+        let (stop, mut early) = (AtomicBool::new(false), Vec::new());
+        account.sync_now().expect_err("not running yet");
+        let tried = account.try_connect(&client, &stop, &rx, &mut early);
+        assert!(matches!(tried, Some(Err(_))), "{tried:?}");
+        assert!(early.is_empty(), "kept for later");
+        assert!(rx.try_recv().is_err(), "left for the next wait");
+        Ok(())
     }
 }

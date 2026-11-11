@@ -142,6 +142,8 @@ pub(crate) enum Msg {
     Woke,
     /// Look again: it is to end, the daemon stops, its pause changed, or a runner is ending.
     Wake,
+    /// Sync now was asked before its folders run: a wait to connect ends ([`Account::connect`]).
+    SyncNow,
     /// A try at connecting ended (its thread's answer, while the account connects).
     Connected(Box<Result<hbsync_homebase::drive::HomebaseRemote, hbsync_homebase::HomebaseError>>),
 }
@@ -257,6 +259,16 @@ impl Account {
         }
         let found = shown.shown().find(|r| r.root.folder == path);
         found.map(|r| Ok(r.handle.clone()))
+    }
+
+    /// Syncs its folders now. Refused, saying why, before they run: a wait to connect again
+    /// then ends, the user may have set it right.
+    pub(super) fn sync_now(&self) -> Result<(), String> {
+        let shown = lock(&self.shown);
+        if shown.waiting.is_some() {
+            self.tell(Msg::SyncNow);
+        }
+        shown.send(&self.identity, &Command::SyncNow)
     }
 
     /// Passes `command` to every runner; refused, saying why, while it isn't running yet.
