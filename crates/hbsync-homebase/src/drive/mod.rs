@@ -30,12 +30,15 @@ use crate::crypto::{Key, WriteOnlyKey, key_of, zk_unlock};
 use crate::drive::sealed::{
     CipherRange, Decrypting, Encrypting, KeyHeader, SealedKeyHeader, sealed_len,
 };
+use crate::drive::share_keys::CircleKey;
 use crate::multipart::{Multipart, Part, SourceEnded};
+use crate::peer::SealedKey;
 use crate::{ApiError, HomebaseError, app};
 
 pub mod markers;
 pub mod sealed;
 mod share_keys;
+pub mod shared;
 pub mod wire;
 
 use wire::Keys;
@@ -52,6 +55,10 @@ pub(crate) const PRIVATE: &str = "the Filesync drive on your Homebase cloud is p
 /// tried again by itself.
 const UNLISTED: &str = "your Homebase cloud doesn't hand this app its private drive's key: it \
                         needs an update of Homebase (odin-core #2047)";
+
+/// How long a share waits on its sharer (a circle key not sealed to this identity yet, a
+/// connection they haven't reviewed) before it is asked about again.
+const SHARER_WAIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
 /// The largest file uploaded: 50 GiB. Not the server's limit (odin-core counts an upload's
 /// bytes in 64 bits since PR #1932, #1893, **[verified]**), a sanity cap for one upload: it has no resume, so
@@ -506,6 +513,7 @@ impl HomebaseRemote {
         Keys {
             shared: self.client.key(),
             drive,
+            circle: None,
         }
     }
 
@@ -539,7 +547,7 @@ impl HomebaseRemote {
 
     /// The route of the drive's files.
     pub fn files(&self) -> String {
-        format!("/api/v2/drives/{}/files", self.drive.alias.simple())
+        files_route(self.drive.alias)
     }
 
     /// The route of one file.
@@ -560,10 +568,26 @@ impl HomebaseRemote {
     /// shared. None where there is none (a drive made before write-only keys, or a grant
     /// without the copy) or it doesn't open: nothing shared opens here. A private drive without
     /// its key refuses this computer, as [`Self::drive_key`] does.
-    #[expect(dead_code, reason = "the reads of what is shared (next) open with it")]
     pub(crate) fn write_only_key(&self) -> Result<Option<WriteOnlyKey>> {
         let locked = self.key_state(false, KeyState::write_only)?;
         Ok(locked.and_then(|(key, locked)| open_write_only(&key, &locked)))
+    }
+
+    /// The key of `sharer`'s `circle`, sealed to this identity's drive and opened with its
+    /// write-only key: one request to this identity's server (which asks theirs). None sealed yet,
+    /// or the connection not reviewed by them, is [`RemoteError::Later`]: they do it on their own
+    /// time (a device of theirs seals it when next online).
+    pub(crate) fn circle_key(&self, sharer: &markers::Sharer, circle: Uuid) -> Result<CircleKey> {
+        let answer = SealedKey::ask(&self.client, &sharer.odin_id, circle).map_err(remote_error)?;
+        let sealed = sealed_or_wait(answer, &sharer.odin_id)?;
+        let write_only = self.write_only_key()?.ok_or_else(|| {
+            RemoteError::Fatal(
+                "your Filesync drive has no key that opens what others share with you".into(),
+            )
+        })?;
+        let member = markers::owner_of(self.client.identity());
+        CircleKey::unseal(&sealed, &write_only, circle, sharer.drive_alias, &member)
+            .map_err(remote_error)
     }
 
     /// Whether the app may read what others share with this identity: an install from before it
@@ -716,14 +740,8 @@ impl HomebaseRemote {
         // A drive made private since the notifications last connected refuses a login without
         // its key here, before a page that leaves its files out.
         self.drive_key(false)?;
-        let mut page = self.query_batch(&wire::feed_query(cursor, limit, shape))?;
-        // An empty page of an empty drive has no cursor yet: start from the beginning.
-        let next = page
-            .cursor_state
-            .take()
-            .or_else(|| cursor.map(str::to_owned))
-            .unwrap_or_default();
-        Ok((page, next))
+        let page = self.query_batch(&wire::feed_query(cursor, limit, shape))?;
+        Ok(with_cursor(page, cursor))
     }
 
     /// The header of `at`, which must still be that version and not deleted.
@@ -799,10 +817,7 @@ impl HomebaseRemote {
 
     /// Stored bytes `range` of the payload at `path`: one request.
     fn fetch(&self, path: &str, range: Range<u64>) -> Result<Fetched, HomebaseError> {
-        // The route names the range as well; the Range header decides.
-        let (start, len) = (range.start, range.end - range.start);
-        self.client
-            .fetch(&format!("{path}/{start}/{len}"), start, range.end - 1)
+        fetch(&self.client, path, range)
     }
 }
 
@@ -896,50 +911,13 @@ impl Remote for HomebaseRemote {
     /// Rows that aren't usable sync nodes come back in [`ChangesPage::skipped`], with why.
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         let (page, cursor) = self.feed_page(cursor, limit, wire::Shape::Full)?;
-        let mut entries = Vec::with_capacity(page.search_results.len());
-        let mut skipped = Vec::new();
-        for row in &page.search_results {
-            let read = match serde_json::from_str::<wire::FileHeader>(row.get()) {
-                Ok(h) => self.to_remote(h)?,
-                Err(e) => Err(format!("unreadable header: {e}")),
-            };
-            match read {
-                Ok(header) => entries.push(header),
-                Err(why) => skipped.push(wire::skipped_row(row.get(), why)),
-            }
-        }
-        Ok(ChangesPage {
-            entries,
-            cursor,
-            has_more: page.has_more_rows,
-            skipped,
-            server_time: page.query_time,
-        })
+        changes_page(page, cursor, |h| self.to_remote(h))
     }
 
     /// A minimal page (odin-core #1967): what changed, without the headers.
     fn change_refs(&self, cursor: Option<&str>, limit: usize) -> Result<RefsPage> {
         let (page, cursor) = self.feed_page(cursor, limit, wire::Shape::Minimal)?;
-        // A server without #1967 ignores the shape and sends headers: an empty page there
-        // would skip what changed.
-        let rows = page.file_refs.ok_or_else(|| {
-            RemoteError::Fatal("the server doesn't page the feed slim (odin-core #1967)".into())
-        })?;
-        let mut refs = Vec::with_capacity(rows.len());
-        let mut unread = 0;
-        for row in &rows {
-            match serde_json::from_str::<wire::FileRef>(row.get()) {
-                Ok(r) => refs.push(r.to_ref()),
-                Err(_) => unread += 1,
-            }
-        }
-        Ok(RefsPage {
-            refs,
-            cursor,
-            has_more: page.has_more_rows,
-            unread,
-            server_time: page.query_time,
-        })
+        refs_page(page, cursor)
     }
 
     fn cursor_time(&self, cursor: &str) -> Option<i64> {
@@ -955,39 +933,11 @@ impl Remote for HomebaseRemote {
     /// told by its `archivalStatus`, a file's version by its `versionTag` (minimal rows carry
     /// both, **[verified]** odin-core #1967 `QueryBatchFileRef`: [`wire::FileRef`]).
     fn holding(&self, folders: &[NodeId], holds: Holds<'_>) -> Result<HashSet<NodeId>> {
-        let mut holding = HashSet::new();
-        for some in folders.chunks(CHILDREN_QUERY_FOLDERS) {
-            let fetch =
-                |cursor: Option<&str>| self.query_batch(&wire::children_query(some, cursor, 500));
-            // Ended short, it is as before: what the pages read.
-            read_pages(fetch, |page| {
-                for row in page.file_refs.iter().flatten() {
-                    // A row that doesn't read is something there all the same: its folder's.
-                    let Ok(r) = serde_json::from_str::<wire::FileRef>(row.get()) else {
-                        holding.extend(some.iter().copied());
-                        continue;
-                    };
-                    let at = RemoteRef {
-                        file_id: RemoteFileId(r.file_id),
-                        version: VersionTag(r.version_tag),
-                    };
-                    if holds.counts(at, r.archival_status == ARCHIVAL_REMOVED)
-                        && let Some(folder) = r.group_id.map(NodeId)
-                    {
-                        holding.insert(folder);
-                    }
-                }
-                // Each folder known to hold one: the rest of the pages can't change that.
-                Ok(!some.iter().all(|f| holding.contains(f)))
-            })?;
-        }
-        Ok(holding)
+        holding(|body| self.query_batch(body), folders, holds)
     }
 
-    /// odin-core's query leaves out what changed in its last second (`HoldBackWindowMs`, #1923,
-    /// homebase-api-notes), and a little more for the clocks.
     fn hold_back(&self) -> std::time::Duration {
-        std::time::Duration::from_millis(1100)
+        HOLD_BACK
     }
 
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Written> {
@@ -1096,7 +1046,7 @@ impl Remote for HomebaseRemote {
         let path = format!("{}/payload/{PAYLOAD_KEY}", self.file(file_id));
         let at = CipherRange::of(&range);
         // One request, streamed: the client's idle timeout catches a stalled one.
-        let mut response = self.fetch(&path, at.fetch.clone()).map_err(remote_error)?;
+        let response = self.fetch(&path, at.fetch.clone()).map_err(remote_error)?;
         let key = match (response.encrypted, response.key_header.as_deref()) {
             // A payload's key header carries the payload's IV.
             (true, Some(sealed)) => SealedKeyHeader::from_base64(sealed)
@@ -1109,21 +1059,168 @@ impl Remote for HomebaseRemote {
             },
             (false, _) => return Err(RemoteError::Fatal(format!("{path}: not encrypted"))),
         };
-        // A range past the stored payload is cut short at its end (odin-core #1921).
-        let end = at.fetch.end.min(response.size);
-        let first_iv = (!at.iv_first).then_some(&key.iv);
-        let mut plain = Decrypting::new(&key.key, first_iv, at.skip, len, sink);
-        let want = end.saturating_sub(at.fetch.start);
-        let got = response.copy_to(&mut plain, want).map_err(remote_error)?;
-        if got != want {
-            return Err(RemoteError::Transient(format!(
-                "{path}: short read, {got} of {want} bytes at {}",
-                at.fetch.start
-            )));
-        }
-        plain.finish(end == response.size)?;
-        Ok(len - plain.left())
+        decrypt(response, &key, &at, len, &path, sink)
     }
+}
+
+/// The sealed circle key `sharer`'s server answered, or how long to wait for it
+/// ([`HomebaseRemote::circle_key`]).
+fn sealed_or_wait(answer: SealedKey, sharer: &str) -> Result<Vec<u8>> {
+    let why = match answer {
+        SealedKey::Sealed(sealed) => return Ok(sealed),
+        SealedKey::NotYet => format!(
+            "waiting for {sharer}: a device of theirs opens the share to you when next online"
+        ),
+        SealedKey::NotReviewed => format!("waiting for {sharer} to review your connection"),
+    };
+    Err(RemoteError::Later {
+        why,
+        retry_after: SHARER_WAIT,
+    })
+}
+
+/// The route of the files of the drive `alias` names.
+fn files_route(alias: Uuid) -> String {
+    format!("/api/v2/drives/{}/files", alias.simple())
+}
+
+/// Stored bytes `range` of the payload at `path`, through `client`: one request.
+fn fetch(client: &Client, path: &str, range: Range<u64>) -> Result<Fetched, HomebaseError> {
+    // The route names the range as well; the Range header decides.
+    let (start, len) = (range.start, range.end - range.start);
+    client.fetch(&format!("{path}/{start}/{len}"), start, range.end - 1)
+}
+
+/// odin-core's query leaves out what changed in its last second (`HoldBackWindowMs`, #1923,
+/// homebase-api-notes), and a little more for the clocks.
+const HOLD_BACK: std::time::Duration = std::time::Duration::from_millis(1100);
+
+/// A feed page, and the cursor after it: an empty page of an empty drive has no cursor yet, so
+/// the next starts from the beginning.
+fn with_cursor(
+    mut page: wire::QueryBatchResponse,
+    cursor: Option<&str>,
+) -> (wire::QueryBatchResponse, String) {
+    let next = page
+        .cursor_state
+        .take()
+        .or_else(|| cursor.map(str::to_owned))
+        .unwrap_or_default();
+    (page, next)
+}
+
+/// A full feed page, each row read with `read`: rows that aren't usable sync nodes come back in
+/// [`ChangesPage::skipped`], with why.
+fn changes_page(
+    page: wire::QueryBatchResponse,
+    cursor: String,
+    mut read: impl FnMut(wire::FileHeader) -> Result<std::result::Result<RemoteHeader, String>>,
+) -> Result<ChangesPage> {
+    let mut entries = Vec::with_capacity(page.search_results.len());
+    let mut skipped = Vec::new();
+    for row in &page.search_results {
+        let header = match serde_json::from_str::<wire::FileHeader>(row.get()) {
+            Ok(h) => read(h)?,
+            Err(e) => Err(format!("unreadable header: {e}")),
+        };
+        match header {
+            Ok(header) => entries.push(header),
+            Err(why) => skipped.push(wire::skipped_row(row.get(), why)),
+        }
+    }
+    Ok(ChangesPage {
+        entries,
+        cursor,
+        has_more: page.has_more_rows,
+        skipped,
+        server_time: page.query_time,
+    })
+}
+
+/// A minimal feed page (odin-core #1967): what changed, without the headers.
+fn refs_page(page: wire::QueryBatchResponse, cursor: String) -> Result<RefsPage> {
+    // A server without #1967 ignores the shape and sends headers: an empty page there would
+    // skip what changed.
+    let rows = page.file_refs.ok_or_else(|| {
+        RemoteError::Fatal("the server doesn't page the feed slim (odin-core #1967)".into())
+    })?;
+    let mut refs = Vec::with_capacity(rows.len());
+    let mut unread = 0;
+    for row in &rows {
+        match serde_json::from_str::<wire::FileRef>(row.get()) {
+            Ok(r) => refs.push(r.to_ref()),
+            Err(_) => unread += 1,
+        }
+    }
+    Ok(RefsPage {
+        refs,
+        cursor,
+        has_more: page.has_more_rows,
+        unread,
+        server_time: page.query_time,
+    })
+}
+
+/// [`Remote::holding`] through `query_batch`: one `groupId` query a page at a time (any type,
+/// active files only).
+fn holding(
+    query_batch: impl Fn(&serde_json::Value) -> Result<wire::QueryBatchResponse>,
+    folders: &[NodeId],
+    holds: Holds<'_>,
+) -> Result<HashSet<NodeId>> {
+    let mut holding = HashSet::new();
+    for some in folders.chunks(CHILDREN_QUERY_FOLDERS) {
+        let fetch = |cursor: Option<&str>| query_batch(&wire::children_query(some, cursor, 500));
+        // Ended short, it is as before: what the pages read.
+        read_pages(fetch, |page| {
+            for row in page.file_refs.iter().flatten() {
+                // A row that doesn't read is something there all the same: its folder's.
+                let Ok(r) = serde_json::from_str::<wire::FileRef>(row.get()) else {
+                    holding.extend(some.iter().copied());
+                    continue;
+                };
+                let at = RemoteRef {
+                    file_id: RemoteFileId(r.file_id),
+                    version: VersionTag(r.version_tag),
+                };
+                if holds.counts(at, r.archival_status == ARCHIVAL_REMOVED)
+                    && let Some(folder) = r.group_id.map(NodeId)
+                {
+                    holding.insert(folder);
+                }
+            }
+            // Each folder known to hold one: the rest of the pages can't change that.
+            Ok(!some.iter().all(|f| holding.contains(f)))
+        })?;
+    }
+    Ok(holding)
+}
+
+/// Plaintext `len` bytes of the payload at `path` from `response`, the stored bytes `at` asks
+/// for, decrypted with `key` (the payload's): a range that reaches the payload's last block has
+/// its padding removed, and comes back short if it runs past the plaintext.
+fn decrypt(
+    mut response: Fetched,
+    key: &KeyHeader,
+    at: &CipherRange,
+    len: u64,
+    path: &str,
+    sink: &mut dyn Write,
+) -> Result<u64> {
+    // A range past the stored payload is cut short at its end (odin-core #1921).
+    let end = at.fetch.end.min(response.size);
+    let first_iv = (!at.iv_first).then_some(&key.iv);
+    let mut plain = Decrypting::new(&key.key, first_iv, at.skip, len, sink);
+    let want = end.saturating_sub(at.fetch.start);
+    let got = response.copy_to(&mut plain, want).map_err(remote_error)?;
+    if got != want {
+        return Err(RemoteError::Transient(format!(
+            "{path}: short read, {got} of {want} bytes at {}",
+            at.fetch.start
+        )));
+    }
+    plain.finish(end == response.size)?;
+    Ok(len - plain.left())
 }
 
 /// The body of a batch of files each at its version: `{files: [{fileId, versionTag}]}`.
@@ -1399,7 +1496,7 @@ mod tests {
     }
 
     /// An error answer of the identity itself.
-    fn api(status: u16, code: Option<&str>) -> HomebaseError {
+    pub(super) fn api(status: u16, code: Option<&str>) -> HomebaseError {
         HomebaseError::Api {
             what: "test".into(),
             error: ApiError {
@@ -1852,7 +1949,29 @@ mod tests {
 
     /// The drive of an identity that can't be reached, what is known of its key as `state`
     /// says (read at the client's start: not read again).
-    fn unreachable_remote(state: KeyState) -> Result<HomebaseRemote, HomebaseError> {
+    /// A circle key not sealed yet, or a connection not reviewed, waits on the sharer: asked
+    /// again later, never a refusal.
+    #[test]
+    fn a_sharer_not_ready_is_waited_for() {
+        assert_eq!(
+            sealed_or_wait(SealedKey::Sealed(vec![1]), "sam.example").ok(),
+            Some(vec![1])
+        );
+        for (answer, says) in [
+            (SealedKey::NotYet, "when next online"),
+            (SealedKey::NotReviewed, "review your connection"),
+        ] {
+            match sealed_or_wait(answer, "sam.example") {
+                Err(RemoteError::Later { why, retry_after }) => {
+                    assert!(why.contains("sam.example") && why.contains(says), "{why}");
+                    assert_eq!(retry_after, SHARER_WAIT);
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    pub(super) fn unreachable_remote(state: KeyState) -> Result<HomebaseRemote, HomebaseError> {
         let credentials = crate::youauth::Credentials {
             identity: "unreachable.invalid".into(),
             client_auth_token: "AAAA".into(),

@@ -540,6 +540,21 @@ server answers the rest, to a token their server made for this identity's connec
   again after a codeless one; a 401 there is this login's. On the sharer's own server
   (`Client::for_peer`) a 401 refuses the token (`peer::refused`), a 403 a file or drive not
   shared with this identity.
+- **Reading on their server** **[verified]** (odin-core `PeerDirectReadAttribute`, #2127;
+  `drive/shared.rs`, `PeerRemote`): with the token as `Authorization: Bearer`, the routes of
+  their drive by its alias (the marker's `driveAlias`), `/api/v2/drives/<alias>/files/...`:
+  `query-batch` (the feed and `groupId` listings alike; no other query route), `{fileId}/header`
+  and `{fileId}/payload/{key}[/{start}/{length}]`, sealed with the token's shared secret as an
+  app's are (payloads aren't). A member's query lists only files with a share row for one of
+  its circles, with the same cursor, hold-back and `resultShape` as the owner's, never cached;
+  a header carries `shares` (the live rows the file reaches them through, by circle id) and no
+  server metadata. A share withdrawn or expired (or above an unreviewed connection's level)
+  comes as a tombstone without its version (all zeros), parent, node id or key; a soft delete
+  by the sharer as the usual tombstone; a hard delete takes the rows with it, so the file just
+  isn't listed any more (only a full re-read finds it gone). Refusals: 401 the token (unknown,
+  the connection gone, their keys invalid), 403 a file not (or no longer) shared, 404 none
+  there. A share-key answer not sealed yet or not reviewed waits (`RemoteError::Later`, asked
+  again in 15 minutes); reads never write: every write refuses before a request.
 
 ## Conventions
 - camelCase JSON, enums as camelCase strings, bytes as standard base64, times as Unix ms.
