@@ -160,6 +160,16 @@ pub(crate) fn circle_request(drive: TargetDrive) -> serde_json::Value {
     })
 }
 
+/// The one permission key the app asks for besides its drive: odin-core's `UseTransitRead`
+/// (305, **[verified]**), for reading what others share with this identity through its own server
+/// (`docs/spec/homebase-api-notes.md`, "Permission keys"; what it also gives the app:
+/// `encryption.md`, "What it doesn't do").
+pub(crate) const USE_TRANSIT_READ: u32 = 305;
+
+/// The keys the app asks for as the owner app reads them (`p`, odin-js
+/// `permissionParamToPermissionSet`: numbers joined by commas): [`USE_TRANSIT_READ`].
+const PERMISSION_KEYS: &str = "305";
+
 /// The YouAuth `permission_request` for registering the app (or authorizing a new device).
 /// `friendly_name` names this device in the owner's list of the app's clients.
 pub(crate) fn permission_request(friendly_name: &str, return_url: &str) -> serde_json::Value {
@@ -171,22 +181,42 @@ pub(crate) fn permission_request(friendly_name: &str, return_url: &str) -> serde
         // JSON lists sent as strings, as the owner app expects; `cd` must be present.
         "d": serde_json::to_string(&[drive_request(&SYNC_DRIVE)]).unwrap_or_default(),
         "cd": "[]",
+        // Read when the app registers; an installed app gets it on `/owner/appupdate`
+        // ([`update_url`]), as a sign-in never adds permissions (odin-core
+        // `AppNeedsRegistration`, verified).
+        "p": PERMISSION_KEYS,
         // Created with the app when it is installed; only the install reads it.
         "ac": serde_json::to_string(&[circle_declaration()]).unwrap_or_default(),
         "return": return_url,
     })
 }
 
+/// What the installed app asks the owner for again ([`update_url`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Update {
+    /// [`SYNC_DRIVE`], made when it is missing, owned by the app (one that exists is only
+    /// granted: `ensureAppOwnedDrives`, `ensureDrive`, verified): for [`HomebaseError::NoDrive`].
+    Drive,
+    /// [`USE_TRANSIT_READ`], for an install from before the app asked for it. Only when it
+    /// lacks it: the page adds the keys it is asked for to the ones the app has, a second
+    /// copy too, and tells the owner of it as more access (odin-js, verified).
+    Permission,
+}
+
 /// The owner app's page that gives the installed app more (`/owner/appupdate`, odin-js
-/// `ExtendAppPermissions.tsx`), asked for [`SYNC_DRIVE`] again: a drive the app asks for as its
-/// own is made there when it is missing, owned by the app; one that exists is only granted
-/// (`ensureAppOwnedDrives` and `ensureDrive`, verified). The browser comes back to `return_url`,
-/// with `status=canceled` when the owner says no. For [`HomebaseError::NoDrive`].
-pub fn restore_drive_url(identity: &str, return_url: &str) -> String {
+/// `ExtendAppPermissions.tsx`): `what`. The browser comes back to `return_url`, with
+/// `status=canceled` when the owner says no.
+pub fn update_url(identity: &str, return_url: &str, what: Update) -> String {
+    let app_id = APP_ID.simple().to_string();
+    let drives = json!([drive_request(&SYNC_DRIVE)]).to_string();
+    let asked = match what {
+        Update::Drive => ("d", drives.as_str()),
+        Update::Permission => ("p", PERMISSION_KEYS),
+    };
     let query = crate::query(&[
-        ("appId", &APP_ID.simple().to_string()),
-        ("d", &json!([drive_request(&SYNC_DRIVE)]).to_string()),
-        // No circle grants asked for (a missing `cd` reads the same there, verified).
+        ("appId", &app_id),
+        asked,
+        // No circle grants asked for (a missing `cd`, or `d`, reads the same there, verified).
         ("cd", "[]"),
         ("return", return_url),
     ]);
@@ -208,6 +238,8 @@ pub fn app_circle(remote: &HomebaseRemote) -> Result<Uuid, HomebaseError> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use super::*;
 
     #[test]
@@ -235,30 +267,48 @@ mod tests {
         Ok(())
     }
 
-    /// Asked for again, the drive is the one registration asks for, as the app's own (`n`, `ds`):
-    /// what makes the owner app create it.
-    #[test]
-    fn restoring_asks_for_the_registered_drive() -> Result<(), Box<dyn std::error::Error>> {
-        let url = restore_drive_url("anna.example.com", "http://localhost:1/back?x=1");
+    /// `url`'s page and query, decoded.
+    fn query_of(url: &str) -> Result<(&str, HashMap<String, String>), &'static str> {
         let (page, query) = url.split_once('?').ok_or("no query")?;
-        assert_eq!(page, "https://anna.example.com/owner/appupdate");
-        let params: std::collections::HashMap<&str, String> = query
+        let decode = |s: &str| {
+            percent_encoding::percent_decode_str(s)
+                .decode_utf8_lossy()
+                .into()
+        };
+        let params = query
             .split('&')
             .filter_map(|kv| kv.split_once('='))
-            .map(|(k, v)| {
-                (
-                    k,
-                    percent_encoding::percent_decode_str(v)
-                        .decode_utf8_lossy()
-                        .into(),
-                )
-            })
+            .map(|(k, v)| (decode(k), decode(v)))
             .collect();
+        Ok((page, params))
+    }
+
+    /// Asked for again, the drive is the one registration asks for, as the app's own (`n`, `ds`):
+    /// what makes the owner app create it; the permission key, only when the app lacks it.
+    #[test]
+    fn updating_asks_for_what_registration_asks() -> Result<(), Box<dyn std::error::Error>> {
+        let registered = permission_request("laptop", "http://localhost:1/cb");
+        let url = update_url(
+            "anna.example.com",
+            "http://localhost:1/back?x=1",
+            Update::Drive,
+        );
+        let (page, params) = query_of(&url)?;
+        assert_eq!(page, "https://anna.example.com/owner/appupdate");
         assert_eq!(params["appId"], "03ae1a49cdae483f9da7fedc0e8f20b9");
         assert_eq!(params["return"], "http://localhost:1/back?x=1");
         assert_eq!(params["cd"], "[]");
-        let registered = permission_request("laptop", "http://localhost:1/cb");
         assert_eq!(params["d"], registered["d"].as_str().ok_or("no d")?);
+        // The drive alone: a key the app holds would be stored twice.
+        assert!(!params.contains_key("p"));
+        let (_, params) = query_of(&update_url(
+            "anna.example.com",
+            "http://x/b",
+            Update::Permission,
+        ))?;
+        assert_eq!(params["p"], registered["p"].as_str().ok_or("no p")?);
+        assert_eq!(params["p"], USE_TRANSIT_READ.to_string());
+        assert!(!params.contains_key("d"));
         Ok(())
     }
 

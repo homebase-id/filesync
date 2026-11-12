@@ -64,9 +64,10 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   #2046, odin-js #1013, step 4; **[verified]** in code, in production from odin-core v0.1.974).
   The app's locked copy can lag behind: private with no copy means sign in again. Up to
   v0.1.974 the security context lists **no** drive grants for an app that asks for no
-  permission keys, as Filesync (`PermissionGroup.Redacted` returns an empty list when the
-  group's `PermissionSet` is null; access checks use the real grants, so the drive answers;
-  **[verified]** live on frodo, cause from true-zero): the client reads a missing grant as a
+  permission keys, as a Filesync install from before it asked for 305
+  (`PermissionGroup.Redacted` returns an empty list when the group's `PermissionSet` is null;
+  access checks use the real grants, so the drive answers; **[verified]** live on frodo, cause
+  from true-zero): the client reads a missing grant as a
   drive whose privacy the drive's answer (`sharingModel`) tells (`encryption.md`); fixed in
   odin-core #2047 (tracking: filesync #335).
   How this client uses it: `encryption.md`.
@@ -103,6 +104,20 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   new circle. Circles made before had slugs made from their names (`CircleSlugGenerator`:
   "Filesync" is `filesync`, a second one `filesync-2`). Filesync's circle (`filesync`) grants
   Read on its drive and starts empty.
+- **Permission keys** **[verified]**: registration asks for them in `p`, numbers joined by
+  commas (odin-js `permissionParamToPermissionSet`); an installed app gets no more at a sign-in
+  (`YouAuthUnifiedService.AppNeedsRegistration` is false once registered), only on
+  `/owner/appupdate` with `p`, which adds them to the ones it has, a key it holds a second time
+  too, shown to the owner as more access (`ExtendAppPermissions.tsx`): ask only for what it
+  lacks. Device tokens gain them without signing in again (`AppRegistrationService`, from its
+  code).
+  The security context lists them per permission group (`permissionContext.permissionGroups[]
+  .permissionSet.keys`). Filesync asks for `UseTransitRead` (305) since shared-folder sync, for
+  the identity's `/api/v2/peer/...` routes; an install from before lacks it until the owner
+  approves the update. Any transit key also gives the app the identity's connection key (ICR
+  key) and ReadWrite on the transient temp drive (`AppRegistrationService.GrantInputsAsync`,
+  `HasRequestedTransit`). Holding a key also lists the app's drive grants on a server up to
+  v0.1.974 (#2047: the group's permission set is no longer null; **[inferred]** from code).
 - **Desktop callback** **[tried]**: `http://localhost:{port}/authorization-code-callback`.
   Firefox may first open a connection the callback server can't read (an https attempt);
   ignore such connections rather than failing.

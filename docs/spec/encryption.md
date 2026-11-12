@@ -177,8 +177,8 @@ payload IV to the download would save it (a follow-up). What changes for this cl
   taken as gone (a header read refused is "can't tell", §8b). The tray asks such a login to log
   in again already before the drive is made private.
 - **A grant the server leaves out.** odin-core up to v0.1.974 lists no drive grants in the
-  security context for an app that asks for no permission keys, as this one (odin-core #2047,
-  **[verified]** live). Then the drive's answer (`sharingModel`, one more request) says whether
+  security context for an app that asks for no permission keys, as an install of this one from
+  before it asked for 305 (odin-core #2047, **[verified]** live). Then the drive's answer (`sharingModel`, one more request) says whether
   it is private: a shared drive syncs as before; a private one stops this computer, as a login
   without the key does (log in again) or, for a login holding it, until the server is updated
   (signing in again can't help), retried by itself. Nothing is read or written as shared.
@@ -215,6 +215,12 @@ odin-core's `SelectiveShareKeyVectorTests` **[verified]**):
   encrypted video by decrypting it **[verified]** (odin-js `MediaProvider`, chat-kmp
   `VideoContentResolver`). That a synced video would play there is **[inferred]**: neither app
   shows the sync drive yet.
+- **Confine a stolen device token to the Filesync drive.** Since shared-folder sync the app
+  holds `UseTransitRead`, which comes with the identity's connection key (homebase-api-notes,
+  "Permission keys"): a Filesync device token also reaches, through the identity's own server,
+  what the identity's connections share with it. So does every app with a transit permission
+  (chat-kmp's asks for 305, **[verified]** `PermissionTypes.kt`). Logging the device out, or
+  removing the app, ends it.
 
 ## Cost
 Measured on an i7-8700K (AES-NI, no VAES), against a Homebase on the same machine
