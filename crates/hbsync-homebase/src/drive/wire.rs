@@ -65,17 +65,16 @@ where
     let rows: Option<Vec<Value>> = lenient(d)?;
     Ok(rows.map(|rows| {
         rows.into_iter()
-            .map(|row| serde_json::from_value(row).unwrap_or(ShareRow { circle_id: None }))
+            .map(|row| serde_json::from_value(row).unwrap_or_default())
             .collect()
     }))
 }
 
 /// One of a shared file's live shares, as a member reads it.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareRow {
-    /// Read leniently: a row that doesn't read leaves the others.
-    #[serde(default, deserialize_with = "lenient")]
+    /// None in a row that doesn't read ([`share_rows`]).
     pub circle_id: Option<Uuid>,
 }
 

@@ -40,7 +40,9 @@ pub struct PeerRemote {
     sharer: Sharer,
     /// The keys of their circles opened so far: one request each, the first time a file shared
     /// through it is read. A circle's key is set once (odin-core `V2CircleShareKeyController`,
-    /// **[verified]**), so one kept stays good.
+    /// **[verified]**), so one kept stays good; only its developer reset (`ResetShareKey`)
+    /// replaces it, and a key kept from before that opens the files locked since only after a
+    /// restart.
     circles: Mutex<HashMap<Uuid, Arc<CircleKey>>>,
 }
 
@@ -221,6 +223,8 @@ impl Remote for PeerRemote {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+
     use crate::drive::tests::{api, unreachable_remote};
 
     fn sam() -> Result<PeerRemote, HomebaseError> {
@@ -266,6 +270,31 @@ mod tests {
         refused(sam.delete(&[]).map(drop));
         refused(sam.delete_for_good(&[]).map(drop));
         refused(sam.set_removed(&[], true).map(drop));
+        Ok(())
+    }
+
+    /// A live shared file naming no circle waits, before any request: its page isn't passed by.
+    #[test]
+    fn a_shared_file_naming_no_circle_waits() -> Result<(), Box<dyn std::error::Error>> {
+        let sam = sam()?;
+        for shares in [json!(null), json!([]), json!(["junk"])] {
+            let header: FileHeader = serde_json::from_value(json!({
+                "fileId": Uuid::new_v4(), "fileState": "active",
+                "fileMetadata": {
+                    "isEncrypted": true, "versionTag": Uuid::new_v4(),
+                    "appData": { "uniqueId": Uuid::new_v4(), "groupId": Uuid::new_v4(),
+                                 "fileType": hbsync_types::schema::FILE_TYPE_FILE, "content": "" },
+                },
+                "sharedSecretEncryptedKeyHeader": {
+                    "encryptionVersion": 1, "type": "share", "iv": "", "encryptedAesKey": "",
+                },
+                "shares": shares,
+            }))?;
+            match sam.to_remote(header) {
+                Err(RemoteError::Later { why, .. }) => assert!(why.contains("no circle"), "{why}"),
+                other => panic!("{other:?}"),
+            }
+        }
         Ok(())
     }
 

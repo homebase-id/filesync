@@ -535,9 +535,11 @@ server answers the rest, to a token their server made for this identity's connec
   their 400, 400 `argumentError`; a server too old for the route, 400
   `remoteServerReturnedNotFound`; anything else, 400 `remoteServerReturnedInternalServerError`.
 - **Whose a refusal is.** Without the permission they need, the peer routes answer 403 with no
-  code too, like a sharer's: the client asks whether the app holds `UseTransitRead` before
-  (`reads_shared`), reads a 403 there as the sharer's (`Client::whose`) and the permission
-  again after a codeless one; a 401 there is this login's. On the sharer's own server
+  code too, like a sharer's: before asking, the client looks whether the app holds
+  `UseTransitRead` (`reads_shared`, as last read; the security context read again when it
+  didn't), reads a 403 there as the sharer's (`Client::whose`), and after a codeless one reads
+  the security context again (`reads_shared_now`): the owner may have given the permission
+  without any reconnect. Lacking it, the share waits (`Later`); a 401 there is this login's. On the sharer's own server
   (`Client::for_peer`) a 401 refuses the token (`peer::refused`), a 403 a file or drive not
   shared with this identity.
 - **Reading on their server** **[verified]** (odin-core `PeerDirectReadAttribute`, #2127;
