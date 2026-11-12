@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::HomebaseError;
 use crate::crypto::{Key, aes_cbc_encrypt};
-use crate::drive::sealed::{KeyHeader, SealedKeyHeader, checked_sealed_len, sealed_len};
+use crate::drive::sealed::{KeyHeader, SealedKeyHeader, checked_sealed_len, iv16, sealed_len};
 use crate::drive::share_keys::CircleKey;
 
 pub(crate) const CONTENT_TYPE: &str = "application/octet-stream";
@@ -28,7 +28,7 @@ pub(crate) const CONTENT_TYPE: &str = "application/octet-stream";
 /// The keys a file's key header is locked with: the shared secret, or on a private
 /// (zero-knowledge) drive the drive's own key, once this computer holds it; a file another
 /// identity shares with this one, the key of the circle it is shared through
-/// ([`FileHeader::share_circle`]).
+/// ([`FileHeader::needs_circle_key`]).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Keys<'a> {
     pub shared: &'a Key,
@@ -495,17 +495,10 @@ impl FileHeader {
             .as_ref()
             .ok_or_else(|| HomebaseError::Crypto("no key header".into()))?;
         if sealed.locked_for_share() {
-            let circle = self.share_circle().ok_or_else(|| {
-                HomebaseError::Crypto("shared, but through no circle it names".into())
+            // The circle is bound into the locked key: another circle's doesn't open it.
+            let key = keys.circle.ok_or_else(|| {
+                HomebaseError::Crypto("shared through a circle whose key isn't here".into())
             })?;
-            let key = keys
-                .circle
-                .filter(|k| k.circle() == circle)
-                .ok_or_else(|| {
-                    HomebaseError::Crypto(format!(
-                        "shared through circle {circle}, whose key isn't here"
-                    ))
-                })?;
             return KeyHeader::open_share(
                 sealed,
                 key,
@@ -522,22 +515,22 @@ impl FileHeader {
         KeyHeader::open(sealed, key)
     }
 
-    /// The circle a shared file's key header is locked for, the first of its shares; `None` for
-    /// one that isn't shared with this identity.
-    pub(crate) fn share_circle(&self) -> Option<Uuid> {
-        self.shares.as_ref()?.first().map(|s| s.circle_id)
-    }
-
     /// A live node's, shared with this identity: the circle whose key [`to_remote`] opens it
-    /// with.
+    /// with, the first of its shares'.
     pub(crate) fn needs_circle_key(&self) -> Option<Uuid> {
         let shared = self
             .shared_secret_encrypted_key_header
             .as_ref()
             .is_some_and(SealedKeyHeader::locked_for_share);
-        (self.file_state == "active" && node_type(self.file_metadata.app_data.file_type) && shared)
-            .then(|| self.share_circle())
-            .flatten()
+        if !(self.live_node() && shared) {
+            return None;
+        }
+        self.shares.as_ref()?.first().map(|s| s.circle_id)
+    }
+
+    /// A live sync node's header (not a tombstone, nor another app's file).
+    fn live_node(&self) -> bool {
+        self.file_state == "active" && node_type(self.file_metadata.app_data.file_type)
     }
 
     /// Its key header is locked with the drive's key (a private drive's file).
@@ -549,9 +542,7 @@ impl FileHeader {
 
     /// A live node's, locked with the drive's key: [`to_remote`] opens it with that.
     pub(crate) fn needs_drive_key(&self) -> bool {
-        self.file_state == "active"
-            && node_type(self.file_metadata.app_data.file_type)
-            && self.locked_with_drive_key()
+        self.live_node() && self.locked_with_drive_key()
     }
 }
 
@@ -568,11 +559,7 @@ impl FileMetadata {
 /// The IV of a payload.
 pub(crate) fn payload_iv(p: &Payload) -> Result<[u8; 16], String> {
     let iv = p.iv.as_deref().ok_or("no payload IV")?;
-    STANDARD
-        .decode(iv)
-        .ok()
-        .and_then(|iv| iv.try_into().ok())
-        .ok_or_else(|| format!("payload IV {iv:?}"))
+    iv16(iv).ok_or_else(|| format!("payload IV {iv:?}"))
 }
 
 /// The payload's size and content hash, sealed with the file `key` under the payload IV.
@@ -889,12 +876,20 @@ mod tests {
             assert!(why.contains("circle"), "{why}");
         }
 
-        // Through another circle, or bound to another file: not opened.
+        // Through another circle: that one's key is asked for (one of another circle wouldn't
+        // open it, the circle being bound into the locked key). Bound to another file: not
+        // opened.
         let mut other = shared(v::LOCKED, json!("share"))?;
-        other.shares = Some(vec![ShareRow {
-            circle_id: Uuid::new_v4(),
-        }]);
-        assert!(to_remote(other, keys).is_err());
+        let elsewhere = Uuid::new_v4();
+        other.shares = Some(vec![
+            ShareRow {
+                circle_id: elsewhere,
+            },
+            ShareRow {
+                circle_id: v::id(v::CIRCLE),
+            },
+        ]);
+        assert_eq!(other.needs_circle_key(), Some(elsewhere));
         let mut moved = shared(v::LOCKED, json!("share"))?;
         moved.file_id = Uuid::new_v4();
         assert!(to_remote(moved, keys).is_err());

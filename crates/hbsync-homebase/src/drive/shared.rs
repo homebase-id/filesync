@@ -11,20 +11,20 @@ use std::ops::Range;
 use std::sync::{Arc, Mutex};
 
 use hbsync_remote::{
-    Answers, ChangesPage, Deletes, ForGood, Holds, NodeMeta, RefsPage, Refusal, Remote, RemoteBody,
+    Answers, ChangesPage, Deletes, ForGood, Holds, NodeMeta, RefsPage, Refusal, Remote,
     RemoteError, RemoteHeader, Result, Upload,
 };
-use hbsync_types::schema::{NodeContent, PAYLOAD_KEY};
+use hbsync_types::schema::PAYLOAD_KEY;
 use hbsync_types::{Doomed, NodeId, RemoteFileId, Target, Written};
 use uuid::Uuid;
 
 use super::markers::Sharer;
-use super::sealed::{CipherRange, KeyHeader};
+use super::sealed::CipherRange;
 use super::share_keys::CircleKey;
 use super::wire::{self, FileHeader, Keys};
 use super::{
-    HOLD_BACK, HomebaseRemote, changes_page, decrypt, fetch, files_route, holding, refs_page,
-    remote_error, with_cursor,
+    HOLD_BACK, HomebaseRemote, changes_page, decrypt, feed_page, fetch, file_route, holding,
+    payload_key, plain_size, query_batch, raw_header, refs_page, remote_error,
 };
 use crate::peer::{self, PeerToken};
 use crate::{Client, HomebaseError};
@@ -59,54 +59,37 @@ impl PeerRemote {
         })
     }
 
-    pub fn sharer(&self) -> &Sharer {
-        &self.sharer
-    }
-
-    /// Their server's answer as the trait's error: refusing the token (401) is a refusal of the
-    /// credentials, which a new token may lift ([`peer::refused`]).
+    /// Their server's answer as the trait's error: refusing the token (401) is
+    /// [`Refusal::Token`], which a new token may lift ([`peer::refused`]).
     fn error(&self, e: HomebaseError) -> RemoteError {
-        match peer::refused(&e) {
-            true => RemoteError::Denied(
-                format!(
-                    "{} refuses the token their server gave you: {e}",
-                    self.sharer.odin_id
-                ),
-                Refusal::Credentials,
-            ),
-            false => remote_error(e),
+        if peer::refused(&e) {
+            let why = format!(
+                "{} refuses the token their server gave you: {e}",
+                self.sharer.odin_id
+            );
+            return RemoteError::Denied(why, Refusal::Token);
         }
-    }
-
-    fn files(&self) -> String {
-        files_route(self.sharer.drive_alias)
-    }
-
-    fn file(&self, file_id: RemoteFileId) -> String {
-        format!("{}/{}", self.files(), file_id.0)
+        remote_error(e)
     }
 
     fn query_batch(&self, body: &serde_json::Value) -> Result<wire::QueryBatchResponse> {
-        self.client
-            .post(&format!("{}/query-batch", self.files()), body)
-            .map_err(|e| self.error(e))
+        query_batch(&self.client, self.sharer.drive_alias, body).map_err(|e| self.error(e))
     }
 
     fn raw_header(&self, file_id: RemoteFileId) -> Result<FileHeader> {
-        self.client
-            .get(&format!("{}/header", self.file(file_id)), &[])
-            .map_err(|e| self.error(e))
+        raw_header(&self.client, self.sharer.drive_alias, file_id).map_err(|e| self.error(e))
     }
 
-    /// The key of their `circle`, opened once ([`HomebaseRemote::circle_key`]): asked while
-    /// held, so a second reader of the same circle waits for that one request.
+    /// The key of their `circle`, opened once ([`HomebaseRemote::circle_key`]). Not held while
+    /// asked (two requests, theirs through this identity's server): readers of circles already
+    /// open don't wait, and two first readers of one may each ask once.
     fn circle_key(&self, circle: Uuid) -> Result<Arc<CircleKey>> {
-        let mut circles = self.circles.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some(key) = circles.get(&circle) {
+        let circles = || self.circles.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(key) = circles().get(&circle) {
             return Ok(Arc::clone(key));
         }
         let key = Arc::new(self.own.circle_key(&self.sharer, circle)?);
-        circles.insert(circle, Arc::clone(&key));
+        circles().insert(circle, Arc::clone(&key));
         Ok(key)
     }
 
@@ -144,14 +127,13 @@ impl PeerRemote {
 
 impl Remote for PeerRemote {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
-        let page = self.query_batch(&wire::feed_query(cursor, limit, wire::Shape::Full))?;
-        let (page, cursor) = with_cursor(page, cursor);
+        let (page, cursor) = feed_page(|b| self.query_batch(b), cursor, limit, wire::Shape::Full)?;
         changes_page(page, cursor, |h| self.to_remote(h))
     }
 
     fn change_refs(&self, cursor: Option<&str>, limit: usize) -> Result<RefsPage> {
-        let page = self.query_batch(&wire::feed_query(cursor, limit, wire::Shape::Minimal))?;
-        let (page, cursor) = with_cursor(page, cursor);
+        let (page, cursor) =
+            feed_page(|b| self.query_batch(b), cursor, limit, wire::Shape::Minimal)?;
         refs_page(page, cursor)
     }
 
@@ -202,43 +184,22 @@ impl Remote for PeerRemote {
         sink: &mut dyn Write,
     ) -> Result<u64> {
         let header = self.raw_header(file_id)?;
-        if header.file_state == "deleted" {
-            return Err(RemoteError::Deleted);
-        }
         let circle = self.circle_for(&header)?;
         let keys = self.keys(circle.as_deref());
-        let file_key = header.key(keys).map_err(remote_error)?;
-        let iv = header
-            .file_metadata
-            .sync_payload()
-            .ok_or_else(|| RemoteError::StaleRange(format!("file {}: no payload now", file_id.0)))
-            .and_then(|p| wire::payload_iv(p).map_err(RemoteError::Fatal))?;
-        let key = KeyHeader {
-            iv,
-            key: file_key.key,
-        };
+        let key = payload_key(&header, keys)?;
         let range = match range {
             Some(r) => r,
-            None => match wire::to_remote(header, keys)
-                .map_err(RemoteError::Fatal)?
-                .body
-            {
-                RemoteBody::Live {
-                    payload: Some(_),
-                    content:
-                        NodeContent {
-                            size: Some(size), ..
-                        },
-                    ..
-                } => 0..size,
-                _ => return Err(RemoteError::NotFound),
-            },
+            // The engine always names a range: this opens the content too.
+            None => 0..plain_size(&wire::to_remote(header, keys).map_err(RemoteError::Fatal)?)?,
         };
         if range.is_empty() {
             return Ok(0);
         }
         let len = range.end - range.start;
-        let path = format!("{}/payload/{PAYLOAD_KEY}", self.file(file_id));
+        let path = format!(
+            "{}/payload/{PAYLOAD_KEY}",
+            file_route(self.sharer.drive_alias, file_id)
+        );
         let at = CipherRange::of(&range);
         let response = fetch(&self.client, &path, at.fetch.clone()).map_err(|e| self.error(e))?;
         if !response.encrypted {
@@ -277,7 +238,7 @@ mod tests {
             node: NodeId::new(),
             parent: NodeId::ROOT,
             kind: hbsync_types::NodeKind::Folder,
-            content: NodeContent::folder("Photos"),
+            content: hbsync_types::schema::NodeContent::folder("Photos"),
             removed: false,
         };
         let refused = |r: Result<()>| match r {
@@ -299,13 +260,13 @@ mod tests {
         Ok(())
     }
 
-    /// Their server refusing the token is a refusal of the credentials (a new token may lift
-    /// it); refusing a file isn't.
+    /// Their server refusing the token is a refusal of the token (a new one may lift it, not a
+    /// login); refusing a file isn't.
     #[test]
-    fn a_refused_token_is_a_refusal_of_the_credentials() -> Result<(), HomebaseError> {
+    fn a_refused_token_is_a_refusal_of_the_token() -> Result<(), HomebaseError> {
         let sam = sam()?;
         match sam.error(api(401, None)) {
-            RemoteError::Denied(why, Refusal::Credentials) => {
+            RemoteError::Denied(why, Refusal::Token) => {
                 assert!(why.contains("sam.invalid"), "{why}");
             }
             other => panic!("{other:?}"),

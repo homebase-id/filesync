@@ -59,11 +59,6 @@ impl CircleKey {
         })
     }
 
-    /// The circle it is the key of.
-    pub(crate) fn circle(&self) -> Uuid {
-        self.circle
-    }
-
     /// A file's key from its share row (`lockedFileKey`): `format ‖ nonce (12) ‖ ciphertext (16)
     /// ‖ tag (16)` under this key, bound to `drive ‖ file_id ‖ circle` (format 2) or
     /// `drive ‖ global_transit_id ‖ circle` (format 3).

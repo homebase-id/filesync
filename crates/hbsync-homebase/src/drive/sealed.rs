@@ -182,11 +182,8 @@ impl KeyHeader {
         file_id: uuid::Uuid,
         global_transit_id: Option<uuid::Uuid>,
     ) -> Result<Self, HomebaseError> {
-        let iv = STANDARD
-            .decode(&sealed.iv)
-            .ok()
-            .and_then(|iv| <[u8; 16]>::try_from(iv).ok())
-            .ok_or_else(|| crypto("a shared file's header IV isn't 16 bytes"))?;
+        let iv =
+            iv16(&sealed.iv).ok_or_else(|| crypto("a shared file's header IV isn't 16 bytes"))?;
         let locked = STANDARD
             .decode(&sealed.encrypted_aes_key)
             .map_err(|_| crypto("a shared file's locked key isn't base64"))?;
@@ -271,6 +268,11 @@ pub(crate) fn strong() -> Result<[u8; 16], HomebaseError> {
             return Ok(bytes);
         }
     }
+}
+
+/// An IV as base64: 16 bytes, or `None`.
+pub(crate) fn iv16(b64: &str) -> Option<[u8; 16]> {
+    STANDARD.decode(b64).ok()?.try_into().ok()
 }
 
 fn crypto(why: impl Into<String>) -> HomebaseError {
