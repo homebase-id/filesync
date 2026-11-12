@@ -61,6 +61,11 @@ const UNLISTED: &str = "your Homebase cloud doesn't hand this app its private dr
 const NOT_PERMITTED: &str = "your Homebase cloud hasn't given Filesync the permission to read what \
                              others share with you yet";
 
+/// Why nothing shared opens: this identity's drive has no write-only key that opens, which
+/// sharers seal their circles' keys to.
+const NO_WRITE_ONLY_KEY: &str =
+    "your Filesync drive has no key that opens what others share with you";
+
 /// How long a share waits on its sharer (a circle key not sealed to this identity yet, a
 /// connection they haven't reviewed) before it is asked about again.
 const SHARER_WAIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
@@ -239,6 +244,12 @@ impl KeyState {
 }
 
 struct DriveKey(Mutex<KeyState>);
+
+impl DriveKey {
+    fn lock(&self) -> std::sync::MutexGuard<'_, KeyState> {
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
 
 impl std::fmt::Debug for DriveKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -493,15 +504,25 @@ impl HomebaseRemote {
         needed: bool,
         take: impl FnOnce(&KeyState) -> std::result::Result<T, HomebaseError>,
     ) -> Result<T> {
+        self.key_state_read(needed, take).map(|(t, _)| t)
+    }
+
+    /// [`Self::key_state`], and whether the security context was read for it just now.
+    fn key_state_read<T>(
+        &self,
+        needed: bool,
+        take: impl FnOnce(&KeyState) -> std::result::Result<T, HomebaseError>,
+    ) -> Result<(T, bool)> {
         let connects = self.client.connects();
         // Held while it is read: whoever needs it then waits for that one read.
-        let mut state = self.drive_key.0.lock().unwrap_or_else(|e| e.into_inner());
-        if state.read_at != connects || (needed && !state.private) {
+        let mut state = self.drive_key.lock();
+        let read = state.read_at != connects || (needed && !state.private);
+        if read {
             let known = state.private || needed;
             *state =
                 KeyState::read(&self.client, &self.drive, connects, known).map_err(remote_error)?;
         }
-        take(&state).map_err(remote_error)
+        Ok((take(&state).map_err(remote_error)?, read))
     }
 
     /// `header` as a [`RemoteHeader`], opened with the drive's key when a live node's is locked
@@ -565,48 +586,37 @@ impl HomebaseRemote {
         raw_header(&self.client, self.drive.alias, file_id).map_err(remote_error)
     }
 
-    /// The drive's write-only key, which opens what sharers sealed to this identity's drive (a
-    /// circle's key, [`share_keys::CircleKey`]), opened from the app's grant when asked for (and
-    /// kept by the caller only while it opens what is shared): nothing for a user with nothing
-    /// shared. None where there is none (a drive made before write-only keys, or a grant
-    /// without the copy) or it doesn't open: nothing shared opens here. A private drive without
-    /// its key refuses this computer, as [`Self::drive_key`] does.
-    pub(crate) fn write_only_key(&self) -> Result<Option<WriteOnlyKey>> {
-        let locked = self.key_state(false, KeyState::write_only)?;
-        Ok(locked.and_then(|(key, locked)| open_write_only(&key, &locked)))
-    }
-
-    /// The key of `sharer`'s `circle`, sealed to this identity's drive and opened with its
-    /// write-only key: one request to this identity's server (which asks theirs), and one more
-    /// to read the security context again where the app may lack the permission to ask
-    /// ([`HomebaseRemote::reads_shared_now`]). None sealed yet, or the connection not reviewed by
-    /// them, is [`RemoteError::Later`]: they do it on their own time (a device of theirs seals it
-    /// when next online). The app's want of the permission, or a drive without a write-only key,
-    /// is the owner's to lift: [`RemoteError::Fatal`], with why.
+    /// The key of `sharer`'s `circle`, sealed to this identity's drive and opened with the
+    /// drive's write-only key (its private half, locked with the drive's key in the app's grant):
+    /// one request to this identity's server (which asks theirs), and one more where the app
+    /// may lack the permission to ask ([`HomebaseRemote::reads_shared_now`]).
+    ///
+    /// None sealed yet, or the connection not reviewed by them, is [`RemoteError::Later`]: they
+    /// do it on their own time (a device of theirs seals it when next online). What only the
+    /// owner lifts refuses: the app's want of the permission ([`Refusal::Permission`], an
+    /// approval), a drive without a write-only key that opens ([`Refusal::NoKey`]: a drive made
+    /// before them, or a grant without the copy). A private drive without its key refuses this
+    /// computer first, as [`Self::drive_key`] does.
     pub(crate) fn circle_key(&self, sharer: &markers::Sharer, circle: Uuid) -> Result<CircleKey> {
-        // The notifications connected since the security context was last read: the next look
-        // at it reads it again.
-        let just_read = self.key_read_at() != self.client.connects();
-        // A drive without one opens nothing shared (and a private one without its key refuses
-        // this computer first).
-        let write_only = self.write_only_key()?.ok_or_else(|| {
-            RemoteError::Fatal(
-                "your Filesync drive has no key that opens what others share with you".into(),
-            )
-        })?;
-        // Without the permission the ask is refused: read again first when it was lacking, unless
-        // just read.
-        let read_now = !self.reads_shared()? && !just_read;
-        if read_now && !self.reads_shared_now()? {
-            return Err(RemoteError::Fatal(NOT_PERMITTED.into()));
+        let ((locked, permitted), fresh) =
+            self.key_state_read(false, |s| Ok((s.write_only()?, s.reads_shared)))?;
+        let not_permitted = || RemoteError::Denied(NOT_PERMITTED.into(), Refusal::Permission);
+        // Without the permission the ask is refused: the context read again first, unless it
+        // was just now.
+        if !permitted && (fresh || !self.reads_shared_now()?) {
+            return Err(not_permitted());
         }
+        let checked = fresh || !permitted;
+        let write_only = locked
+            .and_then(|(key, locked)| open_write_only(&key, &locked))
+            .ok_or_else(|| RemoteError::Denied(NO_WRITE_ONLY_KEY.into(), Refusal::NoKey))?;
         let answer = match SealedKey::ask(&self.client, &sharer.odin_id, circle) {
             Ok(answer) => answer,
             // A codeless 403 is theirs, or the app's want of the permission (`Client::whose`):
-            // the security context, read again, says which.
-            Err(e) if codeless_forbidden(&e) && !read_now => {
+            // the context, read again unless it was just now, says which.
+            Err(e) if codeless_forbidden(&e) && !checked => {
                 return match self.reads_shared_now()? {
-                    false => Err(RemoteError::Fatal(NOT_PERMITTED.into())),
+                    false => Err(not_permitted()),
                     true => Err(remote_error(e)),
                 };
             }
@@ -618,33 +628,20 @@ impl HomebaseRemote {
             .map_err(remote_error)
     }
 
-    /// Whether the app may read what others share with this identity: an install from before it
-    /// asked for that has to be given it by the owner ([`app::update_url`]). As the security
-    /// context said at its last read.
-    pub(crate) fn reads_shared(&self) -> Result<bool> {
-        self.key_state(false, |state| Ok(state.reads_shared))
-    }
-
-    /// At how many of the notifications' reconnects the security context was last read.
-    fn key_read_at(&self) -> u64 {
-        self.drive_key
-            .0
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .read_at
-    }
-
-    /// [`HomebaseRemote::reads_shared`], the security context read again now (one request, the
-    /// state not held meanwhile): the owner may have given the permission since, which no
-    /// reconnect tells (**[inferred]**: odin-core's permission update closes no socket). Only
-    /// the permission is taken from it; the drive's privacy and keys stay [`Self::key_state`]'s.
+    /// Whether the app may read what others share with this identity (an install from before it
+    /// asked for that has to be given it by the owner, [`app::update_url`]), the security
+    /// context read again now for it alone (one request, nothing held meanwhile): the owner may have given the permission
+    /// since, which no reconnect tells (**[inferred]**: odin-core's permission update closes no
+    /// socket). Kept for [`Self::circle_key`]'s next look; an answer overtaken by another read
+    /// costs that look one more read, no more.
     fn reads_shared_now(&self) -> Result<bool> {
-        let lock = || self.drive_key.0.lock().unwrap_or_else(|e| e.into_inner());
-        let known = lock().private;
-        let read = KeyState::read(&self.client, &self.drive, self.client.connects(), known)
+        let context: serde_json::Value = self
+            .client
+            .get("/api/v2/auth/context", &[])
             .map_err(remote_error)?;
-        lock().reads_shared = read.reads_shared;
-        Ok(read.reads_shared)
+        let reads = holds_key(&context, app::USE_TRANSIT_READ);
+        self.drive_key.lock().reads_shared = reads;
+        Ok(reads)
     }
 
     /// What this identity's own markers say: whose shares its computers sync, and which of its
@@ -2020,8 +2017,8 @@ mod tests {
         assert_eq!(read(enough, 1), (Ok(Ended::Done), vec![None]));
     }
 
-    /// A drive without a write-only key opens nothing shared: refused with why, before any
-    /// request (the identity is unreachable here).
+    /// A drive without a write-only key opens nothing shared: it refuses (the owner's to lift),
+    /// before any request (the identity is unreachable here).
     #[test]
     fn no_write_only_key_asks_nothing() -> Result<(), HomebaseError> {
         let own = unreachable_remote(KeyState {
@@ -2033,7 +2030,9 @@ mod tests {
             drive_alias: Uuid::new_v4(),
         };
         match own.circle_key(&sharer, Uuid::new_v4()) {
-            Err(RemoteError::Fatal(why)) => assert!(why.contains("no key"), "{why}"),
+            Err(RemoteError::Denied(why, Refusal::NoKey)) => {
+                assert!(why.contains("no key"), "{why}")
+            }
             other => panic!("{other:?}"),
         }
         Ok(())
@@ -2103,7 +2102,7 @@ mod tests {
         let refused = remote.drive_key(false).expect_err("refused");
         assert_eq!(refused.refusal(), Some(Refusal::NoKey), "{refused}");
         assert_eq!(refused.to_string(), format!("access denied: {PRIVATE}"));
-        *remote.drive_key.0.lock().unwrap_or_else(|e| e.into_inner()) = state(Some([1; 16]));
+        *remote.drive_key.lock() = state(Some([1; 16]));
         assert_eq!(remote.drive_key(false).ok(), Some(Some([1; 16])));
         Ok(())
     }

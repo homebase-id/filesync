@@ -379,7 +379,8 @@ impl std::fmt::Debug for Upload<'_> {
 }
 
 /// Why the identity refused this computer ([`RemoteError::Denied`]): logging in again sets
-/// the credentials or the key right, a new token a sharer's refusal of one.
+/// the credentials or the key right, a new token a sharer's refusal of one, the owner's
+/// approval a missing permission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     /// The credentials or the drive (401, 403): revoked, say.
@@ -389,6 +390,9 @@ pub enum Refusal {
     /// Another identity's server refused the token it made for this one, to read what they
     /// share: a new token lifts it, not a login (it may refuse that too: no longer connected).
     Token,
+    /// The app lacks a permission only the owner gives, an approval in their Homebase (reading
+    /// what others share, say): logging in again doesn't give it.
+    Permission,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -397,8 +401,9 @@ pub enum RemoteError {
     #[error("a node with this id already exists")]
     AlreadyExists,
     /// The identity refused the credentials or the drive (401/403): stop syncing until the
-    /// user re-authorizes (a sharer's refused token, [`Refusal::Token`]: until a new token);
-    /// retrying changes nothing.
+    /// user re-authorizes (a sharer's refused token, [`Refusal::Token`]: until a new token; a
+    /// missing permission, [`Refusal::Permission`]: until the owner approves); retrying changes
+    /// nothing.
     #[error("access denied: {0}")]
     Denied(String, Refusal),
     /// The file changed since the given version (Homebase 4160).
