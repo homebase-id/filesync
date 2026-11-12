@@ -123,6 +123,53 @@ pub fn file_id_of(row: &str) -> Option<Uuid> {
     serde_json::from_str::<Id>(row).ok().map(|id| id.file_id)
 }
 
+/// What of a row's `appData` still reads when its header doesn't.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Ids {
+    #[serde(default, deserialize_with = "lenient")]
+    unique_id: Option<Uuid>,
+    #[serde(default, deserialize_with = "lenient")]
+    group_id: Option<Uuid>,
+    #[serde(default, deserialize_with = "lenient")]
+    file_type: Option<i32>,
+}
+
+/// What of a row still reads when its header doesn't: its state, and its `appData`'s ids.
+#[derive(Debug, Default)]
+pub(crate) struct RowIds {
+    pub file_state: Option<String>,
+    pub unique_id: Option<Uuid>,
+    pub file_type: Option<i32>,
+}
+
+/// A row's [`RowIds`], read leniently: none that don't read.
+pub(crate) fn row_ids(row: &Value) -> RowIds {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Row {
+        #[serde(default, deserialize_with = "lenient")]
+        file_state: Option<String>,
+        #[serde(default, deserialize_with = "lenient")]
+        file_metadata: Option<Meta>,
+    }
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Meta {
+        #[serde(default, deserialize_with = "lenient")]
+        app_data: Option<Ids>,
+    }
+    let Ok(row) = Row::deserialize(row) else {
+        return RowIds::default();
+    };
+    let ids = row.file_metadata.and_then(|m| m.app_data);
+    RowIds {
+        file_state: row.file_state,
+        unique_id: ids.as_ref().and_then(|i| i.unique_id),
+        file_type: ids.and_then(|i| i.file_type),
+    }
+}
+
 /// Whether `file_type` is a sync node's.
 fn node_type(file_type: i32) -> bool {
     file_type == FILE_TYPE_FOLDER || file_type == FILE_TYPE_FILE
@@ -144,16 +191,6 @@ pub(crate) fn skipped_row(row: &str, why: String) -> Skipped {
         version_tag: Uuid,
         #[serde(default, deserialize_with = "lenient")]
         app_data: Option<Ids>,
-    }
-    #[derive(Deserialize)]
-    #[serde(rename_all = "camelCase")]
-    struct Ids {
-        #[serde(default, deserialize_with = "lenient")]
-        unique_id: Option<Uuid>,
-        #[serde(default, deserialize_with = "lenient")]
-        group_id: Option<Uuid>,
-        #[serde(default, deserialize_with = "lenient")]
-        file_type: Option<i32>,
     }
     let Ok(row) = serde_json::from_str::<Row>(row) else {
         return Skipped::why(why);
@@ -267,25 +304,49 @@ pub enum Shape {
     Minimal,
 }
 
-/// The `query-batch` body for one page of the change feed: every change to a sync node,
-/// tombstones included, oldest first. Both shapes page alike: the same rows and cursor.
-pub fn feed_query(cursor: Option<&str>, limit: usize, shape: Shape) -> Value {
+/// The order of a `query-batch` listing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Order {
+    /// Every change, oldest first: the server holds back what changed in its last second
+    /// (homebase-api-notes).
+    Changes,
+    /// When each file was made, oldest first: a write doesn't move a file, and nothing is
+    /// held back (a file made while the pages are read may be missed by them).
+    Created,
+}
+
+/// A `query-batch` body: `params`, a page of `limit` rows in `shape` and `order`, from
+/// `cursor`.
+pub(crate) fn query(
+    params: Value,
+    cursor: Option<&str>,
+    limit: usize,
+    shape: Shape,
+    order: Order,
+) -> Value {
     let mut options = json!({
         "maxRecords": limit.max(1),
         "resultShape": match shape {
             Shape::Full => "full",
             Shape::Minimal => "minimal",
         },
-        "sorting": "anyChangeDate",
+        "sorting": match order {
+            Order::Changes => "anyChangeDate",
+            Order::Created => "createdDate",
+        },
         "ordering": "oldestFirst",
     });
     if let Some(cursor) = cursor.filter(|c| !c.is_empty()) {
         options["cursorState"] = json!(cursor);
     }
-    json!({
-        "queryParams": { "fileType": [FILE_TYPE_FOLDER, FILE_TYPE_FILE] },
-        "resultOptionsRequest": options,
-    })
+    json!({ "queryParams": params, "resultOptionsRequest": options })
+}
+
+/// The `query-batch` body for one page of the change feed: every change to a sync node,
+/// tombstones included, oldest first. Both shapes page alike: the same rows and cursor.
+pub fn feed_query(cursor: Option<&str>, limit: usize, shape: Shape) -> Value {
+    let params = json!({ "fileType": [FILE_TYPE_FOLDER, FILE_TYPE_FILE] });
+    query(params, cursor, limit, shape, Order::Changes)
 }
 
 /// The `query-batch` body for a page of the active files in `folders` (their `groupId`), of
@@ -293,22 +354,11 @@ pub fn feed_query(cursor: Option<&str>, limit: usize, shape: Shape) -> Value {
 /// odin-core filters on `groupId`, `fileState` and `archivalStatus` (**[verified]**
 /// `QueryBatch.cs:130-142, 351`); live is any status but removed, so that is read per row.
 pub(crate) fn children_query(folders: &[NodeId], cursor: Option<&str>, limit: usize) -> Value {
-    let mut options = json!({
-        "maxRecords": limit.max(1),
-        "resultShape": "minimal",
-        "sorting": "anyChangeDate",
-        "ordering": "oldestFirst",
+    let params = json!({
+        "groupId": folders.iter().map(|f| f.0).collect::<Vec<_>>(),
+        "fileState": ["active"],
     });
-    if let Some(cursor) = cursor.filter(|c| !c.is_empty()) {
-        options["cursorState"] = json!(cursor);
-    }
-    json!({
-        "queryParams": {
-            "groupId": folders.iter().map(|f| f.0).collect::<Vec<_>>(),
-            "fileState": ["active"],
-        },
-        "resultOptionsRequest": options,
-    })
+    query(params, cursor, limit, Shape::Minimal, Order::Changes)
 }
 
 /// A header as a [`RemoteHeader`], decrypted with `keys`; `Err` says why it isn't a usable
@@ -407,7 +457,7 @@ pub(crate) fn to_remote(header: FileHeader, keys: Keys<'_>) -> Result<RemoteHead
 }
 
 /// `T` if the value is one, else `None`.
-fn lenient<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+pub(crate) fn lenient<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: serde::de::DeserializeOwned,

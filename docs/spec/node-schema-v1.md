@@ -95,6 +95,44 @@ that computer when its user adds its Desktop, and synced with that computer's ow
 - Deleted (it, or a computer's folder in it), it comes back with what was in it at the next
   sync of a computer syncing that Desktop: restore it rather than create it.
 
+## Sync markers
+Not a node: a file on the drive saying the owner's computers sync what one person shares with
+them, into `~/Homebase/Shared/<their identity>` (read-only). Written by the owner's apps
+(chat-kmp's "Sync to my computers" in Filesync's Shared with me, #2307), read by every computer.
+
+| Field | Value |
+|---|---|
+| `fileType` | `7103` |
+| `dataType` | `0` |
+| `uniqueId` | the first 16 bytes of `sha256("filesync-marker\n<sharer>\n<owner>")`, both identities lower case, as a UUID in byte order: one marker per sharer, the same on every device |
+| `groupId` | none |
+| ACL | `Owner`; `isEncrypted`, `allowDistribution: false` |
+| payload | none |
+
+- **Content:** `{"odinId":"sam.example.com","driveAlias":"cfceb937-b868-496b-91cb-3402f18320f8","sync":true}`:
+  the sharer, the drive their files are on (needed when `sync` is true), and whether to sync
+  them. A missing `sync` is off.
+  Keep keys you don't know when you change it.
+- **Trust:** `sync` counts only in a marker whose `senderOdinId` is null, empty or the owner
+  (odin-core names the identity that wrote a file, the owner for its own apps, and reads an
+  empty sender as none, **[verified]** `StandardFileStreamWriter.cs`, `FileRef.cs`). Nobody
+  else can change the owner's marker: on a Selective Share drive (Filesync's) an outside
+  caller writes a stored file only as its sender or through a share with Write on it, and a
+  marker has no shares (**[verified]**
+  `DriveStorageServiceBase.AssertMayWriteStoredFileAsync`). A marker someone else left (an
+  editor with Write on the drive can add one, and the server keeps its sender through the
+  owner's updates, **[verified]** `DriveStorageServiceBase.cs`) never turns sync on, whatever
+  it names, and isn't opened; to sync that person, delete it (its tombstone frees the
+  `uniqueId`, **[verified]** `DriveStorageServiceBase.TombstoneOf`) and write your own. A
+  marker whose `uniqueId` isn't its sharer's doesn't read.
+- **Turning sync off** is `sync: false` in place: the marker isn't deleted, as it keeps the
+  person listed in Shared with me. Computers then delete their local copy of that share.
+- A marker of the owner's that doesn't read leaves its sharer as the computer has it (the one
+  its `uniqueId` or its content names; every sharer when neither does): it is never read as
+  off.
+- Computers list markers in the order they were made (`sorting: createdDate`), which the
+  server never holds back (homebase-api-notes).
+
 ## File header fields
 
 | Field | Folder | File |
@@ -383,6 +421,8 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-11-12: sync markers (`fileType` 7103), the people whose shares the owner's computers
+  sync. Nodes are the same.
 - 2026-11-07: a computer's folder in Desktops is renamed whenever its computer is given a
   name, the same one again too, over a rename made elsewhere; a computer joining a folder there
   keeps its name. Nodes are the same.

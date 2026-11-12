@@ -33,6 +33,7 @@ use crate::drive::sealed::{
 use crate::multipart::{Multipart, Part, SourceEnded};
 use crate::{ApiError, HomebaseError, app};
 
+pub mod markers;
 pub mod sealed;
 pub mod wire;
 
@@ -77,6 +78,73 @@ pub struct HomebaseRemote {
     made: i64,
     /// What is known of the drive's privacy, and its key ([`HomebaseRemote::drive_key`]).
     drive_key: DriveKey,
+}
+
+/// How [`read_pages`] ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ended {
+    /// At the last page, or where the reader had what it needed.
+    Done,
+    /// The server promised more rows without a new cursor.
+    CutShort,
+}
+
+/// Reads the pages `fetch` gives for each cursor, each to `each`, until the last or `each` says
+/// it has what it needs (false). A page promising more rows without a new cursor (a held-back
+/// page of a change order may) ends it, [`Ended::CutShort`].
+fn read_pages(
+    mut fetch: impl FnMut(Option<&str>) -> Result<wire::QueryBatchResponse>,
+    mut each: impl FnMut(&wire::QueryBatchResponse) -> Result<bool>,
+) -> Result<Ended> {
+    let mut cursor: Option<String> = None;
+    loop {
+        let page = fetch(cursor.as_deref())?;
+        if !each(&page)? || !page.has_more_rows {
+            return Ok(Ended::Done);
+        }
+        match page.cursor_state {
+            Some(next) if Some(&next) != cursor.as_ref() => cursor = Some(next),
+            _ => return Ok(Ended::CutShort),
+        }
+    }
+}
+
+/// The markers of `identity`'s drive, from the pages `fetch` gives ([`read_pages`]), opened
+/// with `shared` or what `drive_key` gives (when a row needs the drive's key). A listing the
+/// server cut short, or that came back to a cursor it gave, is an error, never fewer markers.
+fn read_markers(
+    identity: &str,
+    shared: &Key,
+    fetch: impl FnMut(Option<&str>) -> Result<wire::QueryBatchResponse>,
+    mut drive_key: impl FnMut(bool) -> Result<Option<Key>>,
+) -> Result<markers::Markers> {
+    let mut found = markers::Markers::of(identity);
+    let mut seen = HashSet::new();
+    let mut asked: Option<String> = None;
+    let ended = read_pages(fetch, |page| {
+        for row in &page.search_results {
+            found.read(row.get(), shared, &mut drive_key)?;
+        }
+        // A server coming back to an earlier cursor would page on for ever (the one just asked
+        // from is read_pages' to end short).
+        if page.has_more_rows
+            && let Some(cursor) = &page.cursor_state
+            && Some(cursor) != asked.as_ref()
+            && !seen.insert(cursor.clone())
+        {
+            return Err(RemoteError::Transient(
+                "the sync markers' listing came back to a cursor it gave".into(),
+            ));
+        }
+        asked.clone_from(&page.cursor_state);
+        Ok(true)
+    })?;
+    match ended {
+        Ended::Done => Ok(found),
+        Ended::CutShort => Err(RemoteError::Transient(
+            "the sync markers' listing promised more rows without a new cursor".into(),
+        )),
+    }
 }
 
 /// What this computer knows of the drive's privacy: whether it is private, its key while this
@@ -431,6 +499,29 @@ impl HomebaseRemote {
             .map_err(remote_error)
     }
 
+    /// What this identity's own markers say: whose shares its computers sync, and which of its
+    /// markers don't read (`docs/spec/node-schema-v1.md`, "Sync markers"). A page per 100
+    /// markers; a listing the server cut short is an error, never fewer markers.
+    pub fn markers(&self) -> Result<markers::Markers> {
+        // A drive made private since the notifications last connected refuses a login without
+        // its key here, before a page that leaves its files out (until they reconnect, a
+        // listing can't tell, as the feed can't).
+        self.drive_key(false)?;
+        read_markers(
+            self.client.identity(),
+            self.client.key(),
+            |cursor| self.query_batch(&markers::markers_query(cursor)),
+            |needed| self.drive_key(needed),
+        )
+    }
+
+    /// One `query-batch` page.
+    fn query_batch(&self, body: &serde_json::Value) -> Result<wire::QueryBatchResponse> {
+        self.client
+            .post(&format!("{}/query-batch", self.files()), body)
+            .map_err(remote_error)
+    }
+
     /// Creates a file, or with `target` updates that file at its version (the key from its
     /// token, if given), in one multipart request, encrypted. An update keeps the file's key,
     /// with a new header IV. Returns the file as written, with the token the server will give
@@ -547,13 +638,7 @@ impl HomebaseRemote {
         // A drive made private since the notifications last connected refuses a login without
         // its key here, before a page that leaves its files out.
         self.drive_key(false)?;
-        let mut page: wire::QueryBatchResponse = self
-            .client
-            .post(
-                &format!("{}/query-batch", self.files()),
-                &wire::feed_query(cursor, limit.max(1), shape),
-            )
-            .map_err(remote_error)?;
+        let mut page = self.query_batch(&wire::feed_query(cursor, limit, shape))?;
         // An empty page of an empty drive has no cursor yet: start from the beginning.
         let next = page
             .cursor_state
@@ -794,15 +879,10 @@ impl Remote for HomebaseRemote {
     fn holding(&self, folders: &[NodeId], holds: Holds<'_>) -> Result<HashSet<NodeId>> {
         let mut holding = HashSet::new();
         for some in folders.chunks(CHILDREN_QUERY_FOLDERS) {
-            let mut cursor: Option<String> = None;
-            loop {
-                let page: wire::QueryBatchResponse = self
-                    .client
-                    .post(
-                        &format!("{}/query-batch", self.files()),
-                        &wire::children_query(some, cursor.as_deref(), 500),
-                    )
-                    .map_err(remote_error)?;
+            let fetch =
+                |cursor: Option<&str>| self.query_batch(&wire::children_query(some, cursor, 500));
+            // Ended short, it is as before: what the pages read.
+            read_pages(fetch, |page| {
                 for row in page.file_refs.iter().flatten() {
                     // A row that doesn't read is something there all the same: its folder's.
                     let Ok(r) = serde_json::from_str::<wire::FileRef>(row.get()) else {
@@ -820,17 +900,8 @@ impl Remote for HomebaseRemote {
                     }
                 }
                 // Each folder known to hold one: the rest of the pages can't change that.
-                if some.iter().all(|f| holding.contains(f)) {
-                    break;
-                }
-                // A page may be empty with more to come (the query's hold-back).
-                match page.cursor_state {
-                    Some(next) if page.has_more_rows && Some(&next) != cursor.as_ref() => {
-                        cursor = Some(next)
-                    }
-                    _ => break,
-                }
-            }
+                Ok(!some.iter().all(|f| holding.contains(f)))
+            })?;
         }
         Ok(holding)
     }
@@ -1560,6 +1631,120 @@ mod tests {
             why,
             "too large to sync: 50.1 GiB, over the 50 GiB limit for one file"
         );
+    }
+
+    /// A page of no rows, with `cursor` and `more` to come.
+    fn page(cursor: Option<&str>, more: bool) -> wire::QueryBatchResponse {
+        serde_json::from_value(json!({
+            "cursorState": cursor, "hasMoreRows": more, "queryTime": 1,
+        }))
+        .expect("a page")
+    }
+
+    /// A listing of markers cut short, or coming back to a cursor it gave, is an error; a last
+    /// page may give the cursor it was asked from.
+    #[test]
+    fn a_markers_listing_is_read_whole_or_not_at_all() {
+        let read = |answers: Vec<wire::QueryBatchResponse>| {
+            let mut answers = answers.into_iter();
+            let fetch = |_: Option<&str>| answers.next().ok_or(RemoteError::NotFound);
+            read_markers("frodo.test", &[3; 16], fetch, |_| Ok(None))
+        };
+        let last = vec![page(Some("a"), true), page(Some("a"), false)];
+        assert!(read(last).is_ok());
+        let cycle = vec![
+            page(Some("a"), true),
+            page(Some("b"), true),
+            page(Some("a"), true),
+        ];
+        assert!(matches!(read(cycle), Err(RemoteError::Transient(_))));
+        let cut = vec![page(None, true)];
+        assert!(matches!(read(cut), Err(RemoteError::Transient(_))));
+        let held = vec![page(Some("a"), true), page(Some("a"), true)];
+        let got = read(held).expect_err("cut short");
+        assert!(got.to_string().contains("without a new cursor"), "{got}");
+    }
+
+    /// Every page's markers are read, and a drive refusing this computer ends the listing.
+    #[test]
+    fn every_pages_markers_are_read() {
+        let key = crate::drive::sealed::KeyHeader::random().expect("random");
+        let marker = |who: &str| {
+            json!({
+                "fileId": Uuid::new_v4(),
+                "fileState": "active",
+                "sharedSecretEncryptedKeyHeader": key.seal(&[3; 16], &[7; 16]),
+                "fileMetadata": {
+                    "isEncrypted": true,
+                    "versionTag": Uuid::new_v4(),
+                    "appData": {
+                        "uniqueId": markers::marker_id(who, "frodo.test"),
+                        "fileType": hbsync_types::schema::FILE_TYPE_MARKER,
+                        "content": key.seal_text(&format!(
+                            r#"{{"odinId":"{who}","driveAlias":"{}","sync":true}}"#,
+                            Uuid::nil()
+                        )),
+                    },
+                },
+            })
+        };
+        let pages = || {
+            [("a", true, "sam.test"), ("b", false, "merry.test")].map(|(cursor, more, who)| {
+                serde_json::from_value::<wire::QueryBatchResponse>(json!({
+                    "cursorState": cursor, "hasMoreRows": more, "queryTime": 1,
+                    "searchResults": [marker(who)],
+                }))
+                .expect("a page")
+            })
+        };
+        let mut answers = pages().into_iter();
+        let fetch = |_: Option<&str>| answers.next().ok_or(RemoteError::NotFound);
+        let found = read_markers("frodo.test", &[3; 16], fetch, |_| Ok(None)).expect("read");
+        let names: Vec<_> = found.synced.iter().map(|s| s.odin_id.as_str()).collect();
+        assert_eq!(names, ["sam.test", "merry.test"]);
+        let mut answers = pages().into_iter();
+        let fetch = |_: Option<&str>| answers.next().ok_or(RemoteError::NotFound);
+        let refuse = |_| Err(RemoteError::Denied("no key".into(), Refusal::NoKey));
+        let got = read_markers("frodo.test", &[3; 16], fetch, refuse);
+        assert!(matches!(got, Err(RemoteError::Denied(..))), "{got:?}");
+    }
+
+    /// Pages are read on while more come with a new cursor; one promising more without one ends
+    /// the reading short, as does the reader having what it needs.
+    #[test]
+    fn pages_are_read_to_the_last() {
+        let read = |answers: Vec<wire::QueryBatchResponse>, wanted: usize| {
+            let mut answers = answers.into_iter();
+            let mut asked = Vec::new();
+            let mut seen = 0;
+            let ended = read_pages(
+                |cursor| {
+                    asked.push(cursor.map(str::to_owned));
+                    answers.next().ok_or(RemoteError::NotFound)
+                },
+                |_| {
+                    seen += 1;
+                    Ok(seen < wanted)
+                },
+            );
+            (ended.map_err(|e| e.to_string()), asked)
+        };
+        let some = |c: &str| Some(c.to_owned());
+        let all = vec![
+            page(Some("a"), true),
+            page(Some("b"), true),
+            page(Some("c"), false),
+        ];
+        assert_eq!(
+            read(all, 9),
+            (Ok(Ended::Done), vec![None, some("a"), some("b")])
+        );
+        let held = vec![page(Some("a"), true), page(Some("a"), true)];
+        assert_eq!(read(held, 9), (Ok(Ended::CutShort), vec![None, some("a")]));
+        let lost = vec![page(None, true)];
+        assert_eq!(read(lost, 9), (Ok(Ended::CutShort), vec![None]));
+        let enough = vec![page(Some("a"), true), page(Some("b"), true)];
+        assert_eq!(read(enough, 1), (Ok(Ended::Done), vec![None]));
     }
 
     /// The drive of an identity that can't be reached, what is known of its key as `state`

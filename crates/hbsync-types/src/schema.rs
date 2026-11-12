@@ -10,6 +10,9 @@ use crate::{NodeKind, Tag, Tags};
 pub const FILE_TYPE_FOLDER: i32 = 7101;
 /// `appData.fileType` of a file node (provisional, see the spec).
 pub const FILE_TYPE_FILE: i32 = 7102;
+/// `appData.fileType` of a sync marker: a person whose share the drive owner's computers sync
+/// (the spec's "Sync markers").
+pub const FILE_TYPE_MARKER: i32 = 7103;
 /// The one payload key of a file node.
 pub const PAYLOAD_KEY: &str = "sync_data";
 /// The current schema version.

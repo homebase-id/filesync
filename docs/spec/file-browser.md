@@ -23,6 +23,9 @@ Every file and folder is one Homebase file:
 | `groupId` | parent's node id | parent's node id |
 | payload | none | one, key `sync_data` |
 
+The drive also holds sync markers (`fileType` 7103, node schema "Sync markers"): not nodes; the
+browser writes them, for "Sync to my computers", and leaves them out of every listing.
+
 - **Root id:** `2a1c0d55-8ad3-417e-a5d7-42c3d0baba0e`, the same on every drive. The root is
   never stored. An item with `groupId` = root id is at the top level.
 - **Encrypted content (`appData.content`):**
