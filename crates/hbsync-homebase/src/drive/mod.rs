@@ -1165,6 +1165,11 @@ fn code_error(code: &str) -> Option<RemoteError> {
         "payloadhashmismatch" | "payloadhashmissing" => RemoteError::HashMismatch,
         "invalidpayloadhash" => RemoteError::InvalidHash,
         "payloadhashrequired" => RemoteError::HashRequired,
+        // Through a peer route, the other identity's server not answering now (odin-core
+        // `PeerCircleShareKeyService`, `PeerAppNotificationService`): it may again.
+        "remoteserverreturnedunavailable" => {
+            RemoteError::Transient("the other identity's server isn't answering".into())
+        }
         _ => return None,
     };
     Some(mapped)

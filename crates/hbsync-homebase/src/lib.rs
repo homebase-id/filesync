@@ -13,6 +13,7 @@ mod crypto;
 pub mod drive;
 mod multipart;
 pub mod notify;
+pub mod peer;
 mod problem;
 pub mod youauth;
 

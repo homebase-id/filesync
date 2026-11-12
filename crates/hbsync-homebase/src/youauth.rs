@@ -52,10 +52,7 @@ impl Credentials {
     /// shared secret (FNV-1a, stable across builds). A new login gets a new shared secret, so
     /// what was sealed under the old one (the files' tokens) is known not to open.
     pub fn login_id(&self) -> String {
-        format!(
-            "{:016x}",
-            hbsync_platform::fnv::fnv1a64(self.shared_secret.as_bytes())
-        )
+        login_of(&self.shared_secret)
     }
 
     /// A login from before this client asked for the app's zero-knowledge key: once the drive
@@ -93,8 +90,17 @@ impl Credentials {
     }
 }
 
+/// The fingerprint of a login's (or a peer token's) shared secret, base64: FNV-1a, stable
+/// across builds ([`Credentials::login_id`]).
+pub(crate) fn login_of(shared_secret: &str) -> String {
+    format!(
+        "{:016x}",
+        hbsync_platform::fnv::fnv1a64(shared_secret.as_bytes())
+    )
+}
+
 /// `what`, base64 of a 16-byte key.
-fn key16(b64: &str, what: &str) -> Result<Key, HomebaseError> {
+pub(crate) fn key16(b64: &str, what: &str) -> Result<Key, HomebaseError> {
     let bytes = STANDARD
         .decode(b64)
         .map(Zeroizing::new)

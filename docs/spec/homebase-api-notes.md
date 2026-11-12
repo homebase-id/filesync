@@ -509,6 +509,38 @@ there is gone for good only once it is not there again a minute on (sync semanti
   version still comes with the feed's row (`soft-delete-batch`, above). Before #1971 the answers had no time (`payloads[].lastModified` is
   the payload's, not the header's `updated`).
 
+## Shared with you
+What reading another identity's share (synced into `~/Homebase/Shared/<them>`) uses. The owner's
+own server answers the peer routes, which need `UseTransitRead` ("Permission keys"); the sharer's
+server answers the rest, to a token their server made for this identity's connection.
+- **A token for their server** **[verified]** (`V2PeerNotificationController`,
+  `PeerAppNotificationService`, `CircleNetworkService.CreatePeerIcrClientForCallerAsync`): `POST
+  /api/v2/peer/notify/token` `{"identity": "<sharer>"}` (needs `UseTransitRead` or
+  `UseTransitWrite`) answers `{authenticationToken64, sharedSecret}`. Each call adds a client
+  registration on their server that is never removed (20-year life, no revoke route): keep it,
+  ask again only once their server refuses it (401: unknown, or the connection gone or
+  blocked). The own server retries the call to theirs, and an answer lost on the way may still
+  have left a row: don't retry blindly. Refusals: not connected here, 400
+  `notAConnectedIdentity`; their server unreachable, 400 with no code (503 from it:
+  `remoteServerReturnedUnavailable`); their 400, 400 `invalidGlobalTransitId`; their 500, 400
+  `remoteServerReturnedInternalServerError`; their 403 (they disconnected or blocked this
+  identity), 403 with no code.
+- **Their circle's key** **[verified]** (`PeerCircleShareKeyService`, `AssertCanUsePeer(Read)`:
+  `UseTransitRead` only): `GET /api/v2/peer/<sharer>/circles/<circleId>/share-key` answers
+  `{sealedKey}`, sealed to this identity's drive (`encryption.md`, "Files shared with you");
+  `null` until a device of theirs sealed it (it does when next online); 403
+  `notReviewedByOwner` until they reviewed the connection; another 403 (no code): not a member,
+  the circle off, or they no longer count this identity as connected. Their server down (or a
+  socket error, a timeout): 400 `remoteServerReturnedUnavailable` (read as a passing outage);
+  their 400, 400 `argumentError`; a server too old for the route, 400
+  `remoteServerReturnedNotFound`; anything else, 400 `remoteServerReturnedInternalServerError`.
+- **Whose a refusal is.** Without the permission they need, the peer routes answer 403 with no
+  code too, like a sharer's: the client asks whether the app holds `UseTransitRead` before
+  (`reads_shared`), reads a 403 there as the sharer's (`Client::whose`) and the permission
+  again after a codeless one; a 401 there is this login's. On the sharer's own server
+  (`Client::for_peer`) a 401 refuses the token (`peer::refused`), a 403 a file or drive not
+  shared with this identity.
+
 ## Conventions
 - camelCase JSON, enums as camelCase strings, bytes as standard base64, times as Unix ms.
 - Errors are RFC 7807 ProblemDetails with `errorCode` as a number **or** a camelCase string.
