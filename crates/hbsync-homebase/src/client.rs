@@ -520,6 +520,24 @@ fn retry_after(headers: &ureq::http::HeaderMap) -> Option<Duration> {
 /// odin-core's header on every answer (`OdinVersionNumberMiddleware`).
 const ODIN_VERSION: &str = "X-Odin-Version";
 
+/// Whether an answer with `headers` is the identity's own: odin-core sets [`ODIN_VERSION`] on
+/// every answer, a captive portal's login page or a proxy's has none. The header alone (an
+/// identity's refusal may have no body): `ApiError::from_identity` asks for its body too.
+pub(crate) fn has_odin_header(headers: &ureq::http::HeaderMap) -> bool {
+    headers.contains_key(ODIN_VERSION)
+}
+
+/// Whether an answer of `status` refuses the credentials (401, 403): the identity's own only
+/// ([`has_odin_header`]).
+pub(crate) fn refuses(status: u16) -> bool {
+    matches!(status, 401 | 403)
+}
+
+/// Why an answer of `status` to `what` that isn't the identity's is the network not there yet.
+pub(crate) fn not_from_identity(what: &str, status: u16) -> String {
+    format!("{what}: HTTP {status} not from the identity (a login page or a proxy in the way)")
+}
+
 /// Whether an answer is sealed under the shared secret (`X-SSE: 1`).
 fn sealed(headers: &ureq::http::HeaderMap) -> bool {
     headers.get("X-SSE").is_some_and(|v| v.as_bytes() == b"1")
@@ -532,17 +550,17 @@ fn checked(
 ) -> Result<Response<ureq::Body>, HomebaseError> {
     let mut response = response.map_err(|e| HomebaseError::Network(format!("{what}: {e}")))?;
     let status = response.status().as_u16();
-    let odin = response.headers().contains_key(ODIN_VERSION);
+    let odin = has_odin_header(response.headers());
+    // Only the identity's own answer is one: a captive portal's page, a proxy's, or where a
+    // redirect led has no `X-Odin-Version`, and a redirect not followed isn't an answer either.
+    // The network isn't there yet: offline, not a refusal of each file, nor of the login (a
+    // hotel's or a proxy's 401 or 403).
+    let redirect = (300..400).contains(&status);
+    let foreign = !odin && (status < 400 || refuses(status));
+    if redirect || foreign {
+        return Err(HomebaseError::Network(not_from_identity(what, status)));
+    }
     if status < 400 {
-        // Only the identity's own answer is one: a captive portal's page, a proxy's, or where
-        // a redirect led has no `X-Odin-Version` (odin-core sets it on every answer), and a
-        // redirect not followed isn't an answer either. The network isn't there yet: offline,
-        // not a refusal of each file.
-        if !odin || (300..400).contains(&status) {
-            return Err(HomebaseError::Network(format!(
-                "{what}: HTTP {status} not from the identity (a login page or a proxy in the way)"
-            )));
-        }
         return Ok(response);
     }
     let sender = Sender {
@@ -558,7 +576,7 @@ fn checked(
         .unwrap_or_default();
     let error = ApiError::read(status, &body, sender);
     Err(match status {
-        401 | 403 => HomebaseError::Denied(format!("{what}: {error}")),
+        s if refuses(s) => HomebaseError::Denied(format!("{what}: {error}")),
         _ => HomebaseError::Api {
             what: what.to_owned(),
             error,
@@ -725,15 +743,38 @@ mod tests {
         Ok(())
     }
 
-    /// An answer that isn't the identity's (a captive portal's login page, a proxy's), or a
-    /// redirect, is the network not being there yet: offline, not a refusal.
+    /// An answer that isn't the identity's (a captive portal's login page, a proxy's, its 401
+    /// or 403 too), or a redirect, is the network not being there yet: offline, not a refusal.
+    /// The identity's own 401 or 403 is one.
     #[test]
     fn an_answer_not_from_the_identity_is_offline() -> Result<(), Box<dyn std::error::Error>> {
-        let heads: [&[u8]; 2] = [
-            b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 6\r\n\r\n<html>",
-            b"HTTP/1.1 304 Not Modified\r\nx-odin-version: test\r\ncontent-length: 0\r\n\r\n",
+        let heads: [(&[u8], bool); 6] = [
+            (
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/html\r\ncontent-length: 6\r\n\r\n<html>",
+                false,
+            ),
+            (
+                b"HTTP/1.1 304 Not Modified\r\nx-odin-version: test\r\ncontent-length: 0\r\n\r\n",
+                false,
+            ),
+            (
+                b"HTTP/1.1 403 Forbidden\r\ncontent-type: text/html\r\ncontent-length: 6\r\n\r\n<html>",
+                false,
+            ),
+            (
+                b"HTTP/1.1 401 Unauthorized\r\ncontent-length: 0\r\n\r\n",
+                false,
+            ),
+            (
+                b"HTTP/1.1 401 Unauthorized\r\nx-odin-version: test\r\ncontent-length: 0\r\n\r\n",
+                true,
+            ),
+            (
+                b"HTTP/1.1 403 Forbidden\r\nx-odin-version: test\r\ncontent-length: 0\r\n\r\n",
+                true,
+            ),
         ];
-        for head in heads {
+        for (head, refused) in heads {
             let listener = TcpListener::bind("127.0.0.1:0")?;
             let url = format!("http://{}/", listener.local_addr()?);
             let server = std::thread::spawn(move || -> std::io::Result<()> {
@@ -744,9 +785,10 @@ mod tests {
             let got = fetch(&connections(REUSED_WITHIN), &url, 10);
             server.join().map_err(|_| "server panicked")??;
             match got {
-                Err(e @ HomebaseError::Network(_)) => {
+                Err(e @ HomebaseError::Network(_)) if !refused => {
                     assert_eq!(e.class(), hbsync_remote::ErrorClass::Transient)
                 }
+                Err(HomebaseError::Denied(_)) if refused => {}
                 other => panic!("{other:?}"),
             }
         }

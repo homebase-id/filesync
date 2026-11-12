@@ -394,6 +394,10 @@ the seconds form only.
 **Who answered** **[verified]**: every answer of odin-core carries `X-Odin-Version` (below), a
 success too, so one without it (a captive portal's login page, a proxy's) isn't the identity's:
 the client takes it for the network not being there yet, as it does a redirect it was given.
+That holds for a 401 or 403 too (an API call's, the notification socket's upgrade): only the
+identity's own refuses the login (a bad or missing token answers 401 after the header is set,
+verified in odin-core's code). Inferred, not verified: the hosting in front of an identity (a
+load balancer) answers no 401 or 403 of its own; one that did would show offline, not refused.
 
 **Who sent a 404** **[verified]** in odin-core's code: `OdinVersionNumberMiddleware` sets
 `X-Odin-Version` on every answer, first after logging (`Startup.Configure`; odin-core tells a

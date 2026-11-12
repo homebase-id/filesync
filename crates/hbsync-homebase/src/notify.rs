@@ -30,7 +30,7 @@ use serde_json::json;
 use tungstenite::client::IntoClientRequest;
 use tungstenite::{Message, WebSocket};
 
-use crate::client::Client;
+use crate::client::{Client, has_odin_header, not_from_identity, refuses};
 use crate::crypto::{Envelope, random};
 use crate::drive::TargetDrive;
 use crate::drive::wire::FileRef;
@@ -476,10 +476,7 @@ fn connect(client: &Client, control: &Control) -> Result<Socket, Unopened> {
         .headers_mut()
         .insert("Sec-WebSocket-Protocol", protocols);
     let (socket, _) = tungstenite::client(request, stream).map_err(|e| match e {
-        tungstenite::HandshakeError::Failure(e) => match refused_upgrade(&e) {
-            Some(status) => Unopened::Refused(format!("{host}: HTTP {status}")),
-            None => Unopened::Lost(e.to_string()),
-        },
+        tungstenite::HandshakeError::Failure(e) => unopened(host, &e),
         tungstenite::HandshakeError::Interrupted(_) => {
             Unopened::Lost("handshake timed out".to_owned())
         }
@@ -487,13 +484,21 @@ fn connect(client: &Client, control: &Control) -> Result<Socket, Unopened> {
     Ok(socket)
 }
 
-/// The status of an upgrade the identity refused for the credentials (401, 403).
-fn refused_upgrade(e: &tungstenite::Error) -> Option<u16> {
+/// Why the upgrade to `host` failed with `e`: refused for the credentials (401, 403) only in the
+/// identity's own answer; a hotel's or a proxy's, as any other failure, is a connection lost.
+fn unopened(host: &str, e: &tungstenite::Error) -> Unopened {
     match e {
         tungstenite::Error::Http(answer) => {
-            Some(answer.status().as_u16()).filter(|s| matches!(s, 401 | 403))
+            let status = answer.status().as_u16();
+            if !has_odin_header(answer.headers()) {
+                Unopened::Lost(not_from_identity(host, status))
+            } else if refuses(status) {
+                Unopened::Refused(format!("{host}: HTTP {status}"))
+            } else {
+                Unopened::Lost(e.to_string())
+            }
         }
-        _ => None,
+        _ => Unopened::Lost(e.to_string()),
     }
 }
 
@@ -792,20 +797,26 @@ mod tests {
         assert!(matches!(event(7101), Notification::Changed(Some(_))));
     }
 
-    /// An upgrade refused for the credentials is a refusal (the account waits for a login);
-    /// any other failure is a connection lost.
+    /// An upgrade the identity refused for the credentials is a refusal (the account waits for
+    /// a login); any other failure is a connection lost, a hotel's or a proxy's 401 or 403 too.
     #[test]
     fn a_refused_upgrade_is_a_refusal() -> Result<(), Box<dyn std::error::Error>> {
-        let answer = |status: u16| -> Result<tungstenite::Error, Box<dyn std::error::Error>> {
-            let response = tungstenite::http::Response::builder()
-                .status(status)
-                .body(None)?;
-            Ok(tungstenite::Error::Http(Box::new(response)))
+        let answer = |status: u16, odin: bool| -> Result<Unopened, Box<dyn std::error::Error>> {
+            let mut response = tungstenite::http::Response::builder().status(status);
+            if odin {
+                response = response.header("X-Odin-Version", "1.0");
+            }
+            let e = tungstenite::Error::Http(Box::new(response.body(None)?));
+            Ok(unopened("frodo.dotyou.cloud", &e))
         };
-        assert_eq!(refused_upgrade(&answer(401)?), Some(401));
-        assert_eq!(refused_upgrade(&answer(403)?), Some(403));
-        assert_eq!(refused_upgrade(&answer(502)?), None);
-        assert_eq!(refused_upgrade(&tungstenite::Error::ConnectionClosed), None);
+        assert!(matches!(answer(401, true)?, Unopened::Refused(_)));
+        assert!(matches!(answer(403, true)?, Unopened::Refused(_)));
+        assert!(matches!(answer(502, true)?, Unopened::Lost(_)));
+        assert!(
+            matches!(answer(403, false)?, Unopened::Lost(why) if why.contains("not from the identity"))
+        );
+        let closed = unopened("frodo.dotyou.cloud", &tungstenite::Error::ConnectionClosed);
+        assert!(matches!(closed, Unopened::Lost(_)));
         Ok(())
     }
 
