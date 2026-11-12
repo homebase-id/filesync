@@ -21,8 +21,9 @@ use crate::HomebaseError;
 use crate::connections::{Call, Connections, REUSED_WITHIN, SharedConnector};
 use crate::crypto::{Envelope, Key};
 use crate::multipart::Multipart;
+use crate::peer::PeerToken;
 use crate::problem::{ApiError, Sender};
-use crate::youauth::Credentials;
+use crate::youauth::{Credentials, key16, login_of};
 
 /// The largest JSON answer read (a page of the change feed is far below it).
 const MAX_JSON: u64 = 256 * 1024 * 1024;
@@ -171,6 +172,9 @@ pub struct Client {
     /// [`Credentials::login_id`] of the credentials it was made with.
     login: String,
     connections: Arc<Connections>,
+    /// A client of another identity's server, with the token it made for this identity's
+    /// connection ([`Client::for_peer`]): a 403 there is that one's refusal.
+    peer: bool,
     /// How often the notifications connected again ([`Client::connected`]), shared by its
     /// clones.
     connects: Arc<AtomicU64>,
@@ -200,8 +204,40 @@ impl Client {
             zk_app_key: credentials.zk_key()?,
             login: credentials.login_id(),
             connections: Arc::new(connections(REUSED_WITHIN)),
+            peer: false,
             connects: Arc::default(),
         })
+    }
+
+    /// A client of `sharer`'s server with the token it made for this identity's connection
+    /// ([`PeerToken`]): keep one per sharer (its own connections, so they don't push this
+    /// identity's out of a shared pool). There a 401 or 403 is that server's refusal of the
+    /// token or the file, an [`HomebaseError::Api`], never this login's.
+    pub fn for_peer(sharer: &str, token: &PeerToken) -> Result<Client, HomebaseError> {
+        Ok(Client {
+            identity: sharer.to_owned(),
+            token: token.token.clone(),
+            key: key16(&token.shared_secret, "a sharer's token's secret")?,
+            zk_app_key: None,
+            login: login_of(&token.shared_secret),
+            connections: Arc::new(connections(REUSED_WITHIN)),
+            peer: true,
+            connects: Arc::default(),
+        })
+    }
+
+    /// Whose a refusal of `path` would be: another identity's on their server
+    /// ([`Client::for_peer`]); on this one's peer routes (`/api/v2/peer/...`, which ask another),
+    /// a 403 is theirs (not reviewed, not a member, no longer connected; odin-core
+    /// `PeerServiceBase`) as long as the app holds the permission they need, which a codeless
+    /// 403 can also mean (the caller asks `reads_shared` again after one), a 401 this login's;
+    /// elsewhere this login's.
+    fn whose(&self, path: &str) -> Whose {
+        match (self.peer, path.starts_with("/api/v2/peer/")) {
+            (true, _) => Whose::Theirs,
+            (false, true) => Whose::TheirsIfForbidden,
+            (false, false) => Whose::Mine,
+        }
     }
 
     pub(crate) fn identity(&self) -> &str {
@@ -324,7 +360,7 @@ impl Client {
             .header("Authorization", &self.bearer())
             .header("Range", &format!("bytes={start}-{last}"))
             .call();
-        Fetched::new(call, response, path, start, last)
+        Fetched::new(call, response, path, start, last, self.whose(path))
     }
 
     fn decode<T: DeserializeOwned>(
@@ -332,7 +368,7 @@ impl Client {
         response: Result<Response<ureq::Body>, ureq::Error>,
         what: &str,
     ) -> Result<T, HomebaseError> {
-        let mut response = checked(response, what)?;
+        let mut response = checked(response, what, self.whose(what))?;
         let encrypted = sealed(response.headers());
         let body = response
             .body_mut()
@@ -393,8 +429,9 @@ impl Fetched {
         path: &str,
         start: u64,
         last: u64,
+        whose: Whose,
     ) -> Result<Fetched, HomebaseError> {
-        let response = checked(response, path)?;
+        let response = checked(response, path, whose)?;
 
         // Anything but the range asked for (a proxy that ignored `Range`) must not reach the
         // sink: it would be written at the wrong offset.
@@ -480,7 +517,7 @@ pub(crate) fn http_json<T: DeserializeOwned>(
     response: Result<Response<ureq::Body>, ureq::Error>,
     what: &str,
 ) -> Result<T, HomebaseError> {
-    let mut response = checked(response, what)?;
+    let mut response = checked(response, what, Whose::Mine)?;
     response
         .body_mut()
         .read_json()
@@ -543,10 +580,34 @@ fn sealed(headers: &ureq::http::HeaderMap) -> bool {
     headers.get("X-SSE").is_some_and(|v| v.as_bytes() == b"1")
 }
 
+/// Whose a refusal (401, 403) is ([`Client::whose`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Whose {
+    /// This login's: [`HomebaseError::Denied`].
+    Mine,
+    /// A 403 another identity's, a 401 this login's.
+    TheirsIfForbidden,
+    /// Another identity's: an [`HomebaseError::Api`], with its code.
+    Theirs,
+}
+
+impl Whose {
+    /// Whether `status` refuses this login.
+    fn refuses_me(self, status: u16) -> bool {
+        refuses(status)
+            && match self {
+                Whose::Mine => true,
+                Whose::TheirsIfForbidden => status == 401,
+                Whose::Theirs => false,
+            }
+    }
+}
+
 /// The response if it is a success; otherwise the error it carries.
 fn checked(
     response: Result<Response<ureq::Body>, ureq::Error>,
     what: &str,
+    whose: Whose,
 ) -> Result<Response<ureq::Body>, HomebaseError> {
     let mut response = response.map_err(|e| HomebaseError::Network(format!("{what}: {e}")))?;
     let status = response.status().as_u16();
@@ -576,7 +637,7 @@ fn checked(
         .unwrap_or_default();
     let error = ApiError::read(status, &body, sender);
     Err(match status {
-        s if refuses(s) => HomebaseError::Denied(format!("{what}: {error}")),
+        s if whose.refuses_me(s) => HomebaseError::Denied(format!("{what}: {error}")),
         _ => HomebaseError::Api {
             what: what.to_owned(),
             error,
@@ -591,10 +652,12 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        ANSWER, Fetched, REUSED_WITHIN, agent_with, answer_within, connections, content_range,
+        ANSWER, Fetched, REUSED_WITHIN, Whose, agent_with, answer_within, connections,
+        content_range,
     };
     use crate::HomebaseError;
     use crate::connections::Connections;
+    use crate::peer::PeerToken;
 
     /// A keep-alive server answering every request with `body` as bytes `0..len` of a payload
     /// (its `Content-Length` is the body's): the connections it accepted, once the client is done.
@@ -644,13 +707,27 @@ mod tests {
         Ok((url, server))
     }
 
+    /// A server answering one request with `head`: its URL, and its thread.
+    fn answer_once(
+        head: &'static [u8],
+    ) -> std::io::Result<(String, std::thread::JoinHandle<std::io::Result<()>>)> {
+        let listener = TcpListener::bind("127.0.0.1:0")?;
+        let url = format!("http://{}/", listener.local_addr()?);
+        let server = std::thread::spawn(move || -> std::io::Result<()> {
+            let (mut socket, _) = listener.accept()?;
+            let _ = socket.read(&mut [0u8; 1024])?;
+            socket.write_all(head)
+        });
+        Ok((url, server))
+    }
+
     fn fetch(connections: &Connections, url: &str, len: u64) -> Result<Fetched, HomebaseError> {
         let call = connections.call();
         let response = call
             .get(url)
             .header("Range", &format!("bytes=0-{}", len - 1))
             .call();
-        Fetched::new(call, response, "payload", 0, len - 1)
+        Fetched::new(call, response, "payload", 0, len - 1, Whose::Mine)
     }
 
     /// Stops `ranges_server`: the connections it accepted.
@@ -775,13 +852,7 @@ mod tests {
             ),
         ];
         for (head, refused) in heads {
-            let listener = TcpListener::bind("127.0.0.1:0")?;
-            let url = format!("http://{}/", listener.local_addr()?);
-            let server = std::thread::spawn(move || -> std::io::Result<()> {
-                let (mut socket, _) = listener.accept()?;
-                let _ = socket.read(&mut [0u8; 1024])?;
-                socket.write_all(head)
-            });
+            let (url, server) = answer_once(head)?;
             let got = fetch(&connections(REUSED_WITHIN), &url, 10);
             server.join().map_err(|_| "server panicked")??;
             match got {
@@ -791,6 +862,54 @@ mod tests {
                 Err(HomebaseError::Denied(_)) if refused => {}
                 other => panic!("{other:?}"),
             }
+        }
+        Ok(())
+    }
+
+    /// A refusal is this login's on its own routes, the other identity's on theirs (401 and
+    /// 403) and, a 403 only, on this one's peer routes; theirs keeps its code.
+    #[test]
+    fn another_identitys_refusal_is_not_this_logins() -> Result<(), Box<dyn std::error::Error>> {
+        let creds = crate::youauth::Credentials {
+            identity: "a.example".into(),
+            client_auth_token: "Y2F0".into(),
+            shared_secret: "AAECAwQFBgcICQoLDA0ODw==".into(),
+            zk_app_key: None,
+        };
+        let own = super::Client::new(&creds)?;
+        let token: PeerToken = serde_json::from_value(serde_json::json!({
+            "authenticationToken64": "dG9rZW4=", "sharedSecret": "AAAAAAAAAAAAAAAAAAAAAA==",
+        }))?;
+        let theirs = super::Client::for_peer("sam.example", &token)?;
+        assert_eq!(own.whose("/api/v2/drives/x/files"), Whose::Mine);
+        assert_eq!(
+            own.whose("/api/v2/peer/notify/token"),
+            Whose::TheirsIfForbidden
+        );
+        assert_eq!(theirs.whose("/api/v2/drives/x/files"), Whose::Theirs);
+        // Its login: its own token's, not this identity's.
+        assert_eq!(
+            theirs.login_id(),
+            crate::youauth::login_of("AAAAAAAAAAAAAAAAAAAAAA==")
+        );
+        assert_ne!(theirs.login_id(), own.login_id());
+        let refused = |whose: Whose| [401, 403].map(|s| whose.refuses_me(s));
+        assert_eq!(refused(Whose::Mine), [true, true]);
+        assert_eq!(refused(Whose::TheirsIfForbidden), [true, false]);
+        assert_eq!(refused(Whose::Theirs), [false, false]);
+
+        // Theirs, as the identity answers it: its code kept.
+        let head: &[u8] =
+            b"HTTP/1.1 403 Forbidden\r\nx-odin-version: test\r\ncontent-type: application/json\r\n\
+              content-length: 38\r\n\r\n{\"status\":403,\"errorCode\":\"notShared\"}";
+        let (url, server) = answer_once(head)?;
+        let call = connections(REUSED_WITHIN).call();
+        let response = call.get(&url).header("Range", "bytes=0-9").call();
+        let got = Fetched::new(call, response, "payload", 0, 9, Whose::Theirs);
+        server.join().map_err(|_| "server panicked")??;
+        match got {
+            Err(HomebaseError::Api { error, .. }) => assert!(error.is("notShared"), "{error}"),
+            other => panic!("{other:?}"),
         }
         Ok(())
     }
