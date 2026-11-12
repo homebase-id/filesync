@@ -379,8 +379,9 @@ impl std::fmt::Debug for Upload<'_> {
 }
 
 /// Why the identity refused this computer ([`RemoteError::Denied`]): logging in again sets
-/// the credentials or the key right, a new token a sharer's refusal of one, the owner's
-/// approval a missing permission.
+/// the credentials or the private drive's key right, a new token a sharer's refusal of one, the
+/// owner's approval a missing permission; a drive without a write-only key ([`Refusal::NoKey`])
+/// may need more than a login.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     /// The credentials or the drive (401, 403): revoked, say.

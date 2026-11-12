@@ -588,26 +588,29 @@ impl HomebaseRemote {
     ///
     /// None sealed yet, or the connection not reviewed by them, is [`RemoteError::Later`]: they
     /// do it on their own time (a device of theirs seals it when next online). What only the
-    /// owner lifts refuses: the app's want of the permission ([`Refusal::Permission`], an
-    /// approval), a drive without a write-only key that opens ([`Refusal::NoKey`]: a drive made
-    /// before them, or a grant without the copy). A private drive without its key refuses this
-    /// computer first, as [`Self::drive_key`] does.
+    /// owner lifts refuses, in this order: a drive without a write-only key that opens
+    /// ([`Refusal::NoKey`]: a drive made before them, a grant without the copy, or a drive that
+    /// isn't private), the app's want of the permission ([`Refusal::Permission`], an approval).
+    /// A private drive without its key refuses this computer first, as [`Self::drive_key`]
+    /// does.
     pub(crate) fn circle_key(&self, sharer: &markers::Sharer, circle: Uuid) -> Result<CircleKey> {
         let (locked, permitted) =
             self.key_state(false, |s| Ok((s.write_only()?, s.reads_shared)))?;
         let no_key = || RemoteError::Denied(NO_WRITE_ONLY_KEY.into(), Refusal::NoKey);
         let not_permitted = || RemoteError::Denied(NOT_PERMITTED.into(), Refusal::Permission);
-        // No write-only key first: without one the permission wouldn't help (and costs nothing to
-        // look at). Without the permission the ask is refused: the context read again first.
-        let (key, locked) = locked.ok_or_else(no_key)?;
+        // The write-only key first: without one that opens, the permission wouldn't help (and it
+        // costs no request). Without the permission the ask is refused: the context read again
+        // first (right after a reconnect, a second read of it: one request, rarely).
+        let write_only = locked
+            .and_then(|(key, locked)| open_write_only(&key, &locked))
+            .ok_or_else(no_key)?;
         if !permitted && !self.reads_shared_now()? {
             return Err(not_permitted());
         }
-        let write_only = open_write_only(&key, &locked).ok_or_else(no_key)?;
         let answer = match SealedKey::ask(&self.client, &sharer.odin_id, circle) {
             Ok(answer) => answer,
             // A codeless 403 is theirs, or the app's want of the permission (`Client::whose`):
-            // the context, read again unless it just was, says which.
+            // the context, read again, says which.
             Err(e) if codeless_forbidden(&e) && permitted => {
                 return match self.reads_shared_now()? {
                     false => Err(not_permitted()),
