@@ -227,7 +227,11 @@ fn nodes_are_stored_encrypted() -> R {
         assert_eq!(payload.bytes_written, stored);
         let path = format!("{}/payload/sync_data/0/{stored}", remote.file(at.file_id));
         let mut fetched = remote.client().fetch(&path, 0, stored - 1)?;
-        assert!(fetched.encrypted && fetched.key_header.is_some());
+        // Without its key: written to a private drive, its key header is the client's, which the
+        // server can't open, so it sends none (**[verified]** odin-core
+        // `DriveFileUtility.GetPayloadEncryptedKeyHeader`, a client-locked file's). A file written
+        // before the drive was made private would still come with one.
+        assert!(fetched.encrypted && fetched.key_header.is_none());
         let mut raw = Vec::new();
         fetched.copy_to(&mut raw, stored)?;
         assert!(!raw.windows(64).any(|w| w == &data[..64]));

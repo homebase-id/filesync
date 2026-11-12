@@ -36,7 +36,8 @@ enum Command {
     Setup {
         /// Your identity's domain, e.g. anna.example.com.
         identity: String,
-        /// The folder to sync [default: Homebase in your home folder].
+        /// The folder to sync [default: the main folder already set up with IDENTITY, else
+        /// Homebase in your home folder].
         #[arg(long)]
         folder: Option<PathBuf>,
         /// Sync a folder that already has files in it (they are merged with the drive).
@@ -192,11 +193,11 @@ fn run(command: Command) -> Res<ExitCode> {
             no_start,
             no_autostart,
         } => {
+            let config = Config::load(&paths.config_file())?.unwrap_or_default();
             let folder = match folder {
                 Some(f) => f,
-                None => setup::default_folder()?,
+                None => setup::folder_for(&config, &identity)?,
             };
-            let config = Config::load(&paths.config_file())?.unwrap_or_default();
             let home = hbsync_app::paths::home();
             let mut request =
                 match setup::plan(&config, &identity, &folder, existing, home.as_deref()) {

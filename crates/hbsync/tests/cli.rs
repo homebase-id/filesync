@@ -21,7 +21,12 @@ impl Home {
 
     /// [`Home::set_up`] for `identity`.
     fn set_up_as(&self, identity: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
-        let folder = self.path().join("Homebase");
+        self.set_up_in(identity, "Homebase")
+    }
+
+    /// [`Home::set_up_as`] with the folder `name` in this home.
+    fn set_up_in(&self, identity: &str, name: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
+        let folder = self.path().join(name);
         std::fs::create_dir_all(&folder)?;
         // As the config keeps it: without `\\?\` on Windows.
         let folder = hbsync_platform::winpath::plain(&folder.canonicalize()?);
@@ -97,6 +102,28 @@ fn setup_refuses_a_folder_with_files_in_it() -> R {
     assert!(text(&out).contains("--existing"), "{}", text(&out));
     assert!(!home.path().join("config.toml").exists());
     assert!(!folder.join(".hbsync").exists());
+    Ok(())
+}
+
+/// Logging in again as `hbsync status` and `logout` say it, `hbsync setup <identity>`, takes
+/// the folder set up, elsewhere than the default: not refused as another folder, not made anew.
+#[test]
+fn setup_again_takes_the_folder_set_up() -> R {
+    let home = Home::new()?;
+    home.set_up_in(IDENTITY, "Elsewhere")?;
+    let out = home
+        .command(
+            env!("CARGO_BIN_EXE_hbsync"),
+            &["setup", IDENTITY, "--no-start", "--no-autostart"],
+        )
+        // The default folder in this home, not the user's.
+        .env("HOME", home.path())
+        .env("USERPROFILE", home.path())
+        .output()?;
+    let said = text(&out);
+    assert!(!said.contains("unlink it first"), "{said}");
+    assert!(said.contains("already authorized"), "{said}");
+    assert!(!home.path().join("Homebase").exists(), "{said}");
     Ok(())
 }
 

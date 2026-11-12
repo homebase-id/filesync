@@ -208,6 +208,25 @@ pub fn open_browser(
     Command::new(opener).arg(url).spawn().map(crate::reap)
 }
 
+/// The folder `setup` syncs with `identity` (as typed) when none is chosen: its main folder
+/// already set up, wherever it is (logging in again needs no `--folder`), else
+/// [`default_folder`]. One set up but gone is refused, not made again empty where a disk
+/// mounts.
+pub fn folder_for(config: &Config, identity: &str) -> crate::Result<PathBuf> {
+    let Some(root) = config.folder(&Identity::new(identity), None) else {
+        return default_folder();
+    };
+    if !root.folder.exists() {
+        return Err(format!(
+            "{} is synced with {identity} here, but it is gone: if it is on a disk, plug it in; \
+             or choose another folder with --folder",
+            root.folder.display()
+        )
+        .into());
+    }
+    Ok(root.folder.clone())
+}
+
 /// The folder synced when none is chosen: `Homebase` in the home folder.
 pub fn default_folder() -> crate::Result<PathBuf> {
     home()
@@ -824,6 +843,33 @@ mod tests {
         assert!(plan("a.example", &fresh, false, &set).is_ok());
         refused(plan("b.example", &fresh, false, &set), "unlink it first");
         refused(plan("a.example", &full, false, &set), "unlink it first");
+        Ok(())
+    }
+
+    /// Without `--folder`, the identity's main folder already set up is the one: logging in
+    /// again on a folder elsewhere than the default is set up where it is.
+    #[test]
+    fn setup_without_a_folder_takes_the_one_set_up() -> R {
+        let dir = tempfile::tempdir()?;
+        let elsewhere = canonical(dir.path())?.join("Sync");
+        std::fs::create_dir(&elsewhere)?;
+        let set = Config {
+            roots: vec![Root::main(&"a.example".into(), &elsewhere)],
+            ..Config::default()
+        };
+        assert_eq!(folder_for(&set, "A.Example")?, elsewhere);
+        assert_eq!(folder_for(&set, "b.example")?, default_folder()?);
+        assert_eq!(
+            folder_for(&Config::default(), "a.example")?,
+            default_folder()?
+        );
+        // Gone (a disk unplugged): refused, not made again.
+        std::fs::remove_dir(&elsewhere)?;
+        let gone = folder_for(&set, "a.example")
+            .expect_err("refused")
+            .to_string();
+        assert!(gone.contains("plug it in"), "{gone}");
+        assert!(!elsewhere.exists());
         Ok(())
     }
 }
