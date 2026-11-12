@@ -183,6 +183,29 @@ payload IV to the download would save it (a follow-up). What changes for this cl
   without the key does (log in again) or, for a login holding it, until the server is updated
   (signing in again can't help), retried by itself. Nothing is read or written as shared.
 
+### Files shared with you
+What others share with this identity (synced read-only into `~/Homebase/Shared/<them>`, node
+schema "Sync markers") opens with Selective Share's keys (odin-core
+`docs/selective-share-plan.md`, "Blob formats"; `drive/share_keys.rs`, checked against
+odin-core's `SelectiveShareKeyVectorTests` **[verified]**):
+- **The drive's write-only key.** A drive has a P-384 key pair, one made before write-only keys
+  may have none (odin-core `PeerDriveQueryService.GetDriveWriteOnlyPublicKeyAsync`,
+  **[verified]**); a private drive's grant carries the private half (PKCS#8) locked with the
+  drive's key (`zkStorageKeyEncryptedWriteOnlyPrivateKey`, AES-128-GCM as
+  `zkAppKeyEncryptedStorageKey`, **[verified]** odin-core `RedactedDriveGrant`, chat-kmp
+  `ZkKeyStore`), opened only while reading what is shared. Sharers seal only to a private drive
+  (chat-kmp's `FilesyncSharing`, **[verified]**). A private drive without the key (or whose copy
+  doesn't open) opens nothing shared here, and its own folders sync on.
+- **A circle's key.** The sharer seals their circle's 16-byte key to the member's drive
+  (`sealedShareKey`): `ZkSeal` with format byte 2 and the AAD `circleId ‖` the UTF-8 of the
+  member's lowercased identity, 146 bytes.
+- **A file's key.** Each share row holds the file's key under the circle's key
+  (`lockedFileKey`): `format ‖ nonce (12) ‖ ciphertext (16) ‖ tag (16)`, AES-128-GCM, AAD
+  `driveId ‖ fileId ‖ circleId` (format 2) or `driveId ‖ globalTransitId ‖ circleId` (format 3,
+  a file a member added). The file's own IV, from its key header, goes with it.
+- Every id in an AAD is a Guid's .NET byte order (the first three fields little-endian); a
+  drive's id is its alias.
+
 ## What it doesn't do
 - **Authentication of its own:** CBC has none. The content hash is the check, after
   decryption. A server could still swap in an older version of a file, with its matching hash.
