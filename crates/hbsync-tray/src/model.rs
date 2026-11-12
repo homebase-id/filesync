@@ -151,8 +151,9 @@ pub(crate) fn look(view: &View) -> Look {
 
 fn folder_look(s: &FolderStatus) -> Look {
     match s.state {
+        // Refused (paused too) first: before the arms below that would show it quiet.
+        _ if s.refused() || s.held_deletes.is_some() => Look::Attention,
         State::Failing | State::Denied => Look::Attention,
-        _ if s.held_deletes.is_some() => Look::Attention,
         State::Paused | State::Offline | State::Stopped => Look::Quiet,
         State::Starting | State::Syncing => Look::Busy,
         State::Idle if s.pending > 0 => Look::Busy,
@@ -177,8 +178,8 @@ pub(crate) fn status_line(view: &View) -> String {
     }
 }
 
-/// The notification for folders refused ([`State::Denied`]) for want of the private drive's
-/// key (`lacks_key`), or for the login: what to do, and why.
+/// The notification for folders refused ([`FolderStatus::refused`]) for want of the private
+/// drive's key (`lacks_key`), or for the login: what to do, and why.
 pub(crate) fn refused_notice(lacks_key: bool) -> String {
     format!(
         "{}. Log in again… is in the menu.",
@@ -259,7 +260,7 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
             "Set up this computer…".into(),
         ));
         // Refused, or a login from before private drives: asked before the drive is made one.
-        if s.state == State::Denied || view.daemon.login_without_key(&s.identity) {
+        if s.refused() || view.daemon.login_without_key(&s.identity) {
             items.push(Item::Action(Action::LogInAgain, "Log in again…".into()));
         }
         items.push(Item::Separator);
@@ -636,6 +637,24 @@ mod tests {
         let a = actions(&menu(&v));
         assert!(a.contains(&Action::Resume));
         assert!(!a.contains(&Action::Pause) && !a.contains(&Action::SyncNow));
+    }
+
+    /// Paused while the identity refuses this computer: the refusal shows, with Log in again,
+    /// and it can still be resumed.
+    #[test]
+    fn paused_and_refused_shows_the_refusal() {
+        let mut s = status(State::Paused);
+        s.refused_paused = true;
+        let d = running(s);
+        let v = view(&d, &[]);
+        assert_eq!(look(&v), Look::Attention);
+        assert_eq!(
+            status_line(&v),
+            "Paused · log in again to authorize this computer"
+        );
+        let a = actions(&menu(&v));
+        assert!(a.contains(&Action::LogInAgain) && a.contains(&Action::Resume));
+        assert!(!a.contains(&Action::SyncNow));
     }
 
     #[test]

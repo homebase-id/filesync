@@ -248,7 +248,9 @@ says so when it couldn't reach the keychain to remove the credentials there.
    it (the folder shows idle then: never refused at once); a pull that asked, or the
    notifications connecting, end one of the login (not one for want of the key: the login
    says nothing of it). A folder says it lacks the key only while it shows refused. While the
-   account connects, it keeps its own, until it connects.
+   account connects, it keeps its own, until it connects. A paused folder shows a refusal too
+   (`refused_paused`, with `lacks_key`), one from before the pause or since (the
+   notifications'): still `paused`, so it can be resumed, but told as refused.
 
 An account stopped by what only the user can fix ends alone; one failing otherwise stops the
 daemon (it is restarted whole).
@@ -528,9 +530,12 @@ included (service managers restart it then).
 `starting` (catching up, then the first sync, with its progress), `syncing`, `idle`, `paused`, `offline` (can't
 reach the identity), `failing` (another failure, or the folder gone), `denied` (the identity
 refused this device: log in again, `hbsync setup`; `lacks_key` when the drive is private and
-this login holds no key that opens it), `stopped`. The status line of a `denied` folder (the
-tray's, `hbsync status`'s) says what to do: "Not syncing: log in again to get your private
-drive's key" (`lacks_key`), else "Not syncing: log in again to authorize this computer". A
+this login holds no key that opens it), `stopped`. A `paused` folder the identity refuses
+meanwhile has `refused_paused`. The status line of a `denied` folder (the tray's, `hbsync
+status`'s) says what to do: "Not syncing: log in again to get your private drive's key"
+(`lacks_key`), else "Not syncing: log in again to authorize this computer"; a paused one says
+"Paused · log in again to …". The tray shows either with its warning dot, Log in again… and
+the notification (a paused one keeps Resume syncing). A
 request of Recently deleted (a restore, emptying, the purge) the identity refused says the
 same in its note.
 
