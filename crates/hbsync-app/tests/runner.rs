@@ -16,8 +16,8 @@ use hbsync_app::{Command, FolderStatus, Handle, HeldAnswer, Runner, RunnerConfig
 use hbsync_engine::Drive;
 use hbsync_engine::root::{AccountReader, RootError, SyncRoot};
 use hbsync_homebase::notify::Event;
-use hbsync_remote::ChangeRef;
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
+use hbsync_remote::{ChangeRef, Refusal};
 use hbsync_types::RemoteFileId;
 
 type R = Result<(), Box<dyn std::error::Error>>;
@@ -329,6 +329,40 @@ fn syncs_by_itself_and_pauses_and_resumes() -> R {
     wait_until("b has two.txt", || b.has("two.txt"))?;
     wait_until("three.txt is up", || on_server(&server, "three.txt"))?;
     b.stop()?;
+    Ok(())
+}
+
+/// Paused while the identity refuses this computer (before the pause or since): the status
+/// shows the refusal and its reason with the pause, so the user is told to log in again; resumed
+/// and refused again, as running.
+#[test]
+fn a_paused_folder_shows_a_refusal() -> R {
+    let server = server();
+    let mut a = Device::start(&server, "a")?;
+    wait_until("a is idle", || a.status().state == State::Idle)?;
+    let until = hbsync_types::unix_now() + 3600;
+    a.handle.send(Command::Pause(Pause::ending_at(until)));
+    wait_until("the runner took it", || {
+        a.status().paused_until == Some(until)
+    })?;
+    let paused = a.status();
+    assert!(paused.state == State::Paused && !paused.refused());
+    a.drive.deny("HTTP 401", Refusal::Credentials);
+    let refused = a.status();
+    assert_eq!(
+        (refused.state, refused.paused_until),
+        (State::Paused, Some(until))
+    );
+    assert!(refused.refused() && !refused.lacks_key);
+    assert_eq!(refused.error.as_deref(), Some("HTTP 401"), "why");
+    a.drive.deny("no key", Refusal::NoKey);
+    assert!(a.status().refused() && a.status().lacks_key, "and why");
+
+    (a.remote.faults().denied, a.remote.faults().deny_key) = (true, true);
+    a.handle.send(Command::Resume);
+    wait_until("refused again", || a.status().state == State::Denied)?;
+    assert!(a.status().lacks_key, "{:?}", a.status());
+    a.stop()?;
     Ok(())
 }
 
@@ -1347,7 +1381,7 @@ fn a_refused_computer_asks_nothing_until_the_user_acts() -> R {
 
 /// A refused folder shows the refusal and why (for want of the drive's key, or the login, as
 /// the identity last said), also through a sync that gets no answer (asked for while
-/// offline), and says it lacks the key only while it shows refused (not paused). A request in
+/// offline), and paused too (with its reason, the pause shown with it). A request in
 /// the account that goes well ends a refusal of the login (here the account's pull, which a
 /// folder's own may be covered by); a sync that goes well, either (it shows idle then).
 #[test]
@@ -1369,7 +1403,11 @@ fn a_refusal_shows_until_a_request_goes_well() -> R {
     offline(Some(true))?;
     a.handle.send(Command::Pause(Pause::UNTIL_RESUMED));
     wait_until("paused", || a.status().state == State::Paused)?;
-    assert!(!a.status().lacks_key, "not refused while paused");
+    let paused = a.status();
+    assert!(
+        paused.refused() && paused.lacks_key,
+        "refused while paused, and why"
+    );
     a.handle.send(Command::Resume);
     assert_eq!(
         a.sync_reported()?.state,

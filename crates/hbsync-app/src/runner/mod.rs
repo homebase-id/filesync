@@ -240,6 +240,8 @@ pub struct Handle {
     woken: crate::TestCount,
     /// Raised when its status may have changed.
     changed: Arc<Wakeup>,
+    /// Its account's drive: whether it refuses this computer while paused.
+    drive: Arc<Drive>,
 }
 
 impl Command {
@@ -323,9 +325,17 @@ impl Handle {
         drop(held);
         if self.stop.load(Ordering::Relaxed) && status.state != State::Stopped {
             status.state = State::Paused;
+            // Refused before or since the pause (the notifications', say): shown till a
+            // request goes well, as running.
+            if let Some(refused) = self.drive.refused() {
+                let shown = Showing::refused(refused);
+                status.refused_paused = true;
+                status.error = Some(shown.why);
+                status.lacks_key = shown.lacks_key;
+            }
         }
         // Only while it shows refused.
-        status.lacks_key &= status.state == State::Denied;
+        status.lacks_key &= status.refused();
         let progress = self.progress.get();
         if matches!(status.state, State::Starting | State::Syncing) && progress.files_total > 0 {
             status.progress = Some(progress);
@@ -445,6 +455,7 @@ impl Runner {
             #[cfg(feature = "testkit")]
             woken: woken.clone(),
             changed: cfg.changed.clone(),
+            drive: Arc::clone(&drive),
         };
         let runner = Runner {
             cfg,

@@ -611,7 +611,7 @@ fn print_folder(s: &FolderStatus) {
     }
     // The status line says to log in again, and why where it is known: here is how (as the
     // tray's Log in again does it).
-    if s.state == State::Denied {
+    if s.refused() {
         println!("  log in again: hbsync setup {}", s.identity);
     }
     if let Some(at) = s.retry_at.filter(|_| s.state != State::Offline) {

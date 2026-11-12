@@ -75,15 +75,19 @@ impl Showing {
         why: String,
         kept: Option<(String, Refusal)>,
     ) -> Showing {
-        let refused = |(why, refusal): (String, Refusal)| Showing {
+        match (refusal, kept) {
+            (Some(refusal), _) => Showing::refused((why, refusal)),
+            (None, Some(kept)) if policy(class).shown == Shown::Offline => Showing::refused(kept),
+            _ => Showing::failing(shown(class), why),
+        }
+    }
+
+    /// Refused by the identity: `why`, and whether for want of the drive's key.
+    pub(crate) fn refused((why, refusal): (String, Refusal)) -> Showing {
+        Showing {
             state: State::Denied,
             why,
             lacks_key: refusal == Refusal::NoKey,
-        };
-        match (refusal, kept) {
-            (Some(refusal), _) => refused((why, refusal)),
-            (None, Some(kept)) if policy(class).shown == Shown::Offline => refused(kept),
-            _ => Showing::failing(shown(class), why),
         }
     }
 

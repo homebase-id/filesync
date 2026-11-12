@@ -398,10 +398,14 @@ pub struct FolderStatus {
     pub progress: Option<Progress>,
     /// Why the last sync failed (states `Offline`, `Failing`, `Denied`).
     pub error: Option<String>,
-    /// Refused (`Denied`) for want of a key: the drive is private, and this login holds no key
-    /// that opens it. Logging in again gets it.
+    /// Refused ([`FolderStatus::refused`]) for want of a key: the drive is private, and this
+    /// login holds no key that opens it. Logging in again gets it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lacks_key: bool,
+    /// `Paused`, and the identity refuses this computer meanwhile ([`FolderStatus::refused`]):
+    /// shown paused, with its resume, and refused.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub refused_paused: bool,
     /// When the next attempt is after a failure (Unix seconds).
     pub retry_at: Option<u64>,
     pub last_sync: Option<LastSync>,
@@ -432,6 +436,16 @@ impl FolderStatus {
         self.kind == RootKind::Main
     }
 
+    /// Whether the identity refuses this computer (`Denied`, or `Paused` meanwhile): logging in
+    /// again is the way out.
+    pub fn refused(&self) -> bool {
+        match self.state {
+            State::Denied => true,
+            State::Paused => self.refused_paused,
+            _ => false,
+        }
+    }
+
     /// What it is, for people ([`RootKind::what`]).
     pub fn what(&self) -> String {
         self.kind.what(&self.identity)
@@ -448,6 +462,7 @@ impl FolderStatus {
             progress: None,
             error: None,
             lacks_key: false,
+            refused_paused: false,
             retry_at: None,
             last_sync: None,
             pending: 0,

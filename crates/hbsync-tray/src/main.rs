@@ -151,9 +151,9 @@ struct App {
     restart: Option<PathBuf>,
     shown: Shown,
     notified: HashMap<&'static str, Instant>,
-    /// The folders told refused ([`State::Denied`]) since they last synced, each with whether
-    /// for want of the private drive's key: told once a reason, not again as their tries come
-    /// and go ([`refused_untold`]).
+    /// The folders told refused ([`FolderStatus::refused`]) since they last synced, each with
+    /// whether for want of the private drive's key: told once a reason, not again as their
+    /// tries come and go ([`refused_untold`]).
     told_denied: HashMap<PathBuf, bool>,
     /// The folder given its icon and shortcut ([`shell`]) by this run.
     decorated: Option<PathBuf>,
@@ -309,7 +309,7 @@ impl App {
                 // before private drives, still accepted, has only the login replaced.
                 let mut page = "setup";
                 if let Some(s) = self.status() {
-                    if s.state != State::Denied && self.daemon.login_without_key(&s.identity) {
+                    if !s.refused() && self.daemon.login_without_key(&s.identity) {
                         page = "login";
                     }
                     let (identity, folder) = (s.identity.clone(), s.path.clone());
@@ -555,13 +555,11 @@ fn refused_untold<'a>(
         Daemon::Starting(_) => return Vec::new(),
     };
     let synced = |f: &FolderStatus| f.state == State::Idle && f.error.is_none();
-    let kept = |f: &FolderStatus, key: bool| {
-        !synced(f) && (f.state != State::Denied || f.lacks_key == key)
-    };
+    let kept = |f: &FolderStatus, key: bool| !synced(f) && (!f.refused() || f.lacks_key == key);
     told.retain(|path, key| now.folders.iter().any(|f| f.path == *path && kept(f, *key)));
     now.folders
         .iter()
-        .filter(|f| f.state == State::Denied && told.get(&f.path) != Some(&f.lacks_key))
+        .filter(|f| f.refused() && told.get(&f.path) != Some(&f.lacks_key))
         .collect()
 }
 
@@ -914,5 +912,16 @@ mod tests {
         assert_eq!(tell(&denied, true), 0, "kept while being started");
         assert_eq!(tell(&Daemon::Stopped, true), 0);
         assert_eq!(tell(&denied, true), 1, "syncing stopped, then started");
+
+        // Paused while refused (before the pause or since): told as refused; resumed and still
+        // refused, not told again.
+        let mut paused = one(State::Paused, Some("refused"));
+        if let Daemon::Running(s) = &mut paused {
+            s.folders[0].refused_paused = true;
+        }
+        assert_eq!(tell(&one(State::Idle, None), true), 0);
+        assert_eq!(tell(&paused, true), 1, "refused while paused");
+        assert_eq!(tell(&paused, true), 0);
+        assert_eq!(tell(&denied, true), 0, "resumed, still refused");
     }
 }

@@ -619,9 +619,10 @@ impl Waiting {
         } else {
             self.state
         };
+        folder.refused_paused = paused.is_some() && self.state == State::Denied;
         folder.paused_until = paused.and_then(|p| p.until);
         folder.error.clone_from(&self.error);
-        folder.lacks_key = folder.state == State::Denied && self.lacks_key;
+        folder.lacks_key = folder.refused() && self.lacks_key;
         folder
     }
 

@@ -293,8 +293,8 @@ pub(crate) fn progress(p: &Progress) -> String {
     )
 }
 
-/// Why a folder the identity refused ([`State::Denied`]) doesn't sync, and what to do
-/// ([`log_in_again`]). The status line's (the tray's and `hbsync status`'s) and the tray's
+/// Why a folder the identity refused (`Denied`, [`FolderStatus::refused`]) doesn't sync, and
+/// what to do ([`log_in_again`]). The status line's (the tray's and `hbsync status`'s) and the tray's
 /// notification's.
 pub fn refused(lacks_key: bool) -> String {
     format!("Not syncing: {}", log_in_again(lacks_key))
@@ -332,10 +332,18 @@ pub fn status_line(s: &FolderStatus, now: u64) -> String {
             Some(last) => format!("Up to date · synced {}", when_roughly(last.at, now)),
             None => "Up to date".into(),
         },
-        State::Paused => match s.paused_until {
-            Some(until) => format!("Paused · syncing again {}", when(until, now)),
-            None => "Paused".into(),
-        },
+        State::Paused => {
+            let paused = match s.paused_until {
+                Some(until) => format!("Paused · syncing again {}", when(until, now)),
+                None => "Paused".into(),
+            };
+            // Refused meanwhile: it won't sync once resumed either, unless logged in again.
+            if s.refused() {
+                format!("{paused} · {}", log_in_again(s.lacks_key))
+            } else {
+                paused
+            }
+        }
         State::Offline => match s.retry_at {
             Some(at) => format!("Offline · trying again {}", when(at, now)),
             None => "Offline".into(),
@@ -446,6 +454,18 @@ mod tests {
         assert_eq!(
             status_line(&s, 0),
             "Not syncing: log in again to get your private drive's key"
+        );
+        // Paused meanwhile: said so, and what to do.
+        s.state = State::Paused;
+        s.refused_paused = true;
+        assert_eq!(
+            status_line(&s, 0),
+            "Paused · log in again to get your private drive's key"
+        );
+        s.paused_until = Some(3 * 3600);
+        assert_eq!(
+            status_line(&s, 0),
+            "Paused · syncing again in 3 h · log in again to get your private drive's key"
         );
         s.state = State::Failing;
         assert_eq!(status_line(&s, 0), "Problem: syncing failed");
