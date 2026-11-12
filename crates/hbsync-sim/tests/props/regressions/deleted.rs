@@ -2469,26 +2469,122 @@ fn regression_a_delete_in_a_held_folder_that_moves_stays_held() {
     }
 }
 
+/// A Put back that comes while a delete here is in flight waits for it (the runner takes an
+/// answer after the sync in progress, as `regression_a_put_back_waits_for_the_delete_in_flight`
+/// had it before #359 held that delete with what it took along): client 1 deletes three files
+/// here, held (limit two), while client 0 deletes folder `a`, followed on client 1 unasked. Put
+/// back comes with `a` aside: the delete runs to its end first, checked against its bases, and
+/// the files put back come back.
+#[test]
+fn regression_a_put_back_waits_for_a_delete_here_in_flight() {
+    put_back_with_a_delete_here_in_flight(Sim::new(2));
+}
+
+/// The same planned in pages of 4: the sweep in progress runs to its end first.
+#[test]
+fn regression_a_put_back_waits_for_the_paged_sweep_in_progress() {
+    put_back_with_a_delete_here_in_flight(Sim::new(2).with_small_pages(4));
+}
+
+fn put_back_with_a_delete_here_in_flight(mut sim: Sim) {
+    use Action::{CreateFile, CreateFolder, Delete};
+    let act = |client, action| Event::Act { client, action };
+    sim.guard = Some(2);
+    let top = sim.pick(0, NodeId::ROOT, true).expect("the top");
+    sim.run(&[act(
+        0,
+        CreateFolder {
+            parent: top,
+            name: 0,
+        },
+    )]);
+    let a = sim.item(0, "a").expect("a");
+    let in_a = sim.pick(0, a, true).expect("a as a parent");
+    sim.run(&[act(
+        0,
+        CreateFile {
+            parent: in_a,
+            name: 1,
+        },
+    )]);
+    let top = sim.pick(0, NodeId::ROOT, true).expect("the top");
+    for name in [1, 3, 6] {
+        sim.run(&[act(0, CreateFile { parent: top, name })]);
+    }
+    assert!(sim.quiesce(30), "no convergence");
+    let long = format!("{}.txt", "L".repeat(251));
+    let files = ["b", "c.txt", long.as_str()];
+    for path in files {
+        let node = sim.item(1, path).expect(path);
+        let pick = sim.pick(1, node, false).expect(path);
+        sim.run(&[act(1, Delete { node: pick })]);
+    }
+    let pick = sim.pick(0, a, false).expect("a");
+    sim.run(&[act(0, Delete { node: pick }), Event::Plan { client: 0 }]);
+    while !sim.planned(0).is_empty() {
+        sim.run(&[Event::Step { client: 0 }]);
+    }
+    sim.run(&[Event::Plan { client: 1 }, Event::Step { client: 1 }]);
+    assert_eq!(sim.planned(1), ["LocalDelete"], "a aside");
+    let held = sim.held(1).to_vec();
+    assert!(
+        !held.is_empty(),
+        "the files' removals held (so far, in pages)"
+    );
+    sim.run(&[Event::PutBack { client: 1 }]);
+    assert!(sim.planned(1).is_empty(), "the sync ran to its end first");
+    // What a later page held since stays held (one answer, for what it named); under the
+    // limit once two came back, the third's removal goes through.
+    assert!(sim.held(1).iter().all(|n| !held.contains(n)), "answered");
+    assert!(sim.quiesce(30), "no convergence");
+    for node in held {
+        assert!(
+            sim.pick(1, node, false).is_some(),
+            "{node:?} back: {:?}",
+            sim.local_paths(1)
+        );
+    }
+    assert!(sim.item(1, "a").is_none(), "{:?}", sim.local_paths(1));
+    if let Err(e) = sim.check() {
+        panic!("{e}");
+    }
+}
+
 /// Seed `dac2c5d2` (`clients_converge_when_asked_only`): another device removes a folder (its
 /// files left live, taken along) right after a rename of it lands. A client that synced it
-/// plans its delete here (a removal elsewhere) and holds the removal of the taken-along files
+/// plans its delete here (a removal elsewhere) and the removal of the taken-along files, held
 /// (every synced file, by its own count). Its delete was aside when the user put back the
 /// held removals: the put back forgot the files' bases, and the old plan's next step unlinked
-/// them unchecked. The runner takes the answer after the sync in progress: the delete is
-/// unlinked first, checked against the bases it was planned with. Nothing was lost (the files
-/// wait on the drive).
+/// them unchecked (the runner now takes the answer after the sync in progress). Since #359 the
+/// folder's delete is held with them: nothing is in flight, and Put them back restores the
+/// folder on the drive, kept here with its files.
 #[test]
-fn regression_a_put_back_waits_for_the_delete_in_flight() {
-    put_back_after_the_delete_in_flight(Sim::new(3), |sim| sim.quiesce_announced(300));
+fn regression_a_folder_held_with_what_it_took_along_is_put_back() {
+    held_with_what_it_took_along(Sim::new(3), |sim| sim.quiesce_announced(300), false);
 }
 
-/// The same planned in pages of 4: the sync in progress runs the rest of its sweep first.
+/// The same planned in pages of 4.
 #[test]
-fn regression_a_put_back_waits_for_the_paged_sync_in_progress() {
-    put_back_after_the_delete_in_flight(Sim::new(3).with_small_pages(4), |sim| sim.quiesce(30));
+fn regression_a_folder_held_with_what_it_took_along_is_put_back_in_pages() {
+    held_with_what_it_took_along(
+        Sim::new(3).with_small_pages(4),
+        |sim| sim.quiesce(30),
+        false,
+    );
 }
 
-fn put_back_after_the_delete_in_flight(mut sim: Sim, settle: fn(&mut Sim) -> bool) {
+/// The same answered Delete: the folder goes here, and what it took along from the drive,
+/// before the folder's delete here; nothing is held again as deleted on this computer.
+#[test]
+fn regression_a_folder_held_with_what_it_took_along_goes_on_delete() {
+    for sim in [Sim::new(3), Sim::new(3).with_small_pages(4)] {
+        held_with_what_it_took_along(sim, |sim| sim.quiesce(30), true);
+    }
+}
+
+/// The scenario of [`regression_a_folder_held_with_what_it_took_along_is_put_back`], answered
+/// `delete` (or put back).
+fn held_with_what_it_took_along(mut sim: Sim, settle: fn(&mut Sim) -> bool, delete: bool) {
     use hbsync_sim::Action::{CreateFile, CreateFolder, Edit, Meanwhile};
     let act = |client, action| Event::Act { client, action };
     let (plan, step) = (
@@ -2534,19 +2630,40 @@ fn put_back_after_the_delete_in_flight(mut sim: Sim, settle: fn(&mut Sim) -> boo
         plan(2),
         step(2),
     ]);
-    // The folder's delete is aside, its taken-along files' removal held.
-    assert_eq!(sim.planned(2), ["LocalDelete"]);
-    assert_eq!(sim.held(2).len(), 2, "both files' removals held");
-    sim.run(&[Event::PutBack { client: 2 }]);
-    assert!(sim.planned(2).is_empty(), "the sync ran to its end first");
-    assert!(sim.held(2).is_empty(), "nothing held since");
-    assert!(
-        sim.local_paths(2).is_empty(),
-        "the folder went: {:?}",
-        sim.local_paths(2)
+    // The folder's delete is held with its taken-along files' removal (#359): nothing in
+    // flight.
+    assert!(sim.planned(2).is_empty(), "{:?}", sim.planned(2));
+    assert_eq!(
+        sim.held(2).len(),
+        3,
+        "the folder's delete and both files' removals held"
     );
-    // Unlinked against their bases: the check finds nothing deleted unchecked.
+    let here = sim.local_paths(2);
+    match delete {
+        true => sim.run(&[Event::Confirm { client: 2 }]),
+        false => {
+            sim.run(&[Event::PutBack { client: 2 }]);
+            assert!(sim.held(2).is_empty(), "nothing held since");
+            assert_eq!(sim.local_paths(2), here, "the folder stays, with its files");
+        }
+    }
     assert!(settle(&mut sim), "no convergence");
+    assert!(
+        sim.held(2).is_empty(),
+        "nothing held again: {:?}",
+        sim.held(2)
+    );
+    if delete {
+        // What was in the folder went with it (a file of another device takes its name).
+        let after = sim.local_paths(2);
+        assert!(
+            here.iter()
+                .filter(|p| p.contains('/'))
+                .all(|p| !after.contains(p)),
+            "{after:?}"
+        );
+    }
+    // The check finds nothing deleted unchecked.
     if let Err(e) = sim.check() {
         panic!("{e}");
     }

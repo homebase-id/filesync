@@ -404,6 +404,12 @@ impl Engine {
         self.held.confirm(nodes);
     }
 
+    /// The nodes whose removal elsewhere is held as a removal of every synced file, till
+    /// answered (sync semantics §7): among [`SyncReport::held`], the deletes here held so.
+    pub fn held_wipes(&self) -> &std::collections::HashSet<NodeId> {
+        self.held.wiped()
+    }
+
     /// Puts back the held removals of `nodes` the user was shown (sync semantics §7, "Put them
     /// back"), as the drive has them now (read first: what it removed or changed since wins):
     /// - deleted here, live on the drive: its base goes, with what below it is gone here too,
@@ -754,10 +760,16 @@ impl Engine {
                 opts.piece = own == Some(true);
                 match self.plan_and_execute(&dirty, &opts, &mut hold_out, report)? {
                     Some(page) => {
-                        // A node planned again counts as its last plan says.
-                        let planned: std::collections::HashSet<NodeId> =
-                            dirty.iter().map(|m| m.node).collect();
-                        held.retain(|op| !planned.contains(&op.node()));
+                        // A node planned again counts as its last plan says (also what a
+                        // folder's removal took along, held with it outside the page).
+                        if !held.is_empty() {
+                            let planned: std::collections::HashSet<NodeId> = dirty
+                                .iter()
+                                .map(|m| m.node)
+                                .chain(page.iter().map(Op::node))
+                                .collect();
+                            crate::held::drop_replaced(&mut held, |op| op, &planned);
+                        }
                         held.extend(page);
                     }
                     None => return Ok(None),

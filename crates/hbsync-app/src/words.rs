@@ -246,12 +246,27 @@ pub fn held_deletes(held: &HeldDeletes, delete: &str, put_back: &str) -> Vec<Str
             items(held.here)
         ));
     }
-    if held.remotely > 0 {
+    let wiped = held.remotely.saturating_sub(held.unfinished);
+    if wiped > 0 {
         out.push(format!(
             "Everything here was removed on another device: {}. {delete} removes them \
              here too. {put_back} keeps them here and restores them on Homebase, for every \
              device.",
-            items(held.remotely)
+            items(wiped)
+        ));
+    }
+    if held.unfinished > 0 {
+        let (were, them) = if held.unfinished == 1 {
+            ("was", "it")
+        } else {
+            ("were", "them")
+        };
+        out.push(format!(
+            "{} {were} removed on another device, and removing {them} from Homebase didn't \
+             finish. {delete} finishes that and removes {them} here too: Recently deleted keeps \
+             {them}. {put_back} keeps {them} here and restores {them} on Homebase, for every \
+             device.",
+            items(held.unfinished)
         ));
     }
     out
@@ -391,6 +406,7 @@ mod tests {
         let held = HeldDeletes {
             here: 812,
             remotely: 0,
+            unfinished: 0,
             examples: Vec::new(),
             token: "t".into(),
         };
@@ -413,7 +429,30 @@ mod tests {
               device."
             ]
         );
-        assert!(tray.iter().chain(&cli).all(|p| !p.contains('?')));
+        let unfinished = HeldDeletes {
+            here: 0,
+            remotely: 3,
+            unfinished: 1,
+            ..elsewhere.clone()
+        };
+        let both = held_deletes(&unfinished, "Delete", "Put them back");
+        assert_eq!(
+            both,
+            [
+                "Everything here was removed on another device: 2 items. Delete removes them \
+              here too. Put them back keeps them here and restores them on Homebase, for every \
+              device.",
+                "1 item was removed on another device, and removing it from Homebase didn't \
+              finish. Delete finishes that and removes it here too: Recently deleted keeps it. \
+              Put them back keeps it here and restores it on Homebase, for every device."
+            ]
+        );
+        assert!(
+            tray.iter()
+                .chain(&cli)
+                .chain(&both)
+                .all(|p| !p.contains('?'))
+        );
 
         assert_eq!(
             held_answered(HeldAnswer::Delete, false),

@@ -1179,8 +1179,7 @@ fn wanted_files_are_not_counted_as_deletes() -> R {
 /// Another app removed folder `d` alone, its files left live on the drive (taken along, §6.3),
 /// while the user deleted a file here: this device removes all three from the drive, over the
 /// limit of two. Planned a node a page, they are weighed together as one plan of all would
-/// weigh them, held, and still held at the next sync (when the local delete of `d` took the
-/// bases of its files, held for the drive).
+/// weigh them, held, and still held at the next sync, with the delete of `d` here.
 #[test]
 fn what_a_removal_took_along_counts_with_deletes_here_over_pages() -> R {
     let server = server();
@@ -1209,6 +1208,9 @@ fn what_a_removal_took_along_counts_with_deletes_here_over_pages() -> R {
             live()?.iter().any(|n| n == name),
             "{name} still held: {report:?}"
         );
+    }
+    for name in ["d/t0.txt", "d/t1.txt"] {
+        assert!(a.root.join(name).exists(), "{name} here: {report:?}");
     }
     Ok(())
 }
@@ -1326,6 +1328,212 @@ fn a_wipe_stays_held_through_the_rounds_of_a_sync() -> R {
         "e2/g.txt = g2",
     ] {
         assert!(tree.iter().any(|l| l == kept), "{kept}: {tree:?}");
+    }
+    Ok(())
+}
+
+/// The files of folder `d` in [`d_removed_alone`].
+const D_FILES: [&str; 3] = ["d/f0.txt", "d/f1.txt", "d/f2.txt"];
+
+/// Client `a` (configured by `tweak`) synced folder `d` with [`D_FILES`] and `x.txt`, `y.txt`
+/// beside it; then another app removed `d` alone, its files left live on the drive (taken
+/// along, §6.3), and `a` read the feed.
+fn d_removed_alone(
+    server: &Arc<Mutex<hbsync_remote::fake::FakeServer>>,
+    tweak: impl Fn(&mut hbsync_engine::EngineConfig) + 'static,
+) -> Result<Client, Box<dyn std::error::Error>> {
+    let mut a = Client::with_config(server, "a", tweak)?;
+    for name in D_FILES.iter().chain(&["x.txt", "y.txt"]) {
+        a.write(name, name)?;
+    }
+    a.sync()?;
+    remove_on_drive(server, &|name| name == "d")?;
+    a.engine.drive().pull(None)?;
+    Ok(a)
+}
+
+/// The issue's case (#359): another app removed folder `d` alone, its three files left live
+/// on the drive (taken along, §6.3), two files beside it, the limit two. The removals of the
+/// three from the drive trip the guard, and the delete of `d` here is held with them: nothing
+/// goes here or there, the next sync holds them still, the folder's delete counted as one
+/// removal elsewhere. Put them back brings `d` back on the drive with its files, here and for
+/// every device. In pages as in one.
+#[test]
+fn a_removal_elsewhere_is_held_with_what_it_took_along_and_put_back() -> R {
+    for batch in [1, 2, 20_000] {
+        let server = server();
+        let mut a = d_removed_alone(&server, move |cfg| {
+            cfg.guard.min = 2;
+            cfg.batch = batch;
+        })?;
+        let d = node_named(&server, "d");
+        let mut held = Vec::new();
+        for sync in ["first", "next"] {
+            let report = a.sync()?;
+            held = report.held.iter().map(|op| op.node()).collect();
+            assert!(
+                report.held.iter().any(
+                    |op| matches!(op, hbsync_engine::Op::LocalDelete { node, .. } if *node == d)
+                ),
+                "pages of {batch}, {sync}: d held with its files: {:?}",
+                report.held
+            );
+            for name in D_FILES {
+                assert!(a.root.join(name).exists(), "pages of {batch}: {name} here");
+            }
+            let live = server.lock().map_err(|_| "poisoned")?.live_names();
+            assert_eq!(
+                live.iter().filter(|n| n.starts_with('f')).count(),
+                3,
+                "pages of {batch}, {sync}: none removed from the drive: {live:?}"
+            );
+        }
+        assert!(a.engine.put_back(&held)? > 0, "pages of {batch}: {held:?}");
+        let report = a.sync()?;
+        assert!(report.held.is_empty(), "pages of {batch}: {report:?}");
+        let mut b = Client::new(&server, "b")?;
+        b.sync()?;
+        for c in [&a, &b] {
+            for name in D_FILES {
+                assert_eq!(c.read_text(name)?, name, "pages of {batch}: back");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// As [`a_removal_elsewhere_is_held_with_what_it_took_along_and_put_back`], answered Delete:
+/// `d` goes here, and what it took along from the drive, in pages as in one.
+#[test]
+fn a_removal_elsewhere_held_with_what_it_took_along_goes_on_delete() -> R {
+    for batch in [1, 2, 20_000] {
+        let server = server();
+        let mut a = d_removed_alone(&server, move |cfg| {
+            cfg.guard.min = 2;
+            cfg.batch = batch;
+        })?;
+        let report = a.sync()?;
+        assert!(!report.held.is_empty(), "pages of {batch}: {report:?}");
+        a.engine
+            .confirm_deletes(report.held.iter().map(|op| op.node()));
+        let report = a.sync()?;
+        assert!(report.held.is_empty(), "pages of {batch}: {report:?}");
+        assert_eq!(a.tree_text(""), ["x.txt = x.txt", "y.txt = y.txt"]);
+        let live = server.lock().map_err(|_| "poisoned")?.live_names();
+        assert_eq!(live, ["x.txt", "y.txt"], "pages of {batch}");
+    }
+    Ok(())
+}
+
+/// Another app removed folder `d` alone, its three files taken along (§6.3), two files beside
+/// it, under the guard's limit: followed unasked. The run is cut between the removals from the
+/// drive of what `d` took along and its delete here (a removal that fails for now, a crash
+/// in the delete here, one after it): the delete here waits for the removals, so what is left
+/// is a removal elsewhere done on the drive, followed as any. Never held as deleted on this
+/// computer, nothing left on the drive.
+#[test]
+fn a_removal_elsewhere_cut_before_its_delete_here_is_followed_after() -> R {
+    for cut in [
+        None,
+        Some(CrashPoint::AfterAside),
+        Some(CrashPoint::AfterUnlink),
+    ] {
+        let server = server();
+        let mut a = d_removed_alone(&server, move |cfg| cfg.exec.hooks.crash_at = cut)?;
+        a.engine.scan_local()?;
+        let live = || Ok::<_, &str>(server.lock().map_err(|_| "poisoned")?.live_names());
+        match cut {
+            None => {
+                a.remote.faults().fail_writes_named = Some("f0.txt".into());
+                let report = a.engine.sync("2026-10-08", true)?;
+                assert!(report.held.is_empty(), "{report:?}");
+                assert!(
+                    a.root.join("d/f0.txt").exists(),
+                    "d waits for f0's removal: {report:?}"
+                );
+                a.remote.faults().fail_writes_named = None;
+            }
+            Some(_) => {
+                assert!(
+                    a.engine.sync("2026-10-08", true).is_err(),
+                    "{cut:?}: the crash point"
+                );
+                let remote = Box::new(a.remote.clone());
+                a.restart_with(remote, |cfg| cfg.exec.hooks.crash_at = None)?;
+            }
+        }
+        let report = a.sync()?;
+        assert!(report.held.is_empty(), "{cut:?}: not held: {report:?}");
+        assert_eq!(live()?, ["x.txt", "y.txt"], "{cut:?}: {report:?}");
+        assert_eq!(a.tree_text(""), ["x.txt = x.txt", "y.txt = y.txt"]);
+    }
+    Ok(())
+}
+
+/// Another app removed folder `d` alone, its files taken along (§6.3), under the guard's
+/// limit. Their removals from the drive land first; then an app saves into `d` while it is
+/// being deleted here: that delete goes stale, and `d` stays for the file saved. What `d`
+/// took along is removed by then, as the removal elsewhere meant: it goes here too (the
+/// removal followed), kept in Recently deleted with `d`'s item; nothing else is lost (the
+/// trade-off of removing it first, sync semantics §7).
+#[test]
+fn a_folder_kept_by_a_save_during_its_delete_keeps_only_whats_new() -> R {
+    use hbsync_engine::exec::Aside;
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| {
+        cfg.exec.hooks.aside = Some(Aside(Arc::new(|at| {
+            if at.is_dir() {
+                let _ = fs::write(at.join("saved.txt"), "saved");
+            }
+        })));
+    })?;
+    for name in ["d/f.txt", "x.txt", "y.txt"] {
+        a.write(name, name)?;
+    }
+    a.sync()?;
+    remove_on_drive(&server, &|name| name == "d")?;
+    a.engine.drive().pull(None)?;
+    for _ in 0..3 {
+        let report = a.sync()?;
+        assert!(report.held.is_empty(), "{report:?}");
+    }
+    assert_eq!(a.read_text("d/saved.txt")?, "saved");
+    assert!(!a.root.join("d/f.txt").exists(), "{:?}", a.tree_text(""));
+    let deleted = a.recently_deleted(20)?;
+    assert!(
+        deleted.iter().any(|i| i.path == "d/f.txt"),
+        "in Recently deleted: {deleted:#?}"
+    );
+    Ok(())
+}
+
+/// Another app removed `d` alone, while the user deleted `d` here too, with its three files:
+/// their removals from the drive are this device's own (§7), over the limit of two, held. Put
+/// them back restores `d` on the drive, which took them along: they come back here with it,
+/// and nothing is held again.
+#[test]
+fn put_back_of_what_a_removal_took_along_brings_it_back() -> R {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.min = 2)?;
+    for name in [
+        "d/t0.txt", "d/t1.txt", "d/t2.txt", "k0.txt", "k1.txt", "k2.txt", "k3.txt",
+    ] {
+        a.write(name, name)?;
+    }
+    a.sync()?;
+    fs::remove_dir_all(a.root.join("d"))?;
+    remove_on_drive(&server, &|name| name == "d")?;
+    a.engine.drive().pull(None)?;
+    let report = a.sync()?;
+    assert!(!report.held.is_empty(), "{report:?}");
+    let held: Vec<NodeId> = report.held.iter().map(|op| op.node()).collect();
+    assert!(a.engine.put_back(&held)? > 0);
+    for _ in 0..2 {
+        let report = a.sync()?;
+        assert!(report.held.is_empty(), "{report:?}");
+    }
+    for name in ["d/t0.txt", "d/t1.txt", "d/t2.txt"] {
+        assert_eq!(a.read_text(name)?, name, "{:?}", a.tree_text(""));
     }
     Ok(())
 }

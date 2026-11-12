@@ -106,6 +106,14 @@ pub fn take_refused<E>(
     if out.is_empty() {
         return Ok((kept, out));
     }
+    // A folder's delete here and the removals of what its removal took along wait together.
+    blocked.along = crate::held::along(kept.iter().chain(&out));
+    let folders: Vec<NodeId> = out
+        .iter()
+        .filter(|op| matches!(op, Op::RemoteDelete { .. }))
+        .filter_map(|op| blocked.along.get(&op.node()).copied())
+        .collect();
+    blocked.removals_in.extend(folders);
     // What waits for a blocked operation, and what waits for that, in any order.
     loop {
         let (waiting, rest): (Vec<Op>, Vec<Op>) = std::mem::take(&mut kept)
@@ -138,6 +146,14 @@ struct Blocked {
     removals: HashSet<NodeId>,
     places: HashSet<(NodeId, String)>,
     folders: HashSet<NodeId>,
+    /// The folders whose delete here is blocked.
+    deletes_here: HashSet<NodeId>,
+    /// The deletes here a blocked removal holds back: its folder's, if its removal took it
+    /// along, and its own.
+    removals_in: HashSet<NodeId>,
+    /// The removals of what a folder's removal took along, each with that folder
+    /// ([`crate::held::along`]).
+    along: HashMap<NodeId, NodeId>,
     case_insensitive: bool,
 }
 
@@ -149,7 +165,12 @@ impl Blocked {
     ) -> Result<(), E> {
         match op {
             Op::RemoteCreate { node, .. } => drop(self.creates.insert(*node)),
-            Op::RemoteDelete { node, .. } => drop(self.removals.insert(*node)),
+            Op::RemoteDelete { node, .. } => {
+                self.removals.insert(*node);
+                self.removals_in.insert(*node);
+                self.removals_in.extend(self.along.get(node));
+            }
+            Op::LocalDelete { node, .. } => drop(self.deletes_here.insert(*node)),
             _ => {}
         }
         let at = place(op.node())?;
@@ -188,7 +209,17 @@ impl Blocked {
         // would have taken out.
         let empties = matches!(op, Op::LocalDelete { node, .. } | Op::Forget { node, .. }
             if self.folders.contains(node));
-        waits_for_folder || empties || goes_to.is_some_and(|p| self.places.contains(&p))
+        // Nor while the removal from the drive of what it takes is blocked (what its removal
+        // elsewhere took along, §7): one removal, done together.
+        let along = match op {
+            Op::LocalDelete { node, .. } => self.removals_in.contains(node),
+            Op::RemoteDelete { node, .. } => self
+                .along
+                .get(node)
+                .is_some_and(|f| self.deletes_here.contains(f)),
+            _ => false,
+        };
+        waits_for_folder || empties || along || goes_to.is_some_and(|p| self.places.contains(&p))
     }
 }
 

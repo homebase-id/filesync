@@ -1173,7 +1173,8 @@ impl Runner {
     ) -> Result<(), StateError> {
         let notes = self.notes_of(engine, report)?;
         let notes = self.told.fresh(notes);
-        let token = report::held_token(&report.held);
+        let shown = report::shown(&report.held, engine.held_wipes());
+        let token = report::held_token(shown.ops.iter().copied());
         // Before the status shows the new token, so no answer can name it before it is held;
         // the status is set under this lock too ([`Handle::status`] reads them so).
         // An answer taken during this sync stays for the next: it names what the user saw.
@@ -1182,7 +1183,7 @@ impl Runner {
         kept.shown = if kept.answer.is_some() && kept.token == token {
             None
         } else {
-            report::held(engine, report, &token)?
+            report::held(engine, &shown, &token)?
         };
         kept.nodes = report.held.iter().map(|op| op.node()).collect();
         kept.token = token;
@@ -1193,9 +1194,10 @@ impl Runner {
         }
         if let Some(h) = &kept.shown {
             tracing::warn!(
-                "deletions to review: {} here, {} remotely",
+                "deletions to review: {} here, {} remotely ({} not finished on the drive)",
                 h.here,
-                h.remotely
+                h.remotely,
+                h.unfinished
             );
         }
         self.set(|s| report::record(s, report, notes, took, unix_now()));

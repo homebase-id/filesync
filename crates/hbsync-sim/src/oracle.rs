@@ -1050,10 +1050,73 @@ impl Ledger {
                     base.contains(*f) && gone && waiting.contains(f)
                 })
                 .collect();
-            let unconfirmed = |p: &&Planned<'_>| {
-                !confirmed.contains(&p.node)
-                    && !base.ancestors(p.node).iter().any(|a| waits.contains(a))
+            // A removal of what a folder's removal took along is answered by that folder's
+            // answer (§7).
+            let mut along: HashMap<NodeId, NodeId> = HashMap::new();
+            if !confirmed.is_empty() {
+                let removals: HashSet<NodeId> = seen
+                    .ops
+                    .iter()
+                    .filter(|p| matches!(p.what, What::RemoteDelete))
+                    .map(|p| p.node)
+                    .collect();
+                for p in seen.ops {
+                    if let What::LocalDelete { subtree } = &p.what {
+                        along.extend(
+                            subtree
+                                .iter()
+                                .filter(|n| **n != p.node && removals.contains(n))
+                                .map(|n| (*n, p.node)),
+                        );
+                    }
+                }
+            }
+            let confirmed_node = |n: NodeId| {
+                confirmed.contains(&n) || base.ancestors(n).iter().any(|a| waits.contains(a))
             };
+            let unconfirmed = |p: &&Planned<'_>| {
+                !confirmed_node(p.node) && !along.get(&p.node).is_some_and(|f| confirmed_node(*f))
+            };
+            let held_removals: HashSet<NodeId> = seen
+                .held
+                .iter()
+                .filter(|p| matches!(p.what, What::RemoteDelete))
+                .map(|p| p.node)
+                .collect();
+            if !seen.held.is_empty() {
+                // A folder isn't deleted here while the removal from the drive of what its
+                // removal took along is held (#359): one removal, held as one.
+                if let Some(p) = seen.ops.iter().find(|p| {
+                    matches!(&p.what, What::LocalDelete { subtree }
+                        if subtree.iter().any(|n| held_removals.contains(n)))
+                }) {
+                    return Some(format!(
+                        "{} deletes {:?} here while the removal of what it took along is held: {:?}",
+                        seen.client, p.op, seen.all_held
+                    ));
+                }
+                // Nor is what a held delete here takes removed from the drive meanwhile.
+                let held_here: HashSet<NodeId> = seen
+                    .held
+                    .iter()
+                    .filter_map(|p| match &p.what {
+                        What::LocalDelete { subtree } => Some(subtree.iter().copied()),
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect();
+                if let Some(p) = seen
+                    .ops
+                    .iter()
+                    .find(|p| matches!(p.what, What::RemoteDelete) && held_here.contains(&p.node))
+                {
+                    return Some(format!(
+                        "{} removes {:?} from the drive while the delete here that takes it is held: \
+                         {:?}",
+                        seen.client, p.op, seen.all_held
+                    ));
+                }
+            }
             for p in seen.ops.iter().filter(unconfirmed) {
                 match p.what {
                     What::RemoteDelete
@@ -1072,13 +1135,18 @@ impl Ledger {
             let was_wiped = |n: NodeId| {
                 wiped.contains(&n) || base.ancestors(n).iter().any(|a| wiped.contains(a))
             };
+            // A folder's delete here held with the removals of what in it its removal took
+            // along is held with them (§7).
             let held_deleted_here: usize = seen
                 .held
                 .iter()
                 .map(|p| match &p.what {
                     // Nor a delete taking along what was held so (held with it, §7).
                     What::LocalDelete { subtree }
-                        if !was_wiped(p.node) && !subtree.iter().any(|n| wiped.contains(n)) =>
+                        if !was_wiped(p.node)
+                            && !subtree
+                                .iter()
+                                .any(|n| wiped.contains(n) || held_removals.contains(n)) =>
                     {
                         files_in(p.node)
                     }

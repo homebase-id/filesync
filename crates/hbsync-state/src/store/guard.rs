@@ -15,6 +15,16 @@ const GONE_REMOTELY: &str = "b.kind = 0 AND NOT EXISTS (SELECT 1 FROM remote m W
 const MARKED: &str = "(EXISTS (SELECT 1 FROM dirty md WHERE md.folder = $F AND md.id = d.id) \
     OR EXISTS (SELECT 1 FROM held_deletes mh WHERE mh.folder = $F AND mh.id = d.id))";
 
+/// A file `d` taken along (with base `b`, if synced) that this device removes from the drive,
+/// finishing the removal ([`ReadTx::taken_files`]): one synced (but one marked and gone
+/// locally, counted already), or one not synced but marked here.
+fn removes_taken() -> String {
+    format!(
+        "CASE WHEN b.id IS NULL THEN {MARKED} \
+         ELSE b.kind = 0 AND NOT ({MARKED} AND coalesce({GONE_LOCALLY}, 0)) END"
+    )
+}
+
 /// Live node `m` was written by the time of removal `r` (`along::taken_along`): its time or the
 /// removal's not known yet (this device's own write, an open removal) counts as written before.
 const WRITTEN_BY_REMOVAL: &str =
@@ -76,11 +86,10 @@ impl ReadTx<'_> {
         static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             format!(
                 "WITH RECURSIVE {} \
-                 SELECT coalesce(sum(d.kind = 0 AND CASE WHEN b.id IS NULL THEN {MARKED} \
-                     ELSE b.kind = 0 AND NOT ({MARKED} AND coalesce({GONE_LOCALLY}, 0)) END), 0), \
-                   coalesce(sum(b.kind = 0), 0) \
+                 SELECT coalesce(sum(d.kind = 0 AND {}), 0), coalesce(sum(b.kind = 0), 0) \
                  FROM taken d LEFT JOIN base b ON b.folder = $F AND b.id = d.id",
-                taken_along("EXISTS (SELECT 1 FROM dirty WHERE folder = $F)")
+                taken_along("EXISTS (SELECT 1 FROM dirty WHERE folder = $F)"),
+                removes_taken()
             )
         });
         self.count2(&SQL)
@@ -106,14 +115,20 @@ impl ReadTx<'_> {
     }
 
     /// What a confirmed delete of dirty `node` covers of the
-    /// [`pending_file_deletes`](Self::pending_file_deletes): whether `node` is a file gone
-    /// locally, or one a folder's removal took along that this device removes from the drive
-    /// (either deleted remotely, one node at a time; dirty, so marked: [`ReadTx::taken_files`]),
+    /// [`pending_file_deletes`](Self::pending_file_deletes): gone here, `node` if it is a file
+    /// gone locally, or one a folder's removal took along that this device removes from the
+    /// drive (either deleted remotely, one node at a time; dirty, so marked:
+    /// [`ReadTx::taken_files`]), and the files in its local subtree its removal took along that
+    /// this device removes from the drive with its delete here (as `taken_files` counts them,
+    /// sync semantics §7);
     /// and the files gone remotely in its local subtree (a delete takes everything below
     /// it with it): the dirty ones gone from the drive, and the synced ones a folder's removal
     /// took along, still live there, whether that folder is in `node` or above it (as
     /// `taken_files` counts them). `None` when `node` isn't dirty.
-    pub fn confirmed_file_deletes(&self, node: NodeId) -> Result<Option<(bool, Vec<NodeId>)>> {
+    pub fn confirmed_file_deletes(
+        &self,
+        node: NodeId,
+    ) -> Result<Option<(Vec<NodeId>, Vec<NodeId>)>> {
         static SQL: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
             format!(
                 "WITH RECURSIVE top(id) AS (SELECT {ID_OF}), \
@@ -123,8 +138,10 @@ impl ReadTx<'_> {
                  up(id) AS (SELECT m.parent FROM remote m WHERE m.id = (SELECT id FROM top) \
                    UNION SELECT m.parent FROM remote m JOIN up ON m.id = up.id), {} \
                  SELECT n.uuid, k.id IS NOT NULL AND d.id = (SELECT id FROM top), \
-                   k.id IS NOT NULL AND (coalesce({GONE_LOCALLY}, 0) \
-                     OR coalesce(t.kind = 0 AND (b.id IS NULL OR b.kind = 0), 0)), \
+                   CASE WHEN d.id = (SELECT id FROM top) THEN \
+                     k.id IS NOT NULL AND (coalesce({GONE_LOCALLY}, 0) \
+                       OR coalesce(t.kind = 0 AND (b.id IS NULL OR b.kind = 0), 0)) \
+                   ELSE coalesce(t.id IS NOT NULL AND t.kind = 0 AND {}, 0) END, \
                    coalesce(k.id IS NOT NULL AND {GONE_REMOTELY}, 0) \
                      OR coalesce(b.kind = 0 AND t.id IS NOT NULL, 0) \
                  FROM (SELECT id FROM sub) d LEFT JOIN dirty k ON k.folder = $F AND k.id = d.id \
@@ -133,7 +150,8 @@ impl ReadTx<'_> {
                 // The removed folders in `node`, and the one above it on the drive (`up`: its
                 // live folders' parents, up to the first not live): its removal takes what is
                 // in `node` along too (only what is in `node` is kept, below).
-                taken_along("(n.id IN (SELECT id FROM sub) OR n.id IN (SELECT id FROM up))")
+                taken_along("(n.id IN (SELECT id FROM sub) OR n.id IN (SELECT id FROM up))"),
+                removes_taken()
             )
         });
         let mut stmt = self.prep(&SQL)?;
@@ -145,12 +163,12 @@ impl ReadTx<'_> {
                 r.get::<_, bool>(3)?,
             ))
         })?;
-        let (mut dirty, mut gone_here, mut gone_there) = (false, false, Vec::new());
+        let (mut dirty, mut gone_here, mut gone_there) = (false, Vec::new(), Vec::new());
         for row in rows {
             let (uuid, top, here, there) = row?;
-            if top {
-                dirty = true;
-                gone_here = here;
+            dirty |= top;
+            if here {
+                gone_here.push(codec::node(&uuid)?);
             }
             if there {
                 gone_there.push(codec::node(&uuid)?);

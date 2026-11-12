@@ -899,6 +899,7 @@ impl Sim {
             local: &local,
             live: &|n| view.contains(n),
             taken: &|n| taken.contains(&n),
+            drive: &|n| view.get(n).map(|s| s.parent),
             server: &self.server,
             coords,
         };
@@ -1366,6 +1367,8 @@ pub(crate) struct ModelSides<'a> {
     /// Live on the drive but taken along by a folder in Recently deleted, as the plan reads it
     /// (`reconcile::taken_along`).
     pub(crate) taken: &'a dyn Fn(NodeId) -> bool,
+    /// The folder a live node is in on the drive, as `live` reads it.
+    pub(crate) drive: &'a dyn Fn(NodeId) -> Option<NodeId>,
     pub(crate) server: &'a Server,
     pub(crate) coords: Coords,
 }
@@ -1415,6 +1418,10 @@ impl hbsync_engine::held::Sides for ModelSides<'_> {
                 .unwrap_or(i64::MAX);
             (self.coords.from_drive(n.state.parent), at)
         }))
+    }
+
+    fn drive_parent(&self, node: NodeId) -> Result<Option<NodeId>, Infallible> {
+        Ok((self.drive)(node))
     }
 }
 

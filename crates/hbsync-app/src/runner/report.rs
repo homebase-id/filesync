@@ -144,41 +144,67 @@ impl Stalled {
     }
 }
 
-/// The deletes the guard held in `report` (named by `token`), as the status shows them; `None`
-/// when none were.
+/// The deletes the guard held, as [`shown`] (named by `token`), as the status shows them;
+/// `None` when none were.
 pub(super) fn held(
     engine: &mut Engine,
-    report: &SyncReport,
+    shown: &Shown,
     token: &str,
 ) -> Result<Option<HeldDeletes>, StateError> {
-    if report.held.is_empty() {
+    if shown.ops.is_empty() {
         return Ok(None);
     }
-    let here = report
-        .held
-        .iter()
-        .filter(|op| matches!(op, Op::RemoteDelete { .. }))
-        .count() as u64;
     let mut examples = Vec::new();
-    for op in report.held.iter().take(EXAMPLES) {
+    for op in shown.ops.iter().take(EXAMPLES) {
         examples.extend(engine.path_of(op.node())?);
     }
     Ok(Some(HeldDeletes {
-        here,
-        remotely: report.held.len() as u64 - here,
+        here: shown.here,
+        remotely: shown.ops.len() as u64 - shown.here,
+        unfinished: shown.unfinished,
         examples,
         token: token.to_owned(),
     }))
 }
 
-/// The token of the held deletes `held`, a hash of their sorted ids, each with its way (from
-/// the drive, or from here): made and checked by one daemon process.
-pub(super) fn held_token(held: &[Op]) -> String {
+/// Held deletes as the user is shown them ([`shown`]), counted as [`HeldDeletes`] counts them.
+pub(super) struct Shown<'o> {
+    pub ops: Vec<&'o Op>,
+    /// Removals from the drive among them ([`HeldDeletes::here`]).
+    pub here: u64,
+    /// Deletes on this computer among them not held as a removal of every synced file: held
+    /// for the removals from the drive they hold ([`HeldDeletes::unfinished`]).
+    pub unfinished: u64,
+}
+
+/// The held deletes `held` as the user is shown them: what a held delete on this computer
+/// takes (what a folder's removal elsewhere took along, or the node itself) is removed from the
+/// drive with it, part of that item, not deleted here. `wiped`: [`Engine::held_wipes`].
+pub(super) fn shown<'o>(held: &'o [Op], wiped: &HashSet<NodeId>) -> Shown<'o> {
+    let with = hbsync_engine::held::together(held.iter());
+    let mut shown = Shown {
+        ops: Vec::with_capacity(held.len()),
+        here: 0,
+        unfinished: 0,
+    };
+    for op in held {
+        match op {
+            Op::RemoteDelete { node, .. } if with.contains_key(node) => continue,
+            Op::RemoteDelete { .. } => shown.here += 1,
+            Op::LocalDelete { node, .. } if !wiped.contains(node) => shown.unfinished += 1,
+            _ => {}
+        }
+        shown.ops.push(op);
+    }
+    shown
+}
+
+/// The token of the held deletes as [`shown`] (what a delete here holds with it goes with its
+/// answer, however much of it is left), a hash of their sorted [`Op::key`]s: made and checked
+/// by one daemon process.
+pub(super) fn held_token<'o>(shown: impl IntoIterator<Item = &'o Op>) -> String {
     use std::hash::{DefaultHasher, Hash, Hasher};
-    let mut sorted: Vec<(NodeId, bool)> = held
-        .iter()
-        .map(|op| (op.node(), matches!(op, Op::RemoteDelete { .. })))
-        .collect();
+    let mut sorted: Vec<(NodeId, bool)> = shown.into_iter().map(Op::key).collect();
     sorted.sort();
     let mut hasher = DefaultHasher::new();
     sorted.hash(&mut hasher);
@@ -522,6 +548,41 @@ mod tests {
             nodes(stalled.told(&sync[..1], t0 + 23 * minute)),
             Vec::<NodeId>::new()
         );
+    }
+
+    /// A folder removed elsewhere, held with what its removal took along (removed from the
+    /// drive with it): one item removed on another device. A removal of a file deleted here
+    /// beside it is one deleted here.
+    #[test]
+    fn what_a_held_folder_took_along_is_shown_with_it() {
+        let (d, f, x) = (NodeId::new(), NodeId::new(), NodeId::new());
+        let delete = |node| Op::RemoteDelete {
+            node,
+            parent: d,
+            file_id: hbsync_types::RemoteFileId(hbsync_types::Uuid::nil()),
+            expected: hbsync_types::VersionTag(hbsync_types::Uuid::nil()),
+        };
+        let g = NodeId::new();
+        let held = [
+            delete(f),
+            delete(x),
+            delete(g),
+            Op::LocalDelete {
+                node: d,
+                subtree: vec![d, f],
+            },
+            Op::LocalDelete {
+                node: g,
+                subtree: vec![g],
+            },
+        ];
+        let seen = shown(&held, &HashSet::new());
+        let nodes: Vec<NodeId> = seen.ops.iter().map(|op| op.node()).collect();
+        assert_eq!(nodes, [x, d, g], "each delete here, once");
+        assert_eq!(seen.here, 1, "x alone is deleted here");
+        assert_eq!(seen.unfinished, 2, "d with f, g with its own removal");
+        // Held as a removal of every synced file, d is told so, whatever it holds with it.
+        assert_eq!(shown(&held, &HashSet::from([d])).unfinished, 1);
     }
 
     #[test]

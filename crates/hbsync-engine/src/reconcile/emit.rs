@@ -299,6 +299,88 @@ impl Reconciler<'_> {
         self.plan.ops.extend(settles);
     }
 
+    /// A folder's delete here with the removals from the drive of what in it the removal there
+    /// took along (§6.3), still live on the drive, that the plan doesn't make otherwise: one
+    /// removal elsewhere, held and answered as one (§7). Added once the plan's deletes are
+    /// settled (what waits for other pages isn't deleted): they go before the deletes here,
+    /// parents first, and the folder's delete waits for them ([`Op::met`]): a run cut between
+    /// leaves a removal elsewhere done on the drive, followed here as any.
+    pub(super) fn with_what_it_took_along(&mut self) {
+        let i = self.input;
+        let folders = |op: &Op| matches!(op, Op::LocalDelete { subtree, .. } if subtree.len() > 1);
+        if self.taken.is_empty() || !self.plan.ops.iter().any(folders) {
+            return;
+        }
+        let removing: HashSet<NodeId> = self
+            .plan
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::RemoteDelete { .. }))
+            .map(Op::node)
+            .collect();
+        let depth = |n: NodeId| i.remote.ancestors_iter(n).count();
+        // The removed folder above each node, by the folder it is in (one walk a folder).
+        let mut by_folder: HashMap<NodeId, Option<NodeId>> = HashMap::new();
+        let mut along: Vec<(usize, Op)> = Vec::new();
+        for op in &self.plan.ops {
+            let Op::LocalDelete { node, subtree } = op else {
+                continue;
+            };
+            if subtree.len() < 2 {
+                continue;
+            }
+            // What the removal of a folder in it, or of the one that took it along, took
+            // along: not what another removal took (moved out of it on the drive first).
+            let above = taken_by(i, *node);
+            for &n in subtree {
+                if n == *node || !self.taken.contains(&n) || removing.contains(&n) {
+                    continue;
+                }
+                let (Some(r), Some(at)) = (i.remote.get(n), i.remote_refs.get(&n)) else {
+                    continue;
+                };
+                let by = *by_folder.entry(r.parent).or_insert_with(|| taken_by(i, n));
+                if !by.is_some_and(|f| subtree.binary_search(&f).is_ok() || above == Some(f)) {
+                    continue;
+                }
+                along.push((
+                    depth(n),
+                    Op::RemoteDelete {
+                        node: n,
+                        parent: r.parent,
+                        file_id: at.file_id,
+                        expected: at.version,
+                    },
+                ));
+            }
+        }
+        if along.is_empty() {
+            return;
+        }
+        // With the plan's own removals from the drive, before the first delete here: parents
+        // first, all of them.
+        let at = self
+            .plan
+            .ops
+            .iter()
+            .position(|op| matches!(op, Op::LocalDelete { .. } | Op::Forget { .. }))
+            .unwrap_or(self.plan.ops.len());
+        let from = self.plan.ops[..at]
+            .iter()
+            .rposition(|op| !matches!(op, Op::RemoteDelete { .. }))
+            .map_or(0, |p| p + 1);
+        along.extend(
+            self.plan
+                .ops
+                .drain(from..at)
+                .map(|op| (depth(op.node()), op)),
+        );
+        along.sort_by_key(|(depth, op)| (*depth, op.node()));
+        self.plan
+            .ops
+            .splice(from..from, along.into_iter().map(|(_, op)| op));
+    }
+
     /// Whether the remote already holds the target content (same algorithm, same hash).
     pub(super) fn remote_has(&self, r: &NodeState, t: &NodeState) -> bool {
         match (&r.content, &t.content) {
