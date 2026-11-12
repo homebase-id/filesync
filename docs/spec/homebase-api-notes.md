@@ -366,6 +366,11 @@ comment (**[verified]** `UploadConcurrencyLimit`). App callers get `serverMetada
   (removed with filesync #90). The live checks `a_page_read_during_a_write_may_be_kept_stale` and
   `another_clients_write_is_in_the_feed_at_once` (`hbsync-dev/tests/live.rs`) fail if the
   server hides a write again.
+- **Only a change order is held back** **[verified]** (`QueryBatch.cs`): `anyChangeDate` and
+  `onlyModifiedDate`; `createdDate` and `fileId` hold nothing back, in an order a write doesn't
+  change, but a file made while the pages are read may be missed by them (the cursor is
+  `created` and the row, and a row may commit after a later one; **[inferred]** for Postgres).
+  A held-back page may come with the cursor it was asked from and `hasMoreRows` true.
 - **Rows held back**: a row written in the server's last millisecond or so is held back,
   answered as an empty or short page with `hasMoreRows` true (odin-core #1906,
   `QueryBatch.HoldBackWindowMs`, 1000 ms, **[verified]**); tried: 3 of 60 reads right after
