@@ -20,7 +20,7 @@ hbsync-platform.workspace = true
 hbsync-remote.workspace = true
 hbsync-types.workspace = true
 hkdf = "0.13.0"
-p384 = { version = "0.14.0", features = ["ecdh"] }
+p384 = { version = "0.14.0", features = ["ecdh", "pkcs8"] }
 percent-encoding = "2.3.2"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 serde.workspace = true

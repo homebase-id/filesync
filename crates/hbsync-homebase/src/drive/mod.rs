@@ -26,7 +26,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::client::{Client, Fetched, UploadMethod};
-use crate::crypto::{Key, zk_unlock};
+use crate::crypto::{Key, WriteOnlyKey, key_of, zk_unlock};
 use crate::drive::sealed::{
     CipherRange, Decrypting, Encrypting, KeyHeader, SealedKeyHeader, sealed_len,
 };
@@ -35,6 +35,7 @@ use crate::{ApiError, HomebaseError, app};
 
 pub mod markers;
 pub mod sealed;
+mod share_keys;
 pub mod wire;
 
 use wire::Keys;
@@ -158,6 +159,8 @@ struct KeyState {
     /// The security context listed no grant on the drive while this login holds the app's key
     /// ([`UNLISTED`]).
     unlisted: bool,
+    /// The drive's write-only key, locked with the drive's key, as the grant gives it.
+    write_only: Option<String>,
 }
 
 impl KeyState {
@@ -186,6 +189,7 @@ impl KeyState {
         };
         let unlisted = grant.is_none() && client.zk_key().is_some();
         let key = grant
+            .as_ref()
             .and_then(|g| g.locked)
             .map(|locked| unlock_drive_key(client, locked))
             .transpose()?;
@@ -194,7 +198,15 @@ impl KeyState {
             private: known_private || zero_knowledge || key.is_some(),
             key,
             unlisted,
+            write_only: grant.and_then(|g| g.write_only).map(str::to_owned),
         })
+    }
+
+    /// The drive's key and its write-only key locked with it, as the grant gives them: none on a
+    /// shared drive, nor in a grant without the copy; a private drive without its key refuses as
+    /// [`KeyState::key`] does.
+    fn write_only(&self) -> std::result::Result<Option<(Key, String)>, HomebaseError> {
+        Ok(self.key()?.zip(self.write_only.clone()))
     }
 
     /// The key to open and lock with: none on a shared drive. A private drive without one (a
@@ -227,8 +239,18 @@ fn unlock_drive_key(client: &Client, locked: &str) -> Result<Key, HomebaseError>
         HomebaseError::Crypto(_) => HomebaseError::NoDriveKey,
         e => e,
     })?;
-    <Key>::try_from(&key[..])
-        .map_err(|_| HomebaseError::Protocol("the drive's key isn't 16 bytes".into()))
+    key_of(&key, "the drive's key")
+}
+
+/// The drive's write-only key `locked` with its `key` in the app's grant, opened as chat-kmp's
+/// `ZkKeyStore` does: none where it doesn't open (locked with another key, or not a key), said
+/// at each try, which comes only when something shared is read. Then nothing shared opens here,
+/// and the drive's own folders sync on.
+fn open_write_only(key: &Key, locked: &str) -> Option<WriteOnlyKey> {
+    zk_unlock(key, locked)
+        .and_then(|der| WriteOnlyKey::from_pkcs8(&der))
+        .inspect_err(|e| tracing::warn!("the Filesync drive's write-only key doesn't open: {e}"))
+        .ok()
 }
 
 /// The app's grant on a drive, as the security context gives it.
@@ -238,6 +260,9 @@ struct Grant<'a> {
     zero_knowledge: bool,
     /// Its key locked with the app's zero-knowledge key (`zkAppKeyEncryptedStorageKey`).
     locked: Option<&'a str>,
+    /// Its write-only private key locked with its key
+    /// (`zkStorageKeyEncryptedWriteOnlyPrivateKey`, **[verified]** odin-core `RedactedDriveGrant`).
+    write_only: Option<&'a str>,
 }
 
 /// In the security context (`GET /api/v2/auth/context`, odin-core `RedactedOdinContext`), the
@@ -259,6 +284,7 @@ fn drive_grant<'a>(context: &'a serde_json::Value, drive: &TargetDrive) -> Optio
     Some(Grant {
         zero_knowledge: grant["isZeroKnowledge"].as_bool().unwrap_or(false),
         locked: grant["zkAppKeyEncryptedStorageKey"].as_str(),
+        write_only: grant["zkStorageKeyEncryptedWriteOnlyPrivateKey"].as_str(),
     })
 }
 
@@ -426,6 +452,16 @@ impl HomebaseRemote {
     /// whose key this computer doesn't hold refuses it ([`RemoteError::Denied`]): it stops,
     /// rather than read the files hidden from it as gone.
     fn drive_key(&self, needed: bool) -> Result<Option<Key>> {
+        self.key_state(needed, KeyState::key)
+    }
+
+    /// What `take` reads of the drive's key state, read again first as [`Self::drive_key`]
+    /// says.
+    fn key_state<T>(
+        &self,
+        needed: bool,
+        take: impl FnOnce(&KeyState) -> std::result::Result<T, HomebaseError>,
+    ) -> Result<T> {
         let connects = self.client.connects();
         // Held while it is read: whoever needs it then waits for that one read.
         let mut state = self.drive_key.0.lock().unwrap_or_else(|e| e.into_inner());
@@ -434,7 +470,7 @@ impl HomebaseRemote {
             *state =
                 KeyState::read(&self.client, &self.drive, connects, known).map_err(remote_error)?;
         }
-        state.key().map_err(remote_error)
+        take(&state).map_err(remote_error)
     }
 
     /// `header` as a [`RemoteHeader`], opened with the drive's key when a live node's is locked
@@ -497,6 +533,18 @@ impl HomebaseRemote {
         self.client
             .get(&format!("{}/header", self.file(file_id)), &[])
             .map_err(remote_error)
+    }
+
+    /// The drive's write-only key, which opens what sharers sealed to this identity's drive (a
+    /// circle's key, [`share_keys::CircleKey`]), opened from the app's grant when asked for (and
+    /// kept by the caller only while it opens what is shared): nothing for a user with nothing
+    /// shared. None where there is none (a drive made before write-only keys, or a grant
+    /// without the copy) or it doesn't open: nothing shared opens here. A private drive without
+    /// its key refuses this computer, as [`Self::drive_key`] does.
+    #[expect(dead_code, reason = "the reads of what is shared (next) open with it")]
+    pub(crate) fn write_only_key(&self) -> Result<Option<WriteOnlyKey>> {
+        let locked = self.key_state(false, KeyState::write_only)?;
+        Ok(locked.and_then(|(key, locked)| open_write_only(&key, &locked)))
     }
 
     /// What this identity's own markers say: whose shares its computers sync, and which of its
@@ -1280,11 +1328,18 @@ mod tests {
         let found = |c: serde_json::Value| {
             drive_grant(&c, &drive).map(|g| (g.zero_knowledge, g.locked.map(str::to_owned)))
         };
+        let write_only = |c: serde_json::Value| {
+            drive_grant(&c, &drive).and_then(|g| g.write_only.map(str::to_owned))
+        };
         let private = context(vec![
             grant(3, true, Some("other")),
             grant(1, true, Some("ours")),
         ]);
-        assert_eq!(found(private), Some((true, Some("ours".into()))));
+        assert_eq!(found(private.clone()), Some((true, Some("ours".into()))));
+        assert_eq!(write_only(private), None);
+        let mut with_key = grant(1, true, Some("ours"));
+        with_key["zkStorageKeyEncryptedWriteOnlyPrivateKey"] = json!("wo");
+        assert_eq!(write_only(context(vec![with_key])), Some("wo".into()));
         // Private, its key not locked for the app yet.
         let no_copy = context(vec![grant(1, true, None)]);
         assert_eq!(found(no_copy), Some((true, None)));
@@ -1783,6 +1838,50 @@ mod tests {
         *remote.drive_key.0.lock().unwrap_or_else(|e| e.into_inner()) = state(Some([1; 16]));
         assert_eq!(remote.drive_key(false).ok(), Some(Some([1; 16])));
         Ok(())
+    }
+
+    /// The drive's write-only key opens from the grant with the drive's key; a drive without
+    /// one (a shared drive, or no copy in the grant) has none to give.
+    #[test]
+    fn the_write_only_key_opens_with_the_drives_key() {
+        use aes_gcm::aead::Aead;
+        use aes_gcm::{Aes128Gcm, KeyInit};
+        use base64::Engine;
+        use base64::engine::general_purpose::STANDARD;
+        let drive: Key = [9; 16];
+        let pkcs8 = share_keys::tests::bytes(share_keys::tests::WRITE_ONLY_PKCS8);
+        let iv = [4u8; 12];
+        let sealed = Aes128Gcm::new((&drive).into())
+            .encrypt((&iv).into(), &pkcs8[..])
+            .expect("sealed");
+        let locked = STANDARD.encode([&iv[..], &sealed].concat());
+        let key = open_write_only(&drive, &locked).expect("opens");
+        assert!(share_keys::tests::unseal_with(&key, "sam.dotyou.cloud").is_ok());
+        // Locked with another key: none here.
+        assert!(open_write_only(&[1; 16], &locked).is_none());
+        let state = |key: Option<Key>, write_only: Option<&str>| KeyState {
+            private: true,
+            key,
+            write_only: write_only.map(str::to_owned),
+            ..KeyState::default()
+        };
+        let read = |s: KeyState| s.write_only().map(|w| w.map(|(k, l)| (k, l.len())));
+        assert_eq!(
+            read(state(Some(drive), Some(&locked))).ok(),
+            Some(Some((drive, locked.len())))
+        );
+        // None in the grant, or a shared drive: none here.
+        assert_eq!(read(state(Some(drive), None)).ok(), Some(None));
+        let shared = KeyState {
+            private: false,
+            ..state(None, Some(&locked))
+        };
+        assert_eq!(read(shared).ok(), Some(None));
+        // A private drive without its key refuses, as for everything else.
+        assert!(matches!(
+            read(state(None, Some(&locked))),
+            Err(HomebaseError::NoDriveKey)
+        ));
     }
 
     /// A file over the limit is refused before any request, a create or an update: here the

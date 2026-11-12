@@ -19,9 +19,10 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
+use zeroize::Zeroizing;
 
 use crate::HomebaseError;
-use crate::crypto::{Exchange, Key, aes_cbc_decrypt, random};
+use crate::crypto::{Exchange, Key, aes_cbc_decrypt, key_of, random};
 
 /// What a device keeps after authorizing: who it talks to and how.
 #[derive(Clone, Serialize, Deserialize)]
@@ -94,11 +95,11 @@ impl Credentials {
 
 /// `what`, base64 of a 16-byte key.
 fn key16(b64: &str, what: &str) -> Result<Key, HomebaseError> {
-    STANDARD
+    let bytes = STANDARD
         .decode(b64)
-        .ok()
-        .and_then(|k| k.try_into().ok())
-        .ok_or_else(|| HomebaseError::Protocol(format!("{what} isn't 16 bytes")))
+        .map(Zeroizing::new)
+        .map_err(|_| HomebaseError::Protocol(format!("{what} isn't base64")))?;
+    key_of(&bytes, what)
 }
 
 /// A YouAuth flow waiting for the identity's answer, which comes back to `redirect_uri` (a
@@ -196,12 +197,10 @@ impl Pending {
                 "the identity didn't hand over the app's zero-knowledge key".into(),
             )
         })?;
-        let zk_app_key = self.exchange.unseal(sealed)?;
-        if zk_app_key.len() != 16 {
-            return Err(HomebaseError::Protocol(
-                "the app's zero-knowledge key isn't 16 bytes".into(),
-            ));
-        }
+        let zk_app_key = key_of(
+            &self.exchange.unseal(sealed)?,
+            "the app's zero-knowledge key",
+        )?;
         Ok(Credentials {
             identity: self.identity.clone(),
             client_auth_token: open(
