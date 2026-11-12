@@ -148,8 +148,8 @@ fn read_markers(
     }
 }
 
-/// What this computer knows of the drive's privacy: whether it is private, its key while this
-/// computer holds it, and when that was read: at how many of the notifications' reconnects
+/// What the security context says, as this computer knows it: the drive's privacy and keys, the
+/// app's permissions, and when that was read: at how many of the notifications' reconnects
 /// ([`Client::connects`]).
 #[derive(Default)]
 struct KeyState {
@@ -161,6 +161,9 @@ struct KeyState {
     unlisted: bool,
     /// The drive's write-only key, locked with the drive's key, as the grant gives it.
     write_only: Option<String>,
+    /// The app holds `UseTransitRead` ([`app::USE_TRANSIT_READ`]): it may read what others
+    /// share with this identity.
+    reads_shared: bool,
 }
 
 impl KeyState {
@@ -199,6 +202,7 @@ impl KeyState {
             key,
             unlisted,
             write_only: grant.and_then(|g| g.write_only).map(str::to_owned),
+            reads_shared: holds_key(&context, app::USE_TRANSIT_READ),
         })
     }
 
@@ -253,6 +257,24 @@ fn open_write_only(key: &Key, locked: &str) -> Option<WriteOnlyKey> {
         .ok()
 }
 
+/// The security context's permission groups (`permissionContext.permissionGroups`, odin-core
+/// `RedactedPermissionContext`).
+fn permission_groups(context: &serde_json::Value) -> impl Iterator<Item = &serde_json::Value> {
+    context["permissionContext"]["permissionGroups"]
+        .as_array()
+        .into_iter()
+        .flatten()
+}
+
+/// Whether the security context gives the caller permission `key` (`permissionContext
+/// .permissionGroups[].permissionSet.keys`, odin-core `RedactedPermissionSet`, **[verified]**).
+fn holds_key(context: &serde_json::Value, key: u32) -> bool {
+    permission_groups(context)
+        .filter_map(|g| g["permissionSet"]["keys"].as_array())
+        .flatten()
+        .any(|k| k.as_u64() == Some(u64::from(key)))
+}
+
 /// The app's grant on a drive, as the security context gives it.
 #[derive(Debug, PartialEq, Eq)]
 struct Grant<'a> {
@@ -271,10 +293,7 @@ struct Grant<'a> {
 /// any app without permission keys up to odin-core v0.1.974 (odin-core #2047,
 /// `docs/spec/homebase-api-notes.md`).
 fn drive_grant<'a>(context: &'a serde_json::Value, drive: &TargetDrive) -> Option<Grant<'a>> {
-    let grant = context["permissionContext"]["permissionGroups"]
-        .as_array()
-        .into_iter()
-        .flatten()
+    let grant = permission_groups(context)
         .filter_map(|g| g["driveGrants"].as_array())
         .flatten()
         .find(|g| {
@@ -545,6 +564,17 @@ impl HomebaseRemote {
     pub(crate) fn write_only_key(&self) -> Result<Option<WriteOnlyKey>> {
         let locked = self.key_state(false, KeyState::write_only)?;
         Ok(locked.and_then(|(key, locked)| open_write_only(&key, &locked)))
+    }
+
+    /// Whether the app may read what others share with this identity: an install from before it
+    /// asked for that has to be given it by the owner ([`app::update_url`]). As the security
+    /// context said at its last read.
+    #[expect(
+        dead_code,
+        reason = "syncing what is shared (later) asks for it when it lacks it"
+    )]
+    pub(crate) fn reads_shared(&self) -> Result<bool> {
+        self.key_state(false, |state| Ok(state.reads_shared))
     }
 
     /// What this identity's own markers say: whose shares its computers sync, and which of its
@@ -1348,6 +1378,19 @@ mod tests {
         // Not listed (odin-core's bug for an app without permission keys).
         assert_eq!(found(context(vec![grant(3, true, Some("other"))])), None);
         assert_eq!(found(json!({})), None);
+    }
+
+    /// The security context's permission keys, in any group.
+    #[test]
+    fn the_context_gives_the_apps_permission_keys() {
+        let context = json!({ "permissionContext": { "permissionGroups": [
+            { "permissionSet": { "keys": [10] } },
+            { "permissionSet": null },
+            { "permissionSet": { "keys": [305, 210] } },
+        ] } });
+        assert!(holds_key(&context, app::USE_TRANSIT_READ));
+        assert!(!holds_key(&context, 50));
+        assert!(!holds_key(&json!({}), app::USE_TRANSIT_READ));
     }
 
     /// An error answer of the identity itself.

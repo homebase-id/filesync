@@ -155,7 +155,7 @@ impl Login {
     }
 }
 
-/// The owner giving the app its drive again ([`hbsync_homebase::app::restore_drive_url`]),
+/// The owner giving the app its drive again ([`hbsync_homebase::app::Update::Drive`]),
 /// waiting for the browser to come back.
 #[derive(Debug)]
 pub struct DriveRestore {
@@ -169,7 +169,11 @@ pub(crate) fn begin_restore(identity: &str) -> Result<DriveRestore, HomebaseErro
     let path = format!("{DRIVE_PATH}/{}", uuid::Uuid::new_v4().simple());
     let (back, return_url) = Callback::bind(path)?;
     Ok(DriveRestore {
-        url: hbsync_homebase::app::restore_drive_url(identity, &return_url),
+        url: hbsync_homebase::app::update_url(
+            identity,
+            &return_url,
+            hbsync_homebase::app::Update::Drive,
+        ),
         back,
     })
 }
