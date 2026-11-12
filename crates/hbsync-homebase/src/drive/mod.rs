@@ -56,6 +56,11 @@ pub(crate) const PRIVATE: &str = "the Filesync drive on your Homebase cloud is p
 const UNLISTED: &str = "your Homebase cloud doesn't hand this app its private drive's key: it \
                         needs an update of Homebase (odin-core #2047)";
 
+/// Why nothing shared opens: the app was installed before it asked for the permission to read
+/// what others share, and the owner hasn't given it since ([`app::update_url`]).
+const NOT_PERMITTED: &str = "your Homebase cloud hasn't given Filesync the permission to read what \
+                             others share with you yet";
+
 /// How long a share waits on its sharer (a circle key not sealed to this identity yet, a
 /// connection they haven't reviewed) before it is asked about again.
 const SHARER_WAIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
@@ -582,7 +587,17 @@ impl HomebaseRemote {
                 "your Filesync drive has no key that opens what others share with you".into(),
             )
         })?;
-        let answer = SealedKey::ask(&self.client, &sharer.odin_id, circle).map_err(remote_error)?;
+        let answer = match SealedKey::ask(&self.client, &sharer.odin_id, circle) {
+            Ok(answer) => answer,
+            // A codeless 403 there is theirs, or this app's want of the permission to ask
+            // (`Client::whose`): which, the security context says.
+            Err(HomebaseError::Api { error, .. })
+                if error.status == 403 && error.code.is_none() && !self.reads_shared()? =>
+            {
+                return Err(RemoteError::Fatal(NOT_PERMITTED.into()));
+            }
+            Err(e) => return Err(remote_error(e)),
+        };
         let sealed = sealed_or_wait(answer, &sharer.odin_id)?;
         let member = markers::owner_of(self.client.identity());
         CircleKey::unseal(&sealed, &write_only, circle, sharer.drive_alias, &member)
@@ -592,10 +607,6 @@ impl HomebaseRemote {
     /// Whether the app may read what others share with this identity: an install from before it
     /// asked for that has to be given it by the owner ([`app::update_url`]). As the security
     /// context said at its last read.
-    #[expect(
-        dead_code,
-        reason = "syncing what is shared (later) asks for it when it lacks it"
-    )]
     pub(crate) fn reads_shared(&self) -> Result<bool> {
         self.key_state(false, |state| Ok(state.reads_shared))
     }

@@ -397,7 +397,8 @@ pub enum RemoteError {
     #[error("a node with this id already exists")]
     AlreadyExists,
     /// The identity refused the credentials or the drive (401/403): stop syncing until the
-    /// user re-authorizes; retrying changes nothing.
+    /// user re-authorizes (a sharer's refused token, [`Refusal::Token`]: until a new token);
+    /// retrying changes nothing.
     #[error("access denied: {0}")]
     Denied(String, Refusal),
     /// The file changed since the given version (Homebase 4160).

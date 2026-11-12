@@ -28,7 +28,7 @@ pub(crate) const CONTENT_TYPE: &str = "application/octet-stream";
 /// The keys a file's key header is locked with: the shared secret, or on a private
 /// (zero-knowledge) drive the drive's own key, once this computer holds it; a file another
 /// identity shares with this one, the key of the circle it is shared through
-/// ([`FileHeader::needs_circle_key`]).
+/// ([`FileHeader::share_circle`]).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Keys<'a> {
     pub shared: &'a Key,
@@ -60,7 +60,9 @@ pub struct FileHeader {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareRow {
-    pub circle_id: Uuid,
+    /// Read leniently: a row that doesn't read leaves the others.
+    #[serde(default, deserialize_with = "lenient")]
+    pub circle_id: Option<Uuid>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -75,7 +77,7 @@ pub struct FileMetadata {
     #[serde(default)]
     pub updated: Option<i64>,
     /// A shared file's key may be bound to it rather than to its file id
-    /// ([`CircleKey::file_key`]).
+    /// (`CircleKey::file_key`).
     #[serde(default, deserialize_with = "lenient")]
     pub global_transit_id: Option<Uuid>,
 }
@@ -515,17 +517,19 @@ impl FileHeader {
         KeyHeader::open(sealed, key)
     }
 
-    /// A live node's, shared with this identity: the circle whose key [`to_remote`] opens it
-    /// with, the first of its shares'.
-    pub(crate) fn needs_circle_key(&self) -> Option<Uuid> {
-        let shared = self
-            .shared_secret_encrypted_key_header
-            .as_ref()
-            .is_some_and(SealedKeyHeader::locked_for_share);
-        if !(self.live_node() && shared) {
-            return None;
-        }
-        self.shares.as_ref()?.first().map(|s| s.circle_id)
+    /// A live node's, shared with this identity: [`to_remote`] opens it with the key of its
+    /// [`FileHeader::share_circle`].
+    pub(crate) fn needs_circle_key(&self) -> bool {
+        self.live_node()
+            && self
+                .shared_secret_encrypted_key_header
+                .as_ref()
+                .is_some_and(SealedKeyHeader::locked_for_share)
+    }
+
+    /// The circle a shared file's key header is locked for: the one its first share names.
+    pub(crate) fn share_circle(&self) -> Option<Uuid> {
+        self.shares.as_ref()?.first()?.circle_id
     }
 
     /// A live sync node's header (not a tombstone, nor another app's file).
@@ -847,7 +851,7 @@ mod tests {
                 header.file_id = v::id(v::FILE);
                 header.file_metadata.global_transit_id = Some(v::id(v::GTID));
                 header.shares = Some(vec![ShareRow {
-                    circle_id: v::id(v::CIRCLE),
+                    circle_id: Some(v::id(v::CIRCLE)),
                 }]);
                 header.shared_secret_encrypted_key_header = Some(serde_json::from_value(json!({
                     "encryptionVersion": 1, "type": kind,
@@ -865,7 +869,8 @@ mod tests {
             shared(v::LOCKED, json!(14))?,
             shared(v::LOCKED_BY_GTID, json!("share"))?,
         ] {
-            assert_eq!(header.needs_circle_key(), Some(v::id(v::CIRCLE)));
+            assert!(header.needs_circle_key());
+            assert_eq!(header.share_circle(), Some(v::id(v::CIRCLE)));
             assert_eq!(header.key(keys)?, kh);
             let file = to_remote(header.clone(), keys)?;
             assert_eq!(file.state().ok_or("state")?.name, "Résumé.txt");
@@ -883,19 +888,31 @@ mod tests {
         let elsewhere = Uuid::new_v4();
         other.shares = Some(vec![
             ShareRow {
-                circle_id: elsewhere,
+                circle_id: Some(elsewhere),
             },
             ShareRow {
-                circle_id: v::id(v::CIRCLE),
+                circle_id: Some(v::id(v::CIRCLE)),
             },
         ]);
-        assert_eq!(other.needs_circle_key(), Some(elsewhere));
+        assert_eq!(other.share_circle(), Some(elsewhere));
         let mut moved = shared(v::LOCKED, json!("share"))?;
         moved.file_id = Uuid::new_v4();
         assert!(to_remote(moved, keys).is_err());
         let mut unbound = shared(v::LOCKED_BY_GTID, json!("share"))?;
         unbound.file_metadata.global_transit_id = None;
         assert!(to_remote(unbound, keys).is_err());
+
+        // A share row that doesn't read leaves the others; with the first unread, no circle is
+        // named.
+        let rows: FileHeader = serde_json::from_value({
+            let mut row = serde_json::to_value(fixture_value("file-node.json"))?;
+            row["shares"] = json!([{ "circleId": null }, { "circleId": v::CIRCLE }]);
+            row
+        })?;
+        let shares = rows.shares.as_ref().ok_or("shares")?;
+        assert_eq!(shares.len(), 2);
+        assert_eq!(shares[1].circle_id, Some(v::id(v::CIRCLE)));
+        assert_eq!(rows.share_circle(), None);
 
         // A share withdrawn: a tombstone without its version, parent or key, read as gone.
         let gone: FileHeader = serde_json::from_value(json!({
@@ -908,7 +925,7 @@ mod tests {
                 "encryptionVersion": 1, "type": "aes", "iv": "", "encryptedAesKey": "",
             },
         }))?;
-        assert_eq!(gone.needs_circle_key(), None);
+        assert!(!gone.needs_circle_key());
         let gone = to_remote(gone, keys)?;
         assert!(matches!(gone.body, RemoteBody::Deleted));
         Ok(())
