@@ -119,24 +119,23 @@ impl Schedule {
         }
     }
 
-    /// The server-side order guards ([`Op::requires`]); `on_drive`: whether the mirror has a
-    /// folder.
+    /// The order guards ([`Op::met`]); `on_drive`: whether the mirror has a folder.
     pub(super) fn ready(
         &self,
         op: &Op,
         on_drive: impl FnOnce(NodeId) -> Result<bool, StateError>,
     ) -> Step<()> {
-        let Some(requires) = op.requires() else {
-            return Ok(());
-        };
-        let met = requires.met(
+        let met = op.met(
             on_drive,
-            |f| self.removing.contains(&f),
-            |f| self.unremoved.contains(&f),
+            |n| self.removing.contains(&n),
+            |n| self.unremoved.contains(&n),
         )?;
+        let along = matches!(op, Op::LocalDelete { .. });
         match met {
             Met::Yes => Ok(()),
-            Met::Later => Err(Outcome::Retry(format!("waiting for {:?}", Some(requires)))),
+            Met::Later if along => Err(Outcome::Retry("waiting for what it took along".into())),
+            Met::Later => Err(Outcome::Retry(format!("waiting for {:?}", op.requires()))),
+            Met::NextPlan if along => Err(Outcome::waiting("what it took along wasn't removed")),
             Met::NextPlan => Err(Outcome::waiting("its folder wasn't removed")),
         }
     }

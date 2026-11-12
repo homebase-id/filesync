@@ -45,10 +45,15 @@ pub fn out_of_dirty<'p>(plan: &'p Plan, page: &[NodeId]) -> (Vec<&'p Op>, HashSe
         };
         std::iter::once(op.node()).chain(subtree.iter().copied())
     };
-    // Nor one whose folder the plan moves something out of first ([`Plan::moves_out_of`]): it
-    // stays dirty while that move is planned, as it did when it expected what moves.
+    let taken = along(plan.held.iter());
     let mut ops = Vec::new();
     for op in &plan.held {
+        // A removal held with a folder's delete here goes with it, below.
+        if matches!(op, Op::RemoteDelete { .. }) && taken.contains_key(&op.node()) {
+            continue;
+        }
+        // Nor one whose folder the plan moves something out of first ([`Plan::moves_out_of`]):
+        // it stays dirty while that move is planned, as it did when it expected what moves.
         if page.contains(&op.node())
             && !plan.moves_out_of.contains(&op.node())
             && !covers(op).any(|n| busy.contains(&n))
@@ -57,14 +62,98 @@ pub fn out_of_dirty<'p>(plan: &'p Plan, page: &[NodeId]) -> (Vec<&'p Op>, HashSe
             nodes.extend(covers(op).filter(|n| page.contains(n)));
         }
     }
+    // With a folder's delete here, the removals from the drive of what its removal elsewhere
+    // took along, held with it (§7), whatever page they are in: one hold.
+    if !taken.is_empty() {
+        let out: HashSet<NodeId> = ops.iter().map(|op| op.node()).collect();
+        ops.extend(
+            plan.held
+                .iter()
+                .filter(|op| taken.get(&op.node()).is_some_and(|f| out.contains(f))),
+        );
+    }
     (ops, nodes)
+}
+
+/// The removals from the drive in `ops` of what a folder's delete here in `ops` takes below it,
+/// each with that folder: what its removal elsewhere took along (§6.3), removed with it and
+/// held, answered and shown as one with it (§7). Costs a scan of `ops` where no folder is
+/// deleted here; else a set of the removals and a look at each node a delete here takes.
+pub fn along<'o>(ops: impl Iterator<Item = &'o Op> + Clone) -> HashMap<NodeId, NodeId> {
+    if !ops
+        .clone()
+        .any(|op| matches!(op, Op::LocalDelete { subtree, .. } if subtree.len() > 1))
+    {
+        return HashMap::new();
+    }
+    let removals: HashSet<NodeId> = ops
+        .clone()
+        .filter(|op| matches!(op, Op::RemoteDelete { .. }))
+        .map(Op::node)
+        .collect();
+    if removals.is_empty() {
+        return HashMap::new();
+    }
+    let mut along = HashMap::new();
+    for op in ops {
+        if let Op::LocalDelete { node, subtree } = op {
+            along.extend(
+                subtree
+                    .iter()
+                    .filter(|n| *n != node && removals.contains(n))
+                    .map(|n| (*n, *node)),
+            );
+        }
+    }
+    along
+}
+
+/// [`along`], and each node's own removal from the drive with its delete here (planned apart
+/// from its folder's delete): what the guard holds and answers with a delete here, and the
+/// user is shown as that delete.
+pub fn together<'o>(ops: impl Iterator<Item = &'o Op> + Clone) -> HashMap<NodeId, NodeId> {
+    let mut together = along(ops.clone());
+    let here: HashSet<NodeId> = ops
+        .clone()
+        .filter(|op| matches!(op, Op::LocalDelete { .. }))
+        .map(Op::node)
+        .collect();
+    if !here.is_empty() {
+        together.extend(
+            ops.filter(|op| matches!(op, Op::RemoteDelete { node, .. } if here.contains(node)))
+                .map(|op| (op.node(), op.node())),
+        );
+    }
+    together
+}
+
+/// Drops from held deletes `held` (each read by `op`) what a page's plan replaces, planned
+/// again (`planned`, its dirty nodes and what it holds): those, with the removals held with a
+/// folder's delete among them outside the page (what its removal took along, [`along`]: its
+/// subtrees looked at only when a held folder's delete is planned again, hardly ever).
+pub fn drop_replaced<T>(held: &mut Vec<T>, op: impl Fn(&T) -> &Op, planned: &HashSet<NodeId>) {
+    if held.is_empty() {
+        return;
+    }
+    let again = held
+        .iter()
+        .any(|t| matches!(op(t), Op::LocalDelete { node, .. } if planned.contains(node)));
+    let along: HashSet<NodeId> = match again {
+        true => along(held.iter().map(&op))
+            .into_iter()
+            .filter(|(_, folder)| planned.contains(folder))
+            .map(|(n, _)| n)
+            .collect(),
+        false => HashSet::new(),
+    };
+    held.retain(|t| !planned.contains(&op(t).node()) && !along.contains(&op(t).node()));
 }
 
 /// The files `ops` (held deletes of `plan`) take, as the guard counted them
 /// ([`Plan::held_takes`]): (removed from the drive, deleted here).
 pub fn files<'p>(plan: &Plan, ops: impl IntoIterator<Item = &'p Op>) -> (usize, usize) {
     ops.into_iter()
-        .filter_map(|op| plan.held_takes.get(&op.node()))
+        .filter_map(|op| plan.held_takes.get(&op.key()))
         .fold((0, 0), |(here, there), (h, t)| (here + h, there + t))
 }
 
@@ -117,6 +206,42 @@ pub trait Sides {
     /// `node`'s row of Recently deleted: the folder it was in, and the removal's time
     /// ([`hbsync_types::removal_time`]).
     fn removed(&self, node: NodeId) -> Result<Option<(NodeId, i64)>, Self::Error>;
+    /// The folder `node` is in on the drive, if it is live there (`None`: not live).
+    fn drive_parent(&self, node: NodeId) -> Result<Option<NodeId>, Self::Error>;
+}
+
+/// The folder in Recently deleted above live `node` on the drive (through live folders), if
+/// there is one: what took it along, if it was written before that removal. A base-free walk:
+/// a node this device no longer syncs is found too. Each folder walked is remembered in `memo`
+/// with the answer, so the walk costs a read per folder, not per node; `removed` reads (and
+/// keeps) rows of Recently deleted. Bounded: a cycle on the drive ends at a node met again.
+fn removed_above<S: Sides>(
+    node: NodeId,
+    sides: &S,
+    removed: &impl Fn(NodeId) -> Result<Option<(NodeId, i64)>, S::Error>,
+    memo: &mut HashMap<NodeId, Option<NodeId>>,
+) -> Result<Option<NodeId>, S::Error> {
+    let Some(mut at) = sides.drive_parent(node)? else {
+        return Ok(None);
+    };
+    let mut seen = HashSet::from([node]);
+    let mut walked = Vec::new();
+    let found = loop {
+        if let Some(found) = memo.get(&at) {
+            break *found;
+        }
+        if !seen.insert(at) {
+            break None;
+        }
+        walked.push(at);
+        match sides.drive_parent(at)? {
+            Some(parent) => at = parent,
+            // The first folder not live there.
+            None => break removed(at)?.map(|_| at),
+        }
+    };
+    memo.extend(walked.into_iter().map(|n| (n, found)));
+    Ok(found)
 }
 
 /// Whether removals elsewhere held as every synced file at `node` stay held (sync semantics
@@ -161,6 +286,9 @@ pub struct PutBack {
     /// Nodes gone for good kept with their base for now: folders below which something synced
     /// waits in Recently deleted ([`after_restore`] looks at them again).
     pub kept: Vec<NodeId>,
+    /// The folders in Recently deleted whose removal took a held node along: restored, it
+    /// comes back with them.
+    pub along: Vec<NodeId>,
 }
 
 /// The folders, synced, from each of `folders` up, when `gone` has any (else none: nothing to
@@ -230,7 +358,8 @@ pub fn after_restore<S: Sides>(plan: &PutBack, sides: &S) -> Result<Vec<NodeId>,
 ///
 /// Costs, per node walked, a base, a live and (here) a row lookup, a row lookup and a listing
 /// per folder here, and a row of Recently deleted per node restored and per folder above it
-/// (each read once).
+/// (each read once); per held node live on the drive, a walk up its folders there to the first
+/// not live, each folder once, and the rule of taken along only below a removed one.
 pub fn put_back_plan<S: Sides>(nodes: &[NodeId], sides: &S) -> Result<PutBack, S::Error> {
     let mut plan = PutBack::default();
     // Synced and here, gone for good on the drive.
@@ -249,11 +378,23 @@ pub fn put_back_plan<S: Sides>(nodes: &[NodeId], sides: &S) -> Result<PutBack, S
         removed.borrow_mut().insert(n, r);
         Ok(r)
     };
+    // Folders in Recently deleted whose removal took a held node along: restored, it comes
+    // back with them (§7: a removal elsewhere is put back as a whole), whether it is still here
+    // or not, and also one this device no longer syncs (a delete here took its base: Put back
+    // has nothing else to go by).
+    let mut above = HashMap::new();
     for &node in nodes {
+        let live = sides.live(node)?;
+        if live
+            && let Some(folder) = removed_above(node, sides, &removed, &mut above)?
+            && sides.gone(node)?
+        {
+            plan.along.push(folder);
+        }
         if sides.synced(node)?.is_none() {
             continue;
         }
-        match (sides.here(node)?, sides.live(node)?) {
+        match (sides.here(node)?, live) {
             (None, true) => {
                 // Below it in the base, gone here and live there.
                 let mut below = vec![node];
@@ -317,6 +458,11 @@ pub fn put_back_plan<S: Sides>(nodes: &[NodeId], sides: &S) -> Result<PutBack, S
     };
     let mut known = HashMap::new();
     let mut items = HashSet::new();
+    plan.along.sort();
+    plan.along.dedup();
+    for &folder in &plan.along {
+        items.insert(crate::deleted::item_by(folder, &mut known, with)?);
+    }
     for (node, folder, at) in restore {
         let in_folder = removed(folder)?
             .is_some_and(|(_, folder_at)| crate::deleted::deleted_with_at(at, folder_at));
@@ -355,6 +501,8 @@ mod tests {
         taken: HashSet<NodeId>,
         /// In Recently deleted: its folder there and the removal's time.
         removed: HashMap<NodeId, (NodeId, i64)>,
+        /// Live on the drive: the folder each is in there.
+        drive: HashMap<NodeId, NodeId>,
     }
 
     impl Sides for Model {
@@ -390,6 +538,9 @@ mod tests {
         fn removed(&self, node: NodeId) -> Result<Option<(NodeId, i64)>, Infallible> {
             Ok(self.removed.get(&node).copied())
         }
+        fn drive_parent(&self, node: NodeId) -> Result<Option<NodeId>, Infallible> {
+            Ok(self.drive.get(&node).copied())
+        }
     }
 
     /// A wipe held on folder `g`, which a folder removed on the drive took along (live there,
@@ -410,6 +561,7 @@ mod tests {
             live: HashSet::from([g, f]),
             taken: HashSet::from([g, f]),
             removed: HashMap::from([(r, (NodeId::ROOT, 5))]),
+            ..Model::default()
         };
         assert_eq!(keep_held(g, false, &model), Ok(true));
         assert_eq!(keep_held(g, true, &model), Ok(false), "answered");
@@ -451,6 +603,25 @@ mod tests {
             (vec![there], 1),
             "with the folder deleted with it"
         );
+    }
+
+    /// Held removals of files a folder's removal elsewhere took along, deleted here (by the
+    /// user, or by a delete here before #359 held it with them: then nothing synced is left):
+    /// Put them back restores that folder, and they come back with it.
+    #[test]
+    fn put_back_restores_the_folder_that_took_a_held_node_along() {
+        let (d, f, g) = (NodeId::new(), NodeId::new(), NodeId::new());
+        let model = Model {
+            base: HashMap::from([(f, d)]),
+            live: HashSet::from([f, g]),
+            taken: HashSet::from([f, g]),
+            removed: HashMap::from([(d, (NodeId::ROOT, 5))]),
+            drive: HashMap::from([(f, d), (g, d)]),
+            ..Model::default()
+        };
+        let Ok(plan) = put_back_plan(&[f, g], &model);
+        assert_eq!(plan.items, vec![d]);
+        assert_eq!(plan.forget, vec![f], "synced: comes down with the folder");
     }
 
     /// Removed folders in a cycle, each deleted with the other: put back ends at one of them.

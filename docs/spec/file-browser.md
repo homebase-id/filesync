@@ -175,8 +175,13 @@ only the file key's lock changes (`encryption.md`, "A private drive"):
   file (`versionTagMismatch`: changed since, leave it). The folder in one request, then what is
   in it.
   Desktop clients delete their local copies of what the phone deletes, and keep nothing:
-  Recently deleted on the drive is the only copy, for 30 days. One exception: a delete of every
-  file a computer syncs at once (more than 50, by default) is held there until its user answers.
+  Recently deleted on the drive is the only copy, for 30 days. Two exceptions, held there until
+  its user answers: a delete of every file a computer syncs at once (more than 50, by default);
+  and a folder delete that computer sees half done (the folder removed, files in it not yet)
+  where it would remove more files from the drive itself than its limit lets it (by default
+  more than 50 and more than a quarter of what it syncs, counted with what else it removes
+  then): it holds the folder's delete with them. Finish the delete (the folder first, then
+  what is in it) and the computer follows it unasked.
 - A retry keeps the node id, including one the user asks for after a failure, so a retry that gets 4105
   (`ExistingFileWithUniqueId`) means an earlier attempt already succeeded.
 

@@ -446,8 +446,10 @@ impl Sim {
         // - what a folder's removal took along (`taken_files`): those this device removes from
         //   the drive on the gone here side, the synced ones on the gone there side;
         // - less what the dirty confirmed deletes cover (`confirmed_file_deletes`): the node
-        //   itself gone here, and of its subtree here what is gone there (taken along by a
-        //   removal in that subtree or above the node on the drive, if so), each file once.
+        //   itself gone here, with what in its subtree here a removal took along (removed from
+        //   the drive with its delete here, §7), and of its subtree here what is gone there
+        //   (taken along by a removal in that subtree or above the node on the drive, if so),
+        //   each file once.
         // Not modelled: the engine counts at a sync's start and again only when another
         // connection wrote, never below the counts before (`HeldDeletes::recount`); the
         // simulator counts afresh at each plan.
@@ -487,7 +489,28 @@ impl Sim {
         // it is in that one's subtree here or above it on the drive).
         let confirmed_dirty = |n: &NodeId| client.confirmed.contains(n) && all.contains(n);
         if client.confirmed.iter().any(confirmed_dirty) {
-            here.retain(|n| !confirmed_dirty(n));
+            // And what a confirmed folder's delete here takes that its removal took along,
+            // removed from the drive with it (§7).
+            // (Taken by a removed folder in that one here, or by the one that took it along:
+            // as the store counts them, and as the plan removes them.)
+            here.retain(|n| {
+                if confirmed_dirty(n) {
+                    return false;
+                }
+                let by = match taken.contains(n) {
+                    true => hbsync_engine::reconcile::taken_by(&input, *n),
+                    false => None,
+                };
+                let Some(by) = by else {
+                    return true;
+                };
+                !input.local.ancestors(*n).into_iter().any(|c| {
+                    confirmed_dirty(&c)
+                        && (by == c
+                            || input.local.ancestors(by).contains(&c)
+                            || hbsync_engine::reconcile::taken_by(&input, c) == Some(by))
+                })
+            });
             let covering = |n: NodeId| {
                 std::iter::once(n)
                     .chain(input.local.ancestors(n))
@@ -520,6 +543,7 @@ impl Sim {
             local: &input.local,
             live: &|n| remote.contains(n),
             taken: &|n| taken.contains(&n),
+            drive: &|n| remote.get(n).map(|s| s.parent),
             server: &self.server,
             coords: client.coords,
         };
@@ -566,6 +590,22 @@ impl Sim {
             client.local.contains(id) || client.base.contains(id) || self.server.ever.contains(&id)
         };
         let plan = reconcile_with_known(&input, &opts, masking, known);
+        // A file outside the page whose removal from the drive the plan makes or holds (what a
+        // folder's delete here took along, planned with it) is the plan's own, not another
+        // page's.
+        if outside.0 > 0 {
+            let removing: HashSet<NodeId> = plan
+                .ops
+                .iter()
+                .chain(&plan.held)
+                .filter(|op| matches!(op, Op::RemoteDelete { .. }))
+                .map(Op::node)
+                .collect();
+            outside.0 -= here
+                .iter()
+                .filter(|n| outside_page(n) && removing.contains(n))
+                .count();
+        }
         // A taken-along file gone there is outside the page unless it is in it, or this plan's
         // delete here takes it (what that expects: not what the plan moves out of it first).
         if !taken_there.is_empty() {
@@ -749,12 +789,7 @@ impl Sim {
             .collect();
         client.held = plan.held.iter().map(Op::node).collect();
         client.wiped = wiped;
-        client
-            .wiped
-            .extend(plan.held.iter().filter_map(|op| match op {
-                Op::LocalDelete { node, .. } => Some(*node),
-                _ => None,
-            }));
+        client.wiped.extend(plan.held_wipes.iter().copied());
         if self.faults.refusing {
             client.last_plan = ops.clone();
         }
@@ -2761,23 +2796,35 @@ fn see_held(client: &Client, view: &mut Tree, remote: &Tree) {
     }
 }
 
-/// Whether `op`'s server-side requirements hold in the client's mirror (the snapshot it planned
-/// from, plus its own writes since) and its run, by the executor's rule
-/// ([`hbsync_engine::reconcile::Requirement::met`]).
+/// Whether `op`'s order guards hold in the client's mirror (the snapshot it planned from, plus
+/// its own writes since) and its run, by the executor's rule ([`Op::met`]).
 fn ready(client: &Client, op: &Op) -> Met {
-    let Some(requires) = op.requires() else {
-        return Met::Yes;
-    };
-    let removing = |folder| {
+    let removing_one = |at| {
         client
             .plan
             .iter()
-            .any(|(o, _)| matches!(o, Op::RemoteDelete { node, .. } if *node == folder))
+            .any(|(o, _)| matches!(o, Op::RemoteDelete { node, .. } if *node == at))
     };
-    let Ok(met) = requires.met::<Infallible>(
+    // Looked up once for a folder's delete here, which asks for each node of its subtree.
+    let removing: Option<HashSet<NodeId>> = match op {
+        Op::LocalDelete { subtree, .. } if subtree.len() > 1 => Some(
+            client
+                .plan
+                .iter()
+                .filter(|(o, _)| matches!(o, Op::RemoteDelete { .. }))
+                .map(|(o, _)| o.node())
+                .collect(),
+        ),
+        _ => None,
+    };
+    let Ok(met) = op.met::<Infallible>(
         |folder| Ok(client.planned_remote.contains(folder)),
-        removing,
-        |folder| client.unremoved.contains(&folder),
+        |at| {
+            removing
+                .as_ref()
+                .map_or_else(|| removing_one(at), |r| r.contains(&at))
+        },
+        |at| client.unremoved.contains(&at),
     );
     met
 }

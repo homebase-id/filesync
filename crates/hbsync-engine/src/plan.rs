@@ -471,6 +471,41 @@ impl Op {
             _ => None,
         }
     }
+
+    /// Which delete it is, among held deletes: its node, and whether it removes it from the
+    /// drive (a node's delete here and its removal there, held together, are two).
+    pub fn key(&self) -> (NodeId, bool) {
+        (self.node(), matches!(self, Op::RemoteDelete { .. }))
+    }
+
+    /// Whether the executor's order guards let it run ([`Requirement::met`], with its
+    /// arguments): a folder's delete here also waits for the removals from the drive in its
+    /// subtree (what its removal elsewhere took along, planned with it, §7), and one that ended
+    /// without removing its node leaves it for the next plan (one look per node of its
+    /// subtree). The executor and the simulator both judge by it.
+    pub fn met<E>(
+        &self,
+        on_drive: impl FnOnce(NodeId) -> Result<bool, E>,
+        removing: impl Fn(NodeId) -> bool,
+        unremoved: impl Fn(NodeId) -> bool,
+    ) -> Result<Met, E> {
+        if let Op::LocalDelete { subtree, .. } = self {
+            let mut later = false;
+            for &n in subtree {
+                if unremoved(n) {
+                    return Ok(Met::NextPlan);
+                }
+                later |= removing(n);
+            }
+            if later {
+                return Ok(Met::Later);
+            }
+        }
+        match self.requires() {
+            Some(requires) => requires.met(on_drive, removing, unremoved),
+            None => Ok(Met::Yes),
+        }
+    }
 }
 
 /// An ordering condition on the server side (see [`Op::requires`]).
@@ -559,9 +594,13 @@ pub struct Plan {
     pub ops: Vec<Op>,
     /// Deletes held by the mass-delete guard.
     pub held: Vec<Op>,
-    /// The files each of `held` takes, by its node, as the guard counted them: (removed from
-    /// the drive, deleted here).
-    pub held_takes: BTreeMap<NodeId, (usize, usize)>,
+    /// The files each of `held` takes, by its [`Op::key`], as the guard counted them:
+    /// (removed from the drive, deleted here).
+    pub held_takes: BTreeMap<(NodeId, bool), (usize, usize)>,
+    /// Of the held deletes here, those held as removals elsewhere of every synced file (or
+    /// in or over one held so): kept till answered ([`crate::Guarding::wiped`]), unlike one
+    /// held only with what its removal took along, judged again with every plan.
+    pub held_wipes: BTreeSet<NodeId>,
     /// The folders deleted here that the plan moves something out of first (not expected by
     /// their deletes): a held one stays dirty with that move ([`crate::held::out_of_dirty`]).
     pub moves_out_of: BTreeSet<NodeId>,

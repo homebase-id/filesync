@@ -428,9 +428,12 @@ included (service managers restart it then).
   keeps them. Put them back keeps them on Homebase and brings them back here. …" (or,
   everything removed elsewhere, "Everything here was removed on another device: 1,200 items.
   Delete removes them here too. Put them back keeps them here and restores them on Homebase,
-  for every device."), with **Delete** and **Put them back**; each button names its answer,
-  and a form without one does nothing. The CLI says the same with its commands in place of
-  the buttons, and asks one question. The reply says when they go: "with the next sync", or
+  for every device."; or, a removal elsewhere not finished on the drive, sync semantics §7,
+  "1 item was removed on another device, and removing it from Homebase didn't finish. Delete
+  finishes that and removes it here too: Recently deleted keeps it. Put them back keeps it here
+  and restores it on Homebase, for every device."), with **Delete** and **Put them back**;
+  each button names its answer, and a form without one does nothing. The CLI says the same
+  with its commands in place of the buttons, and asks one question. The reply says when they go: "with the next sync", or
   "once you resume syncing".
 - **Notes:** each conflict and failure is noted once; one that comes back sync after sync (a
   file that can't be read) isn't noted again until it has gone away. An operation left for the

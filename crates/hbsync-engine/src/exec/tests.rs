@@ -4844,8 +4844,8 @@ fn a_confirmed_delete_covers_what_a_removal_above_it_took_along() -> R {
     );
     assert_eq!(
         confirmed,
-        Some((false, vec![file])),
-        "the delete of g covers it"
+        Some((vec![file], vec![file])),
+        "the delete of g covers it, here and its removal from the drive with it (§7)"
     );
     Ok(())
 }
@@ -4863,7 +4863,7 @@ fn a_confirmed_removal_of_a_file_taken_along_covers_it() -> R {
     assert_eq!(pending, (1, 1));
     assert_eq!(
         confirmed,
-        Some((true, vec![file])),
+        Some((vec![file], vec![file])),
         "its removal from the drive"
     );
     Ok(())
@@ -4974,8 +4974,8 @@ fn an_open_removal_counts_what_it_took_along() -> R {
     );
     assert_eq!(
         confirmed,
-        Some((false, vec![file])),
-        "the folder's delete covers it"
+        Some((vec![file], vec![file])),
+        "the folder's delete covers it, with its removal from the drive (§7)"
     );
     Ok(())
 }

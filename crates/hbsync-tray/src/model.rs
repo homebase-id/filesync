@@ -453,6 +453,7 @@ mod tests {
             folder.held_deletes = Some(HeldDeletes {
                 here: 0,
                 remotely: 300,
+                unfinished: 0,
                 examples: Vec::new(),
                 token: "t".into(),
             });
@@ -643,6 +644,7 @@ mod tests {
         s.held_deletes = Some(HeldDeletes {
             here: 100,
             remotely: 20,
+            unfinished: 0,
             examples: vec![],
             token: "t".into(),
         });
@@ -731,6 +733,7 @@ mod tests {
         held.held_deletes = Some(HeldDeletes {
             here: 60,
             remotely: 0,
+            unfinished: 0,
             examples: Vec::new(),
             token: "t".into(),
         });

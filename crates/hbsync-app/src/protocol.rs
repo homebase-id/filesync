@@ -478,6 +478,11 @@ pub struct HeldDeletes {
     pub here: u64,
     /// Items deleted elsewhere, to be deleted here.
     pub remotely: u64,
+    /// Of [`HeldDeletes::remotely`], those whose removal elsewhere isn't finished on the drive:
+    /// what it took along is still there, removed from the drive with their delete here, put
+    /// back with them (sync semantics §7).
+    #[serde(default)]
+    pub unfinished: u64,
     /// Some of them.
     pub examples: Vec<String>,
     /// Names exactly these deletes: a confirmation carries it back.

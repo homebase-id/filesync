@@ -459,7 +459,30 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   from the drive of a file not synced and not marked here is weighed within its own plan, not
   across pages. Taken along is read by the drive's times alone: where the plan keeps the
   removed folder (a change here in it, §6.3), the count is higher than what the plan removes,
-  and holds sooner. The rest of the plan proceeds. The user answers, about exactly what was shown (a token names the
+  and holds sooner. A removal elsewhere goes with what it took along: a folder's delete here
+  plans the removals from the drive of what in it is still live there (taken along), which run
+  first; the delete here waits for them, and one that doesn't land leaves it for the next plan
+  (a run cut between leaves a removal elsewhere done on the drive, followed as any: engine
+  `a_removal_elsewhere_cut_before_its_delete_here_is_followed_after`). A delete here that goes
+  stale after them (an app saving into the folder meanwhile) keeps the folder for what is new
+  there; what it took along is removed by then, as the removal elsewhere meant, and goes here
+  too, kept in Recently deleted (engine
+  `a_folder_kept_by_a_save_during_its_delete_keeps_only_whats_new`). Where those removals
+  are held, the folder's delete here is held with them, and a held delete here holds them: one
+  item, shown as removed on another device with a removal not finished on the drive (its own
+  sentence, not that of a removal of every synced file), answered as one (the folder's answer
+  is theirs, and a confirmed folder's delete covers them in the counts). Held so, it is judged again with
+  every plan, not kept till answered as a removal of every synced file is: once the removal
+  elsewhere is finished on the drive, nothing is left to hold. While the drive refuses one of
+  those removals (§8a, Refused), the folder stays here: a removal elsewhere is followed only
+  once all of it can be. Cost: a held removal is an operation of its own per file while held
+  (about 100 bytes in memory, and a copy in each sync's report), where the folder's delete
+  alone was a node id per file.
+  **Put them back** restores the folder on the drive with what it took along; **Delete** lets
+  all of it through (engine
+  `a_removal_elsewhere_is_held_with_what_it_took_along_and_put_back`,
+  `a_removal_elsewhere_held_with_what_it_took_along_goes_on_delete`). The rest of the plan
+  proceeds. The user answers, about exactly what was shown (a token names the
   held items; an answer to a set that changed since is refused, the new one shown; one taken
   goes with the next sync, for the items it named, and any held since stay held):
   - **Delete**: they go to the drive's Recently deleted, as any delete does.

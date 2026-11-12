@@ -53,11 +53,19 @@ impl Reconciler<'_> {
             .copied()
             .filter(|n| yes.contains(n))
             .collect();
-        let confirmed = |op: &Op| {
-            let node = op.node();
+        // What a folder's delete here took along, removed from the drive with it (planned
+        // with it, [`Reconciler::with_what_it_took_along`]), and a node's own removal with its
+        // delete here: one removal elsewhere, answered as one, by the delete's answer too.
+        let along = crate::held::together(self.plan.ops.iter());
+        let confirmed_node = |node: NodeId| {
             yes.contains(&node)
                 || (!waiting.is_empty()
                     && i.base.ancestors(node).iter().any(|a| waiting.contains(a)))
+        };
+        let confirmed = |op: &Op| {
+            confirmed_node(op.node())
+                || matches!(op, Op::RemoteDelete { node, .. }
+                    if along.get(node).is_some_and(|f| confirmed_node(*f)))
         };
         // The files each delete takes: a file removed from the drive, what a delete takes here.
         let takes = |op: &Op| match op {
@@ -108,25 +116,50 @@ impl Reconciler<'_> {
         if !hold_local && !hold_remote && wiped.is_empty() {
             return;
         }
+        // A removal elsewhere is held with what it took along (§6.3): held as this device's
+        // own removals from the drive, they hold the folder's delete here (only while they
+        // are: not kept as a wipe is), and a held delete here holds them. Nothing goes here
+        // while the rest of it waits on the drive.
+        let mut own = HashSet::new();
+        let mut wipes = HashSet::new();
+        let mut with_along: HashSet<NodeId> = HashSet::new();
+        for op in &self.plan.ops {
+            match op {
+                Op::LocalDelete { node, subtree } => {
+                    if !confirmed(op)
+                        && (hold_local
+                            || was_wiped(*node)
+                            || subtree.iter().any(|n| wiped.contains(n)))
+                    {
+                        wipes.insert(*node);
+                    }
+                }
+                Op::RemoteDelete { node, .. } if hold_remote && !confirmed(op) => {
+                    own.insert(*node);
+                    with_along.extend(along.get(node));
+                }
+                _ => {}
+            }
+        }
+        let held_folder = |n: &NodeId| wipes.contains(n) || with_along.contains(n);
         let ops = std::mem::take(&mut self.plan.ops);
         for op in ops {
-            let held = !confirmed(&op)
-                && match &op {
-                    Op::RemoteDelete { .. } => hold_remote,
-                    // Itself, a folder it is in, or anything it takes along.
-                    Op::LocalDelete { node, subtree } => {
-                        hold_local || was_wiped(*node) || subtree.iter().any(|n| wiped.contains(n))
-                    }
-                    _ => false,
-                };
+            let held = match &op {
+                Op::LocalDelete { node, .. } => held_folder(node),
+                Op::RemoteDelete { node, .. } => {
+                    own.contains(node) || along.get(node).is_some_and(held_folder)
+                }
+                _ => false,
+            };
             if held {
                 if let Some(takes) = takes(&op) {
-                    self.plan.held_takes.insert(op.node(), takes);
+                    self.plan.held_takes.insert(op.key(), takes);
                 }
                 self.plan.held.push(op);
             } else {
                 self.plan.ops.push(op);
             }
         }
+        self.plan.held_wipes = wipes.into_iter().collect();
     }
 }

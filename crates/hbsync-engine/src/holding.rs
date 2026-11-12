@@ -36,6 +36,9 @@ struct HeldOut {
     nodes: HashSet<NodeId>,
     /// The files they take ([`Guarding::held`]).
     files: (usize, usize),
+    /// Whether any of them is this device's own removal from the drive (not one of what a
+    /// removal elsewhere held as a wipe took along, held with it).
+    own: bool,
     /// Their part of the guard's totals ([`ReadTx::held_file_deletes`]), once read: what
     /// changes them marks a node of theirs dirty, and the plan that reaches it plans them all
     /// again.
@@ -47,9 +50,16 @@ struct HeldOut {
 }
 
 impl HeldOut {
-    fn add(&mut self, ops: impl IntoIterator<Item = Op>, (here, there): (usize, usize)) {
-        self.ops.extend(ops);
-        self.files = (self.files.0 + here, self.files.1 + there);
+    /// Adds `ops`, each with the files it takes; `wiped`: the removals elsewhere held as every
+    /// synced file.
+    fn add(&mut self, ops: Vec<(Op, (usize, usize))>, wiped: &HashSet<NodeId>) {
+        let along = held::along(ops.iter().map(|(op, _)| op));
+        for (op, (here, there)) in ops {
+            self.files = (self.files.0 + here, self.files.1 + there);
+            self.own |= matches!(op, Op::RemoteDelete { .. })
+                && !along.get(&op.node()).is_some_and(|f| wiped.contains(f));
+            self.ops.push(op);
+        }
     }
 }
 
@@ -68,8 +78,15 @@ impl HoldOut {
     /// set, replacing what earlier pages held of its nodes.
     pub(crate) fn add(&mut self, plan: &Plan, page: &[NodeId], marks: &[Mark]) {
         let (out, nodes) = held::out_of_dirty(plan, page);
-        let planned: HashSet<NodeId> = page.iter().copied().collect();
-        self.ops.retain(|(op, _)| !planned.contains(&op.node()));
+        if out.is_empty() && self.ops.is_empty() && self.marks.is_empty() {
+            return;
+        }
+        let planned: HashSet<NodeId> = page
+            .iter()
+            .copied()
+            .chain(out.iter().map(|op| op.node()))
+            .collect();
+        held::drop_replaced(&mut self.ops, |(op, _)| op, &planned);
         self.marks.retain(|m| !planned.contains(&m.node));
         self.ops.extend(
             out.into_iter()
@@ -77,13 +94,6 @@ impl HoldOut {
         );
         self.marks
             .extend(marks.iter().filter(|m| nodes.contains(&m.node)));
-    }
-
-    /// The files its deletes take.
-    fn files(&self) -> (usize, usize) {
-        self.ops
-            .iter()
-            .fold((0, 0), |(here, there), (_, (h, t))| (here + h, there + t))
     }
 
     /// The nodes it would take out.
@@ -161,13 +171,9 @@ impl HeldDeletes {
         );
         // Before the hold of removals elsewhere is looked at: that of one out of the dirty set
         // is kept as it was.
-        let own = self
-            .out
-            .ops
-            .iter()
-            .any(|op| matches!(op, Op::RemoteDelete { .. }));
+        // Counted as the guard counts them (with what a wipe took along: `Guarding::held`).
         if any_out && settings.allow
-            || own
+            || self.out.own
                 && !settings.trips(pending.0, synced)
                 && !settings.trips(self.out.files.0, synced)
         {
@@ -242,10 +248,10 @@ impl HeldDeletes {
     }
 
     /// After a page's `plan` (for the dirty nodes `dirty`): what it holds of removals elsewhere
-    /// stays held till answered (only the every-file rule holds those), kept before anything
-    /// of the page runs or goes clean. A confirmation lasts while its node's plan deletes it,
-    /// or its delete waits for a file in it not hashed yet (§6.3): one whose delete was undone
-    /// (the file back) is forgotten, so a later delete is judged anew.
+    /// as every synced file ([`Plan::held_wipes`]) stays held till answered, kept before
+    /// anything of the page runs or goes clean. A confirmation lasts while its node's plan
+    /// deletes it, or its delete waits for a file in it not hashed yet (§6.3): one whose delete
+    /// was undone (the file back) is forgotten, so a later delete is judged anew.
     pub(crate) fn after_plan(
         &mut self,
         db: &mut StateDb,
@@ -253,11 +259,7 @@ impl HeldDeletes {
         dirty: &[NodeId],
     ) -> Result<(), StateError> {
         let before = self.wiped.len();
-        self.wiped
-            .extend(plan.held.iter().filter_map(|op| match op {
-                Op::LocalDelete { node, .. } => Some(*node),
-                _ => None,
-            }));
+        self.wiped.extend(&plan.held_wipes);
         if self.wiped.len() != before {
             save_wiped(db, &self.wiped)?;
         }
@@ -309,11 +311,15 @@ impl HeldDeletes {
         })?;
         if taken {
             self.out.nodes.extend(page.marks.iter().map(|m| m.node));
-            let files = page.files();
-            self.out.add(page.ops.into_iter().map(|(op, _)| op), files);
+            self.out.add(page.ops, &self.wiped);
             self.out.pending = None;
         }
         Ok(())
+    }
+
+    /// [`HeldDeletes::wiped`].
+    pub(crate) fn wiped(&self) -> &HashSet<NodeId> {
+        &self.wiped
     }
 
     /// `held`, the deletes a sweep held, with those held out of the dirty set: what the user is
@@ -322,12 +328,13 @@ impl HeldDeletes {
         if self.out.ops.is_empty() {
             return held;
         }
-        let mut nodes: HashSet<NodeId> = held.iter().map(Op::node).collect();
+        // A node's delete here and its removal from the drive are two.
+        let mut nodes: HashSet<(NodeId, bool)> = held.iter().map(Op::key).collect();
         held.extend(
             self.out
                 .ops
                 .iter()
-                .filter(|op| nodes.insert(op.node()))
+                .filter(|op| nodes.insert(op.key()))
                 .cloned(),
         );
         held
@@ -385,7 +392,7 @@ impl HeldDeletes {
         };
         let kept: HashSet<NodeId> = plan.kept.iter().copied().collect();
         let kept_gone = after.iter().filter(|n| kept.contains(n)).count();
-        Ok(plan.forget.len() + plan.restored.len() + kept_gone)
+        Ok(plan.forget.len() + plan.restored.len() + plan.along.len() + kept_gone)
     }
 }
 
@@ -425,10 +432,10 @@ pub(crate) fn guard_counts(
     let (here, there) = (here + held.0, there + held.1);
     let mut still = HashSet::new();
     // Each file once, however many confirmed deletes it is under.
-    let (mut confirmed_here, mut confirmed_there) = (0, HashSet::new());
+    let (mut confirmed_here, mut confirmed_there) = (HashSet::new(), HashSet::new());
     for &node in confirmed {
         if let Some((gone_here, gone_there)) = s.confirmed_file_deletes(node)? {
-            confirmed_here += u64::from(gone_here);
+            confirmed_here.extend(gone_here);
             confirmed_there.extend(gone_there);
             still.insert(node);
         }
@@ -440,7 +447,7 @@ pub(crate) fn guard_counts(
     };
     Ok(Counts {
         pending: (
-            here.saturating_sub(confirmed_here),
+            here.saturating_sub(confirmed_here.len() as u64),
             there.saturating_sub(confirmed_there.len() as u64),
         ),
         synced,
@@ -499,6 +506,10 @@ impl Sides for StoreSides<'_, '_> {
             .0
             .removed_by_node(node)?
             .map(|r| (r.row.parent, r.time())))
+    }
+
+    fn drive_parent(&self, node: NodeId) -> Result<Option<NodeId>, StateError> {
+        Ok(self.0.get_mirror(node)?.map(|m| m.parent))
     }
 }
 
