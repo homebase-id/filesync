@@ -587,16 +587,13 @@ impl HomebaseRemote {
                 "your Filesync drive has no key that opens what others share with you".into(),
             )
         })?;
+        self.permitted(None)?;
         let answer = match SealedKey::ask(&self.client, &sharer.odin_id, circle) {
             Ok(answer) => answer,
-            // A codeless 403 there is theirs, or this app's want of the permission to ask
-            // (`Client::whose`): which, the security context says.
-            Err(HomebaseError::Api { error, .. })
-                if error.status == 403 && error.code.is_none() && !self.reads_shared()? =>
-            {
-                return Err(RemoteError::Fatal(NOT_PERMITTED.into()));
+            Err(e) => {
+                self.permitted(Some(&e))?;
+                return Err(remote_error(e));
             }
-            Err(e) => return Err(remote_error(e)),
         };
         let sealed = sealed_or_wait(answer, &sharer.odin_id)?;
         let member = markers::owner_of(self.client.identity());
@@ -609,6 +606,28 @@ impl HomebaseRemote {
     /// context said at its last read.
     pub(crate) fn reads_shared(&self) -> Result<bool> {
         self.key_state(false, |state| Ok(state.reads_shared))
+    }
+
+    /// Refuses a peer route ([`NOT_PERMITTED`]) when the app may not ask it: before asking
+    /// (`refused` none), as last read, or after a refusal that may be for that (a codeless 403,
+    /// `Client::whose`). Either way the security context is read again (one request) before it
+    /// refuses: the owner may have given it since, which no reconnect tells.
+    fn permitted(&self, refused: Option<&HomebaseError>) -> Result<()> {
+        let maybe_unpermitted = match refused {
+            None => !self.reads_shared()?,
+            Some(e) => codeless_forbidden(e),
+        };
+        if !maybe_unpermitted {
+            return Ok(());
+        }
+        let mut state = self.drive_key.0.lock().unwrap_or_else(|e| e.into_inner());
+        let known = state.private;
+        *state = KeyState::read(&self.client, &self.drive, self.client.connects(), known)
+            .map_err(remote_error)?;
+        match state.reads_shared {
+            true => Ok(()),
+            false => Err(RemoteError::Fatal(NOT_PERMITTED.into())),
+        }
     }
 
     /// What this identity's own markers say: whose shares its computers sync, and which of its
@@ -1036,6 +1055,12 @@ impl Remote for HomebaseRemote {
         };
         decrypt(response, &key, &at, len, &path, sink)
     }
+}
+
+/// A 403 without a code: on a peer route, the other identity's refusal, or this app's want of
+/// the permission to ask (`Client::whose`).
+fn codeless_forbidden(e: &HomebaseError) -> bool {
+    matches!(e, HomebaseError::Api { error, .. } if error.status == 403 && error.code.is_none())
 }
 
 /// The sealed circle key `sharer`'s server answered, or how long to wait for it
@@ -1976,6 +2001,15 @@ mod tests {
         assert_eq!(read(lost, 9), (Ok(Ended::CutShort), vec![None]));
         let enough = vec![page(Some("a"), true), page(Some("b"), true)];
         assert_eq!(read(enough, 1), (Ok(Ended::Done), vec![None]));
+    }
+
+    /// Only a 403 without a code may be for want of the permission to read shares.
+    #[test]
+    fn only_a_codeless_403_may_be_the_permission() {
+        assert!(codeless_forbidden(&api(403, None)));
+        assert!(!codeless_forbidden(&api(403, Some("notReviewedByOwner"))));
+        assert!(!codeless_forbidden(&api(401, None)));
+        assert!(!codeless_forbidden(&HomebaseError::Network("cut".into())));
     }
 
     /// A circle key not sealed yet, or a connection not reviewed, waits on the sharer: asked

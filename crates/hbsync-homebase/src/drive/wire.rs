@@ -52,8 +52,22 @@ pub struct FileHeader {
     /// To a member, the live shares the file reaches them through, by circle id: its key header
     /// is the first one's (**[verified]** odin-core `CallerShares.LiveRowsOf`,
     /// `DriveFileUtility.CreateClientFileHeader`). None on this identity's own drive.
-    #[serde(default, deserialize_with = "lenient")]
+    #[serde(default, deserialize_with = "share_rows")]
     pub shares: Option<Vec<ShareRow>>,
+}
+
+/// A header's `shares`, each row read on its own: one that doesn't read (not an object, say)
+/// names no circle, and leaves the others.
+fn share_rows<'de, D>(d: D) -> Result<Option<Vec<ShareRow>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let rows: Option<Vec<Value>> = lenient(d)?;
+    Ok(rows.map(|rows| {
+        rows.into_iter()
+            .map(|row| serde_json::from_value(row).unwrap_or(ShareRow { circle_id: None }))
+            .collect()
+    }))
 }
 
 /// One of a shared file's live shares, as a member reads it.
@@ -905,13 +919,13 @@ mod tests {
         // A share row that doesn't read leaves the others; with the first unread, no circle is
         // named.
         let rows: FileHeader = serde_json::from_value({
-            let mut row = serde_json::to_value(fixture_value("file-node.json"))?;
-            row["shares"] = json!([{ "circleId": null }, { "circleId": v::CIRCLE }]);
+            let mut row = fixture_value("file-node.json");
+            row["shares"] = json!([{ "circleId": null }, "junk", { "circleId": v::CIRCLE }]);
             row
         })?;
         let shares = rows.shares.as_ref().ok_or("shares")?;
-        assert_eq!(shares.len(), 2);
-        assert_eq!(shares[1].circle_id, Some(v::id(v::CIRCLE)));
+        assert_eq!(shares.len(), 3);
+        assert_eq!(shares[2].circle_id, Some(v::id(v::CIRCLE)));
         assert_eq!(rows.share_circle(), None);
 
         // A share withdrawn: a tombstone without its version, parent or key, read as gone.

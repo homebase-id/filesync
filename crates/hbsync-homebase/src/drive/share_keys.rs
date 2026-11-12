@@ -126,24 +126,6 @@ pub(crate) mod tests {
         CircleKey::unseal(&bytes(SEALED), key, id(CIRCLE), id(DRIVE), member)
     }
 
-    /// A file key is bound to its circle: the key of another circle (another id, the same
-    /// bytes even) doesn't open it.
-    #[test]
-    fn a_file_key_opens_only_with_its_circles_key() {
-        let other = |circle: Uuid| CircleKey {
-            key: Zeroizing::new(key_of(&bytes(CIRCLE_KEY), "a circle's key").expect("key")),
-            circle,
-            drive: id(DRIVE),
-        };
-        let locked = bytes(LOCKED);
-        assert!(other(id(CIRCLE)).file_key(&locked, id(FILE), None).is_ok());
-        assert!(
-            other(Uuid::new_v4())
-                .file_key(&locked, id(FILE), None)
-                .is_err()
-        );
-    }
-
     #[test]
     fn a_sealed_circle_key_opens_for_that_circle_and_member() {
         let key = WriteOnlyKey::from_pkcs8(&bytes(WRITE_ONLY_PKCS8)).expect("pkcs8");
@@ -177,5 +159,14 @@ pub(crate) mod tests {
         );
         assert!(open(&by_gtid, FILE, None).is_err(), "no gtid to bind");
         assert!(open(&locked[..44], FILE, None).is_err(), "cut short");
+        // Bound to its circle: the same key under another circle's id doesn't open it.
+        let elsewhere = CircleKey {
+            circle: Uuid::new_v4(),
+            ..circle
+        };
+        assert!(
+            elsewhere.file_key(&locked, id(FILE), None).is_err(),
+            "another circle"
+        );
     }
 }

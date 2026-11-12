@@ -9,7 +9,6 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::ops::Range;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
 
 use hbsync_remote::{
     Answers, ChangesPage, Deletes, ForGood, Holds, NodeMeta, RefsPage, Refusal, Remote,
@@ -24,15 +23,11 @@ use super::sealed::CipherRange;
 use super::share_keys::CircleKey;
 use super::wire::{self, FileHeader, Keys};
 use super::{
-    HOLD_BACK, HomebaseRemote, changes_page, decrypt, feed_page, fetch, file_route, holding,
-    payload_key, plain_size, query_batch, raw_header, refs_page, remote_error,
+    HOLD_BACK, HomebaseRemote, SHARER_WAIT, changes_page, decrypt, feed_page, fetch, file_route,
+    holding, payload_key, plain_size, query_batch, raw_header, refs_page, remote_error,
 };
 use crate::peer::{self, PeerToken};
 use crate::{Client, HomebaseError};
-
-/// How long a circle's key is kept before one that doesn't open a file of the circle is asked
-/// for again ([`PeerRemote::circle_for`]).
-const ASKED_AGAIN: Duration = Duration::from_secs(60);
 
 /// One sharer's files shared with this identity, on their server.
 #[derive(Debug)]
@@ -43,9 +38,10 @@ pub struct PeerRemote {
     /// write-only key opens it.
     own: Arc<HomebaseRemote>,
     sharer: Sharer,
-    /// The keys of their circles opened so far, with when: one request each, the first time a
-    /// file shared through it is read.
-    circles: Mutex<HashMap<Uuid, (Arc<CircleKey>, Instant)>>,
+    /// The keys of their circles opened so far: one request each, the first time a file shared
+    /// through it is read. A circle's key is set once (odin-core `V2CircleShareKeyController`,
+    /// **[verified]**), so one kept stays good.
+    circles: Mutex<HashMap<Uuid, Arc<CircleKey>>>,
 }
 
 impl PeerRemote {
@@ -85,42 +81,34 @@ impl PeerRemote {
         raw_header(&self.client, self.sharer.drive_alias, file_id).map_err(|e| self.error(e))
     }
 
-    /// The key of their `circle`, opened once ([`HomebaseRemote::circle_key`]), or asked for
-    /// again when `stale` (one kept that didn't open a file of it) and kept for longer than
-    /// [`ASKED_AGAIN`]. Not held while asked (two requests, theirs through this identity's
-    /// server): readers of circles already open don't wait, and two first readers of one may
-    /// each ask once.
-    fn circle_key(&self, circle: Uuid, stale: bool) -> Result<Arc<CircleKey>> {
+    /// The key of their `circle`, opened once ([`HomebaseRemote::circle_key`]). Not held while
+    /// asked (two requests, theirs through this identity's server): readers of circles already
+    /// open don't wait, and two first readers of one may each ask once.
+    fn circle_key(&self, circle: Uuid) -> Result<Arc<CircleKey>> {
         let circles = || self.circles.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((key, at)) = circles().get(&circle)
-            && !(stale && at.elapsed() > ASKED_AGAIN)
-        {
+        if let Some(key) = circles().get(&circle) {
             return Ok(Arc::clone(key));
         }
         let key = Arc::new(self.own.circle_key(&self.sharer, circle)?);
-        circles().insert(circle, (Arc::clone(&key), Instant::now()));
+        circles().insert(circle, Arc::clone(&key));
         Ok(key)
     }
 
-    /// The circle key `header` needs, if a live node's, and whether it opens the file: a page
-    /// with a file whose circle's key isn't to be had yet (or that names no circle) fails whole,
-    /// so its cursor doesn't pass the file by. A kept key that doesn't open it may be one the
-    /// sharer replaced since: asked for again (once a minute at most).
+    /// The circle key `header` needs, if a live node's: a page with a file whose circle's key
+    /// isn't to be had yet (or that names no circle) fails whole, so its cursor doesn't pass the
+    /// file by.
     fn circle_for(&self, header: &FileHeader) -> Result<Option<Arc<CircleKey>>> {
         if !header.needs_circle_key() {
             return Ok(None);
         }
-        let circle = header.share_circle().ok_or_else(|| {
-            RemoteError::Fatal(format!(
+        let circle = header.share_circle().ok_or_else(|| RemoteError::Later {
+            why: format!(
                 "file {}: shared with you, but through no circle it names",
                 header.file_id
-            ))
+            ),
+            retry_after: SHARER_WAIT,
         })?;
-        let key = self.circle_key(circle, false)?;
-        if header.key(self.keys(Some(&key))).is_ok() {
-            return Ok(Some(key));
-        }
-        self.circle_key(circle, true).map(Some)
+        self.circle_key(circle).map(Some)
     }
 
     fn keys<'a>(&'a self, circle: Option<&'a CircleKey>) -> Keys<'a> {
