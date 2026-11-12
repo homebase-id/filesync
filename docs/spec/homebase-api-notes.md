@@ -534,16 +534,16 @@ server answers the rest, to a token their server made for this identity's connec
   socket error, a timeout): 400 `remoteServerReturnedUnavailable` (read as a passing outage);
   their 400, 400 `argumentError`; a server too old for the route, 400
   `remoteServerReturnedNotFound`; anything else, 400 `remoteServerReturnedInternalServerError`.
-- **Whose a refusal is.** Without the permission they need, the peer routes answer 403 with no
-  code too, like a sharer's. Before asking, the client looks whether the app holds
-  `UseTransitRead` as the security context last said, and reads it again when it didn't (unless
-  just read); after a codeless 403 it reads it again the same way (`reads_shared_now`, the
-  context alone): the owner may have given the permission without any reconnect
-  (**[inferred]**: the permission update closes no socket). A 403 with the permission held is the
-  sharer's (`Client::whose`). Lacking it, the share stops, refused (`Refusal::Permission`) until
-  the owner approves; a 401 there is this login's. On the sharer's own server
-  (`Client::for_peer`) a 401 refuses the token (`peer::refused`), a 403 a file or drive not
-  shared with this identity.
+- **Whose a refusal is.** Without the permission they need, the peer routes answer 403 with no code
+  too, like a sharer's. Before asking, the client looks whether the app holds `UseTransitRead` as
+  the security context last said, and reads it again when it didn't; after a codeless 403 (the
+  permission held as last read) it reads it again (`reads_shared_now`, the context alone): the owner
+  may have given the permission without any reconnect (**[inferred]**: the permission update closes
+  no socket). A 403 with the permission held is the sharer's (**[verified]** odin-core
+  `PeerServiceBase`; `Client::whose`). Lacking it, the share stops, refused (`Refusal::Permission`)
+  until the owner approves; a 401 there is this login's. On the sharer's own server
+  (`Client::for_peer`) a 401 refuses the token (`peer::refused`), a 403 a file or drive not shared
+  with this identity.
 - **Reading on their server** **[verified]** (odin-core `PeerDirectReadAttribute`, #2127;
   `drive/shared.rs`, `PeerRemote`): with the token as `Authorization: Bearer`, the routes of
   their drive by its alias (the marker's `driveAlias`), `/api/v2/drives/<alias>/files/...`:

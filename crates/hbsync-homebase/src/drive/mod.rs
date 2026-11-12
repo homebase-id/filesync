@@ -194,7 +194,7 @@ impl KeyState {
         read_at: u64,
         known_private: bool,
     ) -> Result<Self, HomebaseError> {
-        let context: serde_json::Value = client.get("/api/v2/auth/context", &[])?;
+        let context = security_context(client)?;
         let grant = drive_grant(&context, drive);
         let zero_knowledge = match &grant {
             Some(grant) => grant.zero_knowledge,
@@ -241,6 +241,11 @@ impl KeyState {
             (_, key) => Ok(key),
         }
     }
+}
+
+/// The login's security context: its grants and permissions.
+fn security_context(client: &Client) -> Result<serde_json::Value, HomebaseError> {
+    client.get("/api/v2/auth/context", &[])
 }
 
 struct DriveKey(Mutex<KeyState>);
@@ -504,25 +509,15 @@ impl HomebaseRemote {
         needed: bool,
         take: impl FnOnce(&KeyState) -> std::result::Result<T, HomebaseError>,
     ) -> Result<T> {
-        self.key_state_read(needed, take).map(|(t, _)| t)
-    }
-
-    /// [`Self::key_state`], and whether the security context was read for it just now.
-    fn key_state_read<T>(
-        &self,
-        needed: bool,
-        take: impl FnOnce(&KeyState) -> std::result::Result<T, HomebaseError>,
-    ) -> Result<(T, bool)> {
         let connects = self.client.connects();
         // Held while it is read: whoever needs it then waits for that one read.
         let mut state = self.drive_key.lock();
-        let read = state.read_at != connects || (needed && !state.private);
-        if read {
+        if state.read_at != connects || (needed && !state.private) {
             let known = state.private || needed;
             *state =
                 KeyState::read(&self.client, &self.drive, connects, known).map_err(remote_error)?;
         }
-        Ok((take(&state).map_err(remote_error)?, read))
+        take(&state).map_err(remote_error)
     }
 
     /// `header` as a [`RemoteHeader`], opened with the drive's key when a live node's is locked
@@ -598,23 +593,22 @@ impl HomebaseRemote {
     /// before them, or a grant without the copy). A private drive without its key refuses this
     /// computer first, as [`Self::drive_key`] does.
     pub(crate) fn circle_key(&self, sharer: &markers::Sharer, circle: Uuid) -> Result<CircleKey> {
-        let ((locked, permitted), fresh) =
-            self.key_state_read(false, |s| Ok((s.write_only()?, s.reads_shared)))?;
+        let (locked, permitted) =
+            self.key_state(false, |s| Ok((s.write_only()?, s.reads_shared)))?;
+        let no_key = || RemoteError::Denied(NO_WRITE_ONLY_KEY.into(), Refusal::NoKey);
         let not_permitted = || RemoteError::Denied(NOT_PERMITTED.into(), Refusal::Permission);
-        // Without the permission the ask is refused: the context read again first, unless it
-        // was just now.
-        if !permitted && (fresh || !self.reads_shared_now()?) {
+        // No write-only key first: without one the permission wouldn't help (and costs nothing to
+        // look at). Without the permission the ask is refused: the context read again first.
+        let (key, locked) = locked.ok_or_else(no_key)?;
+        if !permitted && !self.reads_shared_now()? {
             return Err(not_permitted());
         }
-        let checked = fresh || !permitted;
-        let write_only = locked
-            .and_then(|(key, locked)| open_write_only(&key, &locked))
-            .ok_or_else(|| RemoteError::Denied(NO_WRITE_ONLY_KEY.into(), Refusal::NoKey))?;
+        let write_only = open_write_only(&key, &locked).ok_or_else(no_key)?;
         let answer = match SealedKey::ask(&self.client, &sharer.odin_id, circle) {
             Ok(answer) => answer,
             // A codeless 403 is theirs, or the app's want of the permission (`Client::whose`):
-            // the context, read again unless it was just now, says which.
-            Err(e) if codeless_forbidden(&e) && !checked => {
+            // the context, read again unless it just was, says which.
+            Err(e) if codeless_forbidden(&e) && permitted => {
                 return match self.reads_shared_now()? {
                     false => Err(not_permitted()),
                     true => Err(remote_error(e)),
@@ -630,15 +624,12 @@ impl HomebaseRemote {
 
     /// Whether the app may read what others share with this identity (an install from before it
     /// asked for that has to be given it by the owner, [`app::update_url`]), the security
-    /// context read again now for it alone (one request, nothing held meanwhile): the owner may have given the permission
-    /// since, which no reconnect tells (**[inferred]**: odin-core's permission update closes no
-    /// socket). Kept for [`Self::circle_key`]'s next look; an answer overtaken by another read
-    /// costs that look one more read, no more.
+    /// context read again now for it alone (one request, nothing held meanwhile): the owner may
+    /// have given the permission since, which no reconnect tells (**[inferred]**: odin-core's
+    /// permission update closes no socket). Kept for [`Self::circle_key`]'s next look; an
+    /// answer overtaken by another read costs that look one more read, no more.
     fn reads_shared_now(&self) -> Result<bool> {
-        let context: serde_json::Value = self
-            .client
-            .get("/api/v2/auth/context", &[])
-            .map_err(remote_error)?;
+        let context = security_context(&self.client).map_err(remote_error)?;
         let reads = holds_key(&context, app::USE_TRANSIT_READ);
         self.drive_key.lock().reads_shared = reads;
         Ok(reads)
@@ -2021,10 +2012,9 @@ mod tests {
     /// before any request (the identity is unreachable here).
     #[test]
     fn no_write_only_key_asks_nothing() -> Result<(), HomebaseError> {
-        let own = unreachable_remote(KeyState {
-            reads_shared: true,
-            ..KeyState::default()
-        })?;
+        // Nor the permission: the key is looked at first (the permission costs a request, and
+        // alone it wouldn't help).
+        let own = unreachable_remote(KeyState::default())?;
         let sharer = markers::Sharer {
             odin_id: "sam.example".into(),
             drive_alias: Uuid::new_v4(),

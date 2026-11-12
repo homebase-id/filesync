@@ -385,7 +385,10 @@ impl std::fmt::Debug for Upload<'_> {
 pub enum Refusal {
     /// The credentials or the drive (401, 403): revoked, say.
     Credentials,
-    /// The drive is private, and this login holds no key that opens it.
+    /// The drive is private, and this login holds no key that opens it; or, reading what
+    /// others share, the drive has no write-only key that opens (a drive made before them, a
+    /// grant without its copy, or a drive that isn't private: sharers seal only to private
+    /// ones).
     NoKey,
     /// Another identity's server refused the token it made for this one, to read what they
     /// share: a new token lifts it, not a login (it may refuse that too: no longer connected).
