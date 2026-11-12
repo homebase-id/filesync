@@ -232,7 +232,8 @@ says so when it couldn't reach the keychain to remove the credentials there.
    meanwhile; the account's other folders sync on. A loop that can't start stops its account.
 
    **Refused (401, 403).** Once the identity refuses this computer (a sync, a read of the
-   feed, or the notifications' upgrade), the account is latched (`Drive::deny`): its folders
+   feed, or the notifications' upgrade; its own answer, with `X-Odin-Version`: a hotel's or a
+   proxy's 401 or 403 is offline), the account is latched (`Drive::deny`): its folders
    show `denied` and ask nothing but one sync an hour each (a 403 for one write needn't hold
    the account for good), its puller reads nothing and wakes no folder, the daily purge waits. The notifications ask again
    after 5 min, doubling up to an hour: once they connect (the credentials work again), or the
