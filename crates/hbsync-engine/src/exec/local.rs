@@ -606,6 +606,25 @@ impl Executor<'_> {
             let why = Outcome::stale("the folder holds something synced the plan didn't expect");
             return self.left_here(&row, original.as_ref(), why);
         }
+        // What is parked below it gets its name back first: out there, nothing names it.
+        let below: Vec<(LocalRow, RelPath)> = self.db.read(|s| {
+            let mut parked = Vec::new();
+            for n in s.all_parked()? {
+                if let Some(r) = s.local_by_node(n)?
+                    && r.node != node
+                    && r.path.starts_with(&row.path)
+                    && let Some(at) = view::parked_place(s, &r)?
+                {
+                    parked.push((r, at));
+                }
+            }
+            Ok(parked)
+        })?;
+        for (r, at) in below {
+            if let Err(why) = self.name_parked(&r, &at)? {
+                return self.left_here(&row, original.as_ref(), why);
+            }
+        }
         let place = original.clone().unwrap_or_else(|| row.path.clone());
         let to = match self.move_out(&row, &place) {
             Ok(to) => to,
@@ -641,6 +660,9 @@ impl Executor<'_> {
             match self.disk.move_out(self.db, &row.path, &to) {
                 Ok(Ok(())) => return Ok(to),
                 Ok(Err(e)) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Ok(Err(e)) if e.kind() == io::ErrorKind::CrossesDevices => {
+                    return Err(Outcome::unsyncable(self.disk.out_elsewhere()));
+                }
                 Ok(Err(e)) => return Err(io_outcome(e)),
                 Err(e) => return Err(e.into()),
             }

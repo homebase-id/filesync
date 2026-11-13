@@ -218,9 +218,9 @@ impl ReadTx<'_> {
         self.with_paths(raw)
     }
 
-    /// `path` and everything below it with their ids, unsorted.
     /// The nodes of the local subtree at `path` (its top included) that this folder has a base
-    /// of, or the drive holds (the mirror), each with whether it has a base: one query.
+    /// of, or the drive holds (the mirror), each with whether it has a base: one query. A
+    /// subtree too deep (or a cycle) is corrupt, as for [`ReadTx::local_subtree`].
     pub fn held_below(&self, path: &RelPath) -> Result<Vec<(NodeId, bool)>> {
         let Some(start) = self.local_id_at(path)? else {
             return Ok(Vec::new());
@@ -231,21 +231,33 @@ impl ReadTx<'_> {
                  UNION ALL \
                  SELECT l.id, sub.depth + 1 FROM local l JOIN sub ON l.parent = sub.id \
                  WHERE l.folder = $F AND sub.depth < ?2) \
-             SELECT n.uuid, EXISTS (SELECT 1 FROM base b WHERE b.folder = $F AND b.id = sub.id) \
+             SELECT n.uuid, EXISTS (SELECT 1 FROM base b WHERE b.folder = $F AND b.id = sub.id), \
+                 sub.depth \
              FROM sub JOIN nodes n ON n.id = sub.id \
-             WHERE EXISTS (SELECT 1 FROM base b WHERE b.folder = $F AND b.id = sub.id) \
+             WHERE sub.depth >= ?2 \
+                OR EXISTS (SELECT 1 FROM base b WHERE b.folder = $F AND b.id = sub.id) \
                 OR EXISTS (SELECT 1 FROM remote m WHERE m.id = sub.id)",
         )?;
         let rows = stmt.query_map(params![start, MAX_DEPTH as i64], |r| {
-            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, bool>(1)?))
+            Ok((
+                r.get::<_, Vec<u8>>(0)?,
+                r.get::<_, bool>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
         })?;
         rows.map(|r| {
-            let (uuid, base) = r?;
+            let (uuid, base, depth) = r?;
+            if depth as usize >= MAX_DEPTH {
+                return Err(StateError::Corrupt(format!(
+                    "below {path}: too deep, or a cycle"
+                )));
+            }
             Ok((codec::node(&uuid)?, base))
         })
         .collect()
     }
 
+    /// `path` and everything below it with their ids, unsorted.
     pub(super) fn subtree_raw(&self, path: &RelPath) -> Result<Vec<(RelPath, RawLocal)>> {
         let Some(start) = self.local_id_at(path)? else {
             return Ok(Vec::new());

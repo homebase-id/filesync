@@ -45,16 +45,23 @@ pub(super) fn notes(
     }
     // What changed in a read-only folder, kept where it moved out to (sync semantics §13): by
     // where it went, the first few named.
-    let mut moved: Vec<(String, &str)> = (report.moved_out.iter())
+    // Each by the name it went out as, where not its own (taken there).
+    let mut moved: Vec<(String, String)> = (report.moved_out.iter())
         .map(|(path, to)| {
             let into = to.parent().unwrap_or(to).display().to_string();
-            (into, path.as_str())
+            let own = path.rsplit('/').next().unwrap_or(path);
+            let named = to.file_name().map(|n| n.to_string_lossy().into_owned());
+            let shown = match named {
+                Some(n) if n != own => format!("{path} (as {n})"),
+                _ => path.clone(),
+            };
+            (into, shown)
         })
         .collect();
     moved.sort();
     for group in moved.chunk_by(|a, b| a.0 == b.0) {
         let into = &group[0].0;
-        let paths: Vec<String> = group.iter().map(|(_, path)| (*path).to_owned()).collect();
+        let paths: Vec<String> = group.iter().map(|(_, path)| path.clone()).collect();
         notes.push(format!(
             "{}: moved to {into}, as this folder is read-only (what changes here isn't synced)",
             listed(&paths)

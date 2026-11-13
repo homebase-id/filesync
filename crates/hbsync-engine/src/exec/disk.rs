@@ -146,10 +146,18 @@ impl<'a> Disk<'a> {
             .read_only
             .as_deref()
             .ok_or("the folder isn't read-only")?;
-        if self.out_checked.is_none() {
-            self.out_checked = Some(check_out(out, self.root, db));
-        }
-        self.out_checked.clone().unwrap_or(Ok(())).map(|()| out)
+        let checked = self
+            .out_checked
+            .get_or_insert_with(|| check_out(out, self.root, db));
+        checked.clone().map(|()| out)
+    }
+
+    /// The out folder found on another volume by a rename into it (a bind mount of the same
+    /// file system shares a device id): refused for the rest of the run.
+    pub(super) fn out_elsewhere(&mut self) -> String {
+        let why = "the folder changes move out to is on another volume".to_owned();
+        self.out_checked = Some(Err(why.clone()));
+        why
     }
 
     /// Moves `from` out of the sync root, to `to`, never over anything ([`rename_ordered`]).
