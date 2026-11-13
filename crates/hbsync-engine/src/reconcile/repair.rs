@@ -325,15 +325,6 @@ impl Reconciler<'_> {
                     self.wait_together(vec![node, parent]);
                     Parent::Wait
                 }
-                // Left to the devices that sync where it would go, or where it is: in a folder
-                // in Recently deleted at a place this device filters (masked, §10), it is
-                // another device's to bring back with its folder, no orphan (§6.3).
-                Parent::Recover
-                    if !self.holds_any(node)
-                        && (self.in_masked(node) || self.recovered_path(node).is_none()) =>
-                {
-                    Parent::Leave
-                }
                 // Read-only (§13): no folder made again, nothing moved into Recovered files, as
                 // either is a write to the drive. Its item here goes with what is below it, once
                 // nothing of that is planned elsewhere or waits (a new item there moves out
@@ -343,6 +334,15 @@ impl Reconciler<'_> {
                         true => Parent::LetGo,
                         false => Parent::Wait,
                     }
+                }
+                // Left to the devices that sync where it would go, or where it is: in a folder
+                // in Recently deleted at a place this device filters (masked, §10), it is
+                // another device's to bring back with its folder, no orphan (§6.3).
+                Parent::Recover
+                    if !self.holds_any(node)
+                        && (self.in_masked(node) || self.recovered_path(node).is_none()) =>
+                {
+                    Parent::Leave
                 }
                 decided => decided,
             };
@@ -581,14 +581,18 @@ impl Reconciler<'_> {
     /// once, for `node`.
     fn left_out(&mut self, node: NodeId) {
         for n in self.merged.subtree(node) {
-            self.scope.remove(&n);
-            self.origin.remove(&n);
+            // What changed here still moves out (its name aside): a folder deleted here takes
+            // it along otherwise.
+            if !self.evicted.contains(&n) {
+                self.scope.remove(&n);
+                self.origin.remove(&n);
+            }
             // Where it is here, it holds that name: nothing else is planned onto it.
             match self.input.local.get(n) {
                 Some(here) => self.merged.insert(n, here.clone()),
                 None => self.merged.remove(n),
             };
-            if self.input.dirty.contains(&n) {
+            if self.input.dirty.contains(&n) && !self.evicted.contains(&n) {
                 self.deferred.insert(n);
             }
         }
@@ -655,8 +659,12 @@ impl Reconciler<'_> {
             // And names this device's held removals keep there (§7): the same.
             let masked = self.masks.names.get(&parent);
             let kept = self.kept.get(&parent);
+            // Read-only (§13), nothing goes up to clash with them there: none is taken.
+            let read_only = self.masking.read_only;
             let taken = |key: &str| {
-                masked.is_some_and(|m| m.contains(key)) || kept.is_some_and(|k| k.contains(key))
+                !read_only
+                    && (masked.is_some_and(|m| m.contains(key))
+                        || kept.is_some_and(|k| k.contains(key)))
             };
             // Each name once, and again when a node left where it is for a name comes to it
             // (a chain of name waits in one folder, judged in one pass).

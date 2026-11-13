@@ -3340,3 +3340,39 @@ fn read_only_the_synced_item_keeps_its_name_through_a_rename_here() {
     assert_eq!(kinds(&plan.ops), ["move"]);
     assert_eq!(plan.conflicts, [Conflict::NameTaken { node: newcomer }]);
 }
+
+/// A file edited here that the drive moved onto a name taken here, out of a folder it deleted:
+/// the edit still moves out (only its syncing waits for the clash), and the folder's delete
+/// here doesn't take it.
+#[test]
+fn read_only_an_edited_clash_loser_moves_out_before_its_folder_goes() {
+    let [d1, d2, edited, held] = ids(4)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(d1, folder(ROOT, "D1"))
+        .synced(d2, folder(ROOT, "D2"))
+        .synced(held, file(d2, "a.txt", "a"))
+        .synced(edited, file(d1, "x", "x"))
+        .local(edited, Some(file(d1, "x", "mine")))
+        .remote(edited, Some(file(d2, "A.TXT", "x")))
+        .remote(d1, None);
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    assert_eq!(kinds(&plan.ops), ["evict", "delete"]);
+    assert_eq!(
+        plan.ops[0],
+        Op::LocalEvict {
+            node: edited,
+            subtree: vec![edited]
+        }
+    );
+    assert_eq!(
+        plan.ops[1],
+        Op::LocalDelete {
+            node: d1,
+            subtree: vec![d1]
+        }
+    );
+    assert_eq!(plan.conflicts, [Conflict::NameTaken { node: edited }]);
+}

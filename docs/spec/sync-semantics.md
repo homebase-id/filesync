@@ -1170,12 +1170,14 @@ whatever changed here, and the plan holds no operation on the drive:
   Known limits, where the plan is split in pages (§6.5, a dirty set of over 20,000): an item
   in a folder made here that another page plans moves out on its own, beside the folder (the
   tree flattened); and a synced item moved into a folder made here that another page plans
-  goes out with the folder and comes down again (a download, not a move back). Nothing is
-  lost either way.
+  goes out with the folder and comes down again (a download, not a move back). Likewise a new
+  folder holding a file still being written waits for it (§6.3), while what else is in it
+  moves out on its own. Nothing is lost either way.
   The cost: each save of a file there is a move out and a download of the drive's version
   (a file kept open with autosave, one per save), and a hundred moved out under one name
   leave the next where it is, told, till one goes. Files there set read-only on disk (the
   app's, later) keep most saves from happening at all.
+- **A name-clash loser that changed here** still moves out (only its syncing waits).
 - **Undone.** A move or rename here goes back to the drive's place; a delete here comes back
   (downloaded again); tags here become the drive's. Nothing of these moves out: the drive holds
   what they changed.

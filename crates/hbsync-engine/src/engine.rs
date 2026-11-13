@@ -580,7 +580,8 @@ impl Engine {
                 let tell = !(report.conflicts.is_empty()
                     && report.failed.is_empty()
                     && report.skipped.is_empty()
-                    && report.left_aside.is_empty());
+                    && report.left_aside.is_empty()
+                    && report.moved_out.is_empty());
                 self.unreported = tell.then_some(report);
                 Err(e)
             }

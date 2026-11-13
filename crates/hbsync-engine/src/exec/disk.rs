@@ -136,10 +136,10 @@ impl<'a> Disk<'a> {
         rename_ordered(db, &self.abs(from), &self.abs(to))
     }
 
-    /// The folder a read-only folder's changes move out to (§13), checked once a run: a full
-    /// path outside the root (as the file system resolves both: else its scan would find what
-    /// moved out as new items here), checked before it is made where it is missing, and again
-    /// after. Why not, where it isn't one.
+    /// The folder a read-only folder's changes move out to (§13), checked once a run before
+    /// it is made where it is missing: a full path without `..`, outside the root as the file
+    /// system resolves both (else its scan would find what moved out as new items here). Why
+    /// not, where it isn't one.
     pub(super) fn out_folder(&mut self, db: &mut StateDb) -> Result<&'a Path, String> {
         let out = self
             .folder
@@ -147,7 +147,11 @@ impl<'a> Disk<'a> {
             .as_deref()
             .ok_or("the folder isn't read-only")?;
         if !self.out_ready {
-            let outside = || out.is_absolute() && !resolved(out).starts_with(resolved(self.root));
+            let plain = out.is_absolute()
+                && !out
+                    .components()
+                    .any(|c| c == std::path::Component::ParentDir);
+            let outside = || plain && !resolved(out).starts_with(resolved(self.root));
             let inside = "the folder changes move out to is inside this one, or not a full path";
             if !outside() {
                 return Err(inside.into());

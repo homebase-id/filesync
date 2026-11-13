@@ -410,8 +410,11 @@ fn build(
         }
     }
     // Whether a masked folder synced here leaves the drive depends on everything in it
-    // remotely (§10): load all of it.
-    let masked = crate::mask::masked(&b.input.remote, filter);
+    // remotely (§10): load all of it. Nothing leaves it read-only (§13).
+    let masked = match ctx.read_only {
+        None => crate::mask::masked(&b.input.remote, filter),
+        Some(_) => HashSet::new(),
+    };
     let mut expanded: HashSet<NodeId> = HashSet::new();
     for &node in dirty {
         if !(masked.contains(&node) && b.input.base.contains(node)) {
@@ -454,8 +457,9 @@ fn build(
     // after the role folders held nothing of are dropped: one holding it masks it), and what
     // may clash with the names coming, in it and, for its own, at the top (the plan asks for
     // the rest: `Plan::uncovered`).
+    // Read-only, none goes there (§13).
     let missing = looked_up_removed(&b.input.remote, scope.top);
-    if missing.contains(&NodeId::RECOVERED) {
+    if missing.contains(&NodeId::RECOVERED) && ctx.read_only.is_none() {
         b.load(NodeId::RECOVERED)?;
         match full {
             None => b.load_children(NodeId::RECOVERED)?,

@@ -325,12 +325,21 @@ impl Reconciler<'_> {
                 .map(|(&node, &new_node)| Op::LocalDetach { node, new_node }),
         );
         self.plan.ops.extend(forks);
+        // A file moves out first, freeing its name for what the drive has there (nothing to
+        // park, nothing hidden under a parked name if it can't go); a folder after what moves
+        // out of it (a move, a download to another folder), before the deletes here, what takes
+        // a name it holds parking it first, as a delete's.
+        let is_file = |op: &Op| {
+            i.local
+                .get(op.node())
+                .is_some_and(|l| l.kind == NodeKind::File)
+        };
+        let (files, folders): (Vec<Op>, Vec<Op>) = evicts.into_iter().partition(is_file);
+        self.plan.ops.extend(files);
         self.plan.ops.extend(creates.into_iter().map(|(_, op)| op));
         self.plan.ops.extend(moves);
         self.plan.ops.extend(content);
-        // After what moves out of them (a move, a download to another folder), before the
-        // deletes; what takes a name one holds parks it first, as it parks a delete's.
-        self.plan.ops.extend(evicts);
+        self.plan.ops.extend(folders);
         self.plan.ops.extend(deletes);
         self.plan.ops.extend(settles);
     }
