@@ -829,7 +829,7 @@ mod tests;
 
 use delete::Deleted;
 pub use delete::keeps_its_folder;
-use disk::Disk;
+use disk::{Disk, volume_of};
 #[cfg(feature = "testkit")]
 pub use hooks::{Aside, Faults, Meanwhile};
 pub use hooks::{CrashPoint, FailPoint, Hooks};

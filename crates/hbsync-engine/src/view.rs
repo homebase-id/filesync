@@ -406,10 +406,15 @@ fn build(
     };
     let mut loaded: HashSet<NodeId> = HashSet::new();
     for &node in dirty {
-        let orphan = orphaned(&b.input.remote, node);
-        if !loaded.contains(&node)
-            && (b.input.base.contains(node) || orphan)
-            && (!b.input.remote.contains(node) || hidden.contains(&node) || orphan)
+        if loaded.contains(&node) {
+            continue;
+        }
+        let gone = !b.input.remote.contains(node) || hidden.contains(&node);
+        let synced = b.input.base.contains(node);
+        // (The walk up only where the rest doesn't settle it.)
+        let orphan = !(synced && gone) && orphaned(&b.input.remote, node);
+        if (synced || orphan)
+            && (gone || orphan)
             && let Some(row) = s
                 .local_by_node(node)?
                 .filter(|r| r.kind == NodeKind::Folder)

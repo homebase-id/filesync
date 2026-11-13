@@ -3475,3 +3475,23 @@ fn read_only_a_left_out_loser_holds_its_name_in_a_folder_judged_before() {
     want.sort();
     assert_eq!(told, want);
 }
+
+/// [`read_only_a_left_out_loser_holds_the_name_it_has_here`] where the loser changed here: it
+/// moves out first, so it holds no name, and what the drive puts there comes down at once.
+#[test]
+fn read_only_a_left_out_loser_that_moves_out_holds_no_name() {
+    let [kept, loser, newcomer] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(kept, file(ROOT, "a", "a"))
+        .synced(loser, file(ROOT, "b", "b"))
+        .local(loser, Some(file(ROOT, "b", "mine")))
+        .remote(loser, Some(file(ROOT, "A", "b")))
+        .remote(newcomer, Some(file(ROOT, "b", "new")));
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    assert_eq!(kinds(&plan.ops), ["evict", "download"], "{:?}", plan.ops);
+    let told: Vec<NodeId> = plan.conflicts.iter().map(Conflict::node).collect();
+    assert_eq!(told, [loser]);
+}

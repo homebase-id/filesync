@@ -285,6 +285,11 @@ impl<'a> Disk<'a> {
     }
 }
 
+/// The volume `path` itself is on (a link not followed), where it can be read.
+pub(super) fn volume_of(path: &Path) -> Option<u64> {
+    hbsync_platform::stat(path).map(|m| m.file_id.volume).ok()
+}
+
 /// Why the out folder is refused, where it is on another volume than the folder.
 const OUT_ELSEWHERE: &str = "the folder changes move out to is on another volume";
 
@@ -300,11 +305,7 @@ fn check_out(out: &Path, root: &Path, db: &mut StateDb) -> Result<(), String> {
     }
     // On the root's volume (a move out is one rename), as its nearest folder that is there,
     // links followed.
-    let volume = |p: &Path| {
-        hbsync_platform::stat(&resolved(p))
-            .map(|m| m.file_id.volume)
-            .ok()
-    };
+    let volume = |p: &Path| volume_of(&resolved(p));
     let there = out.ancestors().find(|p| p.exists()).unwrap_or(out);
     if volume(there) != volume(root) {
         return Err(OUT_ELSEWHERE.into());

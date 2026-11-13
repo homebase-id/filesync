@@ -752,9 +752,11 @@ impl Reconciler<'_> {
                 // here): a loser can't be renamed on the drive. A name this device's masks hold
                 // is kept by such an item all the same (none of theirs is here with it); one
                 // held by them alone leaves every newcomer out (one ignored here may be on it).
+                // What moves out holds no name: it goes first.
                 let at_name = |s: &NodeState| s.parent == parent && name_key(&s.name) == key;
                 let here = |n: &NodeId| {
                     self.masking.read_only
+                        && !self.evicted.contains(n)
                         && (self.input.base.get(*n).is_some_and(at_name)
                             || self.input.local.get(*n).is_some_and(at_name))
                 };
@@ -773,7 +775,8 @@ impl Reconciler<'_> {
                 // moves out once it is read, and never takes a name.)
                 group.sort_by_cached_key(|n| {
                     let arriving = self.adopted.contains(n) || n.is_fixed_folder();
-                    (!here(n), !self.deferred.contains(n), arriving, *n)
+                    let leaving = self.evicted.contains(n);
+                    (leaving, !here(n), !self.deferred.contains(n), arriving, *n)
                 });
                 // The folder's path here, for the filter (`None`: not connected), read once
                 // a loser is renamed.
@@ -790,8 +793,10 @@ impl Reconciler<'_> {
                     if self.masking.read_only {
                         self.left_out(loser);
                         // Where it is here, in this folder, it holds that name: judged with what
-                        // would take it, as one left where it is for a name.
-                        let held = self.input.local.get(loser).filter(|h| h.parent == parent);
+                        // would take it, as one left where it is for a name. (One that moves
+                        // out holds none.)
+                        let held = (self.input.local.get(loser))
+                            .filter(|h| h.parent == parent && !self.evicted.contains(&loser));
                         if let Some(to) = held.map(|h| name_key(&h.name)).filter(|to| *to != key) {
                             by_key.entry(to.clone()).or_default().push(loser);
                             queue.push_back(to);

@@ -606,9 +606,13 @@ impl Executor<'_> {
             let why = Outcome::stale("the folder holds something synced the plan didn't expect");
             return self.left_here(&row, original.as_ref(), why);
         }
-        // What is parked below it gets its name back first: out there, nothing names it.
-        let below: Vec<(LocalRow, RelPath)> = self.db.read(|s| {
+        // What is parked below it gets its name back first: out there, nothing names it. The
+        // deepest first, so what is above keeps the path read here.
+        let mut below: Vec<(LocalRow, RelPath)> = self.db.read(|s| {
             let mut parked = Vec::new();
+            if row.kind != NodeKind::Folder {
+                return Ok(parked);
+            }
             for n in s.all_parked()? {
                 if let Some(r) = s.local_by_node(n)?
                     && r.node != node
@@ -620,6 +624,7 @@ impl Executor<'_> {
             }
             Ok(parked)
         })?;
+        below.sort_by_key(|(r, _)| std::cmp::Reverse(r.path.components().count()));
         for (r, at) in below {
             if let Err(why) = self.name_parked(&r, &at)? {
                 return self.left_here(&row, original.as_ref(), why);
@@ -634,19 +639,16 @@ impl Executor<'_> {
             "{place}: moved out of the read-only folder, to {}",
             to.display()
         );
+        // Told once it moved, whatever the commit does (a failed one ends the run: the next
+        // scan finds the item gone, and the drive's version comes back the same way).
+        let moved = (place.to_string(), to);
+        match &mut self.moved_out {
+            Some(sink) => sink.push(moved),
+            None => self.report.moved_out.push(moved),
+        }
         // Its bases stay, and what was synced, or the drive holds, is planned again: the
         // drive's version comes back.
-        let done = self.finish(&[], |s| gone_from_here(s, &row.path, node, Bases::Keep));
-        // Told once committed (a failed commit ends the run, its report with it: the next scan
-        // finds the item gone, and the drive's version comes back the same way).
-        if done.is_ok() {
-            let moved = (place.to_string(), to);
-            match &mut self.moved_out {
-                Some(sink) => sink.push(moved),
-                None => self.report.moved_out.push(moved),
-            }
-        }
-        done
+        self.finish(&[], |s| gone_from_here(s, &row.path, node, Bases::Keep))
     }
 
     /// Moves `row`'s item out to the read-only folder's out folder, under the first free of
@@ -666,9 +668,8 @@ impl Executor<'_> {
                 Ok(Err(e)) if e.kind() == io::ErrorKind::AlreadyExists => continue,
                 Ok(Err(e)) if e.kind() == io::ErrorKind::CrossesDevices => {
                     // The item on a volume mounted inside the folder: it alone can't go.
-                    let volume = |p: &Path| hbsync_platform::stat(p).map(|m| m.file_id.volume);
-                    let item = volume(&self.disk.abs(&row.path)).ok();
-                    if item.is_some() && item != volume(&self.folder.root).ok() {
+                    let item = volume_of(&self.disk.abs(&row.path));
+                    if item.is_some() && item != volume_of(&self.folder.root) {
                         return Err(Outcome::unsyncable(
                             "on a volume mounted inside the folder: it can't move out",
                         ));

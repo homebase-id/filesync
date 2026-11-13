@@ -1121,18 +1121,19 @@ impl Runner {
     ) -> Result<(), StateError> {
         // Told once, the notes told so far kept: a part of a sync doesn't say what went away.
         let notes = self.notes_of(engine, partial)?;
-        let mut notes = self.told.unseen(notes);
-        notes.extend(report::moved_out_notes(partial));
+        let notes = self.told.unseen(notes);
         self.tell(notes);
         Ok(())
     }
 
-    /// `report`'s notes.
+    /// `report`'s notes, but where it moved out of a read-only folder (§13): told here, each
+    /// time, before the rest (which reads the DB, and may fail).
     fn notes_of(
         &mut self,
         engine: &mut Engine,
         report: &SyncReport,
     ) -> Result<Vec<String>, StateError> {
+        self.tell(report::moved_out_notes(report));
         let skips = self.stalled.told(&report.skipped, Instant::now());
         report::notes(engine, report, &skips)
     }
@@ -1193,8 +1194,7 @@ impl Runner {
         took: Duration,
     ) -> Result<(), StateError> {
         let notes = self.notes_of(engine, report)?;
-        let mut notes = self.told.fresh(notes);
-        notes.extend(report::moved_out_notes(report));
+        let notes = self.told.fresh(notes);
         let shown = report::shown(&report.held, engine.held_wipes());
         let token = report::held_token(shown.ops.iter().copied());
         // Before the status shows the new token, so no answer can name it before it is held;
