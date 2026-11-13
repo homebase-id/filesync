@@ -203,6 +203,13 @@ odin-core's `SelectiveShareKeyVectorTests` **[verified]**):
   (`lockedFileKey`): `format ‖ nonce (12) ‖ ciphertext (16) ‖ tag (16)`, AES-128-GCM, AAD
   `driveId ‖ fileId ‖ circleId` (format 2) or `driveId ‖ globalTransitId ‖ circleId` (format 3,
   a file a member added). The file's own IV, from its key header, goes with it.
+- **As a member reads it.** The sharer's server sends a shared file's key header as type `share`
+  (14): `iv` the file's header IV as it is (not wrapped), `encryptedAesKey` the share row's
+  `lockedFileKey`, the row being the first of the file's `shares` (by circle id), whose circle
+  key opens it (**[verified]** odin-core `EncryptedKeyHeader.ForShare`,
+  `DriveFileUtility.CreateClientFileHeader`, `CallerShares.LiveRowsOf`; `drive/shared.rs`).
+  A payload comes without a key header; its IV is the payload descriptor's, as on a private
+  drive.
 - Every id in an AAD is a Guid's .NET byte order (the first three fields little-endian); a
   drive's id is its alias.
 

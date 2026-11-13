@@ -18,6 +18,7 @@ use zeroize::Zeroize;
 
 use crate::HomebaseError;
 use crate::crypto::{Envelope, Key, aes_cbc_decrypt, aes_cbc_encrypt, random};
+use crate::drive::share_keys::CircleKey;
 
 const BLOCK: usize = 16;
 
@@ -63,7 +64,7 @@ pub struct SealedKeyHeader {
     pub iv: String,
     #[serde(default)]
     pub encrypted_aes_key: String,
-    /// `aes` (11), `sealed` (12) or `zkDrive` (13), by name or number.
+    /// `aes` (11), `sealed` (12), `zkDrive` (13) or `share` (14), by name or number.
     #[serde(default, rename = "type")]
     pub kind: Value,
 }
@@ -85,6 +86,14 @@ impl SealedKeyHeader {
     /// Locked with the drive's key, not the shared secret.
     pub(crate) fn locked_with_drive_key(&self) -> bool {
         self.kind == "zkDrive" || self.kind == 13
+    }
+
+    /// A file another identity shares with this one, as their server sends it to a member: the
+    /// file's header IV as it is, and the file key locked with the circle's key (its share row's
+    /// `lockedFileKey`; **[verified]** odin-core `EncryptedKeyHeader.ForShare`,
+    /// `DriveFileUtility.CreateClientFileHeader`).
+    pub(crate) fn locked_for_share(&self) -> bool {
+        self.kind == "share" || self.kind == 14
     }
 
     /// As sync keeps it, a file's token: the wrap IV, then the encrypted IV and key. `None` if
@@ -164,6 +173,24 @@ impl KeyHeader {
         FileToken(bytes.into())
     }
 
+    /// Opens a shared file's key header ([`SealedKeyHeader::locked_for_share`]) with the key of
+    /// the circle it is shared through: `file_id` and `global_transit_id` are the file's, which
+    /// its key is bound to.
+    pub(crate) fn open_share(
+        sealed: &SealedKeyHeader,
+        circle: &CircleKey,
+        file_id: uuid::Uuid,
+        global_transit_id: Option<uuid::Uuid>,
+    ) -> Result<Self, HomebaseError> {
+        let iv =
+            iv16(&sealed.iv).ok_or_else(|| crypto("a shared file's header IV isn't 16 bytes"))?;
+        let locked = STANDARD
+            .decode(&sealed.encrypted_aes_key)
+            .map_err(|_| crypto("a shared file's locked key isn't base64"))?;
+        let key = circle.file_key(&locked, file_id, global_transit_id)?;
+        Ok(KeyHeader { iv, key })
+    }
+
     /// Opens a key header sealed with `shared_secret`.
     pub(crate) fn open(
         sealed: &SealedKeyHeader,
@@ -241,6 +268,11 @@ pub(crate) fn strong() -> Result<[u8; 16], HomebaseError> {
             return Ok(bytes);
         }
     }
+}
+
+/// An IV as base64: 16 bytes, or `None`.
+pub(crate) fn iv16(b64: &str) -> Option<[u8; 16]> {
+    STANDARD.decode(b64).ok()?.try_into().ok()
 }
 
 fn crypto(why: impl Into<String>) -> HomebaseError {

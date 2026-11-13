@@ -230,8 +230,8 @@ impl Client {
     /// ([`Client::for_peer`]); on this one's peer routes (`/api/v2/peer/...`, which ask another),
     /// a 403 is theirs (not reviewed, not a member, no longer connected; odin-core
     /// `PeerServiceBase`) as long as the app holds the permission they need, which a codeless
-    /// 403 can also mean (the caller asks `reads_shared` again after one), a 401 this login's;
-    /// elsewhere this login's.
+    /// 403 can also mean (the caller reads the security context again after one:
+    /// `reads_shared_now`), a 401 this login's; elsewhere this login's.
     fn whose(&self, path: &str) -> Whose {
         match (self.peer, path.starts_with("/api/v2/peer/")) {
             (true, _) => Whose::Theirs,

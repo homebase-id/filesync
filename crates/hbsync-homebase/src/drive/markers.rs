@@ -56,7 +56,7 @@ pub fn marker_id(sharer: &str, owner: &str) -> Uuid {
 
 /// The identity markers name as their owner: `identity` without a port, lower case (a sender
 /// and a marker's id name the domain only).
-fn owner_of(identity: &str) -> String {
+pub(crate) fn owner_of(identity: &str) -> String {
     identity
         .split(':')
         .next()
@@ -162,6 +162,7 @@ impl Markers {
         let keys = Keys {
             shared,
             drive: drive.as_ref(),
+            circle: None,
         };
         let unique_id = header.file_metadata.app_data.unique_id;
         match sharer_of(&header, keys, &self.owner) {

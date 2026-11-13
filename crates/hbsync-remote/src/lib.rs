@@ -378,14 +378,25 @@ impl std::fmt::Debug for Upload<'_> {
     }
 }
 
-/// Why the identity refused this computer ([`RemoteError::Denied`]); logging in again sets
-/// either right.
+/// Why the identity refused this computer ([`RemoteError::Denied`]): logging in again sets
+/// the credentials or the private drive's key right, a new token a sharer's refusal of one, the
+/// owner's approval a missing permission; a drive without a write-only key ([`Refusal::NoKey`])
+/// may need more than a login.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refusal {
     /// The credentials or the drive (401, 403): revoked, say.
     Credentials,
-    /// The drive is private, and this login holds no key that opens it.
+    /// The drive is private, and this login holds no key that opens it; or, reading what
+    /// others share, the drive has no write-only key that opens (a drive made before them, a
+    /// grant without its copy, or a drive that isn't private: sharers seal only to private
+    /// ones).
     NoKey,
+    /// Another identity's server refused the token it made for this one, to read what they
+    /// share: a new token lifts it, not a login (it may refuse that too: no longer connected).
+    Token,
+    /// The app lacks a permission only the owner gives, an approval in their Homebase (reading
+    /// what others share, say): logging in again doesn't give it.
+    Permission,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -394,7 +405,9 @@ pub enum RemoteError {
     #[error("a node with this id already exists")]
     AlreadyExists,
     /// The identity refused the credentials or the drive (401/403): stop syncing until the
-    /// user re-authorizes; retrying changes nothing.
+    /// user re-authorizes (a sharer's refused token, [`Refusal::Token`]: until a new token; a
+    /// missing permission, [`Refusal::Permission`]: until the owner approves; a drive without a
+    /// write-only key, [`Refusal::NoKey`]: until the drive has one); retrying changes nothing.
     #[error("access denied: {0}")]
     Denied(String, Refusal),
     /// The file changed since the given version (Homebase 4160).

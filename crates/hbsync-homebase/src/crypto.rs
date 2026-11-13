@@ -117,10 +117,6 @@ impl Exchange {
 
 /// A drive's write-only private key (P-384): what is sealed to the drive opens with it, such as
 /// a circle's key a sharer sealed to it.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the reads of what is shared (next) open with it")
-)]
 pub(crate) struct WriteOnlyKey {
     secret: SecretKey,
 }
@@ -131,10 +127,6 @@ impl std::fmt::Debug for WriteOnlyKey {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the reads of what is shared (next) open with it")
-)]
 impl WriteOnlyKey {
     /// The key as a PKCS#8 document (DER), as the drive's grant holds it.
     pub(crate) fn from_pkcs8(der: &[u8]) -> Result<Self, HomebaseError> {

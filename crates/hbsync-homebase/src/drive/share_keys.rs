@@ -1,13 +1,6 @@
 //! The keys of the files others share with this identity: Selective Share's blobs
 //! (`docs/spec/encryption.md`, "Files shared with you"; **[verified]** against odin-core's
 //! golden vector `SelectiveShareKeyVectorTests`, which chat-kmp's `ShareKeys` also checks).
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the reads of what is shared (next) open with them"
-    )
-)]
 
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -104,14 +97,15 @@ pub(crate) mod tests {
 
     // odin-core `SelectiveShareKeyVectorTests` and `ClientLockedKeyHeaderVectorTests`.
     const CIRCLE_KEY: &str = "MDEyMzQ1Njc4OTo7PD0+Pw==";
-    const FILE_KEY: &str = "ICEiIyQlJicoKSorLC0uLw==";
+    pub(crate) const FILE_KEY: &str = "ICEiIyQlJicoKSorLC0uLw==";
     const DRIVE: &str = "11111111-2222-3333-4444-555555555555";
-    const FILE: &str = "66666666-7777-8888-9999-aaaaaaaaaaaa";
-    const GTID: &str = "12345678-9abc-def0-1234-56789abcdef0";
-    const CIRCLE: &str = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
-    const MEMBER: &str = "Sam.DotYou.Cloud";
-    const LOCKED: &str = "AlBRUlNUVVZXWFlaWyNALFXaUVoKLLDbDk0g5bIydyRsCSpKQjTVXgru8mq5";
-    const LOCKED_BY_GTID: &str = "A1BRUlNUVVZXWFlaWyNALFXaUVoKLLDbDk0g5bID6/ZsXceCKma5R4GJLiTG";
+    pub(crate) const FILE: &str = "66666666-7777-8888-9999-aaaaaaaaaaaa";
+    pub(crate) const GTID: &str = "12345678-9abc-def0-1234-56789abcdef0";
+    pub(crate) const CIRCLE: &str = "bbbbbbbb-cccc-dddd-eeee-ffffffffffff";
+    pub(crate) const MEMBER: &str = "Sam.DotYou.Cloud";
+    pub(crate) const LOCKED: &str = "AlBRUlNUVVZXWFlaWyNALFXaUVoKLLDbDk0g5bIydyRsCSpKQjTVXgru8mq5";
+    pub(crate) const LOCKED_BY_GTID: &str =
+        "A1BRUlNUVVZXWFlaWyNALFXaUVoKLLDbDk0g5bID6/ZsXceCKma5R4GJLiTG";
     const SEALED: &str = "AhRSmXQE7NVFE2N+zrbujRavkL1z/E4GHalzavkps48544kxb1C5vlxaQZbfnbT2N+RRSjZob4zGxLf4jftVPwAgZq3c692FaLeGasq2pZGKZ1iIyxpJ7Fbilv77slwQlOIeKC7Rag3IKHq3cJUyfbDKapD3G1IWdxUh0JkipMakO1Wy1Um0cvyaU9IBa5FBFpM=";
     /// The write-only key of the vectors' member drive (PKCS#8).
     pub(crate) const WRITE_ONLY_PKCS8: &str = "MIG2AgEAMBAGByqGSM49AgEGBSuBBAAiBIGeMIGbAgEBBDCZAel29rv0BgBwa7LGp4+tmSi5g4LlRzkW9/ZLQNgeVdrB44imUOGeaKmn1eiPZsShZANiAATKPHfd0ojszgjchR06XVN2p/iaosbJedgQGD86jcH39CM7EjWiXa6wVTW3cWGdDXwWQYx4NHDg8lIWULARJhvn02W1/eoTtDkhdpQrY6KmVbxpY/ehNZlDlhlh3MntF40=";
@@ -120,7 +114,7 @@ pub(crate) mod tests {
         STANDARD.decode(b64).expect("base64")
     }
 
-    fn id(s: &str) -> Uuid {
+    pub(crate) fn id(s: &str) -> Uuid {
         s.parse().expect("uuid")
     }
 
@@ -165,5 +159,14 @@ pub(crate) mod tests {
         );
         assert!(open(&by_gtid, FILE, None).is_err(), "no gtid to bind");
         assert!(open(&locked[..44], FILE, None).is_err(), "cut short");
+        // Bound to its circle: the same key under another circle's id doesn't open it.
+        let elsewhere = CircleKey {
+            circle: Uuid::new_v4(),
+            ..circle
+        };
+        assert!(
+            elsewhere.file_key(&locked, id(FILE), None).is_err(),
+            "another circle"
+        );
     }
 }
