@@ -3443,3 +3443,35 @@ fn read_only_a_left_out_loser_holds_the_name_it_has_here() {
     want.sort();
     assert_eq!(told, want);
 }
+
+/// [`read_only_a_left_out_loser_holds_the_name_it_has_here`] where that name is in another
+/// folder, one judged before the clash (its id the lower): judged again with it.
+#[test]
+fn read_only_a_left_out_loser_holds_its_name_in_a_folder_judged_before() {
+    let [q, p, kept, loser, newcomer] = ids(5)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(q, folder(ROOT, "Q"))
+        .synced(p, folder(ROOT, "P"))
+        .synced(kept, file(p, "a", "a"))
+        .synced(loser, file(q, "b", "b"))
+        .remote(loser, Some(file(p, "A", "b")))
+        .remote(newcomer, Some(file(q, "b", "new")));
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalDownload { .. })),
+        "{:?}",
+        plan.ops
+    );
+    let mut told: Vec<NodeId> = plan.conflicts.iter().map(Conflict::node).collect();
+    told.sort();
+    told.dedup();
+    let mut want = vec![loser, newcomer];
+    want.sort();
+    assert_eq!(told, want);
+}

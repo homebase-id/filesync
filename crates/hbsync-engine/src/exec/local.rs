@@ -555,13 +555,9 @@ impl Executor<'_> {
                 if !self.on_disk_unchanged(&row) {
                     return Ok(rescan(&mut self.report, &row.path));
                 }
-                let is_dir = row.kind == NodeKind::Folder;
-                let Some(to) = release_place(self.db, self.folder, &original, is_dir)? else {
-                    return Ok(Outcome::unsyncable("no free name to leave the parked one"));
-                };
-                match restore_parked(self.db, &self.disk, &row, &to)? {
+                match self.name_parked(&row, &original)? {
                     Ok(row) => row,
-                    Err(e) => return Ok(io_outcome(e)),
+                    Err(why) => return Ok(why),
                 }
             }
         };
@@ -593,28 +589,27 @@ impl Executor<'_> {
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
             return Ok(Outcome::stale("gone"));
         };
+        // Parked for what took its name, it moves out under its original one; where it can't,
+        // it gets a name of its own again ([`Executor::name_parked`]): never left hidden.
+        let original = self.db.read(|s| view::parked_place(s, &row))?;
         if !self.on_disk_unchanged(&row) {
-            return Ok(rescan(&mut self.report, &row.path));
+            let why = rescan(&mut self.report, &row.path);
+            return self.left_here(&row, original.as_ref(), why);
         }
         let unexpected = self.db.read(|s| {
-            for r in s.local_subtree(&row.path)? {
-                if expected.binary_search(&r.node).is_err() && s.has_base(r.node)? {
-                    return Ok(true);
-                }
-            }
-            Ok(false)
+            let held = s.held_below(&row.path)?;
+            Ok(held
+                .iter()
+                .any(|(n, base)| *base && expected.binary_search(n).is_err()))
         })?;
         if unexpected {
-            return Ok(Outcome::stale(
-                "the folder holds something synced the plan didn't expect",
-            ));
+            let why = Outcome::stale("the folder holds something synced the plan didn't expect");
+            return self.left_here(&row, original.as_ref(), why);
         }
-        // Parked for what took its name, it moves out under its original one.
-        let original = self.db.read(|s| view::parked_place(s, &row))?;
         let place = original.clone().unwrap_or_else(|| row.path.clone());
         let to = match self.move_out(&row, &place) {
             Ok(to) => to,
-            Err(why) => return self.unpark(&row, original.as_ref(), why),
+            Err(why) => return self.left_here(&row, original.as_ref(), why),
         };
         tracing::info!(
             "{place}: moved out of the read-only folder, to {}",
@@ -656,20 +651,31 @@ impl Executor<'_> {
         )))
     }
 
-    /// An item that couldn't move out (`why`), parked for what took its name (`original`):
-    /// given a name of its own again (its original if free), so it isn't left hidden.
-    fn unpark(&mut self, row: &LocalRow, original: Option<&RelPath>, why: Outcome) -> Step {
-        let Some(original) = original else {
-            return Ok(why);
-        };
-        let is_dir = row.kind == NodeKind::Folder;
-        let Some(to) = release_place(self.db, self.folder, original, is_dir)? else {
-            return Ok(why);
-        };
-        if let Err(e) = restore_parked(self.db, &self.disk, row, &to)? {
-            tracing::warn!("{}: left parked: {e}", row.path);
+    /// An item that didn't move out (`why`), parked for what took its name (`original`):
+    /// given a name of its own again, so it isn't left hidden.
+    fn left_here(&mut self, row: &LocalRow, original: Option<&RelPath>, why: Outcome) -> Step {
+        if let Some(original) = original
+            && let Err(e) = self.name_parked(row, original)?
+        {
+            tracing::warn!("{}: left parked: {e:?}", row.path);
         }
         Ok(why)
+    }
+
+    /// Gives the parked item of `row` a name of its own again: `original` if free, else the
+    /// first free numbered one. Its row there, or why not.
+    fn name_parked(
+        &mut self,
+        row: &LocalRow,
+        original: &RelPath,
+    ) -> Result<Result<LocalRow, Outcome>, StateError> {
+        let is_dir = row.kind == NodeKind::Folder;
+        let Some(to) = release_place(self.db, self.folder, original, is_dir)? else {
+            return Ok(Err(Outcome::unsyncable(
+                "no free name to leave the parked one",
+            )));
+        };
+        Ok(restore_parked(self.db, &self.disk, row, &to)?.map_err(io_outcome))
     }
 
     /// Drops the base of a node this device no longer syncs and holds nothing of (§10).
@@ -711,18 +717,22 @@ fn gone_from_here(
     node: NodeId,
     bases: Bases,
 ) -> Result<(), StateError> {
+    // Kept: what has a base, or the drive holds, read in one query before the rows go.
+    let held = match bases {
+        Bases::Keep => s.held_below(path)?,
+        Bases::Forget => Vec::new(),
+    };
     for r in s.folder().delete_local_subtree(path)? {
         match bases {
             Bases::Forget => forget(s, r.node, node)?,
-            Bases::Keep => {
+            // A parking record is only where the item carries its parked name.
+            Bases::Keep if r.path.name() == Some(layout::parked_name(r.node).as_str()) => {
                 s.folder().delete_parked(r.node)?;
-                if s.has_base(r.node)? || s.get_mirror(r.node)?.is_some() {
-                    s.folder().mark_dirty(r.node)?;
-                }
             }
+            Bases::Keep => {}
         }
     }
-    Ok(())
+    held.iter().try_for_each(|(n, _)| s.folder().mark_dirty(*n))
 }
 
 /// `nodes` went from here, deleted with `node`: their rows go, and so do their bases

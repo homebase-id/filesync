@@ -219,6 +219,33 @@ impl ReadTx<'_> {
     }
 
     /// `path` and everything below it with their ids, unsorted.
+    /// The nodes of the local subtree at `path` (its top included) that this folder has a base
+    /// of, or the drive holds (the mirror), each with whether it has a base: one query.
+    pub fn held_below(&self, path: &RelPath) -> Result<Vec<(NodeId, bool)>> {
+        let Some(start) = self.local_id_at(path)? else {
+            return Ok(Vec::new());
+        };
+        let mut stmt = self.prep(
+            "WITH RECURSIVE sub(id, depth) AS ( \
+                 VALUES (?1, 0) \
+                 UNION ALL \
+                 SELECT l.id, sub.depth + 1 FROM local l JOIN sub ON l.parent = sub.id \
+                 WHERE l.folder = $F AND sub.depth < ?2) \
+             SELECT n.uuid, EXISTS (SELECT 1 FROM base b WHERE b.folder = $F AND b.id = sub.id) \
+             FROM sub JOIN nodes n ON n.id = sub.id \
+             WHERE EXISTS (SELECT 1 FROM base b WHERE b.folder = $F AND b.id = sub.id) \
+                OR EXISTS (SELECT 1 FROM remote m WHERE m.id = sub.id)",
+        )?;
+        let rows = stmt.query_map(params![start, MAX_DEPTH as i64], |r| {
+            Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, bool>(1)?))
+        })?;
+        rows.map(|r| {
+            let (uuid, base) = r?;
+            Ok((codec::node(&uuid)?, base))
+        })
+        .collect()
+    }
+
     pub(super) fn subtree_raw(&self, path: &RelPath) -> Result<Vec<(RelPath, RawLocal)>> {
         let Some(start) = self.local_id_at(path)? else {
             return Ok(Vec::new());

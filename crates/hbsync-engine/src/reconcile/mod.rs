@@ -198,6 +198,8 @@ struct Reconciler<'a> {
     forks: BTreeMap<NodeId, NodeId>,
     /// What moves out of a read-only folder before the drive's state comes back (§13).
     evicted: BTreeSet<NodeId>,
+    /// What a read-only name clash left out (§13), each once.
+    left: BTreeSet<NodeId>,
     /// Becomes `plan.deferred`.
     deferred: BTreeSet<NodeId>,
     /// Orphans the repairs move into Recovered files (§6.3): they lose a name clash there.
@@ -255,6 +257,7 @@ impl<'a> Reconciler<'a> {
             origin: HashMap::new(),
             forks: BTreeMap::new(),
             evicted: BTreeSet::new(),
+            left: BTreeSet::new(),
             deferred: BTreeSet::new(),
             adopted: HashSet::new(),
             taken,
@@ -306,12 +309,13 @@ impl<'a> Reconciler<'a> {
             }),
             "the repairs left a cycle or an orphan"
         );
-        // A node left where it is for a name may hold the name another would take: again,
-        // till none more waits (in each pass at least one node more waits).
+        // A node left where it is for a name, or left out read-only (§13: where it is here,
+        // maybe in a folder judged already), may hold the name another would take: again, till
+        // none more waits or is left out (in each pass at least one node more does).
         loop {
-            let waited = self.waiters.len();
+            let (waited, left) = (self.waiters.len(), self.left.len());
             self.fix_names();
-            if self.waiters.len() == waited {
+            if self.waiters.len() == waited && self.left.len() == left {
                 break;
             }
         }

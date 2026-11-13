@@ -577,6 +577,9 @@ impl Reconciler<'_> {
     /// names they hold here stay held: nothing is planned onto them), else out of it. Told
     /// once, for `node`.
     fn left_out(&mut self, node: NodeId) {
+        if !self.left.insert(node) {
+            return;
+        }
         for n in self.merged.subtree(node) {
             // What changed here still moves out (its name aside): a folder deleted here takes
             // it along otherwise.
@@ -766,9 +769,11 @@ impl Reconciler<'_> {
                 // being written) is never renamed: it wins, and is left alone if it loses;
                 // and an orphan moving in, or Recovered files or Desktops made beside a folder
                 // of its name, loses to what is there.
+                // (Read-only, what is synced here comes first: a new item still being written
+                // moves out once it is read, and never takes a name.)
                 group.sort_by_cached_key(|n| {
                     let arriving = self.adopted.contains(n) || n.is_fixed_folder();
-                    (!self.deferred.contains(n), !here(n), arriving, *n)
+                    (!here(n), !self.deferred.contains(n), arriving, *n)
                 });
                 // The folder's path here, for the filter (`None`: not connected), read once
                 // a loser is renamed.

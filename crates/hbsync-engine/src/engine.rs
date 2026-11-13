@@ -1048,11 +1048,12 @@ impl Engine {
         report.ops_done += exec.done;
         report.skipped.extend(exec.skipped);
         report.failed.extend(exec.failed);
+        // Told even where recording what was done fails: it already moved.
+        report.moved_out.extend(exec.moved_out);
         let synced = activity::group(exec.synced, activity::GROUP_OVER);
         self.db
             .write(|s| s.folder().add_synced(&synced, activity::KEEP))?;
         report.synced.extend(synced);
-        report.moved_out.extend(exec.moved_out);
         if !exec.rescan.is_empty() {
             rescan_dirs(
                 &mut self.db,

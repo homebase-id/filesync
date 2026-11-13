@@ -288,8 +288,13 @@ fn check_out(out: &Path, root: &Path, db: &mut StateDb) -> Result<(), String> {
     if !plain || resolved(out).starts_with(resolved(root)) {
         return Err("the folder changes move out to is inside this one, or not a full path".into());
     }
-    // On the root's volume (a move out is one rename), as its nearest folder that is there.
-    let volume = |p: &Path| hbsync_platform::stat(p).map(|m| m.file_id.volume).ok();
+    // On the root's volume (a move out is one rename), as its nearest folder that is there,
+    // links followed.
+    let volume = |p: &Path| {
+        hbsync_platform::stat(&resolved(p))
+            .map(|m| m.file_id.volume)
+            .ok()
+    };
     let there = out.ancestors().find(|p| p.exists()).unwrap_or(out);
     if volume(there) != volume(root) {
         return Err("the folder changes move out to is on another volume".into());

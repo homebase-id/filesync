@@ -43,11 +43,21 @@ pub(super) fn notes(
         let path = engine.path_of(op.node())?.unwrap_or_else(|| "?".into());
         notes.push(format!("{path}: {} ({why})", op.kind()));
     }
-    // What changed in a read-only folder, kept where it moved out to (sync semantics §13).
-    for (path, to) in &report.moved_out {
+    // What changed in a read-only folder, kept where it moved out to (sync semantics §13): by
+    // where it went, the first few named.
+    let mut moved: Vec<(String, &str)> = (report.moved_out.iter())
+        .map(|(path, to)| {
+            let into = to.parent().unwrap_or(to).display().to_string();
+            (into, path.as_str())
+        })
+        .collect();
+    moved.sort();
+    for group in moved.chunk_by(|a, b| a.0 == b.0) {
+        let into = &group[0].0;
+        let paths: Vec<String> = group.iter().map(|(_, path)| (*path).to_owned()).collect();
         notes.push(format!(
-            "{path}: moved to {}, as this folder is read-only (what changes here isn't synced)",
-            to.display()
+            "{}: moved to {into}, as this folder is read-only (what changes here isn't synced)",
+            listed(&paths)
         ));
     }
     // A file that can't be read yet, which other changes wait for (sync semantics §6.3).

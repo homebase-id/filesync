@@ -1208,7 +1208,8 @@ whatever changed here, and the plan holds no operation on the drive:
 - The folder things move out to is a full path outside the read-only one (else its scan would find them
   as new items there) and made where it is missing, on the folder's volume (a move out is one
   rename): one that isn't is refused, told, each move out staying where it is. An item parked
-  under a temporary name for what took its name (§8) is given a name of its own again before
-  it moves out, so one that can't go isn't left hidden.
+  under a temporary name for what took its name (§8) moves out under its original name; one
+  that doesn't go (refused, changed since, holding what the plan didn't expect) is given a
+  name of its own again (its original if free, else a numbered one), never left hidden.
 - The executor refuses any write to the drive from a read-only folder, whatever planned it;
   so does the read-only remote (what another identity shares: `PeerRemote`).
