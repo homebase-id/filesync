@@ -3521,3 +3521,42 @@ fn read_only_what_is_on_a_name_here_keeps_it_from_what_moved_out() {
     let told: Vec<NodeId> = plan.conflicts.iter().map(Conflict::node).collect();
     assert_eq!(told, [moved]);
 }
+
+/// Read-only, a new folder here holding a file still being written waits for it, and so does
+/// what else is new in it, a folder below included: they move out with it, as one, once it is
+/// read (not one by one beside where it goes).
+#[test]
+fn read_only_what_is_in_a_new_folder_that_waits_waits_with_it() {
+    let [n, u, h, sub, deep] = ids(5)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.local(n, Some(folder(ROOT, "New")))
+        .local(
+            u,
+            Some(NodeState {
+                content: None,
+                ..file(n, "u", "?")
+            }),
+        )
+        .local(h, Some(file(n, "h", "h")))
+        .local(sub, Some(folder(n, "Sub")))
+        .local(deep, Some(file(sub, "d", "d")));
+    w.input.local_unhashed.insert(u);
+    let plan = w.plan();
+    assert!(plan.ops.is_empty(), "{:?}", plan.ops);
+    assert!(!plan.writes_drive());
+    // Once it is read, the folder moves out whole.
+    w.input.local_unhashed.remove(&u);
+    w.local(u, Some(file(n, "u", "u")));
+    let plan = w.plan();
+    let mut whole = vec![n, u, h, sub, deep];
+    whole.sort();
+    assert_eq!(
+        plan.ops,
+        [Op::LocalEvict {
+            node: n,
+            subtree: whole
+        }]
+    );
+}

@@ -320,13 +320,14 @@ impl<'a> Reconciler<'a> {
             let waited = self.waiters.len();
             self.fix_names(only.as_ref());
             only = if self.waiters.len() != waited {
+                // Every folder again: none just for what was left out.
+                self.rejudge.clear();
                 None
             } else if self.rejudge.is_empty() {
                 break;
             } else {
                 Some(std::mem::take(&mut self.rejudge))
             };
-            self.rejudge.clear();
         }
         self.emit();
         self.places_across_pages();

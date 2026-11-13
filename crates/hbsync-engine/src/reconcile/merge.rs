@@ -104,6 +104,32 @@ impl Reconciler<'_> {
         }
     }
 
+    /// Whether `node` is new here (neither synced nor on the drive), in a folder new here that
+    /// waits: for a file in it still being written, or for another page (§6.5), up to the first
+    /// folder above it that isn't new here.
+    fn in_a_new_folder_that_waits(&self, node: NodeId) -> bool {
+        let i = self.input;
+        let new_here =
+            |n: NodeId| i.local.contains(n) && !i.base.contains(n) && !i.remote.contains(n);
+        if !new_here(node) {
+            return false;
+        }
+        let mut at = node;
+        for _ in 0..hbsync_state::MAX_DEPTH {
+            let Some(parent) = i.local.get(at).map(|l| l.parent) else {
+                return false;
+            };
+            if parent.is_root() || !new_here(parent) {
+                return false;
+            }
+            if self.waits.contains(&parent) || self.elsewhere(parent) {
+                return true;
+            }
+            at = parent;
+        }
+        false
+    }
+
     /// Whether `node`'s merge would make a conflict copy: a file edited on both sides, not
     /// alike, as [`Reconciler::merge_both`] decides.
     fn would_fork(&self, node: NodeId) -> bool {
@@ -245,6 +271,12 @@ impl Reconciler<'_> {
             if self.name_takers.contains(&node) && self.would_fork(node) {
                 self.plan.conflicts.push(Conflict::CopyWaits { node });
             }
+            self.leave_as_is(node);
+            return;
+        }
+        // Read-only (§13), what is new here in a new folder here that waits moves out with it,
+        // as one, once it can: it waits as it is too.
+        if self.masking.read_only && self.in_a_new_folder_that_waits(node) {
             self.leave_as_is(node);
             return;
         }

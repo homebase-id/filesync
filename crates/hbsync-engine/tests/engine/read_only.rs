@@ -123,3 +123,41 @@ fn nothing_is_put_back_from_a_read_only_folder() -> R {
         other => Err(format!("{other:?}").into()),
     }
 }
+
+/// A folder removed on the drive, one item in it still live there (its removal failed): the
+/// read-only folder lets both go, and the folder's restore brings back all of it, the item
+/// that never changed on the drive included.
+#[test]
+fn a_restored_folder_comes_back_whole_in_a_read_only_folder() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("d/keep.txt", "k")?;
+    a.write("d/other.txt", "o")?;
+    a.write("stay.txt", "s")?; // not everything is deleted: no mass-delete hold
+    a.sync()?;
+    let (mut b, _out) = read_only_client(&server, "b")?;
+    b.sync()?;
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.remote.faults().fail_writes_named = Some("keep.txt".into());
+    a.sync()?;
+    assert_eq!(
+        server.lock().map_err(|_| "poisoned")?.live_names(),
+        ["keep.txt", "stay.txt"]
+    );
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["stay.txt = s"]);
+    // Nothing of it is dirty here meanwhile: the folder coming back brings what is in it.
+    assert!(b.engine.sync_once("2026-10-08")?.is_idle());
+    let d = a
+        .recently_deleted(10)?
+        .into_iter()
+        .find(|i| i.path == "d")
+        .ok_or("d")?;
+    a.engine.drive().restore(&[d.node])?;
+    b.sync()?;
+    assert_eq!(
+        b.tree_text(""),
+        ["d/", "d/keep.txt = k", "d/other.txt = o", "stay.txt = s"]
+    );
+    Ok(())
+}

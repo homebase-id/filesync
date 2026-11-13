@@ -671,7 +671,11 @@ impl Executor<'_> {
                     if item.is_none() {
                         return Err(io_outcome(e));
                     }
-                    if item != volume_of(&resolved(&self.folder.root)) {
+                    // On the folder's volume, it may be on another mount of it inside the
+                    // folder: a rename from the folder's own tmp into the out folder tells.
+                    if item != volume_of(&resolved(&self.folder.root))
+                        || self.disk.out_takes_renames(out)
+                    {
                         return Err(Outcome::unsyncable(
                             "on a volume mounted inside the folder: it can't move out",
                         ));

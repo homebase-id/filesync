@@ -154,6 +154,20 @@ impl<'a> Disk<'a> {
 
     /// The out folder found on another volume by a rename into it (a bind mount of the same
     /// file system shares a device id): refused for the rest of the run.
+    /// Whether a rename from the folder into `out` works, by a folder made in the folder's
+    /// tmp, renamed there and removed: one on another mount of the folder's file system can't
+    /// take it, though its volume is the folder's. (Where none can be made, as if it does.)
+    pub(super) fn out_takes_renames(&self, out: &Path) -> bool {
+        let name = format!(".hbsync-probe-{}", hbsync_types::NodeId::new());
+        let (from, to) = (layout::tmp_dir(self.root).join(&name), out.join(&name));
+        if fs::create_dir(&from).is_err() {
+            return true;
+        }
+        let moved = fs::rename(&from, &to);
+        let _ = fs::remove_dir(if moved.is_ok() { &to } else { &from });
+        !moved.is_err_and(|e| e.kind() == io::ErrorKind::CrossesDevices)
+    }
+
     pub(super) fn out_elsewhere(&mut self) -> String {
         self.out_checked = Some(Err(OUT_ELSEWHERE.into()));
         OUT_ELSEWHERE.into()
@@ -295,6 +309,9 @@ pub(super) fn volume_of(path: &Path) -> Option<u64> {
     hbsync_platform::stat(path).map(|m| m.file_id.volume).ok()
 }
 
+/// Why the out folder is refused, where it is in the folder (or not a full path).
+const OUT_INSIDE: &str = "the folder changes move out to is inside this one, or not a full path";
+
 /// Why the out folder is refused, where it is on another volume than the folder.
 const OUT_ELSEWHERE: &str = "the folder changes move out to is on another volume";
 
@@ -306,7 +323,7 @@ fn check_out(out: &Path, root: &Path, db: &mut StateDb) -> Result<(), String> {
             .components()
             .any(|c| c == std::path::Component::ParentDir);
     if !plain || resolved(out).starts_with(resolved(root)) {
-        return Err("the folder changes move out to is inside this one, or not a full path".into());
+        return Err(OUT_INSIDE.into());
     }
     // On the root's volume (a move out is one rename), as its nearest folder that is there,
     // links followed.
@@ -319,7 +336,7 @@ fn check_out(out: &Path, root: &Path, db: &mut StateDb) -> Result<(), String> {
     let id = |p: &Path| hbsync_platform::stat(p).map(|m| m.file_id).ok();
     let root_id = id(&resolved(root));
     if root_id.is_some() && there.ancestors().any(|p| id(p) == root_id) {
-        return Err("the folder changes move out to is inside this one, or not a full path".into());
+        return Err(OUT_INSIDE.into());
     }
     // Each folder it makes is noted as it is made, so its entry is synced before a commit
     // that relies on what moved into it (a failure part way keeps those made noted).
