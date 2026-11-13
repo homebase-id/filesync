@@ -3376,3 +3376,41 @@ fn read_only_an_edited_clash_loser_moves_out_before_its_folder_goes() {
     );
     assert_eq!(plan.conflicts, [Conflict::NameTaken { node: edited }]);
 }
+
+/// `f` as executable as `x`.
+fn executable(mut s: NodeState, x: bool) -> NodeState {
+    if let Some(c) = s.content.as_mut() {
+        c.executable = x;
+    }
+    s
+}
+
+/// An executable bit changed here stays as it is: nothing moves out, nothing comes down; the
+/// drive's change of the bit comes down; and an edit there of a file whose bit only changed
+/// here comes down over it, nothing moved out (its bytes are the ones synced).
+#[test]
+fn read_only_executable_bits_follow_the_drive_where_it_changed_them() {
+    let [here, there, both] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(here, file(ROOT, "here.sh", "h"))
+        .synced(there, file(ROOT, "there.sh", "t"))
+        .synced(both, file(ROOT, "both.sh", "b"))
+        .local(here, Some(executable(file(ROOT, "here.sh", "h"), true)))
+        .remote(there, Some(executable(file(ROOT, "there.sh", "t"), true)))
+        .local(both, Some(executable(file(ROOT, "both.sh", "b"), true)))
+        .remote(both, Some(file(ROOT, "both.sh", "edited")));
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    let mut got: Vec<(&str, NodeId)> = plan
+        .ops
+        .iter()
+        .filter(|op| !matches!(op, Op::Settle { .. }))
+        .map(|op| (op.kind(), op.node()))
+        .collect();
+    got.sort();
+    let mut want = vec![("LocalDownload", there), ("LocalDownload", both)];
+    want.sort();
+    assert_eq!(got, want);
+}

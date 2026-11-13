@@ -164,17 +164,7 @@ impl Reconciler<'_> {
                 let moved = !b.same_place(l);
                 let edited = match (&b.content, &l.content) {
                     (Some(bc), Some(lc)) => {
-                        let base_local = i.base_extra.get(&node).and_then(|e| e.local_hash);
-                        let local_now = lc.hash;
-                        let bytes_changed = match base_local {
-                            Some(h) => h != local_now,
-                            // Never had local bytes (online-only): unchanged unless replaced.
-                            None => {
-                                self.content_state(node) != ContentState::OnlineOnly
-                                    && bc.hash != local_now
-                            }
-                        };
-                        bytes_changed || bc.executable != lc.executable
+                        self.bytes_changed_here(node, bc, lc) || bc.executable != lc.executable
                     }
                     _ => false,
                 };
@@ -184,6 +174,42 @@ impl Reconciler<'_> {
                     Change::Unchanged
                 }
             }
+        }
+    }
+
+    /// Whether the bytes of `node`'s file here (`lc`) aren't the ones it synced with (`bc`, the
+    /// base's): compared with the local hash it synced at, where it has one.
+    fn bytes_changed_here(&self, node: NodeId, bc: &FileContent, lc: &FileContent) -> bool {
+        match self.input.base_extra.get(&node).and_then(|e| e.local_hash) {
+            Some(h) => h != lc.hash,
+            // Never had local bytes (online-only): unchanged unless replaced.
+            None => self.content_state(node) != ContentState::OnlineOnly && bc.hash != lc.hash,
+        }
+    }
+
+    /// Whether going back to the drive's state loses what changed here, in a read-only folder
+    /// (§13): an item made here that doesn't hold the drive's bytes (not one adopted), or a
+    /// file whose bytes changed here (against what it synced with) to other than the drive's.
+    /// A move, a delete or tags here lose nothing: the drive's place, item and tags come back;
+    /// nor does an executable bit, left as it is here where the drive's didn't change.
+    pub(super) fn loses_here(&self, node: NodeId) -> bool {
+        let i = self.input;
+        let Some(l) = i.local.get(node) else {
+            return false;
+        };
+        let r = self.remote_state(node);
+        let drives = |r: &NodeState| l.kind == NodeKind::File && self.same_bytes(node, l, r);
+        match i.base.get(node) {
+            None => {
+                !r.is_some_and(|r| r.kind == l.kind && (l.kind == NodeKind::Folder || drives(r)))
+            }
+            Some(b) if b.kind != l.kind => true,
+            Some(b) => match (&b.content, &l.content) {
+                (Some(bc), Some(lc)) => {
+                    self.bytes_changed_here(node, bc, lc) && !r.is_some_and(drives)
+                }
+                _ => false,
+            },
         }
     }
 
@@ -241,7 +267,7 @@ impl Reconciler<'_> {
         let (b, l) = (i.base.get(node), self.local_state(node));
         let masked = self.masks.masked.contains(&node);
         // Read-only (§13): what going back to the drive's would lose here moves out first.
-        let evict = self.masking.read_only && !masked && loses_here(lc, l.as_ref(), r);
+        let evict = self.masking.read_only && !masked && self.loses_here(node);
         let (target, origin): (Option<NodeState>, Origin) = match (lc, rc) {
             // Gone from what this device syncs; what must stay here was detached (§10).
             _ if masked => (None, Origin::Base),
@@ -387,24 +413,6 @@ impl Reconciler<'_> {
             }
         }
         (Some(target), origin)
-    }
-}
-
-/// Whether going back to the drive's state `r` loses what changed here (`lc`, to `l`), in a
-/// read-only folder (§13): an item made here (not the drive's own, adopted), or a file's bytes
-/// changed here to other than the drive's. A move, a delete or tags here lose nothing: the
-/// drive's place, item and tags come back; nor does an executable bit, left as it is here.
-pub(super) fn loses_here(lc: Change, l: Option<&NodeState>, r: Option<&NodeState>) -> bool {
-    if !content_changed(lc) {
-        return false;
-    }
-    match (l, r) {
-        (Some(l), Some(r)) => {
-            let bytes = |s: &NodeState| s.content.map(|c| c.hash);
-            l.kind != r.kind || bytes(l) != bytes(r)
-        }
-        (Some(_), None) => true,
-        (None, _) => false,
     }
 }
 

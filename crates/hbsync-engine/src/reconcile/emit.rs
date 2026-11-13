@@ -440,11 +440,24 @@ impl Reconciler<'_> {
         let (Some(lc), Some(tc)) = (&l.content, &t.content) else {
             return true;
         };
-        // Read-only (§13), a bit changed here stays: undone, it came back on a volume that
-        // doesn't keep it, sync after sync.
-        if lc.executable != tc.executable && !self.masking.read_only {
+        // Read-only (§13), a bit changed here stays where the drive's is the one synced (undone,
+        // it came back sync after sync on a volume that doesn't keep it); the drive's change of
+        // it comes down.
+        let drives_unchanged = || {
+            (self.input.base.get(node).and_then(|b| b.content))
+                .is_some_and(|bc| bc.executable == tc.executable)
+        };
+        if lc.executable != tc.executable && !(self.masking.read_only && drives_unchanged()) {
             return false;
         }
+        self.same_bytes(node, l, t)
+    }
+
+    /// Whether the local file holds the target's bytes, whatever its executable bit.
+    pub(super) fn same_bytes(&self, node: NodeId, l: &NodeState, t: &NodeState) -> bool {
+        let (Some(lc), Some(tc)) = (&l.content, &t.content) else {
+            return true;
+        };
         if lc.hash.algorithm == tc.hash.algorithm {
             return lc.hash == tc.hash;
         }

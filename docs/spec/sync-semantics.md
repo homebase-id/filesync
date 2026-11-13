@@ -1155,8 +1155,8 @@ another identity shares with this one; the engine's `FolderCtx::read_only`, a fo
 it given to move things out to, on the same volume). Every node's target is the drive's state,
 whatever changed here, and the plan holds no operation on the drive:
 
-- **Changed here, kept by moving it out.** A file whose bytes changed here to other than the
-  drive's, and an item made here (a new folder as one, with what is in it),
+- **Changed here, kept by moving it out.** A file whose bytes changed here (to other than the
+  drive's), and an item made here that doesn't hold the drive's bytes (a new folder as one, with what is in it),
   move out of the folder first, in one rename, under their own name in the folder they go to,
   else the first free of `name (from <folder>)`, `name (from <folder> 2)` … (a hundred). Their
   rows go, their bases stay: the next plan finds the drive's version missing here and brings
@@ -1180,8 +1180,11 @@ whatever changed here, and the plan holds no operation on the drive:
 - **A name-clash loser that changed here** still moves out (only its syncing waits).
 - **Undone.** A move or rename here goes back to the drive's place; a delete here comes back
   (downloaded again); tags here become the drive's. Nothing of these moves out: the drive holds
-  what they changed. An executable bit changed here stays as it is (the bytes are the drive's;
-  undone, it came back sync after sync on a volume that doesn't keep it).
+  what they changed. An executable bit changed here stays as it is while the drive's is the one
+  synced (the bytes are the drive's; undone, it came back sync after sync on a volume that
+  doesn't keep it); one the drive changes comes down. A file's bytes count as changed here
+  against the ones it synced with (its local hash then), not against the drive's: an edit
+  there of a file whose bit only changed here comes down, nothing moved out.
 - **The same item on both sides** (adopted, the drive's bytes) stays.
 - **Filters** (section 10). An item ignored here since it synced stays on the drive (it never
   leaves it): masked, as one never synced here, its item here kept here only. One moved out of

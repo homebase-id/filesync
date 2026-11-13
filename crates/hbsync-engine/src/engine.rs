@@ -301,6 +301,13 @@ impl Engine {
                 ));
             }
         };
+        // Only a main folder syncs read-only (§13): a role folder or a Desktop makes its top on
+        // the drive.
+        if cfg.folder.read_only.is_some() && part != Part::Main {
+            return Err(StateError::Conflict(
+                "a role folder or a Desktop never syncs read-only".into(),
+            ));
+        }
         if cfg.folder.scope.top != top {
             cfg.folder.scope = Arc::new(Scope::of(top));
         }
@@ -620,13 +627,8 @@ impl Engine {
             Pull::IfBehind => self.drive.catch_up(folder)?,
         };
         // A role folder's top on the drive, or this device's Desktop's: joined, restored, or
-        // made; never from a read-only folder (§13), which doesn't write the drive.
+        // made (never read-only, §13: refused at the open).
         match self.part {
-            // A main folder only: a role folder or a Desktop is never read-only.
-            Part::Main if self.cfg.folder.read_only.is_some() => {}
-            _ if self.cfg.folder.read_only.is_some() => {
-                return Err(EngineError::ReadOnly("only a main folder syncs read-only"));
-            }
             Part::Role(role) => self.drive.ensure_role(role)?,
             Part::Desktop => self.ensure_desktop(self.cfg.folder.scope.top)?,
             Part::Main => {}

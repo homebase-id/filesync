@@ -393,11 +393,8 @@ impl Reconciler<'_> {
                     let_go.insert(node);
                     // Only what was synced here is deleted, as the drive had it: what changed
                     // here that the drive doesn't hold, or was never synced, moves out.
-                    let r = self.remote_state(node);
-                    let l = self.local_state(node);
-                    if l.is_some()
-                        && (!self.input.base.contains(node)
-                            || merge::loses_here(self.local_change(node), l.as_ref(), r))
+                    if self.input.local.contains(node)
+                        && (!self.input.base.contains(node) || self.loses_here(node))
                     {
                         self.evicted.insert(node);
                     }

@@ -613,19 +613,15 @@ impl Executor<'_> {
                 }
             }
         };
-        let (place, unexpected) = self.db.read(|s| {
-            let mut unexpected = false;
+        let unexpected = self.db.read(|s| {
             for r in s.local_subtree(&row.path)? {
                 if expected.binary_search(&r.node).is_err() && s.has_base(r.node)? {
-                    unexpected = true;
-                    break;
+                    return Ok(true);
                 }
             }
-            Ok((
-                original.clone().unwrap_or(view::place(s, &row)?),
-                unexpected,
-            ))
+            Ok(false)
         })?;
+        let place = original.unwrap_or_else(|| row.path.clone());
         if unexpected {
             return Ok(Outcome::stale(
                 "the folder holds something synced the plan didn't expect",

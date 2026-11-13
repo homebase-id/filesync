@@ -56,8 +56,8 @@ pub(super) struct Disk<'a> {
     ids_durable: bool,
     /// The aside folder is there ([`Disk::move_aside`]), as far as this run knows.
     aside_ready: bool,
-    /// The folder things move out to was checked and is there ([`Disk::out_folder`]).
-    out_ready: bool,
+    /// What the check of the folder things move out to found, this run ([`Disk::out_folder`]).
+    out_checked: Option<Result<(), String>>,
 }
 
 impl<'a> Disk<'a> {
@@ -68,7 +68,7 @@ impl<'a> Disk<'a> {
             hooks,
             ids_durable: false,
             aside_ready: false,
-            out_ready: false,
+            out_checked: None,
         }
     }
 
@@ -146,31 +146,10 @@ impl<'a> Disk<'a> {
             .read_only
             .as_deref()
             .ok_or("the folder isn't read-only")?;
-        if !self.out_ready {
-            let plain = out.is_absolute()
-                && !out
-                    .components()
-                    .any(|c| c == std::path::Component::ParentDir);
-            let outside = || plain && !resolved(out).starts_with(resolved(self.root));
-            let inside = "the folder changes move out to is inside this one, or not a full path";
-            if !outside() {
-                return Err(inside.into());
-            }
-            // The folders it makes are noted, so their entries are synced before a commit that
-            // relies on what moved into them.
-            let missing: Vec<&Path> = out.ancestors().take_while(|p| !p.exists()).collect();
-            fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
-            for made in missing {
-                db.changed(made);
-            }
-            // On the root's volume: a move out is one rename.
-            let volume = |p: &Path| hbsync_platform::stat(p).map(|m| m.file_id.volume).ok();
-            if volume(out) != volume(self.root) {
-                return Err("the folder changes move out to is on another volume".into());
-            }
-            self.out_ready = true;
+        if self.out_checked.is_none() {
+            self.out_checked = Some(check_out(out, self.root, db));
         }
-        Ok(out)
+        self.out_checked.clone().unwrap_or(Ok(())).map(|()| out)
     }
 
     /// Moves `from` out of the sync root, to `to`, never over anything ([`rename_ordered`]).
@@ -297,6 +276,32 @@ impl<'a> Disk<'a> {
             },
         }
     }
+}
+
+/// [`Disk::out_folder`]'s check of `out` against the sync root `root`, made where it is
+/// missing once it passed (the folders made noted in `db` for the durable commits).
+fn check_out(out: &Path, root: &Path, db: &mut StateDb) -> Result<(), String> {
+    let plain = out.is_absolute()
+        && !out
+            .components()
+            .any(|c| c == std::path::Component::ParentDir);
+    if !plain || resolved(out).starts_with(resolved(root)) {
+        return Err("the folder changes move out to is inside this one, or not a full path".into());
+    }
+    // On the root's volume (a move out is one rename), as its nearest folder that is there.
+    let volume = |p: &Path| hbsync_platform::stat(p).map(|m| m.file_id.volume).ok();
+    let there = out.ancestors().find(|p| p.exists()).unwrap_or(out);
+    if volume(there) != volume(root) {
+        return Err("the folder changes move out to is on another volume".into());
+    }
+    // The folders it makes are noted, so their entries are synced before a commit that relies
+    // on what moved into them.
+    let missing: Vec<&Path> = out.ancestors().take_while(|p| !p.exists()).collect();
+    fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    for made in missing {
+        db.changed(made);
+    }
+    Ok(())
 }
 
 /// `path` as the file system resolves it: its nearest folder that is there resolved (links,

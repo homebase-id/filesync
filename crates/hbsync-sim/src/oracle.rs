@@ -502,9 +502,9 @@ impl Sim {
                 }
             }
             // The tags as the client holds them, on both sides.
-            // Read-only (§13), an executable bit changed here stays as it is.
+            // Read-only (§13), an executable bit its user changed here stays as it is.
             let x_kept = |tree: Tree| match client.read_only {
-                true => without_x(tree),
+                true => without_x(tree, &client.user_x),
                 false => tree,
             };
             let server_view = view(&x_kept(held_by(&synced, client.os)));
@@ -1334,12 +1334,9 @@ pub(crate) fn tag_names(tags: &Tags) -> Vec<String> {
         .collect()
 }
 
-/// A tree as a sorted list of `path kind content id`: node ids are part of identity across
-/// clients, so two trees only match if the same nodes sit at the same paths.
-/// `tree` with every file's executable bit cleared.
-fn without_x(mut tree: Tree) -> Tree {
-    let ids: Vec<NodeId> = tree.ids().collect();
-    for n in ids {
+/// `tree` with the executable bit cleared on `nodes`.
+fn without_x(mut tree: Tree, nodes: &HashSet<NodeId>) -> Tree {
+    for &n in nodes {
         if let Some(mut s) = tree.get(n).cloned()
             && let Some(c) = s.content.as_mut()
         {
@@ -1350,6 +1347,8 @@ fn without_x(mut tree: Tree) -> Tree {
     tree
 }
 
+/// A tree as a sorted list of `path kind content id`: node ids are part of identity across
+/// clients, so two trees only match if the same nodes sit at the same paths.
 fn view(tree: &Tree) -> Vec<String> {
     view_with(tree, &HashMap::new())
 }
