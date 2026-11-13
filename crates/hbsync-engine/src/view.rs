@@ -384,14 +384,25 @@ fn build(
     // (§13: let go of, deleted or moved out with what is below it).
     // Each folder once: a dirty folder inside one already loaded is in it.
     let hidden = crate::mask::hidden(&b.input.remote, filter, scope);
+    // Its folders on the drive don't reach the top: one missing, or a file, anywhere above.
     let orphaned = |remote: &crate::tree::Tree, node: NodeId| {
-        ctx.read_only.is_some()
-            && remote.get(node).is_some_and(|s| {
-                !s.parent.is_root()
-                    && remote
-                        .get(s.parent)
-                        .is_none_or(|p| p.kind != NodeKind::Folder)
-            })
+        if ctx.read_only.is_none() || !remote.contains(node) {
+            return false;
+        }
+        let mut at = node;
+        for _ in 0..hbsync_state::MAX_DEPTH {
+            let Some(parent) = remote.get(at).map(|s| s.parent) else {
+                return true;
+            };
+            if parent.is_root() {
+                return false;
+            }
+            match remote.get(parent) {
+                Some(p) if p.kind == NodeKind::Folder => at = parent,
+                _ => return true,
+            }
+        }
+        true
     };
     let mut loaded: HashSet<NodeId> = HashSet::new();
     for &node in dirty {

@@ -1121,7 +1121,8 @@ impl Runner {
     ) -> Result<(), StateError> {
         // Told once, the notes told so far kept: a part of a sync doesn't say what went away.
         let notes = self.notes_of(engine, partial)?;
-        let notes = self.told.unseen(notes);
+        let mut notes = self.told.unseen(notes);
+        notes.extend(report::moved_out_notes(partial));
         self.tell(notes);
         Ok(())
     }
@@ -1192,7 +1193,8 @@ impl Runner {
         took: Duration,
     ) -> Result<(), StateError> {
         let notes = self.notes_of(engine, report)?;
-        let notes = self.told.fresh(notes);
+        let mut notes = self.told.fresh(notes);
+        notes.extend(report::moved_out_notes(report));
         let shown = report::shown(&report.held, engine.held_wipes());
         let token = report::held_token(shown.ops.iter().copied());
         // Before the status shows the new token, so no answer can name it before it is held;

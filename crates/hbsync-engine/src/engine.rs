@@ -1029,6 +1029,8 @@ impl Engine {
         if ops.is_empty() {
             return Ok(Some(plan.held));
         }
+        // What moves out is told however the run ends (§13): it already moved.
+        let mut moved_out = Vec::new();
         let exec = Executor::new(
             &mut self.db,
             self.remote.as_ref(),
@@ -1038,9 +1040,12 @@ impl Engine {
         .with_stop(Arc::clone(&self.stop))
         .with_progress(Arc::clone(&self.progress))
         .with_full(self.drive.full())
-        .with_refusals(refusals);
+        .with_refusals(refusals)
+        .with_moved_out(&mut moved_out);
         self.refusals.running();
-        let exec = exec.run(ops)?;
+        let ran = exec.run(ops);
+        report.moved_out.extend(moved_out);
+        let exec = ran?;
         self.refusals.ran(exec.refused);
         self.drive.absorb(exec.news);
         // What was done counts, and the folders it asks to look at are looked at, however
@@ -1048,8 +1053,6 @@ impl Engine {
         report.ops_done += exec.done;
         report.skipped.extend(exec.skipped);
         report.failed.extend(exec.failed);
-        // Told even where recording what was done fails: it already moved.
-        report.moved_out.extend(exec.moved_out);
         let synced = activity::group(exec.synced, activity::GROUP_OVER);
         self.db
             .write(|s| s.folder().add_synced(&synced, activity::KEEP))?;

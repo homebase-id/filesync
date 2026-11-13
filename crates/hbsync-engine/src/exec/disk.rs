@@ -155,9 +155,8 @@ impl<'a> Disk<'a> {
     /// The out folder found on another volume by a rename into it (a bind mount of the same
     /// file system shares a device id): refused for the rest of the run.
     pub(super) fn out_elsewhere(&mut self) -> String {
-        let why = "the folder changes move out to is on another volume".to_owned();
-        self.out_checked = Some(Err(why.clone()));
-        why
+        self.out_checked = Some(Err(OUT_ELSEWHERE.into()));
+        OUT_ELSEWHERE.into()
     }
 
     /// Moves `from` out of the sync root, to `to`, never over anything ([`rename_ordered`]).
@@ -286,6 +285,9 @@ impl<'a> Disk<'a> {
     }
 }
 
+/// Why the out folder is refused, where it is on another volume than the folder.
+const OUT_ELSEWHERE: &str = "the folder changes move out to is on another volume";
+
 /// [`Disk::out_folder`]'s check of `out` against the sync root `root`, made where it is
 /// missing once it passed (the folders made noted in `db` for the durable commits).
 fn check_out(out: &Path, root: &Path, db: &mut StateDb) -> Result<(), String> {
@@ -305,7 +307,7 @@ fn check_out(out: &Path, root: &Path, db: &mut StateDb) -> Result<(), String> {
     };
     let there = out.ancestors().find(|p| p.exists()).unwrap_or(out);
     if volume(there) != volume(root) {
-        return Err("the folder changes move out to is on another volume".into());
+        return Err(OUT_ELSEWHERE.into());
     }
     // The folders it makes are noted, so their entries are synced before a commit that relies
     // on what moved into them.

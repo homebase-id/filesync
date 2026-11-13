@@ -640,7 +640,11 @@ impl Executor<'_> {
         // Told once committed (a failed commit ends the run, its report with it: the next scan
         // finds the item gone, and the drive's version comes back the same way).
         if done.is_ok() {
-            self.report.moved_out.push((place.to_string(), to));
+            let moved = (place.to_string(), to);
+            match &mut self.moved_out {
+                Some(sink) => sink.push(moved),
+                None => self.report.moved_out.push(moved),
+            }
         }
         done
     }
@@ -661,6 +665,14 @@ impl Executor<'_> {
                 Ok(Ok(())) => return Ok(to),
                 Ok(Err(e)) if e.kind() == io::ErrorKind::AlreadyExists => continue,
                 Ok(Err(e)) if e.kind() == io::ErrorKind::CrossesDevices => {
+                    // The item on a volume mounted inside the folder: it alone can't go.
+                    let volume = |p: &Path| hbsync_platform::stat(p).map(|m| m.file_id.volume);
+                    let item = volume(&self.disk.abs(&row.path)).ok();
+                    if item.is_some() && item != volume(&self.folder.root).ok() {
+                        return Err(Outcome::unsyncable(
+                            "on a volume mounted inside the folder: it can't move out",
+                        ));
+                    }
                     return Err(Outcome::unsyncable(self.disk.out_elsewhere()));
                 }
                 Ok(Err(e)) => return Err(io_outcome(e)),

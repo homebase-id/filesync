@@ -67,8 +67,6 @@ pub(crate) struct Masks {
     pub filtered: HashSet<NodeId>,
     /// Local items that become new nodes: old id → new id.
     pub detached: BTreeMap<NodeId, NodeId>,
-    /// The folder is read-only (§13): an executable bit changed here holds no item.
-    read_only: bool,
     /// The detached folders held for the filter's masks alone, outside the scope (§12) and in
     /// no folder outside it: what moves away from one may spare it ([`Masks::moved_away`]).
     by_filter: HashSet<NodeId>,
@@ -254,7 +252,6 @@ impl Masks {
             names,
             filtered,
             by_filter,
-            read_only: masking.read_only,
             ..Masks::default()
         };
         masks.with_view(input, detach, computer, taken)
@@ -267,12 +264,13 @@ impl Masks {
     pub(crate) fn sparing(
         self,
         input: &Input,
+        masking: Masking<'_>,
         computer: &str,
         taken: &HashSet<NodeId>,
         away: &HashMap<NodeId, NodeId>,
         first_detached: usize,
     ) -> Option<Masks> {
-        let detach = to_detach(input, &self.masked, away, self.read_only);
+        let detach = to_detach(input, &self.masked, away, masking.read_only);
         let again = detach.iter().eq(self.detached.keys());
         (detach.len() < first_detached && !again)
             .then(|| self.with_view(input, detach, computer, taken))
@@ -613,7 +611,18 @@ mod tests {
     fn sparing(input: &Input, away: &HashMap<NodeId, NodeId>) -> Option<Masks> {
         let masks = masks_in(&Scope::main(), input);
         let detached = masks.detached.len();
-        masks.sparing(input, "c", &HashSet::new(), away, detached)
+        masks.sparing(input, two_way(), "c", &HashSet::new(), away, detached)
+    }
+
+    /// A two-way folder's masking, as far as `sparing` reads it (whether it is read-only).
+    fn two_way() -> Masking<'static> {
+        static FILTER: std::sync::LazyLock<Filter> = std::sync::LazyLock::new(Filter::default);
+        static SCOPE: std::sync::LazyLock<Scope> = std::sync::LazyLock::new(Scope::main);
+        Masking {
+            filter: &FILTER,
+            scope: &SCOPE,
+            read_only: false,
+        }
     }
 
     fn moving(node: NodeId, parent: NodeId) -> Op {
@@ -662,7 +671,7 @@ mod tests {
         // Nor is a round that detaches what the last one did planned again.
         assert!(
             spared
-                .sparing(&input, "c", &HashSet::new(), &away, 1)
+                .sparing(&input, two_way(), "c", &HashSet::new(), &away, 1)
                 .is_none()
         );
     }

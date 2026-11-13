@@ -97,6 +97,9 @@ pub(crate) struct Executor<'a> {
     refusals: Refusals,
     /// The sync root, written only through it.
     disk: Disk<'a>,
+    /// Where what moved out of a read-only folder is told (§13), whatever the run's end:
+    /// else its report.
+    moved_out: Option<&'a mut Vec<(String, std::path::PathBuf)>>,
 }
 
 /// What a run goes by of the drive: what its operations' answers said, and what it read of it
@@ -199,7 +202,18 @@ impl<'a> Executor<'a> {
             counted: HashSet::new(),
             refusals: Refusals::default(),
             disk: Disk::new(folder, &cfg.hooks),
+            moved_out: None,
         }
+    }
+
+    /// Tells what moves out of a read-only folder into `sink` as it goes (§13), so a run that
+    /// fails later still tells it.
+    pub(crate) fn with_moved_out(
+        mut self,
+        sink: &'a mut Vec<(String, std::path::PathBuf)>,
+    ) -> Self {
+        self.moved_out = Some(sink);
+        self
     }
 
     /// Stops the run between operations once `stop` is set: each operation is done or not

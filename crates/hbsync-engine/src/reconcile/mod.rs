@@ -82,7 +82,7 @@ pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
     let away = masks.moved_away(&first);
     let detached = masks.detached.len();
     spare_away(first, masks, away, |masks, away| {
-        let spared = masks.sparing(input, &opts.computer, &opts.taken, away, detached)?;
+        let spared = masks.sparing(input, masking, &opts.computer, &opts.taken, away, detached)?;
         let plan = plan_with(input, opts, masking, &spared);
         let stayed = spared.not_moved_away(input, &plan, away);
         Some((plan, stayed, spared))

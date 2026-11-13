@@ -43,8 +43,33 @@ pub(super) fn notes(
         let path = engine.path_of(op.node())?.unwrap_or_else(|| "?".into());
         notes.push(format!("{path}: {} ({why})", op.kind()));
     }
-    // What changed in a read-only folder, kept where it moved out to (sync semantics §13): by
-    // where it went, the first few named.
+    // A file that can't be read yet, which other changes wait for (sync semantics §6.3).
+    for (path, why) in &report.waiting {
+        notes.push(format!(
+            "{path}: can't be read yet ({why}), so changes around it wait till it can"
+        ));
+    }
+    // What a delete left aside that this folder can't place (sync semantics §8a): told, kept.
+    if !report.left_aside.is_empty() {
+        notes.push(format!(
+            "{}: left aside, as this device can't tell where they belong; look at them, and \
+             delete by hand what isn't needed",
+            listed(&report.left_aside)
+        ));
+    }
+    if report.full {
+        notes.push(
+            "Homebase is out of storage: new and changed files wait until there is room".into(),
+        );
+    }
+    Ok(notes)
+}
+
+/// Where what changed in a read-only folder moved out to (sync semantics §13), worded: each
+/// time it moves (an event, never told only once as a lasting note is), by where it went, the
+/// first few named.
+pub(super) fn moved_out_notes(report: &SyncReport) -> Vec<String> {
+    let mut notes = Vec::new();
     // Each by the name it went out as, where not its own (taken there).
     let mut moved: Vec<(String, String)> = (report.moved_out.iter())
         .map(|(path, to)| {
@@ -67,26 +92,7 @@ pub(super) fn notes(
             listed(&paths)
         ));
     }
-    // A file that can't be read yet, which other changes wait for (sync semantics §6.3).
-    for (path, why) in &report.waiting {
-        notes.push(format!(
-            "{path}: can't be read yet ({why}), so changes around it wait till it can"
-        ));
-    }
-    // What a delete left aside that this folder can't place (sync semantics §8a): told, kept.
-    if !report.left_aside.is_empty() {
-        notes.push(format!(
-            "{}: left aside, as this device can't tell where they belong; look at them, and \
-             delete by hand what isn't needed",
-            listed(&report.left_aside)
-        ));
-    }
-    if report.full {
-        notes.push(
-            "Homebase is out of storage: new and changed files wait until there is room".into(),
-        );
-    }
-    Ok(notes)
+    notes
 }
 
 /// Notes told once: one that keeps coming back sync after sync (a file that can't be read)
