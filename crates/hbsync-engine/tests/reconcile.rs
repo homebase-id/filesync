@@ -3560,3 +3560,22 @@ fn read_only_what_is_in_a_new_folder_that_waits_waits_with_it() {
         }]
     );
 }
+
+/// Read-only, an item synced here that is edited here keeps its name from one the drive has a
+/// name one apart in case, left out till now: it moves out, and its drive version comes back
+/// to that name (one edit doesn't hand the name over).
+#[test]
+fn read_only_an_edit_here_doesnt_hand_its_name_over() {
+    let [synced, other] = ids(2)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(synced, file(ROOT, "a.txt", "a"))
+        .local(synced, Some(file(ROOT, "a.txt", "mine")))
+        .remote(other, Some(file(ROOT, "A.txt", "b")));
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    assert_eq!(kinds(&plan.ops), ["evict"], "{:?}", plan.ops);
+    let told: Vec<NodeId> = plan.conflicts.iter().map(Conflict::node).collect();
+    assert_eq!(told, [other]);
+}

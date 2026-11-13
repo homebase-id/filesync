@@ -152,27 +152,6 @@ impl<'a> Disk<'a> {
         checked.clone().map(|()| out)
     }
 
-    /// The out folder found on another volume by a rename into it (a bind mount of the same
-    /// file system shares a device id): refused for the rest of the run.
-    /// Whether a rename from the folder into `out` works, by a folder made in the folder's
-    /// tmp, renamed there and removed: one on another mount of the folder's file system can't
-    /// take it, though its volume is the folder's. (Where none can be made, as if it does.)
-    pub(super) fn out_takes_renames(&self, out: &Path) -> bool {
-        let name = format!(".hbsync-probe-{}", hbsync_types::NodeId::new());
-        let (from, to) = (layout::tmp_dir(self.root).join(&name), out.join(&name));
-        if fs::create_dir(&from).is_err() {
-            return true;
-        }
-        let moved = fs::rename(&from, &to);
-        let _ = fs::remove_dir(if moved.is_ok() { &to } else { &from });
-        !moved.is_err_and(|e| e.kind() == io::ErrorKind::CrossesDevices)
-    }
-
-    pub(super) fn out_elsewhere(&mut self) -> String {
-        self.out_checked = Some(Err(OUT_ELSEWHERE.into()));
-        OUT_ELSEWHERE.into()
-    }
-
     /// Moves `from` out of the sync root, to `to`, never over anything ([`rename_ordered`]).
     pub(super) fn move_out(
         &self,
@@ -305,7 +284,7 @@ impl<'a> Disk<'a> {
 }
 
 /// The volume `path` itself is on (a link not followed), where it can be read.
-pub(super) fn volume_of(path: &Path) -> Option<u64> {
+fn volume_of(path: &Path) -> Option<u64> {
     hbsync_platform::stat(path).map(|m| m.file_id.volume).ok()
 }
 
@@ -349,12 +328,28 @@ fn check_out(out: &Path, root: &Path, db: &mut StateDb) -> Result<(), String> {
             Err(e) => return Err(format!("{}: {e}", made.display())),
         }
     }
+    if !out.is_dir() {
+        return Err(format!("{}: not a folder", out.display()));
+    }
+    // A rename into it works: one on another mount of the root's file system (a bind mount
+    // shares its volume) can't take one. Tried once a run, with a folder made in the root's
+    // tmp, renamed there and removed (where none can be made, it is taken as working).
+    let probe = format!(".hbsync-probe-{}", hbsync_types::NodeId::new());
+    let (from, to) = (layout::tmp_dir(root).join(&probe), out.join(&probe));
+    let made = fs::create_dir_all(layout::tmp_dir(root)).and_then(|()| fs::create_dir(&from));
+    if made.is_ok() {
+        let moved = fs::rename(&from, &to);
+        let _ = fs::remove_dir(if moved.is_ok() { &to } else { &from });
+        if moved.is_err_and(|e| e.kind() == io::ErrorKind::CrossesDevices) {
+            return Err(OUT_ELSEWHERE.into());
+        }
+    }
     Ok(())
 }
 
 /// `path` as the file system resolves it: its nearest folder that is there resolved (links,
 /// `..`, the volume's own spelling), the rest as given.
-pub(super) fn resolved(path: &Path) -> PathBuf {
+fn resolved(path: &Path) -> PathBuf {
     let mut rest = Vec::new();
     for at in path.ancestors() {
         if let Ok(real) = fs::canonicalize(at) {

@@ -596,13 +596,14 @@ impl Executor<'_> {
             let why = rescan(&mut self.report, &row.path);
             return self.left_here(&row, original.as_ref(), why);
         }
-        let unexpected = self.db.read(|s| {
-            let held = s.held_below(&row.path)?;
-            Ok(held
-                .iter()
-                .any(|(n, base)| *base && expected.binary_search(n).is_err()))
-        })?;
-        if unexpected {
+        // What has a base below it, or the drive holds: planned again once it went (only this
+        // run writes the folder's rows and bases; a drive change meanwhile marks what it
+        // changes, held here till the commit).
+        let held = self.db.read(|s| s.held_below(&row.path))?;
+        if held
+            .iter()
+            .any(|(n, base)| *base && expected.binary_search(n).is_err())
+        {
             let why = Outcome::stale("the folder holds something synced the plan didn't expect");
             return self.left_here(&row, original.as_ref(), why);
         }
@@ -646,7 +647,10 @@ impl Executor<'_> {
         }
         // Its bases stay, and what was synced, or the drive holds, is planned again: the
         // drive's version comes back.
-        self.finish(&[], |s| gone_from_here(s, &row.path, node, Bases::Keep))
+        let held: Vec<NodeId> = held.into_iter().map(|(n, _)| n).collect();
+        self.finish(&[], |s| {
+            gone_from_here(s, &row.path, node, Bases::Keep(&held))
+        })
     }
 
     /// Moves `row`'s item out to the read-only folder's out folder, under the first free of
@@ -664,23 +668,12 @@ impl Executor<'_> {
             match self.disk.move_out(self.db, &row.path, &to) {
                 Ok(Ok(())) => return Ok(to),
                 Ok(Err(e)) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                // The out folder takes renames from here (its check): the item is on a
+                // volume mounted inside the folder, and it alone can't go.
                 Ok(Err(e)) if e.kind() == io::ErrorKind::CrossesDevices => {
-                    // The item on a volume mounted inside the folder: it alone can't go.
-                    // (One that can't be read now fails alone.)
-                    let item = volume_of(&self.disk.abs(&row.path));
-                    if item.is_none() {
-                        return Err(io_outcome(e));
-                    }
-                    // On the folder's volume, it may be on another mount of it inside the
-                    // folder: a rename from the folder's own tmp into the out folder tells.
-                    if item != volume_of(&resolved(&self.folder.root))
-                        || self.disk.out_takes_renames(out)
-                    {
-                        return Err(Outcome::unsyncable(
-                            "on a volume mounted inside the folder: it can't move out",
-                        ));
-                    }
-                    return Err(Outcome::unsyncable(self.disk.out_elsewhere()));
+                    return Err(Outcome::unsyncable(
+                        "on a volume mounted inside the folder: it can't move out",
+                    ));
                 }
                 Ok(Err(e)) => return Err(io_outcome(e)),
                 Err(e) => return Err(e.into()),
@@ -743,11 +736,12 @@ fn deleted_here(s: &Store<'_>, path: &RelPath, node: NodeId) -> Result<(), State
 
 /// What becomes of the bases of what left here ([`gone_from_here`]).
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Bases {
+enum Bases<'a> {
     /// Deleted here: they go ([`forget`]).
     Forget,
-    /// Moved out (§13): they stay, and what has one, or the drive holds, is planned again.
-    Keep,
+    /// Moved out (§13): they stay, and these (what has one, or the drive holds) are planned
+    /// again.
+    Keep(&'a [NodeId]),
 }
 
 /// What was at `path` left here with `node` (the item at the top of what left): its rows and
@@ -756,24 +750,22 @@ fn gone_from_here(
     s: &Store<'_>,
     path: &RelPath,
     node: NodeId,
-    bases: Bases,
+    bases: Bases<'_>,
 ) -> Result<(), StateError> {
-    // Kept: what has a base, or the drive holds, read in one query before the rows go.
-    let held = match bases {
-        Bases::Keep => s.held_below(path)?,
-        Bases::Forget => Vec::new(),
-    };
     for r in s.folder().delete_local_subtree(path)? {
         match bases {
             Bases::Forget => forget(s, r.node, node)?,
             // A parking record is only where the item carries its parked name.
-            Bases::Keep if r.path.name() == Some(layout::parked_name(r.node).as_str()) => {
+            Bases::Keep(_) if r.path.name() == Some(layout::parked_name(r.node).as_str()) => {
                 s.folder().delete_parked(r.node)?;
             }
-            Bases::Keep => {}
+            Bases::Keep(_) => {}
         }
     }
-    held.iter().try_for_each(|(n, _)| s.folder().mark_dirty(*n))
+    match bases {
+        Bases::Keep(held) => held.iter().try_for_each(|n| s.folder().mark_dirty(*n)),
+        Bases::Forget => Ok(()),
+    }
 }
 
 /// `nodes` went from here, deleted with `node`: their rows go, and so do their bases

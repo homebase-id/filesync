@@ -577,7 +577,7 @@ impl Reconciler<'_> {
     /// names they hold here stay held: nothing is planned onto them), else out of it. Told
     /// once, for `node`.
     /// False where it was left out already.
-    fn left_out(&mut self, node: NodeId) -> bool {
+    fn leave_out(&mut self, node: NodeId) -> bool {
         if !self.left.insert(node) {
             return false;
         }
@@ -756,18 +756,20 @@ impl Reconciler<'_> {
                 // here): a loser can't be renamed on the drive. A name this device's masks hold
                 // is kept by such an item all the same (none of theirs is here with it); one
                 // held by them alone leaves every newcomer out (one ignored here may be on it).
-                // What moves out holds no name: it goes first.
+                // What moves out holds no name on disk: it goes first.
                 let at_name = |s: &NodeState| s.parent == parent && name_key(&s.name) == key;
                 let on_disk = |n: &NodeId| {
                     self.masking.read_only
                         && !self.evicted.contains(n)
                         && self.input.local.get(*n).is_some_and(at_name)
                 };
+                // (One that moves out holds the name where its drive version comes back to it.)
                 let here = |n: &NodeId| {
                     on_disk(n)
                         || (self.masking.read_only
-                            && !self.evicted.contains(n)
-                            && self.input.base.get(*n).is_some_and(at_name))
+                            && self.input.base.get(*n).is_some_and(at_name)
+                            && (!self.evicted.contains(n)
+                                || self.remote_state(*n).is_some_and(at_name)))
                 };
                 let keep = usize::from(!taken(&key) || group.iter().any(here));
                 if group.len() <= keep {
@@ -786,7 +788,7 @@ impl Reconciler<'_> {
                 group.sort_by_cached_key(|n| {
                     let arriving = self.adopted.contains(n) || n.is_fixed_folder();
                     let leaving = self.evicted.contains(n);
-                    let first = (leaving, !here(n), !on_disk(n));
+                    let first = (!here(n), !on_disk(n), leaving);
                     (first, !self.deferred.contains(n), arriving, *n)
                 });
                 // The folder's path here, for the filter (`None`: not connected), read once
@@ -803,7 +805,7 @@ impl Reconciler<'_> {
                     }
                     if self.masking.read_only {
                         // Once: held in another folder here, that one is judged again with it.
-                        if !self.left_out(loser) {
+                        if !self.leave_out(loser) {
                             continue;
                         }
                         if let Some(h) = self.input.local.get(loser).filter(|h| h.parent != parent)
