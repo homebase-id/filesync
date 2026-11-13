@@ -12,6 +12,9 @@ impl Reconciler<'_> {
         let mut moves = Vec::new();
         let mut content = Vec::new();
         let mut deletes = Vec::new(); // (depth, op)
+        // What moves out of a read-only folder (§13), like the deletes here: only the topmost
+        // of a subtree, its subtree filled in once known.
+        let mut evicts = Vec::new();
         // The nodes whose item here a delete (or a forget) takes: their subtrees are filled in
         // once only the topmost of them is left.
         let mut gone_here: HashSet<NodeId> = HashSet::new();
@@ -45,9 +48,14 @@ impl Reconciler<'_> {
                 });
             }
 
-            // Remote side.
+            // Remote side: none read-only (§13), where what the drive holds and the merged tree
+            // doesn't (a removal there taken along, a node let go of) stays as it is.
             let mut remote_ops = false;
-            match (&target, remote) {
+            let remote_side = match self.masking.read_only {
+                true => (None, None),
+                false => (target.as_ref(), remote),
+            };
+            match remote_side {
                 (None, Some(now)) => {
                     if let Some(r) = i.remote_refs.get(&node) {
                         deletes.push((
@@ -128,7 +136,16 @@ impl Reconciler<'_> {
                 }))
             };
             let mut local_ops = false;
-            if !fork_copies.contains(&node) {
+            if self.evicted.contains(&node) {
+                // Out first; the drive's version comes back with a later plan (§13).
+                if local_real.is_some() {
+                    evicts.push(Op::LocalEvict {
+                        node,
+                        subtree: Vec::new(),
+                    });
+                    local_ops = true;
+                }
+            } else if !fork_copies.contains(&node) {
                 match (&target, local_real.filter(|_| forked.is_none())) {
                     (None, Some(_)) => {
                         let subtree = Vec::new(); // filled in below, for the topmost
@@ -240,10 +257,26 @@ impl Reconciler<'_> {
         content.sort_by_key(Op::pooled);
         // What this plan moves out of its folder here (a move, a download to another folder:
         // they run before the deletes) leaves a folder it deletes with what is below it.
-        let moving = match gone_here.is_empty() {
+        let moving = match gone_here.is_empty() && evicts.is_empty() {
             true => HashSet::new(),
             false => moving_out(moves.iter().chain(&content), &i.local),
         };
+        // What moves out of the folder, only the topmost (it takes what is below it, but what
+        // the plan moves out of it first), before the deletes here: a folder they delete
+        // doesn't take it (§13).
+        let evicting: HashSet<NodeId> = evicts.iter().map(Op::node).collect();
+        evicts.retain(|op| !below_another(&i.local, op.node(), &evicting, &moving));
+        for op in &mut evicts {
+            if let Op::LocalEvict { node, subtree } = op {
+                *subtree = i.local.subtree_where(*node, |n| !moving.contains(&n));
+                subtree.sort();
+            }
+        }
+        // A delete here doesn't expect what moves out first, nor what is below it.
+        let moving: HashSet<NodeId> = moving
+            .into_iter()
+            .chain(evicts.iter().map(Op::node))
+            .collect();
         // Only the topmost delete here of a subtree is needed.
         deletes.retain(|(_, op)| match op {
             Op::LocalDelete { node, .. } | Op::Forget { node, .. } if gone_here.contains(node) => {
@@ -295,6 +328,9 @@ impl Reconciler<'_> {
         self.plan.ops.extend(creates.into_iter().map(|(_, op)| op));
         self.plan.ops.extend(moves);
         self.plan.ops.extend(content);
+        // After what moves out of them (a move, a download to another folder), before the
+        // deletes; what takes a name one holds parks it first, as it parks a delete's.
+        self.plan.ops.extend(evicts);
         self.plan.ops.extend(deletes);
         self.plan.ops.extend(settles);
     }
@@ -308,7 +344,8 @@ impl Reconciler<'_> {
     pub(super) fn with_what_it_took_along(&mut self) {
         let i = self.input;
         let folders = |op: &Op| matches!(op, Op::LocalDelete { subtree, .. } if subtree.len() > 1);
-        if self.taken.is_empty() || !self.plan.ops.iter().any(folders) {
+        // Read-only (§13): never a removal from the drive.
+        if self.masking.read_only || self.taken.is_empty() || !self.plan.ops.iter().any(folders) {
             return;
         }
         let removing: HashSet<NodeId> = self

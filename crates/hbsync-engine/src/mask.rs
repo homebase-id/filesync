@@ -92,7 +92,12 @@ pub(crate) struct FilterMasks {
 }
 
 impl FilterMasks {
-    pub(crate) fn of(input: &Input, filter: &Filter, scope: &Scope) -> FilterMasks {
+    pub(crate) fn of(input: &Input, masking: Masking<'_>) -> FilterMasks {
+        let Masking {
+            filter,
+            scope,
+            read_only,
+        } = masking;
         // Where a node is: through the folders in Recently deleted too (a node in one is where
         // that folder was).
         let with_removed;
@@ -138,10 +143,12 @@ impl FilterMasks {
         // back: it is masked as one never synced here.
         let mut filtered_base = self::masked(&input.base, filter);
         filtered_base.retain(|n| input.content_state(*n) != ContentState::Wanted);
+        // Read-only (§13), the drive's place wins, and this device filters it: masked still,
+        // the item here let go of as any masked node's (detached where it changed).
         let brought_back: HashSet<NodeId> = masked
             .iter()
             .copied()
-            .filter(|m| filtered_base.contains(m) && input.local.contains(*m))
+            .filter(|m| !read_only && filtered_base.contains(m) && input.local.contains(*m))
             .collect();
         masked.retain(|m| !brought_back.contains(m));
         let leaving: HashSet<NodeId> = masked
@@ -159,8 +166,13 @@ impl FilterMasks {
                 _ => false,
             })
             .collect();
-        // Leaving is an ordinary local delete: the scanner no longer reports the item.
-        let leaving = only_whole_folders(&input.remote, leaving);
+        // Leaving is an ordinary local delete: the scanner no longer reports the item. Never
+        // in a read-only folder (§13), which removes nothing from the drive: masked there, as
+        // one never synced here.
+        let leaving = match read_only {
+            true => HashSet::new(),
+            false => only_whole_folders(&input.remote, leaving),
+        };
         masked.retain(|m| !leaving.contains(m));
         FilterMasks {
             masked,
@@ -182,12 +194,12 @@ impl Masks {
         computer: &str,
         taken: &HashSet<NodeId>,
     ) -> Masks {
-        let Masking { filter, scope } = masking;
+        let Masking { scope, .. } = masking;
         let FilterMasks {
             mut masked,
             outside,
             brought_back,
-        } = FilterMasks::of(input, filter, scope);
+        } = FilterMasks::of(input, masking);
         if masked.is_empty() && outside.is_empty() && brought_back.is_empty() {
             return Masks::default();
         }
@@ -591,6 +603,7 @@ mod tests {
         let masking = Masking {
             filter: &filter,
             scope,
+            read_only: false,
         };
         Masks::of(input, masking, "c", &HashSet::new())
     }

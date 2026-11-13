@@ -591,8 +591,9 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
 Local: `mkdir`, `download` (to temp, verify stored hash, atomic swap), `move`, `tags`, `delete`
 (what goes takes its bases along, whatever the drive holds by then: a base left behind would read
 as a local delete once the node is back in view, and undo a restore made while it ran),
-`rename-for-conflict`, and for filters (section 10) `detach` (a new node id in place) and
-`forget` (a delete plus dropping the base, also where nothing of it is here). Remote: `create-folder`, `upload` (create by node id),
+`rename-for-conflict`, for filters (section 10) `detach` (a new node id in place) and
+`forget` (a delete plus dropping the base, also where nothing of it is here), and for read-only
+folders (section 13) `move-out` (out of the folder, the base kept). Remote: `create-folder`, `upload` (create by node id),
 `update-content`, `move`, `tags`, `remove` (to Recently deleted; a create of a removed node
 restores it). Outside plans: `restore` and `purge` (Recently deleted). Every op that writes a
 node (create, upload, move, download, mkdir) writes its merged tags too; `tags` is for a change
@@ -862,6 +863,8 @@ here (or put up anew, if edited). That takes proof (`hbsync-engine/src/gone.rs`)
    it here; the clients converge without loss.
 7. **Deletes are checked:** no client unlinks an item that isn't the version its base
    records (junk aside), and nothing stays aside once the clients settle (§7).
+8. **Read-only folders** (section 13): a read-only client never writes the drive, converges to
+   it like any other, and loses nothing: what changed there is where it moved out to.
 
 ## 10. Filters
 
@@ -1144,3 +1147,41 @@ A detached item's new id is fixed for the node and the computer (the state DB's 
 for conflict copies, section 5), so a replan picks the same one,
 but never one in use here: the same node detached again while its first copy lives gets the
 next.
+
+## 13. Read-only folders
+
+A read-only folder syncs one way: the drive decides, and nothing is ever written to it (what
+another identity shares with this one; the engine's `FolderCtx::read_only`, a folder outside
+it given to move things out to, on the same volume). Every node's target is the drive's state,
+whatever changed here, and the plan holds no operation on the drive:
+
+- **Changed here, kept by moving it out.** A file whose bytes or executable bit changed here
+  to other than the drive's, and an item made here (a new folder as one, with what is in it),
+  move out of the folder first, in one rename, under their own name in the folder they go to,
+  else the first free of `name (from <folder>)`, `name (from <folder> 2)` … (a hundred). Their
+  rows go, their bases stay: the next plan finds the drive's version missing here and brings
+  it back. A synced item moved into a folder made here moves back first, a download of it to
+  another folder too: the move-out runs after them, before the deletes here (a folder the drive
+  deleted, holding a new file here, keeps it out of its delete), and expects what it takes as a
+  delete does (§7); a synced item there it doesn't expect makes it wait for the next plan. A
+  crash after the rename and before the commit leaves rows of an item that isn't there: the
+  next scan reads it as deleted here, which comes back the same way.
+- **Undone.** A move or rename here goes back to the drive's place; a delete here comes back
+  (downloaded again); tags here become the drive's. Nothing of these moves out: the drive holds
+  what they changed.
+- **The same item on both sides** (adopted, the drive's bytes) stays.
+- **Filters** (section 10). An item ignored here since it synced stays on the drive (it never
+  leaves it): masked, as one never synced here, its item here kept here only. One moved out of
+  an ignored place here isn't brought back: the drive's place wins, and this device filters
+  it, so it stays masked, and what is here of it is let go of as of any masked node (detached
+  and so moved out, where it changed here).
+- **Repairs** (section 6) that would write the drive don't happen. An orphan isn't moved into
+  Recovered files, nor its folder made again: it has no place here, so what is here of it is
+  let go of with what is below it (deleted as synced, moved out where it changed here or never
+  synced), once nothing of that waits or is planned in another page; it comes back once the
+  drive gives it a place. A name clash among the drive's items (case, normalization, or a name
+  this device's ignored items hold) can't be renamed away: the item synced here keeps the name
+  (else the lowest id), and the others aren't synced here, each told so, as long as the clash
+  lasts. What a folder's removal there took along is left there as it is.
+- The mass-delete guard (§7) judges the deletes here as everywhere (a removal elsewhere of
+  every synced file is held).

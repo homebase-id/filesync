@@ -1,6 +1,6 @@
 //! The sync loop for one sync root.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -106,6 +106,9 @@ pub struct SyncReport {
     pub synced: Vec<Synced>,
     /// The drive is out of storage: uploads wait until there is room.
     pub full: bool,
+    /// What moved out of a read-only folder (sync semantics §13), to keep what changed here:
+    /// where it was in the folder, and where it went.
+    pub moved_out: Vec<(String, PathBuf)>,
     /// Operations not sent because the drive refused them as they are ([`crate::refused`]),
     /// with why: they wait for a change, an hour, or Sync now.
     pub refused: Vec<(Op, String)>,
@@ -142,6 +145,7 @@ impl SyncReport {
         self.stopped = later.stopped;
         self.synced.extend(later.synced);
         self.full = later.full;
+        self.moved_out.extend(later.moved_out);
         self.refused.extend(later.refused);
         self.waiting.extend(later.waiting);
         self.left_aside = later.left_aside;
@@ -1030,6 +1034,7 @@ impl Engine {
         self.db
             .write(|s| s.folder().add_synced(&synced, activity::KEEP))?;
         report.synced.extend(synced);
+        report.moved_out.extend(exec.moved_out);
         if !exec.rescan.is_empty() {
             rescan_dirs(
                 &mut self.db,

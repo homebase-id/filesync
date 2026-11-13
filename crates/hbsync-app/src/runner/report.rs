@@ -361,6 +361,11 @@ fn describe_conflict(engine: &mut Engine, c: &Conflict) -> Result<String, StateE
         Conflict::NameClash { node } => {
             format!("{}: renamed, as the name was taken", path(*node)?)
         }
+        Conflict::NameTaken { node } => format!(
+            "{}: not synced here, as another item in its folder has its name (or one differing \
+             only in case)",
+            path(*node)?
+        ),
         Conflict::Cycle { node } => format!(
             "{}: a move that would have put a folder inside itself was undone",
             path(*node)?

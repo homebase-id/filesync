@@ -582,6 +582,75 @@ impl Executor<'_> {
         Ok(Outcome::Settled)
     }
 
+    /// Moves the local item of `node`, with what is below it, out of the read-only folder (§13)
+    /// into the folder its changes go to, under the first free of [`moved_out_names`] there:
+    /// one rename, never over anything. `expected`: the subtree the plan saw (sorted); a synced
+    /// item there that it doesn't expect (moved in since) makes it wait for the next plan. Its
+    /// rows go and the bases stay, so what was synced is planned again: the drive's version
+    /// comes back. A crash after the rename leaves the rows of an item that isn't there: the
+    /// scan reads it as deleted here, which a read-only folder undoes the same way.
+    pub(super) fn evict(&mut self, node: NodeId, expected: &[NodeId]) -> Step {
+        let Some(out) = self.folder.read_only.clone() else {
+            return Ok(Outcome::unsyncable("the folder isn't read-only"));
+        };
+        let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
+            return Ok(Outcome::stale("gone"));
+        };
+        if !self.on_disk_unchanged(&row) {
+            return Ok(rescan(&mut self.report, &row.path));
+        }
+        let (place, unexpected) = self.db.read(|s| {
+            let mut unexpected = false;
+            for r in s.local_subtree(&row.path)? {
+                if expected.binary_search(&r.node).is_err() && s.get_base(r.node)?.is_some() {
+                    unexpected = true;
+                }
+            }
+            Ok((view::place(s, &row)?, unexpected))
+        })?;
+        if unexpected {
+            return Ok(Outcome::stale(
+                "the folder holds something synced the plan didn't expect",
+            ));
+        }
+        let name = place.name().unwrap_or_default();
+        let from = self
+            .folder
+            .root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let mut moved = None;
+        for candidate in moved_out_names(name, &from) {
+            let to = out.join(&candidate);
+            match self.disk.move_out(self.db, &row.path, &to)? {
+                Ok(()) => {
+                    moved = Some(to);
+                    break;
+                }
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Ok(io_outcome(e)),
+            }
+        }
+        let Some(to) = moved else {
+            return Ok(Outcome::unsyncable(format!(
+                "no free name to move it out to in {}",
+                out.display()
+            )));
+        };
+        self.report.moved_out.push((place.to_string(), to));
+        // What was synced is planned again, the drive's version to come back.
+        self.finish(&[], |s| {
+            for r in s.folder().delete_local_subtree(&row.path)? {
+                s.folder().delete_parked(r.node)?;
+                if s.get_base(r.node)?.is_some() {
+                    s.folder().mark_dirty(r.node)?;
+                }
+            }
+            Ok(())
+        })
+    }
+
     /// Drops the base of a node this device no longer syncs and holds nothing of (§10).
     pub(super) fn drop_unsynced_base(&mut self, node: NodeId) -> Step {
         if self.db.read(|s| s.local_by_node(node))?.is_some() {

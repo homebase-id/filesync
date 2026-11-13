@@ -210,6 +210,12 @@ pub(crate) struct Client {
     /// last given it ([`crate::Action::RenameComputer`]; the engine's `DESKTOP_NAME(D)`).
     pub(crate) desktop_name: String,
     pub(crate) desktop_named: Option<String>,
+    /// The folder is read-only (sync semantics §13): it never writes the drive, and what
+    /// changed here goes back to the drive's.
+    pub(crate) read_only: bool,
+    /// What moved out of it, read-only, to keep what changed here: each item with what was
+    /// below it (`Op::LocalEvict`).
+    pub(crate) moved_out: Vec<Tree>,
 }
 
 impl Client {
@@ -292,6 +298,8 @@ impl Client {
             added: true,
             desktop_name: String::new(),
             desktop_named: None,
+            read_only: false,
+            moved_out: Vec::new(),
         }
     }
 

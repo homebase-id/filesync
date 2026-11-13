@@ -133,6 +133,16 @@ impl<'a> Disk<'a> {
         rename_ordered(db, &self.abs(from), &self.abs(to))
     }
 
+    /// Moves `from` out of the sync root, to `to`, never over anything ([`rename_ordered`]).
+    pub(super) fn move_out(
+        &self,
+        db: &mut StateDb,
+        from: &RelPath,
+        to: &Path,
+    ) -> Result<io::Result<()>, StateError> {
+        rename_ordered(db, &self.abs(from), to)
+    }
+
     // ---- what is written on items: tags, creation times ----
 
     /// Whether the root's volume keeps tags, as far as known (this OS keeps some, and no tag

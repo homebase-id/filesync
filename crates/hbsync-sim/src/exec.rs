@@ -431,12 +431,12 @@ impl Sim {
                 ],
                 all: &all,
             };
-            let Ok(()) = hbsync_engine::pages::dirty_elsewhere(
-                &mut input,
-                &client.filter,
-                &scope,
-                &mut pending,
-            );
+            let masking = Masking {
+                filter: &client.filter,
+                scope: &scope,
+                read_only: client.read_only,
+            };
+            let Ok(()) = hbsync_engine::pages::dirty_elsewhere(&mut input, masking, &mut pending);
         }
         // The guard's totals over the whole dirty set, as the engine's store counts them
         // (`holding::guard_counts`, which `narrow::counts_differ` holds this to), and of them
@@ -584,6 +584,7 @@ impl Sim {
         let masking = Masking {
             filter: &client.filter,
             scope: &scope,
+            read_only: client.read_only,
         };
         // Ids the client or the server knows are taken, as in the executor's state DB.
         let known = |id: NodeId| {
@@ -931,6 +932,11 @@ impl Sim {
             Some(_) => self.server.node(node).map(|(n, r)| (n.clone(), r)),
             None => None,
         };
+        if self.clients[c].read_only && writes_drive(&op) {
+            let name = &self.clients[c].name;
+            self.ledger
+                .read_only_wrote(|| Some(format!("{name} {op:?}")));
+        }
         let outcome = self.execute(c, &op);
         // What it read before its write, as the executor's (a pull landing before its commit
         // changes nothing of it).
@@ -1740,6 +1746,31 @@ impl Sim {
                 Done
             }
             Op::LocalDelete { node, subtree } => self.delete_here(c, node, &subtree),
+            Op::LocalEvict { node, subtree } => {
+                // As the executor: the item as the plan saw it, with what is below it but for a
+                // synced item it doesn't expect; out with it, the bases stay.
+                let client = &mut self.clients[c];
+                if !client.local.contains(node) || !unchanged(client, node) {
+                    return Skip;
+                }
+                let below = client.local.subtree(node);
+                let unexpected = |n: &NodeId| subtree.binary_search(n).is_err();
+                if below
+                    .iter()
+                    .any(|n| unexpected(n) && client.base.contains(*n))
+                {
+                    return Skip;
+                }
+                let mut out = Tree::new();
+                for n in below {
+                    if let Some(state) = client.local.remove(n) {
+                        out.insert(n, state);
+                    }
+                    client.parked.remove(&n);
+                }
+                client.moved_out.push(out);
+                Done
+            }
             Op::RemoteCreate {
                 node,
                 parent,
@@ -3030,6 +3061,9 @@ fn planned(ops: &[Op]) -> Vec<Planned<'_>> {
                     subtree: subtree.clone(),
                 },
                 Op::Forget { subtree, .. } if !subtree.is_empty() => What::Forget {
+                    subtree: subtree.clone(),
+                },
+                Op::LocalEvict { subtree, .. } => What::Evict {
                     subtree: subtree.clone(),
                 },
                 Op::LocalMove { parent, name, .. } => What::LocalMove {

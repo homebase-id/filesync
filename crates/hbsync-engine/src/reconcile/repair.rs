@@ -14,6 +14,10 @@ enum Parent {
     Recover,
     /// It waits for more information.
     Wait,
+    /// Read-only (§13), it has no place here: nothing goes to the drive, Recovered files
+    /// neither, so what is here of it goes (moved out where it changed here, or never synced),
+    /// as its folder's would. Once the drive gives it a place, it comes back.
+    LetGo,
     /// It isn't this device's: the place it would take is one this device doesn't sync (§10),
     /// or it is in a folder in Recently deleted at a place it filters. Left as it is, for a
     /// device that syncs that place: brought in, it would read as an item this device stopped
@@ -275,6 +279,8 @@ impl Reconciler<'_> {
         let mut withdrawn: HashSet<NodeId> = HashSet::new();
         // Nodes left to the devices that sync where they would go; their children too.
         let mut left: HashSet<NodeId> = HashSet::new();
+        // Nodes let go of (read-only, §13); their children too.
+        let mut let_go: HashSet<NodeId> = HashSet::new();
         while let Some(node) = queue.pop() {
             let Some(parent) = self.merged.get(node).map(|s| s.parent) else {
                 continue;
@@ -288,6 +294,7 @@ impl Reconciler<'_> {
                 // A file: another writer put the node in it (§6.3).
                 Some(_) => self.recover_or_wait(node),
                 None if left.contains(&parent) => Parent::Leave,
+                None if let_go.contains(&parent) => Parent::LetGo,
                 None if withdrawn.contains(&parent) => Parent::Wait,
                 None => match self.known_state(parent) {
                     Some(state) if state.kind == NodeKind::Folder => Parent::Folder(state),
@@ -305,6 +312,10 @@ impl Reconciler<'_> {
             // change unmerged, it read alive and brought its deleted folder back: review 14 R1).
             let decided = match decided {
                 Parent::Recover if self.waits.contains(&node) => Parent::Wait,
+                // Its item here goes with what is below it: only once nothing of that is
+                // planned elsewhere or waits (a new item there moves out first, in its own
+                // plan).
+                Parent::LetGo if !self.may_let_go(node) => Parent::Wait,
                 // Waits for another page, with its folders: decided there, never brought back
                 // here (its folder may go with it there).
                 Parent::Recover | Parent::Folder(_) if self.paged.contains(&node) => Parent::Wait,
@@ -324,6 +335,14 @@ impl Reconciler<'_> {
                         && (self.in_masked(node) || self.recovered_path(node).is_none()) =>
                 {
                     Parent::Leave
+                }
+                // Read-only (§13): no folder made again, nothing moved into Recovered files, as
+                // either is a write to the drive.
+                Parent::Recover | Parent::Folder(_) if self.masking.read_only => {
+                    match self.may_let_go(node) {
+                        true => Parent::LetGo,
+                        false => Parent::Wait,
+                    }
                 }
                 decided => decided,
             };
@@ -363,6 +382,26 @@ impl Reconciler<'_> {
                     self.merged.remove(node);
                     self.scope.remove(&node);
                     left.insert(node);
+                    if self.adopted.remove(&node) {
+                        self.plan
+                            .conflicts
+                            .retain(|c| *c != Conflict::Orphan { node });
+                    }
+                }
+                Parent::LetGo => {
+                    // Out of the merged tree, in the plan: its item here goes, and so do its
+                    // children's, which are let go of in turn.
+                    queue.extend(self.merged.children(node).collect::<Vec<_>>());
+                    self.merged.remove(node);
+                    self.scope.insert(node);
+                    let_go.insert(node);
+                    // Only the drive's version, as synced, is deleted here: anything else
+                    // (changed here, or never synced) moves out.
+                    if self.input.local.contains(node)
+                        && self.local_change(node) != Change::Unchanged
+                    {
+                        self.evicted.insert(node);
+                    }
                     if self.adopted.remove(&node) {
                         self.plan
                             .conflicts
@@ -518,6 +557,32 @@ impl Reconciler<'_> {
             self.origin.remove(&copy);
             self.merged.remove(copy);
         }
+    }
+
+    /// Whether read-only `node`'s item here may go with what is below it ([`Parent::LetGo`]):
+    /// none of that waits, here or for another page, nor is planned in another.
+    fn may_let_go(&self, node: NodeId) -> bool {
+        self.input
+            .local
+            .subtree(node)
+            .into_iter()
+            .all(|n| !self.waits.contains(&n) && !self.paged.contains(&n) && !self.elsewhere(n))
+    }
+
+    /// `node`, which lost its name in a read-only folder (§13), and what is below it stay as
+    /// they are: out of the plan (dirty still), out of the merged tree, so nothing here takes
+    /// their place. Told once, for `node`.
+    fn left_out(&mut self, node: NodeId) {
+        for n in self.merged.subtree(node) {
+            self.scope.remove(&n);
+            self.origin.remove(&n);
+            self.evicted.remove(&n);
+            self.merged.remove(n);
+            if self.input.dirty.contains(&n) {
+                self.deferred.insert(n);
+            }
+        }
+        self.plan.conflicts.push(Conflict::NameTaken { node });
     }
 
     /// Scoped `node` and what is below it wait for a hash ([`super::waits`]): it would take a
@@ -688,9 +753,19 @@ impl Reconciler<'_> {
                 // being written) is never renamed: it wins, and is left alone if it loses;
                 // and an orphan moving in, or Recovered files or Desktops made beside a folder
                 // of its name, loses to what is there.
+                // Read-only (§13), what holds the name here keeps it: a loser can't be renamed on
+                // the drive.
+                let here = |n: &NodeId| {
+                    self.masking.read_only
+                        && self
+                            .input
+                            .local
+                            .get(*n)
+                            .is_some_and(|l| l.parent == parent && name_key(&l.name) == key)
+                };
                 group.sort_by_key(|n| {
                     let arriving = self.adopted.contains(n) || n.is_fixed_folder();
-                    (!self.deferred.contains(n), arriving, *n)
+                    (!self.deferred.contains(n), !here(n), arriving, *n)
                 });
                 // The folder's path here, for the filter (`None`: not connected), read once
                 // a loser is renamed.
@@ -702,6 +777,10 @@ impl Reconciler<'_> {
                         if self.scope.contains(&loser) {
                             self.wait_for_name(loser);
                         }
+                        continue;
+                    }
+                    if self.masking.read_only {
+                        self.left_out(loser);
                         continue;
                     }
                     let Some(mut state) = self.merged.get(loser).cloned() else {

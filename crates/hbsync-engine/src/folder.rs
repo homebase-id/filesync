@@ -34,6 +34,9 @@ pub struct FolderCtx {
     pub mtime_proves_bytes: Arc<OnceLock<bool>>,
     /// The file system family of the root's volume, learned when first asked.
     pub family: Arc<OnceLock<FsFamily>>,
+    /// Read-only (sync semantics §13): the folder that what changed here moves out to, on the
+    /// root's volume and outside it. `None`: the folder syncs both ways.
+    pub read_only: Option<PathBuf>,
 }
 
 impl FolderCtx {
@@ -50,6 +53,7 @@ impl FolderCtx {
             tags_kept: Arc::default(),
             mtime_proves_bytes: Arc::default(),
             family: Arc::default(),
+            read_only: None,
         }
     }
 
@@ -58,6 +62,7 @@ impl FolderCtx {
         Masking {
             filter: &self.filter,
             scope: &self.scope,
+            read_only: self.read_only.is_some(),
         }
     }
 

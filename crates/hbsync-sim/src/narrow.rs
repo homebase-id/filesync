@@ -203,6 +203,9 @@ impl Sim {
             tags_kept: Arc::default(),
             mtime_proves_bytes: Arc::default(),
             family: Arc::default(),
+            read_only: client
+                .read_only
+                .then(|| std::path::PathBuf::from("/sim-out")),
         }
     }
 

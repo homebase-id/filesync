@@ -37,6 +37,11 @@ pub struct BaseExtra {
 pub struct Masking<'a> {
     pub filter: &'a Filter,
     pub scope: &'a Scope,
+    /// The folder is read-only (sync semantics §13): the drive decides, and nothing is
+    /// written to it. What changed here goes back to the drive's, and what that would lose
+    /// (an edit, a new item) moves out first ([`Op::LocalEvict`]); an item filtered here since
+    /// it synced stays on the drive, masked, as one never synced here.
+    pub read_only: bool,
 }
 
 /// Settings that affect decisions.
@@ -313,6 +318,12 @@ pub enum Op {
     /// below it): `node` moved remotely to where this device doesn't sync, and the item holds
     /// what must stay here (§10). A later op creates it remotely.
     LocalDetach { node: NodeId, new_node: NodeId },
+    /// Moves the local item of `node`, with what is below it, out of the read-only folder
+    /// (§13) into the folder its changes go to, under a free name there; its rows go, its base
+    /// stays (the drive's version comes back by a later plan). `subtree` is every node the plan
+    /// expects there (sorted, `node` included): a synced item there that it doesn't expect makes
+    /// it wait for the next plan; a new one goes along.
+    LocalEvict { node: NodeId, subtree: Vec<NodeId> },
     /// This device no longer syncs `node` (§10): its local item is deleted, as with
     /// [`Op::LocalDelete`] with `subtree` (empty if nothing of it is here), with its bases; where
     /// nothing of it is here, `node`'s base goes all the same. A base left behind would read as
@@ -336,6 +347,7 @@ impl Op {
             Op::RemoteDelete { .. } => "RemoteDelete",
             Op::Settle { .. } => "Settle",
             Op::LocalDetach { .. } => "LocalDetach",
+            Op::LocalEvict { .. } => "LocalEvict",
             Op::Forget { .. } => "Forget",
         }
     }
@@ -354,6 +366,7 @@ impl Op {
             | Op::RemoteDelete { node, .. }
             | Op::Settle { node }
             | Op::LocalDetach { node, .. }
+            | Op::LocalEvict { node, .. }
             | Op::Forget { node, .. } => *node,
         }
     }
@@ -449,6 +462,7 @@ impl Op {
         match self {
             Op::LocalMove { node, .. }
             | Op::LocalFork { node, .. }
+            | Op::LocalEvict { node, .. }
             | Op::LocalDownload {
                 node,
                 replace: true,
@@ -563,6 +577,9 @@ pub enum Conflict {
     EditDelete { node: NodeId },
     /// A name clash; `node` was renamed.
     NameClash { node: NodeId },
+    /// A name clash in a read-only folder (§13): `node` can't be renamed on the drive, so it
+    /// isn't synced here while another item there has its name.
+    NameTaken { node: NodeId },
     /// A move would have created a cycle and was undone.
     Cycle { node: NodeId },
     /// The node's folder is gone from the drive for good; it was moved into Recovered files
@@ -581,6 +598,7 @@ impl Conflict {
             | Conflict::MoveMove { node }
             | Conflict::EditDelete { node }
             | Conflict::NameClash { node }
+            | Conflict::NameTaken { node }
             | Conflict::Cycle { node }
             | Conflict::Orphan { node }
             | Conflict::CopyWaits { node } => *node,

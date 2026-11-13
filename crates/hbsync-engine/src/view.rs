@@ -545,7 +545,7 @@ fn build(
     // What the page leaves to other pages (§6.5): nothing where it is all there is to plan
     // (a count; the page's nodes are dirty marks).
     if s.pending_count()? > b.input.dirty.len() as u64 {
-        crate::pages::dirty_elsewhere(&mut b.input, filter, scope, &mut StorePending(s))?;
+        crate::pages::dirty_elsewhere(&mut b.input, ctx.masking(), &mut StorePending(s))?;
     }
     if full.is_some() {
         b.input.coverage = Some(coverage);

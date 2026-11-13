@@ -228,9 +228,21 @@ impl Reconciler<'_> {
         // One a folder's removal took along isn't in the tree.
         let r = i.remote.get(node).filter(|_| !self.taken.contains(&node));
         let (b, l) = (i.base.get(node), self.local_state(node));
+        let masked = self.masks.masked.contains(&node);
+        // Read-only (§13): what going back to the drive's would lose here moves out first.
+        let evict = self.masking.read_only && !masked && loses_here(lc, l.as_ref(), r);
         let (target, origin): (Option<NodeState>, Origin) = match (lc, rc) {
             // Gone from what this device syncs; what must stay here was detached (§10).
-            _ if self.masks.masked.contains(&node) => (None, Origin::Base),
+            _ if masked => (None, Origin::Base),
+            // Read-only (§13): the drive's, whatever changed here.
+            _ if self.masking.read_only => (
+                r.cloned(),
+                if r.is_some() {
+                    Origin::Remote
+                } else {
+                    Origin::Base
+                },
+            ),
             (Change::Absent | Change::Unchanged, Change::Absent | Change::Unchanged) => {
                 (r.or(l.as_ref()).or(b).cloned(), Origin::Base)
             }
@@ -277,9 +289,10 @@ impl Reconciler<'_> {
             (target, _) => (target, origin),
         };
         // Tags merge on their own, whatever else changed (§11); a merge too large for the
-        // drive leaves the drive's.
+        // drive leaves the drive's. Read-only, the drive's (§13).
         if let (Some(t), Some(l), Some(r)) = (&mut target, &l, r)
-            && !self.masks.masked.contains(&node)
+            && !masked
+            && !self.masking.read_only
         {
             let none = Tags::default();
             let merged = Tags::merge(b.map_or(&none, |b| &b.tags), &l.tags, &r.tags);
@@ -304,6 +317,9 @@ impl Reconciler<'_> {
         }
         self.scope.insert(node);
         self.origin.insert(node, origin);
+        if evict {
+            self.evicted.insert(node);
+        }
         match target {
             Some(t) => {
                 self.merged.insert(node, t);
@@ -367,6 +383,21 @@ impl Reconciler<'_> {
             }
         }
         (Some(target), origin)
+    }
+}
+
+/// Whether going back to the drive's state `r` loses what changed here (`lc`, to `l`), in a
+/// read-only folder (§13): an item made here (not the drive's own, adopted), or a file's bytes
+/// or executable bit changed here to other than the drive's. A move, a delete or tags here
+/// lose nothing: the drive's place, item and tags come back.
+fn loses_here(lc: Change, l: Option<&NodeState>, r: Option<&NodeState>) -> bool {
+    if !content_changed(lc) {
+        return false;
+    }
+    match (l, r) {
+        (Some(l), Some(r)) => l.kind != r.kind || (l.kind == NodeKind::File && !same_edit(l, r)),
+        (Some(_), None) => true,
+        (None, _) => false,
     }
 }
 

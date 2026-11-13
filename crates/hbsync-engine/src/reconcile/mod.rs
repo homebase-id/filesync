@@ -196,6 +196,8 @@ struct Reconciler<'a> {
     origin: HashMap<NodeId, Origin>,
     /// Local file of `node` becomes the conflict copy `copy`.
     forks: BTreeMap<NodeId, NodeId>,
+    /// What moves out of a read-only folder before the drive's state comes back (§13).
+    evicted: BTreeSet<NodeId>,
     /// Becomes `plan.deferred`.
     deferred: BTreeSet<NodeId>,
     /// Orphans the repairs move into Recovered files (§6.3): they lose a name clash there.
@@ -252,6 +254,7 @@ impl<'a> Reconciler<'a> {
             scope: BTreeSet::new(),
             origin: HashMap::new(),
             forks: BTreeMap::new(),
+            evicted: BTreeSet::new(),
             deferred: BTreeSet::new(),
             adopted: HashSet::new(),
             taken,
@@ -318,11 +321,36 @@ impl<'a> Reconciler<'a> {
         self.deletes_wait_with_their_folder();
         self.with_what_it_took_along();
         self.guard_mass_delete();
+        if self.masking.read_only {
+            self.never_to_the_drive();
+        }
         self.plan.waiting = self.waited_for();
         // The folders this page waits for, with everything of it below them.
         self.plan.waits_for_pages = self.going.iter().map(|n| self.masks.store_id(*n)).collect();
         self.plan.deferred = self.deferred.into_iter().collect();
         (self.plan, self.waiters, self.name_waits, self.placed)
+    }
+}
+
+impl Reconciler<'_> {
+    /// Read-only (§13): the drive is never written. Nothing above plans a write to it; were one
+    /// planned, its node waits instead (dirty still).
+    fn never_to_the_drive(&mut self) {
+        let writes = |op: &Op| op.writes_remote();
+        debug_assert!(
+            !self.plan.ops.iter().chain(&self.plan.held).any(writes),
+            "a read-only plan writes the drive: {:?}",
+            (self.plan.ops.iter().chain(&self.plan.held))
+                .filter(|op| writes(op))
+                .collect::<Vec<_>>()
+        );
+        let nodes: Vec<NodeId> = (self.plan.ops.iter().chain(&self.plan.held))
+            .filter(|op| writes(op))
+            .map(Op::node)
+            .collect();
+        self.deferred.extend(nodes);
+        self.plan.ops.retain(|op| !writes(op));
+        self.plan.held.retain(|op| !writes(op));
     }
 }
 

@@ -78,6 +78,8 @@ pub(crate) struct Ledger {
     /// The first answer of a client's write the store recorded wrongly: left out alone, or
     /// over a newer state of its node a pull recorded meanwhile ([`crate::Action::Meanwhile`]).
     answer_undid: Option<String>,
+    /// The first write to the drive a read-only folder planned (sync semantics §13).
+    read_only_wrote: Option<String>,
     /// The first plan the engine's own planning path made otherwise ([`Sim::with_narrow_check`]).
     narrow_differs: Option<String>,
     /// The first node a put back left held again though nothing of it waits in Recently
@@ -173,6 +175,10 @@ impl Ledger {
     }
 
     /// An operation wrote outside its folder's part of the drive, if `what` names one.
+    pub(crate) fn read_only_wrote(&mut self, what: impl FnOnce() -> Option<String>) {
+        first(&mut self.read_only_wrote, what);
+    }
+
     pub(crate) fn wrote_outside_scope(&mut self, what: impl FnOnce() -> Option<String>) {
         first(&mut self.scope_breach, what);
     }
@@ -363,6 +369,11 @@ impl Sim {
         }
         if let Some(what) = &ledger.narrow_differs {
             return Err(what.clone());
+        }
+        if let Some(what) = &ledger.read_only_wrote {
+            return Err(format!(
+                "a read-only folder planned a write to the drive: {what}"
+            ));
         }
         if let Some(what) = &ledger.held_after_put_back {
             return Err(format!("after a put back: {what}"));
@@ -622,6 +633,13 @@ impl Sim {
         }));
         // Filtered items are kept on their client only.
         present.extend(kept_here);
+        // What moved out of a read-only folder is kept where it went (§13).
+        present.extend(
+            self.clients
+                .iter()
+                .flat_map(|c| c.moved_out.iter().flat_map(|t| t.iter()))
+                .filter_map(|(_, s)| s.content.and_then(|c| ledger.blobs.get(&c.hash).copied())),
+        );
         let lost: Vec<u64> = ledger
             .written
             .difference(&ledger.superseded)
@@ -720,7 +738,7 @@ impl Sim {
     /// What of `tree` (what client `c` syncs of the drive) its engine leaves to other clients
     /// (sync semantics §6.3, §10): an orphan (its folder nowhere, or a file) it holds nothing
     /// of, whose place it doesn't sync, in Recovered files or at its top, with what is below
-    /// it. (What is below a recovered one at an ignored name is connected once it is, and
+    /// it; in a read-only folder, every orphan (§13). (What is below a recovered one at an ignored name is connected once it is, and
     /// filtered as anything.)
     fn left_orphans(&self, c: usize, tree: &Tree, drive: &Tree) -> BTreeSet<NodeId> {
         let client = &self.clients[c];
@@ -764,6 +782,12 @@ impl Sim {
                 continue;
             }
             let subtree = below(tree, node);
+            // A read-only folder writes nothing to the drive, Recovered files neither: every
+            // orphan waits, out of it (§13).
+            if client.read_only {
+                left.extend(subtree);
+                continue;
+            }
             if subtree.iter().any(held) {
                 continue;
             }
@@ -826,6 +850,10 @@ pub(crate) enum What {
     },
     /// A forget with something here (§10): deletes it as a [`What::LocalDelete`] would.
     Forget {
+        subtree: Vec<NodeId>,
+    },
+    /// Out of a read-only folder (§13), with what is below it.
+    Evict {
         subtree: Vec<NodeId>,
     },
     LocalMove {
@@ -975,7 +1003,8 @@ impl Ledger {
                             && match &p.what {
                                 What::RemoteDelete
                                 | What::LocalDelete { .. }
-                                | What::Forget { .. } => true,
+                                | What::Forget { .. }
+                                | What::Evict { .. } => true,
                                 What::LocalMove { parent, name } => moved(local, parent, name),
                                 What::RemoteUpdate { parent, name } => moved(remote, parent, name),
                                 _ => false,
@@ -998,10 +1027,47 @@ impl Ledger {
                 _ => None,
             })
             .collect();
+        // What moves out of a read-only folder (§13) expects the same, and runs before the
+        // deletes too: a detached item (§10) under its new id, with what is below it.
+        let mut differ = None;
+        let mut detached_here = local.clone();
+        for (&old, &new) in &detached {
+            let kids: Vec<NodeId> = detached_here.children(old).collect();
+            if let Some(state) = detached_here.remove(old) {
+                detached_here.insert(new, state);
+            }
+            for kid in kids {
+                if let Some(mut state) = detached_here.get(kid).cloned() {
+                    state.parent = new;
+                    detached_here.insert(kid, state);
+                }
+            }
+        }
+        for p in seen.ops {
+            let What::Evict { subtree } = &p.what else {
+                continue;
+            };
+            let want = delete_expects(&detached_here, p.node, &moving);
+            if differ.is_none() && *subtree != want {
+                differ = Some(format!(
+                    "{}: {:?} expects {subtree:?}, not what its folder holds less what the \
+                     plan moves out of it ({want:?})",
+                    seen.client, p.op
+                ));
+            }
+        }
+        let evicting = seen
+            .ops
+            .iter()
+            .filter(|p| matches!(p.what, What::Evict { .. }));
+        let moving: HashSet<NodeId> = moving
+            .iter()
+            .copied()
+            .chain(evicting.map(|p| p.node))
+            .collect();
         let expects = |node: NodeId| delete_expects(local, node, &moving);
         // Each delete's, once, compared with what it expects (sorted, as the plan keeps it).
         let mut expected: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-        let mut differ = None;
         for p in seen.ops.iter().chain(seen.held) {
             let (What::LocalDelete { subtree } | What::Forget { subtree }) = &p.what else {
                 continue;

@@ -433,7 +433,23 @@ impl Sim {
                 };
                 let mut tags: Vec<Tag> = state.tags.iter().cloned().collect();
                 let had = tags.iter().position(|t| t.name == name);
+                // Read-only (§13), the drive's tags come back: nothing is owed of a change
+                // there, so the book doesn't hear of it.
+                let read_only = self.clients[c].read_only;
                 match (action, had) {
+                    _ if read_only => match (action, had) {
+                        (Action::Colour { .. }, Some(i)) if os == Os::MacOs => {
+                            tags[i].colour = (tags[i].colour + 1) % 8;
+                        }
+                        (Action::Tag { .. }, Some(i)) => {
+                            tags.remove(i);
+                        }
+                        (Action::Tag { .. }, None) => match express(&Tag::new(name, colour), os) {
+                            Some(tag) => tags.push(tag),
+                            None => return,
+                        },
+                        _ => return,
+                    },
                     (Action::Colour { .. }, Some(i)) if os == Os::MacOs => {
                         tags[i].colour = (tags[i].colour + 1) % 8;
                         let seen = self.clients[c].base_tag(node, name).map(|t| t.colour);

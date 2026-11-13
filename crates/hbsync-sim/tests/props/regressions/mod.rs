@@ -5,5 +5,6 @@ mod deleted;
 mod desktops;
 mod executable;
 mod names;
+mod read_only;
 mod roles;
 mod tags;

@@ -46,6 +46,7 @@ use crate::settle::{
 use crate::transfer::{
     Download, Job, JobError, JobResult, SendHash, TransferConfig, run_jobs_while,
 };
+use crate::tree::moved_out_names;
 use crate::view;
 use hbsync_local::layout;
 
@@ -709,6 +710,7 @@ impl<'a> Executor<'a> {
             }
             Op::Settle { .. } => Ok(Outcome::Done),
             Op::LocalDetach { node, new_node } => self.detach(*node, *new_node),
+            Op::LocalEvict { node, subtree } => self.evict(*node, subtree),
             Op::Forget { node, subtree } if subtree.is_empty() => self.drop_unsynced_base(*node),
             Op::Forget { node, subtree } => self.delete_here(*node, subtree, true),
         };

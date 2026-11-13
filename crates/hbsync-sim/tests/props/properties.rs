@@ -115,6 +115,40 @@ proptest! {
 
     /// The main folders leave a role folder another device made alone (§12): never synced
     /// here, never changed, whatever the users do around it.
+    /// A read-only folder (sync semantics §13) follows the drive whatever its user does there,
+    /// never writes it, and loses nothing: what changed there moved out.
+    #[test]
+    fn read_only_folders_follow_the_drive_without_loss(
+        read_only in 0usize..3,
+        events in proptest::collection::vec(event(3), 0..120)
+    ) {
+        run_with(3, None, |sim| sim.with_read_only(read_only), &events)?;
+    }
+
+    /// [`read_only_folders_follow_the_drive_without_loss`], the read-only client planning in
+    /// pages of 1 to 4, its downloads fetched and placed in two steps, every client dying now
+    /// and then, while folders are deleted, stopped half way and deleted outright elsewhere.
+    #[test]
+    fn read_only_folders_in_pages_that_crash_follow_the_drive(
+        read_only in 0usize..3,
+        size in 1usize..5,
+        events in proptest::collection::vec(
+            with_crashes(3, events_of(3, prop_oneof![
+                2 => action(),
+                1 => stopped_delete_action(),
+                1 => orphaning_action(),
+            ])),
+            0..120,
+        ),
+    ) {
+        let setup = |sim: Sim| {
+            sim.with_read_only(read_only)
+                .with_small_pages(size)
+                .with_split_downloads()
+        };
+        run_with(3, None, setup, &events)?;
+    }
+
     #[test]
     fn main_folders_leave_role_folders_alone(events in proptest::collection::vec(event(3), 0..120)) {
         run_with(3, None, Sim::with_role_folder, &events)?;
