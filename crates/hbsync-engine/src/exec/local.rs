@@ -669,7 +669,7 @@ impl Executor<'_> {
                 Ok(Err(e)) if e.kind() == io::ErrorKind::CrossesDevices => {
                     // The item on a volume mounted inside the folder: it alone can't go.
                     let item = volume_of(&self.disk.abs(&row.path));
-                    if item.is_some() && item != volume_of(&self.folder.root) {
+                    if item.is_some() && item != volume_of(&resolved(&self.folder.root)) {
                         return Err(Outcome::unsyncable(
                             "on a volume mounted inside the folder: it can't move out",
                         ));

@@ -3495,3 +3495,29 @@ fn read_only_a_left_out_loser_that_moves_out_holds_no_name() {
     let told: Vec<NodeId> = plan.conflicts.iter().map(Conflict::node).collect();
     assert_eq!(told, [loser]);
 }
+
+/// Read-only, a drive-side clash of names one apart in case: what is on the name here keeps
+/// it, ahead of what was synced there and moved out (its id the lower), which is left out
+/// instead of planned onto a name it can't take.
+#[test]
+fn read_only_what_is_on_a_name_here_keeps_it_from_what_moved_out() {
+    let [moved, held] = ids(2)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(moved, file(ROOT, "Foo", "a"))
+        .local(moved, None)
+        .synced(held, file(ROOT, "foo", "b"));
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalDownload { .. })),
+        "{:?}",
+        plan.ops
+    );
+    let told: Vec<NodeId> = plan.conflicts.iter().map(Conflict::node).collect();
+    assert_eq!(told, [moved]);
+}

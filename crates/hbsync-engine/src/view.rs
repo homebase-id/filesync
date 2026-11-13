@@ -386,35 +386,20 @@ fn build(
     let hidden = crate::mask::hidden(&b.input.remote, filter, scope);
     // Its folders on the drive don't reach the top: one missing, or a file, anywhere above.
     let orphaned = |remote: &crate::tree::Tree, node: NodeId| {
-        if ctx.read_only.is_none() || !remote.contains(node) {
-            return false;
-        }
-        let mut at = node;
-        for _ in 0..hbsync_state::MAX_DEPTH {
-            let Some(parent) = remote.get(at).map(|s| s.parent) else {
-                return true;
-            };
-            if parent.is_root() {
-                return false;
-            }
-            match remote.get(parent) {
-                Some(p) if p.kind == NodeKind::Folder => at = parent,
-                _ => return true,
-            }
-        }
-        true
+        ctx.read_only.is_some()
+            && remote.contains(node)
+            && (remote.path(node).is_none()
+                || (remote.ancestors_iter(node))
+                    .any(|a| remote.get(a).is_some_and(|s| s.kind != NodeKind::Folder)))
     };
+
     let mut loaded: HashSet<NodeId> = HashSet::new();
     for &node in dirty {
         if loaded.contains(&node) {
             continue;
         }
         let gone = !b.input.remote.contains(node) || hidden.contains(&node);
-        let synced = b.input.base.contains(node);
-        // (The walk up only where the rest doesn't settle it.)
-        let orphan = !(synced && gone) && orphaned(&b.input.remote, node);
-        if (synced || orphan)
-            && (gone || orphan)
+        if ((b.input.base.contains(node) && gone) || orphaned(&b.input.remote, node))
             && let Some(row) = s
                 .local_by_node(node)?
                 .filter(|r| r.kind == NodeKind::Folder)

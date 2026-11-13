@@ -565,7 +565,7 @@ impl Reconciler<'_> {
         let below = self.input.local.subtree(node);
         let free = below
             .iter()
-            .all(|n| !self.waits.contains(n) && !self.paged.contains(n) && !self.elsewhere(*n));
+            .all(|n| !self.waits.contains(n) && !self.elsewhere(*n));
         if free {
             cleared.extend(below);
         }
@@ -576,9 +576,10 @@ impl Reconciler<'_> {
     /// they are: out of the plan (dirty still), in the merged tree where they are here (the
     /// names they hold here stay held: nothing is planned onto them), else out of it. Told
     /// once, for `node`.
-    fn left_out(&mut self, node: NodeId) {
+    /// False where it was left out already.
+    fn left_out(&mut self, node: NodeId) -> bool {
         if !self.left.insert(node) {
-            return;
+            return false;
         }
         for n in self.merged.subtree(node) {
             // What changed here still moves out (its name aside): a folder deleted here takes
@@ -597,6 +598,7 @@ impl Reconciler<'_> {
             }
         }
         self.plan.conflicts.push(Conflict::NameTaken { node });
+        true
     }
 
     /// Scoped `node` and what is below it wait for a hash ([`super::waits`]): it would take a
@@ -754,11 +756,16 @@ impl Reconciler<'_> {
                 // held by them alone leaves every newcomer out (one ignored here may be on it).
                 // What moves out holds no name: it goes first.
                 let at_name = |s: &NodeState| s.parent == parent && name_key(&s.name) == key;
-                let here = |n: &NodeId| {
+                let on_disk = |n: &NodeId| {
                     self.masking.read_only
                         && !self.evicted.contains(n)
-                        && (self.input.base.get(*n).is_some_and(at_name)
-                            || self.input.local.get(*n).is_some_and(at_name))
+                        && self.input.local.get(*n).is_some_and(at_name)
+                };
+                let here = |n: &NodeId| {
+                    on_disk(n)
+                        || (self.masking.read_only
+                            && !self.evicted.contains(n)
+                            && self.input.base.get(*n).is_some_and(at_name))
                 };
                 let keep = usize::from(!taken(&key) || group.iter().any(here));
                 if group.len() <= keep {
@@ -771,12 +778,14 @@ impl Reconciler<'_> {
                 // being written) is never renamed: it wins, and is left alone if it loses;
                 // and an orphan moving in, or Recovered files or Desktops made beside a folder
                 // of its name, loses to what is there.
-                // (Read-only, what is synced here comes first: a new item still being written
+                // (Read-only, what is synced here comes first, what is on the name on disk
+                // before what was synced there and isn't now: a new item still being written
                 // moves out once it is read, and never takes a name.)
                 group.sort_by_cached_key(|n| {
                     let arriving = self.adopted.contains(n) || n.is_fixed_folder();
                     let leaving = self.evicted.contains(n);
-                    (leaving, !here(n), !self.deferred.contains(n), arriving, *n)
+                    let first = (leaving, !here(n), !on_disk(n));
+                    (first, !self.deferred.contains(n), arriving, *n)
                 });
                 // The folder's path here, for the filter (`None`: not connected), read once
                 // a loser is renamed.
@@ -791,7 +800,10 @@ impl Reconciler<'_> {
                         continue;
                     }
                     if self.masking.read_only {
-                        self.left_out(loser);
+                        // Held in another folder here, that one is judged again with it.
+                        let elsewhere =
+                            (self.input.local.get(loser)).is_some_and(|h| h.parent != parent);
+                        self.rejudge |= self.left_out(loser) && elsewhere;
                         // Where it is here, in this folder, it holds that name: judged with what
                         // would take it, as one left where it is for a name. (One that moves
                         // out holds none.)

@@ -166,6 +166,11 @@ impl<'a> Disk<'a> {
         from: &RelPath,
         to: &Path,
     ) -> Result<io::Result<()>, StateError> {
+        // Never onto what is there, even the same file (a hard link of it), which a rename
+        // keeps as it is.
+        if to.symlink_metadata().is_ok() {
+            return Ok(Err(io::ErrorKind::AlreadyExists.into()));
+        }
         rename_ordered(db, &self.abs(from), to)
     }
 
@@ -322,7 +327,7 @@ fn check_out(out: &Path, root: &Path, db: &mut StateDb) -> Result<(), String> {
 
 /// `path` as the file system resolves it: its nearest folder that is there resolved (links,
 /// `..`, the volume's own spelling), the rest as given.
-fn resolved(path: &Path) -> PathBuf {
+pub(super) fn resolved(path: &Path) -> PathBuf {
     let mut rest = Vec::new();
     for at in path.ancestors() {
         if let Ok(real) = fs::canonicalize(at) {

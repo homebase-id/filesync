@@ -200,6 +200,8 @@ struct Reconciler<'a> {
     evicted: BTreeSet<NodeId>,
     /// What a read-only name clash left out (§13), each once.
     left: BTreeSet<NodeId>,
+    /// A name pass left one out that is held in another folder here (§13): judged again.
+    rejudge: bool,
     /// Becomes `plan.deferred`.
     deferred: BTreeSet<NodeId>,
     /// Orphans the repairs move into Recovered files (§6.3): they lose a name clash there.
@@ -258,6 +260,7 @@ impl<'a> Reconciler<'a> {
             forks: BTreeMap::new(),
             evicted: BTreeSet::new(),
             left: BTreeSet::new(),
+            rejudge: false,
             deferred: BTreeSet::new(),
             adopted: HashSet::new(),
             taken,
@@ -313,9 +316,10 @@ impl<'a> Reconciler<'a> {
         // maybe in a folder judged already), may hold the name another would take: again, till
         // none more waits or is left out (in each pass at least one node more does).
         loop {
-            let (waited, left) = (self.waiters.len(), self.left.len());
+            let waited = self.waiters.len();
+            self.rejudge = false;
             self.fix_names();
-            if self.waiters.len() == waited && self.left.len() == left {
+            if self.waiters.len() == waited && !self.rejudge {
                 break;
             }
         }
