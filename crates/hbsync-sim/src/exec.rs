@@ -1210,6 +1210,8 @@ impl Sim {
             // executor's).
             let at = match op {
                 Op::LocalFork { .. } => None,
+                // A move out settles nothing: the bases stay, planned again (the executor's).
+                Op::LocalEvict { .. } => None,
                 // A folder made here with nothing to settle against, its mirror holding no live
                 // version of it: the base stays (the executor's settle finds no mirror row).
                 Op::LocalMkdir { drive: None, .. } if restored.is_none() && !read.live => None,

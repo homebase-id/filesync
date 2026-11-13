@@ -590,8 +590,9 @@ impl Executor<'_> {
     /// comes back. A crash after the rename leaves the rows of an item that isn't there: the
     /// scan reads it as deleted here, which a read-only folder undoes the same way.
     pub(super) fn evict(&mut self, node: NodeId, expected: &[NodeId]) -> Step {
-        let Some(out) = self.folder.read_only.clone() else {
-            return Ok(Outcome::unsyncable("the folder isn't read-only"));
+        let out = match self.disk.out_folder() {
+            Ok(out) => out.to_path_buf(),
+            Err(why) => return Ok(Outcome::unsyncable(why)),
         };
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
             return Ok(Outcome::stale("gone"));
@@ -621,18 +622,6 @@ impl Executor<'_> {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        // Made if it isn't there (one rename then; a stat while it is), and outside the folder
-        // (else its scan would find what moved out as new items here): the folder that sets it
-        // gives a fixed path, checked here as the file system resolves it.
-        if let Err(e) = fs::create_dir_all(&out) {
-            return Ok(io_outcome(e));
-        }
-        let resolved = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        if !out.is_absolute() || resolved(&out).starts_with(resolved(&self.folder.root)) {
-            return Ok(Outcome::unsyncable(
-                "the folder changes move out to is inside this one, or not a full path",
-            ));
-        }
         let mut moved = None;
         for candidate in moved_out_names(name, &from) {
             let to = out.join(&candidate);

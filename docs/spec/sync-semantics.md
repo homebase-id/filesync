@@ -1165,7 +1165,15 @@ whatever changed here, and the plan holds no operation on the drive:
   deleted, holding a new file here, keeps it out of its delete), and expects what it takes as a
   delete does (§7); a synced item there it doesn't expect makes it wait for the next plan. A
   crash after the rename and before the commit leaves rows of an item that isn't there: the
-  next scan reads it as deleted here, which comes back the same way.
+  next scan reads it as deleted here, which comes back the same way. A delete here of what is
+  in a folder that moves out isn't planned: it goes out with it, its base kept, planned again.
+  A known limit: where the plan is split in pages (§6.5), an item in a folder made here that
+  another page plans moves out on its own, beside the folder (nothing lost, the tree
+  flattened).
+  The cost: each save of a file there is a move out and a download of the drive's version
+  (a file kept open with autosave, one per save), and a hundred moved out under one name
+  leave the next where it is, told, till one goes. Files there set read-only on disk (the
+  app's, later) keep most saves from happening at all.
 - **Undone.** A move or rename here goes back to the drive's place; a delete here comes back
   (downloaded again); tags here become the drive's. Nothing of these moves out: the drive holds
   what they changed.

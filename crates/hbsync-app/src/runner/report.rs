@@ -43,6 +43,13 @@ pub(super) fn notes(
         let path = engine.path_of(op.node())?.unwrap_or_else(|| "?".into());
         notes.push(format!("{path}: {} ({why})", op.kind()));
     }
+    // What changed in a read-only folder, kept where it moved out to (sync semantics §13).
+    for (path, to) in &report.moved_out {
+        notes.push(format!(
+            "{path}: moved to {}, as this folder is read-only (what changes here isn't synced)",
+            to.display()
+        ));
+    }
     // A file that can't be read yet, which other changes wait for (sync semantics §6.3).
     for (path, why) in &report.waiting {
         notes.push(format!(

@@ -40,6 +40,17 @@ pub fn taken_along(i: &Input, left_out: &HashSet<NodeId>) -> HashSet<NodeId> {
     )
 }
 
+impl<'a> Reconciler<'a> {
+    /// The drive's state of `node`, but none where a folder's removal took it along (it isn't
+    /// in the tree, [`taken_along`]).
+    pub(super) fn remote_state(&self, node: NodeId) -> Option<&'a NodeState> {
+        self.input
+            .remote
+            .get(node)
+            .filter(|_| !self.taken.contains(&node))
+    }
+}
+
 impl Reconciler<'_> {
     // ---- 1–2: classify and merge ----
 
@@ -118,7 +129,7 @@ impl Reconciler<'_> {
         let Some(t) = target else {
             return false;
         };
-        let remote = i.remote.get(node).filter(|_| !self.taken.contains(&node));
+        let remote = self.remote_state(node);
         let gone = i.base.contains(node) || i.removed.contains_key(&node);
         [self.local_state(node).as_ref(), remote]
             .into_iter()
@@ -226,7 +237,7 @@ impl Reconciler<'_> {
         );
         let (lc, rc) = (self.local_change(node), self.remote_change(node));
         // One a folder's removal took along isn't in the tree.
-        let r = i.remote.get(node).filter(|_| !self.taken.contains(&node));
+        let r = self.remote_state(node);
         let (b, l) = (i.base.get(node), self.local_state(node));
         let masked = self.masks.masked.contains(&node);
         // Read-only (§13): what going back to the drive's would lose here moves out first.

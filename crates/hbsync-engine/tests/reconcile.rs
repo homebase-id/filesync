@@ -3133,11 +3133,6 @@ fn read_only() -> World {
     }
 }
 
-/// Whether the plan writes to the drive: never, read-only.
-fn writes_drive(plan: &hbsync_engine::Plan) -> bool {
-    plan.ops.iter().chain(&plan.held).any(Op::writes_remote)
-}
-
 /// A file edited here moves out first, kept; nothing goes up, and the node stays to plan
 /// again, for the drive's version to come back.
 #[test]
@@ -3170,7 +3165,7 @@ fn read_only_new_items_move_out_whole() {
         .local(g, Some(file(d, "g.txt", "g")))
         .local(n, Some(file(ROOT, "n.txt", "n")));
     let plan = w.plan();
-    assert!(!writes_drive(&plan));
+    assert!(!plan.writes_drive());
     let mut evicts: Vec<(NodeId, Vec<NodeId>)> = plan
         .ops
         .iter()
@@ -3200,7 +3195,7 @@ fn read_only_moves_tags_and_deletes_here_are_undone() {
         .local(f, Some(tagged))
         .local(g, None);
     let plan = w.plan();
-    assert!(!writes_drive(&plan));
+    assert!(!plan.writes_drive());
     let mut got = kinds(&plan.ops);
     got.sort();
     assert_eq!(got, ["download", "local-tags", "move"]);
@@ -3254,7 +3249,7 @@ fn read_only_a_new_file_in_a_folder_deleted_there_moves_out_before_the_delete() 
         .remote(d, None)
         .remote(f, None);
     let plan = w.plan();
-    assert!(!writes_drive(&plan));
+    assert!(!plan.writes_drive());
     assert_eq!(kinds(&plan.ops), ["evict", "delete"]);
     assert_eq!(
         plan.ops[0],
@@ -3282,7 +3277,7 @@ fn read_only_the_drives_own_bytes_here_stay() {
     w.local(f, Some(file(ROOT, "a.txt", "a")))
         .remote(f, Some(file(ROOT, "a.txt", "a")));
     let plan = w.plan();
-    assert!(!writes_drive(&plan));
+    assert!(!plan.writes_drive());
     assert_eq!(kinds(&plan.ops), ["settle"]);
 }
 
@@ -3301,7 +3296,7 @@ fn read_only_orphans_are_let_go_of() {
         .remote(g, Some(file(gone, "g.txt", "g")))
         .local(g, Some(file(ROOT, "g.txt", "mine")));
     let plan = w.plan();
-    assert!(!writes_drive(&plan));
+    assert!(!plan.writes_drive());
     assert!(plan.conflicts.is_empty());
     let mut got: Vec<(&str, NodeId)> = plan.ops.iter().map(|op| (op.kind(), op.node())).collect();
     got.sort();
@@ -3323,7 +3318,7 @@ fn read_only_a_name_clash_leaves_the_newcomer_out() {
     w.synced(old, file(ROOT, "a.txt", "a"))
         .remote(new, Some(file(ROOT, "A.TXT", "b")));
     let plan = w.plan();
-    assert!(!writes_drive(&plan));
+    assert!(!plan.writes_drive());
     assert!(plan.ops.is_empty(), "{:?}", plan.ops);
     assert_eq!(plan.conflicts, [Conflict::NameTaken { node: new }]);
     assert!(plan.deferred.contains(&new));
@@ -3341,7 +3336,7 @@ fn read_only_the_synced_item_keeps_its_name_through_a_rename_here() {
         .local(synced, Some(file(ROOT, "b.txt", "a")))
         .remote(newcomer, Some(file(ROOT, "A.txt", "new")));
     let plan = w.plan();
-    assert!(!writes_drive(&plan));
+    assert!(!plan.writes_drive());
     assert_eq!(kinds(&plan.ops), ["move"]);
     assert_eq!(plan.conflicts, [Conflict::NameTaken { node: newcomer }]);
 }

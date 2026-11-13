@@ -275,14 +275,20 @@ impl Reconciler<'_> {
                 subtree: expects_here(&i.local, node, &moving).0,
             })
             .collect();
-        moving.extend(evicts.iter().map(Op::node));
-        // Only the topmost delete here of a subtree is needed.
+        // Only the topmost delete here of a subtree is needed, and none in what moves out: that
+        // takes it along (its base kept, planned again).
+        let taken: HashSet<NodeId> = gone_here
+            .iter()
+            .copied()
+            .chain(evicts.iter().map(Op::node))
+            .collect();
         deletes.retain(|(_, op)| match op {
             Op::LocalDelete { node, .. } | Op::Forget { node, .. } if gone_here.contains(node) => {
-                !below_another(&i.local, *node, &gone_here, &moving)
+                !below_another(&i.local, *node, &taken, &moving)
             }
             _ => true,
         });
+        moving.extend(evicts.iter().map(Op::node));
         deletes.sort_by_key(|(d, op)| {
             let depth = *d as i64;
             (

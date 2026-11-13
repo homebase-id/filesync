@@ -650,3 +650,11 @@ pub struct Plan {
     /// page (§6.5).
     pub waits_together: Vec<Vec<NodeId>>,
 }
+
+impl Plan {
+    /// Whether it writes to the drive, held deletes included: never read-only (sync semantics
+    /// §13).
+    pub fn writes_drive(&self) -> bool {
+        self.ops.iter().chain(&self.held).any(Op::writes_remote)
+    }
+}

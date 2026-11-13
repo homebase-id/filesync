@@ -323,13 +323,7 @@ impl<'a> Reconciler<'a> {
         self.guard_mass_delete();
         // Read-only (§13): the drive is never written (emit plans no write there).
         debug_assert!(
-            !self.masking.read_only
-                || !self
-                    .plan
-                    .ops
-                    .iter()
-                    .chain(&self.plan.held)
-                    .any(Op::writes_remote),
+            !(self.masking.read_only && self.plan.writes_drive()),
             "a read-only plan writes the drive: {:?}",
             self.plan.ops
         );

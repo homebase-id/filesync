@@ -393,11 +393,7 @@ impl Reconciler<'_> {
                     let_go.insert(node);
                     // Only what was synced here is deleted, as the drive had it: what changed
                     // here that the drive doesn't hold, or was never synced, moves out.
-                    let r = self
-                        .input
-                        .remote
-                        .get(node)
-                        .filter(|_| !self.taken.contains(&node));
+                    let r = self.remote_state(node);
                     let l = self.local_state(node);
                     if l.is_some()
                         && (!self.input.base.contains(node)
@@ -630,12 +626,7 @@ impl Reconciler<'_> {
         // waiters): taken for it.
         let mut drive_holders: HashMap<(NodeId, String), Vec<NodeId>> = HashMap::new();
         for &n in self.waits.iter().chain(&self.waiters) {
-            let Some(r) = self
-                .input
-                .remote
-                .get(n)
-                .filter(|_| !self.taken.contains(&n))
-            else {
+            let Some(r) = self.remote_state(n) else {
                 continue;
             };
             if self.merged.get(n).is_none_or(|h| !h.same_place(r)) {
@@ -716,11 +707,7 @@ impl Reconciler<'_> {
                         waited = true;
                         // Left where it is: under another name in this folder, it holds that
                         // (and its drive name, if another).
-                        let remote = self
-                            .input
-                            .remote
-                            .get(n)
-                            .filter(|_| !self.taken.contains(&n));
+                        let remote = self.remote_state(n);
                         let mut names = Vec::new();
                         if let Some(left) = self.merged.get(n) {
                             if let Some(r) = remote.filter(|r| !r.same_place(left)) {

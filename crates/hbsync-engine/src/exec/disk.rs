@@ -56,6 +56,8 @@ pub(super) struct Disk<'a> {
     ids_durable: bool,
     /// The aside folder is there ([`Disk::move_aside`]), as far as this run knows.
     aside_ready: bool,
+    /// The folder things move out to was checked and is there ([`Disk::out_folder`]).
+    out_ready: bool,
 }
 
 impl<'a> Disk<'a> {
@@ -66,6 +68,7 @@ impl<'a> Disk<'a> {
             hooks,
             ids_durable: false,
             aside_ready: false,
+            out_ready: false,
         }
     }
 
@@ -131,6 +134,32 @@ impl<'a> Disk<'a> {
         to: &RelPath,
     ) -> Result<io::Result<()>, StateError> {
         rename_ordered(db, &self.abs(from), &self.abs(to))
+    }
+
+    /// The folder a read-only folder's changes move out to (§13), checked once a run: a full
+    /// path outside the root (as the file system resolves both: else its scan would find what
+    /// moved out as new items here), checked before it is made where it is missing, and again
+    /// after. Why not, where it isn't one.
+    pub(super) fn out_folder(&mut self) -> Result<&'a Path, String> {
+        let out = self
+            .folder
+            .read_only
+            .as_deref()
+            .ok_or("the folder isn't read-only")?;
+        if !self.out_ready {
+            let resolved = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+            let outside = || out.is_absolute() && !resolved(out).starts_with(resolved(self.root));
+            let inside = "the folder changes move out to is inside this one, or not a full path";
+            if !outside() {
+                return Err(inside.into());
+            }
+            fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+            if !outside() {
+                return Err(inside.into());
+            }
+            self.out_ready = true;
+        }
+        Ok(out)
     }
 
     /// Moves `from` out of the sync root, to `to`, never over anything ([`rename_ordered`]).
