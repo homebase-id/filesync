@@ -13,6 +13,17 @@ impl ReadTx<'_> {
         )
     }
 
+    /// Whether `node` has a base in the folder (none of its columns read).
+    pub fn has_base(&self, node: NodeId) -> Result<bool> {
+        let n: i64 = self
+            .prep(
+                "SELECT EXISTS (SELECT 1 FROM base b JOIN nodes n ON n.id = b.id \
+                 WHERE b.folder = $F AND n.uuid = ?1)",
+            )?
+            .query_row([node.0.as_bytes()], |r| r.get(0))?;
+        Ok(n != 0)
+    }
+
     pub fn base_by_remote_file(&self, file_id: RemoteFileId) -> Result<Option<BaseRow>> {
         self.one(
             &format!("{BASE_SELECT} WHERE b.remote_file_id = ?1"),

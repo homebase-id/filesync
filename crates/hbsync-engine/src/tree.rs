@@ -312,15 +312,24 @@ pub(crate) fn restored_name(name: &str, n: usize) -> String {
 }
 
 /// The names an item moved out of the read-only folder named `from` tries where it goes (§13),
-/// in order: its own, then `"report (from sam.example.com).pdf"`, `"report (from
-/// sam.example.com 2).pdf"`: a hundred at most.
-pub fn moved_out_names<'a>(name: &'a str, from: &'a str) -> impl Iterator<Item = String> + 'a {
+/// in order: its own, then [`moved_out_name`]s; a hundred at most.
+pub(crate) fn moved_out_names<'a>(
+    name: &'a str,
+    from: &'a str,
+) -> impl Iterator<Item = String> + 'a {
+    std::iter::once(name.to_owned())
+        .chain((1..NUMBERED_TRIES).map(move |n| moved_out_name(name, from, n)))
+}
+
+/// `"report (from sam.example.com).pdf"`, then `"report (from sam.example.com 2).pdf"`: an
+/// item moved out of the read-only folder named `from` whose name was taken where it went.
+fn moved_out_name(name: &str, from: &str, n: usize) -> String {
     // The folder's name comes from elsewhere; keep it from crowding out the item's own.
     let from = truncate_bytes(from, 64);
-    std::iter::once(name.to_owned()).chain((1..100).map(move |n| match n {
-        1 => with_tag(name, &format!(" (from {from})")),
+    match n {
+        0 | 1 => with_tag(name, &format!(" (from {from})")),
         n => with_tag(name, &format!(" (from {from} {n})")),
-    }))
+    }
 }
 
 /// `"report (conflict laptop 2026-10-08).pdf"`: the name of a conflict copy of an edit.

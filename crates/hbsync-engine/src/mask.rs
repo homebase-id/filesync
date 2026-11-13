@@ -130,7 +130,10 @@ impl FilterMasks {
             let filtered = self::masked(paths, filter);
             masked.extend(input.removed.keys().filter(|n| filtered.contains(n)));
         }
-        if masked.is_empty() {
+        // Read-only (§13), nothing is brought back nor leaves: the drive's place wins, and this
+        // device filters it, so it stays masked, as one never synced here, the item here let
+        // go of as any masked node's (detached where it changed); and nothing leaves the drive.
+        if masked.is_empty() || read_only {
             return FilterMasks {
                 masked,
                 outside,
@@ -143,12 +146,10 @@ impl FilterMasks {
         // back: it is masked as one never synced here.
         let mut filtered_base = self::masked(&input.base, filter);
         filtered_base.retain(|n| input.content_state(*n) != ContentState::Wanted);
-        // Read-only (§13), the drive's place wins, and this device filters it: masked still,
-        // the item here let go of as any masked node's (detached where it changed).
         let brought_back: HashSet<NodeId> = masked
             .iter()
             .copied()
-            .filter(|m| !read_only && filtered_base.contains(m) && input.local.contains(*m))
+            .filter(|m| filtered_base.contains(m) && input.local.contains(*m))
             .collect();
         masked.retain(|m| !brought_back.contains(m));
         let leaving: HashSet<NodeId> = masked
@@ -166,13 +167,8 @@ impl FilterMasks {
                 _ => false,
             })
             .collect();
-        // Leaving is an ordinary local delete: the scanner no longer reports the item. Never
-        // in a read-only folder (§13), which removes nothing from the drive: masked there, as
-        // one never synced here.
-        let leaving = match read_only {
-            true => HashSet::new(),
-            false => only_whole_folders(&input.remote, leaving),
-        };
+        // Leaving is an ordinary local delete: the scanner no longer reports the item.
+        let leaving = only_whole_folders(&input.remote, leaving);
         masked.retain(|m| !leaving.contains(m));
         FilterMasks {
             masked,

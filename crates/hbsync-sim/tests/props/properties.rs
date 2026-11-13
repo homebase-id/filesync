@@ -113,8 +113,6 @@ proptest! {
         run_with(2, Some(min), |sim| sim, &events)?;
     }
 
-    /// The main folders leave a role folder another device made alone (§12): never synced
-    /// here, never changed, whatever the users do around it.
     /// A read-only folder (sync semantics §13) follows the drive whatever its user does there,
     /// never writes it, and loses nothing: what changed there moved out.
     #[test]
@@ -149,6 +147,8 @@ proptest! {
         run_with(3, None, setup, &events)?;
     }
 
+    /// The main folders leave a role folder another device made alone (§12): never synced
+    /// here, never changed, whatever the users do around it.
     #[test]
     fn main_folders_leave_role_folders_alone(events in proptest::collection::vec(event(3), 0..120)) {
         run_with(3, None, Sim::with_role_folder, &events)?;

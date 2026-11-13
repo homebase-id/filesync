@@ -321,36 +321,23 @@ impl<'a> Reconciler<'a> {
         self.deletes_wait_with_their_folder();
         self.with_what_it_took_along();
         self.guard_mass_delete();
-        if self.masking.read_only {
-            self.never_to_the_drive();
-        }
+        // Read-only (§13): the drive is never written (emit plans no write there).
+        debug_assert!(
+            !self.masking.read_only
+                || !self
+                    .plan
+                    .ops
+                    .iter()
+                    .chain(&self.plan.held)
+                    .any(Op::writes_remote),
+            "a read-only plan writes the drive: {:?}",
+            self.plan.ops
+        );
         self.plan.waiting = self.waited_for();
         // The folders this page waits for, with everything of it below them.
         self.plan.waits_for_pages = self.going.iter().map(|n| self.masks.store_id(*n)).collect();
         self.plan.deferred = self.deferred.into_iter().collect();
         (self.plan, self.waiters, self.name_waits, self.placed)
-    }
-}
-
-impl Reconciler<'_> {
-    /// Read-only (§13): the drive is never written. Nothing above plans a write to it; were one
-    /// planned, its node waits instead (dirty still).
-    fn never_to_the_drive(&mut self) {
-        let writes = |op: &Op| op.writes_remote();
-        debug_assert!(
-            !self.plan.ops.iter().chain(&self.plan.held).any(writes),
-            "a read-only plan writes the drive: {:?}",
-            (self.plan.ops.iter().chain(&self.plan.held))
-                .filter(|op| writes(op))
-                .collect::<Vec<_>>()
-        );
-        let nodes: Vec<NodeId> = (self.plan.ops.iter().chain(&self.plan.held))
-            .filter(|op| writes(op))
-            .map(Op::node)
-            .collect();
-        self.deferred.extend(nodes);
-        self.plan.ops.retain(|op| !writes(op));
-        self.plan.held.retain(|op| !writes(op));
     }
 }
 

@@ -602,8 +602,9 @@ impl Executor<'_> {
         let (place, unexpected) = self.db.read(|s| {
             let mut unexpected = false;
             for r in s.local_subtree(&row.path)? {
-                if expected.binary_search(&r.node).is_err() && s.get_base(r.node)?.is_some() {
+                if expected.binary_search(&r.node).is_err() && s.has_base(r.node)? {
                     unexpected = true;
+                    break;
                 }
             }
             Ok((view::place(s, &row)?, unexpected))
@@ -643,7 +644,7 @@ impl Executor<'_> {
         self.finish(&[], |s| {
             for r in s.folder().delete_local_subtree(&row.path)? {
                 s.folder().delete_parked(r.node)?;
-                if s.get_base(r.node)?.is_some() {
+                if s.has_base(r.node)? {
                     s.folder().mark_dirty(r.node)?;
                 }
             }

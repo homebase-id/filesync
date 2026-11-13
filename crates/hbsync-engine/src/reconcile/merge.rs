@@ -235,14 +235,7 @@ impl Reconciler<'_> {
             // Gone from what this device syncs; what must stay here was detached (§10).
             _ if masked => (None, Origin::Base),
             // Read-only (§13): the drive's, whatever changed here.
-            _ if self.masking.read_only => (
-                r.cloned(),
-                if r.is_some() {
-                    Origin::Remote
-                } else {
-                    Origin::Base
-                },
-            ),
+            _ if self.masking.read_only => (r.cloned(), r.map_or(Origin::Base, |_| Origin::Remote)),
             (Change::Absent | Change::Unchanged, Change::Absent | Change::Unchanged) => {
                 (r.or(l.as_ref()).or(b).cloned(), Origin::Base)
             }
@@ -390,7 +383,7 @@ impl Reconciler<'_> {
 /// read-only folder (§13): an item made here (not the drive's own, adopted), or a file's bytes
 /// or executable bit changed here to other than the drive's. A move, a delete or tags here
 /// lose nothing: the drive's place, item and tags come back.
-fn loses_here(lc: Change, l: Option<&NodeState>, r: Option<&NodeState>) -> bool {
+pub(super) fn loses_here(lc: Change, l: Option<&NodeState>, r: Option<&NodeState>) -> bool {
     if !content_changed(lc) {
         return false;
     }

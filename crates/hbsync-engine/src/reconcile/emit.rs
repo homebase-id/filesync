@@ -13,8 +13,8 @@ impl Reconciler<'_> {
         let mut content = Vec::new();
         let mut deletes = Vec::new(); // (depth, op)
         // What moves out of a read-only folder (§13), like the deletes here: only the topmost
-        // of a subtree, its subtree filled in once known.
-        let mut evicts = Vec::new();
+        // of a subtree.
+        let mut evicting: HashSet<NodeId> = HashSet::new();
         // The nodes whose item here a delete (or a forget) takes: their subtrees are filled in
         // once only the topmost of them is left.
         let mut gone_here: HashSet<NodeId> = HashSet::new();
@@ -139,10 +139,7 @@ impl Reconciler<'_> {
             if self.evicted.contains(&node) {
                 // Out first; the drive's version comes back with a later plan (§13).
                 if local_real.is_some() {
-                    evicts.push(Op::LocalEvict {
-                        node,
-                        subtree: Vec::new(),
-                    });
+                    evicting.insert(node);
                     local_ops = true;
                 }
             } else if !fork_copies.contains(&node) {
@@ -228,7 +225,11 @@ impl Reconciler<'_> {
                     (Some(_), None) | (None, Some(_)) => true,
                     (None, None) => false,
                 };
-                if needs_settle && target.is_none() && self.masks.masked.contains(&node) {
+                // Read-only (§13), one the drive holds that the merge doesn't (let go of, or taken
+                // along by a removal there) isn't synced here any more, as a masked one.
+                let unsynced = self.masks.masked.contains(&node)
+                    || (self.masking.read_only && remote.is_some());
+                if needs_settle && target.is_none() && unsynced {
                     // A detached node's base goes with the detach.
                     if !self.masks.detached.contains_key(&node) {
                         let op = Op::Forget {
@@ -257,26 +258,24 @@ impl Reconciler<'_> {
         content.sort_by_key(Op::pooled);
         // What this plan moves out of its folder here (a move, a download to another folder:
         // they run before the deletes) leaves a folder it deletes with what is below it.
-        let moving = match gone_here.is_empty() && evicts.is_empty() {
+        let mut moving = match gone_here.is_empty() && evicting.is_empty() {
             true => HashSet::new(),
             false => moving_out(moves.iter().chain(&content), &i.local),
         };
         // What moves out of the folder, only the topmost (it takes what is below it, but what
         // the plan moves out of it first), before the deletes here: a folder they delete
-        // doesn't take it (§13).
-        let evicting: HashSet<NodeId> = evicts.iter().map(Op::node).collect();
-        evicts.retain(|op| !below_another(&i.local, op.node(), &evicting, &moving));
-        for op in &mut evicts {
-            if let Op::LocalEvict { node, subtree } = op {
-                *subtree = i.local.subtree_where(*node, |n| !moving.contains(&n));
-                subtree.sort();
-            }
-        }
-        // A delete here doesn't expect what moves out first, nor what is below it.
-        let moving: HashSet<NodeId> = moving
-            .into_iter()
-            .chain(evicts.iter().map(Op::node))
+        // doesn't take it, nor what is below it (§13). Never held, so no `moves_out_of`.
+        let mut tops: Vec<NodeId> = (evicting.iter().copied())
+            .filter(|&n| !below_another(&i.local, n, &evicting, &moving))
             .collect();
+        tops.sort();
+        let evicts: Vec<Op> = (tops.into_iter())
+            .map(|node| Op::LocalEvict {
+                node,
+                subtree: expects_here(&i.local, node, &moving).0,
+            })
+            .collect();
+        moving.extend(evicts.iter().map(Op::node));
         // Only the topmost delete here of a subtree is needed.
         deletes.retain(|(_, op)| match op {
             Op::LocalDelete { node, .. } | Op::Forget { node, .. } if gone_here.contains(node) => {
@@ -303,13 +302,8 @@ impl Reconciler<'_> {
                 Op::LocalDelete { node, subtree } | Op::Forget { node, subtree }
                     if gone_here.contains(node) =>
                 {
-                    let mut trimmed = false;
-                    *subtree = i.local.subtree_where(*node, |n| {
-                        let stays = !moving.contains(&n);
-                        trimmed |= !stays;
-                        stays
-                    });
-                    subtree.sort();
+                    let trimmed;
+                    (*subtree, trimmed) = expects_here(&i.local, *node, &moving);
                     if trimmed {
                         self.plan.moves_out_of.insert(*node);
                     }
@@ -453,6 +447,20 @@ impl Reconciler<'_> {
         };
         self.input.base_extra.get(&node).and_then(|e| e.local_hash) != Some(l.hash)
     }
+}
+
+/// What a delete or a move out of `node` here expects to take (sorted, `node` included): what
+/// is below it but what the plan moves out of it first (`moving`), with what is below that; and
+/// whether anything was left so.
+fn expects_here(local: &Tree, node: NodeId, moving: &HashSet<NodeId>) -> (Vec<NodeId>, bool) {
+    let mut trimmed = false;
+    let mut subtree = local.subtree_where(node, |n| {
+        let stays = !moving.contains(&n);
+        trimmed |= !stays;
+        stays
+    });
+    subtree.sort();
+    (subtree, trimmed)
 }
 
 /// The nodes `ops` move out of their folder here: a move, or a download to another folder

@@ -174,11 +174,12 @@ impl Ledger {
         first(&mut self.dangling, what);
     }
 
-    /// An operation wrote outside its folder's part of the drive, if `what` names one.
+    /// A read-only folder wrote to the drive (§13), if `what` names the write.
     pub(crate) fn read_only_wrote(&mut self, what: impl FnOnce() -> Option<String>) {
         first(&mut self.read_only_wrote, what);
     }
 
+    /// An operation wrote outside its folder's part of the drive, if `what` names one.
     pub(crate) fn wrote_outside_scope(&mut self, what: impl FnOnce() -> Option<String>) {
         first(&mut self.scope_breach, what);
     }
@@ -738,8 +739,8 @@ impl Sim {
     /// What of `tree` (what client `c` syncs of the drive) its engine leaves to other clients
     /// (sync semantics §6.3, §10): an orphan (its folder nowhere, or a file) it holds nothing
     /// of, whose place it doesn't sync, in Recovered files or at its top, with what is below
-    /// it; in a read-only folder, every orphan (§13). (What is below a recovered one at an ignored name is connected once it is, and
-    /// filtered as anything.)
+    /// it; in a read-only folder, every orphan (§13). (What is below a recovered one at an
+    /// ignored name is connected once it is, and filtered as anything.)
     fn left_orphans(&self, c: usize, tree: &Tree, drive: &Tree) -> BTreeSet<NodeId> {
         let client = &self.clients[c];
         // What the client's scan reports: not what it ignores, kept on its device only.
@@ -895,6 +896,25 @@ fn delete_expects(local: &Tree, node: NodeId, moving: &HashSet<NodeId>) -> Vec<N
     kept
 }
 
+/// `local` with the items detached (§10, `detached`: old id → new) under their new ids, with
+/// what is below them.
+fn at_new_ids(local: &Tree, detached: &HashMap<NodeId, NodeId>) -> Tree {
+    let mut tree = local.clone();
+    for (&old, &new) in detached {
+        let kids: Vec<NodeId> = tree.children(old).collect();
+        if let Some(state) = tree.remove(old) {
+            tree.insert(new, state);
+        }
+        for kid in kids {
+            if let Some(mut state) = tree.get(kid).cloned() {
+                state.parent = new;
+                tree.insert(kid, state);
+            }
+        }
+    }
+    tree
+}
+
 /// A plan and what it was made from, for [`Ledger::plan_made`].
 pub(crate) struct PlanSeen<'a> {
     pub(crate) client: &'a str,
@@ -1030,24 +1050,15 @@ impl Ledger {
         // What moves out of a read-only folder (§13) expects the same, and runs before the
         // deletes too: a detached item (§10) under its new id, with what is below it.
         let mut differ = None;
-        let mut detached_here = local.clone();
-        for (&old, &new) in &detached {
-            let kids: Vec<NodeId> = detached_here.children(old).collect();
-            if let Some(state) = detached_here.remove(old) {
-                detached_here.insert(new, state);
-            }
-            for kid in kids {
-                if let Some(mut state) = detached_here.get(kid).cloned() {
-                    state.parent = new;
-                    detached_here.insert(kid, state);
-                }
-            }
-        }
-        for p in seen.ops {
-            let What::Evict { subtree } = &p.what else {
+        let evicts: Vec<&Planned<'_>> = (seen.ops.iter())
+            .filter(|p| matches!(p.what, What::Evict { .. }))
+            .collect();
+        let detached_here = (!evicts.is_empty()).then(|| at_new_ids(local, &detached));
+        for p in &evicts {
+            let (What::Evict { subtree }, Some(here)) = (&p.what, &detached_here) else {
                 continue;
             };
-            let want = delete_expects(&detached_here, p.node, &moving);
+            let want = delete_expects(here, p.node, &moving);
             if differ.is_none() && *subtree != want {
                 differ = Some(format!(
                     "{}: {:?} expects {subtree:?}, not what its folder holds less what the \
@@ -1056,15 +1067,8 @@ impl Ledger {
                 ));
             }
         }
-        let evicting = seen
-            .ops
-            .iter()
-            .filter(|p| matches!(p.what, What::Evict { .. }));
-        let moving: HashSet<NodeId> = moving
-            .iter()
-            .copied()
-            .chain(evicting.map(|p| p.node))
-            .collect();
+        let mut moving = moving;
+        moving.extend(evicts.iter().map(|p| p.node));
         let expects = |node: NodeId| delete_expects(local, node, &moving);
         // Each delete's, once, compared with what it expects (sorted, as the plan keeps it).
         let mut expected: HashMap<NodeId, Vec<NodeId>> = HashMap::new();

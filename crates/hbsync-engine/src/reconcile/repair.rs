@@ -281,6 +281,8 @@ impl Reconciler<'_> {
         let mut left: HashSet<NodeId> = HashSet::new();
         // Nodes let go of (read-only, §13); their children too.
         let mut let_go: HashSet<NodeId> = HashSet::new();
+        // What a check that a node may be let go of passed: its subtree here.
+        let mut cleared: HashSet<NodeId> = HashSet::new();
         while let Some(node) = queue.pop() {
             let Some(parent) = self.merged.get(node).map(|s| s.parent) else {
                 continue;
@@ -312,10 +314,6 @@ impl Reconciler<'_> {
             // change unmerged, it read alive and brought its deleted folder back: review 14 R1).
             let decided = match decided {
                 Parent::Recover if self.waits.contains(&node) => Parent::Wait,
-                // Its item here goes with what is below it: only once nothing of that is
-                // planned elsewhere or waits (a new item there moves out first, in its own
-                // plan).
-                Parent::LetGo if !self.may_let_go(node) => Parent::Wait,
                 // Waits for another page, with its folders: decided there, never brought back
                 // here (its folder may go with it there).
                 Parent::Recover | Parent::Folder(_) if self.paged.contains(&node) => Parent::Wait,
@@ -337,9 +335,11 @@ impl Reconciler<'_> {
                     Parent::Leave
                 }
                 // Read-only (§13): no folder made again, nothing moved into Recovered files, as
-                // either is a write to the drive.
-                Parent::Recover | Parent::Folder(_) if self.masking.read_only => {
-                    match self.may_let_go(node) {
+                // either is a write to the drive. Its item here goes with what is below it, once
+                // nothing of that is planned elsewhere or waits (a new item there moves out
+                // first, in its own plan).
+                Parent::Recover | Parent::Folder(_) | Parent::LetGo if self.masking.read_only => {
+                    match self.may_let_go(node, &mut cleared) {
                         true => Parent::LetGo,
                         false => Parent::Wait,
                     }
@@ -382,11 +382,7 @@ impl Reconciler<'_> {
                     self.merged.remove(node);
                     self.scope.remove(&node);
                     left.insert(node);
-                    if self.adopted.remove(&node) {
-                        self.plan
-                            .conflicts
-                            .retain(|c| *c != Conflict::Orphan { node });
-                    }
+                    self.unadopt(node);
                 }
                 Parent::LetGo => {
                     // Out of the merged tree, in the plan: its item here goes, and so do its
@@ -395,18 +391,21 @@ impl Reconciler<'_> {
                     self.merged.remove(node);
                     self.scope.insert(node);
                     let_go.insert(node);
-                    // Only the drive's version, as synced, is deleted here: anything else
-                    // (changed here, or never synced) moves out.
-                    if self.input.local.contains(node)
-                        && self.local_change(node) != Change::Unchanged
+                    // Only what was synced here is deleted, as the drive had it: what changed
+                    // here that the drive doesn't hold, or was never synced, moves out.
+                    let r = self
+                        .input
+                        .remote
+                        .get(node)
+                        .filter(|_| !self.taken.contains(&node));
+                    let l = self.local_state(node);
+                    if l.is_some()
+                        && (!self.input.base.contains(node)
+                            || merge::loses_here(self.local_change(node), l.as_ref(), r))
                     {
                         self.evicted.insert(node);
                     }
-                    if self.adopted.remove(&node) {
-                        self.plan
-                            .conflicts
-                            .retain(|c| *c != Conflict::Orphan { node });
-                    }
+                    self.unadopt(node);
                 }
                 Parent::Wait => {
                     // The parent is unknown (or not a folder, or itself waiting): wait for more
@@ -416,11 +415,7 @@ impl Reconciler<'_> {
                     self.scope.remove(&node);
                     withdrawn.insert(node);
                     // An orphan whose Recovered files waits too: not moved after all.
-                    if self.adopted.remove(&node) {
-                        self.plan
-                            .conflicts
-                            .retain(|c| *c != Conflict::Orphan { node });
-                    }
+                    self.unadopt(node);
                     if self.input.dirty.contains(&node) {
                         self.deferred.insert(node);
                     }
@@ -559,14 +554,30 @@ impl Reconciler<'_> {
         }
     }
 
+    /// An orphan taken out of Recovered files after all: not reported as moved there.
+    fn unadopt(&mut self, node: NodeId) {
+        if self.adopted.remove(&node) {
+            self.plan
+                .conflicts
+                .retain(|c| *c != Conflict::Orphan { node });
+        }
+    }
+
     /// Whether read-only `node`'s item here may go with what is below it ([`Parent::LetGo`]):
-    /// none of that waits, here or for another page, nor is planned in another.
-    fn may_let_go(&self, node: NodeId) -> bool {
-        self.input
-            .local
-            .subtree(node)
-            .into_iter()
-            .all(|n| !self.waits.contains(&n) && !self.paged.contains(&n) && !self.elsewhere(n))
+    /// none of that waits, here or for another page, nor is planned in another. What passed
+    /// once (`cleared`, a subtree here) isn't walked again.
+    fn may_let_go(&self, node: NodeId, cleared: &mut HashSet<NodeId>) -> bool {
+        if cleared.contains(&node) {
+            return true;
+        }
+        let below = self.input.local.subtree(node);
+        let free = below
+            .iter()
+            .all(|n| !self.waits.contains(n) && !self.paged.contains(n) && !self.elsewhere(*n));
+        if free {
+            cleared.extend(below);
+        }
+        free
     }
 
     /// `node`, which lost its name in a read-only folder (§13), and what is below it stay as
@@ -576,7 +587,6 @@ impl Reconciler<'_> {
         for n in self.merged.subtree(node) {
             self.scope.remove(&n);
             self.origin.remove(&n);
-            self.evicted.remove(&n);
             self.merged.remove(n);
             if self.input.dirty.contains(&n) {
                 self.deferred.insert(n);
@@ -763,7 +773,7 @@ impl Reconciler<'_> {
                             .get(*n)
                             .is_some_and(|l| l.parent == parent && name_key(&l.name) == key)
                 };
-                group.sort_by_key(|n| {
+                group.sort_by_cached_key(|n| {
                     let arriving = self.adopted.contains(n) || n.is_fixed_folder();
                     (!self.deferred.contains(n), !here(n), arriving, *n)
                 });

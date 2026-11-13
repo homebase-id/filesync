@@ -87,34 +87,18 @@ fn a_crash_at_any_commit_while_moving_out_loses_nothing() -> R {
                 b.sync()?;
                 assert_eq!(versions(&server), drive, "{case}");
                 assert_eq!(b.tree_text(""), a.tree_text(""), "{case}");
-                let mut kept_out: Vec<String> = walk_files(out.path());
-                kept_out.sort();
                 assert_eq!(
-                    kept_out,
-                    ["New/x.txt = x", "report.txt = mine", "top.txt = edited"],
+                    hbsync_engine::testkit::tree_text_of(out.path()),
+                    [
+                        "New/",
+                        "New/x.txt = x",
+                        "report.txt = mine",
+                        "top.txt = edited"
+                    ],
                     "{case}"
                 );
             }
         }
     }
     Ok(())
-}
-
-/// Every file under `dir`, as `path = content`.
-fn walk_files(dir: &std::path::Path) -> Vec<String> {
-    let mut files = Vec::new();
-    let mut next = vec![dir.to_path_buf()];
-    while let Some(d) = next.pop() {
-        for entry in fs::read_dir(&d).expect("readable") {
-            let path = entry.expect("an entry").path();
-            if path.is_dir() {
-                next.push(path);
-            } else {
-                let rel = path.strip_prefix(dir).expect("below").to_string_lossy();
-                let content = fs::read_to_string(&path).expect("text");
-                files.push(format!("{} = {content}", rel.replace('\\', "/")));
-            }
-        }
-    }
-    files
 }

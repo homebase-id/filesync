@@ -427,7 +427,7 @@ impl Op {
     }
 
     /// Whether it writes to the remote.
-    pub(crate) fn writes_remote(&self) -> bool {
+    pub fn writes_remote(&self) -> bool {
         matches!(
             self,
             Op::RemoteCreate { .. }

@@ -3133,17 +3133,9 @@ fn read_only() -> World {
     }
 }
 
-/// What the plan writes to the drive: nothing, read-only.
+/// Whether the plan writes to the drive: never, read-only.
 fn writes_drive(plan: &hbsync_engine::Plan) -> bool {
-    plan.ops.iter().chain(&plan.held).any(|op| {
-        matches!(
-            op,
-            Op::RemoteCreate { .. }
-                | Op::RemoteUpdate { .. }
-                | Op::RemoteTags { .. }
-                | Op::RemoteDelete { .. }
-        )
-    })
+    plan.ops.iter().chain(&plan.held).any(Op::writes_remote)
 }
 
 /// A file edited here moves out first, kept; nothing goes up, and the node stays to plan
