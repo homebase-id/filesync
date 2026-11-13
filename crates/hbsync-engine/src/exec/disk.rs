@@ -140,22 +140,24 @@ impl<'a> Disk<'a> {
     /// path outside the root (as the file system resolves both: else its scan would find what
     /// moved out as new items here), checked before it is made where it is missing, and again
     /// after. Why not, where it isn't one.
-    pub(super) fn out_folder(&mut self) -> Result<&'a Path, String> {
+    pub(super) fn out_folder(&mut self, db: &mut StateDb) -> Result<&'a Path, String> {
         let out = self
             .folder
             .read_only
             .as_deref()
             .ok_or("the folder isn't read-only")?;
         if !self.out_ready {
-            let resolved = |p: &Path| fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
             let outside = || out.is_absolute() && !resolved(out).starts_with(resolved(self.root));
             let inside = "the folder changes move out to is inside this one, or not a full path";
             if !outside() {
                 return Err(inside.into());
             }
+            // The folders it makes are noted, so their entries are synced before a commit that
+            // relies on what moved into them.
+            let missing: Vec<&Path> = out.ancestors().take_while(|p| !p.exists()).collect();
             fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
-            if !outside() {
-                return Err(inside.into());
+            for made in missing {
+                db.changed(made);
             }
             self.out_ready = true;
         }
@@ -286,6 +288,24 @@ impl<'a> Disk<'a> {
             },
         }
     }
+}
+
+/// `path` as the file system resolves it: its nearest folder that is there resolved (links,
+/// `..`, the volume's own spelling), the rest as given.
+fn resolved(path: &Path) -> PathBuf {
+    let mut rest = Vec::new();
+    for at in path.ancestors() {
+        if let Ok(real) = fs::canonicalize(at) {
+            return rest
+                .iter()
+                .rev()
+                .fold(real, |p: PathBuf, name| p.join(name));
+        }
+        if let Some(name) = at.file_name() {
+            rest.push(name.to_owned());
+        }
+    }
+    path.to_path_buf()
 }
 
 /// Puts something at `at` on disk with `put`: once the place can take it

@@ -576,13 +576,18 @@ impl Reconciler<'_> {
     }
 
     /// `node`, which lost its name in a read-only folder (§13), and what is below it stay as
-    /// they are: out of the plan (dirty still), out of the merged tree, so nothing here takes
-    /// their place. Told once, for `node`.
+    /// they are: out of the plan (dirty still), in the merged tree where they are here (the
+    /// names they hold here stay held: nothing is planned onto them), else out of it. Told
+    /// once, for `node`.
     fn left_out(&mut self, node: NodeId) {
         for n in self.merged.subtree(node) {
             self.scope.remove(&n);
             self.origin.remove(&n);
-            self.merged.remove(n);
+            // Where it is here, it holds that name: nothing else is planned onto it.
+            match self.input.local.get(n) {
+                Some(here) => self.merged.insert(n, here.clone()),
+                None => self.merged.remove(n),
+            };
             if self.input.dirty.contains(&n) {
                 self.deferred.insert(n);
             }

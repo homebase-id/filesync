@@ -590,10 +590,6 @@ impl Executor<'_> {
     /// comes back. A crash after the rename leaves the rows of an item that isn't there: the
     /// scan reads it as deleted here, which a read-only folder undoes the same way.
     pub(super) fn evict(&mut self, node: NodeId, expected: &[NodeId]) -> Step {
-        let out = match self.disk.out_folder() {
-            Ok(out) => out.to_path_buf(),
-            Err(why) => return Ok(Outcome::unsyncable(why)),
-        };
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
             return Ok(Outcome::stale("gone"));
         };
@@ -615,6 +611,10 @@ impl Executor<'_> {
                 "the folder holds something synced the plan didn't expect",
             ));
         }
+        let out = match self.disk.out_folder(self.db) {
+            Ok(out) => out.to_path_buf(),
+            Err(why) => return Ok(Outcome::unsyncable(why)),
+        };
         let name = place.name().unwrap_or_default();
         let from = self
             .folder
@@ -644,17 +644,23 @@ impl Executor<'_> {
             "{place}: moved out of the read-only folder, to {}",
             to.display()
         );
-        self.report.moved_out.push((place.to_string(), to));
-        // What was synced is planned again, the drive's version to come back.
-        self.finish(&[], |s| {
+        // What was synced, or the drive holds, is planned again: the drive's version comes back
+        // (as a delete's `forget` marks it).
+        let done = self.finish(&[], |s| {
             for r in s.folder().delete_local_subtree(&row.path)? {
                 s.folder().delete_parked(r.node)?;
-                if s.has_base(r.node)? {
+                if s.has_base(r.node)? || s.get_mirror(r.node)?.is_some() {
                     s.folder().mark_dirty(r.node)?;
                 }
             }
             Ok(())
-        })
+        });
+        // Told once committed (a failed commit ends the run, its report with it: the next scan
+        // finds the item gone, and the drive's version comes back the same way).
+        if done.is_ok() {
+            self.report.moved_out.push((place.to_string(), to));
+        }
+        done
     }
 
     /// Drops the base of a node this device no longer syncs and holds nothing of (§10).

@@ -395,11 +395,10 @@ fn build(
     };
     let mut loaded: HashSet<NodeId> = HashSet::new();
     for &node in dirty {
+        let orphan = orphaned(&b.input.remote, node);
         if !loaded.contains(&node)
-            && (b.input.base.contains(node) || orphaned(&b.input.remote, node))
-            && (!b.input.remote.contains(node)
-                || hidden.contains(&node)
-                || orphaned(&b.input.remote, node))
+            && (b.input.base.contains(node) || orphan)
+            && (!b.input.remote.contains(node) || hidden.contains(&node) || orphan)
             && let Some(row) = s
                 .local_by_node(node)?
                 .filter(|r| r.kind == NodeKind::Folder)

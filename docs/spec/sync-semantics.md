@@ -1167,9 +1167,11 @@ whatever changed here, and the plan holds no operation on the drive:
   crash after the rename and before the commit leaves rows of an item that isn't there: the
   next scan reads it as deleted here, which comes back the same way. A delete here of what is
   in a folder that moves out isn't planned: it goes out with it, its base kept, planned again.
-  A known limit: where the plan is split in pages (§6.5), an item in a folder made here that
-  another page plans moves out on its own, beside the folder (nothing lost, the tree
-  flattened).
+  Known limits, where the plan is split in pages (§6.5, a dirty set of over 20,000): an item
+  in a folder made here that another page plans moves out on its own, beside the folder (the
+  tree flattened); and a synced item moved into a folder made here that another page plans
+  goes out with the folder and comes down again (a download, not a move back). Nothing is
+  lost either way.
   The cost: each save of a file there is a move out and a download of the drive's version
   (a file kept open with autosave, one per save), and a hundred moved out under one name
   leave the next where it is, told, till one goes. Files there set read-only on disk (the
