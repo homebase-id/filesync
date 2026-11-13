@@ -198,11 +198,12 @@ impl Reconciler<'_> {
             return false;
         };
         let r = self.remote_state(node);
-        let drives = |r: &NodeState| l.kind == NodeKind::File && self.same_bytes(node, l, r);
+        // The drive holds what is here: the same kind, a folder, or a file of the same bytes.
+        let drives = |r: &NodeState| {
+            r.kind == l.kind && (l.kind == NodeKind::Folder || self.same_bytes(node, l, r))
+        };
         match i.base.get(node) {
-            None => {
-                !r.is_some_and(|r| r.kind == l.kind && (l.kind == NodeKind::Folder || drives(r)))
-            }
+            None => !r.is_some_and(drives),
             Some(b) if b.kind != l.kind => true,
             Some(b) => match (&b.content, &l.content) {
                 (Some(bc), Some(lc)) => {

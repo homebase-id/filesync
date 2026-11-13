@@ -503,8 +503,15 @@ impl Sim {
             }
             // The tags as the client holds them, on both sides.
             // Read-only (§13), an executable bit its user changed here stays as it is.
+            // Only where the drive's bit is the one synced: its change of it comes down.
+            let changed_here: HashSet<NodeId> = (client.user_x.iter().copied())
+                .filter(|n| {
+                    let x = |t: &Tree| t.get(*n).and_then(|s| s.content).map(|c| c.executable);
+                    x(&client.base) == x(&synced)
+                })
+                .collect();
             let x_kept = |tree: Tree| match client.read_only {
-                true => without_x(tree, &client.user_x),
+                true => without_x(tree, &changed_here),
                 false => tree,
             };
             let server_view = view(&x_kept(held_by(&synced, client.os)));
@@ -965,6 +972,12 @@ impl Ledger {
                 _ => None,
             })
             .collect();
+        // What moves out of a read-only folder (§13), and the tree here with the detached items
+        // under their new ids (its plan's view), for those.
+        let evicts: Vec<&Planned<'_>> = (seen.ops.iter())
+            .filter(|p| matches!(p.what, What::Evict { .. }))
+            .collect();
+        let detached_here = (!evicts.is_empty()).then(|| at_new_ids(local, &detached));
         // What waits for a hash, worked out on its own (sync semantics §6.3): every folder a
         // file here not hashed yet is in, on any side, and every folder those are in, on the
         // drive as this device sees it (what its filter leaves out is out of view); a detached
@@ -1031,7 +1044,12 @@ impl Ledger {
                                 | What::Forget { .. } => true,
                                 // Local only: what it takes is what is below it here.
                                 What::Evict { .. } => {
-                                    below(local, node).iter().any(|n| unhashed.contains(n))
+                                    let here = detached_here.as_ref().unwrap_or(local);
+                                    let old = |n: &NodeId| {
+                                        (detached.iter().find(|(_, new)| *new == n))
+                                            .map_or(*n, |(old, _)| *old)
+                                    };
+                                    below(here, node).iter().any(|n| unhashed.contains(&old(n)))
                                 }
                                 What::LocalMove { parent, name } => moved(local, parent, name),
                                 What::RemoteUpdate { parent, name } => moved(remote, parent, name),
@@ -1058,10 +1076,6 @@ impl Ledger {
         // What moves out of a read-only folder (§13) expects the same, and runs before the
         // deletes too: a detached item (§10) under its new id, with what is below it.
         let mut differ = None;
-        let evicts: Vec<&Planned<'_>> = (seen.ops.iter())
-            .filter(|p| matches!(p.what, What::Evict { .. }))
-            .collect();
-        let detached_here = (!evicts.is_empty()).then(|| at_new_ids(local, &detached));
         for p in &evicts {
             let (What::Evict { subtree }, Some(here)) = (&p.what, &detached_here) else {
                 continue;

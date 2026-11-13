@@ -3414,3 +3414,32 @@ fn read_only_executable_bits_follow_the_drive_where_it_changed_them() {
     want.sort();
     assert_eq!(got, want);
 }
+
+/// A clash loser left where it is here holds its name there: what the drive puts on that name
+/// is left out too, never planned onto it (it waited forever for the name).
+#[test]
+fn read_only_a_left_out_loser_holds_the_name_it_has_here() {
+    let [kept, loser, newcomer] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(kept, file(ROOT, "a", "a"))
+        .synced(loser, file(ROOT, "b", "b"))
+        .remote(loser, Some(file(ROOT, "A", "b")))
+        .remote(newcomer, Some(file(ROOT, "b", "new")));
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalDownload { .. })),
+        "{:?}",
+        plan.ops
+    );
+    let mut told: Vec<NodeId> = plan.conflicts.iter().map(Conflict::node).collect();
+    told.sort();
+    let mut want = vec![loser, newcomer];
+    want.sort();
+    assert_eq!(told, want);
+}

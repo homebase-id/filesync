@@ -67,6 +67,8 @@ pub(crate) struct Masks {
     pub filtered: HashSet<NodeId>,
     /// Local items that become new nodes: old id → new id.
     pub detached: BTreeMap<NodeId, NodeId>,
+    /// The folder is read-only (§13): an executable bit changed here holds no item.
+    read_only: bool,
     /// The detached folders held for the filter's masks alone, outside the scope (§12) and in
     /// no folder outside it: what moves away from one may spare it ([`Masks::moved_away`]).
     by_filter: HashSet<NodeId>,
@@ -232,7 +234,7 @@ impl Masks {
             .filter_map(|m| input.remote.get(*m).map(|s| s.parent))
             .filter(|p| !p.is_root() && !masked.contains(p))
             .collect();
-        let detach = to_detach(input, &masked, &HashMap::new());
+        let detach = to_detach(input, &masked, &HashMap::new(), masking.read_only);
         // The scope's detached folders stay as they are (§12): not one outside it, nor one in a
         // folder outside it.
         let by_filter = (detach.iter().copied())
@@ -252,6 +254,7 @@ impl Masks {
             names,
             filtered,
             by_filter,
+            read_only: masking.read_only,
             ..Masks::default()
         };
         masks.with_view(input, detach, computer, taken)
@@ -269,7 +272,7 @@ impl Masks {
         away: &HashMap<NodeId, NodeId>,
         first_detached: usize,
     ) -> Option<Masks> {
-        let detach = to_detach(input, &self.masked, away);
+        let detach = to_detach(input, &self.masked, away, self.read_only);
         let again = detach.iter().eq(self.detached.keys());
         (detach.len() < first_detached && !again)
             .then(|| self.with_view(input, detach, computer, taken))
@@ -415,6 +418,7 @@ fn to_detach(
     input: &Input,
     masked: &HashSet<NodeId>,
     away: &HashMap<NodeId, NodeId>,
+    read_only: bool,
 ) -> BTreeSet<NodeId> {
     let mut detach: BTreeSet<NodeId> = BTreeSet::new();
     for (node, local) in input.local.iter() {
@@ -429,7 +433,8 @@ fn to_detach(
                             .get(&node)
                             .and_then(|e| e.local_hash)
                             .unwrap_or(b.hash);
-                        base_bytes != l.hash || b.executable != l.executable
+                        // Read-only (§13), a bit changed here is no change to keep.
+                        base_bytes != l.hash || (!read_only && b.executable != l.executable)
                     }
                     // Not hashed yet: it may hold anything.
                     _ => true,

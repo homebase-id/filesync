@@ -784,6 +784,13 @@ impl Reconciler<'_> {
                     }
                     if self.masking.read_only {
                         self.left_out(loser);
+                        // Where it is here, in this folder, it holds that name: judged with what
+                        // would take it, as one left where it is for a name.
+                        let held = self.input.local.get(loser).filter(|h| h.parent == parent);
+                        if let Some(to) = held.map(|h| name_key(&h.name)).filter(|to| *to != key) {
+                            by_key.entry(to.clone()).or_default().push(loser);
+                            queue.push_back(to);
+                        }
                         continue;
                     }
                     let Some(mut state) = self.merged.get(loser).cloned() else {

@@ -596,23 +596,6 @@ impl Executor<'_> {
         if !self.on_disk_unchanged(&row) {
             return Ok(rescan(&mut self.report, &row.path));
         }
-        // Parked for what took its name: back under a name of its own first (its original if
-        // free), so one that can't move out isn't left hidden. It moves out under its original
-        // name all the same.
-        let original = self.db.read(|s| view::parked_place(s, &row))?;
-        let row = match &original {
-            None => row,
-            Some(original) => {
-                let is_dir = row.kind == NodeKind::Folder;
-                let Some(to) = release_place(self.db, self.folder, original, is_dir)? else {
-                    return Ok(Outcome::unsyncable("no free name to leave the parked one"));
-                };
-                match restore_parked(self.db, &self.disk, &row, &to)? {
-                    Ok(row) => row,
-                    Err(e) => return Ok(io_outcome(e)),
-                }
-            }
-        };
         let unexpected = self.db.read(|s| {
             for r in s.local_subtree(&row.path)? {
                 if expected.binary_search(&r.node).is_err() && s.has_base(r.node)? {
@@ -621,62 +604,72 @@ impl Executor<'_> {
             }
             Ok(false)
         })?;
-        let place = original.unwrap_or_else(|| row.path.clone());
         if unexpected {
             return Ok(Outcome::stale(
                 "the folder holds something synced the plan didn't expect",
             ));
         }
-        let out = match self.disk.out_folder(self.db) {
-            Ok(out) => out.to_path_buf(),
-            Err(why) => return Ok(Outcome::unsyncable(why)),
-        };
-        let name = place.name().unwrap_or_default();
-        let from = self
-            .folder
-            .root
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let mut moved = None;
-        for candidate in moved_out_names(name, &from) {
-            let to = out.join(&candidate);
-            match self.disk.move_out(self.db, &row.path, &to)? {
-                Ok(()) => {
-                    moved = Some(to);
-                    break;
-                }
-                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
-                Err(e) => return Ok(io_outcome(e)),
-            }
-        }
-        let Some(to) = moved else {
-            return Ok(Outcome::unsyncable(format!(
-                "no free name to move it out to in {}",
-                out.display()
-            )));
+        // Parked for what took its name, it moves out under its original one.
+        let original = self.db.read(|s| view::parked_place(s, &row))?;
+        let place = original.clone().unwrap_or_else(|| row.path.clone());
+        let to = match self.move_out(&row, &place) {
+            Ok(to) => to,
+            Err(why) => return self.unpark(&row, original.as_ref(), why),
         };
         tracing::info!(
             "{place}: moved out of the read-only folder, to {}",
             to.display()
         );
-        // What was synced, or the drive holds, is planned again: the drive's version comes back
-        // (as a delete's `forget` marks it).
-        let done = self.finish(&[], |s| {
-            for r in s.folder().delete_local_subtree(&row.path)? {
-                s.folder().delete_parked(r.node)?;
-                if s.has_base(r.node)? || s.get_mirror(r.node)?.is_some() {
-                    s.folder().mark_dirty(r.node)?;
-                }
-            }
-            Ok(())
-        });
+        // Its bases stay, and what was synced, or the drive holds, is planned again: the
+        // drive's version comes back.
+        let done = self.finish(&[], |s| gone_from_here(s, &row.path, node, Bases::Keep));
         // Told once committed (a failed commit ends the run, its report with it: the next scan
         // finds the item gone, and the drive's version comes back the same way).
         if done.is_ok() {
             self.report.moved_out.push((place.to_string(), to));
         }
         done
+    }
+
+    /// Moves `row`'s item out to the read-only folder's out folder, under the first free of
+    /// [`moved_out_names`] of `place`'s name: where it went, or why not.
+    fn move_out(&mut self, row: &LocalRow, place: &RelPath) -> Result<std::path::PathBuf, Outcome> {
+        let out = match self.disk.out_folder(self.db) {
+            Ok(out) => out,
+            Err(why) => return Err(Outcome::unsyncable(why)),
+        };
+        let from = (self.folder.root.file_name())
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        for candidate in moved_out_names(place.name().unwrap_or_default(), &from) {
+            let to = out.join(&candidate);
+            match self.disk.move_out(self.db, &row.path, &to) {
+                Ok(Ok(())) => return Ok(to),
+                Ok(Err(e)) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+                Ok(Err(e)) => return Err(io_outcome(e)),
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Err(Outcome::unsyncable(format!(
+            "no free name to move it out to in {}",
+            out.display()
+        )))
+    }
+
+    /// An item that couldn't move out (`why`), parked for what took its name (`original`):
+    /// given a name of its own again (its original if free), so it isn't left hidden.
+    fn unpark(&mut self, row: &LocalRow, original: Option<&RelPath>, why: Outcome) -> Step {
+        let Some(original) = original else {
+            return Ok(why);
+        };
+        let is_dir = row.kind == NodeKind::Folder;
+        let Some(to) = release_place(self.db, self.folder, original, is_dir)? else {
+            return Ok(why);
+        };
+        if let Err(e) = restore_parked(self.db, &self.disk, row, &to)? {
+            tracing::warn!("{}: left parked: {e}", row.path);
+        }
+        Ok(why)
     }
 
     /// Drops the base of a node this device no longer syncs and holds nothing of (§10).
@@ -698,8 +691,36 @@ impl Executor<'_> {
 /// What was at `path` went from here, deleted with `node` (the item at the top of what went):
 /// its rows go, and so do their bases ([`forget`]).
 fn deleted_here(s: &Store<'_>, path: &RelPath, node: NodeId) -> Result<(), StateError> {
+    gone_from_here(s, path, node, Bases::Forget)
+}
+
+/// What becomes of the bases of what left here ([`gone_from_here`]).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Bases {
+    /// Deleted here: they go ([`forget`]).
+    Forget,
+    /// Moved out (§13): they stay, and what has one, or the drive holds, is planned again.
+    Keep,
+}
+
+/// What was at `path` left here with `node` (the item at the top of what left): its rows and
+/// parking records go, its bases as `bases` says.
+fn gone_from_here(
+    s: &Store<'_>,
+    path: &RelPath,
+    node: NodeId,
+    bases: Bases,
+) -> Result<(), StateError> {
     for r in s.folder().delete_local_subtree(path)? {
-        forget(s, r.node, node)?;
+        match bases {
+            Bases::Forget => forget(s, r.node, node)?,
+            Bases::Keep => {
+                s.folder().delete_parked(r.node)?;
+                if s.has_base(r.node)? || s.get_mirror(r.node)?.is_some() {
+                    s.folder().mark_dirty(r.node)?;
+                }
+            }
+        }
     }
     Ok(())
 }
