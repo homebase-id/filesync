@@ -610,7 +610,8 @@ impl HomebaseRemote {
         let answer = match SealedKey::ask(&self.client, &sharer.odin_id, circle) {
             Ok(answer) => answer,
             // A codeless 403 is theirs, or the app's want of the permission (`Client::whose`):
-            // the context, read again, says which.
+            // the context, read again (unless just read for a permission lacking before), says
+            // which.
             Err(e) if codeless_forbidden(&e) && permitted => {
                 return match self.reads_shared_now()? {
                     false => Err(not_permitted()),
@@ -2026,6 +2027,17 @@ mod tests {
             Err(RemoteError::Denied(why, Refusal::NoKey)) => {
                 assert!(why.contains("no key"), "{why}")
             }
+            other => panic!("{other:?}"),
+        }
+        // One there that doesn't open: the same, before the permission is looked at.
+        let own = unreachable_remote(KeyState {
+            private: true,
+            key: Some([9; 16]),
+            write_only: Some("bm90IGEga2V5".into()),
+            ..KeyState::default()
+        })?;
+        match own.circle_key(&sharer, Uuid::new_v4()) {
+            Err(RemoteError::Denied(_, Refusal::NoKey)) => {}
             other => panic!("{other:?}"),
         }
         Ok(())

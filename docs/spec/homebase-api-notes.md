@@ -536,10 +536,10 @@ server answers the rest, to a token their server made for this identity's connec
   `remoteServerReturnedNotFound`; anything else, 400 `remoteServerReturnedInternalServerError`.
 - **Whose a refusal is.** Without the permission they need, the peer routes answer 403 with no code
   too, like a sharer's. Before asking for a circle's key, the client refuses a drive without a
-  write-only key that opens (`Refusal::NoKey`, no request), then looks whether the app holds
-  `UseTransitRead` as the security context last said, and reads it again when it didn't; after a
-  codeless 403 (the permission held as last read) it reads it again (`reads_shared_now`, the context
-  alone): the owner may have given the permission without any reconnect (**[inferred]**: the
+  write-only key that opens (`Refusal::NoKey`, without asking the sharer), then looks whether the
+  app holds `UseTransitRead` as the security context last said, and reads it again when it didn't;
+  after a codeless 403 (the permission held as last read) it reads it again (`reads_shared_now`, the
+  context alone): the owner may have given the permission without any reconnect (**[inferred]**: the
   permission update closes no socket). A 403 with the permission held is the sharer's
   (**[verified]** odin-core `PeerServiceBase`; `Client::whose`). Lacking it, the share stops,
   refused (`Refusal::Permission`) until the owner approves; a 401 there is this login's. On the
