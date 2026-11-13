@@ -97,8 +97,8 @@ pub(crate) struct Executor<'a> {
     refusals: Refusals,
     /// The sync root, written only through it.
     disk: Disk<'a>,
-    /// Where what moved out of a read-only folder is told (§13), whatever the run's end:
-    /// else its report.
+    /// Where what moved out of a read-only folder is told (§13), whatever the run's end
+    /// (none: not told).
     moved_out: Option<&'a mut Vec<(String, std::path::PathBuf)>>,
 }
 

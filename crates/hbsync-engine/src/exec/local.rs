@@ -624,7 +624,7 @@ impl Executor<'_> {
             }
             Ok(parked)
         })?;
-        below.sort_by_key(|(r, _)| std::cmp::Reverse(r.path.components().count()));
+        below.sort_by_key(|(r, _)| std::cmp::Reverse(r.path.depth()));
         for (r, at) in below {
             if let Err(why) = self.name_parked(&r, &at)? {
                 return self.left_here(&row, original.as_ref(), why);
@@ -641,10 +641,8 @@ impl Executor<'_> {
         );
         // Told once it moved, whatever the commit does (a failed one ends the run: the next
         // scan finds the item gone, and the drive's version comes back the same way).
-        let moved = (place.to_string(), to);
-        match &mut self.moved_out {
-            Some(sink) => sink.push(moved),
-            None => self.report.moved_out.push(moved),
+        if let Some(sink) = &mut self.moved_out {
+            sink.push((place.to_string(), to));
         }
         // Its bases stay, and what was synced, or the drive holds, is planned again: the
         // drive's version comes back.
@@ -668,8 +666,12 @@ impl Executor<'_> {
                 Ok(Err(e)) if e.kind() == io::ErrorKind::AlreadyExists => continue,
                 Ok(Err(e)) if e.kind() == io::ErrorKind::CrossesDevices => {
                     // The item on a volume mounted inside the folder: it alone can't go.
+                    // (One that can't be read now fails alone.)
                     let item = volume_of(&self.disk.abs(&row.path));
-                    if item.is_some() && item != volume_of(&resolved(&self.folder.root)) {
+                    if item.is_none() {
+                        return Err(io_outcome(e));
+                    }
+                    if item != volume_of(&resolved(&self.folder.root)) {
                         return Err(Outcome::unsyncable(
                             "on a volume mounted inside the folder: it can't move out",
                         ));

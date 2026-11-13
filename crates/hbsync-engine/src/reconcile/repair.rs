@@ -627,11 +627,13 @@ impl Reconciler<'_> {
         any
     }
 
-    pub(super) fn fix_names(&mut self) {
+    /// Only the folders in `only`, where given.
+    pub(super) fn fix_names(&mut self, only: Option<&BTreeSet<NodeId>>) {
         let parents: BTreeSet<NodeId> = self
             .scope
             .iter()
             .filter_map(|n| self.merged.get(*n).map(|s| s.parent))
+            .filter(|p| only.is_none_or(|o| o.contains(p)))
             .collect();
         // The drive's names of what waits for a hash elsewhere here (`waits`, and this plan's
         // waiters): taken for it.
@@ -800,10 +802,14 @@ impl Reconciler<'_> {
                         continue;
                     }
                     if self.masking.read_only {
-                        // Held in another folder here, that one is judged again with it.
-                        let elsewhere =
-                            (self.input.local.get(loser)).is_some_and(|h| h.parent != parent);
-                        self.rejudge |= self.left_out(loser) && elsewhere;
+                        // Once: held in another folder here, that one is judged again with it.
+                        if !self.left_out(loser) {
+                            continue;
+                        }
+                        if let Some(h) = self.input.local.get(loser).filter(|h| h.parent != parent)
+                        {
+                            self.rejudge.insert(h.parent);
+                        }
                         // Where it is here, in this folder, it holds that name: judged with what
                         // would take it, as one left where it is for a name. (One that moves
                         // out holds none.)

@@ -31,8 +31,6 @@ pub(crate) struct ExecReport {
     pub refused: bool,
     /// What was done, for people (one entry per file or item).
     pub synced: Vec<Synced>,
-    /// What moved out of a read-only folder (§13): where it was here, and where it went.
-    pub moved_out: Vec<(String, std::path::PathBuf)>,
     /// What it learned of the drive, for the account: behind (a remote write refused for the
     /// drive's state, an earlier try of it landed unanswered, an answer that didn't come), or
     /// full (the run's uploads from then on were held, left dirty).

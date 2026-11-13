@@ -200,8 +200,8 @@ struct Reconciler<'a> {
     evicted: BTreeSet<NodeId>,
     /// What a read-only name clash left out (§13), each once.
     left: BTreeSet<NodeId>,
-    /// A name pass left one out that is held in another folder here (§13): judged again.
-    rejudge: bool,
+    /// The folders here a name pass left one out in, held there (§13): judged again.
+    rejudge: BTreeSet<NodeId>,
     /// Becomes `plan.deferred`.
     deferred: BTreeSet<NodeId>,
     /// Orphans the repairs move into Recovered files (§6.3): they lose a name clash there.
@@ -260,7 +260,7 @@ impl<'a> Reconciler<'a> {
             forks: BTreeMap::new(),
             evicted: BTreeSet::new(),
             left: BTreeSet::new(),
-            rejudge: false,
+            rejudge: BTreeSet::new(),
             deferred: BTreeSet::new(),
             adopted: HashSet::new(),
             taken,
@@ -315,13 +315,18 @@ impl<'a> Reconciler<'a> {
         // A node left where it is for a name, or left out read-only (§13: where it is here,
         // maybe in a folder judged already), may hold the name another would take: again, till
         // none more waits or is left out (in each pass at least one node more does).
+        let mut only = None;
         loop {
             let waited = self.waiters.len();
-            self.rejudge = false;
-            self.fix_names();
-            if self.waiters.len() == waited && !self.rejudge {
+            self.fix_names(only.as_ref());
+            only = if self.waiters.len() != waited {
+                None
+            } else if self.rejudge.is_empty() {
                 break;
-            }
+            } else {
+                Some(std::mem::take(&mut self.rejudge))
+            };
+            self.rejudge.clear();
         }
         self.emit();
         self.places_across_pages();

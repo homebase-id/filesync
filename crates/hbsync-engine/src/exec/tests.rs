@@ -92,6 +92,18 @@ impl Harness {
         Executor::new(&mut self.db, &self.remote, &self.folder, &self.cfg).run(ops)
     }
 
+    /// [`Harness::run`], with what moved out of a read-only folder (§13).
+    fn run_moving_out(
+        &mut self,
+        ops: Vec<Op>,
+    ) -> Result<(ExecReport, Vec<(String, std::path::PathBuf)>), StateError> {
+        let mut moved = Vec::new();
+        let report = Executor::new(&mut self.db, &self.remote, &self.folder, &self.cfg)
+            .with_moved_out(&mut moved)
+            .run(ops)?;
+        Ok((report, moved))
+    }
+
     fn base(&mut self, node: NodeId) -> Result<Option<BaseRow>, StateError> {
         self.db.read(|s| s.get_base(node))
     }
@@ -5029,7 +5041,7 @@ fn an_item_moves_out_of_a_read_only_folder_under_a_free_name() -> R {
     fs::write(out.join("a.txt"), b"other")?;
     let mut whole = vec![n, x];
     whole.sort();
-    let report = h.run(vec![
+    let (report, moved_out) = h.run_moving_out(vec![
         Op::LocalEvict {
             node: n,
             subtree: whole,
@@ -5048,9 +5060,9 @@ fn an_item_moves_out_of_a_read_only_folder_under_a_free_name() -> R {
     assert_eq!(fs::read(out.join(&renamed))?, b"mine");
     assert_eq!(fs::read(out.join("a.txt"))?, b"other");
     assert!(!h.at("New")?.exists() && !h.at("a.txt")?.exists());
-    let moved: Vec<&str> = report.moved_out.iter().map(|(p, _)| p.as_str()).collect();
+    let moved: Vec<&str> = moved_out.iter().map(|(p, _)| p.as_str()).collect();
     assert_eq!(moved, ["New", "a.txt"]);
-    assert_eq!(report.moved_out[1].1, out.join(&renamed));
+    assert_eq!(moved_out[1].1, out.join(&renamed));
     for node in [n, x, a] {
         assert!(h.db.read(|s| s.local_by_node(node))?.is_none());
     }

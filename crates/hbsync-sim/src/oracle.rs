@@ -1093,7 +1093,11 @@ impl Ledger {
         // detach, and finds it moved out.)
         let old_id: HashMap<NodeId, NodeId> = detached.iter().map(|(&o, &n)| (n, o)).collect();
         let mut moving = moving;
-        moving.extend(evicts.iter().map(|p| old_id.get(&p.node).copied().unwrap_or(p.node)));
+        moving.extend(
+            evicts
+                .iter()
+                .map(|p| old_id.get(&p.node).copied().unwrap_or(p.node)),
+        );
         let expects = |node: NodeId| delete_expects(local, node, &moving);
         // Each delete's, once, compared with what it expects (sorted, as the plan keeps it).
         let mut expected: HashMap<NodeId, Vec<NodeId>> = HashMap::new();

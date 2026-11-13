@@ -315,12 +315,22 @@ fn check_out(out: &Path, root: &Path, db: &mut StateDb) -> Result<(), String> {
     if volume(there) != volume(root) {
         return Err(OUT_ELSEWHERE.into());
     }
-    // The folders it makes are noted, so their entries are synced before a commit that relies
-    // on what moved into them.
-    let missing: Vec<&Path> = out.ancestors().take_while(|p| !p.exists()).collect();
-    fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    // Nor is the root one of its folders by another path (a bind mount): told by file id.
+    let id = |p: &Path| hbsync_platform::stat(p).map(|m| m.file_id).ok();
+    let root_id = id(&resolved(root));
+    if root_id.is_some() && there.ancestors().any(|p| id(p) == root_id) {
+        return Err("the folder changes move out to is inside this one, or not a full path".into());
+    }
+    // Each folder it makes is noted as it is made, so its entry is synced before a commit
+    // that relies on what moved into it (a failure part way keeps those made noted).
+    let mut missing: Vec<&Path> = out.ancestors().take_while(|p| !p.exists()).collect();
+    missing.reverse();
     for made in missing {
-        db.changed(made);
+        match fs::create_dir(made) {
+            Ok(()) => db.changed(made),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && made.is_dir() => {}
+            Err(e) => return Err(format!("{}: {e}", made.display())),
+        }
     }
     Ok(())
 }
