@@ -1023,8 +1023,11 @@ impl Ledger {
                             && match &p.what {
                                 What::RemoteDelete
                                 | What::LocalDelete { .. }
-                                | What::Forget { .. }
-                                | What::Evict { .. } => true,
+                                | What::Forget { .. } => true,
+                                // Local only: what it takes is what is below it here.
+                                What::Evict { .. } => {
+                                    below(local, node).iter().any(|n| unhashed.contains(n))
+                                }
                                 What::LocalMove { parent, name } => moved(local, parent, name),
                                 What::RemoteUpdate { parent, name } => moved(remote, parent, name),
                                 _ => false,

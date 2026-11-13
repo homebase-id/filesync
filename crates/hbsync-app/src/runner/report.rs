@@ -364,7 +364,7 @@ fn describe_conflict(engine: &mut Engine, c: &Conflict) -> Result<String, StateE
         Conflict::NameTaken { node } => format!(
             "{}: not synced here, as another item in its folder has its name (or one differing \
              only in case)",
-            path(*node)?
+            engine.drive_path_of(*node)?.unwrap_or_else(|| "?".into())
         ),
         Conflict::Cycle { node } => format!(
             "{}: a move that would have put a folder inside itself was undone",

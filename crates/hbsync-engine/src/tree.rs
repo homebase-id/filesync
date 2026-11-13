@@ -299,36 +299,29 @@ pub fn numbered_conflict_name(name: &str, n: usize) -> String {
 /// The names a restored item tries, in order: its own, then the restored variants; a hundred
 /// at most.
 pub fn restored_names(name: &str) -> impl Iterator<Item = String> + '_ {
-    std::iter::once(name.to_owned()).chain((1..100).map(move |n| restored_name(name, n)))
-}
-
-/// `"report (restored).pdf"`, then `"report (restored 2).pdf"`: a restored item whose name
-/// was taken meanwhile.
-pub(crate) fn restored_name(name: &str, n: usize) -> String {
-    match n {
-        0 | 1 => with_tag(name, " (restored)"),
-        n => with_tag(name, &format!(" (restored {n})")),
-    }
+    tagged_names(name, "restored".into())
 }
 
 /// The names an item moved out of the read-only folder named `from` tries where it goes (§13),
-/// in order: its own, then [`moved_out_name`]s; a hundred at most.
-pub(crate) fn moved_out_names<'a>(
-    name: &'a str,
-    from: &'a str,
-) -> impl Iterator<Item = String> + 'a {
-    std::iter::once(name.to_owned())
-        .chain((1..NUMBERED_TRIES).map(move |n| moved_out_name(name, from, n)))
+/// in order: its own, then `"report (from sam.example.com).pdf"`, `"report (from
+/// sam.example.com 2).pdf"`; a hundred at most.
+pub(crate) fn moved_out_names<'a>(name: &'a str, from: &str) -> impl Iterator<Item = String> + 'a {
+    // The folder's name comes from elsewhere; keep it from crowding out the item's own.
+    tagged_names(name, format!("from {}", truncate_bytes(from, 64)))
 }
 
-/// `"report (from sam.example.com).pdf"`, then `"report (from sam.example.com 2).pdf"`: an
-/// item moved out of the read-only folder named `from` whose name was taken where it went.
-fn moved_out_name(name: &str, from: &str, n: usize) -> String {
-    // The folder's name comes from elsewhere; keep it from crowding out the item's own.
-    let from = truncate_bytes(from, 64);
+/// `name`, then [`tagged_name`]s with `tag`: [`NUMBERED_TRIES`] in all.
+fn tagged_names(name: &str, tag: String) -> impl Iterator<Item = String> + '_ {
+    std::iter::once(name.to_owned())
+        .chain((1..NUMBERED_TRIES).map(move |n| tagged_name(name, &tag, n)))
+}
+
+/// `name` with ` (tag)` before its extension, the `n`th from the second on numbered:
+/// `"report (restored).pdf"`, `"report (restored 2).pdf"`.
+fn tagged_name(name: &str, tag: &str, n: usize) -> String {
     match n {
-        0 | 1 => with_tag(name, &format!(" (from {from})")),
-        n => with_tag(name, &format!(" (from {from} {n})")),
+        0 | 1 => with_tag(name, &format!(" ({tag})")),
+        n => with_tag(name, &format!(" ({tag} {n})")),
     }
 }
 

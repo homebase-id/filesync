@@ -5001,16 +5001,10 @@ fn an_upload_over_a_bit_changed_elsewhere_never_had_it() {
 }
 
 /// The folder of `h` made read-only, what changed there moving out to a folder of its own
-/// beside it (same volume): its path.
-fn read_only(h: &mut Harness) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let out = h
-        .folder
-        .root
-        .parent()
-        .ok_or("no parent")?
-        .join(format!("out-{}", NodeId::new().0));
-    fs::create_dir_all(&out)?;
-    h.folder.read_only = Some(out.clone());
+/// (same volume, removed with the test): it.
+fn read_only(h: &mut Harness) -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
+    let out = tempfile::tempdir()?;
+    h.folder.read_only = Some(out.path().to_path_buf());
     Ok(out)
 }
 
@@ -5021,7 +5015,8 @@ fn read_only(h: &mut Harness) -> Result<PathBuf, Box<dyn std::error::Error>> {
 #[test]
 fn an_item_moves_out_of_a_read_only_folder_under_a_free_name() -> R {
     let mut h = Harness::new()?;
-    let out = read_only(&mut h)?;
+    let dir = read_only(&mut h)?;
+    let out = dir.path();
     let from = h.folder.root.file_name().ok_or("no name")?.to_owned();
     let (n, x, a) = (NodeId::new(), NodeId::new(), NodeId::new());
     h.local_folder("New", n)?;
@@ -5088,6 +5083,32 @@ fn a_move_out_waits_for_a_synced_item_it_did_not_expect() -> R {
         "{report:?}"
     );
     assert_eq!(fs::read(h.at("New/a.txt")?)?, b"a");
-    assert!(fs::read_dir(&out)?.next().is_none());
+    assert!(fs::read_dir(out.path())?.next().is_none());
+    Ok(())
+}
+
+/// Whatever planned it, the executor sends nothing to the drive from a read-only folder.
+#[test]
+fn a_read_only_folder_sends_nothing_to_the_drive() -> R {
+    let mut h = Harness::new()?;
+    let _out = read_only(&mut h)?;
+    let f = NodeId::new();
+    h.local_file("a.txt", f, b"a")?;
+    let create = Op::RemoteCreate {
+        node: f,
+        parent: NodeId::ROOT,
+        name: "a.txt".into(),
+        kind: NodeKind::File,
+        tags: Tags::default(),
+    };
+    let report = h.run(vec![create.clone()])?;
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|(op, why)| *op == create && matches!(why, Skip::Unsyncable(_))),
+        "{report:?}"
+    );
+    assert_eq!(h.remote.server().live().count(), 0);
     Ok(())
 }

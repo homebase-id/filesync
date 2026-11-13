@@ -199,7 +199,17 @@ pub(crate) fn run_narrow(
     clients: usize,
     events: &[Event],
 ) -> Result<(), TestCaseError> {
-    let (prepare, guard) = NARROW_SETUPS[setup];
+    run_narrow_in(NARROW_SETUPS, setup, clients, events)
+}
+
+/// [`run_narrow`] on `setups`.
+pub(crate) fn run_narrow_in(
+    setups: &[Setup],
+    setup: usize,
+    clients: usize,
+    events: &[Event],
+) -> Result<(), TestCaseError> {
+    let (prepare, guard) = setups[setup];
     let mut sim = prepare(Sim::new(clients)).with_narrow_check();
     sim.guard = guard;
     sim.run(events);
@@ -280,8 +290,6 @@ pub(crate) const SETUPS: &[Setup] = &[
     (Sim::with_new_role_devices, Some(1)),
     (|sim| sim, Some(2)),
     (with_a_folder_wiped, Some(WIPED_MIN)),
-    (|sim| sim.with_read_only(2).with_split_downloads(), None),
-    (|sim| sim.with_read_only(1), Some(2)),
 ];
 
 /// The setups [`the_engines_planning_path_plans_as_the_sim`] picks from: those that settle
@@ -293,8 +301,14 @@ pub(crate) const NARROW_SETUPS: &[Setup] = &[
     (|sim| sim, Some(2)),
     (Sim::with_desktop_devices, None),
     (Sim::with_desktop_to_add, None),
+];
+
+/// Read-only folders' setups (sync semantics §13), for the replay and the engine's path: kept
+/// apart from [`SETUPS`] and [`NARROW_SETUPS`], whose saved seeds pick by index.
+pub(crate) const READ_ONLY_SETUPS: &[Setup] = &[
     (|sim| sim.with_read_only(0), None),
     (|sim| sim.with_read_only(1), Some(2)),
+    (|sim| sim.with_read_only(2).with_split_downloads(), None),
 ];
 
 /// Events of every kind the properties make: the users' actions, deletes another device stops

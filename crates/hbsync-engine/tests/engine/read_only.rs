@@ -102,3 +102,18 @@ fn a_crash_at_any_commit_while_moving_out_loses_nothing() -> R {
     }
     Ok(())
 }
+
+/// Putting held deletes back writes to the drive: refused read-only, whatever is held.
+#[test]
+fn nothing_is_put_back_from_a_read_only_folder() -> R {
+    let server = server();
+    let out = tempfile::tempdir()?;
+    let to = out.path().to_path_buf();
+    let mut b = Client::with_config(&server, "b", move |cfg| {
+        cfg.folder.read_only = Some(to.clone());
+    })?;
+    match b.engine.put_back(&[NodeId::new()]) {
+        Err(hbsync_engine::EngineError::ReadOnly(_)) => Ok(()),
+        other => Err(format!("{other:?}").into()),
+    }
+}

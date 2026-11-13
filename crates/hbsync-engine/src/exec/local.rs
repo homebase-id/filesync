@@ -621,6 +621,16 @@ impl Executor<'_> {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
+        // Outside the folder (else its scan would find what moved out as new items here), and
+        // made if it isn't there (one rename then; a stat while it is).
+        if out.starts_with(&self.folder.root) {
+            return Ok(Outcome::unsyncable(
+                "the folder changes move out to is inside this one",
+            ));
+        }
+        if let Err(e) = fs::create_dir_all(&out) {
+            return Ok(io_outcome(e));
+        }
         let mut moved = None;
         for candidate in moved_out_names(name, &from) {
             let to = out.join(&candidate);

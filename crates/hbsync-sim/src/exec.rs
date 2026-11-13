@@ -932,7 +932,7 @@ impl Sim {
             Some(_) => self.server.node(node).map(|(n, r)| (n.clone(), r)),
             None => None,
         };
-        if self.clients[c].read_only && writes_drive(&op) {
+        if self.clients[c].read_only && op.writes_remote() {
             let name = &self.clients[c].name;
             self.ledger
                 .read_only_wrote(|| Some(format!("{name} {op:?}")));
@@ -951,7 +951,7 @@ impl Sim {
             self.pull_mid_local(c, node, change);
         }
         let landed = outcome == Outcome::Landed;
-        let remote_write = outcome == Outcome::Done && writes_drive(&op);
+        let remote_write = outcome == Outcome::Done && op.writes_remote();
         let outcome = if landed { Outcome::Done } else { outcome };
         if outcome == Outcome::Done {
             // The sweep did something: its held deletes stay dirty (the engine's `progress`).
@@ -2914,23 +2914,13 @@ impl Sim {
     /// ([`Sim::with_refusals`]): written out by the simulator itself, not with the client's key
     /// (`hbsync_engine::refused::key`), so a key that leaves out an input is caught.
     fn request(&self, c: usize, op: &Op) -> Option<String> {
-        let sends = writes_drive(op) || matches!(op, Op::LocalDownload { .. });
+        let sends = op.writes_remote() || matches!(op, Op::LocalDownload { .. });
         (self.faults.refusing && sends)
             .then(|| format!("{op:?} {:?}", uploaded(&self.clients[c], op)))
     }
 }
 
 /// Whether `op` writes to the drive.
-fn writes_drive(op: &Op) -> bool {
-    matches!(
-        op,
-        Op::RemoteCreate { .. }
-            | Op::RemoteUpdate { .. }
-            | Op::RemoteTags { .. }
-            | Op::RemoteDelete { .. }
-    )
-}
-
 /// The base's extra the executor records for `local` at `version`.
 pub(crate) fn extra(local: &NodeState, version: Option<VersionTag>) -> BaseExtra {
     BaseExtra {
@@ -3113,6 +3103,7 @@ fn pulled_on(op: &Op, on: usize) -> bool {
                 | Op::LocalDelete { .. }
                 | Op::LocalFork { .. }
                 | Op::LocalDetach { .. }
+                | Op::LocalEvict { .. }
         ),
     }
 }

@@ -1181,7 +1181,16 @@ whatever changed here, and the plan holds no operation on the drive:
   synced), once nothing of that waits or is planned in another page; it comes back once the
   drive gives it a place. A name clash among the drive's items (case, normalization, or a name
   this device's ignored items hold) can't be renamed away: the item synced here keeps the name
-  (else the lowest id), and the others aren't synced here, each told so, as long as the clash
-  lasts. What a folder's removal there took along is left there as it is.
+  (else the lowest id), and the others aren't synced here, each told so (by its place on the
+  drive), as long as the clash lasts; each stays dirty, planned again at every sync (a page's
+  work a clash, rare: what another writer made). What a folder's removal there took along is
+  left there as it is, and a node no longer synced here with nothing of it here has its base
+  forgotten.
 - The mass-delete guard (§7) judges the deletes here as everywhere (a removal elsewhere of
-  every synced file is held).
+  every synced file is held); what it holds is confirmed or stays held: putting it back would
+  restore it on the drive, and is refused.
+- The folder things move out to is outside the read-only one (else its scan would find them
+  as new items there) and made where it is missing; on another volume a move out fails, and
+  is tried again each sync.
+- The executor refuses any write to the drive from a read-only folder, whatever planned it;
+  so does the read-only remote (what another identity shares: `PeerRemote`).

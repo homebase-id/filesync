@@ -745,6 +745,10 @@ impl Sim {
     /// in pages the rest of its sweep, as [`Sim::quiesce`] runs it). What a later page held
     /// meanwhile stays held, shown again.
     pub(crate) fn put_back(&mut self, c: usize) {
+        // Read-only (§13), the engine refuses it: what is held stays held.
+        if self.clients[c].read_only {
+            return;
+        }
         let held = std::mem::take(&mut self.clients[c].held);
         if held.is_empty() {
             return;

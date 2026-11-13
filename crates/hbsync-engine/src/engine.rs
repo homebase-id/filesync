@@ -428,8 +428,12 @@ impl Engine {
     /// The next sync does the rest; what a failure leaves is still held, and shown again.
     /// Costs a feed read, then one restore of them all: a request per wave and per thousand rows,
     /// and after it two reads per node restored ([`crate::held::after_restore`]). Returns how
-    /// many it put back.
+    /// many it put back. Refused in a read-only folder (§13), whose drive this device never
+    /// writes: what is held there is confirmed or stays held.
     pub fn put_back(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
+        if self.cfg.folder.read_only.is_some() {
+            return Err(EngineError::ReadOnly("nothing is put back on the drive"));
+        }
         self.held
             .put_back(&mut self.db, &self.drive, nodes, &self.cfg.folder.scope)
     }
@@ -514,6 +518,12 @@ impl Engine {
     /// (a node deleted here). `None` for a node this device never had.
     pub fn path_of(&mut self, node: NodeId) -> Result<Option<String>, StateError> {
         self.db.read(|s| activity::path_of(s, node))
+    }
+
+    /// Where `node` is on the drive as the folder sees it, `/`-separated: for what isn't here
+    /// (one a read-only folder leaves out, §13). `None` where its path doesn't reach the top.
+    pub fn drive_path_of(&mut self, node: NodeId) -> Result<Option<String>, StateError> {
+        self.db.read(|s| activity::drive_path_of(s, node))
     }
 
     /// A full local scan (tier C). The live observer does this incrementally in production.

@@ -85,6 +85,19 @@ pub(crate) fn path_of(s: &ReadTx<'_>, node: NodeId) -> Result<Option<String>, St
     Ok(Some(names.join("/")))
 }
 
+/// [`path_of`] as the mirror has it: where `node` is on the drive, in the folder's coordinates.
+pub(crate) fn drive_path_of(s: &ReadTx<'_>, node: NodeId) -> Result<Option<String>, StateError> {
+    let up = crate::walk::up::<_, StateError>(node, |at| {
+        Ok(s.get_mirror(at)?.map(|m| (m.name, m.parent)))
+    })?;
+    if up.end != crate::walk::End::Top {
+        return Ok(None);
+    }
+    let mut names = up.items;
+    names.reverse();
+    Ok(Some(names.join("/")))
+}
+
 fn folder_of(path: &str) -> &str {
     path.rsplit_once('/').map_or("", |(folder, _)| folder)
 }

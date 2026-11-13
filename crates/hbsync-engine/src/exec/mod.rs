@@ -266,6 +266,12 @@ impl<'a> Executor<'a> {
                 self.run_batch(&mut batch)?;
                 continue;
             };
+            // Read-only (§13): nothing goes to the drive, whatever planned it.
+            if self.folder.read_only.is_some() && op.writes_remote() {
+                let never = Outcome::unsyncable("the folder is read-only: the drive isn't written");
+                self.handle(op, attempts, never, None)?;
+                continue;
+            }
             // Everything else runs on its own, in order: after the batch.
             let pooled = op.pooled();
             let mut target = if pooled { self.move_target(&op)? } else { None };
