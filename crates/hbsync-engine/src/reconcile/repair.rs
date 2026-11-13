@@ -405,7 +405,6 @@ impl Reconciler<'_> {
                     {
                         self.evicted.insert(node);
                     }
-                    self.unadopt(node);
                 }
                 Parent::Wait => {
                     // The parent is unknown (or not a folder, or itself waiting): wait for more
@@ -757,21 +756,20 @@ impl Reconciler<'_> {
                 if group.len() <= keep {
                     continue;
                 }
-                // A rename needs every name of the folder ([`super::coverage`]).
-                uncovered |= part;
+                // A rename needs every name of the folder ([`super::coverage`]); read-only, none
+                // is renamed.
+                uncovered |= part && !self.masking.read_only;
                 // The lowest id keeps the name, except that a deferred node (a file still
                 // being written) is never renamed: it wins, and is left alone if it loses;
                 // and an orphan moving in, or Recovered files or Desktops made beside a folder
                 // of its name, loses to what is there.
-                // Read-only (§13), what holds the name here keeps it: a loser can't be renamed on
-                // the drive.
+                // Read-only (§13), what is synced here under the name keeps it (or holds it
+                // here): a loser can't be renamed on the drive.
+                let at_name = |s: &NodeState| s.parent == parent && name_key(&s.name) == key;
                 let here = |n: &NodeId| {
                     self.masking.read_only
-                        && self
-                            .input
-                            .local
-                            .get(*n)
-                            .is_some_and(|l| l.parent == parent && name_key(&l.name) == key)
+                        && (self.input.base.get(*n).is_some_and(at_name)
+                            || self.input.local.get(*n).is_some_and(at_name))
                 };
                 group.sort_by_cached_key(|n| {
                     let arriving = self.adopted.contains(n) || n.is_fixed_folder();

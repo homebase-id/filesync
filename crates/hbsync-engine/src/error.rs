@@ -25,15 +25,15 @@ pub enum EngineError {
     /// §8b): a suspicion only, the rows stay; asked again a minute on, each is gone for good
     /// (or there). `rest`: the rows of the restore still in Recently deleted, with their names,
     /// to restore again; `went`: the names of those it found deleted for good meanwhile.
-    /// Asked to write to the drive from a read-only folder (sync semantics §13).
-    #[error("this folder is read-only: {0}")]
-    ReadOnly(&'static str),
     #[error("{}", not_there(*files))]
     NotThereOnce {
         files: usize,
         rest: Vec<(hbsync_types::NodeId, String)>,
         went: Vec<String>,
     },
+    /// Asked to write to the drive from a read-only folder (sync semantics §13).
+    #[error("this folder is read-only: {0}")]
+    ReadOnly(&'static str),
 }
 
 /// "Homebase says one item isn't there", or "… 3 items aren't there".

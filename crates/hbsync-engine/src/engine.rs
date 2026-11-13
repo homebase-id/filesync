@@ -619,8 +619,9 @@ impl Engine {
             Pull::IfBehind => self.drive.catch_up(folder)?,
         };
         // A role folder's top on the drive, or this device's Desktop's: joined, restored, or
-        // made.
+        // made; never from a read-only folder (§13), which doesn't write the drive.
         match self.part {
+            _ if self.cfg.folder.read_only.is_some() => {}
             Part::Role(role) => self.drive.ensure_role(role)?,
             Part::Desktop => self.ensure_desktop(self.cfg.folder.scope.top)?,
             Part::Main => {}

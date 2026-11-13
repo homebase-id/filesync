@@ -1189,7 +1189,7 @@ whatever changed here, and the plan holds no operation on the drive:
 - The mass-delete guard (§7) judges the deletes here as everywhere (a removal elsewhere of
   every synced file is held); what it holds is confirmed or stays held: putting it back would
   restore it on the drive, and is refused.
-- The folder things move out to is outside the read-only one (else its scan would find them
+- The folder things move out to is a full path outside the read-only one (else its scan would find them
   as new items there) and made where it is missing; on another volume a move out fails, and
   is tried again each sync.
 - The executor refuses any write to the drive from a read-only folder, whatever planned it;

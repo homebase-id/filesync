@@ -380,14 +380,26 @@ fn build(
         b.load_named(folder, &keys)?;
     }
     // A folder that is gone remotely (or masked) but present locally may be deleted or
-    // detached: load all of it.
+    // detached: load all of it. So may one whose folder is gone from the drive, read-only
+    // (§13: let go of, deleted or moved out with what is below it).
     // Each folder once: a dirty folder inside one already loaded is in it.
     let hidden = crate::mask::hidden(&b.input.remote, filter, scope);
+    let orphaned = |remote: &crate::tree::Tree, node: NodeId| {
+        ctx.read_only.is_some()
+            && remote.get(node).is_some_and(|s| {
+                !s.parent.is_root()
+                    && remote
+                        .get(s.parent)
+                        .is_none_or(|p| p.kind != NodeKind::Folder)
+            })
+    };
     let mut loaded: HashSet<NodeId> = HashSet::new();
     for &node in dirty {
         if !loaded.contains(&node)
-            && b.input.base.contains(node)
-            && (!b.input.remote.contains(node) || hidden.contains(&node))
+            && (b.input.base.contains(node) || orphaned(&b.input.remote, node))
+            && (!b.input.remote.contains(node)
+                || hidden.contains(&node)
+                || orphaned(&b.input.remote, node))
             && let Some(row) = s
                 .local_by_node(node)?
                 .filter(|r| r.kind == NodeKind::Folder)

@@ -60,7 +60,9 @@ fn a_read_only_folder_keeps_what_changed_and_follows_the_drive() -> R {
 /// as one without it, every change here kept once where it went, the drive as it was.
 #[test]
 fn a_crash_at_any_commit_while_moving_out_loses_nothing() -> R {
-    for at in 0..22 {
+    // Commit after commit, till the sync has no more.
+    for at in 0.. {
+        let mut any = false;
         for before in [true, false] {
             for kept in [common::Kept::All, common::Kept::Durable(None)] {
                 let case = format!("at {at}, before {before}, {kept:?}");
@@ -79,11 +81,9 @@ fn a_crash_at_any_commit_while_moving_out_loses_nothing() -> R {
                 b.write("Docs/report.txt", "mine")?;
                 b.write("New/x.txt", "x")?;
                 b.write("top.txt", "edited")?;
-                // Every commit of the sync (21 of them) crashes once.
-                let crashed = common::crash(&mut b, kept, move |now, n| {
+                any |= common::crash(&mut b, kept, move |now, n| {
                     n == at && (now == Commit::Before) == before
                 })?;
-                assert!(crashed || at > 20, "{case}: the sync has fewer commits now");
                 b.sync()?;
                 assert_eq!(versions(&server), drive, "{case}");
                 assert_eq!(b.tree_text(""), a.tree_text(""), "{case}");
@@ -98,6 +98,10 @@ fn a_crash_at_any_commit_while_moving_out_loses_nothing() -> R {
                     "{case}"
                 );
             }
+        }
+        if !any {
+            assert!(at > 10, "the sync crashed at {at} commits only");
+            break;
         }
     }
     Ok(())

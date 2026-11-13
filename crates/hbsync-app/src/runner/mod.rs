@@ -825,7 +825,9 @@ impl Runner {
                         // What it didn't put back is still held, and shown again; the first
                         // time, it runs once more a minute on (a file the identity said once
                         // isn't there is gone for good then, and goes up again from here).
-                        let then = if once_more {
+                        // A read-only folder never puts back (§13): nothing to try again.
+                        let refused = matches!(e, hbsync_engine::EngineError::ReadOnly(_));
+                        let then = if once_more || refused {
                             "what is still to review is shown again, to answer again"
                         } else {
                             let at = Instant::now() + self.cfg.put_back_again;

@@ -2920,7 +2920,6 @@ impl Sim {
     }
 }
 
-/// Whether `op` writes to the drive.
 /// The base's extra the executor records for `local` at `version`.
 pub(crate) fn extra(local: &NodeState, version: Option<VersionTag>) -> BaseExtra {
     BaseExtra {

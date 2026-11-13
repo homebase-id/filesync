@@ -3328,3 +3328,20 @@ fn read_only_a_name_clash_leaves_the_newcomer_out() {
     assert_eq!(plan.conflicts, [Conflict::NameTaken { node: new }]);
     assert!(plan.deferred.contains(&new));
 }
+
+/// The item synced here keeps its name though this device renamed it meanwhile: the rename is
+/// undone, and the newcomer (the lower id) is the one left out.
+#[test]
+fn read_only_the_synced_item_keeps_its_name_through_a_rename_here() {
+    let [newcomer, synced] = ids(2)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(synced, file(ROOT, "a.txt", "a"))
+        .local(synced, Some(file(ROOT, "b.txt", "a")))
+        .remote(newcomer, Some(file(ROOT, "A.txt", "new")));
+    let plan = w.plan();
+    assert!(!writes_drive(&plan));
+    assert_eq!(kinds(&plan.ops), ["move"]);
+    assert_eq!(plan.conflicts, [Conflict::NameTaken { node: newcomer }]);
+}
