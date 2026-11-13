@@ -596,6 +596,23 @@ impl Executor<'_> {
         if !self.on_disk_unchanged(&row) {
             return Ok(rescan(&mut self.report, &row.path));
         }
+        // Parked for what took its name: back under a name of its own first (its original if
+        // free), so one that can't move out isn't left hidden. It moves out under its original
+        // name all the same.
+        let original = self.db.read(|s| view::parked_place(s, &row))?;
+        let row = match &original {
+            None => row,
+            Some(original) => {
+                let is_dir = row.kind == NodeKind::Folder;
+                let Some(to) = release_place(self.db, self.folder, original, is_dir)? else {
+                    return Ok(Outcome::unsyncable("no free name to leave the parked one"));
+                };
+                match restore_parked(self.db, &self.disk, &row, &to)? {
+                    Ok(row) => row,
+                    Err(e) => return Ok(io_outcome(e)),
+                }
+            }
+        };
         let (place, unexpected) = self.db.read(|s| {
             let mut unexpected = false;
             for r in s.local_subtree(&row.path)? {
@@ -604,7 +621,10 @@ impl Executor<'_> {
                     break;
                 }
             }
-            Ok((view::place(s, &row)?, unexpected))
+            Ok((
+                original.clone().unwrap_or(view::place(s, &row)?),
+                unexpected,
+            ))
         })?;
         if unexpected {
             return Ok(Outcome::stale(

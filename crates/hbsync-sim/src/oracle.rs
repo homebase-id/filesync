@@ -502,8 +502,13 @@ impl Sim {
                 }
             }
             // The tags as the client holds them, on both sides.
-            let server_view = view(&held_by(&synced, client.os));
-            let local_view = view(&held_by(&visible, client.os));
+            // Read-only (§13), an executable bit changed here stays as it is.
+            let x_kept = |tree: Tree| match client.read_only {
+                true => without_x(tree),
+                false => tree,
+            };
+            let server_view = view(&x_kept(held_by(&synced, client.os)));
+            let local_view = view(&x_kept(held_by(&visible, client.os)));
             if local_view != server_view {
                 return Err(format!(
                     "{} diverged:\n  local:  {local_view:?}\n  server: {server_view:?}",
@@ -1331,6 +1336,20 @@ pub(crate) fn tag_names(tags: &Tags) -> Vec<String> {
 
 /// A tree as a sorted list of `path kind content id`: node ids are part of identity across
 /// clients, so two trees only match if the same nodes sit at the same paths.
+/// `tree` with every file's executable bit cleared.
+fn without_x(mut tree: Tree) -> Tree {
+    let ids: Vec<NodeId> = tree.ids().collect();
+    for n in ids {
+        if let Some(mut s) = tree.get(n).cloned()
+            && let Some(c) = s.content.as_mut()
+        {
+            c.executable = false;
+            tree.insert(n, s);
+        }
+    }
+    tree
+}
+
 fn view(tree: &Tree) -> Vec<String> {
     view_with(tree, &HashMap::new())
 }

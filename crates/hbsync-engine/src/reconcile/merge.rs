@@ -392,14 +392,17 @@ impl Reconciler<'_> {
 
 /// Whether going back to the drive's state `r` loses what changed here (`lc`, to `l`), in a
 /// read-only folder (§13): an item made here (not the drive's own, adopted), or a file's bytes
-/// or executable bit changed here to other than the drive's. A move, a delete or tags here
-/// lose nothing: the drive's place, item and tags come back.
+/// changed here to other than the drive's. A move, a delete or tags here lose nothing: the
+/// drive's place, item and tags come back; nor does an executable bit, left as it is here.
 pub(super) fn loses_here(lc: Change, l: Option<&NodeState>, r: Option<&NodeState>) -> bool {
     if !content_changed(lc) {
         return false;
     }
     match (l, r) {
-        (Some(l), Some(r)) => l.kind != r.kind || (l.kind == NodeKind::File && !same_edit(l, r)),
+        (Some(l), Some(r)) => {
+            let bytes = |s: &NodeState| s.content.map(|c| c.hash);
+            l.kind != r.kind || bytes(l) != bytes(r)
+        }
         (Some(_), None) => true,
         (None, _) => false,
     }

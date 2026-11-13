@@ -138,8 +138,8 @@ impl<'a> Disk<'a> {
 
     /// The folder a read-only folder's changes move out to (§13), checked once a run before
     /// it is made where it is missing: a full path without `..`, outside the root as the file
-    /// system resolves both (else its scan would find what moved out as new items here). Why
-    /// not, where it isn't one.
+    /// system resolves both (else its scan would find what moved out as new items here), on
+    /// the root's volume. Why not, where it isn't one.
     pub(super) fn out_folder(&mut self, db: &mut StateDb) -> Result<&'a Path, String> {
         let out = self
             .folder
@@ -162,6 +162,11 @@ impl<'a> Disk<'a> {
             fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
             for made in missing {
                 db.changed(made);
+            }
+            // On the root's volume: a move out is one rename.
+            let volume = |p: &Path| hbsync_platform::stat(p).map(|m| m.file_id.volume).ok();
+            if volume(out) != volume(self.root) {
+                return Err("the folder changes move out to is on another volume".into());
             }
             self.out_ready = true;
         }

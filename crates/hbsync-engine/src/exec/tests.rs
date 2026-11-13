@@ -5112,3 +5112,33 @@ fn a_read_only_folder_sends_nothing_to_the_drive() -> R {
     assert_eq!(h.remote.server().live().count(), 0);
     Ok(())
 }
+
+/// An item parked for what took its name gets a name of its own again before it moves out: one
+/// that can't go (its out folder refused) isn't left hidden under the parked name.
+#[test]
+fn a_parked_item_that_cannot_move_out_is_not_left_hidden() -> R {
+    let mut h = Harness::new()?;
+    // Inside the folder: refused.
+    h.folder.read_only = Some(h.folder.root.join("out"));
+    let (n, taker) = (NodeId::new(), NodeId::new());
+    let parked = layout::parked_name(n);
+    h.local_folder(&parked, n)?;
+    let original = RelPath::new("New")?;
+    h.db.write(|s| s.folder().put_parked(n, &original))?;
+    h.local_file("New", taker, b"the drive's")?;
+    let evict = Op::LocalEvict {
+        node: n,
+        subtree: vec![n],
+    };
+    let report = h.run(vec![evict])?;
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|(_, why)| matches!(why, Skip::Unsyncable(_))),
+        "{report:?}"
+    );
+    assert!(!h.at(&parked)?.exists(), "left under the parked name");
+    assert!(h.at("New (conflict 1)")?.is_dir());
+    Ok(())
+}

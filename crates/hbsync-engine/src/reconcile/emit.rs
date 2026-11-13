@@ -440,7 +440,9 @@ impl Reconciler<'_> {
         let (Some(lc), Some(tc)) = (&l.content, &t.content) else {
             return true;
         };
-        if lc.executable != tc.executable {
+        // Read-only (§13), a bit changed here stays: undone, it came back on a volume that
+        // doesn't keep it, sync after sync.
+        if lc.executable != tc.executable && !self.masking.read_only {
             return false;
         }
         if lc.hash.algorithm == tc.hash.algorithm {

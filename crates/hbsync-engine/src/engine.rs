@@ -622,7 +622,11 @@ impl Engine {
         // A role folder's top on the drive, or this device's Desktop's: joined, restored, or
         // made; never from a read-only folder (§13), which doesn't write the drive.
         match self.part {
-            _ if self.cfg.folder.read_only.is_some() => {}
+            // A main folder only: a role folder or a Desktop is never read-only.
+            Part::Main if self.cfg.folder.read_only.is_some() => {}
+            _ if self.cfg.folder.read_only.is_some() => {
+                return Err(EngineError::ReadOnly("only a main folder syncs read-only"));
+            }
             Part::Role(role) => self.drive.ensure_role(role)?,
             Part::Desktop => self.ensure_desktop(self.cfg.folder.scope.top)?,
             Part::Main => {}

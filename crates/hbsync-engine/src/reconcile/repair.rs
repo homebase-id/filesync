@@ -659,12 +659,8 @@ impl Reconciler<'_> {
             // And names this device's held removals keep there (§7): the same.
             let masked = self.masks.names.get(&parent);
             let kept = self.kept.get(&parent);
-            // Read-only (§13), nothing goes up to clash with them there: none is taken.
-            let read_only = self.masking.read_only;
             let taken = |key: &str| {
-                !read_only
-                    && (masked.is_some_and(|m| m.contains(key))
-                        || kept.is_some_and(|k| k.contains(key)))
+                masked.is_some_and(|m| m.contains(key)) || kept.is_some_and(|k| k.contains(key))
             };
             // Each name once, and again when a node left where it is for a name comes to it
             // (a chain of name waits in one folder, judged in one pass).
@@ -752,7 +748,17 @@ impl Reconciler<'_> {
                 }
                 // Alone on a name taken here: what another page plans is its page's (§6.5).
                 group.retain(|n| !self.elsewhere(*n));
-                let keep = usize::from(!taken(&key));
+                // Read-only (§13), what is synced here under the name keeps it (or holds it
+                // here): a loser can't be renamed on the drive. A name this device's masks hold
+                // is kept by such an item all the same (none of theirs is here with it); one
+                // held by them alone leaves every newcomer out (one ignored here may be on it).
+                let at_name = |s: &NodeState| s.parent == parent && name_key(&s.name) == key;
+                let here = |n: &NodeId| {
+                    self.masking.read_only
+                        && (self.input.base.get(*n).is_some_and(at_name)
+                            || self.input.local.get(*n).is_some_and(at_name))
+                };
+                let keep = usize::from(!taken(&key) || group.iter().any(here));
                 if group.len() <= keep {
                     continue;
                 }
@@ -763,14 +769,6 @@ impl Reconciler<'_> {
                 // being written) is never renamed: it wins, and is left alone if it loses;
                 // and an orphan moving in, or Recovered files or Desktops made beside a folder
                 // of its name, loses to what is there.
-                // Read-only (§13), what is synced here under the name keeps it (or holds it
-                // here): a loser can't be renamed on the drive.
-                let at_name = |s: &NodeState| s.parent == parent && name_key(&s.name) == key;
-                let here = |n: &NodeId| {
-                    self.masking.read_only
-                        && (self.input.base.get(*n).is_some_and(at_name)
-                            || self.input.local.get(*n).is_some_and(at_name))
-                };
                 group.sort_by_cached_key(|n| {
                     let arriving = self.adopted.contains(n) || n.is_fixed_folder();
                     (!self.deferred.contains(n), !here(n), arriving, *n)

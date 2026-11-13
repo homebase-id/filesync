@@ -1155,8 +1155,8 @@ another identity shares with this one; the engine's `FolderCtx::read_only`, a fo
 it given to move things out to, on the same volume). Every node's target is the drive's state,
 whatever changed here, and the plan holds no operation on the drive:
 
-- **Changed here, kept by moving it out.** A file whose bytes or executable bit changed here
-  to other than the drive's, and an item made here (a new folder as one, with what is in it),
+- **Changed here, kept by moving it out.** A file whose bytes changed here to other than the
+  drive's, and an item made here (a new folder as one, with what is in it),
   move out of the folder first, in one rename, under their own name in the folder they go to,
   else the first free of `name (from <folder>)`, `name (from <folder> 2)` … (a hundred). Their
   rows go, their bases stay: the next plan finds the drive's version missing here and brings
@@ -1180,7 +1180,8 @@ whatever changed here, and the plan holds no operation on the drive:
 - **A name-clash loser that changed here** still moves out (only its syncing waits).
 - **Undone.** A move or rename here goes back to the drive's place; a delete here comes back
   (downloaded again); tags here become the drive's. Nothing of these moves out: the drive holds
-  what they changed.
+  what they changed. An executable bit changed here stays as it is (the bytes are the drive's;
+  undone, it came back sync after sync on a volume that doesn't keep it).
 - **The same item on both sides** (adopted, the drive's bytes) stays.
 - **Filters** (section 10). An item ignored here since it synced stays on the drive (it never
   leaves it): masked, as one never synced here, its item here kept here only. One moved out of
@@ -1202,7 +1203,9 @@ whatever changed here, and the plan holds no operation on the drive:
   every synced file is held); what it holds is confirmed or stays held: putting it back would
   restore it on the drive, and is refused.
 - The folder things move out to is a full path outside the read-only one (else its scan would find them
-  as new items there) and made where it is missing; on another volume a move out fails, and
-  is tried again each sync.
+  as new items there) and made where it is missing, on the folder's volume (a move out is one
+  rename): one that isn't is refused, told, each move out staying where it is. An item parked
+  under a temporary name for what took its name (§8) is given a name of its own again before
+  it moves out, so one that can't go isn't left hidden.
 - The executor refuses any write to the drive from a read-only folder, whatever planned it;
   so does the read-only remote (what another identity shares: `PeerRemote`).
