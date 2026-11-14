@@ -46,6 +46,7 @@ use crate::settle::{
 use crate::transfer::{
     Download, Job, JobError, JobResult, SendHash, TransferConfig, run_jobs_while,
 };
+use crate::tree::moved_out_names;
 use crate::view;
 use hbsync_local::layout;
 
@@ -96,6 +97,9 @@ pub(crate) struct Executor<'a> {
     refusals: Refusals,
     /// The sync root, written only through it.
     disk: Disk<'a>,
+    /// Where what moved out of a read-only folder is told (§13), whatever the run's end
+    /// (none: not told).
+    moved_out: Option<&'a mut Vec<(String, std::path::PathBuf)>>,
 }
 
 /// What a run goes by of the drive: what its operations' answers said, and what it read of it
@@ -198,7 +202,18 @@ impl<'a> Executor<'a> {
             counted: HashSet::new(),
             refusals: Refusals::default(),
             disk: Disk::new(folder, &cfg.hooks),
+            moved_out: None,
         }
+    }
+
+    /// Tells what moves out of a read-only folder into `sink` as it goes (§13), so a run that
+    /// fails later still tells it.
+    pub(crate) fn with_moved_out(
+        mut self,
+        sink: &'a mut Vec<(String, std::path::PathBuf)>,
+    ) -> Self {
+        self.moved_out = Some(sink);
+        self
     }
 
     /// Stops the run between operations once `stop` is set: each operation is done or not
@@ -265,6 +280,12 @@ impl<'a> Executor<'a> {
                 self.run_batch(&mut batch)?;
                 continue;
             };
+            // Read-only (§13): nothing goes to the drive, whatever planned it.
+            if self.folder.read_only.is_some() && op.writes_remote() {
+                let never = Outcome::unsyncable("the folder is read-only: the drive isn't written");
+                self.handle(op, attempts, never, None)?;
+                continue;
+            }
             // Everything else runs on its own, in order: after the batch.
             let pooled = op.pooled();
             let mut target = if pooled { self.move_target(&op)? } else { None };
@@ -709,6 +730,7 @@ impl<'a> Executor<'a> {
             }
             Op::Settle { .. } => Ok(Outcome::Done),
             Op::LocalDetach { node, new_node } => self.detach(*node, *new_node),
+            Op::LocalEvict { node, subtree } => self.evict(*node, subtree),
             Op::Forget { node, subtree } if subtree.is_empty() => self.drop_unsynced_base(*node),
             Op::Forget { node, subtree } => self.delete_here(*node, subtree, true),
         };

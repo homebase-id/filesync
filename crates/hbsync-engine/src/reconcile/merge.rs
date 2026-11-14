@@ -40,6 +40,17 @@ pub fn taken_along(i: &Input, left_out: &HashSet<NodeId>) -> HashSet<NodeId> {
     )
 }
 
+impl<'a> Reconciler<'a> {
+    /// The drive's state of `node`, but none where a folder's removal took it along (it isn't
+    /// in the tree, [`taken_along`]).
+    pub(super) fn remote_state(&self, node: NodeId) -> Option<&'a NodeState> {
+        self.input
+            .remote
+            .get(node)
+            .filter(|_| !self.taken.contains(&node))
+    }
+}
+
 impl Reconciler<'_> {
     // ---- 1–2: classify and merge ----
 
@@ -93,6 +104,32 @@ impl Reconciler<'_> {
         }
     }
 
+    /// Whether `node` is new here (neither synced nor on the drive), in a folder new here that
+    /// waits: for a file in it still being written, or for another page (§6.5), up to the first
+    /// folder above it that isn't new here.
+    fn in_a_new_folder_that_waits(&self, node: NodeId) -> bool {
+        let i = self.input;
+        let new_here =
+            |n: NodeId| i.local.contains(n) && !i.base.contains(n) && !i.remote.contains(n);
+        if !new_here(node) {
+            return false;
+        }
+        let mut at = node;
+        for _ in 0..hbsync_state::MAX_DEPTH {
+            let Some(parent) = i.local.get(at).map(|l| l.parent) else {
+                return false;
+            };
+            if parent.is_root() || !new_here(parent) {
+                return false;
+            }
+            if self.waits.contains(&parent) || self.elsewhere(parent) {
+                return true;
+            }
+            at = parent;
+        }
+        false
+    }
+
     /// Whether `node`'s merge would make a conflict copy: a file edited on both sides, not
     /// alike, as [`Reconciler::merge_both`] decides.
     fn would_fork(&self, node: NodeId) -> bool {
@@ -118,7 +155,7 @@ impl Reconciler<'_> {
         let Some(t) = target else {
             return false;
         };
-        let remote = i.remote.get(node).filter(|_| !self.taken.contains(&node));
+        let remote = self.remote_state(node);
         let gone = i.base.contains(node) || i.removed.contains_key(&node);
         [self.local_state(node).as_ref(), remote]
             .into_iter()
@@ -153,17 +190,7 @@ impl Reconciler<'_> {
                 let moved = !b.same_place(l);
                 let edited = match (&b.content, &l.content) {
                     (Some(bc), Some(lc)) => {
-                        let base_local = i.base_extra.get(&node).and_then(|e| e.local_hash);
-                        let local_now = lc.hash;
-                        let bytes_changed = match base_local {
-                            Some(h) => h != local_now,
-                            // Never had local bytes (online-only): unchanged unless replaced.
-                            None => {
-                                self.content_state(node) != ContentState::OnlineOnly
-                                    && bc.hash != local_now
-                            }
-                        };
-                        bytes_changed || bc.executable != lc.executable
+                        self.bytes_changed_here(node, bc, lc) || bc.executable != lc.executable
                     }
                     _ => false,
                 };
@@ -173,6 +200,43 @@ impl Reconciler<'_> {
                     Change::Unchanged
                 }
             }
+        }
+    }
+
+    /// Whether the bytes of `node`'s file here (`lc`) aren't the ones it synced with (`bc`, the
+    /// base's): compared with the local hash it synced at, where it has one.
+    fn bytes_changed_here(&self, node: NodeId, bc: &FileContent, lc: &FileContent) -> bool {
+        match self.input.base_extra.get(&node).and_then(|e| e.local_hash) {
+            Some(h) => h != lc.hash,
+            // Never had local bytes (online-only): unchanged unless replaced.
+            None => self.content_state(node) != ContentState::OnlineOnly && bc.hash != lc.hash,
+        }
+    }
+
+    /// Whether going back to the drive's state loses what changed here, in a read-only folder
+    /// (§13): an item made here that doesn't hold the drive's bytes (not one adopted), or a
+    /// file whose bytes changed here (against what it synced with) to other than the drive's.
+    /// A move, a delete or tags here lose nothing: the drive's place, item and tags come back;
+    /// nor does an executable bit, left as it is here where the drive's didn't change.
+    pub(super) fn loses_here(&self, node: NodeId) -> bool {
+        let i = self.input;
+        let Some(l) = i.local.get(node) else {
+            return false;
+        };
+        let r = self.remote_state(node);
+        // The drive holds what is here: the same kind, a folder, or a file of the same bytes.
+        let drives = |r: &NodeState| {
+            r.kind == l.kind && (l.kind == NodeKind::Folder || self.same_bytes(node, l, r))
+        };
+        match i.base.get(node) {
+            None => !r.is_some_and(drives),
+            Some(b) if b.kind != l.kind => true,
+            Some(b) => match (&b.content, &l.content) {
+                (Some(bc), Some(lc)) => {
+                    self.bytes_changed_here(node, bc, lc) && !r.is_some_and(drives)
+                }
+                _ => false,
+            },
         }
     }
 
@@ -210,6 +274,12 @@ impl Reconciler<'_> {
             self.leave_as_is(node);
             return;
         }
+        // Read-only (§13), what is new here in a new folder here that waits moves out with it,
+        // as one, once it can: it waits as it is too.
+        if self.masking.read_only && self.in_a_new_folder_that_waits(node) {
+            self.leave_as_is(node);
+            return;
+        }
         if i.local_unhashed.contains(&node) {
             self.defer(node);
             return;
@@ -226,11 +296,16 @@ impl Reconciler<'_> {
         );
         let (lc, rc) = (self.local_change(node), self.remote_change(node));
         // One a folder's removal took along isn't in the tree.
-        let r = i.remote.get(node).filter(|_| !self.taken.contains(&node));
+        let r = self.remote_state(node);
         let (b, l) = (i.base.get(node), self.local_state(node));
+        let masked = self.masks.masked.contains(&node);
+        // Read-only (§13): what going back to the drive's would lose here moves out first.
+        let evict = self.masking.read_only && !masked && self.loses_here(node);
         let (target, origin): (Option<NodeState>, Origin) = match (lc, rc) {
             // Gone from what this device syncs; what must stay here was detached (§10).
-            _ if self.masks.masked.contains(&node) => (None, Origin::Base),
+            _ if masked => (None, Origin::Base),
+            // Read-only (§13): the drive's, whatever changed here.
+            _ if self.masking.read_only => (r.cloned(), r.map_or(Origin::Base, |_| Origin::Remote)),
             (Change::Absent | Change::Unchanged, Change::Absent | Change::Unchanged) => {
                 (r.or(l.as_ref()).or(b).cloned(), Origin::Base)
             }
@@ -277,9 +352,10 @@ impl Reconciler<'_> {
             (target, _) => (target, origin),
         };
         // Tags merge on their own, whatever else changed (§11); a merge too large for the
-        // drive leaves the drive's.
+        // drive leaves the drive's. Read-only, the drive's (§13).
         if let (Some(t), Some(l), Some(r)) = (&mut target, &l, r)
-            && !self.masks.masked.contains(&node)
+            && !masked
+            && !self.masking.read_only
         {
             let none = Tags::default();
             let merged = Tags::merge(b.map_or(&none, |b| &b.tags), &l.tags, &r.tags);
@@ -304,6 +380,9 @@ impl Reconciler<'_> {
         }
         self.scope.insert(node);
         self.origin.insert(node, origin);
+        if evict {
+            self.evicted.insert(node);
+        }
         match target {
             Some(t) => {
                 self.merged.insert(node, t);

@@ -92,6 +92,18 @@ impl Harness {
         Executor::new(&mut self.db, &self.remote, &self.folder, &self.cfg).run(ops)
     }
 
+    /// [`Harness::run`], with what moved out of a read-only folder (§13).
+    fn run_moving_out(
+        &mut self,
+        ops: Vec<Op>,
+    ) -> Result<(ExecReport, Vec<(String, std::path::PathBuf)>), StateError> {
+        let mut moved = Vec::new();
+        let report = Executor::new(&mut self.db, &self.remote, &self.folder, &self.cfg)
+            .with_moved_out(&mut moved)
+            .run(ops)?;
+        Ok((report, moved))
+    }
+
     fn base(&mut self, node: NodeId) -> Result<Option<BaseRow>, StateError> {
         self.db.read(|s| s.get_base(node))
     }
@@ -4998,4 +5010,147 @@ fn an_upload_over_a_bit_changed_elsewhere_never_had_it() {
     // No agreed version: anything on the drive is one this device never had.
     assert!(never_had(Some((a, false)), None, false));
     assert!(!never_had(None, None, false));
+}
+
+/// The folder of `h` made read-only, what changed there moving out to a folder of its own
+/// (same volume, removed with the test): it.
+fn read_only(h: &mut Harness) -> Result<tempfile::TempDir, Box<dyn std::error::Error>> {
+    let out = tempfile::tempdir()?;
+    h.folder.read_only = Some(out.path().to_path_buf());
+    Ok(out)
+}
+
+/// What moves out of a read-only folder (§13) goes in one rename, with what is in it, under
+/// its own name where it goes, or the first free one naming the folder it came from; its rows
+/// go, and a synced node it took along is planned again (its base kept, for the drive's
+/// version to come back).
+#[test]
+fn an_item_moves_out_of_a_read_only_folder_under_a_free_name() -> R {
+    let mut h = Harness::new()?;
+    let dir = read_only(&mut h)?;
+    let out = dir.path();
+    let from = h.folder.root.file_name().ok_or("no name")?.to_owned();
+    let (n, x, a) = (NodeId::new(), NodeId::new(), NodeId::new());
+    h.local_folder("New", n)?;
+    h.local_file("New/x", x, b"x")?;
+    h.local_file("a.txt", a, b"mine")?;
+    // `a.txt` synced before (edited here since): its base stays, and it is planned again.
+    let state = NodeState::file(NodeId::ROOT, "a.txt", h.content(b"a"));
+    h.db.write(|s| s.folder().put_base(&BaseRow::new(a, state, some_version())))?;
+    // Where they go, `a.txt` is taken already.
+    fs::write(out.join("a.txt"), b"other")?;
+    let mut whole = vec![n, x];
+    whole.sort();
+    let (report, moved_out) = h.run_moving_out(vec![
+        Op::LocalEvict {
+            node: n,
+            subtree: whole,
+        },
+        Op::LocalEvict {
+            node: a,
+            subtree: vec![a],
+        },
+    ])?;
+    assert!(
+        report.skipped.is_empty() && report.failed.is_empty(),
+        "{report:?}"
+    );
+    assert_eq!(fs::read(out.join("New").join("x"))?, b"x");
+    let renamed = format!("a (from {}).txt", from.to_string_lossy());
+    assert_eq!(fs::read(out.join(&renamed))?, b"mine");
+    assert_eq!(fs::read(out.join("a.txt"))?, b"other");
+    assert!(!h.at("New")?.exists() && !h.at("a.txt")?.exists());
+    let moved: Vec<&str> = moved_out.iter().map(|(p, _)| p.as_str()).collect();
+    assert_eq!(moved, ["New", "a.txt"]);
+    assert_eq!(moved_out[1].1, out.join(&renamed));
+    for node in [n, x, a] {
+        assert!(h.db.read(|s| s.local_by_node(node))?.is_none());
+    }
+    assert!(h.base(a)?.is_some());
+    assert!(h.db.read(|s| s.is_dirty(a))?);
+    Ok(())
+}
+
+/// A synced item in a folder about to move out that the plan didn't expect there (moved in
+/// since) makes it wait for the next plan: it stays, with all it holds.
+#[test]
+fn a_move_out_waits_for_a_synced_item_it_did_not_expect() -> R {
+    let mut h = Harness::new()?;
+    let out = read_only(&mut h)?;
+    let (n, a) = (NodeId::new(), NodeId::new());
+    h.local_folder("New", n)?;
+    h.local_file("New/a.txt", a, b"a")?;
+    let state = NodeState::file(NodeId::ROOT, "a.txt", h.content(b"a"));
+    h.db.write(|s| s.folder().put_base(&BaseRow::new(a, state, some_version())))?;
+    let evict = Op::LocalEvict {
+        node: n,
+        subtree: vec![n],
+    };
+    let report = h.run(vec![evict.clone()])?;
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|(op, why)| *op == evict && matches!(why, Skip::Stale(_))),
+        "{report:?}"
+    );
+    assert_eq!(fs::read(h.at("New/a.txt")?)?, b"a");
+    assert!(fs::read_dir(out.path())?.next().is_none());
+    Ok(())
+}
+
+/// Whatever planned it, the executor sends nothing to the drive from a read-only folder.
+#[test]
+fn a_read_only_folder_sends_nothing_to_the_drive() -> R {
+    let mut h = Harness::new()?;
+    let _out = read_only(&mut h)?;
+    let f = NodeId::new();
+    h.local_file("a.txt", f, b"a")?;
+    let create = Op::RemoteCreate {
+        node: f,
+        parent: NodeId::ROOT,
+        name: "a.txt".into(),
+        kind: NodeKind::File,
+        tags: Tags::default(),
+    };
+    let report = h.run(vec![create.clone()])?;
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|(op, why)| *op == create && matches!(why, Skip::Unsyncable(_))),
+        "{report:?}"
+    );
+    assert_eq!(h.remote.server().live().count(), 0);
+    Ok(())
+}
+
+/// An item parked for what took its name gets a name of its own again before it moves out: one
+/// that can't go (its out folder refused) isn't left hidden under the parked name.
+#[test]
+fn a_parked_item_that_cannot_move_out_is_not_left_hidden() -> R {
+    let mut h = Harness::new()?;
+    // Inside the folder: refused.
+    h.folder.read_only = Some(h.folder.root.join("out"));
+    let (n, taker) = (NodeId::new(), NodeId::new());
+    let parked = layout::parked_name(n);
+    h.local_folder(&parked, n)?;
+    let original = RelPath::new("New")?;
+    h.db.write(|s| s.folder().put_parked(n, &original))?;
+    h.local_file("New", taker, b"the drive's")?;
+    let evict = Op::LocalEvict {
+        node: n,
+        subtree: vec![n],
+    };
+    let report = h.run(vec![evict])?;
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|(_, why)| matches!(why, Skip::Unsyncable(_))),
+        "{report:?}"
+    );
+    assert!(!h.at(&parked)?.exists(), "left under the parked name");
+    assert!(h.at("New (conflict 1)")?.is_dir());
+    Ok(())
 }

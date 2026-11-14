@@ -49,6 +49,8 @@ struct World {
     opts: Options,
     /// This device's ignore rules (§10).
     filter: hbsync_local::Filter,
+    /// The folder is read-only (§13).
+    read_only: bool,
 }
 
 impl World {
@@ -110,6 +112,7 @@ impl World {
         let masking = Masking {
             filter: &self.filter,
             scope: &scope,
+            read_only: self.read_only,
         };
         reconcile(&self.input, &self.opts, masking)
     }
@@ -143,6 +146,7 @@ fn kinds(ops: &[Op]) -> Vec<&'static str> {
             Op::RemoteDelete { .. } => "delete",
             Op::Settle { .. } => "settle",
             Op::LocalDetach { .. } => "detach",
+            Op::LocalEvict { .. } => "evict",
             Op::Forget { subtree, .. } if subtree.is_empty() => "forget",
             Op::Forget { .. } => "forget+delete",
         })
@@ -3117,4 +3121,461 @@ fn a_delete_in_a_held_folder_stays_held_whatever_moves() {
         }
     }
     assert!(let_through.is_empty(), "{let_through:#?}");
+}
+
+// ---- §13 Read-only folders ----
+
+/// A read-only world: the drive decides (§13).
+fn read_only() -> World {
+    World {
+        read_only: true,
+        ..World::default()
+    }
+}
+
+/// A file edited here moves out first, kept; nothing goes up, and the node stays to plan
+/// again, for the drive's version to come back.
+#[test]
+fn read_only_an_edit_here_moves_out() {
+    let [f] = ids(1)[..] else { unreachable!() };
+    let mut w = read_only();
+    w.synced(f, file(ROOT, "a.txt", "a"))
+        .local(f, Some(file(ROOT, "a.txt", "mine")));
+    let plan = w.plan();
+    assert_eq!(kinds(&plan.ops), ["evict"]);
+    assert_eq!(
+        plan.ops[0],
+        Op::LocalEvict {
+            node: f,
+            subtree: vec![f]
+        }
+    );
+    assert!(!plan.clean.contains(&f));
+    assert!(plan.conflicts.is_empty());
+}
+
+/// A new folder here moves out as one, with what is in it; a new file at the top too.
+#[test]
+fn read_only_new_items_move_out_whole() {
+    let [d, g, n] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.local(d, Some(folder(ROOT, "New")))
+        .local(g, Some(file(d, "g.txt", "g")))
+        .local(n, Some(file(ROOT, "n.txt", "n")));
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    let mut evicts: Vec<(NodeId, Vec<NodeId>)> = plan
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            Op::LocalEvict { node, subtree } => Some((*node, subtree.clone())),
+            _ => None,
+        })
+        .collect();
+    evicts.sort();
+    let mut whole = vec![d, g];
+    whole.sort();
+    let mut want = vec![(d, whole), (n, vec![n])];
+    want.sort();
+    assert_eq!(evicts, want);
+}
+
+/// A rename and a tag here are undone, a delete here comes back: the drive's place, tags and
+/// item, nothing moved out.
+#[test]
+fn read_only_moves_tags_and_deletes_here_are_undone() {
+    let [f, g] = ids(2)[..] else { unreachable!() };
+    let mut w = read_only();
+    let mut tagged = file(ROOT, "b.txt", "a");
+    tagged.tags = Tags::new(vec![Tag::new("Red", 0)]);
+    w.synced(f, file(ROOT, "a.txt", "a"))
+        .synced(g, file(ROOT, "g.txt", "g"))
+        .local(f, Some(tagged))
+        .local(g, None);
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    let mut got = kinds(&plan.ops);
+    got.sort();
+    assert_eq!(got, ["download", "local-tags", "move"]);
+}
+
+/// A file the drive's owner edited while this device only renamed it: the drive's bytes come
+/// down to the drive's place, the rename undone with them.
+#[test]
+fn read_only_a_rename_here_loses_to_the_drive() {
+    let [f] = ids(1)[..] else { unreachable!() };
+    let mut w = read_only();
+    w.synced(f, file(ROOT, "a.txt", "a"))
+        .local(f, Some(file(ROOT, "mine.txt", "a")))
+        .remote(f, Some(file(ROOT, "a.txt", "theirs")));
+    let plan = w.plan();
+    assert_eq!(kinds(&plan.ops), ["download-replace"]);
+    assert!(matches!(&plan.ops[0], Op::LocalDownload { name, .. } if name == "a.txt"));
+}
+
+/// A synced file moved into a folder made here: the file moves back first, then the folder
+/// moves out without it.
+#[test]
+fn read_only_a_new_folder_moves_out_after_what_moves_back_out_of_it() {
+    let [f, n] = ids(2)[..] else { unreachable!() };
+    let mut w = read_only();
+    w.synced(f, file(ROOT, "a.txt", "a"))
+        .local(n, Some(folder(ROOT, "New")))
+        .local(f, Some(file(n, "a.txt", "a")));
+    let plan = w.plan();
+    assert_eq!(kinds(&plan.ops), ["move", "evict"]);
+    assert_eq!(
+        plan.ops[1],
+        Op::LocalEvict {
+            node: n,
+            subtree: vec![n]
+        }
+    );
+}
+
+/// The drive's owner deleted a folder this device added a file to: the file moves out first,
+/// then the folder's delete here takes the rest, not it.
+#[test]
+fn read_only_a_new_file_in_a_folder_deleted_there_moves_out_before_the_delete() {
+    let [d, f, g] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(d, folder(ROOT, "Docs"))
+        .synced(f, file(d, "a.txt", "a"))
+        .local(g, Some(file(d, "g.txt", "g")))
+        .remote(d, None)
+        .remote(f, None);
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    assert_eq!(kinds(&plan.ops), ["evict", "delete"]);
+    assert_eq!(
+        plan.ops[0],
+        Op::LocalEvict {
+            node: g,
+            subtree: vec![g]
+        }
+    );
+    let mut rest = vec![d, f];
+    rest.sort();
+    assert_eq!(
+        plan.ops[1],
+        Op::LocalDelete {
+            node: d,
+            subtree: rest
+        }
+    );
+}
+
+/// The same item made on both sides (adopted: same id, same bytes) isn't moved out.
+#[test]
+fn read_only_the_drives_own_bytes_here_stay() {
+    let [f] = ids(1)[..] else { unreachable!() };
+    let mut w = read_only();
+    w.local(f, Some(file(ROOT, "a.txt", "a")))
+        .remote(f, Some(file(ROOT, "a.txt", "a")));
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    assert_eq!(kinds(&plan.ops), ["settle"]);
+}
+
+/// An orphan (its folder gone for good from the drive) goes nowhere on the drive: what is here
+/// of it goes, unchanged, or moves out, changed; never into Recovered files.
+#[test]
+fn read_only_orphans_are_let_go_of() {
+    let [f, g, gone] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.input.remote_complete = true;
+    w.synced(f, file(ROOT, "a.txt", "a"))
+        .synced(g, file(ROOT, "g.txt", "g"))
+        .remote(f, Some(file(gone, "a.txt", "a")))
+        .remote(g, Some(file(gone, "g.txt", "g")))
+        .local(g, Some(file(ROOT, "g.txt", "mine")));
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    assert!(plan.conflicts.is_empty());
+    let mut got: Vec<(&str, NodeId)> = plan.ops.iter().map(|op| (op.kind(), op.node())).collect();
+    got.sort();
+    let mut want = vec![("LocalDelete", f), ("LocalEvict", g)];
+    want.sort();
+    assert_eq!(got, want);
+}
+
+/// Two of the drive's items whose names clash here: the one held here keeps its name, the other
+/// isn't synced here (it can't be renamed on the drive), and says why.
+#[test]
+fn read_only_a_name_clash_leaves_the_newcomer_out() {
+    let [old, new] = ids(2)[..] else {
+        unreachable!()
+    };
+    // The newcomer has the lower id: it would win the name both ways.
+    let (old, new) = (new, old);
+    let mut w = read_only();
+    w.synced(old, file(ROOT, "a.txt", "a"))
+        .remote(new, Some(file(ROOT, "A.TXT", "b")));
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    assert!(plan.ops.is_empty(), "{:?}", plan.ops);
+    assert_eq!(plan.conflicts, [Conflict::NameTaken { node: new }]);
+    assert!(plan.deferred.contains(&new));
+}
+
+/// The item synced here keeps its name though this device renamed it meanwhile: the rename is
+/// undone, and the newcomer (the lower id) is the one left out.
+#[test]
+fn read_only_the_synced_item_keeps_its_name_through_a_rename_here() {
+    let [newcomer, synced] = ids(2)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(synced, file(ROOT, "a.txt", "a"))
+        .local(synced, Some(file(ROOT, "b.txt", "a")))
+        .remote(newcomer, Some(file(ROOT, "A.txt", "new")));
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    assert_eq!(kinds(&plan.ops), ["move"]);
+    assert_eq!(plan.conflicts, [Conflict::NameTaken { node: newcomer }]);
+}
+
+/// A file edited here that the drive moved onto a name taken here, out of a folder it deleted:
+/// the edit still moves out (only its syncing waits for the clash), and the folder's delete
+/// here doesn't take it.
+#[test]
+fn read_only_an_edited_clash_loser_moves_out_before_its_folder_goes() {
+    let [d1, d2, edited, held] = ids(4)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(d1, folder(ROOT, "D1"))
+        .synced(d2, folder(ROOT, "D2"))
+        .synced(held, file(d2, "a.txt", "a"))
+        .synced(edited, file(d1, "x", "x"))
+        .local(edited, Some(file(d1, "x", "mine")))
+        .remote(edited, Some(file(d2, "A.TXT", "x")))
+        .remote(d1, None);
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    assert_eq!(kinds(&plan.ops), ["evict", "delete"]);
+    assert_eq!(
+        plan.ops[0],
+        Op::LocalEvict {
+            node: edited,
+            subtree: vec![edited]
+        }
+    );
+    assert_eq!(
+        plan.ops[1],
+        Op::LocalDelete {
+            node: d1,
+            subtree: vec![d1]
+        }
+    );
+    assert_eq!(plan.conflicts, [Conflict::NameTaken { node: edited }]);
+}
+
+/// `f` as executable as `x`.
+fn executable(mut s: NodeState, x: bool) -> NodeState {
+    if let Some(c) = s.content.as_mut() {
+        c.executable = x;
+    }
+    s
+}
+
+/// An executable bit changed here stays as it is: nothing moves out, nothing comes down; the
+/// drive's change of the bit comes down; and an edit there of a file whose bit only changed
+/// here comes down over it, nothing moved out (its bytes are the ones synced).
+#[test]
+fn read_only_executable_bits_follow_the_drive_where_it_changed_them() {
+    let [here, there, both] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(here, file(ROOT, "here.sh", "h"))
+        .synced(there, file(ROOT, "there.sh", "t"))
+        .synced(both, file(ROOT, "both.sh", "b"))
+        .local(here, Some(executable(file(ROOT, "here.sh", "h"), true)))
+        .remote(there, Some(executable(file(ROOT, "there.sh", "t"), true)))
+        .local(both, Some(executable(file(ROOT, "both.sh", "b"), true)))
+        .remote(both, Some(file(ROOT, "both.sh", "edited")));
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    let mut got: Vec<(&str, NodeId)> = plan
+        .ops
+        .iter()
+        .filter(|op| !matches!(op, Op::Settle { .. }))
+        .map(|op| (op.kind(), op.node()))
+        .collect();
+    got.sort();
+    let mut want = vec![("LocalDownload", there), ("LocalDownload", both)];
+    want.sort();
+    assert_eq!(got, want);
+}
+
+/// A clash loser left where it is here holds its name there: what the drive puts on that name
+/// is left out too, never planned onto it (it waited forever for the name).
+#[test]
+fn read_only_a_left_out_loser_holds_the_name_it_has_here() {
+    let [kept, loser, newcomer] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(kept, file(ROOT, "a", "a"))
+        .synced(loser, file(ROOT, "b", "b"))
+        .remote(loser, Some(file(ROOT, "A", "b")))
+        .remote(newcomer, Some(file(ROOT, "b", "new")));
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalDownload { .. })),
+        "{:?}",
+        plan.ops
+    );
+    let mut told: Vec<NodeId> = plan.conflicts.iter().map(Conflict::node).collect();
+    told.sort();
+    let mut want = vec![loser, newcomer];
+    want.sort();
+    assert_eq!(told, want);
+}
+
+/// [`read_only_a_left_out_loser_holds_the_name_it_has_here`] where that name is in another
+/// folder, one judged before the clash (its id the lower): judged again with it.
+#[test]
+fn read_only_a_left_out_loser_holds_its_name_in_a_folder_judged_before() {
+    let [q, p, kept, loser, newcomer] = ids(5)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(q, folder(ROOT, "Q"))
+        .synced(p, folder(ROOT, "P"))
+        .synced(kept, file(p, "a", "a"))
+        .synced(loser, file(q, "b", "b"))
+        .remote(loser, Some(file(p, "A", "b")))
+        .remote(newcomer, Some(file(q, "b", "new")));
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalDownload { .. })),
+        "{:?}",
+        plan.ops
+    );
+    let mut told: Vec<NodeId> = plan.conflicts.iter().map(Conflict::node).collect();
+    told.sort();
+    told.dedup();
+    let mut want = vec![loser, newcomer];
+    want.sort();
+    assert_eq!(told, want);
+}
+
+/// [`read_only_a_left_out_loser_holds_the_name_it_has_here`] where the loser changed here: it
+/// moves out first, so it holds no name, and what the drive puts there comes down at once.
+#[test]
+fn read_only_a_left_out_loser_that_moves_out_holds_no_name() {
+    let [kept, loser, newcomer] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(kept, file(ROOT, "a", "a"))
+        .synced(loser, file(ROOT, "b", "b"))
+        .local(loser, Some(file(ROOT, "b", "mine")))
+        .remote(loser, Some(file(ROOT, "A", "b")))
+        .remote(newcomer, Some(file(ROOT, "b", "new")));
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    assert_eq!(kinds(&plan.ops), ["evict", "download"], "{:?}", plan.ops);
+    let told: Vec<NodeId> = plan.conflicts.iter().map(Conflict::node).collect();
+    assert_eq!(told, [loser]);
+}
+
+/// Read-only, a drive-side clash of names one apart in case: what is on the name here keeps
+/// it, ahead of what was synced there and moved out (its id the lower), which is left out
+/// instead of planned onto a name it can't take.
+#[test]
+fn read_only_what_is_on_a_name_here_keeps_it_from_what_moved_out() {
+    let [moved, held] = ids(2)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(moved, file(ROOT, "Foo", "a"))
+        .local(moved, None)
+        .synced(held, file(ROOT, "foo", "b"));
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    assert!(
+        !plan
+            .ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalDownload { .. })),
+        "{:?}",
+        plan.ops
+    );
+    let told: Vec<NodeId> = plan.conflicts.iter().map(Conflict::node).collect();
+    assert_eq!(told, [moved]);
+}
+
+/// Read-only, a new folder here holding a file still being written waits for it, and so does
+/// what else is new in it, a folder below included: they move out with it, as one, once it is
+/// read (not one by one beside where it goes).
+#[test]
+fn read_only_what_is_in_a_new_folder_that_waits_waits_with_it() {
+    let [n, u, h, sub, deep] = ids(5)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.local(n, Some(folder(ROOT, "New")))
+        .local(
+            u,
+            Some(NodeState {
+                content: None,
+                ..file(n, "u", "?")
+            }),
+        )
+        .local(h, Some(file(n, "h", "h")))
+        .local(sub, Some(folder(n, "Sub")))
+        .local(deep, Some(file(sub, "d", "d")));
+    w.input.local_unhashed.insert(u);
+    let plan = w.plan();
+    assert!(plan.ops.is_empty(), "{:?}", plan.ops);
+    assert!(!plan.writes_drive());
+    // Once it is read, the folder moves out whole.
+    w.input.local_unhashed.remove(&u);
+    w.local(u, Some(file(n, "u", "u")));
+    let plan = w.plan();
+    let mut whole = vec![n, u, h, sub, deep];
+    whole.sort();
+    assert_eq!(
+        plan.ops,
+        [Op::LocalEvict {
+            node: n,
+            subtree: whole
+        }]
+    );
+}
+
+/// Read-only, an item synced here that is edited here keeps its name from one the drive has a
+/// name one apart in case, left out till now: it moves out, and its drive version comes back
+/// to that name (one edit doesn't hand the name over).
+#[test]
+fn read_only_an_edit_here_doesnt_hand_its_name_over() {
+    let [synced, other] = ids(2)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(synced, file(ROOT, "a.txt", "a"))
+        .local(synced, Some(file(ROOT, "a.txt", "mine")))
+        .remote(other, Some(file(ROOT, "A.txt", "b")));
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    assert_eq!(kinds(&plan.ops), ["evict"], "{:?}", plan.ops);
+    let told: Vec<NodeId> = plan.conflicts.iter().map(Conflict::node).collect();
+    assert_eq!(told, [other]);
 }

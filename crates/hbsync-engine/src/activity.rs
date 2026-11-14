@@ -72,11 +72,24 @@ pub(crate) fn path_of(s: &ReadTx<'_>, node: NodeId) -> Result<Option<String>, St
     if let Some(row) = s.local_by_node(node)? {
         return Ok(Some(row.path.as_str().to_owned()));
     }
-    let up = crate::walk::up::<_, StateError>(node, |at| {
+    joined_up(node, |at| {
         Ok(s.get_base(at)?
             .map(|b| (b.local_name.unwrap_or(b.state.name), b.state.parent)))
-    })?;
-    // Only a path that reaches the top is one: a gap or a cycle gives none.
+    })
+}
+
+/// [`path_of`] as the mirror has it: where `node` is on the drive, in the folder's coordinates.
+pub(crate) fn drive_path_of(s: &ReadTx<'_>, node: NodeId) -> Result<Option<String>, StateError> {
+    joined_up(node, |at| Ok(s.get_mirror(at)?.map(|m| (m.name, m.parent))))
+}
+
+/// The names from the top down to `node`, `/`-separated, as `step` gives each node's name and
+/// folder: only a path that reaches the top is one (a gap or a cycle gives none).
+fn joined_up(
+    node: NodeId,
+    step: impl FnMut(NodeId) -> Result<Option<(String, NodeId)>, StateError>,
+) -> Result<Option<String>, StateError> {
+    let up = crate::walk::up::<_, StateError>(node, step)?;
     if up.end != crate::walk::End::Top {
         return Ok(None);
     }

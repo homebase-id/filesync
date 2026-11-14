@@ -185,25 +185,34 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
     /// `(path, content)` for files, `(path/, [])` for folders, under `folder` ("" for the
     /// whole root, the state folder left out), sorted.
     pub fn entries(&self, folder: &str) -> Vec<(String, Vec<u8>)> {
-        let base = self.root.join(folder);
-        let mut out = Vec::new();
-        walk(&base, &base, &mut out);
-        out.sort();
-        out
+        entries_of(&self.root.join(folder))
     }
 
     /// [`TestClient::entries`] as text: `path = content` for files (`path = <n bytes>` past
     /// 100 bytes), `path/` for folders.
     pub fn tree_text(&self, folder: &str) -> Vec<String> {
-        self.entries(folder)
-            .into_iter()
-            .map(|(path, data)| match data.len() {
-                _ if path.ends_with('/') => path,
-                n if n > 100 => format!("{path} = <{n} bytes>"),
-                _ => format!("{path} = {}", String::from_utf8_lossy(&data)),
-            })
-            .collect()
+        tree_text_of(&self.root.join(folder))
     }
+}
+
+/// [`TestClient::entries`] of any folder `dir`.
+pub fn entries_of(dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
+}
+
+/// [`TestClient::tree_text`] of any folder `dir`.
+pub fn tree_text_of(dir: &Path) -> Vec<String> {
+    entries_of(dir)
+        .into_iter()
+        .map(|(path, data)| match data.len() {
+            _ if path.ends_with('/') => path,
+            n if n > 100 => format!("{path} = <{n} bytes>"),
+            _ => format!("{path} = {}", String::from_utf8_lossy(&data)),
+        })
+        .collect()
 }
 
 /// The account's DB, beside the folder (as the product keeps it with the account).

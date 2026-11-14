@@ -92,7 +92,12 @@ pub(crate) struct FilterMasks {
 }
 
 impl FilterMasks {
-    pub(crate) fn of(input: &Input, filter: &Filter, scope: &Scope) -> FilterMasks {
+    pub(crate) fn of(input: &Input, masking: Masking<'_>) -> FilterMasks {
+        let Masking {
+            filter,
+            scope,
+            read_only,
+        } = masking;
         // Where a node is: through the folders in Recently deleted too (a node in one is where
         // that folder was).
         let with_removed;
@@ -125,7 +130,10 @@ impl FilterMasks {
             let filtered = self::masked(paths, filter);
             masked.extend(input.removed.keys().filter(|n| filtered.contains(n)));
         }
-        if masked.is_empty() {
+        // Read-only (§13), nothing is brought back nor leaves: the drive's place wins, and this
+        // device filters it, so it stays masked, as one never synced here, the item here let
+        // go of as any masked node's (detached where it changed); and nothing leaves the drive.
+        if masked.is_empty() || read_only {
             return FilterMasks {
                 masked,
                 outside,
@@ -182,12 +190,12 @@ impl Masks {
         computer: &str,
         taken: &HashSet<NodeId>,
     ) -> Masks {
-        let Masking { filter, scope } = masking;
+        let Masking { scope, .. } = masking;
         let FilterMasks {
             mut masked,
             outside,
             brought_back,
-        } = FilterMasks::of(input, filter, scope);
+        } = FilterMasks::of(input, masking);
         if masked.is_empty() && outside.is_empty() && brought_back.is_empty() {
             return Masks::default();
         }
@@ -224,7 +232,7 @@ impl Masks {
             .filter_map(|m| input.remote.get(*m).map(|s| s.parent))
             .filter(|p| !p.is_root() && !masked.contains(p))
             .collect();
-        let detach = to_detach(input, &masked, &HashMap::new());
+        let detach = to_detach(input, &masked, &HashMap::new(), masking.read_only);
         // The scope's detached folders stay as they are (§12): not one outside it, nor one in a
         // folder outside it.
         let by_filter = (detach.iter().copied())
@@ -256,12 +264,13 @@ impl Masks {
     pub(crate) fn sparing(
         self,
         input: &Input,
+        masking: Masking<'_>,
         computer: &str,
         taken: &HashSet<NodeId>,
         away: &HashMap<NodeId, NodeId>,
         first_detached: usize,
     ) -> Option<Masks> {
-        let detach = to_detach(input, &self.masked, away);
+        let detach = to_detach(input, &self.masked, away, masking.read_only);
         let again = detach.iter().eq(self.detached.keys());
         (detach.len() < first_detached && !again)
             .then(|| self.with_view(input, detach, computer, taken))
@@ -407,6 +416,7 @@ fn to_detach(
     input: &Input,
     masked: &HashSet<NodeId>,
     away: &HashMap<NodeId, NodeId>,
+    read_only: bool,
 ) -> BTreeSet<NodeId> {
     let mut detach: BTreeSet<NodeId> = BTreeSet::new();
     for (node, local) in input.local.iter() {
@@ -421,7 +431,8 @@ fn to_detach(
                             .get(&node)
                             .and_then(|e| e.local_hash)
                             .unwrap_or(b.hash);
-                        base_bytes != l.hash || b.executable != l.executable
+                        // Read-only (§13), a bit changed here is no change to keep.
+                        base_bytes != l.hash || (!read_only && b.executable != l.executable)
                     }
                     // Not hashed yet: it may hold anything.
                     _ => true,
@@ -591,6 +602,7 @@ mod tests {
         let masking = Masking {
             filter: &filter,
             scope,
+            read_only: false,
         };
         Masks::of(input, masking, "c", &HashSet::new())
     }
@@ -599,7 +611,18 @@ mod tests {
     fn sparing(input: &Input, away: &HashMap<NodeId, NodeId>) -> Option<Masks> {
         let masks = masks_in(&Scope::main(), input);
         let detached = masks.detached.len();
-        masks.sparing(input, "c", &HashSet::new(), away, detached)
+        masks.sparing(input, two_way(), "c", &HashSet::new(), away, detached)
+    }
+
+    /// A two-way folder's masking, as far as `sparing` reads it (whether it is read-only).
+    fn two_way() -> Masking<'static> {
+        static FILTER: std::sync::LazyLock<Filter> = std::sync::LazyLock::new(Filter::default);
+        static SCOPE: std::sync::LazyLock<Scope> = std::sync::LazyLock::new(Scope::main);
+        Masking {
+            filter: &FILTER,
+            scope: &SCOPE,
+            read_only: false,
+        }
     }
 
     fn moving(node: NodeId, parent: NodeId) -> Op {
@@ -648,7 +671,7 @@ mod tests {
         // Nor is a round that detaches what the last one did planned again.
         assert!(
             spared
-                .sparing(&input, "c", &HashSet::new(), &away, 1)
+                .sparing(&input, two_way(), "c", &HashSet::new(), &away, 1)
                 .is_none()
         );
     }

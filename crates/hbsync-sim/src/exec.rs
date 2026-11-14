@@ -431,12 +431,12 @@ impl Sim {
                 ],
                 all: &all,
             };
-            let Ok(()) = hbsync_engine::pages::dirty_elsewhere(
-                &mut input,
-                &client.filter,
-                &scope,
-                &mut pending,
-            );
+            let masking = Masking {
+                filter: &client.filter,
+                scope: &scope,
+                read_only: client.read_only,
+            };
+            let Ok(()) = hbsync_engine::pages::dirty_elsewhere(&mut input, masking, &mut pending);
         }
         // The guard's totals over the whole dirty set, as the engine's store counts them
         // (`holding::guard_counts`, which `narrow::counts_differ` holds this to), and of them
@@ -584,6 +584,7 @@ impl Sim {
         let masking = Masking {
             filter: &client.filter,
             scope: &scope,
+            read_only: client.read_only,
         };
         // Ids the client or the server knows are taken, as in the executor's state DB.
         let known = |id: NodeId| {
@@ -931,6 +932,11 @@ impl Sim {
             Some(_) => self.server.node(node).map(|(n, r)| (n.clone(), r)),
             None => None,
         };
+        if self.clients[c].read_only && op.writes_remote() {
+            let name = &self.clients[c].name;
+            self.ledger
+                .read_only_wrote(|| Some(format!("{name} {op:?}")));
+        }
         let outcome = self.execute(c, &op);
         // What it read before its write, as the executor's (a pull landing before its commit
         // changes nothing of it).
@@ -945,7 +951,7 @@ impl Sim {
             self.pull_mid_local(c, node, change);
         }
         let landed = outcome == Outcome::Landed;
-        let remote_write = outcome == Outcome::Done && writes_drive(&op);
+        let remote_write = outcome == Outcome::Done && op.writes_remote();
         let outcome = if landed { Outcome::Done } else { outcome };
         if outcome == Outcome::Done {
             // The sweep did something: its held deletes stay dirty (the engine's `progress`).
@@ -1204,6 +1210,8 @@ impl Sim {
             // executor's).
             let at = match op {
                 Op::LocalFork { .. } => None,
+                // A move out settles nothing: the bases stay, planned again (the executor's).
+                Op::LocalEvict { .. } => None,
                 // A folder made here with nothing to settle against, its mirror holding no live
                 // version of it: the base stays (the executor's settle finds no mirror row).
                 Op::LocalMkdir { drive: None, .. } if restored.is_none() && !read.live => None,
@@ -1740,6 +1748,31 @@ impl Sim {
                 Done
             }
             Op::LocalDelete { node, subtree } => self.delete_here(c, node, &subtree),
+            Op::LocalEvict { node, subtree } => {
+                // As the executor: the item as the plan saw it, with what is below it but for a
+                // synced item it doesn't expect; out with it, the bases stay.
+                let client = &mut self.clients[c];
+                if !client.local.contains(node) || !unchanged(client, node) {
+                    return Skip;
+                }
+                let below = client.local.subtree(node);
+                let unexpected = |n: &NodeId| subtree.binary_search(n).is_err();
+                if below
+                    .iter()
+                    .any(|n| unexpected(n) && client.base.contains(*n))
+                {
+                    return Skip;
+                }
+                let mut out = Tree::new();
+                for n in below {
+                    if let Some(state) = client.local.remove(n) {
+                        out.insert(n, state);
+                    }
+                    client.parked.remove(&n);
+                }
+                client.moved_out.push(out);
+                Done
+            }
             Op::RemoteCreate {
                 node,
                 parent,
@@ -2883,21 +2916,10 @@ impl Sim {
     /// ([`Sim::with_refusals`]): written out by the simulator itself, not with the client's key
     /// (`hbsync_engine::refused::key`), so a key that leaves out an input is caught.
     fn request(&self, c: usize, op: &Op) -> Option<String> {
-        let sends = writes_drive(op) || matches!(op, Op::LocalDownload { .. });
+        let sends = op.writes_remote() || matches!(op, Op::LocalDownload { .. });
         (self.faults.refusing && sends)
             .then(|| format!("{op:?} {:?}", uploaded(&self.clients[c], op)))
     }
-}
-
-/// Whether `op` writes to the drive.
-fn writes_drive(op: &Op) -> bool {
-    matches!(
-        op,
-        Op::RemoteCreate { .. }
-            | Op::RemoteUpdate { .. }
-            | Op::RemoteTags { .. }
-            | Op::RemoteDelete { .. }
-    )
 }
 
 /// The base's extra the executor records for `local` at `version`.
@@ -3032,6 +3054,9 @@ fn planned(ops: &[Op]) -> Vec<Planned<'_>> {
                 Op::Forget { subtree, .. } if !subtree.is_empty() => What::Forget {
                     subtree: subtree.clone(),
                 },
+                Op::LocalEvict { subtree, .. } => What::Evict {
+                    subtree: subtree.clone(),
+                },
                 Op::LocalMove { parent, name, .. } => What::LocalMove {
                     parent: *parent,
                     name: name.clone(),
@@ -3079,6 +3104,7 @@ fn pulled_on(op: &Op, on: usize) -> bool {
                 | Op::LocalDelete { .. }
                 | Op::LocalFork { .. }
                 | Op::LocalDetach { .. }
+                | Op::LocalEvict { .. }
         ),
     }
 }

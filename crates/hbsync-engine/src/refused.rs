@@ -205,10 +205,10 @@ impl Blocked {
             | Op::LocalMove { parent, name, .. } => Some((*parent, self.key(name))),
             _ => None,
         };
-        // A folder isn't deleted or forgotten here while it holds a node a blocked operation
-        // would have taken out.
+        // A folder isn't deleted, forgotten or moved out (§13) here while it holds a node a
+        // blocked operation would have taken out.
         let empties = matches!(op, Op::LocalDelete { node, .. } | Op::Forget { node, .. }
-            if self.folders.contains(node));
+            | Op::LocalEvict { node, .. } if self.folders.contains(node));
         // Nor while the removal from the drive of what it takes is blocked (what its removal
         // elsewhere took along, §7): one removal, done together.
         let along = match op {

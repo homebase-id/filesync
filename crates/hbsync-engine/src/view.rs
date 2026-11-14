@@ -380,14 +380,33 @@ fn build(
         b.load_named(folder, &keys)?;
     }
     // A folder that is gone remotely (or masked) but present locally may be deleted or
-    // detached: load all of it.
+    // detached: load all of it. So may one whose folder is gone from the drive, read-only
+    // (§13: let go of, deleted or moved out with what is below it).
     // Each folder once: a dirty folder inside one already loaded is in it.
     let hidden = crate::mask::hidden(&b.input.remote, filter, scope);
+    // Its folders on the drive don't reach the top: one missing, or a file, anywhere above
+    // (or a cycle).
+    let orphaned = |remote: &crate::tree::Tree, node: NodeId| {
+        if ctx.read_only.is_none() || !remote.contains(node) {
+            return false;
+        }
+        let mut top = node;
+        for above in remote.ancestors_iter(node) {
+            if remote.get(above).is_none_or(|s| s.kind != NodeKind::Folder) {
+                return true;
+            }
+            top = above;
+        }
+        remote.get(top).is_none_or(|s| !s.parent.is_root())
+    };
+
     let mut loaded: HashSet<NodeId> = HashSet::new();
     for &node in dirty {
-        if !loaded.contains(&node)
-            && b.input.base.contains(node)
-            && (!b.input.remote.contains(node) || hidden.contains(&node))
+        if loaded.contains(&node) {
+            continue;
+        }
+        let gone = !b.input.remote.contains(node) || hidden.contains(&node);
+        if ((b.input.base.contains(node) && gone) || orphaned(&b.input.remote, node))
             && let Some(row) = s
                 .local_by_node(node)?
                 .filter(|r| r.kind == NodeKind::Folder)
@@ -399,8 +418,11 @@ fn build(
         }
     }
     // Whether a masked folder synced here leaves the drive depends on everything in it
-    // remotely (§10): load all of it.
-    let masked = crate::mask::masked(&b.input.remote, filter);
+    // remotely (§10): load all of it. Nothing leaves it read-only (§13).
+    let masked = match ctx.read_only {
+        None => crate::mask::masked(&b.input.remote, filter),
+        Some(_) => HashSet::new(),
+    };
     let mut expanded: HashSet<NodeId> = HashSet::new();
     for &node in dirty {
         if !(masked.contains(&node) && b.input.base.contains(node)) {
@@ -443,8 +465,9 @@ fn build(
     // after the role folders held nothing of are dropped: one holding it masks it), and what
     // may clash with the names coming, in it and, for its own, at the top (the plan asks for
     // the rest: `Plan::uncovered`).
+    // Read-only, none goes there (§13).
     let missing = looked_up_removed(&b.input.remote, scope.top);
-    if missing.contains(&NodeId::RECOVERED) {
+    if missing.contains(&NodeId::RECOVERED) && ctx.read_only.is_none() {
         b.load(NodeId::RECOVERED)?;
         match full {
             None => b.load_children(NodeId::RECOVERED)?,
@@ -545,7 +568,7 @@ fn build(
     // What the page leaves to other pages (§6.5): nothing where it is all there is to plan
     // (a count; the page's nodes are dirty marks).
     if s.pending_count()? > b.input.dirty.len() as u64 {
-        crate::pages::dirty_elsewhere(&mut b.input, filter, scope, &mut StorePending(s))?;
+        crate::pages::dirty_elsewhere(&mut b.input, ctx.masking(), &mut StorePending(s))?;
     }
     if full.is_some() {
         b.input.coverage = Some(coverage);

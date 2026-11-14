@@ -78,6 +78,8 @@ pub(crate) struct Ledger {
     /// The first answer of a client's write the store recorded wrongly: left out alone, or
     /// over a newer state of its node a pull recorded meanwhile ([`crate::Action::Meanwhile`]).
     answer_undid: Option<String>,
+    /// The first write to the drive a read-only folder planned (sync semantics §13).
+    read_only_wrote: Option<String>,
     /// The first plan the engine's own planning path made otherwise ([`Sim::with_narrow_check`]).
     narrow_differs: Option<String>,
     /// The first node a put back left held again though nothing of it waits in Recently
@@ -170,6 +172,11 @@ impl Ledger {
     /// A write pointed a node at a folder the server never had, if `what` names one.
     pub(crate) fn dangling_write(&mut self, what: impl FnOnce() -> Option<String>) {
         first(&mut self.dangling, what);
+    }
+
+    /// A read-only folder wrote to the drive (§13), if `what` names the write.
+    pub(crate) fn read_only_wrote(&mut self, what: impl FnOnce() -> Option<String>) {
+        first(&mut self.read_only_wrote, what);
     }
 
     /// An operation wrote outside its folder's part of the drive, if `what` names one.
@@ -364,6 +371,11 @@ impl Sim {
         if let Some(what) = &ledger.narrow_differs {
             return Err(what.clone());
         }
+        if let Some(what) = &ledger.read_only_wrote {
+            return Err(format!(
+                "a read-only folder planned a write to the drive: {what}"
+            ));
+        }
         if let Some(what) = &ledger.held_after_put_back {
             return Err(format!("after a put back: {what}"));
         }
@@ -490,8 +502,20 @@ impl Sim {
                 }
             }
             // The tags as the client holds them, on both sides.
-            let server_view = view(&held_by(&synced, client.os));
-            let local_view = view(&held_by(&visible, client.os));
+            // Read-only (§13), an executable bit its user changed here stays as it is.
+            // Only where the drive's bit is the one synced: its change of it comes down.
+            let changed_here: HashSet<NodeId> = (client.user_x.iter().copied())
+                .filter(|n| {
+                    let x = |t: &Tree| t.get(*n).and_then(|s| s.content).map(|c| c.executable);
+                    x(&client.base) == x(&synced)
+                })
+                .collect();
+            let x_kept = |tree: Tree| match client.read_only {
+                true => without_x(tree, &changed_here),
+                false => tree,
+            };
+            let server_view = view(&x_kept(held_by(&synced, client.os)));
+            let local_view = view(&x_kept(held_by(&visible, client.os)));
             if local_view != server_view {
                 return Err(format!(
                     "{} diverged:\n  local:  {local_view:?}\n  server: {server_view:?}",
@@ -622,6 +646,13 @@ impl Sim {
         }));
         // Filtered items are kept on their client only.
         present.extend(kept_here);
+        // What moved out of a read-only folder is kept where it went (§13).
+        present.extend(
+            self.clients
+                .iter()
+                .flat_map(|c| c.moved_out.iter().flat_map(|t| t.iter()))
+                .filter_map(|(_, s)| s.content.and_then(|c| ledger.blobs.get(&c.hash).copied())),
+        );
         let lost: Vec<u64> = ledger
             .written
             .difference(&ledger.superseded)
@@ -720,8 +751,8 @@ impl Sim {
     /// What of `tree` (what client `c` syncs of the drive) its engine leaves to other clients
     /// (sync semantics §6.3, §10): an orphan (its folder nowhere, or a file) it holds nothing
     /// of, whose place it doesn't sync, in Recovered files or at its top, with what is below
-    /// it. (What is below a recovered one at an ignored name is connected once it is, and
-    /// filtered as anything.)
+    /// it; in a read-only folder, every orphan (§13). (What is below a recovered one at an
+    /// ignored name is connected once it is, and filtered as anything.)
     fn left_orphans(&self, c: usize, tree: &Tree, drive: &Tree) -> BTreeSet<NodeId> {
         let client = &self.clients[c];
         // What the client's scan reports: not what it ignores, kept on its device only.
@@ -764,6 +795,12 @@ impl Sim {
                 continue;
             }
             let subtree = below(tree, node);
+            // A read-only folder writes nothing to the drive, Recovered files neither: every
+            // orphan waits, out of it (§13).
+            if client.read_only {
+                left.extend(subtree);
+                continue;
+            }
             if subtree.iter().any(held) {
                 continue;
             }
@@ -828,6 +865,10 @@ pub(crate) enum What {
     Forget {
         subtree: Vec<NodeId>,
     },
+    /// Out of a read-only folder (§13), with what is below it.
+    Evict {
+        subtree: Vec<NodeId>,
+    },
     LocalMove {
         parent: NodeId,
         name: String,
@@ -865,6 +906,25 @@ fn delete_expects(local: &Tree, node: NodeId, moving: &HashSet<NodeId>) -> Vec<N
     }
     kept.sort();
     kept
+}
+
+/// `local` with the items detached (§10, `detached`: old id → new) under their new ids, with
+/// what is below them.
+fn at_new_ids(local: &Tree, detached: &HashMap<NodeId, NodeId>) -> Tree {
+    let mut tree = local.clone();
+    for (&old, &new) in detached {
+        let kids: Vec<NodeId> = tree.children(old).collect();
+        if let Some(state) = tree.remove(old) {
+            tree.insert(new, state);
+        }
+        for kid in kids {
+            if let Some(mut state) = tree.get(kid).cloned() {
+                state.parent = new;
+                tree.insert(kid, state);
+            }
+        }
+    }
+    tree
 }
 
 /// A plan and what it was made from, for [`Ledger::plan_made`].
@@ -912,6 +972,12 @@ impl Ledger {
                 _ => None,
             })
             .collect();
+        // What moves out of a read-only folder (§13), and the tree here with the detached items
+        // under their new ids (its plan's view), for those.
+        let evicts: Vec<&Planned<'_>> = (seen.ops.iter())
+            .filter(|p| matches!(p.what, What::Evict { .. }))
+            .collect();
+        let detached_here = (!evicts.is_empty()).then(|| at_new_ids(local, &detached));
         // What waits for a hash, worked out on its own (sync semantics §6.3): every folder a
         // file here not hashed yet is in, on any side, and every folder those are in, on the
         // drive as this device sees it (what its filter leaves out is out of view); a detached
@@ -976,6 +1042,15 @@ impl Ledger {
                                 What::RemoteDelete
                                 | What::LocalDelete { .. }
                                 | What::Forget { .. } => true,
+                                // Local only: what it takes is what is below it here.
+                                What::Evict { .. } => {
+                                    let here = detached_here.as_ref().unwrap_or(local);
+                                    let old = |n: &NodeId| {
+                                        (detached.iter().find(|(_, new)| *new == n))
+                                            .map_or(*n, |(old, _)| *old)
+                                    };
+                                    below(here, node).iter().any(|n| unhashed.contains(&old(n)))
+                                }
                                 What::LocalMove { parent, name } => moved(local, parent, name),
                                 What::RemoteUpdate { parent, name } => moved(remote, parent, name),
                                 _ => false,
@@ -998,10 +1073,34 @@ impl Ledger {
                 _ => None,
             })
             .collect();
+        // What moves out of a read-only folder (§13) expects the same, and runs before the
+        // deletes too: a detached item (§10) under its new id, with what is below it.
+        let mut differ = None;
+        for p in &evicts {
+            let (What::Evict { subtree }, Some(here)) = (&p.what, &detached_here) else {
+                continue;
+            };
+            let want = delete_expects(here, p.node, &moving);
+            if differ.is_none() && *subtree != want {
+                differ = Some(format!(
+                    "{}: {:?} expects {subtree:?}, not what its folder holds less what the \
+                     plan moves out of it ({want:?})",
+                    seen.client, p.op
+                ));
+            }
+        }
+        // (A detached one under the id the folder holds it by here: the delete runs after the
+        // detach, and finds it moved out.)
+        let old_id: HashMap<NodeId, NodeId> = detached.iter().map(|(&o, &n)| (n, o)).collect();
+        let mut moving = moving;
+        moving.extend(
+            evicts
+                .iter()
+                .map(|p| old_id.get(&p.node).copied().unwrap_or(p.node)),
+        );
         let expects = |node: NodeId| delete_expects(local, node, &moving);
         // Each delete's, once, compared with what it expects (sorted, as the plan keeps it).
         let mut expected: HashMap<NodeId, Vec<NodeId>> = HashMap::new();
-        let mut differ = None;
         for p in seen.ops.iter().chain(seen.held) {
             let (What::LocalDelete { subtree } | What::Forget { subtree }) = &p.what else {
                 continue;
@@ -1254,6 +1353,19 @@ pub(crate) fn tag_names(tags: &Tags) -> Vec<String> {
     tags.iter()
         .map(|t| format!("{}:{}", t.name, t.colour))
         .collect()
+}
+
+/// `tree` with the executable bit cleared on `nodes`.
+fn without_x(mut tree: Tree, nodes: &HashSet<NodeId>) -> Tree {
+    for &n in nodes {
+        if let Some(mut s) = tree.get(n).cloned()
+            && let Some(c) = s.content.as_mut()
+        {
+            c.executable = false;
+            tree.insert(n, s);
+        }
+    }
+    tree
 }
 
 /// A tree as a sorted list of `path kind content id`: node ids are part of identity across

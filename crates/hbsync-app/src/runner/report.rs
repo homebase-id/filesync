@@ -65,6 +65,36 @@ pub(super) fn notes(
     Ok(notes)
 }
 
+/// Where what changed in a read-only folder moved out to (sync semantics §13), worded: each
+/// time it moves (an event, never told only once as a lasting note is), by where it went, the
+/// first few named.
+pub(super) fn moved_out_notes(report: &SyncReport) -> Vec<String> {
+    let mut notes = Vec::new();
+    // Each by the name it went out as, where not its own (taken there).
+    let mut moved: Vec<(String, String)> = (report.moved_out.iter())
+        .map(|(path, to)| {
+            let into = to.parent().unwrap_or(to).display().to_string();
+            let own = path.rsplit('/').next().unwrap_or(path);
+            let named = to.file_name().map(|n| n.to_string_lossy().into_owned());
+            let shown = match named {
+                Some(n) if n != own => format!("{path} (as {n})"),
+                _ => path.clone(),
+            };
+            (into, shown)
+        })
+        .collect();
+    moved.sort();
+    for group in moved.chunk_by(|a, b| a.0 == b.0) {
+        let into = &group[0].0;
+        let paths: Vec<String> = group.iter().map(|(_, path)| path.clone()).collect();
+        notes.push(format!(
+            "{}: moved to {into}, as this folder is read-only (what changes here isn't synced)",
+            listed(&paths)
+        ));
+    }
+    notes
+}
+
 /// Notes told once: one that keeps coming back sync after sync (a file that can't be read)
 /// isn't told again until it has gone away; one that comes twice in a sync (a node planned
 /// again in a later sweep), once.
@@ -361,6 +391,11 @@ fn describe_conflict(engine: &mut Engine, c: &Conflict) -> Result<String, StateE
         Conflict::NameClash { node } => {
             format!("{}: renamed, as the name was taken", path(*node)?)
         }
+        Conflict::NameTaken { node } => format!(
+            "{}: not synced here, as another item in its folder has its name (or one differing \
+             only in case)",
+            engine.drive_path_of(*node)?.unwrap_or_else(|| "?".into())
+        ),
         Conflict::Cycle { node } => format!(
             "{}: a move that would have put a folder inside itself was undone",
             path(*node)?

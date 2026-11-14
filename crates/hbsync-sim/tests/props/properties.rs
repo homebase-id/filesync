@@ -113,6 +113,40 @@ proptest! {
         run_with(2, Some(min), |sim| sim, &events)?;
     }
 
+    /// A read-only folder (sync semantics §13) follows the drive whatever its user does there,
+    /// never writes it, and loses nothing: what changed there moved out.
+    #[test]
+    fn read_only_folders_follow_the_drive_without_loss(
+        read_only in 0usize..3,
+        events in proptest::collection::vec(event(3), 0..120)
+    ) {
+        run_with(3, None, |sim| sim.with_read_only(read_only), &events)?;
+    }
+
+    /// [`read_only_folders_follow_the_drive_without_loss`], the read-only client planning in
+    /// pages of 1 to 4, its downloads fetched and placed in two steps, every client dying now
+    /// and then, while folders are deleted, stopped half way and deleted outright elsewhere.
+    #[test]
+    fn read_only_folders_in_pages_that_crash_follow_the_drive(
+        read_only in 0usize..3,
+        size in 1usize..5,
+        events in proptest::collection::vec(
+            with_crashes(3, events_of(3, prop_oneof![
+                2 => action(),
+                1 => stopped_delete_action(),
+                1 => orphaning_action(),
+            ])),
+            0..120,
+        ),
+    ) {
+        let setup = |sim: Sim| {
+            sim.with_read_only(read_only)
+                .with_small_pages(size)
+                .with_split_downloads()
+        };
+        run_with(3, None, setup, &events)?;
+    }
+
     /// The main folders leave a role folder another device made alone (§12): never synced
     /// here, never changed, whatever the users do around it.
     #[test]
@@ -363,6 +397,15 @@ proptest! {
     ) {
         run_narrow(setup, 3, &events)?;
     }
+
+    /// [`the_engines_planning_path_plans_as_the_sim`] with a read-only folder (§13).
+    #[test]
+    fn a_read_only_folder_plans_as_the_sim_on_the_engines_path(
+        setup in 0..READ_ONLY_SETUPS.len(),
+        events in proptest::collection::vec(any_event(5), 0..80),
+    ) {
+        run_narrow_in(READ_ONLY_SETUPS, setup, 3, &events)?;
+    }
 }
 
 proptest! {
@@ -463,21 +506,42 @@ proptest! {
         setup in 0..SETUPS.len(),
         events in proptest::collection::vec(any_event(5), 0..120),
     ) {
-        let replay = || {
-            let (prepare, guard) = SETUPS[setup];
-            let mut sim = prepare(Sim::new(3));
-            sim.guard = guard;
-            sim.verbose = true;
-            sim.run(&events);
-            let settled = sim.quiesce(30);
-            let paths = sim.server_paths();
-            (settled, sim.trace, paths)
-        };
-        let ((settled, trace, paths), (again, retrace, repaths)) = (replay(), replay());
-        // Where the two runs part, not both traces whole.
-        if let Some(at) = (0..trace.len().max(retrace.len())).find(|i| trace.get(*i) != retrace.get(*i)) {
-            prop_assert!(false, "the runs part at trace line {at}:\n{:?}\n{:?}", trace.get(at), retrace.get(at));
-        }
-        prop_assert_eq!((settled, paths), (again, repaths));
+        replays_the_same(SETUPS[setup], &events)?;
     }
+
+    /// [`a_run_replays_the_same`] with a read-only folder (§13).
+    #[test]
+    fn a_read_only_run_replays_the_same(
+        setup in 0..READ_ONLY_SETUPS.len(),
+        events in proptest::collection::vec(any_event(5), 0..120),
+    ) {
+        replays_the_same(READ_ONLY_SETUPS[setup], &events)?;
+    }
+}
+
+/// Runs `events` twice on `setup`: the same trace, settling and drive both times.
+fn replays_the_same(setup: Setup, events: &[Event]) -> Result<(), TestCaseError> {
+    let replay = || {
+        let (prepare, guard) = setup;
+        let mut sim = prepare(Sim::new(3));
+        sim.guard = guard;
+        sim.verbose = true;
+        sim.run(events);
+        let settled = sim.quiesce(30);
+        let paths = sim.server_paths();
+        (settled, sim.trace, paths)
+    };
+    let ((settled, trace, paths), (again, retrace, repaths)) = (replay(), replay());
+    // Where the two runs part, not both traces whole.
+    if let Some(at) = (0..trace.len().max(retrace.len())).find(|i| trace.get(*i) != retrace.get(*i))
+    {
+        prop_assert!(
+            false,
+            "the runs part at trace line {at}:\n{:?}\n{:?}",
+            trace.get(at),
+            retrace.get(at)
+        );
+    }
+    prop_assert_eq!((settled, paths), (again, repaths));
+    Ok(())
 }

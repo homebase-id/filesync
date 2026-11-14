@@ -1,6 +1,6 @@
 //! The sync loop for one sync root.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -106,6 +106,9 @@ pub struct SyncReport {
     pub synced: Vec<Synced>,
     /// The drive is out of storage: uploads wait until there is room.
     pub full: bool,
+    /// What moved out of a read-only folder (sync semantics §13), to keep what changed here:
+    /// where it was in the folder, and where it went.
+    pub moved_out: Vec<(String, PathBuf)>,
     /// Operations not sent because the drive refused them as they are ([`crate::refused`]),
     /// with why: they wait for a change, an hour, or Sync now.
     pub refused: Vec<(Op, String)>,
@@ -142,6 +145,7 @@ impl SyncReport {
         self.stopped = later.stopped;
         self.synced.extend(later.synced);
         self.full = later.full;
+        self.moved_out.extend(later.moved_out);
         self.refused.extend(later.refused);
         self.waiting.extend(later.waiting);
         self.left_aside = later.left_aside;
@@ -297,6 +301,13 @@ impl Engine {
                 ));
             }
         };
+        // Only a main folder syncs read-only (§13): a role folder or a Desktop makes its top on
+        // the drive.
+        if cfg.folder.read_only.is_some() && part != Part::Main {
+            return Err(StateError::Conflict(
+                "a role folder or a Desktop never syncs read-only".into(),
+            ));
+        }
         if cfg.folder.scope.top != top {
             cfg.folder.scope = Arc::new(Scope::of(top));
         }
@@ -425,8 +436,12 @@ impl Engine {
     /// The next sync does the rest; what a failure leaves is still held, and shown again.
     /// Costs a feed read, then one restore of them all: a request per wave and per thousand rows,
     /// and after it two reads per node restored ([`crate::held::after_restore`]). Returns how
-    /// many it put back.
+    /// many it put back. Refused in a read-only folder (§13), whose drive this device never
+    /// writes: what is held there is confirmed or stays held.
     pub fn put_back(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
+        if self.cfg.folder.read_only.is_some() {
+            return Err(EngineError::ReadOnly("nothing is put back on the drive"));
+        }
         self.held
             .put_back(&mut self.db, &self.drive, nodes, &self.cfg.folder.scope)
     }
@@ -513,6 +528,12 @@ impl Engine {
         self.db.read(|s| activity::path_of(s, node))
     }
 
+    /// Where `node` is on the drive as the folder sees it, `/`-separated: for what isn't here
+    /// (one a read-only folder leaves out, §13). `None` where its path doesn't reach the top.
+    pub fn drive_path_of(&mut self, node: NodeId) -> Result<Option<String>, StateError> {
+        self.db.read(|s| activity::drive_path_of(s, node))
+    }
+
     /// A full local scan (tier C). The live observer does this incrementally in production.
     pub fn scan_local(&mut self) -> Result<ScanReport, EngineError> {
         Ok(scan(&mut self.db, &self.cfg.folder.root, &self.scan_opts)?)
@@ -567,7 +588,8 @@ impl Engine {
                 let tell = !(report.conflicts.is_empty()
                     && report.failed.is_empty()
                     && report.skipped.is_empty()
-                    && report.left_aside.is_empty());
+                    && report.left_aside.is_empty()
+                    && report.moved_out.is_empty());
                 self.unreported = tell.then_some(report);
                 Err(e)
             }
@@ -606,7 +628,7 @@ impl Engine {
             Pull::IfBehind => self.drive.catch_up(folder)?,
         };
         // A role folder's top on the drive, or this device's Desktop's: joined, restored, or
-        // made.
+        // made (never read-only, §13: refused at the open).
         match self.part {
             Part::Role(role) => self.drive.ensure_role(role)?,
             Part::Desktop => self.ensure_desktop(self.cfg.folder.scope.top)?,
@@ -1008,6 +1030,8 @@ impl Engine {
         if ops.is_empty() {
             return Ok(Some(plan.held));
         }
+        // What moves out is told however the run ends (§13): it already moved.
+        let mut moved_out = Vec::new();
         let exec = Executor::new(
             &mut self.db,
             self.remote.as_ref(),
@@ -1017,9 +1041,12 @@ impl Engine {
         .with_stop(Arc::clone(&self.stop))
         .with_progress(Arc::clone(&self.progress))
         .with_full(self.drive.full())
-        .with_refusals(refusals);
+        .with_refusals(refusals)
+        .with_moved_out(&mut moved_out);
         self.refusals.running();
-        let exec = exec.run(ops)?;
+        let ran = exec.run(ops);
+        report.moved_out.extend(moved_out);
+        let exec = ran?;
         self.refusals.ran(exec.refused);
         self.drive.absorb(exec.news);
         // What was done counts, and the folders it asks to look at are looked at, however

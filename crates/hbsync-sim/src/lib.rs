@@ -322,6 +322,27 @@ impl Sim {
         self
     }
 
+    /// Client `c`'s folder is read-only (sync semantics §13): it follows the drive and never
+    /// writes it; what its user changes there goes back to the drive's, and what that would
+    /// lose (an edit, a new item) moves out first, kept.
+    pub fn with_read_only(mut self, c: usize) -> Self {
+        self.clients[c].read_only = true;
+        self
+    }
+
+    /// What moved out of client `c`'s read-only folder: each item's name, in order.
+    pub fn moved_out(&self, c: usize) -> Vec<String> {
+        self.clients[c]
+            .moved_out
+            .iter()
+            .flat_map(|t| {
+                t.iter()
+                    .filter(|(_, s)| !t.contains(s.parent))
+                    .map(|(_, s)| s.name.clone())
+            })
+            .collect()
+    }
+
     /// Puts the Documents role folder on the server, named like the users' items (a role
     /// folder may have any name), with a file another device made in it. Every client syncs the
     /// main folder, which leaves role folders out (§12): no client may touch it or what is in

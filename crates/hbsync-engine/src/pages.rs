@@ -5,11 +5,9 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use hbsync_local::Filter;
 use hbsync_types::{NodeId, NodeKind};
 
-use crate::plan::{Conflict, Input, Op};
-use crate::scope::Scope;
+use crate::plan::{Conflict, Input, Masking, Op};
 use crate::tree::Tree;
 
 /// What of the dirty set outside a page is still to plan ([`dirty_elsewhere`]): the engine's
@@ -31,10 +29,10 @@ pub trait Pending {
 /// 500 nodes outside the page, and one a topmost such folder.
 pub fn dirty_elsewhere<P: Pending>(
     input: &mut Input,
-    filter: &Filter,
-    scope: &Scope,
+    masking: Masking<'_>,
     pending: &mut P,
 ) -> Result<(), P::Error> {
+    let Masking { filter, scope, .. } = masking;
     let outside: Vec<NodeId> = input
         .base
         .ids()
@@ -52,7 +50,7 @@ pub fn dirty_elsewhere<P: Pending>(
     let taken = match input.removed.is_empty() {
         true => HashSet::new(),
         false => {
-            let filtered = crate::mask::FilterMasks::of(input, filter, scope).masked;
+            let filtered = crate::mask::FilterMasks::of(input, masking).masked;
             crate::reconcile::merge::taken_along(input, &filtered)
         }
     };

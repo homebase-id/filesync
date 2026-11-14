@@ -31,6 +31,9 @@ pub enum EngineError {
         rest: Vec<(hbsync_types::NodeId, String)>,
         went: Vec<String>,
     },
+    /// Asked to write to the drive from a read-only folder (sync semantics §13).
+    #[error("this folder is read-only: {0}")]
+    ReadOnly(&'static str),
 }
 
 /// "Homebase says one item isn't there", or "… 3 items aren't there".
@@ -51,6 +54,7 @@ impl EngineError {
             EngineError::Stopped(e) => e.class(),
             EngineError::Remote(e) => e.class(),
             EngineError::NotThereOnce { .. } => ErrorClass::Gone,
+            EngineError::ReadOnly(_) => ErrorClass::Refused,
         }
     }
 

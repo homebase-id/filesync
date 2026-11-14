@@ -82,7 +82,7 @@ pub fn reconcile(input: &Input, opts: &Options, masking: Masking<'_>) -> Plan {
     let away = masks.moved_away(&first);
     let detached = masks.detached.len();
     spare_away(first, masks, away, |masks, away| {
-        let spared = masks.sparing(input, &opts.computer, &opts.taken, away, detached)?;
+        let spared = masks.sparing(input, masking, &opts.computer, &opts.taken, away, detached)?;
         let plan = plan_with(input, opts, masking, &spared);
         let stayed = spared.not_moved_away(input, &plan, away);
         Some((plan, stayed, spared))
@@ -196,6 +196,12 @@ struct Reconciler<'a> {
     origin: HashMap<NodeId, Origin>,
     /// Local file of `node` becomes the conflict copy `copy`.
     forks: BTreeMap<NodeId, NodeId>,
+    /// What moves out of a read-only folder before the drive's state comes back (§13).
+    evicted: BTreeSet<NodeId>,
+    /// What a read-only name clash left out (§13), each once.
+    left: BTreeSet<NodeId>,
+    /// The folders here a name pass left one out in, held there (§13): judged again.
+    rejudge: BTreeSet<NodeId>,
     /// Becomes `plan.deferred`.
     deferred: BTreeSet<NodeId>,
     /// Orphans the repairs move into Recovered files (§6.3): they lose a name clash there.
@@ -252,6 +258,9 @@ impl<'a> Reconciler<'a> {
             scope: BTreeSet::new(),
             origin: HashMap::new(),
             forks: BTreeMap::new(),
+            evicted: BTreeSet::new(),
+            left: BTreeSet::new(),
+            rejudge: BTreeSet::new(),
             deferred: BTreeSet::new(),
             adopted: HashSet::new(),
             taken,
@@ -303,14 +312,22 @@ impl<'a> Reconciler<'a> {
             }),
             "the repairs left a cycle or an orphan"
         );
-        // A node left where it is for a name may hold the name another would take: again,
-        // till none more waits (in each pass at least one node more waits).
+        // A node left where it is for a name, or left out read-only (§13: where it is here,
+        // maybe in a folder judged already), may hold the name another would take: again, till
+        // none more waits or is left out (in each pass at least one node more does).
+        let mut only = None;
         loop {
             let waited = self.waiters.len();
-            self.fix_names();
-            if self.waiters.len() == waited {
+            self.fix_names(only.as_ref());
+            only = if self.waiters.len() != waited {
+                // Every folder again: none just for what was left out.
+                self.rejudge.clear();
+                None
+            } else if self.rejudge.is_empty() {
                 break;
-            }
+            } else {
+                Some(std::mem::take(&mut self.rejudge))
+            };
         }
         self.emit();
         self.places_across_pages();
@@ -318,6 +335,12 @@ impl<'a> Reconciler<'a> {
         self.deletes_wait_with_their_folder();
         self.with_what_it_took_along();
         self.guard_mass_delete();
+        // Read-only (§13): the drive is never written (emit plans no write there).
+        debug_assert!(
+            !(self.masking.read_only && self.plan.writes_drive()),
+            "a read-only plan writes the drive: {:?}",
+            self.plan.ops
+        );
         self.plan.waiting = self.waited_for();
         // The folders this page waits for, with everything of it below them.
         self.plan.waits_for_pages = self.going.iter().map(|n| self.masks.store_id(*n)).collect();

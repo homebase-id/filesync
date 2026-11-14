@@ -433,29 +433,38 @@ impl Sim {
                 };
                 let mut tags: Vec<Tag> = state.tags.iter().cloned().collect();
                 let had = tags.iter().position(|t| t.name == name);
+                // Read-only (§13), the drive's tags come back: nothing is owed of a change
+                // there, so the book doesn't hear of it.
+                let book = !self.clients[c].read_only;
                 match (action, had) {
                     (Action::Colour { .. }, Some(i)) if os == Os::MacOs => {
                         tags[i].colour = (tags[i].colour + 1) % 8;
-                        let seen = self.clients[c].base_tag(node, name).map(|t| t.colour);
-                        let in_flight = self.writes_tag(c, node, name);
-                        let colour = tags[i].colour;
-                        let book = &mut self.ledger.tags;
-                        book.recolour(c, node, name, colour, seen, in_flight);
+                        if book {
+                            let seen = self.clients[c].base_tag(node, name).map(|t| t.colour);
+                            let in_flight = self.writes_tag(c, node, name);
+                            let colour = tags[i].colour;
+                            let book = &mut self.ledger.tags;
+                            book.recolour(c, node, name, colour, seen, in_flight);
+                        }
                     }
                     (Action::Tag { .. }, Some(i)) => {
                         tags.remove(i);
-                        let synced = self.clients[c].base_tag(node, name).is_some();
-                        let now = synced.then(|| self.server.now());
-                        let in_flight = self.writes_tag(c, node, name);
-                        self.ledger.tags.remove(c, node, name, now, in_flight);
+                        if book {
+                            let synced = self.clients[c].base_tag(node, name).is_some();
+                            let now = synced.then(|| self.server.now());
+                            let in_flight = self.writes_tag(c, node, name);
+                            self.ledger.tags.remove(c, node, name, now, in_flight);
+                        }
                     }
                     (Action::Tag { .. }, None) => {
                         let Some(tag) = express(&Tag::new(name, colour), os) else {
                             return; // this OS can't hold it
                         };
                         tags.push(tag);
-                        let (concurrent, limit) = self.removal_unseen(c, node, name);
-                        self.ledger.tags.add(c, node, name, concurrent, limit);
+                        if book {
+                            let (concurrent, limit) = self.removal_unseen(c, node, name);
+                            self.ledger.tags.add(c, node, name, concurrent, limit);
+                        }
                     }
                     _ => return,
                 }
@@ -735,6 +744,10 @@ impl Sim {
     /// in pages the rest of its sweep, as [`Sim::quiesce`] runs it). What a later page held
     /// meanwhile stays held, shown again.
     pub(crate) fn put_back(&mut self, c: usize) {
+        // Read-only (§13), the engine refuses it: what is held stays held.
+        if self.clients[c].read_only {
+            return;
+        }
         let held = std::mem::take(&mut self.clients[c].held);
         if held.is_empty() {
             return;

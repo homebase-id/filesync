@@ -821,20 +821,29 @@ impl Runner {
             match answer {
                 Some((HeldAnswer::Delete, seen)) => p.engine.confirm_deletes(seen.iter().copied()),
                 Some((HeldAnswer::PutBack, seen)) => {
-                    if let Err(e) = p.engine.put_back(&seen) {
+                    match p.engine.put_back(&seen) {
+                        Ok(_) => {}
+                        // A read-only folder never puts back (§13): nothing to try again.
+                        Err(hbsync_engine::EngineError::ReadOnly(_)) => self.tell(vec![
+                            "This folder is read-only: what it holds back can't be put back on \
+                             Homebase, only deleted here or left held"
+                                .into(),
+                        ]),
                         // What it didn't put back is still held, and shown again; the first
                         // time, it runs once more a minute on (a file the identity said once
                         // isn't there is gone for good then, and goes up again from here).
-                        let then = if once_more {
-                            "what is still to review is shown again, to answer again"
-                        } else {
-                            let at = Instant::now() + self.cfg.put_back_again;
-                            put_back_again = Some((at, Arc::clone(&seen)));
-                            "tried again in a minute; what is still to review is shown again"
-                        };
-                        self.tell(vec![format!(
-                            "Not all of the deletions to review could be put back ({e}): {then}"
-                        )]);
+                        Err(e) => {
+                            let then = if once_more {
+                                "what is still to review is shown again, to answer again"
+                            } else {
+                                let at = Instant::now() + self.cfg.put_back_again;
+                                put_back_again = Some((at, Arc::clone(&seen)));
+                                "tried again in a minute; what is still to review is shown again"
+                            };
+                            self.tell(vec![format!(
+                                "Not all of the deletions to review could be put back ({e}): {then}"
+                            )]);
+                        }
                     }
                 }
                 None => {}
@@ -1117,12 +1126,14 @@ impl Runner {
         Ok(())
     }
 
-    /// `report`'s notes.
+    /// `report`'s notes, but where it moved out of a read-only folder (§13): told here, each
+    /// time, before the rest (which reads the DB, and may fail).
     fn notes_of(
         &mut self,
         engine: &mut Engine,
         report: &SyncReport,
     ) -> Result<Vec<String>, StateError> {
+        self.tell(report::moved_out_notes(report));
         let skips = self.stalled.told(&report.skipped, Instant::now());
         report::notes(engine, report, &skips)
     }
