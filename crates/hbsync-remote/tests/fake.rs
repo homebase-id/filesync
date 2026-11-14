@@ -2,7 +2,7 @@ use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 use std::time::Duration;
 
-use hbsync_remote::contract::{Bench, Shares, file, folder, upload};
+use hbsync_remote::contract::{self, Bench, Shares, file, folder, upload};
 use hbsync_remote::{ChangeRef, NodeMeta, Remote, RemoteError, RemoteHeader, Upload, feed_end};
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{NodeId, NodeKind, Target, Written};
@@ -34,6 +34,8 @@ fn the_contract_holds() -> R {
 fn the_shared_contract_holds() -> R {
     let sharer = remote();
     let member = FakeRemote::member(sharer.server_handle());
+    // The sharer's own feed end: the bench's start is the member's cursor.
+    let sharers_start = feed_end(&sharer, None)?;
     let bench = Bench::shared(&sharer, &member, &sharer, "contract", Duration::ZERO)?;
     let failed = bench.run_all();
     assert!(failed.is_empty(), "{failed:#?}");
@@ -50,8 +52,11 @@ fn the_shared_contract_holds() -> R {
         let shared: Vec<_> = server.shared().collect();
         assert!(shared.is_empty(), "cleanup left share rows of {shared:?}");
     }
-    for (who, r) in [("sharer", &sharer), ("member", &member)] {
-        let rows = rows_after(r, Some(bench.start()))?;
+    for (who, r, start) in [
+        ("sharer", &sharer, sharers_start.as_str()),
+        ("member", &member, bench.start()),
+    ] {
+        let rows = rows_after(r, Some(start))?;
         assert!(
             rows.is_empty(),
             "cleanup left in the {who}'s feed: {rows:?}"
@@ -62,16 +67,8 @@ fn the_shared_contract_holds() -> R {
 
 /// Every row of `r`'s feed after `cursor` (from the start without one).
 fn rows_after(r: &FakeRemote, cursor: Option<&str>) -> Result<Vec<RemoteHeader>, RemoteError> {
-    let mut cursor = cursor.map(str::to_owned);
-    let mut rows = Vec::new();
-    loop {
-        let page = r.changes(cursor.as_deref(), 1000)?;
-        rows.extend(page.entries);
-        if !page.has_more {
-            return Ok(rows);
-        }
-        cursor = Some(page.cursor);
-    }
+    contract::rows_after(Duration::ZERO, cursor, |at, limit| r.changes(at, limit))
+        .map(|(rows, _)| rows)
 }
 
 /// A member's subscription hears what its feed shows: nothing of a file not shared with it, a

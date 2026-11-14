@@ -28,6 +28,7 @@
 //! homebase-api-notes, "Shared with you"): only the files shared with it, a share withdrawn as
 //! a tombstone without a version, read-only.
 
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -135,6 +136,13 @@ enum Seen {
     Unshared,
 }
 
+/// What of a file a client reads ([`FakeServer::access`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    Header,
+    Payload,
+}
+
 impl FakeServer {
     pub fn new(config: ServerConfig) -> Arc<Mutex<FakeServer>> {
         Arc::new(Mutex::new(FakeServer {
@@ -179,21 +187,28 @@ impl FakeServer {
             self.feed.remove(&(f.modified, f.row));
             f.modified = modified;
             self.feed.insert((modified, f.row), file_id);
-            // Each subscriber hears the row as its view's feed has it (odin-core sends a
-            // member's socket the answer its query gets: `NoLongerSharedViewOf`): the member
-            // nothing of a file not shared with it.
-            let (owner, member) = (
-                self.row_seen(file_id, View::Owner),
-                self.row_seen(file_id, View::Member),
-            );
+            // Each subscriber hears the row as its view's feed has it: odin-core sends a
+            // member's socket the answer its query gets, the member nothing of a file no share
+            // row names it on (**[verified]** `DriveEventMessage.MessageForAsync`,
+            // `NoLongerSharedViewOf`). Each view's row is built for its first subscriber.
+            let (header, shares) = (&f.header, &self.shares);
+            let (owner, member) = (OnceCell::new(), OnceCell::new());
+            let owners = || *owner.get_or_init(|| ChangeRef::of(header));
             // A subscriber that went away is dropped.
             self.subscribers.retain(|s| {
+                if writer.is_some() && s.excluded == writer {
+                    return true;
+                }
                 let change = match s.view {
-                    View::Owner => owner,
-                    View::Member => member,
+                    View::Owner => Some(owners()),
+                    View::Member => *member.get_or_init(|| {
+                        Some(match seen_by(shares, file_id, View::Member)? {
+                            Seen::AsIs => owners(),
+                            Seen::Unshared => unshared_ref(header),
+                        })
+                    }),
                 };
-                (writer.is_some() && s.excluded == writer)
-                    || change.is_none_or(|c| s.events.send(c).is_ok())
+                change.is_none_or(|c| s.events.send(c).is_ok())
             });
         }
         if self.config.auto_tick {
@@ -488,8 +503,10 @@ impl FakeServer {
     }
 
     /// Shares `file_id` with the member (`live`), or withdraws its share: its place in the feed
-    /// moves, its version stays (as odin-core's share rows). Withdrawing a share never given is
-    /// refused, and one withdrawn already changes nothing (`WithdrawShareAsync`).
+    /// moves, its version stays, and it is announced as any write (**[verified]** odin-core
+    /// `MainIndexMeta.WriteSharesAsync`, `DriveShareService.PublishChangedAsync`). Withdrawing
+    /// a share never given is refused (a 400 there), and one withdrawn already changes nothing
+    /// (**[verified]** `DriveShareService.WithdrawShareAsync`).
     fn set_share(&mut self, writer: ClientId, file_id: RemoteFileId, live: bool) -> Result<()> {
         if !self.files.contains_key(&file_id) {
             return Err(RemoteError::NotFound);
@@ -508,37 +525,45 @@ impl FakeServer {
         Ok(())
     }
 
-    /// How `view` sees `file_id`'s row, if at all. The owner sees every row as it is.
+    /// How `view` sees `file_id`'s row, if at all ([`seen_by`]).
     fn sees(&self, file_id: RemoteFileId, view: View) -> Option<Seen> {
-        match view {
-            View::Owner => Some(Seen::AsIs),
-            View::Member => self
-                .shares
-                .get(&file_id)
-                .map(|&live| if live { Seen::AsIs } else { Seen::Unshared }),
-        }
+        seen_by(&self.shares, file_id, view)
     }
 
-    /// `file_id`'s row as `view` sees it, slim, if it does.
-    fn row_seen(&self, file_id: RemoteFileId, view: View) -> Option<ChangeRef> {
-        let header = &self.files.get(&file_id)?.header;
-        Some(match self.sees(file_id, view)? {
-            Seen::AsIs => ChangeRef::of(header),
-            how => ChangeRef::of(&seen(header.clone(), view, how)),
-        })
-    }
-
-    /// Refuses `view` the header and payload of a file it may not read: the member one not
-    /// shared with it, as Homebase does with a 403 that has no code (as the adapter reads it),
-    /// or one deleted for good (its share row went with it) as not found.
-    fn access(&self, file_id: RemoteFileId, view: View) -> Result<()> {
+    /// Whether `view` may read `part` of `file_id`, and how it is refused. The member is
+    /// refused a file not shared with it, as Homebase refuses it with a 403 that has no code
+    /// (**[verified]** odin-core `DriveStorageServiceBase`, "No access permitted to the file";
+    /// the adapter reads it as fatal), one deleted for good (its share row went with it) as not
+    /// found, and the payload of a tombstone as deleted: its adapter reads the header first, for
+    /// the key (`PeerRemote`). The owner's adapter goes by the payload: not there.
+    fn access(&self, file_id: RemoteFileId, view: View, part: Part) -> Result<()> {
+        let file = self.files.get(&file_id);
         match self.sees(file_id, view) {
+            _ if file.is_none() => Err(RemoteError::NotFound),
+            Some(Seen::AsIs)
+                if view == View::Member
+                    && part == Part::Payload
+                    && file.is_some_and(|f| f.header.is_deleted()) =>
+            {
+                Err(RemoteError::Deleted)
+            }
             Some(Seen::AsIs) => Ok(()),
-            _ if !self.files.contains_key(&file_id) => Err(RemoteError::NotFound),
             _ => Err(RemoteError::Fatal(format!(
                 "{file_id:?}: not shared with you"
             ))),
         }
+    }
+
+    /// `file_id`'s header as `view` reads it ([`FakeServer::access`]).
+    fn header_as(&self, file_id: RemoteFileId, view: View) -> Result<RemoteHeader> {
+        self.access(file_id, view, Part::Header)?;
+        Ok(seen(self.header(file_id)?, view, Seen::AsIs))
+    }
+
+    /// `file_id`'s payload as `view` reads it ([`FakeServer::access`]).
+    fn payload_as(&self, file_id: RemoteFileId, view: View) -> Result<Arc<Vec<u8>>> {
+        self.access(file_id, view, Part::Payload)?;
+        self.payload(file_id)
     }
 
     /// Moves the server's clock by `ms` (for tests: writes that look old to the purge).
@@ -971,8 +996,10 @@ impl FakeRemote {
         self.client
     }
 
-    /// Subscribes to the drive's notifications ([`FakeServer::subscribe`]), leaving out the
-    /// writes made with this client's token if `exclude_own_writes`.
+    /// Subscribes to the drive's notifications: every write from now on, as its file's row as
+    /// this client's view sees it (the member's: only what is shared with it, a share withdrawn
+    /// as a tombstone without a version), leaving out the writes made with this client's token
+    /// if `exclude_own_writes`.
     pub fn subscribe(&self, exclude_own_writes: bool) -> Receiver<ChangeRef> {
         self.server()
             .subscribe(exclude_own_writes.then_some(self.client), self.view)
@@ -1182,9 +1209,7 @@ impl Remote for FakeRemote {
         if not_found {
             return Err(RemoteError::NotFound);
         }
-        let server = self.server();
-        server.access(file_id, self.view)?;
-        Ok(seen(server.header(file_id)?, self.view, Seen::AsIs))
+        self.server().header_as(file_id, self.view)
     }
 
     fn holding(&self, folders: &[NodeId], holds: Holds<'_>) -> Result<HashSet<NodeId>> {
@@ -1316,20 +1341,7 @@ impl Remote for FakeRemote {
         sink: &mut dyn Write,
     ) -> Result<u64> {
         self.gate()?;
-        let bytes = {
-            let server = self.server();
-            server.access(file_id, self.view)?;
-            // The member's adapter reads the header first and finds a tombstone (`PeerRemote`);
-            // the owner's goes by the payload, not there.
-            let tombstone = server
-                .files
-                .get(&file_id)
-                .is_some_and(|f| f.header.is_deleted());
-            if self.view == View::Member && tombstone {
-                return Err(RemoteError::Deleted);
-            }
-            server.payload(file_id)?
-        };
+        let bytes = self.server().payload_as(file_id, self.view)?;
         let len = bytes.len() as u64;
         let range = range.unwrap_or(0..len);
         let (start, end) = (range.start.min(len), range.end.min(len));
@@ -1375,6 +1387,34 @@ impl crate::contract::Shares for FakeRemote {
         self.writable()?;
         self.gate()?;
         self.server().set_share(self.client, file_id, false)
+    }
+}
+
+/// How `view` sees `file_id`'s row, if at all, by the member's share rows `shares`: the owner
+/// every row as it is, the member only the rows shared with it.
+fn seen_by(
+    shares: &HashMap<RemoteFileId, bool>,
+    file_id: RemoteFileId,
+    view: View,
+) -> Option<Seen> {
+    match view {
+        View::Owner => Some(Seen::AsIs),
+        View::Member => shares
+            .get(&file_id)
+            .map(|&live| if live { Seen::AsIs } else { Seen::Unshared }),
+    }
+}
+
+/// The slim row of `header` [`Seen::Unshared`]: `ChangeRef::of` the [`seen`] tombstone, without
+/// building it.
+fn unshared_ref(header: &RemoteHeader) -> ChangeRef {
+    ChangeRef {
+        file_id: header.file_id,
+        version: VersionTag(Uuid::nil()),
+        deleted: true,
+        parent: None,
+        removed: false,
+        changed_at: header.changed_at,
     }
 }
 

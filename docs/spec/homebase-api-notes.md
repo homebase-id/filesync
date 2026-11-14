@@ -561,10 +561,18 @@ server answers the rest, to a token their server made for this identity's connec
   `DriveStorageServiceBase.NoLongerSharedTombstoneOf`), and is sent again after every change of
   the file while a row still names the member; sharing or withdrawing moves the file's
   `modified` and keeps its version, so a share given again brings the file back live at the
-  version it had (**[verified]**). The client tells it from a delete by its zero version
-  (`RemoteHeader::is_unshared`, `ChangeRef::is_unshared`): the file leaves the member's
-  devices, but isn't gone. `FakeRemote::member` (`hbsync-remote`) models this member's view,
-  and the contract's read-only subset (`Bench::shared`) checks it. Refusals: 401 the token (unknown,
+  version it had (**[verified]**). The client can tell it from a delete by its zero version
+  (`RemoteHeader::is_unshared`, `ChangeRef::is_unshared`); the engine's handling of it (the
+  file leaves the member's devices, but isn't gone) comes with the read-only shared folders'
+  next step. A member's notification socket hears what its query gets: a file through its
+  share, the same tombstone once the share ends (after every change of the file while a row
+  names the member), and nothing of a file no row names them on (**[verified]**
+  `DriveEventMessage.MessageForAsync`, `DriveStorageServiceBase.NoLongerSharedViewOf`); a
+  share written or withdrawn raises the file's ordinary change event, a withdrawal of a share
+  withdrawn already none (**[verified]** `DriveShareService.WithdrawShareAsync`).
+  `FakeRemote::member` (`hbsync-remote`) models this member's view, and the contract's
+  read-only subset (`Bench::shared`) checks the fake now; it runs live against `PeerRemote`
+  with the wiring PR. Refusals: 401 the token (unknown,
   the connection gone, their keys invalid), 403 a file not (or no longer) shared, 404 none
   there. A share-key answer not sealed yet or not reviewed waits (`RemoteError::Later`, asked
   again in 15 minutes); reads never write: every write refuses before a request.

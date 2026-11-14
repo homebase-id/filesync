@@ -20,7 +20,8 @@ use hbsync_types::{
 };
 
 use crate::{
-    ChangeRef, Holds, NodeMeta, Planned, Remote, RemoteBody, RemoteError, RemoteHeader, Upload,
+    ChangeRef, ChangesPage, Holds, NodeMeta, Planned, RefsPage, Remote, RemoteBody, RemoteError,
+    RemoteHeader, Upload,
 };
 
 /// `files` to delete, unchecked ([`Doomed::unchecked`]): what a test wrote itself.
@@ -29,6 +30,64 @@ pub fn doomed(files: &[RemoteRef]) -> Vec<Doomed> {
 }
 
 pub type Outcome = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+/// A page of the feed, whole ([`ChangesPage`]) or slim ([`RefsPage`]), for [`rows_after`].
+pub trait FeedPage {
+    type Row;
+
+    /// Its rows, cursor and whether more follow; an error when it left rows out (skipped
+    /// whole, unread slim): a scenario would miss them.
+    fn rows(self) -> Result<(Vec<Self::Row>, String, bool), RemoteError>;
+}
+
+impl FeedPage for ChangesPage {
+    type Row = RemoteHeader;
+
+    fn rows(self) -> Result<(Vec<RemoteHeader>, String, bool), RemoteError> {
+        if !self.skipped.is_empty() {
+            return Err(RemoteError::Fatal(format!(
+                "feed rows skipped: {:?}",
+                self.skipped
+            )));
+        }
+        Ok((self.entries, self.cursor, self.has_more))
+    }
+}
+
+impl FeedPage for RefsPage {
+    type Row = ChangeRef;
+
+    fn rows(self) -> Result<(Vec<ChangeRef>, String, bool), RemoteError> {
+        if self.unread != 0 {
+            return Err(RemoteError::Fatal(format!(
+                "{} feed rows not read slim",
+                self.unread
+            )));
+        }
+        Ok((self.refs, self.cursor, self.has_more))
+    }
+}
+
+/// Every row of the feed after `cursor` (from the start without one) once writes `settle`d,
+/// read by `page` (a cursor and a limit) 100 at a time until no more follow, and the cursor
+/// after them.
+pub fn rows_after<P: FeedPage>(
+    settle: Duration,
+    cursor: Option<&str>,
+    mut page: impl FnMut(Option<&str>, usize) -> Result<P, RemoteError>,
+) -> Result<(Vec<P::Row>, String), RemoteError> {
+    std::thread::sleep(settle);
+    let mut cursor = cursor.map(str::to_owned);
+    let mut rows = Vec::new();
+    loop {
+        let (more, next, has_more) = page(cursor.as_deref(), 100)?.rows()?;
+        rows.extend(more);
+        if !has_more {
+            return Ok((rows, next));
+        }
+        cursor = Some(next);
+    }
+}
 
 /// A sharer's share rows for the member a shared bench reads as ([`Bench::shared`]).
 pub trait Shares: Sync {
@@ -203,18 +262,18 @@ impl<'a> Bench<'a> {
         settle: Duration,
     ) -> Result<Self, RemoteError> {
         let scratch = folder(name, NodeId::ROOT);
-        let mut bench = Bench {
+        // The feed's end as the scenarios read it ([`Bench::reader`]).
+        let start = feed_end(shared.map_or(remote, |s| s.member), None)?;
+        let bench = Bench {
             remote,
             shared,
             scratch: scratch.node,
             settle,
             created: Mutex::default(),
             tokens: Mutex::default(),
-            end: Mutex::default(),
-            start: String::new(),
+            end: Mutex::new(start.clone()),
+            start,
         };
-        bench.start = feed_end(bench.reader(), None)?;
-        bench.end = Mutex::new(bench.start.clone());
         let at = bench.create_unshared(&scratch, None)?;
         // A scratch folder that can't be shared is deleted again: nothing left on the drive.
         if let Err(e) = bench.share(at.file_id) {
@@ -414,38 +473,17 @@ impl<'a> Bench<'a> {
         &self,
         cursor: Option<&str>,
     ) -> Result<(Vec<RemoteHeader>, String), RemoteError> {
-        std::thread::sleep(self.settle);
-        let mut cursor = cursor.map(str::to_owned);
-        let mut entries = Vec::new();
-        loop {
-            let page = self.reader().changes(cursor.as_deref(), 100)?;
-            if !page.skipped.is_empty() {
-                return Err(RemoteError::Fatal(format!(
-                    "feed rows skipped: {:?}",
-                    page.skipped
-                )));
-            }
-            entries.extend(page.entries);
-            if !page.has_more {
-                return Ok((entries, page.cursor));
-            }
-            cursor = Some(page.cursor);
-        }
+        rows_after(self.settle, cursor, |at, limit| {
+            self.reader().changes(at, limit)
+        })
     }
 
     /// Every change after `cursor` read slim ([`Remote::change_refs`], all pages).
     fn refs_after(&self, cursor: &str) -> Result<Vec<ChangeRef>, RemoteError> {
-        std::thread::sleep(self.settle);
-        let mut cursor = cursor.to_owned();
-        let mut refs = Vec::new();
-        loop {
-            let page = self.reader().change_refs(Some(&cursor), 100)?;
-            refs.extend(page.refs);
-            if !page.has_more {
-                return Ok(refs);
-            }
-            cursor = page.cursor;
-        }
+        rows_after(self.settle, Some(cursor), |at, limit| {
+            self.reader().change_refs(at, limit)
+        })
+        .map(|(refs, _)| refs)
     }
 
     /// The changes after `cursor` to the files in `ids` (other writers may share the drive).
@@ -1098,13 +1136,12 @@ fn a_removed_node_deleted_for_good(b: &Bench) -> Outcome {
         feed.last().is_some_and(RemoteHeader::is_deleted),
         "no tombstone in the feed: {feed:?}"
     );
-    // Gone either way, as the remotes differ: the owner's reads the size from the header and
-    // finds no payload (not found), a member's reads the header for the key and finds a
-    // tombstone (deleted).
-    ensure_err!(
-        b.read(w.file_id, None),
-        RemoteError::NotFound | RemoteError::Deleted
-    );
+    // The owner's remote reads the size from the header and finds no payload (not found), a
+    // member's reads the header for the key and finds a tombstone (deleted).
+    match b.shared {
+        Some(_) => ensure_err!(b.read(w.file_id, None), RemoteError::Deleted),
+        None => ensure_err!(b.read(w.file_id, None), RemoteError::NotFound),
+    }
     Ok(())
 }
 
