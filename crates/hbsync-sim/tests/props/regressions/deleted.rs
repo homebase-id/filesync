@@ -2668,3 +2668,61 @@ fn held_with_what_it_took_along(mut sim: Sim, settle: fn(&mut Sim) -> bool, dele
         panic!("{e}");
     }
 }
+
+/// c0 deletes file `a/a/a` here; another device removes `a` on the drive and stops: `a/a` and
+/// the file stay live, taken along. In pages of one node, `a` is too big for a page (it and the
+/// file are dirty): its folders' subtrees go first, and `a/a`'s piece holds only the file, as
+/// `a/a` is unchanged here. The file removed in it went to Recently deleted apart from its
+/// folders, removed by `a`'s last page. Now, deleted here, it waits for `a`'s plan as what is
+/// unchanged does, and goes with it, as planned whole (seed f779bad4).
+#[test]
+fn regression_a_file_deleted_here_in_a_piece_waits_for_the_folder_that_took_it_along() {
+    use Action::*;
+    let acts = [
+        (1, CreateFolder { parent: 0, name: 0 }, false),
+        (0, CreateFolder { parent: 0, name: 0 }, false),
+        (0, Purge, true),
+        (
+            0,
+            CreateFolder {
+                parent: 15,
+                name: 0,
+            },
+            false,
+        ),
+        (
+            0,
+            CreateFile {
+                parent: 14,
+                name: 0,
+            },
+            false,
+        ),
+        (0, DeleteStopped { pick: 0, done: 0 }, false),
+        (0, DeleteStopped { pick: 0, done: 0 }, false),
+        (0, Purge, true),
+        (0, Delete { node: 11 }, false),
+        (0, DeleteStopped { pick: 0, done: 3 }, false),
+        (0, Purge, false),
+    ];
+    let end = |pages: Option<usize>| {
+        let mut sim = Sim::new(3).without_ignore_rules();
+        if let Some(size) = pages {
+            sim = sim.with_small_pages(size);
+        }
+        for (client, action, sync) in acts {
+            sim.run(&[Event::Act { client, action }]);
+            if sync {
+                assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
+            }
+        }
+        assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
+        if let Err(e) = sim.check() {
+            panic!("pages {pages:?}: {e}");
+        }
+        (sim.server_paths(), sim.removed_files_apart())
+    };
+    let whole = end(None);
+    assert_eq!(whole.1, 0, "{whole:?}");
+    assert_eq!(end(Some(1)), whole, "in pages of one");
+}
