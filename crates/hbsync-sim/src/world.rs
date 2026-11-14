@@ -969,7 +969,7 @@ impl Sim {
         } else {
             // (Nothing here restores a row meanwhile: back already, the engine's would be a
             // version mismatch, its contents waiting in Recently deleted.)
-            debug_assert!(
+            assert!(
                 !self.server.live.contains_key(&row.node),
                 "{:?} back",
                 row.node

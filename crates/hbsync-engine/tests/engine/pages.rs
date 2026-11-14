@@ -199,8 +199,9 @@ fn a_file_deleted_here_in_a_piece_goes_with_its_folders_to_recently_deleted() ->
         roots.sort();
         Ok(roots)
     };
+    // One item, `d`: what b removed after it was removed with it.
     let whole = roots(20_000)?;
-    assert!(!whole.iter().any(|r| r.ends_with("x.txt")), "{whole:?}");
+    assert_eq!(whole, ["d"]);
     for batch in [1, 2] {
         assert_eq!(roots(batch)?, whole, "in pages of {batch}");
     }
@@ -400,7 +401,7 @@ fn a_stopped_wipe_planned_in_pages_is_held() -> R {
 #[test]
 fn what_a_held_removal_took_along_waits_without_a_spin() -> R {
     use hbsync_platform::tags::{self, Tag, Tags};
-    held_removal_settles_without_a_spin(false, &|b| {
+    held_removal_settles_without_a_spin(None, &|b| {
         let s = b.root.join("d1/s");
         if !tags::CAN_TAG || tags::write(&s, &Tags::default())?.is_none() {
             eprintln!("no tags here; skipped");
@@ -414,8 +415,8 @@ fn what_a_held_removal_took_along_waits_without_a_spin() -> R {
 /// Three folders `d1`…`d3`, each with `a.txt` and `s/x.txt`, removed on the drive but `s` and
 /// `x.txt` (taken along), held by b, and `change` made in b (`false`: it can't be here,
 /// skipped), b syncing in pages of 1, 2 and whole: once the hold settles, a sync plans
-/// nothing, and each `x.txt` stays (`d1`'s gone where `deleted` says it was deleted here).
-fn held_removal_settles_without_a_spin(deleted: bool, change: &Change) -> R {
+/// nothing, and each `x.txt` stays here but `deleted` (the one `change` deleted).
+fn held_removal_settles_without_a_spin(deleted: Option<&str>, change: &Change) -> R {
     for batch in [1, 2, 20_000] {
         let server = server();
         let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
@@ -447,7 +448,7 @@ fn held_removal_settles_without_a_spin(deleted: bool, change: &Change) -> R {
         );
         for d in ["d1", "d2", "d3"] {
             let x = format!("{d}/s/x.txt");
-            match deleted && d == "d1" {
+            match deleted == Some(x.as_str()) {
                 true => assert!(!b.root.join(&x).exists(), "pages of {batch}"),
                 false => assert_eq!(b.read_text(&x)?, "x", "pages of {batch}"),
             }
@@ -466,7 +467,7 @@ fn held_removal_settles_without_a_spin(deleted: bool, change: &Change) -> R {
 /// §6.5): the wait settles with the hold all the same, later syncs plan nothing.
 #[test]
 fn a_file_deleted_here_that_a_held_removal_took_along_waits_without_a_spin() -> R {
-    held_removal_settles_without_a_spin(true, &|b| {
+    held_removal_settles_without_a_spin(Some("d1/s/x.txt"), &|b| {
         fs::remove_file(b.root.join("d1/s/x.txt"))?;
         Ok(true)
     })
