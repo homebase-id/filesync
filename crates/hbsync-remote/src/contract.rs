@@ -203,21 +203,32 @@ impl<'a> Bench<'a> {
         settle: Duration,
     ) -> Result<Self, RemoteError> {
         let scratch = folder(name, NodeId::ROOT);
-        let start = feed_end(shared.map_or(remote, |s| s.member), None)?;
-        let written = remote.create(&scratch, None)?;
-        let file_id = written.at().file_id;
-        let bench = Bench {
+        let mut bench = Bench {
             remote,
             shared,
             scratch: scratch.node,
             settle,
-            created: Mutex::new(vec![file_id]),
+            created: Mutex::default(),
             tokens: Mutex::default(),
-            end: Mutex::new(start.clone()),
-            start,
+            end: Mutex::default(),
+            start: String::new(),
         };
-        bench.share(file_id)?;
+        bench.start = feed_end(bench.reader(), None)?;
+        bench.end = Mutex::new(bench.start.clone());
+        let at = bench.create_unshared(&scratch, None)?;
+        // A scratch folder that can't be shared is deleted again: nothing left on the drive.
+        if let Err(e) = bench.share(at.file_id) {
+            if let Err(left) = bench.cleanup() {
+                eprintln!("cleanup of the scratch folder not shared: {left}");
+            }
+            return Err(e);
+        }
         Ok(bench)
+    }
+
+    /// The feed's end before the scratch folder was made, as the scenarios read it.
+    pub fn start(&self) -> &str {
+        &self.start
     }
 
     /// Runs every scenario that reaches this bench ([`Reach`]); returns the names and errors of
@@ -567,8 +578,11 @@ fn create_read_and_feed(b: &Bench) -> Outcome {
     );
     ensure!(feed[1] == header, "the feed's header differs from header()");
     // A write returns the token the writer's header gives for its version, so the engine has
-    // it at once: one written, one updated.
-    let token = b.remote.header(written.file_id)?.token;
+    // it at once: one written, one updated. The member's header has none: the writer's is read.
+    let token = match b.shared {
+        Some(_) => b.remote.header(written.file_id)?.token,
+        None => header.token,
+    };
     ensure!(
         token.is_some() && token == b.token(written.file_id),
         "the create's token isn't the header's"
@@ -1084,7 +1098,13 @@ fn a_removed_node_deleted_for_good(b: &Bench) -> Outcome {
         feed.last().is_some_and(RemoteHeader::is_deleted),
         "no tombstone in the feed: {feed:?}"
     );
-    ensure_err!(b.read(w.file_id, None), RemoteError::NotFound);
+    // Gone either way, as the remotes differ: the owner's reads the size from the header and
+    // finds no payload (not found), a member's reads the header for the key and finds a
+    // tombstone (deleted).
+    ensure_err!(
+        b.read(w.file_id, None),
+        RemoteError::NotFound | RemoteError::Deleted
+    );
     Ok(())
 }
 

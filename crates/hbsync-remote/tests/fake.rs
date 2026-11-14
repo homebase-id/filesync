@@ -2,8 +2,8 @@ use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 use std::time::Duration;
 
-use hbsync_remote::contract::{Bench, file, folder, upload};
-use hbsync_remote::{NodeMeta, Remote, RemoteError, Upload};
+use hbsync_remote::contract::{Bench, Shares, file, folder, upload};
+use hbsync_remote::{ChangeRef, NodeMeta, Remote, RemoteError, RemoteHeader, Upload, feed_end};
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{NodeId, NodeKind, Target, Written};
 
@@ -38,8 +38,90 @@ fn the_shared_contract_holds() -> R {
     let failed = bench.run_all();
     assert!(failed.is_empty(), "{failed:#?}");
     bench.cleanup()?;
-    let live: Vec<_> = sharer.server().live().map(|h| h.file_id).collect();
-    assert!(live.is_empty(), "cleanup left {live:?}");
+    // Nothing left, as `Bench::cleanup` promises: no file, removed or not, no share row, and
+    // nothing (tombstones neither) in either view's feed since the bench began.
+    let server = sharer.server_handle();
+    {
+        let server = server.lock().unwrap_or_else(|p| p.into_inner());
+        let live: Vec<_> = server.live().map(|h| h.file_id).collect();
+        assert!(live.is_empty(), "cleanup left {live:?}");
+        let removed: Vec<_> = server.removed().map(|h| h.file_id).collect();
+        assert!(removed.is_empty(), "cleanup left removed {removed:?}");
+        let shared: Vec<_> = server.shared().collect();
+        assert!(shared.is_empty(), "cleanup left share rows of {shared:?}");
+    }
+    for (who, r) in [("sharer", &sharer), ("member", &member)] {
+        let rows = rows_after(r, Some(bench.start()))?;
+        assert!(
+            rows.is_empty(),
+            "cleanup left in the {who}'s feed: {rows:?}"
+        );
+    }
+    Ok(())
+}
+
+/// Every row of `r`'s feed after `cursor` (from the start without one).
+fn rows_after(r: &FakeRemote, cursor: Option<&str>) -> Result<Vec<RemoteHeader>, RemoteError> {
+    let mut cursor = cursor.map(str::to_owned);
+    let mut rows = Vec::new();
+    loop {
+        let page = r.changes(cursor.as_deref(), 1000)?;
+        rows.extend(page.entries);
+        if !page.has_more {
+            return Ok(rows);
+        }
+        cursor = Some(page.cursor);
+    }
+}
+
+/// A member's subscription hears what its feed shows: nothing of a file not shared with it, a
+/// shared one as it is, and a share withdrawn as the tombstone without a version.
+#[test]
+fn a_members_subscription_hears_its_view() -> R {
+    let sharer = remote();
+    let member = FakeRemote::member(sharer.server_handle());
+    let (members, owners) = (member.subscribe(false), sharer.subscribe(false));
+    let private = create_file(&sharer, &file("private", NodeId::ROOT, b"mine"), b"mine")?;
+    let shared = create_file(&sharer, &file("shared", NodeId::ROOT, b"ours"), b"ours")?;
+    sharer.share(shared.at().file_id)?;
+    sharer.withdraw(shared.at().file_id)?;
+    let heard: Vec<_> = members.try_iter().collect();
+    assert_eq!(heard.len(), 2, "{heard:?}");
+    assert!(heard.iter().all(|c| c.file_id == shared.at().file_id));
+    assert_eq!(heard[0].version, shared.at().version);
+    assert!(!heard[0].deleted, "{heard:?}");
+    assert!(
+        heard[1].is_unshared() && heard[1].parent.is_none(),
+        "{heard:?}"
+    );
+    // The withdrawal is announced as the member's feed has it.
+    let feed = rows_after(&member, None)?;
+    assert_eq!(feed.len(), 1, "{feed:?}");
+    assert_eq!(heard[1], ChangeRef::of(&feed[0]));
+    // The owner hears every write as it is: two creates, a share and its withdrawal.
+    let (private, shared) = (private.at().file_id, shared.at().file_id);
+    assert_eq!(
+        owners
+            .try_iter()
+            .map(|c| (c.file_id, c.deleted))
+            .collect::<Vec<_>>(),
+        [
+            (private, false),
+            (shared, false),
+            (shared, false),
+            (shared, false)
+        ]
+    );
+    // A share withdrawn already changes nothing, nor is it announced; one never given is
+    // refused.
+    let before = feed_end(&sharer, None)?;
+    sharer.withdraw(shared)?;
+    assert!(
+        sharer.withdraw(private).is_err(),
+        "withdrew a share never given"
+    );
+    assert_eq!(members.try_iter().count() + owners.try_iter().count(), 0);
+    assert_eq!(rows_after(&sharer, Some(&before))?, [], "the feed moved");
     Ok(())
 }
 
