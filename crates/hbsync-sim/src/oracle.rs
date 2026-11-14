@@ -430,6 +430,8 @@ impl Sim {
         let mut synced_somewhere: BTreeSet<NodeId> = BTreeSet::new();
         // Orphans some client leaves, its place there one it doesn't sync (§6.3, §10).
         let mut left_somewhere: BTreeSet<NodeId> = BTreeSet::new();
+        // What some client may write to the drive syncs: a read-only one (§13) repairs nothing.
+        let mut written_somewhere: BTreeSet<NodeId> = BTreeSet::new();
         for (c, client) in self.clients.iter().enumerate() {
             // A launcher whose bit the client doesn't hold is executable only as the user made
             // it here (§1): never as it came from the drive.
@@ -456,6 +458,9 @@ impl Sim {
             }
             let (mut synced, left) = self.expected(c, &drive, &taken);
             synced_somewhere.extend(synced.ids());
+            if !client.read_only {
+                written_somewhere.extend(synced.ids());
+            }
             left_somewhere.extend(left);
             // What the client blocks for a refusal: each operation refused itself is one the
             // drive refuses as it is now (by its own judgement: a record that blocked one it
@@ -559,10 +564,13 @@ impl Sim {
                 !matches!(v, Violation::ParentNotFolder { node, .. }
                     if !synced_somewhere.contains(node))
             })
-            // A cycle whose repair (a move out of it) the drive refused stays one.
+            // A cycle whose repair (a move out of it) the drive refused stays one, and so does
+            // one no client that writes syncs any of (each filters it, or only follows the
+            // drive: §10, §13).
             .filter(|v| {
                 !matches!(v, Violation::Cycle { node }
-                    if up_from(&server, *node).iter().any(|n| refused_here.contains(n)))
+                    if up_from(&server, *node).iter().any(|n| refused_here.contains(n))
+                        || !up_from(&server, *node).iter().any(|n| written_somewhere.contains(n)))
             })
             .collect();
         if !broken.is_empty() {
