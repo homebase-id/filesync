@@ -188,6 +188,46 @@ pub(crate) fn with_crashes(
     ]
 }
 
+/// A paging regression's acts (`(client, action, sync)`, a sync quiescing every client) on
+/// three clients without ignore rules, the dirty set planned in pages of `pages`, or not kept
+/// at all (`None`: every node differing from its base planned, the sim's own model): the sim
+/// once settled and checked, for what is compared between the two.
+pub(crate) fn replay_in_pages(acts: &[(usize, Action, bool)], pages: Option<usize>) -> Sim {
+    let mut sim = paged(Sim::new(3).without_ignore_rules(), pages);
+    for &(client, action, sync) in acts {
+        sim.run(&[Event::Act { client, action }]);
+        if sync {
+            assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
+        }
+    }
+    settled(sim, pages)
+}
+
+/// [`replay_in_pages`] for `events` on three clients (ignore rules on), the dirty set
+/// planned in pages of `pages`.
+pub(crate) fn replay_events_in_pages(events: &[Event], pages: Option<usize>) -> Sim {
+    let mut sim = paged(Sim::new(3), pages);
+    sim.run(events);
+    settled(sim, pages)
+}
+
+/// `sim` planning in pages of `pages`, where given.
+pub(crate) fn paged(sim: Sim, pages: Option<usize>) -> Sim {
+    match pages {
+        Some(size) => sim.with_small_pages(size),
+        None => sim,
+    }
+}
+
+/// `sim` once its clients settled, checked.
+fn settled(mut sim: Sim, pages: Option<usize>) -> Sim {
+    assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
+    if let Err(e) = sim.check() {
+        panic!("pages {pages:?}: {e}");
+    }
+    sim
+}
+
 pub(crate) fn run(clients: usize, events: &[Event]) -> Result<(), TestCaseError> {
     run_with(clients, None, |sim| sim, events)
 }

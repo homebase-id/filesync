@@ -407,8 +407,9 @@ impl Engine {
     }
 
     /// Lets the held deletes of `nodes` (those of [`SyncReport::held`] the user was shown)
-    /// through, until they are done or undone (a delete waiting for a file not hashed yet
-    /// lasts, and what was in such a folder goes with it: [`Plan::delete_waits`]). Deletes of
+    /// through, until they are done or undone (a delete waiting, for a file not hashed yet or
+    /// another page's plan, lasts, and what was in such a folder goes with it:
+    /// [`Plan::delete_waits`]). Deletes of
     /// other nodes are judged as before: one the user didn't see is never let through by a
     /// confirmation.
     pub fn confirm_deletes(&mut self, nodes: impl IntoIterator<Item = NodeId>) {

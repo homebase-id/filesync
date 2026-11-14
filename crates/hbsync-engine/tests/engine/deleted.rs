@@ -1262,17 +1262,7 @@ fn a_removal_answered_gone_for_good_keeps_the_file_gone() -> R {
     a.write("keep.txt", "k")?;
     a.write("x.txt", "x")?;
     a.sync()?;
-    let x = {
-        let mut s = server.lock().map_err(|_| "poisoned")?;
-        let h = s
-            .live()
-            .find(|h| h.state().is_some_and(|st| st.name == "x.txt"))
-            .ok_or("no x")?
-            .clone();
-        s.delete(h.file_id, h.version)?;
-        s.unlist(h.file_id);
-        h.file_id
-    };
+    let x = gone_unheard(&server, "x.txt")?;
     fs::remove_file(a.root.join("x.txt"))?;
     a.sync_unasked()?;
     assert!(a.engine.db().read(|s| s.file_gone(x))?, "known gone");

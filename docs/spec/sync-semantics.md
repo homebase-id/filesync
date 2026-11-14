@@ -338,7 +338,15 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    here, say), is planned in the folder's last page: about 1 KB more there, and a plan more
    in its piece, a node (simulator:
    `regression_what_a_removal_took_along_waits_for_its_folder_in_pages`; engine:
-   `what_a_held_removal_took_along_waits_without_a_spin`). What is left then (more than a
+   `what_a_held_removal_took_along_waits_without_a_spin`). So does one deleted here in a
+   piece, at the same cost a node: removed there, it went to Recently deleted apart from the
+   folders it is in (those not dirty aren't in the piece), which the folder's last page
+   removes. That page has no size limit: a large folder deleted here while a removal of it
+   on the drive took its files along is planned there whole, about 1 KB a node (rare: another
+   device's removal of it stopped part way, and the folder deleted here too) (engine:
+   `a_file_deleted_here_in_a_piece_goes_with_its_folders_to_recently_deleted`,
+   `a_file_deleted_here_that_a_held_removal_took_along_waits_without_a_spin`; simulator:
+   `regression_a_file_deleted_here_in_a_piece_waits_for_the_folder_that_took_it_along`). What is left then (more than a
    page directly in the folder, and what so waits) is planned whole, as one larger page. So the drive removes the
    folder first, then what is in it, and Recently deleted lists it as one item, or as its
    folders' items and then its own: never a file of it apart. What waits is planned before
@@ -569,7 +577,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   own, as in any restore. What a failure leaves is still held, and shown again, with a note.
 
   A confirmation lasts while its removal is pending, or waits for a file in it not hashed yet
-  (§6.3: what was in such a folder, sent apart meanwhile, goes with it); done or undone, it is
+  (§6.3: what was in such a folder, sent apart meanwhile, goes with it) or for another page's
+  plan (§6.5); done or undone, it is
   forgotten. It is kept in memory only: after a restart, or when the folder's engine is set
   up again (new ignore rules, the folder set up again), what was confirmed and isn't done yet
   is judged again by the guard's rules, and asked about again where they hold it. A removal
