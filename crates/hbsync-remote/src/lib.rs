@@ -45,12 +45,13 @@ pub struct RemoteHeader {
     pub body: RemoteBody,
     /// A live node in Recently deleted (`archivalStatus` 2 on Homebase): it went there at
     /// [`RemoteHeader::changed_at`], the server's time of the write that removed it (nobody
-    /// writes to a removed node, but a share given or withdrawn since moves it), if the remote
-    /// said.
+    /// writes to a removed node, but a share given or withdrawn since moves it, **[verified]**
+    /// odin-core `TouchKeepingVersionTagAsync`), if the remote said.
     pub removed: bool,
     /// When the file last changed on the drive, Unix ms, the server's time (Homebase's
     /// `updated`): when this version was written, or later a share of it given or withdrawn,
-    /// which moves it and keeps the version (odin-core `TouchKeepingVersionTagAsync`). What
+    /// which moves it and keeps the version (**[verified]** odin-core
+    /// `TouchKeepingVersionTagAsync`; homebase-api-notes, "Shared with you"). What
     /// decides whether a node in a removed folder went with it (node schema, Recently deleted),
     /// and, for a tombstone, when it may be deleted hard. `None` where the remote doesn't say.
     pub changed_at: Option<i64>,
@@ -109,12 +110,12 @@ impl RemoteHeader {
 
     /// A tombstone without a version, but with a time: a file someone else shares, no longer
     /// shared with this identity (withdrawn, expired), not deleted; a share again brings it
-    /// back at its version. As [`ChangeRef::is_unshared`], so a header and its ref agree. A
+    /// back at its version. Its ref's [`ChangeRef::is_unshared`], so the two agree. A
     /// file the sharer deletes for good is never this: its share rows go with it, so it is
     /// just gone from the member's feed, its header not found, and no notification names it
     /// to the member; only a full re-read finds it gone (homebase-api-notes, "Shared with you").
     pub fn is_unshared(&self) -> bool {
-        self.is_deleted() && self.version.0.is_nil() && self.changed_at.is_some()
+        ChangeRef::of(self).is_unshared()
     }
 
     /// The node state, if the header is in the tree (and, for a file, has its payload).
@@ -857,29 +858,5 @@ mod tests {
         };
         assert!(!hard_deleted.is_unshared());
         assert!(!unshared.tombstone().is_unshared());
-    }
-
-    /// A header and its ref classify alike: a nil-version tombstone is unshared with a time,
-    /// not without one.
-    #[test]
-    fn a_header_and_its_ref_agree_on_unshared() {
-        let unshared = RemoteHeader {
-            file_id: RemoteFileId(Uuid::from_u128(1)),
-            version: VersionTag(Uuid::nil()),
-            parent: NodeId::ROOT,
-            kind: NodeKind::File,
-            body: RemoteBody::Deleted,
-            removed: false,
-            changed_at: Some(1_000),
-            token: None,
-        };
-        let timeless = RemoteHeader {
-            changed_at: None,
-            ..unshared.clone()
-        };
-        for (header, want) in [(unshared, true), (timeless, false)] {
-            assert_eq!(header.is_unshared(), want, "{header:?}");
-            assert_eq!(ChangeRef::of(&header).is_unshared(), want, "{header:?}");
-        }
     }
 }

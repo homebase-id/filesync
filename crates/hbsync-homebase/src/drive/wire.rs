@@ -307,13 +307,14 @@ impl FileRef {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Times {
     pub deleted: bool,
-    /// In Recently deleted: the status says whether it's removed, the header's `updated`
-    /// ([`Times::changed_at`]) when, the server's time of the last write (odin-core's
-    /// `record.modified`, **[verified]** `FileMetadata.cs`). Nobody writes to a removed node
-    /// (node schema: also no sharing, reactions or local app data, which move it too).
+    /// In Recently deleted: the status says whether it's removed, [`Times::changed_at`] when.
     pub removed: bool,
-    /// The server's time of this version, a tombstone's too (when it may be deleted hard), a
-    /// removed node's removal.
+    /// The header's `updated`, as [`RemoteHeader::changed_at`]: when the file last changed on
+    /// the drive, the server's time (odin-core's `record.modified`, **[verified]**
+    /// `FileMetadata.cs`). Its version's write, or a share given or withdrawn since, which
+    /// moves it and keeps the version (**[verified]** `TouchKeepingVersionTagAsync`); a
+    /// tombstone's too (when it may be deleted hard). A removed node's removal: no client
+    /// writes to a removed node (node schema), but a share change since moves it.
     pub changed_at: Option<i64>,
 }
 
@@ -941,6 +942,7 @@ mod tests {
         assert!(!gone.needs_circle_key());
         let gone = to_remote(gone, keys)?;
         assert!(matches!(gone.body, RemoteBody::Deleted));
+        assert!(gone.is_unshared());
         Ok(())
     }
 
@@ -1154,7 +1156,11 @@ mod tests {
                 {"fileId": "44444444-4444-4444-4444-444444444444", "fileState": "deleted",
                  "fileType": 1, "dataType": 0, "archivalStatus": 0,
                  "versionTag": "55555555-5555-5555-5555-555555555555",
-                 "created": 5, "updated": 10, "fileByteCount": 0}
+                 "created": 5, "updated": 10, "fileByteCount": 0},
+                {"fileId": "66666666-6666-6666-6666-666666666666", "fileState": "deleted",
+                 "fileType": 1, "dataType": 0, "archivalStatus": 0,
+                 "versionTag": "00000000-0000-0000-0000-000000000000",
+                 "created": 5, "updated": 11, "fileByteCount": 0}
             ]}"#,
         )?;
         assert!(page.search_results.is_empty());
@@ -1173,6 +1179,11 @@ mod tests {
             (true, None, Some(10)),
             "a tombstone's time: when it may go hard"
         );
+        assert!(!refs[1].is_unshared(), "a delete keeps its version");
+        // A share withdrawn, as odin-core's `FileRef.FromHeader` makes the member's row of
+        // `NoLongerSharedTombstoneOf`: no version (all zeros), no `groupId`, its own `updated`.
+        assert!(refs[2].is_unshared() && refs[2].parent.is_none());
+        assert_eq!(refs[2].changed_at, Some(11));
         // A row that doesn't say when: no time, never old enough to go without a trace.
         let unknown: FileRef = serde_json::from_str(
             r#"{"fileId": "11111111-1111-1111-1111-111111111111", "fileState": "active",

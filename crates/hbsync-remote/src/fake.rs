@@ -127,13 +127,22 @@ enum View {
     Member,
 }
 
-/// How a view sees a file's row ([`seen_by`]).
+/// How a view sees a file's row ([`seen_by`], [`seen`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Seen {
-    /// As it is.
-    AsIs,
-    /// As a share withdrawn: a tombstone without a version ([`seen`]).
+    /// The owner: as it is.
+    Owner,
+    /// The member, shared: as it is, without the file's token.
+    Shared,
+    /// The member, a share withdrawn: a tombstone without a version.
     Unshared,
+}
+
+impl Seen {
+    /// Whether the view reads the file: not a share withdrawn.
+    fn reads(self) -> bool {
+        self != Seen::Unshared
+    }
 }
 
 impl FakeServer {
@@ -175,7 +184,11 @@ impl FakeServer {
     /// A write of `file_id` by `writer` (`None`: not through a client) landed: its new place
     /// in the feed, and its announcement.
     fn touch(&mut self, file_id: RemoteFileId, writer: Option<ClientId>) {
-        let modified = self.clock_ms;
+        self.touch_at(file_id, writer, self.clock_ms);
+    }
+
+    /// [`FakeServer::touch`], the file's feed time set to `modified`.
+    fn touch_at(&mut self, file_id: RemoteFileId, writer: Option<ClientId>, modified: i64) {
         if let Some(f) = self.files.get_mut(&file_id) {
             self.feed.remove(&(f.modified, f.row));
             f.modified = modified;
@@ -512,11 +525,13 @@ impl FakeServer {
             (false, _, Some(false)) => return Ok(()),
             _ => {}
         }
-        let now = self.clock_ms;
         let f = self.files.get_mut(&file_id).ok_or(RemoteError::NotFound)?;
-        f.header.changed_at = Some(now);
+        // At least one past the file's last change, as odin-core's `MAX(modified+1, now)`: a
+        // share in the millisecond of the last write still moves the time and the feed.
+        let modified = (f.modified + 1).max(self.clock_ms);
+        f.header.changed_at = Some(modified);
         self.shares.insert(file_id, live);
-        self.touch(file_id, Some(writer));
+        self.touch_at(file_id, Some(writer), modified);
         Ok(())
     }
 
@@ -528,12 +543,12 @@ impl FakeServer {
     /// is refused a file not shared with it as Homebase refuses it, with a 403 that has no code
     /// (**[verified]** `DriveStorageServiceBase`, "No access permitted to the file"; the adapter
     /// reads it as fatal).
-    fn access(&self, file_id: RemoteFileId, view: View) -> Result<&StoredFile> {
+    fn access(&self, file_id: RemoteFileId, view: View) -> Result<(&StoredFile, Seen)> {
         let Some(file) = self.files.get(&file_id) else {
             return Err(RemoteError::NotFound);
         };
         match seen_by(&self.shares, file_id, view) {
-            Some(Seen::AsIs) => Ok(file),
+            Some(how) if how.reads() => Ok((file, how)),
             _ => Err(RemoteError::Fatal(format!(
                 "{file_id:?}: not shared with you"
             ))),
@@ -541,11 +556,11 @@ impl FakeServer {
     }
 
     /// `file_id`'s header as `view` reads it ([`FakeServer::access`]), refused first if it is
-    /// unreadable, as [`FakeServer::header`].
+    /// unreadable (a test's).
     fn header_as(&self, file_id: RemoteFileId, view: View) -> Result<RemoteHeader> {
         self.readable(file_id)?;
-        let file = self.access(file_id, view)?;
-        Ok(seen(file.header.clone(), view, Seen::AsIs))
+        let (file, how) = self.access(file_id, view)?;
+        Ok(seen(file.header.clone(), how))
     }
 
     /// Refuses a header read of a file made unreadable (a test's).
@@ -563,11 +578,11 @@ impl FakeServer {
     /// deleted, a file without a payload (a folder) has none now. The owner's goes by the
     /// payload: not there.
     fn payload_as(&self, file_id: RemoteFileId, view: View) -> Result<Arc<Vec<u8>>> {
-        let file = self.access(file_id, view)?;
-        match view {
-            View::Owner => self.payload(file_id),
-            View::Member if file.header.is_deleted() => Err(RemoteError::Deleted),
-            View::Member => file.bytes.clone().ok_or_else(|| {
+        let (file, how) = self.access(file_id, view)?;
+        match how {
+            Seen::Owner => self.payload(file_id),
+            _ if file.header.is_deleted() => Err(RemoteError::Deleted),
+            _ => file.bytes.clone().ok_or_else(|| {
                 RemoteError::StaleRange(format!("file {file_id:?}: no payload now"))
             }),
         }
@@ -599,11 +614,7 @@ impl FakeServer {
     }
 
     pub fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader> {
-        self.readable(file_id)?;
-        self.files
-            .get(&file_id)
-            .map(|f| f.header.clone())
-            .ok_or(RemoteError::NotFound)
+        self.header_as(file_id, View::Owner)
     }
 
     /// The name of file `file_id`, unless it is a tombstone or missing.
@@ -623,7 +634,7 @@ impl FakeServer {
             .filter(|h| {
                 !h.is_deleted()
                     && holds.counts(h.at(), h.removed)
-                    && seen_by(&self.shares, h.file_id, view) == Some(Seen::AsIs)
+                    && seen_by(&self.shares, h.file_id, view).is_some_and(Seen::reads)
             })
             .map(|h| h.parent)
             .filter(|p| folders.contains(p))
@@ -678,7 +689,7 @@ impl FakeServer {
                 break;
             }
             let header = &self.files[file_id].header;
-            if how == Seen::AsIs && self.unreadable.contains(file_id) && !header.is_deleted() {
+            if how.reads() && self.unreadable.contains(file_id) && !header.is_deleted() {
                 skipped.push(Skipped {
                     at: Some(header.at()),
                     node: header.node(),
@@ -686,7 +697,7 @@ impl FakeServer {
                     why: format!("{file_id:?}: unreadable (test)"),
                 });
             } else {
-                entries.push(seen(header.clone(), view, how));
+                entries.push(seen(header.clone(), how));
             }
             last = Some(*key);
         }
@@ -1401,24 +1412,24 @@ fn seen_by(
     view: View,
 ) -> Option<Seen> {
     match view {
-        View::Owner => Some(Seen::AsIs),
+        View::Owner => Some(Seen::Owner),
         View::Member => shares
             .get(&file_id)
-            .map(|&live| if live { Seen::AsIs } else { Seen::Unshared }),
+            .map(|&live| if live { Seen::Shared } else { Seen::Unshared }),
     }
 }
 
-/// `header` as `view` sees it, `how` it [`seen_by`] it: the member sees no file's token,
-/// and a share withdrawn as a tombstone without a version, `groupId`, tags or key (the root its
-/// parent, as the Homebase adapter reads a tombstone without a `groupId`).
-fn seen(header: RemoteHeader, view: View, how: Seen) -> RemoteHeader {
-    match (view, how) {
-        (View::Owner, _) => header,
-        (View::Member, Seen::AsIs) => RemoteHeader {
+/// `header` as it is seen `how` ([`seen_by`]): the member sees no file's token, and a share
+/// withdrawn as a tombstone without a version, `groupId`, tags or key (the root its parent, as
+/// the Homebase adapter reads a tombstone without a `groupId`).
+fn seen(header: RemoteHeader, how: Seen) -> RemoteHeader {
+    match how {
+        Seen::Owner => header,
+        Seen::Shared => RemoteHeader {
             token: None,
             ..header
         },
-        (View::Member, Seen::Unshared) => RemoteHeader {
+        Seen::Unshared => RemoteHeader {
             version: VersionTag(Uuid::nil()),
             parent: NodeId::ROOT,
             body: RemoteBody::Deleted,
@@ -1429,12 +1440,12 @@ fn seen(header: RemoteHeader, view: View, how: Seen) -> RemoteHeader {
     }
 }
 
-/// The member's ref of `header`, `how` it [`seen_by`] it: [`ChangeRef::of`] its [`seen`]
+/// The ref of `header` as it is seen `how` ([`seen_by`]): [`ChangeRef::of`] its [`seen`]
 /// header, without building that header (a notification's, built for every write).
 fn seen_ref(header: &RemoteHeader, how: Seen) -> ChangeRef {
     let as_is = ChangeRef::of(header);
     match how {
-        Seen::AsIs => as_is,
+        Seen::Owner | Seen::Shared => as_is,
         Seen::Unshared => ChangeRef {
             version: VersionTag(Uuid::nil()),
             deleted: true,
@@ -1516,8 +1527,7 @@ mod tests {
         Ok(())
     }
 
-    /// The member's notice of a file is the ref of the header its feed has, either way it is
-    /// seen.
+    /// A notice of a file is the ref of the header its view's feed has, however it is seen.
     #[test]
     fn a_members_ref_is_its_headers() {
         let header = RemoteHeader {
@@ -1540,14 +1550,40 @@ mod tests {
             ..header.clone()
         };
         for h in [header, live] {
-            for how in [Seen::AsIs, Seen::Unshared] {
+            for how in [Seen::Owner, Seen::Shared, Seen::Unshared] {
                 assert_eq!(
                     seen_ref(&h, how),
-                    ChangeRef::of(&seen(h.clone(), View::Member, how)),
+                    ChangeRef::of(&seen(h.clone(), how)),
                     "{how:?} {h:?}"
                 );
             }
         }
+    }
+
+    /// A share in the millisecond of the file's last write still moves its time and its place
+    /// in the feed, one past it (odin-core's `MAX(modified+1, now)`).
+    #[test]
+    fn a_share_in_the_writes_millisecond_moves_the_file() -> Result<()> {
+        let server = FakeServer::new(ServerConfig {
+            auto_tick: false,
+            ..ServerConfig::default()
+        });
+        let sharer = FakeRemote::new(server.clone());
+        let mut s = server.lock().unwrap_or_else(|p| p.into_inner());
+        let folder = NodeMeta {
+            node: NodeId::new(),
+            parent: NodeId::ROOT,
+            kind: NodeKind::Folder,
+            content: NodeContent::folder("shared"),
+            removed: false,
+        };
+        let file_id = s.create(&folder, None)?.file_id;
+        let written = s.files[&file_id].modified;
+        assert_eq!(s.header(file_id)?.changed_at, Some(written));
+        s.set_share(sharer.client(), file_id, true)?;
+        assert_eq!(s.header(file_id)?.changed_at, Some(written + 1));
+        assert_eq!(s.files[&file_id].modified, written + 1);
+        Ok(())
     }
 
     #[test]
