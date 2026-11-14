@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use common::{Client, header_named, server};
+use common::{Client, gone_unheard, header_named, server};
 use hbsync_engine::deleted;
 use hbsync_engine::feed;
 use hbsync_engine::time::TRACE_MS;
@@ -21,6 +21,41 @@ use hbsync_types::{NodeId, RemoteFileId};
 
 /// A day more than the feed keeps a trace of a delete for good.
 const LATER: i64 = TRACE_MS + 24 * 60 * 60 * 1000;
+
+/// `a` removed folder `d` (4 files, every one synced) and `b` holds it ([`a_folder_removed_and_held`]).
+struct HeldFolder {
+    server: Arc<Mutex<FakeServer>>,
+    a: Client,
+    b: Client,
+    /// `b`'s tree before.
+    whole: Vec<String>,
+    /// What `b` holds: the folder.
+    held: Vec<NodeId>,
+}
+
+/// `a` removes folder `d` (4 files, every one synced) and `b` holds it.
+fn a_folder_removed_and_held() -> common::Res<HeldFolder> {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |cfg| cfg.guard.min = 2)?;
+    for i in 0..4 {
+        a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
+    }
+    a.sync()?;
+    b.sync()?;
+    let whole = b.tree_text("");
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.sync()?;
+    let held: Vec<NodeId> = b.sync()?.held.iter().map(|op| op.node()).collect();
+    assert_eq!(held.len(), 1, "the folder");
+    Ok(HeldFolder {
+        server,
+        a,
+        b,
+        whole,
+        held,
+    })
+}
 
 fn live(server: &Arc<Mutex<FakeServer>>) -> Vec<String> {
     let mut names = server.lock().expect("server").live_names();
@@ -1679,12 +1714,7 @@ fn a_put_back_uploads_what_its_restore_finds_deleted_for_good() -> common::Res<(
     let held: Vec<NodeId> = b.sync()?.held.iter().map(|op| op.node()).collect();
     assert_eq!(held.len(), 10);
     // Deleted for good (a tombstone), the feed not telling yet.
-    let f0 = header_named(&server, "f0.txt");
-    {
-        let mut s = server.lock().map_err(|_| "poisoned")?;
-        s.delete(f0.at().file_id, f0.at().version)?;
-        s.unlist(f0.at().file_id);
-    }
+    gone_unheard(&server, "f0.txt")?;
     assert_eq!(b.engine.put_back(&held)?, 10);
     let report = b.sync()?;
     assert!(report.held.is_empty(), "{report:?}");
@@ -1701,28 +1731,21 @@ fn a_put_back_uploads_what_its_restore_finds_deleted_for_good() -> common::Res<(
 /// asked again, all of it goes up again from b.
 #[test]
 fn a_put_back_keeps_a_folder_gone_for_good_while_a_file_in_it_waits() -> common::Res<()> {
-    let server = server();
-    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
-    let mut b = Client::with_config(&server, "b", |cfg| cfg.guard.min = 2)?;
-    for i in 0..4 {
-        a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
-    }
-    a.sync()?;
-    b.sync()?;
-    let whole = b.tree_text("");
-    fs::remove_dir_all(a.root.join("d"))?;
-    a.sync()?;
-    let held: Vec<NodeId> = b.sync()?.held.iter().map(|op| op.node()).collect();
-    assert_eq!(held.len(), 1, "the folder");
+    let HeldFolder {
+        server,
+        mut a,
+        mut b,
+        whole,
+        held,
+    } = a_folder_removed_and_held()?;
     // The folder deleted for good (a tombstone the feed doesn't tell yet), a file in it gone
     // without one (said not there once).
-    let (d, f1) = (header_named(&server, "d"), header_named(&server, "f1.txt"));
-    {
-        let mut s = server.lock().map_err(|_| "poisoned")?;
-        s.delete(d.at().file_id, d.at().version)?;
-        s.unlist(d.at().file_id);
-        s.hard_delete(f1.at().file_id, f1.at().version)?;
-    }
+    gone_unheard(&server, "d")?;
+    let f1 = header_named(&server, "f1.txt");
+    server
+        .lock()
+        .map_err(|_| "poisoned")?
+        .hard_delete(f1.at().file_id, f1.at().version)?;
     assert!(b.engine.put_back(&held).is_err(), "not there once");
     assert!(
         b.engine.db().read(|s| s.get_base(held[0]))?.is_some(),
@@ -2085,5 +2108,31 @@ fn a_stop_after_the_files_leaves_their_folder() -> common::Res<()> {
     assert_eq!(removed_rows(&account)?, 1);
     assert_eq!(purge(&account, &remote, 0, now, &mut false)?, 1);
     assert!(deleted(d.file_id)?);
+    Ok(())
+}
+
+/// A put back whose folder went for good meanwhile (a tombstone the feed doesn't tell yet),
+/// everything in it still in Recently deleted ([`a_put_back_keeps_a_folder_gone_for_good_while_a_file_in_it_waits`]
+/// has a file in it gone too, said not there once): the restore's answer tells it, and what
+/// was deleted with the folder comes back as into any folder gone for good; the folder goes
+/// up again from here, and nothing of it is deleted here. (Simulator:
+/// `put_backs_that_go_wrong_lose_nothing`.)
+#[test]
+fn a_put_back_brings_back_what_was_in_a_folder_gone_for_good_meanwhile() -> common::Res<()> {
+    let HeldFolder {
+        server,
+        mut a,
+        mut b,
+        whole,
+        held,
+    } = a_folder_removed_and_held()?;
+    // The folder deleted for good, the feed not telling yet.
+    gone_unheard(&server, "d")?;
+    b.engine.put_back(&held)?;
+    let report = b.sync()?;
+    assert!(report.held.is_empty(), "{report:?}");
+    assert_eq!(b.tree_text(""), whole, "nothing deleted here");
+    a.sync()?;
+    assert_eq!(a.tree_text(""), whole);
     Ok(())
 }

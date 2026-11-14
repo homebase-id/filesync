@@ -6,6 +6,9 @@ use super::*;
 /// tree, the drive's live names, and a fresh device's tree.
 type Outcome = (Vec<String>, Vec<String>, Vec<String>, Vec<String>);
 
+/// A change made in b ([`held_removal_settles_without_a_spin`]): `false` when it can't be.
+type Change = dyn Fn(&mut Client) -> Result<bool, Box<dyn std::error::Error>>;
+
 /// A delete made on a, on b or on the drive (the server).
 type Delete = dyn Fn(&mut Client, &mut Client, &Arc<Mutex<hbsync_remote::fake::FakeServer>>) -> R;
 
@@ -157,6 +160,51 @@ fn a_delete_here_in_pages_goes_as_one_to_recently_deleted() -> R {
     assert_eq!(roots(20_000)?, ["d"]);
     assert_eq!(roots(12)?, ["d"], "in pages of 12");
     assert_eq!(roots(4)?, ["d", "d/e"], "in pages of 4");
+    Ok(())
+}
+
+/// Another app removes `d` and stops: `d/e` and `d/e/x.txt` stay live, taken along (§6.3). b
+/// deletes `d/e/x.txt` here. In pages of one, `d` is too big for a page: `e`'s piece holds only
+/// the file (`e` is unchanged here). Removed in it, the file went to Recently deleted apart
+/// from its folders; now it waits for `d`'s last page and goes with `e`, as in one page (§6.5).
+#[test]
+fn a_file_deleted_here_in_a_piece_goes_with_its_folders_to_recently_deleted() -> R {
+    let roots = |batch: usize| -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        let server = server();
+        let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+        let mut b = Client::with_config(&server, "b", move |cfg| {
+            cfg.guard.allow = true;
+            cfg.batch = batch;
+        })?;
+        a.write("d/e/x.txt", "x")?;
+        a.write("d/y.txt", "y")?;
+        a.write("keep.txt", "k")?;
+        a.sync()?;
+        b.sync()?;
+        remove_on_drive_except(&server, &["e", "x.txt", "keep.txt"])?;
+        fs::remove_file(b.root.join("d/e/x.txt"))?;
+        let mut pending = u64::MAX;
+        for _ in 0..8 {
+            pending = b.sync()?.pending;
+            if pending == 0 {
+                break;
+            }
+        }
+        assert_eq!(pending, 0, "pages of {batch}: still pending");
+        assert_eq!(b.tree_text(""), ["keep.txt = k"], "pages of {batch}");
+        let mut roots: Vec<String> = (b.recently_deleted(100)?.iter())
+            .filter(|d| d.root == d.node)
+            .map(|d| d.path.clone())
+            .collect();
+        roots.sort();
+        Ok(roots)
+    };
+    // One item, `d`: what b removed after it was removed with it.
+    let whole = roots(20_000)?;
+    assert_eq!(whole, ["d"]);
+    for batch in [1, 2] {
+        assert_eq!(roots(batch)?, whole, "in pages of {batch}");
+    }
     Ok(())
 }
 
@@ -353,6 +401,22 @@ fn a_stopped_wipe_planned_in_pages_is_held() -> R {
 #[test]
 fn what_a_held_removal_took_along_waits_without_a_spin() -> R {
     use hbsync_platform::tags::{self, Tag, Tags};
+    held_removal_settles_without_a_spin(None, &|b| {
+        let s = b.root.join("d1/s");
+        if !tags::CAN_TAG || tags::write(&s, &Tags::default())?.is_none() {
+            eprintln!("no tags here; skipped");
+            return Ok(false);
+        }
+        tags::write(&s, &Tags::new([Tag::new("Red", 6)]))?;
+        Ok(true)
+    })
+}
+
+/// Three folders `d1`…`d3`, each with `a.txt` and `s/x.txt`, removed on the drive but `s` and
+/// `x.txt` (taken along), held by b, and `change` made in b (`false`: it can't be here,
+/// skipped), b syncing in pages of 1, 2 and whole: once the hold settles, a sync plans
+/// nothing, and each `x.txt` stays here but `deleted` (the one `change` deleted).
+fn held_removal_settles_without_a_spin(deleted: Option<&str>, change: &Change) -> R {
     for batch in [1, 2, 20_000] {
         let server = server();
         let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
@@ -364,14 +428,12 @@ fn what_a_held_removal_took_along_waits_without_a_spin() -> R {
             a.write(&format!("{d}/a.txt"), "a")?;
             a.write(&format!("{d}/s/x.txt"), "x")?;
         }
-        if !tags::CAN_TAG || tags::write(&a.root.join("d1/s"), &Tags::default())?.is_none() {
-            eprintln!("no tags here; skipped");
-            return Ok(());
-        }
         a.sync()?;
         b.sync()?;
         remove_on_drive_except(&server, &["s", "x.txt"])?;
-        tags::write(&b.root.join("d1/s"), &Tags::new([Tag::new("Red", 6)]))?;
+        if !change(&mut b)? {
+            return Ok(());
+        }
         let mut syncs = Vec::new();
         for _ in 0..8 {
             let report = b.sync()?;
@@ -385,14 +447,30 @@ fn what_a_held_removal_took_along_waits_without_a_spin() -> R {
             "pages of {batch}: (rounds, ops, held) a sync: {syncs:?}"
         );
         for d in ["d1", "d2", "d3"] {
-            assert_eq!(
-                b.read_text(&format!("{d}/s/x.txt"))?,
-                "x",
-                "pages of {batch}"
-            );
+            let x = format!("{d}/s/x.txt");
+            match deleted == Some(x.as_str()) {
+                true => assert!(!b.root.join(&x).exists(), "pages of {batch}"),
+                false => assert_eq!(b.read_text(&x)?, "x", "pages of {batch}"),
+            }
         }
+        // Held, nothing of the removal goes from the drive, d1's file deleted here included
+        // (the rule itself: a_file_deleted_here_in_a_piece_goes_with_its_folders_to_recently_deleted).
+        let live = server.lock().map_err(|_| "poisoned")?.live_names();
+        let files = live.iter().filter(|n| *n == "x.txt").count();
+        assert_eq!(files, 3, "pages of {batch}: {live:?}");
     }
     Ok(())
+}
+
+/// [`what_a_held_removal_took_along_waits_without_a_spin`] with the file it took along deleted
+/// here (in a piece of a folder too big for a page it waits for the folder's last page,
+/// §6.5): the wait settles with the hold all the same, later syncs plan nothing.
+#[test]
+fn a_file_deleted_here_that_a_held_removal_took_along_waits_without_a_spin() -> R {
+    held_removal_settles_without_a_spin(Some("d1/s/x.txt"), &|b| {
+        fs::remove_file(b.root.join("d1/s/x.txt"))?;
+        Ok(true)
+    })
 }
 
 /// Another app removes `d` on the drive and stops there: `e` and `f1.txt` in it are taken

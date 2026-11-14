@@ -221,8 +221,10 @@ impl Reconciler<'_> {
     /// that folder's plan when another page makes it: planned again as it is (`placed`). The
     /// folder's plan decides whether it stays, and with it whether what its removal took along
     /// does ([`Reconciler::untake_kept`]); planned first, that went with the removal while the
-    /// folder came back. A node changed here plans the same either way. The folder is in
-    /// another page ([`Input::going_above`], in a piece of a folder too big for a page,
+    /// folder came back. One changed here plans the same either way, but in a piece one deleted
+    /// here waits too: removed in the piece, it went to Recently deleted apart from the folders
+    /// it is in, which the folder's last page removes. The folder is in another
+    /// page ([`Input::going_above`], in a piece of a folder too big for a page,
     /// `Options::piece`: that one's last page plans it), or in this one but waits to be planned
     /// with another page's nodes (placed into a folder another page makes, say): then the node
     /// waits with it, planned together next.
@@ -238,18 +240,22 @@ impl Reconciler<'_> {
         let mut grouped: Option<HashSet<NodeId>> = None;
         let mut with_folder: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
         for &n in &i.dirty {
-            if !self.taken.contains(&n)
-                || !self.scope.contains(&n)
-                || self.local_change(n).is_change()
-            {
+            if !self.taken.contains(&n) || !self.scope.contains(&n) {
                 continue;
             }
+            // Unchanged here: either way. Deleted here: in a piece only. Else: planned now.
+            let unchanged = match self.local_change(n) {
+                Change::Deleted if piece => false,
+                change if change.is_change() => continue,
+                _ => true,
+            };
             let Some(folder) = taken_by(i, n) else {
                 continue;
             };
             if piece && i.going_above.contains(&folder) {
                 self.placed.insert(n);
-            } else if i.dirty.contains(&folder)
+            } else if unchanged
+                && i.dirty.contains(&folder)
                 && !self.scope.contains(&folder)
                 && grouped
                     .get_or_insert_with(|| self.groups().flatten().copied().collect())

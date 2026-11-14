@@ -3,7 +3,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use hbsync_platform::name::name_key;
 use hbsync_remote::{Answers, NodeMeta, Remote, RemoteError};
 use hbsync_state::{Answer, MirrorRow, ReadTx, RemovedRow, StateError};
 use hbsync_types::{NodeId, RemoteFileId, Target, Written};
@@ -14,7 +13,7 @@ use crate::mirror::{self, meta_at};
 use crate::walk::End;
 
 use super::listing::group;
-use super::rules::{RestoreWave, restore_wave, take_restored_name, taken_in};
+use super::rules::{RestoreWave, free_restored_name, restore_wave, take_restored_name, taken_in};
 use super::{AccountOps, lock};
 
 /// What a restore did, beyond how many items came back: for the user (sync semantics §8b).
@@ -275,9 +274,7 @@ impl Restoring<'_> {
             Err(e) => e,
         };
         // The name it didn't take is free again.
-        if let Some(names) = self.taken.get_mut(&meta.parent) {
-            names.remove(&name_key(&meta.content.name));
-        }
+        free_restored_name(&mut self.taken, meta.parent, &meta.content.name);
         *self.behind = true;
         match e {
             // Deleted for good meanwhile (its answer or its header says so), maybe without a

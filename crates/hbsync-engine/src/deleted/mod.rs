@@ -31,8 +31,8 @@ pub use restore::{RestorePlan, RestoreSource, Restored, plan_restore_from};
 pub use rules::deleted_with_at;
 pub(crate) use rules::item_by;
 pub use rules::{
-    Chosen, Holdings, RestoreWave, before_folders_go, inside, passes, restore_wave,
-    take_restored_name, taken_in,
+    Chosen, Holdings, RestoreWave, before_folders_go, free_restored_name, inside, passes,
+    restore_wave, take_restored_name, taken_in,
 };
 
 use crate::lock;

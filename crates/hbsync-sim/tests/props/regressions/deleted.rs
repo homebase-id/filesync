@@ -1451,10 +1451,8 @@ fn an_edit_aside_beside_an_ignored_item_is_kept() {
 fn regression_a_folder_an_edit_restores_keeps_what_its_delete_took_along() {
     use Action::*;
     for pages in [None, Some(1)] {
-        let (mut sim, [b, _, c, _]) = stopped_delete_setup();
-        if let Some(size) = pages {
-            sim = sim.with_small_pages(size);
-        }
+        let (sim, [b, _, c, _]) = stopped_delete_setup();
+        let mut sim = paged(sim, pages);
         let file = sim.file_pick(1, c).expect("b/c.txt on 1");
         sim.run(&[Event::Act {
             client: 1,
@@ -1568,20 +1566,7 @@ fn regression_what_a_removal_took_along_waits_for_its_folder_in_pages() {
         (0, DeleteStopped { pick: 3, done: 2 }, false),
     ];
     for pages in [None, Some(1)] {
-        let mut sim = Sim::new(3).without_ignore_rules();
-        if let Some(size) = pages {
-            sim = sim.with_small_pages(size);
-        }
-        for (client, action, sync) in acts {
-            sim.run(&[Event::Act { client, action }]);
-            if sync {
-                assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
-            }
-        }
-        assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
-        if let Err(e) = sim.check() {
-            panic!("pages {pages:?}: {e}");
-        }
+        let sim = replay_in_pages(&acts, pages);
         assert_eq!(
             sim.server_paths(),
             ["c.txt", "c.txt/a", "c.txt/a/a"],
@@ -1649,20 +1634,7 @@ fn regression_what_a_folder_waiting_for_another_page_deletes_waits_with_it() {
         ),
     ];
     let end = |pages: Option<usize>| {
-        let mut sim = Sim::new(3).without_ignore_rules();
-        if let Some(size) = pages {
-            sim = sim.with_small_pages(size);
-        }
-        for (client, action, sync) in acts {
-            sim.run(&[Event::Act { client, action }]);
-            if sync {
-                assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
-            }
-        }
-        assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
-        if let Err(e) = sim.check() {
-            panic!("pages {pages:?}: {e}");
-        }
+        let sim = replay_in_pages(&acts, pages);
         (sim.server_paths(), sim.removed_files_apart())
     };
     let whole = end(None);
@@ -1737,20 +1709,7 @@ fn regression_what_a_folder_waiting_for_a_folders_page_deletes_waits_with_it() {
         (1, Delete { node: 1 }, false),
     ];
     let end = |pages: Option<usize>| {
-        let mut sim = Sim::new(3).without_ignore_rules();
-        if let Some(size) = pages {
-            sim = sim.with_small_pages(size);
-        }
-        for (client, action, sync) in acts {
-            sim.run(&[Event::Act { client, action }]);
-            if sync {
-                assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
-            }
-        }
-        assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
-        if let Err(e) = sim.check() {
-            panic!("pages {pages:?}: {e}");
-        }
+        let sim = replay_in_pages(&acts, pages);
         (sim.server_paths(), sim.removed_files_apart())
     };
     let whole = end(None);
@@ -1799,20 +1758,7 @@ fn regression_what_a_waiting_folders_removal_took_along_waits_with_it() {
         (0, CreateFile { parent: 0, name: 0 }, false),
     ];
     let end = |pages: Option<usize>| {
-        let mut sim = Sim::new(3).without_ignore_rules();
-        if let Some(size) = pages {
-            sim = sim.with_small_pages(size);
-        }
-        for (client, action, sync) in acts {
-            sim.run(&[Event::Act { client, action }]);
-            if sync {
-                assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
-            }
-        }
-        assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
-        if let Err(e) = sim.check() {
-            panic!("pages {pages:?}: {e}");
-        }
+        let sim = replay_in_pages(&acts, pages);
         let tags = sim.server_tags("a (conflict 1)/b/a");
         (sim.server_paths(), sim.removed_files_apart(), tags)
     };
@@ -2667,4 +2613,95 @@ fn held_with_what_it_took_along(mut sim: Sim, settle: fn(&mut Sim) -> bool, dele
     if let Err(e) = sim.check() {
         panic!("{e}");
     }
+}
+
+/// c0 deletes file `a/a/a` here; another device removes `a` on the drive and stops: `a/a` and
+/// the file stay live, taken along. In pages of one node, `a` is too big for a page (it and the
+/// file are dirty): its folders' subtrees go first, and `a/a`'s piece holds only the file, as
+/// `a/a` is unchanged here. The file removed in it went to Recently deleted apart from its
+/// folders, removed by `a`'s last page. Now, deleted here, it waits for `a`'s plan as what is
+/// unchanged does, and goes with it, as planned whole (seed f779bad4).
+#[test]
+fn regression_a_file_deleted_here_in_a_piece_waits_for_the_folder_that_took_it_along() {
+    use Action::*;
+    let acts = [
+        (1, CreateFolder { parent: 0, name: 0 }, false),
+        (0, CreateFolder { parent: 0, name: 0 }, false),
+        (0, Purge, true),
+        (
+            0,
+            CreateFolder {
+                parent: 15,
+                name: 0,
+            },
+            false,
+        ),
+        (
+            0,
+            CreateFile {
+                parent: 14,
+                name: 0,
+            },
+            false,
+        ),
+        (0, DeleteStopped { pick: 0, done: 0 }, false),
+        (0, DeleteStopped { pick: 0, done: 0 }, false),
+        (0, Purge, true),
+        (0, Delete { node: 11 }, false),
+        (0, DeleteStopped { pick: 0, done: 3 }, false),
+        (0, Purge, false),
+    ];
+    let end = |pages: Option<usize>| {
+        let sim = replay_in_pages(&acts, pages);
+        (sim.server_paths(), sim.removed_files_apart())
+    };
+    let whole = end(None);
+    assert_eq!(whole.1, 0, "{whole:?}");
+    assert_eq!(end(Some(1)), whole, "in pages of one");
+}
+
+/// [`regression_a_file_deleted_here_in_a_piece_waits_for_the_folder_that_took_it_along`] where
+/// the folder is in the same page but waits with another page's nodes (not in a piece): c2
+/// deletes a file here in a folder c0's stopped delete took along, and moves a folder into
+/// it. Planned in pages of four, it ends as planned whole without the file waiting (the
+/// rule is a piece's only).
+#[test]
+fn regression_a_file_deleted_here_by_a_folder_waiting_for_another_page_ends_as_whole() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(2, CreateFolder { parent: 0, name: 6 }),
+        Event::Plan { client: 2 },
+        Event::Step { client: 2 },
+        act(0, CreateFile { parent: 0, name: 6 }),
+        act(2, CreateFile { parent: 2, name: 0 }),
+        Event::Plan { client: 2 },
+        act(0, DeleteStopped { pick: 0, done: 0 }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 2 },
+        act(2, CreateJunkFolder { parent: 0 }),
+        Event::Step { client: 0 },
+        act(2, Delete { node: 5 }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        act(
+            2,
+            Move {
+                node: 10,
+                parent: 3,
+                name: 0,
+            },
+        ),
+        Event::Step { client: 0 },
+        act(0, DeleteStopped { pick: 0, done: 2 }),
+        Event::Plan { client: 2 },
+        Event::Plan { client: 2 },
+    ];
+    let end = |pages| {
+        let sim = replay_events_in_pages(&events, pages);
+        (sim.server_paths(), sim.removed_files_apart())
+    };
+    let whole = end(None);
+    assert_eq!(whole.1, 0, "nothing listed apart: {whole:?}");
+    assert_eq!(end(Some(4)), whole, "in pages of four");
 }

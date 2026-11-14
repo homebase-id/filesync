@@ -145,6 +145,18 @@ fn taken_at(taken: &mut HashMap<NodeId, HashSet<String>>, parent: NodeId) -> &mu
         .or_insert_with(|| taken_in(crate::along::is_sync_top(parent, None), std::iter::empty()))
 }
 
+/// A restore's row named `name` in `parent` that didn't come back (not there, or refused):
+/// the name it took there is free again. The engine's restore and the simulator's share it.
+pub fn free_restored_name(
+    taken: &mut HashMap<NodeId, HashSet<String>>,
+    parent: NodeId,
+    name: &str,
+) {
+    if let Some(names) = taken.get_mut(&parent) {
+        names.remove(&name_key(name));
+    }
+}
+
 /// The name a restored row that can't take its own (`name`) in `parent` comes back under: the
 /// first of its restored names free there, taken now (`None`: none is). The engine's restore and
 /// the simulator's share it.

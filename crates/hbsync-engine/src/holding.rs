@@ -250,8 +250,9 @@ impl HeldDeletes {
     /// After a page's `plan` (for the dirty nodes `dirty`): what it holds of removals elsewhere
     /// as every synced file ([`Plan::held_wipes`]) stays held till answered, kept before
     /// anything of the page runs or goes clean. A confirmation lasts while its node's plan
-    /// deletes it, or its delete waits for a file in it not hashed yet (§6.3): one whose delete
-    /// was undone (the file back) is forgotten, so a later delete is judged anew.
+    /// deletes it, or its delete waits ([`Plan::delete_waits`]: for a file in it not hashed
+    /// yet, §6.3, or another page's plan, §6.5): one whose delete was undone (the file back) is
+    /// forgotten, so a later delete is judged anew.
     pub(crate) fn after_plan(
         &mut self,
         db: &mut StateDb,
