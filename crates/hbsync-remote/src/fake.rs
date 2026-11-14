@@ -194,8 +194,7 @@ impl FakeServer {
                 let change = match s.view {
                     View::Owner => Some(*owner.get_or_init(|| ChangeRef::of(header))),
                     View::Member => *member.get_or_init(|| {
-                        seen_by(shares, file_id, View::Member)
-                            .map(|how| ChangeRef::of(&seen(header.clone(), View::Member, how)))
+                        seen_by(shares, file_id, View::Member).map(|how| seen_ref(header, how))
                     }),
                 };
                 change.is_none_or(|c| s.events.send(c).is_ok())
@@ -541,10 +540,22 @@ impl FakeServer {
         }
     }
 
-    /// `file_id`'s header as `view` reads it ([`FakeServer::access`]).
+    /// `file_id`'s header as `view` reads it ([`FakeServer::access`]), refused first if it is
+    /// unreadable, as [`FakeServer::header`].
     fn header_as(&self, file_id: RemoteFileId, view: View) -> Result<RemoteHeader> {
-        self.access(file_id, view)?;
-        Ok(seen(self.header(file_id)?, view, Seen::AsIs))
+        self.readable(file_id)?;
+        let file = self.access(file_id, view)?;
+        Ok(seen(file.header.clone(), view, Seen::AsIs))
+    }
+
+    /// Refuses a header read of a file made unreadable (a test's).
+    fn readable(&self, file_id: RemoteFileId) -> Result<()> {
+        if self.unreadable.contains(&file_id) {
+            return Err(RemoteError::Fatal(format!(
+                "{file_id:?}: unreadable (test)"
+            )));
+        }
+        Ok(())
     }
 
     /// `file_id`'s payload as `view` reads it ([`FakeServer::access`]). The member's adapter
@@ -588,11 +599,7 @@ impl FakeServer {
     }
 
     pub fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader> {
-        if self.unreadable.contains(&file_id) {
-            return Err(RemoteError::Fatal(format!(
-                "{file_id:?}: unreadable (test)"
-            )));
-        }
+        self.readable(file_id)?;
         self.files
             .get(&file_id)
             .map(|f| f.header.clone())
@@ -1422,6 +1429,22 @@ fn seen(header: RemoteHeader, view: View, how: Seen) -> RemoteHeader {
     }
 }
 
+/// The member's ref of `header`, `how` it [`seen_by`] it: [`ChangeRef::of`] its [`seen`]
+/// header, without building that header (a notification's, built for every write).
+fn seen_ref(header: &RemoteHeader, how: Seen) -> ChangeRef {
+    let as_is = ChangeRef::of(header);
+    match how {
+        Seen::AsIs => as_is,
+        Seen::Unshared => ChangeRef {
+            version: VersionTag(Uuid::nil()),
+            deleted: true,
+            parent: None,
+            removed: false,
+            ..as_is
+        },
+    }
+}
+
 /// Whether `files` make a batch odin-core takes (`FileVersionTagBatchV2.AssertValidBatch`): 1
 /// to 1,000 files, none twice; else a 400 for all of it.
 fn batch_of(files: impl ExactSizeIterator<Item = RemoteFileId>) -> Result<()> {
@@ -1491,6 +1514,40 @@ mod tests {
             .header(mine.at().file_id)?;
         assert!(ChangeRef::of(&header).deleted);
         Ok(())
+    }
+
+    /// The member's notice of a file is the ref of the header its feed has, either way it is
+    /// seen.
+    #[test]
+    fn a_members_ref_is_its_headers() {
+        let header = RemoteHeader {
+            file_id: RemoteFileId(Uuid::from_u128(1)),
+            version: VersionTag(Uuid::from_u128(2)),
+            parent: NodeId::new(),
+            kind: NodeKind::File,
+            body: RemoteBody::Deleted,
+            removed: true,
+            changed_at: Some(1_000),
+            token: None,
+        };
+        let live = RemoteHeader {
+            body: RemoteBody::Live {
+                node: NodeId::new(),
+                content: NodeContent::file("f", 1, 1, false),
+                payload: None,
+            },
+            token: Some(token_of(header.file_id)),
+            ..header.clone()
+        };
+        for h in [header, live] {
+            for how in [Seen::AsIs, Seen::Unshared] {
+                assert_eq!(
+                    seen_ref(&h, how),
+                    ChangeRef::of(&seen(h.clone(), View::Member, how)),
+                    "{how:?} {h:?}"
+                );
+            }
+        }
     }
 
     #[test]

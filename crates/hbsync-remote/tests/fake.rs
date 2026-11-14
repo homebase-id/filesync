@@ -122,6 +122,33 @@ fn a_members_subscription_hears_its_view() -> R {
     Ok(())
 }
 
+/// After a share is withdrawn, every later write of the file announces the "no longer shared"
+/// tombstone to the member again, at the write's time, and lists it again in the member's feed
+/// (odin-core sends it after every change while a row names the member).
+#[test]
+fn a_write_after_a_withdrawal_announces_the_tombstone_again() -> R {
+    let sharer = remote();
+    let member = FakeRemote::member(sharer.server_handle());
+    let f = file("f", NodeId::ROOT, b"1");
+    let w = create_file(&sharer, &f, b"1")?;
+    sharer.share(w.at().file_id)?;
+    sharer.withdraw(w.at().file_id)?;
+    let withdrawn = feed_end(&member, None)?;
+    let members = member.subscribe(false);
+    let written = sharer.update(&w.target, &f, None)?;
+    let heard: Vec<_> = members.try_iter().collect();
+    let feed = rows_after(&member, Some(&withdrawn))?;
+    assert_eq!(feed.len(), 1, "{feed:?}");
+    let tomb = &feed[0];
+    assert!(
+        tomb.is_unshared() && tomb.file_id == written.at().file_id,
+        "{tomb:?}"
+    );
+    assert_eq!(tomb.changed_at, sharer.header(w.at().file_id)?.changed_at);
+    assert_eq!(heard, [ChangeRef::of(tomb)]);
+    Ok(())
+}
+
 /// Sharing what isn't a live file is refused as Homebase refuses it (a 400: fatal), as is
 /// withdrawing a share gone with a file deleted for good; a tombstone's share is withdrawn. The
 /// member reads a folder's payload as none now, a tombstone's as deleted, as `PeerRemote` does.

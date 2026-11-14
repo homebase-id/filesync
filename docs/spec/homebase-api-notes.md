@@ -556,13 +556,21 @@ server answers the rest, to a token their server made for this identity's connec
   server metadata. A share withdrawn or expired (or above an unreviewed connection's level)
   comes as a tombstone without its version (all zeros), parent, node id or key; a soft delete
   by the sharer as the usual tombstone; a hard delete takes the rows with it, so the file just
-  isn't listed any more (only a full re-read finds it gone). The "no longer shared" tombstone
-  keeps the file's id, `fileType` and its own `updated` (**[verified]**
-  `DriveStorageServiceBase.NoLongerSharedTombstoneOf`), and is sent again after every change of
-  the file while a row still names the member; sharing or withdrawing moves the file's
-  `modified` and keeps its version, so a share given again brings the file back live at the
-  version it had (**[verified]**). The client can tell it from a delete by its zero version
-  (`RemoteHeader::is_unshared`, `ChangeRef::is_unshared`); the engine's handling of it (the
+  isn't listed any more, and no notification tells the member (the rows go in the delete's own
+  transaction, before it is announced, and the socket then finds no row naming the member:
+  **[verified]** `DriveStorageServiceBase.HardDeleteHeaderAsync`,
+  `MainIndexMeta.DeleteEntryAsync`, `DriveEventMessage.MessageForAsync`): only a full re-read
+  finds it gone. The "no longer shared" tombstone keeps the file's id, `fileType` and its own
+  `updated` (**[verified]** `DriveStorageServiceBase.NoLongerSharedTombstoneOf`), and is sent
+  again after every change of the file while a row still names the member; sharing or
+  withdrawing moves the file's `modified` and keeps its version, so a share given again brings
+  the file back live at the version it had (**[verified]**
+  `TableDriveMainIndex.TouchKeepingVersionTagAsync`). That is the header's `updated` too
+  (`FileMetadata`), so `RemoteHeader::changed_at` is when the file last changed on the drive,
+  not when its version was written: a removed node's removal time and a tombstone's age (when
+  it may be deleted hard) move with a share change too. The client can tell it from a delete
+  by its zero version and its time (`RemoteHeader::is_unshared`, `ChangeRef::is_unshared`);
+  the engine's handling of it (the
   file leaves the member's devices, but isn't gone) comes with the read-only shared folders'
   next step. A member's notification socket hears what its query gets: a file through its
   share, the same tombstone once the share ends (after every change of the file while a row

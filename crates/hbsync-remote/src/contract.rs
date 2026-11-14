@@ -234,6 +234,11 @@ pub const SCENARIOS: &[(&str, Reach, Scenario)] = &[
         Reach::SharedOnly,
         the_member_writes_nothing,
     ),
+    (
+        "a_member_holds_only_what_is_shared",
+        Reach::SharedOnly,
+        a_member_holds_only_what_is_shared,
+    ),
 ];
 
 impl<'a> Bench<'a> {
@@ -1479,5 +1484,33 @@ fn the_member_writes_nothing(b: &Bench) -> Outcome {
         b.reader().header(w.file_id)?.version == w.version,
         "the file changed"
     );
+    Ok(())
+}
+
+/// A folder holds, to the member, only children shared with it: one not shared, or whose share
+/// was withdrawn (a tombstone to the member), isn't counted, live or any; shared, it is.
+fn a_member_holds_only_what_is_shared(b: &Bench) -> Outcome {
+    let (dir, _) = b.folder("held")?;
+    let (other, _) = b.folder("withdrawn")?;
+    let private = b.create_unshared(&file("private", dir.node, b"1"), Some(b"1"))?;
+    let w = b.create(&file("w", other.node, b"2"), Some(b"2"))?;
+    shares(b)?.withdraw(w.file_id)?;
+    let folders = [dir.node, other.node];
+    let none = HashSet::new();
+    let holding = |expected: &[NodeId], why: &str| -> Outcome {
+        std::thread::sleep(b.reader().hold_back());
+        for holds in [Holds::Live, Holds::AnyBut(&none)] {
+            let got = b.reader().holding(&folders, holds)?;
+            ensure!(
+                got == expected.iter().copied().collect(),
+                "{why}, {holds:?}: {got:?}"
+            );
+        }
+        Ok(())
+    };
+    holding(&[], "a child not shared and one withdrawn")?;
+    shares(b)?.share(private.file_id)?;
+    shares(b)?.share(w.file_id)?;
+    holding(&folders, "both shared")?;
     Ok(())
 }
