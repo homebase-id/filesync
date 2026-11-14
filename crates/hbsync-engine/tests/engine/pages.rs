@@ -395,6 +395,42 @@ fn what_a_held_removal_took_along_waits_without_a_spin() -> R {
     Ok(())
 }
 
+/// [`what_a_held_removal_took_along_waits_without_a_spin`] with the file it took along deleted
+/// here (in a piece of a folder too big for a page it waits for the folder's last page,
+/// §6.5): the wait settles with the hold all the same, later syncs plan nothing.
+#[test]
+fn a_file_deleted_here_that_a_held_removal_took_along_waits_without_a_spin() -> R {
+    for batch in [1, 2, 20_000] {
+        let server = server();
+        let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+        let mut b = Client::with_config(&server, "b", move |cfg| {
+            cfg.guard.min = 2;
+            cfg.batch = batch;
+        })?;
+        for d in ["d1", "d2", "d3"] {
+            a.write(&format!("{d}/a.txt"), "a")?;
+            a.write(&format!("{d}/s/x.txt"), "x")?;
+        }
+        a.sync()?;
+        b.sync()?;
+        remove_on_drive_except(&server, &["s", "x.txt"])?;
+        fs::remove_file(b.root.join("d1/s/x.txt"))?;
+        let mut syncs = Vec::new();
+        for _ in 0..8 {
+            let report = b.sync()?;
+            syncs.push((report.rounds, report.ops_done, report.held.len()));
+        }
+        assert!(
+            syncs[4..]
+                .iter()
+                .all(|&(rounds, ops, held)| rounds == 0 && ops == 0 && held > 0),
+            "pages of {batch}: (rounds, ops, held) a sync: {syncs:?}"
+        );
+        assert!(!b.root.join("d1/s/x.txt").exists(), "pages of {batch}");
+    }
+    Ok(())
+}
+
 /// Another app removes `d` on the drive and stops there: `e` and `f1.txt` in it are taken
 /// along, live, and not marked (the feed marks the folder). b edits `d/e/f1.txt` and makes
 /// `d/e/new.txt` meanwhile, their marks in later pages than `d`'s. The page holding `d` waits

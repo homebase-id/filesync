@@ -43,8 +43,9 @@ impl Reconciler<'_> {
         }
         let i = self.input;
         // Deletes the user confirmed are theirs, and so is each of what was in a folder whose
-        // delete they confirmed and that waits for a file in it not hashed yet (planned apart
-        // meanwhile, §6.3): only the others are judged.
+        // delete they confirmed and that waits ([`Plan::delete_waits`]: for a file in it not
+        // hashed yet, §6.3, or another page's plan, §6.5; planned apart meanwhile): only the
+        // others are judged.
         let yes = &self.opts.guarding.confirmed;
         let waiting: HashSet<NodeId> = self
             .plan

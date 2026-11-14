@@ -965,14 +965,12 @@ impl Sim {
         seen: &mut HashSet<NodeId>,
         taken: &mut HashMap<NodeId, HashSet<String>>,
     ) {
-        let key = hbsync_platform::name::name_key(&name);
-        if self.restore_as(row.node, name) {
+        if self.server.removed.contains_key(&row.node) {
+            self.restore_as(row.node, name);
             live.insert(row.node);
         } else {
             seen.remove(&row.node);
-            if let Some(names) = taken.get_mut(&row.parent) {
-                names.remove(&key);
-            }
+            deleted::free_restored_name(taken, row.parent, &name);
         }
     }
 
