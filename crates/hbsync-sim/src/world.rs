@@ -993,7 +993,7 @@ impl Sim {
     }
 
     /// Brings `node` back from Recently deleted, named `name`: a write.
-    fn restore_as(&mut self, node: NodeId, name: String) {
+    pub(crate) fn restore_as(&mut self, node: NodeId, name: String) {
         let Some(mut n) = self.server.removed.remove(&node) else {
             return;
         };

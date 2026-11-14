@@ -594,8 +594,10 @@ impl Drive {
 
     /// Makes sure the drive has the folder `node`, just pulled: kept if it is there, back from
     /// Recently deleted (with what was deleted with it), else made in `parent` under the name
-    /// `name` gives (whichever device gets there first). Fails unless it is live at the end.
-    /// Whether this device made it.
+    /// `name` gives (whichever device gets there first). One still in Recently deleted that
+    /// can't come back where it was (its folders there in a cycle, each waiting for the other)
+    /// comes back alone in `parent`, under that name: made anew, its id would be refused.
+    /// Fails unless it is live at the end. Whether this device made it.
     fn ensure_folder(
         &self,
         node: NodeId,
@@ -607,21 +609,41 @@ impl Drive {
         }
         let mut made = false;
         if self.restore(&[node])? == 0 {
-            let meta = NodeMeta {
-                node,
-                parent,
-                kind: NodeKind::Folder,
-                content: NodeContent::folder(&name()?),
-                removed: false,
+            let removed = self.account().read(|s| s.removed_by_node(node))?;
+            let (written, expected, meta) = match removed {
+                Some(removed) => {
+                    let row = removed.row;
+                    let meta = mirror::meta_at(&row, parent, &name()?, false);
+                    (
+                        self.remote().update(&row.target(), &meta, None),
+                        Some(row.version),
+                        meta,
+                    )
+                }
+                None => {
+                    let meta = NodeMeta {
+                        node,
+                        parent,
+                        kind: NodeKind::Folder,
+                        content: NodeContent::folder(&name()?),
+                        removed: false,
+                    };
+                    (self.remote().create(&meta, None), None, meta)
+                }
             };
-            match self.remote().create(&meta, None) {
+            match written {
                 // Recorded from the answer, as the executor records its writes.
                 Ok(written) => {
-                    self.record_written(None, &meta, written)?;
+                    self.record_written(expected, &meta, written)?;
                     made = true;
                 }
-                // Another device made it (or deleted it) meanwhile: read it.
-                Err(RemoteError::AlreadyExists) => {
+                // Another device made it, changed it or deleted it meanwhile: read it.
+                Err(
+                    RemoteError::AlreadyExists
+                    | RemoteError::VersionMismatch
+                    | RemoteError::NotFound
+                    | RemoteError::Deleted,
+                ) => {
                     self.pull(None)?;
                 }
                 Err(e) => return Err(EngineError::Remote(e)),

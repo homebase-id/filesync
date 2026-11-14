@@ -527,6 +527,12 @@ fn remove_documents(server: &Arc<Mutex<FakeServer>>) -> R {
 /// Moves the folder `folder` alone to Recently deleted on the server (what is in it stays live:
 /// a delete stopped half way).
 fn remove_alone(server: &Arc<Mutex<FakeServer>>, folder: NodeId) -> R {
+    remove_from(server, folder, None)
+}
+
+/// [`remove_alone`], removed from folder `from` (`None`: where it is), as another device's
+/// move into `from` and delete there leave it.
+fn remove_from(server: &Arc<Mutex<FakeServer>>, folder: NodeId, from: Option<NodeId>) -> R {
     let mut srv = server.lock().map_err(|_| "poisoned")?;
     let header = srv
         .live()
@@ -536,7 +542,7 @@ fn remove_alone(server: &Arc<Mutex<FakeServer>>, folder: NodeId) -> R {
     if let RemoteBody::Live { node, content, .. } = header.body {
         let meta = hbsync_remote::contract::removed(&NodeMeta {
             node,
-            parent: header.parent,
+            parent: from.unwrap_or(header.parent),
             kind: header.kind,
             content,
             removed: false,
@@ -856,6 +862,41 @@ fn desktops_removed_alone_comes_back() -> R {
     );
     assert_eq!(desktops(&server), ["Laptop"]);
     assert_eq!(files(&a.desk_root), ["a.txt"]);
+    Ok(())
+}
+
+/// Desktops and a folder `q` in Recently deleted each in the other (two devices' moves met in a
+/// cycle, then went), with the computer's Desktop in Desktops: neither can come back where it
+/// was, each waiting for the other. The computer's next sync brings Desktops back alone at the
+/// top, then its own folder in it: made anew, Desktops' id would be refused, and the Desktop
+/// never synced again.
+#[test]
+fn desktops_removed_in_a_cycle_comes_back_at_the_top() -> R {
+    let server = FakeServer::new(ServerConfig::default());
+    let mut a = DeskPc::new(&server, Some((NodeId::new(), "Laptop")))?;
+    std::fs::write(a.desk_root.join("a.txt"), b"a")?;
+    a.sync()?;
+    let q = hbsync_remote::contract::folder("q", NodeId::ROOT);
+    server.lock().map_err(|_| "poisoned")?.create(&q, None)?;
+    let q = q.node;
+    remove_from(&server, q, Some(NodeId::DESKTOPS))?;
+    remove_from(&server, NodeId::DESKTOPS, Some(q))?;
+    std::fs::write(a.desk_root.join("b.txt"), b"b")?;
+    a.sync()?;
+    let live = drive_listing(&server);
+    assert!(
+        live.iter().any(|(n, p)| n == "Desktops" && p.is_root()),
+        "{live:?}"
+    );
+    assert!(!live.iter().any(|(n, _)| n == "q"), "{live:?}");
+    assert_eq!(desktops(&server), ["Laptop"]);
+    assert_eq!(files(&a.desk_root), ["a.txt", "b.txt"]);
+    let mut b = DeskPc::new(&server, None)?;
+    b.sync()?;
+    assert_eq!(
+        files(&b.main_root),
+        ["Desktops/Laptop/a.txt", "Desktops/Laptop/b.txt"]
+    );
     Ok(())
 }
 

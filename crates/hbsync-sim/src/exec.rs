@@ -224,10 +224,20 @@ impl Sim {
         if self.server.live.contains_key(&node) {
             return false;
         }
-        // One that doesn't come back (no free name) waits, as the engine's sync fails.
+        // One that can't come back where it was (no free name there, or its folders there in
+        // a cycle, each waiting for the other) comes back alone here, named, as the engine's
+        // `Drive::ensure_folder`.
         if self.server.removed.contains_key(&node) {
             self.restore_with(node);
-            return false;
+            if self.server.live.contains_key(&node) {
+                return false;
+            }
+            let name = name(self);
+            if let Some(n) = self.server.removed.get_mut(&node) {
+                n.state.parent = parent;
+            }
+            self.restore_as(node, name);
+            return true;
         }
         let name = name(self);
         self.server.put(node, NodeState::folder(parent, &name));
