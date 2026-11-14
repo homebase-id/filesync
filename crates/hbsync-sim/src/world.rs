@@ -823,10 +823,18 @@ impl Sim {
             if !self.server.live.contains_key(&item) {
                 self.restore_with(item);
             }
-            // In order, each after its folder; one whose folder didn't come back stays.
+            // In order, each after its folder; one whose folder didn't come back stays. One whose
+            // folder went for good meanwhile comes back as into any folder gone for good (an
+            // orphan): the engine plans the restore from its store, which hasn't heard it went,
+            // and the restore's answer tells it ([`deleted::restore_wave`]).
             for n in group {
                 let back_into = self.server.removed.get(&n).map(|r| r.state.parent);
-                if back_into.is_some_and(|p| p.is_root() || self.server.live.contains_key(&p)) {
+                let server = &self.server;
+                let gone =
+                    |p: &NodeId| !server.live.contains_key(p) && !server.removed.contains_key(p);
+                if back_into
+                    .is_some_and(|p| p.is_root() || server.live.contains_key(&p) || gone(&p))
+                {
                     self.restore_with(n);
                 }
             }

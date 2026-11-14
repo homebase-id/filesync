@@ -2087,3 +2087,39 @@ fn a_stop_after_the_files_leaves_their_folder() -> common::Res<()> {
     assert!(deleted(d.file_id)?);
     Ok(())
 }
+
+/// A put back whose folder went for good meanwhile, with a tombstone the feed doesn't tell yet
+/// ([`a_put_back_keeps_a_folder_gone_for_good_while_a_file_in_it_waits`] has none): the
+/// restore's answer tells it, and what was deleted with the folder comes back as into any
+/// folder gone for good; the folder goes up again from here, and nothing of it is deleted
+/// here. (Simulator: `put_backs_that_go_wrong_lose_nothing`.)
+#[test]
+fn a_put_back_brings_back_what_was_in_a_folder_gone_for_good_meanwhile() -> common::Res<()> {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |cfg| cfg.guard.min = 2)?;
+    for i in 0..4 {
+        a.write(&format!("d/f{i}.txt"), format!("{i}"))?;
+    }
+    a.sync()?;
+    b.sync()?;
+    let whole = b.tree_text("");
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.sync()?;
+    let held: Vec<NodeId> = b.sync()?.held.iter().map(|op| op.node()).collect();
+    assert_eq!(held.len(), 1, "the folder");
+    // The folder deleted for good, the feed not telling yet.
+    let d = header_named(&server, "d");
+    {
+        let mut s = server.lock().map_err(|_| "poisoned")?;
+        s.delete(d.at().file_id, d.at().version)?;
+        s.unlist(d.at().file_id);
+    }
+    b.engine.put_back(&held)?;
+    let report = b.sync()?;
+    assert!(report.held.is_empty(), "{report:?}");
+    assert_eq!(b.tree_text(""), whole, "nothing deleted here");
+    a.sync()?;
+    assert_eq!(a.tree_text(""), whole);
+    Ok(())
+}
