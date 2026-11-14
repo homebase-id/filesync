@@ -106,6 +106,8 @@ impl RemoteHeader {
 
     /// A tombstone without a version: a file someone else shares, no longer shared with this
     /// identity (withdrawn, expired), not deleted; a share again brings it back at its version.
+    /// A file deleted for good has no header to be read as this (gone from the feed, its
+    /// header not found); only a notification names it ([`ChangeRef::is_unshared`]).
     pub fn is_unshared(&self) -> bool {
         self.is_deleted() && self.version.0.is_nil()
     }
@@ -207,9 +209,11 @@ impl ChangeRef {
         self.changed_at.filter(|_| self.removed)
     }
 
-    /// As [`RemoteHeader::is_unshared`].
+    /// As [`RemoteHeader::is_unshared`]: a tombstone without a version, but with a time. A
+    /// delete for good's ref (a notification's, [`ChangeRef::tombstone`]) has none, and its
+    /// version may be nil too (the notification told none): it is a delete, not this.
     pub fn is_unshared(&self) -> bool {
-        self.deleted && self.version.0.is_nil()
+        self.deleted && self.version.0.is_nil() && self.changed_at.is_some()
     }
 
     pub fn of(header: &RemoteHeader) -> ChangeRef {
@@ -821,5 +825,32 @@ impl<T: Remote + ?Sized> Remote for std::sync::Arc<T> {
         sink: &mut dyn Write,
     ) -> Result<u64> {
         (**self).read(file_id, range, sink)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hbsync_types::Uuid;
+
+    /// A notification's ref of a file deleted for good (no version told, no time) is a delete,
+    /// not a share withdrawn; the withdrawn share's tombstone, with its time, is.
+    #[test]
+    fn a_hard_delete_is_not_unshared() {
+        let unshared = ChangeRef {
+            file_id: RemoteFileId(Uuid::from_u128(1)),
+            version: VersionTag(Uuid::nil()),
+            deleted: true,
+            parent: None,
+            removed: false,
+            changed_at: Some(1_000),
+        };
+        assert!(unshared.is_unshared());
+        let hard_deleted = ChangeRef {
+            changed_at: None,
+            ..unshared
+        };
+        assert!(!hard_deleted.is_unshared());
+        assert!(!unshared.tombstone().is_unshared());
     }
 }

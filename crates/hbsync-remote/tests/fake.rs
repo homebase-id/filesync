@@ -122,6 +122,47 @@ fn a_members_subscription_hears_its_view() -> R {
     Ok(())
 }
 
+/// Sharing what isn't a live file is refused as Homebase refuses it (a 400: fatal), as is
+/// withdrawing a share gone with a file deleted for good; a tombstone's share is withdrawn. The
+/// member reads a folder's payload as none now, a tombstone's as deleted, as `PeerRemote` does.
+#[test]
+fn shares_of_what_isnt_live_and_payloads_not_there() -> R {
+    let sharer = remote();
+    let member = FakeRemote::member(sharer.server_handle());
+    let dir = sharer.create(&folder("dir", NodeId::ROOT), None)?.at();
+    let tomb = create_file(&sharer, &file("tomb", NodeId::ROOT, b"1"), b"1")?.at();
+    let gone = create_file(&sharer, &file("gone", NodeId::ROOT, b"2"), b"2")?.at();
+    for at in [dir, tomb, gone] {
+        sharer.share(at.file_id)?;
+    }
+    let read = |at: hbsync_types::RemoteRef| member.read(at.file_id, None, &mut Vec::new());
+    assert!(
+        matches!(read(dir), Err(RemoteError::StaleRange(_))),
+        "{:?}",
+        read(dir)
+    );
+    sharer.server().delete(tomb.file_id, tomb.version)?;
+    sharer.server().hard_delete(gone.file_id, gone.version)?;
+    assert!(
+        matches!(read(tomb), Err(RemoteError::Deleted)),
+        "{:?}",
+        read(tomb)
+    );
+    for refused in [
+        sharer.share(tomb.file_id),
+        sharer.share(gone.file_id),
+        sharer.withdraw(gone.file_id),
+    ] {
+        assert!(matches!(refused, Err(RemoteError::Fatal(_))), "{refused:?}");
+    }
+    sharer.withdraw(tomb.file_id)?;
+    assert!(
+        member.header(tomb.file_id).is_err(),
+        "a share withdrawn read"
+    );
+    Ok(())
+}
+
 #[test]
 fn an_update_keeps_node_id_and_kind() -> R {
     let r = remote();

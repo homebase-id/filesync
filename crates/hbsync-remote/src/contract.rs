@@ -1366,10 +1366,13 @@ fn what_isnt_shared_is_refused(b: &Bench) -> Outcome {
 }
 
 /// A share withdrawn comes as a tombstone without a version, a parent or a node id, whole and
-/// slim alike ([`RemoteHeader::is_unshared`]); the file isn't read any more. The sharer's file
-/// keeps its version.
+/// slim alike ([`RemoteHeader::is_unshared`]), at the withdrawal's time: later than the file's
+/// last write. The file isn't read any more. The sharer's file keeps its version, its time
+/// moved too.
 fn a_withdrawn_share_is_a_tombstone_without_a_version(b: &Bench) -> Outcome {
     let (_, w) = b.file("withdrawn", b"data")?;
+    let before = b.reader().header(w.file_id)?.changed_at;
+    ensure!(before.is_some(), "no time on the shared file");
     let cursor = b.cursor_now()?;
     shares(b)?.withdraw(w.file_id)?;
     let feed = b.changes_to(&cursor, &[w.file_id])?;
@@ -1382,6 +1385,10 @@ fn a_withdrawn_share_is_a_tombstone_without_a_version(b: &Bench) -> Outcome {
     ensure!(
         tomb.kind == NodeKind::File && tomb.parent != b.scratch,
         "kind kept, parent not told: {tomb:?}"
+    );
+    ensure!(
+        tomb.changed_at > before,
+        "not at the withdrawal's time (the file's last write {before:?}): {tomb:?}"
     );
     let slim: Vec<_> = b
         .refs_after(&cursor)?
@@ -1396,8 +1403,8 @@ fn a_withdrawn_share_is_a_tombstone_without_a_version(b: &Bench) -> Outcome {
     ensure_err!(b.read(w.file_id, None), RemoteError::Fatal(_));
     let kept = b.remote.header(w.file_id)?;
     ensure!(
-        kept.version == w.version && !kept.is_deleted(),
-        "the sharer's file changed: {kept:?}"
+        kept.version == w.version && !kept.is_deleted() && kept.changed_at > before,
+        "the sharer's file changed, or its time didn't move: {kept:?}"
     );
     Ok(())
 }
@@ -1421,7 +1428,10 @@ fn a_share_again_comes_back_at_its_version(b: &Bench) -> Outcome {
     Ok(())
 }
 
-/// A file deleted for good is just gone: not in the feed (no tombstone), its header not found.
+/// A file deleted for good is just gone: not in the feed (no tombstone), its header not found,
+/// as its share row went with it (**[verified]** odin-core: `MainIndexMeta.WriteSharesAsync`
+/// locks the file's row so a hard delete takes its shares; `ReadForCallerAsync` finds no header
+/// before it looks at shares, and the peer header routes answer that 404).
 fn a_file_deleted_for_good_is_gone(b: &Bench) -> Outcome {
     let cursor = b.cursor_now()?;
     let (_, w) = b.file("gone", b"1")?;
