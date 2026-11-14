@@ -243,17 +243,18 @@ impl Reconciler<'_> {
             if !self.taken.contains(&n) || !self.scope.contains(&n) {
                 continue;
             }
-            let change = self.local_change(n);
-            let deleted_in_piece = piece && change == Change::Deleted;
-            if change.is_change() && !deleted_in_piece {
-                continue;
-            }
+            // Unchanged here: either way. Deleted here: in a piece only. Else: planned now.
+            let unchanged = match self.local_change(n) {
+                Change::Deleted if piece => false,
+                change if change.is_change() => continue,
+                _ => true,
+            };
             let Some(folder) = taken_by(i, n) else {
                 continue;
             };
             if piece && i.going_above.contains(&folder) {
                 self.placed.insert(n);
-            } else if !change.is_change()
+            } else if unchanged
                 && i.dirty.contains(&folder)
                 && !self.scope.contains(&folder)
                 && grouped

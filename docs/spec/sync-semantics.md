@@ -574,7 +574,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   own, as in any restore. What a failure leaves is still held, and shown again, with a note.
 
   A confirmation lasts while its removal is pending, or waits for a file in it not hashed yet
-  (§6.3: what was in such a folder, sent apart meanwhile, goes with it); done or undone, it is
+  (§6.3: what was in such a folder, sent apart meanwhile, goes with it) or for another page's
+  plan (§6.5); done or undone, it is
   forgotten. It is kept in memory only: after a restart, or when the folder's engine is set
   up again (new ignore rules, the folder set up again), what was confirmed and isn't done yet
   is judged again by the guard's rules, and asked about again where they hold it. A removal

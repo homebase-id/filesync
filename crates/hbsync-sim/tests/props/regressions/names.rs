@@ -1384,11 +1384,7 @@ fn regression_a_clash_in_another_page_keeps_a_rename_and_its_tag() {
     ];
     for pages in [None, Some(1)] {
         for guard in [None, Some(1)] {
-            let setup = |sim: Sim| match pages {
-                Some(size) => sim.with_small_pages(size),
-                None => sim,
-            };
-            if let Err(e) = run_with(2, guard, setup, &events) {
+            if let Err(e) = run_with(2, guard, |sim| paged(sim, pages), &events) {
                 panic!("pages {pages:?}, guard {guard:?}: {e}");
             }
         }

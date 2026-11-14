@@ -1451,10 +1451,8 @@ fn an_edit_aside_beside_an_ignored_item_is_kept() {
 fn regression_a_folder_an_edit_restores_keeps_what_its_delete_took_along() {
     use Action::*;
     for pages in [None, Some(1)] {
-        let (mut sim, [b, _, c, _]) = stopped_delete_setup();
-        if let Some(size) = pages {
-            sim = sim.with_small_pages(size);
-        }
+        let (sim, [b, _, c, _]) = stopped_delete_setup();
+        let mut sim = paged(sim, pages);
         let file = sim.file_pick(1, c).expect("b/c.txt on 1");
         sim.run(&[Event::Act {
             client: 1,
@@ -2703,5 +2701,7 @@ fn regression_a_file_deleted_here_by_a_folder_waiting_for_another_page_ends_as_w
         let sim = replay_events_in_pages(&events, pages);
         (sim.server_paths(), sim.removed_files_apart())
     };
-    assert_eq!(end(Some(4)), end(None), "in pages of four");
+    let whole = end(None);
+    assert_eq!(whole.1, 0, "nothing listed apart: {whole:?}");
+    assert_eq!(end(Some(4)), whole, "in pages of four");
 }

@@ -212,7 +212,7 @@ pub(crate) fn replay_events_in_pages(events: &[Event], pages: Option<usize>) -> 
 }
 
 /// `sim` planning in pages of `pages`, where given.
-fn paged(sim: Sim, pages: Option<usize>) -> Sim {
+pub(crate) fn paged(sim: Sim, pages: Option<usize>) -> Sim {
     match pages {
         Some(size) => sim.with_small_pages(size),
         None => sim,

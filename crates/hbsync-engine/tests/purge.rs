@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use common::{Client, header_named, server};
+use common::{Client, gone_unheard, header_named, server};
 use hbsync_engine::deleted;
 use hbsync_engine::feed;
 use hbsync_engine::time::TRACE_MS;
@@ -21,15 +21,6 @@ use hbsync_types::{NodeId, RemoteFileId};
 
 /// A day more than the feed keeps a trace of a delete for good.
 const LATER: i64 = TRACE_MS + 24 * 60 * 60 * 1000;
-
-/// `name` deleted for good on the drive (a tombstone), the feed not telling yet.
-fn gone_unheard(server: &Arc<Mutex<FakeServer>>, name: &str) -> common::Res<()> {
-    let at = header_named(server, name).at();
-    let mut s = server.lock().map_err(|_| "poisoned")?;
-    s.delete(at.file_id, at.version)?;
-    s.unlist(at.file_id);
-    Ok(())
-}
 
 /// `a` removed folder `d` (4 files, every one synced) and `b` holds it ([`a_folder_removed_and_held`]).
 struct HeldFolder {

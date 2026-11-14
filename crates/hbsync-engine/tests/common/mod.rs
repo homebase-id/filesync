@@ -108,6 +108,18 @@ pub(crate) fn node_named(server: &Arc<Mutex<FakeServer>>, name: &str) -> hbsync_
         .expect("found by its name")
 }
 
+/// `name` deleted for good on the drive (a tombstone), the feed not telling yet: its file id.
+pub(crate) fn gone_unheard(
+    server: &Arc<Mutex<FakeServer>>,
+    name: &str,
+) -> Res<hbsync_types::RemoteFileId> {
+    let at = header_named(server, name).at();
+    let mut s = server.lock().map_err(|_| "poisoned")?;
+    s.delete(at.file_id, at.version)?;
+    s.unlist(at.file_id);
+    Ok(at.file_id)
+}
+
 /// The header of the file named `name` on the server, live or removed.
 pub(crate) fn header_named(
     server: &Arc<Mutex<FakeServer>>,
