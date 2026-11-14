@@ -36,7 +36,7 @@ fn the_shared_contract_holds() -> R {
     let member = FakeRemote::member(sharer.server_handle());
     // The sharer's own feed end: the bench's start is the member's cursor.
     let sharers_start = feed_end(&sharer, None)?;
-    let bench = Bench::shared(&sharer, &member, &sharer, "contract", Duration::ZERO)?;
+    let bench = Bench::shared(&sharer, &member, "contract", Duration::ZERO)?;
     let failed = bench.run_all();
     assert!(failed.is_empty(), "{failed:#?}");
     bench.cleanup()?;
@@ -124,7 +124,8 @@ fn a_members_subscription_hears_its_view() -> R {
 
 /// After a share is withdrawn, every later write of the file announces the "no longer shared"
 /// tombstone to the member again, at the write's time, and lists it again in the member's feed
-/// (odin-core sends it after every change while a row names the member).
+/// (odin-core sends it after every change while a row names the member: **[verified]**
+/// `DriveStorageServiceBase.NoLongerSharedTombstoneOf`, `NoLongerSharedViewOf`).
 #[test]
 fn a_write_after_a_withdrawal_announces_the_tombstone_again() -> R {
     let sharer = remote();

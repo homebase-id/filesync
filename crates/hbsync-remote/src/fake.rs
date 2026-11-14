@@ -181,17 +181,21 @@ impl FakeServer {
         Uuid::from_u128(u128::from(self.next_id) | 0x0000_0000_0000_4000_8000_0000_0000_0000)
     }
 
-    /// A write of `file_id` by `writer` (`None`: not through a client) landed: its new place
-    /// in the feed, and its announcement.
-    fn touch(&mut self, file_id: RemoteFileId, writer: Option<ClientId>) {
-        self.touch_at(file_id, writer, self.clock_ms);
-    }
-
-    /// [`FakeServer::touch`], the file's feed time set to `modified`.
-    fn touch_at(&mut self, file_id: RemoteFileId, writer: Option<ClientId>, modified: i64) {
+    /// A write of `file_id` by `writer` (`None`: not through a client) landed: its time, its
+    /// new place in the feed, and its announcement. Returns the write's time: at least one
+    /// past the file's last change, as every write on Homebase sets `modified =
+    /// MAX(modified+1, now)` (**[verified]** odin-core `TableDriveMainIndex`: upsert, the
+    /// local app data, a share's touch), so a file's time never goes back, and a write in the
+    /// millisecond of the last one still moves it and its place in the feed. The header's
+    /// time (`updated`) is that one value (**[verified]** `FileMetadata`: `Updated =
+    /// record.modified`).
+    fn touch(&mut self, file_id: RemoteFileId, writer: Option<ClientId>) -> i64 {
+        let mut modified = self.clock_ms;
         if let Some(f) = self.files.get_mut(&file_id) {
+            modified = (f.modified + 1).max(modified);
             self.feed.remove(&(f.modified, f.row));
             f.modified = modified;
+            f.header.changed_at = Some(modified);
             self.feed.insert((modified, f.row), file_id);
             // Each subscriber hears the row as its view's feed has it: odin-core sends a
             // member's socket the answer its query gets, the member nothing of a file no share
@@ -216,6 +220,7 @@ impl FakeServer {
         if self.config.auto_tick {
             self.tick();
         }
+        modified
     }
 
     /// A new client registration.
@@ -333,8 +338,7 @@ impl FakeServer {
         );
         self.feed.insert((0, row), file_id);
         self.by_node.insert(node.node, file_id);
-        let at = self.clock_ms;
-        self.touch(file_id, writer);
+        let at = self.touch(file_id, writer);
         Ok(written(RemoteRef { file_id, version }, at, sent))
     }
 
@@ -392,7 +396,6 @@ impl FakeServer {
         f.header.version = version;
         f.header.parent = meta.parent;
         f.header.removed = meta.removed;
-        f.header.changed_at = Some(self.clock_ms);
         let payload = match new_payload {
             Some((bytes, info)) => {
                 f.bytes = Some(bytes);
@@ -405,8 +408,7 @@ impl FakeServer {
             content: meta.content.clone(),
             payload,
         };
-        let at = self.clock_ms;
-        self.touch(file_id, writer);
+        let at = self.touch(file_id, writer);
         Ok(written(RemoteRef { file_id, version }, at, sent))
     }
 
@@ -434,16 +436,13 @@ impl FakeServer {
             self.by_node.remove(&node);
         }
         let version = VersionTag(self.fresh_uuid());
-        let now = self.clock_ms;
         let f = self.files.get_mut(&file_id).ok_or(RemoteError::NotFound)?;
         f.header.version = version;
         f.header.body = RemoteBody::Deleted;
         f.header.removed = false;
-        f.header.changed_at = Some(now);
         f.header.token = None;
         f.bytes = None;
-        self.touch(file_id, writer);
-        Ok(Some(now))
+        Ok(Some(self.touch(file_id, writer)))
     }
 
     /// Sets only a file's removal, if it is still at `expected`, as Homebase's
@@ -479,12 +478,10 @@ impl FakeServer {
             });
         }
         let version = VersionTag(self.fresh_uuid());
-        let now = self.clock_ms;
         let f = self.files.get_mut(&file_id).ok_or(RemoteError::NotFound)?;
         f.header.version = version;
         f.header.removed = removed;
-        f.header.changed_at = Some(now);
-        self.touch(file_id, writer);
+        let now = self.touch(file_id, writer);
         Ok(written(RemoteRef { file_id, version }, now, None))
     }
 
@@ -525,13 +522,8 @@ impl FakeServer {
             (false, _, Some(false)) => return Ok(()),
             _ => {}
         }
-        let f = self.files.get_mut(&file_id).ok_or(RemoteError::NotFound)?;
-        // At least one past the file's last change, as odin-core's `MAX(modified+1, now)`: a
-        // share in the millisecond of the last write still moves the time and the feed.
-        let modified = (f.modified + 1).max(self.clock_ms);
-        f.header.changed_at = Some(modified);
         self.shares.insert(file_id, live);
-        self.touch_at(file_id, Some(writer), modified);
+        self.touch(file_id, Some(writer));
         Ok(())
     }
 
@@ -906,19 +898,19 @@ pub struct Faults {
     pub cut_upload_after: Option<u64>,
     /// The next download breaks after this many bytes.
     pub cut_download_after: Option<u64>,
-    /// Creates, updates and deletes of nodes with this name fail transiently (a write that
-    /// keeps failing).
+    /// Creates, updates, deletes and share changes of nodes with this name fail transiently (a
+    /// write that keeps failing).
     pub fail_writes_named: Option<String>,
     /// Every request is refused with [`RemoteError::Denied`] (credentials revoked).
     pub denied: bool,
     /// What `denied` refuses for: the drive private and this login without its key
     /// ([`Refusal::NoKey`]), not the credentials.
     pub deny_key: bool,
-    /// Creates, updates and deletes are refused with [`RemoteError::Denied`] (the app lost
-    /// write access to the drive); reads still work.
+    /// Creates, updates, deletes and share changes are refused with [`RemoteError::Denied`]
+    /// (the app lost write access to the drive); reads still work.
     pub deny_writes: bool,
-    /// Creates, updates and deletes are refused with [`RemoteError::Fatal`] (a drive that won't
-    /// take them, read-only); reads still work.
+    /// Creates, updates, deletes and share changes are refused with [`RemoteError::Fatal`] (a
+    /// drive that won't take them, read-only); reads still work.
     pub refuse_writes: bool,
     /// Added to every request.
     pub latency: Duration,
@@ -1023,11 +1015,16 @@ impl FakeRemote {
         self.faults.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// The server it is a client of, to make another client of it.
+    /// The server it is a client of, to make another client of it. Its own reads
+    /// ([`FakeServer::header`], [`FakeServer::changes`], [`FakeServer::payload`],
+    /// [`FakeServer::live`]) are the owner's view, whosever client handed it out: a member's
+    /// view is read through a [`FakeRemote::member`].
     pub fn server_handle(&self) -> Arc<Mutex<FakeServer>> {
         Arc::clone(&self.server)
     }
 
+    /// The server it is a client of, locked: its reads are the owner's view, as
+    /// [`FakeRemote::server_handle`]'s are, on a member's client too.
     pub fn server(&self) -> MutexGuard<'_, FakeServer> {
         self.server.lock().unwrap_or_else(|p| p.into_inner())
     }
@@ -1392,15 +1389,29 @@ impl Remote for FakeRemote {
 /// The sharer's share rows for the member, through its own client.
 impl crate::contract::Shares for FakeRemote {
     fn share(&self, file_id: RemoteFileId) -> Result<()> {
-        self.writable()?;
-        self.gate()?;
-        self.server().set_share(self.client, file_id, true)
+        self.set_share(file_id, true)
     }
 
     fn withdraw(&self, file_id: RemoteFileId) -> Result<()> {
+        self.set_share(file_id, false)
+    }
+}
+
+impl FakeRemote {
+    /// Shares `file_id` (`live`) or withdraws its share, refused by the faults on every write
+    /// first, as Homebase checks the caller may write to the drive before it looks at the file
+    /// (**[verified]** odin-core `DriveShareService.WriteSharesAsync`, `WithdrawShareAsync`:
+    /// `AssertCallerMayWrite`).
+    fn set_share(&self, file_id: RemoteFileId, live: bool) -> Result<()> {
         self.writable()?;
         self.gate()?;
-        self.server().set_share(self.client, file_id, false)
+        let name = self
+            .server()
+            .live_name(file_id)
+            .unwrap_or_default()
+            .to_owned();
+        self.gate_name(&name)?;
+        self.server().set_share(self.client, file_id, live)
     }
 }
 
@@ -1560,10 +1571,11 @@ mod tests {
         }
     }
 
-    /// A share in the millisecond of the file's last write still moves its time and its place
-    /// in the feed, one past it (odin-core's `MAX(modified+1, now)`).
+    /// Every write in the millisecond of the file's last change still moves its time and its
+    /// place in the feed, one past it, and the header and the answer carry that one time:
+    /// odin-core's `MAX(modified+1, now)` (**[verified]** `TableDriveMainIndex`).
     #[test]
-    fn a_share_in_the_writes_millisecond_moves_the_file() -> Result<()> {
+    fn a_write_in_the_last_changes_millisecond_moves_the_file() -> Result<()> {
         let server = FakeServer::new(ServerConfig {
             auto_tick: false,
             ..ServerConfig::default()
@@ -1577,12 +1589,39 @@ mod tests {
             content: NodeContent::folder("shared"),
             removed: false,
         };
-        let file_id = s.create(&folder, None)?.file_id;
-        let written = s.files[&file_id].modified;
-        assert_eq!(s.header(file_id)?.changed_at, Some(written));
+        let created = s.create_by(None, &folder, None)?;
+        let file_id = created.at().file_id;
+        let at = |s: &FakeServer| {
+            (
+                s.files[&file_id].modified,
+                s.files[&file_id].header.changed_at,
+            )
+        };
+        let mut time = s.clock_ms;
+        assert_eq!(created.changed_at, Some(time));
+        assert_eq!(at(&s), (time, Some(time)));
+        let updated = s.update_by(None, file_id, created.at().version, &folder, None)?;
+        time += 1;
+        assert_eq!(
+            (updated.changed_at, at(&s)),
+            (Some(time), (time, Some(time)))
+        );
+        let removed = s.set_removed_by(None, file_id, updated.at().version, true)?;
+        time += 1;
+        assert_eq!(
+            (removed.changed_at, at(&s)),
+            (Some(time), (time, Some(time)))
+        );
         s.set_share(sharer.client(), file_id, true)?;
-        assert_eq!(s.header(file_id)?.changed_at, Some(written + 1));
-        assert_eq!(s.files[&file_id].modified, written + 1);
+        time += 1;
+        assert_eq!(at(&s), (time, Some(time)));
+        let deleted = s.delete_by(None, file_id, removed.at().version)?;
+        time += 1;
+        assert_eq!((deleted, at(&s)), (Some(time), (time, Some(time))));
+        s.set_share(sharer.client(), file_id, false)?;
+        time += 1;
+        assert_eq!(at(&s), (time, Some(time)));
+        assert_eq!(s.feed.keys().last().map(|k| k.0), Some(time));
         Ok(())
     }
 

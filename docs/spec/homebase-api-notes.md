@@ -566,7 +566,7 @@ server answers the rest, to a token their server made for this identity's connec
   withdrawing moves the file's `modified` and keeps its version, so a share given again brings
   the file back live at the version it had (**[verified]**
   `TableDriveMainIndex.TouchKeepingVersionTagAsync`). That is the header's `updated` too
-  (`FileMetadata`), so `RemoteHeader::changed_at` is when the file last changed on the drive,
+  (**[verified]** `FileMetadata`: `Updated = record.modified`), so `RemoteHeader::changed_at` is when the file last changed on the drive,
   not when its version was written: a removed node's removal time and a tombstone's age (when
   it may be deleted hard) move with a share change too. The client can tell it from a delete
   by its zero version and its time (`RemoteHeader::is_unshared`, `ChangeRef::is_unshared`);

@@ -98,6 +98,12 @@ pub trait Shares: Sync {
     fn withdraw(&self, file_id: RemoteFileId) -> Result<(), RemoteError>;
 }
 
+/// A sharer: one client that both writes the drive and shares its files, so a shared bench
+/// can't write to one drive and share on another ([`Bench::shared`]).
+pub trait Sharer: Remote + Shares {}
+
+impl<T: Remote + Shares + ?Sized> Sharer for T {}
+
 /// The member a shared bench reads as, and the sharer's share rows for it.
 #[derive(Clone, Copy)]
 struct Shared<'a> {
@@ -247,17 +253,16 @@ impl<'a> Bench<'a> {
         Bench::of(remote, None, name, settle)
     }
 
-    /// A bench where `remote` (the sharer) writes and shares through `shares`, and `member`
-    /// (a member of what it shares) reads: the scenarios not [`Reach::OwnerOnly`]. The scratch
-    /// folder is shared.
+    /// A bench where `sharer` writes and shares, and `member` (a member of what it shares)
+    /// reads: the scenarios not [`Reach::OwnerOnly`]. The scratch folder is shared.
     pub fn shared(
-        remote: &'a dyn Remote,
+        sharer: &'a dyn Sharer,
         member: &'a dyn Remote,
-        shares: &'a dyn Shares,
         name: &str,
         settle: Duration,
     ) -> Result<Self, RemoteError> {
-        Bench::of(remote, Some(Shared { member, shares }), name, settle)
+        let shares = sharer;
+        Bench::of(sharer, Some(Shared { member, shares }), name, settle)
     }
 
     fn of(
@@ -1370,8 +1375,8 @@ fn what_isnt_shared_is_refused(b: &Bench) -> Outcome {
     Ok(())
 }
 
-/// A share withdrawn comes as a tombstone without a version, a parent or a node id, whole and
-/// slim alike ([`RemoteHeader::is_unshared`]), at the withdrawal's time: later than the file's
+/// A share withdrawn comes as a tombstone without a version, a parent (the root, as the adapter
+/// reads a tombstone without a `groupId`) or a node id, whole and slim alike ([`RemoteHeader::is_unshared`]), at the withdrawal's time: later than the file's
 /// last write. The file isn't read any more. The sharer's file keeps its version, its time
 /// moved too.
 fn a_withdrawn_share_is_a_tombstone_without_a_version(b: &Bench) -> Outcome {
@@ -1388,8 +1393,8 @@ fn a_withdrawn_share_is_a_tombstone_without_a_version(b: &Bench) -> Outcome {
         "not a tombstone without a version: {tomb:?}"
     );
     ensure!(
-        tomb.kind == NodeKind::File && tomb.parent != b.scratch,
-        "kind kept, parent not told: {tomb:?}"
+        tomb.kind == NodeKind::File && tomb.parent == NodeId::ROOT,
+        "kind kept, the root its parent: {tomb:?}"
     );
     ensure!(
         tomb.changed_at > before,
