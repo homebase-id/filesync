@@ -1568,20 +1568,7 @@ fn regression_what_a_removal_took_along_waits_for_its_folder_in_pages() {
         (0, DeleteStopped { pick: 3, done: 2 }, false),
     ];
     for pages in [None, Some(1)] {
-        let mut sim = Sim::new(3).without_ignore_rules();
-        if let Some(size) = pages {
-            sim = sim.with_small_pages(size);
-        }
-        for (client, action, sync) in acts {
-            sim.run(&[Event::Act { client, action }]);
-            if sync {
-                assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
-            }
-        }
-        assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
-        if let Err(e) = sim.check() {
-            panic!("pages {pages:?}: {e}");
-        }
+        let sim = replay_in_pages(&acts, pages);
         assert_eq!(
             sim.server_paths(),
             ["c.txt", "c.txt/a", "c.txt/a/a"],
@@ -1649,20 +1636,7 @@ fn regression_what_a_folder_waiting_for_another_page_deletes_waits_with_it() {
         ),
     ];
     let end = |pages: Option<usize>| {
-        let mut sim = Sim::new(3).without_ignore_rules();
-        if let Some(size) = pages {
-            sim = sim.with_small_pages(size);
-        }
-        for (client, action, sync) in acts {
-            sim.run(&[Event::Act { client, action }]);
-            if sync {
-                assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
-            }
-        }
-        assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
-        if let Err(e) = sim.check() {
-            panic!("pages {pages:?}: {e}");
-        }
+        let sim = replay_in_pages(&acts, pages);
         (sim.server_paths(), sim.removed_files_apart())
     };
     let whole = end(None);
@@ -1737,20 +1711,7 @@ fn regression_what_a_folder_waiting_for_a_folders_page_deletes_waits_with_it() {
         (1, Delete { node: 1 }, false),
     ];
     let end = |pages: Option<usize>| {
-        let mut sim = Sim::new(3).without_ignore_rules();
-        if let Some(size) = pages {
-            sim = sim.with_small_pages(size);
-        }
-        for (client, action, sync) in acts {
-            sim.run(&[Event::Act { client, action }]);
-            if sync {
-                assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
-            }
-        }
-        assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
-        if let Err(e) = sim.check() {
-            panic!("pages {pages:?}: {e}");
-        }
+        let sim = replay_in_pages(&acts, pages);
         (sim.server_paths(), sim.removed_files_apart())
     };
     let whole = end(None);
@@ -1799,20 +1760,7 @@ fn regression_what_a_waiting_folders_removal_took_along_waits_with_it() {
         (0, CreateFile { parent: 0, name: 0 }, false),
     ];
     let end = |pages: Option<usize>| {
-        let mut sim = Sim::new(3).without_ignore_rules();
-        if let Some(size) = pages {
-            sim = sim.with_small_pages(size);
-        }
-        for (client, action, sync) in acts {
-            sim.run(&[Event::Act { client, action }]);
-            if sync {
-                assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
-            }
-        }
-        assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
-        if let Err(e) = sim.check() {
-            panic!("pages {pages:?}: {e}");
-        }
+        let sim = replay_in_pages(&acts, pages);
         let tags = sim.server_tags("a (conflict 1)/b/a");
         (sim.server_paths(), sim.removed_files_apart(), tags)
     };
@@ -2706,20 +2654,7 @@ fn regression_a_file_deleted_here_in_a_piece_waits_for_the_folder_that_took_it_a
         (0, Purge, false),
     ];
     let end = |pages: Option<usize>| {
-        let mut sim = Sim::new(3).without_ignore_rules();
-        if let Some(size) = pages {
-            sim = sim.with_small_pages(size);
-        }
-        for (client, action, sync) in acts {
-            sim.run(&[Event::Act { client, action }]);
-            if sync {
-                assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
-            }
-        }
-        assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
-        if let Err(e) = sim.check() {
-            panic!("pages {pages:?}: {e}");
-        }
+        let sim = replay_in_pages(&acts, pages);
         (sim.server_paths(), sim.removed_files_apart())
     };
     let whole = end(None);

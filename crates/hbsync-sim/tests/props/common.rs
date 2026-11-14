@@ -188,6 +188,27 @@ pub(crate) fn with_crashes(
     ]
 }
 
+/// A paging regression's acts (`(client, action, sync)`, a sync quiescing every client) on
+/// three clients without ignore rules, the dirty set planned whole (`None`) or in pages of
+/// `pages`: the sim once settled and checked, for what is compared between the two.
+pub(crate) fn replay_in_pages(acts: &[(usize, Action, bool)], pages: Option<usize>) -> Sim {
+    let mut sim = Sim::new(3).without_ignore_rules();
+    if let Some(size) = pages {
+        sim = sim.with_small_pages(size);
+    }
+    for &(client, action, sync) in acts {
+        sim.run(&[Event::Act { client, action }]);
+        if sync {
+            assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
+        }
+    }
+    assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
+    if let Err(e) = sim.check() {
+        panic!("pages {pages:?}: {e}");
+    }
+    sim
+}
+
 pub(crate) fn run(clients: usize, events: &[Event]) -> Result<(), TestCaseError> {
     run_with(clients, None, |sim| sim, events)
 }

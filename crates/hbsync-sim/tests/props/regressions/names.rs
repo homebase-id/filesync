@@ -1193,20 +1193,7 @@ fn regression_a_swap_of_a_folder_and_the_one_in_it_planned_in_pages() {
         (1, Purge, true),
     ];
     let end = |pages: Option<usize>| {
-        let mut sim = Sim::new(3).without_ignore_rules();
-        if let Some(size) = pages {
-            sim = sim.with_small_pages(size);
-        }
-        for (client, action, sync) in acts {
-            sim.run(&[Event::Act { client, action }]);
-            if sync {
-                assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
-            }
-        }
-        assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
-        if let Err(e) = sim.check() {
-            panic!("pages {pages:?}: {e}");
-        }
+        let sim = replay_in_pages(&acts, pages);
         sim.server_paths()
     };
     let whole = end(None);
