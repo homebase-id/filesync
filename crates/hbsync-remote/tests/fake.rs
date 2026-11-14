@@ -151,8 +151,9 @@ fn a_write_after_a_withdrawal_announces_the_tombstone_again() -> R {
 }
 
 /// Sharing what isn't a live file is refused as Homebase refuses it (a 400: fatal), as is
-/// withdrawing a share gone with a file deleted for good; a tombstone's share is withdrawn. The
-/// member reads a folder's payload as none now, a tombstone's as deleted, as `PeerRemote` does.
+/// withdrawing a share gone with a file deleted for good; a tombstone's share is withdrawn
+/// without moving it (odin-core PR #2141). The member reads a folder's payload as none now, a
+/// tombstone's as deleted, as `PeerRemote` does.
 #[test]
 fn shares_of_what_isnt_live_and_payloads_not_there() -> R {
     let sharer = remote();
@@ -183,10 +184,35 @@ fn shares_of_what_isnt_live_and_payloads_not_there() -> R {
     ] {
         assert!(matches!(refused, Err(RemoteError::Fatal(_))), "{refused:?}");
     }
+    // The share goes, but the tombstone keeps its time and place in the feed, where the member
+    // finds the "no longer shared" tombstone; the change is announced at that time.
+    let (members, owners) = (member.subscribe(false), sharer.subscribe(false));
+    let (before, feed) = (sharer.header(tomb.file_id)?, feed_end(&sharer, None)?);
+    let shared = member.header(tomb.file_id)?;
+    assert!(shared.is_deleted() && !shared.is_unshared(), "{shared:?}");
     sharer.withdraw(tomb.file_id)?;
     assert!(
         member.header(tomb.file_id).is_err(),
         "a share withdrawn read"
+    );
+    assert_eq!(sharer.header(tomb.file_id)?, before);
+    assert_eq!(rows_after(&sharer, Some(&feed))?, [], "the feed moved");
+    let unshared: Vec<_> = rows_after(&member, None)?
+        .into_iter()
+        .filter(|r| r.file_id == tomb.file_id)
+        .collect();
+    assert!(
+        unshared.len() == 1 && unshared[0].is_unshared(),
+        "{unshared:?}"
+    );
+    assert_eq!(unshared[0].changed_at, before.changed_at);
+    assert_eq!(
+        members.try_iter().collect::<Vec<_>>(),
+        [ChangeRef::of(&unshared[0])]
+    );
+    assert_eq!(
+        owners.try_iter().collect::<Vec<_>>(),
+        [ChangeRef::of(&before)]
     );
     Ok(())
 }

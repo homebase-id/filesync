@@ -1460,10 +1460,12 @@ fn the_member_writes_nothing(b: &Bench) -> Outcome {
     let cursor = b.cursor_now()?;
     let target = Target { at: w, token: None };
     let new = file("mine", b.scratch, b"2");
-    ensure_err!(
-        with_upload(Some(b"2"), |upload| b.reader().create(&new, upload)),
-        RemoteError::Fatal(_)
-    );
+    let made = with_upload(Some(b"2"), |upload| b.reader().create(&new, upload));
+    // Made wrongly, it is still cleaned up.
+    if let Ok(w) = &made {
+        b.track(w.at().file_id);
+    }
+    ensure_err!(made, RemoteError::Fatal(_));
     ensure_err!(
         b.reader().update(
             &target,

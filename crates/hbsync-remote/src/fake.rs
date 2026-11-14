@@ -52,8 +52,8 @@ struct StoredFile {
     header: RemoteHeader,
     /// `None` for folders and tombstones.
     bytes: Option<Arc<Vec<u8>>>,
-    /// Feed position: (modified time, row id). The row id never changes.
-    modified: i64,
+    /// Feed position: (the header's `changed_at`, row id), once written. The row id never
+    /// changes.
     row: u64,
 }
 
@@ -101,7 +101,7 @@ pub struct FakeServer {
     files: HashMap<RemoteFileId, StoredFile>,
     /// Live files only, removed ones included: their node id stays taken, as on Homebase.
     by_node: HashMap<NodeId, RemoteFileId>,
-    /// Feed index: (modified, row) → file.
+    /// Feed index: (the file's time, its header's `changed_at`, row) → file.
     feed: BTreeMap<(i64, u64), RemoteFileId>,
     clock_ms: i64,
     /// Files the feed leaves out though they exist (odin-core leaves out a row with a later
@@ -192,35 +192,44 @@ impl FakeServer {
     fn touch(&mut self, file_id: RemoteFileId, writer: Option<ClientId>) -> i64 {
         let mut modified = self.clock_ms;
         if let Some(f) = self.files.get_mut(&file_id) {
-            modified = (f.modified + 1).max(modified);
-            self.feed.remove(&(f.modified, f.row));
-            f.modified = modified;
+            if let Some(last) = f.header.changed_at {
+                modified = (last + 1).max(modified);
+                self.feed.remove(&(last, f.row));
+            }
             f.header.changed_at = Some(modified);
             self.feed.insert((modified, f.row), file_id);
-            // Each subscriber hears the row as its view's feed has it: odin-core sends a
-            // member's socket the answer its query gets, the member nothing of a file no share
-            // row names it on (**[verified]** `DriveEventMessage.MessageForAsync`,
-            // `NoLongerSharedViewOf`). Each view's row is built for its first subscriber.
-            let (header, shares) = (&f.header, &self.shares);
-            let (owner, member) = (OnceCell::new(), OnceCell::new());
-            // A subscriber that went away is dropped.
-            self.subscribers.retain(|s| {
-                if writer.is_some() && s.excluded == writer {
-                    return true;
-                }
-                let change = match s.view {
-                    View::Owner => Some(*owner.get_or_init(|| ChangeRef::of(header))),
-                    View::Member => *member.get_or_init(|| {
-                        seen_by(shares, file_id, View::Member).map(|how| seen_ref(header, how))
-                    }),
-                };
-                change.is_none_or(|c| s.events.send(c).is_ok())
-            });
+            self.announce(file_id, writer);
         }
         if self.config.auto_tick {
             self.tick();
         }
         modified
+    }
+
+    /// Announces `file_id`'s row as it is now, written by `writer`. Each subscriber hears it as
+    /// its view's feed has it: odin-core sends a member's socket the answer its query gets, the
+    /// member nothing of a file no share row names it on (**[verified]**
+    /// `DriveEventMessage.MessageForAsync`, `NoLongerSharedViewOf`). Each view's row is built
+    /// for its first subscriber.
+    fn announce(&mut self, file_id: RemoteFileId, writer: Option<ClientId>) {
+        let Some(f) = self.files.get(&file_id) else {
+            return;
+        };
+        let (header, shares) = (&f.header, &self.shares);
+        let (owner, member) = (OnceCell::new(), OnceCell::new());
+        // A subscriber that went away is dropped.
+        self.subscribers.retain(|s| {
+            if writer.is_some() && s.excluded == writer {
+                return true;
+            }
+            let change = match s.view {
+                View::Owner => Some(*owner.get_or_init(|| ChangeRef::of(header))),
+                View::Member => *member.get_or_init(|| {
+                    seen_by(shares, file_id, View::Member).map(|how| seen_ref(header, how))
+                }),
+            };
+            change.is_none_or(|c| s.events.send(c).is_ok())
+        });
     }
 
     /// A new client registration.
@@ -324,7 +333,8 @@ impl FakeServer {
                 payload: payload.as_ref().map(|(_, info)| *info),
             },
             removed: node.removed,
-            changed_at: Some(self.clock_ms),
+            // Its time and place in the feed come with the write ([`FakeServer::touch`]).
+            changed_at: None,
             token: Some(token_of(file_id)),
         };
         self.files.insert(
@@ -332,11 +342,9 @@ impl FakeServer {
             StoredFile {
                 header,
                 bytes: payload.map(|(b, _)| b),
-                modified: 0,
                 row,
             },
         );
-        self.feed.insert((0, row), file_id);
         self.by_node.insert(node.node, file_id);
         let at = self.touch(file_id, writer);
         Ok(written(RemoteRef { file_id, version }, at, sent))
@@ -509,21 +517,29 @@ impl FakeServer {
     /// read as fatal (**[verified]** `DriveShareService`): sharing a file not on the drive ("No
     /// file … on the drive") or a tombstone (`CheckFileAndLift`, "deleted or isn't a file"), and
     /// withdrawing a share never given or gone with a file deleted for good ("isn't shared with
-    /// circle"). A withdrawal looks at no file state (a tombstone's share is withdrawn), and one
-    /// withdrawn already changes nothing (`WithdrawShareAsync`).
+    /// circle"). A withdrawal changes nothing of one withdrawn already (`WithdrawShareAsync`). A
+    /// deleted file's share is withdrawn, the member reading it no more, but its tombstone keeps
+    /// its time, its place in the feed and the age it is purged by; the change is announced at
+    /// that time (odin-core PR #2141: `WithdrawShareAsync`, `FileShares.MovesModified`,
+    /// `PublishChangedAsync`; **[verified]** on that PR at 1fd30efcb, not merged yet).
     fn set_share(&mut self, writer: ClientId, file_id: RemoteFileId, live: bool) -> Result<()> {
         let refused = |why: String| Err(RemoteError::Fatal(why));
-        match (live, self.files.get(&file_id), self.shares.get(&file_id)) {
+        let deleted = match (live, self.files.get(&file_id), self.shares.get(&file_id)) {
             (true, None, _) => return refused(format!("No file {file_id:?} on the drive")),
             (true, Some(f), _) if f.header.is_deleted() => {
                 return refused(format!("File {file_id:?} is deleted or isn't a file"));
             }
             (false, _, None) => return refused(format!("{file_id:?} isn't shared with circle")),
             (false, _, Some(false)) => return Ok(()),
-            _ => {}
-        }
+            (_, f, _) => f.is_some_and(|f| f.header.is_deleted()),
+        };
         self.shares.insert(file_id, live);
-        self.touch(file_id, Some(writer));
+        match deleted {
+            true => self.announce(file_id, Some(writer)),
+            false => {
+                self.touch(file_id, Some(writer));
+            }
+        }
         Ok(())
     }
 
@@ -792,7 +808,8 @@ impl FakeServer {
                 payload: info,
             },
             removed: meta.removed,
-            changed_at: Some(self.clock_ms),
+            // Its time comes with the write ([`FakeServer::touch`]).
+            changed_at: None,
             token: None,
         };
         let file_id = match over {
@@ -804,6 +821,8 @@ impl FakeServer {
                 f.header = RemoteHeader {
                     file_id,
                     token: Some(token_of(file_id)),
+                    // Its place in the feed until the write moves it.
+                    changed_at: f.header.changed_at,
                     ..header
                 };
                 f.bytes = bytes;
@@ -818,16 +837,8 @@ impl FakeServer {
                     token: Some(token_of(file_id)),
                     ..header
                 };
-                self.files.insert(
-                    file_id,
-                    StoredFile {
-                        header,
-                        bytes,
-                        modified: 0,
-                        row,
-                    },
-                );
-                self.feed.insert((0, row), file_id);
+                self.files
+                    .insert(file_id, StoredFile { header, bytes, row });
                 file_id
             }
         };
@@ -1283,18 +1294,27 @@ impl Remote for FakeRemote {
         Answers::in_batches(files, BATCH_FILES, |batch| self.delete_batch(batch))
     }
 
-    /// A request per [`BATCH_FILES`] files, as Homebase's `hard-delete-batch`.
+    /// A request per [`BATCH_FILES`] files, as Homebase's `hard-delete-batch`, refused by the
+    /// faults on every write as a delete is: Homebase checks the caller may write to the drive
+    /// first (**[verified]** odin-core
+    /// `V2DriveBatchFileWriteOperationsController.HardDeleteBatch`: `AssertCanWriteToDrive`).
     fn delete_for_good(&self, files: &[Doomed]) -> Result<ForGood> {
         self.writable()?;
         Answers::in_batches(files, BATCH_FILES, |batch| {
             self.gate()?;
             batch_of(batch.iter().map(|f| f.at().file_id))?;
+            // The faults on every write (no file is named so).
+            self.gate_name("")?;
+            let failing = self.faults().fail_writes_named.clone();
             let mut server = self.server();
             Ok(batch
                 .iter()
                 .map(|f| {
                     let RemoteRef { file_id, version } = f.at();
-                    server.hard_delete(file_id, version)
+                    match failing.is_some() && server.live_name(file_id) == failing.as_deref() {
+                        true => Err(RemoteError::Transient("injected write failure".into())),
+                        false => server.hard_delete(file_id, version),
+                    }
                 })
                 .collect())
         })
@@ -1591,36 +1611,42 @@ mod tests {
         };
         let created = s.create_by(None, &folder, None)?;
         let file_id = created.at().file_id;
+        // The file's time, and its place in the feed.
         let at = |s: &FakeServer| {
-            (
-                s.files[&file_id].modified,
-                s.files[&file_id].header.changed_at,
-            )
+            let changed_at = s.files[&file_id].header.changed_at;
+            let row = s.files[&file_id].row;
+            let place = s.feed.iter().find(|(_, f)| **f == file_id).map(|(k, _)| *k);
+            (changed_at, place == changed_at.map(|t| (t, row)))
         };
         let mut time = s.clock_ms;
         assert_eq!(created.changed_at, Some(time));
-        assert_eq!(at(&s), (time, Some(time)));
+        assert_eq!(at(&s), (Some(time), true));
         let updated = s.update_by(None, file_id, created.at().version, &folder, None)?;
         time += 1;
         assert_eq!(
             (updated.changed_at, at(&s)),
-            (Some(time), (time, Some(time)))
+            (Some(time), (Some(time), true))
         );
         let removed = s.set_removed_by(None, file_id, updated.at().version, true)?;
         time += 1;
         assert_eq!(
             (removed.changed_at, at(&s)),
-            (Some(time), (time, Some(time)))
+            (Some(time), (Some(time), true))
         );
         s.set_share(sharer.client(), file_id, true)?;
         time += 1;
-        assert_eq!(at(&s), (time, Some(time)));
+        assert_eq!(at(&s), (Some(time), true));
         let deleted = s.delete_by(None, file_id, removed.at().version)?;
         time += 1;
-        assert_eq!((deleted, at(&s)), (Some(time), (time, Some(time))));
+        assert_eq!((deleted, at(&s)), (Some(time), (Some(time), true)));
+        // Withdrawing a deleted file's share keeps the tombstone's time (odin-core PR #2141).
         s.set_share(sharer.client(), file_id, false)?;
-        time += 1;
-        assert_eq!(at(&s), (time, Some(time)));
+        assert_eq!(at(&s), (Some(time), true));
+        assert_eq!(
+            s.shares.get(&file_id),
+            Some(&false),
+            "withdrawn all the same"
+        );
         assert_eq!(s.feed.keys().last().map(|k| k.0), Some(time));
         Ok(())
     }
