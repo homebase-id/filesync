@@ -433,6 +433,16 @@ header and one of the two; anything else is passing (`ApiError::read`). Even the
 there is gone for good only once it is not there again a minute on (sync semantics §8b). Live: frodo's header and payload reads of a missing file are both "not there"
 (`hbsync-dev` live test `a_missing_file_is_not_found`).
 
+**A deleted file's payload or thumbnail** (odin-core PR #2141, not merged yet; **[verified]**
+on that PR at 1fd30efcb: `DriveStorageServiceBase.AssertNotDeletedForPayloads`,
+`docs/file-access.md`) is a 404 with `errorCode: fileDeleted` (4181): on the owner and app
+routes by file id and by global transit id (tested on the owner's V2 routes; the V1, app and
+guest routes go through the same lookup), from the sharer's server with a member's peer token,
+and through the member's own server, which passes the code on. By unique id a deleted file is
+a plain 404 (a tombstone keeps no unique id), a missing file a plain 404, and one the caller may
+not read a 403. The adapters read a 404 with `fileDeleted` as `RemoteError::Deleted` once it
+ships (a later PR); until then it is "not there", as above.
+
 | Code | Name |
 |---|---|
 | 4002 | `cannotUpdateNonActiveFile` |
@@ -440,6 +450,7 @@ there is gone for good only once it is not there again a minute on (sync semanti
 | 4106 | `fileNotFound` |
 | 4159 / 4160 | `missingVersionTag` / `versionTagMismatch` |
 | 4175 / 4176 / 4177 / 4178 | `payloadHashMismatch` / `invalidPayloadHash` / `payloadHashRequired` / `payloadHashMissing` |
+| 4181 | `fileDeleted` (odin-core PR #2141, not merged yet) |
 
 ## Notifications (WebSocket)
 **[verified]** `V2NotificationSocketController.cs`, `AppNotificationHandler.cs`,
@@ -556,7 +567,38 @@ server answers the rest, to a token their server made for this identity's connec
   server metadata. A share withdrawn or expired (or above an unreviewed connection's level)
   comes as a tombstone without its version (all zeros), parent, node id or key; a soft delete
   by the sharer as the usual tombstone; a hard delete takes the rows with it, so the file just
-  isn't listed any more (only a full re-read finds it gone). Refusals: 401 the token (unknown,
+  isn't listed any more, and no notification tells the member (the rows go in the delete's own
+  transaction, before it is announced, and the socket then finds no row naming the member:
+  **[verified]** `DriveStorageServiceBase.HardDeleteHeaderAsync`,
+  `MainIndexMeta.DeleteEntryAsync`, `DriveEventMessage.MessageForAsync`): only a full re-read
+  finds it gone. The "no longer shared" tombstone keeps the file's id, `fileType` and its own
+  `updated` (**[verified]** `DriveStorageServiceBase.NoLongerSharedTombstoneOf`), and is sent
+  again after every change of the file while a row still names the member; sharing or
+  withdrawing moves the file's `modified` and keeps its version, so a share given again brings
+  the file back live at the version it had (**[verified]**
+  `TableDriveMainIndex.TouchKeepingVersionTagAsync`). That is the header's `updated` too
+  (**[verified]** `FileMetadata`: `Updated = record.modified`), so `RemoteHeader::changed_at` is when the file last changed on the drive,
+  not when its version was written: a removed node's removal time moves with a share change
+  too. A tombstone's age (when it may be deleted hard) doesn't: withdrawing a share of a deleted
+  file withdraws it (the member reads it no more, and their feed has the "no longer shared"
+  tombstone at the file's place) but leaves its time, its place in the feed and its age as they
+  were (odin-core PR #2141: `DriveShareService.WithdrawShareAsync`, `FileShares.MovesModified`;
+  **[verified]** on that PR at 1fd30efcb, not merged yet); sharing a tombstone is refused. The
+  client can tell a share withdrawn from a delete
+  by its zero version and its time (`RemoteHeader::is_unshared`, `ChangeRef::is_unshared`);
+  the engine's handling of it (the
+  file leaves the member's devices, but isn't gone) comes with the read-only shared folders'
+  next step. A member's notification socket hears what its query gets: a file through its
+  share, the same tombstone once the share ends (after every change of the file while a row
+  names the member), and nothing of a file no row names them on (**[verified]**
+  `DriveEventMessage.MessageForAsync`, `DriveStorageServiceBase.NoLongerSharedViewOf`); a
+  share written or withdrawn raises the file's ordinary change event, a withdrawal of a share
+  withdrawn already none (**[verified]** `DriveShareService.WithdrawShareAsync`); a deleted
+  file's withdrawal raises it too, at the tombstone's unchanged time (PR #2141,
+  `PublishChangedAsync`: **[verified]** on that PR, not merged yet).
+  `FakeRemote::member` (`hbsync-remote`) models this member's view, and the contract's
+  read-only subset (`Bench::shared`) checks the fake now; it runs live against `PeerRemote`
+  with the wiring PR. Refusals: 401 the token (unknown,
   the connection gone, their keys invalid), 403 a file not (or no longer) shared, 404 none
   there. A share-key answer not sealed yet or not reviewed waits (`RemoteError::Later`, asked
   again in 15 minutes); reads never write: every write refuses before a request.

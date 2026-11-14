@@ -228,6 +228,11 @@ of this schema may define some of them.)
 - A tombstone keeps `fileId`, `groupId`, `fileType` and nulls `uniqueId`, `content` and payloads
   **[verified]** `DriveStorageServiceBase.cs:1923-1965`. Clients therefore map
   `fileId → node id` themselves.
+- A member reading another identity's share also gets a "no longer shared" tombstone, without
+  a version (all zeros) or `groupId`: the share was withdrawn or expired, the file isn't gone
+  **[verified]** `DriveStorageServiceBase.NoLongerSharedTombstoneOf` (homebase-api-notes,
+  "Shared with you"). The client can tell it by its zero version (`RemoteHeader::is_unshared`);
+  the engine's handling of it comes with the read-only shared folders' next step.
 - Tombstoned UniqueIds are free again (the duplicate check skips tombstones **[verified]**), so
   a deleted node can be re-created under the same node id; it gets a new `fileId`.
 - A node is one folder or one file for its life: a version that changes its `fileType` isn't
@@ -421,6 +426,10 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-11-14: a member reading another identity's share can tell a "no longer shared"
+  tombstone (no version, no `groupId`: the share withdrawn or expired) from a delete by its
+  zero version; the engine's handling of it comes with the read-only shared folders' next
+  step. Nodes are the same.
 - 2026-11-12: sync markers (`fileType` 7103), the people whose shares the owner's computers
   sync. Nodes are the same.
 - 2026-11-07: a computer's folder in Desktops is renamed whenever its computer is given a

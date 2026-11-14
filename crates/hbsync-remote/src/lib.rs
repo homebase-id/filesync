@@ -5,7 +5,8 @@
 //! internally.
 //!
 //! Implementations: `fake::FakeServer` / `fake::FakeRemote` (in memory, Homebase semantics;
-//! feature `testkit`, with the `contract` every remote passes) and the Homebase drive
+//! feature `testkit`, with the `contract` every remote passes; `FakeRemote::member` reads what
+//! the fake's owner shares, the contract's read-only subset) and the Homebase drive
 //! (`hbsync-homebase`).
 
 use std::collections::HashSet;
@@ -44,9 +45,13 @@ pub struct RemoteHeader {
     pub body: RemoteBody,
     /// A live node in Recently deleted (`archivalStatus` 2 on Homebase): it went there at
     /// [`RemoteHeader::changed_at`], the server's time of the write that removed it (nobody
-    /// writes to a removed node), if the remote said.
+    /// writes to a removed node, but a share given or withdrawn since moves it, **[verified]**
+    /// odin-core `TouchKeepingVersionTagAsync`), if the remote said.
     pub removed: bool,
-    /// When this version was written, Unix ms, the server's time (Homebase's `updated`): what
+    /// When the file last changed on the drive, Unix ms, the server's time (Homebase's
+    /// `updated`): when this version was written, or later a share of it given or withdrawn,
+    /// which moves it and keeps the version (**[verified]** odin-core
+    /// `TouchKeepingVersionTagAsync`; homebase-api-notes, "Shared with you"). What
     /// decides whether a node in a removed folder went with it (node schema, Recently deleted),
     /// and, for a tombstone, when it may be deleted hard. `None` where the remote doesn't say.
     pub changed_at: Option<i64>,
@@ -101,6 +106,16 @@ impl RemoteHeader {
 
     pub fn is_deleted(&self) -> bool {
         matches!(self.body, RemoteBody::Deleted)
+    }
+
+    /// A tombstone without a version, but with a time: a file someone else shares, no longer
+    /// shared with this identity (withdrawn, expired), not deleted; a share again brings it
+    /// back at its version. Its ref's [`ChangeRef::is_unshared`], so the two agree. A
+    /// file the sharer deletes for good is never this: its share rows go with it, so it is
+    /// just gone from the member's feed, its header not found, and no notification names it
+    /// to the member; only a full re-read finds it gone (homebase-api-notes, "Shared with you").
+    pub fn is_unshared(&self) -> bool {
+        ChangeRef::of(self).is_unshared()
     }
 
     /// The node state, if the header is in the tree (and, for a file, has its payload).
@@ -198,6 +213,13 @@ impl ChangeRef {
     /// As [`RemoteHeader::removed_at`].
     pub fn removed_at(&self) -> Option<i64> {
         self.changed_at.filter(|_| self.removed)
+    }
+
+    /// As [`RemoteHeader::is_unshared`]: a tombstone without a version, but with a time. A
+    /// delete for good's ref (a notification's, [`ChangeRef::tombstone`]) has none, and its
+    /// version may be nil too (the notification told none): it is a delete, not this.
+    pub fn is_unshared(&self) -> bool {
+        self.deleted && self.version.0.is_nil() && self.changed_at.is_some()
     }
 
     pub fn of(header: &RemoteHeader) -> ChangeRef {
@@ -573,6 +595,11 @@ impl<T> Answers<T> {
 }
 
 impl RemoteError {
+    /// The refusal of a write to what `sharer` shares with this identity: read-only here.
+    pub fn read_only(sharer: impl std::fmt::Display) -> RemoteError {
+        RemoteError::Fatal(format!("what {sharer} shares with you is read-only here"))
+    }
+
     /// What it means ([`ErrorClass`]).
     pub fn class(&self) -> ErrorClass {
         match self {
@@ -804,5 +831,32 @@ impl<T: Remote + ?Sized> Remote for std::sync::Arc<T> {
         sink: &mut dyn Write,
     ) -> Result<u64> {
         (**self).read(file_id, range, sink)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hbsync_types::Uuid;
+
+    /// A notification's ref of a file deleted for good (no version told, no time) is a delete,
+    /// not a share withdrawn; the withdrawn share's tombstone, with its time, is.
+    #[test]
+    fn a_hard_delete_is_not_unshared() {
+        let unshared = ChangeRef {
+            file_id: RemoteFileId(Uuid::from_u128(1)),
+            version: VersionTag(Uuid::nil()),
+            deleted: true,
+            parent: None,
+            removed: false,
+            changed_at: Some(1_000),
+        };
+        assert!(unshared.is_unshared());
+        let hard_deleted = ChangeRef {
+            changed_at: None,
+            ..unshared
+        };
+        assert!(!hard_deleted.is_unshared());
+        assert!(!unshared.tombstone().is_unshared());
     }
 }

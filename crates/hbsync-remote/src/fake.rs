@@ -13,16 +13,22 @@
 //! - payload hashes: the stored hash is checked over the received bytes (4175), unencrypted
 //!   payloads need `contentHash == storedHash` (here: one hash), and a drive can require
 //!   hashes (4177);
-//! - notifications: every write is announced to the subscribers as its file's row
-//!   ([`FakeServer::subscribe`]), except to those that exclude their own client's writes
-//!   (`excludeOwnWrites`, odin-core #1971): each [`FakeRemote::new`] is a client registration
-//!   (a token) of its own. A write not made through a client (a test's, on the server) is
-//!   announced to all, as Homebase does when it can't tell whose write it is.
+//! - notifications: every write is announced to the subscribers as its file's row as each
+//!   one's view sees it ([`FakeRemote::subscribe`]), except to those that exclude their own
+//!   client's writes (`excludeOwnWrites`, odin-core #1971): each [`FakeRemote::new`] is a
+//!   client registration (a token) of its own. A write not made through a client (a test's,
+//!   on the server) is announced to all, as Homebase does when it can't tell whose write it is.
 //!
 //! [`FakeRemote`] is a client of it implementing [`Remote`] the way the Homebase adapter does:
 //! a delete refused for its version (4160) is read once more and counts as done when the file
 //! is deleted (a retry). Faults and latency are injected per client.
+//!
+//! [`FakeRemote::member`] is a client of the member the drive's owner shares files with,
+//! reading them as the Homebase adapter reads another identity's share (`PeerRemote`;
+//! homebase-api-notes, "Shared with you"): only the files shared with it, a share withdrawn as
+//! a tombstone without a version, read-only.
 
+use std::cell::OnceCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -46,8 +52,8 @@ struct StoredFile {
     header: RemoteHeader,
     /// `None` for folders and tombstones.
     bytes: Option<Arc<Vec<u8>>>,
-    /// Feed position: (modified time, row id). The row id never changes.
-    modified: i64,
+    /// Feed position: (the header's `changed_at`, row id), once written. The row id never
+    /// changes.
     row: u64,
 }
 
@@ -79,11 +85,13 @@ impl Default for ServerConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ClientId(u64);
 
-/// A notification subscription: what it is told, and whose writes it leaves out.
+/// A notification subscription: what it is told, whose writes it leaves out, and whose view
+/// of the drive it hears them in.
 #[derive(Debug)]
 struct Subscriber {
     events: Sender<ChangeRef>,
     excluded: Option<ClientId>,
+    view: View,
 }
 
 /// The shared in-memory drive.
@@ -93,7 +101,7 @@ pub struct FakeServer {
     files: HashMap<RemoteFileId, StoredFile>,
     /// Live files only, removed ones included: their node id stays taken, as on Homebase.
     by_node: HashMap<NodeId, RemoteFileId>,
-    /// Feed index: (modified, row) → file.
+    /// Feed index: (the file's time, its header's `changed_at`, row) → file.
     feed: BTreeMap<(i64, u64), RemoteFileId>,
     clock_ms: i64,
     /// Files the feed leaves out though they exist (odin-core leaves out a row with a later
@@ -107,6 +115,34 @@ pub struct FakeServer {
     next_id: u64,
     subscribers: Vec<Subscriber>,
     next_client: u64,
+    /// The member's share rows ([`FakeRemote::member`]): live (`true`) or withdrawn. A hard
+    /// delete takes a file's row with it.
+    shares: HashMap<RemoteFileId, bool>,
+}
+
+/// Whose view of the drive a client has: its owner's, or the member's ([`FakeRemote::member`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum View {
+    Owner,
+    Member,
+}
+
+/// How a view sees a file's row ([`seen_by`], [`seen`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Seen {
+    /// The owner: as it is.
+    Owner,
+    /// The member, shared: as it is, without the file's token.
+    Shared,
+    /// The member, a share withdrawn: a tombstone without a version.
+    Unshared,
+}
+
+impl Seen {
+    /// Whether the view reads the file: not a share withdrawn.
+    fn reads(self) -> bool {
+        self != Seen::Unshared
+    }
 }
 
 impl FakeServer {
@@ -124,6 +160,7 @@ impl FakeServer {
             next_id: 1,
             subscribers: Vec::new(),
             next_client: 1,
+            shares: HashMap::new(),
         }))
     }
 
@@ -144,23 +181,55 @@ impl FakeServer {
         Uuid::from_u128(u128::from(self.next_id) | 0x0000_0000_0000_4000_8000_0000_0000_0000)
     }
 
-    /// A write of `file_id` by `writer` (`None`: not through a client) landed: its new place
-    /// in the feed, and its announcement.
-    fn touch(&mut self, file_id: RemoteFileId, writer: Option<ClientId>) {
-        let modified = self.clock_ms;
+    /// A write of `file_id` by `writer` (`None`: not through a client) landed: its time, its
+    /// new place in the feed, and its announcement. Returns the write's time: at least one
+    /// past the file's last change, as every write on Homebase sets `modified =
+    /// MAX(modified+1, now)` (**[verified]** odin-core `TableDriveMainIndex`: upsert, the
+    /// local app data, a share's touch), so a file's time never goes back, and a write in the
+    /// millisecond of the last one still moves it and its place in the feed. The header's
+    /// time (`updated`) is that one value (**[verified]** `FileMetadata`: `Updated =
+    /// record.modified`).
+    fn touch(&mut self, file_id: RemoteFileId, writer: Option<ClientId>) -> i64 {
+        let mut modified = self.clock_ms;
         if let Some(f) = self.files.get_mut(&file_id) {
-            self.feed.remove(&(f.modified, f.row));
-            f.modified = modified;
+            if let Some(last) = f.header.changed_at {
+                modified = (last + 1).max(modified);
+                self.feed.remove(&(last, f.row));
+            }
+            f.header.changed_at = Some(modified);
             self.feed.insert((modified, f.row), file_id);
-            let change = ChangeRef::of(&f.header);
-            // A subscriber that went away is dropped.
-            self.subscribers.retain(|s| {
-                (writer.is_some() && s.excluded == writer) || s.events.send(change).is_ok()
-            });
+            self.announce(file_id, writer);
         }
         if self.config.auto_tick {
             self.tick();
         }
+        modified
+    }
+
+    /// Announces `file_id`'s row as it is now, written by `writer`. Each subscriber hears it as
+    /// its view's feed has it: odin-core sends a member's socket the answer its query gets, the
+    /// member nothing of a file no share row names it on (**[verified]**
+    /// `DriveEventMessage.MessageForAsync`, `NoLongerSharedViewOf`). Each view's row is built
+    /// for its first subscriber.
+    fn announce(&mut self, file_id: RemoteFileId, writer: Option<ClientId>) {
+        let Some(f) = self.files.get(&file_id) else {
+            return;
+        };
+        let (header, shares) = (&f.header, &self.shares);
+        let (owner, member) = (OnceCell::new(), OnceCell::new());
+        // A subscriber that went away is dropped.
+        self.subscribers.retain(|s| {
+            if writer.is_some() && s.excluded == writer {
+                return true;
+            }
+            let change = match s.view {
+                View::Owner => Some(*owner.get_or_init(|| ChangeRef::of(header))),
+                View::Member => *member.get_or_init(|| {
+                    seen_by(shares, file_id, View::Member).map(|how| seen_ref(header, how))
+                }),
+            };
+            change.is_none_or(|c| s.events.send(c).is_ok())
+        });
     }
 
     /// A new client registration.
@@ -169,11 +238,16 @@ impl FakeServer {
         ClientId(self.next_client)
     }
 
-    /// Subscribes to the drive's notifications: every write from now on, as its file's row,
-    /// but those of `excluded` (a client's own writes, with `excludeOwnWrites`).
-    pub fn subscribe(&mut self, excluded: Option<ClientId>) -> Receiver<ChangeRef> {
+    /// Subscribes to the drive's notifications: every write from now on, as its file's row
+    /// as `view` sees it, but those of `excluded` (a client's own writes, with
+    /// `excludeOwnWrites`).
+    fn subscribe(&mut self, excluded: Option<ClientId>, view: View) -> Receiver<ChangeRef> {
         let (events, rx) = channel();
-        self.subscribers.push(Subscriber { events, excluded });
+        self.subscribers.push(Subscriber {
+            events,
+            excluded,
+            view,
+        });
         rx
     }
 
@@ -259,7 +333,8 @@ impl FakeServer {
                 payload: payload.as_ref().map(|(_, info)| *info),
             },
             removed: node.removed,
-            changed_at: Some(self.clock_ms),
+            // Its time and place in the feed come with the write ([`FakeServer::touch`]).
+            changed_at: None,
             token: Some(token_of(file_id)),
         };
         self.files.insert(
@@ -267,14 +342,11 @@ impl FakeServer {
             StoredFile {
                 header,
                 bytes: payload.map(|(b, _)| b),
-                modified: 0,
                 row,
             },
         );
-        self.feed.insert((0, row), file_id);
         self.by_node.insert(node.node, file_id);
-        let at = self.clock_ms;
-        self.touch(file_id, writer);
+        let at = self.touch(file_id, writer);
         Ok(written(RemoteRef { file_id, version }, at, sent))
     }
 
@@ -332,7 +404,6 @@ impl FakeServer {
         f.header.version = version;
         f.header.parent = meta.parent;
         f.header.removed = meta.removed;
-        f.header.changed_at = Some(self.clock_ms);
         let payload = match new_payload {
             Some((bytes, info)) => {
                 f.bytes = Some(bytes);
@@ -345,8 +416,7 @@ impl FakeServer {
             content: meta.content.clone(),
             payload,
         };
-        let at = self.clock_ms;
-        self.touch(file_id, writer);
+        let at = self.touch(file_id, writer);
         Ok(written(RemoteRef { file_id, version }, at, sent))
     }
 
@@ -374,16 +444,13 @@ impl FakeServer {
             self.by_node.remove(&node);
         }
         let version = VersionTag(self.fresh_uuid());
-        let now = self.clock_ms;
         let f = self.files.get_mut(&file_id).ok_or(RemoteError::NotFound)?;
         f.header.version = version;
         f.header.body = RemoteBody::Deleted;
         f.header.removed = false;
-        f.header.changed_at = Some(now);
         f.header.token = None;
         f.bytes = None;
-        self.touch(file_id, writer);
-        Ok(Some(now))
+        Ok(Some(self.touch(file_id, writer)))
     }
 
     /// Sets only a file's removal, if it is still at `expected`, as Homebase's
@@ -419,12 +486,10 @@ impl FakeServer {
             });
         }
         let version = VersionTag(self.fresh_uuid());
-        let now = self.clock_ms;
         let f = self.files.get_mut(&file_id).ok_or(RemoteError::NotFound)?;
         f.header.version = version;
         f.header.removed = removed;
-        f.header.changed_at = Some(now);
-        self.touch(file_id, writer);
+        let now = self.touch(file_id, writer);
         Ok(written(RemoteRef { file_id, version }, now, None))
     }
 
@@ -440,7 +505,95 @@ impl FakeServer {
         }
         self.files.remove(&file_id);
         self.feed.retain(|_, f| *f != file_id);
+        self.shares.remove(&file_id);
         Ok(())
+    }
+
+    /// Shares `file_id` with the member (`live`), or withdraws its share: its version stays, its
+    /// time (`updated`) and place in the feed move, and it is announced as any write
+    /// (**[verified]** odin-core `MainIndexMeta.WriteSharesAsync`,
+    /// `TableDriveMainIndex.TouchKeepingVersionTagAsync`, `FileMetadata`'s `Updated`,
+    /// `DriveShareService.PublishChangedAsync`). Each refusal is a 400 there, which the adapters
+    /// read as fatal (**[verified]** `DriveShareService`): sharing a file not on the drive ("No
+    /// file … on the drive") or a tombstone (`CheckFileAndLift`, "deleted or isn't a file"), and
+    /// withdrawing a share never given or gone with a file deleted for good ("isn't shared with
+    /// circle"). A withdrawal changes nothing of one withdrawn already (`WithdrawShareAsync`). A
+    /// deleted file's share is withdrawn, the member reading it no more, but its tombstone keeps
+    /// its time, its place in the feed and the age it is purged by; the change is announced at
+    /// that time (odin-core PR #2141: `WithdrawShareAsync`, `FileShares.MovesModified`,
+    /// `PublishChangedAsync`; **[verified]** on that PR at 1fd30efcb, not merged yet).
+    fn set_share(&mut self, writer: ClientId, file_id: RemoteFileId, live: bool) -> Result<()> {
+        let refused = |why: String| Err(RemoteError::Fatal(why));
+        let deleted = match (live, self.files.get(&file_id), self.shares.get(&file_id)) {
+            (true, None, _) => return refused(format!("No file {file_id:?} on the drive")),
+            (true, Some(f), _) if f.header.is_deleted() => {
+                return refused(format!("File {file_id:?} is deleted or isn't a file"));
+            }
+            (false, _, None) => return refused(format!("{file_id:?} isn't shared with circle")),
+            (false, _, Some(false)) => return Ok(()),
+            (_, f, _) => f.is_some_and(|f| f.header.is_deleted()),
+        };
+        self.shares.insert(file_id, live);
+        match deleted {
+            true => self.announce(file_id, Some(writer)),
+            false => {
+                self.touch(file_id, Some(writer));
+            }
+        }
+        Ok(())
+    }
+
+    /// `file_id`, if `view` may read it, or how it is refused. A file not on the drive (deleted
+    /// for good too: the member's share row went with it) is not found, as the header is looked
+    /// up before the share rows (**[verified]** odin-core
+    /// `DriveStorageServiceBase.ReadForCallerAsync`: no header, no share looked at; the peer
+    /// header routes answer none 404, `V2PeerAppDriveReadControllers`). The member
+    /// is refused a file not shared with it as Homebase refuses it, with a 403 that has no code
+    /// (**[verified]** `DriveStorageServiceBase`, "No access permitted to the file"; the adapter
+    /// reads it as fatal).
+    fn access(&self, file_id: RemoteFileId, view: View) -> Result<(&StoredFile, Seen)> {
+        let Some(file) = self.files.get(&file_id) else {
+            return Err(RemoteError::NotFound);
+        };
+        match seen_by(&self.shares, file_id, view) {
+            Some(how) if how.reads() => Ok((file, how)),
+            _ => Err(RemoteError::Fatal(format!(
+                "{file_id:?}: not shared with you"
+            ))),
+        }
+    }
+
+    /// `file_id`'s header as `view` reads it ([`FakeServer::access`]), refused first if it is
+    /// unreadable (a test's).
+    fn header_as(&self, file_id: RemoteFileId, view: View) -> Result<RemoteHeader> {
+        self.readable(file_id)?;
+        let (file, how) = self.access(file_id, view)?;
+        Ok(seen(file.header.clone(), how))
+    }
+
+    /// Refuses a header read of a file made unreadable (a test's).
+    fn readable(&self, file_id: RemoteFileId) -> Result<()> {
+        if self.unreadable.contains(&file_id) {
+            return Err(RemoteError::Fatal(format!(
+                "{file_id:?}: unreadable (test)"
+            )));
+        }
+        Ok(())
+    }
+
+    /// `file_id`'s payload as `view` reads it ([`FakeServer::access`]). The member's adapter
+    /// reads the header first, for the key (`PeerRemote::read`, `payload_key`): a tombstone is
+    /// deleted, a file without a payload (a folder) has none now. The owner's goes by the
+    /// payload: not there.
+    fn payload_as(&self, file_id: RemoteFileId, view: View) -> Result<Arc<Vec<u8>>> {
+        let (file, how) = self.access(file_id, view)?;
+        match how {
+            Seen::Owner => self.payload(file_id),
+            _ if file.header.is_deleted() => Err(RemoteError::Deleted),
+            _ => file.bytes.clone().ok_or_else(|| {
+                RemoteError::StaleRange(format!("file {file_id:?}: no payload now"))
+            }),
+        }
     }
 
     /// Moves the server's clock by `ms` (for tests: writes that look old to the purge).
@@ -469,15 +622,7 @@ impl FakeServer {
     }
 
     pub fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader> {
-        if self.unreadable.contains(&file_id) {
-            return Err(RemoteError::Fatal(format!(
-                "{file_id:?}: unreadable (test)"
-            )));
-        }
-        self.files
-            .get(&file_id)
-            .map(|f| f.header.clone())
-            .ok_or(RemoteError::NotFound)
+        self.header_as(file_id, View::Owner)
     }
 
     /// The name of file `file_id`, unless it is a tombstone or missing.
@@ -488,12 +633,18 @@ impl FakeServer {
         }
     }
 
-    /// Which of `folders` hold a file not deleted that `holds` counts (unlisted ones too).
-    pub fn holding(&self, folders: &[NodeId], holds: Holds<'_>) -> HashSet<NodeId> {
+    /// Which of `folders` hold a file not deleted that `holds` counts (unlisted ones too), as
+    /// `view` sees them: a share withdrawn is a tombstone to the member, holding nothing.
+    fn holding(&self, folders: &[NodeId], holds: Holds<'_>, view: View) -> HashSet<NodeId> {
         self.files
             .values()
-            .filter(|f| !f.header.is_deleted() && holds.counts(f.header.at(), f.header.removed))
-            .map(|f| f.header.parent)
+            .map(|f| &f.header)
+            .filter(|h| {
+                !h.is_deleted()
+                    && holds.counts(h.at(), h.removed)
+                    && seen_by(&self.shares, h.file_id, view).is_some_and(Seen::reads)
+            })
+            .map(|h| h.parent)
             .filter(|p| folders.contains(p))
             .collect()
     }
@@ -507,8 +658,8 @@ impl FakeServer {
 
     /// A client's read of the feed ([`FakeServer::changes`]): when it held rows back, the
     /// clock has moved on by the client's next read.
-    fn read(&mut self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
-        let page = self.changes(cursor, limit)?;
+    fn read(&mut self, cursor: Option<&str>, limit: usize, view: View) -> Result<ChangesPage> {
+        let page = self.page(cursor, limit, view)?;
         if page.has_more && page.entries.len() < limit {
             self.tick();
         }
@@ -516,6 +667,11 @@ impl FakeServer {
     }
 
     pub fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
+        self.page(cursor, limit, View::Owner)
+    }
+
+    /// A page of the feed as `view` sees it: the rows it doesn't see aren't in it.
+    fn page(&self, cursor: Option<&str>, limit: usize, view: View) -> Result<ChangesPage> {
         let after = match cursor {
             None => None,
             Some(c) => Some(parse_cursor(c)?),
@@ -526,13 +682,14 @@ impl FakeServer {
                 .feed
                 .range((std::ops::Bound::Excluded(pos), std::ops::Bound::Unbounded)),
         }
-        // A file the feed leaves out (unlisted) isn't in it.
-        .filter(|(_, file_id)| !self.unlisted.contains(*file_id));
+        // A file the feed leaves out (unlisted), or one the view doesn't see, isn't in it.
+        .filter(|(_, file_id)| !self.unlisted.contains(*file_id))
+        .filter_map(|(key, file_id)| Some((key, file_id, seen_by(&self.shares, *file_id, view)?)));
         let mut entries = Vec::new();
         let mut skipped = Vec::new();
         let mut last = after;
         let mut has_more = false;
-        for (key, file_id) in rows {
+        for (key, file_id, how) in rows {
             // A row of the current millisecond is held back, with more rows to come (the
             // feed is in time order: so is everything after it).
             if entries.len() + skipped.len() == limit || key.0 >= self.clock_ms {
@@ -540,7 +697,7 @@ impl FakeServer {
                 break;
             }
             let header = &self.files[file_id].header;
-            if self.unreadable.contains(file_id) && !header.is_deleted() {
+            if how.reads() && self.unreadable.contains(file_id) && !header.is_deleted() {
                 skipped.push(Skipped {
                     at: Some(header.at()),
                     node: header.node(),
@@ -548,7 +705,7 @@ impl FakeServer {
                     why: format!("{file_id:?}: unreadable (test)"),
                 });
             } else {
-                entries.push(header.clone());
+                entries.push(seen(header.clone(), how));
             }
             last = Some(*key);
         }
@@ -651,7 +808,8 @@ impl FakeServer {
                 payload: info,
             },
             removed: meta.removed,
-            changed_at: Some(self.clock_ms),
+            // Its time comes with the write ([`FakeServer::touch`]).
+            changed_at: None,
             token: None,
         };
         let file_id = match over {
@@ -663,6 +821,8 @@ impl FakeServer {
                 f.header = RemoteHeader {
                     file_id,
                     token: Some(token_of(file_id)),
+                    // Its place in the feed until the write moves it.
+                    changed_at: f.header.changed_at,
                     ..header
                 };
                 f.bytes = bytes;
@@ -677,16 +837,8 @@ impl FakeServer {
                     token: Some(token_of(file_id)),
                     ..header
                 };
-                self.files.insert(
-                    file_id,
-                    StoredFile {
-                        header,
-                        bytes,
-                        modified: 0,
-                        row,
-                    },
-                );
-                self.feed.insert((0, row), file_id);
+                self.files
+                    .insert(file_id, StoredFile { header, bytes, row });
                 file_id
             }
         };
@@ -722,6 +874,11 @@ impl FakeServer {
         self.files.values().map(|f| &f.header).filter(|h| h.removed)
     }
 
+    /// The files with a share row for the member ([`FakeRemote::member`]), live or withdrawn.
+    pub fn shared(&self) -> impl Iterator<Item = RemoteFileId> + '_ {
+        self.shares.keys().copied()
+    }
+
     pub fn file_id_of(&self, node: NodeId) -> Option<RemoteFileId> {
         self.by_node.get(&node).copied()
     }
@@ -752,19 +909,19 @@ pub struct Faults {
     pub cut_upload_after: Option<u64>,
     /// The next download breaks after this many bytes.
     pub cut_download_after: Option<u64>,
-    /// Creates, updates and deletes of nodes with this name fail transiently (a write that
-    /// keeps failing).
+    /// Creates, updates, deletes and share changes of nodes with this name fail transiently (a
+    /// write that keeps failing).
     pub fail_writes_named: Option<String>,
     /// Every request is refused with [`RemoteError::Denied`] (credentials revoked).
     pub denied: bool,
     /// What `denied` refuses for: the drive private and this login without its key
     /// ([`Refusal::NoKey`]), not the credentials.
     pub deny_key: bool,
-    /// Creates, updates and deletes are refused with [`RemoteError::Denied`] (the app lost
-    /// write access to the drive); reads still work.
+    /// Creates, updates, deletes and share changes are refused with [`RemoteError::Denied`]
+    /// (the app lost write access to the drive); reads still work.
     pub deny_writes: bool,
-    /// Creates, updates and deletes are refused with [`RemoteError::Fatal`] (a drive that won't
-    /// take them, read-only); reads still work.
+    /// Creates, updates, deletes and share changes are refused with [`RemoteError::Fatal`] (a
+    /// drive that won't take them, read-only); reads still work.
     pub refuse_writes: bool,
     /// Added to every request.
     pub latency: Duration,
@@ -810,6 +967,8 @@ pub struct FakeRemote {
     faults: Arc<Mutex<Faults>>,
     /// Its client registration: whose writes these are.
     client: ClientId,
+    /// Whose client it is: the owner's, or the member's ([`FakeRemote::member`]).
+    view: View,
 }
 
 impl FakeRemote {
@@ -823,6 +982,19 @@ impl FakeRemote {
             server,
             faults: Arc::default(),
             client,
+            view: View::Owner,
+        }
+    }
+
+    /// A client of the member `server`'s owner shares files with, reading them as the Homebase
+    /// adapter reads another identity's share: the feed, headers and payloads of what is shared
+    /// with it, a share withdrawn as a tombstone without a version
+    /// ([`RemoteHeader::is_unshared`]). Every write refuses before it is a request, as
+    /// `PeerRemote`'s do.
+    pub fn member(server: Arc<Mutex<FakeServer>>) -> Self {
+        FakeRemote {
+            view: View::Member,
+            ..FakeRemote::new(server)
         }
     }
 
@@ -833,6 +1005,7 @@ impl FakeRemote {
             server: Arc::clone(&self.server),
             faults: Arc::default(),
             client: self.client,
+            view: self.view,
         }
     }
 
@@ -840,24 +1013,39 @@ impl FakeRemote {
         self.client
     }
 
-    /// Subscribes to the drive's notifications ([`FakeServer::subscribe`]), leaving out the
-    /// writes made with this client's token if `exclude_own_writes`.
+    /// Subscribes to the drive's notifications: every write from now on, as its file's row as
+    /// this client's view sees it (the member's: only what is shared with it, a share withdrawn
+    /// as a tombstone without a version), leaving out the writes made with this client's token
+    /// if `exclude_own_writes`.
     pub fn subscribe(&self, exclude_own_writes: bool) -> Receiver<ChangeRef> {
         self.server()
-            .subscribe(exclude_own_writes.then_some(self.client))
+            .subscribe(exclude_own_writes.then_some(self.client), self.view)
     }
 
     pub fn faults(&self) -> MutexGuard<'_, Faults> {
         self.faults.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// The server it is a client of, to make another client of it.
+    /// The server it is a client of, to make another client of it. Its own reads
+    /// ([`FakeServer::header`], [`FakeServer::changes`], [`FakeServer::payload`],
+    /// [`FakeServer::live`]) are the owner's view, whosever client handed it out: a member's
+    /// view is read through a [`FakeRemote::member`].
     pub fn server_handle(&self) -> Arc<Mutex<FakeServer>> {
         Arc::clone(&self.server)
     }
 
+    /// The server it is a client of, locked: its reads are the owner's view, as
+    /// [`FakeRemote::server_handle`]'s are, on a member's client too.
     pub fn server(&self) -> MutexGuard<'_, FakeServer> {
         self.server.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Refuses a write of the member's: what is shared with it is read-only.
+    fn writable(&self) -> Result<()> {
+        match self.view {
+            View::Owner => Ok(()),
+            View::Member => Err(RemoteError::read_only("the owner")),
+        }
     }
 
     /// Runs the per-request fault logic. Returns an error if this request should fail.
@@ -1013,7 +1201,7 @@ impl Remote for FakeRemote {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         self.gate()?;
         self.faults().full_pages += 1;
-        self.server().read(cursor, limit)
+        self.server().read(cursor, limit, self.view)
     }
 
     fn change_refs(&self, cursor: Option<&str>, limit: usize) -> Result<RefsPage> {
@@ -1025,7 +1213,7 @@ impl Remote for FakeRemote {
         };
         Ok(RefsPage {
             unread,
-            ..RefsPage::of(&self.server().read(cursor, limit)?)
+            ..RefsPage::of(&self.server().read(cursor, limit, self.view)?)
         })
     }
 
@@ -1043,15 +1231,16 @@ impl Remote for FakeRemote {
         if not_found {
             return Err(RemoteError::NotFound);
         }
-        self.server().header(file_id)
+        self.server().header_as(file_id, self.view)
     }
 
     fn holding(&self, folders: &[NodeId], holds: Holds<'_>) -> Result<HashSet<NodeId>> {
         self.gate()?;
-        Ok(self.server().holding(folders, holds))
+        Ok(self.server().holding(folders, holds, self.view))
     }
 
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Written> {
+        self.writable()?;
         self.gate()?;
         self.gate_name(&node.content.name)?;
         // Receive the bytes before taking the server lock, as a real server handles several
@@ -1070,6 +1259,7 @@ impl Remote for FakeRemote {
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
     ) -> Result<Written> {
+        self.writable()?;
         let file_id = target.at.file_id;
         // On Homebase another file's token would write content no one can read.
         match &target.token {
@@ -1100,20 +1290,31 @@ impl Remote for FakeRemote {
     /// write failure injected for a name ([`Faults::fail_writes_named`]) fails that file
     /// alone, undeleted.
     fn delete(&self, files: &[Doomed]) -> Result<Deletes> {
+        self.writable()?;
         Answers::in_batches(files, BATCH_FILES, |batch| self.delete_batch(batch))
     }
 
-    /// A request per [`BATCH_FILES`] files, as Homebase's `hard-delete-batch`.
+    /// A request per [`BATCH_FILES`] files, as Homebase's `hard-delete-batch`, refused by the
+    /// faults on every write as a delete is: Homebase checks the caller may write to the drive
+    /// first (**[verified]** odin-core
+    /// `V2DriveBatchFileWriteOperationsController.HardDeleteBatch`: `AssertCanWriteToDrive`).
     fn delete_for_good(&self, files: &[Doomed]) -> Result<ForGood> {
+        self.writable()?;
         Answers::in_batches(files, BATCH_FILES, |batch| {
             self.gate()?;
             batch_of(batch.iter().map(|f| f.at().file_id))?;
+            // The faults on every write (no file is named so).
+            self.gate_name("")?;
+            let failing = self.faults().fail_writes_named.clone();
             let mut server = self.server();
             Ok(batch
                 .iter()
                 .map(|f| {
                     let RemoteRef { file_id, version } = f.at();
-                    server.hard_delete(file_id, version)
+                    match failing.is_some() && server.live_name(file_id) == failing.as_deref() {
+                        true => Err(RemoteError::Transient("injected write failure".into())),
+                        false => server.hard_delete(file_id, version),
+                    }
                 })
                 .collect())
         })
@@ -1124,6 +1325,7 @@ impl Remote for FakeRemote {
     /// ([`Faults::fail_writes_named`]) fails that file alone, unwritten: a lever of the fake's
     /// (Homebase answers a file only with a client error) to hold one file back.
     fn set_removed(&self, files: &[Target], removed: bool) -> Result<Answers<Written>> {
+        self.writable()?;
         self.gate()?;
         batch_of(files.iter().map(|t| t.at.file_id))?;
         let names: Vec<Option<String>> = {
@@ -1170,7 +1372,7 @@ impl Remote for FakeRemote {
         sink: &mut dyn Write,
     ) -> Result<u64> {
         self.gate()?;
-        let bytes = self.server().payload(file_id)?;
+        let bytes = self.server().payload_as(file_id, self.view)?;
         let len = bytes.len() as u64;
         let range = range.unwrap_or(0..len);
         let (start, end) = (range.start.min(len), range.end.min(len));
@@ -1201,6 +1403,87 @@ impl Remote for FakeRemote {
                 Ok(slice.len() as u64)
             }
         }
+    }
+}
+
+/// The sharer's share rows for the member, through its own client.
+impl crate::contract::Shares for FakeRemote {
+    fn share(&self, file_id: RemoteFileId) -> Result<()> {
+        self.set_share(file_id, true)
+    }
+
+    fn withdraw(&self, file_id: RemoteFileId) -> Result<()> {
+        self.set_share(file_id, false)
+    }
+}
+
+impl FakeRemote {
+    /// Shares `file_id` (`live`) or withdraws its share, refused by the faults on every write
+    /// first, as Homebase checks the caller may write to the drive before it looks at the file
+    /// (**[verified]** odin-core `DriveShareService.WriteSharesAsync`, `WithdrawShareAsync`:
+    /// `AssertCallerMayWrite`).
+    fn set_share(&self, file_id: RemoteFileId, live: bool) -> Result<()> {
+        self.writable()?;
+        self.gate()?;
+        let name = self
+            .server()
+            .live_name(file_id)
+            .unwrap_or_default()
+            .to_owned();
+        self.gate_name(&name)?;
+        self.server().set_share(self.client, file_id, live)
+    }
+}
+
+/// How `view` sees `file_id`'s row, if at all, by the member's share rows `shares`: the owner
+/// every row as it is, the member only the rows shared with it.
+fn seen_by(
+    shares: &HashMap<RemoteFileId, bool>,
+    file_id: RemoteFileId,
+    view: View,
+) -> Option<Seen> {
+    match view {
+        View::Owner => Some(Seen::Owner),
+        View::Member => shares
+            .get(&file_id)
+            .map(|&live| if live { Seen::Shared } else { Seen::Unshared }),
+    }
+}
+
+/// `header` as it is seen `how` ([`seen_by`]): the member sees no file's token, and a share
+/// withdrawn as a tombstone without a version, `groupId`, tags or key (the root its parent, as
+/// the Homebase adapter reads a tombstone without a `groupId`).
+fn seen(header: RemoteHeader, how: Seen) -> RemoteHeader {
+    match how {
+        Seen::Owner => header,
+        Seen::Shared => RemoteHeader {
+            token: None,
+            ..header
+        },
+        Seen::Unshared => RemoteHeader {
+            version: VersionTag(Uuid::nil()),
+            parent: NodeId::ROOT,
+            body: RemoteBody::Deleted,
+            removed: false,
+            token: None,
+            ..header
+        },
+    }
+}
+
+/// The ref of `header` as it is seen `how` ([`seen_by`]): [`ChangeRef::of`] its [`seen`]
+/// header, without building that header (a notification's, built for every write).
+fn seen_ref(header: &RemoteHeader, how: Seen) -> ChangeRef {
+    let as_is = ChangeRef::of(header);
+    match how {
+        Seen::Owner | Seen::Shared => as_is,
+        Seen::Unshared => ChangeRef {
+            version: VersionTag(Uuid::nil()),
+            deleted: true,
+            parent: None,
+            removed: false,
+            ..as_is
+        },
     }
 }
 
@@ -1272,6 +1555,99 @@ mod tests {
             .unwrap_or_else(|p| p.into_inner())
             .header(mine.at().file_id)?;
         assert!(ChangeRef::of(&header).deleted);
+        Ok(())
+    }
+
+    /// A notice of a file is the ref of the header its view's feed has, however it is seen.
+    #[test]
+    fn a_members_ref_is_its_headers() {
+        let header = RemoteHeader {
+            file_id: RemoteFileId(Uuid::from_u128(1)),
+            version: VersionTag(Uuid::from_u128(2)),
+            parent: NodeId::new(),
+            kind: NodeKind::File,
+            body: RemoteBody::Deleted,
+            removed: true,
+            changed_at: Some(1_000),
+            token: None,
+        };
+        let live = RemoteHeader {
+            body: RemoteBody::Live {
+                node: NodeId::new(),
+                content: NodeContent::file("f", 1, 1, false),
+                payload: None,
+            },
+            token: Some(token_of(header.file_id)),
+            ..header.clone()
+        };
+        for h in [header, live] {
+            for how in [Seen::Owner, Seen::Shared, Seen::Unshared] {
+                assert_eq!(
+                    seen_ref(&h, how),
+                    ChangeRef::of(&seen(h.clone(), how)),
+                    "{how:?} {h:?}"
+                );
+            }
+        }
+    }
+
+    /// Every write in the millisecond of the file's last change still moves its time and its
+    /// place in the feed, one past it, and the header and the answer carry that one time:
+    /// odin-core's `MAX(modified+1, now)` (**[verified]** `TableDriveMainIndex`).
+    #[test]
+    fn a_write_in_the_last_changes_millisecond_moves_the_file() -> Result<()> {
+        let server = FakeServer::new(ServerConfig {
+            auto_tick: false,
+            ..ServerConfig::default()
+        });
+        let sharer = FakeRemote::new(server.clone());
+        let mut s = server.lock().unwrap_or_else(|p| p.into_inner());
+        let folder = NodeMeta {
+            node: NodeId::new(),
+            parent: NodeId::ROOT,
+            kind: NodeKind::Folder,
+            content: NodeContent::folder("shared"),
+            removed: false,
+        };
+        let created = s.create_by(None, &folder, None)?;
+        let file_id = created.at().file_id;
+        // The file's time, and its place in the feed.
+        let at = |s: &FakeServer| {
+            let changed_at = s.files[&file_id].header.changed_at;
+            let row = s.files[&file_id].row;
+            let place = s.feed.iter().find(|(_, f)| **f == file_id).map(|(k, _)| *k);
+            (changed_at, place == changed_at.map(|t| (t, row)))
+        };
+        let mut time = s.clock_ms;
+        assert_eq!(created.changed_at, Some(time));
+        assert_eq!(at(&s), (Some(time), true));
+        let updated = s.update_by(None, file_id, created.at().version, &folder, None)?;
+        time += 1;
+        assert_eq!(
+            (updated.changed_at, at(&s)),
+            (Some(time), (Some(time), true))
+        );
+        let removed = s.set_removed_by(None, file_id, updated.at().version, true)?;
+        time += 1;
+        assert_eq!(
+            (removed.changed_at, at(&s)),
+            (Some(time), (Some(time), true))
+        );
+        s.set_share(sharer.client(), file_id, true)?;
+        time += 1;
+        assert_eq!(at(&s), (Some(time), true));
+        let deleted = s.delete_by(None, file_id, removed.at().version)?;
+        time += 1;
+        assert_eq!((deleted, at(&s)), (Some(time), (Some(time), true)));
+        // Withdrawing a deleted file's share keeps the tombstone's time (odin-core PR #2141).
+        s.set_share(sharer.client(), file_id, false)?;
+        assert_eq!(at(&s), (Some(time), true));
+        assert_eq!(
+            s.shares.get(&file_id),
+            Some(&false),
+            "withdrawn all the same"
+        );
+        assert_eq!(s.feed.keys().last().map(|k| k.0), Some(time));
         Ok(())
     }
 

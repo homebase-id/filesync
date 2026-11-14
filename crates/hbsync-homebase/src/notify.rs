@@ -926,4 +926,38 @@ mod tests {
             Notification::Changed(None)
         );
     }
+
+    /// A member's socket announces a share withdrawn as a `fileDeleted` of the tombstone
+    /// odin-core makes for it (**[verified]** `ClientDriveNotification.MessageForAsync`,
+    /// `NoLongerSharedTombstoneOf`, minimal: `FileRef.FromHeader`, no previous): no version, no
+    /// `groupId`, its own `updated`, read as unshared. A hard delete's (only the file as it was,
+    /// or just its id) has no time: a delete, not a share withdrawn.
+    #[test]
+    fn a_withdrawn_share_is_heard_as_unshared() {
+        use uuid::Uuid;
+        let file = Uuid::new_v4();
+        let deleted = |data: serde_json::Value| match n(
+            json!({"notificationType": "fileDeleted", "data": data.to_string()}),
+        ) {
+            Notification::Changed(Some(change)) => change,
+            other => panic!("{other:?}"),
+        };
+        let withdrawn = deleted(json!({"targetDrive": {}, "fileRef": {
+            "fileId": file, "fileState": "deleted", "fileType": 7101, "dataType": 0,
+            "archivalStatus": 0, "versionTag": Uuid::nil(), "created": 5, "updated": 9,
+            "fileByteCount": 0}}));
+        assert!(
+            withdrawn.is_unshared() && withdrawn.parent.is_none(),
+            "{withdrawn:?}"
+        );
+        let before = json!({"fileId": file, "fileState": "active", "fileType": 7101,
+            "archivalStatus": 0, "versionTag": Uuid::new_v4(), "groupId": Uuid::new_v4(),
+            "updated": 7});
+        for hard in [
+            deleted(json!({"targetDrive": {}, "previousFileRef": before})),
+            deleted(json!({"previousFileRef": {"fileId": file}})),
+        ] {
+            assert!(hard.deleted && !hard.is_unshared(), "{hard:?}");
+        }
+    }
 }

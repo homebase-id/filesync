@@ -129,10 +129,7 @@ impl PeerRemote {
 
     /// Writes nothing: what they share is theirs to change.
     fn read_only(&self) -> RemoteError {
-        RemoteError::Fatal(format!(
-            "what {} shares with you is read-only here",
-            self.sharer.odin_id
-        ))
+        RemoteError::read_only(&self.sharer.odin_id)
     }
 }
 
