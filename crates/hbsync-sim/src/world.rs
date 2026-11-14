@@ -770,15 +770,17 @@ impl Sim {
         // earlier one brought back (a folder above it) still has what was deleted with it
         // restored.
         let had_items = !plan.items.is_empty();
-        let items: Vec<(NodeId, Vec<NodeId>)> = plan
-            .items
-            .iter()
-            .copied()
-            .map(|item| {
-                let item = coords.to_drive(item);
-                (item, self.server.group(item))
-            })
-            .collect();
+        // The engine plans its one restore of all the items before it goes to the drive, from
+        // what it read: so here, before anything goes wrong ([`Sim::restore_planned`]).
+        let restore = match had_items {
+            true => {
+                let items: Vec<NodeId> = plan.items.iter().map(|n| coords.to_drive(*n)).collect();
+                deleted::plan_restore_from(&mut RestoreFrom(&self.server), &items)
+                    .ok()
+                    .flatten()
+            }
+            false => None,
+        };
         // Going wrong now and then ([`Sim::with_failing_put_backs`]), counting the put backs
         // that restore something: a file it is to restore deleted for good after it read the
         // drive (a tombstone the feed hasn't told of: the restore's answer tells it), and the
@@ -819,25 +821,8 @@ impl Sim {
                 self.faults.waves_left = Some(1);
             }
         }
-        for (item, group) in items {
-            if !self.server.live.contains_key(&item) {
-                self.restore_with(item);
-            }
-            // In order, each after its folder; one whose folder didn't come back stays. One whose
-            // folder went for good meanwhile comes back as into any folder gone for good (an
-            // orphan): the engine plans the restore from its store, which hasn't heard it went,
-            // and the restore's answer tells it ([`deleted::restore_wave`]).
-            for n in group {
-                let back_into = self.server.removed.get(&n).map(|r| r.state.parent);
-                let server = &self.server;
-                let gone =
-                    |p: &NodeId| !server.live.contains_key(p) && !server.removed.contains_key(p);
-                if back_into
-                    .is_some_and(|p| p.is_root() || server.live.contains_key(&p) || gone(&p))
-                {
-                    self.restore_with(n);
-                }
-            }
+        if let Some(restore) = restore {
+            self.restore_planned(restore);
         }
         self.faults.waves_left = None;
         // By the same rule again, as the restore left the drive: a folder gone for good whose
@@ -935,16 +920,23 @@ impl Sim {
         // The engine's plan ([`deleted::plan_restore_from`]): the folders above it in Recently
         // deleted, outermost first, then it and what was deleted with it, each once; the
         // folders the rows may go into, and the names taken there.
-        let Ok(Some(plan)) = deleted::plan_restore_from(&mut RestoreFrom(&self.server), &[node])
-        else {
-            return;
-        };
+        if let Ok(Some(plan)) = deleted::plan_restore_from(&mut RestoreFrom(&self.server), &[node])
+        {
+            self.restore_planned(plan);
+        }
+    }
+
+    /// Runs restore `plan` against the drive as it is now, in waves, as the engine does
+    /// ([`deleted::restore_wave`]): a row no longer in Recently deleted is back already, or
+    /// went for good meanwhile (its answer tells it: it leaves the restore, and what was to come
+    /// back into it comes back as into any folder gone for good).
+    fn restore_planned(&mut self, plan: deleted::RestorePlan<Row>) {
         let deleted::RestorePlan {
             rows,
             mut live,
             mut taken,
         } = plan;
-        let seen: HashSet<NodeId> = rows.iter().map(|r| r.node).collect();
+        let mut seen: HashSet<NodeId> = rows.iter().map(|r| r.node).collect();
         let mut left: Vec<&Row> = rows.iter().collect();
         while let Some(wave) =
             deleted::restore_wave(left, |r| (r.parent, &r.name), &live, &seen, &mut taken)
@@ -956,30 +948,39 @@ impl Sim {
                 None => {}
             }
             left = wave.later;
-            for row in wave.asked {
-                self.restore_as(row.node, row.name.clone());
-                live.insert(row.node);
-            }
-            for row in wave.rest {
-                let Some(name) = deleted::take_restored_name(&mut taken, row.parent, &row.name)
-                else {
-                    continue; // no free name: it stays deleted
+            let named = wave
+                .asked
+                .into_iter()
+                .map(|row| (row, Some(row.name.clone())));
+            let free = wave.rest.into_iter().map(|row| {
+                // No free name: it stays deleted.
+                let name = deleted::take_restored_name(&mut taken, row.parent, &row.name);
+                (row, name)
+            });
+            for (row, name) in named.chain(free).collect::<Vec<_>>() {
+                let Some(name) = name else {
+                    continue;
                 };
-                self.restore_as(row.node, name);
-                live.insert(row.node);
+                if self.restore_as(row.node, name) || self.server.live.contains_key(&row.node) {
+                    live.insert(row.node);
+                } else {
+                    seen.remove(&row.node);
+                }
             }
         }
     }
 
-    /// Brings `node` back from Recently deleted, named `name`: a write.
-    fn restore_as(&mut self, node: NodeId, name: String) {
+    /// Brings `node` back from Recently deleted, named `name`: a write. False when it isn't
+    /// there.
+    fn restore_as(&mut self, node: NodeId, name: String) -> bool {
         let Some(mut n) = self.server.removed.remove(&node) else {
-            return;
+            return false;
         };
         n.state.name = name;
         n.remote.version = VersionTag(self.server.uuid());
         self.server.live.insert(node, n);
         self.restored_on_drive(node);
+        true
     }
 
     /// The user of client `c` took its item `node` out of what it syncs (a delete, a move to
