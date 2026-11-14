@@ -769,9 +769,7 @@ impl Sim {
         // The engine plans its one restore of all the items before it goes to the drive, from
         // what it read: so here, before anything goes wrong ([`Sim::restore_planned`]).
         let items: Vec<NodeId> = plan.items.iter().map(|n| coords.to_drive(*n)).collect();
-        let restore = deleted::plan_restore_from(&mut RestoreFrom(&self.server), &items)
-            .ok()
-            .flatten();
+        let Ok(restore) = deleted::plan_restore_from(&mut RestoreFrom(&self.server), &items);
         // Going wrong now and then ([`Sim::with_failing_put_backs`]), counting the put backs
         // that restore something: a file it is to restore deleted for good after it read the
         // drive (a tombstone the feed hasn't told of: the restore's answer tells it), and the
@@ -974,17 +972,15 @@ impl Sim {
         }
     }
 
-    /// Brings `node` back from Recently deleted, named `name`: a write. False when it isn't
-    /// there.
-    fn restore_as(&mut self, node: NodeId, name: String) -> bool {
+    /// Brings `node` back from Recently deleted, named `name`: a write.
+    fn restore_as(&mut self, node: NodeId, name: String) {
         let Some(mut n) = self.server.removed.remove(&node) else {
-            return false;
+            return;
         };
         n.state.name = name;
         n.remote.version = VersionTag(self.server.uuid());
         self.server.live.insert(node, n);
         self.restored_on_drive(node);
-        true
     }
 
     /// The user of client `c` took its item `node` out of what it syncs (a delete, a move to
