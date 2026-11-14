@@ -4,6 +4,9 @@
 //! The scenarios only use the trait, and only inside a scratch folder of their own, so they
 //! can run on a drive that holds other files. Everything they create is deleted by
 //! [`Bench::cleanup`].
+//!
+//! A read-only remote (another identity's share, as a member reads it) runs a subset
+//! ([`SHARED_SCENARIOS`], [`Bench::shared`]): the sharer writes and shares, the member reads.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Cursor;
@@ -27,9 +30,23 @@ pub fn doomed(files: &[RemoteRef]) -> Vec<Doomed> {
 
 pub type Outcome = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
+/// A sharer's share rows for the member a shared bench reads as ([`Bench::shared`]).
+pub trait Shares: Sync {
+    /// Shares `file_id` with the member, or shares it again; its version stays.
+    fn share(&self, file_id: RemoteFileId) -> Result<(), RemoteError>;
+
+    /// Withdraws the member's share of `file_id`; its version stays.
+    fn withdraw(&self, file_id: RemoteFileId) -> Result<(), RemoteError>;
+}
+
 /// A remote under test and the scratch folder the scenarios work in.
 pub struct Bench<'a> {
+    /// What the scenarios write through.
     pub remote: &'a dyn Remote,
+    /// What they read through: `remote`, or the member reading what `remote` shares.
+    pub reader: &'a dyn Remote,
+    /// The sharer's share rows, on a shared bench: every file it creates is shared.
+    shares: Option<&'a dyn Shares>,
     scratch: NodeId,
     /// How long a write takes to show up in the feed (Homebase: rows of the current
     /// millisecond are held back).
@@ -87,28 +104,107 @@ pub const SCENARIOS: &[(&str, Scenario)] = &[
         every_write_shows_up_promptly,
     ),
     ("ranged_reads", ranged_reads),
+    (
+        "a_write_answers_its_headers_token",
+        a_write_answers_its_headers_token,
+    ),
+];
+
+/// The scenarios a member runs on what is shared with it, read-only ([`Bench::shared`]): the
+/// reads of [`SCENARIOS`] and what sharing does.
+pub const SHARED_SCENARIOS: &[(&str, Scenario)] = &[
+    ("create_read_and_feed", create_read_and_feed),
+    ("empty_file", empty_file),
+    ("content_round_trips", content_round_trips),
+    ("folder_holdings", folder_holdings),
+    ("tombstone_in_the_feed", tombstone_in_the_feed),
+    (
+        "removal_keeps_the_bytes_and_restores",
+        removal_keeps_the_bytes_and_restores,
+    ),
+    (
+        "a_removed_node_deleted_for_good",
+        a_removed_node_deleted_for_good,
+    ),
+    ("feed_pages_and_resumes", feed_pages_and_resumes),
+    ("slim_pages_match_whole_ones", slim_pages_match_whole_ones),
+    (
+        "every_write_shows_up_promptly",
+        every_write_shows_up_promptly,
+    ),
+    ("ranged_reads", ranged_reads),
+    (
+        "a_child_of_a_folder_not_shared",
+        a_child_of_a_folder_not_shared,
+    ),
+    ("what_isnt_shared_is_refused", what_isnt_shared_is_refused),
+    (
+        "a_withdrawn_share_is_a_tombstone_without_a_version",
+        a_withdrawn_share_is_a_tombstone_without_a_version,
+    ),
+    (
+        "a_share_again_comes_back_at_its_version",
+        a_share_again_comes_back_at_its_version,
+    ),
+    (
+        "a_file_deleted_for_good_is_gone",
+        a_file_deleted_for_good_is_gone,
+    ),
+    ("the_member_writes_nothing", the_member_writes_nothing),
 ];
 
 impl<'a> Bench<'a> {
     /// Creates a scratch folder named `name` at the top of the drive.
     pub fn new(remote: &'a dyn Remote, name: &str, settle: Duration) -> Result<Self, RemoteError> {
+        Bench::of(remote, remote, None, name, settle)
+    }
+
+    /// A bench where `remote` (the sharer) writes and shares through `shares`, and `reader`
+    /// (a member of what it shares) reads: [`SHARED_SCENARIOS`]. The scratch folder is shared.
+    pub fn shared(
+        remote: &'a dyn Remote,
+        reader: &'a dyn Remote,
+        shares: &'a dyn Shares,
+        name: &str,
+        settle: Duration,
+    ) -> Result<Self, RemoteError> {
+        Bench::of(remote, reader, Some(shares), name, settle)
+    }
+
+    fn of(
+        remote: &'a dyn Remote,
+        reader: &'a dyn Remote,
+        shares: Option<&'a dyn Shares>,
+        name: &str,
+        settle: Duration,
+    ) -> Result<Self, RemoteError> {
         let scratch = folder(name, NodeId::ROOT);
-        let start = feed_end(remote, None)?;
+        let start = feed_end(reader, None)?;
         let written = remote.create(&scratch, None)?;
-        Ok(Bench {
+        let file_id = written.at().file_id;
+        let bench = Bench {
             remote,
+            reader,
+            shares,
             scratch: scratch.node,
             settle,
-            created: Mutex::new(vec![written.at().file_id]),
+            created: Mutex::new(vec![file_id]),
             tokens: Mutex::default(),
             end: Mutex::new(start.clone()),
             start,
-        })
+        };
+        bench.share(file_id)?;
+        Ok(bench)
     }
 
-    /// Runs every scenario; returns the names and errors of the ones that failed.
+    /// Runs every scenario ([`SHARED_SCENARIOS`] on a shared bench); returns the names and
+    /// errors of the ones that failed.
     pub fn run_all(&self) -> Vec<(&'static str, String)> {
-        SCENARIOS
+        let scenarios = match self.shares {
+            Some(_) => SHARED_SCENARIOS,
+            None => SCENARIOS,
+        };
+        scenarios
             .iter()
             .filter_map(|(name, run)| run(self).err().map(|e| (*name, e.to_string())))
             .collect()
@@ -160,11 +256,30 @@ impl<'a> Bench<'a> {
         Ok(())
     }
 
-    /// A create, remembered for cleanup.
+    /// A create, remembered for cleanup; on a shared bench, shared.
     pub fn create(&self, meta: &NodeMeta, data: Option<&[u8]>) -> Result<RemoteRef, RemoteError> {
+        let at = self.create_unshared(meta, data)?;
+        self.share(at.file_id)?;
+        Ok(at)
+    }
+
+    /// A create, remembered for cleanup, not shared.
+    fn create_unshared(
+        &self,
+        meta: &NodeMeta,
+        data: Option<&[u8]>,
+    ) -> Result<RemoteRef, RemoteError> {
         let written = with_upload(data, |upload| self.remote.create(meta, upload))?;
         self.track(written.at().file_id);
         Ok(self.keep(written.target))
+    }
+
+    /// Shares `file_id` with the member, on a shared bench.
+    fn share(&self, file_id: RemoteFileId) -> Result<(), RemoteError> {
+        match self.shares {
+            Some(shares) => shares.share(file_id),
+            None => Ok(()),
+        }
     }
 
     /// Keeps a write's token for the next update of its file.
@@ -235,7 +350,7 @@ impl<'a> Bench<'a> {
         range: Option<std::ops::Range<u64>>,
     ) -> Result<Vec<u8>, RemoteError> {
         let mut out = Vec::new();
-        let n = self.remote.read(file_id, range, &mut out)?;
+        let n = self.reader.read(file_id, range, &mut out)?;
         if n != out.len() as u64 {
             return Err(RemoteError::Fatal(format!(
                 "read returned {n} but wrote {} bytes",
@@ -249,7 +364,7 @@ impl<'a> Bench<'a> {
     pub fn cursor_now(&self) -> Result<String, RemoteError> {
         std::thread::sleep(self.settle);
         let mut end = self.end.lock().unwrap_or_else(|e| e.into_inner());
-        *end = feed_end(self.remote, Some(&end))?;
+        *end = feed_end(self.reader, Some(&end))?;
         Ok(end.clone())
     }
 
@@ -262,7 +377,7 @@ impl<'a> Bench<'a> {
         let mut cursor = cursor.map(str::to_owned);
         let mut entries = Vec::new();
         loop {
-            let page = self.remote.changes(cursor.as_deref(), 100)?;
+            let page = self.reader.changes(cursor.as_deref(), 100)?;
             if !page.skipped.is_empty() {
                 return Err(RemoteError::Fatal(format!(
                     "feed rows skipped: {:?}",
@@ -372,7 +487,7 @@ fn create_read_and_feed(b: &Bench) -> Outcome {
     let f = file("a.txt", dir.node, b"hello");
     let written = b.create(&f, Some(b"hello"))?;
 
-    let header = b.remote.header(written.file_id)?;
+    let header = b.reader.header(written.file_id)?;
     ensure!(
         header.node() == Some(f.node),
         "node id: {:?}",
@@ -406,8 +521,14 @@ fn create_read_and_feed(b: &Bench) -> Outcome {
         "feed order: {ids:?}"
     );
     ensure!(feed[1] == header, "the feed's header differs from header()");
-    // A write returns the token the header gives for its version, so the engine has it at
-    // once: one written, one updated.
+    Ok(())
+}
+
+/// A write returns the token the header gives for its version, so the engine has it at once:
+/// one written, one updated.
+fn a_write_answers_its_headers_token(b: &Bench) -> Outcome {
+    let (f, written) = b.file("a.txt", b"hello")?;
+    let header = b.remote.header(written.file_id)?;
     ensure!(
         header.token.is_some() && header.token == b.token(written.file_id),
         "the create's token isn't the header's"
@@ -427,7 +548,7 @@ fn create_read_and_feed(b: &Bench) -> Outcome {
 fn empty_file(b: &Bench) -> Outcome {
     let (_, written) = b.file("empty", b"")?;
     let state = b
-        .remote
+        .reader
         .header(written.file_id)?
         .state()
         .ok_or("no state")?;
@@ -521,7 +642,7 @@ fn content_round_trips(b: &Bench) -> Outcome {
         ..file("", b.scratch, b"data")
     };
     let written = b.create(&meta, Some(b"data"))?;
-    let RemoteBody::Live { content: back, .. } = b.remote.header(written.file_id)?.body else {
+    let RemoteBody::Live { content: back, .. } = b.reader.header(written.file_id)?.body else {
         return Err("not live".into());
     };
     ensure!(back == content, "content came back as {back:?}");
@@ -628,7 +749,7 @@ fn folder_holdings(b: &Bench) -> Outcome {
     let folders = [dir.node, other.node, empty.node];
     let none = HashSet::new();
     let ask = |holds: Holds<'_>, expected: &[NodeId], why: &str| -> Outcome {
-        let mut got: Vec<NodeId> = b.remote.holding(&folders, holds)?.into_iter().collect();
+        let mut got: Vec<NodeId> = b.reader.holding(&folders, holds)?.into_iter().collect();
         got.sort();
         let mut want = expected.to_vec();
         want.sort();
@@ -636,7 +757,7 @@ fn folder_holdings(b: &Bench) -> Outcome {
         Ok(())
     };
     let holding = |live: &[NodeId], any: &[NodeId], why: &str| -> Outcome {
-        std::thread::sleep(b.remote.hold_back());
+        std::thread::sleep(b.reader.hold_back());
         ask(Holds::Live, live, why)?;
         ask(Holds::AnyBut(&none), any, why)
     };
@@ -725,7 +846,7 @@ fn tombstone_in_the_feed(b: &Bench) -> Outcome {
         "tombstone keeps file id, parent and kind: {tomb:?}"
     );
     ensure!(
-        tomb.body == RemoteBody::Deleted && tomb.node().is_none(),
+        tomb.body == RemoteBody::Deleted && tomb.node().is_none() && !tomb.is_unshared(),
         "{tomb:?}"
     );
     Ok(())
@@ -745,7 +866,7 @@ fn removal_keeps_the_bytes_and_restores(b: &Bench) -> Outcome {
     let (g, v) = b.file("g", b"later")?;
     let cursor = b.cursor_now()?;
     let gone = b.update(w, &removed(&f), None)?;
-    let header = b.remote.header(w.file_id)?;
+    let header = b.reader.header(w.file_id)?;
     ensure!(
         header.removed && header.state().is_none(),
         "not removed: {header:?}"
@@ -754,7 +875,7 @@ fn removal_keeps_the_bytes_and_restores(b: &Bench) -> Outcome {
     b.update(v, &removed(&g), None)?;
     let (first, then) = (
         header.removed_at(),
-        b.remote.header(v.file_id)?.removed_at(),
+        b.reader.header(v.file_id)?.removed_at(),
     );
     ensure!(
         first.zip(then).is_some_and(|(f, t)| f <= t),
@@ -772,11 +893,11 @@ fn removal_keeps_the_bytes_and_restores(b: &Bench) -> Outcome {
     // A write that keeps the removal keeps it (every write sends the status).
     let renamed = removed(&with(&f, NodeContent::file("f2", 1, 4, false)));
     let gone = b.update(gone, &renamed, None)?;
-    ensure!(b.remote.header(w.file_id)?.removed, "a rewrite restored it");
+    ensure!(b.reader.header(w.file_id)?.removed, "a rewrite restored it");
     // Restore: the update back, here with new bytes (an edit that wins over the delete).
     let edited = with(&f, NodeContent::file("f", 1_700_000_000_124, 6, false));
     b.update(gone, &edited, Some(b"edited"))?;
-    let back = b.remote.header(w.file_id)?;
+    let back = b.reader.header(w.file_id)?;
     ensure!(
         !back.removed && back.state().is_some(),
         "not restored: {back:?}"
@@ -889,8 +1010,8 @@ fn slim_pages_match_whole_ones(b: &Bench) -> Outcome {
     let mut at = Some(cursor);
     let mut rows = 0;
     loop {
-        let refs = b.remote.change_refs(at.as_deref(), 2)?;
-        let page = b.remote.changes(at.as_deref(), 2)?;
+        let refs = b.reader.change_refs(at.as_deref(), 2)?;
+        let page = b.reader.changes(at.as_deref(), 2)?;
         ensure!(page.skipped.is_empty(), "rows skipped: {:?}", page.skipped);
         let whole: Vec<_> = page.entries.iter().map(ChangeRef::of).collect();
         ensure!(refs.refs == whole, "slim {:?}, whole {whole:?}", refs.refs);
@@ -1014,7 +1135,7 @@ fn feed_pages_and_resumes(b: &Bench) -> Outcome {
     let mut cursor = start.clone();
     let mut seen = Vec::new();
     for _ in 0..100 {
-        let page = b.remote.changes(Some(&cursor), 2)?;
+        let page = b.reader.changes(Some(&cursor), 2)?;
         ensure!(page.entries.len() <= 2, "page of {}", page.entries.len());
         seen.extend(
             page.entries
@@ -1056,7 +1177,7 @@ fn every_write_shows_up_promptly(b: &Bench) -> Outcome {
         let (_, w) = b.folder(&format!("w{i}"))?;
         let started = std::time::Instant::now();
         loop {
-            let page = b.remote.changes(Some(&cursor), 100)?;
+            let page = b.reader.changes(Some(&cursor), 100)?;
             cursor = page.cursor;
             if page.entries.iter().any(|h| h.file_id == w.file_id) {
                 break;
@@ -1102,5 +1223,157 @@ fn ranged_reads(b: &Bench) -> Outcome {
             );
         }
     }
+    Ok(())
+}
+
+/// The sharer's share rows, which only a shared bench has.
+fn shares<'a>(b: &Bench<'a>) -> Result<&'a dyn Shares, &'static str> {
+    b.shares
+        .ok_or("not a shared bench: no member to share with")
+}
+
+/// A file shared in a folder that isn't is listed with its parent (`groupId`), the folder not at
+/// all, nor read.
+fn a_child_of_a_folder_not_shared(b: &Bench) -> Outcome {
+    let cursor = b.cursor_now()?;
+    let dir = folder("not shared", b.scratch);
+    let dir_ref = b.create_unshared(&dir, None)?;
+    let f = file("shared", dir.node, b"in it");
+    let w = b.create(&f, Some(b"in it"))?;
+    let feed = b.changes_to(&cursor, &[dir_ref.file_id, w.file_id])?;
+    ensure!(
+        feed.len() == 1 && feed[0].file_id == w.file_id && feed[0].parent == dir.node,
+        "the feed: {feed:?}"
+    );
+    ensure!(b.read(w.file_id, None)? == b"in it", "payload");
+    ensure_err!(b.reader.header(dir_ref.file_id), RemoteError::Fatal(_));
+    Ok(())
+}
+
+/// A file not shared isn't in the feed, and its header and payload are refused: not as gone
+/// (the file is there), nor as a refusal of the member (the rest is still shared).
+fn what_isnt_shared_is_refused(b: &Bench) -> Outcome {
+    let cursor = b.cursor_now()?;
+    let w = b.create_unshared(&file("private", b.scratch, b"mine"), Some(b"mine"))?;
+    ensure!(
+        b.changes_to(&cursor, &[w.file_id])?.is_empty(),
+        "a file not shared is in the feed"
+    );
+    ensure_err!(b.reader.header(w.file_id), RemoteError::Fatal(_));
+    ensure_err!(b.read(w.file_id, None), RemoteError::Fatal(_));
+    Ok(())
+}
+
+/// A share withdrawn comes as a tombstone without a version, a parent or a node id, whole and
+/// slim alike ([`RemoteHeader::is_unshared`]); the file isn't read any more. The sharer's file
+/// keeps its version.
+fn a_withdrawn_share_is_a_tombstone_without_a_version(b: &Bench) -> Outcome {
+    let (dir, _) = b.folder("withdrawn")?;
+    let f = file("f", dir.node, b"data");
+    let w = b.create(&f, Some(b"data"))?;
+    let cursor = b.cursor_now()?;
+    shares(b)?.withdraw(w.file_id)?;
+    let feed = b.changes_to(&cursor, &[w.file_id])?;
+    ensure!(feed.len() == 1, "{} feed entries", feed.len());
+    let tomb = &feed[0];
+    ensure!(
+        tomb.is_unshared() && tomb.node().is_none() && !tomb.removed,
+        "not a tombstone without a version: {tomb:?}"
+    );
+    ensure!(
+        tomb.kind == NodeKind::File && tomb.parent != dir.node,
+        "kind kept, parent not told: {tomb:?}"
+    );
+    let mut slim = Vec::new();
+    let mut at = Some(cursor);
+    loop {
+        let page = b.reader.change_refs(at.as_deref(), 100)?;
+        slim.extend(page.refs.into_iter().filter(|r| r.file_id == w.file_id));
+        if !page.has_more {
+            break;
+        }
+        at = Some(page.cursor);
+    }
+    ensure!(
+        slim == [ChangeRef::of(tomb)] && slim[0].is_unshared() && slim[0].parent.is_none(),
+        "slim {slim:?}, whole {tomb:?}"
+    );
+    ensure_err!(b.reader.header(w.file_id), RemoteError::Fatal(_));
+    ensure_err!(b.read(w.file_id, None), RemoteError::Fatal(_));
+    let kept = b.remote.header(w.file_id)?;
+    ensure!(
+        kept.version == w.version && !kept.is_deleted(),
+        "the sharer's file changed: {kept:?}"
+    );
+    Ok(())
+}
+
+/// A share withdrawn and given again comes back live at the version it had.
+fn a_share_again_comes_back_at_its_version(b: &Bench) -> Outcome {
+    let (_, w) = b.file("again", b"back")?;
+    shares(b)?.withdraw(w.file_id)?;
+    let cursor = b.cursor_now()?;
+    shares(b)?.share(w.file_id)?;
+    let feed = b.changes_to(&cursor, &[w.file_id])?;
+    ensure!(
+        feed.len() == 1 && feed[0].version == w.version && feed[0].state().is_some(),
+        "not back as it was: {feed:?}"
+    );
+    ensure!(
+        b.reader.header(w.file_id)? == feed[0],
+        "the header isn't the feed's"
+    );
+    ensure!(b.read(w.file_id, None)? == b"back", "payload");
+    Ok(())
+}
+
+/// A file deleted for good is just gone: not in the feed (no tombstone), its header not found.
+fn a_file_deleted_for_good_is_gone(b: &Bench) -> Outcome {
+    let cursor = b.cursor_now()?;
+    let (_, w) = b.file("gone", b"1")?;
+    b.remote.delete_for_good(&doomed(&[w]))?.single()?;
+    ensure!(
+        b.changes_to(&cursor, &[w.file_id])?.is_empty(),
+        "a file deleted for good is in the feed"
+    );
+    ensure_err!(b.reader.header(w.file_id), RemoteError::NotFound);
+    Ok(())
+}
+
+/// Every write of the member's refuses (what is shared is read-only), and changes nothing.
+fn the_member_writes_nothing(b: &Bench) -> Outcome {
+    let (f, w) = b.file("theirs", b"1")?;
+    let cursor = b.cursor_now()?;
+    let target = Target { at: w, token: None };
+    let new = file("mine", b.scratch, b"2");
+    ensure_err!(
+        with_upload(Some(b"2"), |upload| b.reader.create(&new, upload)),
+        RemoteError::Fatal(_)
+    );
+    ensure_err!(
+        b.reader.update(
+            &target,
+            &with(&f, NodeContent::file("x", 1, 1, false)),
+            None
+        ),
+        RemoteError::Fatal(_)
+    );
+    ensure_err!(b.reader.delete(&doomed(&[w])), RemoteError::Fatal(_));
+    ensure_err!(
+        b.reader.delete_for_good(&doomed(&[w])),
+        RemoteError::Fatal(_)
+    );
+    ensure_err!(
+        b.reader.set_removed(std::slice::from_ref(&target), true),
+        RemoteError::Fatal(_)
+    );
+    ensure!(
+        b.changes_to(&cursor, &[w.file_id])?.is_empty(),
+        "the file changed"
+    );
+    ensure!(
+        b.reader.header(w.file_id)?.version == w.version,
+        "the file changed"
+    );
     Ok(())
 }

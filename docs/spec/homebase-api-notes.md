@@ -556,7 +556,15 @@ server answers the rest, to a token their server made for this identity's connec
   server metadata. A share withdrawn or expired (or above an unreviewed connection's level)
   comes as a tombstone without its version (all zeros), parent, node id or key; a soft delete
   by the sharer as the usual tombstone; a hard delete takes the rows with it, so the file just
-  isn't listed any more (only a full re-read finds it gone). Refusals: 401 the token (unknown,
+  isn't listed any more (only a full re-read finds it gone). The "no longer shared" tombstone
+  keeps the file's id, `fileType` and its own `updated` (**[verified]**
+  `DriveStorageServiceBase.NoLongerSharedTombstoneOf`), and is sent again after every change of
+  the file while a row still names the member; sharing or withdrawing moves the file's
+  `modified` and keeps its version, so a share given again brings the file back live at the
+  version it had (**[verified]**). The client tells it from a delete by its zero version
+  (`RemoteHeader::is_unshared`, `ChangeRef::is_unshared`): the file leaves the member's
+  devices, but isn't gone. `FakePeer` (`hbsync-remote`) models this member's view, and the
+  contract's read-only subset (`SHARED_SCENARIOS`) checks it. Refusals: 401 the token (unknown,
   the connection gone, their keys invalid), 403 a file not (or no longer) shared, 404 none
   there. A share-key answer not sealed yet or not reviewed waits (`RemoteError::Later`, asked
   again in 15 minutes); reads never write: every write refuses before a request.

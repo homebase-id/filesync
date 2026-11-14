@@ -228,6 +228,9 @@ of this schema may define some of them.)
 - A tombstone keeps `fileId`, `groupId`, `fileType` and nulls `uniqueId`, `content` and payloads
   **[verified]** `DriveStorageServiceBase.cs:1923-1965`. Clients therefore map
   `fileId → node id` themselves.
+- A member reading another identity's share also gets a "no longer shared" tombstone, without
+  a version (all zeros) or `groupId`: the share was withdrawn or expired, the file isn't gone
+  (homebase-api-notes, "Shared with you").
 - Tombstoned UniqueIds are free again (the duplicate check skips tombstones **[verified]**), so
   a deleted node can be re-created under the same node id; it gets a new `fileId`.
 - A node is one folder or one file for its life: a version that changes its `fileType` isn't

@@ -5,8 +5,9 @@
 //! internally.
 //!
 //! Implementations: `fake::FakeServer` / `fake::FakeRemote` (in memory, Homebase semantics;
-//! feature `testkit`, with the `contract` every remote passes) and the Homebase drive
-//! (`hbsync-homebase`).
+//! feature `testkit`, with the `contract` every remote passes), `fake::FakePeer` (a member
+//! reading what the fake's owner shares: the contract's read-only subset) and the Homebase
+//! drive (`hbsync-homebase`).
 
 use std::collections::HashSet;
 use std::io::{Read, Write};
@@ -101,6 +102,12 @@ impl RemoteHeader {
 
     pub fn is_deleted(&self) -> bool {
         matches!(self.body, RemoteBody::Deleted)
+    }
+
+    /// A tombstone without a version: a file someone else shares, no longer shared with this
+    /// identity (withdrawn, expired), not deleted; a share again brings it back at its version.
+    pub fn is_unshared(&self) -> bool {
+        self.is_deleted() && self.version.0.is_nil()
     }
 
     /// The node state, if the header is in the tree (and, for a file, has its payload).
@@ -198,6 +205,11 @@ impl ChangeRef {
     /// As [`RemoteHeader::removed_at`].
     pub fn removed_at(&self) -> Option<i64> {
         self.changed_at.filter(|_| self.removed)
+    }
+
+    /// As [`RemoteHeader::is_unshared`].
+    pub fn is_unshared(&self) -> bool {
+        self.deleted && self.version.0.is_nil()
     }
 
     pub fn of(header: &RemoteHeader) -> ChangeRef {
