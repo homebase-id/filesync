@@ -183,11 +183,14 @@ fn a_file_deleted_here_in_a_piece_goes_with_its_folders_to_recently_deleted() ->
         b.sync()?;
         remove_on_drive_except(&server, &["e", "x.txt", "keep.txt"])?;
         fs::remove_file(b.root.join("d/e/x.txt"))?;
+        let mut pending = u64::MAX;
         for _ in 0..8 {
-            if b.sync()?.pending == 0 {
+            pending = b.sync()?.pending;
+            if pending == 0 {
                 break;
             }
         }
+        assert_eq!(pending, 0, "pages of {batch}: still pending");
         assert_eq!(b.tree_text(""), ["keep.txt = k"], "pages of {batch}");
         let mut roots: Vec<String> = (b.recently_deleted(100)?.iter())
             .filter(|d| d.root == d.node)
@@ -449,6 +452,11 @@ fn held_removal_settles_without_a_spin(deleted: bool, change: &Change) -> R {
                 false => assert_eq!(b.read_text(&x)?, "x", "pages of {batch}"),
             }
         }
+        // Held, nothing of the removal goes from the drive, d1's file deleted here included
+        // (the rule itself: a_file_deleted_here_in_a_piece_goes_with_its_folders_to_recently_deleted).
+        let live = server.lock().map_err(|_| "poisoned")?.live_names();
+        let files = live.iter().filter(|n| *n == "x.txt").count();
+        assert_eq!(files, 3, "pages of {batch}: {live:?}");
     }
     Ok(())
 }

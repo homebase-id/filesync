@@ -967,6 +967,13 @@ impl Sim {
             self.restore_as(row.node, name);
             live.insert(row.node);
         } else {
+            // (Nothing here restores a row meanwhile: back already, the engine's would be a
+            // version mismatch, its contents waiting in Recently deleted.)
+            debug_assert!(
+                !self.server.live.contains_key(&row.node),
+                "{:?} back",
+                row.node
+            );
             seen.remove(&row.node);
             deleted::free_restored_name(taken, row.parent, &name);
         }
