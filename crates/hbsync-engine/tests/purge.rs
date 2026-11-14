@@ -2120,11 +2120,12 @@ fn a_stop_after_the_files_leaves_their_folder() -> common::Res<()> {
     Ok(())
 }
 
-/// A put back whose folder went for good meanwhile, with a tombstone the feed doesn't tell yet
-/// ([`a_put_back_keeps_a_folder_gone_for_good_while_a_file_in_it_waits`] has none): the
-/// restore's answer tells it, and what was deleted with the folder comes back as into any
-/// folder gone for good; the folder goes up again from here, and nothing of it is deleted
-/// here. (Simulator: `put_backs_that_go_wrong_lose_nothing`.)
+/// A put back whose folder went for good meanwhile (a tombstone the feed doesn't tell yet),
+/// everything in it still in Recently deleted ([`a_put_back_keeps_a_folder_gone_for_good_while_a_file_in_it_waits`]
+/// has a file in it gone too, said not there once): the restore's answer tells it, and what
+/// was deleted with the folder comes back as into any folder gone for good; the folder goes
+/// up again from here, and nothing of it is deleted here. (Simulator:
+/// `put_backs_that_go_wrong_lose_nothing`.)
 #[test]
 fn a_put_back_brings_back_what_was_in_a_folder_gone_for_good_meanwhile() -> common::Res<()> {
     let HeldFolder {

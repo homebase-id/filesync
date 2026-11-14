@@ -1,6 +1,6 @@
 //! What the users, other devices and the server do, and how each folder sees the drive.
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -726,9 +726,8 @@ impl Sim {
 
     /// The user puts back the deletes the guard held in client `c`'s last plan (sync semantics
     /// §7), by the engine's rule ([`hbsync_engine::held::put_back_plan`]), as the drive has
-    /// them now. The engine restores the items together, in one set of waves; here one item
-    /// after the other, outermost first: the same rows come back (a restored name can differ
-    /// where one item's restored name is another's own).
+    /// them now. Its items are restored together, in one set of waves planned before the drive
+    /// is asked, as the engine does ([`Sim::restore_planned`]).
     ///
     /// As the runner takes the answer, for the held deletes the user was shown: refused when
     /// nothing is held; else with the next sync, after the one in progress, which runs to its
@@ -766,9 +765,6 @@ impl Sim {
         });
         self.forget_bases(c, &plan.forget);
         let coords = self.clients[c].coords;
-        // What each item takes along, as the engine plans them all in one read: an item an
-        // earlier one brought back (a folder above it) still has what was deleted with it
-        // restored.
         let had_items = !plan.items.is_empty();
         // The engine plans its one restore of all the items before it goes to the drive, from
         // what it read: so here, before anything goes wrong ([`Sim::restore_planned`]).
@@ -948,24 +944,38 @@ impl Sim {
                 None => {}
             }
             left = wave.later;
-            let named = wave
-                .asked
-                .into_iter()
-                .map(|row| (row, Some(row.name.clone())));
-            let free = wave.rest.into_iter().map(|row| {
-                // No free name: it stays deleted.
-                let name = deleted::take_restored_name(&mut taken, row.parent, &row.name);
-                (row, name)
-            });
-            for (row, name) in named.chain(free).collect::<Vec<_>>() {
-                let Some(name) = name else {
-                    continue;
-                };
-                if self.restore_as(row.node, name) || self.server.live.contains_key(&row.node) {
-                    live.insert(row.node);
-                } else {
-                    seen.remove(&row.node);
+            // Each under its own name first, then the rest under the first free restored name
+            // (none free: it stays deleted), as the engine sends them; one not there frees the
+            // name it took.
+            for row in wave.asked {
+                self.restore_row(row, row.name.clone(), &mut live, &mut seen, &mut taken);
+            }
+            for row in wave.rest {
+                if let Some(name) = deleted::take_restored_name(&mut taken, row.parent, &row.name) {
+                    self.restore_row(row, name, &mut live, &mut seen, &mut taken);
                 }
+            }
+        }
+    }
+
+    /// Restores `row` named `name` ([`Sim::restore_planned`]): back, it is a folder rows may
+    /// go into; gone for good meanwhile (its answer tells it), it leaves the restore and its
+    /// name is free again.
+    fn restore_row(
+        &mut self,
+        row: &Row,
+        name: String,
+        live: &mut HashSet<NodeId>,
+        seen: &mut HashSet<NodeId>,
+        taken: &mut HashMap<NodeId, HashSet<String>>,
+    ) {
+        let key = hbsync_platform::name::name_key(&name);
+        if self.restore_as(row.node, name) {
+            live.insert(row.node);
+        } else {
+            seen.remove(&row.node);
+            if let Some(names) = taken.get_mut(&row.parent) {
+                names.remove(&key);
             }
         }
     }

@@ -217,13 +217,13 @@ impl Reconciler<'_> {
         }
     }
 
-    /// What the removal on the drive of a folder took along (§6.3), unchanged here or deleted
-    /// here, waits for that folder's plan when another page makes it: planned again as it is
-    /// (`placed`). The folder's plan decides whether it stays, and with it whether what its
-    /// removal took along does ([`Reconciler::untake_kept`]); planned first, that went with
-    /// the removal while the folder came back, and one deleted here went to Recently deleted
-    /// apart from the folders it is in. One otherwise changed here plans the same either way.
-    /// The folder is in another
+    /// What the removal on the drive of a folder took along (§6.3), unchanged here, waits for
+    /// that folder's plan when another page makes it: planned again as it is (`placed`). The
+    /// folder's plan decides whether it stays, and with it whether what its removal took along
+    /// does ([`Reconciler::untake_kept`]); planned first, that went with the removal while the
+    /// folder came back. One changed here plans the same either way, but in a piece one deleted
+    /// here waits too: removed in the piece, it went to Recently deleted apart from the folders
+    /// it is in, which the folder's last page removes. The folder is in another
     /// page ([`Input::going_above`], in a piece of a folder too big for a page,
     /// `Options::piece`: that one's last page plans it), or in this one but waits to be planned
     /// with another page's nodes (placed into a folder another page makes, say): then the node
@@ -244,7 +244,8 @@ impl Reconciler<'_> {
                 continue;
             }
             let change = self.local_change(n);
-            if change.is_change() && change != Change::Deleted {
+            let deleted_in_piece = piece && change == Change::Deleted;
+            if change.is_change() && !deleted_in_piece {
                 continue;
             }
             let Some(folder) = taken_by(i, n) else {
@@ -252,7 +253,8 @@ impl Reconciler<'_> {
             };
             if piece && i.going_above.contains(&folder) {
                 self.placed.insert(n);
-            } else if i.dirty.contains(&folder)
+            } else if !change.is_change()
+                && i.dirty.contains(&folder)
                 && !self.scope.contains(&folder)
                 && grouped
                     .get_or_insert_with(|| self.groups().flatten().copied().collect())

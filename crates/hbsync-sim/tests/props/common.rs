@@ -189,13 +189,12 @@ pub(crate) fn with_crashes(
 }
 
 /// A paging regression's acts (`(client, action, sync)`, a sync quiescing every client) on
-/// three clients without ignore rules, the dirty set planned whole (`None`) or in pages of
-/// `pages`: the sim once settled and checked, for what is compared between the two.
+/// three clients without ignore rules, the dirty set planned in pages of `pages`, or whole
+/// (`None`: in one page, as the property it comes from has it): the sim once settled and
+/// checked, for what is compared between the two.
 pub(crate) fn replay_in_pages(acts: &[(usize, Action, bool)], pages: Option<usize>) -> Sim {
-    let mut sim = Sim::new(3).without_ignore_rules();
-    if let Some(size) = pages {
-        sim = sim.with_small_pages(size);
-    }
+    let sim = Sim::new(3).without_ignore_rules();
+    let mut sim = sim.with_small_pages(pages.unwrap_or(1_000_000));
     for &(client, action, sync) in acts {
         sim.run(&[Event::Act { client, action }]);
         if sync {

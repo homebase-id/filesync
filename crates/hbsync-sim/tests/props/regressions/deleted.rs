@@ -2661,3 +2661,55 @@ fn regression_a_file_deleted_here_in_a_piece_waits_for_the_folder_that_took_it_a
     assert_eq!(whole.1, 0, "{whole:?}");
     assert_eq!(end(Some(1)), whole, "in pages of one");
 }
+
+/// [`regression_a_file_deleted_here_in_a_piece_waits_for_the_folder_that_took_it_along`] where
+/// the folder is in the same page but waits with another page's nodes (not in a piece): c2
+/// deletes a file here in a folder c0's stopped delete took along, and moves a folder into
+/// it. Planned in pages of four, it ends as planned whole without the file waiting (the
+/// rule is a piece's only).
+#[test]
+fn regression_a_file_deleted_here_waits_with_its_folder_that_waits_for_another_page() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let events = [
+        act(2, CreateFolder { parent: 0, name: 6 }),
+        Event::Plan { client: 2 },
+        Event::Step { client: 2 },
+        act(0, CreateFile { parent: 0, name: 6 }),
+        act(2, CreateFile { parent: 2, name: 0 }),
+        Event::Plan { client: 2 },
+        act(0, DeleteStopped { pick: 0, done: 0 }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 2 },
+        act(2, CreateJunkFolder { parent: 0 }),
+        Event::Step { client: 0 },
+        act(2, Delete { node: 5 }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        act(
+            2,
+            Move {
+                node: 10,
+                parent: 3,
+                name: 0,
+            },
+        ),
+        Event::Step { client: 0 },
+        act(0, DeleteStopped { pick: 0, done: 2 }),
+        Event::Plan { client: 2 },
+        Event::Plan { client: 2 },
+    ];
+    let end = |pages: Option<usize>| {
+        let mut sim = Sim::new(3);
+        if let Some(size) = pages {
+            sim = sim.with_small_pages(size);
+        }
+        sim.run(&events);
+        assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
+        if let Err(e) = sim.check() {
+            panic!("pages {pages:?}: {e}");
+        }
+        (sim.server_paths(), sim.removed_files_apart())
+    };
+    assert_eq!(end(Some(4)), end(Some(1_000_000)), "in pages of four");
+}
