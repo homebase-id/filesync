@@ -2668,7 +2668,7 @@ fn regression_a_file_deleted_here_in_a_piece_waits_for_the_folder_that_took_it_a
 /// it. Planned in pages of four, it ends as planned whole without the file waiting (the
 /// rule is a piece's only).
 #[test]
-fn regression_a_file_deleted_here_waits_with_its_folder_that_waits_for_another_page() {
+fn regression_a_file_deleted_here_by_a_folder_waiting_for_another_page_ends_as_whole() {
     use Action::*;
     let act = |client, action| Event::Act { client, action };
     let events = [
@@ -2699,17 +2699,9 @@ fn regression_a_file_deleted_here_waits_with_its_folder_that_waits_for_another_p
         Event::Plan { client: 2 },
         Event::Plan { client: 2 },
     ];
-    let end = |pages: Option<usize>| {
-        let mut sim = Sim::new(3);
-        if let Some(size) = pages {
-            sim = sim.with_small_pages(size);
-        }
-        sim.run(&events);
-        assert!(sim.quiesce(30), "no convergence (pages: {pages:?})");
-        if let Err(e) = sim.check() {
-            panic!("pages {pages:?}: {e}");
-        }
+    let end = |pages| {
+        let sim = replay_events_in_pages(&events, pages);
         (sim.server_paths(), sim.removed_files_apart())
     };
-    assert_eq!(end(Some(4)), end(Some(1_000_000)), "in pages of four");
+    assert_eq!(end(Some(4)), end(None), "in pages of four");
 }

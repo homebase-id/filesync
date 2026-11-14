@@ -339,8 +339,10 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    in its piece, a node (simulator:
    `regression_what_a_removal_took_along_waits_for_its_folder_in_pages`; engine:
    `what_a_held_removal_took_along_waits_without_a_spin`). So does one deleted here in a
-   piece, at the same cost: removed there, it went to Recently deleted apart from the folders
-   it is in (those not dirty aren't in the piece), which the folder's last page removes (simulator:
+   piece, at the same cost a node: removed there, it went to Recently deleted apart from the
+   folders it is in (those not dirty aren't in the piece), which the folder's last page
+   removes. That page has no size limit: a large folder deleted here while another device's
+   removal of it took its files along (both at once, rare) is planned there whole (simulator:
    `regression_a_file_deleted_here_in_a_piece_waits_for_the_folder_that_took_it_along`). What is left then (more than a
    page directly in the folder, and what so waits) is planned whole, as one larger page. So the drive removes the
    folder first, then what is in it, and Recently deleted lists it as one item, or as its

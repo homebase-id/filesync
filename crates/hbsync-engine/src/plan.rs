@@ -56,7 +56,8 @@ pub struct Options {
     /// The page is a piece of a folder's subtree too big for a page
     /// ([`crate::pages::OwnPages`]), so what is in it doesn't wait for a folder above it that
     /// another page deletes ([`Input::going_above`]): that one goes after it. What that
-    /// folder's removal on the drive took along, unchanged here, waits for it all the same.
+    /// folder's removal on the drive took along, unchanged or deleted here, waits for it all
+    /// the same.
     pub piece: bool,
 }
 
@@ -614,8 +615,9 @@ pub struct Plan {
     /// again. By the ids the store knows them by (a detached item's old one, unlike
     /// `deferred`).
     pub waiting: Vec<NodeId>,
-    /// Nodes whose delete waits for a file in them not hashed yet (§6.3): a
-    /// confirmation of it lasts ([`Engine::confirm_deletes`]).
+    /// Nodes whose delete waits: for a file in them not hashed yet (§6.3), or for another
+    /// page's plan (§6.5: a folder going there, or what its removal took along): a confirmation
+    /// of it lasts ([`Engine::confirm_deletes`]).
     ///
     /// [`Engine::confirm_deletes`]: crate::Engine::confirm_deletes
     pub delete_waits: Vec<NodeId>,

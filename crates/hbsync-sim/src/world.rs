@@ -768,15 +768,10 @@ impl Sim {
         let had_items = !plan.items.is_empty();
         // The engine plans its one restore of all the items before it goes to the drive, from
         // what it read: so here, before anything goes wrong ([`Sim::restore_planned`]).
-        let restore = match had_items {
-            true => {
-                let items: Vec<NodeId> = plan.items.iter().map(|n| coords.to_drive(*n)).collect();
-                deleted::plan_restore_from(&mut RestoreFrom(&self.server), &items)
-                    .ok()
-                    .flatten()
-            }
-            false => None,
-        };
+        let items: Vec<NodeId> = plan.items.iter().map(|n| coords.to_drive(*n)).collect();
+        let restore = deleted::plan_restore_from(&mut RestoreFrom(&self.server), &items)
+            .ok()
+            .flatten();
         // Going wrong now and then ([`Sim::with_failing_put_backs`]), counting the put backs
         // that restore something: a file it is to restore deleted for good after it read the
         // drive (a tombstone the feed hasn't told of: the restore's answer tells it), and the
@@ -923,9 +918,10 @@ impl Sim {
     }
 
     /// Runs restore `plan` against the drive as it is now, in waves, as the engine does
-    /// ([`deleted::restore_wave`]): a row no longer in Recently deleted is back already, or
-    /// went for good meanwhile (its answer tells it: it leaves the restore, and what was to come
-    /// back into it comes back as into any folder gone for good).
+    /// ([`deleted::restore_wave`]): a row no longer in Recently deleted went for good meanwhile
+    /// (its answer tells it: it leaves the restore, and what was to come back into it comes
+    /// back as into any folder gone for good). Nothing restores a row between the plan and
+    /// the restore here: one that came back so would be the engine's version mismatch.
     fn restore_planned(&mut self, plan: deleted::RestorePlan<Row>) {
         let deleted::RestorePlan {
             rows,
@@ -959,8 +955,8 @@ impl Sim {
     }
 
     /// Restores `row` named `name` ([`Sim::restore_planned`]): back, it is a folder rows may
-    /// go into; gone for good meanwhile (its answer tells it), it leaves the restore and its
-    /// name is free again.
+    /// go into; not there (gone for good meanwhile), it leaves the restore and its name is
+    /// free again.
     fn restore_row(
         &mut self,
         row: &Row,
