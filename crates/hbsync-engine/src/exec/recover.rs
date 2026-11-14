@@ -73,6 +73,25 @@ pub fn recover_aside(db: &mut StateDb, folder: &FolderCtx) -> Result<AsideOutcom
             }
             continue;
         }
+        // An old version a download replaced from another place, the new one there (a crash
+        // before its commit; the scan keeps the old row while it is aside): it goes as above,
+        // its row with it, and its base stays for the placement's recovery to settle against.
+        // Gone with it, the placed file read as new, and its tags merged over what the drive
+        // removed meanwhile.
+        if let layout::AsideEntry::File(_, hash) = parsed
+            && let Some(placed) = placed_elsewhere(db, folder, node, &row.path)?
+        {
+            match discard_old(db, &disk, folder, &aside, hash, Some(&placed))? {
+                Discarded::Left => {}
+                Discarded::Stranded | Discarded::Back(None) => unknown.push(left(&aside)),
+                gone => {
+                    db.write(|s| s.folder().delete_local(node))?;
+                    dirs.extend(row.path.parent());
+                    dirs.extend(gone.into_inner());
+                }
+            }
+            continue;
+        }
         let rows = db.read(|s| s.local_subtree(&row.path))?;
         // Each row as its base has it: what the drive's delete took.
         let synced = db.read(|s| {
@@ -163,6 +182,28 @@ fn recover_by_base(
         Discarded::Stranded | Discarded::Back(None) => Ok(ByBase::Unknown),
         gone => Ok(ByBase::Rescan(gone.into_inner())),
     }
+}
+
+/// Where `node`'s download put its new version in place, if elsewhere than `from`: its
+/// record's target, holding it as the placement's recovery judges it.
+fn placed_elsewhere(
+    db: &mut StateDb,
+    folder: &FolderCtx,
+    node: NodeId,
+    from: &RelPath,
+) -> Result<Option<RelPath>, StateError> {
+    let Some(p) = db
+        .read(|s| s.get_placing(node))?
+        .filter(|p| &p.target != from)
+    else {
+        return Ok(None);
+    };
+    let root = folder.root.as_path();
+    let OnDisk::There(meta) = look(root, &p.target) else {
+        return Ok(None);
+    };
+    let row = read_row(root, &p.target, node, &meta, folder.algorithm);
+    Ok(matches!(judge(root, &p, Some(row)), Judged::Settle(_)).then_some(p.target))
 }
 
 /// What [`recover_by_base`] did with an entry.

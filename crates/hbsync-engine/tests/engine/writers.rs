@@ -360,3 +360,54 @@ fn an_edit_of_a_file_whose_newer_version_doesnt_read_forks() -> R {
     );
     Ok(())
 }
+
+/// The drive moves f (tagged Work) to another folder and edits it: b's download puts the new
+/// version in place there, moves the old one aside, and b crashes before the commit. a then
+/// removes the tag. b's recovery takes the placed file for its node, and the removal reaches
+/// it: the tag never comes back.
+#[test]
+fn a_tag_removed_while_a_moved_download_waits_for_recovery_stays_removed() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("p1/f", "one")?;
+    a.write("p2/k", "k")?;
+    if !tags::CAN_TAG || tags::write(&a.root.join("p1/f"), &Tags::default())?.is_none() {
+        eprintln!("no tags here; skipped");
+        return Ok(());
+    }
+    tags::write(&a.root.join("p1/f"), &Tags::new([Tag::new("Work", 0)]))?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(names(&b, "p1/f"), ["Work"]);
+    fs::rename(a.root.join("p1/f"), a.root.join("p2/f"))?;
+    a.sync()?;
+    tick();
+    fs::OpenOptions::new()
+        .append(true)
+        .open(a.root.join("p2/f"))
+        .and_then(|mut f| std::io::Write::write_all(&mut f, b" two"))?;
+    a.sync()?;
+    assert_eq!(drive_tags(&server, "f"), ["Work:0"]);
+    let placed = b.root.join("p2/f");
+    let crashed = common::crash(&mut b, common::Kept::All, move |at, _| {
+        at == Commit::Before && fs::read(&placed).is_ok_and(|b| b == b"one two")
+    })?;
+    assert!(crashed);
+    assert_eq!(names(&b, "p2/f"), ["Work"], "put in place, not committed");
+    tick();
+    tags::write(&a.root.join("p2/f"), &Tags::default())?;
+    a.sync()?;
+    assert!(drive_tags(&server, "f").is_empty());
+    b.restart()?;
+    b.sync()?;
+    a.sync()?;
+    b.sync()?;
+    assert!(
+        drive_tags(&server, "f").is_empty(),
+        "the removed tag came back"
+    );
+    assert!(names(&b, "p2/f").is_empty());
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    Ok(())
+}
