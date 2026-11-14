@@ -23,10 +23,10 @@
 //! a delete refused for its version (4160) is read once more and counts as done when the file
 //! is deleted (a retry). Faults and latency are injected per client.
 //!
-//! [`FakePeer`] is a member the drive's owner shares files with, reading them as the Homebase
-//! adapter reads another identity's share (`PeerRemote`; homebase-api-notes, "Shared with
-//! you"): only the files shared with it, a share withdrawn as a tombstone without a version,
-//! read-only.
+//! [`FakeRemote::member`] is a client of the member the drive's owner shares files with,
+//! reading them as the Homebase adapter reads another identity's share (`PeerRemote`;
+//! homebase-api-notes, "Shared with you"): only the files shared with it, a share withdrawn as
+//! a tombstone without a version, read-only.
 
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Write;
@@ -112,12 +112,12 @@ pub struct FakeServer {
     next_id: u64,
     subscribers: Vec<Subscriber>,
     next_client: u64,
-    /// The member's share rows ([`FakePeer`]): live (`true`) or withdrawn. A hard delete takes
-    /// a file's row with it.
+    /// The member's share rows ([`FakeRemote::member`]): live (`true`) or withdrawn. A hard
+    /// delete takes a file's row with it.
     shares: HashMap<RemoteFileId, bool>,
 }
 
-/// Whose view of the drive a read is: its owner's, or the member's ([`FakePeer`]).
+/// Whose view of the drive a client has: its owner's, or the member's ([`FakeRemote::member`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum View {
     Owner,
@@ -460,70 +460,34 @@ impl FakeServer {
         Ok(())
     }
 
-    /// Shares `file_id` with the member ([`FakePeer`]), or shares it again: its place in the
-    /// feed moves, its version stays (as odin-core's share rows).
-    pub fn share(&mut self, file_id: RemoteFileId) -> Result<()> {
-        self.set_share(None, file_id, true)
-    }
-
-    /// Withdraws the member's share of `file_id`: the member reads it as no longer shared. Its
-    /// place in the feed moves, its version stays.
-    pub fn withdraw(&mut self, file_id: RemoteFileId) -> Result<()> {
-        self.set_share(None, file_id, false)
-    }
-
-    fn set_share(
-        &mut self,
-        writer: Option<ClientId>,
-        file_id: RemoteFileId,
-        live: bool,
-    ) -> Result<()> {
+    /// Shares `file_id` with the member (`live`), or withdraws its share: its place in the feed
+    /// moves, its version stays (as odin-core's share rows).
+    fn set_share(&mut self, writer: ClientId, file_id: RemoteFileId, live: bool) -> Result<()> {
         if !self.files.contains_key(&file_id) {
             return Err(RemoteError::NotFound);
         }
         self.shares.insert(file_id, live);
-        self.touch(file_id, writer);
+        self.touch(file_id, Some(writer));
         Ok(())
     }
 
-    /// File `f` as `view` sees it, if at all: the member sees a file shared with it, a share
-    /// withdrawn as a tombstone without a version, `groupId`, tags or key (the root its parent,
-    /// as the Homebase adapter reads a tombstone without a `groupId`), and no file's token.
-    fn seen(&self, f: &StoredFile, view: View) -> Option<RemoteHeader> {
-        let header = &f.header;
-        if view == View::Owner {
-            return Some(header.clone());
-        }
-        match self.shares.get(&header.file_id)? {
-            true => Some(RemoteHeader {
-                token: None,
-                ..header.clone()
-            }),
-            false => Some(RemoteHeader {
-                file_id: header.file_id,
-                version: VersionTag(Uuid::nil()),
-                parent: NodeId::ROOT,
-                kind: header.kind,
-                body: RemoteBody::Deleted,
-                removed: false,
-                changed_at: header.changed_at,
-                token: None,
-            }),
+    /// Whether `view` sees `file_id`'s row: as it is (`Some(true)`), as a share withdrawn
+    /// (`Some(false)`, [`seen`]), or not at all. The owner sees every row as it is.
+    fn sees(&self, file_id: RemoteFileId, view: View) -> Option<bool> {
+        match view {
+            View::Owner => Some(true),
+            View::Member => self.shares.get(&file_id).copied(),
         }
     }
 
-    /// Whether `view` may read `file_id`'s header and payload: the member only while it is
-    /// shared with it.
-    fn may_read(&self, file_id: RemoteFileId, view: View) -> bool {
-        view == View::Owner || self.shares.get(&file_id) == Some(&true)
-    }
-
-    /// [`FakeServer::may_read`] as an answer: Homebase refuses the member a file not shared
-    /// with a 403 that has no code, as the adapter reads it.
-    fn readable(&self, file_id: RemoteFileId, view: View) -> Result<()> {
-        match self.may_read(file_id, view) {
-            true => Ok(()),
-            false => Err(RemoteError::Fatal(format!(
+    /// Refuses `view` the header and payload of a file it may not read: the member one not
+    /// shared with it, as Homebase does with a 403 that has no code (as the adapter reads it),
+    /// or one deleted for good (its share row went with it) as not found.
+    fn access(&self, file_id: RemoteFileId, view: View) -> Result<()> {
+        match self.sees(file_id, view) {
+            Some(true) => Ok(()),
+            _ if !self.files.contains_key(&file_id) => Err(RemoteError::NotFound),
+            _ => Err(RemoteError::Fatal(format!(
                 "{file_id:?}: not shared with you"
             ))),
         }
@@ -555,18 +519,15 @@ impl FakeServer {
     }
 
     pub fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader> {
-        self.header_for(file_id, View::Owner)
-    }
-
-    fn header_for(&self, file_id: RemoteFileId, view: View) -> Result<RemoteHeader> {
         if self.unreadable.contains(&file_id) {
             return Err(RemoteError::Fatal(format!(
                 "{file_id:?}: unreadable (test)"
             )));
         }
-        let f = self.files.get(&file_id).ok_or(RemoteError::NotFound)?;
-        self.readable(file_id, view)?;
-        self.seen(f, view).ok_or(RemoteError::NotFound)
+        self.files
+            .get(&file_id)
+            .map(|f| f.header.clone())
+            .ok_or(RemoteError::NotFound)
     }
 
     /// The name of file `file_id`, unless it is a tombstone or missing.
@@ -577,31 +538,27 @@ impl FakeServer {
         }
     }
 
-    /// Which of `folders` hold a file not deleted that `holds` counts (unlisted ones too).
-    pub fn holding(&self, folders: &[NodeId], holds: Holds<'_>) -> HashSet<NodeId> {
-        self.holding_for(folders, holds, View::Owner)
-    }
-
-    fn holding_for(&self, folders: &[NodeId], holds: Holds<'_>, view: View) -> HashSet<NodeId> {
-        // A share withdrawn is a tombstone to the member: it holds nothing.
+    /// Which of `folders` hold a file not deleted that `holds` counts (unlisted ones too), as
+    /// `view` sees them: a share withdrawn is a tombstone to the member, holding nothing.
+    fn holding(&self, folders: &[NodeId], holds: Holds<'_>, view: View) -> HashSet<NodeId> {
         self.files
             .values()
             .map(|f| &f.header)
-            .filter(|h| self.may_read(h.file_id, view))
-            .filter(|h| !h.is_deleted() && holds.counts(h.at(), h.removed))
+            .filter(|h| {
+                !h.is_deleted()
+                    && holds.counts(h.at(), h.removed)
+                    && self.sees(h.file_id, view) == Some(true)
+            })
             .map(|h| h.parent)
             .filter(|p| folders.contains(p))
             .collect()
     }
 
     pub fn payload(&self, file_id: RemoteFileId) -> Result<Arc<Vec<u8>>> {
-        self.payload_for(file_id, View::Owner)
-    }
-
-    fn payload_for(&self, file_id: RemoteFileId, view: View) -> Result<Arc<Vec<u8>>> {
-        let f = self.files.get(&file_id).ok_or(RemoteError::NotFound)?;
-        self.readable(file_id, view)?;
-        f.bytes.clone().ok_or(RemoteError::NotFound)
+        self.files
+            .get(&file_id)
+            .and_then(|f| f.bytes.clone())
+            .ok_or(RemoteError::NotFound)
     }
 
     /// A client's read of the feed ([`FakeServer::changes`]): when it held rows back, the
@@ -632,19 +589,20 @@ impl FakeServer {
         }
         // A file the feed leaves out (unlisted), or one the view doesn't see, isn't in it.
         .filter(|(_, file_id)| !self.unlisted.contains(*file_id))
-        .filter_map(|(key, file_id)| Some((key, file_id, self.seen(&self.files[file_id], view)?)));
+        .filter_map(|(key, file_id)| Some((key, file_id, self.sees(*file_id, view)?)));
         let mut entries = Vec::new();
         let mut skipped = Vec::new();
         let mut last = after;
         let mut has_more = false;
-        for (key, file_id, header) in rows {
+        for (key, file_id, as_is) in rows {
             // A row of the current millisecond is held back, with more rows to come (the
             // feed is in time order: so is everything after it).
             if entries.len() + skipped.len() == limit || key.0 >= self.clock_ms {
                 has_more = true;
                 break;
             }
-            if self.unreadable.contains(file_id) && !header.is_deleted() {
+            let header = &self.files[file_id].header;
+            if as_is && self.unreadable.contains(file_id) && !header.is_deleted() {
                 skipped.push(Skipped {
                     at: Some(header.at()),
                     node: header.node(),
@@ -652,7 +610,7 @@ impl FakeServer {
                     why: format!("{file_id:?}: unreadable (test)"),
                 });
             } else {
-                entries.push(header);
+                entries.push(seen(header.clone(), view, as_is));
             }
             last = Some(*key);
         }
@@ -914,6 +872,8 @@ pub struct FakeRemote {
     faults: Arc<Mutex<Faults>>,
     /// Its client registration: whose writes these are.
     client: ClientId,
+    /// Whose client it is: the owner's, or the member's ([`FakeRemote::member`]).
+    view: View,
 }
 
 impl FakeRemote {
@@ -927,6 +887,19 @@ impl FakeRemote {
             server,
             faults: Arc::default(),
             client,
+            view: View::Owner,
+        }
+    }
+
+    /// A client of the member `server`'s owner shares files with, reading them as the Homebase
+    /// adapter reads another identity's share: the feed, headers and payloads of what is shared
+    /// with it, a share withdrawn as a tombstone without a version
+    /// ([`RemoteHeader::is_unshared`]). Every write refuses before it is a request, as
+    /// `PeerRemote`'s do.
+    pub fn member(server: Arc<Mutex<FakeServer>>) -> Self {
+        FakeRemote {
+            view: View::Member,
+            ..FakeRemote::new(server)
         }
     }
 
@@ -937,6 +910,7 @@ impl FakeRemote {
             server: Arc::clone(&self.server),
             faults: Arc::default(),
             client: self.client,
+            view: self.view,
         }
     }
 
@@ -962,6 +936,14 @@ impl FakeRemote {
 
     pub fn server(&self) -> MutexGuard<'_, FakeServer> {
         self.server.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Refuses a write of the member's: what is shared with it is read-only.
+    fn writable(&self) -> Result<()> {
+        match self.view {
+            View::Owner => Ok(()),
+            View::Member => Err(RemoteError::read_only("the owner")),
+        }
     }
 
     /// Runs the per-request fault logic. Returns an error if this request should fail.
@@ -1117,7 +1099,7 @@ impl Remote for FakeRemote {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         self.gate()?;
         self.faults().full_pages += 1;
-        self.server().read(cursor, limit, View::Owner)
+        self.server().read(cursor, limit, self.view)
     }
 
     fn change_refs(&self, cursor: Option<&str>, limit: usize) -> Result<RefsPage> {
@@ -1129,7 +1111,7 @@ impl Remote for FakeRemote {
         };
         Ok(RefsPage {
             unread,
-            ..RefsPage::of(&self.server().read(cursor, limit, View::Owner)?)
+            ..RefsPage::of(&self.server().read(cursor, limit, self.view)?)
         })
     }
 
@@ -1147,15 +1129,18 @@ impl Remote for FakeRemote {
         if not_found {
             return Err(RemoteError::NotFound);
         }
-        self.server().header(file_id)
+        let server = self.server();
+        server.access(file_id, self.view)?;
+        Ok(seen(server.header(file_id)?, self.view, true))
     }
 
     fn holding(&self, folders: &[NodeId], holds: Holds<'_>) -> Result<HashSet<NodeId>> {
         self.gate()?;
-        Ok(self.server().holding(folders, holds))
+        Ok(self.server().holding(folders, holds, self.view))
     }
 
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Written> {
+        self.writable()?;
         self.gate()?;
         self.gate_name(&node.content.name)?;
         // Receive the bytes before taking the server lock, as a real server handles several
@@ -1174,6 +1159,7 @@ impl Remote for FakeRemote {
         meta: &NodeMeta,
         payload: Option<Upload<'_>>,
     ) -> Result<Written> {
+        self.writable()?;
         let file_id = target.at.file_id;
         // On Homebase another file's token would write content no one can read.
         match &target.token {
@@ -1204,11 +1190,13 @@ impl Remote for FakeRemote {
     /// write failure injected for a name ([`Faults::fail_writes_named`]) fails that file
     /// alone, undeleted.
     fn delete(&self, files: &[Doomed]) -> Result<Deletes> {
+        self.writable()?;
         Answers::in_batches(files, BATCH_FILES, |batch| self.delete_batch(batch))
     }
 
     /// A request per [`BATCH_FILES`] files, as Homebase's `hard-delete-batch`.
     fn delete_for_good(&self, files: &[Doomed]) -> Result<ForGood> {
+        self.writable()?;
         Answers::in_batches(files, BATCH_FILES, |batch| {
             self.gate()?;
             batch_of(batch.iter().map(|f| f.at().file_id))?;
@@ -1228,6 +1216,7 @@ impl Remote for FakeRemote {
     /// ([`Faults::fail_writes_named`]) fails that file alone, unwritten: a lever of the fake's
     /// (Homebase answers a file only with a client error) to hold one file back.
     fn set_removed(&self, files: &[Target], removed: bool) -> Result<Answers<Written>> {
+        self.writable()?;
         self.gate()?;
         batch_of(files.iter().map(|t| t.at.file_id))?;
         let names: Vec<Option<String>> = {
@@ -1274,8 +1263,15 @@ impl Remote for FakeRemote {
         sink: &mut dyn Write,
     ) -> Result<u64> {
         self.gate()?;
-        let bytes = self.server().payload(file_id)?;
-        let slice = ranged(&bytes, range);
+        let bytes = {
+            let server = self.server();
+            server.access(file_id, self.view)?;
+            server.payload(file_id)?
+        };
+        let len = bytes.len() as u64;
+        let range = range.unwrap_or(0..len);
+        let (start, end) = (range.start.min(len), range.end.min(len));
+        let slice = &bytes[start as usize..end as usize];
         let (cut, corrupt) = {
             let mut faults = self.faults();
             faults.reads += 1;
@@ -1305,102 +1301,40 @@ impl Remote for FakeRemote {
     }
 }
 
-/// `range` of `bytes` (all of them without one), ending at their end.
-fn ranged(bytes: &[u8], range: Option<std::ops::Range<u64>>) -> &[u8] {
-    let len = bytes.len() as u64;
-    let range = range.unwrap_or(0..len);
-    let (start, end) = (range.start.min(len), range.end.min(len));
-    &bytes[start as usize..end as usize]
-}
-
-/// The sharer's share rows for the member, through its own client ([`FakeServer::share`]).
+/// The sharer's share rows for the member, through its own client.
 impl crate::contract::Shares for FakeRemote {
     fn share(&self, file_id: RemoteFileId) -> Result<()> {
+        self.writable()?;
         self.gate()?;
-        self.server().set_share(Some(self.client), file_id, true)
+        self.server().set_share(self.client, file_id, true)
     }
 
     fn withdraw(&self, file_id: RemoteFileId) -> Result<()> {
+        self.writable()?;
         self.gate()?;
-        self.server().set_share(Some(self.client), file_id, false)
+        self.server().set_share(self.client, file_id, false)
     }
 }
 
-/// The member a [`FakeServer`]'s owner shares files with, reading them as the Homebase adapter
-/// reads another identity's share: the feed, headers and payloads of what is shared with it, a
-/// share withdrawn as a tombstone without a version ([`RemoteHeader::is_unshared`]). Every write
-/// refuses before it reaches the server, as `PeerRemote`'s do.
-#[derive(Debug, Clone)]
-pub struct FakePeer {
-    server: Arc<Mutex<FakeServer>>,
-}
-
-impl FakePeer {
-    pub fn new(server: Arc<Mutex<FakeServer>>) -> Self {
-        FakePeer { server }
-    }
-
-    fn server(&self) -> MutexGuard<'_, FakeServer> {
-        self.server.lock().unwrap_or_else(|p| p.into_inner())
-    }
-
-    /// As `PeerRemote`'s refusal of a write.
-    fn read_only() -> RemoteError {
-        RemoteError::Fatal("what the owner shares with you is read-only here".into())
-    }
-}
-
-impl Remote for FakePeer {
-    fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
-        self.server().read(cursor, limit, View::Member)
-    }
-
-    fn change_refs(&self, cursor: Option<&str>, limit: usize) -> Result<RefsPage> {
-        Ok(RefsPage::of(&self.changes(cursor, limit)?))
-    }
-
-    fn cursor_time(&self, cursor: &str) -> Option<i64> {
-        parse_cursor(cursor).ok().map(|(time, _)| time)
-    }
-
-    fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader> {
-        self.server().header_for(file_id, View::Member)
-    }
-
-    fn holding(&self, folders: &[NodeId], holds: Holds<'_>) -> Result<HashSet<NodeId>> {
-        Ok(self.server().holding_for(folders, holds, View::Member))
-    }
-
-    fn create(&self, _: &NodeMeta, _: Option<Upload<'_>>) -> Result<Written> {
-        Err(Self::read_only())
-    }
-
-    fn update(&self, _: &Target, _: &NodeMeta, _: Option<Upload<'_>>) -> Result<Written> {
-        Err(Self::read_only())
-    }
-
-    fn delete(&self, _: &[Doomed]) -> Result<Deletes> {
-        Err(Self::read_only())
-    }
-
-    fn delete_for_good(&self, _: &[Doomed]) -> Result<ForGood> {
-        Err(Self::read_only())
-    }
-
-    fn set_removed(&self, _: &[Target], _: bool) -> Result<Answers<Written>> {
-        Err(Self::read_only())
-    }
-
-    fn read(
-        &self,
-        file_id: RemoteFileId,
-        range: Option<std::ops::Range<u64>>,
-        sink: &mut dyn Write,
-    ) -> Result<u64> {
-        let bytes = self.server().payload_for(file_id, View::Member)?;
-        let slice = ranged(&bytes, range);
-        sink.write_all(slice)?;
-        Ok(slice.len() as u64)
+/// `header` as `view` sees it, the row as it is (`as_is`) or a share withdrawn
+/// ([`FakeServer::sees`]): the member sees no file's token, and a share withdrawn as a
+/// tombstone without a version, `groupId`, tags or key (the root its parent, as the Homebase
+/// adapter reads a tombstone without a `groupId`).
+fn seen(header: RemoteHeader, view: View, as_is: bool) -> RemoteHeader {
+    match (view, as_is) {
+        (View::Owner, _) => header,
+        (View::Member, true) => RemoteHeader {
+            token: None,
+            ..header
+        },
+        (View::Member, false) => RemoteHeader {
+            version: VersionTag(Uuid::nil()),
+            parent: NodeId::ROOT,
+            body: RemoteBody::Deleted,
+            removed: false,
+            token: None,
+            ..header
+        },
     }
 }
 

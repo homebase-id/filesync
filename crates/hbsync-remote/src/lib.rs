@@ -5,9 +5,9 @@
 //! internally.
 //!
 //! Implementations: `fake::FakeServer` / `fake::FakeRemote` (in memory, Homebase semantics;
-//! feature `testkit`, with the `contract` every remote passes), `fake::FakePeer` (a member
-//! reading what the fake's owner shares: the contract's read-only subset) and the Homebase
-//! drive (`hbsync-homebase`).
+//! feature `testkit`, with the `contract` every remote passes; `FakeRemote::member` reads what
+//! the fake's owner shares, the contract's read-only subset) and the Homebase drive
+//! (`hbsync-homebase`).
 
 use std::collections::HashSet;
 use std::io::{Read, Write};
@@ -585,6 +585,11 @@ impl<T> Answers<T> {
 }
 
 impl RemoteError {
+    /// The refusal of a write to what `sharer` shares with this identity: read-only here.
+    pub fn read_only(sharer: impl std::fmt::Display) -> RemoteError {
+        RemoteError::Fatal(format!("what {sharer} shares with you is read-only here"))
+    }
+
     /// What it means ([`ErrorClass`]).
     pub fn class(&self) -> ErrorClass {
         match self {

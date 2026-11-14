@@ -563,8 +563,8 @@ server answers the rest, to a token their server made for this identity's connec
   `modified` and keeps its version, so a share given again brings the file back live at the
   version it had (**[verified]**). The client tells it from a delete by its zero version
   (`RemoteHeader::is_unshared`, `ChangeRef::is_unshared`): the file leaves the member's
-  devices, but isn't gone. `FakePeer` (`hbsync-remote`) models this member's view, and the
-  contract's read-only subset (`SHARED_SCENARIOS`) checks it. Refusals: 401 the token (unknown,
+  devices, but isn't gone. `FakeRemote::member` (`hbsync-remote`) models this member's view,
+  and the contract's read-only subset (`Bench::shared`) checks it. Refusals: 401 the token (unknown,
   the connection gone, their keys invalid), 403 a file not (or no longer) shared, 404 none
   there. A share-key answer not sealed yet or not reviewed waits (`RemoteError::Later`, asked
   again in 15 minutes); reads never write: every write refuses before a request.

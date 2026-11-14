@@ -1,5 +1,5 @@
 use hbsync_fileio::{HashAlgorithm, hash_bytes};
-use hbsync_remote::fake::{FakePeer, FakeRemote, FakeServer, ServerConfig};
+use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 use std::time::Duration;
 
 use hbsync_remote::contract::{Bench, file, folder, upload};
@@ -33,7 +33,7 @@ fn the_contract_holds() -> R {
 #[test]
 fn the_shared_contract_holds() -> R {
     let sharer = remote();
-    let member = FakePeer::new(sharer.server_handle());
+    let member = FakeRemote::member(sharer.server_handle());
     let bench = Bench::shared(&sharer, &member, &sharer, "contract", Duration::ZERO)?;
     let failed = bench.run_all();
     assert!(failed.is_empty(), "{failed:#?}");
