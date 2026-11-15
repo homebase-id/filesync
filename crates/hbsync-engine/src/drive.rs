@@ -580,7 +580,14 @@ impl Drive {
         if row.name == name {
             return Ok(true);
         }
-        let meta = mirror::meta_at(&row, row.parent, &name, false);
+        self.write_at(&row, row.parent, &name)
+    }
+
+    /// Writes the drive's folder `row` live in `parent` under `name`: a metadata update at the
+    /// version the mirror has. Whether it was written: one changed meanwhile (renamed, moved,
+    /// removed or deleted for good elsewhere) is read, and left as it is.
+    fn write_at(&self, row: &MirrorRow, parent: NodeId, name: &str) -> Result<bool, EngineError> {
+        let meta = mirror::meta_at(row, parent, name, false);
         match self.remote().update(&row.target(), &meta, None) {
             Ok(written) => self.record_written(Some(row.version), &meta, written)?,
             Err(RemoteError::VersionMismatch | RemoteError::NotFound | RemoteError::Deleted) => {
@@ -594,8 +601,11 @@ impl Drive {
 
     /// Makes sure the drive has the folder `node`, just pulled: kept if it is there, back from
     /// Recently deleted (with what was deleted with it), else made in `parent` under the name
-    /// `name` gives (whichever device gets there first). Fails unless it is live at the end.
-    /// Whether this device made it.
+    /// `name` gives (whichever device gets there first). One still in Recently deleted whose
+    /// folders there are in a cycle (each waiting for the other to come back) comes back in
+    /// `parent`, under that name, and then what was deleted with it: a removed node's id stays
+    /// taken (`hbsync_remote::contract`, which Homebase passes), so it can't be made anew.
+    /// Fails unless it is live at the end. Whether this device made it.
     fn ensure_folder(
         &self,
         node: NodeId,
@@ -605,13 +615,46 @@ impl Drive {
         if self.is_live(node)? {
             return Ok(false);
         }
+        self.restore(&[node])?;
+        if self.is_live(node)? {
+            return Ok(false);
+        }
+        let name = name()?;
+        // Read before it comes back: its row and what was deleted with it, where its folders
+        // in Recently deleted loop.
+        let looped = self.account().read(|s| {
+            let Some(top) = s.removed_by_node(node)? else {
+                return Ok(None);
+            };
+            let up = crate::walk::up(top.row.parent, |at| {
+                Ok::<_, StateError>(s.removed_by_node(at)?.map(|f| ((), f.row.parent)))
+            })?;
+            if !matches!(up.end, crate::walk::End::Cycle) {
+                return Ok(None);
+            }
+            let along = deleted::group(s, top.clone())?;
+            Ok(Some((top, along)))
+        })?;
         let mut made = false;
-        if self.restore(&[node])? == 0 {
+        if let Some((top, along)) = looped {
+            made = self.write_at(&top.row, parent, &name)?;
+            let along: Vec<NodeId> = along
+                .iter()
+                .map(|r| r.row.node)
+                .filter(|&n| n != node)
+                .collect();
+            if made && !along.is_empty() {
+                self.restore_read(&along)?;
+            }
+        }
+        // Not in Recently deleted (deleted for good, maybe without a trace in the feed: then
+        // the write above found it gone), or never made.
+        if !made && !self.is_live(node)? {
             let meta = NodeMeta {
                 node,
                 parent,
                 kind: NodeKind::Folder,
-                content: NodeContent::folder(&name()?),
+                content: NodeContent::folder(&name),
                 removed: false,
             };
             match self.remote().create(&meta, None) {

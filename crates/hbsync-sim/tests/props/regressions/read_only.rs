@@ -174,3 +174,33 @@ fn an_item_ignored_in_a_read_only_folder_stays_on_the_drive() {
     assert_eq!(sim.local_paths(1), ["a", "b", "b/c.txt", "d"]);
     assert!(sim.moved_out(1).is_empty());
 }
+
+/// Folder `d` holding `a`: client 1 ignores `d` by its rules, client 0 from once it synced it
+/// (it leaves the drive, §10, and client 1 restores it), and client 2 is read-only. Another app
+/// moves `d` into `a`: a cycle on the drive, through a file. No client that writes syncs any
+/// of it, and the read-only one only follows the drive (§10, §13): the cycle stays as it is,
+/// and everything else converges. (Seed `b47c7eff`.)
+#[test]
+fn a_cycle_no_writing_client_syncs_stays() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let mut sim = Sim::new(3).with_read_only(2);
+    let parent = top(&sim, 0);
+    sim.run(&[act(0, CreateFolder { parent, name: 5 })]);
+    let d = sim.item(0, "d").expect("d");
+    let parent = sim.pick(0, d, true).expect("d's pick");
+    sim.run(&[act(0, CreateFile { parent, name: 0 })]);
+    settle(&mut sim);
+    let a = sim.item(0, "d/a").expect("d/a");
+    sim.run(&[act(0, ToggleIgnore)]);
+    settle(&mut sim);
+    assert!(sim.is_removed(d), "{:?}", sim.server_paths());
+    sim.run(&[act(1, Restore { node: 0 })]);
+    settle(&mut sim);
+    assert_eq!(sim.server_paths(), ["d", "d/a"]);
+    let (pick, file) = sim.file_move_picks(d, a).expect("on the drive");
+    sim.run(&[act(1, IntoFile { pick, file })]);
+    assert!(sim.server_paths().is_empty(), "{:?}", sim.server_paths());
+    settle(&mut sim);
+    assert!(sim.server_paths().is_empty(), "{:?}", sim.server_paths());
+}

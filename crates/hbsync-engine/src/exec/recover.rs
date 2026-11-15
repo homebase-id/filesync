@@ -11,8 +11,9 @@ use crate::adopt;
 /// copies half made ([`recover_forks`]), parked items ([`unpark`]), temporary files no
 /// download can use ([`sweep_tmp`]), downloads and folders placed but not recorded
 /// ([`recover_placements`]). In that order: a completed fork drops its parking record, and a
-/// placement is looked for where every item has its own name again.
-pub fn recover(db: &mut StateDb, folder: &FolderCtx) -> Result<(), StateError> {
+/// placement is looked for where every item has its own name again. Returns what the
+/// placements' old versions aside left to rescan or tell ([`recover_placements`]).
+pub fn recover(db: &mut StateDb, folder: &FolderCtx) -> Result<AsideOutcome, StateError> {
     recover_forks(db, &folder.root)?;
     unpark(db, folder)?;
     sweep_tmp(db, &folder.root)?;
@@ -29,14 +30,16 @@ pub fn recover(db: &mut StateDb, folder: &FolderCtx) -> Result<(), StateError> {
 /// folder doesn't know (its state DB lost or replaced since), or one to go back whose place it
 /// doesn't, is left aside, and told ([`AsideOutcome::unknown`], §8a). Run at the start of a
 /// sync, before the scan's records are read (the scan keeps an item's rows while it is aside).
+/// A file whose node has a placement record (a download's old version whose commit a crash
+/// took) is decided where that record's recovery settles it, after the scan
+/// ([`recover_placements`]); with the record dropped or kept, at the next sync.
 pub fn recover_aside(db: &mut StateDb, folder: &FolderCtx) -> Result<AsideOutcome, StateError> {
     let hooks = Hooks::default();
     let disk = Disk::new(folder, &hooks);
     let mut dirs = Vec::new();
     let mut unknown = Vec::new();
-    let left = |aside: &Path| {
-        layout::aside_shown(&aside.file_name().unwrap_or_default().to_string_lossy())
-    };
+    let placing: HashSet<NodeId> =
+        db.read(|s| Ok(s.all_placing()?.iter().map(|p| p.base.node).collect()))?;
     for (aside, parsed) in layout::aside_entries(&folder.root) {
         let Some(parsed) = parsed else {
             tracing::debug!("{} is left aside: no delete made it", aside.display());
@@ -44,6 +47,11 @@ pub fn recover_aside(db: &mut StateDb, folder: &FolderCtx) -> Result<AsideOutcom
             continue;
         };
         let node = parsed.node();
+        // Decided by its placement's recovery, after the scan: decided now, against a row not
+        // read since, its row and base would go with it, and the placed file read as new.
+        if matches!(parsed, layout::AsideEntry::File(..)) && placing.contains(&node) {
+            continue;
+        }
         let Some(row) = db.read(|s| s.local_by_node(node))? else {
             // Its row let go (an item came at its place meanwhile): judged by its base alone.
             match recover_by_base(db, &disk, folder, &aside, parsed)? {
@@ -173,7 +181,8 @@ enum ByBase {
     Unknown,
 }
 
-/// What [`recover_aside`] did.
+/// What [`recover_aside`] did, or [`recover_placements`] with the old versions aside it was
+/// left.
 #[derive(Debug, Default)]
 pub struct AsideOutcome {
     /// The folders to rescan: what went back is there.
@@ -182,6 +191,11 @@ pub struct AsideOutcome {
     /// under (sync semantics §8a: told, never deleted), as sorted paths in the folder
     /// (`.hbsync/aside/<name>`).
     pub unknown: Vec<String>,
+}
+
+/// An entry of the aside folder as it is told ([`AsideOutcome::unknown`]).
+fn left(aside: &Path) -> String {
+    layout::aside_shown(&aside.file_name().unwrap_or_default().to_string_lossy())
 }
 
 /// What became of a file a run left aside ([`discard_old`]).
@@ -307,42 +321,68 @@ pub(super) fn recover_forks(db: &mut StateDb, root: &Path) -> Result<(), StateEr
 /// as the scan read it: settled when it is the item; dropped when nothing is there, or another
 /// node is (the next batch writes its own); kept when it can't be told yet (its file not
 /// hashed, its folder unreadable), for a later recovery, for [`UNHASHED_WAIT`] at most from
-/// when it was first found so.
-pub fn recover_placements(db: &mut StateDb, folder: &FolderCtx) -> Result<(), StateError> {
+/// when it was first found so. A settled file's old version aside (a download from another
+/// folder) is decided then, as the commit would have: returns the folders to rescan and what
+/// is left aside to tell.
+pub fn recover_placements(
+    db: &mut StateDb,
+    folder: &FolderCtx,
+) -> Result<AsideOutcome, StateError> {
     let (root, algorithm) = (folder.root.as_path(), folder.algorithm);
+    let aside = layout::aside_dir(root);
     // Each record with the scan's row at its target: the node's own (or a new one), or another
-    // node's.
+    // node's; the node's row elsewhere, and the bytes its old version would be aside under (its
+    // row's, or its base's where the row let go). A row kept only for that old version (the
+    // scan keeps it while that is there) is no other place of it: the new one is in place.
     let found = db.read(|s| {
         let mut found = Vec::new();
         for p in s.all_placing()? {
             let node = p.base.node;
+            let kept = s.local_by_node(node)?.filter(|r| r.path != p.target);
+            let kept_hash = kept
+                .as_ref()
+                .and_then(|r| r.hash.filter(|_| r.kind == NodeKind::File));
             let scanned = match s.get_local(&p.target)? {
                 None => Scanned::None,
-                Some(row) => {
-                    let new = s.get_base(row.node)?.is_none() && s.get_mirror(row.node)?.is_none();
-                    if row.node == node || (new && s.local_by_node(node)?.is_none()) {
-                        Scanned::Ours(row)
-                    } else {
-                        Scanned::Other
-                    }
+                Some(row) if row.node == node => Scanned::Ours(row),
+                Some(row)
+                    if s.get_base(row.node)?.is_some() || s.get_mirror(row.node)?.is_some() =>
+                {
+                    Scanned::Other
                 }
+                // A new item: the node's, unless it is elsewhere.
+                Some(row) => match (&kept, kept_hash) {
+                    (None, _) => Scanned::Ours(row),
+                    (Some(_), None) => Scanned::Other,
+                    (Some(_), Some(hash)) => {
+                        let entry = aside.join(layout::AsideEntry::File(node, hash).name());
+                        match fs::symlink_metadata(entry) {
+                            Ok(_) => Scanned::Ours(row),
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Scanned::Other,
+                            // The aside folder can't be read now: kept, judged again later
+                            // (dropped after UNHASHED_WAIT).
+                            Err(_) => Scanned::Unsure,
+                        }
+                    }
+                },
             };
-            found.push((p, scanned));
+            found.push((p, scanned, kept.map(|r| r.path)));
         }
         Ok(found)
     })?;
     if found.is_empty() {
-        return Ok(());
+        return Ok(AsideOutcome::default());
     }
     // Outside the write: a file of another client's hash algorithm is hashed.
     let now = hbsync_types::unix_now_ms();
-    let judged: Vec<(Placing, Judged)> = found
+    let judged: Vec<_> = found
         .into_iter()
-        .map(|(p, scanned)| {
+        .map(|(p, scanned, kept)| {
             let judged = match (look(root, &p.target), scanned) {
                 (OnDisk::Absent, _) => Judged::Drop,
                 (OnDisk::Unreadable, _) => Judged::Keep,
                 (OnDisk::There(_), Scanned::Other) => Judged::Drop,
+                (OnDisk::There(_), Scanned::Unsure) => Judged::Keep,
                 (OnDisk::There(_), Scanned::Ours(row)) => judge(root, &p, Some(row)),
                 // On disk, not scanned yet: read as the scan would.
                 (OnDisk::There(meta), Scanned::None) => {
@@ -350,14 +390,60 @@ pub fn recover_placements(db: &mut StateDb, folder: &FolderCtx) -> Result<(), St
                     judge(root, &p, Some(row))
                 }
             };
-            (p, judged)
+            (p, judged, kept)
         })
         .collect();
-    db.write(|s| {
-        judged
-            .into_iter()
-            .try_for_each(|(p, judged)| apply(s.folder(), &p, judged, folder, now).map(drop))
-    })
+    let applied = db.write(|s| {
+        let mut applied = Vec::new();
+        for (p, judged, kept) in judged {
+            let settled = match apply(s.folder(), &p, judged, folder, now)? {
+                Applied::Settled(_) => true,
+                Applied::Dropped => false,
+                Applied::Kept => continue,
+            };
+            applied.push((p.base.node, settled, kept));
+        }
+        Ok(applied)
+    })?;
+    // The old version aside [`recover_aside`] left to the record: settled, what the lost commit
+    // did too (it goes, or comes back beside the new one, written to: §7 Old versions);
+    // dropped, decided at the next sync as any entry is. The folder the node's row was kept in
+    // read again (one the record moved it out of, maybe dropped after: a node gone on the drive).
+    let mut out = AsideOutcome::default();
+    let mut settled = Vec::new();
+    for (node, done, kept) in applied {
+        out.rescan.extend(kept.and_then(|k| k.parent()));
+        settled.extend(done.then_some(node));
+    }
+    if !settled.is_empty() {
+        let hooks = Hooks::default();
+        let disk = Disk::new(folder, &hooks);
+        let targets: HashMap<NodeId, RelPath> = db.read(|s| {
+            let mut targets = HashMap::new();
+            for node in settled {
+                if let Some(row) = s.local_by_node(node)? {
+                    targets.insert(node, row.path);
+                }
+            }
+            Ok(targets)
+        })?;
+        for (entry, parsed) in layout::aside_entries(root) {
+            let Some(layout::AsideEntry::File(node, hash)) = parsed else {
+                continue;
+            };
+            let Some(place) = targets.get(&node) else {
+                continue;
+            };
+            match discard_old(db, &disk, folder, &entry, hash, Some(place))? {
+                Discarded::Stranded | Discarded::Back(None) => out.unknown.push(left(&entry)),
+                gone => out.rescan.extend(gone.into_inner()),
+            }
+        }
+    }
+    out.rescan.sort();
+    out.rescan.dedup();
+    out.unknown.sort();
+    Ok(out)
 }
 
 /// The scan's row at a record's target.
@@ -367,6 +453,9 @@ enum Scanned {
     Ours(LocalRow),
     /// Another node's.
     Other,
+    /// A new item's, the node's row elsewhere maybe only for its old version aside, which
+    /// can't be read now.
+    Unsure,
 }
 
 /// How long a record whose file is there but can't be hashed yet waits, keeping its node.
@@ -411,6 +500,22 @@ pub(super) fn judge(root: &Path, p: &Placing, row: Option<LocalRow>) -> Judged {
     }
 }
 
+/// Judges record `p` by its target on disk alone, read as the scan would read it.
+pub(super) fn judge_on_disk(
+    root: &Path,
+    p: &Placing,
+    algorithm: hbsync_fileio::HashAlgorithm,
+) -> Judged {
+    match look(root, &p.target) {
+        OnDisk::Absent => Judged::Drop,
+        OnDisk::Unreadable => Judged::Keep,
+        OnDisk::There(meta) => {
+            let row = read_row(root, &p.target, p.base.node, &meta, algorithm);
+            judge(root, p, Some(row))
+        }
+    }
+}
+
 /// Does what recovery judged of record `p` (as of `now`); settled, the item's row is taken
 /// over (a new one) or written (one read off the disk, not in the DB yet), and no other: where
 /// another node's row is at the target, the record stays instead. One kept waits from now,
@@ -433,6 +538,9 @@ pub(super) fn apply(
         Judged::Settle(row) => {
             let at_target = s.get_local(&row.path)?;
             if row.node != node {
+                // The node's row kept for its old version aside goes: the new one is here.
+                s.delete_local(node)?;
+                s.delete_parked(node)?;
                 adopt::take_over(s, row.node, node)?;
             } else if at_target.as_ref() != Some(&row) {
                 // Read off the disk. Another node's row there is never overwritten: the record

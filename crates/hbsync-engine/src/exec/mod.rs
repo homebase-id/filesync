@@ -838,7 +838,7 @@ pub(crate) use outcome::ExecReport;
 use outcome::{Outcome, Step, io_outcome, remote_outcome, rescan};
 pub use outcome::{Skip, Stopped};
 use park::{numbered_place, occupant, release_place, release_place_for, restore_parked};
-use recover::{Applied, Judged, OnDisk, apply, judge, look, read_row};
+use recover::{Applied, apply, judge_on_disk};
 pub use recover::{
     AsideOutcome, UNHASHED_WAIT, record_dirs, recover, recover_aside, recover_placements,
 };

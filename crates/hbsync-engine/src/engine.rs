@@ -16,7 +16,8 @@ use crate::adopt::adopt;
 use crate::drive::Drive;
 use crate::error::EngineError;
 use crate::exec::{
-    ExecConfig, Executor, Stopped, record_dirs, recover, recover_aside, recover_placements,
+    AsideOutcome, ExecConfig, Executor, Stopped, record_dirs, recover, recover_aside,
+    recover_placements,
 };
 use crate::feed::FeedReport;
 use crate::folder::FolderCtx;
@@ -620,7 +621,8 @@ impl Engine {
             )?;
         }
         self.rescan_records()?;
-        recover(&mut self.db, &self.cfg.folder)?;
+        let placed = recover(&mut self.db, &self.cfg.folder)?;
+        self.after_placements(placed, report)?;
         let folder = Some(self.db.folder());
         report.feed = match pulled {
             Pull::Done(feed) => feed,
@@ -860,6 +862,25 @@ impl Engine {
         Ok(())
     }
 
+    /// What the placements' recovery did with their old versions aside: the folders it left
+    /// to read again are, and what stays aside is told.
+    fn after_placements(
+        &mut self,
+        placed: AsideOutcome,
+        report: &mut SyncReport,
+    ) -> Result<(), EngineError> {
+        if !placed.rescan.is_empty() {
+            let root = &self.cfg.folder.root;
+            rescan_dirs(&mut self.db, root, &placed.rescan, &self.scan_opts)?;
+        }
+        if !placed.unknown.is_empty() {
+            report.left_aside.extend(placed.unknown);
+            report.left_aside.sort();
+            report.left_aside.dedup();
+        }
+        Ok(())
+    }
+
     /// Rescans the folders that downloads and folders being placed go into (their records), and
     /// those their nodes' items are in now (an old version a download replaced from another
     /// folder went aside), so recovery judges what is on disk: an item put in place but
@@ -990,7 +1011,8 @@ impl Engine {
         // What an earlier round left placed (its operation failed after), as at the start of a
         // sync: no round places over a record it didn't write. One query when there is none.
         self.rescan_records()?;
-        recover_placements(&mut self.db, &self.cfg.folder)?;
+        let placed = recover_placements(&mut self.db, &self.cfg.folder)?;
+        self.after_placements(placed, report)?;
         let plan = self.plan(&dirty, opts)?;
         let plan = self.read_waiting(plan, &dirty, opts)?;
         if self.held.take_reached() {

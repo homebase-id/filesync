@@ -358,7 +358,7 @@ fn join(folder: &str, name: &str) -> String {
 /// `top` and what was deleted with it below it, level by level: the removed items in it
 /// deleted with their folder ([`deleted_with`]). What was deleted from it before stays out, and
 /// so do the live nodes its delete took along ([`crate::along`]): what restoring it restores.
-pub(super) fn group(s: &ReadTx<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateError> {
+pub(crate) fn group(s: &ReadTx<'_>, top: RemovedRow) -> Result<Vec<RemovedRow>, StateError> {
     inside(
         top,
         |r| (r.row.node, r.row.kind == NodeKind::Folder),

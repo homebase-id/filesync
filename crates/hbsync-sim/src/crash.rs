@@ -260,11 +260,32 @@ impl Sim {
     /// settled as the commit would have (the same rule, against the same version, the item
     /// read with the tags it was put in place with).
     pub(crate) fn recover(&mut self, c: usize) {
-        // What a crash left aside is decided by what it is (the executor's recovery).
-        let aside: Vec<NodeId> = self.clients[c].aside.keys().copied().collect();
+        // What a crash left aside is decided by what it is (the executor's recovery); a file of
+        // a node with a placement record where that record settles, as the commit would have
+        // (the engine's `recover_placements`): its record dropped or kept, at the next sync.
+        let client = &self.clients[c];
+        let (waiting, aside): (Vec<NodeId>, Vec<NodeId>) =
+            client.aside.keys().copied().partition(|node| {
+                let file = client.aside[node]
+                    .get(*node)
+                    .is_some_and(|i| i.content.is_some());
+                file && client.placing.contains_key(node)
+            });
         for node in aside {
             self.recover_aside(c, node);
         }
+        let settled = self.recover_placings(c);
+        for node in waiting {
+            if settled.contains(&node) {
+                self.recover_aside(c, node);
+            }
+        }
+    }
+
+    /// [`Sim::recover`]'s placement records, each judged by what is at its target. The nodes
+    /// whose record settled.
+    fn recover_placings(&mut self, c: usize) -> HashSet<NodeId> {
+        let mut settled = HashSet::new();
         self.clients[c].unhashed.clear();
         for (node, p) in std::mem::take(&mut self.clients[c].placing) {
             let there = self.record_there(c, node, &p);
@@ -284,7 +305,9 @@ impl Sim {
                 format!("recover c{c} {node:?} there={there} {local:?}")
             });
             if there {
-                if !self.settle_record(c, node, &p, self.gone_for(c, node)) {
+                if self.settle_record(c, node, &p, self.gone_for(c, node)) {
+                    settled.insert(node);
+                } else {
                     // Its node gone, its item not one the drive takes: it waits once (as a file
                     // not hashed yet), then is dropped.
                     if !p.waited {
@@ -307,6 +330,7 @@ impl Sim {
                 self.user_removed(c, node);
             }
         }
+        settled
     }
 
     /// The record `p` of the node's own item on client `c` dropped (the item changed since): the

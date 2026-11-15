@@ -5154,3 +5154,120 @@ fn a_parked_item_that_cannot_move_out_is_not_left_hidden() -> R {
     assert!(h.at("New (conflict 1)")?.is_dir());
     Ok(())
 }
+
+/// A download from p1 to p2 whose commit a crash took: f's row still at p1 (kept for its old
+/// version aside), the new version at p2 as the scan reads it (a new item), the record. Returns
+/// f's node and the aside entry's path.
+fn a_crashed_download_from_another_folder(
+    h: &mut Harness,
+) -> Result<(NodeId, PathBuf), Box<dyn std::error::Error>> {
+    let (p1, p2, node) = (NodeId::new(), NodeId::new(), NodeId::new());
+    h.local_folder("p1", p1)?;
+    h.local_folder("p2", p2)?;
+    h.local_file("p1/f", node, b"A")?;
+    h.local_file("p2/f", NodeId::new(), b"B")?;
+    let (a, b) = (h.content(b"A"), h.content(b"B"));
+    let before = some_version();
+    h.db.write(|s| {
+        s.folder().put_base(&BaseRow {
+            local_hash: Some(a.hash),
+            ..BaseRow::new(node, NodeState::file(p1, "f", a), before)
+        })
+    })?;
+    let aside = hbsync_local::layout::aside_dir(&h.folder.root);
+    fs::create_dir_all(&aside)?;
+    let entry = aside.join(hbsync_local::layout::AsideEntry::File(node, a.hash).name());
+    fs::rename(h.at("p1/f")?, &entry)?;
+    let record = Placing {
+        base: BaseRow::new(node, NodeState::file(p2, "f", b), some_version()),
+        target: RelPath::new("p2/f")?,
+        placed_tags: None,
+        prior_tags: None,
+        base_at: PlannedBase::At(before.version),
+        waiting_since_ms: None,
+    };
+    h.db.write(|s| s.folder().put_placing(&record))?;
+    Ok((node, entry))
+}
+
+/// The old version a crashed download from another folder left aside waits for the placement's
+/// recovery, which takes the new version for its node, its base kept, and then unlinks it as
+/// the commit would have, the folder the node's row left read again.
+#[test]
+fn an_old_version_from_another_folder_goes_with_its_placement() -> R {
+    let mut h = Harness::new()?;
+    let (node, entry) = a_crashed_download_from_another_folder(&mut h)?;
+    crate::exec::recover_aside(&mut h.db, &h.folder)?;
+    assert!(entry.exists(), "waits");
+    assert!(h.base(node)?.is_some());
+    let outcome = recover_placements(&mut h.db, &h.folder)?;
+    let row = h.db.read(|s| s.local_by_node(node))?.ok_or("no row")?;
+    assert_eq!(row.path.to_string(), "p2/f");
+    assert_eq!(h.records()?, []);
+    let base = h.base(node)?.ok_or("no base")?;
+    assert_eq!(base.state.content, Some(h.content(b"B")));
+    assert!(!entry.exists(), "gone with the placement");
+    assert_eq!(outcome.rescan, [RelPath::new("p1")?]);
+    assert!(outcome.unknown.is_empty());
+    Ok(())
+}
+
+/// The same, the new version gone from its place since (moved or deleted before the restart):
+/// the record goes, and the old version aside is decided at the next sync, as any entry is
+/// (the synced version: unlinked, its row and base with it).
+#[test]
+fn an_old_version_whose_placement_went_is_decided_at_the_next_sync() -> R {
+    let mut h = Harness::new()?;
+    let (node, entry) = a_crashed_download_from_another_folder(&mut h)?;
+    fs::remove_file(h.at("p2/f")?)?;
+    crate::exec::recover_aside(&mut h.db, &h.folder)?;
+    recover_placements(&mut h.db, &h.folder)?;
+    assert_eq!(h.records()?, []);
+    assert!(entry.exists(), "the next sync's");
+    assert!(h.base(node)?.is_some());
+    crate::exec::recover_aside(&mut h.db, &h.folder)?;
+    assert!(!entry.exists());
+    assert!(h.base(node)?.is_none());
+    assert!(h.db.read(|s| s.local_by_node(node))?.is_none());
+    Ok(())
+}
+
+/// The same, the old version written to aside: it comes back beside the new one, a new item.
+#[test]
+fn an_old_version_written_to_aside_comes_back_beside_its_placement() -> R {
+    let mut h = Harness::new()?;
+    let (node, entry) = a_crashed_download_from_another_folder(&mut h)?;
+    fs::write(&entry, b"A, written aside")?;
+    crate::exec::recover_aside(&mut h.db, &h.folder)?;
+    assert!(entry.exists(), "waits");
+    recover_placements(&mut h.db, &h.folder)?;
+    let row = h.db.read(|s| s.local_by_node(node))?.ok_or("no row")?;
+    assert_eq!(row.path.to_string(), "p2/f");
+    assert!(!entry.exists());
+    assert_eq!(fs::read(h.at("p2/f (conflict 1)")?)?, b"A, written aside");
+    assert_eq!(fs::read(h.at("p2/f")?)?, b"B");
+    Ok(())
+}
+
+/// The same, the aside folder unreadable when the placement's recovery runs: the record stays
+/// (dropped, the old version would be judged as a finished delete, its base with it).
+#[cfg(unix)]
+#[test]
+fn a_placement_stays_while_its_old_version_aside_cant_be_read() -> R {
+    use std::os::unix::fs::PermissionsExt;
+    let mut h = Harness::new()?;
+    let (node, _) = a_crashed_download_from_another_folder(&mut h)?;
+    let aside = hbsync_local::layout::aside_dir(&h.folder.root);
+    fs::set_permissions(&aside, fs::Permissions::from_mode(0o000))?;
+    let readable = fs::read_dir(&aside).is_ok();
+    let recovered = recover_placements(&mut h.db, &h.folder);
+    fs::set_permissions(&aside, fs::Permissions::from_mode(0o755))?;
+    recovered?;
+    if readable {
+        eprintln!("permissions not enforced here (root); skipped");
+        return Ok(());
+    }
+    assert_eq!(h.records()?.len(), 1, "kept");
+    assert!(h.base(node)?.is_some());
+    Ok(())
+}

@@ -893,6 +893,39 @@ fn a_role_folder_made_leaves_recently_deleted() -> R {
     Ok(())
 }
 
+/// A role folder in Recently deleted in a cycle with another folder (each in the other), then
+/// deleted for good, which the feed doesn't tell: the write that would bring it back finds it
+/// gone, and it is made anew, at the top, instead of failing every sync.
+#[test]
+fn a_role_folder_in_a_cycle_deleted_for_good_is_made_again() -> R {
+    use hbsync_remote::contract::{folder, removed};
+    let dir = tempfile::tempdir()?;
+    let (drive, remote) = drive(dir.path())?;
+    let top = Role::Documents.node();
+    let q = folder("q", NodeId::ROOT);
+    let q_made = remote.create(&q, None)?;
+    let docs = NodeMeta {
+        node: top,
+        parent: q.node,
+        kind: NodeKind::Folder,
+        content: NodeContent::folder(Role::Documents.name()),
+        removed: false,
+    };
+    let docs_made = remote.create(&docs, None)?;
+    // q into Documents, as another device's move that met this one; then both deleted.
+    let q_in_docs = NodeMeta { parent: top, ..q };
+    remote.update(&q_made.target, &removed(&q_in_docs), None)?;
+    let gone = remote.update(&docs_made.target, &removed(&docs), None)?;
+    drive.pull(None)?;
+    remote.delete(&doomed(&[gone.at()]))?.single()?;
+    drive.announcing_from(drive.connection());
+    drive.ensure_role(Role::Documents)?;
+    let mut db = StateDb::open_account(&dir.path().join("state.db"))?;
+    let live = db.read(|s| s.get_mirror(top))?.ok_or("not live")?;
+    assert_eq!(live.parent, NodeId::ROOT);
+    Ok(())
+}
+
 /// A doubt that comes while a read of the feed runs isn't cleared by that read: the account
 /// stays behind until a read that started after it.
 #[test]
