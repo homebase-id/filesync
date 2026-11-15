@@ -5191,25 +5191,41 @@ fn a_crashed_download_from_another_folder(
 }
 
 /// The old version a crashed download from another folder left aside waits for the placement's
-/// recovery, which takes the new version for its node, its base kept; then the second pass, in
-/// the same sync, unlinks it.
+/// recovery, which takes the new version for its node, its base kept, and then unlinks it as
+/// the commit would have, the folder the node's row left read again.
 #[test]
-fn an_old_version_from_another_folder_waits_for_its_placement() -> R {
+fn an_old_version_from_another_folder_goes_with_its_placement() -> R {
     let mut h = Harness::new()?;
     let (node, entry) = a_crashed_download_from_another_folder(&mut h)?;
-    let outcome = crate::exec::recover_aside(&mut h.db, &h.folder)?;
-    assert_eq!(outcome.waiting.len(), 1);
+    crate::exec::recover_aside(&mut h.db, &h.folder)?;
     assert!(entry.exists(), "waits");
     assert!(h.base(node)?.is_some());
-    recover_placements(&mut h.db, &h.folder)?;
+    let outcome = recover_placements(&mut h.db, &h.folder)?;
     let row = h.db.read(|s| s.local_by_node(node))?.ok_or("no row")?;
     assert_eq!(row.path.to_string(), "p2/f");
     assert_eq!(h.records()?, []);
     let base = h.base(node)?.ok_or("no base")?;
     assert_eq!(base.state.content, Some(h.content(b"B")));
-    let again = crate::exec::recover_waiting(&mut h.db, &h.folder, outcome.waiting)?;
-    assert!(again.waiting.is_empty() && again.unknown.is_empty());
-    assert!(!entry.exists(), "decided in the same sync");
+    assert!(!entry.exists(), "gone with the placement");
+    assert_eq!(outcome.rescan, [RelPath::new("p1")?]);
+    assert!(outcome.unknown.is_empty());
+    Ok(())
+}
+
+/// The same, the old version written to aside: it comes back beside the new one, a new item.
+#[test]
+fn an_old_version_written_to_aside_comes_back_beside_its_placement() -> R {
+    let mut h = Harness::new()?;
+    let (node, entry) = a_crashed_download_from_another_folder(&mut h)?;
+    fs::write(&entry, b"A, written aside")?;
+    crate::exec::recover_aside(&mut h.db, &h.folder)?;
+    assert!(entry.exists(), "waits");
+    recover_placements(&mut h.db, &h.folder)?;
+    let row = h.db.read(|s| s.local_by_node(node))?.ok_or("no row")?;
+    assert_eq!(row.path.to_string(), "p2/f");
+    assert!(!entry.exists());
+    assert_eq!(fs::read(h.at("p2/f (conflict 1)")?)?, b"A, written aside");
+    assert_eq!(fs::read(h.at("p2/f")?)?, b"B");
     Ok(())
 }
 
