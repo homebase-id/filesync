@@ -315,7 +315,7 @@ impl<'a> Executor<'a> {
             // What a delete removes is described before its rows go.
             let gone = match activity::kind_of(&op) {
                 Some(kind) if kind.removes() => {
-                    self.db.read(|s| activity::place_of(s, op.node()))?
+                    self.db.read(|s| activity::shown_path_of(s, op.node()))?
                 }
                 _ => None,
             };
@@ -501,7 +501,7 @@ impl<'a> Executor<'a> {
                         (Some(row.path.as_str().to_owned()), row.fingerprint.size)
                     }
                     Some(row) => (Some(row.path.as_str().to_owned()), 0),
-                    None => (activity::path_of(s, node)?, 0),
+                    None => (activity::synced_path_of(s, node)?, 0),
                 })
             })?,
         };
@@ -762,31 +762,35 @@ impl<'a> Executor<'a> {
         occupant(self.db, self.folder.case_insensitive, target)
     }
 
-    /// Frees `target` if a node that the plan is about to move away holds it: that node is
-    /// parked under a temporary name (recorded in the DB). Returns `false` if it stays taken.
-    /// The mover itself may hold it under another case (a case-only rename).
+    /// Whether `target` is free for `mover` after [`Executor::park_occupant`].
     fn free_target(&mut self, target: &RelPath, mover: Option<NodeId>) -> Result<bool, StateError> {
-        Ok(self.park_occupant(target, mover)? != Freed::Taken)
+        Ok(!matches!(self.park_occupant(target, mover)?, Freed::Taken))
     }
 
-    /// [`Executor::free_target`] for the item of `row`, which moves there: its row once the
-    /// name is free, or `None` if it stays taken. A folder that held the name, parked, took
-    /// what is in it along: an item that leaves it for its name is read again.
+    /// [`Executor::free_target`] for the item of `row`, which moves there. A folder that held
+    /// the name, parked, took what is in it along: the row of an item that leaves it for its
+    /// name is read again (`false` too where it is gone).
     fn free_target_for(
         &mut self,
         target: &RelPath,
-        row: LocalRow,
-    ) -> Result<Option<LocalRow>, StateError> {
+        row: &mut LocalRow,
+    ) -> Result<bool, StateError> {
         match self.park_occupant(target, Some(row.node))? {
-            Freed::Taken => Ok(None),
+            Freed::Taken => Ok(false),
             Freed::Parked(from) if row.path.starts_with(&from) => {
-                self.db.read(|s| s.local_by_node(row.node))
+                let Some(now) = self.db.read(|s| s.local_by_node(row.node))? else {
+                    return Ok(false);
+                };
+                *row = now;
+                Ok(true)
             }
-            Freed::Free | Freed::Parked(_) => Ok(Some(row)),
+            Freed::Free | Freed::Parked(_) => Ok(true),
         }
     }
 
-    /// See [`Executor::free_target`].
+    /// Frees `target` if a node that the plan is about to move away holds it: that node is
+    /// parked under a temporary name (recorded in the DB). The mover itself may hold it under
+    /// another case (a case-only rename).
     fn park_occupant(
         &mut self,
         target: &RelPath,
@@ -831,8 +835,7 @@ impl<'a> Executor<'a> {
     }
 }
 
-/// What became of a name an item is to take ([`Executor::free_target`]).
-#[derive(Debug, PartialEq, Eq)]
+/// What became of a name an item is to take ([`Executor::park_occupant`]).
 enum Freed {
     /// Something that stays holds it.
     Taken,

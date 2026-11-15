@@ -76,16 +76,19 @@ pub(crate) fn path_of(s: &ReadTx<'_>, node: NodeId) -> Result<Option<String>, St
 }
 
 /// [`path_of`], an item parked for the one that takes its name at the place it had
-/// ([`crate::view::place`]): people never gave it its temporary name.
-pub(crate) fn place_of(s: &ReadTx<'_>, node: NodeId) -> Result<Option<String>, StateError> {
+/// ([`crate::view::parked_place`]): people never gave it its temporary name.
+pub(crate) fn shown_path_of(s: &ReadTx<'_>, node: NodeId) -> Result<Option<String>, StateError> {
     match s.local_by_node(node)? {
-        Some(row) => Ok(Some(crate::view::place(s, &row)?.as_str().to_owned())),
+        Some(row) => {
+            let place = crate::view::parked_place(s, &row)?.unwrap_or(row.path);
+            Ok(Some(place.as_str().to_owned()))
+        }
         None => synced_path_of(s, node),
     }
 }
 
-/// The path `node` had when last synced.
-fn synced_path_of(s: &ReadTx<'_>, node: NodeId) -> Result<Option<String>, StateError> {
+/// The path `node` had when last synced: where one with no local row was.
+pub(crate) fn synced_path_of(s: &ReadTx<'_>, node: NodeId) -> Result<Option<String>, StateError> {
     joined_up(node, |at| {
         Ok(s.get_base(at)?
             .map(|b| (b.local_name.unwrap_or(b.state.name), b.state.parent)))

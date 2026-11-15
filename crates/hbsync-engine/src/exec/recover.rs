@@ -141,7 +141,7 @@ fn recover_by_base(
         if base.is_none() && s.get_mirror(node)?.is_none() && s.removed_by_node(node)?.is_none() {
             return Ok(None);
         }
-        let place = crate::activity::path_of(s, node)?.and_then(|p| RelPath::new(&p).ok());
+        let place = crate::activity::synced_path_of(s, node)?.and_then(|p| RelPath::new(&p).ok());
         Ok(Some((base, place)))
     })?;
     let Some((base, place)) = known else {

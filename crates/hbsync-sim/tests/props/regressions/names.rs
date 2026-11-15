@@ -1503,8 +1503,8 @@ fn regression_a_folder_moved_out_of_view_after_its_file_moved_out_stays_out() {
 /// A file takes the name of the folder it was in, the folder deleted, and is edited, before
 /// the other client hears of any of it: there the folder, whose delete is still to run, is
 /// parked for the file's new version and deleted once the old one is out of it, in one plan.
-/// (The executor ran its transfers with the delete that waited for them off its queue: the
-/// folder wasn't one that leaves, the name stayed taken and the delete stale, sync after sync.)
+/// (The model always did; the executor didn't, which the engine's test
+/// `an_edited_file_takes_the_name_of_the_folder_it_was_in` holds: this one keeps the two alike.)
 #[test]
 fn regression_an_edited_file_takes_the_name_of_the_folder_it_was_in() {
     use Action::*;
