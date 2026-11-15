@@ -34,6 +34,7 @@ pub fn recover_aside(db: &mut StateDb, folder: &FolderCtx) -> Result<AsideOutcom
     let disk = Disk::new(folder, &hooks);
     let mut dirs = Vec::new();
     let mut unknown = Vec::new();
+    let mut waiting = Vec::new();
     let left = |aside: &Path| {
         layout::aside_shown(&aside.file_name().unwrap_or_default().to_string_lossy())
     };
@@ -48,6 +49,7 @@ pub fn recover_aside(db: &mut StateDb, folder: &FolderCtx) -> Result<AsideOutcom
             // Its row let go (an item came at its place meanwhile): judged by its base alone.
             match recover_by_base(db, &disk, folder, &aside, parsed)? {
                 ByBase::Rescan(dir) => dirs.extend(dir),
+                ByBase::Waits(dir) => waiting.push(dir),
                 ByBase::Unknown => unknown.push(left(&aside)),
             }
             continue;
@@ -75,13 +77,15 @@ pub fn recover_aside(db: &mut StateDb, folder: &FolderCtx) -> Result<AsideOutcom
             // Replaced from another place, the new one there (a crash before its commit; the
             // scan keeps the old row while it is aside): it waits for the placement's recovery
             // after the scan, which moves the node's row there with its base, and is then the
-            // old version of a node holding the new one, as above. Decided now, the row and
-            // base gone with it, the placed file would read as new, its tags merged over what
-            // the drive removed meanwhile.
+            // old version of a node holding the new one, as above, at a second pass in the
+            // same sync ([`AsideOutcome::waiting`]). Decided now, the row and base gone with
+            // it, the placed file would read as new, its tags merged over what the drive
+            // removed meanwhile.
             if db
                 .read(|s| s.get_placing(node))?
                 .is_some_and(|p| p.target != row.path)
             {
+                waiting.push(row.path.parent().unwrap_or_default());
                 continue;
             }
         }
@@ -122,6 +126,7 @@ pub fn recover_aside(db: &mut StateDb, folder: &FolderCtx) -> Result<AsideOutcom
     Ok(AsideOutcome {
         rescan: dirs,
         unknown,
+        waiting,
     })
 }
 
@@ -168,7 +173,9 @@ fn recover_by_base(
     // A download's old version whose new one waits for its placement's recovery: decided
     // after it (as [`recover_aside`] does), the base still there to settle against.
     if db.read(|s| s.get_placing(node))?.is_some() {
-        return Ok(ByBase::Rescan(None));
+        return Ok(ByBase::Waits(
+            place.and_then(|p| p.parent()).unwrap_or_default(),
+        ));
     }
     let gone = discard_old(db, disk, folder, aside, hash, place.as_ref())?;
     match gone {
@@ -186,6 +193,8 @@ fn recover_by_base(
 enum ByBase {
     /// Decided: the folder to rescan, if any.
     Rescan(Option<RelPath>),
+    /// Waiting for its placement's recovery ([`AsideOutcome::waiting`]): its folder.
+    Waits(RelPath),
     /// Left aside, to be told: nothing this device knows places it.
     Unknown,
 }
@@ -199,6 +208,10 @@ pub struct AsideOutcome {
     /// under (sync semantics §8a: told, never deleted), as sorted paths in the folder
     /// (`.hbsync/aside/<name>`).
     pub unknown: Vec<String>,
+    /// The folders of old versions a download replaced from another place that wait for its
+    /// placement's recovery: once that ran, a second pass decides them, and these folders are
+    /// read again (the scan kept them for the old rows).
+    pub waiting: Vec<RelPath>,
 }
 
 /// What became of a file a run left aside ([`discard_old`]).
@@ -336,19 +349,24 @@ pub fn recover_placements(db: &mut StateDb, folder: &FolderCtx) -> Result<(), St
             let node = p.base.node;
             let scanned = match s.get_local(&p.target)? {
                 None => Scanned::None,
-                Some(row) => {
-                    let new = s.get_base(row.node)?.is_none() && s.get_mirror(row.node)?.is_none();
-                    let elsewhere = s.local_by_node(node)?.is_some_and(|r| {
-                        !aside
-                            .get_or_insert_with(|| aside_files(root))
-                            .contains(&(node, r.hash))
-                    });
-                    if row.node == node || (new && !elsewhere) {
-                        Scanned::Ours(row)
-                    } else {
-                        Scanned::Other
-                    }
+                Some(row) if row.node == node => Scanned::Ours(row),
+                Some(row)
+                    if s.get_base(row.node)?.is_some() || s.get_mirror(row.node)?.is_some() =>
+                {
+                    Scanned::Other
                 }
+                // A new item: the node's, unless it is elsewhere.
+                Some(row) => match s.local_by_node(node)? {
+                    None => Scanned::Ours(row),
+                    Some(r) => match aside.get_or_insert_with(|| aside_files(root)) {
+                        // The aside folder can't be read now: told later.
+                        None => Scanned::Unsure,
+                        Some(files) if r.hash.is_some_and(|h| files.contains(&(node, h))) => {
+                            Scanned::Ours(row)
+                        }
+                        Some(_) => Scanned::Other,
+                    },
+                },
             };
             found.push((p, scanned));
         }
@@ -366,6 +384,7 @@ pub fn recover_placements(db: &mut StateDb, folder: &FolderCtx) -> Result<(), St
                 (OnDisk::Absent, _) => Judged::Drop,
                 (OnDisk::Unreadable, _) => Judged::Keep,
                 (OnDisk::There(_), Scanned::Other) => Judged::Drop,
+                (OnDisk::There(_), Scanned::Unsure) => Judged::Keep,
                 (OnDisk::There(_), Scanned::Ours(row)) => judge(root, &p, Some(row)),
                 // On disk, not scanned yet: read as the scan would.
                 (OnDisk::There(meta), Scanned::None) => {
@@ -390,16 +409,24 @@ enum Scanned {
     Ours(LocalRow),
     /// Another node's.
     Other,
+    /// A new item's, the node's row elsewhere maybe only for its old version aside, which
+    /// can't be read now.
+    Unsure,
 }
 
-/// The files a run left aside in the folder at `root`, each as its node and bytes.
-fn aside_files(root: &Path) -> HashSet<(NodeId, Option<hbsync_types::ContentHash>)> {
-    layout::aside_entries(root)
-        .filter_map(|(_, entry)| match entry? {
-            layout::AsideEntry::File(node, hash) => Some((node, Some(hash))),
-            layout::AsideEntry::Folder(_) => None,
-        })
-        .collect()
+/// The files a run left aside in the folder at `root`, each as its node and bytes; `None`
+/// where that folder can't be read now.
+fn aside_files(root: &Path) -> Option<HashSet<(NodeId, hbsync_types::ContentHash)>> {
+    if let Err(e) = fs::read_dir(layout::aside_dir(root))
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        return None;
+    }
+    let files = layout::aside_entries(root).filter_map(|(_, entry)| match entry? {
+        layout::AsideEntry::File(node, hash) => Some((node, hash)),
+        layout::AsideEntry::Folder(_) => None,
+    });
+    Some(files.collect())
 }
 
 /// How long a record whose file is there but can't be hashed yet waits, keeping its node.

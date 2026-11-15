@@ -3130,6 +3130,35 @@ mod tests {
     use super::*;
     use crate::action::{Action, Event, act};
 
+    /// Desktops and a folder `q` in Recently deleted, each in the other, and another computer's
+    /// Desktop (with its file) deleted with Desktops: Desktops comes back at the top, then what
+    /// was deleted with it, as the engine's `Drive::ensure_folder` does; `q`, deleted before
+    /// it, stays.
+    #[test]
+    fn a_fixed_folder_out_of_a_cycle_comes_back_with_what_was_deleted_with_it() {
+        let mut sim = Sim::new(1);
+        let (q, pc, file) = (sim.ids.fresh(), sim.ids.fresh(), sim.ids.fresh());
+        sim.server
+            .put(NodeId::DESKTOPS, NodeState::folder(q, DESKTOPS_NAME));
+        sim.server.put(q, NodeState::folder(NodeId::DESKTOPS, "q"));
+        sim.server
+            .put(pc, NodeState::folder(NodeId::DESKTOPS, "Old PC"));
+        let blob = sim.new_blob();
+        sim.server.put(file, NodeState::file(pc, "f", blob));
+        for node in [q, NodeId::DESKTOPS, pc, file] {
+            let n = sim.server.live.remove(&node).expect("live");
+            sim.remove_on_drive(node, n, true);
+        }
+        assert!(sim.ensure_folder(NodeId::DESKTOPS, NodeId::ROOT, |_| DESKTOPS_NAME.into()));
+        let live = &sim.server.live;
+        assert_eq!(live[&NodeId::DESKTOPS].state.parent, NodeId::ROOT);
+        assert!(
+            live.contains_key(&pc) && live.contains_key(&file),
+            "deleted with it"
+        );
+        assert!(!live.contains_key(&q));
+    }
+
     /// The scope check catches a write to a node the plan saw outside its folder's part, judged
     /// on where the plan saw it before what the plan's own writes recorded since: Documents'
     /// plan saw the file at the top of the drive.

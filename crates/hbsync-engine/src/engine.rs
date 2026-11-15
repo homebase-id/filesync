@@ -621,6 +621,14 @@ impl Engine {
         }
         self.rescan_records()?;
         recover(&mut self.db, &self.cfg.folder)?;
+        // An old version that waited for its placement's recovery is decided now, and the
+        // folder it was in read again: the scan kept it for the item.
+        if !aside.waiting.is_empty() {
+            let again = recover_aside(&mut self.db, &self.cfg.folder)?;
+            report.left_aside = again.unknown;
+            let dirs: Vec<_> = again.rescan.into_iter().chain(aside.waiting).collect();
+            rescan_dirs(&mut self.db, &self.cfg.folder.root, &dirs, &self.scan_opts)?;
+        }
         let folder = Some(self.db.folder());
         report.feed = match pulled {
             Pull::Done(feed) => feed,
