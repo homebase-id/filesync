@@ -15,7 +15,8 @@ use hbsync_platform::Os;
 use hbsync_platform::tags::express;
 use hbsync_state::Coords;
 use hbsync_types::{
-    FileContent, NodeId, NodeKind, NodeState, RemoteRef, Role, Tag, Tags, VersionTag,
+    FileContent, NodeId, NodeKind, NodeState, RECOVERED_NAME, RemoteRef, Role, Tag, Tags,
+    VersionTag,
 };
 
 use crate::Sim;
@@ -942,11 +943,23 @@ impl Sim {
             rows,
             mut live,
             mut taken,
+            moved,
+            make_recovered,
         } = plan;
+        // Made first for a loop's folder to come back into, as the engine's restore does (its
+        // id taken meanwhile, by one live or in Recently deleted: not made).
+        let on_drive = |n| self.server.live.contains_key(n) || self.server.removed.contains_key(n);
+        if make_recovered && !on_drive(&NodeId::RECOVERED) {
+            let folder = NodeState::folder(NodeId::ROOT, RECOVERED_NAME);
+            self.server.put(NodeId::RECOVERED, folder);
+            live.insert(NodeId::RECOVERED);
+        }
         let mut seen: HashSet<NodeId> = rows.iter().map(|r| r.node).collect();
         let mut left: Vec<&Row> = rows.iter().collect();
+        // A loop's folder comes back elsewhere, the rest of the loop into it.
+        let into = |r: &Row| moved.get(&r.node).copied().unwrap_or(r.parent);
         while let Some(wave) =
-            deleted::restore_wave(left, |r| (r.parent, &r.name), &live, &seen, &mut taken)
+            deleted::restore_wave(left, |r| (into(r), &r.name), &live, &seen, &mut taken)
         {
             // A put back the drive stops ([`Sim::with_failing_put_backs`]).
             match self.faults.waves_left {
@@ -959,29 +972,31 @@ impl Sim {
             // (none free: it stays deleted), as the engine sends them; one not there frees the
             // name it took.
             for row in wave.asked {
-                self.restore_row(row, row.name.clone(), &mut live, &mut seen, &mut taken);
+                let at = (into(row), row.name.clone());
+                self.restore_row(row, at, &mut live, &mut seen, &mut taken);
             }
             for row in wave.rest {
-                if let Some(name) = deleted::take_restored_name(&mut taken, row.parent, &row.name) {
-                    self.restore_row(row, name, &mut live, &mut seen, &mut taken);
+                if let Some(name) = deleted::take_restored_name(&mut taken, into(row), &row.name) {
+                    let at = (into(row), name);
+                    self.restore_row(row, at, &mut live, &mut seen, &mut taken);
                 }
             }
         }
     }
 
-    /// Restores `row` named `name` ([`Sim::restore_planned`]): back, it is a folder rows may
-    /// go into; not there (gone for good meanwhile), it leaves the restore and its name is
-    /// free again.
+    /// Restores `row` into the folder named in `at`, under the name there
+    /// ([`Sim::restore_planned`]): back, it is a folder rows may go into; not there (gone for
+    /// good meanwhile), it leaves the restore and its name is free again.
     fn restore_row(
         &mut self,
         row: &Row,
-        name: String,
+        (parent, name): (NodeId, String),
         live: &mut HashSet<NodeId>,
         seen: &mut HashSet<NodeId>,
         taken: &mut HashMap<NodeId, HashSet<String>>,
     ) {
         if self.server.removed.contains_key(&row.node) {
-            self.restore_as(row.node, name);
+            self.restore_as(row.node, parent, name);
             live.insert(row.node);
         } else {
             // (Nothing here restores a row meanwhile: back already, the engine's would be a
@@ -992,15 +1007,16 @@ impl Sim {
                 row.node
             );
             seen.remove(&row.node);
-            deleted::free_restored_name(taken, row.parent, &name);
+            deleted::free_restored_name(taken, parent, &name);
         }
     }
 
-    /// Brings `node` back from Recently deleted, named `name`: a write.
-    pub(crate) fn restore_as(&mut self, node: NodeId, name: String) {
+    /// Brings `node` back from Recently deleted into `parent`, named `name`: a write.
+    pub(crate) fn restore_as(&mut self, node: NodeId, parent: NodeId, name: String) {
         let Some(mut n) = self.server.removed.remove(&node) else {
             return;
         };
+        n.state.parent = parent;
         n.state.name = name;
         n.remote.version = VersionTag(self.server.uuid());
         self.server.live.insert(node, n);
@@ -1490,6 +1506,44 @@ mod tests {
         assert_eq!(name(live), "x");
         assert_eq!(name(restored), "x (restored)");
         assert_eq!(name(x), "x (restored 2)");
+    }
+
+    /// Two folders in Recently deleted, each in the other (another app moved x into y, then
+    /// deleted x, then y with its file): a user's restore of x brings it back into Recovered
+    /// files, made for it, y into x and the file into y, as the engine's restore does; both
+    /// clients follow, nothing lost.
+    #[test]
+    fn a_loop_in_recently_deleted_comes_back_in_recovered_files() {
+        let mut sim = Sim::new(2);
+        let (x, y, f) = (sim.ids.fresh(), sim.ids.fresh(), sim.ids.fresh());
+        sim.server.put(x, NodeState::folder(NodeId::ROOT, "x"));
+        sim.server.put(y, NodeState::folder(x, "y"));
+        let blob = sim.new_blob();
+        sim.server.put(f, NodeState::file(y, "f", blob));
+        assert!(sim.quiesce(10));
+        let mut moved = sim.server.live.remove(&x).expect("live");
+        moved.state.parent = y;
+        sim.remove_on_drive(x, moved, true);
+        for node in [y, f] {
+            let n = sim.server.live.remove(&node).expect("live");
+            sim.remove_on_drive(node, n, true);
+        }
+        assert!(sim.quiesce(10));
+        let pick = sim.removed_pick(x).expect("in Recently deleted");
+        sim.run(&[act(0, Action::Restore { node: pick })]);
+        assert!(sim.quiesce(10));
+        sim.check().unwrap_or_else(|e| panic!("{e}"));
+        let parent = |node: NodeId| sim.server.live[&node].state.parent;
+        assert_eq!((parent(x), parent(y), parent(f)), (NodeId::RECOVERED, x, y));
+        assert_eq!(parent(NodeId::RECOVERED), NodeId::ROOT);
+        for c in 0..2 {
+            assert!(
+                sim.local_paths(c)
+                    .contains(&"Recovered files/x/y/f".to_owned()),
+                "{:?}",
+                sim.local_paths(c)
+            );
+        }
     }
 
     /// A `.HBSYNC` removed at the drive's top, and one in Documents removed with it, restored

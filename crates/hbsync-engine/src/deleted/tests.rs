@@ -128,6 +128,49 @@ fn a_restore_of_a_folder_and_an_item_in_it_takes_the_whole_folder() -> Result<()
     Ok(())
 }
 
+/// A loop of folders in Recently deleted (x in y, y in x) comes back broken where a restore
+/// meets it: the item, where it is one of the loop, else the loop's folder it is in, comes back
+/// into Recovered files (not on the drive: made for it, as for an orphan), the rest after it.
+/// Where Recovered files is in the loop, or in another one, it comes back at the top instead.
+#[test]
+fn a_loop_in_recently_deleted_breaks_where_a_restore_meets_it()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = Db::new()?;
+    let (x, y, n) = (NodeId::new(), NodeId::new(), NodeId::new());
+    db.write(|s| {
+        s.account().put_removed(&removed(x, y, 1))?;
+        s.account().put_removed(&removed(y, x, 2))?;
+        // Deleted on its own, later: an item of its own, in y.
+        s.account().put_removed(&removed(n, y, 3))
+    })?;
+    let plan = |nodes: &[NodeId]| db.read(|s| plan_restore(s, nodes));
+    let moved = |nodes: &[NodeId]| -> Result<HashMap<NodeId, NodeId>, StateError> {
+        Ok(plan(nodes)?.map(|p| p.moved).unwrap_or_default())
+    };
+    let recovered = |node| HashMap::from([(node, NodeId::RECOVERED)]);
+    assert_eq!(moved(&[x])?, recovered(x), "the item");
+    assert_eq!(moved(&[y])?, recovered(y), "the item");
+    assert_eq!(moved(&[n])?, recovered(y), "the loop's folder n is in");
+    assert_eq!(moved(&[n, x])?, recovered(y), "broken once, by the first");
+    assert!(plan(&[x])?.is_some_and(|p| p.make_recovered), "made");
+    // In Recently deleted at the top: back first, alone.
+    db.write(|s| {
+        s.account()
+            .put_removed(&removed(NodeId::RECOVERED, NodeId::ROOT, 4))
+    })?;
+    let back = plan(&[x])?.ok_or("a plan")?;
+    assert!(!back.make_recovered);
+    assert_eq!(
+        back.rows.first().map(|r| r.row.node),
+        Some(NodeId::RECOVERED)
+    );
+    assert_eq!(back.moved, recovered(x));
+    // In the loop: the top.
+    db.write(|s| s.account().put_removed(&removed(NodeId::RECOVERED, x, 5)))?;
+    assert_eq!(moved(&[x])?, HashMap::from([(x, NodeId::ROOT)]));
+    Ok(())
+}
+
 fn fake() -> hbsync_remote::fake::FakeRemote {
     use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
     // The drive has none of the files: each delete for good finds it not there, which is done

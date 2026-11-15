@@ -224,30 +224,25 @@ impl Sim {
         if self.server.live.contains_key(&node) {
             return false;
         }
-        if self.server.removed.contains_key(&node) {
-            self.restore_with(node);
+        if let Some(at) = self.server.removed.get(&node).map(|n| n.state.parent) {
             // One whose folders in Recently deleted loop (each waiting for the other to come
             // back) comes back here, named, and then what was deleted with it, as the engine's
-            // `Drive::ensure_folder`; one that doesn't come back otherwise (no free name)
-            // waits, as the engine's sync fails.
-            let Some(at) = self.server.removed.get(&node).map(|n| n.state.parent) else {
-                return false;
-            };
+            // `Drive::ensure_folder` (a restore would bring it back into the loop's folder,
+            // wherever that comes back); else a restore brings it back. One that doesn't come
+            // back so (no free name) waits, as the engine's sync fails.
             let up = hbsync_engine::walk::up(at, |at| {
                 let removed = self.server.removed.get(&at);
                 Ok::<_, Infallible>(removed.map(|n| ((), n.state.parent)))
             });
             if !matches!(up, Ok(w) if w.end == hbsync_engine::walk::End::Cycle) {
+                self.restore_with(node);
                 return false;
             }
             let name = name(self);
             let along: Vec<NodeId> = (self.server.group(node).into_iter())
                 .filter(|&n| n != node)
                 .collect();
-            if let Some(n) = self.server.removed.get_mut(&node) {
-                n.state.parent = parent;
-            }
-            self.restore_as(node, name);
+            self.restore_as(node, parent, name);
             self.restore_all(&along);
             return true;
         }
