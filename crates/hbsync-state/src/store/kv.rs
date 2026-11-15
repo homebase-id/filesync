@@ -21,6 +21,28 @@ impl ReadTx<'_> {
             .optional()?)
     }
 
+    /// Whether this DB is of another identity's drive, read as a member of what they share
+    /// with this one ([`AccountTx::set_shared`]): its feed lists only what is shared, so the
+    /// mirror may hold a node without its folder (shown at the top, [`ReadTx::mirror_children`]),
+    /// and a tombstone without a version is a share withdrawn ([`ReadTx::withdrawn`]). Read
+    /// once per transaction.
+    pub fn shared(&self) -> Result<bool> {
+        if let Some(shared) = self.shared.get() {
+            return Ok(shared);
+        }
+        let shared = self.account_kv(crate::keys::SHARED)?.is_some();
+        self.shared.set(Some(shared));
+        Ok(shared)
+    }
+
+    /// Whether a deleted file's `at` says its share was withdrawn, not that it is gone: on
+    /// another identity's drive ([`ReadTx::shared`]), a tombstone without a version (verified,
+    /// API notes "Shared with you": the server's answer for a file this identity may no longer
+    /// read, whose version it doesn't tell). The sharer's own delete keeps its version.
+    pub fn withdrawn(&self, at: RemoteRef) -> Result<bool> {
+        Ok(at.version.0.is_nil() && self.shared()?)
+    }
+
     // ---- what was synced ----
 
     /// The newest `limit` entries, newest first.
@@ -104,6 +126,19 @@ impl AccountTx<'_> {
     pub fn set_account_kv(&self, key: AccountKey, value: &str) -> Result<()> {
         self.prep("INSERT OR REPLACE INTO kv (key, value) VALUES (?1, ?2)")?
             .execute([key.0, value])?;
+        Ok(())
+    }
+
+    /// Says whose drive this DB is of ([`ReadTx::shared`]): kept in the DB, as every
+    /// connection reading its mirror goes by it. Set before the mirror's first row, by whoever
+    /// knows the remote.
+    pub fn set_shared(&self, shared: bool) -> Result<()> {
+        if shared {
+            self.set_account_kv(crate::keys::SHARED, "1")?;
+        } else {
+            self.delete_account_kv(crate::keys::SHARED)?;
+        }
+        self.0.shared.set(Some(shared));
         Ok(())
     }
 }

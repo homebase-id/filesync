@@ -162,6 +162,10 @@ impl Remote for PeerRemote {
         HOLD_BACK
     }
 
+    fn shared(&self) -> bool {
+        true
+    }
+
     fn create(&self, _: &NodeMeta, _: Option<Upload<'_>>) -> Result<Written> {
         Err(self.read_only())
     }

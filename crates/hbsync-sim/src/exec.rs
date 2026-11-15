@@ -167,6 +167,9 @@ impl Sim {
     /// does nothing), till one has work (or holds deletes) or a whole sweep's worth had none.
     /// Whether one had.
     pub(crate) fn next_page_planned(&mut self, c: usize) -> bool {
+        if let Some(planned) = self.as_member(c, |sim| sim.next_page_planned(c)) {
+            return planned;
+        }
         let Some(size) = self.faults.page_size else {
             return false;
         };
@@ -293,7 +296,7 @@ impl Sim {
     /// Client `c` starts a sync: recovers, unparks, and plans from the server as its folder sees
     /// it, as the engine's sync does (its view's input, then `reconcile_with_known`).
     pub(crate) fn plan(&mut self, c: usize) {
-        if !self.clients[c].added {
+        if !self.clients[c].added || self.as_member(c, |sim| sim.plan(c)).is_some() {
             return;
         }
         // A run whose operations are left undone stopped (the engine's sync stopped: what its
@@ -918,6 +921,9 @@ impl Sim {
     pub(crate) fn step(&mut self, c: usize) -> bool {
         if !self.clients[c].added {
             return false;
+        }
+        if let Some(ran) = self.as_member(c, |sim| sim.step(c)) {
+            return ran;
         }
         let Some((op, attempts)) = self.clients[c].plan.pop_front() else {
             return false;

@@ -73,5 +73,6 @@ mod pages;
 mod read_only;
 mod refusals;
 mod sending;
+mod shared;
 mod sync;
 mod writers;

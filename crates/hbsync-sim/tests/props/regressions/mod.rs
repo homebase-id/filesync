@@ -4,6 +4,7 @@ mod crash;
 mod deleted;
 mod desktops;
 mod executable;
+mod member;
 mod names;
 mod read_only;
 mod roles;

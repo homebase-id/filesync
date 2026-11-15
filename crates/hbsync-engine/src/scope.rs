@@ -191,6 +191,9 @@ impl Remote for ScopedRemote {
     fn hold_back(&self) -> std::time::Duration {
         self.inner.hold_back()
     }
+    fn shared(&self) -> bool {
+        self.inner.shared()
+    }
     fn create(
         &self,
         node: &NodeMeta,

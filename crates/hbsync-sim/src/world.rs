@@ -240,6 +240,45 @@ impl Sim {
         }
     }
 
+    /// What [`Action::Share`] picks among: the drive's nodes, live and in Recently deleted.
+    fn shareable(&self) -> Vec<NodeId> {
+        let server = &self.server;
+        (server.live.keys().chain(server.removed.keys()).copied()).collect()
+    }
+
+    /// For scripted tests: what [`Action::Share`]'s `pick` is to pick `node`.
+    pub fn share_pick(&self, node: NodeId) -> Option<usize> {
+        self.shareable().iter().position(|n| *n == node)
+    }
+
+    /// [`Action::Share`].
+    fn share(&mut self, pick: usize, below: bool) {
+        let (server, nodes) = (&self.server, self.shareable());
+        // The pick, and with it what the drive has in it: in the whole drive, all.
+        let (lead, picked) = match nodes.get(pick % (nodes.len() + 1)) {
+            Some(&top) if below => (top, server.with_all_in(top)),
+            Some(&node) => (node, vec![node]),
+            None => match nodes.first() {
+                Some(&first) if below => (first, nodes),
+                _ => return,
+            },
+        };
+        let file = |n: &NodeId| server.node(*n).map(|(n, _)| n.remote.file_id);
+        let files: Vec<_> = picked.iter().filter_map(file).collect();
+        // As the picked one is: given where it isn't shared, withdrawn where it is.
+        let withdraw = file(&lead).is_some_and(|f| server.shared.contains(&f));
+        self.note(|_| match withdraw {
+            true => format!("the owner withdraws the share of {picked:?}"),
+            false => format!("the owner shares {picked:?}"),
+        });
+        for file in files {
+            match withdraw {
+                true => self.server.shared.remove(&file),
+                false => self.server.shared.insert(file),
+            };
+        }
+    }
+
     /// [`Action::DeleteStopped`].
     fn delete_stopped(&mut self, pick: usize, done: usize) {
         let Some(folder) = self.pick_folder(pick) else {
@@ -476,9 +515,12 @@ impl Sim {
             Action::Restore { node } => self.restore(node),
             Action::Phone { op, pick } => self.phone(op, pick),
             Action::Meanwhile { op } => self.clients[c].meanwhile = Some(op),
-            Action::PullMidLocal { on, change } => {
+            // (Not on a member: its steps read the drive as shared with it, `Sim::as_member`,
+            // which another device's change in the middle of one isn't made on.)
+            Action::PullMidLocal { on, change } if !self.clients[c].member => {
                 self.clients[c].pull_mid_local = Some((on, change));
             }
+            Action::PullMidLocal { .. } => {}
             Action::DeleteRoleFolder => self.delete_role_folder(),
             Action::AddDesktop => {
                 self.add_desktop();
@@ -498,6 +540,7 @@ impl Sim {
                     client.desktop_name = name;
                 }
             }
+            Action::Share { pick, below } => self.share(pick, below),
             Action::DeleteStopped { pick, done } => self.delete_stopped(pick, done),
             Action::DeleteOutright { pick } => self.delete_outright(pick),
             Action::IntoFile { pick, file } => self.move_into_file(pick, file),

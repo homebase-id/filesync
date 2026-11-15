@@ -231,8 +231,13 @@ of this schema may define some of them.)
 - A member reading another identity's share also gets a "no longer shared" tombstone, without
   a version (all zeros) or `groupId`: the share was withdrawn or expired, the file isn't gone
   **[verified]** `DriveStorageServiceBase.NoLongerSharedTombstoneOf` (homebase-api-notes,
-  "Shared with you"). The client can tell it by its zero version (`RemoteHeader::is_unshared`);
-  the engine's handling of it comes with the read-only shared folders' next step.
+  "Shared with you"). The client can tell it by its zero version (`RemoteHeader::is_unshared`):
+  the file leaves the member's devices and isn't counted as gone, so the share given again
+  brings it back (sync semantics §13, "Another identity's drive").
+- A member is shared files one by one, so it may read a node whose `groupId` names a folder
+  it wasn't shared (or one in a version it can't read): it shows that node at the top of the
+  share, and inside the folder once it reads the folder. Every client showing a share does
+  the same (sync semantics §13).
 - Tombstoned UniqueIds are free again (the duplicate check skips tombstones **[verified]**), so
   a deleted node can be re-created under the same node id; it gets a new `fileId`.
 - A node is one folder or one file for its life: a version that changes its `fileType` isn't
@@ -452,6 +457,9 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-11-16: reading another identity's share: a node whose folder the member wasn't shared
+  is shown at the top of the share; a "no longer shared" tombstone takes the file off the
+  member's devices without counting it gone. Nothing new on a node.
 - 2026-11-15: a write is a new `versionTag`, never a later `updated` alone: a version's time
   is the `updated` first read with it, as a share given or withdrawn moves `updated` and keeps
   the version (Recently deleted). Nodes are the same.

@@ -13,6 +13,7 @@ use hbsync_types::{
 };
 
 use crate::Sim;
+use crate::model::server::Server;
 use crate::tagbook::TagBook;
 
 /// The oracle's bookkeeping: every blob written and the ones no longer owed, the last listing
@@ -456,7 +457,15 @@ impl Sim {
                     kept_here.insert(*blob);
                 }
             }
-            let (mut synced, left) = self.expected(c, &drive, &taken);
+            // A member's, of the drive as it reads it: what is shared with it.
+            let seen = client.member.then(|| self.member_reads());
+            let (mut synced, left) = match &seen {
+                Some(seen) => {
+                    let taken = self.taken_along_on(seen);
+                    self.expected(c, seen, &seen.tree(), &taken)
+                }
+                None => self.expected(c, &self.server, &drive, &taken),
+            };
             synced_somewhere.extend(synced.ids());
             if !client.read_only {
                 written_somewhere.extend(synced.ids());
@@ -476,6 +485,50 @@ impl Sim {
                         "{}: the refusal record hid {op:?}, which the drive takes as it is",
                         client.name
                     ));
+                }
+            }
+            // Names that clash in what a member reads of the drive stay so (at its top, of
+            // items whose folders aren't shared: no device of the drive's has them together,
+            // and the member repairs nothing): the one here under the name keeps it (the one
+            // on disk before one synced there and parked since, its delete planned when the
+            // other came: put back on the drive, it waits as it is), and the others wait as
+            // they are here, with what is in them, for as long (§13).
+            for v in synced.violations().into_iter().filter(|_| client.member) {
+                let Violation::DuplicateName { nodes, .. } = v else {
+                    continue;
+                };
+                let place = |t: &Tree, n: NodeId| {
+                    t.get(n)
+                        .map(|s| (s.parent, hbsync_platform::name::name_key(&s.name)))
+                };
+                let at = |t: &Tree, n: &NodeId| place(t, *n) == place(&synced, *n);
+                let on_disk = nodes.iter().any(|n| at(&client.local, n));
+                let (here, waiting): (Vec<NodeId>, Vec<NodeId>) =
+                    (nodes.iter()).partition(|n| match on_disk {
+                        true => at(&client.local, n),
+                        false => at(&client.base, n),
+                    });
+                if here.len() != 1 {
+                    return Err(format!(
+                        "{}: of {nodes:?}, one name in what is shared, {here:?} are synced",
+                        client.name
+                    ));
+                }
+                for n in waiting {
+                    let mut inside = below(&visible, n);
+                    inside.extend(below(&synced, n));
+                    inside.extend(below(&base, n));
+                    for m in inside {
+                        synced.remove(m);
+                        base.remove(m);
+                        if let Some(blob) = visible
+                            .remove(m)
+                            .and_then(|s| s.content)
+                            .and_then(|c| ledger.blobs.get(&c.hash))
+                        {
+                            kept_here.insert(*blob);
+                        }
+                    }
                 }
             }
             // A parked item waits for its name, which a folder held back may keep.
@@ -560,9 +613,11 @@ impl Sim {
                 !matches!(v, Violation::Orphan { parent, .. }
                     if self.server.unreadable_on_drive().any(|(n, _)| n == parent))
             })
+            // One in a file stays there while no client that writes syncs it (a member has it
+            // at the top where the file isn't shared with it, and repairs nothing: §13).
             .filter(|v| {
                 !matches!(v, Violation::ParentNotFolder { node, .. }
-                    if !synced_somewhere.contains(node))
+                    if !written_somewhere.contains(node))
             })
             // A cycle whose repair (a move out of it) the drive refused stays one, and so does
             // one no client that writes syncs any of (each filters it, or only follows the
@@ -688,19 +743,43 @@ impl Sim {
     /// The live nodes a folder's removal took along, as it happened ([`Ledger::taken_along`]),
     /// not as the engine's rule has it.
     pub(crate) fn taken_along(&self) -> BTreeSet<NodeId> {
-        let live = self
-            .server
-            .live
-            .iter()
+        self.taken_along_on(&self.server)
+    }
+
+    /// The drive as a member of what its owner shares reads it, by the oracle's own walk (the
+    /// model's is `Server::as_shared`, which its member plans from): the files shared with it,
+    /// live and in Recently deleted, and a live one at the top unless its folder is among
+    /// them in a version a client reads (§13).
+    fn member_reads(&self) -> Server {
+        let drive = &self.server;
+        let (mut live, mut removed) = (drive.live.clone(), drive.removed.clone());
+        live.retain(|_, n| drive.shared.contains(&n.remote.file_id));
+        removed.retain(|_, n| drive.shared.contains(&n.remote.file_id));
+        let folders: BTreeSet<NodeId> = (live.keys().chain(removed.keys()))
+            .filter(|n| !drive.unreadable.contains_key(n))
+            .copied()
+            .collect();
+        for n in live.values_mut() {
+            if !folders.contains(&n.state.parent) {
+                n.state.parent = NodeId::ROOT;
+            }
+        }
+        drive.holding(live, removed)
+    }
+
+    /// [`Sim::taken_along`] on the drive as `server` has it (a member's reading of it:
+    /// [`Sim::member_reads`]).
+    fn taken_along_on(&self, server: &Server) -> BTreeSet<NodeId> {
+        let live = (server.live.iter())
             .map(|(n, l)| (*n, (l.state.parent, l.remote.version)))
             .collect();
         let folder = |n: NodeId| {
-            self.server
+            server
                 .node(n)
                 .is_some_and(|(s, _)| s.state.kind == NodeKind::Folder)
         };
         self.ledger
-            .taken_along(&live, |f| self.server.removed.contains_key(&f), folder)
+            .taken_along(&live, |f| server.removed.contains_key(&f), folder)
     }
 
     /// What client `c` syncs of the drive, in its folder's coordinates, by the oracle's own
@@ -711,20 +790,21 @@ impl Sim {
     fn expected(
         &self,
         c: usize,
+        server: &Server,
         drive: &Tree,
         taken: &BTreeSet<NodeId>,
     ) -> (Tree, BTreeSet<NodeId>) {
         let (coords, outside) = (self.clients[c].coords, self.clients[c].scope().outside);
         // A folder no client reads, while it is on the drive, and what is in it: what is in
         // it waits for it (`Action::NewerFolder`).
-        let unread: BTreeSet<NodeId> = self.server.unreadable_on_drive().map(|(n, _)| *n).collect();
+        let unread: BTreeSet<NodeId> = server.unreadable_on_drive().map(|(n, _)| *n).collect();
         // A node's place goes through the folders in Recently deleted above it too (sync
         // semantics §12): what is in one whose chain reaches a role folder is that folder's,
         // never the main folder's, even where no device brings it back (the role folder's
         // client then leaves it, `left_orphans`).
-        let removed = |n: &NodeId| self.server.removed.get(n).map(|r| r.state.parent);
+        let removed = |n: &NodeId| server.removed.get(n).map(|r| r.state.parent);
         let mut tree = Tree::new();
-        for (node, n) in &self.server.live {
+        for (node, n) in &server.live {
             let mut up = up_from(drive, *node);
             while let Some(&last) = up.last()
                 && let Some(parent) = removed(&last)
@@ -752,7 +832,7 @@ impl Sim {
         for n in filtered(&tree, &self.clients[c].filter) {
             tree.remove(n);
         }
-        let left = self.left_orphans(c, &tree, drive);
+        let left = self.left_orphans(c, server, &tree, drive);
         for n in &left {
             tree.remove(*n);
         }
@@ -764,7 +844,13 @@ impl Sim {
     /// of, whose place it doesn't sync, in Recovered files or at its top, with what is below
     /// it; in a read-only folder, every orphan (§13). (What is below a recovered one at an
     /// ignored name is connected once it is, and filtered as anything.)
-    fn left_orphans(&self, c: usize, tree: &Tree, drive: &Tree) -> BTreeSet<NodeId> {
+    fn left_orphans(
+        &self,
+        c: usize,
+        server: &Server,
+        tree: &Tree,
+        drive: &Tree,
+    ) -> BTreeSet<NodeId> {
         let client = &self.clients[c];
         // What the client's scan reports: not what it ignores, kept on its device only.
         let ignored: BTreeSet<NodeId> = filtered(&client.local, &client.filter)
@@ -779,7 +865,7 @@ impl Sim {
         // otherwise (taken along, waiting, in a role folder), or in Recently deleted with its
         // folder out of the tree, nowhere known: every orphan left; made here if the client
         // syncs its name, else the top; at a role folder's top, the top.
-        let removed = self.server.removed.get(&NodeId::RECOVERED);
+        let removed = server.removed.get(&NodeId::RECOVERED);
         let recovered: Option<Vec<&str>> = match tree.path(NodeId::RECOVERED) {
             _ if !client.coords.top.is_root() => Some(Vec::new()),
             Some(path) => Some(path),
@@ -817,7 +903,7 @@ impl Sim {
             }
             // In a folder in Recently deleted at a place the client filters (masked): another
             // device's to bring back with it, no orphan (§6.3, §10).
-            if let Some(parent) = self.server.removed.get(&state.parent)
+            if let Some(parent) = server.removed.get(&state.parent)
                 && let Some(path) = self.through_removed(c, state.parent)
                 && !names(&path, parent.state.kind == NodeKind::Folder).is_sync()
             {
@@ -1672,7 +1758,9 @@ mod tests {
         // part of the drive and what a filter leaves out are the oracle's own walks. (What it
         // reads of the model, through `Sim`, is the model's state, and the drive's own judgement:
         // whether it refuses requests and what it judged each (`Faults::refusing`, `judged`, by
-        // `drive_refused`); it calls no engine rule through them.)
+        // `drive_refused`); it calls no engine rule through them. `Server` is the type of that
+        // state: the oracle names it to hold a member's reading of the drive, which is its own
+        // walk, `member_reads`, not the model's `Server::as_shared`.)
         let paths = |source: &str| -> Vec<String> {
             // Up to a test module (`lines` reads a Windows checkout's line ends too).
             source
@@ -1698,9 +1786,16 @@ mod tests {
             [
                 "use hbsync_engine::tree::{Tree, Violation};",
                 "use crate::Sim;",
+                "use crate::model::server::Server;",
                 "use crate::tagbook::TagBook;",
             ],
             "the oracle's paths into the engine and the crate"
+        );
+        let code = include_str!("oracle.rs");
+        let code = code.split("mod tests {").next().expect("the oracle");
+        assert!(
+            !(code.lines()).any(|l| !l.trim().starts_with("//") && l.contains("as_shared")),
+            "a member's reading of the drive is the oracle's own"
         );
     }
 }

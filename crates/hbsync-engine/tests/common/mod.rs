@@ -46,7 +46,27 @@ impl Client {
         name: &str,
         tweak: impl Fn(&mut EngineConfig) + 'static,
     ) -> Res<Self> {
-        let remote = FakeRemote::new(server.clone());
+        Self::on(FakeRemote::new(server.clone()), name, tweak)
+    }
+
+    /// A client of the member `server`'s owner shares files with ([`FakeRemote::member`]): the
+    /// owner's drive read as another identity's, in a read-only folder moving out to `out`.
+    pub(crate) fn member(
+        server: &Arc<Mutex<FakeServer>>,
+        name: &str,
+        out: &std::path::Path,
+    ) -> Res<Self> {
+        let out = out.to_path_buf();
+        Self::on(FakeRemote::member(server.clone()), name, move |cfg| {
+            cfg.folder.read_only = Some(out.clone());
+        })
+    }
+
+    fn on(
+        remote: FakeRemote,
+        name: &str,
+        tweak: impl Fn(&mut EngineConfig) + 'static,
+    ) -> Res<Self> {
         Ok(Client(TestClient::new(remote, name, move |cfg| {
             // No real pause between transient retries: the fake's faults are made up.
             cfg.exec.retry_pause = std::time::Duration::from_millis(1);

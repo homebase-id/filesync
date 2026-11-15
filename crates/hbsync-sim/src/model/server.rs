@@ -39,6 +39,9 @@ pub(crate) struct Server {
     /// Nodes no client reads (a newer writer's), with what was put in each: they are on the
     /// drive, and what is in them stays there.
     pub(crate) unreadable: BTreeMap<NodeId, BTreeSet<NodeId>>,
+    /// The files the owner shares with the member ([`crate::Sim::with_member`]), by file id, as
+    /// the server keeps them: a node made again as another file isn't shared.
+    pub(crate) shared: BTreeSet<RemoteFileId>,
 }
 
 /// How long an item stays in Recently deleted, and a delete for good leaves a trace in the feed
@@ -253,6 +256,70 @@ impl Server {
     /// Whether `node` is the role folder or lies in it.
     pub(crate) fn in_role_folder(&self, node: NodeId) -> bool {
         self.place(node) == End::At(Role::Documents.node())
+    }
+
+    /// `top` and all the drive has in it, live and in Recently deleted.
+    pub(crate) fn with_all_in(&self, top: NodeId) -> Vec<NodeId> {
+        let inside = |n: &NodeId| {
+            let Ok(up) = hbsync_engine::walk::up::<_, Infallible>(*n, |at| {
+                Ok((at != top)
+                    .then(|| self.node(at).map(|(n, _)| ((), n.state.parent)))
+                    .flatten())
+            });
+            up.end == End::At(top)
+        };
+        (self.live.keys().chain(self.removed.keys()).copied())
+            .filter(inside)
+            .collect()
+    }
+
+    /// The drive as a member of what its owner shares reads it (sync semantics §13, another
+    /// identity's drive): the shared files only, live and in Recently deleted; a live one whose
+    /// folder isn't among them, or is one no client reads, is at the top, one in Recently
+    /// deleted where the drive has it.
+    /// Read from the drive as it is now: also what was deleted for good shows at once (the
+    /// engine's member learns of that at its next full read).
+    pub(crate) fn as_shared(&self) -> Server {
+        let shared = |(_, n): &(&NodeId, &ServerNode)| self.shared.contains(&n.remote.file_id);
+        let own = |(id, n): (&NodeId, &ServerNode)| (*id, n.clone());
+        let removed: BTreeMap<NodeId, ServerNode> =
+            self.removed.iter().filter(shared).map(own).collect();
+        let mut live: BTreeMap<NodeId, ServerNode> =
+            self.live.iter().filter(shared).map(own).collect();
+        let folderless: Vec<NodeId> = live
+            .iter()
+            .filter(|(_, n)| {
+                let folder = n.state.parent;
+                let read = |m: &BTreeMap<NodeId, ServerNode>| {
+                    m.contains_key(&folder) && !self.unreadable.contains_key(&folder)
+                };
+                !folder.is_root() && !read(&live) && !read(&removed)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in folderless {
+            live.get_mut(&id).expect("live").state.parent = NodeId::ROOT;
+        }
+        self.holding(live, removed)
+    }
+
+    /// This drive holding `live` and `removed` in place of what it holds: the rest as it is.
+    pub(crate) fn holding(
+        &self,
+        live: BTreeMap<NodeId, ServerNode>,
+        removed: BTreeMap<NodeId, ServerNode>,
+    ) -> Server {
+        Server {
+            live,
+            removed,
+            removed_at: self.removed_at.clone(),
+            removals: self.removals.clone(),
+            tags_at_removal: self.tags_at_removal.clone(),
+            next: self.next,
+            ever: self.ever.clone(),
+            unreadable: self.unreadable.clone(),
+            shared: self.shared.clone(),
+        }
     }
 
     /// What the drive holds, live and in Recently deleted: to tell whether it changed since.

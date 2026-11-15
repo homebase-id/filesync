@@ -340,4 +340,5 @@ mod guard;
 mod hostile;
 mod names;
 mod randomized;
+mod shared;
 mod unreadable;

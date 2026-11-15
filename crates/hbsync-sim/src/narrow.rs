@@ -262,11 +262,20 @@ impl Sim {
                 }
                 s.folder().put_base(&row)?;
             }
+            // A member's rows as its feed gives them, each in the folder the drive has it in:
+            // the store reads one whose folder isn't shared at the top itself.
+            let whole = self.whole.as_ref().filter(|_| client.member);
+            if whole.is_some() {
+                s.account().set_shared(true)?;
+            }
             for (node, state) in input.remote.iter() {
                 let Some(&at) = input.remote_refs.get(&node) else {
                     continue;
                 };
                 let mut row = mirror_row(node, state, at);
+                if let Some(on_drive) = whole.and_then(|w| w.live.get(&node)) {
+                    row.parent = on_drive.state.parent;
+                }
                 row.changed_at = input.changed_at.get(&node).copied();
                 s.account().put_live(&row)?;
             }

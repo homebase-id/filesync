@@ -513,6 +513,9 @@ fn save_cursor(
 /// other version (this device's own writes coming back) they are applied as a slim page's,
 /// without reading the feed. Whether that was all; else the feed has to be read.
 pub(crate) fn announced(s: AccountTx<'_>, refs: &[ChangeRef]) -> Result<bool, StateError> {
+    if withdrawal_in_doubt(&s, refs)? {
+        return Ok(false);
+    }
     let (refs, sure) = latest(refs);
     for r in refs.iter().filter(|r| r.deleted) {
         match r.changed_at {
@@ -529,6 +532,29 @@ pub(crate) fn announced(s: AccountTx<'_>, refs: &[ChangeRef]) -> Result<bool, St
         apply_ref(s, r)?;
     }
     Ok(true)
+}
+
+/// Another identity's drive: whether `refs` announce a share withdrawn
+/// ([`hbsync_state::ReadTx::withdrawn`]) that only the feed can place. Unlike a tombstone it
+/// isn't its file's end: the share may have been given again since, with the notice of that
+/// lost or in `refs` too, and the feed has the file as it is now. So nothing is taken from
+/// such refs when the picture holds the file, or when they say more of it than that. A notice
+/// for a file the picture doesn't hold costs no read: the drive sends one after every change
+/// of a file while its share is withdrawn (verified, API notes "Shared with you").
+fn withdrawal_in_doubt(s: &AccountTx<'_>, refs: &[ChangeRef]) -> Result<bool, StateError> {
+    let mut withdrawn = Vec::new();
+    for r in refs.iter().filter(|r| r.deleted) {
+        if s.withdrawn(r.at())? {
+            if s.known_file(r.file_id)?.is_some() {
+                return Ok(true);
+            }
+            withdrawn.push(r.file_id);
+        }
+    }
+    Ok(!withdrawn.is_empty()
+        && refs
+            .iter()
+            .any(|r| !r.deleted && withdrawn.contains(&r.file_id)))
 }
 
 /// One ref per file: the last a file had. A tombstone ends a file (its id never comes back,
@@ -670,6 +696,74 @@ mod tests {
             db.write(|s| announced(s.account(), &[write]))?,
             "the write alone is known"
         );
+        Ok(())
+    }
+
+    /// Another identity's drive: an announced share withdrawn isn't its file's end. Of a file
+    /// the picture holds, or said along with more of the file, the feed tells (nothing is
+    /// taken from the notice); of a file it doesn't hold, the notice costs no read and marks
+    /// nothing gone. This identity's own drive has no such thing: a tombstone is one.
+    #[test]
+    fn an_announced_withdrawal_is_left_to_the_feed() -> Result<(), StateError> {
+        let header = RemoteHeader {
+            file_id: RemoteFileId(Uuid::new_v4()),
+            version: VersionTag(Uuid::new_v4()),
+            parent: NodeId::ROOT,
+            kind: NodeKind::Folder,
+            body: RemoteBody::Live {
+                node: NodeId::new(),
+                content: NodeContent::folder("d"),
+                payload: None,
+            },
+            removed: false,
+            changed_at: Some(5),
+            token: None,
+        };
+        let live = ChangeRef::of(&header);
+        let withdrawn = |file_id, changed_at| ChangeRef {
+            file_id,
+            version: VersionTag(Uuid::nil()),
+            deleted: true,
+            parent: None,
+            changed_at,
+            ..live
+        };
+        let other = RemoteFileId(Uuid::new_v4());
+        for shared in [true, false] {
+            let mut db = StateDb::open_in_memory()?;
+            db.write(|s| s.account().set_shared(shared))?;
+            db.write(|s| apply(s.account(), &header).map(drop))?;
+            for at in [Some(9), None] {
+                assert_eq!(
+                    db.write(|s| announced(s.account(), &[withdrawn(header.file_id, at)]))?,
+                    !shared,
+                    "held: the feed is read"
+                );
+                assert_eq!(
+                    db.read(|s| s.known_file(header.file_id))?.is_some(),
+                    shared,
+                    "held: nothing taken from the notice"
+                );
+                assert!(
+                    db.write(|s| announced(s.account(), &[withdrawn(other, at)]))?,
+                    "not held: no read"
+                );
+                assert_eq!(db.read(|s| s.file_gone(other))?, !shared);
+                if !shared {
+                    break;
+                }
+                let back = ChangeRef {
+                    file_id: other,
+                    ..live
+                };
+                for refs in [[withdrawn(other, at), back], [back, withdrawn(other, at)]] {
+                    assert!(
+                        !db.write(|s| announced(s.account(), &refs))?,
+                        "given again in the same breath: the feed is read"
+                    );
+                }
+            }
+        }
         Ok(())
     }
 

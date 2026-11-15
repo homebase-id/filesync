@@ -880,6 +880,11 @@ impl FakeServer {
         self.shares.keys().copied()
     }
 
+    /// Whether the member reads `file_id`: shared with it, the share not withdrawn.
+    pub fn shared_live(&self, file_id: RemoteFileId) -> bool {
+        self.shares.get(&file_id) == Some(&true)
+    }
+
     pub fn file_id_of(&self, node: NodeId) -> Option<RemoteFileId> {
         self.by_node.get(&node).copied()
     }
@@ -1238,6 +1243,10 @@ impl Remote for FakeRemote {
     fn holding(&self, folders: &[NodeId], holds: Holds<'_>) -> Result<HashSet<NodeId>> {
         self.gate()?;
         Ok(self.server().holding(folders, holds, self.view))
+    }
+
+    fn shared(&self) -> bool {
+        self.view == View::Member
     }
 
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Written> {

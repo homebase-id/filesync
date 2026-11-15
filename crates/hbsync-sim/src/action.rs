@@ -94,6 +94,17 @@ pub enum Action {
     NewerFolder {
         name: usize,
     },
+    /// The drive's owner shares a node of the drive with the member ([`Sim::with_member`]), or
+    /// withdraws its share where it is shared: live or in Recently deleted, its file as it is
+    /// (no new version); `below`: with all the drive has in it now, live and in Recently
+    /// deleted. A pick past the nodes is the whole drive (`below`). What is made later isn't
+    /// shared, in a shared folder neither. Nothing when the drive holds none.
+    ///
+    /// [`Sim::with_member`]: crate::Sim::with_member
+    Share {
+        pick: usize,
+        below: bool,
+    },
     /// A user lists Recently deleted ([`hbsync_engine::deleted::deletes`]): what it holds now,
     /// each node at its version, is what emptying it as listed may take.
     ListDeleted,
