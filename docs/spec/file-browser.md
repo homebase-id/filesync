@@ -190,7 +190,11 @@ only the file key's lock changes (`encryption.md`, "A private drive"):
 
 ## Recently deleted
 filesync's own rules are in its node schema ("Recently deleted") and the engine's `deleted/` module (its pure rules in `deleted/rules.rs`); the mini-app follows them exactly.
-- **Removed:** `archivalStatus` 2, at the header's `updated` (the server's time of the removal). Any other
+- **Removed:** `archivalStatus` 2, at the header's `updated` (the server's time of the removal; a share
+  given or withdrawn moves `updated` too and keeps the `versionTag`: where you keep what you read, a
+  version's time is the `updated` you first read with it, and a later one of the same `versionTag` is no
+  change. Reading on demand you have only the latest, with the limits the node schema names, Recently
+  deleted, "A write is a new `versionTag`"). Any other
   status is live. An `rm` in the content (from before 2026-10-15) means nothing; leave it out when writing.
 - **Deleted with its folder:** a removed node whose folder is removed too, removed no earlier than the folder.
   One removed before it was deleted on its own. A live node in a removed folder (its delete still under way)

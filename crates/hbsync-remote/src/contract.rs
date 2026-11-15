@@ -776,7 +776,7 @@ fn deletes(b: &Bench) -> Outcome {
         b.update(w2, &f, Some(b"edited")),
         RemoteError::NotFound | RemoteError::Deleted | RemoteError::VersionMismatch
     );
-    ensure_err!(b.read(w.file_id, None), RemoteError::NotFound);
+    ensure_err!(b.read(w.file_id, None), RemoteError::Deleted);
     Ok(())
 }
 
@@ -1146,12 +1146,10 @@ fn a_removed_node_deleted_for_good(b: &Bench) -> Outcome {
         feed.last().is_some_and(RemoteHeader::is_deleted),
         "no tombstone in the feed: {feed:?}"
     );
-    // The owner's remote reads the size from the header and finds no payload (not found), a
-    // member's reads the header for the key and finds a tombstone (deleted).
-    match b.shared {
-        Some(_) => ensure_err!(b.read(w.file_id, None), RemoteError::Deleted),
-        None => ensure_err!(b.read(w.file_id, None), RemoteError::NotFound),
-    }
+    // One answer for the owner and a member, whole or a range of it: deleted, not "not there"
+    // (the tombstone is proof on its own; a file not there is asked about again).
+    ensure_err!(b.read(w.file_id, None), RemoteError::Deleted);
+    ensure_err!(b.read(w.file_id, Some(0..1)), RemoteError::Deleted);
     Ok(())
 }
 

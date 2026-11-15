@@ -1160,9 +1160,11 @@ fn payload_key(header: &wire::FileHeader, keys: Keys<'_>) -> Result<KeyHeader> {
     Ok(KeyHeader { iv, key: key.key })
 }
 
-/// The plaintext size of a file's payload, for a read without a range.
+/// The plaintext size of a file's payload, for a read without a range: a tombstone's is
+/// deleted, as the payload's own answer would say (`fileDeleted`).
 fn plain_size(header: &RemoteHeader) -> Result<u64> {
     match &header.body {
+        RemoteBody::Deleted => Err(RemoteError::Deleted),
         RemoteBody::Live {
             payload: Some(_),
             content: NodeContent {
@@ -1323,6 +1325,9 @@ fn code_error(code: &str) -> Option<RemoteError> {
         // Not active: a file is active or deleted (odin-core's `AssertActiveForUpdate`), so a
         // tombstone.
         "cannotupdatenonactivefile" => RemoteError::Deleted,
+        // A deleted file's payload (a 404, odin-core PR #2141): a tombstone, said without a
+        // header read.
+        "filedeleted" => RemoteError::Deleted,
         // An upload whose hash part didn't arrive: sent again like one refused.
         "payloadhashmismatch" | "payloadhashmissing" => RemoteError::HashMismatch,
         "invalidpayloadhash" => RemoteError::InvalidHash,
@@ -1793,6 +1798,8 @@ mod tests {
             (api(400, Some("versionTagMismatch")), "VersionMismatch"),
             (api(400, Some("fileNotFound")), "NotFound"),
             (api(400, Some("cannotUpdateNonActiveFile")), "Deleted"),
+            // A deleted file's payload.
+            (api(404, Some("fileDeleted")), "Deleted"),
             (api(400, Some("payloadHashMismatch")), "HashMismatch"),
             (api(400, Some("payloadHashMissing")), "HashMismatch"),
             (api(400, Some("payloadHashRequired")), "HashRequired"),
@@ -1848,9 +1855,12 @@ mod tests {
         let code = br#"{"title":"x","status":400,"errorCode":"fileNotFound"}"#;
         let envelope = br#"{"iv":"AAAA","data":"BBBB"}"#;
         let tombstone = br#"{"title":"x","status":400,"errorCode":"cannotUpdateNonActiveFile"}"#;
-        let cases: [(String, &str); 12] = [
+        let deleted = br#"{"title":"Not Found","status":404,"errorCode":"fileDeleted"}"#;
+        let cases: [(String, &str); 14] = [
             (read(400, tombstone, true, false), "Deleted"),
             (read(400, tombstone, false, false), "Transient"),
+            (read(404, deleted, true, false), "Deleted"),
+            (read(404, deleted, false, false), "Transient"),
             (read(404, envelope, true, true), "NotFound"),
             (read(404, problem, true, false), "NotFound"),
             (read(410, gone, true, false), "NotFound"),
