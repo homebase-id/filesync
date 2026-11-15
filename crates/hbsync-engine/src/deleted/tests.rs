@@ -130,8 +130,8 @@ fn a_restore_of_a_folder_and_an_item_in_it_takes_the_whole_folder() -> Result<()
 
 /// A loop of folders in Recently deleted (x in y, y in x) comes back broken where a restore
 /// meets it: the item, where it is one of the loop, else the loop's folder it is in, comes back
-/// into Recovered files (not on the drive: made for it, as for an orphan), the rest after it.
-/// Where Recovered files is in the loop, or in another one, it comes back at the top instead.
+/// into Recovered files (not on the drive: made for it first), the rest after it. Where
+/// Recovered files is in the loop, it comes back at the top instead.
 #[test]
 fn a_loop_in_recently_deleted_breaks_where_a_restore_meets_it()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -153,18 +153,15 @@ fn a_loop_in_recently_deleted_breaks_where_a_restore_meets_it()
     assert_eq!(moved(&[n])?, recovered(y), "the loop's folder n is in");
     assert_eq!(moved(&[n, x])?, recovered(y), "broken once, by the first");
     assert!(plan(&[x])?.is_some_and(|p| p.make_recovered), "made");
-    // In Recently deleted at the top: back first, alone.
+    // In Recently deleted: into it, not made (the folder coming into it brings it back, as any
+    // folder a live node keeps).
     db.write(|s| {
         s.account()
             .put_removed(&removed(NodeId::RECOVERED, NodeId::ROOT, 4))
     })?;
-    let back = plan(&[x])?.ok_or("a plan")?;
-    assert!(!back.make_recovered);
-    assert_eq!(
-        back.rows.first().map(|r| r.row.node),
-        Some(NodeId::RECOVERED)
-    );
-    assert_eq!(back.moved, recovered(x));
+    let into = plan(&[x])?.ok_or("a plan")?;
+    assert!(!into.make_recovered);
+    assert_eq!(into.moved, recovered(x));
     // In the loop: the top.
     db.write(|s| s.account().put_removed(&removed(NodeId::RECOVERED, x, 5)))?;
     assert_eq!(moved(&[x])?, HashMap::from([(x, NodeId::ROOT)]));

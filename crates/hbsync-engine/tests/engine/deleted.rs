@@ -1737,27 +1737,14 @@ fn a_loop_in_recently_deleted_comes_back_in_recovered_files() -> R {
     a.write("x/y/f.txt", "f")?;
     a.sync()?;
     b.sync()?;
-    let target = |name: &str| -> Result<(NodeId, Target), Box<dyn std::error::Error>> {
-        let s = server.lock().map_err(|_| "poisoned")?;
-        let h = s
-            .live()
-            .find(|h| h.state().is_some_and(|s| s.name == name))
-            .ok_or(name.to_owned())?;
-        let target = Target {
-            at: RemoteRef {
-                file_id: h.file_id,
-                version: h.version,
-            },
-            token: Some(hbsync_remote::fake::token_of(h.file_id)),
-        };
-        Ok((h.node().ok_or("no node")?, target))
+    let target = |name: &str| {
+        let h = common::header_named(&server, name);
+        let token = Some(hbsync_remote::fake::token_of(h.file_id));
+        (h.node().expect("a node"), Target { at: h.at(), token })
     };
-    let ((x, x_at), (y, y_at), (_, f_at)) = (target("x")?, target("y")?, target("f.txt")?);
+    let ((x, x_at), (y, y_at), (_, f_at)) = (target("x"), target("y"), target("f.txt"));
     let other = FakeRemote::new(server.clone());
-    let x_in_y = NodeMeta {
-        parent: y,
-        ..hbsync_remote::contract::removed(&hbsync_remote::contract::folder("x", y))
-    };
+    let x_in_y = hbsync_remote::contract::removed(&hbsync_remote::contract::folder("x", y));
     other.update(&x_at, &NodeMeta { node: x, ..x_in_y }, None)?;
     server.lock().map_err(|_| "poisoned")?.tick();
     other.set_removed(&[y_at, f_at], true)?;

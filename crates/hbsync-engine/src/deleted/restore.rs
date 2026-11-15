@@ -109,8 +109,9 @@ impl AccountOps<'_> {
             // The rows under their own names first, only their removals undone, as many a request
             // as the drive takes; the rest once those answered (a name one didn't take is free
             // again), and those coming back into another folder, a rewrite each.
-            let (asked, elsewhere): (Vec<&MirrorRow>, Vec<&MirrorRow>) =
-                asked.into_iter().partition(|row| into(row) == row.parent);
+            let (elsewhere, asked): (Vec<&MirrorRow>, Vec<&MirrorRow>) = asked
+                .into_iter()
+                .partition(|row| moved.contains_key(&row.node));
             for part in asked.chunks(hbsync_remote::BATCH_FILES) {
                 if r.failed.is_some() {
                     break;
@@ -132,19 +133,20 @@ impl AccountOps<'_> {
                     break;
                 }
             }
-            let elsewhere = elsewhere.into_iter().map(|row| (row, true));
-            for (row, own) in elsewhere.chain(rest.into_iter().map(|row| (row, false))) {
+            let rewrites = (elsewhere
+                .into_iter()
+                .map(|row| (row, Some(row.name.clone()))))
+            .chain(rest.into_iter().map(|row| (row, None)));
+            for (row, name) in rewrites {
                 if r.failed.is_some() {
                     break;
                 }
-                let name = match own {
-                    true => row.name.clone(),
-                    false => match take_restored_name(&mut r.taken, into(row), &row.name) {
-                        Some(name) => name,
-                        None => continue, // no free name: it stays in Recently deleted
-                    },
+                let parent = into(row);
+                let name = name.or_else(|| take_restored_name(&mut r.taken, parent, &row.name));
+                let Some(name) = name else {
+                    continue; // no free name: it stays in Recently deleted
                 };
-                let meta = meta_at(row, into(row), &name, false);
+                let meta = meta_at(row, parent, &name, false);
                 let answer = self.remote.update(&row.target(), &meta, None);
                 r.settle(row, &meta, answer);
             }
@@ -292,16 +294,17 @@ impl Restoring<'_> {
             content: NodeContent::folder(RECOVERED_NAME),
             removed: false,
         };
-        match self.remote.create(&meta, None) {
+        let e = match self.remote.create(&meta, None) {
             Ok(w) => {
                 self.live.insert(NodeId::RECOVERED);
                 return Some(Answer::live(None, mirror::written(&meta, None, w)));
             }
-            Err(RemoteError::AlreadyExists) => *self.behind = true,
-            Err(e) => {
-                *self.behind = true; // it may have landed
-                self.failed = Some(e);
-            }
+            Err(e) => e,
+        };
+        // Made elsewhere meanwhile, or it may have landed.
+        *self.behind = true;
+        if !matches!(e, RemoteError::AlreadyExists) {
+            self.failed = Some(e);
         }
         None
     }
@@ -395,6 +398,8 @@ pub fn plan_restore_from<S: RestoreSource>(
     let mut rows = Vec::new();
     let mut moved = HashMap::new();
     let mut make_recovered = false;
+    // Where a loop's folder comes back ([`loop_exit`]), worked out once.
+    let mut exit = None;
     for &node in nodes {
         if grouped.contains(&node) {
             continue; // in what another of them took along
@@ -420,36 +425,20 @@ pub fn plan_restore_from<S: RestoreSource>(
             continue;
         }
         // A loop of folders in Recently deleted, each in the next (two writers' moves left it):
-        // each would wait for the other to come back. The item itself, where it is one of them,
-        // else the loop's folder it is in, comes back elsewhere ([`loop_exit`]), the rest of the
-        // loop into it: the same whoever restores that item.
+        // each would wait for the other to come back. The item itself, where it is one of them
+        // (the walk from its folder went round to it), else the loop's folder it is in (the one
+        // the walk came back to), comes back elsewhere ([`loop_exit`]), the rest of the loop into
+        // it: the same whoever restores that item.
         if up.end == End::Cycle
             && let Some(last) = up.items.last()
         {
-            let again = S::place(last).1;
-            let start = up.items.iter().position(|r| S::place(r).0 == again);
-            let looped = &up.items[start.unwrap_or(0)..];
-            let item = S::place(&top).0;
-            let breaks = match looped.iter().any(|r| S::place(r).0 == item) {
-                true => Some(item),
-                false => looped.first().map(|r| S::place(r).0),
+            let (at, again) = S::place(last);
+            let (to, make) = match exit {
+                Some(exit) => exit,
+                None => *exit.insert(loop_exit(source)?),
             };
-            if let Some(breaks) = breaks {
-                let exit = match loop_exit(source)? {
-                    Exit::Into(at) => at,
-                    Exit::Back(row) => {
-                        if seen.insert(NodeId::RECOVERED) {
-                            rows.push(row);
-                        }
-                        NodeId::RECOVERED
-                    }
-                    Exit::Make => {
-                        make_recovered = true;
-                        NodeId::RECOVERED
-                    }
-                };
-                moved.insert(breaks, exit);
-            }
+            make_recovered |= make;
+            moved.insert(if at == node { node } else { again }, to);
         }
         let mut chain = up.items;
         chain.reverse();
@@ -510,48 +499,24 @@ pub fn plan_restore_from<S: RestoreSource>(
 }
 
 /// Where the folder that breaks a loop of folders in Recently deleted comes back
-/// ([`loop_exit`]).
-enum Exit<R> {
-    /// Into this live folder.
-    Into(NodeId),
-    /// Into Recovered files, which comes back first from Recently deleted, alone: its row.
-    Back(R),
-    /// Into Recovered files, made first.
-    Make,
-}
-
-/// Where the folder that breaks a loop of folders in Recently deleted comes back
-/// ([`plan_restore_from`]): into Recovered files, as an orphan does (sync semantics §6.3): live
-/// there, back first from Recently deleted, alone, where its folder is live, or made first at
-/// the top where it isn't on the drive (never a node in a folder the drive never had). At the top
-/// instead where Recovered files is in that loop or another one, through its folders live or
-/// in Recently deleted (it would close one again), in a folder in Recently deleted, or not on the
-/// drive with its name taken at the top.
-fn loop_exit<S: RestoreSource>(source: &mut S) -> Result<Exit<S::Row>, S::Error> {
+/// ([`plan_restore_from`]), and whether Recovered files is made first. Into Recovered files, as
+/// an orphan goes (sync semantics §6.3): one in Recently deleted is brought back by the folder
+/// coming into it, as any folder a live node keeps; one not on the drive is made first at the
+/// top, with its fixed id (never a node in a folder the drive never had). At the top instead
+/// where Recovered files is in a loop, through its folders live or in Recently deleted: it would
+/// close one again.
+fn loop_exit<S: RestoreSource>(source: &mut S) -> Result<(NodeId, bool), S::Error> {
     let up = crate::walk::up::<_, S::Error>(NodeId::RECOVERED, |at| {
         Ok(match source.parent_of(at)? {
             Some(parent) => Some(((), parent)),
             None => source.removed(at)?.map(|r| ((), S::place(&r).1)),
         })
     })?;
-    if matches!(up.end, End::Cycle | End::Deep) {
-        return Ok(Exit::Into(NodeId::ROOT));
-    }
-    if source.is_live(NodeId::RECOVERED)? {
-        return Ok(Exit::Into(NodeId::RECOVERED));
-    }
-    if let Some(row) = source.removed(NodeId::RECOVERED)? {
-        let parent = S::place(&row).1;
-        return Ok(match parent.is_root() || source.is_live(parent)? {
-            true => Exit::Back(row),
-            false => Exit::Into(NodeId::ROOT),
-        });
-    }
-    let name = name_key(RECOVERED_NAME);
-    let names = source.names_in(NodeId::ROOT)?;
-    Ok(match names.iter().any(|n| name_key(n) == name) {
-        true => Exit::Into(NodeId::ROOT),
-        false => Exit::Make,
+    Ok(match up.end {
+        End::Cycle | End::Deep => (NodeId::ROOT, false),
+        // Neither live nor in Recently deleted.
+        End::At(at) if at == NodeId::RECOVERED => (NodeId::RECOVERED, true),
+        End::Top | End::At(_) => (NodeId::RECOVERED, false),
     })
 }
 

@@ -269,10 +269,9 @@ of this schema may define some of them.)
   other: two writers' moves met, then both were deleted) would each wait for the other: the
   restore breaks the loop where it meets it, at the item if that is one of the loop, else at the
   loop's folder the item is in. That folder comes back into Recovered files (restored and moved
-  in one update; Recovered files first restored alone, or made with its fixed id, where it isn't
-  live), and the rest of the loop into it; at the top of the drive instead where Recovered files
-  is in that loop or another one, in a removed folder, or not on the drive with its name taken
-  at the top. If a folder
+  in one update; Recovered files made first, with its fixed id, where no node has that id; one
+  in Recently deleted comes back with it, as any folder a live node keeps), and the rest of the
+  loop into it; at the top of the drive instead where Recovered files is in a loop. If a folder
   doesn't come back (changed meanwhile), what is in it stays removed. A name a live sibling took
   meanwhile gets ` (restored)`; so does `.hbsync`, in any case, at the top of the drive, of a
   role folder or of a computer's Desktop (a folder in Desktops): each computer's own state folder

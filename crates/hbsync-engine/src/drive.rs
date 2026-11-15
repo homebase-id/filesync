@@ -604,8 +604,8 @@ impl Drive {
     /// `name` gives (whichever device gets there first). One still in Recently deleted whose
     /// folders there are in a cycle (each waiting for the other to come back) comes back in
     /// `parent` (not where a restore brings such a loop back: into Recovered files), under that
-    /// name, and then what was deleted with it: a removed node's id stays
-    /// taken (`hbsync_remote::contract`, which Homebase passes), so it can't be made anew.
+    /// name, and then what was deleted with it: a removed node's id stays taken
+    /// (`hbsync_remote::contract`, which Homebase passes), so it can't be made anew.
     /// Fails unless it is live at the end. Whether this device made it.
     fn ensure_folder(
         &self,

@@ -948,8 +948,7 @@ impl Sim {
         } = plan;
         // Made first for a loop's folder to come back into, as the engine's restore does (its
         // id taken meanwhile, by one live or in Recently deleted: not made).
-        let on_drive = |n| self.server.live.contains_key(n) || self.server.removed.contains_key(n);
-        if make_recovered && !on_drive(&NodeId::RECOVERED) {
+        if make_recovered && self.server.node(NodeId::RECOVERED).is_none() {
             let folder = NodeState::folder(NodeId::ROOT, RECOVERED_NAME);
             self.server.put(NodeId::RECOVERED, folder);
             live.insert(NodeId::RECOVERED);
@@ -972,25 +971,26 @@ impl Sim {
             // (none free: it stays deleted), as the engine sends them; one not there frees the
             // name it took.
             for row in wave.asked {
-                let at = (into(row), row.name.clone());
-                self.restore_row(row, at, &mut live, &mut seen, &mut taken);
+                let (parent, name) = (into(row), row.name.clone());
+                self.restore_row(row, parent, name, &mut live, &mut seen, &mut taken);
             }
             for row in wave.rest {
-                if let Some(name) = deleted::take_restored_name(&mut taken, into(row), &row.name) {
-                    let at = (into(row), name);
-                    self.restore_row(row, at, &mut live, &mut seen, &mut taken);
+                let parent = into(row);
+                if let Some(name) = deleted::take_restored_name(&mut taken, parent, &row.name) {
+                    self.restore_row(row, parent, name, &mut live, &mut seen, &mut taken);
                 }
             }
         }
     }
 
-    /// Restores `row` into the folder named in `at`, under the name there
-    /// ([`Sim::restore_planned`]): back, it is a folder rows may go into; not there (gone for
-    /// good meanwhile), it leaves the restore and its name is free again.
+    /// Restores `row` into `parent`, named `name` ([`Sim::restore_planned`]): back, it is a
+    /// folder rows may go into; not there (gone for good meanwhile), it leaves the restore and its
+    /// name is free again.
     fn restore_row(
         &mut self,
         row: &Row,
-        (parent, name): (NodeId, String),
+        parent: NodeId,
+        name: String,
         live: &mut HashSet<NodeId>,
         seen: &mut HashSet<NodeId>,
         taken: &mut HashMap<NodeId, HashSet<String>>,
@@ -1508,23 +1508,45 @@ mod tests {
         assert_eq!(name(x), "x (restored 2)");
     }
 
+    /// Recovered files before a loop's restore ([`loop_restored`]).
+    enum Recovered {
+        /// Not on the drive.
+        Absent,
+        /// In Recently deleted.
+        Removed,
+        /// Not on the drive, with a plain folder of its name at the top.
+        NameTaken,
+    }
+
     /// Two folders in Recently deleted, each in the other (another app moved x into y, then
-    /// deleted x, then y with its file): a user's restore of x brings it back into Recovered
-    /// files, made for it, y into x and the file into y, as the engine's restore does; both
-    /// clients follow, nothing lost.
-    #[test]
-    fn a_loop_in_recently_deleted_comes_back_in_recovered_files() {
+    /// deleted x, then y with its file), with Recovered files as `before` says: a user's restore
+    /// of x brings it back into Recovered files (made for it, or brought back by it), y into x
+    /// and the file into y, as the engine's restore does; both clients follow, nothing lost.
+    fn loop_restored(before: Recovered) {
         let mut sim = Sim::new(2);
         let (x, y, f) = (sim.ids.fresh(), sim.ids.fresh(), sim.ids.fresh());
         sim.server.put(x, NodeState::folder(NodeId::ROOT, "x"));
         sim.server.put(y, NodeState::folder(x, "y"));
         let blob = sim.new_blob();
         sim.server.put(f, NodeState::file(y, "f", blob));
+        match before {
+            Recovered::Absent => {}
+            Recovered::Removed => {
+                let folder = NodeState::folder(NodeId::ROOT, RECOVERED_NAME);
+                sim.server.put(NodeId::RECOVERED, folder);
+            }
+            Recovered::NameTaken => {
+                let plain = sim.ids.fresh();
+                let folder = NodeState::folder(NodeId::ROOT, RECOVERED_NAME);
+                sim.server.put(plain, folder);
+            }
+        }
         assert!(sim.quiesce(10));
         let mut moved = sim.server.live.remove(&x).expect("live");
         moved.state.parent = y;
         sim.remove_on_drive(x, moved, true);
-        for node in [y, f] {
+        let recovered = matches!(before, Recovered::Removed).then_some(NodeId::RECOVERED);
+        for node in [y, f].into_iter().chain(recovered) {
             let n = sim.server.live.remove(&node).expect("live");
             sim.remove_on_drive(node, n, true);
         }
@@ -1536,14 +1558,24 @@ mod tests {
         let parent = |node: NodeId| sim.server.live[&node].state.parent;
         assert_eq!((parent(x), parent(y), parent(f)), (NodeId::RECOVERED, x, y));
         assert_eq!(parent(NodeId::RECOVERED), NodeId::ROOT);
-        for c in 0..2 {
-            assert!(
-                sim.local_paths(c)
-                    .contains(&"Recovered files/x/y/f".to_owned()),
-                "{:?}",
-                sim.local_paths(c)
-            );
-        }
+        let paths = sim.local_paths(0);
+        assert!(paths.iter().any(|p| p.ends_with("/x/y/f")), "{paths:?}");
+        assert_eq!(sim.local_paths(1), paths);
+    }
+
+    #[test]
+    fn a_loop_in_recently_deleted_comes_back_in_recovered_files() {
+        loop_restored(Recovered::Absent);
+    }
+
+    #[test]
+    fn a_loop_in_recently_deleted_brings_recovered_files_back() {
+        loop_restored(Recovered::Removed);
+    }
+
+    #[test]
+    fn a_loop_in_recently_deleted_makes_recovered_files_beside_a_folder_of_its_name() {
+        loop_restored(Recovered::NameTaken);
     }
 
     /// A `.HBSYNC` removed at the drive's top, and one in Documents removed with it, restored

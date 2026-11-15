@@ -225,9 +225,9 @@ filesync's own rules are in its node schema ("Recently deleted") and the engine'
     break it where you meet it, at the item if it is one of the loop, else at the loop's folder the item is
     in. That folder comes back into Recovered files under its own name (an update with `groupId` Recovered
     files' id and `archivalStatus` 0; a name taken there gets ` (restored)`), then the rest of the loop
-    into it. Recovered files not live: restore it first, alone, where its folder is live; make it (its fixed
-    `uniqueId`, at the top) where it isn't on the drive. At the top instead where Recovered files is in a
-    loop, in a removed folder, or not on the drive with a folder named `Recovered files` at the top.
+    into it. Where no node has Recovered files' id, make it first (its fixed `uniqueId`, at the top); one in
+    Recently deleted the computers bring back. At the top instead where Recovered files is in a loop
+    (walking up its `groupId`s, removed ones too).
   - An item whose folder is gone for good comes back as it was, in the same batch (its `groupId` names no
     node: an orphan, which the computers move into Recovered files; don't move it yourself). Until a
     computer is on, no listing shows it: say where it will appear ("in Recovered files, once one of
