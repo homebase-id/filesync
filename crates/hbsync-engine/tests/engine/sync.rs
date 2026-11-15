@@ -272,6 +272,34 @@ fn an_edited_file_takes_the_name_of_the_folder_it_was_in() -> R {
     a_file_takes_the_name_of_the_folder_it_was_in(true)
 }
 
+/// Another edited file left the folder too: its download runs beside the one that parks the
+/// folder, and where that one is first, is planned again in the same sync (its old version
+/// moved with the folder under it meanwhile).
+#[test]
+fn two_edited_files_leave_a_folder_and_one_takes_its_name() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("Box/note", "one")?;
+    a.write("Box/other", "uno")?;
+    a.sync()?;
+    b.sync()?;
+    fs::rename(a.root.join("Box/note"), a.root.join("tmp"))?;
+    fs::rename(a.root.join("Box/other"), a.root.join("c"))?;
+    fs::remove_dir(a.root.join("Box"))?;
+    fs::rename(a.root.join("tmp"), a.root.join("Box"))?;
+    a.sync()?;
+    a.write("Box", "two")?;
+    a.write("c", "dos")?;
+    a.sync()?;
+    let report = b.sync()?;
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(b.tree_text(""), ["Box = two", "c = dos"]);
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    assert_eq!(b.sync()?.ops_done, 0);
+    Ok(())
+}
+
 #[test]
 fn first_run_adopts_an_existing_copy_without_downloading() -> R {
     let server = server();
