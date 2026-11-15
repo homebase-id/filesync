@@ -222,7 +222,8 @@ filesync's own rules are in its node schema ("Recently deleted") and the engine'
   - Order: the removed folders above the item first, outermost first, then the item, then what was deleted
     with it (not what was deleted from it before).
   - Removed folders in a loop (each in the other, read up through their `groupId`s) wait for each other.
-    A fixed folder of the loop (a role folder, Desktops) breaks it: back at the top under its own name.
+    Its fixed folders (role folders, Desktops, Recovered files) break it: each back at the top under its
+    own name.
     Else break it where you meet it, at the item if it is one of the loop, else at the loop's folder the
     item is in. That folder comes back into Recovered files under its own name (an update with `groupId` Recovered
     files' id and `archivalStatus` 0; a name taken there gets ` (restored)`), then the rest of the loop

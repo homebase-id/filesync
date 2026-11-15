@@ -442,9 +442,8 @@ pub fn plan_restore_from<S: RestoreSource>(
             continue;
         }
         // A loop of folders in Recently deleted, each in the next (two writers' moves left it):
-        // each would wait for the other to come back. A fixed folder of it (a role folder,
-        // Desktops) comes back at the top, where it belongs, as `Drive::ensure_folder` brings one
-        // back; else the item itself, where it is one of them (the walk from its folder went round
+        // each would wait for the other to come back. Its fixed folders ([`is_fixed`]) come back
+        // at the top, where they belong, as `Drive::ensure_folder` brings one back; else the item itself, where it is one of them (the walk from its folder went round
         // to it), or the loop's folder it is in (the one the walk came back to), comes back
         // elsewhere ([`loop_exit`]). The rest of the loop follows into it: the same whoever
         // restores that item.
@@ -452,21 +451,19 @@ pub fn plan_restore_from<S: RestoreSource>(
             && let Some(last) = up.items.last()
         {
             let (at, again) = S::place(last);
-            let fixed = (up.round(|r| S::place(r).0, again).iter())
+            let fixed: Vec<NodeId> = (up.round(|r| S::place(r).0, again).iter())
                 .map(|r| S::place(r).0)
-                .find(|&n| n == NodeId::DESKTOPS || crate::along::is_sync_top(n, None));
-            let (breaks, to) = match fixed {
-                Some(fixed) => (fixed, NodeId::ROOT),
-                None => {
-                    let (to, make) = match exit {
-                        Some(exit) => exit,
-                        None => *exit.insert(loop_exit(source)?),
-                    };
-                    make_recovered |= make;
-                    (if at == node { node } else { again }, to)
-                }
-            };
-            moved.insert(breaks, to);
+                .filter(|&n| is_fixed(n))
+                .collect();
+            if fixed.is_empty() {
+                let (to, make) = match exit {
+                    Some(exit) => exit,
+                    None => *exit.insert(loop_exit(source)?),
+                };
+                make_recovered |= make;
+                moved.insert(if at == node { node } else { again }, to);
+            }
+            moved.extend(fixed.into_iter().map(|n| (n, NodeId::ROOT)));
         }
         let mut chain = up.items;
         chain.reverse();
@@ -513,7 +510,11 @@ pub fn plan_restore_from<S: RestoreSource>(
         let names = source.names_in(parent)?;
         taken.insert(parent, taken_in(top, names.iter().map(String::as_str)));
     }
+    // Made for what comes back into it (before the first of it): a folder it may go into, holding
+    // nothing yet, and its name taken at the top.
     if make_recovered {
+        live.insert(NodeId::RECOVERED);
+        taken.insert(NodeId::RECOVERED, HashSet::new());
         let at_top = taken.entry(NodeId::ROOT).or_default();
         at_top.insert(name_key(RECOVERED_NAME));
     }
@@ -548,22 +549,35 @@ fn loop_exit<S: RestoreSource>(source: &mut S) -> Result<(NodeId, bool), S::Erro
     })
 }
 
-/// Whether `node` is in Recently deleted with its folders there in a loop, each in the next
+/// Whether `node` comes back at the top where a restore breaks a loop it is in
+/// ([`plan_restore_from`]): a folder whose place is fixed by its id, a role folder, Desktops or
+/// Recovered files.
+fn is_fixed(node: NodeId) -> bool {
+    [NodeId::DESKTOPS, NodeId::RECOVERED].contains(&node) || crate::along::is_sync_top(node, None)
+}
+
+/// `node`'s row in Recently deleted, where its folders there are in a loop, each in the next
 /// (`node` in it or below it): a restore breaks it ([`plan_restore_from`]). The engine's
 /// `Drive::ensure_folder` and the simulator's share it.
-pub fn in_removed_loop<S: RestoreSource>(source: &mut S, node: NodeId) -> Result<bool, S::Error> {
+pub fn removed_in_loop<S: RestoreSource>(
+    source: &mut S,
+    node: NodeId,
+) -> Result<Option<S::Row>, S::Error> {
     let Some(row) = source.removed(node)? else {
-        return Ok(false);
+        return Ok(None);
     };
     let up = crate::walk::up::<_, S::Error>(S::place(&row).1, |at| {
         Ok(source.removed(at)?.map(|f| ((), S::place(&f).1)))
     })?;
-    Ok(up.end == End::Cycle)
+    Ok((up.end == End::Cycle).then_some(row))
 }
 
-/// [`in_removed_loop`] in the store.
-pub(crate) fn in_removed_loop_here(s: &ReadTx<'_>, node: NodeId) -> Result<bool, StateError> {
-    in_removed_loop(&mut Store(s), node)
+/// [`removed_in_loop`] in the store.
+pub(crate) fn removed_in_loop_here(
+    s: &ReadTx<'_>,
+    node: NodeId,
+) -> Result<Option<RemovedRow>, StateError> {
+    removed_in_loop(&mut Store(s), node)
 }
 
 /// [`plan_restore_from`] the store.

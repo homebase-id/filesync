@@ -618,12 +618,9 @@ impl Drive {
         }
         // Its row and what was deleted with it, where its folders in Recently deleted loop: a
         // restore would bring it back where it breaks the loop (Recovered files, for a computer's
-        // Desktop), not into `parent`.
+        // Desktop: its place is Desktops, not its id), not into `parent`.
         let looped = self.account().read(|s| {
-            if !deleted::in_removed_loop_here(s, node)? {
-                return Ok(None);
-            }
-            let Some(top) = s.removed_by_node(node)? else {
+            let Some(top) = deleted::removed_in_loop_here(s, node)? else {
                 return Ok(None);
             };
             let along = deleted::group(s, top.clone())?;

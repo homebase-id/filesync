@@ -170,7 +170,7 @@ fn a_loop_in_recently_deleted_breaks_where_a_restore_meets_it()
 
 /// A fixed folder in a loop of folders in Recently deleted (Documents in z, z in Documents)
 /// comes back at the top whichever item a restore meets the loop from, as `Drive::ensure_folder`
-/// brings one back, not into Recovered files.
+/// brings one back, not into Recovered files; so does each of two, and Recovered files itself.
 #[test]
 fn a_loop_breaks_at_a_fixed_folder_to_the_top() -> Result<(), StateError> {
     let db = Db::new()?;
@@ -184,11 +184,35 @@ fn a_loop_breaks_at_a_fixed_folder_to_the_top() -> Result<(), StateError> {
         s.account().put_removed(&removed(z, docs, 2))?;
         s.account().put_removed(&removed(n, z, 3))
     })?;
-    for item in [docs, z, n] {
+    let moved = |item| -> Result<HashMap<NodeId, NodeId>, StateError> {
         let plan = db.read(|s| plan_restore(s, &[item]))?;
-        let moved = plan.map(|p| p.moved).unwrap_or_default();
-        assert_eq!(moved, HashMap::from([(docs, NodeId::ROOT)]), "{item:?}");
+        Ok(plan.map(|p| p.moved).unwrap_or_default())
+    };
+    for item in [docs, z, n] {
+        assert_eq!(
+            moved(item)?,
+            HashMap::from([(docs, NodeId::ROOT)]),
+            "{item:?}"
+        );
     }
+    // Two fixed folders in one loop: each at the top, neither in the other.
+    let pics = hbsync_types::Role::Pictures.node();
+    db.write(|s| {
+        s.account().put_removed(&removed(z, pics, 2))?;
+        s.account().put_removed(&removed(pics, docs, 4))
+    })?;
+    let both = HashMap::from([(docs, NodeId::ROOT), (pics, NodeId::ROOT)]);
+    assert_eq!(moved(n)?, both);
+    // Recovered files in a loop: at the top, where orphans go.
+    let w = NodeId::new();
+    db.write(|s| {
+        s.account().put_removed(&removed(w, NodeId::RECOVERED, 5))?;
+        s.account().put_removed(&removed(NodeId::RECOVERED, w, 6))
+    })?;
+    assert_eq!(
+        moved(w)?,
+        HashMap::from([(NodeId::RECOVERED, NodeId::ROOT)])
+    );
     Ok(())
 }
 
