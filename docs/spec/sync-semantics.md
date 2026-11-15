@@ -1069,10 +1069,19 @@ That loses a removal, not a tag.
 Two lose a removal (the tag comes back):
 - *Own tag write in flight*: a tag removed while this device's plan still writes it (onto the
   item, or up): the write, planned before, lands over the removal. A colour given then is lost
-  the same way: both sides changed it since the base, and the merge takes the drive's.
+  the same way: both sides changed it since the base, and the merge takes the drive's. So is
+  one given after the write landed and before the next plan settles it: the base still has
+  the colour from before the write.
 - *Answer superseded*: a write carrying a tag landed, but another device changed the node
   before its answer was recorded (§8a, Answers): the base never records the tag as on the
   drive, so it goes up again, over another device's later removal.
+
+A write up is on its way until its answer is recorded. The engine reads the folder between
+plans only, so its own write up lands over nothing it has seen; what leaves a node in this
+state is a write that landed with its answer lost (a timeout after the server wrote): the next
+plan reads it as another device's change, and a tag put back before that plan goes (seen in
+the engine), a colour given before it likewise. The simulator reads the item at each step, and
+reaches the same state without a lost answer.
 
 Apart from these and the crash case above, no tag add or removal is lost, nor a colour given
 to a tag the device's base holds, unless another device gave the tag a colour it hadn't seen

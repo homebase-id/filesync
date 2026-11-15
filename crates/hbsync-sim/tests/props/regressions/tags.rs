@@ -1410,6 +1410,51 @@ fn regression_a_colour_given_while_its_own_tag_write_is_in_flight_is_a_known_lim
     );
 }
 
+/// Seed 328c6cf9 (`guarded_clients_in_pages_hold_the_whole_delete`): as seed 5317e937, on a
+/// file client 1 (Linux) tagged Red: client 0's user gives Red a colour, the plan sends it up,
+/// and before it does they give Red another (the known limit). The write lands with the first,
+/// and before the next plan they give Red one more: client 0's base still has the colour from
+/// before its write, so the merge reads that one too as changed on both sides, and takes the
+/// drive's. The same limit, until a plan settles the write: a colour given after that stands.
+#[test]
+fn regression_a_colour_given_before_its_own_tag_write_is_settled_is_a_known_limit() {
+    use Action::{Colour, CreateFile, Tag};
+    let act = |client, action| Event::Act { client, action };
+    let plan = |client| Event::Plan { client };
+    let step = |client| Event::Step { client };
+    let events = [
+        act(1, CreateFile { parent: 0, name: 0 }),
+        act(1, Tag { node: 0, tag: 0 }),
+        plan(1),
+        step(1),
+        plan(0),
+        step(0),
+        act(0, Colour { node: 0, tag: 0 }),
+        plan(0),
+        act(0, Colour { node: 0, tag: 0 }),
+        step(0),
+        act(0, Colour { node: 0, tag: 0 }),
+    ];
+    let mut sim = Sim::new(2);
+    sim.guard = Some(1);
+    sim.run(&events);
+    assert!(sim.quiesce(30), "no convergence");
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    let limits = sim.tags_lost_to_known_limits();
+    assert_eq!(limits.len(), 1, "{limits:?}");
+    assert!(
+        limits[0].starts_with("OwnTagWriteInFlight") && limits[0].ends_with(" Red"),
+        "{limits:?}"
+    );
+    assert_eq!(sim.server_tags("a"), Some(vec!["Red:1".to_owned()]));
+    // Settled: the next colour is owed, and goes up.
+    sim.run(&[act(0, Colour { node: 0, tag: 0 })]);
+    assert!(sim.quiesce(30), "no convergence");
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    assert!(sim.tags_lost_to_known_limits().is_empty());
+    assert_eq!(sim.server_tags("a"), Some(vec!["Red:2".to_owned()]));
+}
+
 /// Client 0 (macOS) makes folder d, tagged Red with its colour, and a file in it; client 1
 /// (Linux) ignores d. Another device deletes d and stops, and the phone saves an edit of the file:
 /// d in Recently deleted, its file live. Client 1 stops ignoring d and plans it back for the
