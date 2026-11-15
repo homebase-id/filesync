@@ -135,14 +135,7 @@ impl Executor<'_> {
             return Ok(Outcome::stale("put in place, its record gone"));
         };
         let (root, now) = (&self.folder.root, hbsync_types::unix_now_ms());
-        let judged = match look(root, &record.target) {
-            OnDisk::Absent => Judged::Drop,
-            OnDisk::Unreadable => Judged::Keep,
-            OnDisk::There(meta) => {
-                let row = read_row(root, &record.target, node, &meta, self.folder.algorithm);
-                judge(root, &record, Some(row))
-            }
-        };
+        let judged = judge_on_disk(root, &record, self.folder.algorithm);
         let folder = self.folder;
         match self
             .db

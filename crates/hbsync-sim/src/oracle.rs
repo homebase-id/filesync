@@ -568,9 +568,12 @@ impl Sim {
             // one no client that writes syncs any of (each filters it, or only follows the
             // drive: §10, §13).
             .filter(|v| {
-                !matches!(v, Violation::Cycle { node }
-                    if up_from(&server, *node).iter().any(|n| refused_here.contains(n))
-                        || !up_from(&server, *node).iter().any(|n| written_somewhere.contains(n)))
+                let Violation::Cycle { node } = v else {
+                    return true;
+                };
+                let up = up_from(&server, *node);
+                !(up.iter().any(|n| refused_here.contains(n))
+                    || !up.iter().any(|n| written_somewhere.contains(n)))
             })
             .collect();
         if !broken.is_empty() {

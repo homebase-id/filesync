@@ -57,40 +57,42 @@ pub fn recover_aside(db: &mut StateDb, folder: &FolderCtx) -> Result<AsideOutcom
         // the new one, numbered where that is taken; unreadable now, it waits. Its node parked
         // (under a temporary name, to free its own), beside the name the node has and gets
         // back: numbered, never the temporary name, which would go up as an item's name.
-        if let layout::AsideEntry::File(_, hash) = parsed
-            && row.hash != Some(hash)
-        {
-            let place = match db.read(|s| crate::view::parked_place(s, &row))? {
-                Some(original) => super::park::numbered_place(db, folder, &original, false)?,
-                None => Some(row.path.clone()),
-            };
-            match discard_old(db, &disk, folder, &aside, hash, place.as_ref())? {
-                // Written to, with no name it could come back under (every numbered one
-                // taken, or the rename failing): the user's edit, told (§8a), and tried again
-                // at the next sync.
-                Discarded::Stranded | Discarded::Back(None) => unknown.push(left(&aside)),
-                gone => dirs.extend(gone.into_inner()),
-            }
-            continue;
-        }
-        // An old version a download replaced from another place, the new one there (a crash
-        // before its commit; the scan keeps the old row while it is aside): it goes as above,
-        // its row with it, and its base stays for the placement's recovery to settle against.
-        // Gone with it, the placed file read as new, and its tags merged over what the drive
-        // removed meanwhile.
-        if let layout::AsideEntry::File(_, hash) = parsed
-            && let Some(placed) = placed_elsewhere(db, folder, node, &row.path)?
-        {
-            match discard_old(db, &disk, folder, &aside, hash, Some(&placed))? {
-                Discarded::Left => {}
-                Discarded::Stranded | Discarded::Back(None) => unknown.push(left(&aside)),
-                gone => {
-                    db.write(|s| s.folder().delete_local(node))?;
-                    dirs.extend(row.path.parent());
-                    dirs.extend(gone.into_inner());
+        // Replaced from another place, the new one there (a crash before its commit; the scan
+        // keeps the old row while it is aside), its row there goes with it, and its base stays
+        // for the placement's recovery to settle against: gone with it, the placed file read
+        // as new, and its tags merged over what the drive removed meanwhile.
+        if let layout::AsideEntry::File(_, hash) = parsed {
+            let replaced = if row.hash != Some(hash) {
+                let place = match db.read(|s| crate::view::parked_place(s, &row))? {
+                    Some(original) => super::park::numbered_place(db, folder, &original, false)?,
+                    None => Some(row.path.clone()),
+                };
+                Some((place, false))
+            } else {
+                match placed_elsewhere(db, folder, node, &row.path)? {
+                    Elsewhere::No => None,
+                    // Its new one there can't be read yet: both wait for the next sync.
+                    Elsewhere::Unsure => continue,
+                    Elsewhere::Placed(placed) => Some((Some(placed), true)),
                 }
+            };
+            if let Some((place, elsewhere)) = replaced {
+                match discard_old(db, &disk, folder, &aside, hash, place.as_ref())? {
+                    // Written to, with no name it could come back under (every numbered one
+                    // taken, or the rename failing): the user's edit, told (§8a), and tried
+                    // again at the next sync.
+                    Discarded::Stranded | Discarded::Back(None) => unknown.push(left(&aside)),
+                    Discarded::Left => {}
+                    gone => {
+                        if elsewhere {
+                            db.write(|s| s.folder().delete_local(node))?;
+                            dirs.extend(row.path.parent());
+                        }
+                        dirs.extend(gone.into_inner());
+                    }
+                }
+                continue;
             }
-            continue;
         }
         let rows = db.read(|s| s.local_subtree(&row.path))?;
         // Each row as its base has it: what the drive's delete took.
@@ -184,26 +186,35 @@ fn recover_by_base(
     }
 }
 
-/// Where `node`'s download put its new version in place, if elsewhere than `from`: its
-/// record's target, holding it as the placement's recovery judges it.
+/// Whether `node`'s download put its new version in place elsewhere than `from`: its record's
+/// target holding it, as the placement's recovery judges it.
 fn placed_elsewhere(
     db: &mut StateDb,
     folder: &FolderCtx,
     node: NodeId,
     from: &RelPath,
-) -> Result<Option<RelPath>, StateError> {
+) -> Result<Elsewhere, StateError> {
     let Some(p) = db
         .read(|s| s.get_placing(node))?
         .filter(|p| &p.target != from)
     else {
-        return Ok(None);
+        return Ok(Elsewhere::No);
     };
-    let root = folder.root.as_path();
-    let OnDisk::There(meta) = look(root, &p.target) else {
-        return Ok(None);
-    };
-    let row = read_row(root, &p.target, node, &meta, folder.algorithm);
-    Ok(matches!(judge(root, &p, Some(row)), Judged::Settle(_)).then_some(p.target))
+    Ok(match judge_on_disk(&folder.root, &p, folder.algorithm) {
+        Judged::Settle(_) => Elsewhere::Placed(p.target),
+        Judged::Keep => Elsewhere::Unsure,
+        Judged::Drop => Elsewhere::No,
+    })
+}
+
+/// What [`placed_elsewhere`] found.
+enum Elsewhere {
+    /// No new version in place elsewhere (none placed, or another item there).
+    No,
+    /// One there that can't be told yet (not hashed, unreadable).
+    Unsure,
+    /// In place there.
+    Placed(RelPath),
 }
 
 /// What [`recover_by_base`] did with an entry.
@@ -449,6 +460,22 @@ pub(super) fn judge(root: &Path, p: &Placing, row: Option<LocalRow>) -> Judged {
         Judged::Settle(row)
     } else {
         Judged::Drop
+    }
+}
+
+/// Judges record `p` by its target on disk alone, read as the scan would read it.
+pub(super) fn judge_on_disk(
+    root: &Path,
+    p: &Placing,
+    algorithm: hbsync_fileio::HashAlgorithm,
+) -> Judged {
+    match look(root, &p.target) {
+        OnDisk::Absent => Judged::Drop,
+        OnDisk::Unreadable => Judged::Keep,
+        OnDisk::There(meta) => {
+            let row = read_row(root, &p.target, p.base.node, &meta, algorithm);
+            judge(root, p, Some(row))
+        }
     }
 }
 

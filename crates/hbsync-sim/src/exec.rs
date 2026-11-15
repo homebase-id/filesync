@@ -224,25 +224,22 @@ impl Sim {
         if self.server.live.contains_key(&node) {
             return false;
         }
+        self.restore_with(node);
+        if self.server.live.contains_key(&node) {
+            return false;
+        }
+        let name = name(self);
         // One that can't come back where it was (no free name there, or its folders there in
         // a cycle, each waiting for the other) comes back alone here, named, as the engine's
         // `Drive::ensure_folder`.
-        if self.server.removed.contains_key(&node) {
-            self.restore_with(node);
-            if self.server.live.contains_key(&node) {
-                return false;
-            }
-            let name = name(self);
-            if let Some(n) = self.server.removed.get_mut(&node) {
-                n.state.parent = parent;
-            }
+        if let Some(n) = self.server.removed.get_mut(&node) {
+            n.state.parent = parent;
             self.restore_as(node, name);
-            return true;
+        } else {
+            self.server.put(node, NodeState::folder(parent, &name));
+            // Made again after it went for good: a delete that won settles its tags.
+            self.restored_on_drive(node);
         }
-        let name = name(self);
-        self.server.put(node, NodeState::folder(parent, &name));
-        // Made again after it went for good: a delete that won settles its tags.
-        self.restored_on_drive(node);
         true
     }
 
@@ -2312,15 +2309,17 @@ impl Sim {
         self.note(|_| {
             format!("  c{c} recovers {node:?}'s old version: committed {committed}, unchanged {unchanged}, synced {synced}, placed {placed}")
         });
+        // The new version is the node's: committed, or in place for its record to settle.
+        let new_is_its = committed || placed;
         let client = &mut self.clients[c];
-        if unchanged && (committed || synced || placed) {
+        if unchanged && (new_is_its || synced) {
             client.aside.remove(&node);
-            if !committed && !placed {
+            if !new_is_its {
                 client.drop_base(node);
             }
             return;
         }
-        if !committed && !placed && !client.local.contains(node) {
+        if !new_is_its && !client.local.contains(node) {
             return self.return_from_aside(c, node);
         }
         client.aside.remove(&node);

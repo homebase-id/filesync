@@ -580,7 +580,14 @@ impl Drive {
         if row.name == name {
             return Ok(true);
         }
-        let meta = mirror::meta_at(&row, row.parent, &name, false);
+        self.write_at(&row, row.parent, &name)
+    }
+
+    /// Writes the drive's folder `row` live in `parent` under `name`: a metadata update at the
+    /// version the mirror has. Whether it was written: one changed meanwhile (renamed, moved,
+    /// removed or deleted for good elsewhere) is read, and left as it is.
+    fn write_at(&self, row: &MirrorRow, parent: NodeId, name: &str) -> Result<bool, EngineError> {
+        let meta = mirror::meta_at(row, parent, name, false);
         match self.remote().update(&row.target(), &meta, None) {
             Ok(written) => self.record_written(Some(row.version), &meta, written)?,
             Err(RemoteError::VersionMismatch | RemoteError::NotFound | RemoteError::Deleted) => {
@@ -609,44 +616,32 @@ impl Drive {
         }
         let mut made = false;
         if self.restore(&[node])? == 0 {
+            let name = name()?;
+            // Bound first: the account lock's guard would otherwise live through the match.
             let removed = self.account().read(|s| s.removed_by_node(node))?;
-            let (written, expected, meta) = match removed {
-                Some(removed) => {
-                    let row = removed.row;
-                    let meta = mirror::meta_at(&row, parent, &name()?, false);
-                    (
-                        self.remote().update(&row.target(), &meta, None),
-                        Some(row.version),
-                        meta,
-                    )
-                }
+            match removed {
+                Some(removed) => made = self.write_at(&removed.row, parent, &name)?,
                 None => {
                     let meta = NodeMeta {
                         node,
                         parent,
                         kind: NodeKind::Folder,
-                        content: NodeContent::folder(&name()?),
+                        content: NodeContent::folder(&name),
                         removed: false,
                     };
-                    (self.remote().create(&meta, None), None, meta)
+                    match self.remote().create(&meta, None) {
+                        // Recorded from the answer, as the executor records its writes.
+                        Ok(written) => {
+                            self.record_written(None, &meta, written)?;
+                            made = true;
+                        }
+                        // Another device made it (or deleted it) meanwhile: read it.
+                        Err(RemoteError::AlreadyExists) => {
+                            self.pull(None)?;
+                        }
+                        Err(e) => return Err(EngineError::Remote(e)),
+                    }
                 }
-            };
-            match written {
-                // Recorded from the answer, as the executor records its writes.
-                Ok(written) => {
-                    self.record_written(expected, &meta, written)?;
-                    made = true;
-                }
-                // Another device made it, changed it or deleted it meanwhile: read it.
-                Err(
-                    RemoteError::AlreadyExists
-                    | RemoteError::VersionMismatch
-                    | RemoteError::NotFound
-                    | RemoteError::Deleted,
-                ) => {
-                    self.pull(None)?;
-                }
-                Err(e) => return Err(EngineError::Remote(e)),
             }
         }
         if !self.is_live(node)? {
