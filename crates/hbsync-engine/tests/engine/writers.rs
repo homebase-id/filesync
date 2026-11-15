@@ -367,6 +367,21 @@ fn an_edit_of_a_file_whose_newer_version_doesnt_read_forks() -> R {
 /// it: the tag never comes back.
 #[test]
 fn a_tag_removed_while_a_moved_download_waits_for_recovery_stays_removed() -> R {
+    tag_removed_while_a_download_waits_for_recovery(true)
+}
+
+/// [`a_tag_removed_while_a_moved_download_waits_for_recovery_stays_removed`], the drive's edit
+/// in place: the new version swapped in where it was (nothing aside), b's row of it not read
+/// since.
+#[test]
+fn a_tag_removed_while_a_download_in_place_waits_for_recovery_stays_removed() -> R {
+    tag_removed_while_a_download_waits_for_recovery(false)
+}
+
+/// f, tagged Work, edited on the drive (`moved`: moved to p2 first); b crashes between placing
+/// the new version and the commit, then a removes the tag. The old version aside is decided in
+/// b's first sync after it, and the tag stays removed.
+fn tag_removed_while_a_download_waits_for_recovery(moved: bool) -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
     let mut b = Client::new(&server, "b")?;
@@ -380,34 +395,41 @@ fn a_tag_removed_while_a_moved_download_waits_for_recovery_stays_removed() -> R 
     a.sync()?;
     b.sync()?;
     assert_eq!(names(&b, "p1/f"), ["Work"]);
-    fs::rename(a.root.join("p1/f"), a.root.join("p2/f"))?;
-    a.sync()?;
+    let at = if moved { "p2/f" } else { "p1/f" };
+    if moved {
+        fs::rename(a.root.join("p1/f"), a.root.join(at))?;
+        a.sync()?;
+    }
     tick();
     fs::OpenOptions::new()
         .append(true)
-        .open(a.root.join("p2/f"))
+        .open(a.root.join(at))
         .and_then(|mut f| std::io::Write::write_all(&mut f, b" two"))?;
     a.sync()?;
     assert_eq!(drive_tags(&server, "f"), ["Work:0"]);
-    let placed = b.root.join("p2/f");
+    let placed = b.root.join(at);
     let crashed = common::crash(&mut b, common::Kept::All, move |at, _| {
         at == Commit::Before && fs::read(&placed).is_ok_and(|b| b == b"one two")
     })?;
     assert!(crashed);
-    assert_eq!(names(&b, "p2/f"), ["Work"], "put in place, not committed");
+    assert_eq!(names(&b, at), ["Work"], "put in place, not committed");
     tick();
-    tags::write(&a.root.join("p2/f"), &Tags::default())?;
+    tags::write(&a.root.join(at), &Tags::default())?;
     a.sync()?;
     assert!(drive_tags(&server, "f").is_empty());
     b.restart()?;
     b.sync()?;
+    let aside = fs::read_dir(b.root.join(".hbsync/aside"))
+        .map(|d| d.count())
+        .unwrap_or(0);
+    assert_eq!(aside, 0, "the old version decided in the same sync");
     a.sync()?;
     b.sync()?;
     assert!(
         drive_tags(&server, "f").is_empty(),
         "the removed tag came back"
     );
-    assert!(names(&b, "p2/f").is_empty());
+    assert!(names(&b, at).is_empty());
     assert_eq!(a.tree_text(""), b.tree_text(""));
     Ok(())
 }

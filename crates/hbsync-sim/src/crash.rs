@@ -260,11 +260,25 @@ impl Sim {
     /// settled as the commit would have (the same rule, against the same version, the item
     /// read with the tags it was put in place with).
     pub(crate) fn recover(&mut self, c: usize) {
-        // What a crash left aside is decided by what it is (the executor's recovery).
-        let aside: Vec<NodeId> = self.clients[c].aside.keys().copied().collect();
+        // What a crash left aside is decided by what it is (the executor's recovery); a node's
+        // with a placement record after that record's recovery, as the engine's second pass
+        // (`recover_waiting`): one whose record stays waits for the next sync.
+        let client = &self.clients[c];
+        let (waiting, aside): (Vec<NodeId>, Vec<NodeId>) =
+            (client.aside.keys().copied()).partition(|node| client.placing.contains_key(node));
         for node in aside {
             self.recover_aside(c, node);
         }
+        self.recover_placings(c);
+        for node in waiting {
+            if !self.clients[c].placing.contains_key(&node) {
+                self.recover_aside(c, node);
+            }
+        }
+    }
+
+    /// [`Sim::recover`]'s placement records, each judged by what is at its target.
+    fn recover_placings(&mut self, c: usize) {
         self.clients[c].unhashed.clear();
         for (node, p) in std::mem::take(&mut self.clients[c].placing) {
             let there = self.record_there(c, node, &p);

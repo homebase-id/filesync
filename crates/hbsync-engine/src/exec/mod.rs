@@ -840,7 +840,8 @@ pub use outcome::{Skip, Stopped};
 use park::{numbered_place, occupant, release_place, release_place_for, restore_parked};
 use recover::{Applied, apply, judge_on_disk};
 pub use recover::{
-    AsideOutcome, UNHASHED_WAIT, record_dirs, recover, recover_aside, recover_placements,
+    AsideOutcome, UNHASHED_WAIT, Waiting, record_dirs, recover, recover_aside, recover_placements,
+    recover_waiting,
 };
 use recover::{complete_fork, download_key};
 use schedule::{Retried, Schedule};

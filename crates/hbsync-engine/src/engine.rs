@@ -17,6 +17,7 @@ use crate::drive::Drive;
 use crate::error::EngineError;
 use crate::exec::{
     ExecConfig, Executor, Stopped, record_dirs, recover, recover_aside, recover_placements,
+    recover_waiting,
 };
 use crate::feed::FeedReport;
 use crate::folder::FolderCtx;
@@ -622,11 +623,13 @@ impl Engine {
         self.rescan_records()?;
         recover(&mut self.db, &self.cfg.folder)?;
         // An old version that waited for its placement's recovery is decided now, and the
-        // folder it was in read again: the scan kept it for the item.
+        // folder its row was in read again: the scan kept it for the row.
         if !aside.waiting.is_empty() {
-            let again = recover_aside(&mut self.db, &self.cfg.folder)?;
-            report.left_aside = again.unknown;
-            let dirs: Vec<_> = again.rescan.into_iter().chain(aside.waiting).collect();
+            let kept: Vec<_> = aside.waiting.iter().filter_map(|w| w.dir.clone()).collect();
+            let again = recover_waiting(&mut self.db, &self.cfg.folder, aside.waiting)?;
+            report.left_aside.extend(again.unknown);
+            report.left_aside.sort();
+            let dirs: Vec<_> = again.rescan.into_iter().chain(kept).collect();
             rescan_dirs(&mut self.db, &self.cfg.folder.root, &dirs, &self.scan_opts)?;
         }
         let folder = Some(self.db.folder());

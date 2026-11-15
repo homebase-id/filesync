@@ -744,11 +744,13 @@ expected fingerprint is treated as done.
   version's; written to, it comes back as a new item beside the new one, never onto it (its
   node parked: beside the name it gets back, numbered, never the temporary one); with no name
   to come back under (every numbered one taken), it waits, told; unreadable now, it waits. One
-  replaced from another folder, the new one put in place there before a crash took its commit,
-  waits for that placement's recovery after the scan (§7 Old versions, write-ahead records):
-  the placed file is its node's (the old row, kept while it is aside, is no other place of it),
-  settled against the base the download acted on; then it goes as above. Decided first, its
-  row and base would go with it, and the placed file read as new. Where its rows went (an item took its place meanwhile), its base
+  whose download's commit a crash took (its placement record still there) waits for that
+  placement's recovery after the scan (§7 Old versions, write-ahead records): the placed file
+  is its node's (the old row, kept while it is aside, is no other place of it), settled
+  against the base the download acted on; right after it, in the same sync, it is decided as
+  above, and the folder its old row was in read again. Decided first, its row and base would
+  go with it, and the placed file read as new. A record kept (its file not hashed yet, or the
+  aside folder unreadable) keeps it waiting, for the next sync. Where its rows went (an item took its place meanwhile), its base
   decides: a file holding the bytes its base records goes; anything else goes back where it was
   last synced, read as a new item there. One whose node this folder doesn't know (its state DB
   lost or replaced since), or one to go back whose place it doesn't, is left aside, and told

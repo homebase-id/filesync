@@ -2289,10 +2289,9 @@ impl Sim {
     /// The old version of `node` a download replaced, left aside (a crash, or written to),
     /// decided at the next plan as the executor's recovery does. The download committed (the
     /// base holds the new bytes): the old version goes if it still holds the bytes it went
-    /// aside with, else it comes back as a new item, never onto the new one. Not committed, the
-    /// new one in place (its record's item there): the same, its base kept for the record's
-    /// recovery to settle against. Not committed otherwise: it goes only as the synced version
-    /// (those bytes, its base's too), its base with it; else it comes back as its node.
+    /// aside with, else it comes back as a new item, never onto the new one. Not committed: it
+    /// goes only as the synced version (those bytes, its base's too), its base with it; else
+    /// it comes back, as its node where nothing of the new one is in place, else as a new item.
     fn recover_replaced(
         &mut self,
         c: usize,
@@ -2308,22 +2307,18 @@ impl Sim {
         let committed = base.is_some_and(|b| !same_bytes(b, name));
         let unchanged = same_bytes(old.content, name);
         let synced = base.is_some_and(|b| same_bytes(b, name));
-        let placed =
-            (client.placing.get(&node).cloned()).is_some_and(|p| self.record_there(c, node, &p));
         self.note(|_| {
-            format!("  c{c} recovers {node:?}'s old version: committed {committed}, unchanged {unchanged}, synced {synced}, placed {placed}")
+            format!("  c{c} recovers {node:?}'s old version: committed {committed}, unchanged {unchanged}, synced {synced}")
         });
-        // The new version is the node's: committed, or in place for its record to settle.
-        let new_is_its = committed || placed;
         let client = &mut self.clients[c];
-        if unchanged && (new_is_its || synced) {
+        if unchanged && (committed || synced) {
             client.aside.remove(&node);
-            if !new_is_its {
+            if !committed {
                 client.drop_base(node);
             }
             return;
         }
-        if !new_is_its && !client.local.contains(node) {
+        if !committed && !client.local.contains(node) {
             return self.return_from_aside(c, node);
         }
         client.aside.remove(&node);
