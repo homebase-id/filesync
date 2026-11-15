@@ -521,7 +521,7 @@ impl FakeServer {
     /// deleted file's share is withdrawn, the member reading it no more, but its tombstone keeps
     /// its time, its place in the feed and the age it is purged by; the change is announced at
     /// that time (odin-core PR #2141: `WithdrawShareAsync`, `FileShares.MovesModified`,
-    /// `PublishChangedAsync`; **[verified]** on that PR at 1fd30efcb, not merged yet).
+    /// `PublishChangedAsync`; **[verified]** in odin-core at aa560aea9).
     fn set_share(&mut self, writer: ClientId, file_id: RemoteFileId, live: bool) -> Result<()> {
         let refused = |why: String| Err(RemoteError::Fatal(why));
         let deleted = match (live, self.files.get(&file_id), self.shares.get(&file_id)) {
@@ -581,15 +581,16 @@ impl FakeServer {
         Ok(())
     }
 
-    /// `file_id`'s payload as `view` reads it ([`FakeServer::access`]). The member's adapter
-    /// reads the header first, for the key (`PeerRemote::read`, `payload_key`): a tombstone is
-    /// deleted, a file without a payload (a folder) has none now. The owner's goes by the
-    /// payload: not there.
+    /// `file_id`'s payload as `view` reads it ([`FakeServer::access`]). A tombstone's is deleted,
+    /// for the owner and the member alike (Homebase's `fileDeleted`, odin-core PR #2141:
+    /// homebase-api-notes, Errors). A file without a payload (a folder) has none now for the
+    /// member, whose adapter reads the header first, for the key (`PeerRemote::read`,
+    /// `payload_key`); the owner's goes by the payload: not there.
     fn payload_as(&self, file_id: RemoteFileId, view: View) -> Result<Arc<Vec<u8>>> {
         let (file, how) = self.access(file_id, view)?;
         match how {
-            Seen::Owner => self.payload(file_id),
             _ if file.header.is_deleted() => Err(RemoteError::Deleted),
+            Seen::Owner => self.payload(file_id),
             _ => file.bytes.clone().ok_or_else(|| {
                 RemoteError::StaleRange(format!("file {file_id:?}: no payload now"))
             }),

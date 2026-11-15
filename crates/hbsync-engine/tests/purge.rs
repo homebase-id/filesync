@@ -15,6 +15,7 @@ use hbsync_engine::deleted;
 use hbsync_engine::feed;
 use hbsync_engine::time::TRACE_MS;
 use hbsync_remote::RemoteError;
+use hbsync_remote::contract::Shares;
 use hbsync_remote::fake::{FakeRemote, FakeServer};
 use hbsync_state::StateDb;
 use hbsync_types::{NodeId, RemoteFileId};
@@ -549,6 +550,172 @@ fn a_node_written_into_a_removed_folder_later_holds_it() -> common::Res<()> {
         b"z",
         hbsync_fileio::HashAlgorithm::Blake3,
     )?;
+
+    server.lock().map_err(|_| "poisoned")?.advance(LATER);
+    assert_eq!(
+        a.engine.drive().purge(0, deleted::Going::UNWATCHED)?,
+        1,
+        "x went, d stays"
+    );
+    let server = server.lock().map_err(|_| "poisoned")?;
+    let d = server.header(d.file_id)?;
+    assert!(d.removed, "d stays: {d:?}");
+    assert_eq!(server.live_names(), ["z.txt"]);
+    Ok(())
+}
+
+/// `file_id`'s share given by `c` (a share row written): its `updated` moves on and its version
+/// stays, as every share given or withdrawn does (node schema, Recently deleted: When).
+fn share(server: &Arc<Mutex<FakeServer>>, c: &Client, file_id: RemoteFileId) -> common::Res<()> {
+    let before = server.lock().map_err(|_| "poisoned")?.header(file_id)?;
+    c.remote.share(file_id)?;
+    let after = server.lock().map_err(|_| "poisoned")?.header(file_id)?;
+    assert_eq!(after.version, before.version, "the version stays");
+    assert!(after.changed_at > before.changed_at, "the time moves");
+    Ok(())
+}
+
+/// A share given for what a removal took along, after it, isn't a write: this device holds the
+/// version from before, so its time is the one it read with it. The file is still taken along
+/// (the purge removes it with its folder), where a file written after the removal would hold
+/// the folder ([`a_node_written_into_a_removed_folder_later_holds_it`]).
+#[test]
+fn a_share_change_of_what_a_removal_took_along_is_no_write() -> common::Res<()> {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("d/x.txt", "x")?;
+    a.sync()?;
+    let (d, x) = (header_named(&server, "d"), header_named(&server, "x.txt"));
+    remove_on_server(&server, &d);
+    server.lock().map_err(|_| "poisoned")?.advance(1000);
+    share(&server, &a, x.file_id)?;
+    server.lock().map_err(|_| "poisoned")?.advance(LATER);
+    assert_eq!(
+        a.engine
+            .drive()
+            .purge(TRACE_MS, deleted::Going::UNWATCHED)?,
+        0,
+        "x removed first"
+    );
+    let now = server.lock().map_err(|_| "poisoned")?.header(x.file_id)?;
+    assert!(now.removed, "taken along all the same: {now:?}");
+    Ok(())
+}
+
+/// The same through a sync: the folder stays in Recently deleted on a device that holds the
+/// file's version, the file with it, and nothing comes back.
+#[test]
+fn a_share_change_below_a_removed_folder_brings_nothing_back() -> common::Res<()> {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    let mut b = Client::with_config(&server, "b", |cfg| cfg.guard.allow = true)?;
+    a.write("d/x.txt", "x")?;
+    a.write("keep.txt", "k")?;
+    a.sync()?;
+    b.sync()?;
+    let (d, x) = (header_named(&server, "d"), header_named(&server, "x.txt"));
+    remove_on_server(&server, &d);
+    server.lock().map_err(|_| "poisoned")?.advance(1000);
+    share(&server, &a, x.file_id)?;
+    for c in [&mut a, &mut b] {
+        c.sync()?;
+        assert_eq!(c.tree_text(""), ["keep.txt = k"], "{}", c.name);
+    }
+    assert_eq!(live(&server), ["keep.txt"]);
+    assert!(removed_on_server(&server, "d"), "d stays removed");
+    Ok(())
+}
+
+/// The limit of that, until the server says when a version was written apart from `updated`:
+/// a device that first reads the file after its share changed has only the later time, and
+/// takes the file for written after the removal. Its folder comes back for everyone (sync
+/// semantics §6 rule 3), the safe side: nothing is lost.
+#[test]
+fn a_device_first_reading_a_file_after_its_share_changed_takes_it_for_written_then()
+-> common::Res<()> {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    a.write("d/x.txt", "x")?;
+    a.write("keep.txt", "k")?;
+    a.sync()?;
+    let (d, x) = (header_named(&server, "d"), header_named(&server, "x.txt"));
+    remove_on_server(&server, &d);
+    server.lock().map_err(|_| "poisoned")?.advance(1000);
+    share(&server, &a, x.file_id)?;
+    let mut new = Client::with_config(&server, "new", |cfg| cfg.guard.allow = true)?;
+    new.sync()?;
+    a.sync()?;
+    for c in [&new, &a] {
+        let tree = c.tree_text("");
+        assert_eq!(tree, ["d/", "d/x.txt = x", "keep.txt = k"], "{}", c.name);
+    }
+    assert_eq!(live(&server), ["d", "keep.txt", "x.txt"]);
+    Ok(())
+}
+
+/// A share change of a removed node moves neither its 30 days nor what it was deleted with:
+/// its removal time is the one this device read with the version. x, removed before its
+/// folder, stays an item of its own, and goes for good 30 days after its removal, though its
+/// `updated` is from today.
+#[test]
+fn a_share_change_of_a_removed_node_keeps_its_time() -> common::Res<()> {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
+    a.write("d/x.txt", "x")?;
+    a.write("d/y.txt", "y")?;
+    a.sync()?;
+    let d = header_named(&server, "d");
+    fs::remove_file(a.root.join("d/x.txt"))?;
+    a.sync()?;
+    server.lock().map_err(|_| "poisoned")?.advance(LATER);
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.sync()?;
+    let x = header_named(&server, "x.txt");
+    server.lock().map_err(|_| "poisoned")?.advance(1000);
+    share(&server, &a, x.file_id)?;
+    a.sync()?;
+    let items = a.recently_deleted(10)?;
+    let listed = items
+        .iter()
+        .find(|i| i.node == node_of(&x))
+        .ok_or("x in Recently deleted")?;
+    assert_eq!(listed.root, listed.node, "an item of its own: {items:?}");
+    assert_eq!(
+        a.engine
+            .drive()
+            .purge(TRACE_MS, deleted::Going::UNWATCHED)?,
+        1,
+        "x is due, d and y aren't"
+    );
+    let server = server.lock().map_err(|_| "poisoned")?;
+    let gone = server.header(x.file_id);
+    assert!(matches!(gone, Err(RemoteError::NotFound)), "x: {gone:?}");
+    let d = server.header(d.file_id)?;
+    assert!(d.removed && !d.is_deleted(), "d: {d:?}");
+    Ok(())
+}
+
+/// A share change of a removed folder doesn't move its removal: what was written into it
+/// after still holds it, where a later removal would have taken that along (and the purge
+/// deleted it with the folder).
+#[test]
+fn a_share_change_of_a_removed_folder_takes_nothing_more_along() -> common::Res<()> {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("d/x.txt", "x")?;
+    a.sync()?;
+    let d = header_named(&server, "d");
+    fs::remove_dir_all(a.root.join("d"))?;
+    a.sync()?;
+    server.lock().map_err(|_| "poisoned")?.advance(1000);
+    server.lock().map_err(|_| "poisoned")?.seed_file(
+        node_of(&d),
+        "z.txt",
+        b"z",
+        hbsync_fileio::HashAlgorithm::Blake3,
+    )?;
+    server.lock().map_err(|_| "poisoned")?.advance(1000);
+    share(&server, &a, d.file_id)?;
 
     server.lock().map_err(|_| "poisoned")?.advance(LATER);
     assert_eq!(

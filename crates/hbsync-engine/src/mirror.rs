@@ -96,11 +96,14 @@ fn misplaced(header: &RemoteHeader) -> Option<String> {
     }
 }
 
-/// A version the store has already (this device's own write coming back, or a page applied
-/// again) changes nothing but what the server says better: the file's `token` where the
-/// header gives one (an earlier login's may not open), a removal's time, and the time of a
-/// version in a removed folder, where it decides whether it went with it (node schema,
-/// Recently deleted). No change of the node, so nothing to reconcile.
+/// A version the store has already (this device's own write coming back, a page applied
+/// again, or a share given or withdrawn, which moves the file's `updated` and keeps its
+/// version) changes nothing but what the server says better: the file's `token` where the
+/// header gives one (an earlier login's may not open), and a time the store doesn't have yet:
+/// a removal's, and that of a version in a removed folder, where it decides whether it went
+/// with it (node schema, Recently deleted). A time the store has stays: a version's time is
+/// the one first read with it, never a later `updated` of the same version. No change of the
+/// node, so nothing to reconcile.
 pub(crate) fn apply_known(
     s: AccountTx<'_>,
     r: &ChangeRef,
@@ -236,6 +239,46 @@ mod tests {
             1,
             "the mirror keeps the file"
         );
+        Ok(())
+    }
+
+    /// A known version read again with a later time (a share given or withdrawn moves a
+    /// file's `updated` and keeps its version) keeps the time first read with it, live or
+    /// removed: only a new version is a write.
+    #[test]
+    fn a_later_time_of_a_known_version_is_no_write() -> Result<(), StateError> {
+        let mut db = StateDb::open_in_memory()?;
+        let node = NodeId::new();
+        let mut header = RemoteHeader {
+            file_id: RemoteFileId(Uuid::new_v4()),
+            version: VersionTag(Uuid::new_v4()),
+            parent: NodeId::ROOT,
+            kind: NodeKind::File,
+            body: RemoteBody::Live {
+                node,
+                content: NodeContent::file("f", 0, 1, false),
+                payload: Some(PayloadInfo {
+                    hash: hash_bytes(b"x", HashAlgorithm::Blake3),
+                    bytes: 1,
+                }),
+            },
+            removed: false,
+            changed_at: Some(100),
+            token: None,
+        };
+        db.write(|s| apply(s.account(), &header))?;
+        header.changed_at = Some(200);
+        assert_eq!(db.write(|s| apply(s.account(), &header))?, Applied::Live);
+        let live = db.read(|s| s.get_mirror(node))?.expect("live");
+        assert_eq!(live.changed_at, Some(100));
+        // Removed, a new version, and that one read again later.
+        header.version = VersionTag(Uuid::new_v4());
+        (header.removed, header.changed_at) = (true, Some(300));
+        assert_eq!(db.write(|s| apply(s.account(), &header))?, Applied::Left);
+        header.changed_at = Some(400);
+        assert_eq!(db.write(|s| apply(s.account(), &header))?, Applied::Left);
+        let removed = db.read(|s| s.removed_by_node(node))?.expect("removed");
+        assert_eq!(removed.removed_at, Some(300));
         Ok(())
     }
 

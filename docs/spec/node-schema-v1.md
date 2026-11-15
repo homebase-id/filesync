@@ -251,7 +251,22 @@ of this schema may define some of them.)
   itself: a removed node is out of the folder tree for every client, and restorable.
 - **When:** a node's removal time is its header's `updated`, the server's time of the write
   that removed it (odin-core's `record.modified`, **[verified]** `FileMetadata.cs`). Nothing
-  writes to a removed node, so it stays that time (see the rules below).
+  writes to a removed node, so it stays that time (see the rules below), but for a share: one
+  given or withdrawn moves a file's `updated` and keeps its `versionTag` (**[verified]**
+  odin-core `TouchKeepingVersionTagAsync`; homebase-api-notes).
+- **A write is a new `versionTag`,** never a later `updated` alone. A version's time, live or
+  removed, is the `updated` a client first read with that `versionTag`: it keeps that time
+  while it holds the version, and a later `updated` of the same version changes nothing (not
+  what a delete took along, not a removal's time, not its 30 days). The computers do so
+  (`mirror::apply`: a known version takes only a time it didn't have). The limit, until the
+  server says when a version was written apart from `updated` (a future enhancement,
+  filesync #385): a client that first reads a version after its share changed (a new
+  device, a client keeping no state) has only the later time. A live node in a removed
+  folder then counts as written after the removal, and
+  brings its folders back (nothing lost); a removed node waits longer for its purge, and may
+  list as deleted with its folder; a removed folder may seem removed later, so a node written
+  into it in between counts as taken along, and goes to Recently deleted (restorable) with
+  the purge's first step.
 - **A folder first:** deleting a folder removes the folder by itself, then everything in it
   (batches of the files below it), so what was deleted with a folder is removed no earlier than
   the folder, even if the delete stops half way.
@@ -405,6 +420,9 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   request, each at its `versionTag`, without reading or rewriting content: send a folder's
   removal before (not in the same request as) what is in it, and leave a file it answers
   `versionTagMismatch` for as it is.
+- **Times go with versions** (Recently deleted, "A write is a new `versionTag`"): where you
+  keep what you read, keep each node's `updated` with its `versionTag`, and take a later
+  `updated` of the same `versionTag` for no change.
 - **A removed node** is never written to except to restore it: its `updated` is its removal
   time. That also rules out what odin-core counts as a change of it **[verified]**
   `TableDriveMainIndex.cs` (`UpdateReactionSummaryAsync`, `UpdateTransferSummaryAsync`,
@@ -434,6 +452,9 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-11-15: a write is a new `versionTag`, never a later `updated` alone: a version's time
+  is the `updated` first read with it, as a share given or withdrawn moves `updated` and keeps
+  the version (Recently deleted). Nodes are the same.
 - 2026-11-15: a restore breaks a loop of removed folders where it meets it: that folder comes
   back into Recovered files (Recently deleted, Restore).
 - 2026-11-14: a member reading another identity's share can tell a "no longer shared"

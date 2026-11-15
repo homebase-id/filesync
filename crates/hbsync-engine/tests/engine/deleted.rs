@@ -1270,6 +1270,27 @@ fn a_removal_answered_gone_for_good_keeps_the_file_gone() -> R {
     Ok(())
 }
 
+/// A file to download that another device deleted for good meanwhile (a tombstone, not in the
+/// picture yet): the read's answer says so (Homebase's `fileDeleted`), and its header isn't
+/// read to make sure. It is known gone here, and nothing of it is placed.
+#[test]
+fn a_download_answered_as_a_tombstone_reads_no_header() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("keep.txt", "k")?;
+    a.write("x.txt", "x")?;
+    a.sync()?;
+    let mut b = Client::new(&server, "b")?;
+    b.engine.drive().pull(None)?;
+    let x = gone_unheard(&server, "x.txt")?;
+    let headers = b.remote.faults().headers;
+    b.sync()?;
+    assert_eq!(b.remote.faults().headers, headers);
+    assert!(b.engine.db().read(|s| s.file_gone(x))?, "known gone");
+    assert_eq!(b.tree_text(""), ["keep.txt = k"]);
+    Ok(())
+}
+
 /// A delete taken back comes down again: the other device kept nothing of what it deleted
 /// (sync semantics §7), so every file of it is downloaded.
 #[test]

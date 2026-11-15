@@ -763,7 +763,8 @@ pub trait Remote: Send + Sync {
     fn set_removed(&self, files: &[Target], removed: bool) -> Result<Answers<Written>>;
 
     /// Streams the payload (or `start..end` of it) into `sink`. Returns the bytes written: fewer
-    /// than asked when the range runs past the payload's end.
+    /// than asked when the range runs past the payload's end. A tombstone's is
+    /// [`RemoteError::Deleted`], whoever reads it; a file not on the drive is not found.
     fn read(
         &self,
         file_id: RemoteFileId,
