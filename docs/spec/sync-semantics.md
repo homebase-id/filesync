@@ -743,7 +743,12 @@ expected fingerprint is treated as done.
   replaced, its node holding the new bytes by then, goes once its bytes read as the old
   version's; written to, it comes back as a new item beside the new one, never onto it (its
   node parked: beside the name it gets back, numbered, never the temporary one); with no name
-  to come back under (every numbered one taken), it waits, told; unreadable now, it waits. Where its rows went (an item took its place meanwhile), its base
+  to come back under (every numbered one taken), it waits, told; unreadable now, it waits. One
+  replaced from another folder, the new one put in place there before a crash took its commit,
+  waits for that placement's recovery after the scan (§7 Old versions, write-ahead records):
+  the placed file is its node's (the old row, kept while it is aside, is no other place of it),
+  settled against the base the download acted on; then it goes as above. Decided first, its
+  row and base would go with it, and the placed file read as new. Where its rows went (an item took its place meanwhile), its base
   decides: a file holding the bytes its base records goes; anything else goes back where it was
   last synced, read as a new item there. One whose node this folder doesn't know (its state DB
   lost or replaced since), or one to go back whose place it doesn't, is left aside, and told
@@ -1089,7 +1094,9 @@ state DB (one mirror, one feed) and keep their own base and local rows:
   folder's.
 
 Before every sync of a role folder, after reading the drive, its top must be on the drive: one
-in Recently deleted comes back with what was deleted with it, one not there at all (never made,
+in Recently deleted comes back with what was deleted with it (one that can't come back where it
+was, its folders there in a cycle each waiting for the other, comes back at the drive's top
+first, then what was deleted with it), one not there at all (never made,
 or deleted for good) is made at the drive's top with the role's id. So the first device to add
 a role makes its folder, the others join it, and a role folder deleted on the drive while a
 device syncs it comes back at that device's next sync, nothing deleted there and nothing
@@ -1121,7 +1128,8 @@ its next round (one not running takes it first thing when it starts), and it let
 held of it (masked, as above: a change made there meanwhile is kept, detached, in a folder of
 its own beside it); one removed comes back into it. The Desktop syncs at once. Before every
 sync of a Desktop, after reading the drive, Desktops comes back
-from Recently deleted (with what was deleted with it) or is made at the top whenever it isn't
+from Recently deleted (with what was deleted with it; at the top where its folders there are in
+a cycle, as a role folder's top) or is made at the top whenever it isn't
 live, even with the computer's folder live in it (a delete stopped half way); then the
 computer's folder must be live: it comes back, or is made in Desktops under the computer's
 name (the first free one: `PC (conflict 1)`); nothing syncs into one that isn't. Made beside a
