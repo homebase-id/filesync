@@ -38,6 +38,8 @@ pub fn recover_aside(db: &mut StateDb, folder: &FolderCtx) -> Result<AsideOutcom
     let disk = Disk::new(folder, &hooks);
     let mut dirs = Vec::new();
     let mut unknown = Vec::new();
+    let placing: HashSet<NodeId> =
+        db.read(|s| Ok(s.all_placing()?.iter().map(|p| p.base.node).collect()))?;
     for (aside, parsed) in layout::aside_entries(&folder.root) {
         let Some(parsed) = parsed else {
             tracing::debug!("{} is left aside: no delete made it", aside.display());
@@ -47,7 +49,7 @@ pub fn recover_aside(db: &mut StateDb, folder: &FolderCtx) -> Result<AsideOutcom
         let node = parsed.node();
         // Decided by its placement's recovery, after the scan: decided now, against a row not
         // read since, its row and base would go with it, and the placed file read as new.
-        if matches!(parsed, layout::AsideEntry::File(..)) && db.read(|s| s.is_placing(node))? {
+        if matches!(parsed, layout::AsideEntry::File(..)) && placing.contains(&node) {
             continue;
         }
         let Some(row) = db.read(|s| s.local_by_node(node))? else {
@@ -376,16 +378,17 @@ pub fn recover_placements(
     let judged: Vec<_> = found
         .into_iter()
         .map(|(p, scanned, kept)| {
-            let judged = match scanned {
-                // Not scanned yet: read as the scan would.
-                Scanned::None => judge_on_disk(root, &p, algorithm),
-                scanned => match (look(root, &p.target), scanned) {
-                    (OnDisk::Absent, _) => Judged::Drop,
-                    (OnDisk::Unreadable, _) => Judged::Keep,
-                    (OnDisk::There(_), Scanned::Ours(row)) => judge(root, &p, Some(row)),
-                    (OnDisk::There(_), Scanned::Unsure) => Judged::Keep,
-                    (OnDisk::There(_), Scanned::Other | Scanned::None) => Judged::Drop,
-                },
+            let judged = match (look(root, &p.target), scanned) {
+                (OnDisk::Absent, _) => Judged::Drop,
+                (OnDisk::Unreadable, _) => Judged::Keep,
+                (OnDisk::There(_), Scanned::Other) => Judged::Drop,
+                (OnDisk::There(_), Scanned::Unsure) => Judged::Keep,
+                (OnDisk::There(_), Scanned::Ours(row)) => judge(root, &p, Some(row)),
+                // On disk, not scanned yet: read as the scan would.
+                (OnDisk::There(meta), Scanned::None) => {
+                    let row = read_row(root, &p.target, p.base.node, &meta, algorithm);
+                    judge(root, &p, Some(row))
+                }
             };
             (p, judged, kept)
         })
