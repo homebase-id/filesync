@@ -751,8 +751,8 @@ expected fingerprint is treated as done.
   would have: unlinked if it still holds its bytes, else back beside the new one as a new
   item; the folder its old row was in is read again. Decided first, its row and base would go
   with it, and the placed file read as new. A record dropped (the new version gone from its
-  place, or changed) has its old version decided at once, as any entry is; one kept (its file
-  not hashed yet, or the aside folder unreadable) leaves it for the next sync. Where its rows went (an item took its place meanwhile), its base
+  place, or changed) or kept (its file not hashed yet, or the aside folder unreadable) leaves
+  it for the next sync, decided then as any entry is. Where its rows went (an item took its place meanwhile), its base
   decides: a file holding the bytes its base records goes; anything else goes back where it was
   last synced, read as a new item there. One whose node this folder doesn't know (its state DB
   lost or replaced since), or one to go back whose place it doesn't, is left aside, and told
