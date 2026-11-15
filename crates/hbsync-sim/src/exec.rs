@@ -230,11 +230,15 @@ impl Sim {
         }
         let name = name(self);
         // One that can't come back where it was (no free name there, or its folders there in
-        // a cycle, each waiting for the other) comes back alone here, named, as the engine's
-        // `Drive::ensure_folder`.
+        // a cycle, each waiting for the other) comes back here, named, and then what was
+        // deleted with it, as the engine's `Drive::ensure_folder`.
         if let Some(n) = self.server.removed.get_mut(&node) {
             n.state.parent = parent;
+            let along: Vec<NodeId> = (self.server.group(node).into_iter())
+                .filter(|&n| n != node)
+                .collect();
             self.restore_as(node, name);
+            self.restore_all(&along);
         } else {
             self.server.put(node, NodeState::folder(parent, &name));
             // Made again after it went for good: a delete that won settles its tags.

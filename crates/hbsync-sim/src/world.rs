@@ -919,11 +919,15 @@ impl Sim {
     /// didn't come back stays, with what is in it. It plans from the drive as it is: a device
     /// plans from its store, which may lag (a stale device's restore isn't simulated).
     pub(crate) fn restore_with(&mut self, node: NodeId) {
-        // The engine's plan ([`deleted::plan_restore_from`]): the folders above it in Recently
+        self.restore_all(&[node]);
+    }
+
+    /// [`Sim::restore_with`] of `nodes` together, as one restore of the engine's.
+    pub(crate) fn restore_all(&mut self, nodes: &[NodeId]) {
+        // The engine's plan ([`deleted::plan_restore_from`]): the folders above each in Recently
         // deleted, outermost first, then it and what was deleted with it, each once; the
         // folders the rows may go into, and the names taken there.
-        if let Ok(Some(plan)) = deleted::plan_restore_from(&mut RestoreFrom(&self.server), &[node])
-        {
+        if let Ok(Some(plan)) = deleted::plan_restore_from(&mut RestoreFrom(&self.server), nodes) {
             self.restore_planned(plan);
         }
     }

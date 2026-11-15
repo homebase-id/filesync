@@ -26,6 +26,7 @@ mod rules;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use listing::group;
 pub use listing::{DeletedSummary, Listed, deletes, listed_here, listed_now};
 pub use restore::{RestorePlan, RestoreSource, Restored, plan_restore_from};
 pub use rules::deleted_with_at;

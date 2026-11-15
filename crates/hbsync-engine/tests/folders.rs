@@ -866,10 +866,11 @@ fn desktops_removed_alone_comes_back() -> R {
 }
 
 /// Desktops and a folder `q` in Recently deleted each in the other (two devices' moves met in a
-/// cycle, then went), with the computer's Desktop in Desktops: neither can come back where it
-/// was, each waiting for the other. The computer's next sync brings Desktops back alone at the
-/// top, then its own folder in it: made anew, Desktops' id would be refused, and the Desktop
-/// never synced again.
+/// cycle, then went), with the computer's Desktop in Desktops, and another computer's deleted
+/// with it: neither can come back where it was, each waiting for the other. The computer's next
+/// sync brings Desktops back at the top, with what was deleted with it, then its own folder in
+/// it: made anew, Desktops' id would be refused, and the Desktop never synced again; back
+/// alone, the other computer's Desktop would stay deleted.
 #[test]
 fn desktops_removed_in_a_cycle_comes_back_at_the_top() -> R {
     let server = FakeServer::new(ServerConfig::default());
@@ -879,8 +880,14 @@ fn desktops_removed_in_a_cycle_comes_back_at_the_top() -> R {
     let q = hbsync_remote::contract::folder("q", NodeId::ROOT);
     server.lock().map_err(|_| "poisoned")?.create(&q, None)?;
     let q = q.node;
+    let other = hbsync_remote::contract::folder("Old PC", NodeId::DESKTOPS);
+    server
+        .lock()
+        .map_err(|_| "poisoned")?
+        .create(&other, None)?;
     remove_from(&server, q, Some(NodeId::DESKTOPS))?;
     remove_from(&server, NodeId::DESKTOPS, Some(q))?;
+    remove_from(&server, other.node, None)?;
     std::fs::write(a.desk_root.join("b.txt"), b"b")?;
     a.sync()?;
     let live = drive_listing(&server);
@@ -889,7 +896,7 @@ fn desktops_removed_in_a_cycle_comes_back_at_the_top() -> R {
         "{live:?}"
     );
     assert!(!live.iter().any(|(n, _)| n == "q"), "{live:?}");
-    assert_eq!(desktops(&server), ["Laptop"]);
+    assert_eq!(desktops(&server), ["Laptop", "Old PC"]);
     assert_eq!(files(&a.desk_root), ["a.txt", "b.txt"]);
     let mut b = DeskPc::new(&server, None)?;
     b.sync()?;
