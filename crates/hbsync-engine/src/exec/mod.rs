@@ -288,20 +288,18 @@ impl<'a> Executor<'a> {
             }
             // Everything else runs on its own, in order: after the batch.
             let pooled = op.pooled();
-            let mut target = if pooled { self.move_target(&op)? } else { None };
+            let target = if pooled { self.move_target(&op)? } else { None };
             if !batch.jobs.is_empty()
                 && (!pooled
                     || batch.holds_up(&op)
                     || target.as_ref().is_some_and(|t| batch.crosses(op.node(), t)))
             {
+                // Still to run while the batch does: what it takes away leaves its name to a
+                // download in the batch ([`Executor::free_target`]). Looked at again after
+                // it: what the batch did may have moved the target's folders.
+                self.schedule.requeue(op, attempts);
                 self.run_batch(&mut batch)?;
-                if self.should_stop() {
-                    break;
-                }
-                // What the batch did may have moved the target's folders.
-                if target.is_some() {
-                    target = self.move_target(&op)?;
-                }
+                continue;
             }
             // A folder temporarily inside its own destination waits for the move that takes
             // the destination out (§8a): moved now, the drive would hold a cycle.
@@ -317,7 +315,7 @@ impl<'a> Executor<'a> {
             // What a delete removes is described before its rows go.
             let gone = match activity::kind_of(&op) {
                 Some(kind) if kind.removes() => {
-                    self.db.read(|s| activity::path_of(s, op.node()))?
+                    self.db.read(|s| activity::place_of(s, op.node()))?
                 }
                 _ => None,
             };
@@ -768,20 +766,46 @@ impl<'a> Executor<'a> {
     /// parked under a temporary name (recorded in the DB). Returns `false` if it stays taken.
     /// The mover itself may hold it under another case (a case-only rename).
     fn free_target(&mut self, target: &RelPath, mover: Option<NodeId>) -> Result<bool, StateError> {
+        Ok(self.park_occupant(target, mover)? != Freed::Taken)
+    }
+
+    /// [`Executor::free_target`] for the item of `row`, which moves there: its row once the
+    /// name is free, or `None` if it stays taken. A folder that held the name, parked, took
+    /// what is in it along: an item that leaves it for its name is read again.
+    fn free_target_for(
+        &mut self,
+        target: &RelPath,
+        row: LocalRow,
+    ) -> Result<Option<LocalRow>, StateError> {
+        match self.park_occupant(target, Some(row.node))? {
+            Freed::Taken => Ok(None),
+            Freed::Parked(from) if row.path.starts_with(&from) => {
+                self.db.read(|s| s.local_by_node(row.node))
+            }
+            Freed::Free | Freed::Parked(_) => Ok(Some(row)),
+        }
+    }
+
+    /// See [`Executor::free_target`].
+    fn park_occupant(
+        &mut self,
+        target: &RelPath,
+        mover: Option<NodeId>,
+    ) -> Result<Freed, StateError> {
         let on_disk = fs::symlink_metadata(self.disk.abs(target)).is_ok();
         let Some(occupant) = self.occupant(target)? else {
-            return Ok(!on_disk);
+            return Ok(if on_disk { Freed::Taken } else { Freed::Free });
         };
         if Some(occupant.node) == mover {
-            return Ok(true);
+            return Ok(Freed::Free);
         }
         let leaving = self.schedule.vacating(occupant.node);
         if !leaving || !self.on_disk_unchanged(&occupant) {
-            return Ok(false);
+            return Ok(Freed::Taken);
         }
         let parent = occupant.path.parent().unwrap_or_default();
         let Ok(parked) = parent.join(&layout::parked_name(occupant.node)) else {
-            return Ok(false);
+            return Ok(Freed::Taken);
         };
         // Write-ahead: after a crash between the rename and the row update, the scan finds the
         // item under its temporary name, and this record maps it back to its real place (a
@@ -791,10 +815,10 @@ impl<'a> Executor<'a> {
             .write_durable(self.db, |s| s.put_parked(occupant.node, &occupant.path))?;
         if self.disk.rename(self.db, &occupant.path, &parked)?.is_err() {
             self.db.write(|s| s.folder().delete_parked(occupant.node))?;
-            return Ok(false);
+            return Ok(Freed::Taken);
         }
         if self.crash_here(CrashPoint::AfterParkRename) {
-            return Ok(false);
+            return Ok(Freed::Taken);
         }
         let refreshed = self.renamed(&occupant, &parked);
         self.db.write(|s| {
@@ -803,8 +827,19 @@ impl<'a> Executor<'a> {
                 .as_ref()
                 .map_or(Ok(()), |r| s.folder().put_local(r))
         })?;
-        Ok(true)
+        Ok(Freed::Parked(occupant.path))
     }
+}
+
+/// What became of a name an item is to take ([`Executor::free_target`]).
+#[derive(Debug, PartialEq, Eq)]
+enum Freed {
+    /// Something that stays holds it.
+    Taken,
+    /// Nothing holds it.
+    Free,
+    /// What held it is parked: taken from this path, with all that is in it.
+    Parked(RelPath),
 }
 
 mod batch;

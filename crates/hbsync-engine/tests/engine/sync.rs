@@ -228,6 +228,50 @@ fn name_swap_uses_a_parked_name() -> R {
     Ok(())
 }
 
+/// A file that takes the name of the folder it was in, the folder deleted, before another
+/// device hears of either: there the folder, which holds the name and the file, is parked for
+/// it and deleted once the file is out, in one go. Edited too (`edit`), the file's new version
+/// is put there, the old one leaving the parked folder.
+fn a_file_takes_the_name_of_the_folder_it_was_in(edit: bool) -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("Box/note", "one")?;
+    a.sync()?;
+    b.sync()?;
+    fs::rename(a.root.join("Box/note"), a.root.join("tmp"))?;
+    fs::remove_dir(a.root.join("Box"))?;
+    fs::rename(a.root.join("tmp"), a.root.join("Box"))?;
+    a.sync()?;
+    if edit {
+        a.write("Box", "two")?;
+        a.sync()?;
+    }
+    let report = b.sync()?;
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert!(report.skipped.is_empty(), "{report:?}");
+    assert_eq!(report.ops_done, 2, "{report:?}");
+    // The folder is told by its name, not the one it was parked under.
+    let told: Vec<_> = report.synced.iter().map(|s| s.path.as_str()).collect();
+    assert_eq!(told, ["Box", "Box"], "{report:?}");
+    let text = if edit { "two" } else { "one" };
+    assert_eq!(b.tree_text(""), [format!("Box = {text}")]);
+    assert_eq!(a.tree_text(""), b.tree_text(""));
+    Ok(())
+}
+
+#[test]
+fn a_moved_file_takes_the_name_of_the_folder_it_was_in() -> R {
+    a_file_takes_the_name_of_the_folder_it_was_in(false)
+}
+
+/// The download waits in the executor's batch when the folder's delete comes up: that is
+/// still to run then, so the folder is one that leaves.
+#[test]
+fn an_edited_file_takes_the_name_of_the_folder_it_was_in() -> R {
+    a_file_takes_the_name_of_the_folder_it_was_in(true)
+}
+
 #[test]
 fn first_run_adopts_an_existing_copy_without_downloading() -> R {
     let server = server();

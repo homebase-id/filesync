@@ -544,10 +544,14 @@ impl Executor<'_> {
                 done.persist_over(at, &row.fingerprint, created_ms)
             })?,
             Some(row) => {
-                if !self.on_disk_unchanged(row) || !self.free_target(target, Some(node))? {
+                let freed = match self.on_disk_unchanged(row) {
+                    true => self.free_target_for(target, row.clone())?,
+                    false => None,
+                };
+                let Some(row) = &freed else {
                     done.keep_for_retry();
                     return Ok(Outcome::Retry("old version changed or name taken".into()));
-                }
+                };
                 let Some(hash) = row.hash else {
                     done.keep_for_retry();
                     return Ok(rescan(&mut self.report, &row.path));

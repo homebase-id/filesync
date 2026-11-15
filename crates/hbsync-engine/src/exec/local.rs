@@ -372,9 +372,9 @@ impl Executor<'_> {
                 "would move a folder into itself for now".into(),
             ));
         }
-        if !self.free_target(&target, Some(node))? {
+        let Some(row) = self.free_target_for(&target, row)? else {
             return Ok(Outcome::Retry("name taken".into()));
-        }
+        };
         if let Err(e) = self.disk.rename(self.db, &row.path, &target)? {
             return Ok(io_outcome(e));
         }
