@@ -1723,3 +1723,47 @@ fn moves_out_of_folders_removed_elsewhere_converge_in_pages() -> R {
     );
     Ok(())
 }
+
+/// Two folders in Recently deleted, each in the other (another app moved x into y, then
+/// deleted x, then y and what is in it): each waits for the other to come back. A restore of x
+/// brings it back into Recovered files, made for it, y back into x and the file into y; the
+/// other computer agrees, and nothing loops on the drive.
+#[test]
+fn a_loop_in_recently_deleted_comes_back_in_recovered_files() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("keep.txt", "k")?;
+    a.write("x/y/f.txt", "f")?;
+    a.sync()?;
+    b.sync()?;
+    let target = |name: &str| {
+        let h = common::header_named(&server, name);
+        let token = Some(hbsync_remote::fake::token_of(h.file_id));
+        (h.node().expect("a node"), Target { at: h.at(), token })
+    };
+    let ((x, x_at), (y, y_at), (_, f_at)) = (target("x"), target("y"), target("f.txt"));
+    let other = FakeRemote::new(server.clone());
+    let x_in_y = hbsync_remote::contract::removed(&hbsync_remote::contract::folder("x", y));
+    other.update(&x_at, &NodeMeta { node: x, ..x_in_y }, None)?;
+    server.lock().map_err(|_| "poisoned")?.tick();
+    other.set_removed(&[y_at, f_at], true)?;
+    server.lock().map_err(|_| "poisoned")?.tick();
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(a.tree_text(""), ["keep.txt = k"]);
+    assert_eq!(a.engine.drive().restore(&[x])?, 3);
+    a.sync()?;
+    b.sync()?;
+    a.sync()?;
+    let back = [
+        "Recovered files/",
+        "Recovered files/x/",
+        "Recovered files/x/y/",
+        "Recovered files/x/y/f.txt = f",
+        "keep.txt = k",
+    ];
+    assert_eq!(a.tree_text(""), back);
+    assert_eq!(b.tree_text(""), back);
+    Ok(())
+}

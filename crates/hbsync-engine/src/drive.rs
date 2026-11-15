@@ -603,8 +603,9 @@ impl Drive {
     /// Recently deleted (with what was deleted with it), else made in `parent` under the name
     /// `name` gives (whichever device gets there first). One still in Recently deleted whose
     /// folders there are in a cycle (each waiting for the other to come back) comes back in
-    /// `parent`, under that name, and then what was deleted with it: a removed node's id stays
-    /// taken (`hbsync_remote::contract`, which Homebase passes), so it can't be made anew.
+    /// `parent` (not where a restore brings such a loop back: into Recovered files), under that
+    /// name, and then what was deleted with it: a removed node's id stays taken
+    /// (`hbsync_remote::contract`, which Homebase passes), so it can't be made anew.
     /// Fails unless it is live at the end. Whether this device made it.
     fn ensure_folder(
         &self,
@@ -615,26 +616,23 @@ impl Drive {
         if self.is_live(node)? {
             return Ok(false);
         }
-        self.restore(&[node])?;
-        if self.is_live(node)? {
-            return Ok(false);
-        }
-        let name = name()?;
-        // Read before it comes back: its row and what was deleted with it, where its folders
-        // in Recently deleted loop.
+        // Its row and what was deleted with it, where its folders in Recently deleted loop: a
+        // restore would bring it back where it breaks the loop (Recovered files, for a computer's
+        // Desktop: its place is Desktops, not its id), not into `parent`.
         let looped = self.account().read(|s| {
-            let Some(top) = s.removed_by_node(node)? else {
+            let Some(top) = deleted::removed_in_loop_here(s, node)? else {
                 return Ok(None);
             };
-            let up = crate::walk::up(top.row.parent, |at| {
-                Ok::<_, StateError>(s.removed_by_node(at)?.map(|f| ((), f.row.parent)))
-            })?;
-            if !matches!(up.end, crate::walk::End::Cycle) {
-                return Ok(None);
-            }
             let along = deleted::group(s, top.clone())?;
             Ok(Some((top, along)))
         })?;
+        if looped.is_none() {
+            self.restore(&[node])?;
+            if self.is_live(node)? {
+                return Ok(false);
+            }
+        }
+        let name = name()?;
         let mut made = false;
         if let Some((top, along)) = looped {
             made = self.write_at(&top.row, parent, &name)?;

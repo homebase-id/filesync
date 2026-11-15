@@ -265,7 +265,15 @@ of this schema may define some of them.)
   deleted) of a folder also restores the removed nodes below it that were deleted with it (not
   what was deleted from it before); a restore by a write (below, The server's time decides)
   doesn't. A node whose parent is removed brings the parent back first, and one whose parent is gone for good comes back as it was, an orphan
-  the computers move into Recovered files (see above). If a folder
+  the computers move into Recovered files (see above). Removed folders in a loop (each in the
+  other: two writers' moves met, then both were deleted) would each wait for the other: the
+  restore breaks the loop: at its fixed folders (role folders, Desktops, Recovered files), each
+  back at the top of the drive; else where it meets it, at the item if that is one of the loop, else
+  at the loop's folder the item is in. That folder comes back into Recovered files (restored and
+  moved in one update; Recovered files made first, with its fixed id, where no node has that id;
+  one in Recently deleted comes back with it, as any folder a live node keeps), and the rest of
+  the loop into it; at the top of the drive instead where Recovered files is in a loop or can't
+  be made (its id taken). If a folder
   doesn't come back (changed meanwhile), what is in it stays removed. A name a live sibling took
   meanwhile gets ` (restored)`; so does `.hbsync`, in any case, at the top of the drive, of a
   role folder or of a computer's Desktop (a folder in Desktops): each computer's own state folder
@@ -426,6 +434,8 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-11-15: a restore breaks a loop of removed folders where it meets it: that folder comes
+  back into Recovered files (Recently deleted, Restore).
 - 2026-11-14: a member reading another identity's share can tell a "no longer shared"
   tombstone (no version, no `groupId`: the share withdrawn or expired) from a delete by its
   zero version; the engine's handling of it comes with the read-only shared folders' next

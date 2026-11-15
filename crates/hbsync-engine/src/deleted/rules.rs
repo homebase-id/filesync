@@ -52,13 +52,14 @@ pub(crate) fn item_by<E>(
         // walked.
         End::Cycle => match up.items.last() {
             None => NodeId::ROOT,
-            Some(&last) => {
-                let start = match with(last)? {
-                    Some(next) => up.items.iter().position(|n| *n == next).unwrap_or(0),
-                    None => 0,
-                };
-                up.items[start..].iter().copied().min().unwrap_or(last)
+            Some(&last) => match with(last)? {
+                Some(next) => up.round(|n| *n, next),
+                None => &up.items[..],
             }
+            .iter()
+            .copied()
+            .min()
+            .unwrap_or(last),
         },
     };
     if let End::At(at) = up.end {

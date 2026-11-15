@@ -128,6 +128,133 @@ fn a_restore_of_a_folder_and_an_item_in_it_takes_the_whole_folder() -> Result<()
     Ok(())
 }
 
+/// A loop of folders in Recently deleted (x in y, y in x) comes back broken where a restore
+/// meets it: the item, where it is one of the loop, else the loop's folder it is in, comes back
+/// into Recovered files (not on the drive: made for it first), the rest after it. Where
+/// Recovered files is in the loop, it comes back at the top instead.
+#[test]
+fn a_loop_in_recently_deleted_breaks_where_a_restore_meets_it()
+-> Result<(), Box<dyn std::error::Error>> {
+    let db = Db::new()?;
+    let (x, y, n) = (NodeId::new(), NodeId::new(), NodeId::new());
+    db.write(|s| {
+        s.account().put_removed(&removed(x, y, 1))?;
+        s.account().put_removed(&removed(y, x, 2))?;
+        // Deleted on its own, later: an item of its own, in y.
+        s.account().put_removed(&removed(n, y, 3))
+    })?;
+    let plan = |nodes: &[NodeId]| db.read(|s| plan_restore(s, nodes));
+    let moved = |nodes: &[NodeId]| -> Result<HashMap<NodeId, NodeId>, StateError> {
+        Ok(plan(nodes)?.map(|p| p.moved).unwrap_or_default())
+    };
+    let recovered = |node| HashMap::from([(node, NodeId::RECOVERED)]);
+    assert_eq!(moved(&[x])?, recovered(x), "the item");
+    assert_eq!(moved(&[y])?, recovered(y), "the item");
+    assert_eq!(moved(&[n])?, recovered(y), "the loop's folder n is in");
+    assert_eq!(moved(&[n, x])?, recovered(y), "broken once, by the first");
+    assert!(plan(&[x])?.is_some_and(|p| p.make_recovered), "made");
+    // In Recently deleted: into it, not made (the folder coming into it brings it back, as any
+    // folder a live node keeps).
+    db.write(|s| {
+        s.account()
+            .put_removed(&removed(NodeId::RECOVERED, NodeId::ROOT, 4))
+    })?;
+    let into = plan(&[x])?.ok_or("a plan")?;
+    assert!(!into.make_recovered);
+    assert_eq!(into.moved, recovered(x));
+    // In the loop: the top.
+    db.write(|s| s.account().put_removed(&removed(NodeId::RECOVERED, x, 5)))?;
+    assert_eq!(moved(&[x])?, HashMap::from([(x, NodeId::ROOT)]));
+    Ok(())
+}
+
+/// A fixed folder in a loop of folders in Recently deleted (Documents in z, z in Documents)
+/// comes back at the top whichever item a restore meets the loop from, as `Drive::ensure_folder`
+/// brings one back, not into Recovered files; so does each of two, and Recovered files itself.
+#[test]
+fn a_loop_breaks_at_a_fixed_folder_to_the_top() -> Result<(), StateError> {
+    let db = Db::new()?;
+    let (docs, z, n) = (
+        hbsync_types::Role::Documents.node(),
+        NodeId::new(),
+        NodeId::new(),
+    );
+    db.write(|s| {
+        s.account().put_removed(&removed(docs, z, 1))?;
+        s.account().put_removed(&removed(z, docs, 2))?;
+        s.account().put_removed(&removed(n, z, 3))
+    })?;
+    let moved = |item| -> Result<HashMap<NodeId, NodeId>, StateError> {
+        let plan = db.read(|s| plan_restore(s, &[item]))?;
+        Ok(plan.map(|p| p.moved).unwrap_or_default())
+    };
+    for item in [docs, z, n] {
+        assert_eq!(
+            moved(item)?,
+            HashMap::from([(docs, NodeId::ROOT)]),
+            "{item:?}"
+        );
+    }
+    // Two fixed folders in one loop: each at the top, neither in the other.
+    let pics = hbsync_types::Role::Pictures.node();
+    db.write(|s| {
+        s.account().put_removed(&removed(z, pics, 2))?;
+        s.account().put_removed(&removed(pics, docs, 4))
+    })?;
+    let both = HashMap::from([(docs, NodeId::ROOT), (pics, NodeId::ROOT)]);
+    assert_eq!(moved(n)?, both);
+    // Recovered files in a loop: at the top, where orphans go.
+    let w = NodeId::new();
+    db.write(|s| {
+        s.account().put_removed(&removed(w, NodeId::RECOVERED, 5))?;
+        s.account().put_removed(&removed(NodeId::RECOVERED, w, 6))
+    })?;
+    assert_eq!(
+        moved(w)?,
+        HashMap::from([(NodeId::RECOVERED, NodeId::ROOT)])
+    );
+    Ok(())
+}
+
+/// A loop's folder that was to come back into Recovered files, made for it, comes back at the
+/// top where the drive refuses to make it: its id taken (made elsewhere since this device last
+/// read the drive, or a row it can't read).
+#[test]
+fn a_loop_comes_back_at_the_top_where_recovered_files_cant_be_made()
+-> Result<(), Box<dyn std::error::Error>> {
+    let remote = fake();
+    let db = Db::new()?;
+    let (x, y) = (NodeId::new(), NodeId::new());
+    let mut rows = Vec::new();
+    for (node, parent, at) in [(x, y, 1), (y, x, 2)] {
+        let mut row = removed(node, parent, at);
+        let content = row.row.content(&row.row.name.clone());
+        let meta = NodeMeta {
+            node,
+            parent,
+            kind: NodeKind::Folder,
+            content,
+            removed: true,
+        };
+        let w = remote.create(&meta, None)?.at();
+        (row.row.file_id, row.row.version) = (w.file_id, w.version);
+        rows.push(row);
+    }
+    // Made on the drive, not known here.
+    remote.create(
+        &NodeMeta {
+            node: NodeId::RECOVERED,
+            ..hbsync_remote::contract::folder("Recovered files", NodeId::ROOT)
+        },
+        None,
+    )?;
+    db.write(|s| rows.iter().try_for_each(|r| s.account().put_removed(r)))?;
+    assert_eq!(ops(&db, &remote).restore(&[x])?, 2);
+    let parent = |node| db.read(|s| s.get_mirror(node)).map(|m| m.map(|m| m.parent));
+    assert_eq!((parent(x)?, parent(y)?), (Some(NodeId::ROOT), Some(x)));
+    Ok(())
+}
+
 fn fake() -> hbsync_remote::fake::FakeRemote {
     use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
     // The drive has none of the files: each delete for good finds it not there, which is done
