@@ -259,9 +259,10 @@ of this schema may define some of them.)
   while it holds the version, and a later `updated` of the same version changes nothing (not
   what a delete took along, not a removal's time, not its 30 days). The computers do so
   (`mirror::apply`: a known version takes only a time it didn't have). The limit, until the
-  server says when a version was written apart from `updated`: a client that first reads a
-  version after its share changed (a new device, a client keeping no state) has only the
-  later time. A live node in a removed folder then counts as written after the removal, and
+  server says when a version was written apart from `updated` (a future enhancement,
+  filesync #385): a client that first reads a version after its share changed (a new
+  device, a client keeping no state) has only the later time. A live node in a removed
+  folder then counts as written after the removal, and
   brings its folders back (nothing lost); a removed node waits longer for its purge, and may
   list as deleted with its folder; a removed folder may seem removed later, so a node written
   into it in between counts as taken along, and goes to Recently deleted (restorable) with

@@ -590,7 +590,8 @@ server answers the rest, to a token their server made for this identity's connec
   the version after a share change has only the later time: no header field says when a
   version was written (the version tag's own time doesn't serve: **[verified]** a peer's
   update keeps the sender's tag, `PeerFileUpdateWriter`, and `FileUpdatePackage` makes the tag
-  when the request starts, not when it lands).
+  when the request starts, not when it lands). Closing that gap is a future enhancement and
+  needs odin-core: filesync #385.
   A tombstone's age (when it may be deleted hard) doesn't move: withdrawing a share of a deleted
   file withdraws it (the member reads it no more, and their feed has the "no longer shared"
   tombstone at the file's place) but leaves its time, its place in the feed and its age as they
