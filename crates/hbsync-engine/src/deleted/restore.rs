@@ -165,7 +165,10 @@ impl AccountOps<'_> {
             // each dirty in the folders it comes back to.
             let (mut back, heard) = (std::mem::take(&mut r.back), std::mem::take(&mut r.heard));
             restored += back.len();
-            back.extend(r.made.take());
+            // Recovered files made first: what comes back into it has a place when recorded.
+            if let Some(made) = r.made.take() {
+                back.insert(0, made);
+            }
             let (gone, superseded) = lock(self.account).write(|s| {
                 let gone = heard
                     .iter()
@@ -251,11 +254,10 @@ impl AccountOps<'_> {
 }
 
 /// Asks the drive about the rows of `left` (in order, each after its folder, `into` gives which)
-/// in the folders
-/// `doubted` (said not there once) or below them, and takes what it says ([`gone::heard`]): not
-/// there, a first "not there" each. A request that fails stops the asking, and a write that
-/// fails is only logged: the restore fails anyway, and its error is the one told. Costs a
-/// header read per row, once (else a folder level a minute).
+/// in the folders `doubted` (said not there once) or below them, and takes what it says
+/// ([`gone::heard`]): not there, a first "not there" each. A request that fails stops the
+/// asking, and a write that fails is only logged: the restore fails anyway, and its error is the
+/// one told. Costs a header read per row, once (else a folder level a minute).
 fn doubt_below(
     remote: &dyn Remote,
     account: &std::sync::Mutex<hbsync_state::StateDb>,
@@ -312,7 +314,6 @@ impl Restoring<'_> {
         };
         let e = match self.remote.create(&meta, None) {
             Ok(w) => {
-                self.live.insert(NodeId::RECOVERED);
                 self.made = Some(Answer::live(None, mirror::written(&meta, None, w)));
                 return true;
             }
@@ -443,9 +444,10 @@ pub fn plan_restore_from<S: RestoreSource>(
         }
         // A loop of folders in Recently deleted, each in the next (two writers' moves left it):
         // each would wait for the other to come back. Its fixed folders ([`is_fixed`]) come back
-        // at the top, where they belong, as `Drive::ensure_folder` brings one back; else the item itself, where it is one of them (the walk from its folder went round
-        // to it), or the loop's folder it is in (the one the walk came back to), comes back
-        // elsewhere ([`loop_exit`]). The rest of the loop follows into it: the same whoever
+        // at the top, where they belong, as `Drive::ensure_folder` brings one back; else the
+        // item itself, where it is one of them (the walk from its folder went round to it), or
+        // the loop's folder it is in (the one the walk came back to), comes back elsewhere
+        // ([`loop_exit`]). The rest of the loop follows into it: the same whoever
         // restores that item.
         if up.end == End::Cycle
             && let Some(last) = up.items.last()
@@ -510,11 +512,16 @@ pub fn plan_restore_from<S: RestoreSource>(
         let names = source.names_in(parent)?;
         taken.insert(parent, taken_in(top, names.iter().map(String::as_str)));
     }
-    // Made for what comes back into it (before the first of it): a folder it may go into, holding
-    // nothing yet, and its name taken at the top.
+    // Made for what comes back into it (before the first of it): a folder it may go into, with
+    // the names of what is live in it still (orphans of one deleted for good), and its name
+    // taken at the top.
     if make_recovered {
         live.insert(NodeId::RECOVERED);
-        taken.insert(NodeId::RECOVERED, HashSet::new());
+        let names = source.names_in(NodeId::RECOVERED)?;
+        taken.insert(
+            NodeId::RECOVERED,
+            taken_in(false, names.iter().map(String::as_str)),
+        );
         let at_top = taken.entry(NodeId::ROOT).or_default();
         at_top.insert(name_key(RECOVERED_NAME));
     }
