@@ -32,7 +32,7 @@ pub fn recover(db: &mut StateDb, folder: &FolderCtx) -> Result<AsideOutcome, Sta
 /// sync, before the scan's records are read (the scan keeps an item's rows while it is aside).
 /// A file whose node has a placement record (a download's old version whose commit a crash
 /// took) is decided where that record's recovery settles it, after the scan
-/// ([`recover_placements`]); with the record gone otherwise, at the next sync.
+/// ([`recover_placements`]), or at once where it drops that record; kept, at the next sync.
 pub fn recover_aside(db: &mut StateDb, folder: &FolderCtx) -> Result<AsideOutcome, StateError> {
     let hooks = Hooks::default();
     let disk = Disk::new(folder, &hooks);
@@ -391,14 +391,16 @@ pub fn recover_placements(
     let judged: Vec<_> = found
         .into_iter()
         .map(|(p, scanned, old, kept)| {
-            let judged = match (scanned, look(root, &p.target)) {
+            let judged = match scanned {
                 // Not scanned yet: read as the scan would.
-                (Scanned::None, _) => judge_on_disk(root, &p, algorithm),
-                (_, OnDisk::Absent) => Judged::Drop,
-                (_, OnDisk::Unreadable) => Judged::Keep,
-                (Scanned::Other, OnDisk::There(_)) => Judged::Drop,
-                (Scanned::Unsure, OnDisk::There(_)) => Judged::Keep,
-                (Scanned::Ours(row), OnDisk::There(_)) => judge(root, &p, Some(row)),
+                Scanned::None => judge_on_disk(root, &p, algorithm),
+                scanned => match (look(root, &p.target), scanned) {
+                    (OnDisk::Absent, _) => Judged::Drop,
+                    (OnDisk::Unreadable, _) => Judged::Keep,
+                    (OnDisk::There(_), Scanned::Ours(row)) => judge(root, &p, Some(row)),
+                    (OnDisk::There(_), Scanned::Unsure) => Judged::Keep,
+                    (OnDisk::There(_), Scanned::Other | Scanned::None) => Judged::Drop,
+                },
             };
             (p, judged, old, kept)
         })
@@ -423,19 +425,18 @@ pub fn recover_placements(
     let disk = Disk::new(folder, &hooks);
     let mut out = AsideOutcome::default();
     for (p, settled, old, kept) in applied {
-        let node = p.base.node;
-        if settled {
-            out.rescan.extend(kept.and_then(|k| k.parent()));
-        }
+        // The folder the node's row was kept in (one the record settled moved it out of, maybe
+        // dropped after: a node gone on the drive).
+        out.rescan.extend(kept.and_then(|k| k.parent()));
         let Some(hash) = old else {
             continue;
         };
-        let entry = aside.join(layout::AsideEntry::File(node, hash).name());
+        let parsed = layout::AsideEntry::File(p.base.node, hash);
+        let entry = aside.join(parsed.name());
         if fs::symlink_metadata(&entry).is_err() {
             continue;
         }
         if !settled {
-            let parsed = layout::AsideEntry::File(node, hash);
             decide_entry(db, &disk, folder, &entry, parsed, &mut out)?;
             continue;
         }
@@ -444,6 +445,8 @@ pub fn recover_placements(
             gone => out.rescan.extend(gone.into_inner()),
         }
     }
+    out.rescan.sort();
+    out.rescan.dedup();
     out.unknown.sort();
     Ok(out)
 }
