@@ -601,10 +601,11 @@ impl Drive {
 
     /// Makes sure the drive has the folder `node`, just pulled: kept if it is there, back from
     /// Recently deleted (with what was deleted with it), else made in `parent` under the name
-    /// `name` gives (whichever device gets there first). One still in Recently deleted that
-    /// can't come back where it was (its folders there in a cycle, each waiting for the other)
-    /// comes back in `parent`, under that name, and then what was deleted with it: made anew,
-    /// its id would be refused. Fails unless it is live at the end. Whether this device made it.
+    /// `name` gives (whichever device gets there first). One still in Recently deleted whose
+    /// folders there are in a cycle (each waiting for the other to come back) comes back in
+    /// `parent`, under that name, and then what was deleted with it: a removed node's id stays
+    /// taken (`hbsync_remote::contract`, which Homebase passes), so it can't be made anew.
+    /// Fails unless it is live at the end. Whether this device made it.
     fn ensure_folder(
         &self,
         node: NodeId,
@@ -619,50 +620,56 @@ impl Drive {
             return Ok(false);
         }
         let name = name()?;
-        // Read before it comes back: what was deleted with it, as Recently deleted lists it.
-        let removed = self.account().read(|s| {
+        // Read before it comes back: its row and what was deleted with it, where its folders
+        // in Recently deleted loop.
+        let looped = self.account().read(|s| {
             let Some(top) = s.removed_by_node(node)? else {
                 return Ok(None);
             };
+            let up = crate::walk::up(top.row.parent, |at| {
+                Ok::<_, StateError>(s.removed_by_node(at)?.map(|f| ((), f.row.parent)))
+            })?;
+            if !matches!(up.end, crate::walk::End::Cycle) {
+                return Ok(None);
+            }
             let along = deleted::group(s, top.clone())?;
             Ok(Some((top, along)))
         })?;
-        let made = match removed {
-            Some((top, along)) => {
-                let made = self.write_at(&top.row, parent, &name)?;
-                let along: Vec<NodeId> = along
-                    .iter()
-                    .map(|r| r.row.node)
-                    .filter(|&n| n != node)
-                    .collect();
-                if made && !along.is_empty() {
-                    self.restore_read(&along)?;
-                }
-                made
+        let mut made = false;
+        if let Some((top, along)) = looped {
+            made = self.write_at(&top.row, parent, &name)?;
+            let along: Vec<NodeId> = along
+                .iter()
+                .map(|r| r.row.node)
+                .filter(|&n| n != node)
+                .collect();
+            if made && !along.is_empty() {
+                self.restore_read(&along)?;
             }
-            None => {
-                let meta = NodeMeta {
-                    node,
-                    parent,
-                    kind: NodeKind::Folder,
-                    content: NodeContent::folder(&name),
-                    removed: false,
-                };
-                match self.remote().create(&meta, None) {
-                    // Recorded from the answer, as the executor records its writes.
-                    Ok(written) => {
-                        self.record_written(None, &meta, written)?;
-                        true
-                    }
-                    // Another device made it (or deleted it) meanwhile: read it.
-                    Err(RemoteError::AlreadyExists) => {
-                        self.pull(None)?;
-                        false
-                    }
-                    Err(e) => return Err(EngineError::Remote(e)),
+        }
+        // Not in Recently deleted (deleted for good, maybe without a trace in the feed: then
+        // the write above found it gone), or never made.
+        if !made && !self.is_live(node)? {
+            let meta = NodeMeta {
+                node,
+                parent,
+                kind: NodeKind::Folder,
+                content: NodeContent::folder(&name),
+                removed: false,
+            };
+            match self.remote().create(&meta, None) {
+                // Recorded from the answer, as the executor records its writes.
+                Ok(written) => {
+                    self.record_written(None, &meta, written)?;
+                    made = true;
                 }
+                // Another device made it (or deleted it) meanwhile: read it.
+                Err(RemoteError::AlreadyExists) => {
+                    self.pull(None)?;
+                }
+                Err(e) => return Err(EngineError::Remote(e)),
             }
-        };
+        }
         if !self.is_live(node)? {
             return Err(EngineError::Remote(RemoteError::Transient(format!(
                 "folder {node} isn't on the drive yet"

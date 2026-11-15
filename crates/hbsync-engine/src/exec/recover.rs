@@ -36,89 +36,98 @@ pub fn recover(db: &mut StateDb, folder: &FolderCtx) -> Result<AsideOutcome, Sta
 pub fn recover_aside(db: &mut StateDb, folder: &FolderCtx) -> Result<AsideOutcome, StateError> {
     let hooks = Hooks::default();
     let disk = Disk::new(folder, &hooks);
-    let mut dirs = Vec::new();
-    let mut unknown = Vec::new();
+    let mut out = AsideOutcome::default();
     for (aside, parsed) in layout::aside_entries(&folder.root) {
         let Some(parsed) = parsed else {
             tracing::debug!("{} is left aside: no delete made it", aside.display());
-            unknown.push(left(&aside));
+            out.unknown.push(left(&aside));
             continue;
         };
-        let node = parsed.node();
         // Decided by its placement's recovery, after the scan: decided now, against a row not
         // read since, its row and base would go with it, and the placed file read as new.
         if matches!(parsed, layout::AsideEntry::File(..))
-            && db.read(|s| s.get_placing(node))?.is_some()
+            && db.read(|s| s.is_placing(parsed.node()))?
         {
             continue;
         }
-        let Some(row) = db.read(|s| s.local_by_node(node))? else {
-            // Its row let go (an item came at its place meanwhile): judged by its base alone.
-            match recover_by_base(db, &disk, folder, &aside, parsed)? {
-                ByBase::Rescan(dir) => dirs.extend(dir),
-                ByBase::Unknown => unknown.push(left(&aside)),
-            }
-            continue;
-        };
-        // An old version a download replaced, its node holding the new one now: it goes once
-        // its bytes read as the old version's; written to, it comes back as a new item beside
-        // the new one, numbered where that is taken; unreadable now, it waits. Its node parked
-        // (under a temporary name, to free its own), beside the name the node has and gets
-        // back: numbered, never the temporary name, which would go up as an item's name.
-        if let layout::AsideEntry::File(_, hash) = parsed
-            && row.hash != Some(hash)
-        {
-            let place = match db.read(|s| crate::view::parked_place(s, &row))? {
-                Some(original) => super::park::numbered_place(db, folder, &original, false)?,
-                None => Some(row.path.clone()),
-            };
-            match discard_old(db, &disk, folder, &aside, hash, place.as_ref())? {
-                // Written to, with no name it could come back under (every numbered one
-                // taken, or the rename failing): the user's edit, told (§8a), and tried again
-                // at the next sync.
-                Discarded::Stranded | Discarded::Back(None) => unknown.push(left(&aside)),
-                gone => dirs.extend(gone.into_inner()),
-            }
-            continue;
-        }
-        let rows = db.read(|s| s.local_subtree(&row.path))?;
-        // Each row as its base has it: what the drive's delete took.
-        let synced = db.read(|s| {
-            rows.iter().try_fold(true, |all, r| {
-                Ok(all
-                    && s.get_base(r.node)?.is_some_and(|b| {
-                        r.kind == NodeKind::Folder || (r.hash.is_some() && b.local_hash == r.hash)
-                    }))
-            })
-        })?;
-        let named = match parsed {
-            layout::AsideEntry::Folder(_) => row.kind == NodeKind::Folder,
-            layout::AsideEntry::File(_, hash) => row.hash == Some(hash),
-        };
-        let gone = match (synced && named)
-            .then(|| check(folder, &aside, &row, &rows, Look::Aside))
-            .flatten()
-        {
-            Some(c) if c.holding.is_empty() => unlink_checked(db, &disk, &aside, c),
-            _ => Vec::new(),
-        };
-        if !gone.is_empty() {
-            db.write(|s| went(s, gone.iter().copied(), row.node))?;
-            // The folder it was in is read again: the scan kept it for the item, gone or not.
-            dirs.push(row.path.parent().unwrap_or_default());
-        }
-        if gone.len() < rows.len()
-            && let Some(to) = return_from_aside(db, &disk, folder, &aside, &row)?
-        {
-            dirs.push(to.parent().unwrap_or_default());
-        }
+        decide_entry(db, &disk, folder, &aside, parsed, &mut out)?;
     }
     // In one order, for the note to read the same each sync (told once).
-    unknown.sort();
-    Ok(AsideOutcome {
-        rescan: dirs,
-        unknown,
-    })
+    out.unknown.sort();
+    Ok(out)
+}
+
+/// One entry of the aside folder, at `aside`, decided as [`recover_aside`] says.
+fn decide_entry(
+    db: &mut StateDb,
+    disk: &Disk<'_>,
+    folder: &FolderCtx,
+    aside: &Path,
+    parsed: layout::AsideEntry,
+    out: &mut AsideOutcome,
+) -> Result<(), StateError> {
+    let node = parsed.node();
+    let Some(row) = db.read(|s| s.local_by_node(node))? else {
+        // Its row let go (an item came at its place meanwhile): judged by its base alone.
+        match recover_by_base(db, disk, folder, aside, parsed)? {
+            ByBase::Rescan(dir) => out.rescan.extend(dir),
+            ByBase::Unknown => out.unknown.push(left(aside)),
+        }
+        return Ok(());
+    };
+    // An old version a download replaced, its node holding the new one now: it goes once
+    // its bytes read as the old version's; written to, it comes back as a new item beside
+    // the new one, numbered where that is taken; unreadable now, it waits. Its node parked
+    // (under a temporary name, to free its own), beside the name the node has and gets
+    // back: numbered, never the temporary name, which would go up as an item's name.
+    if let layout::AsideEntry::File(_, hash) = parsed
+        && row.hash != Some(hash)
+    {
+        let place = match db.read(|s| crate::view::parked_place(s, &row))? {
+            Some(original) => super::park::numbered_place(db, folder, &original, false)?,
+            None => Some(row.path.clone()),
+        };
+        match discard_old(db, disk, folder, aside, hash, place.as_ref())? {
+            // Written to, with no name it could come back under (every numbered one
+            // taken, or the rename failing): the user's edit, told (§8a), and tried again
+            // at the next sync.
+            Discarded::Stranded | Discarded::Back(None) => out.unknown.push(left(aside)),
+            gone => out.rescan.extend(gone.into_inner()),
+        }
+        return Ok(());
+    }
+    let rows = db.read(|s| s.local_subtree(&row.path))?;
+    // Each row as its base has it: what the drive's delete took.
+    let synced = db.read(|s| {
+        rows.iter().try_fold(true, |all, r| {
+            Ok(all
+                && s.get_base(r.node)?.is_some_and(|b| {
+                    r.kind == NodeKind::Folder || (r.hash.is_some() && b.local_hash == r.hash)
+                }))
+        })
+    })?;
+    let named = match parsed {
+        layout::AsideEntry::Folder(_) => row.kind == NodeKind::Folder,
+        layout::AsideEntry::File(_, hash) => row.hash == Some(hash),
+    };
+    let gone = match (synced && named)
+        .then(|| check(folder, aside, &row, &rows, Look::Aside))
+        .flatten()
+    {
+        Some(c) if c.holding.is_empty() => unlink_checked(db, disk, aside, c),
+        _ => Vec::new(),
+    };
+    if !gone.is_empty() {
+        db.write(|s| went(s, gone.iter().copied(), row.node))?;
+        // The folder it was in is read again: the scan kept it for the item, gone or not.
+        out.rescan.push(row.path.parent().unwrap_or_default());
+    }
+    if gone.len() < rows.len()
+        && let Some(to) = return_from_aside(db, disk, folder, aside, &row)?
+    {
+        out.rescan.push(to.parent().unwrap_or_default());
+    }
+    Ok(())
 }
 
 /// What a delete (or a download's replace) left aside of a node with no row here (an item took
@@ -181,7 +190,8 @@ enum ByBase {
     Unknown,
 }
 
-/// What [`recover_aside`] did.
+/// What [`recover_aside`] did, or [`recover_placements`] with the old versions aside it was
+/// left.
 #[derive(Debug, Default)]
 pub struct AsideOutcome {
     /// The folders to rescan: what went back is there.
@@ -381,43 +391,52 @@ pub fn recover_placements(
     let judged: Vec<_> = found
         .into_iter()
         .map(|(p, scanned, old, kept)| {
-            let judged = match (look(root, &p.target), scanned) {
-                (OnDisk::Absent, _) => Judged::Drop,
-                (OnDisk::Unreadable, _) => Judged::Keep,
-                (OnDisk::There(_), Scanned::Other) => Judged::Drop,
-                (OnDisk::There(_), Scanned::Unsure) => Judged::Keep,
-                (OnDisk::There(_), Scanned::Ours(row)) => judge(root, &p, Some(row)),
-                // On disk, not scanned yet: read as the scan would.
-                (OnDisk::There(meta), Scanned::None) => {
-                    let row = read_row(root, &p.target, p.base.node, &meta, algorithm);
-                    judge(root, &p, Some(row))
-                }
+            let judged = match (scanned, look(root, &p.target)) {
+                // Not scanned yet: read as the scan would.
+                (Scanned::None, _) => judge_on_disk(root, &p, algorithm),
+                (_, OnDisk::Absent) => Judged::Drop,
+                (_, OnDisk::Unreadable) => Judged::Keep,
+                (Scanned::Other, OnDisk::There(_)) => Judged::Drop,
+                (Scanned::Unsure, OnDisk::There(_)) => Judged::Keep,
+                (Scanned::Ours(row), OnDisk::There(_)) => judge(root, &p, Some(row)),
             };
             (p, judged, old, kept)
         })
         .collect();
-    let settled = db.write(|s| {
-        let mut settled = Vec::new();
+    let applied = db.write(|s| {
+        let mut applied = Vec::new();
         for (p, judged, old, kept) in judged {
-            if let Applied::Settled(_) = apply(s.folder(), &p, judged, folder, now)? {
-                settled.push((p, old, kept));
-            }
+            let settled = match apply(s.folder(), &p, judged, folder, now)? {
+                Applied::Settled(_) => true,
+                Applied::Dropped => false,
+                Applied::Kept => continue,
+            };
+            applied.push((p, settled, old, kept));
         }
-        Ok(settled)
+        Ok(applied)
     })?;
-    // What the lost commit did too: the old version aside goes, or comes back beside the new
-    // one, written to (§7 Old versions); the folder the node's row left read again (the scan
-    // kept it for the row).
+    // The old version aside [`recover_aside`] left to the record: settled, what the lost commit
+    // did too (it goes, or comes back beside the new one, written to: §7 Old versions), the
+    // folder the node's row left read again (the scan kept it for the row); dropped, decided
+    // as any entry is.
     let hooks = Hooks::default();
     let disk = Disk::new(folder, &hooks);
     let mut out = AsideOutcome::default();
-    for (p, old, kept) in settled {
-        out.rescan.extend(kept.and_then(|k| k.parent()));
+    for (p, settled, old, kept) in applied {
+        let node = p.base.node;
+        if settled {
+            out.rescan.extend(kept.and_then(|k| k.parent()));
+        }
         let Some(hash) = old else {
             continue;
         };
-        let entry = aside.join(layout::AsideEntry::File(p.base.node, hash).name());
+        let entry = aside.join(layout::AsideEntry::File(node, hash).name());
         if fs::symlink_metadata(&entry).is_err() {
+            continue;
+        }
+        if !settled {
+            let parsed = layout::AsideEntry::File(node, hash);
+            decide_entry(db, &disk, folder, &entry, parsed, &mut out)?;
             continue;
         }
         match discard_old(db, &disk, folder, &entry, hash, Some(&p.target))? {

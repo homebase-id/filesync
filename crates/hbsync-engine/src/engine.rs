@@ -862,11 +862,6 @@ impl Engine {
         Ok(())
     }
 
-    /// Rescans the folders that downloads and folders being placed go into (their records), and
-    /// those their nodes' items are in now (an old version a download replaced from another
-    /// folder went aside), so recovery judges what is on disk: an item put in place but
-    /// not committed has its row then, and a record is never dropped only because its item had
-    /// none yet. Each record's folders once a sync pass. One query when there is no record.
     /// What the placements' recovery did with their old versions aside: the folders it left
     /// to read again are, and what stays aside is told.
     fn after_placements(
@@ -886,6 +881,11 @@ impl Engine {
         Ok(())
     }
 
+    /// Rescans the folders that downloads and folders being placed go into (their records), and
+    /// those their nodes' items are in now (an old version a download replaced from another
+    /// folder went aside), so recovery judges what is on disk: an item put in place but
+    /// not committed has its row then, and a record is never dropped only because its item had
+    /// none yet. Each record's folders once a sync pass. One query when there is no record.
     fn rescan_records(&mut self) -> Result<(), EngineError> {
         let rescanned = &mut self.rescanned;
         let dirs: Vec<hbsync_platform::RelPath> = self.db.read(|s| {

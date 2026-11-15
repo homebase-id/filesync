@@ -5212,6 +5212,25 @@ fn an_old_version_from_another_folder_goes_with_its_placement() -> R {
     Ok(())
 }
 
+/// The same, the new version gone from its place since (moved or deleted before the restart):
+/// the record goes, and the old version aside is decided at once, as any entry is (the synced
+/// version: unlinked, its row and base with it), not left a sync for the plan to download over.
+#[test]
+fn an_old_version_whose_placement_went_is_decided_at_once() -> R {
+    let mut h = Harness::new()?;
+    let (node, entry) = a_crashed_download_from_another_folder(&mut h)?;
+    fs::remove_file(h.at("p2/f")?)?;
+    crate::exec::recover_aside(&mut h.db, &h.folder)?;
+    assert!(entry.exists(), "waits");
+    let outcome = recover_placements(&mut h.db, &h.folder)?;
+    assert_eq!(h.records()?, []);
+    assert!(!entry.exists(), "decided");
+    assert!(h.base(node)?.is_none());
+    assert!(h.db.read(|s| s.local_by_node(node))?.is_none());
+    assert_eq!(outcome.rescan, [RelPath::new("p1")?]);
+    Ok(())
+}
+
 /// The same, the old version written to aside: it comes back beside the new one, a new item.
 #[test]
 fn an_old_version_written_to_aside_comes_back_beside_its_placement() -> R {

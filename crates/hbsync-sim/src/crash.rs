@@ -264,14 +264,12 @@ impl Sim {
         // a node with a placement record where that record settles, as the commit would have
         // (the engine's `recover_placements`): its record dropped or kept, at the next sync.
         let client = &self.clients[c];
-        let (waiting, aside): (Vec<NodeId>, Vec<NodeId>) = (client.aside.iter())
-            .map(|(&node, _)| node)
-            .partition(|node| {
-                client.placing.contains_key(node)
-                    && client.aside[node]
-                        .get(*node)
-                        .is_some_and(|i| i.content.is_some())
-            });
+        let (waiting, aside): (Vec<_>, Vec<_>) = client.aside.iter().partition(|(node, tree)| {
+            let file = tree.get(**node).is_some_and(|i| i.content.is_some());
+            file && client.placing.contains_key(node)
+        });
+        let nodes = |of: Vec<(&NodeId, _)>| of.into_iter().map(|(&n, _)| n).collect::<Vec<_>>();
+        let (waiting, aside) = (nodes(waiting), nodes(aside));
         for node in aside {
             self.recover_aside(c, node);
         }
