@@ -28,7 +28,8 @@ mod tests;
 
 pub(crate) use listing::group;
 pub use listing::{DeletedSummary, Listed, deletes, listed_here, listed_now};
-pub use restore::{RestorePlan, RestoreSource, Restored, plan_restore_from};
+pub(crate) use restore::in_removed_loop_here;
+pub use restore::{RestorePlan, RestoreSource, Restored, in_removed_loop, plan_restore_from};
 pub use rules::deleted_with_at;
 pub(crate) use rules::item_by;
 pub use rules::{

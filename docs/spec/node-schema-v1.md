@@ -267,11 +267,13 @@ of this schema may define some of them.)
   doesn't. A node whose parent is removed brings the parent back first, and one whose parent is gone for good comes back as it was, an orphan
   the computers move into Recovered files (see above). Removed folders in a loop (each in the
   other: two writers' moves met, then both were deleted) would each wait for the other: the
-  restore breaks the loop where it meets it, at the item if that is one of the loop, else at the
-  loop's folder the item is in. That folder comes back into Recovered files (restored and moved
-  in one update; Recovered files made first, with its fixed id, where no node has that id; one
-  in Recently deleted comes back with it, as any folder a live node keeps), and the rest of the
-  loop into it; at the top of the drive instead where Recovered files is in a loop. If a folder
+  restore breaks the loop: at a fixed folder of it (a role folder, Desktops), which comes back
+  at the top of the drive; else where it meets it, at the item if that is one of the loop, else
+  at the loop's folder the item is in. That folder comes back into Recovered files (restored and
+  moved in one update; Recovered files made first, with its fixed id, where no node has that id;
+  one in Recently deleted comes back with it, as any folder a live node keeps), and the rest of
+  the loop into it; at the top of the drive instead where Recovered files is in a loop or can't
+  be made (its id taken). If a folder
   doesn't come back (changed meanwhile), what is in it stays removed. A name a live sibling took
   meanwhile gets ` (restored)`; so does `.hbsync`, in any case, at the top of the drive, of a
   role folder or of a computer's Desktop (a folder in Desktops): each computer's own state folder

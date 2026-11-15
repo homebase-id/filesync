@@ -221,13 +221,14 @@ filesync's own rules are in its node schema ("Recently deleted") and the engine'
     content, an old `rm` too: it means nothing).
   - Order: the removed folders above the item first, outermost first, then the item, then what was deleted
     with it (not what was deleted from it before).
-  - Removed folders in a loop (each in the other, read up through their `groupId`s) wait for each other:
-    break it where you meet it, at the item if it is one of the loop, else at the loop's folder the item is
-    in. That folder comes back into Recovered files under its own name (an update with `groupId` Recovered
+  - Removed folders in a loop (each in the other, read up through their `groupId`s) wait for each other.
+    A fixed folder of the loop (a role folder, Desktops) breaks it: back at the top under its own name.
+    Else break it where you meet it, at the item if it is one of the loop, else at the loop's folder the
+    item is in. That folder comes back into Recovered files under its own name (an update with `groupId` Recovered
     files' id and `archivalStatus` 0; a name taken there gets ` (restored)`), then the rest of the loop
     into it. Where no node has Recovered files' id, make it first (its fixed `uniqueId`, at the top); one in
     Recently deleted the computers bring back. At the top instead where Recovered files is in a loop
-    (walking up its `groupId`s, removed ones too).
+    (walking up its `groupId`s, removed ones too) or its create is refused (the id taken).
   - An item whose folder is gone for good comes back as it was, in the same batch (its `groupId` names no
     node: an orphan, which the computers move into Recovered files; don't move it yourself). Until a
     computer is on, no listing shows it: say where it will appear ("in Recovered files, once one of

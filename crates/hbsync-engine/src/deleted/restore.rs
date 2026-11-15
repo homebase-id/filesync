@@ -79,15 +79,14 @@ impl AccountOps<'_> {
             taken,
             behind: &mut self.behind,
             back: Vec::new(),
+            made: None,
             heard: Vec::new(),
             changed: HashSet::new(),
             failed: None,
         };
-        if make_recovered && let Some(made) = r.make_recovered() {
-            let superseded =
-                lock(self.account).write(|s| mirror::answered(s.account(), &[made]))?;
-            *r.behind |= superseded;
-        }
+        // Recovered files, to make before the first row comes back into it; where it can't be
+        // (its id taken), those rows come back at the top instead.
+        let (mut to_make, mut unmade) = (make_recovered, false);
         let mut restored = 0;
         let mut went: HashSet<NodeId> = HashSet::new();
         let mut not_there = 0;
@@ -141,7 +140,18 @@ impl AccountOps<'_> {
                 if r.failed.is_some() {
                     break;
                 }
-                let parent = into(row);
+                let mut parent = into(row);
+                let mut name = name;
+                if parent == NodeId::RECOVERED && to_make {
+                    to_make = false;
+                    unmade = !r.make_recovered();
+                    if r.failed.is_some() {
+                        break;
+                    }
+                }
+                if parent == NodeId::RECOVERED && unmade {
+                    (parent, name) = (NodeId::ROOT, None);
+                }
                 let name = name.or_else(|| take_restored_name(&mut r.taken, parent, &row.name));
                 let Some(name) = name else {
                     continue; // no free name: it stays in Recently deleted
@@ -153,7 +163,9 @@ impl AccountOps<'_> {
             // What came back, and what was deleted for good meanwhile (the identity's "not there"
             // only the second time: sync semantics §8b), in one write. The mirror's write marks
             // each dirty in the folders it comes back to.
-            let (back, heard) = (std::mem::take(&mut r.back), std::mem::take(&mut r.heard));
+            let (mut back, heard) = (std::mem::take(&mut r.back), std::mem::take(&mut r.heard));
+            restored += back.len();
+            back.extend(r.made.take());
             let (gone, superseded) = lock(self.account).write(|s| {
                 let gone = heard
                     .iter()
@@ -163,7 +175,6 @@ impl AccountOps<'_> {
                 Ok((gone, superseded))
             })?;
             *r.behind |= superseded;
-            restored += back.len();
             // Gone: what was to come back into it comes back as into any folder gone for good.
             // Said not there once only: it stays in Recently deleted, and the restore fails, to
             // try again (a minute on, it is gone).
@@ -180,7 +191,7 @@ impl AccountOps<'_> {
             // What was to come back into a folder said not there once is asked about too (a
             // header read each): asked again a minute on, all of it is gone at once (or there),
             // not a level of folders a minute.
-            doubt_below(self.remote, self.account, &left, doubted);
+            doubt_below(self.remote, self.account, &left, into, doubted);
             // Stopped, to try again a minute on.
             if not_there > 0 {
                 break;
@@ -239,7 +250,8 @@ impl AccountOps<'_> {
     }
 }
 
-/// Asks the drive about the rows of `left` (in order, each after its folder) in the folders
+/// Asks the drive about the rows of `left` (in order, each after its folder, `into` gives which)
+/// in the folders
 /// `doubted` (said not there once) or below them, and takes what it says ([`gone::heard`]): not
 /// there, a first "not there" each. A request that fails stops the asking, and a write that
 /// fails is only logged: the restore fails anyway, and its error is the one told. Costs a
@@ -248,11 +260,12 @@ fn doubt_below(
     remote: &dyn Remote,
     account: &std::sync::Mutex<hbsync_state::StateDb>,
     left: &[&MirrorRow],
+    into: impl Fn(&MirrorRow) -> NodeId,
     mut doubted: HashSet<NodeId>,
 ) {
     let below: Vec<RemoteFileId> = left
         .iter()
-        .filter(|row| doubted.contains(&row.parent) && doubted.insert(row.node))
+        .filter(|row| doubted.contains(&into(row)) && doubted.insert(row.node))
         .map(|row| row.file_id)
         .collect();
     if below.is_empty() {
@@ -274,6 +287,8 @@ struct Restoring<'a> {
     behind: &'a mut bool,
     /// Written back, to record.
     back: Vec<Answer>,
+    /// Recovered files made, to record ([`Restoring::make_recovered`]).
+    made: Option<Answer>,
     /// What the drive said of files not found, to take ([`gone::heard`]).
     heard: Vec<(hbsync_types::RemoteFileId, NodeId, Said)>,
     /// Rows the drive had changed since (refused for their version).
@@ -284,9 +299,10 @@ struct Restoring<'a> {
 
 impl Restoring<'_> {
     /// Makes Recovered files at the top, for the folder that breaks a loop to come back into
-    /// ([`RestorePlan::make_recovered`]): its answer, to record. One made elsewhere meanwhile
-    /// (its id taken) is read from the feed.
-    fn make_recovered(&mut self) -> Option<Answer> {
+    /// ([`RestorePlan::make_recovered`]): its answer is recorded with the wave's rows. Whether it
+    /// was made: its id taken (made elsewhere meanwhile, or a row this device can't read: a file
+    /// another writer gave it, #170) is read from the feed, any other failure stops the restore.
+    fn make_recovered(&mut self) -> bool {
         let meta = NodeMeta {
             node: NodeId::RECOVERED,
             parent: NodeId::ROOT,
@@ -297,7 +313,8 @@ impl Restoring<'_> {
         let e = match self.remote.create(&meta, None) {
             Ok(w) => {
                 self.live.insert(NodeId::RECOVERED);
-                return Some(Answer::live(None, mirror::written(&meta, None, w)));
+                self.made = Some(Answer::live(None, mirror::written(&meta, None, w)));
+                return true;
             }
             Err(e) => e,
         };
@@ -306,7 +323,7 @@ impl Restoring<'_> {
         if !matches!(e, RemoteError::AlreadyExists) {
             self.failed = Some(e);
         }
-        None
+        false
     }
 
     /// Takes the drive's answer to `row`'s restore as `meta`.
@@ -425,20 +442,31 @@ pub fn plan_restore_from<S: RestoreSource>(
             continue;
         }
         // A loop of folders in Recently deleted, each in the next (two writers' moves left it):
-        // each would wait for the other to come back. The item itself, where it is one of them
-        // (the walk from its folder went round to it), else the loop's folder it is in (the one
-        // the walk came back to), comes back elsewhere ([`loop_exit`]), the rest of the loop into
-        // it: the same whoever restores that item.
+        // each would wait for the other to come back. A fixed folder of it (a role folder,
+        // Desktops) comes back at the top, where it belongs, as `Drive::ensure_folder` brings one
+        // back; else the item itself, where it is one of them (the walk from its folder went round
+        // to it), or the loop's folder it is in (the one the walk came back to), comes back
+        // elsewhere ([`loop_exit`]). The rest of the loop follows into it: the same whoever
+        // restores that item.
         if up.end == End::Cycle
             && let Some(last) = up.items.last()
         {
             let (at, again) = S::place(last);
-            let (to, make) = match exit {
-                Some(exit) => exit,
-                None => *exit.insert(loop_exit(source)?),
+            let fixed = (up.round(|r| S::place(r).0, again).iter())
+                .map(|r| S::place(r).0)
+                .find(|&n| n == NodeId::DESKTOPS || crate::along::is_sync_top(n, None));
+            let (breaks, to) = match fixed {
+                Some(fixed) => (fixed, NodeId::ROOT),
+                None => {
+                    let (to, make) = match exit {
+                        Some(exit) => exit,
+                        None => *exit.insert(loop_exit(source)?),
+                    };
+                    make_recovered |= make;
+                    (if at == node { node } else { again }, to)
+                }
             };
-            make_recovered |= make;
-            moved.insert(if at == node { node } else { again }, to);
+            moved.insert(breaks, to);
         }
         let mut chain = up.items;
         chain.reverse();
@@ -518,6 +546,24 @@ fn loop_exit<S: RestoreSource>(source: &mut S) -> Result<(NodeId, bool), S::Erro
         End::At(at) if at == NodeId::RECOVERED => (NodeId::RECOVERED, true),
         End::Top | End::At(_) => (NodeId::RECOVERED, false),
     })
+}
+
+/// Whether `node` is in Recently deleted with its folders there in a loop, each in the next
+/// (`node` in it or below it): a restore breaks it ([`plan_restore_from`]). The engine's
+/// `Drive::ensure_folder` and the simulator's share it.
+pub fn in_removed_loop<S: RestoreSource>(source: &mut S, node: NodeId) -> Result<bool, S::Error> {
+    let Some(row) = source.removed(node)? else {
+        return Ok(false);
+    };
+    let up = crate::walk::up::<_, S::Error>(S::place(&row).1, |at| {
+        Ok(source.removed(at)?.map(|f| ((), S::place(&f).1)))
+    })?;
+    Ok(up.end == End::Cycle)
+}
+
+/// [`in_removed_loop`] in the store.
+pub(crate) fn in_removed_loop_here(s: &ReadTx<'_>, node: NodeId) -> Result<bool, StateError> {
+    in_removed_loop(&mut Store(s), node)
 }
 
 /// [`plan_restore_from`] the store.

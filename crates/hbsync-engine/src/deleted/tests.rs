@@ -168,6 +168,69 @@ fn a_loop_in_recently_deleted_breaks_where_a_restore_meets_it()
     Ok(())
 }
 
+/// A fixed folder in a loop of folders in Recently deleted (Documents in z, z in Documents)
+/// comes back at the top whichever item a restore meets the loop from, as `Drive::ensure_folder`
+/// brings one back, not into Recovered files.
+#[test]
+fn a_loop_breaks_at_a_fixed_folder_to_the_top() -> Result<(), StateError> {
+    let db = Db::new()?;
+    let (docs, z, n) = (
+        hbsync_types::Role::Documents.node(),
+        NodeId::new(),
+        NodeId::new(),
+    );
+    db.write(|s| {
+        s.account().put_removed(&removed(docs, z, 1))?;
+        s.account().put_removed(&removed(z, docs, 2))?;
+        s.account().put_removed(&removed(n, z, 3))
+    })?;
+    for item in [docs, z, n] {
+        let plan = db.read(|s| plan_restore(s, &[item]))?;
+        let moved = plan.map(|p| p.moved).unwrap_or_default();
+        assert_eq!(moved, HashMap::from([(docs, NodeId::ROOT)]), "{item:?}");
+    }
+    Ok(())
+}
+
+/// A loop's folder that was to come back into Recovered files, made for it, comes back at the
+/// top where the drive refuses to make it: its id taken (made elsewhere since this device last
+/// read the drive, or a row it can't read).
+#[test]
+fn a_loop_comes_back_at_the_top_where_recovered_files_cant_be_made()
+-> Result<(), Box<dyn std::error::Error>> {
+    let remote = fake();
+    let db = Db::new()?;
+    let (x, y) = (NodeId::new(), NodeId::new());
+    let mut rows = Vec::new();
+    for (node, parent, at) in [(x, y, 1), (y, x, 2)] {
+        let mut row = removed(node, parent, at);
+        let content = row.row.content(&row.row.name.clone());
+        let meta = NodeMeta {
+            node,
+            parent,
+            kind: NodeKind::Folder,
+            content,
+            removed: true,
+        };
+        let w = remote.create(&meta, None)?.at();
+        (row.row.file_id, row.row.version) = (w.file_id, w.version);
+        rows.push(row);
+    }
+    // Made on the drive, not known here.
+    remote.create(
+        &NodeMeta {
+            node: NodeId::RECOVERED,
+            ..hbsync_remote::contract::folder("Recovered files", NodeId::ROOT)
+        },
+        None,
+    )?;
+    db.write(|s| rows.iter().try_for_each(|r| s.account().put_removed(r)))?;
+    assert_eq!(ops(&db, &remote).restore(&[x])?, 2);
+    let parent = |node| db.read(|s| s.get_mirror(node)).map(|m| m.map(|m| m.parent));
+    assert_eq!((parent(x)?, parent(y)?), (Some(NodeId::ROOT), Some(x)));
+    Ok(())
+}
+
 fn fake() -> hbsync_remote::fake::FakeRemote {
     use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
     // The drive has none of the files: each delete for good finds it not there, which is done

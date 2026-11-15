@@ -29,6 +29,16 @@ pub enum End {
     Deep,
 }
 
+impl<T> Up<T> {
+    /// Of a walk that ended in a cycle, the items round it: from the one it came back to
+    /// (`again`, the last item's parent) on; `node` gives an item's node. All of them where none
+    /// is `again`.
+    pub fn round(&self, node: impl Fn(&T) -> NodeId, again: NodeId) -> &[T] {
+        let start = self.items.iter().position(|i| node(i) == again);
+        &self.items[start.unwrap_or(0)..]
+    }
+}
+
 /// Walks up from `start`: `step(at)` gives what `at` holds and its parent, or `None` where the
 /// walk ends.
 pub fn up<T, E>(

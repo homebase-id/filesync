@@ -923,6 +923,13 @@ impl Sim {
         self.restore_all(&[node]);
     }
 
+    /// Whether `node` is in Recently deleted with its folders there in a loop, by the engine's
+    /// rule ([`deleted::in_removed_loop`]).
+    pub(crate) fn in_removed_loop(&self, node: NodeId) -> bool {
+        let Ok(looped) = deleted::in_removed_loop(&mut RestoreFrom(&self.server), node);
+        looped
+    }
+
     /// [`Sim::restore_with`] of `nodes` together, as one restore of the engine's.
     pub(crate) fn restore_all(&mut self, nodes: &[NodeId]) {
         // The engine's plan ([`deleted::plan_restore_from`]): the folders above each in Recently
@@ -946,13 +953,9 @@ impl Sim {
             moved,
             make_recovered,
         } = plan;
-        // Made first for a loop's folder to come back into, as the engine's restore does (its
-        // id taken meanwhile, by one live or in Recently deleted: not made).
-        if make_recovered && self.server.node(NodeId::RECOVERED).is_none() {
-            let folder = NodeState::folder(NodeId::ROOT, RECOVERED_NAME);
-            self.server.put(NodeId::RECOVERED, folder);
-            live.insert(NodeId::RECOVERED);
-        }
+        // Recovered files to make before a loop's folder comes back into it (`None`: it can't
+        // be, [`Sim::recovered_made`]).
+        let mut make = Some(make_recovered);
         let mut seen: HashSet<NodeId> = rows.iter().map(|r| r.node).collect();
         let mut left: Vec<&Row> = rows.iter().collect();
         // A loop's folder comes back elsewhere, the rest of the loop into it.
@@ -970,17 +973,41 @@ impl Sim {
             // Each under its own name first, then the rest under the first free restored name
             // (none free: it stays deleted), as the engine sends them; one not there frees the
             // name it took.
-            for row in wave.asked {
-                let (parent, name) = (into(row), row.name.clone());
-                self.restore_row(row, parent, name, &mut live, &mut seen, &mut taken);
-            }
-            for row in wave.rest {
-                let parent = into(row);
-                if let Some(name) = deleted::take_restored_name(&mut taken, parent, &row.name) {
+            let asked = wave
+                .asked
+                .into_iter()
+                .map(|row| (row, Some(row.name.clone())));
+            for (row, name) in asked.chain(wave.rest.into_iter().map(|row| (row, None))) {
+                let (mut parent, mut name) = (into(row), name);
+                if parent == NodeId::RECOVERED && !self.recovered_made(&mut make, &mut live) {
+                    (parent, name) = (NodeId::ROOT, None);
+                }
+                let name =
+                    name.or_else(|| deleted::take_restored_name(&mut taken, parent, &row.name));
+                if let Some(name) = name {
                     self.restore_row(row, parent, name, &mut live, &mut seen, &mut taken);
                 }
             }
         }
+    }
+
+    /// Whether Recovered files is there for a loop's folder to come back into
+    /// ([`Sim::restore_planned`]): made first where the plan says (`make`), as the engine's
+    /// restore does. Its id taken meanwhile, it isn't made (`make` becomes `None`), and the
+    /// folder comes back at the top.
+    fn recovered_made(&mut self, make: &mut Option<bool>, live: &mut HashSet<NodeId>) -> bool {
+        if *make == Some(true) {
+            *make = match self.server.node(NodeId::RECOVERED) {
+                Some(_) => None,
+                None => {
+                    let folder = NodeState::folder(NodeId::ROOT, RECOVERED_NAME);
+                    self.server.put(NodeId::RECOVERED, folder);
+                    live.insert(NodeId::RECOVERED);
+                    Some(false)
+                }
+            };
+        }
+        make.is_some()
     }
 
     /// Restores `row` into `parent`, named `name` ([`Sim::restore_planned`]): back, it is a

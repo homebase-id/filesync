@@ -617,18 +617,15 @@ impl Drive {
             return Ok(false);
         }
         // Its row and what was deleted with it, where its folders in Recently deleted loop: a
-        // restore would bring it back into the loop's folder, wherever that comes back
-        // (Recovered files).
+        // restore would bring it back where it breaks the loop (Recovered files, for a computer's
+        // Desktop), not into `parent`.
         let looped = self.account().read(|s| {
+            if !deleted::in_removed_loop_here(s, node)? {
+                return Ok(None);
+            }
             let Some(top) = s.removed_by_node(node)? else {
                 return Ok(None);
             };
-            let up = crate::walk::up(top.row.parent, |at| {
-                Ok::<_, StateError>(s.removed_by_node(at)?.map(|f| ((), f.row.parent)))
-            })?;
-            if !matches!(up.end, crate::walk::End::Cycle) {
-                return Ok(None);
-            }
             let along = deleted::group(s, top.clone())?;
             Ok(Some((top, along)))
         })?;
