@@ -17,7 +17,7 @@ use hbsync_engine::Drive;
 use hbsync_engine::root::{AccountReader, RootError, SyncRoot};
 use hbsync_homebase::notify::Event;
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
-use hbsync_remote::{ChangeRef, Refusal};
+use hbsync_remote::{ChangeRef, Refusal, RemoteBody, RemoteHeader};
 use hbsync_types::RemoteFileId;
 
 type R = Result<(), Box<dyn std::error::Error>>;
@@ -50,12 +50,20 @@ impl Device {
         name: &str,
         tweak: impl FnOnce(&mut RunnerConfig),
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::start_on(FakeRemote::new(server.clone()), name, tweak)
+    }
+
+    /// [`Device::start_with`], its drive read through `remote`.
+    fn start_on(
+        remote: FakeRemote,
+        name: &str,
+        tweak: impl FnOnce(&mut RunnerConfig),
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
         let root = set_up(&dir.path().canonicalize()?.join("sync"))?;
         let mut cfg = RunnerConfig::new(&root, &db_of(&root), &"test.example".into(), name);
         cfg.tweak = Some(|c| c.exec.retry_pause = Duration::from_millis(1));
         tweak(&mut cfg);
-        let remote = FakeRemote::new(server.clone());
         let drive = Drive::open(&cfg.db, &cfg.identity, Arc::new(remote.clone()))?;
         let (handle, thread) = Runner::spawn(cfg, Arc::clone(&drive))?;
         Ok(Device {
@@ -274,6 +282,15 @@ fn on_server(server: &Arc<Mutex<FakeServer>>, name: &str) -> bool {
     live_names(server).iter().any(|n| n == name)
 }
 
+/// The header of the file named `name` on the server, live or removed.
+fn header_named(server: &Arc<Mutex<FakeServer>>, name: &str) -> Option<RemoteHeader> {
+    let s = server.lock().unwrap_or_else(|e| e.into_inner());
+    s.live()
+        .chain(s.removed())
+        .find(|h| matches!(&h.body, RemoteBody::Live { content, .. } if content.name == name))
+        .cloned()
+}
+
 /// No poll: an idle runner with a watcher doesn't wake up at all, and a change wakes it at
 /// once.
 #[test]
@@ -379,13 +396,7 @@ fn another_computers_changes_are_announced_and_own_ones_not() -> R {
     if !(a.watching()? && b.watching()?) {
         return Ok(());
     }
-    let file_of = |name: &str| -> Option<RemoteFileId> {
-        let s = server.lock().ok()?;
-        s.live()
-            .chain(s.removed())
-            .find(|h| matches!(&h.body, hbsync_remote::RemoteBody::Live { content, .. } if content.name == name))
-            .map(|h| h.file_id)
-    };
+    let file_of = |name: &str| header_named(&server, name).map(|h| h.file_id);
     // The reads at connecting done.
     a.settled(Duration::from_millis(500), PATIENCE, || a.feed_reads())?;
     let quiet = a.feed_reads();
@@ -535,7 +546,7 @@ fn a_syncs_own_writes_start_no_sync() -> R {
 /// synced.
 #[test]
 fn announced_changes_are_read_only_when_new() -> R {
-    use hbsync_remote::{ChangeRef, Remote, RemoteBody};
+    use hbsync_remote::Remote;
     let server = server();
     let a = Device::start(&server, "a")?;
     let b = Device::start(&server, "b")?;
@@ -577,7 +588,6 @@ fn announced_changes_are_read_only_when_new() -> R {
 /// at the reconnect can't bring it (it is in no feed).
 #[test]
 fn a_hard_delete_announced_before_a_reconnect_is_taken() -> R {
-    use hbsync_remote::{ChangeRef, RemoteBody};
     let server = server();
     let a = Device::start(&server, "a")?;
     let b = Device::start(&server, "b")?;
@@ -589,14 +599,8 @@ fn a_hard_delete_announced_before_a_reconnect_is_taken() -> R {
     // Its sync that brought z.txt done (the delete isn't to race with that sync).
     b.wait_idle()?;
     let gone = {
+        let header = header_named(&server, "z.txt").ok_or("z.txt")?;
         let mut s = server.lock().map_err(|_| "poisoned")?;
-        let header = s
-            .live()
-            .find(
-                |h| matches!(&h.body, RemoteBody::Live { content, .. } if content.name == "z.txt"),
-            )
-            .cloned()
-            .ok_or("z.txt")?;
         s.hard_delete(header.file_id, header.version)?;
         ChangeRef::of(&header).tombstone()
     };
@@ -1543,5 +1547,76 @@ fn a_desktop_runner_syncs_its_own_folder_in_desktops_named_so() -> R {
         named("Work laptop") && !names.iter().any(|n| n == "Laptop"),
         "{names:?}"
     );
+    Ok(())
+}
+
+/// A runner of what another identity shares with the account (sync semantics §13): the
+/// sharer's drive as a member reads it, in a read-only folder. What is shared comes down and
+/// nothing else, the folder shows whose share it is and isn't the account's main folder, and
+/// an edit here moves out (told) for the sharer's version, nothing written to their drive.
+#[test]
+fn a_runner_of_another_identitys_share_is_read_only_and_says_whose() -> R {
+    use hbsync_remote::contract::Shares;
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    a.write("report.txt", "quarterly")?;
+    a.write("private.txt", "mine")?;
+    wait_until("both are up", || {
+        on_server(&server, "report.txt") && on_server(&server, "private.txt")
+    })?;
+    a.wait_idle()?;
+    let report = || header_named(&server, "report.txt").map(|h| h.at());
+    let shared = report().ok_or("report.txt is up")?;
+    a.remote.share(shared.file_id)?;
+
+    let b = Device::start_on(FakeRemote::member(server.clone()), "b", |cfg| {
+        cfg.sharer = Some("sharer.example".into());
+        cfg.read_only = Some(cfg.folder.with_file_name("moved out"));
+    })?;
+    let out = b.root.with_file_name("moved out");
+    wait_until("b has what is shared", || b.has("report.txt"))?;
+    b.wait_idle()?;
+    assert!(!b.has("private.txt"), "not shared");
+    let status = b.status();
+    assert!(!status.is_main(), "{status:?}");
+    assert_eq!(status.sharer, Some("sharer.example".into()));
+    assert_eq!(
+        status.what(),
+        "what sharer.example shares with test.example"
+    );
+
+    b.write("report.txt", "my edit")?;
+    b.handle.send(Command::SyncNow);
+    let text = |path: PathBuf| std::fs::read_to_string(path).unwrap_or_default();
+    wait_until("the edit moved out", || {
+        text(out.join("report.txt")) == "my edit"
+    })?;
+    wait_until("the sharer's version is back", || {
+        text(b.root.join("report.txt")) == "quarterly"
+    })?;
+    wait_until("it said so", || {
+        b.status()
+            .recent
+            .iter()
+            .any(|n| n.text.starts_with("report.txt: moved to") && n.text.contains("read-only"))
+    })?;
+    b.wait_idle()?;
+    assert_eq!(b.remote.faults().uploads, 0, "nothing sent");
+    assert_eq!(report(), Some(shared), "as the sharer wrote it");
+    assert_eq!(live_names(&server), ["private.txt", "report.txt"]);
+
+    // Whose drive it is and what the folder says go together: neither a share shown as the
+    // account's own folder, nor that as a share.
+    let refused = |started: Result<Device, Box<dyn std::error::Error>>| {
+        started.is_err_and(|e| e.to_string().contains("whose drive it syncs"))
+    };
+    let unnamed = Device::start_on(FakeRemote::member(server.clone()), "c", |cfg| {
+        cfg.read_only = Some(cfg.folder.with_file_name("moved out"));
+    });
+    assert!(refused(unnamed), "a share that doesn't say whose");
+    let named = Device::start_with(&server, "d", |cfg| {
+        cfg.sharer = Some("sharer.example".into());
+    });
+    assert!(refused(named), "the account's own drive, a sharer named");
     Ok(())
 }

@@ -1280,7 +1280,8 @@ whatever changed here, and the plan holds no operation on the drive:
 What another identity shares with this one is its drive, read as a member (`Remote::shared`,
 kept in the state DB: `ReadTx::shared`). Its feed lists only the files shared with this
 identity, each on its own: a file can be shared without the folder it is in. A folder synced
-from such a drive is read-only (above), and these rules hold too:
+from such a drive is read-only (above; one set to sync both ways isn't opened), and these
+rules hold too:
 
 - **An item whose folder isn't shared is at the top.** A node whose folder the picture
   doesn't have (not shared with this identity, or no more) is read as in the top folder. Its
@@ -1309,7 +1310,9 @@ from such a drive is read-only (above), and these rules hold too:
 - **Nothing there is deleted for good from here.** The sharer's Recently deleted and their
   tombstones are their own devices' to purge (§8b; node schema, "The purge"): this device's daily purge only forgets
   the files it knew gone, each a tombstone's keeping time after its delete, and keeps no
-  tombstone to delete later.
+  tombstone to delete later. Restoring from it and emptying it are the sharer's too: asked of
+  such a drive here, both are refused before anything is asked of it (`Drive::restore`,
+  `Drive::empty`).
 - **A DB is one kind of drive for good.** Whose drive it is of is recorded before the DB first
   reads its drive, and a DB that read an identity's own drive is refused for a share (and the
   other way): read by the other's rules, a withdrawal would be a delete, and an orphan an

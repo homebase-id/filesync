@@ -438,6 +438,16 @@ included (service managers restart it then).
   each button names its answer, and a form without one does nothing. The CLI says the same
   with its commands in place of the buttons, and asks one question. The reply says when they go: "with the next sync", or
   "once you resume syncing".
+- **A read-only folder** (sync semantics §13; what another identity shares with the account
+  is one, its status naming that identity as its `sharer`): the runner is given the folder
+  that what changes here moves out to, outside the folder and on its volume, and tells each
+  move in a note ("report.txt: moved to …, as this folder is read-only (what changes here
+  isn't synced)"). Held deletes there are only confirmed or left held: a put back is told as
+  not possible, and nothing is asked of the drive. A runner says whose drive it syncs when
+  another identity's, and only then: one that doesn't isn't started (a share never passes
+  for the account's own folder; `hbsync status` shows a share with `->`, and it is never
+  the folder shown first). Built so far: the runner and the drive. The daemon doesn't start
+  one yet.
 - **Notes:** each conflict and failure is noted once; one that comes back sync after sync (a
   file that can't be read) isn't noted again until it has gone away. An operation left for the
   next plan is noted only when this device can't do it (a name or path it can't hold, access
@@ -584,7 +594,9 @@ Replies:
   `notes_added`, as a folder's), and `emptying` while Recently deleted is being deleted for
   good (`done` of `total` items, `purge` when it is the daily purge; left out otherwise). A folder has its `identity`,
   `path`, `kind` (`"main"`, `{"role":"documents"}`, or this computer's Desktop,
-  `{"desktop":"<uuid>"}`), `state`, `progress` (while `starting` or
+  `{"desktop":"<uuid>"}`), `sharer` where it holds what another identity shares with the
+  account (that identity; left out otherwise: such a folder is read-only, sync semantics
+  §13, and never the main folder, whatever its `kind`), `state`, `progress` (while `starting` or
   `syncing`, once the sync has a plan; its totals grow as each batch of up to 20,000 items is
   planned), `paused_until`, `held_deletes`, and the counts `notes_added` and `synced_added`
   that tell a client what is new.

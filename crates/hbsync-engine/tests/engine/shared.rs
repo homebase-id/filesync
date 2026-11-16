@@ -376,3 +376,62 @@ fn a_members_purge_deletes_nothing_on_the_sharers_drive() -> R {
     nothing_moved_out(&out)?;
     Ok(())
 }
+
+/// What the sharer deleted is theirs to restore or to delete for good: a member's restore and
+/// its emptying of Recently deleted are refused before anything is asked of the drive.
+#[test]
+fn a_member_neither_restores_nor_empties_the_sharers_recently_deleted() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("removed.txt", "removed")?;
+    a.write("keep.txt", "keep")?;
+    a.sync()?;
+    share_all(&a, &server)?;
+    let (mut b, out) = Client::member(&server, "b")?;
+    b.sync()?;
+    let (removed, file) = {
+        let header = common::header_named(&server, "removed.txt");
+        (header.node().ok_or("a node")?, header.file_id)
+    };
+    remove_on_drive(&server, &|name| name == "removed.txt")?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["keep.txt = keep"]);
+
+    let listed = b.listed()?;
+    let asked = b.remote.faults().requests;
+    let drive = b.engine.drive();
+    let refused = [
+        drive.restore(&[removed]),
+        drive.empty(&[removed], &listed, Going::UNWATCHED),
+        drive.empty_listed(&listed, Going::UNWATCHED),
+    ];
+    for done in refused {
+        assert!(
+            matches!(done, Err(hbsync_engine::EngineError::ReadOnly(_))),
+            "{done:?}"
+        );
+    }
+    assert_eq!(b.remote.faults().requests, asked, "nothing asked");
+    assert!(
+        server
+            .lock()
+            .map_err(|_| "poisoned")?
+            .removed()
+            .any(|h| h.file_id == file),
+        "still in the sharer's Recently deleted"
+    );
+    nothing_moved_out(&out)?;
+    Ok(())
+}
+
+/// What another identity shares only syncs read-only: a folder of it that would sync both ways
+/// isn't opened (each change here would be a write the drive refuses).
+#[test]
+fn a_shared_drive_is_not_synced_both_ways() -> R {
+    let server = server();
+    match Client::on(FakeRemote::member(server.clone()), "b", |_| {}) {
+        Err(e) if e.to_string().contains("only syncs read-only") => Ok(()),
+        Err(e) => Err(e),
+        Ok(_) => Err("opened".into()),
+    }
+}

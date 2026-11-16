@@ -295,12 +295,12 @@ pub struct DaemonStatus {
 
 impl DaemonStatus {
     /// The main folder (holding the drive's root) of the first account: the one the tray and
-    /// the CLI show first.
+    /// the CLI show first. Never what another identity shares.
     pub fn main_folder(&self) -> Option<&FolderStatus> {
         self.folders
             .iter()
             .find(|f| f.is_main())
-            .or(self.folders.first())
+            .or_else(|| self.folders.iter().find(|f| f.sharer.is_none()))
     }
 }
 
@@ -391,6 +391,11 @@ pub struct FolderStatus {
     /// What of the drive it holds: the main folder (the drive's root), a role folder, this
     /// computer's Desktop (its own folder in Desktops, sync semantics §12).
     pub kind: RootKind,
+    /// Whose drive that is, when not the account's own: the identity that shares it with the
+    /// account (sync semantics §13, "Another identity's drive"). Such a folder is read-only,
+    /// and never the main folder. Left out for the account's own drive.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sharer: Option<Identity>,
     pub state: State,
     /// Until when a pause lasts (Unix seconds); `None` while not paused or until resumed.
     pub paused_until: Option<u64>,
@@ -431,9 +436,9 @@ pub struct FolderStatus {
 }
 
 impl FolderStatus {
-    /// Whether it is the main folder (the drive's root).
+    /// Whether it is the main folder (the root of the account's own drive).
     pub fn is_main(&self) -> bool {
-        self.kind == RootKind::Main
+        self.kind == RootKind::Main && self.sharer.is_none()
     }
 
     /// Whether the identity refuses this computer (`Denied`, or `Paused` meanwhile): logging in
@@ -446,9 +451,12 @@ impl FolderStatus {
         }
     }
 
-    /// What it is, for people ([`RootKind::what`]).
+    /// What it is, for people ([`RootKind::what`]); what another identity shares, by whom.
     pub fn what(&self) -> String {
-        self.kind.what(&self.identity)
+        match &self.sharer {
+            Some(sharer) => format!("what {sharer} shares with {}", self.identity),
+            None => self.kind.what(&self.identity),
+        }
     }
 
     /// Starting to sync the main folder at `path` with `identity`.
@@ -457,6 +465,7 @@ impl FolderStatus {
             identity: identity.clone(),
             path: path.to_path_buf(),
             kind: RootKind::Main,
+            sharer: None,
             state: State::Starting,
             paused_until: None,
             progress: None,
@@ -561,6 +570,43 @@ mod tests {
             "{busy}"
         );
         assert_eq!(serde_json::from_str::<AccountStatus>(&busy)?, account);
+        Ok(())
+    }
+
+    /// A folder of the account's own drive says nothing of a sharer, and a status without one
+    /// (a daemon of the build before) reads: the protocol stays as it was. What another
+    /// identity shares names it, and is no main folder though it holds a drive's root.
+    #[test]
+    fn a_sharer_is_left_out_of_a_folder_of_the_accounts_own_drive() -> Result<(), serde_json::Error>
+    {
+        let mut folder =
+            FolderStatus::new(&"anna.example.com".into(), Path::new("/home/anna/Homebase"));
+        let own = serde_json::to_string(&folder)?;
+        assert!(!own.contains("sharer"), "{own}");
+        assert_eq!(serde_json::from_str::<FolderStatus>(&own)?, folder);
+        assert!(folder.is_main());
+        assert_eq!(folder.what(), "anna.example.com");
+
+        folder.sharer = Some("ben.example.com".into());
+        let shared = serde_json::to_string(&folder)?;
+        assert!(shared.contains(r#""sharer":"ben.example.com""#), "{shared}");
+        assert_eq!(serde_json::from_str::<FolderStatus>(&shared)?, folder);
+        assert!(!folder.is_main());
+        assert_eq!(
+            folder.what(),
+            "what ben.example.com shares with anna.example.com"
+        );
+        // Nor shown as one for want of another.
+        let mut role = folder.clone();
+        (role.kind, role.sharer) = (RootKind::Desktop(NodeId::DESKTOPS), None);
+        let mut status = DaemonStatus {
+            version: String::new(),
+            accounts: Vec::new(),
+            folders: vec![folder],
+        };
+        assert_eq!(status.main_folder(), None);
+        status.folders.push(role.clone());
+        assert_eq!(status.main_folder(), Some(&role));
         Ok(())
     }
 }

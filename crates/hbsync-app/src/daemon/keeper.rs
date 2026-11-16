@@ -461,9 +461,13 @@ fn restore_notes(left: &[String], went: &[String]) -> Vec<String> {
 
 /// The note for `what` that failed with `e`: what to do about it.
 fn failed(what: &str, e: &EngineError) -> String {
-    // Not a network fault: the identity said it isn't there (twice too soon).
-    if let EngineError::NotThereOnce { .. } = e {
-        return format!("{what} failed ({e}): try again later");
+    match e {
+        // Not a network fault: the identity said it isn't there (twice too soon).
+        EngineError::NotThereOnce { .. } => return format!("{what} failed ({e}): try again later"),
+        // Another identity's Recently deleted is its owner's (sync semantics §13): asking
+        // again changes nothing.
+        EngineError::ReadOnly(_) => return format!("{what} failed ({e})"),
+        _ => {}
     }
     let then = match e.class() {
         hbsync_remote::ErrorClass::Transient | hbsync_remote::ErrorClass::RateLimited => {
@@ -502,6 +506,21 @@ mod tests {
             let said = failed(EMPTY, &refused(refusal));
             assert!(said.ends_with(words::log_in_again(key)), "{said}");
         }
+    }
+
+    /// A request of another identity's Recently deleted, refused here, doesn't say to try
+    /// again.
+    #[test]
+    fn a_request_of_another_identitys_recently_deleted_isnt_to_try_again() -> R {
+        let home = tempfile::tempdir()?;
+        let server = FakeServer::new(ServerConfig::default());
+        let remote = Arc::new(FakeRemote::member(server));
+        let drive = Drive::open(&home.path().join("state.db"), "a.example", remote)?;
+        let refused = drive.restore_told(&[]).expect_err("the sharer's");
+        let said = failed("Restoring from Recently deleted", &refused);
+        assert!(said.ends_with("what was deleted from it)"), "{said}");
+        assert!(!said.contains("try again"), "{said}");
+        Ok(())
     }
 
     fn wait_for(what: &str, done: impl Fn() -> bool) -> R {

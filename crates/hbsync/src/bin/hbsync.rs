@@ -605,7 +605,9 @@ fn print_status(status: &DaemonStatus) {
 fn print_folder(s: &FolderStatus) {
     println!("{APP_NAME}: {}", words::status_line(s, words::now()));
     let who = s.what();
-    println!("  {who} <-> {}", s.path.display());
+    // What another identity shares comes one way (sync semantics §13).
+    let arrow = if s.sharer.is_some() { "->" } else { "<->" };
+    println!("  {who} {arrow} {}", s.path.display());
     // The status line has the progress, the pause, the next try and a failure's problem.
     if let Some(e) = s.error.as_ref().filter(|_| s.state != State::Failing) {
         println!("  problem: {e}");

@@ -76,7 +76,7 @@ impl Client {
         Ok((client, out))
     }
 
-    fn on(
+    pub(crate) fn on(
         remote: FakeRemote,
         name: &str,
         tweak: impl Fn(&mut EngineConfig) + 'static,

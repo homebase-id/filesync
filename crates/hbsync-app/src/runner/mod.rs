@@ -115,6 +115,13 @@ pub struct RunnerConfig {
     pub identity: Identity,
     /// What of the drive it holds (shown; the DB keeps it).
     pub kind: crate::RootKind,
+    /// Whose drive `drive` is, when another identity's that shares it with `identity` (sync
+    /// semantics §13, "Another identity's drive"): shown. Such a folder is `read_only`.
+    pub sharer: Option<Identity>,
+    /// The folder syncs one way, the drive deciding (sync semantics §13): what changes here
+    /// moves out to this folder (outside `folder`, on its volume; made where missing).
+    /// `None`: it syncs both ways.
+    pub read_only: Option<PathBuf>,
     /// Shown in conflict-copy names.
     pub device: String,
     pub mass_delete: MassDelete,
@@ -145,6 +152,8 @@ impl RunnerConfig {
             db: db.to_path_buf(),
             identity: identity.clone(),
             kind: crate::RootKind::Main,
+            sharer: None,
+            read_only: None,
             device: device.to_owned(),
             mass_delete: MassDelete::default(),
             paused: None,
@@ -437,10 +446,18 @@ impl Runner {
         drive: Arc<Drive>,
         ended: impl FnOnce() + Send + 'static,
     ) -> Result<(Handle, JoinHandle<Result<(), RunnerError>>), RunnerError> {
+        // Shown as whose it is: a share never passes for the account's own folder, nor that
+        // for a share.
+        if cfg.sharer.is_some() != drive.shared() {
+            return Err(RunnerError::State(StateError::Conflict(
+                "a folder says whose drive it syncs when another identity's, and only then".into(),
+            )));
+        }
         let (tx, rx) = channel();
         let stop = Arc::new(AtomicBool::new(cfg.paused.is_some()));
         let mut status = FolderStatus::new(&cfg.identity, &cfg.folder);
         status.kind = cfg.kind;
+        status.sharer.clone_from(&cfg.sharer);
         status.paused_until = cfg.paused.and_then(|p| p.until);
         let status = Arc::new(Mutex::new(status));
         let held = Arc::new(Mutex::new(Held::default()));
@@ -534,6 +551,7 @@ impl Runner {
         cfg.guard.min = self.cfg.mass_delete.min_files;
         cfg.guard.fraction = self.cfg.mass_delete.fraction;
         cfg.folder.filter = Arc::new(Filter::load(root, cfg.folder.case_insensitive)?);
+        cfg.folder.read_only.clone_from(&self.cfg.read_only);
         if let Some(tweak) = self.cfg.tweak {
             tweak(&mut cfg);
         }

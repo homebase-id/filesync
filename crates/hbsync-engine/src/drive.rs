@@ -369,6 +369,12 @@ impl Drive {
         self.remote.as_ref()
     }
 
+    /// Whether the drive is another identity's, which shares it with the account
+    /// ([`Remote::shared`]; the account's state DB says the same, [`Drive::new`]).
+    pub fn shared(&self) -> bool {
+        self.remote.shared()
+    }
+
     pub(crate) fn shared_remote(&self) -> Arc<dyn Remote> {
         Arc::clone(&self.remote)
     }
@@ -743,11 +749,24 @@ impl Drive {
         }
     }
 
+    /// Refuses a write to Recently deleted on another identity's drive (sync semantics §13):
+    /// what is deleted there is its owner's to restore or to delete for good. Before anything
+    /// is asked of the drive, so the refusal is this one and not the identity's (which would
+    /// be shown as this device refused).
+    fn owned(&self) -> Result<(), EngineError> {
+        if self.shared() {
+            return Err(EngineError::ReadOnly(
+                "only who shares it restores or deletes for good what was deleted from it",
+            ));
+        }
+        Ok(())
+    }
+
     /// Restores these items of Recently deleted (each with what was deleted with it); the
     /// next syncs bring them back. Returns how many items came back.
     /// The user's to ask for: it reads the feed first, whatever the notifications say. A write
     /// the drive refused for its state, or one whose answer didn't come, leaves the account
-    /// behind.
+    /// behind. Refused on another identity's drive ([`EngineError::ReadOnly`]).
     pub fn restore(&self, nodes: &[NodeId]) -> Result<usize, EngineError> {
         self.restore_told(nodes).map(|r| r.back)
     }
@@ -755,13 +774,16 @@ impl Drive {
     /// [`Drive::restore`], with what stayed in Recently deleted and what went for good
     /// ([`deleted::Restored`]): the user's restore, to tell them.
     pub fn restore_told(&self, nodes: &[NodeId]) -> Result<deleted::Restored, EngineError> {
+        self.owned()?;
         self.pull(None)?;
         let restored = self.with_ops(|ops| ops.restore_told(nodes));
         self.wake_all();
         restored
     }
 
-    /// [`Drive::restore`] for a caller that has just read the feed itself.
+    /// [`Drive::restore`] for a caller that has just read the feed itself. Not asked on another
+    /// identity's drive: its callers are a put back and a role's or Desktop's folder, both of
+    /// which [`crate::Engine::new`] rules out there.
     pub(crate) fn restore_read(&self, nodes: &[NodeId]) -> Result<usize, EngineError> {
         let restored = self.with_ops(|ops| ops.restore(nodes));
         self.wake_all();
@@ -771,12 +793,14 @@ impl Drive {
     /// Deletes these items of Recently deleted for good as `listed` showed them, each with
     /// what was in it then ([`deleted::AccountOps::empty`]); `going` stops it between batches
     /// (one stopped already doesn't start) and is told how far it got ([`deleted::Going`]).
+    /// Refused on another identity's drive ([`EngineError::ReadOnly`]).
     pub fn empty(
         &self,
         nodes: &[NodeId],
         listed: &deleted::Listed,
         going: deleted::Going<'_>,
     ) -> Result<usize, EngineError> {
+        self.owned()?;
         going.check()?;
         self.catch_up(None)?;
         self.with_ops(|ops| ops.empty(nodes, listed, going))
@@ -790,6 +814,7 @@ impl Drive {
         listed: &deleted::Listed,
         going: deleted::Going<'_>,
     ) -> Result<usize, EngineError> {
+        self.owned()?;
         going.check()?;
         self.catch_up(None)?;
         self.with_ops(|ops| ops.empty_listed(listed, going))
