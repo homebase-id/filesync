@@ -2418,10 +2418,10 @@ fn regression_a_delete_in_a_held_folder_that_moves_stays_held() {
 /// Seed ed44ce74 (`held_deletes_out_of_the_dirty_set_plan_alike_from_a_wipe`): client 0 makes
 /// folder `c.txt`, removed on the drive as each of its writes lands, with `c.txt/a` (written
 /// before the last removal) and `c.txt/a/d` (after it) left live in it. The client then
-/// ignores `d`: the file leaves the drive, held. Written after the removal, it keeps `a`,
-/// which brings `c.txt` back (§6.3), in every view: the view of `c.txt` alone, the held delete
-/// out of the dirty set, didn't read below `a`, which then went with the removal, its folder
-/// deleted here.
+/// ignores `d`: the file leaves the drive, held, out of the dirty set. Written after the
+/// removal, it keeps `a`, which brings `c.txt` back (§6.3). The view of `c.txt` alone doesn't
+/// hold it, so its plan took `a` as gone with the removal and deleted the folder here: it now
+/// reaches the held delete (`held::reaches`) and is made again with it.
 #[test]
 fn regression_a_held_removal_written_after_its_folders_removal_keeps_it() {
     use hbsync_sim::Action::*;
@@ -2450,7 +2450,6 @@ fn regression_a_held_removal_written_after_its_folders_removal_keeps_it() {
         ),
         plan(0),
         act(0, ToggleIgnore),
-        act(0, CreateFile { parent: 0, name: 0 }),
         step(0),
         step(0),
         step(0),

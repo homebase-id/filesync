@@ -9,7 +9,7 @@
 //! guard's totals would let this device's own removals through.
 //!
 //! The rules here are pure, shared with the simulator: what leaves the dirty set
-//! ([`out_of_dirty`], [`touches`]: the simulator checks that a plan without it plans as one
+//! ([`out_of_dirty`], [`reaches`]: the simulator checks that a plan without it plans as one
 //! with it), whether a hold of removals elsewhere stays ([`keep_held`]), and what "Put them
 //! back" does ([`put_back_plan`]), each over what a [`Sides`] reads.
 
@@ -17,7 +17,8 @@ use std::collections::{HashMap, HashSet};
 
 use hbsync_types::{NodeId, NodeKind};
 
-use crate::plan::{Input, Op, Plan};
+use crate::along::by_removal;
+use crate::plan::{Input, Op, Plan, Removed};
 
 /// What of `plan`, made for the dirty nodes `page`, is held and leaves the dirty set: the held
 /// deletes whose node is in `page`, and the nodes of `page` each of them covers (its node, and
@@ -183,6 +184,70 @@ pub fn touches(input: &Input, out: &HashSet<NodeId>) -> bool {
             .chain(input.removed.keys().copied())
             .any(|n| out.contains(&n)),
     }
+}
+
+/// Whether a plan from `input` may depend on `out`, the nodes out of the dirty set: its view
+/// holds one ([`touches`]), or one it doesn't hold decides what the view's folders in Recently
+/// deleted took along. A live node written after a folder's removal keeps the live folders
+/// above it ([`crate::along::taken_along`]), and the view reads no such node that isn't dirty
+/// and has no item here: a removal from the drive, held. So from each of `out` up the drive's
+/// live folders (`live`: the folder a live node is in on the drive and the server's time of
+/// its version, from the mirror) to the view: reached where that is in a removed folder of
+/// the view, through its live folders, and a node on the way was written after that removal.
+///
+/// Cost: none where the view has no folder in Recently deleted; else one read of the mirror
+/// per node of `out` and per folder above them outside the view.
+pub fn reaches<E>(
+    input: &Input,
+    out: &HashSet<NodeId>,
+    mut live: impl FnMut(NodeId) -> Result<Option<(NodeId, Option<i64>)>, E>,
+) -> Result<bool, E> {
+    if touches(input, out) {
+        return Ok(true);
+    }
+    let folder_removed = |r: &Removed| r.state.kind == NodeKind::Folder;
+    if !input.removed.values().any(folder_removed) {
+        return Ok(false);
+    }
+    let in_view = |n: NodeId| input.remote.contains(n) || input.removed.contains_key(&n);
+    // Of each node outside the view: where its folders enter the view and the latest write on
+    // the way there, its own too (`None`: nowhere, or on its way up now: a cycle ends there).
+    let mut ways: HashMap<NodeId, Option<(NodeId, Option<i64>)>> = HashMap::new();
+    for &node in out {
+        let mut up = Vec::new();
+        let mut at = node;
+        let mut way = loop {
+            if in_view(at) {
+                break Some((at, None));
+            }
+            if let Some(known) = ways.get(&at) {
+                break *known;
+            }
+            let Some((parent, written)) = live(at)? else {
+                break None;
+            };
+            ways.insert(at, None);
+            up.push((at, written));
+            at = parent;
+        };
+        for (n, written) in up.into_iter().rev() {
+            // (A time not known counts as before any removal, and `None` orders so.)
+            way = way.map(|(enters, latest)| (enters, latest.max(written)));
+            ways.insert(n, way);
+        }
+        let Some((enters, latest)) = way else {
+            continue;
+        };
+        // The first node above that the view's drive doesn't have: the removed folder, if any.
+        let top = std::iter::once(enters)
+            .chain(input.remote.ancestors_iter(enters))
+            .find(|n| !input.remote.contains(*n));
+        let removed = top.and_then(|top| input.removed.get(&top));
+        if removed.is_some_and(|r| folder_removed(r) && !by_removal(latest, r.at)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// What the rules of held deletes read of a node: the engine from its store, the simulator
@@ -670,5 +735,88 @@ mod tests {
         // Found deleted for good by the restore: it goes too.
         model.live.remove(&x);
         assert_eq!(after_restore(&plan, &model), Ok(vec![x, d]));
+    }
+
+    /// A view of removed folder `d` (removed at 100) and what `view` gives of the drive below
+    /// it, and whether it reaches `out` with the drive's `live` nodes outside it (each: its
+    /// folder, when it was written), and how many of those it read.
+    fn reach(
+        d: NodeId,
+        view: &[(NodeId, NodeId)],
+        out: NodeId,
+        live: &[(NodeId, NodeId, Option<i64>)],
+    ) -> (bool, usize) {
+        use hbsync_types::NodeState;
+        let mut input = Input::default();
+        let state = NodeState::folder(NodeId::ROOT, "d");
+        input.removed.insert(d, Removed { at: 100, state });
+        for &(node, parent) in view {
+            input.remote.insert(node, NodeState::folder(parent, "a"));
+        }
+        let mut reads = 0;
+        let Ok(reached) = reaches(&input, &HashSet::from([out]), |n| {
+            reads += 1;
+            let row = live.iter().find(|(node, ..)| *node == n);
+            Ok::<_, Infallible>(row.map(|&(_, parent, at)| (parent, at)))
+        });
+        (reached, reads)
+    }
+
+    /// A held delete out of the dirty set and outside the view is reached where it decides what
+    /// a removed folder of the view took along: live below that folder, through live folders,
+    /// and it or a folder on the way written after the removal (seed ed44ce74).
+    #[test]
+    fn a_view_reaches_a_held_delete_written_after_its_folders_removal() {
+        let (d, a, b, late) = (NodeId::new(), NodeId::new(), NodeId::new(), NodeId::new());
+        // In a folder the view has, live in the removed one: written after the removal.
+        assert_eq!(
+            reach(d, &[(a, d)], late, &[(late, a, Some(200))]),
+            (true, 1)
+        );
+        // ... by the removal, or its time not known (this device's write): taken along as the
+        // view has it.
+        assert_eq!(
+            reach(d, &[(a, d)], late, &[(late, a, Some(100))]),
+            (false, 1)
+        );
+        assert_eq!(reach(d, &[(a, d)], late, &[(late, a, None)]), (false, 1));
+        // Through folders outside the view, to the removed folder itself: its own time, or a
+        // folder's on the way.
+        let below = |late_at, b_at| [(late, b, Some(late_at)), (b, a, Some(b_at)), (a, d, None)];
+        assert_eq!(reach(d, &[], late, &below(200, 50)), (true, 3));
+        assert_eq!(reach(d, &[], late, &below(50, 200)), (true, 3));
+        assert_eq!(reach(d, &[], late, &below(50, 50)), (false, 3));
+        // Not below the removed folder: in a live folder of the view at the top, in one the
+        // view doesn't have, or not on the drive (a delete here of what is gone there).
+        let top = (a, NodeId::ROOT);
+        assert_eq!(reach(d, &[top], late, &[(late, a, Some(200))]), (false, 1));
+        let elsewhere = [(late, b, Some(200)), (b, NodeId::ROOT, Some(200))];
+        assert_eq!(reach(d, &[(a, d)], late, &elsewhere), (false, 3));
+        assert_eq!(reach(d, &[(a, d)], late, &[]), (false, 1));
+        // Folders in each other (a broken mirror): the walk ends.
+        let cycle = [(late, a, Some(200)), (a, b, Some(200)), (b, a, Some(200))];
+        assert_eq!(reach(d, &[], late, &cycle), (false, 3));
+    }
+
+    /// Without a folder in Recently deleted the view reaches only what it holds
+    /// ([`touches`]), and reads nothing: a file there takes nothing along.
+    #[test]
+    fn a_view_without_a_removed_folder_reads_nothing_of_held_deletes() {
+        use hbsync_types::NodeState;
+        let (f, a, late) = (NodeId::new(), NodeId::new(), NodeId::new());
+        let mut input = Input::default();
+        input.remote.insert(a, NodeState::folder(f, "a"));
+        let out = HashSet::from([late]);
+        let unread =
+            |_| -> Result<Option<(NodeId, Option<i64>)>, Infallible> { panic!("nothing to read") };
+        assert_eq!(reaches(&input, &out, unread), Ok(false));
+        let state = NodeState {
+            kind: NodeKind::File,
+            ..NodeState::folder(NodeId::ROOT, "f")
+        };
+        input.removed.insert(f, Removed { at: 100, state });
+        assert_eq!(reaches(&input, &out, unread), Ok(false));
+        // What the view holds is reached as before.
+        assert_eq!(reaches(&input, &HashSet::from([a]), unread), Ok(true));
     }
 }

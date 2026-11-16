@@ -159,7 +159,8 @@ impl Sim {
             let reconcile = with(&opts);
             let without =
                 view::plan_narrow(&mut db, &rest, folder, |i: &Input, db: &mut StateDb| {
-                    reached.set(reached.get() || held::touches(i, &nodes));
+                    let reaches = view::reaches_held(db, i, &nodes).unwrap_or(true);
+                    reached.set(reached.get() || reaches);
                     reconcile(i, db)
                 })?;
             if reached.get() {

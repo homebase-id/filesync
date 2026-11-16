@@ -7,9 +7,7 @@
 //!   all children;
 //! - the children of a dirty folder that may go (live children keep it);
 //! - the full local subtree of a folder that is gone remotely (what its delete here would
-//!   take, but what the plan moves out of it first);
-//! - below a live folder in a removed one, what was written after the removal (it keeps the
-//!   folders above it).
+//!   take, but what the plan moves out of it first).
 //!
 //! The local side is translated from paths to the node model here: the parent is the node at
 //! the parent path, the name is the remote spelling (recorded mapping or [`to_remote`]), and a
@@ -270,6 +268,25 @@ pub fn plan_narrow(
             return Ok(plan);
         }
     }
+}
+
+/// Whether a plan from the view `input` may depend on `out`, the held deletes out of the dirty
+/// set ([`crate::held::reaches`]), with what the mirror in `db` has of the drive outside the
+/// view. The engine's plan asks so, and the simulator's check of it. Reads nothing while no
+/// delete is out.
+pub fn reaches_held(
+    db: &mut StateDb,
+    input: &Input,
+    out: &HashSet<NodeId>,
+) -> Result<bool, StateError> {
+    if out.is_empty() {
+        return Ok(false);
+    }
+    db.read(|s| {
+        crate::held::reaches(input, out, |n| {
+            Ok(s.get_mirror(n)?.map(|m| (m.parent, m.changed_at)))
+        })
+    })
 }
 
 /// Past this many names to look up in one folder, it is listed whole: one query instead.
@@ -565,34 +582,6 @@ fn build(
         if !subtree.iter().any(held) {
             for n in subtree {
                 b.input.remote.remove(n);
-            }
-        }
-    }
-    // What a folder's removal took along goes by what is below it as well: a node written after
-    // the removal keeps the live folders above it (`crate::along::taken_along`), and the view
-    // may hold no such node otherwise: one that isn't dirty, in a folder the view doesn't read
-    // whole (a removal from the drive held out of the dirty set, [`crate::held`], has no item
-    // here either). So below each live folder the view has in a removed one, through the
-    // folders that removal may have taken, what was written after it is loaded. Cost: the
-    // mirror's rows of what those folders hold, read once; nothing where no folder in Recently
-    // deleted holds a live folder of the view.
-    let mut taken: Vec<(NodeId, i64)> = (b.input.removed.iter())
-        // A file takes nothing along.
-        .filter(|(_, removed)| removed.state.kind == NodeKind::Folder)
-        .flat_map(|(folder, removed)| {
-            (b.input.remote.children(*folder)).map(move |n| (n, removed.at))
-        })
-        .filter(|&(n, removal)| {
-            (b.input.remote.get(n)).is_some_and(|s| s.kind == NodeKind::Folder)
-                && by_removal(b.input.changed_at.get(&n).copied(), removal)
-        })
-        .collect();
-    while let Some((folder, removal)) = taken.pop() {
-        for child in s.mirror_children(folder)? {
-            if !by_removal(child.changed_at, removal) {
-                b.load(child.node)?;
-            } else if child.kind == NodeKind::Folder {
-                taken.push((child.node, removal));
             }
         }
     }

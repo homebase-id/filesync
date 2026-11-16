@@ -940,7 +940,7 @@ impl Engine {
     }
 
     /// [`Engine::plan`], noting whether a view reached the held deletes out of the dirty set,
-    /// or `more` ([`crate::held::touches`]).
+    /// or `more` ([`crate::held::reaches`]; a read that fails counts as reached).
     fn plan_with(
         &mut self,
         dirty: &[NodeId],
@@ -962,10 +962,12 @@ impl Engine {
             dirty,
             folder,
             |input: &crate::reconcile::Input, db: &mut StateDb| {
+                let reaches =
+                    |out, db: &mut StateDb| view::reaches_held(db, input, out).unwrap_or(true);
                 reached.set(
                     reached.get()
-                        || crate::held::touches(input, held)
-                        || more.is_some_and(|more| crate::held::touches(input, more)),
+                        || reaches(held, db)
+                        || more.is_some_and(|more| reaches(more, db)),
                 );
                 reconcile(input, db)
             },
