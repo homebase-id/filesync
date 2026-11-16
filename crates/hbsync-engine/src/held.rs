@@ -197,6 +197,11 @@ pub fn touches(input: &Input, out: &HashSet<NodeId>) -> bool {
 /// its version, from the mirror) to the view: reached where that is in a removed folder of
 /// the view, through its live folders, and a node on the way was written after that removal.
 ///
+/// Not followed: a chain that ends at a folder in Recently deleted the view doesn't have, which
+/// may be in one the view has. A node written after that folder's removal has brought it back
+/// in the plan that saw the two together (the removal's view reaches the node by this rule,
+/// the write's holds it), so nothing live is left below one to keep.
+///
 /// Cost: none where the view has no folder in Recently deleted; else one read of the mirror
 /// per node of `out` and per folder above them outside the view.
 pub fn reaches<E>(
@@ -222,10 +227,17 @@ pub fn reaches<E>(
                 false => live(at)?.map(|(parent, written)| ((at, written), parent)),
             })
         })?;
+        // Not live itself (a delete here of what is gone there), or its way already known.
+        if up.items.is_empty() {
+            continue;
+        }
         let mut way = match up.end {
             End::At(at) if in_view(at) => Some((at, None)),
-            End::At(at) => ways.get(&at).copied().flatten(),
-            End::Top | End::Cycle | End::Deep => None,
+            // Known, or nothing live there: known from here on.
+            End::At(at) => *ways.entry(at).or_insert(None),
+            End::Top | End::Cycle => None,
+            // Too deep to say where it ends: nothing learnt of the folders on the way.
+            End::Deep => continue,
         };
         for (n, written) in up.items.into_iter().rev() {
             // (A time not known counts as before any removal, and `None` orders so.)
@@ -745,6 +757,15 @@ mod tests {
         out: NodeId,
         live: &[(NodeId, NodeId, Option<i64>)],
     ) -> (bool, usize) {
+        reach_all(d, view, &[out], live)
+    }
+
+    fn reach_all(
+        d: NodeId,
+        view: &[(NodeId, NodeId)],
+        out: &[NodeId],
+        live: &[(NodeId, NodeId, Option<i64>)],
+    ) -> (bool, usize) {
         let mut input = Input::default();
         let state = NodeState::folder(NodeId::ROOT, "d");
         input.removed.insert(d, Removed { at: 100, state });
@@ -752,7 +773,7 @@ mod tests {
             input.remote.insert(node, NodeState::folder(parent, "a"));
         }
         let mut reads = 0;
-        let Ok(reached) = reaches(&input, &HashSet::from([out]), |n| {
+        let Ok(reached) = reaches(&input, &out.iter().copied().collect(), |n| {
             reads += 1;
             let row = live.iter().find(|(node, ..)| *node == n);
             Ok::<_, Infallible>(row.map(|&(_, parent, at)| (parent, at)))
@@ -791,6 +812,15 @@ mod tests {
         let elsewhere = [(late, b, Some(200)), (b, NodeId::ROOT, Some(200))];
         assert_eq!(reach(d, &[(a, d)], late, &elsewhere), (false, 2));
         assert_eq!(reach(d, &[(a, d)], late, &[]), (false, 1));
+        // In a folder that isn't live and that the view doesn't have (gone, or in Recently
+        // deleted itself): read once for all that is in it.
+        let (late2, gone) = (NodeId::new(), NodeId::new());
+        let in_gone = [(late, gone, Some(200)), (late2, gone, Some(200))];
+        assert_eq!(reach(d, &[(a, d)], late, &in_gone), (false, 2));
+        assert_eq!(
+            reach_all(d, &[(a, d)], &[late, late2], &in_gone),
+            (false, 3)
+        );
         // Folders in each other (a broken mirror): the walk ends.
         let cycle = [(late, a, Some(200)), (a, b, Some(200)), (b, a, Some(200))];
         assert_eq!(reach(d, &[], late, &cycle), (false, 3));

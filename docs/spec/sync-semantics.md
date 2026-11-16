@@ -527,9 +527,9 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   drive has no item here, so no view holds it unless it is dirty, yet written after the removal
   of a folder above it, it keeps the live folders between them (§6.3). A view with a folder in
   Recently deleted therefore reaches a held delete that is live below it and was written after
-  its removal, or is in a folder that was (read from the mirror, up from each held delete to
-  the view; cost: a read per held delete and per folder above it outside the view, for a plan
-  whose view has a folder in Recently deleted, none for any other). What else
+  its removal, or is in a folder outside the view that was (read from the mirror, up from each
+  held delete to the view; cost: a read per held delete and per folder above it outside the
+  view, for a plan whose view has a folder in Recently deleted, none for any other). What else
   stays dirty (refused, failing, waiting for a hash) is planned alone
   once more at the end of that sync: if its view reaches them, or it is more than 1,000
   nodes, they stay dirty, planned every sync as before. Cost: taking them out writes a row and clears a
