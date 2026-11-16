@@ -2415,6 +2415,55 @@ fn regression_a_delete_in_a_held_folder_that_moves_stays_held() {
     }
 }
 
+/// Seed ed44ce74 (`held_deletes_out_of_the_dirty_set_plan_alike_from_a_wipe`): client 0 makes
+/// folder `c.txt`, removed on the drive as each of its writes lands, with `c.txt/a` (written
+/// before the last removal) and `c.txt/a/d` (after it) left live in it. The client then
+/// ignores `d`: the file leaves the drive, held, out of the dirty set. Written after the
+/// removal, it keeps `a`, which brings `c.txt` back (§6.3). The view of `c.txt` alone doesn't
+/// hold it, so its plan took `a` as gone with the removal and deleted the folder here: it now
+/// reaches the held delete (`held::reaches`) and is made again with it.
+#[test]
+fn regression_a_held_removal_written_after_its_folders_removal_keeps_it() {
+    use hbsync_sim::Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let (plan, step) = (
+        |client| Event::Plan { client },
+        |client| Event::Step { client },
+    );
+    let events = [
+        act(0, Meanwhile { op: 0 }),
+        act(0, CreateFolder { parent: 0, name: 3 }),
+        Event::PutBack { client: 1 },
+        act(0, CreateFolder { parent: 6, name: 0 }),
+        plan(0),
+        step(0),
+        step(0),
+        step(0),
+        step(0),
+        act(0, Meanwhile { op: 0 }),
+        act(
+            0,
+            CreateFile {
+                parent: 2,
+                name: 13,
+            },
+        ),
+        plan(0),
+        act(0, ToggleIgnore),
+        step(0),
+        step(0),
+        step(0),
+    ];
+    if let Err(e) = run_with(
+        2,
+        Some(crate::common::WIPED_MIN),
+        |sim| crate::common::with_a_folder_wiped(sim.with_held_check()),
+        &events,
+    ) {
+        panic!("{e}");
+    }
+}
+
 /// A Put back that comes while a delete here is in flight waits for it (the runner takes an
 /// answer after the sync in progress, as `regression_a_put_back_waits_for_the_delete_in_flight`
 /// had it before #359 held that delete with what it took along): client 1 deletes three files

@@ -42,8 +42,14 @@ pub fn taken_along(
     removed: impl Fn(NodeId) -> Option<(NodeKind, i64)>,
     changed_at: impl Fn(NodeId) -> Option<i64>,
 ) -> HashSet<NodeId> {
-    let written_by = |node: NodeId, removal: i64| changed_at(node).is_none_or(|at| at <= removal);
+    let written_by = |node: NodeId, removal: i64| by_removal(changed_at(node), removal);
     verdicts(live, removed, written_by).1.into_keys().collect()
+}
+
+/// Whether a node whose version is of `at` (the server's time) was written by the removal at
+/// `removal`, as [`taken_along`] counts it: no later, and one whose time isn't known was.
+pub(crate) fn by_removal(at: Option<i64>, removal: i64) -> bool {
+    at.is_none_or(|at| at <= removal)
 }
 
 /// What the purge removes of what deletes left live (node schema, The purge, 2.), in levels
