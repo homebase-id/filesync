@@ -516,12 +516,14 @@ fn files_whose_folder_is_gone_for_good_are_recovered() -> R {
 }
 
 /// Another app deletes folders `names` for good (a hard delete), leaving what is in them live,
-/// and `c` hears it from the notification, as the daemon does: gone from its mirror at once.
+/// and `hear` hear it from the notification, as the daemon does: gone from their mirrors at
+/// once.
 fn deleted_for_good_announced(
     server: &Arc<Mutex<hbsync_remote::fake::FakeServer>>,
-    c: &Client,
+    hear: &[&Client],
     names: &[&str],
 ) -> R {
+    let c = hear.first().ok_or("no client")?;
     let mut refs = Vec::new();
     for name in names {
         let at = {
@@ -536,7 +538,9 @@ fn deleted_for_good_announced(
         s.hard_delete(at.file_id, at.version)?;
         refs.push(hbsync_remote::ChangeRef::of(&header).tombstone());
     }
-    c.engine.drive().announced(&refs)?;
+    for c in hear {
+        c.engine.drive().announced(&refs)?;
+    }
     Ok(())
 }
 
@@ -572,7 +576,7 @@ fn an_orphan_where_a_device_syncs_nothing_stays_on_the_drive() -> R {
     }
     b.sync()?;
     a.sync()?;
-    deleted_for_good_announced(&server, &a, &["x", "d"])?;
+    deleted_for_good_announced(&server, &[&a], &["x", "d"])?;
     fs::create_dir_all(b.root.join("x/d/f9"))?;
     b.sync()?;
     let report = a.sync()?;
@@ -584,6 +588,86 @@ fn an_orphan_where_a_device_syncs_nothing_stays_on_the_drive() -> R {
     expected.extend(["keep.txt"; 4]);
     expected.sort();
     assert_eq!(live, expected);
+    assert!(!removed, "nothing in Recently deleted");
+    Ok(())
+}
+
+/// a made the folder build and ignores it since; before it syncs again, b adds a file to it and
+/// another app deletes the folder for good: the server keeps b's file. Both hear of it. a and
+/// b as they are then, with a's rule in place.
+fn build_ignored_since_and_deleted_for_good(
+    server: &Arc<Mutex<hbsync_remote::fake::FakeServer>>,
+) -> Result<(Client, Client), Box<dyn std::error::Error>> {
+    let mut a = Client::new(server, "a")?;
+    let mut b = Client::new(server, "b")?;
+    a.write("readme", "r")?;
+    fs::create_dir_all(a.root.join("build"))?;
+    a.sync()?;
+    b.sync()?;
+    b.write("build/new.o", "n")?;
+    b.sync()?;
+    a.write("build/mine.o", "m")?;
+    filters::restart_ignoring(&mut a, "build/\n")?;
+    deleted_for_good_announced(server, &[&a, &b], &["build"])?;
+    Ok((a, b))
+}
+
+/// a knows the folder from before only, at a place it filters now (§10): it doesn't make it
+/// again there for b's file. It forgets the folder (what it keeps in build stays its own), and
+/// b's file is an orphan like any other: into Recovered files, where b follows it. Before, the
+/// folder took over a's own build, b's file came down into it, and left the drive as one a
+/// stopped syncing.
+#[test]
+fn a_folder_ignored_since_isnt_made_again_for_what_the_drive_kept_of_it() -> R {
+    let server = server();
+    let (mut a, mut b) = build_ignored_since_and_deleted_for_good(&server)?;
+    let report = a.sync()?;
+    assert!(report.failed.is_empty(), "{report:?}");
+    let report = a.sync()?;
+    assert_eq!(report.ops_done, 0, "{report:?}");
+    let (live, removed) = server_names(&server)?;
+    assert_eq!(
+        a.tree_text(""),
+        [
+            "Recovered files/",
+            "Recovered files/new.o = n",
+            "build/",
+            "build/mine.o = m",
+            "readme = r"
+        ]
+    );
+    assert_eq!(live, ["Recovered files", "new.o", "readme"], "no build");
+    assert!(!removed, "nothing in Recently deleted");
+    b.sync()?;
+    let recovered = [
+        "Recovered files/",
+        "Recovered files/new.o = n",
+        "readme = r",
+    ];
+    assert_eq!(b.tree_text(""), recovered);
+    Ok(())
+}
+
+/// b, which syncs the folder, is first: it makes the folder again for its file (§6.3). On the
+/// drive again, the folder is one a's filter masks, with b's file in it: a leaves both alone.
+#[test]
+fn a_folder_ignored_since_made_again_by_a_device_that_syncs_it_is_masked() -> R {
+    let server = server();
+    let (mut a, mut b) = build_ignored_since_and_deleted_for_good(&server)?;
+    b.sync()?;
+    for _ in 0..2 {
+        let report = a.sync()?;
+        assert!(report.failed.is_empty(), "{report:?}");
+        assert_eq!(report.pending, 0, "{report:?}");
+    }
+    assert_eq!(
+        a.tree_text(""),
+        ["build/", "build/mine.o = m", "readme = r"]
+    );
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["build/", "build/new.o = n", "readme = r"]);
+    let (live, removed) = server_names(&server)?;
+    assert_eq!(live, ["build", "new.o", "readme"]);
     assert!(!removed, "nothing in Recently deleted");
     Ok(())
 }
@@ -606,7 +690,7 @@ fn every_orphan_of_a_folder_deleted_for_good_is_recovered() -> R {
     b.sync()?;
     a.sync()?;
     assert!(a.tree_text("").is_empty());
-    deleted_for_good_announced(&server, &a, &["x", "d"])?;
+    deleted_for_good_announced(&server, &[&a], &["x", "d"])?;
     // b, not hearing of it, edits a.log: planned in the same plan as its folder's recovery.
     b.write("x/d/f0/a.log", "l2")?;
     b.sync()?;
@@ -649,7 +733,7 @@ fn an_orphan_into_recovered_files_coming_back_leaves_what_is_ignored() -> R {
     b.sync()?;
     a.sync()?;
     assert!(a.tree_text("").is_empty());
-    deleted_for_good_announced(&server, &a, &["x", "d"])?;
+    deleted_for_good_announced(&server, &[&a], &["x", "d"])?;
     a.sync()?;
     a.sync()?;
     assert_eq!(

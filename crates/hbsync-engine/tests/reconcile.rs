@@ -1437,6 +1437,69 @@ fn what_a_new_rule_hides_leaves_the_drive_unless_another_device_added_to_it() {
     assert_eq!(plan.ops[1].node(), d);
 }
 
+/// Whether a plan makes the folder `node`, here or on the drive.
+fn makes(plan: &hbsync_engine::Plan, node: NodeId) -> bool {
+    let made = |op: &&Op| matches!(op, Op::LocalMkdir { .. } | Op::RemoteCreate { .. });
+    plan.ops.iter().filter(made).any(|op| op.node() == node)
+}
+
+/// The folders `folders` (each in the one before it, the first at the top) synced here and gone
+/// since on both sides (deleted for good on the drive; here the scanner no longer reports them,
+/// or they were deleted), with a file another device added (`g`) live in the last.
+fn kept_of_folders_gone(mut w: World, folders: &[(NodeId, &str)], g: NodeId) -> World {
+    w.input.remote_complete = true;
+    let mut parent = ROOT;
+    for &(id, name) in folders {
+        w.synced(id, folder(parent, name));
+        w.local(id, None).remote(id, None);
+        parent = id;
+    }
+    w.remote(g, Some(file(parent, "new.o", "n")));
+    w
+}
+
+/// What recovers the orphan `g` into a new Recovered files and forgets the folders it was in.
+const RECOVERS: [&str; 4] = ["mkdir", "create", "rename", "download"];
+
+/// A folder a new rule hides, deleted for good on the drive with a file another device added
+/// still in it (the server kept that): this device knows the folder from before only, and
+/// doesn't make it again at a place it filters, over the item it keeps to itself (which the
+/// scanner no longer reports). It forgets the folder, and the file is an orphan like any other
+/// (§6.3): into Recovered files.
+#[test]
+fn a_folder_a_new_rule_hides_isnt_made_again_for_what_the_drive_kept_of_it() {
+    let [b, g] = ids(2)[..] else { unreachable!() };
+    let world = |w| kept_of_folders_gone(w, &[(b, "build")], g);
+    let plan = world(World::ignoring_build()).plan();
+    assert_eq!(kinds(&plan.ops), [&RECOVERS[..], &["settle"]].concat());
+    assert!(!makes(&plan, b), "{plan:?}");
+    assert_eq!(plan.ops[4].node(), b);
+    assert_eq!(plan.conflicts, [Conflict::Orphan { node: g }]);
+    // Without the rule, the file keeps its folder: made again.
+    let plan = world(World::default()).plan();
+    assert!(makes(&plan, b), "{plan:?}");
+    assert!(plan.conflicts.is_empty(), "{plan:?}");
+}
+
+/// As above, with the folder below one that went with it, both known from before only: the
+/// place is judged by where both were.
+#[test]
+fn a_folder_below_one_a_new_rule_hides_isnt_made_again_either() {
+    let [p, b, g] = ids(3)[..] else {
+        unreachable!()
+    };
+    let world = |w| kept_of_folders_gone(w, &[(p, "build"), (b, "obj")], g);
+    let plan = world(World::ignoring_build()).plan();
+    assert_eq!(
+        kinds(&plan.ops),
+        [&RECOVERS[..], &["settle", "settle"]].concat()
+    );
+    assert!(!makes(&plan, p) && !makes(&plan, b), "{plan:?}");
+    assert_eq!(plan.conflicts, [Conflict::Orphan { node: g }]);
+    let plan = world(World::default()).plan();
+    assert!(makes(&plan, p) && makes(&plan, b), "{plan:?}");
+}
+
 #[test]
 fn a_folder_deleted_here_stays_deleted_when_what_it_held_leaves_the_drive() {
     let [p, b, f] = ids(3)[..] else {
