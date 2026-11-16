@@ -538,13 +538,17 @@ pub(crate) fn announced(s: AccountTx<'_>, refs: &[ChangeRef]) -> Result<bool, St
 /// ([`hbsync_state::ReadTx::withdrawn`]) that only the feed can place. Unlike a tombstone it
 /// isn't its file's end: the share may have been given again since, with the notice of that
 /// lost or in `refs` too, and the feed has the file as it is now. So nothing is taken from
-/// such refs when the picture holds the file, or when they say more of it than that. A notice
-/// for a file the picture doesn't hold costs no read: the drive sends one after every change
-/// of a file while its share is withdrawn (verified, API notes "Shared with you").
+/// such refs when the picture holds the file (or this device knows it in a version it can't
+/// read), or when they say more of it than that. A notice for a file it knows nothing of
+/// costs no read: the drive sends one after every change of a file while its share is
+/// withdrawn (verified, API notes "Shared with you").
 fn withdrawal_in_doubt(s: &AccountTx<'_>, refs: &[ChangeRef]) -> Result<bool, StateError> {
     for r in refs.iter().filter(|r| r.deleted) {
-        let more = || refs.iter().any(|o| !o.deleted && o.file_id == r.file_id);
-        if s.withdrawn(r.at())? && (s.known_file(r.file_id)?.is_some() || more()) {
+        if !s.withdrawn(r.at())? {
+            continue;
+        }
+        let held = s.known_file(r.file_id)?.is_some() || s.unreadable_version(r.file_id)?.is_some();
+        if held || refs.iter().any(|o| !o.deleted && o.file_id == r.file_id) {
             return Ok(true);
         }
     }
@@ -748,6 +752,21 @@ mod tests {
                         "given again in the same breath: the feed is read"
                     );
                 }
+                // Known only in a version this client can't read: held all the same.
+                let unread = RemoteRef {
+                    file_id: RemoteFileId(Uuid::new_v4()),
+                    version: VersionTag(Uuid::new_v4()),
+                };
+                db.write(|s| s.account().put_unreadable(unread, None, None))?;
+                assert!(
+                    !db.write(|s| announced(s.account(), &[withdrawn(unread.file_id, at)]))?,
+                    "known unreadable: the feed is read"
+                );
+                assert_eq!(
+                    db.read(|s| s.unreadable_version(unread.file_id))?,
+                    Some(unread.version),
+                    "nothing taken from the notice"
+                );
             }
         }
         Ok(())

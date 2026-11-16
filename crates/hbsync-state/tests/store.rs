@@ -1036,12 +1036,14 @@ mod mirror {
             s.account().hard_deleted(withdrawn)
         })?;
         assert!(db.read(|s| s.unreadable_files())?.is_empty());
+        assert!(db.read(|s| s.get_mirror(held.node))?.is_none());
         assert!(!db.read(|s| s.file_gone(held.file_id))?);
         Ok(())
     }
 
-    /// Whose drive a DB is of is said before its first row, and for good: with a row of the
-    /// picture in it, the other kind is refused (the same kind again changes nothing).
+    /// Whose drive a DB is of is said before it reads its drive, and for good: with a row of
+    /// the picture in it, or the feed's cursor (a share may have nothing in it just now), the
+    /// other kind is refused (the same kind again changes nothing).
     #[test]
     fn a_db_that_holds_a_drive_keeps_its_kind() -> R {
         let file = row(NodeId::new(), NodeId::ROOT, "a.txt", None);
@@ -1075,6 +1077,17 @@ mod mirror {
             "{refused:?}"
         );
         assert!(shared.read(|s| s.shared())?);
+
+        let mut empty = StateDb::open_in_memory()?;
+        empty.write(|s| {
+            s.account().set_shared(true)?;
+            s.account().set_account_kv(keys::REMOTE_CURSOR, "c")
+        })?;
+        let refused = empty.write(|s| s.account().set_shared(false));
+        assert!(
+            matches!(refused, Err(StateError::Conflict(_))),
+            "{refused:?}"
+        );
         Ok(())
     }
 

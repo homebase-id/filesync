@@ -1278,7 +1278,8 @@ from such a drive is read-only (above), and these rules hold too:
 - **A share withdrawn isn't a delete.** The drive tells it as a tombstone without a version
   (all zeros). The file leaves the picture and this device (deleted here as synced, moved out
   where it changed here), and nothing records it as gone: the share given again brings it
-  back, at the version it has then. An announced withdrawal of a file the picture holds is
+  back, at the version it has then. An announced withdrawal of a file the picture holds (or
+  this device knows in a version it can't read) is
   left to the feed (one read), as the share may have been given again since. What was noted
   of the file goes with it (a version this client couldn't read, a doubt whether it was
   there). The sharer's own delete keeps its version, and is final as on any drive.
@@ -1286,13 +1287,16 @@ from such a drive is read-only (above), and these rules hold too:
   tombstones are their own devices' to purge (§8b; node schema, "The purge"): this device's daily purge only forgets
   the files it knew gone, each a tombstone's keeping time after its delete, and keeps no
   tombstone to delete later.
-- **A DB is one kind of drive for good.** Whose drive it is of is recorded before its first
-  row, and a DB that holds rows of an identity's own drive is refused for a share (and the
+- **A DB is one kind of drive for good.** Whose drive it is of is recorded before the DB first
+  reads its drive, and a DB that read an identity's own drive is refused for a share (and the
   other way): read by the other's rules, a withdrawal would be a delete, and an orphan an
   item at the top.
 - **Known limits.** A hard delete on the sharer's drive is told to no member (API notes,
   "Shared with you"): only a whole re-read of the feed finds it, which a device does after
-  about 29 days away, so a device that stays connected keeps such a file. A file shared
+  about 29 days away, so a device that stays connected keeps such a file. Every item of the
+  sharer's Recently deleted ends that way (their purge deletes it for good after 30 days): its
+  row stays in this device's Recently deleted until that re-read, and a file here whose
+  folder is such a row stays hidden in it. A file shared
   without its folder stays here while that folder is in the sharer's Recently deleted (the
   picture never had the folder to take it along). A copy parked for a download that took its
   name (§8), its own delete planned, whose file is shared again before the delete ran (a

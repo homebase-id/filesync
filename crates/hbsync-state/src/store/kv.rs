@@ -134,16 +134,23 @@ impl AccountTx<'_> {
     }
 
     /// Says whose drive this DB is of ([`ReadTx::shared`]): kept in the DB, as every
-    /// connection reading its mirror goes by it. Set before the picture's first row, by
-    /// whoever knows the remote, and refused once the picture holds a row of the other kind
-    /// of drive: read by the other's rules, a withdrawal would be a delete for good, and an
+    /// connection reading its mirror goes by it. Set before the drive is first read, by
+    /// whoever knows the remote, and refused once the DB read a drive of the other kind (it
+    /// knows when its drive was made or how far it read the feed, or the picture holds a
+    /// row): read by the other's rules, a withdrawal would be a delete for good, and an
     /// orphan an item at the top.
     pub fn set_shared(&self, shared: bool) -> Result<()> {
+        use crate::keys::{DRIVE_MADE, READ_AT, REMOTE_CURSOR};
         if self.shared()? == shared {
             return Ok(());
         }
-        if self.count("SELECT EXISTS (SELECT 1 FROM remote) OR EXISTS (SELECT 1 FROM removed)")? > 0
-        {
+        let mut read = self
+            .count("SELECT EXISTS (SELECT 1 FROM remote) OR EXISTS (SELECT 1 FROM removed)")?
+            > 0;
+        for key in [DRIVE_MADE, REMOTE_CURSOR, READ_AT] {
+            read = read || self.account_kv(key)?.is_some();
+        }
+        if read {
             return Err(StateError::Conflict(format!(
                 "this DB holds {} drive already",
                 if shared {
