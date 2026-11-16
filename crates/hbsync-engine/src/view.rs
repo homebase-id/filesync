@@ -23,6 +23,7 @@ use hbsync_platform::{Os, RelPath, synced_executable};
 use hbsync_state::{BaseRow, LocalRow, MirrorRow, ReadTx, StateDb, StateError};
 use hbsync_types::{ContentHash, FileContent, NodeId, NodeKind, NodeState, RECOVERED_NAME, Tags};
 
+use crate::along::by_removal;
 use crate::folder::FolderCtx;
 use crate::plan::{Coverage, Plan};
 use crate::reconcile::{BaseExtra, Input, Removed};
@@ -568,37 +569,30 @@ fn build(
         }
     }
     // What a folder's removal took along goes by what is below it as well: a node written after
-    // the removal keeps the live folders above it (`crate::along::taken_along`), and no view
-    // may hold it otherwise: not dirty and with no item here, its own removal from the drive is
-    // held, out of the dirty set ([`crate::held`]). So below each live folder the view has in a
-    // removed one, through the folders that removal may have taken, the nodes written after it
-    // are loaded. One read of its children per such folder; none where no folder in Recently
-    // deleted holds a node of the view.
-    let mut below: Vec<(NodeId, i64)> = Vec::new();
-    for (folder, removed) in &b.input.removed {
+    // the removal keeps the live folders above it (`crate::along::taken_along`), and the view
+    // may hold no such node otherwise: one that isn't dirty, in a folder the view doesn't read
+    // whole (a removal from the drive held out of the dirty set, [`crate::held`], has no item
+    // here either). So below each live folder the view has in a removed one, through the
+    // folders that removal may have taken, what was written after it is loaded. Cost: the
+    // mirror's rows of what those folders hold, read once; nothing where no folder in Recently
+    // deleted holds a live folder of the view.
+    let mut taken: Vec<(NodeId, i64)> = (b.input.removed.iter())
         // A file takes nothing along.
-        if removed.state.kind != NodeKind::Folder {
-            continue;
-        }
-        let by_removal = |n: &NodeId| b.input.changed_at.get(n).is_none_or(|at| *at <= removed.at);
-        below.extend(
-            (b.input.remote.children(*folder))
-                .filter(|n| {
-                    b.input
-                        .remote
-                        .get(*n)
-                        .is_some_and(|s| s.kind == NodeKind::Folder)
-                })
-                .filter(by_removal)
-                .map(|n| (n, removed.at)),
-        );
-    }
-    while let Some((folder, removal)) = below.pop() {
+        .filter(|(_, removed)| removed.state.kind == NodeKind::Folder)
+        .flat_map(|(folder, removed)| {
+            (b.input.remote.children(*folder)).map(move |n| (n, removed.at))
+        })
+        .filter(|&(n, removal)| {
+            (b.input.remote.get(n)).is_some_and(|s| s.kind == NodeKind::Folder)
+                && by_removal(b.input.changed_at.get(&n).copied(), removal)
+        })
+        .collect();
+    while let Some((folder, removal)) = taken.pop() {
         for child in s.mirror_children(folder)? {
-            if child.changed_at.is_some_and(|at| at > removal) {
+            if !by_removal(child.changed_at, removal) {
                 b.load(child.node)?;
             } else if child.kind == NodeKind::Folder {
-                below.push((child.node, removal));
+                taken.push((child.node, removal));
             }
         }
     }
@@ -705,9 +699,8 @@ pub(crate) fn gone_on_drive(
         return Ok(false);
     };
     let removal = removed.time();
-    let by_removal = |at: Option<i64>| at.is_none_or(|at| at <= removal);
     let chain = || std::iter::once(&row).chain(&up.items);
-    if removed.row.kind != NodeKind::Folder || !chain().all(|m| by_removal(m.changed_at)) {
+    if removed.row.kind != NodeKind::Folder || !chain().all(|m| by_removal(m.changed_at, removal)) {
         return Ok(false);
     }
     let mut live: Vec<crate::along::Live> = chain().map(|m| (m.node, m.parent, m.kind)).collect();
@@ -720,7 +713,7 @@ pub(crate) fn gone_on_drive(
     };
     while let Some(parent) = below.pop() {
         for child in s.mirror_children(parent)? {
-            if !by_removal(child.changed_at) {
+            if !by_removal(child.changed_at, removal) {
                 return Ok(false);
             }
             if changed.insert(child.node, child.changed_at).is_none() {

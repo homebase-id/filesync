@@ -197,6 +197,26 @@ fn some_version() -> RemoteRef {
     }
 }
 
+/// The mirror's row of folder `name`, or of file `name` holding `f`, in `parent`, written at
+/// `at`.
+fn mirror_row(
+    node: NodeId,
+    parent: NodeId,
+    kind: NodeKind,
+    name: &str,
+    f: FileContent,
+    at: Option<i64>,
+) -> MirrorRow {
+    let content = match kind {
+        NodeKind::File => NodeContent::file(name, 0, f.size, false),
+        NodeKind::Folder => NodeContent::folder(name),
+    };
+    let hash = (kind == NodeKind::File).then_some(f.hash);
+    let mut row = MirrorRow::from_content(some_version(), node, parent, kind, &content, hash);
+    row.changed_at = at;
+    row
+}
+
 /// An upload whose earlier try landed (its answer lost) finds the node there on the retry. The
 /// drive holds the bytes the file had then; the user has edited it since. The base mustn't
 /// take the drive's bytes for the local ones: the edit would never go up.
@@ -4813,16 +4833,8 @@ fn a_removal_took_along_g(
             s.folder()
                 .put_base(&BaseRow::new(node, state, some_version()))?;
         }
-        let row = |node, parent, kind, name: &str| {
-            let content = match kind {
-                NodeKind::File => NodeContent::file(name, 0, f_c.size, false),
-                _ => NodeContent::folder(name),
-            };
-            let hash = (kind == NodeKind::File).then_some(f_c.hash);
-            let mut m = MirrorRow::from_content(some_version(), node, parent, kind, &content, hash);
-            m.changed_at = Some(5);
-            m
-        };
+        let row =
+            |node, parent, kind, name: &str| mirror_row(node, parent, kind, name, f_c, Some(5));
         s.account().put_removed(&RemovedRow {
             row: row(r, NodeId::ROOT, NodeKind::Folder, "r"),
             removed_at: Some(10),
@@ -4948,21 +4960,12 @@ fn an_open_removal_counts_what_it_took_along() -> R {
             NodeState::file(folder, "f", f_c),
             some_version(),
         ))?;
-        let row = |node, parent, kind, name: &str| {
-            let content = match kind {
-                NodeKind::File => NodeContent::file(name, 0, f_c.size, false),
-                _ => NodeContent::folder(name),
-            };
-            let hash = (kind == NodeKind::File).then_some(f_c.hash);
-            MirrorRow::from_content(some_version(), node, parent, kind, &content, hash)
-        };
         s.account().put_removed(&RemovedRow {
-            row: row(folder, NodeId::ROOT, NodeKind::Folder, "d"),
+            row: mirror_row(folder, NodeId::ROOT, NodeKind::Folder, "d", f_c, None),
             removed_at: None,
         })?;
-        let mut live = row(file, folder, NodeKind::File, "f");
-        live.changed_at = Some(5);
-        s.account().put_mirror(&live)?;
+        s.account()
+            .put_mirror(&mirror_row(file, folder, NodeKind::File, "f", f_c, Some(5)))?;
         // And a synced file another writer put in it: a file takes nothing along, so it isn't
         // gone (an orphan for Recovered files).
         s.folder().put_base(&BaseRow::new(
@@ -4970,9 +4973,8 @@ fn an_open_removal_counts_what_it_took_along() -> R {
             NodeState::file(NodeId::ROOT, "y", f_c),
             some_version(),
         ))?;
-        let mut orphan = row(inner, file, NodeKind::File, "y");
-        orphan.changed_at = Some(5);
-        s.account().put_mirror(&orphan)?;
+        s.account()
+            .put_mirror(&mirror_row(inner, file, NodeKind::File, "y", f_c, Some(5)))?;
         s.folder().clear_dirty(file)?;
         s.folder().mark_dirty(folder)
     })?;
@@ -5007,16 +5009,8 @@ fn the_view_of_a_removed_folder_holds_what_was_written_below_it_since() -> R {
     h.local_folder("d/a", a)?;
     let f_c = h.content(b"f");
     h.db.write(|s| {
-        let row = |node, parent, kind, name: &str, at: i64| {
-            let content = match kind {
-                NodeKind::File => NodeContent::file(name, 0, f_c.size, false),
-                _ => NodeContent::folder(name),
-            };
-            let hash = (kind == NodeKind::File).then_some(f_c.hash);
-            let mut row =
-                MirrorRow::from_content(some_version(), node, parent, kind, &content, hash);
-            row.changed_at = Some(at);
-            row
+        let row = |node, parent, kind, name: &str, at| {
+            mirror_row(node, parent, kind, name, f_c, Some(at))
         };
         for (node, state) in [
             (d, NodeState::folder(NodeId::ROOT, "d")),

@@ -526,8 +526,9 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   synced since). Above them counts through a folder's removal too: a view with a live folder in
   a removed one reads what was written below it after the removal, which keeps the folders
   above it (§6.3), and so reaches a held removal among that (it has no item here, and no
-  other view would hold it; one read of the children per live folder below the removed one,
-  none without a removed folder holding live nodes). What else stays dirty (refused, failing, waiting for a hash) is planned alone
+  other view would hold it; cost: the mirror's rows of what the live folders below the removed
+  one hold, nothing without a removed folder holding a live folder of the view). What else
+  stays dirty (refused, failing, waiting for a hash) is planned alone
   once more at the end of that sync: if its view reaches them, or it is more than 1,000
   nodes, they stay dirty, planned every sync as before. Cost: taking them out writes a row and clears a
   mark per node, putting them back writes a mark and deletes a row per node (a change that
