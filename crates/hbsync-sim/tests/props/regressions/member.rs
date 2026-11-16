@@ -2,6 +2,7 @@
 //! what is shared without its folder at the top, and writes nothing.
 
 use hbsync_sim::{Action, Event, Sim};
+use hbsync_types::NodeId;
 
 use super::{act, settle};
 
@@ -207,4 +208,56 @@ fn a_copy_parked_for_a_download_waits_parked_while_its_name_is_taken() {
     settle(&mut sim);
     assert_eq!(sim.local_paths(2), ["a"]);
     assert_eq!(sim.item(2, "a"), Some(first));
+}
+
+/// A file renamed on the drive to a name taken at the member's top waits there under its old
+/// name, and a new file of that old name waits for it in turn: each has its name once the
+/// first one's is free.
+#[test]
+fn a_new_file_waits_for_the_name_a_waiting_one_holds() {
+    use Action::*;
+    let mut sim = owned();
+    let (top, inner) = (
+        sim.item(0, "a").expect("a"),
+        sim.item(0, "b/a").expect("b/a"),
+    );
+    let parent = sim.pick(0, NodeId::ROOT, true).expect("the top");
+    sim.run(&[act(0, CreateFile { parent, name: 3 })]);
+    settle(&mut sim);
+    let old = sim.item(0, "c.txt").expect("c.txt");
+    share(&mut sim, "b/a");
+    share(&mut sim, "c.txt");
+    settle(&mut sim);
+    assert_eq!(sim.local_paths(2), ["a", "c.txt"]);
+    // The owner's own `a` gone, it renames `c.txt` to `a`: the member's `a` keeps the name.
+    let pick = |sim: &Sim, node| sim.pick(0, node, false).expect("on the owner's device");
+    let node = pick(&sim, top);
+    sim.run(&[act(0, Delete { node })]);
+    let node = pick(&sim, old);
+    sim.run(&[act(
+        0,
+        Move {
+            node,
+            parent,
+            name: 0,
+        },
+    )]);
+    settle(&mut sim);
+    assert_eq!(sim.local_paths(0), ["a", "b", "b/a"]);
+    assert_eq!(sim.item(2, "c.txt"), Some(old));
+    // A new `c.txt` waits for the name the old one holds here.
+    sim.run(&[act(0, CreateFile { parent, name: 3 })]);
+    settle(&mut sim);
+    let new = sim.item(0, "c.txt").expect("the new c.txt");
+    share(&mut sim, "c.txt");
+    settle(&mut sim);
+    assert_eq!(sim.local_paths(2), ["a", "c.txt"]);
+    assert_eq!(sim.item(2, "a"), Some(inner));
+    assert_eq!(sim.item(2, "c.txt"), Some(old));
+    // The folder shared, its file leaves the top: each has its name.
+    share(&mut sim, "b");
+    settle(&mut sim);
+    assert_eq!(sim.local_paths(2), ["a", "b", "b/a", "c.txt"]);
+    assert_eq!(sim.item(2, "a"), Some(old));
+    assert_eq!(sim.item(2, "c.txt"), Some(new));
 }

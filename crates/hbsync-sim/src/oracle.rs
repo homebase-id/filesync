@@ -515,9 +515,19 @@ impl Sim {
                         client.name
                     ));
                 }
-                for n in waiting {
+                // What waits holds its name here, where it is: what is to take that name
+                // waits as well, and so on (a file renamed there to a name taken here keeps
+                // its old one, which a new file of that name then waits for).
+                let mut held = waiting;
+                while let Some(n) = held.pop() {
                     let blobs = (&ledger.blobs, &mut kept_here);
-                    set_aside(n, &mut visible, &mut synced, &mut base, blobs);
+                    for aside in set_aside(n, &mut visible, &mut synced, &mut base, blobs) {
+                        let Some((folder, name)) = place(&client.local, aside) else {
+                            continue;
+                        };
+                        let takes = |t: &NodeId| place(&synced, *t).is_some_and(|p| p.1 == name);
+                        held.extend(synced.children(folder).filter(takes));
+                    }
                 }
             }
             // A parked item waits for its name, which a folder held back may keep.

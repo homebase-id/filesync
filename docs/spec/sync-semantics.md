@@ -1274,7 +1274,8 @@ from such a drive is read-only (above), and these rules hold too:
   under it before one only recorded there), and the other isn't synced here, told so, planned
   again at every sync until its folder is shared, its name changes or the first one's share
   ends. One left out that was here already under an older name keeps that copy as it is
-  meanwhile. A loser inside a folder whose share is withdrawn leaves with the folder.
+  meanwhile, and the older name stays taken here: a new item of that name waits for it in
+  turn. A loser inside a folder whose share is withdrawn leaves with the folder.
 - **A share withdrawn isn't a delete.** The drive tells it as a tombstone without a version
   (all zeros). The file leaves the picture and this device (deleted here as synced, moved out
   where it changed here), and nothing records it as gone: the share given again brings it

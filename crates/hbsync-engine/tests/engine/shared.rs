@@ -194,6 +194,41 @@ fn a_folder_no_longer_shared_leaves_with_a_file_whose_name_is_taken_at_the_top()
     Ok(())
 }
 
+/// A file renamed on the drive to a name taken at the member's top keeps its old name here,
+/// and a new file of that old name waits for it in turn (the name is held on this device):
+/// each has its name once the first one's is free.
+#[test]
+fn a_new_file_waits_for_the_name_a_waiting_one_holds() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("D/x.txt", "in D")?;
+    a.write("y.txt", "old")?;
+    a.sync()?;
+    share(&a, &server, "x.txt")?;
+    share(&a, &server, "y.txt")?;
+    let (mut b, out) = Client::member(&server, "b")?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["x.txt = in D", "y.txt = old"]);
+
+    fs::rename(a.root.join("y.txt"), a.root.join("x.txt"))?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["x.txt = in D", "y.txt = old"]);
+    a.write("y.txt", "new")?;
+    a.sync()?;
+    share(&a, &server, "y.txt")?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["x.txt = in D", "y.txt = old"]);
+
+    share(&a, &server, "D")?;
+    b.sync()?;
+    assert_eq!(
+        b.tree_text(""),
+        ["D/", "D/x.txt = in D", "x.txt = old", "y.txt = new"]
+    );
+    nothing_moved_out(&out)
+}
+
 /// A member set up again over a folder that holds its files adopts them where they are: a
 /// file whose folder isn't shared at the top, one in a shared folder there. Nothing is
 /// downloaded.
