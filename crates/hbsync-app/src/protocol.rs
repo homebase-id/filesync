@@ -295,12 +295,12 @@ pub struct DaemonStatus {
 
 impl DaemonStatus {
     /// The main folder (holding the drive's root) of the first account: the one the tray and
-    /// the CLI show first.
+    /// the CLI show first. Never what another identity shares.
     pub fn main_folder(&self) -> Option<&FolderStatus> {
         self.folders
             .iter()
             .find(|f| f.is_main())
-            .or(self.folders.first())
+            .or_else(|| self.folders.iter().find(|f| f.sharer.is_none()))
     }
 }
 
@@ -596,6 +596,17 @@ mod tests {
             folder.what(),
             "what ben.example.com shares with anna.example.com"
         );
+        // Nor shown as one for want of another.
+        let mut role = folder.clone();
+        (role.kind, role.sharer) = (RootKind::Desktop(NodeId::DESKTOPS), None);
+        let mut status = DaemonStatus {
+            version: String::new(),
+            accounts: Vec::new(),
+            folders: vec![folder],
+        };
+        assert_eq!(status.main_folder(), None);
+        status.folders.push(role.clone());
+        assert_eq!(status.main_folder(), Some(&role));
         Ok(())
     }
 }

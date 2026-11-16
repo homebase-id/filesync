@@ -288,9 +288,9 @@ impl Engine {
         drive: Arc<Drive>,
         mut cfg: EngineConfig,
     ) -> Result<Self, StateError> {
-        let (top, kind, shared) = db.read(|s| {
+        let (top, kind) = db.read(|s| {
             let kind = s.this_folder()?.and_then(|f| f.kind);
-            Ok((s.coords()?.top, kind, s.shared()?))
+            Ok((s.coords()?.top, kind))
         })?;
         // A kind a newer client set up (or one that doesn't fit its top): not synced as any
         // this one knows.
@@ -313,7 +313,7 @@ impl Engine {
         }
         // Another identity's drive is never written from here (§13): synced both ways, every
         // change here would be a write it refuses.
-        if shared && cfg.folder.read_only.is_none() {
+        if drive.shared() && cfg.folder.read_only.is_none() {
             return Err(StateError::Conflict(
                 "what another identity shares only syncs read-only".into(),
             ));

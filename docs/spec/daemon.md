@@ -443,8 +443,11 @@ included (service managers restart it then).
   that what changes here moves out to, outside the folder and on its volume, and tells each
   move in a note ("report.txt: moved to …, as this folder is read-only (what changes here
   isn't synced)"). Held deletes there are only confirmed or left held: a put back is told as
-  not possible, and nothing is asked of the drive. Built so far: the runner and the drive.
-  The daemon doesn't start one yet.
+  not possible, and nothing is asked of the drive. A runner says whose drive it syncs when
+  another identity's, and only then: one that doesn't isn't started (a share never passes
+  for the account's own folder; `hbsync status` shows a share with `->`, and it is never
+  the folder shown first). Built so far: the runner and the drive. The daemon doesn't start
+  one yet.
 - **Notes:** each conflict and failure is noted once; one that comes back sync after sync (a
   file that can't be read) isn't noted again until it has gone away. An operation left for the
   next plan is noted only when this device can't do it (a name or path it can't hold, access

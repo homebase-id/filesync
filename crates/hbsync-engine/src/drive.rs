@@ -369,6 +369,12 @@ impl Drive {
         self.remote.as_ref()
     }
 
+    /// Whether the drive is another identity's, which shares it with the account
+    /// ([`Remote::shared`]; the account's state DB says the same, [`Drive::new`]).
+    pub fn shared(&self) -> bool {
+        self.remote.shared()
+    }
+
     pub(crate) fn shared_remote(&self) -> Arc<dyn Remote> {
         Arc::clone(&self.remote)
     }
@@ -748,9 +754,9 @@ impl Drive {
     /// is asked of the drive, so the refusal is this one and not the identity's (which would
     /// be shown as this device refused).
     fn owned(&self) -> Result<(), EngineError> {
-        if self.remote().shared() {
+        if self.shared() {
             return Err(EngineError::ReadOnly(
-                "only its owner restores or deletes for good what was deleted from it",
+                "only who shares it restores or deletes for good what was deleted from it",
             ));
         }
         Ok(())

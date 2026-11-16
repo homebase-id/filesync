@@ -446,6 +446,13 @@ impl Runner {
         drive: Arc<Drive>,
         ended: impl FnOnce() + Send + 'static,
     ) -> Result<(Handle, JoinHandle<Result<(), RunnerError>>), RunnerError> {
+        // Shown as whose it is: a share never passes for the account's own folder, nor that
+        // for a share.
+        if cfg.sharer.is_some() != drive.shared() {
+            return Err(RunnerError::State(StateError::Conflict(
+                "a folder says whose drive it syncs when another identity's, and only then".into(),
+            )));
+        }
         let (tx, rx) = channel();
         let stop = Arc::new(AtomicBool::new(cfg.paused.is_some()));
         let mut status = FolderStatus::new(&cfg.identity, &cfg.folder);

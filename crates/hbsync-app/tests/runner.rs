@@ -1604,5 +1604,19 @@ fn a_runner_of_another_identitys_share_is_read_only_and_says_whose() -> R {
     assert_eq!(b.remote.faults().uploads, 0, "nothing sent");
     assert_eq!(report(), Some(shared), "as the sharer wrote it");
     assert_eq!(live_names(&server), ["private.txt", "report.txt"]);
+
+    // Whose drive it is and what the folder says go together: neither a share shown as the
+    // account's own folder, nor that as a share.
+    let refused = |started: Result<Device, Box<dyn std::error::Error>>| {
+        started.is_err_and(|e| e.to_string().contains("whose drive it syncs"))
+    };
+    let unnamed = Device::start_on(FakeRemote::member(server.clone()), "c", |cfg| {
+        cfg.read_only = Some(cfg.folder.with_file_name("moved out"));
+    });
+    assert!(refused(unnamed), "a share that doesn't say whose");
+    let named = Device::start_with(&server, "d", |cfg| {
+        cfg.sharer = Some("sharer.example".into());
+    });
+    assert!(refused(named), "the account's own drive, a sharer named");
     Ok(())
 }
