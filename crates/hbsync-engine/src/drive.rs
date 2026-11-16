@@ -743,16 +743,15 @@ impl Drive {
         }
     }
 
-    /// Why another identity's drive isn't emptied from here ([`Drive::owned`]).
-    const NOT_EMPTIED: &'static str = "only its owner deletes for good what was deleted from it";
-
     /// Refuses a write to Recently deleted on another identity's drive (sync semantics §13):
     /// what is deleted there is its owner's to restore or to delete for good. Before anything
     /// is asked of the drive, so the refusal is this one and not the identity's (which would
     /// be shown as this device refused).
-    fn owned(&self, theirs: &'static str) -> Result<(), EngineError> {
-        if self.account().read(|s| s.shared())? {
-            return Err(EngineError::ReadOnly(theirs));
+    fn owned(&self) -> Result<(), EngineError> {
+        if self.remote().shared() {
+            return Err(EngineError::ReadOnly(
+                "only its owner restores or deletes for good what was deleted from it",
+            ));
         }
         Ok(())
     }
@@ -769,14 +768,16 @@ impl Drive {
     /// [`Drive::restore`], with what stayed in Recently deleted and what went for good
     /// ([`deleted::Restored`]): the user's restore, to tell them.
     pub fn restore_told(&self, nodes: &[NodeId]) -> Result<deleted::Restored, EngineError> {
-        self.owned("only its owner restores what was deleted from it")?;
+        self.owned()?;
         self.pull(None)?;
         let restored = self.with_ops(|ops| ops.restore_told(nodes));
         self.wake_all();
         restored
     }
 
-    /// [`Drive::restore`] for a caller that has just read the feed itself.
+    /// [`Drive::restore`] for a caller that has just read the feed itself. Not asked on another
+    /// identity's drive: its callers are a put back and a role's or Desktop's folder, both of
+    /// which [`crate::Engine::new`] rules out there.
     pub(crate) fn restore_read(&self, nodes: &[NodeId]) -> Result<usize, EngineError> {
         let restored = self.with_ops(|ops| ops.restore(nodes));
         self.wake_all();
@@ -793,7 +794,7 @@ impl Drive {
         listed: &deleted::Listed,
         going: deleted::Going<'_>,
     ) -> Result<usize, EngineError> {
-        self.owned(Self::NOT_EMPTIED)?;
+        self.owned()?;
         going.check()?;
         self.catch_up(None)?;
         self.with_ops(|ops| ops.empty(nodes, listed, going))
@@ -807,7 +808,7 @@ impl Drive {
         listed: &deleted::Listed,
         going: deleted::Going<'_>,
     ) -> Result<usize, EngineError> {
-        self.owned(Self::NOT_EMPTIED)?;
+        self.owned()?;
         going.check()?;
         self.catch_up(None)?;
         self.with_ops(|ops| ops.empty_listed(listed, going))
