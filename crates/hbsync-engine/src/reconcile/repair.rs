@@ -1,9 +1,12 @@
 //! Step 3: the merged tree made whole again: orphans, cycles, duplicate names (§6).
 
+use std::convert::Infallible;
+
 use super::*;
 use hbsync_types::RECOVERED_NAME;
 
 use crate::tree::{NUMBERED_TRIES, first_free_by, numbered_names};
+use crate::walk::End;
 
 /// What becomes of a node whose folder isn't in the merged tree as a folder
 /// ([`Reconciler::fix_orphans`]).
@@ -183,6 +186,26 @@ impl Reconciler<'_> {
         })
     }
 
+    /// Whether this device syncs the place the folder `state` would come back to, through the
+    /// folders that would come back with it (§10). It doesn't where what it filters changed
+    /// since the folder synced here (its rules, the built-in ones): deleted for good on the
+    /// drive meanwhile, the folder is known from before only, which no mask covers, and the
+    /// item kept there is this device's own. A place not known down from the top counts as
+    /// synced (a folder above it masked, too): its folder waits there, as it did.
+    fn syncs_place(&self, state: &NodeState) -> bool {
+        let Ok(up) = crate::walk::up::<_, Infallible>(state.parent, |at| {
+            let known = self.merged.get(at).cloned();
+            let known = known.or_else(|| self.known_state(at));
+            Ok(known.map(|known| (known.name, known.parent)))
+        });
+        if up.end != End::Top {
+            return true;
+        }
+        let names = up.items.iter().rev().chain([&state.name]);
+        let filter = self.masking.filter;
+        filter.names(names.map(String::as_str), true).is_sync()
+    }
+
     /// Whether this device holds anything of `node` or below it here (a local item, a base).
     fn holds_any(&self, node: NodeId) -> bool {
         let i = self.input;
@@ -299,7 +322,17 @@ impl Reconciler<'_> {
                 None if let_go.contains(&parent) => Parent::LetGo,
                 None if withdrawn.contains(&parent) => Parent::Wait,
                 None => match self.known_state(parent) {
-                    Some(state) if state.kind == NodeKind::Folder => Parent::Folder(state),
+                    // Its folder comes back for it (§6.3), but not at a place this device
+                    // filters since the folder synced here (§10), for a node it holds nothing
+                    // of: the folder would take over the item this device keeps to itself, and
+                    // the node would come down into it and leave the drive with it. This device
+                    // forgets that folder, and the node is an orphan as below.
+                    Some(state)
+                        if state.kind == NodeKind::Folder
+                            && (self.holds_any(node) || self.syncs_place(&state)) =>
+                    {
+                        Parent::Folder(state)
+                    }
                     // Nowhere, or known as a file only before (another writer's), though the
                     // drive's picture is whole: the server kept a child of a folder deleted for
                     // good (a create racing the delete, another app), live or brought back from

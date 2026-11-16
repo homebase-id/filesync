@@ -619,3 +619,62 @@ fn regression_an_upload_hashed_on_send_whose_answer_is_lost_is_sent_once() {
     // Client 0's file once; client 1's, of a name the drive had, read first and sent so.
     assert_eq!(sim.sent_on_send(), 1);
 }
+
+/// Client 2 makes the folder `d` and, once that synced, the file `d` in it: the file's upload
+/// reaches the drive and the crash loses its answer. Client 2 starts ignoring `d` (§10), and
+/// another app deletes the folder outright: the server keeps the file. Client 2 knows the
+/// folder from before only, at a place it filters now. It doesn't make it again there for the
+/// file: what it has stays its own, it forgets the folder, and the file on the drive is an
+/// orphan like any other, here one no client syncs anywhere (its name is `d` too, and client
+/// 0 is read-only). It made the folder again at every sync, on the name of the one it keeps
+/// to itself, and fetched the file each time, never idle (`cc 53669940…`).
+#[test]
+fn regression_a_folder_ignored_since_isnt_made_again_for_what_the_drive_kept_of_it() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let (plan, step) = (
+        |client| Event::Plan { client },
+        |client| Event::Step { client },
+    );
+    let mut sim = Sim::new(3)
+        .with_read_only(0)
+        .with_small_pages(3)
+        .with_split_downloads();
+    sim.verbose = true;
+    sim.run(&[
+        act(
+            2,
+            CreateFolder {
+                parent: 0,
+                name: 13,
+            },
+        ),
+        plan(2),
+        step(2),
+    ]);
+    let d = sim.item(2, "d").expect("d");
+    let parent = sim.pick(2, d, true).expect("d's pick");
+    sim.run(&[
+        act(2, CreateFile { parent, name: 13 }),
+        plan(2),
+        Event::Crash { client: 2 }, // before the write
+        plan(2),
+        Event::Crash { client: 2 }, // written, the answer lost
+        act(2, ToggleIgnore),
+        act(0, DeleteOutright { pick: 0 }),
+    ]);
+    assert!(
+        sim.trace
+            .iter()
+            .any(|l| l.contains("sent, the answer lost")),
+        "{:#?}",
+        sim.trace
+    );
+    assert!(sim.server_paths().is_empty(), "{:?}", sim.server_paths());
+    assert!(sim.quiesce(30));
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(sim.local_paths(2), ["d", "d/d"]);
+    for c in 0..2 {
+        assert!(sim.local_paths(c).is_empty(), "{:?}", sim.local_paths(c));
+    }
+}

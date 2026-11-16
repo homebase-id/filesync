@@ -203,7 +203,7 @@ fn restart_with(
 }
 
 /// `c` restarted with the ignore rules `rules`.
-fn restart_ignoring(c: &mut Client, rules: &'static str) -> R {
+pub(super) fn restart_ignoring(c: &mut Client, rules: &'static str) -> R {
     assert!(restart_with(c, ignoring(rules))?, "the filter changed");
     assert!(!c.engine.apply_filter_change()?, "and is recorded");
     Ok(())
