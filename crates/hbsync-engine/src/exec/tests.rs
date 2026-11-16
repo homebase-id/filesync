@@ -4992,6 +4992,75 @@ fn an_open_removal_counts_what_it_took_along() -> R {
     Ok(())
 }
 
+/// A folder removed on the drive (`d`, at 100) with a live folder in it (`d/a`, written
+/// before) and in that a file written after (`d/a/f`): synced here, its item here gone and its
+/// removal from the drive held, out of the dirty set, so only the base and the mirror have it.
+/// The view of the removed folder alone holds it: written after the removal it keeps `a`,
+/// which brings `d` back (§6.3), and the plan reaches the held delete ([`crate::held::touches`]:
+/// planned again with it). Not read, `a` went with the removal and `d` was deleted here (seed
+/// ed44ce74).
+#[test]
+fn the_view_of_a_removed_folder_holds_what_was_written_below_it_since() -> R {
+    let mut h = Harness::new()?;
+    let (d, a, late) = (NodeId::new(), NodeId::new(), NodeId::new());
+    h.local_folder("d", d)?;
+    h.local_folder("d/a", a)?;
+    let f_c = h.content(b"f");
+    h.db.write(|s| {
+        let row = |node, parent, kind, name: &str, at: i64| {
+            let content = match kind {
+                NodeKind::File => NodeContent::file(name, 0, f_c.size, false),
+                _ => NodeContent::folder(name),
+            };
+            let hash = (kind == NodeKind::File).then_some(f_c.hash);
+            let mut row =
+                MirrorRow::from_content(some_version(), node, parent, kind, &content, hash);
+            row.changed_at = Some(at);
+            row
+        };
+        for (node, state) in [
+            (d, NodeState::folder(NodeId::ROOT, "d")),
+            (a, NodeState::folder(d, "a")),
+            (late, NodeState::file(a, "f", f_c)),
+        ] {
+            s.folder()
+                .put_base(&BaseRow::new(node, state, some_version()))?;
+        }
+        s.account().put_removed(&RemovedRow {
+            row: row(d, NodeId::ROOT, NodeKind::Folder, "d", 10),
+            removed_at: Some(100),
+        })?;
+        s.account()
+            .put_mirror(&row(a, d, NodeKind::Folder, "a", 50))?;
+        s.account()
+            .put_mirror(&row(late, a, NodeKind::File, "f", 200))?;
+        // The removed folder alone dirty: the file's removal is held, out of the dirty set.
+        for node in [a, late] {
+            s.folder().clear_dirty(node)?;
+        }
+        s.folder().mark_dirty(d)
+    })?;
+    let ctx = FolderCtx {
+        scope: Arc::new(Scope::of(NodeId::ROOT)),
+        ..h.folder.clone()
+    };
+    let opts = crate::plan::Options::default();
+    let out = std::collections::HashSet::from([late]);
+    let mut reached = false;
+    let plan = view::plan_narrow(&mut h.db, &[d], &ctx, |input, _| {
+        reached |= crate::held::touches(input, &out);
+        crate::reconcile::reconcile(input, &opts, ctx.masking())
+    })?;
+    assert!(reached, "the view holds the file written after the removal");
+    assert!(
+        matches!(&plan.ops[..], [Op::RemoteCreate { node, .. }] if *node == d),
+        "the folder comes back for it: {:?}",
+        plan.ops
+    );
+    assert!(plan.held.is_empty(), "{:?}", plan.held);
+    Ok(())
+}
+
 /// What an upload writing over a version would lose: bytes other than the agreed ones, or a bit
 /// changed elsewhere that the upload doesn't send (§1, §4). A bit the upload sends as the
 /// drive has it (a device that doesn't hold it), or one only this device changed, loses nothing.

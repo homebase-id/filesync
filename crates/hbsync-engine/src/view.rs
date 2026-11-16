@@ -7,7 +7,9 @@
 //!   all children;
 //! - the children of a dirty folder that may go (live children keep it);
 //! - the full local subtree of a folder that is gone remotely (what its delete here would
-//!   take, but what the plan moves out of it first).
+//!   take, but what the plan moves out of it first);
+//! - below a live folder in a removed one, what was written after the removal (it keeps the
+//!   folders above it).
 //!
 //! The local side is translated from paths to the node model here: the parent is the node at
 //! the parent path, the name is the remote spelling (recorded mapping or [`to_remote`]), and a
@@ -562,6 +564,41 @@ fn build(
         if !subtree.iter().any(held) {
             for n in subtree {
                 b.input.remote.remove(n);
+            }
+        }
+    }
+    // What a folder's removal took along goes by what is below it as well: a node written after
+    // the removal keeps the live folders above it (`crate::along::taken_along`), and no view
+    // may hold it otherwise: not dirty and with no item here, its own removal from the drive is
+    // held, out of the dirty set ([`crate::held`]). So below each live folder the view has in a
+    // removed one, through the folders that removal may have taken, the nodes written after it
+    // are loaded. One read of its children per such folder; none where no folder in Recently
+    // deleted holds a node of the view.
+    let mut below: Vec<(NodeId, i64)> = Vec::new();
+    for (folder, removed) in &b.input.removed {
+        // A file takes nothing along.
+        if removed.state.kind != NodeKind::Folder {
+            continue;
+        }
+        let by_removal = |n: &NodeId| b.input.changed_at.get(n).is_none_or(|at| *at <= removed.at);
+        below.extend(
+            (b.input.remote.children(*folder))
+                .filter(|n| {
+                    b.input
+                        .remote
+                        .get(*n)
+                        .is_some_and(|s| s.kind == NodeKind::Folder)
+                })
+                .filter(by_removal)
+                .map(|n| (n, removed.at)),
+        );
+    }
+    while let Some((folder, removal)) = below.pop() {
+        for child in s.mirror_children(folder)? {
+            if child.changed_at.is_some_and(|at| at > removal) {
+                b.load(child.node)?;
+            } else if child.kind == NodeKind::Folder {
+                below.push((child.node, removal));
             }
         }
     }
