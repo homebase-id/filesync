@@ -357,6 +357,7 @@ fn input_differences(sim: &Input, engine: &Input) -> String {
             ("base_extra", sorted(i.base_extra.iter())),
             ("remote_refs", sorted(i.remote_refs.iter())),
             ("local_unhashed", sorted(i.local_unhashed.iter())),
+            ("parked", sorted(i.parked.iter())),
             ("dirty", sorted(i.dirty.iter())),
             ("unreadable", sorted(i.unreadable.iter())),
             ("removed", sorted(i.removed.iter())),
