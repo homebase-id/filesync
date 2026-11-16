@@ -292,3 +292,52 @@ fn a_folder_the_sharer_deletes_takes_along_what_is_shared_in_it() -> R {
     nothing_moved_out(&out)?;
     Ok(())
 }
+
+/// A member's daily purge deletes nothing on the sharer's drive: what is in their Recently
+/// deleted and the tombstones of their deletes are their own devices' to delete for good.
+/// It only forgets, a keeping time later, the files it knew gone, and it succeeds (a purge
+/// that tried would be refused every day).
+#[test]
+fn a_members_purge_deletes_nothing_on_the_sharers_drive() -> R {
+    const LATER: i64 = hbsync_engine::time::TRACE_MS + 24 * 60 * 60 * 1000;
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("removed.txt", "removed")?;
+    a.write("deleted.txt", "deleted")?;
+    a.write("keep.txt", "keep")?;
+    a.sync()?;
+    share_all(&a, &server)?;
+    let (mut b, out) = Client::member(&server, "b")?;
+    b.sync()?;
+
+    let removed = common::header_named(&server, "removed.txt").file_id;
+    let deleted = common::header_named(&server, "deleted.txt").at();
+    remove_on_drive(&server, &|name| name == "removed.txt")?;
+    {
+        let mut s = server.lock().map_err(|_| "poisoned")?;
+        s.delete(deleted.file_id, deleted.version)?;
+        s.tick();
+    }
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["keep.txt = keep"]);
+    b.engine.db().read(|s| {
+        assert!(s.file_gone(deleted.file_id)?);
+        assert!(s.tombstones_before(i64::MAX)?.is_empty(), "the sharer's");
+        Ok(())
+    })?;
+
+    server.lock().map_err(|_| "poisoned")?.advance(LATER);
+    assert_eq!(b.engine.drive().purge(0, Going::UNWATCHED)?, 0);
+    assert_eq!(b.engine.drive().purge_when_due(Going::UNWATCHED)?, Some(0));
+    assert_eq!(b.engine.drive().purge_when_due(Going::UNWATCHED)?, None);
+    {
+        let s = server.lock().map_err(|_| "poisoned")?;
+        assert!(s.removed().any(|h| h.file_id == removed), "still theirs");
+        assert!(s.header(deleted.file_id)?.is_deleted(), "its tombstone too");
+    }
+    assert!(!b.engine.db().read(|s| s.file_gone(deleted.file_id))?);
+    assert_eq!(b.tree_text(""), ["keep.txt = keep"]);
+    assert!(b.engine.sync_once("2026-10-08")?.is_idle());
+    nothing_moved_out(&out)?;
+    Ok(())
+}

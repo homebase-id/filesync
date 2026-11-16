@@ -1279,8 +1279,17 @@ from such a drive is read-only (above), and these rules hold too:
   (all zeros). The file leaves the picture and this device (deleted here as synced, moved out
   where it changed here), and nothing records it as gone: the share given again brings it
   back, at the version it has then. An announced withdrawal of a file the picture holds is
-  left to the feed (one read), as the share may have been given again since. The sharer's own
-  delete keeps its version, and is final as on any drive.
+  left to the feed (one read), as the share may have been given again since. What was noted
+  of the file goes with it (a version this client couldn't read, a doubt whether it was
+  there). The sharer's own delete keeps its version, and is final as on any drive.
+- **Nothing there is deleted for good from here.** The sharer's Recently deleted and their
+  tombstones are their own devices' to purge (§8b; node schema, "The purge"): this device's daily purge only forgets
+  the files it knew gone, each a tombstone's keeping time after its delete, and keeps no
+  tombstone to delete later.
+- **A DB is one kind of drive for good.** Whose drive it is of is recorded before its first
+  row, and a DB that holds rows of an identity's own drive is refused for a share (and the
+  other way): read by the other's rules, a withdrawal would be a delete, and an orphan an
+  item at the top.
 - **Known limits.** A hard delete on the sharer's drive is told to no member (API notes,
   "Shared with you"): only a whole re-read of the feed finds it, which a device does after
   about 29 days away, so a device that stays connected keeps such a file. A file shared

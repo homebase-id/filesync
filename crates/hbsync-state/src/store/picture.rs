@@ -152,6 +152,14 @@ impl AccountTx<'_> {
         self.drop_file(file_id)
     }
 
+    /// File `file_id` is no longer shared with this identity ([`ReadTx::withdrawn`]): out of
+    /// the picture, with what was noted of it (a version this client couldn't read, a doubt
+    /// whether it was there: `clear_file_marks`), and not recorded gone.
+    fn unshared(&self, file_id: RemoteFileId) -> Result<()> {
+        self.clear_file_marks(file_id)?;
+        self.drop_file(file_id)
+    }
+
     /// The picture without file `file_id`, live or in Recently deleted, with nothing said
     /// about the file itself: gone for good ([`AccountTx::forget_file`]), or no longer shared
     /// with this identity ([`ReadTx::withdrawn`]), which a share given again undoes.
@@ -227,12 +235,16 @@ impl AccountTx<'_> {
 
     /// A tombstone the feed brought (`put_tombstone`, if it says when it was written):
     /// its file is deleted for good ([`AccountTx::forget_file`]). Not one that says a share
-    /// was withdrawn ([`ReadTx::withdrawn`]): the file is out of the picture and no more, so
-    /// the share given again brings it back, and nothing of it is kept to delete later (the
-    /// tombstone is the sharer's).
+    /// was withdrawn ([`ReadTx::withdrawn`]): the file is out of the picture and no more
+    /// ([`AccountTx::unshared`]), so the share given again brings it back. On another
+    /// identity's drive no tombstone is kept to delete later: it is the sharer's, and the file
+    /// is known gone from its time on.
     pub fn tombstone(&self, tombstone: RemoteRef, at: Option<i64>) -> Result<()> {
         if self.withdrawn(tombstone)? {
-            return self.drop_file(tombstone.file_id);
+            return self.unshared(tombstone.file_id);
+        }
+        if self.shared()? {
+            return self.forget_file(tombstone.file_id, at);
         }
         if let Some(at) = at {
             self.put_tombstone(tombstone, at)?;
@@ -246,7 +258,7 @@ impl AccountTx<'_> {
     /// in [`AccountTx::tombstone`].
     pub fn hard_deleted(&self, at: RemoteRef) -> Result<()> {
         if self.withdrawn(at)? {
-            return self.drop_file(at.file_id);
+            return self.unshared(at.file_id);
         }
         self.delete_tombstone_at(at)?;
         self.forget_file(at.file_id, None)

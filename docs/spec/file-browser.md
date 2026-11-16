@@ -138,6 +138,20 @@ only the file key's lock changes (`encryption.md`, "A private drive"):
 - A device without the key sees none of the drive's files and can't write: treat that as "can't
   read", never as the files being gone.
 
+## Another identity's share
+What another identity shares with this one is read from their drive, file by file (node
+schema, "Identity and tombstones"; sync semantics §13, "Another identity's drive"). A mini-app that
+lists it follows the desktops:
+- A node whose `groupId` names a folder you weren't shared, or one you can't read, is
+  listed at the top of the share, and inside the folder once you read the folder. It isn't
+  an orphan: never left out for it, and never moved into Recovered files (that is the
+  owner's).
+- A tombstone without a version (all zeros, no `groupId`) says the share was withdrawn or
+  expired, not that the file is gone: drop it from the list and record nothing as deleted,
+  as the share given again brings it back.
+- Write nothing there, the purge included: Recently deleted and the tombstones are the
+  owner's devices' to delete for good.
+
 ## Downloading
 - Fetch payload `sync_data` and decrypt it with the file's key (AES-CBC, the same as other
   encrypted payloads; on a private drive with the payload's IV, above).

@@ -38,7 +38,11 @@ impl ReadTx<'_> {
     /// Whether a deleted file's `at` says its share was withdrawn, not that it is gone: on
     /// another identity's drive ([`ReadTx::shared`]), a tombstone without a version (verified,
     /// API notes "Shared with you": the server's answer for a file this identity may no longer
-    /// read, whose version it doesn't tell). The sharer's own delete keeps its version.
+    /// read, whose version it doesn't tell). The sharer's own delete keeps its version. With
+    /// its time or without: the wire's `is_unshared` asks for the time too (a delete for good
+    /// announced by file id alone has neither), but the server names no delete for good to a
+    /// member, and a withdrawal taken for a delete would never come back, so here the version
+    /// alone decides.
     pub fn withdrawn(&self, at: RemoteRef) -> Result<bool> {
         Ok(at.version.0.is_nil() && self.shared()?)
     }
@@ -130,9 +134,25 @@ impl AccountTx<'_> {
     }
 
     /// Says whose drive this DB is of ([`ReadTx::shared`]): kept in the DB, as every
-    /// connection reading its mirror goes by it. Set before the mirror's first row, by whoever
-    /// knows the remote.
+    /// connection reading its mirror goes by it. Set before the picture's first row, by
+    /// whoever knows the remote, and refused once the picture holds a row of the other kind
+    /// of drive: read by the other's rules, a withdrawal would be a delete for good, and an
+    /// orphan an item at the top.
     pub fn set_shared(&self, shared: bool) -> Result<()> {
+        if self.shared()? == shared {
+            return Ok(());
+        }
+        if self.count("SELECT EXISTS (SELECT 1 FROM remote) OR EXISTS (SELECT 1 FROM removed)")? > 0
+        {
+            return Err(StateError::Conflict(format!(
+                "this DB holds {} drive already",
+                if shared {
+                    "the identity's own"
+                } else {
+                    "another identity's"
+                }
+            )));
+        }
         if shared {
             self.set_account_kv(crate::keys::SHARED, "1")?;
         } else {

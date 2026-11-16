@@ -599,7 +599,9 @@ server answers the rest, to a token their server made for this identity's connec
   **[verified]** at aa560aea9); sharing a tombstone is refused. The
   client can tell a share withdrawn from a delete
   by its zero version and its time (`RemoteHeader::is_unshared`, `ChangeRef::is_unshared`);
-  the engine drops the file from its picture without recording it gone (the
+  the engine goes by the zero version alone on another identity's drive (the state DB's
+  `withdrawn`: no delete for good is named to a member, and a withdrawal taken for a delete
+  would never come back), and drops the file from its picture without recording it gone (the
   file leaves the member's devices, and the share given again brings it back: sync semantics
   §13, "Another identity's drive"). A member's notification socket hears what its query gets: a file through its
   share, the same tombstone once the share ends (after every change of the file while a row

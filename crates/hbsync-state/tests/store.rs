@@ -967,6 +967,117 @@ mod mirror {
         })
     }
 
+    /// Another identity's drive keeps nothing to delete there: the sharer's delete of a file
+    /// records it gone from the tombstone's time on, forgotten a keeping time later, and no
+    /// tombstone for this device to delete for good. A share withdrawn takes what was noted
+    /// of its file with it: a version this client couldn't read, a doubt whether it is there.
+    #[test]
+    fn a_shared_drive_keeps_no_tombstone_and_a_withdrawal_no_marks() -> R {
+        let mut db = StateDb::open_in_memory()?;
+        db.write(|s| s.account().set_shared(true))?;
+        let (deleted, held) = (
+            row(NodeId::new(), NodeId::ROOT, "deleted.txt", None),
+            row(NodeId::new(), NodeId::ROOT, "held.txt", None),
+        );
+        db.write(|s| {
+            s.account().put_live(&deleted)?;
+            s.account().put_live(&held)
+        })?;
+
+        // The sharer's delete: its tombstone keeps its version.
+        let tombstone = RemoteRef {
+            file_id: deleted.file_id,
+            version: VersionTag(Uuid::now_v7()),
+        };
+        db.write(|s| s.account().tombstone(tombstone, Some(300)))?;
+        db.read(|s| {
+            assert!(s.file_gone(deleted.file_id)?);
+            assert!(s.tombstones_before(i64::MAX)?.is_empty());
+            assert!(s.get_mirror(deleted.node)?.is_none());
+            Ok(())
+        })?;
+        assert_eq!(db.write(|s| s.account().prune_gone(300, 1000))?, 0);
+        assert_eq!(db.write(|s| s.account().prune_gone(301, 1000))?, 1);
+        assert!(!db.read(|s| s.file_gone(deleted.file_id))?);
+
+        // A newer version of the other this client can't read, and a doubt whether it is
+        // there; then its share is withdrawn.
+        let newer = RemoteRef {
+            file_id: held.file_id,
+            version: VersionTag(Uuid::now_v7()),
+        };
+        let suspect = hbsync_state::GoneSuspect {
+            version: Some(held.version),
+            at: 10,
+        };
+        db.write(|s| {
+            s.account()
+                .put_unreadable(newer, Some(held.node), Some(NodeId::ROOT))?;
+            s.account().put_gone_suspect(held.file_id, &suspect)
+        })?;
+        assert!(db.read(|s| s.is_unreadable_version(newer))?);
+        let withdrawn = RemoteRef {
+            file_id: held.file_id,
+            version: VersionTag(Uuid::nil()),
+        };
+        db.write(|s| s.account().tombstone(withdrawn, Some(400)))?;
+        db.read(|s| {
+            assert!(!s.file_gone(held.file_id)?);
+            assert!(s.unreadable_files()?.is_empty());
+            assert_eq!(s.gone_suspect(held.file_id)?, None);
+            assert!(s.get_mirror(held.node)?.is_none());
+            Ok(())
+        })?;
+        // Announced withdrawn, without a time: the same.
+        db.write(|s| {
+            s.account().put_live(&held)?;
+            s.account()
+                .put_unreadable(newer, Some(held.node), Some(NodeId::ROOT))?;
+            s.account().hard_deleted(withdrawn)
+        })?;
+        assert!(db.read(|s| s.unreadable_files())?.is_empty());
+        assert!(!db.read(|s| s.file_gone(held.file_id))?);
+        Ok(())
+    }
+
+    /// Whose drive a DB is of is said before its first row, and for good: with a row of the
+    /// picture in it, the other kind is refused (the same kind again changes nothing).
+    #[test]
+    fn a_db_that_holds_a_drive_keeps_its_kind() -> R {
+        let file = row(NodeId::new(), NodeId::ROOT, "a.txt", None);
+        let removed = RemovedRow {
+            row: file.clone(),
+            removed_at: Some(5),
+        };
+        let mut own = StateDb::open_in_memory()?;
+        own.write(|s| {
+            s.account().set_shared(true)?;
+            s.account().set_shared(false)?;
+            s.account().put_live(&file)?;
+            s.account().set_shared(false)
+        })?;
+        let refused = own.write(|s| s.account().set_shared(true));
+        assert!(
+            matches!(refused, Err(StateError::Conflict(_))),
+            "{refused:?}"
+        );
+        assert!(!own.read(|s| s.shared())?);
+
+        let mut shared = StateDb::open_in_memory()?;
+        shared.write(|s| {
+            s.account().set_shared(true)?;
+            s.account().move_to_removed(&removed)?;
+            s.account().set_shared(true)
+        })?;
+        let refused = shared.write(|s| s.account().set_shared(false));
+        assert!(
+            matches!(refused, Err(StateError::Conflict(_))),
+            "{refused:?}"
+        );
+        assert!(shared.read(|s| s.shared())?);
+        Ok(())
+    }
+
     /// Reading the whole feed again starts from its beginning, the files the store has listed;
     /// tombstones are kept with their time until deleted hard.
     #[test]

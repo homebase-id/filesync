@@ -206,7 +206,8 @@ impl Drive {
 
     /// The drive of the account whose state DB `account` is ([`StateDb::open_account`]). The
     /// DB is told whose drive `remote` is ([`Remote::shared`]) where it doesn't say so yet:
-    /// read first, so a DB that does is opened without writing.
+    /// read first, so a DB that does is opened without writing. Refused where the DB holds
+    /// the other kind of drive already (`set_shared`).
     pub fn new(mut account: StateDb, remote: Arc<dyn Remote>) -> Result<Arc<Drive>, StateError> {
         let shared = remote.shared();
         if account.read(|s| s.shared())? != shared {
