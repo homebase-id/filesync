@@ -1290,18 +1290,19 @@ from such a drive is read-only (above), and these rules hold too:
   crash between) waits under its parked name while the name is taken.
 - **The cost.** Where an item is, is worked out as its row is read, and nothing is stored,
   so nothing goes stale when a folder comes or goes. Measured with 100,000 mirror rows (a
-  release build, the DB on disk), against this identity's own drive, which pays none of it:
+  release build, the DB on disk), against this identity's own drive, which pays one read of
+  the drive's kind per transaction that reads the mirror, and nothing per row:
   - a mirror row read: one indexed probe more (3.0 µs for 1.9 µs);
   - which folders the picture lacks is worked out once per transaction that asks about the
     top, and again after a write to the picture in it: a step along the index for each
     folder holding something shared, 1.3 ms with 500 such folders, 6.5 ms with 5,000, 41 ms
     with 50,000, whatever the number of files;
   - a name looked up at the top after that: 2 to 5 µs (1.5 µs on an own drive) where each
-    of those folders is shared, and one probe more for each folder that isn't (1.3 µs
-    each: 3.4 ms a name with 2,500 of them). A share given by folder has none, or the one
+    of those folders is shared, and one probe more for each folder that isn't (1 µs
+    each: 2.4 ms a name with 2,500 of them). A share given by folder has none, or the one
     its top is in; someone sharing loose files out of thousands of folders pays this, and a
     stored mark with its upkeep on every write would be the cure;
   - a listing of the top: the rows of those folders are read with it (15 ms for 5,000
-    folders at the top against 10 ms on an own drive; 144 ms where all 100,000 rows are at
+    folders at the top against 10 ms on an own drive; 132 ms where all 100,000 rows are at
     the top for want of their folders);
   - a folder arriving marks what the mirror holds in it dirty (one indexed read).

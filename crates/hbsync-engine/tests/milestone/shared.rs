@@ -30,13 +30,13 @@ fn shared_tree(server: &FakeServer) -> Res<BTreeMap<String, Vec<Item>>> {
         .filter(shared)
         .filter_map(|h| h.node())
         .collect();
-    // The names from the top-level item down to `h`, or none when a folder it is in is in
-    // Recently deleted.
+    // The top-level item `h` is in (the last of its folders the picture has) and the names
+    // from it down to `h`, or none when a folder it is in is in Recently deleted.
     fn path<'a>(
         mut h: &'a RemoteHeader,
         live: &HashMap<NodeId, &'a RemoteHeader>,
         removed: &HashSet<NodeId>,
-    ) -> Option<Vec<String>> {
+    ) -> Option<(NodeId, Vec<String>)> {
         let mut path = Vec::new();
         loop {
             path.push(h.state()?.name);
@@ -47,25 +47,20 @@ fn shared_tree(server: &FakeServer) -> Res<BTreeMap<String, Vec<Item>>> {
             }
         }
         path.reverse();
-        Some(path)
+        Some((h.node()?, path))
     }
     let mut tree: BTreeMap<String, BTreeMap<NodeId, Item>> = BTreeMap::new();
     for h in live.values() {
-        let Some(path) = path(h, &live, &removed) else {
+        let Some((top, path)) = path(h, &live, &removed) else {
             continue;
         };
-        // The top-level item it is in: the last of its folders the picture has.
-        let mut top = *h;
-        while let Some(parent) = live.get(&top.parent) {
-            top = parent;
-        }
         let entry = match h.kind {
             hbsync_types::NodeKind::Folder => (format!("{}/", path.join("/")), Vec::new()),
             hbsync_types::NodeKind::File => (path.join("/"), server.payload(h.file_id)?.to_vec()),
         };
         tree.entry(name_key(&path[0]))
             .or_default()
-            .entry(top.node().ok_or("no node")?)
+            .entry(top)
             .or_default()
             .push(entry);
     }
@@ -126,8 +121,7 @@ fn shares_of(seed: u64) -> Res<(usize, usize)> {
     let mut compared = (0, 0);
     let server = server();
     let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
-    let out = tempfile::tempdir()?;
-    let mut b = Client::member(&server, "b", out.path())?;
+    let (mut b, out) = Client::member(&server, "b")?;
     let mut rng = Rng(seed);
     let mut ledger = Ledger::default();
     for step in 0..40 {

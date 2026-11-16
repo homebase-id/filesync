@@ -60,8 +60,7 @@ impl ReadTx<'_> {
     fn mirror_in(&self, parent: NodeId, key: Option<i32>) -> Result<Vec<MirrorRow>> {
         let c = self.coords()?;
         let drive = c.to_drive(parent);
-        let shared = self.shared()?;
-        let mut rows = if shared && !drive.is_root() && !self.has_node(drive)? {
+        let mut rows = if self.lacks(drive)? {
             Vec::new()
         } else {
             match key {
@@ -77,7 +76,7 @@ impl ReadTx<'_> {
                 )?,
             }
         };
-        if shared && drive.is_root() {
+        if drive.is_root() && self.shared()? {
             rows.extend(self.folderless(key)?);
         }
         // Placed already: each row is where the drive has it, or at the top.
@@ -108,28 +107,41 @@ impl ReadTx<'_> {
             .query_row([node.0.as_bytes()], |r| r.get(0))?)
     }
 
+    /// Whether `folder` is one the picture of another identity's drive ([`ReadTx::shared`])
+    /// doesn't have ([`ReadTx::has_node`]): what the mirror holds in it is at the top. Never
+    /// the drive's root, and never on this identity's own drive (no probe there).
+    pub(super) fn lacks(&self, folder: NodeId) -> Result<bool> {
+        Ok(!folder.is_root() && self.shared()? && !self.has_node(folder)?)
+    }
+
     /// Another identity's drive: the mirror's nodes whose folder the picture doesn't have
     /// (all, or those whose name has sibling hash `key`), each as at the top: what is in the
-    /// folders the picture lacks ([`ReadTx::lacking`]), a read along the index for each. None
-    /// where every folder that holds something shared is shared itself.
+    /// folders the picture lacks ([`ReadTx::lacking`]), a read along the index for each (one
+    /// statement, bound again for each folder). None where every folder that holds something
+    /// shared is shared itself.
     fn folderless(&self, key: Option<i32>) -> Result<Vec<MirrorRow>> {
-        let mut rows = Vec::new();
-        for folder in self.lacking()?.iter() {
-            rows.extend(match key {
-                None => self.many(
-                    &format!("{MIRROR_SELECT} WHERE m.parent = ?1"),
-                    [folder],
-                    mirror_row,
-                )?,
-                Some(key) => self.many(
-                    &format!("{MIRROR_SELECT} WHERE m.parent = ?1 AND m.name_key = ?2"),
-                    params![folder, key],
-                    mirror_row,
-                )?,
-            });
+        let lacking = self.lacking()?;
+        if lacking.is_empty() {
+            return Ok(Vec::new());
         }
-        for row in &mut rows {
-            row.parent = NodeId::ROOT;
+        let named = if key.is_some() {
+            " AND m.name_key = ?2"
+        } else {
+            ""
+        };
+        let mut stmt = self.prep(&format!("{MIRROR_SELECT} WHERE m.parent = ?1{named}"))?;
+        let decode = |r: &Row<'_>| Ok(mirror_row(r));
+        let mut rows = Vec::new();
+        for folder in lacking.iter() {
+            let found = match key {
+                None => stmt.query_map([folder], decode)?,
+                Some(key) => stmt.query_map(params![folder, key], decode)?,
+            };
+            for row in found {
+                let mut row = row??;
+                row.parent = NodeId::ROOT;
+                rows.push(row);
+            }
         }
         Ok(rows)
     }
@@ -414,7 +426,7 @@ impl AccountTx<'_> {
     }
 
     /// Removes the mirror row of a deleted file, marks its node dirty where that concerns
-    /// (`fan_out`), and returns the row.
+    /// (`fan_out`), and returns the row, in the folder the drive had it in.
     pub(crate) fn delete_mirror(&self, file_id: RemoteFileId) -> Result<Option<MirrorRow>> {
         let Some(row) = self.one(
             &format!("{MIRROR_SELECT} WHERE m.file_id = ?1"),
@@ -431,7 +443,7 @@ impl AccountTx<'_> {
             "DELETE FROM remote WHERE file_id = ?1",
             file_id.0.as_bytes(),
         )?;
-        self.seen(row)
+        self.in_coords(row)
     }
 
     /// Keeps `token` for file `file_id` (in Recently deleted if `removed`), if it differs.

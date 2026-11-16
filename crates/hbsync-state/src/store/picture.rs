@@ -96,7 +96,10 @@ impl AccountTx<'_> {
         let arrives = self.arrives(row)?;
         self.delete_removed(row.node)?;
         self.put_mirror(row)?;
-        self.arrived(arrives, row.node)
+        if arrives {
+            self.arrived(row.node)?;
+        }
+        Ok(())
     }
 
     /// A node's file moved to Recently deleted, as the feed says: out of the mirror (its node
@@ -106,28 +109,25 @@ impl AccountTx<'_> {
         let arrives = self.arrives(&removed.row)?;
         self.leave_tree(removed.row.file_id)?;
         self.put_removed(removed)?;
-        self.arrived(arrives, removed.row.node)
+        if arrives {
+            self.arrived(removed.row.node)?;
+        }
+        Ok(())
     }
 
-    /// Whether `row` is a folder the picture of another identity's drive ([`ReadTx::shared`])
-    /// doesn't have yet, live or in Recently deleted: what the mirror holds of it was at the
+    /// Whether `row` is a folder the picture of another identity's drive doesn't have yet
+    /// ([`ReadTx::lacks`]), live or in Recently deleted: what the mirror holds of it was at the
     /// top for want of it ([`ReadTx::seen`]), and is in it once the row is in
     /// ([`AccountTx::arrived`]). Asked before the row is written: three probes a new folder,
     /// none for a file or on this identity's own drive.
     fn arrives(&self, row: &MirrorRow) -> Result<bool> {
-        Ok(row.kind == NodeKind::Folder
-            && !row.node.is_root()
-            && self.shared()?
-            && !self.has_node(row.node)?)
+        Ok(row.kind == NodeKind::Folder && self.lacks(row.node)?)
     }
 
     /// Folder `folder` came into the picture ([`AccountTx::arrives`]): what the mirror holds in
     /// it moves from the top into it, without a row of its own changing, so each is planned
     /// again. (The other way, a folder leaving the picture, is `drop_file`'s.)
-    fn arrived(&self, arrives: bool, folder: NodeId) -> Result<()> {
-        if !arrives {
-            return Ok(());
-        }
+    fn arrived(&self, folder: NodeId) -> Result<()> {
         let children: Vec<Vec<u8>> = self
             .prep(&format!(
                 "SELECT n.uuid FROM remote c JOIN nodes n ON n.id = c.id WHERE c.parent = {ID_OF}"

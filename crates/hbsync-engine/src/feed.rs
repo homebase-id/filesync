@@ -542,19 +542,13 @@ pub(crate) fn announced(s: AccountTx<'_>, refs: &[ChangeRef]) -> Result<bool, St
 /// for a file the picture doesn't hold costs no read: the drive sends one after every change
 /// of a file while its share is withdrawn (verified, API notes "Shared with you").
 fn withdrawal_in_doubt(s: &AccountTx<'_>, refs: &[ChangeRef]) -> Result<bool, StateError> {
-    let mut withdrawn = Vec::new();
     for r in refs.iter().filter(|r| r.deleted) {
-        if s.withdrawn(r.at())? {
-            if s.known_file(r.file_id)?.is_some() {
-                return Ok(true);
-            }
-            withdrawn.push(r.file_id);
+        let more = || refs.iter().any(|o| !o.deleted && o.file_id == r.file_id);
+        if s.withdrawn(r.at())? && (s.known_file(r.file_id)?.is_some() || more()) {
+            return Ok(true);
         }
     }
-    Ok(!withdrawn.is_empty()
-        && refs
-            .iter()
-            .any(|r| !r.deleted && withdrawn.contains(&r.file_id)))
+    Ok(false)
 }
 
 /// One ref per file: the last a file had. A tombstone ends a file (its id never comes back,
@@ -658,13 +652,9 @@ mod tests {
         Ok(())
     }
 
-    /// A write of a file the store has, then its removal without a time, announced
-    /// together: which came last can't be told, so the feed is read (the removal isn't lost to
-    /// the write the store already has).
-    #[test]
-    fn a_write_and_a_removal_without_a_time_are_doubt() -> Result<(), StateError> {
-        let mut db = StateDb::open_in_memory()?;
-        let header = RemoteHeader {
+    /// A folder `d` at the top, as the drive tells it.
+    fn folder_header() -> RemoteHeader {
+        RemoteHeader {
             file_id: RemoteFileId(Uuid::new_v4()),
             version: VersionTag(Uuid::new_v4()),
             parent: NodeId::ROOT,
@@ -677,7 +667,16 @@ mod tests {
             removed: false,
             changed_at: Some(5),
             token: None,
-        };
+        }
+    }
+
+    /// A write of a file the store has, then its removal without a time, announced
+    /// together: which came last can't be told, so the feed is read (the removal isn't lost to
+    /// the write the store already has).
+    #[test]
+    fn a_write_and_a_removal_without_a_time_are_doubt() -> Result<(), StateError> {
+        let mut db = StateDb::open_in_memory()?;
+        let header = folder_header();
         db.write(|s| apply(s.account(), &header).map(drop))?;
         let write = ChangeRef::of(&header);
         let removal = ChangeRef {
@@ -705,20 +704,7 @@ mod tests {
     /// nothing gone. This identity's own drive has no such thing: a tombstone is one.
     #[test]
     fn an_announced_withdrawal_is_left_to_the_feed() -> Result<(), StateError> {
-        let header = RemoteHeader {
-            file_id: RemoteFileId(Uuid::new_v4()),
-            version: VersionTag(Uuid::new_v4()),
-            parent: NodeId::ROOT,
-            kind: NodeKind::Folder,
-            body: RemoteBody::Live {
-                node: NodeId::new(),
-                content: NodeContent::folder("d"),
-                payload: None,
-            },
-            removed: false,
-            changed_at: Some(5),
-            token: None,
-        };
+        let header = folder_header();
         let live = ChangeRef::of(&header);
         let withdrawn = |file_id, changed_at| ChangeRef {
             file_id,

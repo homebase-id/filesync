@@ -2,13 +2,11 @@
 
 use hbsync_sim::{Action, Event, Sim};
 
+use super::act;
+
 /// Clients 3 and 4 are the Desktops of client 0's and client 1's computers.
 fn desktops() -> Sim {
     Sim::new(3).with_desktop_devices()
-}
-
-fn act(client: usize, action: Action) -> Event {
-    Event::Act { client, action }
 }
 
 /// Each computer's Desktop is a folder of its own in Desktops, named as the computer; each main

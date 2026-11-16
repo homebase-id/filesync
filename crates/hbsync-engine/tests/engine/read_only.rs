@@ -11,20 +11,6 @@ fn versions(server: &Arc<Mutex<hbsync_remote::fake::FakeServer>>) -> Vec<RemoteR
     live
 }
 
-/// A client of `server` whose folder is read-only, moving out to a folder of its own (kept
-/// with it).
-fn read_only_client(
-    server: &Arc<Mutex<hbsync_remote::fake::FakeServer>>,
-    name: &str,
-) -> Result<(Client, tempfile::TempDir), Box<dyn std::error::Error>> {
-    let out = tempfile::tempdir()?;
-    let to = out.path().to_path_buf();
-    let client = Client::with_config(server, name, move |cfg| {
-        cfg.folder.read_only = Some(to.clone());
-    })?;
-    Ok((client, out))
-}
-
 /// `b` follows `a` read-only: its user's edit, new folder, rename and delete there are kept
 /// (moved out where they would be lost) or undone, in one sync, and the drive stays as `a`
 /// left it.
@@ -36,7 +22,7 @@ fn a_read_only_folder_keeps_what_changed_and_follows_the_drive() -> R {
     a.write("top.txt", "top")?;
     a.write("gone.txt", "gone")?;
     a.sync()?;
-    let (mut b, out) = read_only_client(&server, "b")?;
+    let (mut b, out) = Client::read_only(&server, "b")?;
     b.sync()?;
     assert_eq!(b.tree_text(""), a.tree_text(""));
     let drive = versions(&server);
@@ -81,7 +67,7 @@ fn a_crash_at_any_commit_while_moving_out_loses_nothing() -> R {
                 a.write("Docs/report.txt", "quarterly")?;
                 a.write("top.txt", "top")?;
                 a.sync()?;
-                let (mut b, out) = read_only_client(&server, "b")?;
+                let (mut b, out) = Client::read_only(&server, "b")?;
                 b.sync()?;
                 let drive = versions(&server);
                 b.write("Docs/report.txt", "mine")?;
@@ -117,7 +103,7 @@ fn a_crash_at_any_commit_while_moving_out_loses_nothing() -> R {
 #[test]
 fn nothing_is_put_back_from_a_read_only_folder() -> R {
     let server = server();
-    let (mut b, _out) = read_only_client(&server, "b")?;
+    let (mut b, _out) = Client::read_only(&server, "b")?;
     match b.engine.put_back(&[NodeId::new()]) {
         Err(hbsync_engine::EngineError::ReadOnly(_)) => Ok(()),
         other => Err(format!("{other:?}").into()),
@@ -135,7 +121,7 @@ fn a_restored_folder_comes_back_whole_in_a_read_only_folder() -> R {
     a.write("d/other.txt", "o")?;
     a.write("stay.txt", "s")?; // not everything is deleted: no mass-delete hold
     a.sync()?;
-    let (mut b, _out) = read_only_client(&server, "b")?;
+    let (mut b, _out) = Client::read_only(&server, "b")?;
     b.sync()?;
     fs::remove_dir_all(a.root.join("d"))?;
     a.remote.faults().fail_writes_named = Some("keep.txt".into());

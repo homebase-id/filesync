@@ -33,7 +33,7 @@ impl ReadTx<'_> {
     /// once that is shared. Only reads go through here: a write to such a drive (none yet,
     /// its remote refuses them) must send the drive's own folder, never this one.
     pub(super) fn seen(&self, mut row: MirrorRow) -> Result<Option<MirrorRow>> {
-        if !row.parent.is_root() && self.shared()? && !self.has_node(row.parent)? {
+        if self.lacks(row.parent)? {
             row.parent = NodeId::ROOT;
         }
         self.in_coords(row)

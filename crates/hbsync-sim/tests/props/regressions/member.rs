@@ -3,23 +3,19 @@
 
 use hbsync_sim::{Action, Event, Sim};
 
-fn act(client: usize, action: Action) -> Event {
-    Event::Act { client, action }
+use super::{act, settle};
+
+/// The owner (client 0) shares what `pick` picks with the member, or withdraws its share:
+/// alone, or (`below`) with all the drive has in it.
+fn shares(pick: usize, below: bool) -> Event {
+    act(0, Action::Share { pick, below })
 }
 
-/// Lets every client settle, then checks the run (the member has what is shared with it, and
-/// wrote nothing).
-fn settle(sim: &mut Sim) {
-    assert!(sim.quiesce(30), "no convergence");
-    sim.check().unwrap_or_else(|e| panic!("{e}"));
-}
-
-/// The owner (client 0) shares `path`, as it has it, with the member, or withdraws it: alone,
-/// or (`below`) with all the drive has in it.
-fn share(sim: &mut Sim, path: &str, below: bool) {
+/// The owner shares `path`, as it has it, with the member, or withdraws its share.
+fn share(sim: &mut Sim, path: &str) {
     let node = sim.item(0, path).expect("on the owner's device");
     let pick = sim.share_pick(node).expect("on the drive");
-    sim.run(&[act(0, Action::Share { pick, below })]);
+    sim.run(&[shares(pick, false)]);
 }
 
 /// Client 0, the owner, has `a` and the folder `b` holding another `a`; client 2 is a member
@@ -45,16 +41,16 @@ fn owned() -> Sim {
 #[test]
 fn a_file_shared_without_its_folder_is_at_the_top() {
     let mut sim = owned();
-    share(&mut sim, "b/a", false);
+    share(&mut sim, "b/a");
     settle(&mut sim);
     assert_eq!(sim.local_paths(2), ["a"]);
-    share(&mut sim, "b", false);
+    share(&mut sim, "b");
     settle(&mut sim);
     assert_eq!(sim.local_paths(2), ["b", "b/a"]);
-    share(&mut sim, "b", false);
+    share(&mut sim, "b");
     settle(&mut sim);
     assert_eq!(sim.local_paths(2), ["a"]);
-    share(&mut sim, "b/a", false);
+    share(&mut sim, "b/a");
     settle(&mut sim);
     assert!(sim.local_paths(2).is_empty());
 }
@@ -69,14 +65,14 @@ fn a_name_taken_at_the_top_by_a_file_without_its_folder_leaves_the_newcomer_out(
         sim.item(0, "a").expect("a"),
         sim.item(0, "b/a").expect("b/a"),
     );
-    share(&mut sim, "b/a", false);
+    share(&mut sim, "b/a");
     settle(&mut sim);
     assert_eq!(sim.item(2, "a"), Some(inner));
-    share(&mut sim, "a", false);
+    share(&mut sim, "a");
     settle(&mut sim);
     assert_eq!(sim.local_paths(2), ["a"]);
     assert_eq!(sim.item(2, "a"), Some(inner));
-    share(&mut sim, "b/a", false);
+    share(&mut sim, "b/a");
     settle(&mut sim);
     assert_eq!(sim.local_paths(2), ["a"]);
     assert_eq!(sim.item(2, "a"), Some(top));
@@ -90,13 +86,13 @@ fn a_file_without_its_folder_is_left_out_while_its_name_is_taken_at_the_top() {
         sim.item(0, "a").expect("a"),
         sim.item(0, "b/a").expect("b/a"),
     );
-    share(&mut sim, "a", false);
+    share(&mut sim, "a");
     settle(&mut sim);
-    share(&mut sim, "b/a", false);
+    share(&mut sim, "b/a");
     settle(&mut sim);
     assert_eq!(sim.item(2, "a"), Some(top));
     // Its folder shared: it has its place.
-    share(&mut sim, "b", false);
+    share(&mut sim, "b");
     settle(&mut sim);
     assert_eq!(sim.local_paths(2), ["a", "b", "b/a"]);
     assert_eq!(sim.item(2, "b/a"), Some(inner));
@@ -125,20 +121,13 @@ fn what_the_drive_has_in_a_file_not_shared_is_at_the_top_for_a_member() {
         act(2, Restore { node: 0 }),
         Event::Step { client: 0 },
         Event::Step { client: 1 },
-        act(
-            0,
-            Share {
-                pick: 8,
-                below: false,
-            },
-        ),
+        shares(8, false),
         act(0, Restore { node: 0 }),
         act(0, Restore { node: 0 }),
         act(0, CreateFile { parent: 0, name: 0 }),
         act(0, IntoFile { pick: 11, file: 3 }),
     ]);
-    assert!(sim.quiesce(30), "no convergence");
-    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    settle(&mut sim);
     assert!(sim.server_paths().contains(&"a/d".to_string()));
     assert_eq!(sim.local_paths(2), ["d"]);
 }
@@ -151,27 +140,12 @@ fn what_is_in_a_folder_no_client_reads_is_at_the_top_for_a_member() {
     use Action::*;
     let mut sim = Sim::new(3).with_member(2).with_narrow_check();
     // The folder is the drive's first node, its file the second.
-    sim.run(&[
-        act(0, NewerFolder { name: 3 }),
-        act(
-            0,
-            Share {
-                pick: 1,
-                below: false,
-            },
-        ),
-    ]);
+    sim.run(&[act(0, NewerFolder { name: 3 }), shares(1, false)]);
     settle(&mut sim);
     assert_eq!(sim.server_paths(), ["c.txt", "c.txt/a"]);
     assert!(sim.local_paths(0).is_empty());
     assert_eq!(sim.local_paths(2), ["a"]);
-    sim.run(&[act(
-        0,
-        Share {
-            pick: 0,
-            below: false,
-        },
-    )]);
+    sim.run(&[shares(0, false)]);
     settle(&mut sim);
     assert_eq!(sim.local_paths(2), ["a"]);
 }
@@ -193,40 +167,16 @@ fn a_copy_parked_for_a_download_waits_parked_while_its_name_is_taken() {
         act(0, NewerFolder { name: 0 }),
         act(0, NewerFolder { name: 1 }),
         act(0, CreateFile { parent: 0, name: 0 }),
-        act(
-            0,
-            Share {
-                pick: 2,
-                below: true,
-            },
-        ),
+        shares(2, true),
         Event::Crash { client: 0 },
-        act(
-            0,
-            Share {
-                pick: 9,
-                below: true,
-            },
-        ),
-        act(
-            0,
-            Share {
-                pick: 0,
-                below: true,
-            },
-        ),
+        shares(9, true),
+        shares(0, true),
         act(0, CreateFile { parent: 0, name: 0 }),
         act(0, DeleteStopped { pick: 1, done: 2 }),
         act(0, Purge),
         Event::Plan { client: 2 },
         Event::Step { client: 2 },
-        act(
-            0,
-            Share {
-                pick: 11,
-                below: false,
-            },
-        ),
+        shares(11, false),
         Event::Crash { client: 2 },
         act(0, Tag { node: 0, tag: 0 }),
         act(0, CreateFile { parent: 0, name: 0 }),
@@ -253,7 +203,7 @@ fn a_copy_parked_for_a_download_waits_parked_while_its_name_is_taken() {
     assert!(parked.starts_with(".hbsync-move-"), "{parked}");
     let first = sim.item(2, parked).expect("parked");
     let pick = sim.share_pick(second).expect("on the drive");
-    sim.run(&[act(0, Share { pick, below: false })]);
+    sim.run(&[shares(pick, false)]);
     settle(&mut sim);
     assert_eq!(sim.local_paths(2), ["a"]);
     assert_eq!(sim.item(2, "a"), Some(first));

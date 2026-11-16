@@ -9,14 +9,36 @@ use super::*;
 
 type Server = Arc<Mutex<hbsync_remote::fake::FakeServer>>;
 
-/// The owner `a` shares (`live`) what is named `name` on its drive, or withdraws its share.
-fn share(a: &Client, server: &Server, name: &str, live: bool) -> R {
-    let file_id = common::header_named(server, name).file_id;
-    match live {
-        true => a.remote.share(file_id)?,
-        false => a.remote.withdraw(file_id)?,
-    }
+/// The owner `a` shares what is named `name` on its drive.
+fn share(a: &Client, server: &Server, name: &str) -> R {
+    a.remote.share(common::header_named(server, name).file_id)?;
     server.lock().map_err(|_| "poisoned")?.tick();
+    Ok(())
+}
+
+/// The owner `a` withdraws its share of what is named `name` on its drive.
+fn withdraw(a: &Client, server: &Server, name: &str) -> R {
+    a.remote
+        .withdraw(common::header_named(server, name).file_id)?;
+    server.lock().map_err(|_| "poisoned")?.tick();
+    Ok(())
+}
+
+/// The owner `a` shares all its drive has.
+fn share_all(a: &Client, server: &Server) -> R {
+    let all: Vec<_> = {
+        let s = server.lock().map_err(|_| "poisoned")?;
+        s.live().map(|h| h.file_id).collect()
+    };
+    for file_id in all {
+        a.remote.share(file_id)?;
+    }
+    Ok(())
+}
+
+/// Nothing was moved out of the member's folder.
+fn nothing_moved_out(out: &tempfile::TempDir) -> R {
+    assert!(out.path().read_dir()?.next().is_none(), "nothing moved out");
     Ok(())
 }
 
@@ -30,27 +52,26 @@ fn an_item_is_at_the_top_while_its_folder_is_not_shared() -> R {
     a.write("Docs/sub/deep.txt", "deep")?;
     a.write("Docs/private.txt", "mine")?;
     a.sync()?;
-    let out = tempfile::tempdir()?;
-    let mut b = Client::member(&server, "b", out.path())?;
+    let (mut b, out) = Client::member(&server, "b")?;
     b.sync()?;
     assert!(b.tree_text("").is_empty(), "{:?}", b.tree_text(""));
 
-    share(&a, &server, "report.txt", true)?;
-    share(&a, &server, "deep.txt", true)?;
+    share(&a, &server, "report.txt")?;
+    share(&a, &server, "deep.txt")?;
     b.sync()?;
     assert_eq!(
         b.tree_text(""),
         ["deep.txt = deep", "report.txt = quarterly"]
     );
 
-    share(&a, &server, "Docs", true)?;
+    share(&a, &server, "Docs")?;
     b.sync()?;
     assert_eq!(
         b.tree_text(""),
         ["Docs/", "Docs/report.txt = quarterly", "deep.txt = deep"]
     );
 
-    share(&a, &server, "sub", true)?;
+    share(&a, &server, "sub")?;
     b.sync()?;
     assert_eq!(
         b.tree_text(""),
@@ -62,14 +83,14 @@ fn an_item_is_at_the_top_while_its_folder_is_not_shared() -> R {
         ]
     );
 
-    share(&a, &server, "Docs", false)?;
+    withdraw(&a, &server, "Docs")?;
     b.sync()?;
     assert_eq!(
         b.tree_text(""),
         ["report.txt = quarterly", "sub/", "sub/deep.txt = deep"]
     );
     assert!(b.engine.sync_once("2026-10-08")?.is_idle());
-    assert!(out.path().read_dir()?.next().is_none(), "nothing moved out");
+    nothing_moved_out(&out)?;
     Ok(())
 }
 
@@ -82,14 +103,13 @@ fn a_share_given_again_brings_the_file_back() -> R {
     a.write("top.txt", "top")?;
     a.write("stay.txt", "stay")?;
     a.sync()?;
-    share(&a, &server, "top.txt", true)?;
-    share(&a, &server, "stay.txt", true)?;
-    let out = tempfile::tempdir()?;
-    let mut b = Client::member(&server, "b", out.path())?;
+    share(&a, &server, "top.txt")?;
+    share(&a, &server, "stay.txt")?;
+    let (mut b, _out) = Client::member(&server, "b")?;
     b.sync()?;
     assert_eq!(b.tree_text(""), ["stay.txt = stay", "top.txt = top"]);
 
-    share(&a, &server, "top.txt", false)?;
+    withdraw(&a, &server, "top.txt")?;
     b.sync()?;
     assert_eq!(b.tree_text(""), ["stay.txt = stay"]);
 
@@ -99,7 +119,7 @@ fn a_share_given_again_brings_the_file_back() -> R {
     b.sync()?;
     assert_eq!(b.tree_text(""), ["stay.txt = stay"]);
 
-    share(&a, &server, "top.txt", true)?;
+    share(&a, &server, "top.txt")?;
     b.sync()?;
     assert_eq!(b.tree_text(""), ["stay.txt = stay", "top.txt = newer"]);
     Ok(())
@@ -114,17 +134,11 @@ fn a_name_taken_at_the_top_leaves_the_other_item_out() -> R {
     a.write("A/x.txt", "a's")?;
     a.write("B/x.txt", "b's")?;
     a.sync()?;
-    share(&a, &server, "A", true)?;
-    let out = tempfile::tempdir()?;
-    let mut b = Client::member(&server, "b", out.path())?;
-    for h in {
-        let s = server.lock().map_err(|_| "poisoned")?;
-        s.live().map(|h| h.file_id).collect::<Vec<_>>()
-    } {
-        a.remote.share(h)?;
-    }
-    share(&a, &server, "A", false)?;
-    share(&a, &server, "B", false)?;
+    share(&a, &server, "A")?;
+    let (mut b, _out) = Client::member(&server, "b")?;
+    share_all(&a, &server)?;
+    withdraw(&a, &server, "A")?;
+    withdraw(&a, &server, "B")?;
     b.sync()?;
     let tree = b.tree_text("");
     assert!(
@@ -132,8 +146,8 @@ fn a_name_taken_at_the_top_leaves_the_other_item_out() -> R {
         "{tree:?}"
     );
 
-    share(&a, &server, "A", true)?;
-    share(&a, &server, "B", true)?;
+    share(&a, &server, "A")?;
+    share(&a, &server, "B")?;
     b.sync()?;
     assert_eq!(
         b.tree_text(""),
@@ -154,18 +168,12 @@ fn a_folder_no_longer_shared_leaves_with_a_file_whose_name_is_taken_at_the_top()
     a.write("D/a.txt", "in D")?;
     a.write("a.txt", "top")?;
     a.sync()?;
-    for h in {
-        let s = server.lock().map_err(|_| "poisoned")?;
-        s.live().map(|h| h.file_id).collect::<Vec<_>>()
-    } {
-        a.remote.share(h)?;
-    }
-    let out = tempfile::tempdir()?;
-    let mut b = Client::member(&server, "b", out.path())?;
+    share_all(&a, &server)?;
+    let (mut b, _out) = Client::member(&server, "b")?;
     b.sync()?;
     assert_eq!(b.tree_text(""), ["D/", "D/a.txt = in D", "a.txt = top"]);
 
-    share(&a, &server, "D", false)?;
+    withdraw(&a, &server, "D")?;
     for _ in 0..3 {
         let report = b.engine.sync_once("2026-10-08")?;
         assert_eq!(b.tree_text(""), ["a.txt = top"]);
@@ -180,7 +188,7 @@ fn a_folder_no_longer_shared_leaves_with_a_file_whose_name_is_taken_at_the_top()
         assert!(report.moved_out.is_empty(), "{report:?}");
     }
 
-    share(&a, &server, "D", true)?;
+    share(&a, &server, "D")?;
     b.sync()?;
     assert_eq!(b.tree_text(""), ["D/", "D/a.txt = in D", "a.txt = top"]);
     Ok(())
@@ -196,12 +204,11 @@ fn a_member_set_up_again_adopts_a_file_at_the_top() -> R {
     a.write("Docs/report.txt", "quarterly")?;
     a.write("Pics/cat.jpg", "meow")?;
     a.sync()?;
-    share(&a, &server, "report.txt", true)?;
-    share(&a, &server, "Pics", true)?;
-    share(&a, &server, "cat.jpg", true)?;
+    share(&a, &server, "report.txt")?;
+    share(&a, &server, "Pics")?;
+    share(&a, &server, "cat.jpg")?;
 
-    let out = tempfile::tempdir()?;
-    let mut b = Client::member(&server, "b", out.path())?;
+    let (mut b, out) = Client::member(&server, "b")?;
     b.write("report.txt", "quarterly")?;
     b.write("Pics/cat.jpg", "meow")?;
     let report = b.sync()?;
@@ -212,7 +219,7 @@ fn a_member_set_up_again_adopts_a_file_at_the_top() -> R {
         ["Pics/", "Pics/cat.jpg = meow", "report.txt = quarterly"]
     );
     assert!(b.engine.sync_once("2026-10-08")?.is_idle());
-    assert!(out.path().read_dir()?.next().is_none(), "nothing moved out");
+    nothing_moved_out(&out)?;
     Ok(())
 }
 
@@ -226,16 +233,15 @@ fn a_delete_by_the_sharer_is_final_and_a_withdrawal_is_not() -> R {
     a.write("gone.txt", "gone")?;
     a.write("held.txt", "held")?;
     a.sync()?;
-    share(&a, &server, "gone.txt", true)?;
-    share(&a, &server, "held.txt", true)?;
-    let out = tempfile::tempdir()?;
-    let mut b = Client::member(&server, "b", out.path())?;
+    share(&a, &server, "gone.txt")?;
+    share(&a, &server, "held.txt")?;
+    let (mut b, out) = Client::member(&server, "b")?;
     b.sync()?;
     assert_eq!(b.tree_text(""), ["gone.txt = gone", "held.txt = held"]);
 
     let held = common::header_named(&server, "held.txt").file_id;
     let gone = common::header_named(&server, "gone.txt").at();
-    share(&a, &server, "held.txt", false)?;
+    withdraw(&a, &server, "held.txt")?;
     {
         let mut s = server.lock().map_err(|_| "poisoned")?;
         s.delete(gone.file_id, gone.version)?;
@@ -245,7 +251,7 @@ fn a_delete_by_the_sharer_is_final_and_a_withdrawal_is_not() -> R {
     assert!(b.tree_text("").is_empty(), "{:?}", b.tree_text(""));
     assert!(b.engine.db().read(|s| s.file_gone(gone.file_id))?);
     assert!(!b.engine.db().read(|s| s.file_gone(held))?);
-    assert!(out.path().read_dir()?.next().is_none(), "nothing moved out");
+    nothing_moved_out(&out)?;
     Ok(())
 }
 
@@ -260,14 +266,8 @@ fn a_folder_the_sharer_deletes_takes_along_what_is_shared_in_it() -> R {
     a.write("Docs/report.txt", "quarterly")?;
     a.write("keep.txt", "keep")?;
     a.sync()?;
-    for h in {
-        let s = server.lock().map_err(|_| "poisoned")?;
-        s.live().map(|h| h.file_id).collect::<Vec<_>>()
-    } {
-        a.remote.share(h)?;
-    }
-    let out = tempfile::tempdir()?;
-    let mut b = Client::member(&server, "b", out.path())?;
+    share_all(&a, &server)?;
+    let (mut b, out) = Client::member(&server, "b")?;
     b.sync()?;
     assert_eq!(
         b.tree_text(""),
@@ -279,16 +279,16 @@ fn a_folder_the_sharer_deletes_takes_along_what_is_shared_in_it() -> R {
     assert_eq!(b.tree_text(""), ["keep.txt = keep"]);
     assert!(b.engine.sync_once("2026-10-08")?.is_idle());
 
-    share(&a, &server, "Docs", false)?;
+    withdraw(&a, &server, "Docs")?;
     b.sync()?;
     assert_eq!(
         b.tree_text(""),
         ["keep.txt = keep", "report.txt = quarterly"]
     );
 
-    share(&a, &server, "Docs", true)?;
+    share(&a, &server, "Docs")?;
     b.sync()?;
     assert_eq!(b.tree_text(""), ["keep.txt = keep"]);
-    assert!(out.path().read_dir()?.next().is_none(), "nothing moved out");
+    nothing_moved_out(&out)?;
     Ok(())
 }

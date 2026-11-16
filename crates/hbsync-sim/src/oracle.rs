@@ -493,7 +493,8 @@ impl Sim {
             // on disk before one synced there and parked since, its delete planned when the
             // other came: put back on the drive, it waits as it is), and the others wait as
             // they are here, with what is in them, for as long (§13).
-            for v in synced.violations().into_iter().filter(|_| client.member) {
+            let clashes = client.member.then(|| synced.violations());
+            for v in clashes.into_iter().flatten() {
                 let Violation::DuplicateName { nodes, .. } = v else {
                     continue;
                 };
@@ -515,20 +516,8 @@ impl Sim {
                     ));
                 }
                 for n in waiting {
-                    let mut inside = below(&visible, n);
-                    inside.extend(below(&synced, n));
-                    inside.extend(below(&base, n));
-                    for m in inside {
-                        synced.remove(m);
-                        base.remove(m);
-                        if let Some(blob) = visible
-                            .remove(m)
-                            .and_then(|s| s.content)
-                            .and_then(|c| ledger.blobs.get(&c.hash))
-                        {
-                            kept_here.insert(*blob);
-                        }
-                    }
+                    let blobs = (&ledger.blobs, &mut kept_here);
+                    set_aside(n, &mut visible, &mut synced, &mut base, blobs);
                 }
             }
             // A parked item waits for its name, which a folder held back may keep.
@@ -543,21 +532,8 @@ impl Sim {
                 .chain(parked)
                 .collect();
             for n in nodes {
-                let mut inside = below(&visible, n);
-                inside.extend(below(&synced, n));
-                inside.extend(below(&base, n));
-                for m in inside {
-                    refused_here.insert(m);
-                    synced.remove(m);
-                    base.remove(m);
-                    if let Some(blob) = visible
-                        .remove(m)
-                        .and_then(|s| s.content)
-                        .and_then(|c| ledger.blobs.get(&c.hash))
-                    {
-                        kept_here.insert(*blob);
-                    }
-                }
+                let blobs = (&ledger.blobs, &mut kept_here);
+                refused_here.extend(set_aside(n, &mut visible, &mut synced, &mut base, blobs));
             }
             // The tags as the client holds them, on both sides.
             // Read-only (§13), an executable bit its user changed here stays as it is.
@@ -1520,6 +1496,30 @@ fn up_from(tree: &Tree, node: NodeId) -> Vec<NodeId> {
 
 /// `node` and everything below it in `tree`, each once: a tree a refusal left half moved may
 /// hold a cycle (which the checks report), and a walk must still end.
+/// `node` with all in it stays on its client as it is there: out of what the client shows
+/// (`visible`), is to have (`synced`) and had (`base`), each file's bytes kept (`blobs`: the
+/// ledger's, and those kept). The nodes set aside.
+fn set_aside(
+    node: NodeId,
+    visible: &mut Tree,
+    synced: &mut Tree,
+    base: &mut Tree,
+    (blobs, kept): (&HashMap<ContentHash, u64>, &mut BTreeSet<u64>),
+) -> Vec<NodeId> {
+    let mut inside = below(visible, node);
+    inside.extend(below(synced, node));
+    inside.extend(below(base, node));
+    for &n in &inside {
+        synced.remove(n);
+        base.remove(n);
+        let content = visible.remove(n).and_then(|s| s.content);
+        if let Some(blob) = content.and_then(|c| blobs.get(&c.hash)) {
+            kept.insert(*blob);
+        }
+    }
+    inside
+}
+
 fn below(tree: &Tree, node: NodeId) -> Vec<NodeId> {
     let mut seen = BTreeSet::new();
     let mut stack = vec![node];
