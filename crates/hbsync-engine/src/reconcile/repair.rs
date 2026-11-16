@@ -1,9 +1,12 @@
 //! Step 3: the merged tree made whole again: orphans, cycles, duplicate names (§6).
 
+use std::convert::Infallible;
+
 use super::*;
 use hbsync_types::RECOVERED_NAME;
 
 use crate::tree::{NUMBERED_TRIES, first_free_by, numbered_names};
+use crate::walk::End;
 
 /// What becomes of a node whose folder isn't in the merged tree as a folder
 /// ([`Reconciler::fix_orphans`]).
@@ -22,6 +25,8 @@ enum Parent {
     /// or it is in a folder in Recently deleted at a place it filters. Left as it is, for a
     /// device that syncs that place: brought in, it would read as an item this device stopped
     /// syncing, and leave the drive; or another device's folder would stay deleted without it.
+    /// Or its folder is known from before only, at a place this device filters since: left for
+    /// this plan, which forgets the folder (it stays dirty, and is planned again after it).
     Leave,
 }
 
@@ -189,26 +194,17 @@ impl Reconciler<'_> {
     /// from before only, which no mask covers, and the item kept there is this device's own.
     /// A place not known down from the top counts as synced: judged as before.
     fn syncs_place(&self, state: &NodeState) -> bool {
-        let mut names = vec![state.name.clone()];
-        let mut at = state.parent;
-        // Bounded: a cycle of known places ends at a folder met again.
-        let mut seen = HashSet::new();
-        while !at.is_root() {
-            let known = match self.merged.get(at) {
-                Some(known) => Some(known.clone()),
-                None => self.known_state(at),
-            };
-            let Some(known) = known.filter(|_| seen.insert(at)) else {
-                return true;
-            };
-            names.push(known.name);
-            at = known.parent;
+        let Ok(up) = crate::walk::up::<_, Infallible>(state.parent, |at| {
+            let known = self.merged.get(at).cloned();
+            let known = known.or_else(|| self.known_state(at));
+            Ok(known.map(|known| (known.name, known.parent)))
+        });
+        if up.end != End::Top {
+            return true;
         }
-        names.reverse();
+        let names = up.items.iter().rev().chain([&state.name]);
         let filter = self.masking.filter;
-        filter
-            .names(names.iter().map(String::as_str), true)
-            .is_sync()
+        filter.names(names.map(String::as_str), true).is_sync()
     }
 
     /// Whether this device holds anything of `node` or below it here (a local item, a base).
@@ -375,8 +371,8 @@ impl Reconciler<'_> {
                 // Nor is its folder made again where this device knows it from before only, at
                 // a place it filters since (§10): the folder would take over the item this
                 // device keeps to itself, and the node would come down into it and leave the
-                // drive with it. Left for this plan, which forgets the folder: the node is an
-                // orphan like any other then.
+                // drive with it. Left for this plan, which forgets the folder: still dirty, the
+                // node is planned again after it, an orphan like any other then.
                 Parent::Folder(state) if !self.holds_any(node) && !self.syncs_place(&state) => {
                     Parent::Leave
                 }

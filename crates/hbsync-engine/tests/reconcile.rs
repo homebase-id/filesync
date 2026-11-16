@@ -1444,6 +1444,21 @@ fn makes(plan: &hbsync_engine::Plan) -> bool {
         .any(|kind| ["mkdir", "create", "download"].contains(kind))
 }
 
+/// The folders `folders` (each in the one before it, the first at the top) synced here and gone
+/// since on both sides (deleted for good on the drive; here the scanner no longer reports them,
+/// or they were deleted), with a file another device added (`g`) live in the last.
+fn kept_of_folders_gone(mut w: World, folders: &[(NodeId, &str)], g: NodeId) -> World {
+    w.input.remote_complete = true;
+    let mut parent = ROOT;
+    for &(id, name) in folders {
+        w.synced(id, folder(parent, name));
+        w.local(id, None).remote(id, None);
+        parent = id;
+    }
+    w.remote(g, Some(file(parent, "new.o", "n")));
+    w
+}
+
 /// A folder a new rule hides, deleted for good on the drive with a file another device added
 /// still in it (the server kept that): this device knows the folder from before only, and
 /// doesn't make it again at a place it filters, over the item it keeps to itself (which the
@@ -1452,23 +1467,13 @@ fn makes(plan: &hbsync_engine::Plan) -> bool {
 #[test]
 fn a_folder_a_new_rule_hides_isnt_made_again_for_what_the_drive_kept_of_it() {
     let [b, g] = ids(2)[..] else { unreachable!() };
-    let world = |filter| {
-        let mut w = World {
-            filter,
-            ..World::default()
-        };
-        w.input.remote_complete = true;
-        w.synced(b, folder(ROOT, "build"));
-        w.local(b, None).remote(b, None);
-        w.remote(g, Some(file(b, "new.o", "n")));
-        w
-    };
-    let plan = world(ignoring("build/\n")).plan();
+    let world = |w| kept_of_folders_gone(w, &[(b, "build")], g);
+    let plan = world(World::ignoring_build()).plan();
     assert_eq!(kinds(&plan.ops), ["settle"], "{plan:?}");
     assert_eq!(plan.ops[0].node(), b);
     assert!(plan.conflicts.is_empty(), "{plan:?}");
     // Without the rule, the file keeps its folder: made again.
-    assert!(makes(&world(hbsync_local::Filter::default()).plan()));
+    assert!(makes(&world(World::default()).plan()));
 }
 
 /// As above, with the folder below one that went with it, both known from before only: the
@@ -1478,23 +1483,14 @@ fn a_folder_below_one_a_new_rule_hides_isnt_made_again_either() {
     let [p, b, g] = ids(3)[..] else {
         unreachable!()
     };
-    let world = |filter| {
-        let mut w = World {
-            filter,
-            ..World::default()
-        };
-        w.input.remote_complete = true;
-        w.synced(p, folder(ROOT, "build"));
-        w.synced(b, folder(p, "obj"));
-        w.local(p, None).remote(p, None);
-        w.local(b, None).remote(b, None);
-        w.remote(g, Some(file(b, "new.o", "n")));
-        w
-    };
-    let plan = world(ignoring("build/\n")).plan();
+    let world = |w| kept_of_folders_gone(w, &[(p, "build"), (b, "obj")], g);
+    let plan = world(World::ignoring_build()).plan();
     assert_eq!(kinds(&plan.ops), ["settle", "settle"], "{plan:?}");
+    let mut settled: Vec<NodeId> = plan.ops.iter().map(|op| op.node()).collect();
+    settled.sort();
+    assert_eq!(settled, [p.min(b), p.max(b)]);
     assert!(plan.conflicts.is_empty(), "{plan:?}");
-    assert!(makes(&world(hbsync_local::Filter::default()).plan()));
+    assert!(makes(&world(World::default()).plan()));
 }
 
 #[test]
