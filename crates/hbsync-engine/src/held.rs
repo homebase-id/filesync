@@ -19,6 +19,7 @@ use hbsync_types::{NodeId, NodeKind};
 
 use crate::along::by_removal;
 use crate::plan::{Input, Op, Plan, Removed};
+use crate::walk::{self, End};
 
 /// What of `plan`, made for the dirty nodes `page`, is held and leaves the dirty set: the held
 /// deletes whose node is in `page`, and the nodes of `page` each of them covers (its node, and
@@ -161,7 +162,8 @@ pub fn files<'p>(plan: &Plan, ops: impl IntoIterator<Item = &'p Op>) -> (usize, 
 /// Whether `input` (a plan's view) holds any of `out`, the nodes out of the dirty set, or plans
 /// one dirty again (whatever is left of it): what is planned from it may depend on them, so
 /// they are planned with it. A view that holds none of them plans as one with them dirty would
-/// (their deletes held, counted through [`crate::Guarding::held`]).
+/// (their deletes held, counted through [`crate::Guarding::held`]), but for what [`reaches`]
+/// adds.
 pub fn touches(input: &Input, out: &HashSet<NodeId>) -> bool {
     let has = |n: &NodeId| {
         input.dirty.contains(n)
@@ -211,26 +213,21 @@ pub fn reaches<E>(
     }
     let in_view = |n: NodeId| input.remote.contains(n) || input.removed.contains_key(&n);
     // Of each node outside the view: where its folders enter the view and the latest write on
-    // the way there, its own too (`None`: nowhere, or on its way up now: a cycle ends there).
+    // the way there, its own too (`None`: nowhere).
     let mut ways: HashMap<NodeId, Option<(NodeId, Option<i64>)>> = HashMap::new();
     for &node in out {
-        let mut up = Vec::new();
-        let mut at = node;
-        let mut way = loop {
-            if in_view(at) {
-                break Some((at, None));
-            }
-            if let Some(known) = ways.get(&at) {
-                break *known;
-            }
-            let Some((parent, written)) = live(at)? else {
-                break None;
-            };
-            ways.insert(at, None);
-            up.push((at, written));
-            at = parent;
+        let up = walk::up(node, |at| {
+            Ok(match in_view(at) || ways.contains_key(&at) {
+                true => None,
+                false => live(at)?.map(|(parent, written)| ((at, written), parent)),
+            })
+        })?;
+        let mut way = match up.end {
+            End::At(at) if in_view(at) => Some((at, None)),
+            End::At(at) => ways.get(&at).copied().flatten(),
+            End::Top | End::Cycle | End::Deep => None,
         };
-        for (n, written) in up.into_iter().rev() {
+        for (n, written) in up.items.into_iter().rev() {
             // (A time not known counts as before any removal, and `None` orders so.)
             way = way.map(|(enters, latest)| (enters, latest.max(written)));
             ways.insert(n, way);
@@ -539,7 +536,7 @@ pub fn put_back_plan<S: Sides>(nodes: &[NodeId], sides: &S) -> Result<PutBack, S
     let mut items: Vec<(usize, NodeId)> = items
         .into_iter()
         .map(|item| {
-            let up = crate::walk::up(item, |at| Ok(sides.synced(at)?.map(|p| ((), p))))?;
+            let up = walk::up(item, |at| Ok(sides.synced(at)?.map(|p| ((), p))))?;
             Ok((up.items.len(), item))
         })
         .collect::<Result<_, S::Error>>()?;
@@ -551,6 +548,8 @@ pub fn put_back_plan<S: Sides>(nodes: &[NodeId], sides: &S) -> Result<PutBack, S
 #[cfg(test)]
 mod tests {
     use std::convert::Infallible;
+
+    use hbsync_types::NodeState;
 
     use super::*;
 
@@ -746,7 +745,6 @@ mod tests {
         out: NodeId,
         live: &[(NodeId, NodeId, Option<i64>)],
     ) -> (bool, usize) {
-        use hbsync_types::NodeState;
         let mut input = Input::default();
         let state = NodeState::folder(NodeId::ROOT, "d");
         input.removed.insert(d, Removed { at: 100, state });
@@ -791,7 +789,7 @@ mod tests {
         let top = (a, NodeId::ROOT);
         assert_eq!(reach(d, &[top], late, &[(late, a, Some(200))]), (false, 1));
         let elsewhere = [(late, b, Some(200)), (b, NodeId::ROOT, Some(200))];
-        assert_eq!(reach(d, &[(a, d)], late, &elsewhere), (false, 3));
+        assert_eq!(reach(d, &[(a, d)], late, &elsewhere), (false, 2));
         assert_eq!(reach(d, &[(a, d)], late, &[]), (false, 1));
         // Folders in each other (a broken mirror): the walk ends.
         let cycle = [(late, a, Some(200)), (a, b, Some(200)), (b, a, Some(200))];
@@ -802,7 +800,6 @@ mod tests {
     /// ([`touches`]), and reads nothing: a file there takes nothing along.
     #[test]
     fn a_view_without_a_removed_folder_reads_nothing_of_held_deletes() {
-        use hbsync_types::NodeState;
         let (f, a, late) = (NodeId::new(), NodeId::new(), NodeId::new());
         let mut input = Input::default();
         input.remote.insert(a, NodeState::folder(f, "a"));

@@ -4994,66 +4994,52 @@ fn an_open_removal_counts_what_it_took_along() -> R {
     Ok(())
 }
 
-/// A folder removed on the drive (`d`, at 100) with a live folder in it (`d/a`, written
-/// before) and in that a file written after (`d/a/f`): synced here, its item here gone and its
-/// removal from the drive held, out of the dirty set, so only the base and the mirror have it.
-/// The view of the removed folder alone doesn't hold the file, which keeps `a` and so brings
-/// `d` back (§6.3): its plan reaches the held delete all the same, read from the mirror
-/// ([`view::reaches_held`]), and the engine plans again with it (seed ed44ce74). A file written
-/// by the removal went with it, and is left held.
+/// Folder `r` removed on the drive with live folder `g` in it and in that the synced file,
+/// gone here, its removal from the drive held, out of the dirty set: only the base and the
+/// mirror have it. Written after the removal it keeps `g` and so brings `r` back (§6.3): the
+/// view of `r` alone doesn't hold it, and its plan reaches the held delete all the same, read
+/// from the mirror ([`view::reaches_held`]), so the engine plans again with it (seed
+/// ed44ce74). A file written by the removal went with it, and is left held.
 #[test]
 fn the_view_of_a_removed_folder_reaches_what_was_written_below_it_since() -> R {
     let mut h = Harness::new()?;
-    let (d, a, late) = (NodeId::new(), NodeId::new(), NodeId::new());
-    h.local_folder("d", d)?;
-    h.local_folder("d/a", a)?;
+    let (r, g, file) = a_removal_took_along_g(&mut h)?;
     let f_c = h.content(b"f");
-    let file_at = |at| mirror_row(late, a, NodeKind::File, "f", f_c, Some(at));
-    h.db.write(|s| {
-        for (node, state) in [
-            (d, NodeState::folder(NodeId::ROOT, "d")),
-            (a, NodeState::folder(d, "a")),
-            (late, NodeState::file(a, "f", f_c)),
-        ] {
-            s.folder()
-                .put_base(&BaseRow::new(node, state, some_version()))?;
-        }
-        s.account().put_removed(&RemovedRow {
-            row: mirror_row(d, NodeId::ROOT, NodeKind::Folder, "d", f_c, Some(10)),
-            removed_at: Some(100),
-        })?;
-        s.account()
-            .put_mirror(&mirror_row(a, d, NodeKind::Folder, "a", f_c, Some(50)))?;
-        s.account().put_mirror(&file_at(200))?;
-        // The removed folder alone dirty: the file's removal is held, out of the dirty set.
-        s.folder().clear_dirty(a)?;
-        s.folder().mark_dirty(late)?;
-        let mark = s.dirty_mark(late)?.expect("marked");
-        s.folder().hold_delete(mark)?;
-        s.folder().mark_dirty(d)
-    })?;
-    assert_eq!(h.db.read(|s| s.held_delete_count())?, 1);
+    // Written after the removal (at 10), or by it.
+    let written = |h: &mut Harness, at| {
+        h.db.write(|s| {
+            s.account()
+                .put_mirror(&mirror_row(file, g, NodeKind::File, "f", f_c, Some(at)))?;
+            s.folder().delete_local(file)?;
+            s.folder().mark_dirty(file)?;
+            let mark = s.dirty_mark(file)?.expect("marked");
+            s.folder().hold_delete(mark)?;
+            s.folder().clear_dirty(g)?;
+            s.folder().mark_dirty(r)
+        })
+    };
     let ctx = FolderCtx {
         scope: Arc::new(Scope::of(NodeId::ROOT)),
         ..h.folder.clone()
     };
     let opts = crate::plan::Options::default();
-    let out = std::collections::HashSet::from([late]);
+    let out = std::collections::HashSet::from([file]);
     let reached = |db: &mut StateDb| -> Result<bool, StateError> {
         let mut reached = false;
-        view::plan_narrow(db, &[d], &ctx, |input, db| {
+        view::plan_narrow(db, &[r], &ctx, |input, db| {
             assert!(!crate::held::touches(input, &out), "not in the view");
             reached |= view::reaches_held(db, input, &out).expect("read");
             crate::reconcile::reconcile(input, &opts, ctx.masking())
         })?;
         Ok(reached)
     };
+    written(&mut h, 20)?;
+    assert_eq!(h.db.read(|s| s.held_delete_count())?, 1);
     assert!(
         reached(&mut h.db)?,
-        "written after the removal: it keeps `a`"
+        "written after the removal: it keeps `g`"
     );
-    h.db.write(|s| s.account().put_mirror(&file_at(100)))?;
-    h.db.write(|s| s.folder().clear_dirty(late))?;
+    written(&mut h, 10)?;
     assert!(!reached(&mut h.db)?, "written by the removal: taken along");
     Ok(())
 }
