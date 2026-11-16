@@ -43,7 +43,7 @@ struct HeldOut {
     /// changes them marks a node of theirs dirty, and the plan that reaches it plans them all
     /// again.
     pending: Option<(u64, u64)>,
-    /// A plan's view reached one of `nodes` ([`held::touches`]).
+    /// A plan's view reached one of `nodes` ([`held::reaches`]).
     reached: bool,
     /// To plan again at the next sync: an answer came, or this engine is new.
     plan_again: bool,
@@ -283,7 +283,7 @@ impl HeldDeletes {
         &self.out.nodes
     }
 
-    /// A plan's view reached `reached` of them ([`held::touches`]).
+    /// A plan's view reached `reached` of them ([`held::reaches`]).
     pub(crate) fn reached(&mut self, reached: bool) {
         self.out.reached |= reached;
     }

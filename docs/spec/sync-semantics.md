@@ -523,7 +523,14 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   with every plan, so a later delete is judged with them. They are planned again, all of them,
   when a plan's view reaches one of them (a change in, above or beside them), on an answer, at
   each start, and once the guard would let this device's own removals through (more files
-  synced since). What else stays dirty (refused, failing, waiting for a hash) is planned alone
+  synced since). Above them counts through a folder's removal too: a held removal from the
+  drive has no item here, so no view holds it unless it is dirty, yet written after the removal
+  of a folder above it, it keeps the live folders between them (§6.3). A view with a folder in
+  Recently deleted therefore reaches a held delete that is live below it and was written after
+  its removal, or is in a folder outside the view that was (read from the mirror, up from each
+  held delete to the view; cost: a read per held delete and per folder above it outside the
+  view, for a plan whose view has a folder in Recently deleted, none for any other). What else
+  stays dirty (refused, failing, waiting for a hash) is planned alone
   once more at the end of that sync: if its view reaches them, or it is more than 1,000
   nodes, they stay dirty, planned every sync as before. Cost: taking them out writes a row and clears a
   mark per node, putting them back writes a mark and deletes a row per node (a change that

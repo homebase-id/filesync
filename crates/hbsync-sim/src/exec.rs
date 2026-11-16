@@ -755,7 +755,8 @@ impl Sim {
         // the page the run is sent to rename (`pages::losers_sent`) is marked.
         if self.faults.page_size.is_some() {
             let pages = client.pages.get_mut();
-            // Whether the view reached the held deletes out of the dirty set (`held::touches`).
+            // Whether the view reached the held deletes out of the dirty set (`held::reaches`:
+            // this view is the trees whole, with nothing of the drive outside it to read).
             let reached = !pages.out.is_empty() && {
                 let out: HashSet<NodeId> = pages.out.iter().copied().collect();
                 hbsync_engine::held::touches(&input, &out)

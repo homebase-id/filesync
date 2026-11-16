@@ -21,6 +21,7 @@ use hbsync_platform::{Os, RelPath, synced_executable};
 use hbsync_state::{BaseRow, LocalRow, MirrorRow, ReadTx, StateDb, StateError};
 use hbsync_types::{ContentHash, FileContent, NodeId, NodeKind, NodeState, RECOVERED_NAME, Tags};
 
+use crate::along::by_removal;
 use crate::folder::FolderCtx;
 use crate::plan::{Coverage, Plan};
 use crate::reconcile::{BaseExtra, Input, Removed};
@@ -267,6 +268,25 @@ pub fn plan_narrow(
             return Ok(plan);
         }
     }
+}
+
+/// Whether a plan from the view `input` may depend on `out`, the held deletes out of the dirty
+/// set ([`crate::held::reaches`]), with what the mirror in `db` has of the drive outside the
+/// view. The engine's plan asks so, and the simulator's check of it. Reads nothing while no
+/// delete is out.
+pub fn reaches_held(
+    db: &mut StateDb,
+    input: &Input,
+    out: &HashSet<NodeId>,
+) -> Result<bool, StateError> {
+    if out.is_empty() {
+        return Ok(false);
+    }
+    db.read(|s| {
+        crate::held::reaches(input, out, |n| {
+            Ok(s.get_mirror(n)?.map(|m| (m.parent, m.changed_at)))
+        })
+    })
 }
 
 /// Past this many names to look up in one folder, it is listed whole: one query instead.
@@ -668,9 +688,8 @@ pub(crate) fn gone_on_drive(
         return Ok(false);
     };
     let removal = removed.time();
-    let by_removal = |at: Option<i64>| at.is_none_or(|at| at <= removal);
     let chain = || std::iter::once(&row).chain(&up.items);
-    if removed.row.kind != NodeKind::Folder || !chain().all(|m| by_removal(m.changed_at)) {
+    if removed.row.kind != NodeKind::Folder || !chain().all(|m| by_removal(m.changed_at, removal)) {
         return Ok(false);
     }
     let mut live: Vec<crate::along::Live> = chain().map(|m| (m.node, m.parent, m.kind)).collect();
@@ -683,7 +702,7 @@ pub(crate) fn gone_on_drive(
     };
     while let Some(parent) = below.pop() {
         for child in s.mirror_children(parent)? {
-            if !by_removal(child.changed_at) {
+            if !by_removal(child.changed_at, removal) {
                 return Ok(false);
             }
             if changed.insert(child.node, child.changed_at).is_none() {
