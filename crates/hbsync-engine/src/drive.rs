@@ -201,12 +201,19 @@ impl Drive {
         identity: &str,
         remote: Arc<dyn Remote>,
     ) -> Result<Arc<Drive>, RootError> {
-        Ok(Drive::new(SyncRoot::open_account(db, identity)?, remote))
+        Ok(Drive::new(SyncRoot::open_account(db, identity)?, remote)?)
     }
 
-    /// The drive of the account whose state DB `account` is ([`StateDb::open_account`]).
-    pub fn new(account: StateDb, remote: Arc<dyn Remote>) -> Arc<Drive> {
-        Arc::new(Drive {
+    /// The drive of the account whose state DB `account` is ([`StateDb::open_account`]). The
+    /// DB is told whose drive `remote` is ([`Remote::shared`]) where it doesn't say so yet:
+    /// read first, so a DB that does is opened without writing. Refused where the DB holds
+    /// the other kind of drive already (`set_shared`).
+    pub fn new(mut account: StateDb, remote: Arc<dyn Remote>) -> Result<Arc<Drive>, StateError> {
+        let shared = remote.shared();
+        if account.read(|s| s.shared())? != shared {
+            account.write(|s| s.account().set_shared(shared))?;
+        }
+        Ok(Arc::new(Drive {
             account: Mutex::new(account),
             remote,
             asked: AtomicU64::new(0),
@@ -218,7 +225,7 @@ impl Drive {
             freshness: Freshness::default(),
             server_time: AtomicI64::new(0),
             reread: Mutex::default(),
-        })
+        }))
     }
 
     /// The notifications connected: the mark of this connection, for

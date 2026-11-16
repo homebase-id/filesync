@@ -381,6 +381,10 @@ pub struct ReadTx<'a> {
     /// Whether the store has no row it can't read ([`ReadTx::unreadable_nodes`]), once read: a
     /// feed page's rows then clear none (mostly so).
     no_unreadable: std::cell::Cell<Option<bool>>,
+    /// Whether the DB is of another identity's drive ([`ReadTx::shared`]), once read.
+    shared: std::cell::Cell<Option<bool>>,
+    /// [`ReadTx::lacking`], once worked out; a write to the picture forgets it.
+    lacking: std::cell::RefCell<Option<std::rc::Rc<[i64]>>>,
 }
 
 /// A folder this account syncs here.
@@ -544,6 +548,8 @@ impl<'a> ReadTx<'a> {
             local_paths: Default::default(),
             removed_seq: std::cell::Cell::new(None),
             no_unreadable: std::cell::Cell::new(None),
+            shared: std::cell::Cell::new(None),
+            lacking: Default::default(),
             sqls: Default::default(),
         }
     }

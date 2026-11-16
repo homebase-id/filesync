@@ -2867,6 +2867,30 @@ fn an_old_version_of_a_parked_node_comes_back_beside_its_name() -> R {
     Ok(())
 }
 
+/// The view names a parked node as parked, at the place it belongs: beside the item on that
+/// name, which the clash rule of a read-only folder (§13) mustn't take it for.
+#[test]
+fn the_view_names_a_parked_node_where_it_belongs() -> R {
+    let mut h = Harness::new()?;
+    let (node, other) = (NodeId::new(), NodeId::new());
+    let parked = hbsync_local::layout::parked_name(node);
+    h.local_file(&parked, node, b"A")?;
+    h.local_file("f", other, b"B")?;
+    let original = RelPath::new("f")?;
+    h.db.write(|s| s.folder().put_parked(node, &original))?;
+    let folder = FolderCtx {
+        scope: Arc::new(Scope::of(NodeId::ROOT)),
+        ..h.folder.clone()
+    };
+    let input =
+        h.db.read(|s| view::build_input(s, &[node, other], &folder))?;
+    let name = |n| input.local.get(n).map(|s| s.name.clone());
+    assert_eq!(name(node).as_deref(), Some("f"));
+    assert_eq!(name(other).as_deref(), Some("f"));
+    assert_eq!(input.parked.iter().collect::<Vec<_>>(), [&node]);
+    Ok(())
+}
+
 /// As above, with every numbered name beside the one the parked node gets back taken: the
 /// written-to old version stays aside, and is told (`AsideOutcome::unknown`), not left for the
 /// user to find in `.hbsync/aside`.

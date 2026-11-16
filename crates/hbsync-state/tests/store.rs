@@ -732,6 +732,365 @@ mod mirror {
         }
     }
 
+    /// Another identity's drive: a node whose folder the picture doesn't have reads at the top,
+    /// its row keeping the drive's folder; the folder coming (live or into Recently deleted)
+    /// takes it in, and the folder's share withdrawn leaves it at the top again, each time
+    /// planned again. A share withdrawn is out of the picture and not gone: given again, it
+    /// is back. This identity's own drive reads as it is.
+    #[test]
+    fn a_shared_drive_has_folderless_nodes_at_the_top() -> R {
+        let nil = VersionTag(Uuid::nil());
+        let (docs, sub) = (NodeId::new(), NodeId::new());
+        let top = row(NodeId::new(), NodeId::ROOT, "top.txt", None);
+        let report = row(NodeId::new(), docs, "report.txt", None);
+        let deep = row(NodeId::new(), sub, "deep.txt", None);
+        let sub_row = row(sub, docs, "sub", None);
+        let docs_row = row(docs, NodeId::ROOT, "Docs", None);
+        let rows = [&top, &report, &deep, &sub_row];
+        let names = |db: &mut StateDb, parent| {
+            db.read(|s| {
+                let mut names: Vec<_> = s
+                    .mirror_children(parent)?
+                    .into_iter()
+                    .map(|r| {
+                        assert_eq!(r.parent, parent, "{}", r.name);
+                        r.name
+                    })
+                    .collect();
+                names.sort();
+                Ok(names)
+            })
+        };
+        let dirty = |db: &mut StateDb| {
+            db.write(|s| {
+                let mut dirty = Vec::new();
+                for r in [&top, &report, &deep, &sub_row, &docs_row] {
+                    if s.is_dirty(r.node)? {
+                        dirty.push(r.name.clone());
+                    }
+                    s.folder().clear_dirty(r.node)?;
+                }
+                Ok(dirty)
+            })
+        };
+
+        let mut own = StateDb::open_in_memory()?;
+        own.write(|s| rows.iter().try_for_each(|r| s.account().put_live(r)))?;
+        assert!(!own.read(|s| s.shared())?);
+        assert_eq!(names(&mut own, NodeId::ROOT)?, ["top.txt"]);
+        assert_eq!(names(&mut own, docs)?, ["report.txt", "sub"]);
+
+        let mut db = StateDb::open_in_memory()?;
+        db.write(|s| {
+            s.account().set_shared(true)?;
+            rows.iter().try_for_each(|r| s.account().put_live(r))
+        })?;
+        assert!(db.read(|s| s.shared())?);
+        assert_eq!(
+            names(&mut db, NodeId::ROOT)?,
+            ["report.txt", "sub", "top.txt"]
+        );
+        assert_eq!(names(&mut db, sub)?, ["deep.txt"]);
+        assert!(names(&mut db, docs)?.is_empty(), "not a folder here");
+        db.read(|s| {
+            let key = |n: &str| hbsync_namemap::sibling_hash(n);
+            assert_eq!(
+                s.get_mirror(report.node)?.map(|r| r.parent),
+                Some(NodeId::ROOT)
+            );
+            assert_eq!(
+                s.mirror_by_file(report.file_id)?.map(|r| r.parent),
+                Some(NodeId::ROOT)
+            );
+            let named = s.mirror_named(NodeId::ROOT, key("report.txt"))?;
+            assert_eq!(
+                named.iter().map(|r| r.node).collect::<Vec<_>>(),
+                [report.node]
+            );
+            assert!(s.mirror_named(NodeId::ROOT, key("deep.txt"))?.is_empty());
+            assert!(s.mirror_named(docs, key("report.txt"))?.is_empty());
+            Ok(())
+        })?;
+        dirty(&mut db)?;
+
+        // The folder is shared: what the mirror holds in it is in it.
+        db.write(|s| s.account().put_live(&docs_row))?;
+        assert_eq!(names(&mut db, NodeId::ROOT)?, ["Docs", "top.txt"]);
+        assert_eq!(names(&mut db, docs)?, ["report.txt", "sub"]);
+        assert_eq!(dirty(&mut db)?, ["report.txt", "sub", "Docs"]);
+
+        // In Recently deleted it still holds them (taken along).
+        let removed = RemovedRow {
+            row: MirrorRow {
+                version: VersionTag(Uuid::now_v7()),
+                ..docs_row.clone()
+            },
+            removed_at: Some(5),
+        };
+        db.write(|s| s.account().move_to_removed(&removed))?;
+        assert_eq!(names(&mut db, NodeId::ROOT)?, ["top.txt"]);
+        assert_eq!(dirty(&mut db)?, ["Docs"], "its own removal only");
+
+        // Its share withdrawn: out of the picture, not gone, nothing kept of it.
+        let withdrawn = RemoteRef {
+            file_id: docs_row.file_id,
+            version: nil,
+        };
+        assert!(db.read(|s| s.withdrawn(withdrawn))?);
+        assert!(!own.read(|s| s.withdrawn(withdrawn))?);
+        db.write(|s| s.account().tombstone(withdrawn, Some(9)))?;
+        assert_eq!(
+            names(&mut db, NodeId::ROOT)?,
+            ["report.txt", "sub", "top.txt"]
+        );
+        assert_eq!(dirty(&mut db)?, ["report.txt", "sub"]);
+        db.read(|s| {
+            assert!(!s.file_gone(docs_row.file_id)?);
+            assert!(s.tombstones_before(i64::MAX)?.is_empty());
+            assert!(s.removed_by_node(docs)?.is_none());
+            Ok(())
+        })?;
+
+        // Given again, removed as it is: it holds them again. And withdrawn without a time.
+        db.write(|s| s.account().move_to_removed(&removed))?;
+        assert_eq!(names(&mut db, NodeId::ROOT)?, ["top.txt"]);
+        assert_eq!(dirty(&mut db)?, ["report.txt", "sub", "Docs"]);
+        db.write(|s| s.account().hard_deleted(withdrawn))?;
+        assert_eq!(
+            names(&mut db, NodeId::ROOT)?,
+            ["report.txt", "sub", "top.txt"]
+        );
+        assert!(!db.read(|s| s.file_gone(docs_row.file_id))?);
+
+        // A live file's share withdrawn and given again at the version it had.
+        db.write(|s| {
+            s.account().tombstone(
+                RemoteRef {
+                    file_id: top.file_id,
+                    version: nil,
+                },
+                Some(9),
+            )
+        })?;
+        assert_eq!(names(&mut db, NodeId::ROOT)?, ["report.txt", "sub"]);
+        db.write(|s| s.account().put_live(&top))?;
+        assert_eq!(
+            names(&mut db, NodeId::ROOT)?,
+            ["report.txt", "sub", "top.txt"]
+        );
+
+        // The folder shared in a version this client can't read isn't in the picture: what it
+        // holds stays at the top, and is in it, planned again, once a version it reads comes.
+        let version = || VersionTag(Uuid::now_v7());
+        let newer = RemoteRef {
+            file_id: docs_row.file_id,
+            version: version(),
+        };
+        db.write(|s| {
+            s.account()
+                .put_unreadable(newer, Some(docs), Some(NodeId::ROOT))
+        })?;
+        assert_eq!(
+            names(&mut db, NodeId::ROOT)?,
+            ["report.txt", "sub", "top.txt"]
+        );
+        dirty(&mut db)?;
+        let read = MirrorRow {
+            version: version(),
+            ..docs_row.clone()
+        };
+        db.write(|s| s.account().put_live(&read))?;
+        assert_eq!(names(&mut db, NodeId::ROOT)?, ["Docs", "top.txt"]);
+        assert_eq!(names(&mut db, docs)?, ["report.txt", "sub"]);
+        assert_eq!(dirty(&mut db)?, ["report.txt", "sub", "Docs"]);
+
+        // The same tombstone on this identity's own drive is one.
+        own.write(|s| s.account().tombstone(withdrawn, Some(9)))?;
+        own.write(|s| s.account().put_live(&docs_row))?;
+        assert!(own.read(|s| s.file_gone(docs_row.file_id))?);
+        assert_eq!(names(&mut own, NodeId::ROOT)?, ["top.txt"]);
+        Ok(())
+    }
+
+    /// The top of another identity's drive follows every write of one transaction (a feed page
+    /// is one): which folders the picture lacks is remembered between reads, and worked out
+    /// again after a row of the mirror or of Recently deleted comes or goes.
+    #[test]
+    fn the_top_of_a_shared_drive_follows_the_writes_of_a_transaction() -> R {
+        let docs = NodeId::new();
+        let report = row(NodeId::new(), docs, "report.txt", None);
+        let docs_row = row(docs, NodeId::ROOT, "Docs", None);
+        let removed = RemovedRow {
+            row: MirrorRow {
+                version: VersionTag(Uuid::now_v7()),
+                ..docs_row.clone()
+            },
+            removed_at: Some(5),
+        };
+        let withdrawn = RemoteRef {
+            file_id: docs_row.file_id,
+            version: VersionTag(Uuid::nil()),
+        };
+        let key = hbsync_namemap::sibling_hash("report.txt");
+        let mut db = StateDb::open_in_memory()?;
+        db.write(|s| {
+            // Whether the file is at the top: by its name, and in the listing.
+            let at_top = |s: &hbsync_state::Store<'_>| -> hbsync_state::Result<bool> {
+                let named = !s.mirror_named(NodeId::ROOT, key)?.is_empty();
+                let listed =
+                    (s.mirror_children(NodeId::ROOT)?.iter()).any(|r| r.node == report.node);
+                assert_eq!(named, listed);
+                Ok(named)
+            };
+            s.account().set_shared(true)?;
+            assert!(!at_top(s)?, "nothing yet");
+            s.account().put_live(&report)?;
+            assert!(at_top(s)?, "its folder isn't shared");
+            s.account().put_live(&docs_row)?;
+            assert!(!at_top(s)?, "its folder came");
+            s.account().move_to_removed(&removed)?;
+            assert!(!at_top(s)?, "taken along");
+            s.account().hard_deleted(withdrawn)?;
+            assert!(
+                at_top(s)?,
+                "its folder's share withdrawn, from Recently deleted"
+            );
+            s.account().put_live(&docs_row)?;
+            assert!(!at_top(s)?, "given again");
+            s.account().tombstone(withdrawn, Some(9))?;
+            assert!(at_top(s)?, "withdrawn, live");
+            s.account().move_to_removed(&removed)?;
+            assert!(!at_top(s)?);
+            s.account().forget_file(docs_row.file_id, Some(9))?;
+            assert!(at_top(s)?, "its folder deleted for good");
+            Ok(())
+        })
+    }
+
+    /// Another identity's drive keeps nothing to delete there: the sharer's delete of a file
+    /// records it gone from the tombstone's time on, forgotten a keeping time later, and no
+    /// tombstone for this device to delete for good. A share withdrawn takes what was noted
+    /// of its file with it: a version this client couldn't read, a doubt whether it is there.
+    #[test]
+    fn a_shared_drive_keeps_no_tombstone_and_a_withdrawal_no_marks() -> R {
+        let mut db = StateDb::open_in_memory()?;
+        db.write(|s| s.account().set_shared(true))?;
+        let (deleted, held) = (
+            row(NodeId::new(), NodeId::ROOT, "deleted.txt", None),
+            row(NodeId::new(), NodeId::ROOT, "held.txt", None),
+        );
+        db.write(|s| {
+            s.account().put_live(&deleted)?;
+            s.account().put_live(&held)
+        })?;
+
+        // The sharer's delete: its tombstone keeps its version.
+        let tombstone = RemoteRef {
+            file_id: deleted.file_id,
+            version: VersionTag(Uuid::now_v7()),
+        };
+        db.write(|s| s.account().tombstone(tombstone, Some(300)))?;
+        db.read(|s| {
+            assert!(s.file_gone(deleted.file_id)?);
+            assert!(s.tombstones_before(i64::MAX)?.is_empty());
+            assert!(s.get_mirror(deleted.node)?.is_none());
+            Ok(())
+        })?;
+        assert_eq!(db.write(|s| s.account().prune_gone(300, 1000))?, 0);
+        assert_eq!(db.write(|s| s.account().prune_gone(301, 1000))?, 1);
+        assert!(!db.read(|s| s.file_gone(deleted.file_id))?);
+
+        // A newer version of the other this client can't read, and a doubt whether it is
+        // there; then its share is withdrawn.
+        let newer = RemoteRef {
+            file_id: held.file_id,
+            version: VersionTag(Uuid::now_v7()),
+        };
+        let suspect = hbsync_state::GoneSuspect {
+            version: Some(held.version),
+            at: 10,
+        };
+        db.write(|s| {
+            s.account()
+                .put_unreadable(newer, Some(held.node), Some(NodeId::ROOT))?;
+            s.account().put_gone_suspect(held.file_id, &suspect)
+        })?;
+        assert!(db.read(|s| s.is_unreadable_version(newer))?);
+        let withdrawn = RemoteRef {
+            file_id: held.file_id,
+            version: VersionTag(Uuid::nil()),
+        };
+        db.write(|s| s.account().tombstone(withdrawn, Some(400)))?;
+        db.read(|s| {
+            assert!(!s.file_gone(held.file_id)?);
+            assert!(s.unreadable_files()?.is_empty());
+            assert_eq!(s.gone_suspect(held.file_id)?, None);
+            assert!(s.get_mirror(held.node)?.is_none());
+            Ok(())
+        })?;
+        // Announced withdrawn, without a time: the same.
+        db.write(|s| {
+            s.account().put_live(&held)?;
+            s.account()
+                .put_unreadable(newer, Some(held.node), Some(NodeId::ROOT))?;
+            s.account().hard_deleted(withdrawn)
+        })?;
+        assert!(db.read(|s| s.unreadable_files())?.is_empty());
+        assert!(db.read(|s| s.get_mirror(held.node))?.is_none());
+        assert!(!db.read(|s| s.file_gone(held.file_id))?);
+        Ok(())
+    }
+
+    /// Whose drive a DB is of is said before it reads its drive, and for good: with a row of
+    /// the picture in it, or the feed's cursor (a share may have nothing in it just now), the
+    /// other kind is refused (the same kind again changes nothing).
+    #[test]
+    fn a_db_that_holds_a_drive_keeps_its_kind() -> R {
+        let file = row(NodeId::new(), NodeId::ROOT, "a.txt", None);
+        let removed = RemovedRow {
+            row: file.clone(),
+            removed_at: Some(5),
+        };
+        let mut own = StateDb::open_in_memory()?;
+        own.write(|s| {
+            s.account().set_shared(true)?;
+            s.account().set_shared(false)?;
+            s.account().put_live(&file)?;
+            s.account().set_shared(false)
+        })?;
+        let refused = own.write(|s| s.account().set_shared(true));
+        assert!(
+            matches!(refused, Err(StateError::Conflict(_))),
+            "{refused:?}"
+        );
+        assert!(!own.read(|s| s.shared())?);
+
+        let mut shared = StateDb::open_in_memory()?;
+        shared.write(|s| {
+            s.account().set_shared(true)?;
+            s.account().move_to_removed(&removed)?;
+            s.account().set_shared(true)
+        })?;
+        let refused = shared.write(|s| s.account().set_shared(false));
+        assert!(
+            matches!(refused, Err(StateError::Conflict(_))),
+            "{refused:?}"
+        );
+        assert!(shared.read(|s| s.shared())?);
+
+        let mut empty = StateDb::open_in_memory()?;
+        empty.write(|s| {
+            s.account().set_shared(true)?;
+            s.account().set_account_kv(keys::REMOTE_CURSOR, "c")
+        })?;
+        let refused = empty.write(|s| s.account().set_shared(false));
+        assert!(
+            matches!(refused, Err(StateError::Conflict(_))),
+            "{refused:?}"
+        );
+        Ok(())
+    }
+
     /// Reading the whole feed again starts from its beginning, the files the store has listed;
     /// tombstones are kept with their time until deleted hard.
     #[test]

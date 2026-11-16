@@ -3585,6 +3585,37 @@ fn read_only_what_is_on_a_name_here_keeps_it_from_what_moved_out() {
     assert_eq!(told, [moved]);
 }
 
+/// Read-only, two of the drive's items on one name, both synced here: the one on the name on
+/// disk keeps it and follows the drive, and the one parked under a temporary name for it
+/// (reported at the place it belongs) is left out, though its id is the lower. The same where
+/// this device masks something (`masked`: the plan is made from the masks' view).
+#[test]
+fn read_only_what_is_on_a_name_here_keeps_it_from_a_parked_item() {
+    let [parked, held, build] = ids(3)[..] else {
+        unreachable!()
+    };
+    for masked in [false, true] {
+        let mut w = World {
+            filter: ignoring("build/\n"),
+            ..read_only()
+        };
+        w.synced(parked, file(ROOT, "a", "1"))
+            .synced(held, file(ROOT, "a", "2"))
+            .remote(held, Some(file(ROOT, "a", "3")));
+        if masked {
+            w.remote(build, Some(folder(ROOT, "build")));
+        }
+        w.input.parked.insert(parked);
+        let plan = w.plan();
+        assert!(!plan.writes_drive());
+        let got: Vec<(&str, NodeId)> = (kinds(&plan.ops).into_iter())
+            .zip(plan.ops.iter().map(Op::node))
+            .collect();
+        assert_eq!(got, [("download-replace", held)], "masked: {masked}");
+        assert_eq!(plan.conflicts, [Conflict::NameTaken { node: parked }]);
+    }
+}
+
 /// Read-only, a new folder here holding a file still being written waits for it, and so does
 /// what else is new in it, a folder below included: they move out with it, as one, once it is
 /// read (not one by one beside where it goes).

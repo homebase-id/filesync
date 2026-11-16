@@ -31,7 +31,7 @@ fn drive(
 ) -> Result<(Arc<Drive>, Arc<FakeRemote>), Box<dyn std::error::Error>> {
     let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
     let account = StateDb::open_account(&dir.join("state.db"))?;
-    Ok((Drive::new(account, remote.clone()), remote))
+    Ok((Drive::new(account, remote.clone())?, remote))
 }
 
 /// Engines asking at once share a pull: one at a time, and one that started after an ask
@@ -313,7 +313,7 @@ fn a_page_fetched_before_a_hard_delete_doesnt_bring_it_back() -> R {
     let drive = Drive::new(
         StateDb::open_account(&dir.path().join("state.db"))?,
         remote.clone(),
-    );
+    )?;
     let docs = folder("Docs");
     let v1 = inner.create(&docs, None)?;
     drive.pull(None)?;
@@ -371,7 +371,7 @@ fn a_reread_answer_doesnt_write_over_a_later_removal() -> R {
     let drive = Drive::new(
         StateDb::open_account(&dir.path().join("state.db"))?,
         remote.clone(),
-    );
+    )?;
     let meta = folder("Docs");
     let docs = inner.create(&meta, None)?;
     drive.pull(None)?;
@@ -551,7 +551,7 @@ fn a_pull_that_fails_partway_wakes_what_it_took() -> R {
     let drive = Drive::new(
         StateDb::open_account(&dir.path().join("state.db"))?,
         remote.clone(),
-    );
+    )?;
     let woken = drive.subscribe(main);
     // More than a page: the second read fails.
     for i in 0..=hbsync_engine::drive::FEED_PAGES.whole {

@@ -54,25 +54,35 @@ impl ReadTx<'_> {
         self.mirror_in(parent, Some(key))
     }
 
-    /// The children of `parent`: all, or those whose name has sibling hash `key`.
+    /// The children of `parent`: all, or those whose name has sibling hash `key`. On another
+    /// identity's drive, as [`ReadTx::seen`] places them: the top also holds the nodes whose
+    /// folder the picture doesn't have ([`ReadTx::folderless`]), and such a folder holds none.
     fn mirror_in(&self, parent: NodeId, key: Option<i32>) -> Result<Vec<MirrorRow>> {
         let c = self.coords()?;
         let drive = c.to_drive(parent);
-        let rows = match key {
-            None => self.many(
-                &format!("{MIRROR_SELECT} WHERE m.parent = {ID_OF}"),
-                [drive.0.as_bytes()],
-                mirror_row,
-            )?,
-            Some(key) => self.many(
-                &format!("{MIRROR_SELECT} WHERE m.parent = {ID_OF} AND m.name_key = ?2"),
-                params![drive.0.as_bytes(), key],
-                mirror_row,
-            )?,
+        let mut rows = if self.lacks(drive)? {
+            Vec::new()
+        } else {
+            match key {
+                None => self.many(
+                    &format!("{MIRROR_SELECT} WHERE m.parent = {ID_OF}"),
+                    [drive.0.as_bytes()],
+                    mirror_row,
+                )?,
+                Some(key) => self.many(
+                    &format!("{MIRROR_SELECT} WHERE m.parent = {ID_OF} AND m.name_key = ?2"),
+                    params![drive.0.as_bytes(), key],
+                    mirror_row,
+                )?,
+            }
         };
+        if drive.is_root() && self.shared()? {
+            rows.extend(self.folderless(key)?);
+        }
+        // Placed already: each row is where the drive has it, or at the top.
         let mut seen = Vec::with_capacity(rows.len() + 1);
         for row in rows {
-            seen.extend(self.seen(row)?);
+            seen.extend(self.in_coords(row)?);
         }
         // The rest of the drive is a folder at the top.
         if parent.is_root()
@@ -82,6 +92,88 @@ impl ReadTx<'_> {
             seen.push(outside_row());
         }
         Ok(seen)
+    }
+
+    /// Whether the picture has `node`, live or in Recently deleted: on another identity's
+    /// drive, whether what the mirror holds in it is in it, or at the top for want of it
+    /// ([`ReadTx::seen`]). What a folder in Recently deleted holds stays in it (taken along,
+    /// node schema).
+    pub(super) fn has_node(&self, node: NodeId) -> Result<bool> {
+        Ok(self
+            .prep(
+                "SELECT EXISTS (SELECT 1 FROM remote m JOIN nodes n ON n.id = m.id \
+                 WHERE n.uuid = ?1) OR EXISTS (SELECT 1 FROM removed WHERE node = ?1)",
+            )?
+            .query_row([node.0.as_bytes()], |r| r.get(0))?)
+    }
+
+    /// Whether `folder` is one the picture of another identity's drive ([`ReadTx::shared`])
+    /// doesn't have ([`ReadTx::has_node`]): what the mirror holds in it is at the top. Never
+    /// the drive's root, and never on this identity's own drive (no probe there).
+    pub(super) fn lacks(&self, folder: NodeId) -> Result<bool> {
+        Ok(!folder.is_root() && self.shared()? && !self.has_node(folder)?)
+    }
+
+    /// Another identity's drive: the mirror's nodes whose folder the picture doesn't have
+    /// (all, or those whose name has sibling hash `key`), each as at the top: what is in the
+    /// folders the picture lacks ([`ReadTx::lacking`]), a read along the index for each (one
+    /// statement, bound again for each folder). None where every folder that holds something
+    /// shared is shared itself.
+    fn folderless(&self, key: Option<i32>) -> Result<Vec<MirrorRow>> {
+        let lacking = self.lacking()?;
+        if lacking.is_empty() {
+            return Ok(Vec::new());
+        }
+        let named = if key.is_some() {
+            " AND m.name_key = ?2"
+        } else {
+            ""
+        };
+        let mut stmt = self.prep(&format!("{MIRROR_SELECT} WHERE m.parent = ?1{named}"))?;
+        let decode = |r: &Row<'_>| Ok(mirror_row(r));
+        let mut rows = Vec::new();
+        for folder in lacking.iter() {
+            let found = match key {
+                None => stmt.query_map([folder], decode)?,
+                Some(key) => stmt.query_map(params![folder, key], decode)?,
+            };
+            for row in found {
+                let mut row = row??;
+                row.parent = NodeId::ROOT;
+                rows.push(row);
+            }
+        }
+        Ok(rows)
+    }
+
+    /// Another identity's drive: the folders (their ids in `nodes`) that the mirror's rows
+    /// name and the picture doesn't have. Found by folder, not by node: the folders named (a
+    /// step along the index for each), then the ones among them the picture lacks (two probes
+    /// each), so the cost is the number of folders holding something shared, whatever the
+    /// number of files. Worked out once per transaction: a plan asks for every name at the top.
+    fn lacking(&self) -> Result<std::rc::Rc<[i64]>> {
+        if let Some(known) = self.lacking.borrow().as_ref() {
+            return Ok(known.clone());
+        }
+        let ids: std::rc::Rc<[i64]> = self
+            .prep(
+                "WITH RECURSIVE up(id) AS (SELECT min(parent) FROM remote UNION ALL \
+                 SELECT (SELECT min(parent) FROM remote WHERE parent > up.id) FROM up \
+                 WHERE up.id IS NOT NULL) \
+                 SELECT up.id FROM up JOIN nodes u ON u.id = up.id \
+                 WHERE u.uuid <> ?1 AND NOT EXISTS (SELECT 1 FROM remote f WHERE f.id = up.id) \
+                 AND NOT EXISTS (SELECT 1 FROM removed r WHERE r.node = u.uuid)",
+            )?
+            .query_map([NodeId::ROOT.0.as_bytes()], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        *self.lacking.borrow_mut() = Some(ids.clone());
+        Ok(ids)
+    }
+
+    /// The picture changes (a row of the mirror or of Recently deleted comes, moves or goes):
+    /// which folders it lacks ([`ReadTx::lacking`]) is worked out again.
+    pub(super) fn picture_changed(&self) {
+        self.lacking.take();
     }
 
     /// The folder in Recently deleted that the drive's folder `folder` is, or is in through the
@@ -300,6 +392,7 @@ impl AccountTx<'_> {
             return Ok(());
         };
         self.moved_folder(row.node, row.kind);
+        self.picture_changed();
         let (id, parent) = (
             self.key_or_insert(row.node)?,
             self.key_or_insert(row.parent)?,
@@ -333,7 +426,7 @@ impl AccountTx<'_> {
     }
 
     /// Removes the mirror row of a deleted file, marks its node dirty where that concerns
-    /// (`fan_out`), and returns the row.
+    /// (`fan_out`), and returns the row, in the folder the drive had it in.
     pub(crate) fn delete_mirror(&self, file_id: RemoteFileId) -> Result<Option<MirrorRow>> {
         let Some(row) = self.one(
             &format!("{MIRROR_SELECT} WHERE m.file_id = ?1"),
@@ -345,11 +438,12 @@ impl AccountTx<'_> {
         };
         self.fan_out(row.node, row.parent)?;
         self.moved_folder(row.node, row.kind);
+        self.picture_changed();
         self.change(
             "DELETE FROM remote WHERE file_id = ?1",
             file_id.0.as_bytes(),
         )?;
-        self.seen(row)
+        self.in_coords(row)
     }
 
     /// Keeps `token` for file `file_id` (in Recently deleted if `removed`), if it differs.

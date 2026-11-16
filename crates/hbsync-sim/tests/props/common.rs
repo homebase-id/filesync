@@ -118,6 +118,16 @@ pub(crate) fn deleting_action() -> impl Strategy<Value = Action> + Clone {
     ]
 }
 
+/// The users' actions, the drive's owner sharing nodes with a member and withdrawing shares
+/// ([`Action::Share`], sync semantics §13: another identity's drive) as often as they make
+/// files.
+pub(crate) fn sharing_action() -> impl Strategy<Value = Action> + Clone {
+    prop_oneof![
+        3 => action(),
+        1 => (0usize..16, any::<bool>()).prop_map(|(pick, below)| Action::Share { pick, below }),
+    ]
+}
+
 pub(crate) fn event(clients: usize) -> impl Strategy<Value = Event> {
     events_of(clients, action())
 }
@@ -349,6 +359,13 @@ pub(crate) const READ_ONLY_SETUPS: &[Setup] = &[
     (|sim| sim.with_read_only(0), None),
     (|sim| sim.with_read_only(1), Some(2)),
     (|sim| sim.with_read_only(2).with_split_downloads(), None),
+];
+
+/// A member's setups (sync semantics §13, another identity's drive), for the engine's path:
+/// the last client reads what the owner's two computers share with it.
+pub(crate) const MEMBER_SETUPS: &[Setup] = &[
+    (|sim| sim.with_member(2), None),
+    (|sim| sim.with_member(2).with_split_downloads(), None),
 ];
 
 /// Events of every kind the properties make: the users' actions, deletes another device stops

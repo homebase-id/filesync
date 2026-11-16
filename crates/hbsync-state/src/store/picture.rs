@@ -93,16 +93,51 @@ impl AccountTx<'_> {
     /// the mirror (`put_mirror`: a version it has, or a file deleted for good, changes
     /// nothing there).
     pub fn put_live(&self, row: &MirrorRow) -> Result<()> {
+        let arrives = self.arrives(row)?;
         self.delete_removed(row.node)?;
-        self.put_mirror(row)
+        self.put_mirror(row)?;
+        if arrives {
+            self.arrived(row.node)?;
+        }
+        Ok(())
     }
 
     /// A node's file moved to Recently deleted, as the feed says: out of the mirror (its node
     /// planned again where it was held, also where the mirror had no row of it), into Recently
     /// deleted (`put_removed`).
     pub fn move_to_removed(&self, removed: &RemovedRow) -> Result<()> {
+        let arrives = self.arrives(&removed.row)?;
         self.leave_tree(removed.row.file_id)?;
-        self.put_removed(removed)
+        self.put_removed(removed)?;
+        if arrives {
+            self.arrived(removed.row.node)?;
+        }
+        Ok(())
+    }
+
+    /// Whether `row` is a folder the picture of another identity's drive doesn't have yet
+    /// ([`ReadTx::lacks`]), live or in Recently deleted: what the mirror holds of it was at the
+    /// top for want of it ([`ReadTx::seen`]), and is in it once the row is in
+    /// ([`AccountTx::arrived`]). Asked before the row is written: three probes a new folder,
+    /// none for a file or on this identity's own drive.
+    fn arrives(&self, row: &MirrorRow) -> Result<bool> {
+        Ok(row.kind == NodeKind::Folder && self.lacks(row.node)?)
+    }
+
+    /// Folder `folder` came into the picture ([`AccountTx::arrives`]): what the mirror holds in
+    /// it moves from the top into it, without a row of its own changing, so each is planned
+    /// again. (The other way, a folder leaving the picture, is `drop_file`'s.)
+    fn arrived(&self, folder: NodeId) -> Result<()> {
+        let children: Vec<Vec<u8>> = self
+            .prep(&format!(
+                "SELECT n.uuid FROM remote c JOIN nodes n ON n.id = c.id WHERE c.parent = {ID_OF}"
+            ))?
+            .query_map([folder.0.as_bytes()], |r| r.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for child in children {
+            self.fan_out(codec::node(&child)?, folder)?;
+        }
+        Ok(())
     }
 
     /// File `file_id` deleted for good, since `at` if known (Unix ms, the server's: the time of
@@ -114,12 +149,27 @@ impl AccountTx<'_> {
             Some(at) => self.mark_file_gone_at(file_id, at)?,
             None => self.mark_file_gone(file_id)?,
         }
+        self.drop_file(file_id)
+    }
+
+    /// File `file_id` is no longer shared with this identity ([`ReadTx::withdrawn`]): out of
+    /// the picture, with what was noted of it (a version this client couldn't read, a doubt
+    /// whether it was there: `clear_file_marks`), and not recorded gone.
+    fn unshared(&self, file_id: RemoteFileId) -> Result<()> {
+        self.clear_file_marks(file_id)?;
+        self.drop_file(file_id)
+    }
+
+    /// The picture without file `file_id`, live or in Recently deleted, with nothing said
+    /// about the file itself: gone for good ([`AccountTx::forget_file`]), or no longer shared
+    /// with this identity ([`ReadTx::withdrawn`]), which a share given again undoes.
+    fn drop_file(&self, file_id: RemoteFileId) -> Result<()> {
         // A folder gone for good (deleted outright, another app's; or purged from Recently
         // deleted) with nodes still live in it: they are orphans now, planned again too, dirty
         // or not, in every view alike (sync semantics §6.3): in every folder, the main folder
         // adopting them wherever their folder was. Hardly ever any: one statement, two index
         // probes a file (a purge's too), finding nothing where what was in the folder left with
-        // it.
+        // it. On another identity's drive they are at the top from here on ([`ReadTx::seen`]).
         let orphans: Vec<Vec<u8>> = self
             .prep(
                 "WITH f(id) AS (SELECT id FROM remote WHERE file_id = ?1 \
@@ -184,8 +234,18 @@ impl AccountTx<'_> {
     }
 
     /// A tombstone the feed brought (`put_tombstone`, if it says when it was written):
-    /// its file is deleted for good ([`AccountTx::forget_file`]).
+    /// its file is deleted for good ([`AccountTx::forget_file`]). Not one that says a share
+    /// was withdrawn ([`ReadTx::withdrawn`]): the file is out of the picture and no more
+    /// ([`AccountTx::unshared`]), so the share given again brings it back. On another
+    /// identity's drive no tombstone is kept to delete later: it is the sharer's, and the file
+    /// is known gone from its time on.
     pub fn tombstone(&self, tombstone: RemoteRef, at: Option<i64>) -> Result<()> {
+        if self.withdrawn(tombstone)? {
+            return self.unshared(tombstone.file_id);
+        }
+        if self.shared()? {
+            return self.forget_file(tombstone.file_id, at);
+        }
         if let Some(at) = at {
             self.put_tombstone(tombstone, at)?;
         }
@@ -194,8 +254,12 @@ impl AccountTx<'_> {
 
     /// A file deleted for good with nothing left (a hard delete, announced): a tombstone this
     /// device holds at that version has nothing left to delete, and the file is forgotten
-    /// ([`AccountTx::forget_file`]).
+    /// ([`AccountTx::forget_file`]). A share withdrawn ([`ReadTx::withdrawn`]) is neither, as
+    /// in [`AccountTx::tombstone`].
     pub fn hard_deleted(&self, at: RemoteRef) -> Result<()> {
+        if self.withdrawn(at)? {
+            return self.unshared(at.file_id);
+        }
         self.delete_tombstone_at(at)?;
         self.forget_file(at.file_id, None)
     }

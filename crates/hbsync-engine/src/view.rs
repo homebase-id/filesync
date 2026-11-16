@@ -71,18 +71,19 @@ pub(crate) fn local_node(
     let Some(row) = s.local_by_node(node)? else {
         return Ok(None);
     };
-    let state = local_state(s, &row, os, drive)?;
+    let state = local_state(s, &row, &place(s, &row)?, os, drive)?;
     Ok(Some(LocalNode { row, state }))
 }
 
+/// `row`'s state at `path`, where it counts as being ([`place`]).
 fn local_state(
     s: &ReadTx<'_>,
     row: &LocalRow,
+    path: &RelPath,
     os: Os,
     drive: Option<&Reference>,
 ) -> Result<Option<NodeState>, StateError> {
     let base = s.get_base(row.node)?;
-    let path = place(s, row)?;
     let Some(local_name) = path.name() else {
         return Ok(None);
     };
@@ -857,10 +858,15 @@ impl Builder<'_, '_> {
             None if self.mirror_done.contains(&node) => None,
             None => self.s.get_mirror(node)?.map(|m| Reference::of_mirror(&m)),
         };
-        match local_state(self.s, &row, self.os, drive.as_ref())? {
+        let parked = parked_place(self.s, &row)?;
+        let path = parked.as_ref().unwrap_or(&row.path);
+        match local_state(self.s, &row, path, self.os, drive.as_ref())? {
             Some(state) => {
                 if state.kind == NodeKind::File && state.content.is_none() {
                     self.input.local_unhashed.insert(node);
+                }
+                if parked.is_some() {
+                    self.input.parked.insert(node);
                 }
                 self.input.local.insert(node, state);
             }

@@ -50,7 +50,7 @@ impl Computer {
         let drive = Drive::new(
             StateDb::open_account(&db)?,
             Arc::new(FakeRemote::new(server.clone())),
-        );
+        )?;
         let main = Engine::new(main_db, drive.clone(), config(&main_root))?;
         let docs = Engine::new(StateDb::open_folder(&db, docs)?, drive, config(&docs_root))?;
         Ok(Computer {
@@ -627,7 +627,7 @@ impl DeskPc {
         let drive = Drive::new(
             StateDb::open_account(&db)?,
             Arc::new(FakeRemote::new(server.clone())),
-        );
+        )?;
         let main = Engine::new(StateDb::open(&db)?, drive.clone(), config(&main_root))?;
         let mut pc = DeskPc {
             _dir: dir,

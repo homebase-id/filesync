@@ -298,6 +298,7 @@ impl AccountTx<'_> {
             return Ok(());
         };
         self.moved_folder(row.node, row.kind);
+        self.picture_changed();
         let seq = self.next_removed_seq()?;
         let f = row.file.as_ref();
         self.prep(
@@ -351,11 +352,13 @@ impl AccountTx<'_> {
 
     /// Forgets a node's removal (it was restored, or deleted for good); whether it had one.
     pub(crate) fn delete_removed(&self, node: NodeId) -> Result<bool> {
+        self.picture_changed();
         self.change("DELETE FROM removed WHERE node = ?1", node.0.as_bytes())
     }
 
     /// `delete_removed` by file id (a tombstone carries no node id).
     pub(crate) fn delete_removed_file(&self, file_id: RemoteFileId) -> Result<bool> {
+        self.picture_changed();
         self.change(
             "DELETE FROM removed WHERE file_id = ?1",
             file_id.0.as_bytes(),

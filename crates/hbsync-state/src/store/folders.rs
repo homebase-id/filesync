@@ -26,8 +26,21 @@ impl ReadTx<'_> {
         Ok(c)
     }
 
-    /// `row` of the drive as this folder sees it; `None` for its top (its root).
+    /// `row` of the mirror as this folder sees it; `None` for its top (its root). On another
+    /// identity's drive ([`ReadTx::shared`]) a node whose folder the picture doesn't have (not
+    /// shared with this identity, or no more) is at the top (sync semantics §13): worked out
+    /// as the row is read, one probe a row, so the row keeps the drive's folder and is in it
+    /// once that is shared. Only reads go through here: a write to such a drive (none yet,
+    /// its remote refuses them) must send the drive's own folder, never this one.
     pub(super) fn seen(&self, mut row: MirrorRow) -> Result<Option<MirrorRow>> {
+        if self.lacks(row.parent)? {
+            row.parent = NodeId::ROOT;
+        }
+        self.in_coords(row)
+    }
+
+    /// `row` of the drive in this folder's coordinates; `None` for its top (its root).
+    pub(super) fn in_coords(&self, mut row: MirrorRow) -> Result<Option<MirrorRow>> {
         let c = self.coords()?;
         if c.hides(row.node) {
             return Ok(None);
@@ -36,8 +49,10 @@ impl ReadTx<'_> {
         Ok(Some(row))
     }
 
+    /// A row of Recently deleted as this folder sees it: where the drive has it, also on
+    /// another identity's drive (it is out of the tree, wherever its folder is).
     pub(super) fn seen_removed(&self, mut r: RemovedRow) -> Result<Option<RemovedRow>> {
-        let Some(row) = self.seen(r.row)? else {
+        let Some(row) = self.in_coords(r.row)? else {
             return Ok(None);
         };
         r.row = row;

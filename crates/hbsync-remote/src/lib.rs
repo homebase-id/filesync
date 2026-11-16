@@ -726,6 +726,14 @@ pub trait Remote: Send + Sync {
         std::time::Duration::ZERO
     }
 
+    /// Whether this is another identity's drive, read as a member of what they share: its feed
+    /// lists only what is shared with this identity, so a file may come without its folder, and
+    /// a tombstone without a version says a share was withdrawn, not that the file is gone
+    /// ([`RemoteHeader::is_unshared`]).
+    fn shared(&self) -> bool {
+        false
+    }
+
     /// Creates a node. Fails with [`RemoteError::AlreadyExists`] if a live file already has
     /// this node id (a retry of a create that landed). Returns the file as written, with the
     /// token its header will give for this version.
@@ -798,6 +806,10 @@ impl<T: Remote + ?Sized> Remote for std::sync::Arc<T> {
 
     fn hold_back(&self) -> std::time::Duration {
         (**self).hold_back()
+    }
+
+    fn shared(&self) -> bool {
+        (**self).shared()
     }
 
     fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Written> {

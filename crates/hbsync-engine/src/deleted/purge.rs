@@ -37,6 +37,8 @@ impl AccountOps<'_> {
     /// - Each node goes without a trace (a hard delete) once its own removal is [`TRACE_MS`] old,
     ///   else leaving a tombstone, which goes hard [`TRACE_MS`] after its own time.
     /// - What is known gone longer than that is forgotten ([`hbsync_state::AccountTx::prune_gone`]).
+    /// - On another identity's drive that is all it does: Recently deleted and the tombstones
+    ///   there are the sharer's devices' to delete for good (sync semantics §13).
     ///
     /// Each part runs whatever became of the others; the first error is returned at the end.
     /// Returns how many items went. Leaves the account behind ([`AccountOps::run`]) when the
@@ -51,6 +53,11 @@ impl AccountOps<'_> {
     ) -> Result<usize, EngineError> {
         let traced = now_ms.saturating_sub(TRACE_MS);
         let before = now_ms.saturating_sub(keep_ms);
+        if self.db().read(|s| s.shared())? {
+            self.db()
+                .write(|s| s.account().prune_gone(traced, now_ms))?;
+            return Ok(0);
+        }
         // Each part on its own: one that fails doesn't keep the others from their work.
         let taken = self.remove_taken_along(before);
         let expired = self.expire(before, Some(traced), going);

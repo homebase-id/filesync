@@ -23,6 +23,9 @@ impl Sim {
     ///
     /// [`Event::Crash`]: crate::Event::Crash
     pub(crate) fn crash(&mut self, c: usize) {
+        if self.as_member(c, |sim| sim.crash(c)).is_some() {
+            return;
+        }
         self.faults.crashes += 1;
         // The user's Delete answers, and what they were shown, are kept in memory only: a new
         // process shows its holds again and asks again (§7).

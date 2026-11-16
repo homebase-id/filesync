@@ -31,6 +31,9 @@ pub const TOKENS_SEALED_BY: AccountKey = AccountKey("remote.tokens_sealed_by");
 /// another time is another drive, made again, and the DB is set aside
 /// ([`crate::Unusable::OtherDrive`]).
 pub const DRIVE_MADE: AccountKey = AccountKey("remote.drive_made");
+/// Set on the DB of another identity's drive, read as a member of what they share
+/// ([`crate::AccountTx::set_shared`]).
+pub(crate) const SHARED: AccountKey = AccountKey("remote.shared");
 /// Why the DB this one replaced was set aside (`too-old`, `corrupt`, `other-drive`): one made
 /// so sets the account's folders up again as it starts, whichever it didn't have yet.
 pub const SET_ASIDE: AccountKey = AccountKey("db.set_aside");

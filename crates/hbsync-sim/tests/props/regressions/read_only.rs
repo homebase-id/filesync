@@ -4,6 +4,8 @@
 use hbsync_sim::{Action, Event, Sim};
 use hbsync_types::NodeId;
 
+use super::settle;
+
 /// What an action's `parent` is to pick the top on client `c`.
 fn top(sim: &Sim, c: usize) -> usize {
     sim.pick(c, NodeId::ROOT, true).expect("the top")
@@ -31,13 +33,6 @@ fn shared() -> Sim {
     settle(&mut sim);
     assert_eq!(sim.local_paths(1), ["a", "b", "b/c.txt"]);
     sim
-}
-
-/// Lets every client settle, then checks the run (convergence, no loss, no write to the
-/// drive from the read-only one).
-fn settle(sim: &mut Sim) {
-    assert!(sim.quiesce(30), "no convergence");
-    sim.check().unwrap_or_else(|e| panic!("{e}"));
 }
 
 /// An edit there moves out, kept; the drive's version comes back.

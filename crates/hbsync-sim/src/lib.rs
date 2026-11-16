@@ -64,6 +64,8 @@ use crate::oracle::{Ledger, tag_names, view_with};
 #[derive(Debug)]
 pub struct Sim {
     server: Server,
+    /// The drive, while `server` is a member's reading of it ([`Sim::as_member`]).
+    whole: Option<Server>,
     clients: Vec<Client>,
     /// The last blob written (blobs count up).
     next_blob: u64,
@@ -92,6 +94,7 @@ impl Sim {
     pub fn new(clients: usize) -> Self {
         Sim {
             server: Server::default(),
+            whole: None,
             clients: (0..clients)
                 .map(|i| {
                     let filter = match i % 2 {
@@ -328,6 +331,35 @@ impl Sim {
     pub fn with_read_only(mut self, c: usize) -> Self {
         self.clients[c].read_only = true;
         self
+    }
+
+    /// Client `c` is another identity, a member of what the drive's owner shares with it (sync
+    /// semantics §13, another identity's drive; [`Action::Share`]): its folder is read-only,
+    /// and it reads of the drive only what is shared, an item whose folder isn't at the top.
+    pub fn with_member(mut self, c: usize) -> Self {
+        self.clients[c].read_only = true;
+        self.clients[c].member = true;
+        self
+    }
+
+    /// `f` with the drive as member `c` reads it (`Server::as_shared`) in the drive's place:
+    /// its sync's plans and steps read nothing else. `None` (and `f` not run) for a client
+    /// that isn't one, or inside such a call already. What `f` wrote to the drive is a breach
+    /// ([`Sim::check`]), and is dropped.
+    pub(crate) fn as_member<T>(&mut self, c: usize, f: impl FnOnce(&mut Self) -> T) -> Option<T> {
+        if !self.clients[c].member || self.whole.is_some() {
+            return None;
+        }
+        let seen = self.server.as_shared();
+        let before = seen.snapshot();
+        self.whole = Some(std::mem::replace(&mut self.server, seen));
+        let done = f(self);
+        let wrote = self.server.changed_since(&before);
+        self.server = self.whole.take().expect("set above");
+        let name = &self.clients[c].name;
+        self.ledger
+            .read_only_wrote(|| wrote.then(|| format!("{name}, a member, changed the drive")));
+        Some(done)
     }
 
     /// What moved out of client `c`'s read-only folder: each item's name, in order.

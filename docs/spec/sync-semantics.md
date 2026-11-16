@@ -904,6 +904,10 @@ here (or put up anew, if edited). That takes proof (`hbsync-engine/src/gone.rs`)
    records (junk aside), and nothing stays aside once the clients settle (§7).
 8. **Read-only folders** (section 13): a read-only client never writes the drive, converges to
    it like any other, and loses nothing: what changed there is where it moved out to.
+9. **Another identity's drive** (section 13): a member, as the drive's items are shared with
+   it and withdrawn one by one, converges to what is shared with it (an item without its
+   folder at the top, one of a name kept where names meet there), never writes, and plans
+   the same on the engine's path over the state DB, also in pages and through crashes.
 
 ## 10. Filters
 
@@ -1248,7 +1252,9 @@ whatever changed here, and the plan holds no operation on the drive:
   Recovered files, nor its folder made again: it has no place here, so what is here of it is
   let go of with what is below it (deleted as synced, moved out where it changed here or never
   synced), once nothing of that waits or is planned in another page; it comes back once the
-  drive gives it a place. A name clash among the drive's items (case, normalization, or a name
+  drive gives it a place. (On another identity's drive only a node inside a file that is
+  shared, or in a cycle, is one: an item whose folder isn't shared has a place, the top,
+  below.) A name clash among the drive's items (case, normalization, or a name
   this device's ignored items hold) can't be renamed away: the item synced here keeps the name
   (else the lowest id), and the others aren't synced here, each told so (by its place on the
   drive), as long as the clash lasts; each stays dirty, planned again at every sync (a page's
@@ -1268,3 +1274,72 @@ whatever changed here, and the plan holds no operation on the drive:
   parked below one that moves out gets its name back first.
 - The executor refuses any write to the drive from a read-only folder, whatever planned it;
   so does the read-only remote (what another identity shares: `PeerRemote`).
+
+### Another identity's drive
+
+What another identity shares with this one is its drive, read as a member (`Remote::shared`,
+kept in the state DB: `ReadTx::shared`). Its feed lists only the files shared with this
+identity, each on its own: a file can be shared without the folder it is in. A folder synced
+from such a drive is read-only (above), and these rules hold too:
+
+- **An item whose folder isn't shared is at the top.** A node whose folder the picture
+  doesn't have (not shared with this identity, or no more) is read as in the top folder. Its
+  row keeps the drive's folder: once that folder is shared, the item is in it, each item of
+  it planned again (a move here, nothing downloaded), and it is back at the top once the
+  folder's share is withdrawn while its own lasts. A folder in the sharer's Recently deleted
+  that the picture has still holds what is in it (taken along, §7). A folder shared in a
+  version this client can't read isn't in the picture either: what it holds is at the top
+  till a version it reads comes.
+- **Names that meet at the top** (two items of one name, each there for want of its folder)
+  follow the name-clash rule above: the one here under the name keeps it (the one on disk
+  under it before one only recorded there; a parked item, §8, isn't on its name on disk, though
+  the local view reports it there), and the other isn't synced here, told so, planned
+  again at every sync until its folder is shared, its name changes or the first one's share
+  ends. One left out that was here already under an older name keeps that copy as it is
+  meanwhile, and the older name stays taken here: a new item of that name waits for it in
+  turn. A loser inside a folder whose share is withdrawn leaves with the folder.
+- **A share withdrawn isn't a delete.** The drive tells it as a tombstone without a version
+  (all zeros). The file leaves the picture and this device (deleted here as synced, moved out
+  where it changed here), and nothing records it as gone: the share given again brings it
+  back, at the version it has then. An announced withdrawal of a file the picture holds (or
+  this device knows in a version it can't read) is
+  left to the feed (one read), as the share may have been given again since. What was noted
+  of the file goes with it (a version this client couldn't read, a doubt whether it was
+  there). The sharer's own delete keeps its version, and is final as on any drive.
+- **Nothing there is deleted for good from here.** The sharer's Recently deleted and their
+  tombstones are their own devices' to purge (§8b; node schema, "The purge"): this device's daily purge only forgets
+  the files it knew gone, each a tombstone's keeping time after its delete, and keeps no
+  tombstone to delete later.
+- **A DB is one kind of drive for good.** Whose drive it is of is recorded before the DB first
+  reads its drive, and a DB that read an identity's own drive is refused for a share (and the
+  other way): read by the other's rules, a withdrawal would be a delete, and an orphan an
+  item at the top.
+- **Known limits.** A hard delete on the sharer's drive is told to no member (API notes,
+  "Shared with you"): only a whole re-read of the feed finds it, which a device does after
+  about 29 days away, so a device that stays connected keeps such a file. Every item of the
+  sharer's Recently deleted ends that way (their purge deletes it for good after 30 days): its
+  row stays in this device's Recently deleted until that re-read, and a file here whose
+  folder is such a row stays hidden in it. A file shared
+  without its folder stays here while that folder is in the sharer's Recently deleted (the
+  picture never had the folder to take it along). A copy parked for a download that took its
+  name (§8), its own delete planned, whose file is shared again before the delete ran (the
+  share given back while the download ran, or a crash between) waits under its parked name,
+  hidden, while the name is taken: the file on the name keeps it and follows the drive.
+- **The cost.** Where an item is, is worked out as its row is read, and nothing is stored,
+  so nothing goes stale when a folder comes or goes. Measured with 100,000 mirror rows (a
+  release build, the DB on disk), against this identity's own drive, which pays one read of
+  the drive's kind per transaction that reads the mirror, and nothing per row:
+  - a mirror row read: one indexed probe more (3.0 µs for 1.9 µs);
+  - which folders the picture lacks is worked out once per transaction that asks about the
+    top, and again after a write to the picture in it: a step along the index for each
+    folder holding something shared, 1.3 ms with 500 such folders, 6.5 ms with 5,000, 41 ms
+    with 50,000, whatever the number of files;
+  - a name looked up at the top after that: 2 to 5 µs (1.5 µs on an own drive) where each
+    of those folders is shared, and one probe more for each folder that isn't (1 µs
+    each: 2.4 ms a name with 2,500 of them). A share given by folder has none, or the one
+    its top is in; someone sharing loose files out of thousands of folders pays this, and a
+    stored mark with its upkeep on every write would be the cure;
+  - a listing of the top: the rows of those folders are read with it (15 ms for 5,000
+    folders at the top against 10 ms on an own drive; 132 ms where all 100,000 rows are at
+    the top for want of their folders);
+  - a folder arriving marks what the mirror holds in it dirty (one indexed read).

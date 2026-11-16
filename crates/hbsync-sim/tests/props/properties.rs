@@ -147,6 +147,43 @@ proptest! {
         run_with(3, None, setup, &events)?;
     }
 
+    /// A member of what another identity shares (sync semantics §13, another identity's drive)
+    /// has what is shared with it and nothing else, an item whose folder isn't shared at the
+    /// top, whatever the owner's two computers do, share and withdraw meanwhile; it never
+    /// writes the drive and loses nothing of its own (what changed there moved out). Of items
+    /// that take one name at its top, it has the one it synced first, the others as they
+    /// were. (What the owner deletes for good is gone from the member's reading of the drive
+    /// at once here: the engine's member learns of it at its next full read.)
+    #[test]
+    fn a_member_has_what_is_shared_with_it_and_never_writes(
+        events in proptest::collection::vec(events_of(3, sharing_action()), 0..120)
+    ) {
+        run_with(3, None, |sim| sim.with_member(2), &events)?;
+    }
+
+    /// [`a_member_has_what_is_shared_with_it_and_never_writes`], the member planning in pages
+    /// of 1 to 4, its downloads fetched and placed in two steps, every client dying now and
+    /// then, while the owner's folders are deleted, stopped half way and deleted outright.
+    #[test]
+    fn a_member_in_pages_that_crash_has_what_is_shared_with_it(
+        size in 1usize..5,
+        events in proptest::collection::vec(
+            with_crashes(3, events_of(3, prop_oneof![
+                2 => sharing_action(),
+                1 => stopped_delete_action(),
+                1 => orphaning_action(),
+            ])),
+            0..120,
+        ),
+    ) {
+        let setup = |sim: Sim| {
+            sim.with_member(2)
+                .with_small_pages(size)
+                .with_split_downloads()
+        };
+        run_with(3, None, setup, &events)?;
+    }
+
     /// The main folders leave a role folder another device made alone (§12): never synced
     /// here, never changed, whatever the users do around it.
     #[test]
@@ -396,6 +433,21 @@ proptest! {
         events in proptest::collection::vec(any_event(5), 0..80),
     ) {
         run_narrow(setup, 3, &events)?;
+    }
+
+    /// [`the_engines_planning_path_plans_as_the_sim`] with a member of what another identity
+    /// shares (§13): its store, given each node in the folder the drive has it in, reads the
+    /// ones whose folders aren't shared at the top as the simulator does.
+    #[test]
+    fn a_member_plans_as_the_sim_on_the_engines_path(
+        setup in 0..MEMBER_SETUPS.len(),
+        events in proptest::collection::vec(events_of(3, prop_oneof![
+            3 => sharing_action(),
+            1 => stopped_delete_action(),
+            1 => orphaning_action(),
+        ]), 0..80),
+    ) {
+        run_narrow_in(MEMBER_SETUPS, setup, 3, &events)?;
     }
 
     /// [`the_engines_planning_path_plans_as_the_sim`] with a read-only folder (§13).

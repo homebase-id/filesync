@@ -213,6 +213,10 @@ pub(crate) struct Client {
     /// The folder is read-only (sync semantics §13): it never writes the drive, and what
     /// changed here goes back to the drive's.
     pub(crate) read_only: bool,
+    /// Whether the client reads another identity's drive, as a member of what its owner
+    /// shares ([`crate::Sim::with_member`]): read-only, and of the drive as
+    /// `Server::as_shared` has it.
+    pub(crate) member: bool,
     /// What moved out of it, read-only, to keep what changed here: each item with what was
     /// below it (`Op::LocalEvict`).
     pub(crate) moved_out: Vec<Tree>,
@@ -299,6 +303,7 @@ impl Client {
             desktop_name: String::new(),
             desktop_named: None,
             read_only: false,
+            member: false,
             moved_out: Vec::new(),
         }
     }
