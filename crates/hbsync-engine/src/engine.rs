@@ -288,8 +288,10 @@ impl Engine {
         drive: Arc<Drive>,
         mut cfg: EngineConfig,
     ) -> Result<Self, StateError> {
-        let (top, kind) =
-            db.read(|s| Ok((s.coords()?.top, s.this_folder()?.and_then(|f| f.kind))))?;
+        let (top, kind, shared) = db.read(|s| {
+            let kind = s.this_folder()?.and_then(|f| f.kind);
+            Ok((s.coords()?.top, kind, s.shared()?))
+        })?;
         // A kind a newer client set up (or one that doesn't fit its top): not synced as any
         // this one knows.
         let part = match (kind, Role::of(top)) {
@@ -307,6 +309,13 @@ impl Engine {
         if cfg.folder.read_only.is_some() && part != Part::Main {
             return Err(StateError::Conflict(
                 "a role folder or a Desktop never syncs read-only".into(),
+            ));
+        }
+        // Another identity's drive is never written from here (§13): synced both ways, every
+        // change here would be a write it refuses.
+        if shared && cfg.folder.read_only.is_none() {
+            return Err(StateError::Conflict(
+                "what another identity shares only syncs read-only".into(),
             ));
         }
         if cfg.folder.scope.top != top {

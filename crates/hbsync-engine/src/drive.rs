@@ -743,11 +743,25 @@ impl Drive {
         }
     }
 
+    /// Why another identity's drive isn't emptied from here ([`Drive::owned`]).
+    const NOT_EMPTIED: &'static str = "only its owner deletes for good what was deleted from it";
+
+    /// Refuses a write to Recently deleted on another identity's drive (sync semantics §13):
+    /// what is deleted there is its owner's to restore or to delete for good. Before anything
+    /// is asked of the drive, so the refusal is this one and not the identity's (which would
+    /// be shown as this device refused).
+    fn owned(&self, theirs: &'static str) -> Result<(), EngineError> {
+        if self.account().read(|s| s.shared())? {
+            return Err(EngineError::ReadOnly(theirs));
+        }
+        Ok(())
+    }
+
     /// Restores these items of Recently deleted (each with what was deleted with it); the
     /// next syncs bring them back. Returns how many items came back.
     /// The user's to ask for: it reads the feed first, whatever the notifications say. A write
     /// the drive refused for its state, or one whose answer didn't come, leaves the account
-    /// behind.
+    /// behind. Refused on another identity's drive ([`EngineError::ReadOnly`]).
     pub fn restore(&self, nodes: &[NodeId]) -> Result<usize, EngineError> {
         self.restore_told(nodes).map(|r| r.back)
     }
@@ -755,6 +769,7 @@ impl Drive {
     /// [`Drive::restore`], with what stayed in Recently deleted and what went for good
     /// ([`deleted::Restored`]): the user's restore, to tell them.
     pub fn restore_told(&self, nodes: &[NodeId]) -> Result<deleted::Restored, EngineError> {
+        self.owned("only its owner restores what was deleted from it")?;
         self.pull(None)?;
         let restored = self.with_ops(|ops| ops.restore_told(nodes));
         self.wake_all();
@@ -771,12 +786,14 @@ impl Drive {
     /// Deletes these items of Recently deleted for good as `listed` showed them, each with
     /// what was in it then ([`deleted::AccountOps::empty`]); `going` stops it between batches
     /// (one stopped already doesn't start) and is told how far it got ([`deleted::Going`]).
+    /// Refused on another identity's drive ([`EngineError::ReadOnly`]).
     pub fn empty(
         &self,
         nodes: &[NodeId],
         listed: &deleted::Listed,
         going: deleted::Going<'_>,
     ) -> Result<usize, EngineError> {
+        self.owned(Self::NOT_EMPTIED)?;
         going.check()?;
         self.catch_up(None)?;
         self.with_ops(|ops| ops.empty(nodes, listed, going))
@@ -790,6 +807,7 @@ impl Drive {
         listed: &deleted::Listed,
         going: deleted::Going<'_>,
     ) -> Result<usize, EngineError> {
+        self.owned(Self::NOT_EMPTIED)?;
         going.check()?;
         self.catch_up(None)?;
         self.with_ops(|ops| ops.empty_listed(listed, going))

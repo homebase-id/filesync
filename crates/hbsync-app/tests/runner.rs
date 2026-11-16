@@ -50,12 +50,20 @@ impl Device {
         name: &str,
         tweak: impl FnOnce(&mut RunnerConfig),
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::start_on(FakeRemote::new(server.clone()), name, tweak)
+    }
+
+    /// [`Device::start_with`], its drive read through `remote`.
+    fn start_on(
+        remote: FakeRemote,
+        name: &str,
+        tweak: impl FnOnce(&mut RunnerConfig),
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
         let root = set_up(&dir.path().canonicalize()?.join("sync"))?;
         let mut cfg = RunnerConfig::new(&root, &db_of(&root), &"test.example".into(), name);
         cfg.tweak = Some(|c| c.exec.retry_pause = Duration::from_millis(1));
         tweak(&mut cfg);
-        let remote = FakeRemote::new(server.clone());
         let drive = Drive::open(&cfg.db, &cfg.identity, Arc::new(remote.clone()))?;
         let (handle, thread) = Runner::spawn(cfg, Arc::clone(&drive))?;
         Ok(Device {
@@ -1543,5 +1551,68 @@ fn a_desktop_runner_syncs_its_own_folder_in_desktops_named_so() -> R {
         named("Work laptop") && !names.iter().any(|n| n == "Laptop"),
         "{names:?}"
     );
+    Ok(())
+}
+
+/// A runner of what another identity shares with the account (sync semantics §13): the
+/// sharer's drive as a member reads it, in a read-only folder. What is shared comes down and
+/// nothing else, the folder shows whose share it is and isn't the account's main folder, and
+/// an edit here moves out (told) for the sharer's version, nothing written to their drive.
+#[test]
+fn a_runner_of_another_identitys_share_is_read_only_and_says_whose() -> R {
+    use hbsync_remote::RemoteBody;
+    use hbsync_remote::contract::Shares;
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    a.write("report.txt", "quarterly")?;
+    a.write("private.txt", "mine")?;
+    wait_until("both are up", || {
+        on_server(&server, "report.txt") && on_server(&server, "private.txt")
+    })?;
+    a.wait_idle()?;
+    let report = |server: &Arc<Mutex<FakeServer>>| {
+        let s = server.lock().unwrap_or_else(|e| e.into_inner());
+        s.live()
+            .find(|h| matches!(&h.body, RemoteBody::Live { content, .. } if content.name == "report.txt"))
+            .map(|h| h.at())
+    };
+    let shared = report(&server).ok_or("report.txt is up")?;
+    a.remote.share(shared.file_id)?;
+
+    let b = Device::start_on(FakeRemote::member(server.clone()), "b", |cfg| {
+        cfg.sharer = Some("sharer.example".into());
+        cfg.read_only = Some(cfg.folder.with_file_name("moved out"));
+    })?;
+    let out = b.root.with_file_name("moved out");
+    wait_until("b has what is shared", || b.has("report.txt"))?;
+    b.wait_idle()?;
+    assert!(!b.has("private.txt"), "not shared");
+    let status = b.status();
+    assert!(!status.is_main(), "{status:?}");
+    assert_eq!(status.sharer, Some("sharer.example".into()));
+    assert_eq!(
+        status.what(),
+        "what sharer.example shares with test.example"
+    );
+
+    b.write("report.txt", "my edit")?;
+    b.handle.send(Command::SyncNow);
+    let text = |path: PathBuf| std::fs::read_to_string(path).unwrap_or_default();
+    wait_until("the edit moved out", || {
+        text(out.join("report.txt")) == "my edit"
+    })?;
+    wait_until("the sharer's version is back", || {
+        text(b.root.join("report.txt")) == "quarterly"
+    })?;
+    wait_until("it said so", || {
+        b.status()
+            .recent
+            .iter()
+            .any(|n| n.text.starts_with("report.txt: moved to") && n.text.contains("read-only"))
+    })?;
+    b.wait_idle()?;
+    assert_eq!(b.remote.faults().uploads, 0, "nothing sent");
+    assert_eq!(report(&server), Some(shared), "as the sharer wrote it");
+    assert_eq!(live_names(&server), ["private.txt", "report.txt"]);
     Ok(())
 }
