@@ -588,6 +588,46 @@ fn an_orphan_where_a_device_syncs_nothing_stays_on_the_drive() -> R {
     Ok(())
 }
 
+/// a made the folder build and ignores it since; before it syncs again, b adds a file to it and
+/// another app deletes the folder for good: the server keeps b's file. a knows the folder from
+/// before only, at a place it filters now (§10): it doesn't make it again there for b's file.
+/// It forgets the folder (what it keeps in build stays its own), and b's file is an orphan
+/// like any other: into Recovered files. Before, the folder took over a's own build, b's file
+/// came down into it, and left the drive as one a stopped syncing.
+#[test]
+fn a_folder_ignored_since_isnt_made_again_for_what_the_drive_kept_of_it() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("readme", "r")?;
+    fs::create_dir_all(a.root.join("build"))?;
+    a.sync()?;
+    b.sync()?;
+    b.write("build/new.o", "n")?;
+    b.sync()?;
+    a.write("build/mine.o", "m")?;
+    filters::restart_ignoring(&mut a, "build/\n")?;
+    deleted_for_good_announced(&server, &a, &["build"])?;
+    let report = a.sync()?;
+    assert!(report.failed.is_empty(), "{report:?}");
+    let report = a.sync()?;
+    assert_eq!(report.ops_done, 0, "{report:?}");
+    let (live, removed) = server_names(&server)?;
+    assert_eq!(
+        a.tree_text(""),
+        [
+            "Recovered files/",
+            "Recovered files/new.o = n",
+            "build/",
+            "build/mine.o = m",
+            "readme = r"
+        ]
+    );
+    assert_eq!(live, ["Recovered files", "new.o", "readme"], "no build");
+    assert!(!removed, "nothing in Recently deleted");
+    Ok(())
+}
+
 /// As above, with a syncing the top (it ignores x/ only): every folder of d is an orphan when
 /// d goes for good, dirty or not, and a recovers them all into Recovered files, but for what it
 /// ignores in them (`*.log`, edited meanwhile: planned with them), which stays on the drive,

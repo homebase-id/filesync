@@ -183,6 +183,34 @@ impl Reconciler<'_> {
         })
     }
 
+    /// Whether this device syncs the place the folder `state` would come back to, through the
+    /// folders that would come back with it (§10). It doesn't where its rules changed since
+    /// the folder synced here: deleted for good on the drive meanwhile, the folder is known
+    /// from before only, which no mask covers, and the item kept there is this device's own.
+    /// A place not known down from the top counts as synced: judged as before.
+    fn syncs_place(&self, state: &NodeState) -> bool {
+        let mut names = vec![state.name.clone()];
+        let mut at = state.parent;
+        // Bounded: a cycle of known places ends at a folder met again.
+        let mut seen = HashSet::new();
+        while !at.is_root() {
+            let known = match self.merged.get(at) {
+                Some(known) => Some(known.clone()),
+                None => self.known_state(at),
+            };
+            let Some(known) = known.filter(|_| seen.insert(at)) else {
+                return true;
+            };
+            names.push(known.name);
+            at = known.parent;
+        }
+        names.reverse();
+        let filter = self.masking.filter;
+        filter
+            .names(names.iter().map(String::as_str), true)
+            .is_sync()
+    }
+
     /// Whether this device holds anything of `node` or below it here (a local item, a base).
     fn holds_any(&self, node: NodeId) -> bool {
         let i = self.input;
@@ -342,6 +370,14 @@ impl Reconciler<'_> {
                     if !self.holds_any(node)
                         && (self.in_masked(node) || self.recovered_path(node).is_none()) =>
                 {
+                    Parent::Leave
+                }
+                // Nor is its folder made again where this device knows it from before only, at
+                // a place it filters since (§10): the folder would take over the item this
+                // device keeps to itself, and the node would come down into it and leave the
+                // drive with it. Left for this plan, which forgets the folder: the node is an
+                // orphan like any other then.
+                Parent::Folder(state) if !self.holds_any(node) && !self.syncs_place(&state) => {
                     Parent::Leave
                 }
                 decided => decided,
