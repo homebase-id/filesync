@@ -25,8 +25,6 @@ enum Parent {
     /// or it is in a folder in Recently deleted at a place it filters. Left as it is, for a
     /// device that syncs that place: brought in, it would read as an item this device stopped
     /// syncing, and leave the drive; or another device's folder would stay deleted without it.
-    /// Or its folder is known from before only, at a place this device filters since: left for
-    /// this plan, which forgets the folder (it stays dirty, and is planned again after it).
     Leave,
 }
 
@@ -189,10 +187,11 @@ impl Reconciler<'_> {
     }
 
     /// Whether this device syncs the place the folder `state` would come back to, through the
-    /// folders that would come back with it (§10). It doesn't where its rules changed since
-    /// the folder synced here: deleted for good on the drive meanwhile, the folder is known
-    /// from before only, which no mask covers, and the item kept there is this device's own.
-    /// A place not known down from the top counts as synced: judged as before.
+    /// folders that would come back with it (§10). It doesn't where what it filters changed
+    /// since the folder synced here (its rules, the built-in ones): deleted for good on the
+    /// drive meanwhile, the folder is known from before only, which no mask covers, and the
+    /// item kept there is this device's own. A place not known down from the top counts as
+    /// synced (a folder above it masked, too): its folder waits there, as it did.
     fn syncs_place(&self, state: &NodeState) -> bool {
         let Ok(up) = crate::walk::up::<_, Infallible>(state.parent, |at| {
             let known = self.merged.get(at).cloned();
@@ -323,7 +322,17 @@ impl Reconciler<'_> {
                 None if let_go.contains(&parent) => Parent::LetGo,
                 None if withdrawn.contains(&parent) => Parent::Wait,
                 None => match self.known_state(parent) {
-                    Some(state) if state.kind == NodeKind::Folder => Parent::Folder(state),
+                    // Its folder comes back for it (§6.3), but not at a place this device
+                    // filters since the folder synced here (§10), for a node it holds nothing
+                    // of: the folder would take over the item this device keeps to itself, and
+                    // the node would come down into it and leave the drive with it. This device
+                    // forgets that folder, and the node is an orphan as below.
+                    Some(state)
+                        if state.kind == NodeKind::Folder
+                            && (self.holds_any(node) || self.syncs_place(&state)) =>
+                    {
+                        Parent::Folder(state)
+                    }
                     // Nowhere, or known as a file only before (another writer's), though the
                     // drive's picture is whole: the server kept a child of a folder deleted for
                     // good (a create racing the delete, another app), live or brought back from
@@ -366,14 +375,6 @@ impl Reconciler<'_> {
                     if !self.holds_any(node)
                         && (self.in_masked(node) || self.recovered_path(node).is_none()) =>
                 {
-                    Parent::Leave
-                }
-                // Nor is its folder made again where this device knows it from before only, at
-                // a place it filters since (§10): the folder would take over the item this
-                // device keeps to itself, and the node would come down into it and leave the
-                // drive with it. Left for this plan, which forgets the folder: still dirty, the
-                // node is planned again after it, an orphan like any other then.
-                Parent::Folder(state) if !self.holds_any(node) && !self.syncs_place(&state) => {
                     Parent::Leave
                 }
                 decided => decided,

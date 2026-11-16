@@ -307,11 +307,16 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
      it synced the folder there (its rules changed, §10, and before its next sync the folder
      was deleted for good with a node live in it that the device holds nothing of): it knows
      the folder from before only, which no mask covers. It forgets the folder, what it keeps
-     there staying its own, and the node is an orphan like any other then. Made again, the
-     folder took over the item the device keeps to itself, the node came down into it, and
-     left the drive as one the device stopped syncing. Known limit: a node the device does
-     hold (synced before the rule) that changed on the drive in that same window still brings
-     the folder back there.
+     there staying its own, and the node is an orphan like any other, in the same plan: as on
+     a device that never knew the folder. Made again, the folder took over the item the
+     device keeps to itself, the node came down into it, and left the drive as one the device
+     stopped syncing. A device that still syncs the folder makes it again for the node (rule
+     3): whichever writes first decides where the node is, and the other follows (the folder
+     back on the drive is masked on the device that filters it). Known limit: a node the
+     device does hold (synced before the rule) that changed on the drive in that same window
+     still brings the folder back there, and what else is live in the folder may come down
+     with it. And below a folder that is live on the drive and masked, the folder and the
+     node wait, as before.
    - A folder that leaves the picture for good (deleted outright, announced) while nodes are
      live in it plans those again: they are orphans now, whichever of them changed.
 4. **Folder delete propagation** removes the folder on the drive first, then its descendants,
