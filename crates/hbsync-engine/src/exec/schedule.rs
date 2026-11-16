@@ -214,7 +214,7 @@ impl Schedule {
     }
 
     /// Waits out the pause after a transient remote error, if there is one. Only remote work
-    /// waits; local operations go on meanwhile.
+    /// waits, and what the plan puts after it; local operations before it go on meanwhile.
     pub(super) fn wait_out_backoff(&mut self) {
         if let Some(at) = self.resume_at.take() {
             std::thread::sleep(at.saturating_duration_since(Instant::now()));

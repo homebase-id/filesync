@@ -1499,3 +1499,57 @@ fn regression_a_folder_moved_out_of_view_after_its_file_moved_out_stays_out() {
     assert_eq!(sim.server_paths(), ["c.txt", "d", "d/b", "d/b/a"]);
     assert_eq!(sim.local_paths(1), ["c.txt"]);
 }
+
+/// A file takes the name of the folder it was in, the folder deleted, and is edited, before
+/// the other client hears of any of it: there the folder, whose delete is still to run, is
+/// parked for the file's new version and deleted once the old one is out of it, in one plan.
+/// (The model always did; the executor didn't, which the engine's test
+/// `an_edited_file_takes_the_name_of_the_folder_it_was_in` holds: this one keeps the two alike.)
+#[test]
+fn regression_an_edited_file_takes_the_name_of_the_folder_it_was_in() {
+    use Action::*;
+    let mut sim = Sim::new(2);
+    let act = |sim: &mut Sim, action| sim.run(&[Event::Act { client: 0, action }]);
+    let sync = |sim: &mut Sim, client| {
+        sim.run(&[Event::Plan { client }]);
+        sim.run(&[Event::Step { client }; 8]);
+    };
+    let top = |sim: &Sim| sim.pick(0, NodeId::ROOT, true).expect("the top");
+    let pick = |sim: &Sim, node| sim.pick(0, node, false).expect("an item");
+    let (a, b, c) = (0, 1, 3); // NAMES: "a", "b", "c.txt"
+    let parent = top(&sim);
+    act(&mut sim, CreateFolder { parent, name: b });
+    let folder = sim.item(0, "b").expect("b");
+    let parent = sim.pick(0, folder, true).expect("b");
+    act(&mut sim, CreateFile { parent, name: a });
+    assert!(sim.quiesce(10));
+    let file = sim.item(0, "b/a").expect("b/a");
+    let (node, parent) = (pick(&sim, file), top(&sim));
+    act(
+        &mut sim,
+        Move {
+            node,
+            parent,
+            name: c,
+        },
+    );
+    let node = pick(&sim, folder);
+    act(&mut sim, Delete { node });
+    let (node, parent) = (pick(&sim, file), top(&sim));
+    act(
+        &mut sim,
+        Move {
+            node,
+            parent,
+            name: b,
+        },
+    );
+    act(&mut sim, Edit { file: 0 });
+    sync(&mut sim, 0);
+    assert_eq!(sim.server_paths(), ["b"]);
+    sync(&mut sim, 1);
+    assert_eq!(sim.local_paths(1), ["b"], "in one plan");
+    assert!(sim.quiesce(10));
+    assert_eq!(sim.check(), Ok(()));
+    assert_eq!(sim.item(1, "b"), Some(file));
+}

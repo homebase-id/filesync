@@ -347,7 +347,7 @@ impl Executor<'_> {
         name: &str,
         drive: Option<&DriveVersion>,
     ) -> Step {
-        let Some((row, place)) = self.db.read(|s| {
+        let Some((mut row, place)) = self.db.read(|s| {
             let Some(row) = s.local_by_node(node)? else {
                 return Ok(None);
             };
@@ -372,7 +372,7 @@ impl Executor<'_> {
                 "would move a folder into itself for now".into(),
             ));
         }
-        if !self.free_target(&target, Some(node))? {
+        if !self.free_target_for(&target, &mut row)? {
             return Ok(Outcome::Retry("name taken".into()));
         }
         if let Err(e) = self.disk.rename(self.db, &row.path, &target)? {

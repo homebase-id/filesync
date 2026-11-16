@@ -493,7 +493,7 @@ impl Executor<'_> {
     ) -> Step {
         let Placement {
             mut record,
-            current,
+            mut current,
             created_ms,
             tags: to_write,
         } = placement;
@@ -539,12 +539,12 @@ impl Executor<'_> {
         let tags = self.disk.on_item_after(left, Tags::default());
         // The old version a download replaces from another folder: aside till the commit.
         let mut old_aside = None;
-        let placed = match &current {
+        let placed = match &mut current {
             Some(row) if &row.path == target => self.disk.put(self.db, target, |at| {
                 done.persist_over(at, &row.fingerprint, created_ms)
             })?,
             Some(row) => {
-                if !self.on_disk_unchanged(row) || !self.free_target(target, Some(node))? {
+                if !self.on_disk_unchanged(row) || !self.free_target_for(target, row)? {
                     done.keep_for_retry();
                     return Ok(Outcome::Retry("old version changed or name taken".into()));
                 }
