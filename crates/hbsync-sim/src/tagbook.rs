@@ -30,7 +30,8 @@ pub(crate) enum Limit {
     /// A removal or a recolour made while the client's own plan still writes the tag (onto the
     /// item, or up with a remote write): the write, planned before, lands over it, and the tag
     /// comes back, or its colour before does (sync semantics §1; the in-flight undo design,
-    /// seed f9ca4128; for a colour, seed 5317e937).
+    /// seed f9ca4128; for a colour, seed 5317e937). A colour given after such a write landed
+    /// over one, before a plan settles it, is lost the same way (seed 328c6cf9).
     OwnTagWriteInFlight,
     /// A client adds back a tag its base holds (after removing it here): the item is as the
     /// base has it, so nothing goes up, and where the drive dropped the tag meanwhile (another
@@ -200,6 +201,15 @@ impl TagBook {
             limit: in_flight.then_some(Limit::OwnTagWriteInFlight),
         };
         self.recoloured.insert(add, Recolour { made, colour, seen });
+    }
+
+    /// The colour client `c`'s base had tag `name` of `node` in when its user last gave the tag
+    /// a colour, where that met [`Limit::OwnTagWriteInFlight`].
+    pub(crate) fn recoloured_in_flight(&self, c: usize, node: NodeId, name: &str) -> Option<u8> {
+        self.recoloured
+            .get(&(c, node, name.to_owned()))
+            .filter(|r| r.made.limit == Some(Limit::OwnTagWriteInFlight))
+            .map(|r| r.seen)
     }
 
     /// Client `c`'s adds and colours on `node` are client `to`'s now (the item moved to another
@@ -736,5 +746,16 @@ mod tests {
         assert!(check(&book, &drive_tagged(6)).is_ok());
         let limit = (Limit::OwnTagWriteInFlight, (0, NODE, "Red".to_owned()));
         assert_eq!(book.excused(), [limit]);
+    }
+
+    /// Only a recolour that met the limit says what its client's base had then.
+    #[test]
+    fn a_recolour_in_flight_is_told_with_what_its_base_had() {
+        let mut book = TagBook::default();
+        book.recolour(0, NODE, "Red", 7, Some(6), true);
+        assert_eq!(book.recoloured_in_flight(0, NODE, "Red"), Some(6));
+        assert_eq!(book.recoloured_in_flight(1, NODE, "Red"), None);
+        book.recolour(0, NODE, "Red", 0, Some(7), false);
+        assert_eq!(book.recoloured_in_flight(0, NODE, "Red"), None);
     }
 }

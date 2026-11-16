@@ -442,7 +442,8 @@ impl Sim {
                         tags[i].colour = (tags[i].colour + 1) % 8;
                         if book {
                             let seen = self.clients[c].base_tag(node, name).map(|t| t.colour);
-                            let in_flight = self.writes_tag(c, node, name);
+                            let in_flight = self.writes_tag(c, node, name)
+                                || self.tag_write_unsettled(c, node, name, seen);
                             let colour = tags[i].colour;
                             let book = &mut self.ledger.tags;
                             book.recolour(c, node, name, colour, seen, in_flight);
@@ -1095,6 +1096,22 @@ impl Sim {
             | Op::LocalMkdir { node: n, tags, .. } => *n == node && tags.get(name).is_some(),
             _ => false,
         })
+    }
+
+    /// Whether client `c`'s own write of tag `name` of `node` landed over a colour given while
+    /// it was in flight, and no plan has settled it since: the client's base still has the
+    /// colour from before the write (`seen`, as when that colour was given), the drive another.
+    /// A colour given now is read as that one was (both sides changed it since the base), and
+    /// meets the same limit ([`Limit::OwnTagWriteInFlight`]).
+    fn tag_write_unsettled(&self, c: usize, node: NodeId, name: &str, seen: Option<u8>) -> bool {
+        let drive = self
+            .server
+            .live
+            .get(&node)
+            .and_then(|n| n.state.tags.get(name));
+        seen.is_some()
+            && drive.is_some_and(|t| Some(t.colour) != seen)
+            && self.ledger.tags.recoloured_in_flight(c, node, name) == seen
     }
 
     /// Whether a removal of tag `name` from `node` is under way that client `c`'s add may lose

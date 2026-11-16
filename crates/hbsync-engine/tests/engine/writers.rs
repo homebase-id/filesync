@@ -433,3 +433,45 @@ fn tag_removed_while_a_download_waits_for_recovery(moved: bool) -> R {
     assert_eq!(a.tree_text(""), b.tree_text(""));
     Ok(())
 }
+
+/// A known limit (sync semantics §11, own removal in flight): a tag's removal lands on the
+/// drive but its answer is lost, and the user puts the tag back before the next sync. The base
+/// still has the tag, so the plan reads the drive's lack of it as another device's removal,
+/// and the tag goes from the file again.
+#[test]
+fn a_tag_put_back_after_its_removal_lost_its_answer_goes() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("f.txt", "x")?;
+    let file = a.root.join("f.txt");
+    if !tags::CAN_TAG || tags::write(&file, &Tags::default())?.is_none() {
+        eprintln!("no tags here; skipped");
+        return Ok(());
+    }
+    let red = Tags::new([Tag::new("Red", 6)]);
+    tags::write(&file, &red)?;
+    a.sync()?;
+    assert_eq!(drive_tags(&server, "f.txt").len(), 1);
+
+    // The removal lands; its answer doesn't.
+    tick();
+    tags::write(&file, &Tags::default())?;
+    a.remote.faults().lose_answer_named = Some("f.txt".into());
+    let report = a.sync()?;
+    a.remote.faults().lose_answer_named = None;
+    assert_eq!(
+        (report.ops_done, report.skipped.len()),
+        (0, 1),
+        "{report:?}"
+    );
+    assert!(drive_tags(&server, "f.txt").is_empty());
+
+    // Put back before the next sync: lost to the removal.
+    tick();
+    tags::write(&file, &red)?;
+    a.sync()?;
+    assert!(names(&a, "f.txt").is_empty());
+    assert!(drive_tags(&server, "f.txt").is_empty());
+    assert!(a.engine.sync_once("2026-10-08")?.is_idle());
+    Ok(())
+}
