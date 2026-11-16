@@ -210,6 +210,98 @@ fn a_copy_parked_for_a_download_waits_parked_while_its_name_is_taken() {
     assert_eq!(sim.item(2, "a"), Some(first));
 }
 
+/// The parked name of the one item `paths` (a member's) has beside `a`.
+fn parked_beside_a(paths: &[String]) -> &str {
+    let [parked, a] = paths else {
+        panic!("{paths:?}");
+    };
+    assert_eq!(a, "a");
+    assert!(parked.starts_with(".hbsync-move-"), "{parked}");
+    parked
+}
+
+/// Two shared files of one name at the top, the first for want of its folder. Its share
+/// withdrawn, the second's download parks it (its delete planned) and takes the name; it is
+/// shared again before the member deletes it, and the second is edited. The file on the name
+/// keeps it and follows the drive (the edit comes down); the parked one waits, hidden, though
+/// its id is the lower. (Both are reported at the name, the parked one where it belongs: it
+/// kept the name, and the file on it was left out and never followed the drive again.)
+#[test]
+fn a_parked_copy_shared_again_waits_for_the_file_on_its_name() {
+    use Action::*;
+    let mut sim = Sim::new(3).with_member(2).with_narrow_check();
+    sim.run(&[
+        act(0, NewerFolder { name: 0 }),
+        act(0, DeleteStopped { pick: 0, done: 14 }),
+        shares(0, false),
+        act(1, CreateFile { parent: 0, name: 8 }),
+        Event::Plan { client: 1 },
+        Event::Plan { client: 2 },
+        Event::Step { client: 1 },
+        Event::Step { client: 2 },
+        shares(3, true),
+        shares(5, false),
+        Event::Plan { client: 2 },
+        shares(2, true),
+        act(1, Edit { file: 0 }),
+        Event::Step { client: 2 },
+        act(0, CreateFile { parent: 0, name: 0 }),
+    ]);
+    settle(&mut sim);
+    let paths = sim.local_paths(2);
+    let first = sim.item(2, parked_beside_a(&paths)).expect("parked");
+    let second = sim.item(1, "a").expect("the edited file");
+    assert_eq!(sim.item(2, "a"), Some(second));
+    assert!(first < second);
+}
+
+/// [`a_parked_copy_shared_again_waits_for_the_file_on_its_name`] in pages, the member dying
+/// as the second file is put in place: its download was planned again at every sync, onto the
+/// name it was on (the parked one kept the name in the plan), and the member never settled.
+#[test]
+fn a_parked_copy_shared_again_waits_through_a_crash() {
+    use Action::*;
+    let mut sim = Sim::new(3)
+        .with_member(2)
+        .with_small_pages(3)
+        .with_split_downloads();
+    sim.run(&[
+        act(0, NewerFolder { name: 0 }),
+        act(0, DeleteOutright { pick: 0 }),
+        shares(14, false),
+        act(1, CreateFile { parent: 0, name: 0 }),
+        Event::Plan { client: 0 },
+        act(0, NewerFolder { name: 0 }),
+        Event::Plan { client: 2 },
+        Event::Step { client: 2 },
+        Event::Step { client: 0 },
+        act(1, CreateFile { parent: 0, name: 0 }),
+        Event::Step { client: 0 },
+        Event::Crash { client: 2 },
+        Event::Plan { client: 2 },
+        shares(5, false),
+        Event::Step { client: 0 },
+        shares(6, true),
+        Event::Plan { client: 2 },
+        Event::Step { client: 2 },
+        Event::Crash { client: 0 },
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        Event::Plan { client: 1 },
+        Event::Step { client: 1 },
+        shares(6, false),
+        Event::Crash { client: 2 },
+        Event::Crash { client: 0 },
+        Event::Plan { client: 0 },
+        act(0, Edit { file: 0 }),
+    ]);
+    settle(&mut sim);
+    let paths = sim.local_paths(2);
+    let first = sim.item(2, parked_beside_a(&paths)).expect("parked");
+    assert_eq!(sim.item(0, "Recovered files/a"), Some(first));
+    assert!(sim.item(2, "a").is_some_and(|second| first < second));
+}
+
 /// A file renamed on the drive to a name taken at the member's top waits there under its old
 /// name, and a new file of that old name waits for it in turn: each has its name once the
 /// first one's is free.

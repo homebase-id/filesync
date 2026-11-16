@@ -758,9 +758,11 @@ impl Reconciler<'_> {
                 // held by them alone leaves every newcomer out (one ignored here may be on it).
                 // What moves out holds no name on disk: it goes first.
                 let at_name = |s: &NodeState| s.parent == parent && name_key(&s.name) == key;
+                // Nor does a parked item: its name is free on disk, or another item's.
                 let on_disk = |n: &NodeId| {
                     self.masking.read_only
                         && !self.evicted.contains(n)
+                        && !self.input.parked.contains(n)
                         && self.input.local.get(*n).is_some_and(at_name)
                 };
                 // (One that moves out holds the name where its drive version comes back to it.)

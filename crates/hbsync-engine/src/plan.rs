@@ -163,6 +163,9 @@ pub struct Input {
     pub remote_refs: HashMap<NodeId, RemoteRef>,
     /// Local files whose hash isn't known yet (being written, locked): decided later.
     pub local_unhashed: HashSet<NodeId>,
+    /// The local items parked under a temporary name, `local` holding them at the place they
+    /// belong (§8): not on that name on disk, where another item may be.
+    pub parked: HashSet<NodeId>,
     pub dirty: BTreeSet<NodeId>,
     /// The remote tree holds every live node the remote has that matters here (the feed is
     /// drained, which reads past the rows it holds back, and parents were looked up). Then a

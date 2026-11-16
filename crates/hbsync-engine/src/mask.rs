@@ -305,6 +305,7 @@ impl Masks {
                     base_extra: input.base_extra.clone(),
                     remote_refs: input.remote_refs.clone(),
                     local_unhashed: HashSet::new(),
+                    parked: HashSet::new(),
                     dirty: BTreeSet::new(),
                     remote_complete: input.remote_complete,
                     unreadable: input.unreadable.clone(),
@@ -346,6 +347,7 @@ impl Masks {
         view.dirty_elsewhere = elsewhere(&input.dirty_elsewhere);
         view.going_above = elsewhere(&input.going_above);
         view.local_unhashed = renamed(&input.local_unhashed);
+        view.parked = renamed(&input.parked);
         view.going = renamed(&input.going);
         view.local = local;
         view.dirty = dirty;

@@ -360,14 +360,20 @@ impl Sim {
                 local_view.insert(n, NodeState { content, ..state });
             }
         }
+        let mut parked = HashSet::new();
         for &node in client.parked.keys() {
             if let Some(state) = client.local.get(node) {
-                local_view.insert(node, at_place(client, node, state));
+                let placed = at_place(client, node, state);
+                if placed.name != state.name {
+                    parked.insert(node);
+                }
+                local_view.insert(node, placed);
             }
         }
         // The scanner never reports filtered items (judged by their names on disk).
         for n in masked(&client.local, &client.filter) {
             local_view.remove(n);
+            parked.remove(&n);
         }
         // A file not hashed yet is reported without content: the plan defers it.
         for n in client.unhashed_now() {
@@ -396,6 +402,7 @@ impl Sim {
             base_extra: client.extra.clone(),
             remote_complete: true,
             local_unhashed,
+            parked,
             ..Default::default()
         };
         // On the drive, in a version no client reads ([`Action::NewerFolder`]).

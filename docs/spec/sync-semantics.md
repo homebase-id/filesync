@@ -1271,7 +1271,8 @@ from such a drive is read-only (above), and these rules hold too:
   till a version it reads comes.
 - **Names that meet at the top** (two items of one name, each there for want of its folder)
   follow the name-clash rule above: the one here under the name keeps it (the one on disk
-  under it before one only recorded there), and the other isn't synced here, told so, planned
+  under it before one only recorded there; a parked item, §8, isn't on its name on disk, though
+  the local view reports it there), and the other isn't synced here, told so, planned
   again at every sync until its folder is shared, its name changes or the first one's share
   ends. One left out that was here already under an older name keeps that copy as it is
   meanwhile, and the older name stays taken here: a new item of that name waits for it in
@@ -1300,8 +1301,9 @@ from such a drive is read-only (above), and these rules hold too:
   folder is such a row stays hidden in it. A file shared
   without its folder stays here while that folder is in the sharer's Recently deleted (the
   picture never had the folder to take it along). A copy parked for a download that took its
-  name (§8), its own delete planned, whose file is shared again before the delete ran (a
-  crash between) waits under its parked name while the name is taken.
+  name (§8), its own delete planned, whose file is shared again before the delete ran (the
+  share given back while the download ran, or a crash between) waits under its parked name,
+  hidden, while the name is taken: the file on the name keeps it and follows the drive.
 - **The cost.** Where an item is, is worked out as its row is read, and nothing is stored,
   so nothing goes stale when a folder comes or goes. Measured with 100,000 mirror rows (a
   release build, the DB on disk), against this identity's own drive, which pays one read of
