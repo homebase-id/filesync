@@ -140,8 +140,9 @@ pub(super) enum Look {
 /// as [`Look`] says: a file by [`same_item`] (and, aside, [`proven`]); a folder in one walk
 /// that judges each item at its place in the sync root (ignore rules go by path): every synced
 /// item there must be one of `rows`, unchanged, and every one of `rows` there; junk files go
-/// along; ignored items, and folders on the junk list (they may hold what was never synced),
-/// are reported. `None` if anything else is there.
+/// along; ignored items, state folders (another sync folder's, moved in), and folders on the
+/// junk list (they may hold what was never synced), are reported. `None` if anything else is
+/// there.
 pub(super) fn check<'r>(
     folder: &FolderCtx,
     at: &Path,
@@ -182,7 +183,7 @@ pub(super) fn check<'r>(
             }
             WalkEvent::Skipped {
                 path,
-                reason: reason @ (SkipReason::Junk | SkipReason::Ignored),
+                reason: reason @ (SkipReason::Junk | SkipReason::Ignored | SkipReason::Excluded),
             } => {
                 let below: PathBuf = path.components().skip(row.path.depth()).collect();
                 let place = at.join(below);
@@ -206,8 +207,9 @@ pub(super) fn check<'r>(
 }
 
 /// Whether an item a delete finds but doesn't sync keeps the folder it is in (sync semantics
-/// §7): an ignored one does, and a folder on the junk list (it may hold what was never synced);
-/// only a junk file (`junk`, not `is_dir`) goes along. The simulator's deletes ask this too.
+/// §7): an ignored one does, a state folder, and a folder on the junk list (it may hold what was
+/// never synced); only a junk file (`junk`, not `is_dir`) goes along. The simulator's deletes
+/// ask this too.
 pub fn keeps_its_folder(junk: bool, is_dir: bool) -> bool {
     !junk || is_dir
 }

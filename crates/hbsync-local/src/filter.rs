@@ -14,8 +14,9 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use hbsync_platform::RelPath;
 use hbsync_platform::name::{ends_caseless, name_key, starts_caseless};
 
-/// Bumped whenever the built-in junk list changes, so a changed list counts as a rule change.
-const JUNK_VERSION: u32 = 4;
+/// Bumped whenever what the built-in names leave out changes (the junk list, where the state
+/// folder's name counts), so that counts as a rule change.
+const JUNK_VERSION: u32 = 5;
 
 /// How the built-in list matches a name (ASCII case-insensitively).
 #[derive(Debug, Clone, Copy)]
@@ -84,8 +85,17 @@ pub fn state_dir_key() -> &'static str {
 
 /// Whether `name` is the state folder's ([`crate::STATE_DIR`]) in any case or spelling: caseless
 /// and normalization-insensitive (`name_key`), as a volume that ignores case compares names.
+///
+/// Asked of every name a walk, the watcher and the mask meet, so without building a key where
+/// it can't match: an ASCII name's key is the name in lower case, and only a name that starts
+/// with a `.` has a key that does.
 pub fn is_state_dir(name: &str) -> bool {
-    name.len() <= crate::STATE_DIR.len() * 4 && name_key(name) == state_dir_key()
+    if name.is_ascii() {
+        return name.eq_ignore_ascii_case(crate::STATE_DIR);
+    }
+    name.starts_with('.')
+        && name.len() <= crate::STATE_DIR.len() * 4
+        && name_key(name) == state_dir_key()
 }
 
 /// The folders at the top of `root` that hold what other identities share with the account, by
@@ -152,7 +162,8 @@ pub fn is_junk(name: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Sync,
-    /// The client's own at the top of the sync root: its state folder, and a folder that holds
+    /// The client's own: a state folder ([`crate::STATE_DIR`], this sync root's at its top or
+    /// one below it, of a sync root moved or copied in), and at the top a folder that holds
     /// what other identities share ([`shared_folders`]).
     Excluded,
     Junk,
@@ -408,13 +419,16 @@ impl Filter {
             .unwrap_or_else(|| self.by_rules(path, is_dir))
     }
 
-    /// The verdict the name alone gives (the state folder, a folder that holds what other
-    /// identities share, junk), if any. The state folder in any case or spelling a volume may
-    /// take for it (one that ignores case is most): another writer's `.HBSYNC` there would be
-    /// this client's own folder, and what is in it would land in it (an `ignore` file setting
-    /// this device's rules).
+    /// The verdict the name alone gives (a state folder, a folder that holds what other
+    /// identities share, junk), if any. A state folder at any depth: below the top it is
+    /// another sync root's (a folder of shares that lost its marker, a sync folder moved in),
+    /// whose DB and half-done downloads make no sense on another device, and whose marker
+    /// there would be taken for a set-up sync folder's. In any case or spelling a volume may
+    /// take for it (one that ignores case is most): another writer's `.HBSYNC` at the top
+    /// would be this client's own folder there, and what is in it would land in it (an
+    /// `ignore` file setting this device's rules).
     fn by_name(&self, name: &str, at_root: bool) -> Option<Verdict> {
-        if at_root && (is_state_dir(name) || self.holds_shares(name)) {
+        if is_state_dir(name) || (at_root && self.holds_shares(name)) {
             Some(Verdict::Excluded)
         } else if is_junk(name) {
             Some(Verdict::Junk)
@@ -462,16 +476,39 @@ mod tests {
         Filter::from_rules(text, false).expect("valid rules")
     }
 
-    /// The state folder at the top in any case or spelling (`.HBSYNC`, a long s) is excluded
-    /// as the state folder: on a volume that ignores case, it is. Not deeper, nor a name near it.
+    /// The state folder in any case or spelling (`.HBSYNC`, a long s) is excluded as the state
+    /// folder: on a volume that ignores case, it is. At any depth, a file of the name too; not
+    /// a name near it (an item parked for a move, `.hbsync-move-…`).
     #[test]
     fn the_state_folder_is_excluded_in_any_case() {
         let filter = Filter::default();
         for name in [".hbsync", ".HBSYNC", ".HbSync", ".hb\u{17f}ync"] {
+            assert!(is_state_dir(name), "{name}");
             assert_eq!(filter.names([name], true), Verdict::Excluded, "{name}");
+            assert_eq!(filter.names(["a", name], true), Verdict::Excluded, "{name}");
+            assert_eq!(filter.in_folder("a/b", name, false), Verdict::Excluded);
         }
-        assert!(filter.names(["a", ".HBSYNC"], true).is_sync());
-        assert!(filter.names([".hbsync2"], true).is_sync());
+        for name in [
+            ".hbsync2",
+            ".hbsync-move-1",
+            "hbsync",
+            ".hb\u{161}ync",
+            "\u{e9}",
+        ] {
+            assert!(!is_state_dir(name), "{name}");
+            assert!(filter.names(["a", name], true).is_sync(), "{name}");
+        }
+    }
+
+    /// [`is_state_dir`] builds no key for a name that doesn't start with a `.`: no other
+    /// character's key starts with one.
+    #[test]
+    fn only_a_dot_has_a_key_that_starts_with_one() {
+        let mut buf = [0; 4];
+        for c in (0..=char::MAX as u32).filter_map(char::from_u32) {
+            let key = name_key(c.encode_utf8(&mut buf));
+            assert_eq!(key.starts_with('.'), c == '.', "{c:?}");
+        }
     }
 
     #[test]
@@ -524,11 +561,16 @@ mod tests {
     }
 
     #[test]
-    fn the_state_folder_is_excluded_only_at_the_top() {
+    fn a_state_folder_is_excluded_at_any_depth_with_all_in_it() {
         let f = Filter::default();
         assert_eq!(f.in_folder("", ".hbsync", true), Verdict::Excluded);
-        assert_eq!(f.in_folder("a", ".hbsync", true), Verdict::Sync);
+        assert_eq!(f.in_folder("a", ".hbsync", true), Verdict::Excluded);
         assert_eq!(f.path(&rel(".hbsync/state.db"), false), Verdict::Excluded);
+        let nested = rel("Shared/tom/.hbsync/state.db");
+        assert_eq!(f.path(&nested, false), Verdict::Excluded);
+        // Whatever the user's rules say: it is no rule of theirs.
+        let kept = rules("!.hbsync\n!**/.hbsync/**\n");
+        assert_eq!(kept.path(&nested, false), Verdict::Excluded);
     }
 
     #[test]

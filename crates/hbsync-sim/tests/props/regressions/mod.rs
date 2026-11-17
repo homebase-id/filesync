@@ -9,6 +9,7 @@ mod names;
 mod read_only;
 mod roles;
 mod shared_folder;
+mod state_folder;
 mod tags;
 
 use hbsync_sim::{Action, Event, Sim};

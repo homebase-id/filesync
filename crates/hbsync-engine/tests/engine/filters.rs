@@ -53,6 +53,61 @@ fn a_junk_folder_stays_with_its_folder() -> R {
     Ok(())
 }
 
+/// A state folder below the top (another sync folder's, moved in with its folder) is the
+/// client's own as the one at the top is (§10). Nothing of it is sent; the folder it is in,
+/// deleted elsewhere, stays for it without what was synced; and one another writer put on the
+/// drive (a client from before) neither comes nor is taken off the drive.
+#[test]
+fn a_state_folder_below_the_top_is_left_alone() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("old/doc.txt", "d")?;
+    a.write("old/.hbsync/state.db", "a's own")?;
+    a.write("old/.hbsync/aside/kept.txt", "k")?;
+    a.write("old/sub/.HbSync", "a file of the name")?;
+    a.write("readme.txt", "r")?; // so deleting old isn't deleting everything
+    a.sync()?;
+    b.sync()?;
+    let synced = ["old/", "old/doc.txt = d", "old/sub/", "readme.txt = r"];
+    assert_eq!(b.tree_text(""), synced, "a state folder was sent");
+
+    fs::remove_dir_all(b.root.join("old"))?;
+    b.sync()?;
+    a.sync()?;
+    let kept = [
+        "old/",
+        "old/.hbsync/",
+        "old/.hbsync/aside/",
+        "old/.hbsync/aside/kept.txt = k",
+        "old/.hbsync/state.db = a's own",
+        "old/sub/",
+        "old/sub/.HbSync = a file of the name",
+        "readme.txt = r",
+    ];
+    assert_eq!(a.tree_text(""), kept);
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["old/", "old/sub/", "readme.txt = r"]);
+
+    let theirs = {
+        let old = node_named(&server, "old");
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        let state = hbsync_remote::contract::folder(".HBSYNC", old);
+        srv.create(&state, None)?;
+        let algorithm = hbsync_fileio::HashAlgorithm::Blake3;
+        srv.seed_file(state.node, "state.db", b"theirs", algorithm)?;
+        state.node
+    };
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(a.tree_text(""), kept, "the drive's state folder came");
+    assert_eq!(b.tree_text(""), ["old/", "old/sub/", "readme.txt = r"]);
+    let srv = server.lock().map_err(|_| "poisoned")?;
+    assert!(srv.live().any(|h| h.node() == Some(theirs)), "taken off");
+    Ok(())
+}
+
 #[test]
 fn ignored_items_stay_on_their_device_and_keep_their_folder() -> R {
     let server = server();

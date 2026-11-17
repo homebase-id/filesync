@@ -459,6 +459,10 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-11-17: the computers leave an item named `.hbsync` (any case) out in every folder, with
+  all in it, not only at a sync folder's top: one on the drive stays there, unseen by them
+  (sync semantics §10; the browser's part in `file-browser.md`, "Uploading"). Nothing new on
+  a node.
 - 2026-11-16: reading another identity's share: a node whose folder the member wasn't shared
   is shown at the top of the share; a "no longer shared" tombstone takes the file off the
   member's devices without counting it gone; a member never purges the owner's drive.

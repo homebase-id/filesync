@@ -180,6 +180,9 @@ lists it follows the desktops:
   the computer's own state folder there, which the computers never sync. Don't create, rename,
   upload or restore anything to it there: number around it (`.hbsync (1)`, `.hbsync (restored)`). One that
   already exists (another writer's) is listed with a note that it won't sync to computers.
+  The computers leave an item of that name out in every other folder too, with all in it
+  (it is another sync folder's state, moved in): list one there with the same note, and
+  don't make one.
   - Unique within the folder, ignoring case and Unicode form (as on macOS and Windows): add
     `(1)`, `(2)` and so on if needed.
 - Rename or move: a header-only update of `content.name` and/or `groupId`, guarded by the

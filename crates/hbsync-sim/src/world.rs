@@ -640,13 +640,17 @@ impl Sim {
                     Arc::new(Filter::default())
                 };
             }
-            Action::CreateJunkFolder { parent } => {
+            Action::CreateJunkFolder { parent } | Action::CreateStateFolder { parent } => {
                 let parent = folders[parent % folders.len()];
-                if name_free(local, parent, JUNK_FOLDER, None) {
+                let name = match action {
+                    Action::CreateJunkFolder { .. } => JUNK_FOLDER,
+                    _ => hbsync_local::STATE_DIR,
+                };
+                if name_free(local, parent, name, None) {
                     let folder = self.ids.fresh();
                     let blob = self.new_blob();
                     let local = &mut self.clients[c].local;
-                    local.insert(folder, NodeState::folder(parent, JUNK_FOLDER));
+                    local.insert(folder, NodeState::folder(parent, name));
                     local.insert(self.ids.fresh(), NodeState::file(folder, "x", blob));
                 }
             }
@@ -1733,6 +1737,36 @@ mod tests {
         assert_eq!(name(top), ".HBSYNC (restored)");
         assert_eq!(name(docs), "Documents");
         assert_eq!(name(inside), ".hbsync (restored)");
+    }
+
+    /// A state folder below the top that another writer put on the drive (a client from before
+    /// they were left out at any depth) comes to no client, with what is in it, and no client
+    /// takes it off the drive; a delete of the folder it is in takes what the client saw and
+    /// leaves that folder for it (§10 rule 3).
+    #[test]
+    fn a_state_folder_on_the_drive_below_the_top_comes_to_no_client() {
+        let mut sim = Sim::new(2).without_ignore_rules().with_narrow_check();
+        let [a, b, state, db] = [(); 4].map(|()| sim.ids.fresh());
+        sim.server.put(a, NodeState::folder(NodeId::ROOT, "a"));
+        let file = NodeState::file(a, "b", sim.new_blob());
+        sim.server.put(b, file);
+        sim.server.put(state, NodeState::folder(a, ".HBSYNC"));
+        let file = NodeState::file(state, "state.db", sim.new_blob());
+        sim.server.put(db, file);
+        assert!(sim.quiesce(10));
+        sim.check().unwrap_or_else(|e| panic!("{e}"));
+        let on_drive = ["a", "a/.HBSYNC", "a/.HBSYNC/state.db", "a/b"];
+        assert_eq!(sim.server_paths(), on_drive);
+        assert_eq!(sim.local_paths(0), ["a", "a/b"]);
+        assert_eq!(sim.local_paths(1), ["a", "a/b"]);
+
+        let node = sim.pick(0, a, false).expect("its pick");
+        sim.run(&[act(0, Action::Delete { node })]);
+        assert!(sim.quiesce(10));
+        sim.check().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(sim.server_paths(), on_drive[..3]);
+        assert_eq!(sim.local_paths(0), ["a"]);
+        assert_eq!(sim.local_paths(1), ["a"]);
     }
 
     /// A delete here that loses (another device edited the file) settles nothing of what other

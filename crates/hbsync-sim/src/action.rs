@@ -44,6 +44,11 @@ pub enum Action {
     CreateJunkFolder {
         parent: usize,
     },
+    /// A state folder (`.hbsync`) with a file in it, another sync folder's moved or copied in:
+    /// never synced at any depth, and kept as an ignored item is (sync semantics §10).
+    CreateStateFolder {
+        parent: usize,
+    },
     /// The client starts or stops ignoring `d` (a rule change, picked up at the next plan);
     /// one with a folder that holds what other identities share
     /// ([`crate::Sim::with_shared_folder_on`]) loses or gets back that folder's marker

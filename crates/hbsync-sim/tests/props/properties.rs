@@ -393,7 +393,8 @@ proptest! {
                         | EditTaken { .. }
                         | ToggleIgnore
                         | CreateJunk { .. }
-                        | CreateJunkFolder { .. } => (client, Purge, sync),
+                        | CreateJunkFolder { .. }
+                        | CreateStateFolder { .. } => (client, Purge, sync),
                         // Edits on one device.
                         Edit { .. } | EditWriting { .. } | Lock { .. } => (0, action, sync),
                         _ => (client, action, sync),

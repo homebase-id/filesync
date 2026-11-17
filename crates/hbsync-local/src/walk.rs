@@ -35,7 +35,8 @@ pub enum SkipReason {
     NotUnicode,
     /// Not a valid name for the remote (for example more than 255 UTF-8 bytes).
     InvalidName,
-    /// The client's own `.hbsync` folder, or a folder that holds what other identities share.
+    /// The client's own: a state folder (`.hbsync`, at any depth), or a folder that holds what
+    /// other identities share.
     Excluded,
     /// On the built-in junk list: disposable.
     Junk,
@@ -475,13 +476,53 @@ mod tests {
         fs::write(shared_marker(&r.join("mine/Team")), b"")?;
         fs::create_dir(shared_marker(&r.join("odd")))?;
 
+        let (entries, excluded, asked) = walked(r)?;
+        assert_eq!(entries, ["mine", "mine/Team", "mine/Team/x.txt", "odd"]);
+        assert_eq!(excluded, [PathBuf::from("Team")]);
+        assert_eq!(asked, ["mine", "mine/Team", "odd"]);
+        Ok(())
+    }
+
+    /// A state folder below the top (another sync folder's, moved or copied in) is neither
+    /// reported nor entered, as the one at the top; a file of the name neither.
+    #[test]
+    fn a_state_folder_is_never_entered_at_any_depth() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let r = dir.path();
+        for d in [".hbsync/tmp", "old/.hbsync/aside", "old/docs/.HBSYNC"] {
+            fs::create_dir_all(r.join(d))?;
+        }
+        for f in [".hbsync/state.db", "old/.hbsync/folder", "old/docs/a.txt"] {
+            fs::write(r.join(f), b"x")?;
+        }
+        fs::write(r.join("old/docs/.HBSYNC/state.db"), b"x")?;
+        fs::create_dir(r.join("plain"))?;
+        fs::write(r.join("plain/.hbsync"), b"a file")?;
+
+        let (entries, mut excluded, asked) = walked(r)?;
+        assert_eq!(entries, ["old", "old/docs", "old/docs/a.txt", "plain"]);
+        excluded.sort();
+        let left_out = [
+            ".hbsync",
+            "old/.hbsync",
+            "old/docs/.HBSYNC",
+            "plain/.hbsync",
+        ];
+        assert_eq!(excluded, left_out.map(PathBuf::from));
+        assert_eq!(asked, ["old", "old/docs", "plain"]);
+        Ok(())
+    }
+
+    /// What a walk of `root` with the built-in filter reports: the entries, what it left out
+    /// as the client's own, and the folders it asked to enter.
+    fn walked(root: &Path) -> io::Result<(Vec<String>, Vec<PathBuf>, Vec<String>)> {
         let filter = Filter::default();
         let mut asked = Vec::new();
         let descend = |path: &RelPath, _: &LocalMeta| {
             asked.push(path.as_str().to_owned());
             true
         };
-        let walker = Walker::at(r, RelPath::root(), &filter, Some(Box::new(descend)));
+        let walker = Walker::at(root, RelPath::root(), &filter, Some(Box::new(descend)));
         let (mut entries, mut excluded) = (Vec::new(), Vec::new());
         for event in walker {
             match event {
@@ -494,9 +535,6 @@ mod tests {
                 WalkEvent::Unreadable { .. } => return Err(io::Error::other("unreadable")),
             }
         }
-        assert_eq!(entries, ["mine", "mine/Team", "mine/Team/x.txt", "odd"]);
-        assert_eq!(excluded, [PathBuf::from("Team")]);
-        assert_eq!(asked, ["mine", "mine/Team", "odd"]);
-        Ok(())
+        Ok((entries, excluded, asked))
     }
 }

@@ -1092,18 +1092,26 @@ fn a_folder_of_an_unknown_kind_doesnt_open() -> R {
 
 /// A computer's Desktop folder is a sync root's top, as the drive's and a role folder's: a
 /// restore into it never takes the state folder's name (`.hbsync`, the computer's own there).
+/// Another writer's, removed on the drive: no computer sends one, at any depth (§10).
 #[test]
 fn a_restore_into_a_desktop_never_takes_the_state_folder_s_name() -> R {
+    use hbsync_remote::Remote;
     let server = FakeServer::new(ServerConfig::default());
-    let mut a = DeskPc::new(&server, Some((NodeId::new(), "Laptop")))?;
+    let laptop = NodeId::new();
+    let mut a = DeskPc::new(&server, Some((laptop, "Laptop")))?;
     a.sync()?;
     let mut b = DeskPc::new(&server, None)?;
     b.sync()?;
-    let state = b.main_root.join("Desktops/Laptop/.hbsync");
-    std::fs::create_dir_all(&state)?;
-    std::fs::write(state.join("x.txt"), b"x")?;
-    b.sync()?;
-    std::fs::remove_dir_all(&state)?;
+    let state = hbsync_remote::contract::folder(".hbsync", laptop);
+    let at = server
+        .lock()
+        .map_err(|_| "poisoned")?
+        .create(&state, None)?;
+    let target = hbsync_types::Target {
+        at,
+        token: Some(hbsync_remote::fake::token_of(at.file_id)),
+    };
+    hbsync_remote::fake::FakeRemote::new(server.clone()).set_removed(&[target], true)?;
     b.sync()?;
     let removed = {
         let srv = server.lock().map_err(|_| "poisoned")?;
@@ -1114,6 +1122,7 @@ fn a_restore_into_a_desktop_never_takes_the_state_folder_s_name() -> R {
             })
             .ok_or("in Recently deleted")?
     };
+    assert_eq!(removed, state.node);
     b.drive.restore(&[removed])?;
     let names: Vec<String> = drive_listing(&server).into_iter().map(|(n, _)| n).collect();
     assert!(
