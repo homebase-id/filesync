@@ -1595,3 +1595,50 @@ fn regression_a_failed_tag_write_keeps_a_removal_the_drive_refused() {
     assert_eq!(sim.base_tags(0, file), work.clone(), "and stays the user's");
     assert_eq!(sim.server_tags("a"), work, "which the drive refused");
 }
+
+/// The same for a tag added: client 0 puts Work on a file, the drive refuses that as it is, and
+/// the tag write of the download of client 1's edit fails. Placed, the new version would be
+/// without Work, and the tag nowhere. It isn't placed until its tags are written, the refusal
+/// making no difference: the tag stays on the file, the user's, waiting on the drive.
+#[test]
+fn regression_a_failed_tag_write_keeps_an_added_tag_the_drive_refused() {
+    use hbsync_sim::Action::{CreateFile, Edit, Tag};
+    let act = |client, action| Event::Act { client, action };
+    let (plan, step) = (
+        |client| Event::Plan { client },
+        |client| Event::Step { client },
+    );
+    let synced = |sim: &mut Sim, client| {
+        sim.run(&[plan(client)]);
+        while !sim.planned(client).is_empty() {
+            sim.run(&[step(client)]);
+        }
+    };
+    let mut sim = Sim::new(2).with_refusals();
+    sim.run(&[act(0, CreateFile { parent: 0, name: 0 })]);
+    let file = sim.item(0, "a").expect("the file");
+    synced(&mut sim, 0);
+    synced(&mut sim, 1);
+    let edited = sim.file_pick(1, file).expect("on client 1");
+    sim.run(&[act(1, Edit { file: edited })]);
+    synced(&mut sim, 1);
+    let tag = Tag {
+        node: sim.pick(0, file, false).expect("on client 0"),
+        tag: 1, // Work
+    };
+    sim.run(&[act(0, tag), plan(0)]);
+    assert_eq!(sim.planned(0), ["RemoteTags", "LocalDownload"]);
+    sim.fail_next_tag_write();
+    sim.run(&[step(0), step(0)]);
+    assert_eq!(sim.server_tags("a"), Some(vec![]), "the drive refused it");
+    assert_eq!(sim.planned(0), ["LocalDownload"], "not placed: tried again");
+    assert!(sim.quiesce_still(30), "no convergence");
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    let work = Some(vec!["Work:0".to_owned()]);
+    assert_eq!(sim.local_tags(0, "a"), work, "the tag stays");
+    assert_eq!(
+        sim.server_tags("a"),
+        Some(vec![]),
+        "which the drive refused"
+    );
+}
