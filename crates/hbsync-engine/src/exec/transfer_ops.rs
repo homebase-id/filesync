@@ -520,10 +520,14 @@ impl Executor<'_> {
         // Failed, it would lose a tag the item there holds and the drive doesn't (the user's,
         // not sent up yet): not put in place then, for a retry, the plan sending it up
         // meanwhile; unless the drive refused it for good this run (then as ever: placed).
+        // Nor is one that would forget a tag removed here, refused or not: nothing is lost by
+        // waiting for a write that lands (the item keeps the removal, the fetched bytes stay).
         if left.failed
-            && !self.heard.tags_refused.contains(&node)
             && let Some(on_item) = current.as_ref().and_then(|r| r.tags.as_ref())
-            && tags_lost(on_item, &to_write, &record.base.state.tags, self.folder.os)
+            && let drive = &record.base.state.tags
+            && (removal_forgotten(on_item, &to_write, drive)
+                || !self.heard.tags_refused.contains(&node)
+                    && tags_lost(on_item, &to_write, drive, self.folder.os))
         {
             done.keep_for_retry();
             return Ok(Outcome::Retry("its tags weren't written".into()));
@@ -686,4 +690,14 @@ pub fn tags_lost(on_item: &Tags, to_write: &Tags, drive: &Tags, os: hbsync_platf
     on_item
         .iter()
         .any(|t| to_write.get_alike(t, os).is_some() && drive.get_alike(t, os).is_none())
+}
+
+/// Whether a download whose tag write failed forgets a tag removed here: one the drive holds
+/// that the item there doesn't (`on_item`), and the download wasn't to write (the plan's merge
+/// leaves out only what a side removed). Its base's tags start afresh: the drive's tag would
+/// read as added there, and the next plan put it back on the item.
+pub fn removal_forgotten(on_item: &Tags, to_write: &Tags, drive: &Tags) -> bool {
+    drive
+        .iter()
+        .any(|t| on_item.get(&t.name).is_none() && to_write.get(&t.name).is_none())
 }
