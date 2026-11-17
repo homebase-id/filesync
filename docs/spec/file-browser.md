@@ -180,7 +180,14 @@ lists it follows the desktops:
   computer's own state folder; in any other folder, another sync folder's state, moved in.
   Don't create, rename, upload or restore anything to it, in any folder: number around it
   (`.hbsync (1)`, `.hbsync (restored)`). One that already exists (another writer's) is listed
-  with a note that it won't sync to computers.
+  with a note that it won't sync to computers. What is in it doesn't either, at any depth: show
+  the note on its screen and on the screen of a folder below it too, from the path the user came
+  by (no extra read to find out for a search result or a row of Recently deleted). Uploading
+  and making folders there stay allowed: the item is on the drive, the browser opens it, and
+  nothing leaves a computer by it. A move there is not: don't offer one, or a folder below one,
+  as where a move goes. Every computer that synced the moved item would delete its copy (it
+  went to a place they all leave out: sync semantics §10). Moving something out of one is fine:
+  the computers download it.
   - Unique within the folder, ignoring case and Unicode form (as on macOS and Windows): add
     `(1)`, `(2)` and so on if needed.
 - Rename or move: a header-only update of `content.name` and/or `groupId`, guarded by the
