@@ -20,11 +20,11 @@ const BAD_NAMES: &[&str] = &[
     ".HBSYNC",
 ];
 
-/// Whether no device places a node named `name` in `folder` as it is: a name no file system
-/// takes or that means a path, or the state folder's at the top (filtered in any case, §10).
-fn unplaceable(folder: hbsync_types::NodeId, name: &str) -> bool {
+/// Whether no device places a node named `name` as it is: a name no file system takes or that
+/// means a path, or the state folder's, in any folder (filtered in any case, §10).
+fn unplaceable(name: &str) -> bool {
     ["", ".", "..", "a/b", "../up", "nul\0x"].contains(&name)
-        || (folder.is_root() && name_key(name) == name_key(".hbsync"))
+        || name_key(name) == name_key(".hbsync")
 }
 
 /// What one seed's buggy or hostile writer did ([`hostile`]).
@@ -194,7 +194,7 @@ fn hostile(server: &Arc<Mutex<FakeServer>>, rng: &mut Rng, did: &mut Hostile) ->
                 0 => srv.write_unchecked(None, &file(fresh, folder, name), payload())?,
                 _ => srv.write_unchecked(None, &folder_meta(fresh, folder, name), None)?,
             };
-            if unplaceable(folder, name) {
+            if unplaceable(name) {
                 did.unplaceable.insert(fresh);
                 did.replans = true;
             }
