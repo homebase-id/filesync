@@ -242,6 +242,46 @@ mod tests {
         Ok(())
     }
 
+    /// A known version read again keeps the time the store has for it, live or removed, and
+    /// nothing is written: a version has one time (the server's `versionUpdated`), so another
+    /// one coming with it is no write. Only a new version is.
+    #[test]
+    fn a_known_version_read_again_keeps_its_time() -> Result<(), StateError> {
+        let mut db = StateDb::open_in_memory()?;
+        let node = NodeId::new();
+        let mut header = RemoteHeader {
+            file_id: RemoteFileId(Uuid::new_v4()),
+            version: VersionTag(Uuid::new_v4()),
+            parent: NodeId::ROOT,
+            kind: NodeKind::File,
+            body: RemoteBody::Live {
+                node,
+                content: NodeContent::file("f", 0, 1, false),
+                payload: Some(PayloadInfo {
+                    hash: hash_bytes(b"x", HashAlgorithm::Blake3),
+                    bytes: 1,
+                }),
+            },
+            removed: false,
+            changed_at: Some(100),
+            token: None,
+        };
+        db.write(|s| apply(s.account(), &header))?;
+        header.changed_at = Some(200);
+        assert_eq!(db.write(|s| apply(s.account(), &header))?, Applied::Live);
+        let live = db.read(|s| s.get_mirror(node))?.expect("live");
+        assert_eq!(live.changed_at, Some(100));
+        // Removed, a new version, and that one read again later.
+        header.version = VersionTag(Uuid::new_v4());
+        (header.removed, header.changed_at) = (true, Some(300));
+        assert_eq!(db.write(|s| apply(s.account(), &header))?, Applied::Left);
+        header.changed_at = Some(400);
+        assert_eq!(db.write(|s| apply(s.account(), &header))?, Applied::Left);
+        let removed = db.read(|s| s.removed_by_node(node))?.expect("removed");
+        assert_eq!(removed.removed_at, Some(300));
+        Ok(())
+    }
+
     /// Another client's file without `size` in its content has its payload's.
     #[test]
     fn a_file_without_a_size_has_its_payloads() {
