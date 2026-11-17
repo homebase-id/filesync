@@ -44,7 +44,10 @@ pub enum Action {
     CreateJunkFolder {
         parent: usize,
     },
-    /// The client starts or stops ignoring `d` (a rule change, picked up at the next plan).
+    /// The client starts or stops ignoring `d` (a rule change, picked up at the next plan);
+    /// one with a folder that holds what other identities share
+    /// ([`crate::Sim::with_shared_folder_on`]) loses or gets back that folder's marker
+    /// instead.
     ToggleIgnore,
     /// The user restores one item of Recently deleted, on the server at once, with what was
     /// deleted with it (node schema: in it, removed no earlier than it), and the folders above it

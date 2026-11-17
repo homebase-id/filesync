@@ -938,6 +938,60 @@ fn an_edited_ignore_file_applies_without_a_restart() -> R {
     Ok(())
 }
 
+/// A folder that holds what other identities share (sync semantics §10), put in place with
+/// its marker in it, is this device's own from that moment: nothing of it is sent, and a
+/// folder of its name on the drive stays out until it yields the name. Seen by the watcher:
+/// no restart, nor a minute's look.
+#[test]
+fn a_folder_of_shares_is_left_alone_without_a_restart() -> R {
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    if !a.watching()? {
+        return Ok(());
+    }
+    let b = Device::start(&server, "b")?;
+    b.started()?;
+
+    // Made beside the folder and renamed into it: never there without its marker.
+    let prepared = a.root.parent().ok_or("the folder's folder")?.join("new");
+    std::fs::create_dir_all(prepared.join("tom"))?;
+    std::fs::write(hbsync_local::layout::shared_marker(&prepared), "")?;
+    std::fs::write(prepared.join("tom").join("theirs.txt"), "shared with me")?;
+    std::fs::rename(&prepared, a.root.join("Shared"))?;
+    a.write("notes.txt", "mine")?;
+    wait_until("notes.txt is up", || on_server(&server, "notes.txt"))?;
+    a.wait_idle()?;
+    assert_eq!(live_names(&server), ["notes.txt"]);
+
+    // The drive's folder of that name isn't merged into it.
+    b.write("Shared/cloud.txt", "from the drive")?;
+    b.handle.send(Command::SyncNow);
+    wait_until("the drive's Shared is up", || {
+        on_server(&server, "cloud.txt")
+    })?;
+    a.sync_reported()?;
+    a.wait_idle()?;
+    assert!(
+        !a.has("Shared/cloud.txt"),
+        "merged into the folder of shares"
+    );
+    assert_eq!(a.status().state, State::Idle);
+
+    // Renamed, its marker with it: the drive's folder comes, the folder of shares stays this
+    // device's own under its new name.
+    std::fs::rename(a.root.join("Shared"), a.root.join("Shared-2"))?;
+    wait_until("the drive's Shared is here", || a.has("Shared/cloud.txt"))?;
+    a.wait_idle()?;
+    assert!(a.has("Shared-2/tom/theirs.txt"));
+    b.sync_reported()?;
+    b.wait_idle()?;
+    assert!(!b.has("Shared-2") && !b.has("tom"));
+    let mut names = live_names(&server);
+    names.sort();
+    assert_eq!(names, ["Shared", "cloud.txt", "notes.txt"]);
+    Ok(())
+}
+
 /// A line of the ignore rules that isn't a valid rule is skipped, as in Git: the folder goes
 /// on syncing with the other rules, and says so once, in one note, till the line is fixed.
 #[test]

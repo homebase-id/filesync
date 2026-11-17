@@ -170,6 +170,20 @@ impl Sim {
         self
     }
 
+    /// Client `c` has a folder named `name` at its top that holds what other identities share
+    /// with the account (sync semantics §10): its own, left out with all in it whatever is
+    /// there, and the name held against the drive's in any case, as the names of a client's
+    /// items clash here whatever its OS (a volume that tells `a` from `A` would hold both).
+    /// Instead of its ignore rules; [`Action::ToggleIgnore`] takes the folder's marker away (a
+    /// plain folder from then on, synced) and puts it back.
+    pub fn with_shared_folder_on(mut self, c: usize, name: &str) -> Self {
+        let caseless = Filter::from_rules("", true).expect("no rules");
+        let filter = std::sync::Arc::new(caseless.with_shared([name]));
+        self.clients[c].toggled = std::sync::Arc::clone(&filter);
+        self.clients[c].filter = filter;
+        self
+    }
+
     /// Every fourth plan a main folder makes is checked against the engine's own planning path: its
     /// planning input filled into a state DB as the engine's store holds it, planned from
     /// narrow views as the engine does (`view::plan_narrow`), against whole folders for the

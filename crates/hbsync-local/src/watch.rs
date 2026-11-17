@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use hbsync_platform::journal::ChangeJournal;
 use hbsync_platform::{RelPath, journal::open_journal};
 use hbsync_state::{StateDb, StateError, keys};
-use notify::event::{AccessKind, AccessMode};
+use notify::event::{AccessKind, AccessMode, ModifyKind};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::filter::Filter;
@@ -60,8 +60,8 @@ impl Default for Debounce {
 }
 
 /// Called from the watcher's thread when there is something to record (or the ignore rules
-/// were touched): at most once until the next [`LocalObserver::poll`], however many events
-/// come meanwhile.
+/// were touched, or a folder that holds what other identities share may have come or gone): at
+/// most once until the next [`LocalObserver::poll`], however many events come meanwhile.
 pub type Bell = Arc<dyn Fn() + Send + Sync>;
 
 /// OS change notifications for one sync root.
@@ -73,6 +73,9 @@ pub(crate) struct LiveWatcher {
     rung: Arc<AtomicBool>,
     /// The ignore rules' file was touched.
     rules: Arc<AtomicBool>,
+    /// A folder that holds what other identities share may have come or gone
+    /// ([`touches_shared`]).
+    shared: Arc<AtomicBool>,
     /// The OS watcher stopped sending (its channel closed).
     gone: AtomicBool,
 }
@@ -86,8 +89,8 @@ impl std::fmt::Debug for LiveWatcher {
 }
 
 impl LiveWatcher {
-    /// Starts watching; `bell` rings when an event is queued or the ignore rules' file was
-    /// changed.
+    /// Starts watching; `bell` rings when an event is queued, the ignore rules' file was
+    /// changed, or a folder that holds what other identities share may have come or gone.
     pub(crate) fn start(
         root: &Path,
         filter: Arc<Filter>,
@@ -100,7 +103,9 @@ impl LiveWatcher {
         }
         let (tx, rx) = channel();
         let (rung, rules): (Arc<AtomicBool>, Arc<AtomicBool>) = Default::default();
+        let shared = Arc::new(AtomicBool::new(false));
         let (filter_root, rang, touched) = (root.clone(), Arc::clone(&rung), Arc::clone(&rules));
+        let shares = Arc::clone(&shared);
         let rules_file = crate::layout::ignore_file(&root);
         let rules_dir = rules_file.parent().unwrap_or(&root).to_path_buf();
         let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
@@ -115,6 +120,14 @@ impl LiveWatcher {
             if rules_touched {
                 touched.store(true, Ordering::SeqCst);
             }
+            // So is what a folder of shares leaves out, found by its marker, not by the filter
+            // in use.
+            let shared_touched = res
+                .as_ref()
+                .map_or(true, |e| e.need_rescan() || touches_shared(&filter_root, e));
+            if shared_touched {
+                shares.store(true, Ordering::SeqCst);
+            }
             // Only changes are queued, and only their paths that sync: reads (a viewer, a
             // backup tool, the rescan itself) and filtered items (the client's own state,
             // junk, ignored folders) would otherwise flood the channel.
@@ -125,7 +138,7 @@ impl LiveWatcher {
                 let _ = tx.send(res);
             }
             // After queueing: whoever the bell wakes finds the event.
-            if (queued || rules_touched)
+            if (queued || rules_touched || shared_touched)
                 && !rang.load(Ordering::Relaxed)
                 && !rang.swap(true, Ordering::SeqCst)
                 && let Some(bell) = &bell
@@ -140,6 +153,7 @@ impl LiveWatcher {
             root,
             rung,
             rules,
+            shared,
             gone: AtomicBool::new(false),
         })
     }
@@ -241,6 +255,36 @@ fn keep(
 /// Whether an event of `kind` only says something was opened or read.
 fn reads_only(kind: &EventKind) -> bool {
     matches!(kind, EventKind::Access(a) if *a != AccessKind::Close(AccessMode::Write))
+}
+
+/// Whether `event` may change which folders at the top of `root` hold what other identities
+/// share ([`crate::shared_folders`]): a marker made, removed or renamed in a folder there, or
+/// an entry of the root itself made, removed or renamed (a folder holding one moved in or
+/// away, or renamed). A write to a file at the top doesn't.
+fn touches_shared(root: &Path, event: &Event) -> bool {
+    let entry = matches!(
+        event.kind,
+        EventKind::Create(_)
+            | EventKind::Remove(_)
+            | EventKind::Modify(ModifyKind::Name(_))
+            | EventKind::Any
+            | EventKind::Other
+    );
+    !reads_only(&event.kind)
+        && event.paths.iter().any(|path| {
+            let Ok(rel) = path.strip_prefix(root) else {
+                return false;
+            };
+            let mut names = rel.components();
+            match (names.next(), names.next(), names.next()) {
+                (Some(_), None, _) => entry,
+                (Some(_), Some(name), None) => name
+                    .as_os_str()
+                    .to_str()
+                    .is_some_and(|n| n.eq_ignore_ascii_case(crate::layout::SHARED_MARKER)),
+                _ => false,
+            }
+        })
 }
 
 /// Whether `rel` is filtered or lies in a filtered folder. Whether it is a folder itself is
@@ -673,12 +717,21 @@ impl LocalObserver {
             .as_ref()
             .is_some_and(|w| w.rules.swap(false, Ordering::SeqCst))
     }
+
+    /// Whether a folder that holds what other identities share may have come or gone since
+    /// the last call (only seen with a watcher): nothing of it is half written, so the filter
+    /// can be read again at once ([`Filter::load`]).
+    pub fn shared_touched(&self) -> bool {
+        self.watcher
+            .as_ref()
+            .is_some_and(|w| w.shared.swap(false, Ordering::SeqCst))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notify::event::{CreateKind, Flag, ModifyKind, RenameMode};
+    use notify::event::{CreateKind, DataChange, Flag, RemoveKind, RenameMode};
     use std::collections::HashMap;
     use std::fs;
     use std::sync::{Arc, Mutex};
@@ -708,6 +761,43 @@ mod tests {
         done_rx
             .recv_timeout(Duration::from_secs(20))
             .expect("every call answered");
+    }
+
+    /// What may make or unmake a folder of shares: its marker made, removed or renamed in a
+    /// folder at the top, and an entry of the top made, removed or renamed. Not a write to a
+    /// file there, a read, or anything deeper.
+    #[test]
+    fn a_marker_or_an_entry_at_the_top_touches_the_folders_of_shares() {
+        let root = Path::new("/sync");
+        let touches = |kind, paths: &[&str]| {
+            let event = Event {
+                kind,
+                paths: paths.iter().map(PathBuf::from).collect(),
+                attrs: Default::default(),
+            };
+            touches_shared(root, &event)
+        };
+        let created = EventKind::Create(CreateKind::Any);
+        let renamed = EventKind::Modify(ModifyKind::Name(RenameMode::Both));
+        let written = EventKind::Modify(ModifyKind::Data(DataChange::Any));
+        let closed = EventKind::Access(AccessKind::Close(AccessMode::Write));
+        let opened = EventKind::Access(AccessKind::Open(AccessMode::Any));
+        assert!(touches(created, &["/sync/Shared/.hbsync-shared"]));
+        assert!(touches(written, &["/sync/Shared/.HBSYNC-SHARED"]));
+        let removed = EventKind::Remove(RemoveKind::Any);
+        assert!(touches(removed, &["/sync/Shared/.hbsync-shared"]));
+        assert!(touches(created, &["/sync/Shared"]));
+        assert!(touches(removed, &["/sync/Shared"]));
+        assert!(touches(renamed, &["/sync/a/b/c", "/sync/Shared-2"]));
+        assert!(touches(EventKind::Any, &["/sync/Shared"]));
+
+        assert!(!touches(written, &["/sync/notes.txt"]));
+        assert!(!touches(closed, &["/sync/notes.txt"]));
+        assert!(!touches(opened, &["/sync/Shared/.hbsync-shared"]));
+        assert!(!touches(created, &["/sync/a/b/.hbsync-shared"]));
+        assert!(!touches(created, &["/sync/a/b"]));
+        assert!(!touches(created, &["/elsewhere/Shared"]));
+        assert!(!touches(created, &["/sync"]));
     }
 
     #[test]
@@ -1250,6 +1340,18 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
         assert_eq!(rang.load(Ordering::SeqCst), before, "a read rang");
         assert!(!observer.rules_touched());
+
+        // A marker made in a folder at the top rings too, though nothing of it is recorded
+        // (it is junk): the folder holds what other identities share from now on.
+        fs::create_dir(root.join("Shared"))?;
+        wait_for("the folder is seen", &|| observer.shared_touched())?;
+        std::thread::sleep(Duration::from_millis(300));
+        while observer.poll(&mut db, Duration::ZERO, quick)?.is_some() {}
+        observer.shared_touched();
+        let before = rang.load(Ordering::SeqCst);
+        fs::write(crate::layout::shared_marker(&root.join("Shared")), "")?;
+        wait_for("the marker rings", &|| rang.load(Ordering::SeqCst) > before)?;
+        wait_for("the marker is seen", &|| observer.shared_touched())?;
         Ok(())
     }
 

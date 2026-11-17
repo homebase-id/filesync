@@ -410,6 +410,14 @@ included (service managers restart it then).
   line 2 isn't a valid rule (…), and keeps things synced: syncing stops till it is fixed (fix
   it to resume)"; it goes once fixed. A file that can't be read stops it too, failing, till
   it can.
+- **The folder of shares:** a folder at the top of the account's folder that holds the
+  marker `.hbsync-shared` (what other identities share with the account is synced into it)
+  is left alone by the account's folder, whatever its name: nothing in it is sent, and an
+  item of its name at the top of the drive isn't brought here while it holds the name (sync
+  semantics §10, "The folder of shares"). It is looked for with the ignore rules, and at
+  once when the watcher sees an entry at the top made, removed or renamed or a marker in a
+  folder there; a change restarts the engine as an edit of the rules does. Making the
+  folder, and giving its name to an item of the drive, come with the runners of the shares.
 - **The folder gone** (moved, deleted, a disk not mounted: its marker missing): nothing
   syncs, the status says why, and the loop waits for it to come back. It never creates a
   marker: only `hbsync setup` does.

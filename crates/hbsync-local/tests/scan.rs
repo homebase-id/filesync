@@ -850,6 +850,40 @@ fn filtered_items_never_reach_the_db_and_a_newly_ignored_one_looks_deleted() -> 
     Ok(())
 }
 
+/// A folder at the top that holds what other identities share (its marker in it) is never
+/// walked, whatever it is named; a synced folder given a marker looks deleted (a delete to
+/// sync, nothing leaves the disk), and is new again once the marker goes.
+#[test]
+fn a_folder_of_shares_never_reaches_the_db() -> R {
+    use hbsync_local::layout::shared_marker;
+    let mut f = Fixture::new()?;
+    f.write("Shared/tom/theirs.txt", b"t")?;
+    f.write("Shared/.hbsync-shared", b"")?;
+    f.write("mine/notes.txt", b"n")?;
+    f.write("mine/Shared/deep.txt", b"d")?;
+    f.opts.filter = Arc::new(Filter::load(f.root(), false)?);
+    let (report, _) = f.scan()?;
+    assert_eq!(report.added, 4, "{report:?}"); // mine, notes, mine/Shared, deep
+    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    let root = f.root().to_path_buf();
+    let report = rescan_dirs(&mut f.db, &root, &[RelPath::new("Shared/tom")?], &f.opts)?;
+    assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
+
+    std::fs::write(shared_marker(&f.root().join("mine")), "")?;
+    f.opts.filter = Arc::new(Filter::load(f.root(), false)?);
+    let (report, dirty) = f.scan()?;
+    assert_eq!((report.added, report.removed), (0, 4), "{report:?}");
+    assert_eq!(dirty.len(), 4);
+    assert!(f.root().join("mine/Shared/deep.txt").exists());
+
+    std::fs::remove_file(shared_marker(&f.root().join("mine")))?;
+    std::fs::remove_file(shared_marker(&f.root().join("Shared")))?;
+    f.opts.filter = Arc::new(Filter::load(f.root(), false)?);
+    let (report, _) = f.scan()?;
+    assert_eq!(report.added, 7, "{report:?}");
+    Ok(())
+}
+
 /// A tag change is a change of its own: the scan reads the tags and marks the node dirty,
 /// without the bytes having changed. Tags that couldn't be read are read again.
 #[test]

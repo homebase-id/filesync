@@ -420,8 +420,9 @@ struct Parts {
 }
 
 impl Parts {
-    /// Whether the ignore rules on disk differ from the ones in use (or can't be read): their
-    /// fingerprints differ (sync semantics §10).
+    /// Whether the ignore rules on disk, or the folders at the top that hold what other
+    /// identities share, differ from the ones in use (or can't be read): their fingerprints
+    /// differ (sync semantics §10).
     fn rules_changed(&self, root: &Path) -> bool {
         let folder = &self.engine.config().folder;
         Filter::load(root, folder.case_insensitive)
@@ -674,6 +675,12 @@ impl Runner {
                 if p.observer.rules_touched() {
                     rules_at = Some(Instant::now() + RULES_QUIET);
                 }
+                // A folder that holds what other identities share is there or isn't, with
+                // nothing half written to wait for: read at once, before the sync below would
+                // send what the poll just took of it.
+                if p.observer.shared_touched() {
+                    check_rules = true;
+                }
                 // One that stopped.
                 if self.unwatched.why.is_none()
                     && let Some(why) = p.observer.watcher_error.clone()
@@ -745,7 +752,7 @@ impl Runner {
                     .as_ref()
                     .is_some_and(|p| p.rules_changed(&self.cfg.folder))
             {
-                tracing::info!("the ignore rules changed: starting over");
+                tracing::info!("the ignore rules or the folder of shares changed: starting over");
                 parts = None;
                 schedule.want(Why::Rules);
             }

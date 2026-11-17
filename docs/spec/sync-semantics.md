@@ -918,7 +918,9 @@ on its own.
 **Classes** (`hbsync-local/src/filter.rs`):
 - **Excluded**: the client's own `.hbsync` folder at the top of the sync root, in any case or
   spelling a volume that ignores case takes for it (`.HBSYNC`): another writer's folder so named
-  would be this client's own there, and what is in it would land in it.
+  would be this client's own there, and what is in it would land in it. And a **folder of
+  shares** at the top: the folder that holds what other identities share with this one
+  ("The folder of shares" below), found by its marker, never by its name.
 - **Junk**: a built-in list of names the OS or an application creates by itself, matched in any
   case at any depth: macOS `.DS_Store`, `._*`, `Icon\r`, `.Spotlight-V100`, `.Trashes`,
   `.fseventsd`, `.TemporaryItems`, `.DocumentRevisions-V100`, `.apdisk`; Windows `Thumbs.db`,
@@ -928,7 +930,9 @@ on its own.
   `*.crdownload`, `*.part`, `*.partial`, Safari's `*.download`; other sync apps' own files, left
   in a folder moved over from them: Dropbox `.dropbox`, `.dropbox.cache`, OneDrive
   `.849C9593-D756-4E56-8D6E-42412F2A707B`, Google Drive `.tmp.drivedownload`,
-  `.tmp.driveupload`. Junk is disposable.
+  `.tmp.driveupload`; and this client's `.hbsync-shared`, the marker of a folder of shares
+  (never synced, so a folder of shares copied elsewhere marks nothing on another device).
+  Junk is disposable.
 - **Ignored**: the user's rules in `.hbsync/ignore` (gitignore syntax, per device, never
   synced), matched case-insensitively on case-insensitive volumes. Ignored items are the user's
   data, kept on this device only. A line that isn't a valid rule (in the glob syntax read here,
@@ -949,6 +953,34 @@ on its own.
   its rules are unknown) stops the folder's sync till it can.
 
 An item inside a filtered folder is filtered too.
+
+**The folder of shares.** What other identities share with this one is synced into folders of
+their own (§13, "Another identity's drive"), kept together in one folder at the top of the
+account's sync folder. That folder isn't the account's: nothing in it is on the account's
+drive, and this folder's sync leaves it alone, as its own `.hbsync`. It is known by its
+marker, a file `.hbsync-shared` directly in it, and never by its name, which the user may
+change: a folder (not a link) at the top that holds the marker (a file) is a folder of
+shares, read when the folder is opened and again as rule 4 says (`shared_folders`,
+`Filter::load`).
+
+- Its name is excluded at the top, as the volume compares names, and by rules 1 and 2: it is
+  neither walked nor watched for changes, nothing in it is sent, and an item of its name at
+  the top of the drive (a folder or a file, another device's) is masked on this device while
+  the folder holds the name: not downloaded, not deleted from here, and nothing on the drive
+  changes. It comes once the folder of shares has another name (sim
+  `a_folder_of_the_same_name_on_the_drive_comes_once_the_folder_of_shares_yields`); giving
+  way is the daemon's to do (`docs/spec/daemon.md`).
+- A marker in a folder at the top that is synced makes it a folder of shares: by rule 1 it
+  leaves the drive and the other devices, and stays here (the mass-delete guard applies, and
+  Recently deleted has it). A copy of the folder of shares at the top holds the marker too,
+  and is left alone as well; below the top the marker means nothing (junk), and the copy
+  syncs as the user's own.
+- A folder of shares that loses its marker is a plain folder from then on, synced with what
+  is in it; where the drive has an item of its name at the top, the two meet as a name clash
+  (§6), and one gets a conflict name (sim
+  `a_marker_lost_makes_the_folder_plain_and_one_gained_takes_it_off_the_drive`).
+- A folder at the top that can't be read counts as holding no marker. A top that can't be
+  listed stops the folder's sync, failing, till it can, as a rules file that can't be read.
 
 **Rules:**
 1. **Local.** The walk neither reports nor enters filtered entries (nothing is hashed), and the
@@ -991,12 +1023,18 @@ An item inside a filtered folder is filtered too.
    the junk list, keep their folder: the synced contents are deleted, item by item, and the
    folder is released (the next scan sees it
    as a new folder); junk directly in it stays with it.
-4. **Rule changes.** The filter's fingerprint (rules, junk list version, case sensitivity) is
-   kept in the state DB. When it changed, start-up walks the whole tree (a journal doesn't
+4. **Rule changes.** The filter's fingerprint (rules, junk list version, case sensitivity,
+   the names of the folders of shares) is kept in the state DB. When it changed, start-up walks the whole tree (a journal doesn't
    report items that just became visible) and re-plans every synced node; the new fingerprint
    is stored in the same transaction. Items that come into view are new items. The sync loop
    checks the ignore file for an edit when the watcher sees it change (once a minute without
    a watcher) and on a sync request, and starts over with the new rules when it changed.
+   The folders of shares are looked for with it (one listing of the top and one look for a
+   marker in each folder there), and also at once, before the next sync, when the watcher
+   sees an entry of the top made, removed or renamed, or a marker in a folder there (nothing
+   half written to wait for: a sync in between would send what is in a folder that just
+   became one). Without a watcher a folder of shares made by hand is seen within the minute,
+   and what a sync sent of it meanwhile leaves the drive again by rule 1.
 
 ## 11. Tags
 
