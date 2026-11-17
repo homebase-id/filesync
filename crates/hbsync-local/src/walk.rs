@@ -35,7 +35,7 @@ pub enum SkipReason {
     NotUnicode,
     /// Not a valid name for the remote (for example more than 255 UTF-8 bytes).
     InvalidName,
-    /// The client's own `.hbsync` folder.
+    /// The client's own `.hbsync` folder, or a folder that holds what other identities share.
     Excluded,
     /// On the built-in junk list: disposable.
     Junk,

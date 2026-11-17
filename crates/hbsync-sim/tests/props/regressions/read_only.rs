@@ -2,14 +2,8 @@
 //! what changed there that going back would lose moves out, kept.
 
 use hbsync_sim::{Action, Event, Sim};
-use hbsync_types::NodeId;
 
-use super::settle;
-
-/// What an action's `parent` is to pick the top on client `c`.
-fn top(sim: &Sim, c: usize) -> usize {
-    sim.pick(c, NodeId::ROOT, true).expect("the top")
-}
+use super::{settle, top};
 
 /// Client 0 syncs both ways; client 1 is read-only. Client 0 makes `a` and the folder `b`
 /// holding `c.txt`; both settle.

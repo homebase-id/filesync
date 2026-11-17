@@ -5,6 +5,7 @@
 //! keep their folder. Both are invisible to sync in either direction (sync semantics §10), as
 //! is the folder at the top that holds what other identities share ([`shared_folders`]).
 
+use std::borrow::Cow;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -280,11 +281,15 @@ impl Filter {
     /// The filter leaving out the folders named `names` at the top too: those that hold what
     /// other identities share ([`shared_folders`]), instead of any it left out so before.
     pub fn with_shared<S: AsRef<str>>(mut self, names: impl IntoIterator<Item = S>) -> Self {
-        let keys = names.into_iter().map(|name| self.top_key(name.as_ref()));
-        self.shared = keys.collect();
-        self.shared.sort_unstable();
-        self.shared.dedup();
+        self.shared = self.top_keys(names);
         self
+    }
+
+    /// Whether the folders at the top of `root` that hold what other identities share aren't
+    /// the ones this filter leaves out (or can't be told): [`shared_folders`] alone, the rules
+    /// not read again.
+    pub fn shared_changed(&self, root: &Path) -> bool {
+        shared_folders(root).map_or(true, |names| self.top_keys(names) != self.shared)
     }
 
     /// The folders at the top left out as holding what other identities share
@@ -293,14 +298,25 @@ impl Filter {
         &self.shared
     }
 
+    /// `names` as [`Filter::shared`] holds them: each as it compares, sorted, once.
+    fn top_keys<S: AsRef<str>>(&self, names: impl IntoIterator<Item = S>) -> Vec<String> {
+        let keys = names.into_iter();
+        let mut keys: Vec<String> = keys
+            .map(|name| self.top_key(name.as_ref()).into_owned())
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        keys
+    }
+
     /// `name` as names at the top compare with a folder's that holds what other identities
     /// share: caseless and normalization-insensitive (`name_key`) where the volume ignores
     /// case, as it is elsewhere.
-    fn top_key(&self, name: &str) -> String {
+    fn top_key<'a>(&self, name: &'a str) -> Cow<'a, str> {
         if self.case_insensitive {
-            name_key(name)
+            Cow::Owned(name_key(name))
         } else {
-            name.to_owned()
+            Cow::Borrowed(name)
         }
     }
 
@@ -389,11 +405,16 @@ impl Filter {
 
     /// Whether `name`, at the top, is a folder's that holds what other identities share.
     fn holds_shares(&self, name: &str) -> bool {
-        match self.shared.as_slice() {
-            [] => false,
-            shared if self.case_insensitive => shared.contains(&name_key(name)),
-            shared => shared.iter().any(|s| s == name),
+        if self.shared.is_empty() {
+            return false;
         }
+        // An ASCII name's key is the name in lower case: asked of every event's path, so
+        // without building one.
+        if self.case_insensitive && name.is_ascii() {
+            return self.shared.iter().any(|s| s.eq_ignore_ascii_case(name));
+        }
+        let key = self.top_key(name);
+        self.shared.iter().any(|s| *s == key)
     }
 
     fn by_rules(&self, path: &str, is_dir: bool) -> Verdict {
@@ -621,17 +642,25 @@ mod tests {
         for folder in ["", "plain", "deep/Shared"] {
             assert_eq!(f.in_folder(folder, SHARED_MARKER, false), Verdict::Junk);
         }
+
+        // Asked without the rules read again: the same folders or not.
+        assert!(!f.shared_changed(root));
+        assert!(Filter::default().shared_changed(root));
+        std::fs::rename(root.join("Shared"), root.join("Shared-2"))?;
+        assert!(f.shared_changed(root));
         Ok(())
     }
 
     /// Where the volume ignores case, the folder's name in any case or spelling is the folder.
     #[test]
     fn a_folder_of_shares_holds_its_name_as_the_volume_compares_names() {
-        let f = Filter::from_rules("", true)
-            .expect("valid")
-            .with_shared(["Shared", "SHARED"]);
-        assert_eq!(f.shared().len(), 1);
-        for name in ["Shared", "shared", "SHARED", "\u{17f}hared"] {
+        let f = Filter::from_rules("", true).expect("valid").with_shared([
+            "Shared",
+            "SHARED",
+            "Stra\u{df}e",
+        ]);
+        assert_eq!(f.shared().len(), 2);
+        for name in ["Shared", "shared", "SHARED", "\u{17f}hared", "STRASSE"] {
             assert_eq!(f.in_folder("", name, true), Verdict::Excluded, "{name}");
         }
         assert!(f.in_folder("", "Shared-2", true).is_sync());

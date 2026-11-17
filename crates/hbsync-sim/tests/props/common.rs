@@ -371,12 +371,16 @@ pub(crate) const MEMBER_SETUPS: &[Setup] = &[
 /// Setups with a folder at one device's top that holds what other identities share (sync
 /// semantics §10), under a name the others use too.
 pub(crate) const SHARED_FOLDER_SETUPS: &[Setup] = &[
-    (|sim| sim.with_shared_folder_on(0, "d"), None),
+    (|sim| sim.with_shared_folder_on(0, "d", ""), None),
+    // With ignore rules of its own besides.
     (
-        |sim| sim.with_shared_folder_on(1, "a").with_split_downloads(),
+        |sim| {
+            sim.with_shared_folder_on(1, "a", "d\n")
+                .with_split_downloads()
+        },
         None,
     ),
-    (|sim| sim.with_shared_folder_on(2, "d"), Some(2)),
+    (|sim| sim.with_shared_folder_on(2, "d", ""), Some(2)),
 ];
 
 /// Events of every kind the properties make: the users' actions, deletes another device stops

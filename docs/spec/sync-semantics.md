@@ -961,7 +961,8 @@ drive, and this folder's sync leaves it alone, as its own `.hbsync`. It is known
 marker, a file `.hbsync-shared` directly in it, and never by its name, which the user may
 change: a folder (not a link) at the top that holds the marker (a file) is a folder of
 shares, read when the folder is opened and again as rule 4 says (`shared_folders`,
-`Filter::load`).
+`Filter::load`). The rule is the filter's, so it holds at the top of every folder this
+client syncs, not the account's alone.
 
 - Its name is excluded at the top, as the volume compares names, and by rules 1 and 2: it is
   neither walked nor watched for changes, nothing in it is sent, and an item of its name at
@@ -997,7 +998,7 @@ shares, read when the folder is opened and again as rule 4 says (`shared_folders
    below it are gone or go in the same run). If the user brings the local item back into view first (moves it out of
    the ignored place), it syncs as usual, and its local place wins over a remote move (the
    remote place is filtered too, and following it would take the item out of view again). Names held by masked nodes stay taken: a local item with such a name gets a numbered
-   one (a name clash).
+   one (a name clash); not a folder of shares, which isn't synced and keeps its name.
    A masked node that comes into view (a rule was removed, or another device moved it out of
    the ignored place) is downloaded with everything in it.
    A folder in Recently deleted whose place is filtered is masked; what is live in it is left
@@ -1030,10 +1031,10 @@ shares, read when the folder is opened and again as rule 4 says (`shared_folders
    checks the ignore file for an edit when the watcher sees it change (once a minute without
    a watcher) and on a sync request, and starts over with the new rules when it changed.
    The folders of shares are looked for with it (one listing of the top and one look for a
-   marker in each folder there), and also at once, before the next sync, when the watcher
-   sees an entry of the top made, removed or renamed, or a marker in a folder there (nothing
-   half written to wait for: a sync in between would send what is in a folder that just
-   became one). Without a watcher a folder of shares made by hand is seen within the minute,
+   marker in each folder there), and alone, at once, before the next sync, when the watcher
+   sees an entry of the top made, removed or renamed (not a file, where the OS says it is
+   one), or a marker in a folder there (nothing half written to wait for: a sync in between
+   would send what is in a folder that just became one). Without a watcher a folder of shares made by hand is seen within the minute,
    and what a sync sent of it meanwhile leaves the drive again by rule 1.
 
 ## 11. Tags

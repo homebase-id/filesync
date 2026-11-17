@@ -174,10 +174,11 @@ impl Sim {
     /// with the account (sync semantics §10): its own, left out with all in it whatever is
     /// there, and the name held against the drive's in any case, as the names of a client's
     /// items clash here whatever its OS (a volume that tells `a` from `A` would hold both).
-    /// Instead of its ignore rules; [`Action::ToggleIgnore`] takes the folder's marker away (a
-    /// plain folder from then on, synced) and puts it back.
-    pub fn with_shared_folder_on(mut self, c: usize, name: &str) -> Self {
-        let caseless = Filter::from_rules("", true).expect("no rules");
+    /// It ignores by `rules` besides, instead of the rules it had; [`Action::ToggleIgnore`]
+    /// takes the folder's marker and the rules away (a plain folder from then on, synced) and
+    /// puts both back.
+    pub fn with_shared_folder_on(mut self, c: usize, name: &str, rules: &str) -> Self {
+        let caseless = Filter::from_rules(rules, true).expect("rules");
         let filter = std::sync::Arc::new(caseless.with_shared([name]));
         self.clients[c].toggled = std::sync::Arc::clone(&filter);
         self.clients[c].filter = filter;

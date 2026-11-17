@@ -18,7 +18,7 @@ use std::time::{Duration, Instant};
 use hbsync_platform::journal::ChangeJournal;
 use hbsync_platform::{RelPath, journal::open_journal};
 use hbsync_state::{StateDb, StateError, keys};
-use notify::event::{AccessKind, AccessMode, ModifyKind};
+use notify::event::{AccessKind, AccessMode, CreateKind, ModifyKind, RemoveKind};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::filter::Filter;
@@ -102,8 +102,8 @@ impl LiveWatcher {
             return Err(notify::Error::io(std::io::Error::from_raw_os_error(24)));
         }
         let (tx, rx) = channel();
-        let (rung, rules): (Arc<AtomicBool>, Arc<AtomicBool>) = Default::default();
-        let shared = Arc::new(AtomicBool::new(false));
+        let (rung, rules, shared): (Arc<AtomicBool>, Arc<AtomicBool>, Arc<AtomicBool>) =
+            Default::default();
         let (filter_root, rang, touched) = (root.clone(), Arc::clone(&rung), Arc::clone(&rules));
         let shares = Arc::clone(&shared);
         let rules_file = crate::layout::ignore_file(&root);
@@ -112,19 +112,19 @@ impl LiveWatcher {
             // The rules' file is the client's own (filtered below), but a change to it counts
             // (or may hide in an event that lost its paths); reading it (as the runner does to
             // compare them) doesn't.
-            let rules_touched = res.as_ref().map_or(true, |e| {
-                e.need_rescan()
-                    || !reads_only(&e.kind)
+            let lost = res.as_ref().map_or(true, Event::need_rescan);
+            let rules_touched = lost
+                || res.as_ref().is_ok_and(|e| {
+                    !reads_only(&e.kind)
                         && e.paths.iter().any(|p| *p == rules_file || *p == rules_dir)
-            });
+                });
             if rules_touched {
                 touched.store(true, Ordering::SeqCst);
             }
             // So is what a folder of shares leaves out, found by its marker, not by the filter
             // in use.
-            let shared_touched = res
-                .as_ref()
-                .map_or(true, |e| e.need_rescan() || touches_shared(&filter_root, e));
+            let shared_touched =
+                lost || res.as_ref().is_ok_and(|e| touches_shared(&filter_root, e));
             if shared_touched {
                 shares.store(true, Ordering::SeqCst);
             }
@@ -260,16 +260,18 @@ fn reads_only(kind: &EventKind) -> bool {
 /// Whether `event` may change which folders at the top of `root` hold what other identities
 /// share ([`crate::shared_folders`]): a marker made, removed or renamed in a folder there, or
 /// an entry of the root itself made, removed or renamed (a folder holding one moved in or
-/// away, or renamed). A write to a file at the top doesn't.
+/// away, or renamed). A write to a file at the top doesn't, nor a file made or removed there
+/// where the OS says it is one (a rename doesn't say).
 fn touches_shared(root: &Path, event: &Event) -> bool {
-    let entry = matches!(
-        event.kind,
+    let entry = match event.kind {
+        EventKind::Create(CreateKind::File) | EventKind::Remove(RemoveKind::File) => false,
         EventKind::Create(_)
-            | EventKind::Remove(_)
-            | EventKind::Modify(ModifyKind::Name(_))
-            | EventKind::Any
-            | EventKind::Other
-    );
+        | EventKind::Remove(_)
+        | EventKind::Modify(ModifyKind::Name(_))
+        | EventKind::Any
+        | EventKind::Other => true,
+        _ => false,
+    };
     !reads_only(&event.kind)
         && event.paths.iter().any(|path| {
             let Ok(rel) = path.strip_prefix(root) else {
@@ -428,8 +430,9 @@ impl LocalObserver {
     }
 
     /// [`LocalObserver::start`], ringing `bell` when there is something to record
-    /// ([`LocalObserver::poll`]) or the ignore rules' file was touched
-    /// ([`LocalObserver::rules_touched`]). Poll at [`LocalObserver::deadline`] too.
+    /// ([`LocalObserver::poll`]), the ignore rules' file was touched
+    /// ([`LocalObserver::rules_touched`]) or a folder of shares may have come or gone
+    /// ([`LocalObserver::shared_touched`]). Poll at [`LocalObserver::deadline`] too.
     ///
     /// With a watcher, large files being written are hashed once they are quiet
     /// ([`ScanOptions::settle`]: `opts`' own, else the default), and looked at again for it.
@@ -731,7 +734,7 @@ impl LocalObserver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notify::event::{CreateKind, DataChange, Flag, RemoveKind, RenameMode};
+    use notify::event::{DataChange, Flag, RenameMode};
     use std::collections::HashMap;
     use std::fs;
     use std::sync::{Arc, Mutex};
@@ -763,20 +766,21 @@ mod tests {
             .expect("every call answered");
     }
 
+    fn event(kind: EventKind, paths: &[&str]) -> Event {
+        Event {
+            kind,
+            paths: paths.iter().map(PathBuf::from).collect(),
+            attrs: Default::default(),
+        }
+    }
+
     /// What may make or unmake a folder of shares: its marker made, removed or renamed in a
     /// folder at the top, and an entry of the top made, removed or renamed. Not a write to a
     /// file there, a read, or anything deeper.
     #[test]
     fn a_marker_or_an_entry_at_the_top_touches_the_folders_of_shares() {
         let root = Path::new("/sync");
-        let touches = |kind, paths: &[&str]| {
-            let event = Event {
-                kind,
-                paths: paths.iter().map(PathBuf::from).collect(),
-                attrs: Default::default(),
-            };
-            touches_shared(root, &event)
-        };
+        let touches = |kind, paths: &[&str]| touches_shared(root, &event(kind, paths));
         let created = EventKind::Create(CreateKind::Any);
         let renamed = EventKind::Modify(ModifyKind::Name(RenameMode::Both));
         let written = EventKind::Modify(ModifyKind::Data(DataChange::Any));
@@ -790,7 +794,21 @@ mod tests {
         assert!(touches(removed, &["/sync/Shared"]));
         assert!(touches(renamed, &["/sync/a/b/c", "/sync/Shared-2"]));
         assert!(touches(EventKind::Any, &["/sync/Shared"]));
+        let folder = EventKind::Create(CreateKind::Folder);
+        assert!(touches(folder, &["/sync/Shared"]));
+        assert!(touches(
+            EventKind::Remove(RemoveKind::Folder),
+            &["/sync/Shared"]
+        ));
 
+        // A file isn't a folder of shares, where the OS tells the two apart.
+        let file = EventKind::Create(CreateKind::File);
+        assert!(!touches(file, &["/sync/notes.txt"]));
+        assert!(!touches(
+            EventKind::Remove(RemoveKind::File),
+            &["/sync/notes.txt"]
+        ));
+        assert!(touches(file, &["/sync/Shared/.hbsync-shared"]));
         assert!(!touches(written, &["/sync/notes.txt"]));
         assert!(!touches(closed, &["/sync/notes.txt"]));
         assert!(!touches(opened, &["/sync/Shared/.hbsync-shared"]));
@@ -805,13 +823,7 @@ mod tests {
         let root = Path::new("/sync");
         let mut batch = WatchBatch::default();
         let excl = Filter::from_rules("node_modules/\n", false).expect("valid rules");
-        let ev = |kind, paths: &[&str]| {
-            Ok(Event {
-                kind,
-                paths: paths.iter().map(PathBuf::from).collect(),
-                attrs: Default::default(),
-            })
-        };
+        let ev = |kind, paths: &[&str]| Ok(event(kind, paths));
         add_event(
             root,
             &excl,
