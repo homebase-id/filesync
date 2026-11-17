@@ -429,8 +429,9 @@ impl Parts {
             .map_or(true, |f| f.fingerprint() != folder.filter.fingerprint())
     }
 
-    /// [`Parts::rules_changed`] for the folders of shares alone, the rules neither read nor
-    /// compiled: one listing of the top and a look into each folder there.
+    /// [`Parts::rules_changed`] for the folder of shares alone, the rules neither read nor
+    /// compiled: its record's read, and where one is on record a listing of the top and a
+    /// look for its marker.
     fn shares_changed(&self, root: &Path) -> bool {
         self.engine.config().folder.filter.shared_changed(root)
     }

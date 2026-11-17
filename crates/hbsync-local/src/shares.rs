@@ -10,7 +10,7 @@
 use std::io;
 use std::path::Path;
 
-use hbsync_platform::FileId;
+use hbsync_platform::{EntryKind, FileId};
 
 use crate::filter::{holds_marker, is_state_dir};
 use crate::layout::{shared_marker, shares_file, tmp_dir};
@@ -50,8 +50,20 @@ impl Record {
     }
 
     /// Whether a folder with `id` is the one on record, whatever it holds.
-    pub fn names(&self, id: FileId) -> bool {
+    fn names(&self, id: FileId) -> bool {
         self.0 == Some(id.file)
+    }
+
+    /// The folder on record at the top of `root`, whatever it holds. Nothing is listed where
+    /// nothing is on record.
+    fn at_top(&self, root: &Path) -> io::Result<Option<String>> {
+        if self.0.is_none() {
+            return Ok(None);
+        }
+        let found = top_folders(root)?
+            .into_iter()
+            .find(|(_, id)| self.names(*id));
+        Ok(found.map(|(name, _)| name))
     }
 
     /// Whether the folder at `dir` with `id`, at the sync folder's top, is its folder of
@@ -76,55 +88,33 @@ impl Record {
 }
 
 /// The real folders (no links) at the top of `root`, the state folder left out, each with its
-/// file id. None in a root that isn't there; an entry gone since it was listed is skipped. One
-/// whose name isn't Unicode is never synced anyway ([`crate::SkipReason`]).
+/// file id: one listing, as the walk's. None in a root that isn't there. One whose name isn't
+/// Unicode is never synced anyway ([`crate::SkipReason`]).
 fn top_folders(root: &Path) -> io::Result<Vec<(String, FileId)>> {
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
+    let items = match hbsync_platform::listdir::list_dir(root) {
+        Ok(items) => items,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     };
-    let mut found = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        match entry.file_type() {
-            Ok(kind) if kind.is_dir() => {}
-            Ok(_) => continue,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e),
-        }
-        let Ok(name) = entry.file_name().into_string() else {
-            continue;
-        };
-        if is_state_dir(&name) {
-            continue;
-        }
-        match hbsync_platform::stat(&entry.path()) {
-            Ok(meta) => found.push((name, meta.file_id)),
-            Err(e) if hbsync_platform::meta::nothing_there(&e) => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(found)
+    let folders = items.into_iter().filter_map(|item| {
+        let name = item.name.into_string().ok()?;
+        (item.meta.kind == EntryKind::Dir && !is_state_dir(&name))
+            .then_some((name, item.meta.file_id))
+    });
+    Ok(folders.collect())
 }
 
 /// The folder of shares at the top of `root`, by name: the folder on record there
 /// ([`Record`]), while it holds its marker. Found by the record, never by a name: the user may
 /// rename it. A marker that can't be looked for is an error, as a root that can't be listed.
 ///
-/// Nothing but the record's read where none is on record; else one listing of the root, one
-/// `stat` per folder at its top, and one more for the marker.
+/// Nothing but the record's read where none is on record; else one listing of the root and
+/// one look for the marker.
 pub fn folder(root: &Path) -> io::Result<Option<String>> {
-    let record = Record::read(root)?;
-    if record.0.is_none() {
-        return Ok(None);
+    match Record::read(root)?.at_top(root)? {
+        Some(name) if holds_marker(&root.join(&name))? => Ok(Some(name)),
+        _ => Ok(None),
     }
-    for (name, id) in top_folders(root)? {
-        if record.names(id) {
-            return Ok(holds_marker(&root.join(&name))?.then_some(name));
-        }
-    }
-    Ok(None)
 }
 
 /// What [`make`] did.
@@ -147,11 +137,7 @@ pub enum Made {
 /// The folder on record that is at the top keeps its place ([`Made::Kept`]), with its marker
 /// or without (the user took it away: a plain folder now, and theirs to decide).
 pub fn make(root: &Path, name: &str) -> io::Result<Made> {
-    let record = Record::read(root)?;
-    if let Some((kept, _)) = top_folders(root)?
-        .into_iter()
-        .find(|(_, id)| record.names(*id))
-    {
+    if let Some(kept) = Record::read(root)?.at_top(root)? {
         return Ok(Made::Kept(kept));
     }
     let tmp = tmp_dir(root);
@@ -187,8 +173,8 @@ const PREPARED: &str = "shares";
 /// Never a synced folder: a marker copied into one does nothing. With two to choose from,
 /// neither.
 ///
-/// Costs one listing of the root and a `stat` per folder at its top, and a look for the
-/// marker in each where the folder on record isn't there.
+/// Costs one listing of the root, and a look for the marker in each folder at its top where
+/// the folder on record isn't there.
 pub fn adopt<E: From<io::Error>>(
     root: &Path,
     mut synced: impl FnMut(&str) -> Result<bool, E>,

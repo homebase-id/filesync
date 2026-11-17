@@ -257,7 +257,7 @@ fn reads_only(kind: &EventKind) -> bool {
     matches!(kind, EventKind::Access(a) if *a != AccessKind::Close(AccessMode::Write))
 }
 
-/// Whether `event` may change which folders at the top of `root` hold what other identities
+/// Whether `event` may change which folder at the top of `root` holds what other identities
 /// share ([`crate::shares::folder`]): a marker made, removed or renamed in a folder there, or
 /// an entry of the root itself made, removed or renamed (a folder holding one moved in or
 /// away, or renamed). A write to a file at the top doesn't, nor a file made or removed there
