@@ -849,6 +849,7 @@ mod tests {
         // the rescan's own) touch nothing and don't count; a finished write does.
         for ignored in [
             ev(EventKind::Any, &["/sync/.hbsync/state.db"]),
+            ev(EventKind::Any, &["/sync/a/old/.hbsync/state.db"]),
             ev(EventKind::Any, &["/sync/a/.DS_Store"]),
             ev(EventKind::Any, &["/sync/a/.notes.txt.swp"]),
             ev(EventKind::Any, &["/sync/app/node_modules/x/y.js"]),

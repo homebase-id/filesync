@@ -215,10 +215,11 @@ impl Reconciler<'_> {
             .any(|n| i.local.contains(*n) || i.base.contains(*n))
     }
 
-    /// What is below the orphan `node`, recovered to `path`, at a place this device doesn't
-    /// sync (§10), with what is below that: out of the plan, left to the devices that sync it,
-    /// as the filter masks such a node once its folder is connected again. Brought in, it would
-    /// read as an item this device stopped syncing, and leave the drive. Hardly ever any.
+    /// What is below `node`, connected to the top again at `path` (an orphan recovered, a
+    /// folder taken out of a cycle), at a place this device doesn't sync (§10), with what is
+    /// below that: out of the plan, left to the devices that sync it, as the filter masks such
+    /// a node once its folder is connected again. Brought in, it would read as an item this
+    /// device stopped syncing, and leave the drive. Hardly ever any.
     fn leave_unsynced_below(&mut self, node: NodeId, mut path: Vec<String>) {
         let filter = self.masking.filter;
         let depth = path.len();
@@ -505,6 +506,13 @@ impl Reconciler<'_> {
                 }
                 self.retarget(victim, state);
                 self.plan.conflicts.push(Conflict::Cycle { node: victim });
+                // A cycle on the drive itself (another writer's): no mask judged what is in
+                // it, as none does what the drive doesn't connect to the top.
+                let path = self.merged.path(victim);
+                let path = path.map(|p| p.into_iter().map(str::to_owned).collect());
+                if let Some(path) = path {
+                    self.leave_unsynced_below(victim, path);
+                }
                 fixed = true;
             }
         }

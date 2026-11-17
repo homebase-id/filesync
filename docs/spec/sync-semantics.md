@@ -201,7 +201,12 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    With no local move in it (the drive took two devices' moves, each folder into the other),
    the lowest id goes back to its place on the drive, else in the base, and to the top where
    that would close the cycle again, under its name (reconcile
-   `a_cycle_with_no_local_move_puts_the_lowest_at_the_top`).
+   `a_cycle_with_no_local_move_puts_the_lowest_at_the_top`). What is in a cycle the drive
+   itself holds (another writer's) is filtered as anywhere once its folder is connected again
+   (§10: no mask judges what the drive doesn't connect to the top): an item at a place this
+   device doesn't sync stays out of the plan, as below an orphan recovered. Brought in, it
+   read as an item the device stopped syncing and left the drive (engine and simulator
+   `what_a_cycle_on_the_drive_holds_is_filtered_as_anywhere`, milestone seed 829).
 3. **No orphans.** A live node whose merged parent is deleted resurrects the parent chain:
    - remote-deleted parent → restored remotely (still removed) or re-created with the same
      node id and its base name (deleted for good);
@@ -441,7 +446,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
   through a handle an app had open, a new item, an ignored one) puts it back where it was (under
   a numbered name if that is taken, at the folder's top if its folder is gone), and the next
   plan decides: an edit wins (§4), ignored content stays (§10). Junk files go along; a folder on
-  the junk list (it may hold what was never synced) stays, as ignored content does. A parked
+  the junk list (it may hold what was never synced) stays, as ignored content does, and as a
+  state folder below the top does (`.hbsync`, another sync folder's: §10). A parked
   item goes back under its own name, never its temporary one, and its parking record goes. While
   an item is aside, the scan keeps its rows, and the folders it is in, for it to come back to.
   What the drive removed stays in Recently deleted for 30 days; a restore downloads
@@ -918,7 +924,16 @@ on its own.
 **Classes** (`hbsync-local/src/filter.rs`):
 - **Excluded**: the client's own `.hbsync` folder at the top of the sync root, in any case or
   spelling a volume that ignores case takes for it (`.HBSYNC`): another writer's folder so named
-  would be this client's own there, and what is in it would land in it. And a **folder of
+  would be this client's own there, and what is in it would land in it. And an item of that
+  name **at any depth** (a file too): below the top it is another sync folder's state, moved
+  or copied in with its folder (a folder of shares that lost its marker holds one per sharer).
+  Its DB and half-done downloads make no sense on another device, and its marker there would
+  be taken for a set-up sync folder's. It is the user's as ignored content is: kept on this
+  device only, and it keeps its folder (rule 3). No rule of the user's brings it into view.
+  One a version before this rule synced leaves the drive and the other devices by rule 1 and
+  stays where it is; one another writer puts on the drive is masked (rule 2), listed nowhere
+  on the computers (engine `a_state_folder_below_the_top_is_left_alone`, sim
+  `a_state_folder_stays_on_its_device_at_any_depth`). And a **folder of
   shares** at the top: the folder that holds what other identities share with this one
   ("The folder of shares" below), found by its marker, never by its name.
 - **Junk**: a built-in list of names the OS or an application creates by itself, matched in any
@@ -1033,11 +1048,11 @@ client syncs, not the account's alone.
 3. **Folders.** A remote folder with masked live children (that aren't leaving) counts as
    having a live child: a local delete of it deletes what this device saw, and the folder comes
    back here, empty.
-   Locally, junk files in a folder being deleted go with it; ignored content, and a folder on
-   the junk list, keep their folder: the synced contents are deleted, item by item, and the
+   Locally, junk files in a folder being deleted go with it; ignored content, a state folder
+   (`.hbsync`), and a folder on the junk list, keep their folder: the synced contents are deleted, item by item, and the
    folder is released (the next scan sees it
    as a new folder); junk directly in it stays with it.
-4. **Rule changes.** The filter's fingerprint (rules, junk list version, case sensitivity,
+4. **Rule changes.** The filter's fingerprint (rules, the built-in names' version, case sensitivity,
    the names of the folders of shares) is kept in the state DB. When it changed, start-up walks the whole tree (a journal doesn't
    report items that just became visible) and re-plans every synced node; the new fingerprint
    is stored in the same transaction. Items that come into view are new items. The sync loop

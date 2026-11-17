@@ -20,11 +20,11 @@ const BAD_NAMES: &[&str] = &[
     ".HBSYNC",
 ];
 
-/// Whether no device places a node named `name` in `folder` as it is: a name no file system
-/// takes or that means a path, or the state folder's at the top (filtered in any case, §10).
-fn unplaceable(folder: hbsync_types::NodeId, name: &str) -> bool {
+/// Whether no device places a node named `name` as it is: a name no file system takes or that
+/// means a path, or the state folder's, in any folder (filtered in any case, §10).
+fn unplaceable(name: &str) -> bool {
     ["", ".", "..", "a/b", "../up", "nul\0x"].contains(&name)
-        || (folder.is_root() && name_key(name) == name_key(".hbsync"))
+        || name_key(name) == name_key(".hbsync")
 }
 
 /// What one seed's buggy or hostile writer did ([`hostile`]).
@@ -194,7 +194,7 @@ fn hostile(server: &Arc<Mutex<FakeServer>>, rng: &mut Rng, did: &mut Hostile) ->
                 0 => srv.write_unchecked(None, &file(fresh, folder, name), payload())?,
                 _ => srv.write_unchecked(None, &folder_meta(fresh, folder, name), None)?,
             };
-            if unplaceable(folder, name) {
+            if unplaceable(name) {
                 did.unplaceable.insert(fresh);
                 did.replans = true;
             }
@@ -345,6 +345,15 @@ fn randomized_hostile_writer() -> R {
         "every seed disturbed: little left to check"
     );
     Ok(())
+}
+
+/// Seed 829, kept: a file named as the state folder in a folder the writer put in itself. The
+/// client that took the folder out of the cycle brought the file in, unjudged by the mask, then
+/// took it off the drive as an item it stopped syncing (§6.2; engine
+/// `what_a_cycle_on_the_drive_holds_is_filtered_as_anywhere`).
+#[test]
+fn a_filtered_name_in_a_cycle_stays_on_the_drive() -> R {
+    hostile_seed(829).map(|_| ())
 }
 
 /// One seed of [`randomized_hostile_writer`]: what the writer did.
