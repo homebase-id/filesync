@@ -101,9 +101,11 @@ fn misplaced(header: &RemoteHeader) -> Option<String> {
 /// version) changes nothing but what the server says better: the file's `token` where the
 /// header gives one (an earlier login's may not open), and a time the store doesn't have yet:
 /// a removal's, and that of a version in a removed folder, where it decides whether it went
-/// with it (node schema, Recently deleted). A time the store has stays, unwritten: a version
-/// has one time, whenever it is read ([`RemoteHeader::changed_at`]). No change of the node, so
-/// nothing to reconcile.
+/// with it (node schema, Recently deleted). A version has one time, whenever it is read
+/// ([`RemoteHeader::changed_at`]): where the store has that one, nothing is written; where it
+/// has another for these (a client from before `versionUpdated` took a share change's time for
+/// a version it first read then, filesync #385), it takes the server's. No change of the
+/// node, so nothing to reconcile.
 pub(crate) fn apply_known(
     s: AccountTx<'_>,
     r: &ChangeRef,
@@ -242,11 +244,13 @@ mod tests {
         Ok(())
     }
 
-    /// A known version read again keeps the time the store has for it, live or removed, and
-    /// nothing is written: a version has one time (the server's `versionUpdated`), so another
-    /// one coming with it is no write. Only a new version is.
+    /// A known version read again with another time than the store has for it: a removal
+    /// takes the server's (a version has one time, the server's `versionUpdated`; the store's
+    /// is from a client before it, a share change's). A live node's stays where it decides
+    /// nothing (outside a removed folder:
+    /// `an_own_writes_time_is_kept_in_a_removed_folder_only`).
     #[test]
-    fn a_known_version_read_again_keeps_its_time() -> Result<(), StateError> {
+    fn a_known_version_read_again_takes_the_servers_time() -> Result<(), StateError> {
         let mut db = StateDb::open_in_memory()?;
         let node = NodeId::new();
         let mut header = RemoteHeader {
@@ -270,15 +274,15 @@ mod tests {
         header.changed_at = Some(200);
         assert_eq!(db.write(|s| apply(s.account(), &header))?, Applied::Live);
         let live = db.read(|s| s.get_mirror(node))?.expect("live");
-        assert_eq!(live.changed_at, Some(100));
-        // Removed, a new version, and that one read again later.
+        assert_eq!(live.changed_at, Some(100), "nothing it decides");
+        // Removed, a new version, and that one read again with the server's time.
         header.version = VersionTag(Uuid::new_v4());
         (header.removed, header.changed_at) = (true, Some(300));
         assert_eq!(db.write(|s| apply(s.account(), &header))?, Applied::Left);
         header.changed_at = Some(400);
         assert_eq!(db.write(|s| apply(s.account(), &header))?, Applied::Left);
         let removed = db.read(|s| s.removed_by_node(node))?.expect("removed");
-        assert_eq!(removed.removed_at, Some(300));
+        assert_eq!(removed.removed_at, Some(400));
         Ok(())
     }
 
@@ -397,7 +401,7 @@ mod tests {
         db.write(|s| apply(s.account(), &without))?;
         assert_eq!(held(&mut db)?, token(0xEE));
 
-        // In Recently deleted, the same; its time stays the one it has.
+        // In Recently deleted, the same; its time is the one it has (the server's).
         let removed = RemoteHeader {
             version: VersionTag(Uuid::from_u128(2)),
             removed: true,
@@ -409,8 +413,6 @@ mod tests {
             s.folder().clear_dirty(node)
         })?;
         let again = RemoteHeader {
-            removed: true,
-            changed_at: Some(9),
             token: token(0xAA),
             ..removed
         };
@@ -457,6 +459,14 @@ mod tests {
             Some(7),
             "in a removed folder, two levels up"
         );
+        // Another time than it has (a share change's, kept by a client before
+        // `versionUpdated`): the server's.
+        let echo = RemoteHeader {
+            changed_at: Some(6),
+            ..echo
+        };
+        db.write(|s| apply(s.account(), &echo))?;
+        assert_eq!(time(&mut db)?, Some(6), "the server's time");
         Ok(())
     }
 

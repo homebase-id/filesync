@@ -363,6 +363,14 @@ included (service managers restart it then).
   and none reads after its own writes. A read starts with a page of 500 rows; slim pages grow
   to 2,000 in a run of them (a slim page with something new is read again whole, as far as 500
   rows go, after its rows before the new one, read slim, when 500 wouldn't reach it).
+- **One whole re-read after the upgrade** that reads a version's time from the server's
+  `versionUpdated` (the state DB's migration 28 asks for it, as a device does by itself after
+  29 days away): a client from before kept a share change's time for a version it first read
+  after it (filesync #385), and a row read again takes the server's time where it decides
+  something (a removal's, and a node's in a removed folder). Once per state DB: a page of 500
+  whole rows, the rest slim (about 0.5 KB a file on the wire, as measured for minimal rows:
+  API notes, "Change feed"), a read per row, and a write only for a row whose time was
+  another.
 - **No poll:** nothing syncs on a timer while the notification socket is connected. The
   drive is read from the feed's cursor, so what wasn't announced (the socket was down, a
   notification got lost) arrives at the next (re)connect, when the account pulls as at start
