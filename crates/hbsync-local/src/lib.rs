@@ -11,7 +11,10 @@ pub mod scan;
 mod walk;
 mod watch;
 
-pub use filter::{Filter, FilterError, SkippedRule, Verdict, is_junk, is_state_dir, state_dir_key};
+pub use filter::{
+    Filter, FilterError, SkippedRule, Verdict, holds_marker, is_junk, is_state_dir, shared_folders,
+    state_dir_key,
+};
 pub use journal::{CatchUp, ChangeJournal, Tier, catch_up, open_journal};
 pub use layout::IGNORE_FILE;
 pub use marker::Marker;

@@ -114,6 +114,17 @@ pub fn parked_name(node: NodeId) -> String {
 /// synced.
 pub const IGNORE_FILE: &str = "ignore";
 
+/// The marker, a file, of the folder at a sync folder's top that holds what other identities
+/// share with the account (sync semantics §10): the folder is this device's own, found by its
+/// marker under any name ([`crate::shared_folders`]). On the junk list: never synced, so a
+/// marker never comes from the drive.
+pub const SHARED_MARKER: &str = ".hbsync-shared";
+
+/// The [`SHARED_MARKER`] of `folder`.
+pub fn shared_marker(folder: &Path) -> PathBuf {
+    folder.join(SHARED_MARKER)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

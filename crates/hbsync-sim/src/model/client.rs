@@ -122,6 +122,10 @@ pub(crate) struct Client {
     /// The filter its pending plan runs with: a rule change counts from the next plan, as the
     /// executor holds one for its run.
     pub(crate) run_filter: Arc<Filter>,
+    /// The filter [`crate::Action::ToggleIgnore`] switches on and off: ignoring `d` by rule,
+    /// or leaving out a folder that holds what other identities share
+    /// ([`crate::Sim::with_shared_folder_on`]).
+    pub(crate) toggled: Arc<Filter>,
     /// The nodes of the deletes the guard held in the last plan.
     pub(crate) held: Vec<NodeId>,
     /// Operations the drive refused, by node and kind, with their key
@@ -271,6 +275,7 @@ impl Client {
             pulls: false,
             run_filter: Arc::new(filter.clone()),
             filter: Arc::new(filter),
+            toggled: Arc::new(ignoring_d()),
             held: Vec::new(),
             refused: HashMap::new(),
             blocked: Vec::new(),

@@ -35,7 +35,7 @@ pub enum SkipReason {
     NotUnicode,
     /// Not a valid name for the remote (for example more than 255 UTF-8 bytes).
     InvalidName,
-    /// The client's own `.hbsync` folder.
+    /// The client's own `.hbsync` folder, or a folder that holds what other identities share.
     Excluded,
     /// On the built-in junk list: disposable.
     Junk,
@@ -215,15 +215,41 @@ impl Iterator for Walker<'_> {
             let event = self.classify(&dir, item);
             if let WalkEvent::Entry { path, meta } = &event
                 && meta.kind == EntryKind::Dir
-                && self
+            {
+                let path = path.clone();
+                // A folder at the top that holds what other identities share is neither
+                // reported nor entered: by its marker, whatever the filter knows of it (one
+                // that came, or took another name, since the filter was read).
+                let held = match dir.is_root() {
+                    true => self
+                        .native(&path)
+                        .map(|at| crate::filter::holds_marker(&at)),
+                    false => None,
+                };
+                match held {
+                    Some(Ok(true)) => {
+                        return Some(WalkEvent::Skipped {
+                            path: path.components().collect(),
+                            reason: SkipReason::Excluded,
+                        });
+                    }
+                    // Not known to hold none: reported, not entered.
+                    Some(Err(error)) => {
+                        self.queued.push(WalkEvent::Unreadable { path, error });
+                        return Some(event);
+                    }
+                    Some(Ok(false)) | None => {}
+                }
+                if self
                     .descend
                     .as_mut()
-                    .is_none_or(|descend| descend(path, meta))
-            {
-                // Pre-order: the folder is returned now, its contents on the next calls.
-                // `open` may queue an Unreadable event, which must come right after the folder.
-                let path = path.clone();
-                self.open(path);
+                    .is_none_or(|descend| descend(&path, meta))
+                {
+                    // Pre-order: the folder is returned now, its contents on the next calls.
+                    // `open` may queue an Unreadable event, which must come right after the
+                    // folder.
+                    self.open(path);
+                }
             }
             return Some(event);
         }
@@ -429,6 +455,48 @@ mod tests {
                 (p("proj/build"), SkipReason::Ignored),
             ]
         );
+        Ok(())
+    }
+
+    /// A folder at the top that holds the marker of a folder of shares is neither reported nor
+    /// entered, though the filter knows of none (it came since the filter was read): not one
+    /// deeper, nor one whose marker is a folder.
+    #[test]
+    fn a_folder_of_shares_is_never_entered_whatever_the_filter_knows() -> io::Result<()> {
+        use crate::layout::shared_marker;
+        let dir = tempfile::tempdir()?;
+        let r = dir.path();
+        for d in ["Team/tom", "mine/Team", "odd"] {
+            fs::create_dir_all(r.join(d))?;
+        }
+        fs::write(r.join("Team/tom/theirs.txt"), b"t")?;
+        fs::write(r.join("mine/Team/x.txt"), b"x")?;
+        fs::write(shared_marker(&r.join("Team")), b"")?;
+        fs::write(shared_marker(&r.join("mine/Team")), b"")?;
+        fs::create_dir(shared_marker(&r.join("odd")))?;
+
+        let filter = Filter::default();
+        let mut asked = Vec::new();
+        let descend = |path: &RelPath, _: &LocalMeta| {
+            asked.push(path.as_str().to_owned());
+            true
+        };
+        let walker = Walker::at(r, RelPath::root(), &filter, Some(Box::new(descend)));
+        let (mut entries, mut excluded) = (Vec::new(), Vec::new());
+        for event in walker {
+            match event {
+                WalkEvent::Entry { path, .. } => entries.push(path.as_str().to_owned()),
+                WalkEvent::Skipped {
+                    path,
+                    reason: SkipReason::Excluded,
+                } => excluded.push(path),
+                WalkEvent::Skipped { .. } => {}
+                WalkEvent::Unreadable { .. } => return Err(io::Error::other("unreadable")),
+            }
+        }
+        assert_eq!(entries, ["mine", "mine/Team", "mine/Team/x.txt", "odd"]);
+        assert_eq!(excluded, [PathBuf::from("Team")]);
+        assert_eq!(asked, ["mine", "mine/Team", "odd"]);
         Ok(())
     }
 }

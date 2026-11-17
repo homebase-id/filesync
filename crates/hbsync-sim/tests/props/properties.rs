@@ -184,6 +184,20 @@ proptest! {
         run_with(3, None, setup, &events)?;
     }
 
+    /// A device's folder that holds what other identities share (§10) is its own: nothing in
+    /// it is synced and its name is held against the drive's, whatever the others make of that
+    /// name, while its marker goes and comes back (`ToggleIgnore`: a plain folder meanwhile,
+    /// synced; with its marker again, off the drive and kept where it is). All converge
+    /// without loss.
+    #[test]
+    fn a_folder_of_shares_stays_on_its_device(
+        setup in 0..SHARED_FOLDER_SETUPS.len(),
+        events in proptest::collection::vec(event(3), 0..120)
+    ) {
+        let (prepare, guard) = SHARED_FOLDER_SETUPS[setup];
+        run_with(3, guard, prepare, &events)?;
+    }
+
     /// The main folders leave a role folder another device made alone (§12): never synced
     /// here, never changed, whatever the users do around it.
     #[test]
@@ -457,6 +471,17 @@ proptest! {
         events in proptest::collection::vec(any_event(5), 0..80),
     ) {
         run_narrow_in(READ_ONLY_SETUPS, setup, 3, &events)?;
+    }
+
+    /// [`the_engines_planning_path_plans_as_the_sim`] with a folder that holds what other
+    /// identities share (§10): the engine's mask leaves the drive's item of its name out as
+    /// the simulator does.
+    #[test]
+    fn a_folder_of_shares_plans_as_the_sim_on_the_engines_path(
+        setup in 0..SHARED_FOLDER_SETUPS.len(),
+        events in proptest::collection::vec(any_event(5), 0..80),
+    ) {
+        run_narrow_in(SHARED_FOLDER_SETUPS, setup, 3, &events)?;
     }
 }
 

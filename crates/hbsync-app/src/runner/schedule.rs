@@ -112,7 +112,7 @@ pub(crate) enum Why {
     Drive,
     /// A walk of the folder (no watcher, or one back) found changes.
     Scan,
-    /// The ignore rules changed.
+    /// The ignore rules changed, or the folders of shares at the top.
     Rules,
     /// Asked for: sync now, an answer to held deletes.
     Asked,

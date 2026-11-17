@@ -21,7 +21,7 @@ use hbsync_types::{
 
 use crate::Sim;
 use crate::action::{Action, JUNK, JUNK_FOLDER, LAUNCHERS, NAMES, TAGS};
-use crate::model::client::{Client, ignoring_d};
+use crate::model::client::Client;
 use crate::model::server::{Server, ServerNode};
 use crate::oracle::Seen;
 use crate::tagbook::Limit;
@@ -633,11 +633,12 @@ impl Sim {
                 let client = &mut self.clients[c];
                 // New rules make a new engine: the user's Delete answers are asked again.
                 client.confirmed.clear();
-                client.filter = Arc::new(if client.filter.rule_count() == 0 {
-                    ignoring_d()
+                let plain = client.filter.rule_count() == 0 && client.filter.shared().is_empty();
+                client.filter = if plain {
+                    Arc::clone(&client.toggled)
                 } else {
-                    Filter::default()
-                });
+                    Arc::new(Filter::default())
+                };
             }
             Action::CreateJunkFolder { parent } => {
                 let parent = folders[parent % folders.len()];

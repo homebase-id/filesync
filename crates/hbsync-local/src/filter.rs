@@ -1,9 +1,11 @@
-//! What is never synced: the client's own folder, built-in junk, and the user's ignore rules.
+//! What is never synced: the client's own folders, built-in junk, and the user's ignore rules.
 //!
 //! Junk is disposable (OS metadata, lock and swap files, partial downloads): a junk file goes
 //! with its folder. Ignored items are the user's data kept on this device only: they
-//! keep their folder. Both are invisible to sync in either direction (sync semantics §10).
+//! keep their folder. Both are invisible to sync in either direction (sync semantics §10), as
+//! is the folder at the top that holds what other identities share ([`shared_folders`]).
 
+use std::borrow::Cow;
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -13,7 +15,7 @@ use hbsync_platform::RelPath;
 use hbsync_platform::name::{ends_caseless, name_key, starts_caseless};
 
 /// Bumped whenever the built-in junk list changes, so a changed list counts as a rule change.
-const JUNK_VERSION: u32 = 3;
+const JUNK_VERSION: u32 = 4;
 
 /// How the built-in list matches a name (ASCII case-insensitively).
 #[derive(Debug, Clone, Copy)]
@@ -67,6 +69,9 @@ const JUNK: &[Pat] = &[
     Pat::Suffix(".part"),
     Pat::Suffix(".partial"),
     Pat::Suffix(".download"),
+    // The client's own: the marker of the folder that holds what other identities share. A
+    // marker from the drive would take the folder it lands in off the drive.
+    Pat::Name(crate::layout::SHARED_MARKER),
 ];
 
 /// The state folder's ([`crate::STATE_DIR`]) name key (`name_key`): its name in any case or
@@ -81,6 +86,54 @@ pub fn state_dir_key() -> &'static str {
 /// and normalization-insensitive (`name_key`), as a volume that ignores case compares names.
 pub fn is_state_dir(name: &str) -> bool {
     name.len() <= crate::STATE_DIR.len() * 4 && name_key(name) == state_dir_key()
+}
+
+/// The folders at the top of `root` that hold what other identities share with the account, by
+/// name: the real folders there (no link) holding a [`crate::layout::SHARED_MARKER`], a file.
+/// Found by the marker, never by a name: the user may rename one. None in a root that isn't
+/// there. An entry gone since it was listed is skipped; a marker that can't be looked for
+/// ([`holds_marker`]) is an error, as a root that can't be listed: a folder of shares taken
+/// for a plain one would be sent.
+///
+/// One listing of the root and one `stat` per folder at its top.
+pub fn shared_folders(root: &Path) -> io::Result<Vec<String>> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut found = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => {}
+            Ok(_) => continue,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
+        }
+        // One whose name isn't Unicode is never synced anyway ([`crate::SkipReason`]).
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if !is_state_dir(&name) && holds_marker(&entry.path())? {
+            found.push(name);
+        }
+    }
+    found.sort_unstable();
+    Ok(found)
+}
+
+/// Whether the folder at `dir` holds a [`crate::layout::SHARED_MARKER`], a file: at a sync
+/// folder's top, what makes it a folder that holds what other identities share. A folder that
+/// isn't there, or that this user may not look into (the walk can't read it either), holds
+/// none; any other error is one: the marker may be there.
+pub fn holds_marker(dir: &Path) -> io::Result<bool> {
+    use io::ErrorKind::{NotADirectory, NotFound, PermissionDenied};
+    match std::fs::symlink_metadata(crate::layout::shared_marker(dir)) {
+        Ok(meta) => Ok(meta.is_file()),
+        Err(e) if matches!(e.kind(), NotFound | NotADirectory | PermissionDenied) => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// Whether `name` is on the built-in junk list (at any depth, in any case).
@@ -99,7 +152,8 @@ pub fn is_junk(name: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Verdict {
     Sync,
-    /// The client's own folder at the top of the sync root.
+    /// The client's own at the top of the sync root: its state folder, and a folder that holds
+    /// what other identities share ([`shared_folders`]).
     Excluded,
     Junk,
     Ignored,
@@ -162,6 +216,9 @@ pub struct Filter {
     case_insensitive: bool,
     /// Lines that aren't valid rules, in order.
     skipped: Vec<SkippedRule>,
+    /// The folders at the top that hold what other identities share ([`shared_folders`]), as
+    /// their names compare ([`Filter::top_key`]), in order.
+    shared: Vec<String>,
 }
 
 impl Default for Filter {
@@ -171,6 +228,7 @@ impl Default for Filter {
             text: String::new(),
             case_insensitive: false,
             skipped: Vec::new(),
+            shared: Vec::new(),
         }
     }
 }
@@ -178,7 +236,9 @@ impl Default for Filter {
 impl Filter {
     /// The user's rules from `.hbsync/ignore` under `root`, if the file exists; built-ins only
     /// otherwise. A line that isn't a valid rule is skipped ([`Filter::skipped`]); a file that
-    /// can't be read is an error: its rules are unknown, not mistyped.
+    /// can't be read is an error: its rules are unknown, not mistyped. With the folders at the
+    /// top of `root` that hold what other identities share ([`shared_folders`]), left out; a
+    /// root that can't be listed is an error too.
     pub fn load(root: &Path, case_insensitive: bool) -> Result<Self, FilterError> {
         let path = crate::layout::ignore_file(root);
         let text = match std::fs::read_to_string(&path) {
@@ -186,7 +246,11 @@ impl Filter {
             Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
             Err(source) => return Err(FilterError::Read { path, source }),
         };
-        Self::from_rules(&text, case_insensitive)
+        let shared = shared_folders(root).map_err(|source| FilterError::Read {
+            path: root.to_owned(),
+            source,
+        })?;
+        Ok(Self::from_rules(&text, case_insensitive)?.with_shared(shared))
     }
 
     /// The built-ins plus `text` (gitignore syntax, paths relative to the sync root). A line
@@ -227,7 +291,53 @@ impl Filter {
             text: text.to_owned(),
             case_insensitive,
             skipped,
+            shared: Vec::new(),
         })
+    }
+
+    /// The filter leaving out the folders named `names` at the top too: those that hold what
+    /// other identities share ([`shared_folders`]), instead of any it left out so before.
+    pub fn with_shared<S: AsRef<str>>(mut self, names: impl IntoIterator<Item = S>) -> Self {
+        self.shared = self.top_keys(names);
+        self
+    }
+
+    /// Whether the folders at the top of `root` that hold what other identities share aren't
+    /// the ones this filter leaves out (or can't be told): [`shared_folders`] alone, the rules
+    /// not read again.
+    pub fn shared_changed(&self, root: &Path) -> bool {
+        shared_folders(root).map_or(true, |names| self.top_keys(names) != self.shared)
+    }
+
+    /// The folders at the top left out as holding what other identities share
+    /// ([`Filter::with_shared`]), as their names compare.
+    pub fn shared(&self) -> &[String] {
+        &self.shared
+    }
+
+    /// `names` as [`Filter::shared`] holds them: each as it compares, sorted, once.
+    fn top_keys<S: AsRef<str>>(&self, names: impl IntoIterator<Item = S>) -> Vec<String> {
+        let keys = names.into_iter();
+        let mut keys: Vec<String> = keys
+            .map(|name| self.top_key(name.as_ref()).into_owned())
+            .collect();
+        keys.sort_unstable();
+        keys.dedup();
+        keys
+    }
+
+    /// `name` as names at the top compare with a folder's that holds what other identities
+    /// share: caseless and normalization-insensitive (`name_key`) where the volume ignores
+    /// case, as it is elsewhere. macOS takes a name in any normalization for the same one on
+    /// a volume that tells case apart too: in NFC there.
+    fn top_key<'a>(&self, name: &'a str) -> Cow<'a, str> {
+        if self.case_insensitive {
+            Cow::Owned(name_key(name))
+        } else if cfg!(target_os = "macos") && !name.is_ascii() {
+            Cow::Owned(hbsync_platform::name::nfc(name))
+        } else {
+            Cow::Borrowed(name)
+        }
     }
 
     /// The lines of the rules that aren't valid rules, skipped.
@@ -241,11 +351,11 @@ impl Filter {
     }
 
     /// Changes whenever the filter would decide differently: other rules, another junk list,
-    /// another case sensitivity.
+    /// another case sensitivity, other folders that hold what other identities share.
     pub fn fingerprint(&self) -> String {
         format!(
-            "junk {JUNK_VERSION}; case-insensitive {}; rules:\n{}",
-            self.case_insensitive, self.text
+            "junk {JUNK_VERSION}; case-insensitive {}; shared {:?}; rules:\n{}",
+            self.case_insensitive, self.shared, self.text
         )
     }
 
@@ -298,18 +408,37 @@ impl Filter {
             .unwrap_or_else(|| self.by_rules(path, is_dir))
     }
 
-    /// The verdict the name alone gives (the state folder, junk), if any. The state folder in
-    /// any case or spelling a volume may take for it (one that ignores case is most): another
-    /// writer's `.HBSYNC` there would be this client's own folder, and what is in it would land
-    /// in it (an `ignore` file setting this device's rules).
+    /// The verdict the name alone gives (the state folder, a folder that holds what other
+    /// identities share, junk), if any. The state folder in any case or spelling a volume may
+    /// take for it (one that ignores case is most): another writer's `.HBSYNC` there would be
+    /// this client's own folder, and what is in it would land in it (an `ignore` file setting
+    /// this device's rules).
     fn by_name(&self, name: &str, at_root: bool) -> Option<Verdict> {
-        if at_root && is_state_dir(name) {
+        if at_root && (is_state_dir(name) || self.holds_shares(name)) {
             Some(Verdict::Excluded)
         } else if is_junk(name) {
             Some(Verdict::Junk)
         } else {
             None
         }
+    }
+
+    /// Whether `name`, at the top, is a folder's that holds what other identities share.
+    fn holds_shares(&self, name: &str) -> bool {
+        if self.shared.is_empty() {
+            return false;
+        }
+        // An ASCII name's key is the name, in lower case where the volume ignores case: asked
+        // of every event's path, so without building one.
+        if name.is_ascii() {
+            let same = |s: &String| match self.case_insensitive {
+                true => s.eq_ignore_ascii_case(name),
+                false => s == name,
+            };
+            return self.shared.iter().any(same);
+        }
+        let key = self.top_key(name);
+        self.shared.iter().any(|s| *s == key)
     }
 
     fn by_rules(&self, path: &str, is_dir: bool) -> Verdict {
@@ -367,6 +496,8 @@ mod tests {
             ".Dropbox.Cache",
             ".849c9593-d756-4e56-8d6e-42412f2a707b",
             ".tmp.driveupload",
+            ".hbsync-shared",
+            ".HBSYNC-SHARED",
         ] {
             assert!(is_junk(name), "{name:?}");
         }
@@ -386,6 +517,7 @@ mod tests {
             "Dropbox",
             ".dropbox.txt",
             ".tmp",
+            ".hbsync-shared-2",
         ] {
             assert!(!is_junk(name), "{name:?}");
         }
@@ -499,6 +631,108 @@ mod tests {
         assert_eq!(ok.names(["build", "keep"], false), Verdict::Sync);
     }
 
+    /// A folder at the top holding the marker is the client's own, whatever its name, with all
+    /// in it; the marker itself is junk wherever it is. Not a folder deeper, a link, or one
+    /// whose marker is a folder.
+    #[test]
+    fn a_folder_holding_the_marker_is_left_out_at_the_top_only() -> io::Result<()> {
+        use crate::layout::{SHARED_MARKER, shared_marker};
+        let dir = tempfile::tempdir()?;
+        let root = dir.path();
+        assert!(shared_folders(&root.join("missing"))?.is_empty());
+        for folder in ["Shared", "Renamed by hand", "plain", "deep/Shared", "odd"] {
+            std::fs::create_dir_all(root.join(folder))?;
+        }
+        for folder in ["Shared", "Renamed by hand", "deep/Shared"] {
+            std::fs::write(shared_marker(&root.join(folder)), "")?;
+        }
+        std::fs::create_dir(shared_marker(&root.join("odd")))?;
+        std::fs::write(shared_marker(root), "")?;
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(root.join("Shared"), root.join("link"))?;
+        assert_eq!(shared_folders(root)?, ["Renamed by hand", "Shared"]);
+
+        let f = Filter::load(root, false).map_err(io::Error::other)?;
+        assert_eq!(f.shared(), ["Renamed by hand", "Shared"]);
+        assert_eq!(f.in_folder("", "Shared", true), Verdict::Excluded);
+        assert_eq!(f.path(&rel("Shared/tom/a.txt"), false), Verdict::Excluded);
+        // The name is held there, whatever would take it.
+        assert_eq!(f.in_folder("", "Shared", false), Verdict::Excluded);
+        assert_eq!(f.in_folder("", "shared", true), Verdict::Sync);
+        assert_eq!(f.in_folder("", "plain", true), Verdict::Sync);
+        assert_eq!(f.in_folder("", "deep", true), Verdict::Sync);
+        assert_eq!(f.in_folder("deep", "Shared", true), Verdict::Sync);
+        assert_eq!(f.in_folder("", "odd", true), Verdict::Sync);
+        for folder in ["", "plain", "deep/Shared"] {
+            assert_eq!(f.in_folder(folder, SHARED_MARKER, false), Verdict::Junk);
+        }
+
+        // Asked without the rules read again: the same folders or not.
+        assert!(!f.shared_changed(root));
+        assert!(Filter::default().shared_changed(root));
+        std::fs::rename(root.join("Shared"), root.join("Shared-2"))?;
+        assert!(f.shared_changed(root));
+        Ok(())
+    }
+
+    /// A folder that isn't there, or that can't be looked into, holds no marker; a marker that
+    /// can't be looked for is an error, never "none": a folder of shares taken for a plain
+    /// one would be sent.
+    #[test]
+    fn a_marker_that_cant_be_looked_for_isnt_none() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path();
+        std::fs::write(root.join("file"), "")?;
+        assert!(!holds_marker(&root.join("missing"))?);
+        assert!(!holds_marker(&root.join("file"))?);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert!(holds_marker(&root.join("x".repeat(300))).is_err());
+            let closed = root.join("closed");
+            std::fs::create_dir(&closed)?;
+            std::fs::write(crate::layout::shared_marker(&closed), "")?;
+            std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000))?;
+            // Root looks into anything: nothing to see then.
+            let seen = holds_marker(&closed)?;
+            let listed = shared_folders(root)?;
+            std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o700))?;
+            assert_eq!(listed.is_empty(), !seen);
+        }
+        Ok(())
+    }
+
+    /// Where the volume ignores case, the folder's name in any case or spelling is the folder.
+    #[test]
+    fn a_folder_of_shares_holds_its_name_as_the_volume_compares_names() {
+        let f = Filter::from_rules("", true).expect("valid").with_shared([
+            "Shared",
+            "SHARED",
+            "Stra\u{df}e",
+        ]);
+        assert_eq!(f.shared().len(), 2);
+        for name in ["Shared", "shared", "SHARED", "\u{17f}hared", "STRASSE"] {
+            assert_eq!(f.in_folder("", name, true), Verdict::Excluded, "{name}");
+        }
+        assert!(f.in_folder("", "Shared-2", true).is_sync());
+        assert!(f.in_folder("a", "Shared", true).is_sync());
+
+        // Where it tells case apart, byte for byte; on macOS in any normalization.
+        let exact = Filter::from_rules("", false).expect("valid");
+        let exact = exact.with_shared(["Partage\u{301}", "Shared"]);
+        assert_eq!(exact.in_folder("", "Shared", true), Verdict::Excluded);
+        assert!(exact.in_folder("", "shared", true).is_sync());
+        assert_eq!(
+            exact.in_folder("", "Partage\u{301}", true),
+            Verdict::Excluded
+        );
+        assert!(exact.in_folder("", "partage\u{301}", true).is_sync());
+        assert_eq!(
+            exact.in_folder("", "Partag\u{e9}", true).is_sync(),
+            !cfg!(target_os = "macos")
+        );
+    }
+
     #[test]
     fn fingerprints() {
         let a = rules("*.log\n");
@@ -510,6 +744,12 @@ mod tests {
                 .fingerprint()
         );
         assert_eq!(a.fingerprint(), rules("*.log\n").fingerprint());
+        // A folder of shares made, renamed or gone leaves other things out.
+        let shared = |names: &[&str]| rules("*.log\n").with_shared(names).fingerprint();
+        assert_ne!(a.fingerprint(), shared(&["Shared"]));
+        assert_ne!(shared(&["Shared"]), shared(&["Shared-2"]));
+        assert_eq!(shared(&["b", "a"]), shared(&["a", "b"]));
+        assert_eq!(a.fingerprint(), shared(&[]));
     }
 
     #[test]

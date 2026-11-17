@@ -420,12 +420,19 @@ struct Parts {
 }
 
 impl Parts {
-    /// Whether the ignore rules on disk differ from the ones in use (or can't be read): their
-    /// fingerprints differ (sync semantics §10).
+    /// Whether the ignore rules on disk, or the folders at the top that hold what other
+    /// identities share, differ from the ones in use (or can't be read): their fingerprints
+    /// differ (sync semantics §10).
     fn rules_changed(&self, root: &Path) -> bool {
         let folder = &self.engine.config().folder;
         Filter::load(root, folder.case_insensitive)
             .map_or(true, |f| f.fingerprint() != folder.filter.fingerprint())
+    }
+
+    /// [`Parts::rules_changed`] for the folders of shares alone, the rules neither read nor
+    /// compiled: one listing of the top and a look into each folder there.
+    fn shares_changed(&self, root: &Path) -> bool {
+        self.engine.config().folder.filter.shared_changed(root)
     }
 }
 
@@ -540,7 +547,9 @@ impl Runner {
             if parts.observer.watcher_error.is_some() || !parts.rules_changed(&self.cfg.folder) {
                 return Ok(parts);
             }
-            tracing::info!("the ignore rules changed as the folder opened: opening it again");
+            tracing::info!(
+                "the ignore rules or the folder of shares changed as the folder opened: opening it again"
+            );
         }
         self.open_once()
     }
@@ -593,6 +602,8 @@ impl Runner {
         let mut schedule = Schedule::new(Instant::now(), self.cfg.look, self.cfg.paused.is_some());
         let mut started = false;
         let mut check_rules = false;
+        // The folders of shares alone ([`Parts::shares_changed`]).
+        let mut check_shares = false;
         // When to read the ignore rules, touched a moment ago.
         let mut rules_at: Option<Instant> = None;
         // After taking local changes failed: not again before then.
@@ -674,6 +685,12 @@ impl Runner {
                 if p.observer.rules_touched() {
                     rules_at = Some(Instant::now() + RULES_QUIET);
                 }
+                // A folder that holds what other identities share is there or isn't, with
+                // nothing half written to wait for: read at once, before the sync below would
+                // send what the poll just took of it.
+                if p.observer.shared_touched() {
+                    check_shares = true;
+                }
                 // One that stopped.
                 if self.unwatched.why.is_none()
                     && let Some(why) = p.observer.watcher_error.clone()
@@ -740,12 +757,16 @@ impl Runner {
                     }
                 }
             }
-            if std::mem::take(&mut check_rules)
-                && parts
-                    .as_ref()
-                    .is_some_and(|p| p.rules_changed(&self.cfg.folder))
-            {
-                tracing::info!("the ignore rules changed: starting over");
+            let check = (
+                std::mem::take(&mut check_rules),
+                std::mem::take(&mut check_shares),
+            );
+            if parts.as_ref().is_some_and(|p| match check {
+                (true, _) => p.rules_changed(&self.cfg.folder),
+                (false, true) => p.shares_changed(&self.cfg.folder),
+                (false, false) => false,
+            }) {
+                tracing::info!("the ignore rules or the folder of shares changed: starting over");
                 parts = None;
                 schedule.want(Why::Rules);
             }
