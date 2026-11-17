@@ -258,7 +258,7 @@ fn reads_only(kind: &EventKind) -> bool {
 }
 
 /// Whether `event` may change which folders at the top of `root` hold what other identities
-/// share ([`crate::shared_folders`]): a marker made, removed or renamed in a folder there, or
+/// share ([`crate::shares::folder`]): a marker made, removed or renamed in a folder there, or
 /// an entry of the root itself made, removed or renamed (a folder holding one moved in or
 /// away, or renamed). A write to a file at the top doesn't, nor a file made or removed there
 /// where the OS says it is one (a rename doesn't say).
@@ -1355,7 +1355,8 @@ mod tests {
         assert!(!observer.rules_touched());
 
         // A marker made in a folder at the top rings too, though nothing of it is recorded
-        // (it is junk): the folder holds what other identities share from now on.
+        // (it is junk): the folder of shares that gets its own back holds what other
+        // identities share again.
         fs::create_dir(root.join("Shared"))?;
         wait_for("the folder is seen", &|| observer.shared_touched())?;
         std::thread::sleep(Duration::from_millis(300));

@@ -197,6 +197,23 @@ impl SyncRoot {
         Ok(marker)
     }
 
+    /// Takes a folder of shares its record no longer finds (the folder restored from a backup),
+    /// as the folder opens ([`hbsync_local::shares::adopt`]): never one this folder's DB has at
+    /// the top under its name (as names compare there). The DB is opened only where a folder
+    /// holding a marker is to be judged. Its name, if one was taken.
+    pub fn adopt_shares(&self) -> Result<Option<String>, RootError> {
+        let mut db = None;
+        hbsync_local::shares::adopt(&self.path, |name| {
+            let db = match &mut db {
+                Some(db) => db,
+                None => db.insert(self.state()?),
+            };
+            let key = hbsync_namemap::sibling_hash(name);
+            let known = db.read(|s| s.local_named(&hbsync_platform::RelPath::root(), key))?;
+            Ok(!known.is_empty())
+        })
+    }
+
     /// Whether `identity`'s DB at `db` has a folder at `path` (whatever its marker says).
     pub fn knows_path(db: &Path, identity: &str, path: &Path) -> Result<bool, RootError> {
         let Some(mut account) = AccountReader::open(db, identity)? else {

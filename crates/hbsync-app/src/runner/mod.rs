@@ -559,15 +559,19 @@ impl Runner {
         let mut cfg = EngineConfig::new(root, &self.cfg.device);
         cfg.guard.min = self.cfg.mass_delete.min_files;
         cfg.guard.fraction = self.cfg.mass_delete.fraction;
+        // A folder belongs to one identity (its marker says which): never mix two drives
+        // through one folder.
+        let sync_root = SyncRoot::open(&self.cfg.db, &self.cfg.identity, root)?;
+        // Before the rules are read: a folder of shares taken now is left out by them.
+        if let Some(name) = sync_root.adopt_shares()? {
+            tracing::info!("{name}: taken as the folder of shares (the one on record is gone)");
+        }
         cfg.folder.filter = Arc::new(Filter::load(root, cfg.folder.case_insensitive)?);
         cfg.folder.read_only.clone_from(&self.cfg.read_only);
         if let Some(tweak) = self.cfg.tweak {
             tweak(&mut cfg);
         }
         let rules = cfg.folder.filter.rule_count();
-        // A folder belongs to one identity (its marker says which): never mix two drives
-        // through one folder.
-        let sync_root = SyncRoot::open(&self.cfg.db, &self.cfg.identity, root)?;
         let mut engine = Engine::open(&sync_root, Arc::clone(&self.drive), cfg)?;
         engine.set_stop(Arc::clone(&self.stop));
         engine.set_progress(Arc::clone(&self.progress));

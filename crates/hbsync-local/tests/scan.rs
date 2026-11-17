@@ -850,50 +850,58 @@ fn filtered_items_never_reach_the_db_and_a_newly_ignored_one_looks_deleted() -> 
     Ok(())
 }
 
-/// A folder at the top that holds what other identities share (its marker in it) is never
-/// walked, whatever it is named; a synced folder given a marker looks deleted (a delete to
-/// sync, nothing leaves the disk), and is new again once the marker goes.
+/// The folder of shares (the one on record, its marker in it) is never walked, whatever it
+/// is named. A marker copied into a synced folder does nothing: the folder stays synced, with
+/// all in it. The folder of shares without its marker is a plain folder, and new.
 #[test]
-fn a_folder_of_shares_never_reaches_the_db() -> R {
+fn the_folder_of_shares_never_reaches_the_db_and_a_copied_marker_does_nothing() -> R {
     use hbsync_local::layout::shared_marker;
+    use hbsync_local::shares::{Made, make};
     let mut f = Fixture::new()?;
+    assert_eq!(make(f.root(), "Shared")?, Made::Made);
     f.write("Shared/tom/theirs.txt", b"t")?;
-    f.write("Shared/.hbsync-shared", b"")?;
     f.write("mine/notes.txt", b"n")?;
     f.write("mine/Shared/deep.txt", b"d")?;
     f.opts.filter = Arc::new(Filter::load(f.root(), false)?);
     let (report, _) = f.scan()?;
     assert_eq!(report.added, 4, "{report:?}"); // mine, notes, mine/Shared, deep
-    assert_eq!(report.skipped.len(), 1, "{report:?}");
+    assert_eq!(report.skipped.len(), 2, "{report:?}"); // the state folder, Shared
     let root = f.root().to_path_buf();
     let report = rescan_dirs(&mut f.db, &root, &[RelPath::new("Shared/tom")?], &f.opts)?;
     assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
 
-    std::fs::write(shared_marker(&f.root().join("mine")), "")?;
+    std::fs::copy(
+        shared_marker(&f.root().join("Shared")),
+        shared_marker(&f.root().join("mine")),
+    )?;
     f.opts.filter = Arc::new(Filter::load(f.root(), false)?);
+    assert_eq!(f.opts.filter.shared(), ["Shared"]);
     let (report, dirty) = f.scan()?;
-    assert_eq!((report.added, report.removed), (0, 4), "{report:?}");
-    assert_eq!(dirty.len(), 4);
-    assert!(f.root().join("mine/Shared/deep.txt").exists());
+    assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
+    assert!(dirty.is_empty(), "{dirty:?}");
+    let report = rescan_dirs(&mut f.db, &root, &[RelPath::root()], &f.opts)?;
+    assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
 
-    std::fs::remove_file(shared_marker(&f.root().join("mine")))?;
     std::fs::remove_file(shared_marker(&f.root().join("Shared")))?;
     f.opts.filter = Arc::new(Filter::load(f.root(), false)?);
     let (report, _) = f.scan()?;
-    assert_eq!(report.added, 7, "{report:?}");
+    assert_eq!((report.added, report.removed), (3, 0), "{report:?}");
     Ok(())
 }
 
 /// A folder of shares that came since the filter was read (a sync was running) is left alone
-/// as well, by its marker: neither its own rescan nor its parent's, nor a whole walk, brings
+/// as well, by the record and its marker: neither its own rescan nor its parent's, nor a whole walk, brings
 /// what is in it into the DB.
 #[test]
 fn a_folder_of_shares_the_filter_doesnt_know_yet_never_reaches_the_db() -> R {
     let mut f = Fixture::new()?;
     f.write("mine/notes.txt", b"n")?;
     f.scan()?;
+    assert_eq!(
+        hbsync_local::shares::make(f.root(), "Team")?,
+        hbsync_local::shares::Made::Made
+    );
     f.write("Team/tom/theirs.txt", b"t")?;
-    f.write("Team/.hbsync-shared", b"")?;
     assert!(f.opts.filter.shared().is_empty());
     let root = f.root().to_path_buf();
     let dirs = [RelPath::new("Team/tom")?, RelPath::root()];

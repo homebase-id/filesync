@@ -16,6 +16,7 @@ use hbsync_app::{Command, FolderStatus, Handle, HeldAnswer, Runner, RunnerConfig
 use hbsync_engine::Drive;
 use hbsync_engine::root::{AccountReader, RootError, SyncRoot};
 use hbsync_homebase::notify::Event;
+use hbsync_local::shares::{Made, make};
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 use hbsync_remote::{ChangeRef, Refusal, RemoteBody, RemoteHeader};
 use hbsync_types::RemoteFileId;
@@ -938,8 +939,8 @@ fn an_edited_ignore_file_applies_without_a_restart() -> R {
     Ok(())
 }
 
-/// A folder that holds what other identities share (sync semantics §10), put in place with
-/// its marker in it, is this device's own from that moment: nothing of it is sent, and a
+/// The folder that holds what other identities share (sync semantics §10), put in place with
+/// its marker in it and on record, is this device's own from that moment: nothing of it is sent, and a
 /// folder of its name on the drive stays out until it yields the name. Seen by the watcher:
 /// no restart, nor a minute's look.
 #[test]
@@ -952,12 +953,9 @@ fn a_folder_of_shares_is_left_alone_without_a_restart() -> R {
     let b = Device::start(&server, "b")?;
     b.started()?;
 
-    // Made beside the folder and renamed into it: never there without its marker.
-    let prepared = a.root.parent().ok_or("the folder's folder")?.join("new");
-    std::fs::create_dir_all(prepared.join("tom"))?;
-    std::fs::write(hbsync_local::layout::shared_marker(&prepared), "")?;
-    std::fs::write(prepared.join("tom").join("theirs.txt"), "shared with me")?;
-    std::fs::rename(&prepared, a.root.join("Shared"))?;
+    // Renamed into the folder: never there without its marker, nor before it is on record.
+    assert_eq!(make(&a.root, "Shared")?, Made::Made);
+    a.write("Shared/tom/theirs.txt", "shared with me")?;
     a.write("notes.txt", "mine")?;
     wait_until("notes.txt is up", || on_server(&server, "notes.txt"))?;
     a.wait_idle()?;
@@ -989,6 +987,62 @@ fn a_folder_of_shares_is_left_alone_without_a_restart() -> R {
     let mut names = live_names(&server);
     names.sort();
     assert_eq!(names, ["Shared", "cloud.txt", "notes.txt"]);
+    Ok(())
+}
+
+/// A sync folder restored from a backup: every folder in it is a new one, so the record
+/// doesn't find the folder of shares. As the folder opens it is taken again, being the only
+/// folder that isn't synced and holds a marker: nothing of it is sent. A synced folder a
+/// marker was copied into stays synced.
+#[test]
+fn a_restored_folder_of_shares_is_taken_as_the_folder_opens() -> R {
+    use hbsync_local::layout::shared_marker;
+    let server = server();
+    let dir = tempfile::tempdir()?;
+    let root = set_up(&dir.path().canonicalize()?.join("sync"))?;
+    assert_eq!(make(&root, "Shared")?, Made::Made);
+    std::fs::create_dir_all(root.join("Shared/tom"))?;
+    std::fs::write(root.join("Shared/tom/theirs.txt"), "shared with me")?;
+    std::fs::create_dir(root.join("Projects"))?;
+    std::fs::write(root.join("Projects/plan.txt"), "mine")?;
+    let idle = |handle: &Handle| {
+        wait_until("idle", || {
+            let s = handle.status();
+            s.last_sync.is_some() && s.state == State::Idle && s.pending == 0
+        })
+    };
+    let stop = |handle: Handle, thread: JoinHandle<Result<(), RunnerError>>| -> R {
+        assert!(handle.send(Command::Stop));
+        thread.join().map_err(|_| "the runner panicked")??;
+        Ok(())
+    };
+    let (handle, thread) = spawn_at(&server, &root)?;
+    wait_until("plan.txt is up", || on_server(&server, "plan.txt"))?;
+    idle(&handle)?;
+    stop(handle, thread)?;
+    let mut names = live_names(&server);
+    names.sort();
+    assert_eq!(names, ["Projects", "plan.txt"]);
+
+    // As restored: the same names and what they held, in new folders.
+    std::fs::rename(root.join("Shared"), root.join("old"))?;
+    std::fs::create_dir_all(root.join("Shared/tom"))?;
+    std::fs::write(root.join("Shared/tom/theirs.txt"), "shared with me")?;
+    std::fs::write(shared_marker(&root.join("Shared")), "")?;
+    std::fs::remove_dir_all(root.join("old"))?;
+    assert_eq!(hbsync_local::shares::folder(&root)?, None);
+    std::fs::write(shared_marker(&root.join("Projects")), "")?;
+    std::fs::write(root.join("Projects/more.txt"), "mine too")?;
+
+    let (handle, thread) = spawn_at(&server, &root)?;
+    wait_until("more.txt is up", || on_server(&server, "more.txt"))?;
+    idle(&handle)?;
+    stop(handle, thread)?;
+    let mut names = live_names(&server);
+    names.sort();
+    assert_eq!(names, ["Projects", "more.txt", "plan.txt"]);
+    let shares = hbsync_local::shares::folder(&root)?;
+    assert_eq!(shares.as_deref(), Some("Shared"));
     Ok(())
 }
 

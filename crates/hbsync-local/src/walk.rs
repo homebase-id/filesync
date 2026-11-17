@@ -56,6 +56,9 @@ pub struct Walker<'a> {
     descend: Option<DescendFn<'a>>,
     /// Walking a folder that isn't at its place ([`Walker::moved`]): its place, and where it is.
     moved: Option<(RelPath, PathBuf)>,
+    /// Which folder at the top is the folder of shares, read when the walk first meets a
+    /// folder there.
+    shares: Option<crate::shares::Record>,
 }
 
 impl std::fmt::Debug for Walker<'_> {
@@ -120,9 +123,21 @@ impl<'a> Walker<'a> {
             queued: Vec::new(),
             descend,
             moved,
+            shares: None,
         };
         walker.open(start);
         walker
+    }
+
+    /// Whether the folder at `at` with `id`, at the top, is the folder of shares
+    /// ([`crate::shares::Record::holds`]): the record read once a walk, the marker looked for
+    /// in the one folder it names.
+    fn holds_shares(&mut self, id: hbsync_platform::FileId, at: &Path) -> io::Result<bool> {
+        let record = match self.shares {
+            Some(record) => record,
+            None => *self.shares.insert(crate::shares::Record::read(&self.root)?),
+        };
+        record.holds(id, at)
     }
 
     /// Where folder `dir` is on disk; `None` for one outside a moved folder (never asked).
@@ -218,13 +233,12 @@ impl Iterator for Walker<'_> {
                 && meta.kind == EntryKind::Dir
             {
                 let path = path.clone();
-                // A folder at the top that holds what other identities share is neither
-                // reported nor entered: by its marker, whatever the filter knows of it (one
-                // that came, or took another name, since the filter was read).
+                // The folder at the top that holds what other identities share is neither
+                // reported nor entered: by the record and its marker, whatever the filter
+                // knows of it (it came, or took another name, since the filter was read).
+                let id = meta.file_id;
                 let held = match dir.is_root() {
-                    true => self
-                        .native(&path)
-                        .map(|at| crate::filter::holds_marker(&at)),
+                    true => self.native(&path).map(|at| self.holds_shares(id, &at)),
                     false => None,
                 };
                 match held {
@@ -459,27 +473,44 @@ mod tests {
         Ok(())
     }
 
-    /// A folder at the top that holds the marker of a folder of shares is neither reported nor
-    /// entered, though the filter knows of none (it came since the filter was read): not one
-    /// deeper, nor one whose marker is a folder.
+    /// The folder of shares is neither reported nor entered, though the filter knows of none
+    /// (it came since the filter was read). A folder that only holds a marker is walked as any
+    /// other: at the top (a marker copied into it), deeper, or with a folder for a marker.
     #[test]
-    fn a_folder_of_shares_is_never_entered_whatever_the_filter_knows() -> io::Result<()> {
+    fn the_folder_of_shares_is_never_entered_whatever_the_filter_knows() -> io::Result<()> {
         use crate::layout::shared_marker;
         let dir = tempfile::tempdir()?;
         let r = dir.path();
-        for d in ["Team/tom", "mine/Team", "odd"] {
+        assert_eq!(crate::shares::make(r, "Team")?, crate::shares::Made::Made);
+        for d in ["Team/tom", "mine/Team", "odd", "plain"] {
             fs::create_dir_all(r.join(d))?;
         }
         fs::write(r.join("Team/tom/theirs.txt"), b"t")?;
         fs::write(r.join("mine/Team/x.txt"), b"x")?;
-        fs::write(shared_marker(&r.join("Team")), b"")?;
+        fs::write(r.join("plain/p.txt"), b"p")?;
         fs::write(shared_marker(&r.join("mine/Team")), b"")?;
+        fs::write(shared_marker(&r.join("plain")), b"")?;
         fs::create_dir(shared_marker(&r.join("odd")))?;
 
         let (entries, excluded, asked) = walked(r)?;
-        assert_eq!(entries, ["mine", "mine/Team", "mine/Team/x.txt", "odd"]);
-        assert_eq!(excluded, [PathBuf::from("Team")]);
-        assert_eq!(asked, ["mine", "mine/Team", "odd"]);
+        let all = [
+            "mine",
+            "mine/Team",
+            "mine/Team/x.txt",
+            "odd",
+            "plain",
+            "plain/p.txt",
+        ];
+        assert_eq!(entries, all);
+        let own = PathBuf::from(crate::STATE_DIR);
+        assert_eq!(excluded, [own.clone(), PathBuf::from("Team")]);
+        assert_eq!(asked, ["mine", "mine/Team", "odd", "plain"]);
+
+        // Without its marker it is a plain folder.
+        fs::remove_file(shared_marker(&r.join("Team")))?;
+        let (entries, excluded, _) = walked(r)?;
+        assert_eq!(entries.len(), all.len() + 3, "{entries:?}");
+        assert_eq!(excluded, [own]);
         Ok(())
     }
 
