@@ -1548,3 +1548,50 @@ fn regression_a_folder_recoloured_in_recently_deleted_is_made_on_linux_at_once()
     assert_eq!(sim.local_tags(0, "d"), red(7));
     assert_eq!(sim.local_tags(1, "d"), red(0));
 }
+
+/// Client 0 removes Work from a file, and the drive refuses that as it is; client 1 edited the
+/// file meanwhile, and the tag write of client 0's download fails. A placement whose tag write
+/// failed starts its base's tags afresh: the base would forget Work, the drive's Work read as
+/// added there, and the next plan put it back on the file. The download isn't placed until its
+/// tags are written: the removal stays the user's, waiting on the drive (`cc 08430b6b…`).
+#[test]
+fn regression_a_failed_tag_write_keeps_a_removal_the_drive_refused() {
+    use hbsync_sim::Action::{CreateFile, Edit, Tag};
+    let act = |client, action| Event::Act { client, action };
+    let (plan, step) = (
+        |client| Event::Plan { client },
+        |client| Event::Step { client },
+    );
+    let synced = |sim: &mut Sim, client| {
+        sim.run(&[plan(client)]);
+        while !sim.planned(client).is_empty() {
+            sim.run(&[step(client)]);
+        }
+    };
+    let mut sim = Sim::new(2).with_refusals();
+    sim.run(&[act(0, CreateFile { parent: 0, name: 0 })]);
+    let file = sim.item(0, "a").expect("the file");
+    let tag = |sim: &Sim| Tag {
+        node: sim.pick(0, file, false).expect("on client 0"),
+        tag: 1, // Work
+    };
+    sim.run(&[act(0, tag(&sim))]);
+    synced(&mut sim, 0);
+    synced(&mut sim, 1);
+    let work = Some(vec!["Work:0".to_owned()]);
+    assert_eq!(sim.server_tags("a"), work);
+    let edited = sim.file_pick(1, file).expect("on client 1");
+    sim.run(&[act(1, Edit { file: edited })]);
+    synced(&mut sim, 1);
+    // The fourth request the drive hasn't seen is the removal: refused. Then the download.
+    sim.run(&[act(0, tag(&sim)), plan(0)]);
+    assert_eq!(sim.planned(0), ["RemoteTags", "LocalDownload"]);
+    sim.fail_next_tag_write();
+    sim.run(&[step(0), step(0)]);
+    assert_eq!(sim.planned(0), ["LocalDownload"], "not placed: tried again");
+    assert!(sim.quiesce_still(30), "no convergence");
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(sim.local_tags(0, "a"), Some(vec![]), "the removal stays");
+    assert_eq!(sim.base_tags(0, file), work.clone(), "and stays the user's");
+    assert_eq!(sim.server_tags("a"), work, "which the drive refused");
+}

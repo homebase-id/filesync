@@ -3952,23 +3952,32 @@ fn a_folder_made_whose_tags_cant_be_read_back_holds_none() -> R {
     Ok(())
 }
 
-/// A file tagged blue here (not sent up yet), or with red recoloured here, edited on the drive:
-/// the download's tag write fails, which would leave the new version without the tag as it is
-/// here, and it nowhere. It isn't put in place: the file keeps it, and the next plan still
-/// sends it up.
+/// A file tagged blue here (not sent up yet), or with red recoloured here, or its blue removed
+/// here, edited on the drive: the download's tag write fails, which would leave the new version
+/// without the tag as it is here, and it nowhere (or, the base's tags starting afresh, the
+/// drive's blue taken for added there, and put back). It isn't put in place: the file keeps
+/// its tags, and the next plan still sends the change up. A removal waits so even where the
+/// drive refused it for good in the run (an added tag doesn't:
+/// `a_download_doesnt_wait_for_a_tag_the_drive_refused`).
 #[test]
-fn a_download_whose_tag_write_fails_keeps_a_tag_not_sent_up() -> R {
+fn a_download_whose_tag_write_fails_keeps_a_tag_change_not_sent_up() -> R {
     let (blue, red, recoloured) = (Tag::new("Blue", 0), Tag::new("Red", 0), Tag::new("Red", 3));
-    for (held, drive) in [(blue.clone(), None), (recoloured.clone(), Some(red))] {
+    // (on the file, on the drive and in the base, whether the drive refuses the change)
+    for (held, drive, refused) in [
+        (Some(blue.clone()), None, false),
+        (Some(recoloured), Some(red), false),
+        (None, Some(blue.clone()), false),
+        (None, Some(blue), true),
+    ] {
         let mut h = Harness::new()?;
         if !tags_kept(&h.folder.root) {
             return Ok(()); // nothing to tag with here
         }
+        let here = Tags::new(held.clone());
         // A colour only where this OS keeps one (macOS).
-        if tags::express(&held, h.folder.os).as_ref() != Some(&held) {
+        if here.held_by(h.folder.os) != here {
             continue;
         }
-        let here = Tags::new(vec![held.clone()]);
         let there = Tags::new(drive.clone());
         // On the drive, edited, with what the base holds of the tag (red, its colour unchanged
         // there).
@@ -4015,7 +4024,14 @@ fn a_download_whose_tag_write_fails_keeps_a_tag_not_sent_up() -> R {
             ))
         })?;
         h.cfg.hooks.faults.fail(FailPoint::TagWrite, 10);
-        h.run(vec![Op::LocalDownload {
+        h.remote.faults().refuse_writes = refused;
+        let sent = Op::RemoteTags {
+            node,
+            file_id: at.file_id,
+            expected: at.version,
+            tags: here.clone(),
+        };
+        let download = Op::LocalDownload {
             node,
             parent: NodeId::ROOT,
             name: "x".into(),
@@ -4029,15 +4045,22 @@ fn a_download_whose_tag_write_fails_keeps_a_tag_not_sent_up() -> R {
                 at,
                 base_at: Some(before.version),
             })),
-        }])?;
+        };
+        h.run(
+            refused
+                .then_some(sent)
+                .into_iter()
+                .chain([download])
+                .collect(),
+        )?;
+        h.remote.faults().refuse_writes = false;
         assert_eq!(fs::read(h.at("x")?)?, b"A", "{held:?}");
-        assert_eq!(tags::read(&h.at("x")?), Some(here));
+        assert_eq!(tags::read(&h.at("x")?), Some(here.clone()));
         assert_eq!(h.records()?, []);
         let plan = plan_of(&mut h, &[node])?;
         assert!(
             plan.ops.iter().any(|op| match op {
-                Op::RemoteTags { tags, .. } | Op::RemoteUpdate { tags, .. } =>
-                    tags.get(&held.name) == Some(&held),
+                Op::RemoteTags { tags, .. } | Op::RemoteUpdate { tags, .. } => *tags == here,
                 _ => false,
             }),
             "{held:?} doesn't go up: {:?}",
@@ -4100,6 +4123,39 @@ fn a_recoloured_tag_counts_as_not_sent_up() {
             tags_lost(on_item, to_write, drive, os),
             lost,
             "{os:?}: {why}"
+        );
+    }
+}
+
+/// A removal a failed download write forgets: of a tag the drive holds that the item there
+/// doesn't, and the download wasn't to write (by name: a colour is the item's or the drive's
+/// to change, never a removal).
+#[test]
+fn a_tag_the_download_leaves_off_counts_as_removed_here() {
+    use super::removal_forgotten;
+    let (red3, red0, none) = (tags_of(&[("Red", 3)]), tags_of(&[("Red", 0)]), tags_of(&[]));
+    let both = tags_of(&[("Red", 0), ("Work", 0)]);
+    // (on the item, to write, on the drive, forgotten, why)
+    let cases = [
+        (&none, &none, &red0, true, "removed here"),
+        (
+            &none,
+            &red0,
+            &red0,
+            false,
+            "added on the drive: to be written",
+        ),
+        (&red3, &red3, &red0, false, "recoloured here"),
+        (&red0, &red0, &both, true, "one of two removed here"),
+        (&red0, &both, &both, false, "one of two added on the drive"),
+        (&red0, &none, &none, false, "removed on the drive"),
+        (&none, &none, &none, false, "no tags"),
+    ];
+    for (on_item, to_write, drive, forgotten, why) in cases {
+        assert_eq!(
+            removal_forgotten(on_item, to_write, drive),
+            forgotten,
+            "{why}"
         );
     }
 }

@@ -1039,13 +1039,15 @@ impl Sim {
         // that read fails too, it takes what the item held before, which is the same).
         if tag_failed {
             // A download whose failed write would lose a tag the item there holds and the drive
-            // doesn't (the user's, not sent up yet) isn't put in place: the item stays as it
-            // was, for a retry, the plan sending the tag up meanwhile (the executor's).
+            // doesn't, or forget one removed here (the user's, not sent up yet) isn't put in
+            // place: the item stays as it was, for a retry, the plan sending the change up
+            // meanwhile (the executor's).
             if let Op::LocalDownload { tags, .. } = &op
                 && let Some(record) = &placed_from
                 && before_tags.as_ref().is_some_and(|held| {
-                    let os = self.clients[c].os;
-                    hbsync_engine::exec::tags_lost(held, tags, &record.state.tags, os)
+                    let (os, drive) = (self.clients[c].os, &record.state.tags);
+                    hbsync_engine::exec::tags_lost(held, tags, drive, os)
+                        || hbsync_engine::exec::removal_forgotten(held, tags, drive)
                 })
             {
                 let client = &mut self.clients[c];
