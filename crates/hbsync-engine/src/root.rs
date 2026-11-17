@@ -200,8 +200,10 @@ impl SyncRoot {
     /// Takes a folder of shares its record no longer finds (the folder restored from a backup),
     /// as the folder opens ([`hbsync_local::shares::adopt`]): never one this folder's DB has at
     /// the top under its name, or anywhere by its file id (a synced folder renamed or moved
-    /// while nothing ran). The DB is opened only where a folder holding the marker is to be
-    /// judged. Its name, if one was taken.
+    /// while nothing ran): but an id the DB has for an item that is at its place with another
+    /// id tells nothing (after a restore every id in the DB is from before, and a new folder
+    /// may have got one of them). The DB is opened only where a folder holding the marker is
+    /// to be judged. Its name, if one was taken.
     pub fn adopt_shares(&self) -> Result<Option<String>, RootError> {
         let mut db = None;
         hbsync_local::shares::adopt(&self.path, |name, id| {
@@ -211,11 +213,16 @@ impl SyncRoot {
             };
             let top = hbsync_platform::RelPath::root();
             let key = hbsync_namemap::sibling_hash(name);
-            Ok(db.read(|s| {
+            let (here, by_id) = db.read(|s| {
                 let named = s.local_named(&top, key)?;
                 let here = named.iter().any(|row| row.path.name() == Some(name));
-                Ok(here || !s.local_by_file_id(&id)?.is_empty())
-            })?)
+                Ok((here, s.local_by_file_id(&id)?))
+            })?;
+            let stale = |row: &hbsync_state::LocalRow| {
+                hbsync_platform::stat(&row.path.to_native(&self.path))
+                    .is_ok_and(|meta| meta.file_id != id)
+            };
+            Ok(here || by_id.iter().any(|row| !stale(row)))
         })
     }
 

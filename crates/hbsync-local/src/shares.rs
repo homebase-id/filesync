@@ -50,7 +50,9 @@ impl Record {
             let value = text.lines().find_map(|l| l.strip_prefix(name));
             value.map(str::trim).filter(|v| !v.is_empty())
         };
-        let id = field("folder ").map(str::parse);
+        // A line that starts as the id's must hold one: never taken for a record without.
+        let id = text.lines().find(|l| l.starts_with("folder"));
+        let id = id.map(|l| l.strip_prefix("folder ").unwrap_or("").trim().parse());
         match (field("token "), id.transpose()) {
             (Some(token), Ok(id)) => Ok(Record(Some(Known {
                 token: token.to_owned(),
@@ -227,12 +229,15 @@ pub fn adopt<E: From<io::Error>>(
         return Ok(None);
     };
     let top = top_folders(root)?;
+    // The one on record first: where it is there, no other folder is looked into.
+    for (name, id) in &top {
+        if record.holds(*id, &root.join(name))? {
+            return Ok(None);
+        }
+    }
     let mut found = None;
     for (name, id) in &top {
         let at = root.join(name);
-        if record.holds(*id, &at)? {
-            return Ok(None);
-        }
         if token_in(&at)?.is_none_or(|token| token != known.token) || synced(name, *id)? {
             continue;
         }
@@ -377,7 +382,13 @@ mod tests {
         let root = dir.path();
         fs::create_dir_all(root.join("Shared"))?;
         fs::create_dir_all(crate::layout::state_dir(root))?;
-        for junk in ["junk", "folder 12\n", "token t\nfolder x\n"] {
+        for junk in [
+            "junk",
+            "folder 12\n",
+            "token t\nfolder x\n",
+            "token t\nfolder \n",
+            "token t\nfolder\n",
+        ] {
             fs::write(shares_file(root), junk)?;
             assert!(Record::read(root).is_err(), "{junk:?}");
             assert!(folders(root).is_err());
