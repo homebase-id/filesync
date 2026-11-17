@@ -1118,12 +1118,12 @@ put on it that the drive's last version holds (in Recently deleted; the base's o
 is not known), which would read as the user's removal. One that version lacks stays in the base:
 its absence is the drive's removal, which the restore merges in. A download whose failed write
 would lose a tag the file it replaces holds and the drive doesn't (the user's, not sent up yet)
-isn't put in place: it is tried again, the plan sending the tag up meanwhile, unless the drive refused that
-for good in the run (access, read-only): then it is placed. Nor is one that would forget a tag
-removed here (the drive holds it, the file it replaces doesn't, and the download wasn't to write
-it): its base's tags starting afresh, the drive's tag would read as added there and be put back
-on the file. That one waits for a tag write that lands, refused or not: the file keeps the
-removal meanwhile, and the fetched bytes stay for the retry. A node with no
+isn't put in place: it is tried again, the plan sending the tag up meanwhile. Nor is one that
+would forget a tag removed here (the drive holds it, the file it replaces doesn't, and the
+download wasn't to write it): its base's tags starting afresh, the drive's tag would read as
+added there and be put back on the file. Either waits for a tag write that lands, whether or not
+the drive refused the change for good (access, read-only): the file keeps the change meanwhile,
+and the fetched bytes stay for the retry. A node with no
 base gets one when place and content agree, with the tags both sides have: the merge then
 brings each side the other's (a copy proven equal only across hash algorithms can't be proven
 again later). A tag write needs a base to record what it wrote: the item's own, or one it

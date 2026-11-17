@@ -517,17 +517,16 @@ impl Executor<'_> {
         // Only a volume that keeps no tags says so for the rest: a set that fails or reads
         // back as nothing to go by doesn't.
         let left = self.disk.write_tags(done.path(), &to_write);
-        // Failed, it would lose a tag the item there holds and the drive doesn't (the user's,
-        // not sent up yet): not put in place then, for a retry, the plan sending it up
-        // meanwhile; unless the drive refused it for good this run (then as ever: placed).
-        // Nor is one that would forget a tag removed here, refused or not: nothing is lost by
-        // waiting for a write that lands (the item keeps the removal, the fetched bytes stay).
+        // Failed, it would lose a tag the item there holds and the drive doesn't, or forget
+        // one removed here (the user's, not sent up yet): not put in place then, for a retry,
+        // the plan sending the change up meanwhile. So too where the drive refused that for
+        // good: nothing is lost by waiting for a write that lands (the item keeps the change,
+        // the fetched bytes stay).
         if left.failed
             && let Some(on_item) = current.as_ref().and_then(|r| r.tags.as_ref())
             && let drive = &record.base.state.tags
-            && (removal_forgotten(on_item, &to_write, drive)
-                || !self.heard.tags_refused.contains(&node)
-                    && tags_lost(on_item, &to_write, drive, self.folder.os))
+            && (tags_lost(on_item, &to_write, drive, self.folder.os)
+                || removal_forgotten(on_item, &to_write, drive))
         {
             done.keep_for_retry();
             return Ok(Outcome::Retry("its tags weren't written".into()));

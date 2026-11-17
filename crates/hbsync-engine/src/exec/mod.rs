@@ -108,30 +108,16 @@ pub(crate) struct Executor<'a> {
 struct Heard {
     /// The drive is full: uploads wait (from the start, when it was lately).
     full: bool,
-    /// Nodes whose tags the drive refused this run for good (access, a drive that won't take
-    /// it): a tag only the item here has can't go up now, so a download no longer waits for it.
-    tags_refused: HashSet<NodeId>,
     /// The files the drive has in a version this device can't read
     /// ([`ReadTx::unreadable_files`]), read at the run's first write to an existing file.
     unreadable: Option<HashSet<hbsync_types::RemoteFileId>>,
 }
 
 impl Heard {
-    /// Notes what `op`'s `outcome` told of the drive: it is full, or tags it won't take for
-    /// good (a write of them refused, unsyncable, or denied).
-    fn ended(&mut self, op: &Op, outcome: &Outcome) {
+    /// Notes what an operation's `outcome` told of the drive: it is full.
+    fn ended(&mut self, outcome: &Outcome) {
         if matches!(outcome, Outcome::Full(_)) {
             self.full = true;
-        }
-        if matches!(
-            op,
-            Op::RemoteTags { .. } | Op::RemoteUpdate { .. } | Op::RemoteCreate { .. }
-        ) && matches!(
-            outcome,
-            Outcome::Skip(Skip::Unsyncable(_) | Skip::Refused(_))
-                | Outcome::Stop(Stopped::Denied(..))
-        ) {
-            self.tags_refused.insert(op.node());
         }
     }
 }
@@ -397,7 +383,7 @@ impl<'a> Executor<'a> {
         let (outcome, mut record) = self.refusals_after(&op, outcome)?;
         self.placement_ended(&op, &outcome)?;
         self.schedule.ended(&op, &outcome);
-        self.heard.ended(&op, &outcome);
+        self.heard.ended(&outcome);
         match outcome {
             Outcome::Done => {
                 self.record(&op, gone)?;

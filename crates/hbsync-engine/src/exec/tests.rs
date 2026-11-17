@@ -3956,19 +3956,24 @@ fn a_folder_made_whose_tags_cant_be_read_back_holds_none() -> R {
 /// here, edited on the drive: the download's tag write fails, which would leave the new version
 /// without the tag as it is here, and it nowhere (or, the base's tags starting afresh, the
 /// drive's blue taken for added there, and put back). It isn't put in place: the file keeps
-/// its tags, and the next plan still sends the change up. A removal waits so even where the
-/// drive refused it for good in the run (an added tag doesn't:
-/// `a_download_doesnt_wait_for_a_tag_the_drive_refused`).
+/// its tags, and the next plan still sends the change up. So too where the drive refused the
+/// change for good in the run (a drive that won't take writes): it waits for a tag write that
+/// lands.
 #[test]
 fn a_download_whose_tag_write_fails_keeps_a_tag_change_not_sent_up() -> R {
     let (blue, red, recoloured) = (Tag::new("Blue", 0), Tag::new("Red", 0), Tag::new("Red", 3));
-    // (on the file, on the drive and in the base, whether the drive refuses the change)
-    for (held, drive, refused) in [
-        (Some(blue.clone()), None, false),
-        (Some(recoloured), Some(red), false),
-        (None, Some(blue.clone()), false),
-        (None, Some(blue), true),
-    ] {
+    // (on the file, on the drive and in the base), each with a drive that takes the change and
+    // one that refuses it
+    let cases = [
+        (Some(blue.clone()), None),
+        (Some(recoloured), Some(red)),
+        (None, Some(blue)),
+    ];
+    for ((held, drive), refused) in cases
+        .iter()
+        .cloned()
+        .flat_map(|c| [(c.clone(), false), (c, true)])
+    {
         let mut h = Harness::new()?;
         if !tags_kept(&h.folder.root) {
             return Ok(()); // nothing to tag with here
@@ -4054,7 +4059,7 @@ fn a_download_whose_tag_write_fails_keeps_a_tag_change_not_sent_up() -> R {
                 .collect(),
         )?;
         h.remote.faults().refuse_writes = false;
-        assert_eq!(fs::read(h.at("x")?)?, b"A", "{held:?}");
+        assert_eq!(fs::read(h.at("x")?)?, b"A", "{held:?} {refused}");
         assert_eq!(tags::read(&h.at("x")?), Some(here.clone()));
         assert_eq!(h.records()?, []);
         let plan = plan_of(&mut h, &[node])?;
@@ -4260,55 +4265,6 @@ fn a_restored_folder_made_here_settles_as_a_placement() -> R {
     let base = h.base(node)?.expect("a base");
     assert_eq!(base.remote, at);
     assert_eq!(base.state.tags, Tags::default());
-    Ok(())
-}
-
-/// A file tagged blue here, edited on the drive, and a drive that won't take writes (read-only):
-/// sending blue up fails for good this run, so the download whose tag write fails doesn't wait
-/// for it: it is put in place, as ever.
-#[test]
-fn a_download_doesnt_wait_for_a_tag_the_drive_refused() -> R {
-    let mut h = Harness::new()?;
-    if !tags_kept(&h.folder.root) {
-        return Ok(()); // nothing to tag with here
-    }
-    let (node, at) = h.seed("x", b"B")?;
-    let blue = Tags::new(vec![Tag::new("Blue", 0)]);
-    h.local_file("x", node, b"A")?;
-    tags::write_on(&h.at("x")?, &blue)?;
-    h.local_file("x", node, b"A")?;
-    h.scanned_with("x", blue.clone())?;
-    let (a, b) = (h.content(b"A"), h.content(b"B"));
-    let before = some_version();
-    h.db.write(|s| {
-        s.folder().put_base(&BaseRow {
-            local_hash: Some(a.hash),
-            ..BaseRow::new(node, NodeState::file(NodeId::ROOT, "x", a), before)
-        })
-    })?;
-    h.remote.faults().refuse_writes = true;
-    h.cfg.hooks.faults.fail(FailPoint::TagWrite, 10);
-    h.run(vec![
-        Op::RemoteTags {
-            node,
-            file_id: at.file_id,
-            expected: at.version,
-            tags: blue.clone(),
-        },
-        Op::LocalDownload {
-            node,
-            parent: NodeId::ROOT,
-            name: "x".into(),
-            replace: true,
-            tags: blue,
-            drive: Some(Box::new(DriveVersion {
-                state: NodeState::file(NodeId::ROOT, "x", b),
-                at,
-                base_at: Some(before.version),
-            })),
-        },
-    ])?;
-    assert_eq!(fs::read(h.at("x")?)?, b"B");
     Ok(())
 }
 
