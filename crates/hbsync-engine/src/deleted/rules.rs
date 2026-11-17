@@ -76,7 +76,8 @@ pub struct RestoreWave<'r, R> {
     /// live (so not in the restore either: gone for good) comes back so too, an orphan the main
     /// folders move into Recovered files (sync semantics §6.3).
     pub asked: Vec<&'r R>,
-    /// Its name taken in its folder: under a free name.
+    /// Its name taken in its folder, or the state folder's (free in no folder, [`taken_in`]):
+    /// under a free name.
     pub rest: Vec<&'r R>,
     /// In a folder that isn't back yet: for a later wave.
     pub later: Vec<&'r R>,
@@ -106,10 +107,13 @@ pub fn restore_wave<'r, R>(
     let mut rest = Vec::new();
     for row in wave {
         let (parent, name) = place(row);
-        // A sync root's top holds the state folder's name even where it isn't live (a role
-        // folder made again later takes its id; a Desktop coming back with it).
-        let free = (!live.contains(&parent) && !holds_state_dir(taken, parent))
-            || taken_at(taken, parent).insert(name_key(name));
+        // What was in a folder that isn't live takes no name there, but in a sync root's top
+        // known by its id (a role folder made again later takes it). The state folder's name
+        // is free in no folder, one that isn't live either.
+        let free = match live.contains(&parent) || crate::along::is_sync_top(parent, None) {
+            true => taken_at(taken, parent).insert(name_key(name)),
+            false => !hbsync_local::is_state_dir(name),
+        };
         if free {
             asked.push(row)
         } else {
@@ -119,31 +123,23 @@ pub fn restore_wave<'r, R>(
     Some(RestoreWave { asked, rest, later })
 }
 
-/// The name keys a restore finds taken in folder `parent`, from the names of what is in it on
-/// the drive (`names`); at the top of a sync root (`top`: the drive's, a role folder's, a
-/// Desktop's, [`crate::along::is_sync_top`]) also the state folder's, in any case or spelling
-/// (`.hbsync`): each computer's own folder there, which no computer syncs, so a row removed
-/// under that name comes back under a numbered one. The engine's restore and the simulator's
-/// share it.
-pub fn taken_in<'a>(top: bool, names: impl IntoIterator<Item = &'a str>) -> HashSet<String> {
-    let reserved = top.then(|| hbsync_local::state_dir_key().to_owned());
-    names.into_iter().map(name_key).chain(reserved).collect()
+/// The name keys a restore finds taken in a folder, from the names of what is in it on the
+/// drive (`names`), and in every folder the state folder's, in any case or spelling
+/// (`.hbsync`): no computer syncs an item of that name, at a sync root's top (its own state
+/// folder there) or below (another sync folder's, sync semantics §10), so a row removed under
+/// it comes back under a numbered one, where the computers see it. The engine's restore and the
+/// simulator's share it.
+pub fn taken_in<'a>(names: impl IntoIterator<Item = &'a str>) -> HashSet<String> {
+    let reserved = hbsync_local::state_dir_key().to_owned();
+    names.into_iter().map(name_key).chain([reserved]).collect()
 }
 
-/// Whether the names taken in `parent` hold the state folder's: it is a sync root's top.
-fn holds_state_dir(taken: &HashMap<NodeId, HashSet<String>>, parent: NodeId) -> bool {
-    taken
-        .get(&parent)
-        .is_some_and(|names| names.contains(hbsync_local::state_dir_key()))
-        || crate::along::is_sync_top(parent, None)
-}
-
-/// The name keys taken in `parent`: none yet but the reserved ones ([`taken_in`]) where it holds
-/// nothing known (one gone for good: a top by its id only).
+/// The name keys taken in `parent`: none yet but the reserved one ([`taken_in`]) where it holds
+/// nothing known (one gone for good).
 fn taken_at(taken: &mut HashMap<NodeId, HashSet<String>>, parent: NodeId) -> &mut HashSet<String> {
     taken
         .entry(parent)
-        .or_insert_with(|| taken_in(crate::along::is_sync_top(parent, None), std::iter::empty()))
+        .or_insert_with(|| taken_in(std::iter::empty()))
 }
 
 /// A restore's row named `name` in `parent` that didn't come back (not there, or refused):

@@ -503,14 +503,8 @@ pub fn plan_restore_from<S: RestoreSource>(
         } else if !parent.is_root() && !seen.contains(&parent) {
             continue;
         }
-        // Its own folder: as it comes back, or as it is.
-        let above = match rows.iter().find(|r| S::place(r).0 == parent) {
-            Some(r) => Some(into(r)),
-            None => source.parent_of(parent)?,
-        };
-        let top = crate::along::is_sync_top(parent, above);
         let names = source.names_in(parent)?;
-        taken.insert(parent, taken_in(top, names.iter().map(String::as_str)));
+        taken.insert(parent, taken_in(names.iter().map(String::as_str)));
     }
     // Made for what comes back into it (before the first of it): a folder it may go into, with
     // the names of what is live in it still (orphans of one deleted for good), and its name
@@ -520,7 +514,7 @@ pub fn plan_restore_from<S: RestoreSource>(
         let names = source.names_in(NodeId::RECOVERED)?;
         taken.insert(
             NodeId::RECOVERED,
-            taken_in(false, names.iter().map(String::as_str)),
+            taken_in(names.iter().map(String::as_str)),
         );
         let at_top = taken.entry(NodeId::ROOT).or_default();
         at_top.insert(name_key(RECOVERED_NAME));

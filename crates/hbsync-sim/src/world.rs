@@ -1739,6 +1739,43 @@ mod tests {
         assert_eq!(name(inside), ".hbsync (restored)");
     }
 
+    /// A `.hbsync` another writer left in a plain folder, removed there and restored: no client
+    /// syncs an item of that name in any folder (§10), so it comes back under a numbered name,
+    /// and so to every client. So does one whose folder went for good: an orphan, which the
+    /// clients move into Recovered files under that name.
+    #[test]
+    fn a_restore_below_the_top_numbers_around_the_state_folder_name() {
+        let mut sim = Sim::new(2).without_ignore_rules().with_narrow_check();
+        let [a, gone, state, orphan] = [(); 4].map(|()| sim.ids.fresh());
+        sim.server.put(a, NodeState::folder(NodeId::ROOT, "a"));
+        sim.server
+            .put(gone, NodeState::folder(NodeId::ROOT, "gone"));
+        for (node, parent, name) in [(state, a, ".hbsync"), (orphan, gone, ".HBSYNC")] {
+            let file = NodeState::file(parent, name, sim.new_blob());
+            sim.server.put(node, file);
+        }
+        assert!(sim.quiesce(10));
+        assert_eq!(sim.local_paths(0), ["a", "gone"]);
+        for node in [state, orphan, gone] {
+            let n = sim.server.live.remove(&node).expect("live");
+            sim.remove_on_drive(node, n, true);
+        }
+        sim.gone_for_good_now(gone);
+        assert!(sim.quiesce(10));
+        sim.restore_all(&[state, orphan]);
+        assert!(sim.quiesce(10));
+        sim.check().unwrap_or_else(|e| panic!("{e}"));
+        let back = [
+            "Recovered files",
+            "Recovered files/.HBSYNC (restored)",
+            "a",
+            "a/.hbsync (restored)",
+        ];
+        assert_eq!(sim.server_paths(), back);
+        assert_eq!(sim.local_paths(0), back);
+        assert_eq!(sim.local_paths(1), back);
+    }
+
     /// A state folder below the top that another writer put on the drive (a client from before
     /// they were left out at any depth) comes to no client, with what is in it, and no client
     /// takes it off the drive; a delete of the folder it is in takes what the client saw and

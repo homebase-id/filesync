@@ -1132,3 +1132,51 @@ fn a_restore_into_a_desktop_never_takes_the_state_folder_s_name() -> R {
     assert!(!names.contains(&".hbsync".to_owned()), "{names:?}");
     Ok(())
 }
+
+/// Below a sync root's top too: no computer syncs an item named `.hbsync` in any folder (§10),
+/// so one restored in a plain folder (another writer's, a file here) comes back under a numbered
+/// name, and so to every computer.
+#[test]
+fn a_restore_into_a_plain_folder_never_takes_the_state_folder_s_name() -> R {
+    use hbsync_remote::Remote;
+    let server = FakeServer::new(ServerConfig::default());
+    let mut a = DeskPc::new(&server, None)?;
+    std::fs::create_dir(a.main_root.join("work"))?;
+    std::fs::write(a.main_root.join("work/a.txt"), b"a")?;
+    a.sync()?;
+    let mut b = DeskPc::new(&server, None)?;
+    b.sync()?;
+    let (state, at) = {
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        let work = srv
+            .live()
+            .find_map(|h| match &h.body {
+                RemoteBody::Live { node, content, .. } if content.name == "work" => Some(*node),
+                _ => None,
+            })
+            .ok_or("work on the drive")?;
+        srv.seed_file(work, ".hbsync", b"theirs", HashAlgorithm::Blake3)?
+    };
+    let target = hbsync_types::Target {
+        at,
+        token: Some(hbsync_remote::fake::token_of(at.file_id)),
+    };
+    FakeRemote::new(server.clone()).set_removed(&[target], true)?;
+    b.sync()?;
+    b.drive.restore(&[state])?;
+    assert_eq!(
+        parent_on_server(&server, ".hbsync"),
+        None,
+        "{:?}",
+        drive_listing(&server)
+    );
+    a.sync()?;
+    b.sync()?;
+    for pc in [&a, &b] {
+        assert_eq!(
+            files(&pc.main_root),
+            ["work/.hbsync (restored)", "work/a.txt"]
+        );
+    }
+    Ok(())
+}
