@@ -564,7 +564,16 @@ impl Runner {
         // through one folder.
         let sync_root = SyncRoot::open(&self.cfg.db, &self.cfg.identity, root)?;
         // Before the rules are read: a folder of shares taken now is left out by them.
-        if let Some(name) = sync_root.adopt_shares()? {
+        // What can't be told of it (its record, the top's listing, a marker) stops the sync
+        // as rules that can't be read do: failing, tried again at the next look.
+        let adopted = sync_root.adopt_shares().map_err(|e| match e {
+            RootError::Io(source) => RunnerError::Filter(FilterError::Read {
+                path: root.clone(),
+                source,
+            }),
+            e => e.into(),
+        })?;
+        if let Some(name) = adopted {
             tracing::info!("{name}: taken as the folder of shares (the one on record is gone)");
         }
         cfg.folder.filter = Arc::new(Filter::load(root, cfg.folder.case_insensitive)?);

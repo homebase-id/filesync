@@ -319,12 +319,9 @@ fn a_folder_of_shares_the_filter_doesnt_know_yet_is_neither_sent_nor_merged() ->
 
     assert_eq!(make(&a.root, "Team")?, Made::Made);
     a.write("Team/tom/theirs.txt", "shared with me")?;
+    let mine = a.tree_text("Team");
+    assert_eq!(mine.len(), 3, "{mine:?}"); // its marker, tom, theirs.txt
     a.sync()?;
-    let mine = [
-        ".hbsync-shared = ",
-        "tom/",
-        "tom/theirs.txt = shared with me",
-    ];
     assert_eq!(a.tree_text("Team"), mine, "the drive's folder was merged");
     assert_eq!(a.read_text("readme.txt")?, "r");
     b.sync()?;

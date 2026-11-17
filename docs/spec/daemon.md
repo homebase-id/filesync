@@ -420,8 +420,8 @@ included (service managers restart it then).
   it to resume)"; it goes once fixed. A file that can't be read stops it too, failing, till
   it can.
 - **The folder of shares:** the folder at the top of the account's folder that is on record
-  in `.hbsync/shares` (by its file id) and holds the marker `.hbsync-shared` (what other
-  identities share with the account is synced into it) is left alone by the account's
+  in `.hbsync/shares` (by its file id and its marker's token) and holds that marker,
+  `.hbsync-shared` (what other identities share with the account is synced into it) is left alone by the account's
   folder, whatever its name: nothing in it is sent, and an item of its name at the top of
   the drive isn't brought here while it holds the name (sync semantics §10, "The folder of
   shares"). A marker in any other folder does nothing. It is looked for with the ignore
@@ -429,7 +429,8 @@ included (service managers restart it then).
   a marker in a folder there; a change restarts the engine as an edit of the rules does. As
   the folder opens, a folder of shares the record no longer finds (the sync folder restored
   from a backup) is taken again, if it is the only folder at the top that isn't synced and
-  holds a marker; the log says so. Making the folder for an account, and giving its name to
+  holds the record's marker; the log says so. A record that can't be read stops the
+  folder's sync, failing, till it can. Making the folder for an account, and giving its name to
   an item of the drive, come with the runners of the shares.
 - **The folder gone** (moved, deleted, a disk not mounted: its marker missing): nothing
   syncs, the status says why, and the loop waits for it to come back. It never creates a

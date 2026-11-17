@@ -1025,14 +1025,21 @@ fn a_restored_folder_of_shares_is_taken_as_the_folder_opens() -> R {
     assert_eq!(names, ["Projects", "plan.txt"]);
 
     // As restored: the same names and what they held, in new folders.
+    let marker = std::fs::read(shared_marker(&root.join("Shared")))?;
     std::fs::rename(root.join("Shared"), root.join("old"))?;
     std::fs::create_dir_all(root.join("Shared/tom"))?;
     std::fs::write(root.join("Shared/tom/theirs.txt"), "shared with me")?;
-    std::fs::write(shared_marker(&root.join("Shared")), "")?;
+    std::fs::write(shared_marker(&root.join("Shared")), &marker)?;
     std::fs::remove_dir_all(root.join("old"))?;
-    assert_eq!(hbsync_local::shares::folder(&root)?, None);
-    std::fs::write(shared_marker(&root.join("Projects")), "")?;
+    if !hbsync_local::shares::folders(&root)?.is_empty() {
+        eprintln!("this volume's file ids aren't stable: the token alone tells; skipped");
+        return Ok(());
+    }
+    // A synced folder holding a copy of the marker, renamed while nothing ran: known by its
+    // file id, never taken.
+    std::fs::write(shared_marker(&root.join("Projects")), &marker)?;
     std::fs::write(root.join("Projects/more.txt"), "mine too")?;
+    std::fs::rename(root.join("Projects"), root.join("Work"))?;
 
     let (handle, thread) = spawn_at(&server, &root)?;
     wait_until("more.txt is up", || on_server(&server, "more.txt"))?;
@@ -1040,9 +1047,35 @@ fn a_restored_folder_of_shares_is_taken_as_the_folder_opens() -> R {
     stop(handle, thread)?;
     let mut names = live_names(&server);
     names.sort();
-    assert_eq!(names, ["Projects", "more.txt", "plan.txt"]);
-    let shares = hbsync_local::shares::folder(&root)?;
-    assert_eq!(shares.as_deref(), Some("Shared"));
+    assert_eq!(names, ["Work", "more.txt", "plan.txt"]);
+    assert_eq!(hbsync_local::shares::folders(&root)?, ["Shared"]);
+    Ok(())
+}
+
+/// A record of the folder of shares that isn't one stops the folder's sync, failing, as
+/// rules that can't be read do: the folder of shares taken for a plain one would be sent. The
+/// runner goes on, and syncs once the record reads.
+#[test]
+fn a_record_of_the_folder_of_shares_that_cant_be_read_stops_the_sync_till_it_can() -> R {
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    a.started()?;
+    assert_eq!(make(&a.root, "Shared")?, Made::Made);
+    a.write("Shared/tom/theirs.txt", "shared with me")?;
+    let record = hbsync_local::layout::shares_file(&a.root);
+    let good = std::fs::read(&record)?;
+    std::fs::write(&record, "junk")?;
+    a.write("notes.txt", "mine")?;
+    a.handle.send(Command::SyncNow);
+    wait_until("the folder stops", || a.status().state == State::Failing)?;
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(live_names(&server).is_empty(), "{:?}", live_names(&server));
+
+    std::fs::write(&record, good)?;
+    a.handle.send(Command::SyncNow);
+    wait_until("notes.txt is up", || on_server(&server, "notes.txt"))?;
+    a.wait_idle()?;
+    assert_eq!(live_names(&server), ["notes.txt"]);
     Ok(())
 }
 

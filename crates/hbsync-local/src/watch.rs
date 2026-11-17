@@ -258,7 +258,7 @@ fn reads_only(kind: &EventKind) -> bool {
 }
 
 /// Whether `event` may change which folder at the top of `root` holds what other identities
-/// share ([`crate::shares::folder`]): a marker made, removed or renamed in a folder there, or
+/// share ([`crate::shares::folders`]): a marker made, removed or renamed in a folder there, or
 /// an entry of the root itself made, removed or renamed (a folder holding one moved in or
 /// away, or renamed). A write to a file at the top doesn't, nor a file made or removed there
 /// where the OS says it is one (a rename doesn't say).

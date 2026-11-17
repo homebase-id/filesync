@@ -133,9 +133,9 @@ impl<'a> Walker<'a> {
     /// ([`crate::shares::Record::holds`]): the record read once a walk, the marker looked for
     /// in the one folder it names.
     fn holds_shares(&mut self, id: hbsync_platform::FileId, at: &Path) -> io::Result<bool> {
-        let record = match self.shares {
+        let record = match &mut self.shares {
             Some(record) => record,
-            None => *self.shares.insert(crate::shares::Record::read(&self.root)?),
+            none => none.insert(crate::shares::Record::read(&self.root)?),
         };
         record.holds(id, at)
     }
@@ -489,7 +489,10 @@ mod tests {
         fs::write(r.join("mine/Team/x.txt"), b"x")?;
         fs::write(r.join("plain/p.txt"), b"p")?;
         fs::write(shared_marker(&r.join("mine/Team")), b"")?;
-        fs::write(shared_marker(&r.join("plain")), b"")?;
+        fs::copy(
+            shared_marker(&r.join("Team")),
+            shared_marker(&r.join("plain")),
+        )?;
         fs::create_dir(shared_marker(&r.join("odd")))?;
 
         let (entries, excluded, asked) = walked(r)?;

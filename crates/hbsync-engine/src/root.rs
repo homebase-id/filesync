@@ -199,18 +199,23 @@ impl SyncRoot {
 
     /// Takes a folder of shares its record no longer finds (the folder restored from a backup),
     /// as the folder opens ([`hbsync_local::shares::adopt`]): never one this folder's DB has at
-    /// the top under its name (as names compare there). The DB is opened only where a folder
-    /// holding a marker is to be judged. Its name, if one was taken.
+    /// the top under its name, or anywhere by its file id (a synced folder renamed or moved
+    /// while nothing ran). The DB is opened only where a folder holding the marker is to be
+    /// judged. Its name, if one was taken.
     pub fn adopt_shares(&self) -> Result<Option<String>, RootError> {
         let mut db = None;
-        hbsync_local::shares::adopt(&self.path, |name| {
+        hbsync_local::shares::adopt(&self.path, |name, id| {
             let db = match &mut db {
                 Some(db) => db,
-                None => db.insert(self.state()?),
+                none => none.insert(self.state()?),
             };
+            let top = hbsync_platform::RelPath::root();
             let key = hbsync_namemap::sibling_hash(name);
-            let known = db.read(|s| s.local_named(&hbsync_platform::RelPath::root(), key))?;
-            Ok(!known.is_empty())
+            Ok(db.read(|s| {
+                let named = s.local_named(&top, key)?;
+                let here = named.iter().any(|row| row.path.name() == Some(name));
+                Ok(here || !s.local_by_file_id(&id)?.is_empty())
+            })?)
         })
     }
 

@@ -978,18 +978,26 @@ An item inside a filtered folder is filtered too.
 their own (§13, "Another identity's drive"), kept together in one folder at the top of the
 account's sync folder. That folder isn't the account's: nothing in it is on the account's
 drive, and this folder's sync leaves it alone, as its own `.hbsync`. It is never known by
-its name, which the user may change, but by two things together: the client's record of it
-(`.hbsync/shares`: the folder's file id, which a rename or a move within the volume keeps),
-and its marker, a file `.hbsync-shared` directly in it. The folder (not a link) at the top
-that is the one on record and holds the marker (a file) is the folder of shares, read when
-the folder is opened and again as rule 4 says (`shares::folder`, `Filter::load`). The marker
-alone says nothing: it is an empty file anyone can copy (on Windows it has the hidden
-attribute, as a leading dot hides it elsewhere). There is at most one. The rule is the
-filter's, so it holds at the top of every folder this client syncs, not the account's alone.
+its name, which the user may change, but by the client's record of it, `.hbsync/shares`: the
+folder's file id (which a rename or a move within the volume keeps) and a token, which the
+folder's marker, a file `.hbsync-shared` directly in it, holds too. The folder (not a link)
+at the top with the id on record, holding a marker (a file) with the record's token, is the
+folder of shares, read when the folder is opened and again as rule 4 says
+(`shares::folders`, `Filter::load`). Neither says anything alone: the marker is a file
+anyone can copy (on Windows it has the hidden attribute, as a leading dot hides it
+elsewhere), and where ids are reused (ext4, XFS) a new folder may get the id of one deleted.
+The rule is the filter's, so it holds at the top of every folder this client syncs, not the
+account's alone.
+
+Where the volume's file ids aren't stable (FAT, exFAT, a network or FUSE volume:
+`has_stable_file_ids`), no id is recorded and the token alone tells: there a marker copied
+into another folder at the top makes that one a folder of shares too (a known limit; it
+leaves the drive and the other devices by rule 1, and stays here).
 
 The client makes it so that it is never at the top without its marker, nor before it is on
-record (`shares::make`): prepared in `.hbsync/tmp`, recorded, then renamed into place,
-never over anything; a crash in between leaves the prepared folder to the next try.
+record (`shares::make`): prepared in `.hbsync/tmp` with a marker holding a new token,
+recorded, then renamed into place, never over anything; a crash in between leaves a
+prepared folder, which the next try makes anew.
 
 - Its name is excluded at the top, as the volume compares names (on macOS in any
   normalization, whatever the volume's case), and by rules 1 and 2: it is
@@ -1006,7 +1014,7 @@ never over anything; a crash in between leaves the prepared folder to the next t
   the filter is read again before the next sync) is left alone as well, by the record and
   its marker on disk: the walk reads the record once when it meets a folder at the top,
   compares each folder's file id there with it (the listing has the id: nothing more is
-  read), and looks for the marker in the one that matches, before it reports or enters it;
+  read), and reads the marker of the one that matches, before it reports or enters it;
   and a folder of the drive is never made out of the folder of shares (the drive's waits,
   and is masked once the filter is read). Nothing in it is sent, and the drive's folder of
   its name isn't put into it (engine
@@ -1019,15 +1027,19 @@ never over anything; a crash in between leaves the prepared folder to the next t
   or below it.
 - The folder of shares that loses its marker is a plain folder from then on, synced with
   what is in it; where the drive has an item of its name at the top, the two meet as a name
-  clash (§6), and one gets a conflict name. It stays the one on record: with its marker back
-  it is the folder of shares again, and leaves the drive and the other devices by rule 1
-  (sim `a_marker_lost_makes_the_folder_plain_and_its_own_back_takes_it_off_the_drive`).
+  clash (§6), and one gets a conflict name. With its own marker back it is the folder of
+  shares again, and leaves the drive and the other devices by rule 1 (sim
+  `a_marker_lost_makes_the_folder_plain_and_its_own_back_takes_it_off_the_drive`), unless
+  the client made another meanwhile: that one is on record then, with another token.
 - A copy of the whole sync folder (a restore from a backup) holds new folders, which the
-  record doesn't find. As the folder opens, where the folder on record isn't at the top (or
-  nothing is on record) and exactly one folder there that isn't synced (the state DB has
-  none of its name at the top) holds a marker, that one goes on record (`shares::adopt`,
-  runner `a_restored_folder_of_shares_is_taken_as_the_folder_opens`). Never a synced
-  folder, and with two to choose from neither: those sync as the user's own.
+  record doesn't find. As the folder opens, where the folder on record isn't at the top and
+  exactly one folder there that isn't synced holds a marker with the record's token, that
+  one goes on record (`shares::adopt`, runner
+  `a_restored_folder_of_shares_is_taken_as_the_folder_opens`). Not synced: the state DB has
+  no item of its name at the top, and none with its file id anywhere (a synced folder
+  renamed while nothing ran). Never a synced folder, and with two to choose from neither:
+  those sync as the user's own. With nothing on record nothing is taken, and nothing looked
+  at.
 - A folder at the top this user may not look into counts as holding no marker (the walk
   can't read it either). A top that can't be listed, a record that can't be read or isn't
   one, or a marker that can't be looked for (an I/O error: it may be there, and a folder of
@@ -1082,8 +1094,8 @@ never over anything; a crash in between leaves the prepared folder to the next t
    checks the ignore file for an edit when the watcher sees it change (once a minute without
    a watcher) and on a sync request, and starts over with the new rules when it changed.
    The folder of shares is looked for with it (where one is on record: one listing of the
-   top, one `stat` per folder there, and one look for the marker; nothing but the record's
-   read where none is), and alone, at once, before the next sync, when the watcher
+   top and one marker's read; nothing but the record's read where none is), and alone, at
+   once, before the next sync, when the watcher
    sees an entry of the top made, removed or renamed (not a file, where the OS says it is
    one), or a marker in a folder there (nothing half written to wait for: a sync in between
    would send what is in a folder that just became one). Without a watcher a change to it

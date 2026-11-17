@@ -121,7 +121,7 @@ pub const IGNORE_FILE: &str = "ignore";
 
 /// The marker, a file, of the folder at a sync folder's top that holds what other identities
 /// share with the account (sync semantics §10): the folder is this device's own, under any
-/// name. An empty file anyone can copy: it counts in the folder on record only
+/// name. A file anyone can copy: it counts in the folder on record only
 /// ([`crate::shares`]). On the junk list: never synced, so a marker never comes from the drive.
 pub const SHARED_MARKER: &str = ".hbsync-shared";
 
