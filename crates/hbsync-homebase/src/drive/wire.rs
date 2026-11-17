@@ -86,7 +86,8 @@ pub struct FileMetadata {
     #[serde(default)]
     pub is_encrypted: bool,
     pub payloads: Option<Vec<Payload>>,
-    /// Unix ms of the last change; `None` if the header doesn't say.
+    /// Unix ms of the last change; `None` if the header doesn't say. Read only where there
+    /// is no version ([`Times::of`]).
     #[serde(default)]
     pub updated: Option<i64>,
     /// Unix ms of the write that gave it its `versionTag` ([`Times::changed_at`]).
@@ -275,7 +276,8 @@ pub struct FileRef {
     pub archival_status: i32,
     /// The parent node, as the header's: omitted when empty.
     pub group_id: Option<Uuid>,
-    /// Unix ms, as the header's `updated`; `None` if the row doesn't say.
+    /// Unix ms, as the header's `updated` (read as that one is); `None` if the row doesn't
+    /// say.
     #[serde(default)]
     pub updated: Option<i64>,
     /// Unix ms, as the header's `versionUpdated`.
@@ -321,14 +323,11 @@ pub struct Times {
     pub deleted: bool,
     /// In Recently deleted: the status says whether it's removed, [`Times::changed_at`] when.
     pub removed: bool,
-    /// The header's `versionUpdated`, as [`RemoteHeader::changed_at`]: the server's time of the
-    /// write that gave the file its `versionTag` (the `updated` of that write; odin-core PR
-    /// #2143, **[verified]** at 5e4cd493f: `DriveFileUtility.VersionUpdatedOf`, `FileRef`,
-    /// `ClientFileMetadata`). A share given or withdrawn since moves `updated` and keeps the
-    /// version (**[verified]** `TouchKeepingVersionTagAsync`), and this with it. A tombstone's
-    /// too (when it may be deleted hard), and a removed node's removal. A share withdrawn, as
-    /// its member reads it, has no version and so none (**[verified]**
-    /// `NoLongerSharedTombstoneOf`): its time is its `updated`, the withdrawal's.
+    /// [`RemoteHeader::changed_at`]: the header's `versionUpdated` (odin-core PR #2143,
+    /// **[verified]** at 5e4cd493f: `DriveFileUtility.VersionUpdatedOf`, `FileRef`,
+    /// `ClientFileMetadata`). A share withdrawn, as its member reads it, is a tombstone
+    /// without a version and so without one (**[verified]** `NoLongerSharedTombstoneOf`): its
+    /// time is its `updated`, the withdrawal's.
     pub changed_at: Option<i64>,
 }
 
@@ -346,9 +345,10 @@ impl Times {
         Times {
             deleted,
             removed: !deleted && archival_status == ARCHIVAL_REMOVED,
-            changed_at: match version_tag.is_nil() {
-                true => updated,
-                false => version_updated,
+            changed_at: if deleted && version_tag.is_nil() {
+                updated
+            } else {
+                version_updated
             },
         }
     }

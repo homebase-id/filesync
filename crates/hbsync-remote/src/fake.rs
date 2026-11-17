@@ -187,11 +187,18 @@ impl FakeServer {
 
     /// A write of `file_id` by `writer` (`None`: not through a client) that made its version
     /// landed: its time, its new place in the feed, and its announcement
-    /// ([`FakeServer::modified`]). The version's time is the write's (**[verified]** odin-core
+    /// ([`FakeServer::changed`]). The version's time is the write's (**[verified]** odin-core
     /// PR #2143 at 5e4cd493f: `versionTagModified` is set to `modified` by every write that
     /// sets the version tag).
     fn touch(&mut self, file_id: RemoteFileId, writer: Option<ClientId>) -> i64 {
-        self.modified(file_id, writer, true)
+        self.changed(file_id, writer, true)
+    }
+
+    /// A change of `file_id` by `writer` that keeps its version landed (a share given or
+    /// withdrawn, odin-core's `TouchKeepingVersionTagAsync`): [`FakeServer::changed`], the
+    /// version's time staying.
+    fn touch_keeping_version(&mut self, file_id: RemoteFileId, writer: ClientId) {
+        self.changed(file_id, Some(writer), false);
     }
 
     /// A change of `file_id` by `writer` landed, a write that made its version (`version`) or
@@ -202,7 +209,7 @@ impl FakeServer {
     /// never goes back, and a write in the millisecond of the last one still moves it and its
     /// place in the feed. The header's `updated` is that value (**[verified]** `FileMetadata`:
     /// `Updated = record.modified`); its `versionUpdated` moves only with the version.
-    fn modified(&mut self, file_id: RemoteFileId, writer: Option<ClientId>, version: bool) -> i64 {
+    fn changed(&mut self, file_id: RemoteFileId, writer: Option<ClientId>, version: bool) -> i64 {
         let mut modified = self.clock_ms;
         if let Some(f) = self.files.get_mut(&file_id) {
             if let Some(last) = f.modified {
@@ -555,9 +562,7 @@ impl FakeServer {
         self.shares.insert(file_id, live);
         match deleted {
             true => self.announce(file_id, Some(writer)),
-            false => {
-                self.modified(file_id, Some(writer), false);
-            }
+            false => self.touch_keeping_version(file_id, writer),
         }
         Ok(())
     }
@@ -842,8 +847,6 @@ impl FakeServer {
                 f.header = RemoteHeader {
                     file_id,
                     token: Some(token_of(file_id)),
-                    // Until the write gives it its own ([`FakeServer::touch`]).
-                    changed_at: f.header.changed_at,
                     ..header
                 };
                 f.bytes = bytes;
