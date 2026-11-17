@@ -1374,9 +1374,10 @@ fn what_isnt_shared_is_refused(b: &Bench) -> Outcome {
 }
 
 /// A share withdrawn comes as a tombstone without a version, a parent (the root, as the adapter
-/// reads a tombstone without a `groupId`) or a node id, whole and slim alike ([`RemoteHeader::is_unshared`]), at the withdrawal's time: later than the file's
-/// last write. The file isn't read any more. The sharer's file keeps its version, its time
-/// moved too.
+/// reads a tombstone without a `groupId`) or a node id, whole and slim alike
+/// ([`RemoteHeader::is_unshared`]), at the withdrawal's time: later than the file's last write.
+/// The file isn't read any more. The sharer's file keeps its version and that version's time:
+/// a share change is no write.
 fn a_withdrawn_share_is_a_tombstone_without_a_version(b: &Bench) -> Outcome {
     let (_, w) = b.file("withdrawn", b"data")?;
     let before = b.reader().header(w.file_id)?.changed_at;
@@ -1411,8 +1412,8 @@ fn a_withdrawn_share_is_a_tombstone_without_a_version(b: &Bench) -> Outcome {
     ensure_err!(b.read(w.file_id, None), RemoteError::Fatal(_));
     let kept = b.remote.header(w.file_id)?;
     ensure!(
-        kept.version == w.version && !kept.is_deleted() && kept.changed_at > before,
-        "the sharer's file changed, or its time didn't move: {kept:?}"
+        kept.version == w.version && !kept.is_deleted() && kept.changed_at == before,
+        "the sharer's file changed, or its version's time moved (from {before:?}): {kept:?}"
     );
     Ok(())
 }

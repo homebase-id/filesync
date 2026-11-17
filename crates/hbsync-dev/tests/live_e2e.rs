@@ -53,7 +53,7 @@ impl Client {
             .as_ref()
             .map(|p| format!("{} rows, more: {}", p.refs.len(), p.has_more));
         std::thread::sleep(Duration::from_secs(1));
-        // The rows from that cursor now, with their times (`updated`), to set against the
+        // The rows from that cursor now, with their versions' times, to set against the
         // cursor's time.
         let later = self.remote.change_refs(cursor.as_deref(), 500).map(|p| {
             p.refs
@@ -99,7 +99,7 @@ fn two_clients_converge_through_homebase() -> Res<()> {
     Ok(())
 }
 
-/// The Photos example, with the server's removal times (a header's `updated`): on Monday
+/// The Photos example, with the server's removal times (a header's `versionUpdated`): on Monday
 /// `Photos/a.jpg` is deleted on its own; on Tuesday the folder `Photos`, still holding `b.jpg`
 /// and a subfolder with a file. Restoring `Photos` brings back `b.jpg` and the subfolder's
 /// file, not `a.jpg`: that stays in Recently deleted, and comes back on its own, into `Photos`.

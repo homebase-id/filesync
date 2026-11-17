@@ -564,19 +564,20 @@ fn a_node_written_into_a_removed_folder_later_holds_it() -> common::Res<()> {
     Ok(())
 }
 
-/// `file_id`'s share given by `c` (a share row written): its `updated` moves on and its version
-/// stays, as every share given or withdrawn does (node schema, Recently deleted: When).
+/// `file_id`'s share given by `c` (a share row written): its version and that version's time
+/// stay, as with every share given or withdrawn (it moves the file's `updated`, which nothing
+/// here goes by: node schema, Recently deleted: When).
 fn share(server: &Arc<Mutex<FakeServer>>, c: &Client, file_id: RemoteFileId) -> common::Res<()> {
     let before = server.lock().map_err(|_| "poisoned")?.header(file_id)?;
     c.remote.share(file_id)?;
     let after = server.lock().map_err(|_| "poisoned")?.header(file_id)?;
     assert_eq!(after.version, before.version, "the version stays");
-    assert!(after.changed_at > before.changed_at, "the time moves");
+    assert_eq!(after.changed_at, before.changed_at, "its time too");
     Ok(())
 }
 
-/// A share given for what a removal took along, after it, isn't a write: this device holds the
-/// version from before, so its time is the one it read with it. The file is still taken along
+/// A share given for what a removal took along, after it, isn't a write: the version is the
+/// one from before, and so is its time. The file is still taken along
 /// (the purge removes it with its folder), where a file written after the removal would hold
 /// the folder ([`a_node_written_into_a_removed_folder_later_holds_it`]).
 #[test]
@@ -602,8 +603,8 @@ fn a_share_change_of_what_a_removal_took_along_is_no_write() -> common::Res<()> 
     Ok(())
 }
 
-/// The same through a sync: the folder stays in Recently deleted on a device that holds the
-/// file's version, the file with it, and nothing comes back.
+/// The same through a sync: the folder stays in Recently deleted, the file with it, and
+/// nothing comes back.
 #[test]
 fn a_share_change_below_a_removed_folder_brings_nothing_back() -> common::Res<()> {
     let server = server();
@@ -626,12 +627,12 @@ fn a_share_change_below_a_removed_folder_brings_nothing_back() -> common::Res<()
     Ok(())
 }
 
-/// The limit of that, until the server says when a version was written apart from `updated`:
-/// a device that first reads the file after its share changed has only the later time, and
-/// takes the file for written after the removal. Its folder comes back for everyone (sync
-/// semantics §6 rule 3), the safe side: nothing is lost.
+/// Nor on a device that first reads the file after its share changed: the server says when the
+/// version was written (`versionUpdated`, odin-core PR #2143), apart from the file's last
+/// change. Before, such a device had only the later time, took the file for written after the
+/// removal, and its folder came back for everyone (filesync #385).
 #[test]
-fn a_device_first_reading_a_file_after_its_share_changed_takes_it_for_written_then()
+fn a_device_first_reading_a_file_after_its_share_changed_knows_when_it_was_written()
 -> common::Res<()> {
     let server = server();
     let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.allow = true)?;
@@ -646,15 +647,15 @@ fn a_device_first_reading_a_file_after_its_share_changed_takes_it_for_written_th
     new.sync()?;
     a.sync()?;
     for c in [&new, &a] {
-        let tree = c.tree_text("");
-        assert_eq!(tree, ["d/", "d/x.txt = x", "keep.txt = k"], "{}", c.name);
+        assert_eq!(c.tree_text(""), ["keep.txt = k"], "{}", c.name);
     }
-    assert_eq!(live(&server), ["d", "keep.txt", "x.txt"]);
+    assert_eq!(live(&server), ["keep.txt"]);
+    assert!(removed_on_server(&server, "d"), "d stays removed");
     Ok(())
 }
 
 /// A share change of a removed node moves neither its 30 days nor what it was deleted with:
-/// its removal time is the one this device read with the version. x, removed before its
+/// its removal's time is its version's. x, removed before its
 /// folder, stays an item of its own, and goes for good 30 days after its removal, though its
 /// `updated` is from today.
 #[test]

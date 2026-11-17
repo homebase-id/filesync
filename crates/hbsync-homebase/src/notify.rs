@@ -885,7 +885,8 @@ mod tests {
         };
         let row = |state: &str, archival: i64| {
             json!({"fileId": file, "versionTag": version, "fileState": state,
-                "archivalStatus": archival, "groupId": parent, "updated": 7, "fileType": 7101})
+                "archivalStatus": archival, "groupId": parent, "updated": 8, "versionUpdated": 7,
+                "fileType": 7101})
         };
         let changed = |deleted, removed, changed_at, parent| {
             Notification::Changed(Some(ChangeRef {

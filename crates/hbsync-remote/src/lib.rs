@@ -45,15 +45,15 @@ pub struct RemoteHeader {
     pub body: RemoteBody,
     /// A live node in Recently deleted (`archivalStatus` 2 on Homebase): it went there at
     /// [`RemoteHeader::changed_at`], the server's time of the write that removed it (nobody
-    /// writes to a removed node, but a share given or withdrawn since moves it, **[verified]**
-    /// odin-core `TouchKeepingVersionTagAsync`), if the remote said.
+    /// writes to a removed node), if the remote said.
     pub removed: bool,
-    /// When the file last changed on the drive, Unix ms, the server's time (Homebase's
-    /// `updated`): when this version was written, or later a share of it given or withdrawn,
-    /// which moves it and keeps the version (**[verified]** odin-core
-    /// `TouchKeepingVersionTagAsync`; homebase-api-notes, "Shared with you"). What
-    /// decides whether a node in a removed folder went with it (node schema, Recently deleted),
-    /// and, for a tombstone, when it may be deleted hard. `None` where the remote doesn't say.
+    /// When this version was written, Unix ms, the server's time (Homebase's
+    /// `versionUpdated`, odin-core PR #2143): a share of the file given or withdrawn since
+    /// keeps the version and this with it (it moves the file's `updated`, which isn't read;
+    /// homebase-api-notes, "Shared with you"). What decides whether a node in a removed folder
+    /// went with it (node schema, Recently deleted), and, for a tombstone, when it may be
+    /// deleted hard. A share withdrawn ([`RemoteHeader::is_unshared`]) has no version: the
+    /// withdrawal's time. `None` where the remote doesn't say.
     pub changed_at: Option<i64>,
     /// The file's [`FileToken`], where the remote has one (a tombstone has none).
     pub token: Option<FileToken>,

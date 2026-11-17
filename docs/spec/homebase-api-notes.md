@@ -200,16 +200,17 @@ main e0d52f336 (frodo runs it): `V2DriveBatchFileWriteOperationsController.SoftD
   device's delete); a live file (removed too) goes only at its `versionTag`
   (`SoftDeleteLongTermFile`, checked against the header read), leaving a tombstone with a new
   version (`SaveFileHeader` makes one) and its row in the feed.
-- Answer `{results: [{fileId, errorCode, updated, recipientStatus}]}`, one per file in request
+- Answer `{results: [{fileId, errorCode, updated, versionUpdated, recipientStatus}]}`, one per file in request
   order: `errorCode` null when deleted, `versionTagMismatch` (written since: left as it is),
   `fileNotFound` (missing, or hidden by the ACL), or another client error; one file's error
-  never stops the others, a server error fails the request. `updated` is the tombstone's time
-  as the feed shows it (Unix ms; a tombstone already answers its own), null when it stayed.
+  never stops the others, a server error fails the request. `versionUpdated` is the
+  tombstone's time as its header shows it (Unix ms; a tombstone already answers its own),
+  null when it stayed; the client reads that one ("A version's own time", below).
   The answer carries no `versionTag`: the tombstone's comes with its row in the feed.
 - The client deletes softly through it (`HomebaseRemote::delete`: emptying Recently deleted,
   and the purge's younger nodes), a request per 250 files, so a stop waits less (a request of
   1,000 took ~70 s on the user's Homebase). It records each file gone at once,
-  since `updated` (`gone_files.gone_at`, which the 30 days of keeping its id count from), and
+  since `versionUpdated` (`gone_files.gone_at`, which the 30 days of keeping its id count from), and
   the tombstone, at its version and time, from the feed's row, which the hard delete 30 days
   on needs (node schema, The purge, 3.).
 
@@ -229,8 +230,9 @@ main e0d52f336 (frodo runs it): `V2DriveBatchFileWriteOperationsController.SoftD
   `updated` (`modified` = max(old + 1, now)) and raises the usual drive event. The client
   doesn't put a folder and what is in it in one request: a folder whose removal (or restore)
   is refused must hold back what is in it, and a request goes on past a refused file.
-- Answer `{results: [{fileId, newVersionTag, updated, errorCode}]}`, one per file in request
-  order; `updated` as Unix ms (**[tried]** live, `write_answers_carry_the_feeds_time`). One
+- Answer `{results: [{fileId, newVersionTag, updated, versionUpdated, errorCode}]}`, one per
+  file in request order; both times as Unix ms (**[tried]** live,
+  `write_answers_carry_the_versions_time`); the client reads `versionUpdated`. One
   file's error never stops the others.
 - The client removes and restores through it (`HomebaseRemote::set_removed`): a request per
   level of a folder's tree and per 1,000 files, a folder's level before what is in it. A
@@ -347,7 +349,8 @@ comment (**[verified]** `UploadConcurrencyLimit`). App callers get `serverMetada
   #1967 ignores it). A minimal page has `fileRefs` instead of `searchResults`: per row
   `fileId`, `fileState` (`"active"`/`"deleted"`), `fileType`, `dataType`, `archivalStatus`,
   `versionTag`, `created`, `updated` and `fileByteCount`, plus `globalTransitId`, `uniqueId`,
-  `groupId`, `localVersionTag`, `userDate` and `senderOdinId` when set. The rows, cursor and
+  `groupId`, `localVersionTag`, `userDate`, `senderOdinId` and `versionUpdated` (#2143, V2
+  only) when set. The rows, cursor and
   `hasMoreRows` are those of the same query in any shape: they come from the query before
   the rows are filtered for the caller, and every shape filters alike. `versionTag` changes
   only when the header is written; `updated` also on reactions and transfer history. Measured
@@ -518,9 +521,11 @@ the key, and a tombstone's header says the same; a server without the PR answers
   Hard-delete-batch answers none.
   It is the time the feed shows for that write (odin-core `WriteResponseUpdatedTests`;
   **[tried]** on frodo at fe067124b for a create, a new version, a removal and a restore by
-  PATCH, the archival-status batch and a delete: `write_answers_carry_the_feeds_time`). The
-  client records a version's and a removal's time from it (`drive::HomebaseRemote`'s
-  `Written::changed_at`) and reads no feed after its writes. A soft delete's gives the
+  PATCH, the archival-status batch and a delete). Since #2143 each of these answers carries
+  `versionUpdated` beside it ("A version's own time", below), and the client records a
+  version's and a removal's time from that one (`drive::HomebaseRemote`'s
+  `Written::changed_at`; `write_answers_carry_the_versions_time`); it reads no feed after its
+  writes. A soft delete's gives the
   tombstone's time, which the client records as the time the file went; the tombstone's
   version still comes with the feed's row (`soft-delete-batch`, above). Before #1971 the answers had no time (`payloads[].lastModified` is
   the payload's, not the header's `updated`).
@@ -582,16 +587,25 @@ server answers the rest, to a token their server made for this identity's connec
   withdrawing moves the file's `modified` and keeps its version, so a share given again brings
   the file back live at the version it had (**[verified]**
   `TableDriveMainIndex.TouchKeepingVersionTagAsync`). That is the header's `updated` too
-  (**[verified]** `FileMetadata`: `Updated = record.modified`), so `RemoteHeader::changed_at` is when the file last changed on the drive,
-  not when its version was written: a removed node's `updated` moves with a share change
-  too. The client therefore judges a write by the version tag, never by `updated` alone: a
-  version's time is the `updated` first read with it, and a later `updated` of the same
-  version counts for nothing (node schema, Recently deleted: When). A client that first reads
-  the version after a share change has only the later time: no header field says when a
-  version was written (the version tag's own time doesn't serve: **[verified]** a peer's
-  update keeps the sender's tag, `PeerFileUpdateWriter`, and `FileUpdatePackage` makes the tag
-  when the request starts, not when it lands). Closing that gap is a future enhancement and
-  needs odin-core: filesync #385.
+  (**[verified]** `FileMetadata`: `Updated = record.modified`), so `updated` is when the file
+  last changed in the feed, not when its version was written: a removed node's moves with a
+  share change too. The client therefore reads no time from `updated` (but the "no longer
+  shared" tombstone's, which has no version): "A version's own time", next.
+- **A version's own time** (`versionUpdated`, odin-core PR #2143, merged as 5e4cd493f on
+  2026-11-17, #2142; **[verified]** there: `DriveFileUtility.VersionUpdatedOf` and
+  `AnswersVersionUpdated`, `ClientFileMetadata.VersionUpdated`, `FileRef.VersionUpdated`,
+  `WriteTimes`): the `updated` of the write that gave the file its current `versionTag`,
+  Unix ms. It moves with every write that makes a new tag (content, metadata, archival
+  status, a soft delete's tombstone) and stays on what keeps the tag: a share given or
+  withdrawn, the reaction summary, the transfer history, local app data. Answered on the V2
+  API only (and to another identity's server, which relays it to its own V2 callers): in a
+  header's `fileMetadata`, in a minimal row and a socket event's `fileRef`, and in the answers
+  to a create, an update, the archival-status batch and a soft delete (single and batch);
+  left out where there is none (the "no longer shared" tombstone). A file written before the
+  server had the field answers its `modified` of then **[inferred]** (odin-core's migration,
+  as its PR says). It is `RemoteHeader::changed_at` (`wire::Times`): what the client judges
+  "written after its folder's removal" and a removed node's 30 days by, on first sight too
+  (filesync #385, closed by it). The feed's order and cursor stay on `modified`.
   A tombstone's age (when it may be deleted hard) doesn't move: withdrawing a share of a deleted
   file withdraws it (the member reads it no more, and their feed has the "no longer shared"
   tombstone at the file's place) but leaves its time, its place in the feed and its age as they
