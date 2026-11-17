@@ -472,6 +472,11 @@ const MIGRATIONS: &[&str] = &[
     // drive's root and every other folder a role folder.
     "ALTER TABLE folders ADD COLUMN kind INTEGER NOT NULL DEFAULT 1;
     UPDATE folders SET kind = 0 WHERE top = X'2a1c0d558ad3417ea5d742c3d0baba0e';",
+    // 28: the whole feed is read again, once (`keys::REREADING`): a version's time is the
+    // server's `versionUpdated` now, and the store may hold a share change's time for one it
+    // first read after it (filesync #385). Each row read again takes the server's time where
+    // it matters (`confirm_removed`, `refresh_time`).
+    "INSERT OR REPLACE INTO kv (key, value) VALUES ('remote.rereading', '1');",
 ];
 
 /// The version this client makes and reads.
@@ -827,6 +832,26 @@ mod tests {
             apply(&mut upgraded)?;
             assert_eq!(user_version(&upgraded)?, VERSION);
             assert_eq!(new, shape(&upgraded)?);
+        }
+        Ok(())
+    }
+
+    /// An upgrade asks for the whole feed to be read again, once (migration 28: a version's
+    /// time is the server's `versionUpdated`, and a row read again takes it); a new DB has
+    /// nothing to read again.
+    #[test]
+    fn an_upgrade_reads_the_feed_again_and_a_new_db_doesnt() -> Result<()> {
+        let asked = |conn: &Connection| -> Result<bool> {
+            Ok(conn
+                .prepare("SELECT 1 FROM kv WHERE key = 'remote.rereading'")?
+                .exists([])?)
+        };
+        let mut new = Connection::open_in_memory()?;
+        apply(&mut new)?;
+        assert!(!asked(&new)?);
+        for mut upgraded in [version_13()?, version_24()?] {
+            apply(&mut upgraded)?;
+            assert!(asked(&upgraded)?);
         }
         Ok(())
     }

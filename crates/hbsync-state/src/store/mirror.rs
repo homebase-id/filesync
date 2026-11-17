@@ -457,14 +457,16 @@ impl AccountTx<'_> {
     }
 
     /// Records the server's time of the version the mirror has as `file_id` in `parent` (drive
-    /// coordinates), where it matters: a node in a removed folder whose time isn't known yet.
+    /// coordinates), where it matters: a node in a removed folder whose time isn't known yet,
+    /// or is another (as [`AccountTx::confirm_removed`] has it). One read where it has that
+    /// time.
     pub fn refresh_time(&self, file_id: RemoteFileId, parent: NodeId, at: i64) -> Result<()> {
-        let unknown = self
-            .prep("SELECT 1 FROM remote WHERE file_id = ?1 AND changed_at IS NULL")?
-            .exists([file_id.0.as_bytes()])?;
-        if unknown && self.removed_above(parent, NodeId::ROOT)?.is_some() {
+        let other = self
+            .prep("SELECT 1 FROM remote WHERE file_id = ?1 AND changed_at IS NOT ?2")?
+            .exists(params![file_id.0.as_bytes(), at])?;
+        if other && self.removed_above(parent, NodeId::ROOT)?.is_some() {
             self.prep(
-                "UPDATE remote SET changed_at = ?2 WHERE file_id = ?1 AND changed_at IS NULL",
+                "UPDATE remote SET changed_at = ?2 WHERE file_id = ?1 AND changed_at IS NOT ?2",
             )?
             .execute(params![file_id.0.as_bytes(), at])?;
         }

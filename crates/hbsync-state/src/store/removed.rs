@@ -325,12 +325,14 @@ impl AccountTx<'_> {
         self.fan_out(row.node, row.parent)
     }
 
-    /// Records the server's time of a removal this device made, open until now
-    /// ([`RemovedRow::removed_at`]); a time already known stays.
+    /// Records the server's time of the removal `at` ([`RemovedRow::removed_at`]): one this
+    /// device made, open until now, or one it has another time for (a version has one time,
+    /// the server's `versionUpdated`: a client from before it took a share change's time for a
+    /// version it first read then, filesync #385). Nothing is written where it has that time.
     pub fn confirm_removed(&self, at: RemoteRef, removed_at: i64) -> Result<()> {
         self.prep(
             "UPDATE removed SET removed_at = ?3 \
-             WHERE file_id = ?1 AND version_tag = ?2 AND removed_at IS NULL",
+             WHERE file_id = ?1 AND version_tag = ?2 AND removed_at IS NOT ?3",
         )?
         .execute(params![
             at.file_id.0.as_bytes(),

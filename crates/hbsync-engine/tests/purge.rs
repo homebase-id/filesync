@@ -949,6 +949,36 @@ fn drive_state(db: &std::cell::RefCell<StateDb>) -> common::Res<DriveState> {
     })?)
 }
 
+/// A client from before the server's `versionUpdated` kept a share change's time for a removal
+/// it first read after it (filesync #385). Upgraded, it reads the whole feed again once (the
+/// state DB's migration 28 asks for it), and the removal takes the server's time: its 30 days
+/// count from the removal again.
+#[test]
+fn the_upgrades_reread_heals_a_removal_time_from_before_version_times() -> common::Res<()> {
+    let server = server();
+    let x = seed(&server, "x.txt")?;
+    let live = server.lock().map_err(|_| "poisoned")?.header(x)?;
+    remove_on_server(&server, &live);
+    let remote = FakeRemote::new(server.clone());
+    let db = pulled(&remote)?;
+    let removed = server.lock().map_err(|_| "poisoned")?.header(x)?;
+    let (node, right) = (node_of(&removed), removed.changed_at.ok_or("no time")?);
+    let held = || -> common::Res<Option<i64>> {
+        let row = db.borrow_mut().read(|s| s.removed_by_node(node))?;
+        Ok(row.ok_or("not in Recently deleted")?.removed_at)
+    };
+    assert_eq!(held()?, Some(right));
+    // As such a client left it: the time of a share given five seconds on.
+    db.borrow_mut()
+        .write(|s| s.account().confirm_removed(removed.at(), right + 5_000))?;
+    assert_eq!(held()?, Some(right + 5_000));
+    db.borrow_mut().write(|s| s.account().start_reread())?;
+    feed::pull(|| db.borrow_mut(), &remote, 1000, &mut None)?;
+    assert_eq!(held()?, Some(right), "the server's time");
+    assert!(!db.borrow_mut().read(|s| s.rereading())?, "read again once");
+    Ok(())
+}
+
 /// A re-read asks the server about what the feed didn't show; one it can't tell about now (a
 /// broken connection) is kept and asked again at the next pull, the re-read open until then.
 #[test]
