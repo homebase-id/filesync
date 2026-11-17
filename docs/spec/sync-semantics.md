@@ -201,7 +201,12 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    With no local move in it (the drive took two devices' moves, each folder into the other),
    the lowest id goes back to its place on the drive, else in the base, and to the top where
    that would close the cycle again, under its name (reconcile
-   `a_cycle_with_no_local_move_puts_the_lowest_at_the_top`).
+   `a_cycle_with_no_local_move_puts_the_lowest_at_the_top`). What is in a cycle the drive
+   itself holds (another writer's) is filtered as anywhere once its folder is connected again
+   (§10: no mask judges what the drive doesn't connect to the top): an item at a place this
+   device doesn't sync stays out of the plan, as below an orphan recovered. Brought in, it
+   read as an item the device stopped syncing and left the drive (engine and simulator
+   `what_a_cycle_on_the_drive_holds_is_filtered_as_anywhere`, milestone seed 829).
 3. **No orphans.** A live node whose merged parent is deleted resurrects the parent chain:
    - remote-deleted parent → restored remotely (still removed) or re-created with the same
      node id and its base name (deleted for good);

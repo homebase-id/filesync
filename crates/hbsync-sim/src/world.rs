@@ -1769,6 +1769,28 @@ mod tests {
         assert_eq!(sim.local_paths(1), ["a"]);
     }
 
+    /// A folder another writer put in itself on the drive is taken out of the cycle by the
+    /// first client that plans with it. What is in it was judged by no mask while the drive
+    /// didn't connect it to the top: a state folder's name and junk there come to no client
+    /// all the same, and no client takes them off the drive (brought in, each read as an item
+    /// the client stopped syncing: the engine's milestone seed 829).
+    #[test]
+    fn what_a_cycle_on_the_drive_holds_is_filtered_as_anywhere() {
+        let mut sim = Sim::new(2).without_ignore_rules().with_narrow_check();
+        let [cycle, b, state, junk] = [(); 4].map(|()| sim.ids.fresh());
+        sim.server.put(cycle, NodeState::folder(cycle, "loop"));
+        for (node, name) in [(b, "b"), (state, ".hbsync"), (junk, "Thumbs.db")] {
+            let file = NodeState::file(cycle, name, sim.new_blob());
+            sim.server.put(node, file);
+        }
+        assert!(sim.quiesce(10));
+        sim.check().unwrap_or_else(|e| panic!("{e}"));
+        let on_drive = ["loop", "loop/.hbsync", "loop/Thumbs.db", "loop/b"];
+        assert_eq!(sim.server_paths(), on_drive);
+        assert_eq!(sim.local_paths(0), ["loop", "loop/b"]);
+        assert_eq!(sim.local_paths(1), ["loop", "loop/b"]);
+    }
+
     /// A delete here that loses (another device edited the file) settles nothing of what other
     /// clients did to its tags: a removal and an addition client 1 hasn't synced yet still
     /// count. Of the deleting client's own, only an add sent up stays: the drive has it. One

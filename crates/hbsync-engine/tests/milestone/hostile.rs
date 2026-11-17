@@ -347,6 +347,15 @@ fn randomized_hostile_writer() -> R {
     Ok(())
 }
 
+/// Seed 829, kept: a file named as the state folder in a folder the writer put in itself. The
+/// client that took the folder out of the cycle brought the file in, unjudged by the mask, then
+/// took it off the drive as an item it stopped syncing (§6.2; engine
+/// `what_a_cycle_on_the_drive_holds_is_filtered_as_anywhere`).
+#[test]
+fn a_filtered_name_in_a_cycle_stays_on_the_drive() -> R {
+    hostile_seed(829).map(|_| ())
+}
+
 /// One seed of [`randomized_hostile_writer`]: what the writer did.
 fn hostile_seed(seed: u64) -> Res<Hostile> {
     let server = server();

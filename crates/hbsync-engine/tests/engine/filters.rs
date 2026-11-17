@@ -108,6 +108,62 @@ fn a_state_folder_below_the_top_is_left_alone() -> R {
     Ok(())
 }
 
+/// A folder another writer put in itself on the drive is connected to the top by the first
+/// device that sees it (§6.2). What is in it is filtered as anywhere (§10): no mask judged it
+/// while the drive had it in a cycle. A state folder's name, junk and an ignored item neither
+/// come to that device nor leave the drive for it (brought in, each read as an item the
+/// device stopped syncing: milestone seed 829).
+#[test]
+fn what_a_cycle_on_the_drive_holds_is_filtered_as_anywhere() -> R {
+    use hbsync_remote::NodeMeta;
+    use hbsync_types::schema::NodeContent;
+    use hbsync_types::{NodeId, NodeKind};
+    let server = server();
+    let mut a = Client::with_config(&server, "a", ignoring("*.log\n"))?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("readme.txt", "r")?;
+    a.sync()?;
+    b.sync()?;
+    let names = ["keep.txt", ".hbsync", "Thumbs.db", "run.log"];
+    {
+        let cycle = NodeId::new();
+        let meta = NodeMeta {
+            node: cycle,
+            parent: cycle,
+            kind: NodeKind::Folder,
+            content: NodeContent::folder("loop"),
+            removed: false,
+        };
+        let mut srv = server.lock().map_err(|_| "poisoned")?;
+        srv.write_unchecked(None, &meta, None)?;
+        for name in names {
+            let algorithm = hbsync_fileio::HashAlgorithm::Blake3;
+            srv.seed_file(cycle, name, name.as_bytes(), algorithm)?;
+        }
+    }
+    for _ in 0..2 {
+        a.sync()?;
+        b.sync()?;
+    }
+    let kept = ["loop/", "loop/keep.txt = keep.txt", "readme.txt = r"];
+    assert_eq!(a.tree_text(""), kept);
+    let all = [
+        "loop/",
+        "loop/keep.txt = keep.txt",
+        "loop/run.log = run.log",
+        "readme.txt = r",
+    ];
+    assert_eq!(b.tree_text(""), all);
+    let srv = server.lock().map_err(|_| "poisoned")?;
+    for name in names {
+        let live = srv
+            .live()
+            .any(|h| h.state().is_some_and(|s| s.name == name));
+        assert!(live, "{name} taken off the drive");
+    }
+    Ok(())
+}
+
 #[test]
 fn ignored_items_stay_on_their_device_and_keep_their_folder() -> R {
     let server = server();
