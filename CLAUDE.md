@@ -30,7 +30,9 @@ read says so itself (`fileDeleted`) from odin-core PR #2141 (merged as aa560aea9
 server without it costs one header read to learn the same. When a node was written or removed
 is read from the header's `versionUpdated` (a share change moves `updated`, not it) from odin-core
 PR #2143 (merged as 5e4cd493f, not released yet; filesync #385): a server without it tells no
-such time, so nothing there is taken along by a removal or purged. Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
+such time, so nothing there is purged, and a removed folder takes along all that is live below
+it, what was written after its removal too (**[verified]** `along::by_removal`): don't release
+the client to an identity before its server has it. Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
 sync semantics §10): built-in junk, and per-device ignore rules in `.hbsync/ignore` (gitignore
 syntax, picked up a second after an edit, within a minute without a watcher); an ignored item
 is kept on its device only.

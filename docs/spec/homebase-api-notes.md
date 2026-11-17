@@ -601,9 +601,11 @@ server answers the rest, to a token their server made for this identity's connec
   API only (and to another identity's server, which relays it to its own V2 callers): in a
   header's `fileMetadata`, in a minimal row and a socket event's `fileRef`, and in the answers
   to a create, an update, the archival-status batch and a soft delete (single and batch);
-  left out where there is none (the "no longer shared" tombstone). A file written before the
-  server had the field answers its `modified` of then **[inferred]** (odin-core's migration,
-  as its PR says). It is `RemoteHeader::changed_at` (`wire::Times`): what the client judges
+  left out where there is none: the "no longer shared" tombstone, and a row whose column is
+  0, which only a server still on the older code can have written while the newer one ran
+  (the column's default; its next write sets it). A file written before the server had the
+  field answers its `modified` of then (**[verified]**
+  `TableDriveMainIndexMigrationV202611171200`: the migration copies `modified`). It is `RemoteHeader::changed_at` (`wire::Times`): what the client judges
   "written after its folder's removal" and a removed node's 30 days by, on first sight too
   (filesync #385, closed by it). The feed's order and cursor stay on `modified`.
   A tombstone's age (when it may be deleted hard) doesn't move: withdrawing a share of a deleted

@@ -264,7 +264,7 @@ impl ReadTx<'_> {
     }
 
     /// What was removed before `at_ms` (Unix ms), oldest first; an open time isn't, nor a 0 (a
-    /// header without a time: a server's `updated` of 0).
+    /// header without a time: a server's time of 0).
     pub fn removed_before(&self, at_ms: i64) -> Result<Vec<RemovedRow>> {
         self.removed_rows(
             &format!(

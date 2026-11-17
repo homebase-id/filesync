@@ -320,8 +320,9 @@ included (service managers restart it then).
   out the writes made with this computer's own token (its client registration), so what is
   announced is another computer's (or the phone's) doing. Nothing waits for an echo, and no
   feed is read for them: the executor records each write from its answer (version, token,
-  and `updated`, the server's time the feed shows for it: a version's time, an own
-  removal's for Recently deleted and the purge). An answer without `updated` (null: only
+  and `versionUpdated`, the server's time of that version, as its header and its row in the
+  feed show it: an own removal's for Recently deleted and the purge). An answer without
+  `versionUpdated` (null: only
   for a peer-only update, which this client never makes) leaves that time unknown, a
   removal's shown as just now and never purged, until a feed read the client makes anyway
   passes that row; it never asks for a read. The rows of its own writes stay in the feed

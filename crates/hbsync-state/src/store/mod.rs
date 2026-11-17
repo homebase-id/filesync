@@ -176,7 +176,7 @@ impl RemovedRow {
     }
 
     /// Whether it was removed before `before` (Unix ms, the server's): a time known, and not 0
-    /// (a header without one, a server's `updated` of 0: never old). The SQL of
+    /// (a header without one, a server's time of 0: never old). The SQL of
     /// [`ReadTx::removed_before`](crate::ReadTx::removed_before) says the same.
     pub fn removed_before(&self, before: i64) -> bool {
         self.removed_at.is_some_and(|at| at > 0 && at < before)

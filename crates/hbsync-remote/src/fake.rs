@@ -330,7 +330,7 @@ impl FakeServer {
     }
 
     /// A create by `writer`, answered as Homebase answers it: the file as written, with its
-    /// token and the write's time (`updated`, odin-core #1971).
+    /// token and the version's time (`versionUpdated`, odin-core #1971 and PR #2143).
     fn create_by(
         &mut self,
         writer: Option<ClientId>,
