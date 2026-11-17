@@ -1037,7 +1037,8 @@ prepared folder, which the next try makes anew.
   one goes on record (`shares::adopt`, runner
   `a_restored_folder_of_shares_is_taken_as_the_folder_opens`). Not synced: the state DB has
   no item of its name at the top, and none with its file id anywhere (a synced folder
-  renamed while nothing ran). Never a synced folder, and with two to choose from neither:
+  renamed while nothing ran; an id the DB has for an item that is at its place with another
+  id tells nothing: after a restore every id in the DB is from before). Never a synced folder, and with two to choose from neither:
   those sync as the user's own. With nothing on record nothing is taken, and nothing looked
   at.
 - A folder at the top this user may not look into counts as holding no marker (the walk
