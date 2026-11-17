@@ -110,6 +110,17 @@ impl Executor<'_> {
         // tracks for another node is never taken over.
         let adopt = self.occupant(&target)?.is_none()
             && fs::symlink_metadata(&abs).is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink());
+        // Never a folder at the top that holds what other identities share, which the filter
+        // this run was planned with doesn't know yet (it came, or took this name, since): what
+        // is on the drive under its name would be put into it. The folder is opened again
+        // with it left out before the next sync.
+        if adopt && target.depth() == 1 {
+            match hbsync_local::holds_marker(&abs) {
+                Ok(false) => {}
+                Ok(true) => return Ok(Outcome::Retry("a folder of shares has the name".into())),
+                Err(e) => return Ok(io_outcome(e)),
+            }
+        }
         let prior = if adopt {
             tags::read(&abs)
         } else {

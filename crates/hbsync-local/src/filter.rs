@@ -91,7 +91,9 @@ pub fn is_state_dir(name: &str) -> bool {
 /// The folders at the top of `root` that hold what other identities share with the account, by
 /// name: the real folders there (no link) holding a [`crate::layout::SHARED_MARKER`], a file.
 /// Found by the marker, never by a name: the user may rename one. None in a root that isn't
-/// there. A folder that can't be looked into counts as none: it can't be used as one either.
+/// there. An entry gone since it was listed is skipped; a marker that can't be looked for
+/// ([`holds_marker`]) is an error, as a root that can't be listed: a folder of shares taken
+/// for a plain one would be sent.
 ///
 /// One listing of the root and one `stat` per folder at its top.
 pub fn shared_folders(root: &Path) -> io::Result<Vec<String>> {
@@ -103,20 +105,35 @@ pub fn shared_folders(root: &Path) -> io::Result<Vec<String>> {
     let mut found = Vec::new();
     for entry in entries {
         let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
+        match entry.file_type() {
+            Ok(kind) if kind.is_dir() => {}
+            Ok(_) => continue,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e),
         }
         // One whose name isn't Unicode is never synced anyway ([`crate::SkipReason`]).
         let Ok(name) = entry.file_name().into_string() else {
             continue;
         };
-        let marker = crate::layout::shared_marker(&entry.path());
-        if !is_state_dir(&name) && std::fs::symlink_metadata(marker).is_ok_and(|m| m.is_file()) {
+        if !is_state_dir(&name) && holds_marker(&entry.path())? {
             found.push(name);
         }
     }
     found.sort_unstable();
     Ok(found)
+}
+
+/// Whether the folder at `dir` holds a [`crate::layout::SHARED_MARKER`], a file: at a sync
+/// folder's top, what makes it a folder that holds what other identities share. A folder that
+/// isn't there, or that this user may not look into (the walk can't read it either), holds
+/// none; any other error is one: the marker may be there.
+pub fn holds_marker(dir: &Path) -> io::Result<bool> {
+    use io::ErrorKind::{NotADirectory, NotFound, PermissionDenied};
+    match std::fs::symlink_metadata(crate::layout::shared_marker(dir)) {
+        Ok(meta) => Ok(meta.is_file()),
+        Err(e) if matches!(e.kind(), NotFound | NotADirectory | PermissionDenied) => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// Whether `name` is on the built-in junk list (at any depth, in any case).
@@ -311,10 +328,13 @@ impl Filter {
 
     /// `name` as names at the top compare with a folder's that holds what other identities
     /// share: caseless and normalization-insensitive (`name_key`) where the volume ignores
-    /// case, as it is elsewhere.
+    /// case, as it is elsewhere. macOS takes a name in any normalization for the same one on
+    /// a volume that tells case apart too: in NFC there.
     fn top_key<'a>(&self, name: &'a str) -> Cow<'a, str> {
         if self.case_insensitive {
             Cow::Owned(name_key(name))
+        } else if cfg!(target_os = "macos") && !name.is_ascii() {
+            Cow::Owned(hbsync_platform::name::nfc(name))
         } else {
             Cow::Borrowed(name)
         }
@@ -408,10 +428,14 @@ impl Filter {
         if self.shared.is_empty() {
             return false;
         }
-        // An ASCII name's key is the name in lower case: asked of every event's path, so
-        // without building one.
-        if self.case_insensitive && name.is_ascii() {
-            return self.shared.iter().any(|s| s.eq_ignore_ascii_case(name));
+        // An ASCII name's key is the name, in lower case where the volume ignores case: asked
+        // of every event's path, so without building one.
+        if name.is_ascii() {
+            let same = |s: &String| match self.case_insensitive {
+                true => s.eq_ignore_ascii_case(name),
+                false => s == name,
+            };
+            return self.shared.iter().any(same);
         }
         let key = self.top_key(name);
         self.shared.iter().any(|s| *s == key)
@@ -651,6 +675,33 @@ mod tests {
         Ok(())
     }
 
+    /// A folder that isn't there, or that can't be looked into, holds no marker; a marker that
+    /// can't be looked for is an error, never "none": a folder of shares taken for a plain
+    /// one would be sent.
+    #[test]
+    fn a_marker_that_cant_be_looked_for_isnt_none() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path();
+        std::fs::write(root.join("file"), "")?;
+        assert!(!holds_marker(&root.join("missing"))?);
+        assert!(!holds_marker(&root.join("file"))?);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert!(holds_marker(&root.join("x".repeat(300))).is_err());
+            let closed = root.join("closed");
+            std::fs::create_dir(&closed)?;
+            std::fs::write(crate::layout::shared_marker(&closed), "")?;
+            std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000))?;
+            // Root looks into anything: nothing to see then.
+            let seen = holds_marker(&closed)?;
+            let listed = shared_folders(root)?;
+            std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o700))?;
+            assert_eq!(listed.is_empty(), !seen);
+        }
+        Ok(())
+    }
+
     /// Where the volume ignores case, the folder's name in any case or spelling is the folder.
     #[test]
     fn a_folder_of_shares_holds_its_name_as_the_volume_compares_names() {
@@ -665,6 +716,21 @@ mod tests {
         }
         assert!(f.in_folder("", "Shared-2", true).is_sync());
         assert!(f.in_folder("a", "Shared", true).is_sync());
+
+        // Where it tells case apart, byte for byte; on macOS in any normalization.
+        let exact = Filter::from_rules("", false).expect("valid");
+        let exact = exact.with_shared(["Partage\u{301}", "Shared"]);
+        assert_eq!(exact.in_folder("", "Shared", true), Verdict::Excluded);
+        assert!(exact.in_folder("", "shared", true).is_sync());
+        assert_eq!(
+            exact.in_folder("", "Partage\u{301}", true),
+            Verdict::Excluded
+        );
+        assert!(exact.in_folder("", "partage\u{301}", true).is_sync());
+        assert_eq!(
+            exact.in_folder("", "Partag\u{e9}", true).is_sync(),
+            !cfg!(target_os = "macos")
+        );
     }
 
     #[test]

@@ -964,13 +964,24 @@ shares, read when the folder is opened and again as rule 4 says (`shared_folders
 `Filter::load`). The rule is the filter's, so it holds at the top of every folder this
 client syncs, not the account's alone.
 
-- Its name is excluded at the top, as the volume compares names, and by rules 1 and 2: it is
+- Its name is excluded at the top, as the volume compares names (on macOS in any
+  normalization, whatever the volume's case), and by rules 1 and 2: it is
   neither walked nor watched for changes, nothing in it is sent, and an item of its name at
   the top of the drive (a folder or a file, another device's) is masked on this device while
   the folder holds the name: not downloaded, not deleted from here, and nothing on the drive
   changes. It comes once the folder of shares has another name (sim
   `a_folder_of_the_same_name_on_the_drive_comes_once_the_folder_of_shares_yields`); giving
-  way is the daemon's to do (`docs/spec/daemon.md`).
+  way is the daemon's to do (`docs/spec/daemon.md`). Where the volume ignores case, names
+  compare as everywhere in the client (`name_key`: `ß` as `ss`), which is stricter than the
+  volume: a folder of the user's own beside it that the volume tells apart and the client
+  doesn't is left out with it (a known limit, the daemon's giving way to mend).
+- One the filter doesn't know yet (it came, or took another name, while a sync was running;
+  the filter is read again before the next sync) is left alone as well, by its marker on
+  disk: the walk looks for the marker in each folder at the top before it reports or enters
+  it (one `stat` per folder there per listing of the top), and a folder of the drive is never
+  made out of a folder that holds one (the drive's waits, and is masked once the filter is
+  read). Nothing in it is sent, and the drive's folder of its name isn't put into it (engine
+  `a_folder_of_shares_the_filter_doesnt_know_yet_is_neither_sent_nor_merged`).
 - A marker in a folder at the top that is synced makes it a folder of shares: by rule 1 it
   leaves the drive and the other devices, and stays here (the mass-delete guard applies, and
   Recently deleted has it). A copy of the folder of shares at the top holds the marker too,
@@ -980,8 +991,10 @@ client syncs, not the account's alone.
   is in it; where the drive has an item of its name at the top, the two meet as a name clash
   (§6), and one gets a conflict name (sim
   `a_marker_lost_makes_the_folder_plain_and_one_gained_takes_it_off_the_drive`).
-- A folder at the top that can't be read counts as holding no marker. A top that can't be
-  listed stops the folder's sync, failing, till it can, as a rules file that can't be read.
+- A folder at the top this user may not look into counts as holding no marker (the walk
+  can't read it either). A top that can't be listed, or a marker that can't be looked for
+  (an I/O error: it may be there, and a folder of shares taken for a plain one would be
+  sent), stops the folder's sync, failing, till it can, as a rules file that can't be read.
 
 **Rules:**
 1. **Local.** The walk neither reports nor enters filtered entries (nothing is hashed), and the

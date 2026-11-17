@@ -191,6 +191,53 @@ fn a_file_moved_into_a_folder_one_device_ignores_leaves_that_device_only() -> R 
     Ok(())
 }
 
+/// A folder of shares (§10) that came while a sync was running: the filter the run goes by
+/// doesn't know it yet, and the drive has a folder of its name. Nothing in it is sent, and the
+/// drive's folder isn't put into it; with the filter read again the drive's folder is left
+/// out, and it comes once the folder of shares has another name.
+#[test]
+fn a_folder_of_shares_the_filter_doesnt_know_yet_is_neither_sent_nor_merged() -> R {
+    use hbsync_local::{Filter, layout::shared_marker};
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    b.write("Team/cloud.txt", "from the drive")?;
+    b.write("readme.txt", "r")?;
+    b.sync()?;
+
+    a.write("Team/tom/theirs.txt", "shared with me")?;
+    fs::write(shared_marker(&a.root.join("Team")), "")?;
+    a.sync()?;
+    let mine = [
+        ".hbsync-shared = ",
+        "tom/",
+        "tom/theirs.txt = shared with me",
+    ];
+    assert_eq!(a.tree_text("Team"), mine, "the drive's folder was merged");
+    assert_eq!(a.read_text("readme.txt")?, "r");
+    b.sync()?;
+    let drive = ["Team/", "Team/cloud.txt = from the drive", "readme.txt = r"];
+    assert_eq!(b.tree_text(""), drive, "what is shared was sent");
+
+    let load = |cfg: &mut hbsync_engine::EngineConfig| {
+        let filter = Filter::load(&cfg.folder.root, false).expect("the rules");
+        cfg.folder.filter = std::sync::Arc::new(filter);
+    };
+    assert!(restart_with(&mut a, load)?, "the filter changed");
+    let report = a.sync()?;
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
+    assert_eq!(a.tree_text("Team"), mine);
+
+    fs::rename(a.root.join("Team"), a.root.join("Team-2"))?;
+    assert!(restart_with(&mut a, load)?, "the filter changed");
+    a.sync()?;
+    assert_eq!(a.read_text("Team/cloud.txt")?, "from the drive");
+    assert_eq!(a.read_text("Team-2/tom/theirs.txt")?, "shared with me");
+    b.sync()?;
+    assert_eq!(b.tree_text(""), drive);
+    Ok(())
+}
+
 /// `c` restarted with its config changed by `tweak`, as at a start-up: returns whether the
 /// filter changed.
 fn restart_with(

@@ -884,6 +884,27 @@ fn a_folder_of_shares_never_reaches_the_db() -> R {
     Ok(())
 }
 
+/// A folder of shares that came since the filter was read (a sync was running) is left alone
+/// as well, by its marker: neither its own rescan nor its parent's, nor a whole walk, brings
+/// what is in it into the DB.
+#[test]
+fn a_folder_of_shares_the_filter_doesnt_know_yet_never_reaches_the_db() -> R {
+    let mut f = Fixture::new()?;
+    f.write("mine/notes.txt", b"n")?;
+    f.scan()?;
+    f.write("Team/tom/theirs.txt", b"t")?;
+    f.write("Team/.hbsync-shared", b"")?;
+    assert!(f.opts.filter.shared().is_empty());
+    let root = f.root().to_path_buf();
+    let dirs = [RelPath::new("Team/tom")?, RelPath::root()];
+    let report = rescan_dirs(&mut f.db, &root, &dirs, &f.opts)?;
+    assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
+    let (report, dirty) = f.scan()?;
+    assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
+    assert!(dirty.is_empty());
+    Ok(())
+}
+
 /// A tag change is a change of its own: the scan reads the tags and marks the node dirty,
 /// without the bytes having changed. Tags that couldn't be read are read again.
 #[test]
