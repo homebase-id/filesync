@@ -97,13 +97,13 @@ fn misplaced(header: &RemoteHeader) -> Option<String> {
 }
 
 /// A version the store has already (this device's own write coming back, a page applied
-/// again, or a share given or withdrawn, which moves the file's `updated` and keeps its
+/// again, or a share given or withdrawn, which moves the file in the feed and keeps its
 /// version) changes nothing but what the server says better: the file's `token` where the
 /// header gives one (an earlier login's may not open), and a time the store doesn't have yet:
 /// a removal's, and that of a version in a removed folder, where it decides whether it went
-/// with it (node schema, Recently deleted). A time the store has stays: a version's time is
-/// the one first read with it, never a later `updated` of the same version. No change of the
-/// node, so nothing to reconcile.
+/// with it (node schema, Recently deleted). A time the store has stays, unwritten: a version
+/// has one time, whenever it is read ([`RemoteHeader::changed_at`]). No change of the node, so
+/// nothing to reconcile.
 pub(crate) fn apply_known(
     s: AccountTx<'_>,
     r: &ChangeRef,
@@ -242,11 +242,11 @@ mod tests {
         Ok(())
     }
 
-    /// A known version read again with a later time (a share given or withdrawn moves a
-    /// file's `updated` and keeps its version) keeps the time first read with it, live or
-    /// removed: only a new version is a write.
+    /// A known version read again keeps the time the store has for it, live or removed, and
+    /// nothing is written: a version has one time (the server's `versionUpdated`), so another
+    /// one coming with it is no write. Only a new version is.
     #[test]
-    fn a_later_time_of_a_known_version_is_no_write() -> Result<(), StateError> {
+    fn a_known_version_read_again_keeps_its_time() -> Result<(), StateError> {
         let mut db = StateDb::open_in_memory()?;
         let node = NodeId::new();
         let mut header = RemoteHeader {

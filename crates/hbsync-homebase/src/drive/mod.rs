@@ -374,15 +374,17 @@ fn drive_answer(client: &Client) -> Result<DriveAnswer, HomebaseError> {
 }
 
 /// A create's or update's answer (`CreateFileResult`, `UpdateFileResult`): the version written
-/// and its time, the one the feed shows for it (`updated`, odin-core #1971; null only for a
-/// peer-only update, which this client never makes).
+/// and its time (`versionUpdated`, odin-core PR #2143: the header's, [`wire::Times`]; null only
+/// for a peer-only update, which this client never makes). Its `updated` isn't read: the
+/// file's place in the feed after the request, the same but for what the request changed
+/// besides (**[verified]** `WriteTimes.Of`).
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WriteResult {
     file_id: Uuid,
     new_version_tag: Uuid,
     #[serde(default)]
-    updated: Option<i64>,
+    version_updated: Option<i64>,
 }
 
 pub use hbsync_remote::BATCH_FILES;
@@ -403,14 +405,15 @@ struct SoftDeleted {
     /// `None`: deleted, a tombstone already too. Else why it stayed, as `OdinClientErrorCode`'s
     /// camelCase name.
     error_code: Option<String>,
-    /// The tombstone's time (Unix ms) as the feed shows it; `None` when it stayed.
-    updated: Option<i64>,
+    /// The tombstone's time (Unix ms), as its header's `versionUpdated`; `None` when it stayed.
+    #[serde(default)]
+    version_updated: Option<i64>,
 }
 
 /// One file's answer to a soft delete: its tombstone's time.
 fn soft_deleted(answer: &SoftDeleted) -> Result<Option<i64>> {
     match &answer.error_code {
-        None => Ok(answer.updated),
+        None => Ok(answer.version_updated),
         Some(code) => Err(refused("soft delete", code)),
     }
 }
@@ -439,8 +442,9 @@ struct ArchivalSet {
     /// The version after it; the one asked for when the file was already so. `None` with an
     /// error.
     new_version_tag: Option<Uuid>,
-    /// Its time after it (Unix ms), as the feed shows it.
-    updated: Option<i64>,
+    /// That version's time (Unix ms), as its header's `versionUpdated`.
+    #[serde(default)]
+    version_updated: Option<i64>,
     error_code: Option<String>,
 }
 
@@ -461,7 +465,7 @@ fn archival_set(answer: &ArchivalSet, asked: &Target) -> Result<Written> {
             },
             token: asked.token.clone(),
         },
-        changed_at: answer.updated,
+        changed_at: answer.version_updated,
         content: None,
     })
 }
@@ -746,7 +750,7 @@ impl HomebaseRemote {
         let WriteResult {
             file_id,
             new_version_tag,
-            updated,
+            version_updated,
         } = self
             .client
             .upload(method, &path, Multipart::new(boundary, parts))
@@ -759,7 +763,7 @@ impl HomebaseRemote {
                 },
                 token: Some(key.token(self.client.key())),
             },
-            changed_at: updated,
+            changed_at: version_updated,
             // The plaintext's hash, as its hash part sent it (the server took it).
             content: sending.as_ref().map(|s| finish(&s.plain).0),
         })
@@ -1732,7 +1736,8 @@ mod tests {
             .collect();
         let new = Uuid::new_v4();
         let answer: BatchAnswer<ArchivalSet> = serde_json::from_value(json!({"results": [
-            {"fileId": asked[0].at.file_id.0, "newVersionTag": new, "updated": 1_760_000_000_123i64,
+            {"fileId": asked[0].at.file_id.0, "newVersionTag": new, "updated": 1_760_000_000_999i64,
+             "versionUpdated": 1_760_000_000_123i64,
              "errorCode": null},
             {"fileId": asked[1].at.file_id.0, "newVersionTag": null, "updated": null,
              "errorCode": "versionTagMismatch"},
@@ -1770,7 +1775,8 @@ mod tests {
     fn soft_delete_answers_read_per_file() -> std::result::Result<(), Box<dyn std::error::Error>> {
         let ids: Vec<Uuid> = (0..4).map(|_| Uuid::new_v4()).collect();
         let answer: BatchAnswer<SoftDeleted> = serde_json::from_value(json!({"results": [
-            {"fileId": ids[0], "errorCode": null, "updated": 1_760_000_000_123i64,
+            {"fileId": ids[0], "errorCode": null, "updated": 1_760_000_000_999i64,
+             "versionUpdated": 1_760_000_000_123i64,
              "recipientStatus": {}},
             {"fileId": ids[1], "errorCode": "versionTagMismatch", "updated": null,
              "recipientStatus": {}},

@@ -176,7 +176,7 @@ pub struct Target {
 }
 
 /// A write's answer: the file as written (the target of its next write), and the server's
-/// time of that version (Unix ms, Homebase's `updated`, what the feed shows for it), if the
+/// time of that version (Unix ms, Homebase's `versionUpdated`, what its header shows), if the
 /// answer gave it; and for a write with a payload, the content hash of the bytes it sent (an
 /// upload hashed on send learns it only so).
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -24,7 +24,7 @@ pub(crate) struct Server {
     /// Recently deleted: out of the tree, with their bytes, until restored or purged.
     pub(crate) removed: BTreeMap<NodeId, ServerNode>,
     /// When each node went to Recently deleted (the server's time of that write: a header's
-    /// `updated`, [`time`]).
+    /// `versionUpdated`, [`time`]).
     pub(crate) removed_at: BTreeMap<NodeId, i64>,
     /// Each node's last removal: its folder then, its time and kind. Kept after the purge, so
     /// what was removed apart from its folder is told whether it is still listed or not
@@ -52,7 +52,8 @@ pub const TRACE: i64 = 24;
 pub const PURGE_EVERY: i64 = TRACE / 2;
 
 /// The server's time of the write that made `version`: every write takes the next id, so ids
-/// are the server's clock (Homebase's `updated`).
+/// are the server's clock (Homebase's `versionUpdated`: a share given or withdrawn makes no
+/// version, so it moves no time here).
 pub(crate) fn time(version: VersionTag) -> i64 {
     version.0.as_u128() as i64
 }

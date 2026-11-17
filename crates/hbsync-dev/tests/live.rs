@@ -157,14 +157,29 @@ fn a_change_on_the_drive_is_announced() -> R {
         }
         let (inside, _) = bench.folder("inside")?;
 
-        // Another client's write: announced.
-        let theirs = other.create(&folder("theirs", inside.node), None)?.at();
+        // Another client's write: announced, with its version's time (`versionUpdated`, as
+        // the write's answer has it: odin-core PR #2143).
+        let written = other.create(&folder("theirs", inside.node), None)?;
+        let theirs = written.at();
         bench.track(theirs.file_id);
+        assert!(
+            written.changed_at.is_some(),
+            "a write's answer without a time"
+        );
         let is = |at: hbsync_types::RemoteRef| move |e: &Event| matches!(e, Event::Changed(Some(r)) if r.at() == at && !r.deleted);
-        let took = wait(&quiet_rx, Duration::from_secs(15), &is(theirs))?
-            .ok_or("another client's write wasn't announced")?;
+        let at_time = move |e: &Event| matches!(e, Event::Changed(Some(r)) if r.at() == theirs && !r.deleted && r.changed_at == written.changed_at);
+        let took = wait(&quiet_rx, Duration::from_secs(15), &at_time)?
+            .ok_or("another client's write wasn't announced with its version's time")?;
         assert!(took < Duration::from_secs(2), "announced after {took:?}");
         println!("another client's write announced {took:?} after it returned");
+
+        // Its delete: a tombstone, announced with its time (without one it would be taken
+        // for a delete for good).
+        let gone_at = other.delete(&doomed(&[theirs]))?.single()?;
+        assert!(gone_at.is_some(), "a delete's answer without a time");
+        let tombstone = move |e: &Event| matches!(e, Event::Changed(Some(r)) if r.file_id == theirs.file_id && r.deleted && r.changed_at == gone_at);
+        wait(&quiet_rx, Duration::from_secs(15), &tombstone)?
+            .ok_or("another client's delete wasn't announced with the tombstone's time")?;
 
         // This client's own: heard only by the subscription that asks for it.
         let mine = bench.folder("mine")?.1;
@@ -851,13 +866,13 @@ impl Remote for Counted {
     }
 }
 
-/// Each write's answer carries `updated`, the time the feed then shows for it (odin-core
-/// #1971): a create, a new version, a removal and a restore (PATCH), the archival-status batch,
+/// Each write's answer carries `versionUpdated`, the time the feed's row then shows for that
+/// version (odin-core #1971, PR #2143): a create, a new version, a removal and a restore (PATCH), the archival-status batch,
 /// and the soft-delete batch (the tombstone's, odin-core #1977). One file per kind, as the feed shows only a file's last write; their rows
 /// are read minimal from a cursor taken before. Prints a table.
 #[test]
 #[ignore = "needs a live identity (HBSYNC_LIVE)"]
-fn write_answers_carry_the_feeds_time() -> R {
+fn write_answers_carry_the_versions_time() -> R {
     let _drive = beside_others();
     use hbsync_homebase::drive::wire::{Shape, feed_query};
     use hbsync_remote::contract::{file, removed};
@@ -881,7 +896,7 @@ fn write_answers_carry_the_feeds_time() -> R {
             bench.track(written.at().file_id);
             Ok((meta, written))
         };
-        // (what, file, version, the answer's updated)
+        // (what, file, version, the answer's versionUpdated)
         let mut answers = Vec::new();
         let (_, created) = made("created")?;
         answers.push(("create (POST)", created.at(), created.changed_at));
@@ -926,7 +941,7 @@ fn write_answers_carry_the_feeds_time() -> R {
                 file_id: w.at().file_id,
                 version,
             },
-            r["updated"].as_i64(),
+            r["versionUpdated"].as_i64(),
         ));
         let (_, w) = made("deleted")?;
         let deleted = remote.delete(&doomed(&[w.at()]))?.single()?;
@@ -957,7 +972,7 @@ fn write_answers_carry_the_feeds_time() -> R {
                             .as_str()
                             .unwrap_or_default()
                             .replace('-', ""),
-                        row["updated"].as_i64(),
+                        row["versionUpdated"].as_i64(),
                     ),
                 );
             }
@@ -968,7 +983,7 @@ fn write_answers_carry_the_feeds_time() -> R {
         }
         println!(
             "{:<24} {:>15} {:>15} {:>8}",
-            "write", "answer updated", "feed updated", "equal"
+            "write", "answer", "feed row", "equal"
         );
         let mut unequal = Vec::new();
         for (what, at, answered) in &answers {
@@ -988,7 +1003,7 @@ fn write_answers_carry_the_feeds_time() -> R {
                 unequal.push(*what);
             }
         }
-        assert!(unequal.is_empty(), "not the feed's time: {unequal:?}");
+        assert!(unequal.is_empty(), "not the feed row's time: {unequal:?}");
         Ok(())
     })();
     bench.cleanup()?;

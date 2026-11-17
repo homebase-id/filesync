@@ -86,9 +86,13 @@ pub struct FileMetadata {
     #[serde(default)]
     pub is_encrypted: bool,
     pub payloads: Option<Vec<Payload>>,
-    /// Unix ms of the last change; `None` if the header doesn't say.
+    /// Unix ms of the last change; `None` if the header doesn't say. Read only where there
+    /// is no version ([`Times::of`]).
     #[serde(default)]
     pub updated: Option<i64>,
+    /// Unix ms of the write that gave it its `versionTag` ([`Times::changed_at`]).
+    #[serde(default)]
+    pub version_updated: Option<i64>,
     /// A shared file's key may be bound to it rather than to its file id
     /// (`CircleKey::file_key`).
     #[serde(default, deserialize_with = "lenient")]
@@ -272,9 +276,13 @@ pub struct FileRef {
     pub archival_status: i32,
     /// The parent node, as the header's: omitted when empty.
     pub group_id: Option<Uuid>,
-    /// Unix ms, as the header's `updated`; `None` if the row doesn't say.
+    /// Unix ms, as the header's `updated` (read as that one is); `None` if the row doesn't
+    /// say.
     #[serde(default)]
     pub updated: Option<i64>,
+    /// Unix ms, as the header's `versionUpdated`.
+    #[serde(default)]
+    pub version_updated: Option<i64>,
     /// A sync node's ([`FILE_TYPE_FOLDER`], [`FILE_TYPE_FILE`]), or another app's file on the
     /// drive.
     #[serde(default)]
@@ -291,7 +299,13 @@ impl FileRef {
 impl FileRef {
     /// As [`to_remote`] reads the same row's header ([`Times`]).
     pub(crate) fn to_ref(&self) -> ChangeRef {
-        let times = Times::of(&self.file_state, self.archival_status, self.updated);
+        let times = Times::of(
+            &self.file_state,
+            self.archival_status,
+            self.version_tag,
+            self.version_updated,
+            self.updated,
+        );
         ChangeRef {
             file_id: RemoteFileId(self.file_id),
             version: VersionTag(self.version_tag),
@@ -303,30 +317,39 @@ impl FileRef {
     }
 }
 
-/// What a row's state, status and `updated` say, read alike from a header and a minimal row.
+/// What a row's state, status and times say, read alike from a header and a minimal row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Times {
     pub deleted: bool,
     /// In Recently deleted: the status says whether it's removed, [`Times::changed_at`] when.
     pub removed: bool,
-    /// The header's `updated`, as [`RemoteHeader::changed_at`]: when the file last changed on
-    /// the drive, the server's time (odin-core's `record.modified`, **[verified]**
-    /// `FileMetadata.cs`). Its version's write, or a share given or withdrawn since, which
-    /// moves it and keeps the version (**[verified]** `TouchKeepingVersionTagAsync`); a
-    /// tombstone's too (when it may be deleted hard). A removed node's removal: no client
-    /// writes to a removed node (node schema), but a share change since moves it.
+    /// [`RemoteHeader::changed_at`]: the header's `versionUpdated` (odin-core PR #2143,
+    /// **[verified]** at 5e4cd493f: `DriveFileUtility.VersionUpdatedOf`, `FileRef`,
+    /// `ClientFileMetadata`). A share withdrawn, as its member reads it, is a tombstone
+    /// without a version and so without one (**[verified]** `NoLongerSharedTombstoneOf`): its
+    /// time is its `updated`, the withdrawal's.
     pub changed_at: Option<i64>,
 }
 
 impl Times {
-    /// A row whose `updated` is unknown has no time: removed, its removal's time is unknown (the
+    /// A row that doesn't say when has no time: removed, its removal's time is unknown (the
     /// newest when compared: never old enough to go without a trace).
-    pub(crate) fn of(file_state: &str, archival_status: i32, updated: Option<i64>) -> Times {
+    pub(crate) fn of(
+        file_state: &str,
+        archival_status: i32,
+        version_tag: Uuid,
+        version_updated: Option<i64>,
+        updated: Option<i64>,
+    ) -> Times {
         let deleted = file_state == "deleted";
         Times {
             deleted,
             removed: !deleted && archival_status == ARCHIVAL_REMOVED,
-            changed_at: updated,
+            changed_at: if deleted && version_tag.is_nil() {
+                updated
+            } else {
+                version_updated
+            },
         }
     }
 }
@@ -411,6 +434,8 @@ pub(crate) fn to_remote(header: FileHeader, keys: Keys<'_>) -> Result<RemoteHead
     let times = Times::of(
         &header.file_state,
         meta.app_data.archival_status,
+        meta.version_tag,
+        meta.version_updated,
         meta.updated,
     );
     let (parent, body, token) = match header.file_state.as_str() {
@@ -1129,7 +1154,8 @@ mod tests {
 
     #[test]
     fn the_status_decides_removal() -> R {
-        // A removal without `rm` (this client's, another app's): from the last change.
+        // A removal without `rm` (this client's, another app's): from its version's time (the
+        // fixture's `updated` is later: a share changed since).
         let mut other = fixture("file-node.json");
         other.file_metadata.app_data.archival_status = ARCHIVAL_REMOVED;
         let header = to_remote(as_stored(other)?, SHARED)?;
@@ -1143,7 +1169,8 @@ mod tests {
     }
 
     /// A minimal page's rows as odin-core #1967 sends them read as the same rows' headers do:
-    /// removed from the status at `updated`, a tombstone without times.
+    /// removed from the status at `versionUpdated` (a later `updated`, a share changed since,
+    /// isn't it), a tombstone with its own.
     #[test]
     fn minimal_rows_read_as_their_headers() -> R {
         let page: QueryBatchResponse = serde_json::from_str(
@@ -1151,12 +1178,12 @@ mod tests {
                 {"fileId": "11111111-1111-1111-1111-111111111111", "fileState": "active",
                  "fileType": 1, "dataType": 0, "archivalStatus": 2,
                  "versionTag": "22222222-2222-2222-2222-222222222222",
-                 "created": 5, "updated": 9, "fileByteCount": 3,
+                 "created": 5, "updated": 12, "versionUpdated": 9, "fileByteCount": 3,
                  "uniqueId": "33333333-3333-3333-3333-333333333333"},
                 {"fileId": "44444444-4444-4444-4444-444444444444", "fileState": "deleted",
                  "fileType": 1, "dataType": 0, "archivalStatus": 0,
                  "versionTag": "55555555-5555-5555-5555-555555555555",
-                 "created": 5, "updated": 10, "fileByteCount": 0},
+                 "created": 5, "updated": 10, "versionUpdated": 10, "fileByteCount": 0},
                 {"fileId": "66666666-6666-6666-6666-666666666666", "fileState": "deleted",
                  "fileType": 1, "dataType": 0, "archivalStatus": 0,
                  "versionTag": "00000000-0000-0000-0000-000000000000",
@@ -1181,7 +1208,8 @@ mod tests {
         );
         assert!(!refs[1].is_unshared(), "a delete keeps its version");
         // A share withdrawn, as odin-core's `FileRef.FromHeader` makes the member's row of
-        // `NoLongerSharedTombstoneOf`: no version (all zeros), no `groupId`, its own `updated`.
+        // `NoLongerSharedTombstoneOf`: no version (all zeros), no `groupId`, no
+        // `versionUpdated`: its time is its own `updated`, the withdrawal's.
         assert!(refs[2].is_unshared() && refs[2].parent.is_none());
         assert_eq!(refs[2].changed_at, Some(11));
         // A row that doesn't say when: no time, never old enough to go without a trace.

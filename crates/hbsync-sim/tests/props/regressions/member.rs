@@ -353,3 +353,45 @@ fn a_new_file_waits_for_the_name_a_waiting_one_holds() {
     assert_eq!(sim.item(2, "a"), Some(old));
     assert_eq!(sim.item(2, "c.txt"), Some(new));
 }
+
+/// A folder's delete stopped after the folder itself, its file still live below it, and that
+/// file shared afterwards. A share is no write: the file's version and that version's time
+/// stay, so a device that reads the drive for the first time only then takes the file as
+/// deleted with its folder, as the device that had it does. Nothing comes back, where a file
+/// written after the removal would bring its folder back (filesync #385: such a device once
+/// had only the share change's time).
+#[test]
+fn a_share_after_a_stopped_delete_brings_nothing_back_on_a_device_reading_first_then() {
+    use Action::*;
+    let mut sim = Sim::new(3).with_member(2).with_narrow_check();
+    let synced = |sim: &mut Sim, client| {
+        sim.run(&[Event::Plan { client }]);
+        while !sim.planned(client).is_empty() {
+            sim.run(&[Event::Step { client }]);
+        }
+    };
+    sim.run(&[act(0, CreateFolder { parent: 0, name: 1 })]);
+    let b = sim.item(0, "b").expect("b");
+    let parent = sim.pick(0, b, true).expect("b's pick");
+    sim.run(&[act(0, CreateFile { parent, name: 0 })]);
+    // Only the device that made them has them: client 1 hasn't read the drive yet.
+    synced(&mut sim, 0);
+    assert_eq!(sim.server_paths(), ["b", "b/a"]);
+    assert!(sim.local_paths(1).is_empty());
+    let pick = sim.stopped_pick(b).expect("a folder of the drive");
+    sim.run(&[act(0, DeleteStopped { pick, done: 0 })]);
+    assert!(sim.is_removed(b), "the folder went, its file is still live");
+    share(&mut sim, "b/a");
+    synced(&mut sim, 1);
+    assert!(sim.local_paths(1).is_empty(), "{:?}", sim.local_paths(1));
+    assert!(sim.is_removed(b), "brought back by a share change");
+    settle(&mut sim);
+    assert!(sim.is_removed(b), "brought back by a share change");
+    for c in 0..3 {
+        assert!(
+            sim.local_paths(c).is_empty(),
+            "{c}: {:?}",
+            sim.local_paths(c)
+        );
+    }
+}

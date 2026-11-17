@@ -49,11 +49,15 @@ use crate::{
 
 #[derive(Debug, Clone)]
 struct StoredFile {
+    /// Its `changed_at` is its version's time (Homebase's `versionUpdated`): `modified` as
+    /// the write that made the version left it.
     header: RemoteHeader,
     /// `None` for folders and tombstones.
     bytes: Option<Arc<Vec<u8>>>,
-    /// Feed position: (the header's `changed_at`, row id), once written. The row id never
-    /// changes.
+    /// When the file last changed (Homebase's `updated`), once written: its version's write,
+    /// or a share of it given or withdrawn since, which keeps the version and its time.
+    modified: Option<i64>,
+    /// Feed position: (`modified`, row id). The row id never changes.
     row: u64,
 }
 
@@ -101,7 +105,7 @@ pub struct FakeServer {
     files: HashMap<RemoteFileId, StoredFile>,
     /// Live files only, removed ones included: their node id stays taken, as on Homebase.
     by_node: HashMap<NodeId, RemoteFileId>,
-    /// Feed index: (the file's time, its header's `changed_at`, row) → file.
+    /// Feed index: (the file's `modified`, row) → file.
     feed: BTreeMap<(i64, u64), RemoteFileId>,
     clock_ms: i64,
     /// Files the feed leaves out though they exist (odin-core leaves out a row with a later
@@ -181,22 +185,41 @@ impl FakeServer {
         Uuid::from_u128(u128::from(self.next_id) | 0x0000_0000_0000_4000_8000_0000_0000_0000)
     }
 
-    /// A write of `file_id` by `writer` (`None`: not through a client) landed: its time, its
-    /// new place in the feed, and its announcement. Returns the write's time: at least one
-    /// past the file's last change, as every write on Homebase sets `modified =
-    /// MAX(modified+1, now)` (**[verified]** odin-core `TableDriveMainIndex`: upsert, the
-    /// local app data, a share's touch), so a file's time never goes back, and a write in the
-    /// millisecond of the last one still moves it and its place in the feed. The header's
-    /// time (`updated`) is that one value (**[verified]** `FileMetadata`: `Updated =
-    /// record.modified`).
+    /// A write of `file_id` by `writer` (`None`: not through a client) that made its version
+    /// landed: its time, its new place in the feed, and its announcement
+    /// ([`FakeServer::changed`]). The version's time is the write's (**[verified]** odin-core
+    /// PR #2143 at 5e4cd493f: `versionTagModified` is set to `modified` by every write that
+    /// sets the version tag).
     fn touch(&mut self, file_id: RemoteFileId, writer: Option<ClientId>) -> i64 {
+        self.changed(file_id, writer, true)
+    }
+
+    /// A change of `file_id` by `writer` that keeps its version landed (a share given or
+    /// withdrawn, odin-core's `TouchKeepingVersionTagAsync`): [`FakeServer::changed`], the
+    /// version's time staying.
+    fn touch_keeping_version(&mut self, file_id: RemoteFileId, writer: ClientId) {
+        self.changed(file_id, Some(writer), false);
+    }
+
+    /// A change of `file_id` by `writer` landed, a write that made its version (`version`) or
+    /// one that keeps it (a share given or withdrawn): its new place in the feed, and its
+    /// announcement. Returns the change's time: at least one past the file's last change, as
+    /// every write on Homebase sets `modified = MAX(modified+1, now)` (**[verified]** odin-core
+    /// `TableDriveMainIndex`: upsert, the local app data, a share's touch), so a file's time
+    /// never goes back, and a write in the millisecond of the last one still moves it and its
+    /// place in the feed. The header's `updated` is that value (**[verified]** `FileMetadata`:
+    /// `Updated = record.modified`); its `versionUpdated` moves only with the version.
+    fn changed(&mut self, file_id: RemoteFileId, writer: Option<ClientId>, version: bool) -> i64 {
         let mut modified = self.clock_ms;
         if let Some(f) = self.files.get_mut(&file_id) {
-            if let Some(last) = f.header.changed_at {
+            if let Some(last) = f.modified {
                 modified = (last + 1).max(modified);
                 self.feed.remove(&(last, f.row));
             }
-            f.header.changed_at = Some(modified);
+            f.modified = Some(modified);
+            if version {
+                f.header.changed_at = Some(modified);
+            }
             self.feed.insert((modified, f.row), file_id);
             self.announce(file_id, writer);
         }
@@ -215,7 +238,7 @@ impl FakeServer {
         let Some(f) = self.files.get(&file_id) else {
             return;
         };
-        let (header, shares) = (&f.header, &self.shares);
+        let (header, modified, shares) = (&f.header, f.modified, &self.shares);
         let (owner, member) = (OnceCell::new(), OnceCell::new());
         // A subscriber that went away is dropped.
         self.subscribers.retain(|s| {
@@ -225,7 +248,8 @@ impl FakeServer {
             let change = match s.view {
                 View::Owner => Some(*owner.get_or_init(|| ChangeRef::of(header))),
                 View::Member => *member.get_or_init(|| {
-                    seen_by(shares, file_id, View::Member).map(|how| seen_ref(header, how))
+                    seen_by(shares, file_id, View::Member)
+                        .map(|how| seen_ref(header, modified, how))
                 }),
             };
             change.is_none_or(|c| s.events.send(c).is_ok())
@@ -306,7 +330,7 @@ impl FakeServer {
     }
 
     /// A create by `writer`, answered as Homebase answers it: the file as written, with its
-    /// token and the write's time (`updated`, odin-core #1971).
+    /// token and the version's time (`versionUpdated`, odin-core #1971 and PR #2143).
     fn create_by(
         &mut self,
         writer: Option<ClientId>,
@@ -342,6 +366,7 @@ impl FakeServer {
             StoredFile {
                 header,
                 bytes: payload.map(|(b, _)| b),
+                modified: None,
                 row,
             },
         );
@@ -509,8 +534,9 @@ impl FakeServer {
         Ok(())
     }
 
-    /// Shares `file_id` with the member (`live`), or withdraws its share: its version stays, its
-    /// time (`updated`) and place in the feed move, and it is announced as any write
+    /// Shares `file_id` with the member (`live`), or withdraws its share: its version and that
+    /// version's time stay, its `updated` and place in the feed move, and it is announced as
+    /// any write
     /// (**[verified]** odin-core `MainIndexMeta.WriteSharesAsync`,
     /// `TableDriveMainIndex.TouchKeepingVersionTagAsync`, `FileMetadata`'s `Updated`,
     /// `DriveShareService.PublishChangedAsync`). Each refusal is a 400 there, which the adapters
@@ -536,9 +562,7 @@ impl FakeServer {
         self.shares.insert(file_id, live);
         match deleted {
             true => self.announce(file_id, Some(writer)),
-            false => {
-                self.touch(file_id, Some(writer));
-            }
+            false => self.touch_keeping_version(file_id, writer),
         }
         Ok(())
     }
@@ -568,7 +592,7 @@ impl FakeServer {
     fn header_as(&self, file_id: RemoteFileId, view: View) -> Result<RemoteHeader> {
         self.readable(file_id)?;
         let (file, how) = self.access(file_id, view)?;
-        Ok(seen(file.header.clone(), how))
+        Ok(seen(file.header.clone(), file.modified, how))
     }
 
     /// Refuses a header read of a file made unreadable (a test's).
@@ -697,7 +721,8 @@ impl FakeServer {
                 has_more = true;
                 break;
             }
-            let header = &self.files[file_id].header;
+            let file = &self.files[file_id];
+            let header = &file.header;
             if how.reads() && self.unreadable.contains(file_id) && !header.is_deleted() {
                 skipped.push(Skipped {
                     at: Some(header.at()),
@@ -706,7 +731,7 @@ impl FakeServer {
                     why: format!("{file_id:?}: unreadable (test)"),
                 });
             } else {
-                entries.push(seen(header.clone(), how));
+                entries.push(seen(header.clone(), file.modified, how));
             }
             last = Some(*key);
         }
@@ -822,8 +847,6 @@ impl FakeServer {
                 f.header = RemoteHeader {
                     file_id,
                     token: Some(token_of(file_id)),
-                    // Its place in the feed until the write moves it.
-                    changed_at: f.header.changed_at,
                     ..header
                 };
                 f.bytes = bytes;
@@ -838,8 +861,15 @@ impl FakeServer {
                     token: Some(token_of(file_id)),
                     ..header
                 };
-                self.files
-                    .insert(file_id, StoredFile { header, bytes, row });
+                self.files.insert(
+                    file_id,
+                    StoredFile {
+                        header,
+                        bytes,
+                        modified: None,
+                        row,
+                    },
+                );
                 file_id
             }
         };
@@ -1460,10 +1490,12 @@ fn seen_by(
     }
 }
 
-/// `header` as it is seen `how` ([`seen_by`]): the member sees no file's token, and a share
-/// withdrawn as a tombstone without a version, `groupId`, tags or key (the root its parent, as
-/// the Homebase adapter reads a tombstone without a `groupId`).
-fn seen(header: RemoteHeader, how: Seen) -> RemoteHeader {
+/// `header` of a file last changed at `modified`, as it is seen `how` ([`seen_by`]): the member
+/// sees no file's token, and a share withdrawn as a tombstone without a version, `groupId`,
+/// tags or key (the root its parent, as the Homebase adapter reads a tombstone without a
+/// `groupId`), at the file's last change (the withdrawal: it has no version, so no time of
+/// one).
+fn seen(header: RemoteHeader, modified: Option<i64>, how: Seen) -> RemoteHeader {
     match how {
         Seen::Owner => header,
         Seen::Shared => RemoteHeader {
@@ -1475,6 +1507,7 @@ fn seen(header: RemoteHeader, how: Seen) -> RemoteHeader {
             parent: NodeId::ROOT,
             body: RemoteBody::Deleted,
             removed: false,
+            changed_at: modified,
             token: None,
             ..header
         },
@@ -1483,7 +1516,7 @@ fn seen(header: RemoteHeader, how: Seen) -> RemoteHeader {
 
 /// The ref of `header` as it is seen `how` ([`seen_by`]): [`ChangeRef::of`] its [`seen`]
 /// header, without building that header (a notification's, built for every write).
-fn seen_ref(header: &RemoteHeader, how: Seen) -> ChangeRef {
+fn seen_ref(header: &RemoteHeader, modified: Option<i64>, how: Seen) -> ChangeRef {
     let as_is = ChangeRef::of(header);
     match how {
         Seen::Owner | Seen::Shared => as_is,
@@ -1492,6 +1525,7 @@ fn seen_ref(header: &RemoteHeader, how: Seen) -> ChangeRef {
             deleted: true,
             parent: None,
             removed: false,
+            changed_at: modified,
             ..as_is
         },
     }
@@ -1593,8 +1627,8 @@ mod tests {
         for h in [header, live] {
             for how in [Seen::Owner, Seen::Shared, Seen::Unshared] {
                 assert_eq!(
-                    seen_ref(&h, how),
-                    ChangeRef::of(&seen(h.clone(), how)),
+                    seen_ref(&h, Some(2_000), how),
+                    ChangeRef::of(&seen(h.clone(), Some(2_000), how)),
                     "{how:?} {h:?}"
                 );
             }
@@ -1603,7 +1637,8 @@ mod tests {
 
     /// Every write in the millisecond of the file's last change still moves its time and its
     /// place in the feed, one past it, and the header and the answer carry that one time:
-    /// odin-core's `MAX(modified+1, now)` (**[verified]** `TableDriveMainIndex`).
+    /// odin-core's `MAX(modified+1, now)` (**[verified]** `TableDriveMainIndex`). A share
+    /// given moves the place and keeps the version's time.
     #[test]
     fn a_write_in_the_last_changes_millisecond_moves_the_file() -> Result<()> {
         let server = FakeServer::new(ServerConfig {
@@ -1621,13 +1656,14 @@ mod tests {
         };
         let created = s.create_by(None, &folder, None)?;
         let file_id = created.at().file_id;
-        // The file's time, and its place in the feed.
+        // The file's last change, and its place in the feed.
         let at = |s: &FakeServer| {
-            let changed_at = s.files[&file_id].header.changed_at;
+            let modified = s.files[&file_id].modified;
             let row = s.files[&file_id].row;
             let place = s.feed.iter().find(|(_, f)| **f == file_id).map(|(k, _)| *k);
-            (changed_at, place == changed_at.map(|t| (t, row)))
+            (modified, place == modified.map(|t| (t, row)))
         };
+        let version_at = |s: &FakeServer| s.files[&file_id].header.changed_at;
         let mut time = s.clock_ms;
         assert_eq!(created.changed_at, Some(time));
         assert_eq!(at(&s), (Some(time), true));
@@ -1646,6 +1682,11 @@ mod tests {
         s.set_share(sharer.client(), file_id, true)?;
         time += 1;
         assert_eq!(at(&s), (Some(time), true));
+        assert_eq!(
+            version_at(&s),
+            removed.changed_at,
+            "the version's time stays"
+        );
         let deleted = s.delete_by(None, file_id, removed.at().version)?;
         time += 1;
         assert_eq!((deleted, at(&s)), (Some(time), (Some(time), true)));

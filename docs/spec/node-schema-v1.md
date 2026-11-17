@@ -256,24 +256,23 @@ of this schema may define some of them.)
   content, payload, `groupId` and name (`update-archival-status-batch`, many files in one
   request, each at its `versionTag`: homebase-api-notes). Every removed node is marked so
   itself: a removed node is out of the folder tree for every client, and restorable.
-- **When:** a node's removal time is its header's `updated`, the server's time of the write
-  that removed it (odin-core's `record.modified`, **[verified]** `FileMetadata.cs`). Nothing
-  writes to a removed node, so it stays that time (see the rules below), but for a share: one
-  given or withdrawn moves a file's `updated` and keeps its `versionTag` (**[verified]**
-  odin-core `TouchKeepingVersionTagAsync`; homebase-api-notes).
-- **A write is a new `versionTag`,** never a later `updated` alone. A version's time, live or
-  removed, is the `updated` a client first read with that `versionTag`: it keeps that time
-  while it holds the version, and a later `updated` of the same version changes nothing (not
-  what a delete took along, not a removal's time, not its 30 days). The computers do so
-  (`mirror::apply`: a known version takes only a time it didn't have). The limit, until the
-  server says when a version was written apart from `updated` (a future enhancement,
-  filesync #385): a client that first reads a version after its share changed (a new
-  device, a client keeping no state) has only the later time. A live node in a removed
-  folder then counts as written after the removal, and
-  brings its folders back (nothing lost); a removed node waits longer for its purge, and may
-  list as deleted with its folder; a removed folder may seem removed later, so a node written
-  into it in between counts as taken along, and goes to Recently deleted (restorable) with
-  the purge's first step.
+- **When:** a node's removal time is its header's `versionUpdated`, the server's time of the
+  write that removed it (the `updated` of the write that gave the file its `versionTag`;
+  odin-core PR #2143, **[verified]** at 5e4cd493f, `DriveFileUtility.VersionUpdatedOf`).
+  Nothing writes to a removed node, so the removal is its last version (see the rules below).
+- **A version's time is its `versionUpdated`,** never `updated`: live or removed, wherever
+  these rules speak of when a node was written or removed. `updated` is when the file last
+  changed in the feed, and moves without a write too: a share given or withdrawn moves it and
+  keeps the `versionTag` and `versionUpdated` (**[verified]** odin-core
+  `TouchKeepingVersionTagAsync`; homebase-api-notes). So a share change changes nothing: not
+  what a delete took along, not a removal's time, not its 30 days. A client that keeps no
+  state reads the same time as one that does. The server answers `versionUpdated` on the V2
+  API only: in a header's `fileMetadata`, in a minimal row, in a socket event's row and in
+  the answers to a create, an update, a removal or restore and a soft delete. A "no longer
+  shared" tombstone has no version and no `versionUpdated`: its `updated` is when the share
+  was withdrawn. (Until 2026-11-17 a version's time was the `updated` first read with its
+  `versionTag`, which a client reading it first after a share change got wrong: filesync
+  #385.)
 - **A folder first:** deleting a folder removes the folder by itself, then everything in it
   (batches of the files below it), so what was deleted with a folder is removed no earlier than
   the folder, even if the delete stops half way.
@@ -303,9 +302,9 @@ of this schema may define some of them.)
   below, another sync folder's).
 - **The purge**, the one rule for deleting for good (a user emptying Recently deleted follows
   it too, but for 3.). Any client runs it (the mobile browser too, at its own pace: most people
-  rarely open a desktop app), by the server's clock: its `queryTime` against each `updated`.
+  rarely open a desktop app), by the server's clock: its `queryTime` against each `versionUpdated`.
   1. **What goes:** an item deleted on its own, with everything deleted with it, once all of it
-     was removed more than 30 days ago (every client's, not a setting; strictly: `updated`
+     was removed more than 30 days ago (every client's, not a setting; strictly: `versionUpdated`
      before `queryTime` − 30 days), each node by its own removal: one removed later (in a
      folder a live node held, say) has its own 30 days, and the item waits with it. Files go before their folders, each at the version the client knows: one written
      since stays. An item holding a removal whose time the client doesn't know yet waits for a
@@ -321,8 +320,8 @@ of this schema may define some of them.)
      folder that its delete took along (below). So the purge first removes them (to Recently
      deleted, restorable), for the items it would delete (removed more than 30 days ago): a
      live node below a removed folder of such an item, directly or through live folders,
-     written no later than the removal of the nearest removed folder above it (the server's
-     `updated` of the version the client knows, against the folder's removal). It reads each
+     written no later than the removal of the nearest removed folder above it (its
+     `versionUpdated` against the folder's). It reads each
      removed folder that directly holds such a node first, and goes on only if it is still
      removed at the version the client knows. Then, top-down (a folder before what is in it,
      a level at a time), it removes them with `update-archival-status-batch`, each at the
@@ -363,7 +362,7 @@ of this schema may define some of them.)
      delete: `hard-delete-batch`, odin-core #1968), nothing of the file left, in the feed
      either. What a user empties by hand is deleted softly, leaving a tombstone, the
      trace (`soft-delete-batch`, odin-core #1977, many files a request, each at its version);
-     any client deletes a tombstone hard more than 30 days after its own `updated`, at its
+     any client deletes a tombstone hard more than 30 days after its own `versionUpdated`, at its
      version, both from its row in the feed (the soft delete's answer gives the time, not the
      version). A node whose time isn't known never goes without a trace.
   4. **Why 30 days:** the feed keeps a trace of a delete that long and no longer, so every
@@ -390,8 +389,8 @@ of this schema may define some of them.)
      rows, and a re-read starts over after 29 days).
 - **The server's time decides** what a folder's delete took along. A live node in a removed
   folder (directly, or through live folders it took along too) whose version was written no
-  later than the removal of the nearest removed folder above it (its header's `updated`
-  against the folder's) was in the folder when it was deleted: it is deleted with it, though
+  later than the removal of the nearest removed folder above it (its header's
+  `versionUpdated` against the folder's) was in the folder when it was deleted: it is deleted with it, though
   its own removal may still be on its way (a folder goes first). A client takes it as removed,
   and any client may mark it so; one that doesn't know the node's time (its own write, not
   back from the feed yet) takes it as written before. Deleting for good never takes it while
@@ -428,11 +427,11 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   request, each at its `versionTag`, without reading or rewriting content: send a folder's
   removal before (not in the same request as) what is in it, and leave a file it answers
   `versionTagMismatch` for as it is.
-- **Times go with versions** (Recently deleted, "A write is a new `versionTag`"): where you
-  keep what you read, keep each node's `updated` with its `versionTag`, and take a later
-  `updated` of the same `versionTag` for no change.
-- **A removed node** is never written to except to restore it: its `updated` is its removal
-  time. That also rules out what odin-core counts as a change of it **[verified]**
+- **Times go with versions** (Recently deleted, "A version's time is its `versionUpdated`"):
+  read when a node was written or removed from `versionUpdated`, on the V2 API, and nothing
+  from `updated` but the feed's order.
+- **A removed node** is never written to except to restore it: its `versionUpdated` is its
+  removal time. That also rules out what odin-core counts as a change of it **[verified]**
   `TableDriveMainIndex.cs` (`UpdateReactionSummaryAsync`, `UpdateTransferSummaryAsync`,
   `UpdateLocalAppMetadataAsync`): no sharing or sending it to another identity, no reactions or
   comments, no local app data (local tags, local content, read time).
@@ -460,6 +459,10 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-11-17: a version's time is the header's `versionUpdated` (odin-core PR #2143, V2 only),
+  not the `updated` first read with its `versionTag`: read it for when a node was written or
+  removed. A share given or withdrawn moves `updated` alone, so a client reading a file first
+  after one no longer takes it for written then (filesync #385). Nothing new on a node.
 - 2026-11-17: a restore never brings a node back as `.hbsync` (any case) in any folder, one gone
   for good too, not only at a sync folder's top: it takes ` (restored)`, as a name taken (the
   computers leave an item of that name out in every folder). The browser numbers around the

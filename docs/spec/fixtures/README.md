@@ -5,3 +5,5 @@ Example file headers in the shape Homebase returns them (only the fields the syn
 `storedHash` is the BLAKE3 vector from `../odin-core/docs/payload-hashes.md`. `removed-node.json` is
 the same file in Recently deleted as a writer from before 2026-10-15 left it (`archivalStatus` 2,
 with an `rm`, which readers drop now), and `tombstone.json` the same file deleted for good.
+`versionUpdated` is each version's time; where `updated` is later (`file-node.json`,
+`removed-node.json`), a share was given or withdrawn since, which readers take for no change.

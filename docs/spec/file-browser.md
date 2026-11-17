@@ -212,11 +212,11 @@ lists it follows the desktops:
 
 ## Recently deleted
 filesync's own rules are in its node schema ("Recently deleted") and the engine's `deleted/` module (its pure rules in `deleted/rules.rs`); the mini-app follows them exactly.
-- **Removed:** `archivalStatus` 2, at the header's `updated` (the server's time of the removal; a share
-  given or withdrawn moves `updated` too and keeps the `versionTag`: where you keep what you read, a
-  version's time is the `updated` you first read with it, and a later one of the same `versionTag` is no
-  change. Reading on demand you have only the latest, with the limits the node schema names, Recently
-  deleted, "A write is a new `versionTag`"). Any other
+- **Removed:** `archivalStatus` 2, at the header's `versionUpdated` (the server's time of the removal:
+  when the file got its `versionTag`; V2 API only, odin-core PR #2143). Read every "when" here from
+  `versionUpdated`, never from `updated`: a share given or withdrawn moves `updated` and keeps the
+  `versionTag` and `versionUpdated`. Reading on demand you get the same time as a computer that keeps
+  what it read (node schema, Recently deleted, "A version's time is its `versionUpdated`"). Any other
   status is live. An `rm` in the content (from before 2026-10-15) means nothing; leave it out when writing.
 - **Deleted with its folder:** a removed node whose folder is removed too, removed no earlier than the folder.
   One removed before it was deleted on its own. A live node in a removed folder (its delete still under way)
@@ -237,7 +237,7 @@ filesync's own rules are in its node schema ("Recently deleted") and the engine'
   restored. Files go first, then each folder after what is in it.
 - **Never write to a removed node** except to restore it: no rename, no sharing or sending to another
   identity, no reactions or comments, no local app data (local tags, local content, read time). odin-core
-  counts each as a change, which moves its `updated`, its removal time.
+  counts each as a change of the file. (Its removal time, `versionUpdated`, stays; the rule does too.)
 - **Restore** is a metadata-only update by fileId:
   - Back under its own name in its own folder: `update-archival-status-batch` with `archivalStatus` 0,
     each item at its `versionTag`, a level at a time (each folder's request before what is in it).
@@ -297,7 +297,7 @@ filesync's own rules are in its node schema ("Recently deleted") and the engine'
   - **First, what a delete left** (node schema, "The purge", 2.): for each item the purge would delete
     (removed more than 30 days ago), the live nodes below its removed folders (directly or through live
     folders) that the delete took along: written no later than the removal of the nearest removed folder
-    above (`updated` of the version you have, against the folder's). Skip a node whose `updated` you don't
+    above (its `versionUpdated` against the folder's). Skip a node whose `versionUpdated` you don't
     know, one written after, a role folder and a folder directly in Desktops (a computer's Desktop),
     the live folders above them, and everything in those
     folders: remove a node only where the folder it is in is removed already or by you (node schema,

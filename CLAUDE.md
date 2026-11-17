@@ -27,7 +27,12 @@ without it can keep an answer from before a write and hide that write for up to 
 needs the drive answer's `created` (when the drive was made: a drive deleted and made again is
 told apart by it), from odin-core v0.1.973 (PR #2042, #2038): a server without it can't be connected to. A deleted file's
 read says so itself (`fileDeleted`) from odin-core PR #2141 (merged as aa560aea9, after v0.1.991): a
-server without it costs one header read to learn the same. Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
+server without it costs one header read to learn the same. When a node was written or removed
+is read from the header's `versionUpdated` (a share change moves `updated`, not it) from odin-core
+PR #2143 (merged as 5e4cd493f, not released yet; filesync #385): a server without it tells no
+such time, so nothing there is purged, and a removed folder takes along all that is live below
+it, what was written after its removal too (**[verified]** `along::by_removal`): don't release
+the client to an identity before its server has it. Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
 sync semantics §10): built-in junk, and per-device ignore rules in `.hbsync/ignore` (gitignore
 syntax, picked up a second after an edit, within a minute without a watcher); an ignored item
 is kept on its device only.
