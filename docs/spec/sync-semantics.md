@@ -933,7 +933,11 @@ on its own.
   One a version before this rule synced leaves the drive and the other devices by rule 1 and
   stays where it is; one another writer puts on the drive is masked (rule 2), listed nowhere
   on the computers (engine `a_state_folder_below_the_top_is_left_alone`, sim
-  `a_state_folder_stays_on_its_device_at_any_depth`). And a **folder of
+  `a_state_folder_stays_on_its_device_at_any_depth`). A restore brings nothing back under
+  that name, in any folder (one gone for good too): it takes a numbered one
+  (`.hbsync (restored)`), where the computers see it (engine
+  `a_restore_into_a_plain_folder_never_takes_the_state_folder_s_name`, sim
+  `a_restore_below_the_top_numbers_around_the_state_folder_name`). And a **folder of
   shares** at the top: the folder that holds what other identities share with this one
   ("The folder of shares" below), found by its marker, never by its name.
 - **Junk**: a built-in list of names the OS or an application creates by itself, matched in any
@@ -1253,7 +1257,7 @@ rename didn't land; a rename made elsewhere stands until a name is given again, 
 as before too (the user asked for it). The purge
 keeps a folder in Desktops (a computer's Desktop) that Desktops' delete took along, as it keeps
 a role folder: its computer brings Desktops back with it; and a restore into it never takes
-`.hbsync`, as at any sync root's top. No device knows the other
+`.hbsync`, as into any folder (§10). No device knows the other
 computers' Desktops by id, so the purge knows them by place: one moved out of Desktops isn't
 kept so.
 

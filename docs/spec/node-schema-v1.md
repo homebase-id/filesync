@@ -297,9 +297,10 @@ of this schema may define some of them.)
   the loop into it; at the top of the drive instead where Recovered files is in a loop or can't
   be made (its id taken). If a folder
   doesn't come back (changed meanwhile), what is in it stays removed. A name a live sibling took
-  meanwhile gets ` (restored)`; so does `.hbsync`, in any case, at the top of the drive, of a
-  role folder or of a computer's Desktop (a folder in Desktops): each computer's own state folder
-  there, never synced.
+  meanwhile gets ` (restored)`; so does `.hbsync`, in any case, in every folder, one gone for
+  good too: no computer syncs an item of that name (at the top of the drive, of a role folder
+  or of a computer's Desktop, a folder in Desktops, it is each computer's own state folder;
+  below, another sync folder's).
 - **The purge**, the one rule for deleting for good (a user emptying Recently deleted follows
   it too, but for 3.). Any client runs it (the mobile browser too, at its own pace: most people
   rarely open a desktop app), by the server's clock: its `queryTime` against each `updated`.
@@ -459,6 +460,10 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-11-17: a restore never brings a node back as `.hbsync` (any case) in any folder, one gone
+  for good too, not only at a sync folder's top: it takes ` (restored)`, as a name taken (the
+  computers leave an item of that name out in every folder). The browser numbers around the
+  name in every folder (`file-browser.md`, "Uploading"). Nothing new on a node.
 - 2026-11-17: the computers leave an item named `.hbsync` (any case) out in every folder, with
   all in it, not only at a sync folder's top: one on the drive stays there, unseen by them
   (sync semantics §10; the browser's part in `file-browser.md`, "Uploading"). Nothing new on

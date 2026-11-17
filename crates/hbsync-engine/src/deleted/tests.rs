@@ -1047,23 +1047,56 @@ fn a_restore_comes_back_folder_first_and_by_free_names() {
     );
 }
 
-/// At the top of a sync root (the drive's, a role folder's, a Desktop's) the state folder's name
-/// is taken in any case: each computer's own `.hbsync` is there. Elsewhere it is a name as any.
+/// The state folder's name is taken in every folder, in any case: no computer syncs an item of
+/// that name, at a sync root's top (its own state folder there) or below it.
 #[test]
-fn the_state_folder_name_is_taken_at_a_sync_roots_top() {
+fn the_state_folder_name_is_taken_in_every_folder() {
     let docs = hbsync_types::Role::Documents.node();
     let folder = NodeId::new();
-    for top in [NodeId::ROOT, docs] {
-        let mut taken = HashMap::from([(top, taken_in(true, ["a"]))]);
+    for parent in [NodeId::ROOT, docs, folder] {
+        let mut taken = HashMap::from([(parent, taken_in(["a"]))]);
         assert_eq!(
-            take_restored_name(&mut taken, top, ".HBSYNC"),
+            take_restored_name(&mut taken, parent, ".HBSYNC"),
             Some(".HBSYNC (restored)".to_owned())
         );
+        assert_eq!(
+            take_restored_name(&mut taken, parent, ".hbsync"),
+            Some(".hbsync (restored 2)".to_owned())
+        );
     }
-    let mut taken = HashMap::from([(folder, taken_in(false, ["a"]))]);
+    // In a folder gone for good too, where any other name comes back as it is (an orphan for
+    // Recovered files, which no computer would see under the state folder's name).
+    let gone = NodeId::new();
+    let state = MirrorRow {
+        name: ".hbsync".to_owned(),
+        ..removed(NodeId::new(), gone, 1).row
+    };
+    let other = removed(NodeId::new(), gone, 1).row;
+    let twin = MirrorRow {
+        node: NodeId::new(),
+        ..other.clone()
+    };
+    let live = HashSet::from([NodeId::ROOT]);
+    let in_plan = HashSet::from([state.node, other.node, twin.node]);
+    let mut taken = HashMap::new();
+    let wave = restore_wave(
+        vec![&state, &other, &twin],
+        |r| (r.parent, &r.name),
+        &live,
+        &in_plan,
+        &mut taken,
+    );
     assert_eq!(
-        take_restored_name(&mut taken, folder, ".hbsync"),
-        Some(".hbsync".to_owned())
+        wave,
+        Some(RestoreWave {
+            asked: vec![&other, &twin],
+            rest: vec![&state],
+            later: vec![],
+        })
+    );
+    assert_eq!(
+        take_restored_name(&mut taken, gone, ".hbsync"),
+        Some(".hbsync (restored)".to_owned())
     );
     // In a role folder gone for good, which may be made again under its id: still taken, and
     // asked for under its own name, it comes back under another.

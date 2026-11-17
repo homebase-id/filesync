@@ -174,15 +174,20 @@ lists it follows the desktops:
   only when the platform knows the real creation time (a photo's capture date), never the upload
   time.
 - Names: Unicode NFC, at most 255 UTF-8 bytes, no `/` or NUL, not `.` or `..`.
-- `.hbsync` at the top, directly in a role folder (Documents, Pictures, Music, Videos,
-  Downloads) or directly in a computer's folder in Desktops, in any case (`.HBSYNC`, `.HbSync`), is
-  reserved: each synced folder's root holds
-  the computer's own state folder there, which the computers never sync. Don't create, rename,
-  upload or restore anything to it there: number around it (`.hbsync (1)`, `.hbsync (restored)`). One that
-  already exists (another writer's) is listed with a note that it won't sync to computers.
-  The computers leave an item of that name out in every other folder too, with all in it
-  (it is another sync folder's state, moved in): list one there with the same note, and
-  don't make one.
+- `.hbsync`, in any case (`.HBSYNC`, `.HbSync`), is reserved in every folder: the computers never
+  sync an item of that name, with all in it. At the top, directly in a role folder (Documents,
+  Pictures, Music, Videos, Downloads) and directly in a computer's folder in Desktops it is each
+  computer's own state folder; in any other folder, another sync folder's state, moved in.
+  Don't create, rename, upload or restore anything to it, in any folder: number around it
+  (`.hbsync (1)`, `.hbsync (restored)`). One that already exists (another writer's) is listed
+  with a note that it won't sync to computers. What is in it doesn't either, at any depth: show
+  the note on its screen and on the screen of a folder below it too, from the path the user came
+  by (no extra read to find out for a search result or a row of Recently deleted). Uploading
+  and making folders there stay allowed: the item is on the drive, the browser opens it, and
+  nothing leaves a computer by it. A move there is not: don't offer one, or a folder below one,
+  as where a move goes. Every computer that synced the moved item would delete its copy (it
+  went to a place they all leave out: sync semantics §10). Moving something out of one is fine:
+  the computers download it.
   - Unique within the folder, ignoring case and Unicode form (as on macOS and Windows): add
     `(1)`, `(2)` and so on if needed.
 - Rename or move: a header-only update of `content.name` and/or `groupId`, guarded by the
@@ -256,7 +261,8 @@ filesync's own rules are in its node schema ("Recently deleted") and the engine'
     computer is on, no listing shows it: say where it will appear ("in Recovered files, once one of
     your computers syncs"). One whose folder didn't come back stays removed.
   - A name a live sibling took meanwhile gets ` (restored)`, then ` (restored 2)` up to 99, before the
-    extension.
+    extension. So does `.hbsync`, in any case, in every folder ("Uploading"), one gone for good too (an
+    update there, not the batch): under its own name no computer would sync it.
   - A `VersionTagMismatch` skips the item: another device changed it. A not-found is a first "not
     there" only (node schema, "The purge", 5.): read the file's header; a tombstone means it went
     for good, but a header not found means so only when it is not found again a minute to an hour
