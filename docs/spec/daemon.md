@@ -1010,8 +1010,8 @@ app its drive back, told by the random part of its path.
   that `--paste` has it read: a guess that goes wrong (a tmux pane from a graphical
   session, used over SSH) costs running the command again.
 - The reading starts with the first link shown and goes on till the command ends: what
-  was typed before it is passed over (it comes within a moment of the start; a line is an
-  answer only to a link shown before it), and a line typed ahead for the shell after the
+  was typed at a terminal before it is passed over (it comes within a moment of the start;
+  a line is an answer only to a link shown before it; a pipe's lines are all taken), and a line typed ahead for the shell after the
   answer was taken is lost with it. A line is read up to 8 KiB, and from a pipe no faster
   than it is taken.
 

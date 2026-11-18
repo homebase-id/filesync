@@ -666,12 +666,17 @@ impl Approve {
     /// What the link comes with where no address is read: that `--paste` has it read, or,
     /// asked for and not read (the command is in the terminal's background), why.
     fn unread(&self) -> &'static str {
-        match self.paste {
-            true => {
+        match (self.paste, &self.browser) {
+            (true, _) => {
                 "(--paste: the terminal can't be read while this runs in the background. Bring \
                  it to the foreground, or run it again there.)\n"
             }
-            false => setup::PASTE_HINT,
+            // (The two exclude each other.)
+            (false, Some(_)) => {
+                "(Approving in a browser on another computer? Run this again with --paste in \
+                 place of --browser.)\n"
+            }
+            (false, None) => setup::PASTE_HINT,
         }
     }
 
@@ -687,19 +692,21 @@ impl Approve {
 }
 
 /// The lines of standard input from now on, read by a thread of its own till the input ends
-/// (or till nobody takes them any more). What was typed before it began comes at once, and
-/// isn't an answer to a link not shown yet: passed over ([`TYPED_AHEAD`]). A line that isn't
-/// text is too; one longer than an address can be comes in pieces; and where more come than
-/// are taken (a pipe), the reading waits.
+/// (or till nobody takes them any more). What was typed at a terminal before it began comes
+/// at once, and isn't an answer to a link not shown yet: passed over ([`TYPED_AHEAD`]; a
+/// pipe has nothing typed ahead, and a script may answer at once). A line that isn't text is
+/// too; one longer than an address can be comes in pieces; and where more come than are
+/// taken (a pipe), the reading waits.
 fn typed_lines() -> Receiver<String> {
     let (tx, rx) = std::sync::mpsc::sync_channel(64);
     std::thread::spawn(move || {
         let began = std::time::Instant::now();
+        let terminal = std::io::stdin().is_terminal();
         let mut input = std::io::stdin().lock();
         loop {
             let mut line = String::new();
             let read = (&mut input).take(LINE_AT_MOST).read_line(&mut line);
-            let ahead = began.elapsed() < TYPED_AHEAD;
+            let ahead = terminal && began.elapsed() < TYPED_AHEAD;
             let sent = match read {
                 Ok(0) => false,
                 Ok(_) => ahead || tx.send(line).is_ok(),
