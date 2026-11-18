@@ -15,13 +15,15 @@ use hbsync_remote::ErrorClass;
 use hbsync_state::Unusable;
 
 use super::parts::AccountParts;
-use super::runners::{Life, Running};
+use super::runners::{Life, Running, Sharing};
 use super::{Account, Msg, Request, Try, Waiting};
 use crate::daemon::DaemonError;
 use crate::daemon::keeper::Keeper;
 use crate::folders::{heal_account, ready_account};
 use crate::protocol::{AccountStatus, Hints, Pause, State};
-use crate::runner::{Backoff, Command, Runner, RunnerConfig, RunnerError, Showing};
+use crate::runner::{
+    Backoff, Command, Runner, RunnerConfig, RunnerError, Shares, SharesTold, Showing,
+};
 use crate::sync::{lock, wait_for};
 use crate::words;
 use crate::{Config, CredentialError, CredentialStore, Location, Paths, Root};
@@ -42,6 +44,9 @@ const NEEDS_USER_AGAIN: Duration = Duration::from_secs(3600);
 const PURGE_LOOK: Duration = Duration::from_secs(600);
 /// While the config can't be read, folders to start wait this long before it is read again.
 const CONFIG_AGAIN: Duration = Duration::from_secs(1);
+/// The name the folder of shares is made under (sync semantics §10), in the main folder of an
+/// account other identities share with; the user may give it another.
+const SHARES: &str = "Shared";
 
 impl Account {
     /// Shows that it waits in `to`, for `why`; to connect again when `connecting`, refused for
@@ -286,7 +291,12 @@ impl Account {
             drive,
             notifier,
             mut notifications,
+            shares,
         } = parts;
+        // What other identities share, each synced by a runner of its own.
+        let mut shares: Vec<Sharing> = shares.into_iter().filter_map(Sharing::new).collect();
+        // The main folder and where its folder of shares is, as its runner told last.
+        let mut shares_at: Option<(std::path::PathBuf, Shares)> = None;
         let notifier = match notifier {
             Ok(n) => {
                 self.set_status(|s| s.hints = Hints::Connecting);
@@ -331,7 +341,8 @@ impl Account {
             let mut shown = lock(&self.shown);
             let roots = shown.waiting.take().map(|w| w.roots).unwrap_or_default();
             for root in roots {
-                match self.start(&drive, config, &root, shown.paused(), can_heal) {
+                let paused = shown.paused();
+                match self.start(&drive, config, &root, paused, can_heal, !shares.is_empty()) {
                     Ok(r) => shown.runners.push(r),
                     Err(e) => {
                         result = Err(e.into());
@@ -355,6 +366,7 @@ impl Account {
                 match msg {
                     // Only while it connects ([`Account::try_connect`]).
                     Msg::Connected(_) => {}
+                    Msg::Shares(folder, at) => shares_at = Some((folder, at)),
                     Msg::Hint(event) => {
                         let Some(hints) = notifications.event(event, Instant::now(), paused) else {
                             continue;
@@ -394,8 +406,11 @@ impl Account {
                             self.remove_folder(&folder);
                         }
                         adding.retain(|a| a.folder != folder);
+                        // One of its own: what others share isn't in the config to remove (it
+                        // stops with the main folder, below).
                         let mut shown = lock(&self.shown);
-                        for r in shown.runners.iter_mut().filter(|r| r.root.folder == folder) {
+                        let own = shown.runners.iter_mut().filter(|r| r.sharer.is_none());
+                        for r in own.filter(|r| r.root.folder == folder) {
                             r.stop_for_good();
                         }
                         changed = true;
@@ -408,6 +423,9 @@ impl Account {
                 }
             }
             notifications.tick(Instant::now(), paused);
+            for share in &mut shares {
+                share.notifications.tick(Instant::now(), paused);
+            }
             keeper.paused(paused);
             // Not while paused: no deletes for good, no pulls. On the keeper's thread: this one
             // never waits for it.
@@ -434,15 +452,20 @@ impl Account {
                 }
                 let before = shown.runners.len();
                 // Every runner joined if it ended; the first that ended for the DB.
+                // (The account's: a share's DB is its own, and its runner backs off.)
                 let unusable = (shown.runners.iter_mut())
-                    .filter_map(|r| r.ended(ending))
+                    .filter_map(|r| {
+                        let own = r.sharer.is_none();
+                        r.ended(ending).filter(|_| own)
+                    })
                     .reduce(|first, _| first);
                 if let Some(why) = unusable.filter(|_| can_heal) {
                     // Its folders wait while the DB is looked at ([`Account::sync`]), as at the
                     // account's start: they show starting, and one added or removed meanwhile
                     // changes them.
                     tracing::error!("{}: its state DB can't be used: stopping", self.identity);
-                    let roots = shown.shown().map(|r| r.root.clone());
+                    let roots = shown.own().map(|r| r.root.clone()).collect::<Vec<_>>();
+                    let roots = roots.into_iter();
                     shown.waiting = Some(Waiting::new(
                         roots.chain(adding.drain(..)).collect(),
                         Some("its state DB can't be used: it is being checked".into()),
@@ -455,10 +478,11 @@ impl Account {
                 }
                 shown.runners.retain(|r| !matches!(r.life, Life::Gone));
                 changed |= shown.runners.len() != before;
+                // (A share's starts again with the shares, below.)
                 let due: Vec<Root> = shown
                     .runners
                     .iter()
-                    .filter(|r| r.due(now))
+                    .filter(|r| r.due(now) && r.sharer.is_none())
                     .map(|r| r.root.clone())
                     .collect();
                 let ready: Vec<Root> = adding
@@ -478,7 +502,8 @@ impl Account {
                 let paused = lock(&self.shown).paused();
                 let start = |root: &Root| {
                     let config = config.as_ref()?;
-                    Some(self.start(&drive, config, root, paused, can_heal))
+                    let shared = !shares.is_empty();
+                    Some(self.start(&drive, config, root, paused, can_heal, shared))
                 };
                 let restarted: Vec<_> = due.iter().map(start).collect();
                 let started: Vec<_> = ready.iter().map(start).collect();
@@ -490,7 +515,8 @@ impl Account {
                         r.handle.send(command.clone());
                     }
                 };
-                let restarting = shown.runners.iter_mut().filter(|r| r.due(now));
+                let restarting = shown.runners.iter_mut();
+                let restarting = restarting.filter(|r| r.due(now) && r.sharer.is_none());
                 for (r, again) in restarting.zip(restarted) {
                     match again {
                         Some(Ok(new)) => {
@@ -519,6 +545,9 @@ impl Account {
                 }
                 changed = true;
             }
+            if !ending && !shares.is_empty() {
+                changed |= self.run_shares(paths, &mut shares, shares_at.as_ref(), now);
+            }
             if changed {
                 self.changed.raise();
             }
@@ -528,6 +557,9 @@ impl Account {
                 if shown.runners.is_empty() {
                     drop(shown);
                     notifications.finish();
+                    for share in &shares {
+                        share.notifications.finish();
+                    }
                     keeper.finish();
                     return result.map(|()| heal);
                 }
@@ -541,14 +573,19 @@ impl Account {
                 config_again,
                 restart,
             ];
-            let wait = wait_for(now, deadlines.into_iter().flatten());
+            let of_shares = shares
+                .iter()
+                .flat_map(|s| [s.notifications.deadline(now, paused), s.retry]);
+            let wait = wait_for(now, deadlines.into_iter().chain(of_shares).flatten());
             msgs.extend(requests.recv_timeout(wait).ok());
             msgs.extend(requests.try_iter());
         }
     }
 
     /// Starts syncing the folder `root` on the account's `drive`, with `config`'s settings,
-    /// paused when `paused`; ending when the DB can't be used if the account `heals` it.
+    /// paused when `paused`; ending when the DB can't be used if the account `heals` it. The
+    /// main folder of an account other identities share with (`shared`) makes the folder of
+    /// shares, and tells the account where it is.
     fn start(
         &self,
         drive: &Arc<Drive>,
@@ -556,6 +593,7 @@ impl Account {
         root: &Root,
         paused: Option<Pause>,
         heals: bool,
+        shared: bool,
     ) -> Result<Running, RunnerError> {
         let mut cfg = RunnerConfig::new(
             &root.folder,
@@ -570,6 +608,62 @@ impl Account {
         cfg.kind = root.kind;
         cfg.paused = paused;
         cfg.end_if_unusable = heals;
+        if shared && root.is_main() {
+            cfg.shares = Some(SHARES.to_owned());
+            let (folder, tell) = (root.folder.clone(), self.requests.clone());
+            cfg.shares_told = Some(SharesTold(Arc::new(move |at| {
+                let _ = tell.send(Msg::Shares(folder.clone(), at));
+            })));
+        }
+        self.spawn(cfg, drive, root, None)
+    }
+
+    /// Starts syncing what `share`'s identity shares into `folder`, in the folder of shares
+    /// of the main folder `main`: one way, what changes there moving out to the main folder's
+    /// top (sync semantics §13). The folder is made where missing, and set up in the share's
+    /// own DB (found there again when the folder of shares was renamed).
+    fn start_share(
+        &self,
+        share: &Sharing,
+        config: &Config,
+        main: &Path,
+        folder: &Path,
+        paused: Option<Pause>,
+    ) -> Result<Running, RunnerError> {
+        // Never into a folder of that name that isn't the folder of shares (gone, or renamed,
+        // since its runner told): what the identity shares would be the account's own there,
+        // and sent.
+        let record = hbsync_local::shares::Record::read(main)?;
+        let within = folder
+            .parent()
+            .is_some_and(|dir| record.is(dir).unwrap_or(false));
+        if !within {
+            let gone = format!("{}: not in the folder of shares", folder.display());
+            return Err(std::io::Error::new(std::io::ErrorKind::NotFound, gone).into());
+        }
+        match std::fs::create_dir(folder) {
+            Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e.into()),
+            _ => {}
+        }
+        hbsync_engine::root::SyncRoot::open_or_create(&share.db, &self.identity, folder)?;
+        let device = config.device_name();
+        let mut cfg = RunnerConfig::new(folder, &share.db, &self.identity, &device);
+        cfg.mass_delete = config.mass_delete;
+        cfg.sharer = Some(share.sharer.clone());
+        cfg.read_only = Some(main.to_path_buf());
+        cfg.paused = paused;
+        let root = Root::main(&self.identity, folder);
+        self.spawn(cfg, &share.drive, root, Some(share.sharer.clone()))
+    }
+
+    /// Starts the runner of `root` with `cfg` on `drive`: it wakes the account as it ends.
+    fn spawn(
+        &self,
+        mut cfg: RunnerConfig,
+        drive: &Arc<Drive>,
+        root: Root,
+        sharer: Option<crate::Identity>,
+    ) -> Result<Running, RunnerError> {
         cfg.changed = Arc::clone(&self.changed);
         let done = Arc::new(AtomicBool::new(false));
         let (ending, tell) = (Arc::clone(&done), self.requests.clone());
@@ -579,12 +673,100 @@ impl Account {
         })?;
         Ok(Running {
             root,
+            sharer,
             handle,
             life: Life::Syncing(thread),
             done,
             started: Instant::now(),
             backoff: Backoff::new(),
         })
+    }
+
+    /// Has each of `shares` synced by a runner in the folder of shares the main folder's
+    /// runner told (`at`), while that runner shows: started there, started again after it
+    /// failed, and stopped where that isn't its place any more (the folder of shares has
+    /// another name or is gone, the main folder is removed), to start in the new place once it
+    /// has ended. One that can't start is tried again after a pause; the account's own folders
+    /// sync on. Whether the folders shown changed.
+    fn run_shares(
+        &self,
+        paths: &Paths,
+        shares: &mut [Sharing],
+        at: Option<&(std::path::PathBuf, Shares)>,
+        now: Instant,
+    ) -> bool {
+        let mut changed = false;
+        let mut starting = Vec::new();
+        let (main, paused) = {
+            let mut shown = lock(&self.shown);
+            // Where the shares' folders are now: in the folder of shares, while the main
+            // folder that holds it is synced.
+            let dir = at.and_then(|(main, at)| match at {
+                Shares::At(name) if shown.own().any(|r| r.root.folder == *main) => {
+                    Some((main.clone(), main.join(name)))
+                }
+                _ => None,
+            });
+            for (i, share) in shares.iter().enumerate() {
+                let folder = dir.as_ref().map(|(_, dir)| dir.join(&share.local));
+                let theirs = |r: &&mut Running| r.sharer.as_ref() == Some(&share.sharer);
+                let mut running = false;
+                for r in shown.runners.iter_mut().filter(theirs) {
+                    if folder.as_deref() != Some(&r.root.folder) {
+                        if r.shows() {
+                            r.stop_for_good();
+                            changed = true;
+                        }
+                    } else if r.due(now) {
+                        // Started again where it was, below: this one goes.
+                        r.life = Life::Gone;
+                        continue;
+                    }
+                    running |= !matches!(r.life, Life::Gone);
+                }
+                if !running && folder.is_some() && share.retry.is_none_or(|at| now >= at) {
+                    starting.extend(folder.map(|folder| (i, folder)));
+                }
+            }
+            let before = shown.runners.len();
+            shown.runners.retain(|r| !matches!(r.life, Life::Gone));
+            changed |= shown.runners.len() != before;
+            (dir.map(|(main, _)| main), shown.paused())
+        };
+        let (Some(main), false) = (main, starting.is_empty()) else {
+            return changed;
+        };
+        // Started without the lock, as the account's own.
+        let Some(config) = Config::now(paths) else {
+            for (i, _) in starting {
+                shares[i].retry = Some(now + CONFIG_AGAIN);
+            }
+            return changed;
+        };
+        for (i, folder) in starting {
+            let share = &mut shares[i];
+            match self.start_share(share, &config, &main, &folder, paused) {
+                Ok(new) => {
+                    share.retry = None;
+                    let mut shown = lock(&self.shown);
+                    if let Some(command) = shown.missed(paused) {
+                        new.handle.send(command);
+                    }
+                    shown.runners.push(new);
+                    changed = true;
+                }
+                Err(e) => {
+                    let pause = share.backoff.next();
+                    tracing::warn!(
+                        "what {} shares can't be synced into {} ({e}): trying again in {pause:?}",
+                        share.sharer,
+                        folder.display()
+                    );
+                    share.retry = Some(now + pause);
+                }
+            }
+        }
+        changed
     }
 
     /// The credentials, waiting while the keychain can't be read; `None` when stopped first.

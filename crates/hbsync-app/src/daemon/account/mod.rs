@@ -33,6 +33,7 @@ use crate::protocol::{
     AccountControl, AccountStatus, DeletedAccount, DeletedItem, FolderStatus, Pause, RecentItem,
     State,
 };
+use crate::runner::Shares;
 use crate::runner::{Command, Handle, add_notes};
 use crate::sync::{Wakeup, lock};
 use crate::words;
@@ -150,6 +151,12 @@ impl Shown {
         self.runners.iter().filter(|r| r.shows())
     }
 
+    /// Those of them that sync the account's own folders: not what other identities share
+    /// with it ([`Running::sharer`]).
+    fn own(&self) -> impl Iterator<Item = &Running> {
+        self.shown().filter(|r| r.sharer.is_none())
+    }
+
     /// Passes `command` to every runner shown; refused, saying why, while it isn't running
     /// yet.
     fn send(&self, identity: &Identity, command: &Command) -> Result<(), String> {
@@ -189,6 +196,9 @@ pub(crate) enum Msg {
     SyncNow,
     /// A try at connecting ended (its thread's answer, while the account connects).
     Connected(Box<Result<HomebaseRemote, hbsync_homebase::HomebaseError>>),
+    /// The runner of this folder (the main folder) opened it, and its folder of shares is
+    /// there ([`crate::runner::Shares`]).
+    Shares(PathBuf, Shares),
 }
 
 /// What the account's thread is asked to do.
@@ -232,12 +242,13 @@ impl Account {
         (Arc::new(account), rx)
     }
 
-    /// Its folders.
+    /// Its folders: its own, not those of what other identities share with it (they are in
+    /// no config, and in DBs of their own).
     pub(super) fn folders(&self) -> Vec<Root> {
         let shown = lock(&self.shown);
         match &shown.waiting {
             Some(waiting) => waiting.roots.clone(),
-            None => shown.shown().map(|r| r.root.clone()).collect(),
+            None => shown.own().map(|r| r.root.clone()).collect(),
         }
     }
 
@@ -246,7 +257,7 @@ impl Account {
         let shown = lock(&self.shown);
         let main = match &shown.waiting {
             Some(waiting) => waiting.roots.iter().find(|r| r.is_main()),
-            None => shown.shown().map(|r| &r.root).find(|r| r.is_main()),
+            None => shown.own().map(|r| &r.root).find(|r| r.is_main()),
         };
         main.map(|r| r.folder.clone())
     }
@@ -279,7 +290,12 @@ impl Account {
     pub(super) fn status(&self) -> (AccountStatus, Vec<FolderStatus>) {
         let shown = lock(&self.shown);
         let folders = match &shown.waiting {
-            None => shown.shown().map(|r| r.handle.status()).collect(),
+            // Its own first, then what others share with it.
+            None => (shown
+                .own()
+                .chain(shown.shown().filter(|r| r.sharer.is_some())))
+            .map(|r| r.handle.status())
+            .collect(),
             Some(waiting) => waiting
                 .roots
                 .iter()
@@ -749,11 +765,23 @@ mod tests {
         thread: std::thread::JoinHandle<Result<(), crate::daemon::DaemonError>>,
     }
 
+    /// The account's drive, and what other identities share with it.
+    type Opened = Result<(Arc<Drive>, Vec<parts::Share>), crate::runner::RunnerError>;
+
     impl Started {
         fn new(
             paths: &Paths,
             root: Root,
             open: impl Fn(&Path) -> Result<Arc<Drive>, crate::runner::RunnerError> + Send + 'static,
+        ) -> Started {
+            Started::sharing(paths, root, move |db| Ok((open(db)?, Vec::new())))
+        }
+
+        /// [`Started::new`], `open` also making what other identities share with it.
+        fn sharing(
+            paths: &Paths,
+            root: Root,
+            open: impl Fn(&Path) -> Opened + Send + 'static,
         ) -> Started {
             use super::feed::{Notifications, Puller};
 
@@ -768,12 +796,13 @@ mod tests {
                 running.ready_db(&paths, start, &stopping, &requests, &mut msgs)?;
                 let config = crate::Config::default();
                 running.sync(&paths, &config, &requests, &stopping, &mut msgs, |db| {
-                    let drive = open(db)?;
+                    let (drive, shares) = open(db)?;
                     let puller = Puller::spawn(Arc::clone(&drive));
                     Ok(AccountParts {
                         drive,
                         notifier: Err(std::io::Error::other("none here")),
                         notifications: Notifications::new(puller, std::time::Instant::now()),
+                        shares,
                     })
                 })
             });
@@ -790,10 +819,21 @@ mod tests {
             what: &str,
             done: &dyn Fn(&AccountStatus, &FolderStatus) -> bool,
         ) -> Result<(), String> {
+            self.wait_all(what, &|status, folders| {
+                folders.first().is_some_and(|f| done(status, f))
+            })
+        }
+
+        /// Waits up to 30 s for its folders to be `done`.
+        fn wait_all(
+            &self,
+            what: &str,
+            done: &dyn Fn(&AccountStatus, &[FolderStatus]) -> bool,
+        ) -> Result<(), String> {
             let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
             loop {
                 let (status, folders) = self.account.status();
-                if folders.first().is_some_and(|f| done(&status, f)) {
+                if done(&status, &folders) {
                     return Ok(());
                 }
                 if std::time::Instant::now() > until {
@@ -855,6 +895,290 @@ mod tests {
         std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
         hbsync_engine::root::SyncRoot::create(&db, identity, &folder)?;
         Ok((paths, folder, db))
+    }
+
+    /// What another identity shares with the account is synced by a runner of its own, in a
+    /// folder named after the sharer in the main folder's folder of shares, which the main
+    /// folder's runner makes and leaves alone: one way, from the sharer's drive, on a DB of
+    /// its own. Nothing of it reaches the account's drive; a file changed there moves out to
+    /// the main folder's top and the sharer's comes again. It follows the folder of shares
+    /// when that one is renamed, and is there as it was after a stop and a start.
+    #[test]
+    fn what_another_identity_shares_is_synced_into_the_folder_of_shares()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use hbsync_remote::contract::Shares as _;
+        use std::fs::read_to_string as read;
+
+        let (me, tom): (Identity, Identity) = ("me.example".into(), "tom.example".into());
+        // The sharer, syncing its own folder with its own drive.
+        let toms = tempfile::tempdir()?;
+        let files = [("notes.txt", "from tom"), ("docs/plan.txt", "the plan")];
+        let (tom_paths, tom_folder, _) = set_up(toms.path(), &tom, &files)?;
+        let tom_server = FakeServer::new(ServerConfig::default());
+        let tom_remote = FakeRemote::new(tom_server.clone());
+        let (remote, sharer) = (tom_remote.clone(), tom.clone());
+        let tom_root = Root::main(&tom, &tom_folder);
+        let theirs = Started::new(&tom_paths, tom_root, move |db| {
+            Ok(Drive::open(db, &sharer, Arc::new(remote.clone()))?)
+        });
+        // Shares what is named so on its drive, once it is there.
+        let share = |names: &[&str]| -> Result<(), Box<dyn std::error::Error>> {
+            for name in names {
+                let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                let id = loop {
+                    let found = {
+                        let server = tom_server.lock().map_err(|_| "poisoned")?;
+                        let named = |h: &&hbsync_remote::RemoteHeader| {
+                            matches!(&h.body, hbsync_remote::RemoteBody::Live { content, .. }
+                                if content.name == *name)
+                        };
+                        server.live().find(named).map(|h| h.file_id)
+                    };
+                    match found {
+                        Some(id) => break id,
+                        None if std::time::Instant::now() > until => {
+                            return Err(format!("{name} never reached the sharer's drive").into());
+                        }
+                        None => std::thread::sleep(std::time::Duration::from_millis(20)),
+                    }
+                };
+                tom_remote.share(id)?;
+            }
+            tom_server.lock().map_err(|_| "poisoned")?.tick();
+            Ok(())
+        };
+
+        // The account, with what the sharer shares read as its member reads it.
+        let home = tempfile::tempdir()?;
+        let (paths, folder, _) = set_up(home.path(), &me, &[("mine.txt", "mine")])?;
+        let server = FakeServer::new(ServerConfig::default());
+        let shared_db = paths.shared_db(&me, &tom);
+        std::fs::create_dir_all(shared_db.parent().ok_or("no parent")?)?;
+        let start = || {
+            let (server, tom_server) = (server.clone(), tom_server.clone());
+            let (me, tom, shared_db) = (me.clone(), tom.clone(), shared_db.clone());
+            Started::sharing(&paths, Root::main(&me, &folder), move |db| {
+                let drive = Drive::open(db, &me, Arc::new(FakeRemote::new(server.clone())))?;
+                let member = Arc::new(FakeRemote::member(tom_server.clone()));
+                let theirs = Drive::open(&shared_db, &me, member)?;
+                let puller = feed::Puller::spawn(Arc::clone(&theirs));
+                let share = parts::Share {
+                    sharer: tom.clone(),
+                    drive: theirs,
+                    db: shared_db.clone(),
+                    notifications: feed::Notifications::new(puller, std::time::Instant::now()),
+                };
+                Ok((drive, vec![share]))
+            })
+        };
+        let both = |_: &AccountStatus, folders: &[FolderStatus]| {
+            folders.len() == 2 && folders.iter().all(|f| synced(&AccountStatus::new(&me), f))
+        };
+        let own_names = || -> Result<Vec<String>, Box<dyn std::error::Error>> {
+            let mut names = server.lock().map_err(|_| "poisoned")?.live_names();
+            names.sort();
+            Ok(names)
+        };
+
+        let started = start();
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            theirs.wait("the sharer's first sync", &synced)?;
+            // Its folder is there before anything is shared, in the folder of shares the main
+            // folder's runner made.
+            let at = folder.join("Shared").join("tom.example");
+            started.wait_all("the share's folder is there", &|s, folders| {
+                both(s, folders) && at.is_dir()
+            })?;
+            assert_eq!(hbsync_local::shares::folders(&folder)?, ["Shared"]);
+            share(&["notes.txt", "docs", "plan.txt"])?;
+            // (Read on a timer until its changes are announced: asked for now.)
+            let _ = started.account.sync_now();
+            started.wait_all("the share is here", &|s, folders| {
+                both(s, folders)
+                    && at.join("docs/plan.txt").exists()
+                    && at.join("notes.txt").exists()
+            })?;
+            assert_eq!(read(at.join("notes.txt"))?, "from tom");
+            assert_eq!(read(at.join("docs/plan.txt"))?, "the plan");
+
+            // Shown after the account's own, as the sharer's: never its main folder.
+            let (_, folders) = started.account.status();
+            assert_eq!(folders[0].path, folder);
+            assert!(folders[0].is_main() && folders[0].sharer.is_none());
+            assert_eq!(folders[1].path, at);
+            assert_eq!(folders[1].sharer.as_ref(), Some(&tom));
+            assert!(!folders[1].is_main());
+            assert_eq!(started.account.main_folder().as_deref(), Some(&*folder));
+            let own = started.account.folders();
+            assert_eq!(own.len(), 1, "{own:?}");
+            // Nothing of it on the account's drive; nothing changed on the sharer's.
+            assert_eq!(own_names()?, ["mine.txt"]);
+            assert!(shared_db.exists());
+
+            // Changed here: the change moves out to the main folder's top (the account's own
+            // from then on), and the sharer's comes again.
+            std::fs::write(at.join("notes.txt"), "changed here")?;
+            let _ = started.account.sync_now();
+            let moved_out = || {
+                let top = std::fs::read_dir(&folder).ok()?;
+                top.flatten()
+                    .map(|e| e.path())
+                    .find(|p| p.is_file() && read(p).is_ok_and(|text| text == "changed here"))
+            };
+            started.wait_all("the change moved out", &|s, folders| {
+                both(s, folders)
+                    && moved_out().is_some()
+                    && read(at.join("notes.txt")).is_ok_and(|text| text == "from tom")
+            })?;
+            let out = moved_out().ok_or("moved out")?;
+            let out = out
+                .file_name()
+                .ok_or("no name")?
+                .to_string_lossy()
+                .into_owned();
+            let _ = started.account.sync_now();
+            started.wait_all("what moved out is the account's own", &|s, folders| {
+                both(s, folders) && own_names().is_ok_and(|names| names.contains(&out))
+            })?;
+            assert_eq!(own_names()?.len(), 2, "{:?}", own_names()?);
+
+            // The folder of shares renamed: the share is synced there from then on.
+            std::fs::rename(folder.join("Shared"), folder.join("From others"))?;
+            let at = folder.join("From others").join("tom.example");
+            let _ = started.account.sync_now();
+            started.wait_all("the share follows the folder of shares", &|s, folders| {
+                both(s, folders) && folders[1].path == at
+            })?;
+            std::fs::write(tom_folder.join("later.txt"), "later")?;
+            let _ = theirs.account.sync_now();
+            share(&["later.txt"])?;
+            let _ = started.account.sync_now();
+            started.wait_all("what the sharer shares later comes there", &|s, folders| {
+                both(s, folders) && at.join("later.txt").exists()
+            })?;
+            assert!(!folder.join("Shared").exists());
+            assert_eq!(read(at.join("docs/plan.txt"))?, "the plan");
+            assert_eq!(own_names()?.len(), 2, "{:?}", own_names()?);
+            Ok(())
+        };
+        let checked = checks();
+        started.stop(checked)??;
+
+        // Stopped and started: as it was.
+        let started = start();
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            let at = folder.join("From others").join("tom.example");
+            started.wait_all("both are synced again", &|s, folders| {
+                both(s, folders) && folders[1].path == at
+            })?;
+            assert_eq!(read(at.join("notes.txt"))?, "from tom");
+            assert_eq!(read(at.join("later.txt"))?, "later");
+            assert_eq!(own_names()?.len(), 2, "{:?}", own_names()?);
+            let removed = tom_server.lock().map_err(|_| "poisoned")?.removed().count();
+            assert_eq!(removed, 0, "the sharer's drive is as it was");
+            Ok(())
+        };
+        let checked = checks();
+        started.stop(checked)??;
+        theirs.stop(())?;
+        Ok(())
+    }
+
+    /// An account `me` on a new drive whose main folder holds `mine.txt`, with what `tom`
+    /// shares: nothing yet, read as its member reads it. Its paths, its folder, and how to
+    /// start it.
+    #[allow(clippy::type_complexity)]
+    fn shared_with(
+        home: &Path,
+    ) -> Result<(Paths, PathBuf, impl Fn() -> Started), Box<dyn std::error::Error>> {
+        let (me, tom): (Identity, Identity) = ("me.example".into(), "tom.example".into());
+        let (paths, folder, _) = set_up(home, &me, &[("mine.txt", "mine")])?;
+        let server = FakeServer::new(ServerConfig::default());
+        let tom_server = FakeServer::new(ServerConfig::default());
+        let shared_db = paths.shared_db(&me, &tom);
+        std::fs::create_dir_all(shared_db.parent().ok_or("no parent")?)?;
+        let (starting, root) = (paths.clone(), Root::main(&me, &folder));
+        let start = move || {
+            let (server, tom_server) = (server.clone(), tom_server.clone());
+            let (me, tom, shared_db) = (me.clone(), tom.clone(), shared_db.clone());
+            Started::sharing(&starting, root.clone(), move |db| {
+                let drive = Drive::open(db, &me, Arc::new(FakeRemote::new(server.clone())))?;
+                let member = Arc::new(FakeRemote::member(tom_server.clone()));
+                let theirs = Drive::open(&shared_db, &me, member)?;
+                let puller = feed::Puller::spawn(Arc::clone(&theirs));
+                let share = parts::Share {
+                    sharer: tom.clone(),
+                    drive: theirs,
+                    db: shared_db.clone(),
+                    notifications: feed::Notifications::new(puller, std::time::Instant::now()),
+                };
+                Ok((drive, vec![share]))
+            })
+        };
+        Ok((paths, folder, start))
+    }
+
+    /// A share whose folder can't be set up (something else has its place in the folder of
+    /// shares) doesn't keep the account from syncing its own: it is tried again after a pause,
+    /// and syncs once its place is free.
+    #[test]
+    fn a_share_that_cant_start_is_tried_again_and_the_account_syncs_on()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let (_, folder, start) = shared_with(home.path())?;
+        use hbsync_local::shares::{Made, make};
+        assert_eq!(make(&folder, "Shared")?, Made::Made);
+        let at = folder.join("Shared").join("tom.example");
+        std::fs::write(&at, "in the way")?;
+        let started = start();
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            started.wait("its own folder syncs", &synced)?;
+            std::thread::sleep(std::time::Duration::from_millis(200));
+            let (_, folders) = started.account.status();
+            assert_eq!(folders.len(), 1, "{folders:?}");
+            assert!(at.is_file());
+
+            std::fs::remove_file(&at)?;
+            started.wait_all("the share syncs once its place is free", &|_, folders| {
+                folders.len() == 2
+                    && folders
+                        .iter()
+                        .all(|f| synced(&AccountStatus::new(&"me.example".into()), f))
+            })?;
+            assert!(at.is_dir());
+            Ok(())
+        };
+        let checked = checks();
+        started.stop(checked)?
+    }
+
+    /// The main folder removed: what others share stops with it (its folder of shares is no
+    /// synced folder's any more), its files left where they are, and the account ends.
+    #[test]
+    fn the_shares_stop_with_the_main_folder() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let (_, folder, start) = shared_with(home.path())?;
+        let started = start();
+        let at = folder.join("Shared").join("tom.example");
+        let run = started.wait_all("both sync", &|_, folders| {
+            folders.len() == 2
+                && folders
+                    .iter()
+                    .all(|f| synced(&AccountStatus::new(&"me.example".into()), f))
+        });
+        started.account.remove_folder(&folder);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !started.thread.is_finished() && std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let ended = started.thread.is_finished();
+        let (_, folders) = started.account.status();
+        started.stop(())?;
+        run?;
+        assert!(ended, "the account didn't end: {folders:?}");
+        assert!(folders.is_empty(), "{folders:?}");
+        assert!(at.is_dir() && folder.join("mine.txt").is_file());
+        Ok(())
     }
 
     /// Its DB damaged while the account runs (SQLite answers that it is malformed): its folder's

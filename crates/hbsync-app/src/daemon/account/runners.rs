@@ -8,13 +8,21 @@ use std::time::{Duration, Instant};
 
 use hbsync_state::Unusable;
 
-use crate::Root;
+use hbsync_engine::Drive;
+
+use super::feed::Notifications;
+use super::parts::Share;
 use crate::runner::{Backoff, Command, Handle, RunnerError};
+use crate::{Identity, Root};
 
 /// A folder's runner, on the account's thread.
 pub(super) struct Running {
-    /// Its folder, as the config lists it.
+    /// Its folder, as the config lists it; a share's ([`Running::sharer`]) isn't listed: its
+    /// place in the main folder's folder of shares.
     pub(super) root: Root,
+    /// Whose drive it syncs, when another identity's ([`Sharing`]): not one of the account's
+    /// folders (its main folder, the ones it readies and sets up again).
+    pub(super) sharer: Option<Identity>,
     pub(super) handle: Handle,
     pub(super) life: Life,
     /// Its thread is ending: joining it waits for no more than that.
@@ -31,6 +39,47 @@ pub(super) enum Life {
     Waiting(Instant),
     /// Ended, to be dropped.
     Gone,
+}
+
+/// What another identity shares with the account ([`Share`]), on the account's thread: its
+/// runner ([`Running::sharer`]) syncs it into `<the folder of shares>/<local>` while the main
+/// folder's runner shows and has told where the folder of shares is.
+pub(super) struct Sharing {
+    pub(super) sharer: Identity,
+    /// The sharer's name as a folder's here.
+    pub(super) local: String,
+    pub(super) drive: Arc<Drive>,
+    pub(super) db: std::path::PathBuf,
+    pub(super) notifications: Notifications,
+    /// Its runner couldn't start: tried again at this time.
+    pub(super) retry: Option<Instant>,
+    pub(super) backoff: Backoff,
+}
+
+impl Sharing {
+    /// `share` to run; `None` for a sharer whose name no folder here can have (told once).
+    pub(super) fn new(share: Share) -> Option<Sharing> {
+        let os = hbsync_platform::name::Os::current();
+        let local = match hbsync_namemap::to_local(share.sharer.as_str(), os) {
+            Ok(local) => local.name,
+            Err(e) => {
+                tracing::error!(
+                    "what {} shares isn't synced: no folder here can have its name ({e:?})",
+                    share.sharer
+                );
+                return None;
+            }
+        };
+        Some(Sharing {
+            sharer: share.sharer,
+            local,
+            drive: share.drive,
+            db: share.db,
+            notifications: share.notifications,
+            retry: None,
+            backoff: Backoff::new(),
+        })
+    }
 }
 
 /// A runner that ran this long without failing starts over with short pauses.
@@ -127,6 +176,7 @@ mod tests {
             let (handle, thread) = Runner::spawn(cfg, Arc::clone(&drive))?;
             let mut r = Running {
                 root: Root::main(&"a.example".into(), &folder),
+                sharer: None,
                 handle,
                 life: Life::Syncing(thread),
                 done: Arc::default(),

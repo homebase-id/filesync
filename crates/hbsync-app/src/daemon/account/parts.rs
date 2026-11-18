@@ -1,7 +1,7 @@
 //! An account's parts once its identity answers, made one way for the daemon's account and the
 //! dev tool `hbsync-sync`.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 use std::time::Instant;
@@ -23,6 +23,22 @@ pub struct AccountParts {
     pub notifier: std::io::Result<Notifier>,
     /// Takes the notifications' events: changes announced are pulled by its puller.
     pub notifications: Notifications,
+    /// What other identities share with the account, each a drive of its own: synced into a
+    /// folder of its own in the main folder's folder of shares (sync semantics §10, §13).
+    pub shares: Vec<Share>,
+}
+
+/// What another identity shares with the account: its drive as the account may read it.
+#[derive(Debug)]
+pub struct Share {
+    /// Whose drive it is.
+    pub sharer: crate::Identity,
+    /// The drive, on a state DB of its own ([`crate::Paths::shared_db`]).
+    pub drive: Arc<Drive>,
+    /// That DB.
+    pub db: PathBuf,
+    /// What brings it the drive's changes: read on a timer until they are announced.
+    pub notifications: Notifications,
 }
 
 impl AccountParts {
@@ -40,6 +56,8 @@ impl AccountParts {
             notifier,
             notifications: Notifications::new(Puller::spawn(Arc::clone(&drive)), Instant::now()),
             drive,
+            // Told by the identity's share markers, once they are read.
+            shares: Vec::new(),
         })
     }
 
