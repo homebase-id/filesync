@@ -401,14 +401,20 @@ pub fn there(at: &str) -> io::Error {
 /// the state folder, nor what a trailing separator or dot resolves to. One listing of the
 /// top.
 pub fn takeable(root: &Path, name: &str) -> io::Result<String> {
+    listed(root, name, true)
+}
+
+/// [`takeable`]; not `alike`: only the folder the top lists under exactly this name.
+fn listed(root: &Path, name: &str, alike: bool) -> io::Result<String> {
     let (folders, _) = list_top(root)?;
     let key = top_key(name, true);
-    let mut alike = folders
+    let mut same = folders
         .iter()
         .filter(|(folder, _)| top_key(folder, true) == key);
     let found = match folders.iter().find(|(folder, _)| folder == name) {
         Some(exact) => Some(exact),
-        None => alike.next().filter(|_| alike.next().is_none()),
+        None if alike => same.next().filter(|_| same.next().is_none()),
+        None => None,
     };
     match found {
         Some((folder, _)) => Ok(folder.clone()),
@@ -424,15 +430,16 @@ pub fn takeable(root: &Path, name: &str) -> io::Result<String> {
 /// before it could be told: what was sent of it leaves the drive, as anything left out
 /// does), or any folder they want what is shared in. Its marker is written (over one it
 /// holds), then it goes on record, the record's token and ids kept. Refused where a folder of
-/// shares is at the top, and for anything but a folder there (a path, a link, the state
-/// folder). Its name as the top lists it ([`takeable`]).
-pub fn take(root: &Path, name: &str) -> io::Result<String> {
+/// shares is at the top, and for anything but a folder the top lists under exactly this
+/// name ([`takeable`] gives it for what a person typed).
+pub fn take(root: &Path, name: &str) -> io::Result<()> {
     let record = Record::read(root)?;
     if let Some(at) = Top::told(root, &record)?.shares.first() {
         return Err(there(at));
     }
-    let name = takeable(root, name)?;
-    let dir = root.join(&name);
+    // (By this very name: the one that was resolved, and agreed to. Another folder that
+    // only compares as it, there since, is not the one meant.)
+    let dir = root.join(listed(root, name, false)?);
     let (token, before) = match &record.0 {
         Some(known) => (known.token.clone(), known.ids.as_slice()),
         None => (new_token(), &[][..]),
@@ -444,7 +451,7 @@ pub fn take(root: &Path, name: &str) -> io::Result<String> {
     let prepared = tmp_dir(root).join(PREPARED);
     let _ = std::fs::remove_file(shared_marker(&prepared));
     let _ = std::fs::remove_dir(&prepared);
-    Ok(name)
+    Ok(())
 }
 
 /// The name of the folder [`make`] prepares in the sync folder's tmp.
@@ -1018,9 +1025,12 @@ mod tests {
         // that tells them apart).
         fs::create_dir(root.join("Both"))?;
         if fs::create_dir(root.join("both")).is_ok() {
-            assert!(take(root, "BOTH").is_err());
+            assert!(takeable(root, "BOTH").is_err());
         }
-        assert_eq!(take(root, "theirs")?, "Theirs");
+        assert_eq!(takeable(root, "theirs")?, "Theirs");
+        // Taken by its very name alone: the one that was resolved.
+        assert!(take(root, "theirs").is_err() && folders(root)?.is_empty());
+        take(root, "Theirs")?;
         assert_eq!(folders(root)?, ["Theirs"]);
         let refused = take(root, "Theirs");
         assert!(refused.is_err_and(|e| e.kind() == io::ErrorKind::AlreadyExists));

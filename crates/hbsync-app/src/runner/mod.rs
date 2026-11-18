@@ -1401,7 +1401,10 @@ impl Runner {
         // (Opened for both: only in the folder that is set up, by its marker.)
         let root = SyncRoot::open(&self.cfg.db, &self.cfg.identity, folder);
         let done = root.and_then(|root| match (ask, self.cfg.shares.as_deref()) {
-            (SharesAsk::Take(name), _) => Ok(hbsync_local::shares::take(folder, name)?),
+            (SharesAsk::Take(name), _) => {
+                hbsync_local::shares::take(folder, name)?;
+                Ok(name.clone())
+            }
             (SharesAsk::Make, Some(name)) => {
                 let caseless = EngineConfig::new(folder, &self.cfg.device)
                     .folder

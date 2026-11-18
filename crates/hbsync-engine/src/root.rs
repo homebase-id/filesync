@@ -675,7 +675,8 @@ pub(crate) fn drive_has(
                 row.path.depth() == 1
                     && row.path.name().is_some_and(same)
                     && hbsync_platform::stat(&row.path.to_native(root))
-                        .is_ok_and(|meta| meta.file_id == row.fingerprint.file_id)
+                        // (Without the volume: its number may change with a restart.)
+                        .is_ok_and(|meta| meta.file_id.file == row.fingerprint.file_id.file)
             });
         if !leaving {
             return Ok(true);
