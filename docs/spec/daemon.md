@@ -471,9 +471,13 @@ included (service managers restart it then).
   Recently deleted) and all of it stays on disk; that is the way out for a folder of shares
   that was sent before it could be taken back (§10, "Back as a copy"). Both are refused
   while a folder of shares is at the top, while the folder is paused, and for an account
-  nothing is shared with; to take, also for anything but a folder at the top, by its name
-  as the top lists it. The runner does them between syncs, in the order asked, and opens
-  the folder again; one that fails is told as a note.
+  nothing is shared with; to take, also for anything but a folder at the top: the one
+  the top lists under that name, or else the only one whose name compares as it (another
+  case, another form of an accented letter). The runner does them between syncs, in the
+  order asked, and opens the folder again; one that fails is told as a note, and so is one
+  taken and not done because syncing stopped first. A folder says where its folder of
+  shares is once its sync has opened it: before that (starting, paused from the start)
+  `shares` is left out, as for an account nothing is shared with.
 
   And the folder of shares gives way: when an item at the top of the folder's part of the
   drive (as the account's DB has it; not a role folder, whose name is free in the main

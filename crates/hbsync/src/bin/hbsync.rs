@@ -542,7 +542,13 @@ fn shared_folder(
         .filter_map(|f| Some((f, f.shares.as_ref()?)))
         .collect();
     if shared.is_empty() {
-        println!("Nothing is shared with you here.");
+        // (A folder says what is shared into it once its sync has opened it: not while it
+        // starts, is paused from the start, or can't open.)
+        let none = "nothing is shared with you here, as far as the folders synced now tell";
+        if make.is_some() || take.is_some() {
+            return Err(none.into());
+        }
+        println!("Nothing is shared with you here (as far as the folders synced now tell).");
         return Ok(());
     }
     // Those whose folder isn't there: the ones to make or take one for.
@@ -581,8 +587,8 @@ fn shared_folder(
         let name = take.file_name().and_then(|n| n.to_str());
         let name = name.ok_or("give the folder's name")?.to_owned();
         let folder = meant(take.parent().filter(|p| !p.as_os_str().is_empty()))?;
-        // (Before the question: the daemon refuses the same.)
-        hbsync_local::shares::takeable(&folder.path, &name)?;
+        // (Before the question: the daemon refuses the same. By the name the folder has.)
+        let name = hbsync_local::shares::takeable(&folder.path, &name)?;
         let question = format!(
             "Take {name} in {} as the folder for what is shared with {}? What was synced of \
              it leaves your Homebase cloud (it stays on this computer, and in Recently deleted).",

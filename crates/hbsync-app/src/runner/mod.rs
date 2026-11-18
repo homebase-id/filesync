@@ -380,9 +380,13 @@ impl Handle {
         if self.status().state == State::Paused {
             return Err("syncing is paused: resume it first".to_owned());
         }
-        if let SharesAsk::Take(name) = &ask {
-            takeable(&path, name).map_err(|e| e.to_string())?;
-        }
+        // (The folder as the top lists it, whatever spelling of its name was given.)
+        let ask = match ask {
+            SharesAsk::Take(name) => {
+                SharesAsk::Take(takeable(&path, &name).map_err(|e| e.to_string())?)
+            }
+            make => make,
+        };
         match self.send(Command::Shares(ask)) {
             true => Ok(()),
             false => Err("the sync has stopped".to_owned()),
@@ -875,6 +879,16 @@ impl Runner {
             while let Some(msg) = first.take().or_else(|| self.control.try_recv().ok()) {
                 match msg {
                     Msg::Command(Command::Stop) | Msg::Orphaned => {
+                        // (Taken, and not done: said, for whoever was told it would be.)
+                        if !self.asked.is_empty() {
+                            let n = self.asked.len();
+                            tracing::warn!("stopped with {n} asked of the folder of shares");
+                            self.tell(vec![
+                                "What was asked of the folder for what is shared wasn't done: \
+                                 syncing stopped first. Ask again."
+                                    .to_owned(),
+                            ]);
+                        }
                         tracing::info!("stopped");
                         return Ok(());
                     }
@@ -1387,10 +1401,7 @@ impl Runner {
         // (Opened for both: only in the folder that is set up, by its marker.)
         let root = SyncRoot::open(&self.cfg.db, &self.cfg.identity, folder);
         let done = root.and_then(|root| match (ask, self.cfg.shares.as_deref()) {
-            (SharesAsk::Take(name), _) => {
-                hbsync_local::shares::take(folder, name)?;
-                Ok(name.clone())
-            }
+            (SharesAsk::Take(name), _) => Ok(hbsync_local::shares::take(folder, name)?),
             (SharesAsk::Make, Some(name)) => {
                 let caseless = EngineConfig::new(folder, &self.cfg.device)
                     .folder

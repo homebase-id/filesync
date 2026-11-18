@@ -14,7 +14,7 @@
 //! tells: there a copied marker makes its folder one too (a known limit).
 
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use hbsync_platform::{EntryKind, FileId};
 
@@ -394,18 +394,29 @@ pub fn there(at: &str) -> io::Error {
     io::Error::new(io::ErrorKind::AlreadyExists, what)
 }
 
-/// The folder `name` at the top of the sync folder at `root`, if it is one that can be
-/// taken as its folder of shares ([`take`]): a folder there by its name as the top lists it,
-/// never a path, a link or the state folder. One listing of the top.
-pub fn takeable(root: &Path, name: &str) -> io::Result<PathBuf> {
-    // By the listing: a name is the folder's only as the top has it (never another spelling
-    // of the state folder's, a path, or what a trailing separator or dot resolves to).
+/// The folder at the top of the sync folder at `root` that `name` names, if it is one that
+/// can be taken as its folder of shares ([`take`]), by the name the top lists it under: the
+/// one spelled so, or else the only one whose name compares as `name` does (another case,
+/// another form of an accented letter: what a person types for it). Never a path, a link or
+/// the state folder, nor what a trailing separator or dot resolves to. One listing of the
+/// top.
+pub fn takeable(root: &Path, name: &str) -> io::Result<String> {
     let (folders, _) = list_top(root)?;
-    if folders.iter().any(|(folder, _)| folder == name) {
-        return Ok(root.join(name));
+    let key = top_key(name, true);
+    let mut alike = folders
+        .iter()
+        .filter(|(folder, _)| top_key(folder, true) == key);
+    let found = match folders.iter().find(|(folder, _)| folder == name) {
+        Some(exact) => Some(exact),
+        None => alike.next().filter(|_| alike.next().is_none()),
+    };
+    match found {
+        Some((folder, _)) => Ok(folder.clone()),
+        None => {
+            let what = format!("{name} isn't a folder at the top of {}", root.display());
+            Err(io::Error::new(io::ErrorKind::InvalidInput, what))
+        }
     }
-    let what = format!("{name} isn't a folder at the top of {}", root.display());
-    Err(io::Error::new(io::ErrorKind::InvalidInput, what))
 }
 
 /// Takes the folder `name` at the top of the sync folder at `root` as its folder of shares,
@@ -414,13 +425,14 @@ pub fn takeable(root: &Path, name: &str) -> io::Result<PathBuf> {
 /// does), or any folder they want what is shared in. Its marker is written (over one it
 /// holds), then it goes on record, the record's token and ids kept. Refused where a folder of
 /// shares is at the top, and for anything but a folder there (a path, a link, the state
-/// folder).
-pub fn take(root: &Path, name: &str) -> io::Result<()> {
+/// folder). Its name as the top lists it ([`takeable`]).
+pub fn take(root: &Path, name: &str) -> io::Result<String> {
     let record = Record::read(root)?;
     if let Some(at) = Top::told(root, &record)?.shares.first() {
         return Err(there(at));
     }
-    let dir = takeable(root, name)?;
+    let name = takeable(root, name)?;
+    let dir = root.join(&name);
     let (token, before) = match &record.0 {
         Some(known) => (known.token.clone(), known.ids.as_slice()),
         None => (new_token(), &[][..]),
@@ -432,7 +444,7 @@ pub fn take(root: &Path, name: &str) -> io::Result<()> {
     let prepared = tmp_dir(root).join(PREPARED);
     let _ = std::fs::remove_file(shared_marker(&prepared));
     let _ = std::fs::remove_dir(&prepared);
-    Ok(())
+    Ok(name)
 }
 
 /// The name of the folder [`make`] prepares in the sync folder's tmp.
@@ -1001,8 +1013,14 @@ mod tests {
         }
         assert!(folders(root)?.is_empty());
 
-        // Nothing on record: with a token of its own.
-        take(root, "Theirs")?;
+        // Nothing on record: with a token of its own. By the name the top has for it, also
+        // where another case of it was typed; not where that names more than one (a volume
+        // that tells them apart).
+        fs::create_dir(root.join("Both"))?;
+        if fs::create_dir(root.join("both")).is_ok() {
+            assert!(take(root, "BOTH").is_err());
+        }
+        assert_eq!(take(root, "theirs")?, "Theirs");
         assert_eq!(folders(root)?, ["Theirs"]);
         let refused = take(root, "Theirs");
         assert!(refused.is_err_and(|e| e.kind() == io::ErrorKind::AlreadyExists));

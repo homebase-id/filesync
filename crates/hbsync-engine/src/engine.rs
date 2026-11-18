@@ -631,7 +631,8 @@ impl Engine {
                 // drive and stays on it (changed there meanwhile, or holding what isn't
                 // leaving: only its base went) is in the way now: work left, and the next
                 // sync has the folder of shares give way. One lookup, where one is there.
-                if self.yields && !report.in_the_way && self.shares_in_the_way()? {
+                // (A lookup that fails says the same: what the sync did is told either way.)
+                if self.yields && !report.in_the_way && self.shares_in_the_way().unwrap_or(true) {
                     report.unfinished = true;
                 }
                 Ok(report)
