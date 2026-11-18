@@ -889,6 +889,55 @@ fn the_folder_of_shares_never_reaches_the_db_and_a_copied_marker_does_nothing() 
     Ok(())
 }
 
+/// The folder of shares moved into another folder (a slip of the hand in the file manager) is
+/// left alone there too, known by the file id on record: nothing of it reaches the DB, by a
+/// whole scan, by a rescan of the folder it is in, or by one of a folder inside it. Back at
+/// the top it is the folder of shares as before, and nothing was ever there to take away.
+#[test]
+fn the_folder_of_shares_moved_into_another_folder_never_reaches_the_db() -> R {
+    use hbsync_local::shares::{Made, folders, make};
+    let mut f = Fixture::new()?;
+    assert_eq!(make(f.root(), "Shared")?, Made::Made);
+    f.write("Shared/tom/theirs.txt", b"t")?;
+    f.write("Work/notes.txt", b"n")?;
+    f.opts.filter = Arc::new(Filter::load(f.root(), false)?);
+    if f.opts.filter.shares_id().is_none() {
+        // A volume without stable file ids: the folder is known at the top only.
+        return Ok(());
+    }
+    let (report, _) = f.scan()?;
+    assert_eq!(report.added, 2, "{report:?}"); // Work, notes
+
+    let root = f.root().to_path_buf();
+    std::fs::rename(root.join("Shared"), root.join("Work/Shared"))?;
+    // As the runner opens the folder again: none at the top, the id still on record.
+    f.opts.filter = Arc::new(Filter::load(&root, false)?);
+    assert!(f.opts.filter.shared().is_empty() && f.opts.filter.shares_id().is_some());
+    let (report, dirty) = f.scan()?;
+    assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
+    assert!(dirty.is_empty(), "{dirty:?}");
+    for dir in ["Work", "Work/Shared", "Work/Shared/tom"] {
+        let report = rescan_dirs(&mut f.db, &root, &[RelPath::new(dir)?], &f.opts)?;
+        assert_eq!((report.added, report.removed), (0, 0), "{dir}: {report:?}");
+    }
+    let entry = [RelPath::new("Work/Shared/tom/theirs.txt")?];
+    let report = hbsync_local::rescan_entries(&mut f.db, &root, &[], &entry, &f.opts)?;
+    assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
+
+    // A folder that only has its name there is the user's own.
+    f.write("Work/Other/Shared/mine.txt", b"m")?;
+    let (report, _) = f.scan()?;
+    assert_eq!(report.added, 3, "{report:?}"); // Other, Shared, mine
+
+    std::fs::rename(root.join("Work/Shared"), root.join("Shared"))?;
+    assert_eq!(folders(&root)?, ["Shared"]);
+    f.opts.filter = Arc::new(Filter::load(&root, false)?);
+    let (report, dirty) = f.scan()?;
+    assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
+    assert!(dirty.is_empty(), "{dirty:?}");
+    Ok(())
+}
+
 /// A folder of shares that came since the filter was read (a sync was running) is left alone
 /// as well, by the record and its marker: neither its own rescan nor its parent's, nor a whole walk, brings
 /// what is in it into the DB.

@@ -1215,6 +1215,125 @@ fn a_folder_of_shares_that_cant_give_way_leaves_the_item_out_and_syncs_on() -> R
     Ok(())
 }
 
+/// Its rename refused, the folder of shares is asked again by itself after a while, also on
+/// a folder with nothing else to sync: once the rename works it gives way, and the drive's
+/// item comes, with nothing changed here to start a sync.
+#[cfg(unix)]
+#[test]
+fn a_folder_of_shares_that_couldnt_give_way_is_asked_again_by_itself() -> R {
+    use hbsync_local::shares::folders;
+    use std::os::unix::fs::PermissionsExt;
+    let server = server();
+    let again = |c: &mut RunnerConfig| c.shares_again = Duration::from_millis(400);
+    let a = Device::start_with(&server, "a", again)?;
+    let b = Device::start(&server, "b")?;
+    a.started()?;
+    b.started()?;
+    assert_eq!(make(&a.root, "Shared")?, Made::Made);
+    a.wait_idle()?;
+    let mode = |mode| std::fs::set_permissions(&a.root, std::fs::Permissions::from_mode(mode));
+    mode(0o555)?;
+    if std::fs::write(a.root.join("probe"), "").is_ok() {
+        std::fs::remove_file(a.root.join("probe"))?;
+        return Ok(mode(0o755)?);
+    }
+    b.write("Shared/cloud.txt", "from the drive")?;
+    b.handle.send(Command::SyncNow);
+    wait_until("the drive's Shared is up", || {
+        on_server(&server, "cloud.txt")
+    })?;
+    a.sync_reported()?;
+    let left_out = !a.has("Shared/cloud.txt");
+    mode(0o755)?;
+    assert!(left_out);
+    wait_until("it gave way by itself", || a.has("Shared/cloud.txt"))?;
+    a.wait_idle()?;
+    assert_eq!(folders(&a.root)?, ["Shared-2"]);
+    Ok(())
+}
+
+/// A folder of shares that can't be made keeps nothing of the account's own from syncing:
+/// there is none, said in the log, and it is made when the folder opens again and it can be.
+#[test]
+fn a_folder_of_shares_that_cant_be_made_doesnt_stop_the_folder() -> R {
+    use hbsync_local::shares::folders;
+    let server = server();
+    let a = Device::start_with(&server, "a", |c| {
+        c.shares = Some("Shared".into());
+        // In the way of its making, and not this program's to clear.
+        let stray = hbsync_local::layout::tmp_dir(&c.folder)
+            .join("shares")
+            .join("stray");
+        std::fs::create_dir_all(stray).expect("stray");
+    })?;
+    a.write("notes.txt", "mine")?;
+    wait_until("notes.txt is up", || on_server(&server, "notes.txt"))?;
+    a.wait_idle()?;
+    assert_eq!(a.status().state, State::Idle);
+    assert!(folders(&a.root)?.is_empty());
+
+    let stray = hbsync_local::layout::tmp_dir(&a.root).join("shares");
+    std::fs::remove_dir_all(stray)?;
+    a.write(".hbsync/ignore", "*.tmp\n")?;
+    a.handle.send(Command::SyncNow);
+    wait_until("the folder of shares is made", || {
+        folders(&a.root).is_ok_and(|f| f == ["Shared"])
+    })?;
+    a.wait_idle()?;
+    assert_eq!(live_names(&server), ["notes.txt"]);
+    Ok(())
+}
+
+/// The folder of shares that comes back as a copy while the folder is synced (moved to
+/// another volume and back, restored: another file id, its marker in it) is taken as the
+/// folder of shares again, though the scan saw it first: nothing of it reaches the drive.
+#[test]
+fn a_folder_of_shares_back_as_a_copy_is_taken_again_while_syncing() -> R {
+    use hbsync_local::layout::shared_marker;
+    use hbsync_local::shares::folders;
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    if !a.watching()? {
+        return Ok(());
+    }
+    assert_eq!(make(&a.root, "Shared")?, Made::Made);
+    a.write("Shared/tom/theirs.txt", "shared with me")?;
+    a.write("notes.txt", "mine")?;
+    wait_until("notes.txt is up", || on_server(&server, "notes.txt"))?;
+    a.wait_idle()?;
+    let marker = std::fs::read(shared_marker(&a.root.join("Shared")))?;
+
+    // Away (out of the sync folder), and a copy of it made beside the sync folder.
+    let beside = a.root.parent().ok_or("no parent")?;
+    rename_with_retries(&a.root.join("Shared"), &beside.join("away"))?;
+    a.handle.send(Command::SyncNow);
+    a.sync_reported()?;
+    a.wait_idle()?;
+    assert!(folders(&a.root)?.is_empty());
+    let copy = beside.join("copy");
+    std::fs::create_dir_all(copy.join("tom"))?;
+    std::fs::write(copy.join("tom/theirs.txt"), "shared with me")?;
+    std::fs::write(shared_marker(&copy), &marker)?;
+    if hbsync_platform::stat(&copy)?.file_id == hbsync_platform::stat(&beside.join("away"))?.file_id
+    {
+        return Err("the copy has the folder's file id".into());
+    }
+
+    // Back, whole: seen by the watcher, taken before anything of it is sent.
+    std::fs::rename(&copy, a.root.join("Shared"))?;
+    wait_until("it is the folder of shares again", || {
+        folders(&a.root).is_ok_and(|f| f == ["Shared"])
+    })?;
+    a.write("more.txt", "mine too")?;
+    wait_until("more.txt is up", || on_server(&server, "more.txt"))?;
+    a.wait_idle()?;
+    let mut names = live_names(&server);
+    names.sort();
+    assert_eq!(names, ["more.txt", "notes.txt"]);
+    assert!(a.has("Shared/tom/theirs.txt"));
+    Ok(())
+}
+
 /// A folder of the user's own that the volume tells apart from the folder of shares and the
 /// client doesn't (`STRASSE` beside `Straße`, where the volume ignores case) stays synced: the
 /// folder of shares gives way before the filter holds its name. Where the volume tells case

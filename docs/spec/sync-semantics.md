@@ -1035,6 +1035,27 @@ prepared folder, which the next try makes anew.
   and is masked once the filter is read). Nothing in it is sent, and the drive's folder of
   its name isn't put into it (engine
   `a_folder_of_shares_the_filter_doesnt_know_yet_is_neither_sent_nor_merged`).
+- Moved into another folder (a slip of the hand in the file manager; the same volume, so
+  its file id stays) it is left alone there too: a walk knows it by the file id on record,
+  which each listing has, and looks for its marker before it reports or enters it, and a
+  folder of the drive is never made out of it there either (it waits). Nothing of it is
+  sent; back at the top it is the folder of shares as before, and nothing of it was on the
+  drive to take away (scan `the_folder_of_shares_moved_into_another_folder_never_reaches_the_db`,
+  engine `the_folder_of_shares_moved_into_a_synced_folder_is_neither_sent_nor_merged`).
+  Where the volume's file ids aren't stable no id is on record: there it is known at the
+  top only, and moved into a folder it syncs as the user's own (a known limit).
+- Back as a copy (moved to another volume and back, restored from a backup: another file
+  id, its marker in it) it is taken as the folder of shares again: as the sync folder
+  opens, and while it is synced as soon as a folder at the top holds the record's marker
+  (the folder is opened again for it). Taken is the only folder there that holds the marker
+  and isn't synced: one the state DB has a base for (agreed with the drive), under its name
+  as names compare or by its file id (a synced folder a marker was copied into stays the
+  user's own, renamed or not). One only scanned so far (it came whole, a rename into
+  place) isn't synced: taken, it leaves the DB with the next scan and never reaches the
+  drive (runner `a_folder_of_shares_back_as_a_copy_is_taken_again_while_syncing`). A known
+  limit: copied back piece by piece, the folder is sent as the user's own from the moment
+  its first items are (a sync may begin before the marker is copied), and isn't taken
+  afterwards; the log says that a folder holding the marker wasn't taken.
 - A marker anywhere else does nothing (junk): copied into a synced folder at the top, that
   folder stays synced, with what is in it and what comes (scan
   `the_folder_of_shares_never_reaches_the_db_and_a_copied_marker_does_nothing`, engine

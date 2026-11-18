@@ -198,6 +198,12 @@ pub struct Filter {
     /// Something else at the top had one's name when the filter was read
     /// ([`Filter::in_the_way`]).
     in_the_way: bool,
+    /// The file id on record for the folder of shares when the filter was read
+    /// ([`Filter::shares_id`]).
+    shares_id: Option<u128>,
+    /// How many folders at the top held the record's marker when the filter was read, the
+    /// folder on record not there ([`Filter::returned`]).
+    returned: usize,
 }
 
 /// `name` as names at the top compare with a folder's that holds what other identities
@@ -223,6 +229,8 @@ impl Default for Filter {
             skipped: Vec::new(),
             shared: Vec::new(),
             in_the_way: false,
+            shares_id: None,
+            returned: 0,
         }
     }
 }
@@ -246,6 +254,8 @@ impl Filter {
         })?;
         let mut filter = Self::from_rules(&text, case_insensitive)?.with_shared(&top.shares);
         filter.in_the_way = filter.left_out_with(&top);
+        filter.shares_id = top.id;
+        filter.returned = top.returned;
         Ok(filter)
     }
 
@@ -289,6 +299,8 @@ impl Filter {
             skipped,
             shared: Vec::new(),
             in_the_way: false,
+            shares_id: None,
+            returned: 0,
         })
     }
 
@@ -305,7 +317,9 @@ impl Filter {
     /// read again.
     pub fn shared_changed(&self, root: &Path) -> bool {
         crate::shares::Top::read(root).map_or(true, |top| {
-            self.top_keys(&top.shares) != self.shared || self.left_out_with(&top)
+            self.top_keys(&top.shares) != self.shared
+                || self.left_out_with(&top)
+                || top.returned != self.returned
         })
     }
 
@@ -322,6 +336,25 @@ impl Filter {
     /// folder of shares gives way ([`crate::shares::place`], as the sync folder opens).
     pub fn in_the_way(&self) -> bool {
         self.in_the_way
+    }
+
+    /// How many folders at the top held the marker of the folder of shares on record when
+    /// the filter was read, that folder not being there ([`crate::shares::Top::returned`]):
+    /// each may be it, back as a copy. Another number means the sync folder is to be opened
+    /// again, for one to be taken ([`crate::shares::adopt`]); the same number, that none was
+    /// (it is synced as the user's own, or there are several).
+    pub fn returned(&self) -> usize {
+        self.returned
+    }
+
+    /// The file id on record for the folder of shares when the filter was read
+    /// ([`Filter::load`]), wherever that folder is: at the top it is left out by its name
+    /// ([`Filter::shared`]); moved into another folder (a slip of the hand) it has no name to
+    /// go by, and a walk knows it by this id, to look for its marker
+    /// ([`crate::shares::Record::holds`]) before it reports or enters it. None where none is
+    /// on record, or the volume's file ids aren't stable.
+    pub fn shares_id(&self) -> Option<u128> {
+        self.shares_id
     }
 
     /// The folders at the top left out as holding what other identities share

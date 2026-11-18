@@ -59,9 +59,8 @@ const ANSWER_DROPPED_SET_UP: &str = "Your answer to the deletions to review wasn
 /// The ignore rules are read this long after their file was last touched: not half written.
 const RULES_QUIET: Duration = Duration::from_secs(1);
 
-/// How long after the folder of shares couldn't give way to the drive's item of its name
-/// (the item masked meanwhile) a sync asks it to again: each asking opens the folder anew.
-const GIVE_WAY_AGAIN: Duration = Duration::from_secs(600);
+/// [`RunnerConfig::shares_again`], unless a test says otherwise.
+const SHARES_AGAIN: Duration = Duration::from_secs(600);
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
@@ -145,6 +144,10 @@ pub struct RunnerConfig {
     /// same deletes are held: what the identity said once wasn't there is gone for good when
     /// it says so again a minute on (sync semantics §8b).
     pub put_back_again: Duration,
+    /// How long after the folder of shares couldn't give way to the drive's item of its name
+    /// (the item masked meanwhile) a sync is run to ask it again, and after it couldn't be
+    /// made the folder is opened again to make it: each asking opens the folder anew.
+    pub shares_again: Duration,
     /// Tests: adjusts the engine's config.
     pub tweak: Option<fn(&mut EngineConfig)>,
     /// Raised when its status may have changed (the daemon pushes it to the tray).
@@ -195,6 +198,7 @@ impl RunnerConfig {
             look: Duration::from_secs(60),
             once: false,
             put_back_again: hbsync_engine::gone::ASK_AGAIN,
+            shares_again: SHARES_AGAIN,
             tweak: None,
             changed: Arc::default(),
             end_if_unusable: false,
@@ -457,6 +461,9 @@ struct Parts {
     gave_way: bool,
     /// It couldn't, to the drive's item of its name ([`hbsync_local::shares::Placed::stuck`]).
     stuck: bool,
+    /// The folder of shares was to be made and couldn't be
+    /// ([`hbsync_local::shares::Placed::unmade`]): made as the folder opens again.
+    unmade: bool,
 }
 
 impl Parts {
@@ -466,7 +473,9 @@ impl Parts {
     fn rules_changed(&self, root: &Path) -> bool {
         let folder = &self.engine.config().folder;
         Filter::load(root, folder.case_insensitive).map_or(true, |f| {
-            f.fingerprint() != folder.filter.fingerprint() || f.in_the_way()
+            f.fingerprint() != folder.filter.fingerprint()
+                || f.in_the_way()
+                || f.returned() != folder.filter.returned()
         })
     }
 
@@ -635,7 +644,9 @@ impl Runner {
             }),
             e => e.into(),
         };
-        let adopted = sync_root.adopt_shares().map_err(unread)?;
+        let adopted = sync_root
+            .adopt_shares(cfg.folder.case_insensitive)
+            .map_err(unread)?;
         if let Some(name) = adopted {
             tracing::info!("{name}: taken as the folder of shares (the one on record is gone)");
         }
@@ -654,6 +665,9 @@ impl Runner {
         if let Some(why) = &placed.stuck {
             tracing::warn!("{why}: the item stays out of this folder meanwhile");
         }
+        if let Some(why) = &placed.unmade {
+            tracing::warn!("{why}: tried again later; what is the account's own syncs on");
+        }
         if placed.missing && make_as.is_some() {
             tracing::warn!(
                 "the folder of shares on record isn't at the top of the folder: none is made in its place"
@@ -668,6 +682,13 @@ impl Runner {
             });
         }
         cfg.folder.filter = Arc::new(Filter::load(root, cfg.folder.case_insensitive)?);
+        if cfg.folder.filter.returned() > 0 {
+            tracing::warn!(
+                "the folder of shares on record isn't at the top of the folder, and what holds \
+                 its marker there wasn't taken as it: it is synced as the account's own, or \
+                 more than one holds it"
+            );
+        }
         cfg.folder.read_only.clone_from(&self.cfg.read_only);
         if let Some(tweak) = self.cfg.tweak {
             tweak(&mut cfg);
@@ -696,6 +717,7 @@ impl Runner {
             drive_changed,
             gave_way: !placed.moved.is_empty(),
             stuck: placed.stuck.is_some(),
+            unmade: placed.unmade.is_some(),
         })
     }
 
@@ -744,6 +766,7 @@ impl Runner {
                     observer,
                     rules_at,
                     put_back_again.as_ref().map(|(at, _)| *at),
+                    yield_at,
                 ]
                 .into_iter()
                 .flatten(),
@@ -838,14 +861,20 @@ impl Runner {
                 rules_at = None;
                 check_rules = true;
             }
+            // The folder of shares is asked again: to give way (the next sync asks it, and one
+            // is wanted for that: an idle folder would never ask), or to be made (as the
+            // folder opens again).
+            if yield_at.is_some_and(|at| now >= at) {
+                yield_at = None;
+                match &mut parts {
+                    Some(p) if p.unmade => parts = None,
+                    Some(p) => p.engine.yield_shares(true),
+                    None => {}
+                }
+                schedule.want(Why::Retry);
+            }
             if schedule.look_due(now) {
                 check_rules = true;
-                if yield_at.is_some_and(|at| now >= at)
-                    && let Some(p) = &mut parts
-                {
-                    p.engine.yield_shares(true);
-                    yield_at = None;
-                }
                 // Without a watcher, one is asked for again (its error gone: inotify's
                 // instances freed); the folder's changes are found by scanning it, and once
                 // one is back, what changed while there was none.
@@ -963,8 +992,8 @@ impl Runner {
                         // Asked to give way and didn't (it can't just now, or nothing was
                         // found to give way to): not asked again at every sync.
                         let asked = std::mem::take(&mut yielding);
-                        if p.stuck || (asked && !p.gave_way) {
-                            yield_at = Some(Instant::now() + GIVE_WAY_AGAIN);
+                        if p.stuck || p.unmade || (asked && !p.gave_way) {
+                            yield_at = Some(Instant::now() + self.cfg.shares_again);
                         } else {
                             p.engine.yield_shares(true);
                             yield_at = None;

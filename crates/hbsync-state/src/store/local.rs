@@ -218,6 +218,21 @@ impl ReadTx<'_> {
         self.with_paths(raw)
     }
 
+    /// [`ReadTx::local_by_file_id`] whatever the volume's number: for an item of the folder's
+    /// own volume, whose number may be another after a restart (on Unix), while a file's id
+    /// on it stays.
+    pub fn local_by_file_on_any_volume(&self, id: &FileId) -> Result<Vec<LocalRow>> {
+        let (lo, hi) = codec::file_id_parts(id);
+        let raw = self.raw_local(
+            &format!(
+                "SELECT {LOCAL_COLS} {LOCAL_FROM} \
+                 WHERE l.file_id = ?1 AND l.file_id_hi IS ?2"
+            ),
+            params![lo, hi],
+        )?;
+        self.with_paths(raw)
+    }
+
     /// The nodes of the local subtree at `path` (its top included) that this folder has a base
     /// of, or the drive holds (the mirror), each with whether it has a base: one query. A
     /// subtree too deep (or a cycle) is corrupt, as for [`ReadTx::local_subtree`].

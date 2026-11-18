@@ -129,7 +129,8 @@ impl<'a> Walker<'a> {
         walker
     }
 
-    /// Whether the folder at `at` with `id`, at the top, is the folder of shares
+    /// Whether the folder at `at` with `id` (at the top, or one with the id on record) is the
+    /// folder of shares
     /// ([`crate::shares::Record::holds`]): the record read once a walk, the marker looked for
     /// in the one folder it names.
     fn holds_shares(&mut self, id: hbsync_platform::FileId, at: &Path) -> io::Result<bool> {
@@ -236,8 +237,11 @@ impl Iterator for Walker<'_> {
                 // The folder at the top that holds what other identities share is neither
                 // reported nor entered: by the record and its marker, whatever the filter
                 // knows of it (it came, or took another name, since the filter was read).
+                // Nor is it below the top, moved into another folder: known there by the
+                // file id on record (the listing has each folder's: nothing more is read
+                // but for the one that has it).
                 let id = meta.file_id;
-                let held = match dir.is_root() {
+                let held = match dir.is_root() || self.filter.shares_id() == Some(id.file) {
                     true => self.native(&path).map(|at| self.holds_shares(id, &at)),
                     false => None,
                 };

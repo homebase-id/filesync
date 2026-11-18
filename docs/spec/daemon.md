@@ -431,9 +431,14 @@ included (service managers restart it then).
   rules, and at once when the watcher sees an entry at the top made, removed or renamed or
   a marker in a folder there; a change restarts the engine as an edit of the rules does. As
   the folder opens, a folder of shares the record no longer finds (the sync folder restored
-  from a backup) is taken again, if it is the only folder at the top that isn't synced and
-  holds the record's marker; the log says so. A record that can't be read stops the
-  folder's sync, failing, till it can.
+  from a backup, the folder moved to another volume and back) is taken again, if it is the
+  only folder at the top that isn't synced and holds the record's marker; the log says so.
+  While the folder on record isn't at the top, a folder there that comes to hold its marker
+  opens the folder again for that (sync semantics §10); one that isn't taken (it is synced
+  as the account's own, or more than one holds the marker) is said in the log, once an
+  open. A record that can't be read stops the folder's sync, failing, till it can; so does
+  a volume whose kind can't be told as the folder is put on record (a record without the
+  file id would let any folder holding the marker pass for it).
 
   As the folder opens too, before the rules are read (`shares::place`): where the account
   has shares and no folder of shares is on record, one is made, named `Shared`, or the first
@@ -443,7 +448,10 @@ included (service managers restart it then).
   at the top or not: one moved into another folder, or whose marker can't be read for a
   moment, would be a plain folder for good once another took its place on record, and
   what it holds would be sent. The log says that none is made. (One on record that never
-  got to the top, its making stopped before the rename into place, is made anew.)
+  got to the top, its making stopped before the rename into place, is put into place as it
+  is.) A folder of shares that can't be made (no name free, something in the way in
+  `.hbsync/tmp`) stops nothing: there is none, the log says why, the account's own items
+  sync on, and it is tried again ten minutes on and whenever the folder opens.
 
   And the folder of shares gives way: when an item at the top of the folder's part of the
   drive (as the account's DB has it; not a role folder, whose name is free in the main
@@ -460,8 +468,9 @@ included (service managers restart it then).
   opens. So an item this device has synced that takes the name on the drive (renamed on
   another device) is renamed here as anywhere, never taken from here as masked. Where the
   rename fails (a file in it in use on Windows, no number free) the drive's item is masked
-  meanwhile, which loses nothing, the log says why, and it is tried again ten minutes on at
-  the earliest (and when the folder opens for another reason). Where it fails for an item
+  meanwhile, which loses nothing, the log says why, and it is tried again ten minutes on (a
+  sync is run for it then, also on a folder with nothing else to sync) and when the folder
+  opens for another reason. Where it fails for an item
   beside it in the folder (which would leave the drive, left out with it) the folder's sync
   stops, failing, till it works.
 - **The folder gone** (moved, deleted, a disk not mounted: its marker missing): nothing

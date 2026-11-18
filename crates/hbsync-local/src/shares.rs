@@ -67,8 +67,10 @@ impl Record {
 
     /// Records the folder at `dir`, whose marker holds `token`, as the folder of shares of the
     /// sync folder at `root`, in one step: with its file id where the volume's are stable.
+    /// A volume whose kind can't be told is an error: a record without the id would let any
+    /// folder holding the marker pass for the folder of shares, for good.
     fn write(root: &Path, token: &str, dir: &Path) -> io::Result<()> {
-        let stable = hbsync_platform::fskind::detect(root).is_ok_and(|f| f.has_stable_file_ids());
+        let stable = hbsync_platform::fskind::detect(root)?.has_stable_file_ids();
         let mut text = format!("token {token}\n");
         if stable {
             text += &format!("folder {}\n", hbsync_platform::stat(dir)?.file_id.file);
@@ -151,6 +153,14 @@ pub struct Top {
     pub shares: Vec<String>,
     /// What else is there, by name (the state folder left out).
     pub others: Vec<String>,
+    /// The file id on record for the folder of shares, wherever that folder is now: none
+    /// where none is on record, or the volume's file ids aren't stable.
+    pub id: Option<u128>,
+    /// How many folders here hold the record's marker while the folder on record isn't here:
+    /// it may be back as a copy (moved to another volume and back, restored), which has
+    /// another file id, for [`adopt`] to judge as the sync folder opens. None while the
+    /// folder on record is here: a marker copied elsewhere says nothing then.
+    pub returned: usize,
 }
 
 impl Top {
@@ -171,15 +181,30 @@ impl Top {
     /// [`Top::read`] by `record`, the top listed also where nothing is on record.
     fn told(root: &Path, record: &Record) -> io::Result<Top> {
         let (folders, mut others) = list_top(root)?;
-        let mut shares = Vec::new();
+        let (mut shares, mut plain) = (Vec::new(), Vec::new());
         for (name, id) in folders {
             match record.holds(id, &root.join(&name))? {
                 true => shares.push(name),
-                false => others.push(name),
+                false => plain.push(name),
             }
         }
         shares.sort_unstable();
-        Ok(Top { shares, others })
+        let id = record.0.as_ref().and_then(|known| known.id);
+        // Looked for only while the folder on record isn't here (a marker a folder).
+        let mut returned = 0;
+        if let (true, Some(known)) = (shares.is_empty(), &record.0) {
+            for name in &plain {
+                let token = token_in(&root.join(name))?;
+                returned += usize::from(token.is_some_and(|token| token == known.token));
+            }
+        }
+        others.append(&mut plain);
+        Ok(Top {
+            shares,
+            others,
+            id,
+            returned,
+        })
     }
 }
 
@@ -203,8 +228,10 @@ pub enum Made {
 /// Makes the folder of shares of the sync folder at `root`, named `name` at its top. Never
 /// there without its marker, nor before it is on record: prepared in the sync folder's tmp
 /// (on its volume) with a marker holding a new token, recorded, then renamed into place,
-/// never over anything. A crash in between leaves a prepared folder, which the next call
-/// makes anew.
+/// never over anything. A crash in between leaves a prepared folder: one that is on record
+/// (its marker in it) is put into place by the next call as it is, any other is made anew.
+/// Never taken apart while it is the one on record: stopped there, the record would name
+/// nothing, and read as a folder of shares that is gone ([`Placed::missing`]).
 ///
 /// A folder on record that lost its marker is a plain folder (the user took the marker away:
 /// theirs now): another is made, and goes on record in its place.
@@ -217,24 +244,28 @@ pub fn make(root: &Path, name: &str) -> io::Result<Made> {
     hbsync_fileio::make_dir_in_place(&crate::layout::state_dir(root))?;
     hbsync_fileio::make_dir_in_place(&tmp)?;
     let prepared = tmp.join(PREPARED);
-    let marker = shared_marker(&prepared);
-    // One left by a crash: this program's own, holding its marker and nothing else.
-    for gone in [
-        std::fs::remove_file(&marker),
-        std::fs::remove_dir(&prepared),
-    ] {
-        match gone {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e),
+    if !Record::read(root)?.is(&prepared)? {
+        let marker = shared_marker(&prepared);
+        // One left by a crash before it was on record: this program's own, holding its
+        // marker and nothing else.
+        for gone in [
+            std::fs::remove_file(&marker),
+            std::fs::remove_dir(&prepared),
+        ] {
+            match gone {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e),
+            }
         }
+        std::fs::create_dir(&prepared)?;
+        let token = hbsync_types::Uuid::new_v4().simple().to_string();
+        std::fs::write(&marker, &token)?;
+        // Only looks (a leading dot hides it elsewhere): a marker that can't be hidden still
+        // works.
+        let _ = hbsync_platform::ops::set_hidden(&marker);
+        Record::write(root, &token, &prepared)?;
     }
-    std::fs::create_dir(&prepared)?;
-    let token = hbsync_types::Uuid::new_v4().simple().to_string();
-    std::fs::write(&marker, &token)?;
-    // Only looks (a leading dot hides it elsewhere): a marker that can't be hidden still works.
-    let _ = hbsync_platform::ops::set_hidden(&marker);
-    Record::write(root, &token, &prepared)?;
     match hbsync_platform::ops::rename_noreplace(&prepared, &root.join(name)) {
         Ok(()) => Ok(Made::Made),
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(Made::Taken),
@@ -256,6 +287,10 @@ pub struct Placed {
     /// free), with why: the item stays masked, which loses nothing, and the next open tries
     /// again.
     pub stuck: Option<String>,
+    /// The folder of shares couldn't be made (no name free, something in the way of its
+    /// making), with why: there is none, which keeps nothing of the user's own from syncing,
+    /// and the next open tries again.
+    pub unmade: Option<String>,
     /// One is on record and isn't at the top (moved away, deleted, its marker gone): none
     /// was made in its place.
     pub missing: bool,
@@ -425,17 +460,15 @@ pub fn place<E: From<io::Error>>(
                 }
             })
         })?;
-        let made = made.map_err(|e| {
-            io::Error::new(
-                e.kind(),
-                format!("the folder of shares {name} can't be made: {e}"),
-            )
-        })?;
-        match kept {
-            Some(kept) => placed.at.push(kept),
-            None => {
+        match (made, kept) {
+            (Ok(_), Some(kept)) => placed.at.push(kept),
+            (Ok(made), None) => {
                 placed.at.push(made.clone());
                 placed.made = Some(made);
+            }
+            (Err(e), _) => {
+                let why = format!("the folder of shares {name} can't be made: {e}");
+                placed.unmade = Some(why);
             }
         }
     }
@@ -646,6 +679,40 @@ mod tests {
         assert!(make(&gone, "Shared").is_err());
         assert!(Record::write(&gone, "token", &gone.join("Shared")).is_err());
         assert!(!gone.exists());
+        Ok(())
+    }
+
+    /// A folder prepared and on record whose making stopped before it was in place (a name
+    /// taken, a crash) is put in place as it is by the next try: never taken apart first,
+    /// which would leave the record naming nothing if that stopped too.
+    #[test]
+    fn a_folder_prepared_and_on_record_is_put_in_place_as_it_is() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path();
+        fs::write(root.join("Shared"), "in the way")?;
+        assert_eq!(make(root, "Shared")?, Made::Taken);
+        let prepared = tmp_dir(root).join(PREPARED);
+        let token = fs::read(shared_marker(&prepared))?;
+        assert!(Record::read(root)?.is(&prepared)?);
+        assert_eq!(make(root, "Shared-2")?, Made::Made);
+        assert_eq!(fs::read(shared_marker(&root.join("Shared-2")))?, token);
+        assert_eq!(folders(root)?, ["Shared-2"]);
+        assert!(!prepared.exists());
+        Ok(())
+    }
+
+    /// A folder of shares that can't be made is none, said so: not an error that stops the
+    /// sync folder, whose own items don't wait for it.
+    #[test]
+    fn a_folder_of_shares_that_cant_be_made_is_told_not_an_error() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path();
+        // Something in the way of its making that isn't this program's to clear.
+        fs::create_dir_all(tmp_dir(root).join(PREPARED).join("stray"))?;
+        let placed = place(root, Some("Shared"), false, nothing)?;
+        assert!(placed.unmade.is_some_and(|why| why.contains("Shared")));
+        assert!(placed.made.is_none() && placed.at.is_empty() && !placed.missing);
+        assert!(folders(root)?.is_empty());
         Ok(())
     }
 

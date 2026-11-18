@@ -347,6 +347,75 @@ fn a_folder_of_shares_the_filter_doesnt_know_yet_is_neither_sent_nor_merged() ->
     Ok(())
 }
 
+/// The folder of shares moved into a synced folder (a slip of the hand, §10): nothing of it
+/// is sent, also when it is changed there, and a folder of its name the drive has in that
+/// folder isn't put into it (it waits). Moved back to the top it is the folder of shares as
+/// before: nothing of it was ever on the drive to take away, and the drive's folder comes.
+#[test]
+fn the_folder_of_shares_moved_into_a_synced_folder_is_neither_sent_nor_merged() -> R {
+    use hbsync_local::Filter;
+    use hbsync_local::shares::{Made, folders, make};
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    assert_eq!(make(&a.root, "Shared")?, Made::Made);
+    a.write("Shared/tom/theirs.txt", "shared with me")?;
+    a.write("Work/plan.txt", "mine")?;
+    let load = |cfg: &mut hbsync_engine::EngineConfig| {
+        let filter = Filter::load(&cfg.folder.root, false).expect("the rules");
+        cfg.folder.filter = std::sync::Arc::new(filter);
+    };
+    assert!(restart_with(&mut a, load)?, "the filter changed");
+    if a.engine.config().folder.filter.shares_id().is_none() {
+        // A volume without stable file ids: the folder is known at the top only.
+        return Ok(());
+    }
+    a.sync()?;
+    b.sync()?;
+    let drive = ["Work/", "Work/plan.txt = mine"];
+    assert_eq!(b.tree_text(""), drive);
+
+    fs::rename(a.root.join("Shared"), a.root.join("Work/Shared"))?;
+    a.write("Work/Shared/tom/more.txt", "shared later")?;
+    // As the runner opens the folder again: no folder of shares at the top.
+    restart_with(&mut a, load)?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), drive, "what is shared was sent");
+
+    // The drive gets a folder of its name there: not merged into it.
+    b.write("Work/Shared/cloud.txt", "from the drive")?;
+    b.sync()?;
+    let mine = a.tree_text("Work/Shared");
+    a.sync()?;
+    assert_eq!(
+        a.tree_text("Work/Shared"),
+        mine,
+        "the drive's folder was merged"
+    );
+
+    fs::rename(a.root.join("Work/Shared"), a.root.join("Shared"))?;
+    assert_eq!(folders(&a.root)?, ["Shared"]);
+    restart_with(&mut a, load)?;
+    a.sync()?;
+    assert_eq!(a.read_text("Work/Shared/cloud.txt")?, "from the drive");
+    assert_eq!(a.read_text("Shared/tom/more.txt")?, "shared later");
+    b.sync()?;
+    let both = [
+        "Work/",
+        "Work/Shared/",
+        "Work/Shared/cloud.txt = from the drive",
+        "Work/plan.txt = mine",
+    ];
+    assert_eq!(
+        b.tree_text(""),
+        both,
+        "what is shared was sent or taken away"
+    );
+    assert_eq!(server.lock().map_err(|_| "poisoned")?.removed().count(), 0);
+    Ok(())
+}
+
 /// A marker copied out of the folder of shares into a synced folder (§10) does nothing: the
 /// folder isn't the one on record. It stays synced, with what is in it and what comes; the
 /// marker itself is junk.

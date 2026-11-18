@@ -197,14 +197,20 @@ impl SyncRoot {
         Ok(marker)
     }
 
-    /// Takes a folder of shares its record no longer finds (the folder restored from a backup),
-    /// as the folder opens ([`hbsync_local::shares::adopt`]): never one this folder's DB has at
-    /// the top under its name, or anywhere by its file id (a synced folder renamed or moved
-    /// while nothing ran): but an id the DB has for an item that is at its place with another
-    /// id tells nothing (after a restore every id in the DB is from before, and a new folder
-    /// may have got one of them). The DB is opened only where a folder holding the marker is
-    /// to be judged. Its name, if one was taken.
-    pub fn adopt_shares(&self) -> Result<Option<String>, RootError> {
+    /// Takes a folder of shares its record no longer finds (the folder restored from a backup,
+    /// or moved to another volume and back), as the folder opens
+    /// ([`hbsync_local::shares::adopt`]): never one this folder has synced, which a marker
+    /// copied into it makes nothing. Synced is one the DB has a base for (agreed with the
+    /// drive), at the top under its name as names compare there (`case_insensitive`: the
+    /// volume's) or anywhere by its file id (renamed or moved while nothing ran; the volume's
+    /// number left out, which a restart may change). One only seen here so far (scanned as it
+    /// came back, before its marker was there) isn't synced: taken, it leaves the DB with the
+    /// next scan and never reaches the drive. An id the DB has for an item that is at its
+    /// place with another id, or for a file, tells nothing (after a restore every id in the
+    /// DB is from before, and a new folder may have got one of them); one whose place holds
+    /// nothing is the folder renamed. The DB is opened only
+    /// where a folder holding the marker is to be judged. Its name, if one was taken.
+    pub fn adopt_shares(&self, case_insensitive: bool) -> Result<Option<String>, RootError> {
         let mut db = None;
         hbsync_local::shares::adopt(&self.path, |name, id| {
             let db = match &mut db {
@@ -212,15 +218,33 @@ impl SyncRoot {
                 none => none.insert(self.state()?),
             };
             let top = hbsync_platform::RelPath::root();
-            let key = hbsync_namemap::sibling_hash(name);
+            let key = hbsync_local::top_key(name, case_insensitive);
+            let hash = hbsync_namemap::sibling_hash(name);
             let (here, by_id) = db.read(|s| {
-                let named = s.local_named(&top, key)?;
-                let here = named.iter().any(|row| row.path.name() == Some(name));
-                Ok((here, s.local_by_file_id(&id)?))
+                let synced = |row: &hbsync_state::LocalRow| -> Result<bool, StateError> {
+                    Ok(s.get_base(row.node)?.is_some())
+                };
+                let same = |row: &hbsync_state::LocalRow| {
+                    let named = row.path.name();
+                    named.is_some_and(|n| hbsync_local::top_key(n, case_insensitive) == key)
+                };
+                let mut here = false;
+                for row in s.local_named(&top, hash)? {
+                    here |= same(&row) && synced(&row)?;
+                }
+                let mut by_id = Vec::new();
+                // (A file's row with a folder's id is from before a restore.)
+                for row in s.local_by_file_on_any_volume(&id)? {
+                    if row.kind == hbsync_types::NodeKind::Folder && synced(&row)? {
+                        by_id.push(row);
+                    }
+                }
+                Ok((here, by_id))
             })?;
+            // A row whose place holds nothing is the folder renamed or moved: not stale.
             let stale = |row: &hbsync_state::LocalRow| {
                 hbsync_platform::stat(&row.path.to_native(&self.path))
-                    .is_ok_and(|meta| meta.file_id != id)
+                    .is_ok_and(|meta| meta.file_id.file != id.file)
             };
             Ok(here || by_id.iter().any(|row| !stale(row)))
         })
