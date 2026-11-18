@@ -168,6 +168,9 @@ pub struct Top {
     /// volume's file ids aren't stable (the module's words), or where a folder that was on
     /// record before is at the top beside the one on record now.
     pub shares: Vec<String>,
+    /// The one of [`Top::shares`] on record now (by the record's first id), where more than
+    /// one is there and ids are on record: where what is shared is synced.
+    pub now: Option<String>,
     /// What else is there, by name (the state folder left out).
     pub others: Vec<String>,
     /// The file ids on record for the folder of shares (the one on record now, and those
@@ -200,10 +203,16 @@ impl Top {
     /// [`Top::read`] by `record`, the top listed also where nothing is on record.
     fn told(root: &Path, record: &Record) -> io::Result<Top> {
         let (folders, mut others) = list_top(root)?;
-        let (mut shares, mut plain) = (Vec::new(), Vec::new());
+        let (mut shares, mut plain, mut now) = (Vec::new(), Vec::new(), None);
+        let first = record.0.as_ref().and_then(|known| known.ids.first());
         for (name, id) in folders {
             match record.holds(id, &root.join(&name))? {
-                true => shares.push(name),
+                true => {
+                    if first == Some(&id.file) {
+                        now = Some(name.clone());
+                    }
+                    shares.push(name);
+                }
                 false => plain.push((name, id)),
             }
         }
@@ -226,6 +235,7 @@ impl Top {
         others.extend(plain.into_iter().map(|(name, _)| name));
         Ok(Top {
             shares,
+            now,
             others,
             ids,
             returned,
@@ -437,6 +447,8 @@ pub fn place<E: From<io::Error>>(
         on_drive: &mut on_drive,
     };
     placed.at.clone_from(&top.shares);
+    // The one on record now, under the name it has when this is done.
+    let mut now = top.now.clone();
     for name in &top.shares {
         let here = others.contains(&key(name));
         if !here && !(names.on_drive)(name)? {
@@ -457,6 +469,9 @@ pub fn place<E: From<io::Error>>(
             Ok(to) => {
                 placed.at.retain(|at| at != name);
                 placed.at.push(to.clone());
+                if now.as_ref() == Some(name) {
+                    now = Some(to.clone());
+                }
                 placed.moved.push((name.clone(), to));
             }
             // An item of the user's own would be left out with it, and leave the drive.
@@ -510,17 +525,8 @@ pub fn place<E: From<io::Error>>(
     placed.at.sort_unstable();
     // More than one (the one on record now, and one that was before, back at the top): the
     // one on record now first, which is where what is shared is synced.
-    if placed.at.len() > 1
-        && let Some(now) = Record::read(root)?
-            .0
-            .and_then(|known| known.ids.first().copied())
-    {
-        let is_now = |name: &String| {
-            hbsync_platform::stat(&root.join(name)).is_ok_and(|meta| meta.file_id.file == now)
-        };
-        if let Some(at) = placed.at.iter().position(is_now) {
-            placed.at[..=at].rotate_right(1);
-        }
+    if let Some(at) = now.and_then(|now| placed.at.iter().position(|name| *name == now)) {
+        placed.at[..=at].rotate_right(1);
     }
     Ok(placed)
 }

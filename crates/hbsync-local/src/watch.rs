@@ -249,10 +249,7 @@ fn keep(
     // is on record (junk by its name otherwise): the folder it is in may be the folder of
     // shares below the top again, or no more, and the rescan it leads to says which.
     let marker = |rel: &Path| {
-        // (In any case: the volume may take another spelling for it.)
-        let name = rel.file_name().and_then(|name| name.to_str());
-        filter.knows_shares_by_id()
-            && name.is_some_and(|n| n.eq_ignore_ascii_case(crate::layout::SHARED_MARKER))
+        filter.knows_shares_by_id() && rel.file_name().is_some_and(crate::layout::is_shared_marker)
     };
     event.paths.retain(|path| {
         path.strip_prefix(root)
@@ -289,10 +286,7 @@ fn touches_shared(root: &Path, event: &Event) -> bool {
             let mut names = rel.components();
             match (names.next(), names.next(), names.next()) {
                 (Some(_), None, _) => entry,
-                (Some(_), Some(name), None) => name
-                    .as_os_str()
-                    .to_str()
-                    .is_some_and(|n| n.eq_ignore_ascii_case(crate::layout::SHARED_MARKER)),
+                (Some(_), Some(name), None) => crate::layout::is_shared_marker(name.as_os_str()),
                 _ => false,
             }
         })

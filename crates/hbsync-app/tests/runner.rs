@@ -1211,7 +1211,7 @@ fn a_folder_of_shares_that_cant_give_way_leaves_the_item_out_and_syncs_on() -> R
 
 /// Its rename refused, the folder of shares is asked again by itself after a while, also on
 /// a folder with nothing else to sync: once the rename works it gives way, and the drive's
-/// item comes, with nothing changed here to start a sync.
+/// item comes, with nothing changed here to start a sync. Not while the folder is paused.
 #[cfg(unix)]
 #[test]
 fn a_folder_of_shares_that_couldnt_give_way_is_asked_again_by_itself() -> R {
@@ -1234,8 +1234,13 @@ fn a_folder_of_shares_that_couldnt_give_way_is_asked_again_by_itself() -> R {
     })?;
     a.sync_reported()?;
     let left_out = !a.has("Shared/cloud.txt");
+    // Paused, it isn't asked: nothing in a paused folder is renamed, though it could be now.
+    a.handle.send(Command::Pause(Pause::UNTIL_RESUMED));
     drop(locked);
     assert!(left_out);
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(folders(&a.root)?, ["Shared"], "renamed while paused");
+    a.handle.send(Command::Resume);
     wait_until("it gave way by itself", || a.has("Shared/cloud.txt"))?;
     a.wait_idle()?;
     assert_eq!(folders(&a.root)?, ["Shared-2"]);

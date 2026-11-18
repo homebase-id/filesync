@@ -451,8 +451,9 @@ included (service managers restart it then).
   got to the top, its making stopped before the rename into place, is put into place as it
   is.) A folder of shares that can't be made (no name free, something in the way in
   `.hbsync/tmp`) stops nothing: there is none, the log says why, the account's own items
-  sync on, and it is tried again every ten minutes (the making alone: the folder is opened
-  anew only once that made it) and whenever the folder opens.
+  sync on, and it is tried again after a minute the first three times, then every ten
+  minutes (the making alone: the folder is opened anew only once that made it), and whenever
+  the folder opens. Not while the folder is paused: nothing in it is made or renamed then.
 
   And the folder of shares gives way: when an item at the top of the folder's part of the
   drive (as the account's DB has it; not a role folder, whose name is free in the main
@@ -470,8 +471,8 @@ included (service managers restart it then).
   another device) is renamed here as anywhere, never taken from here as masked. Where the
   rename fails (a file in it in use on Windows, no number free) the drive's item is masked
   meanwhile, which loses nothing, the log says why, and it is tried again every ten minutes
-  (the rename alone, also on a folder with nothing else to sync: the folder is opened anew
-  only once it gave way) and when the folder opens for another reason. Where it fails for an item
+  (the rename alone, also on a folder with nothing else to sync, never on a paused one: the
+  folder is opened anew only once it gave way) and when the folder opens for another reason. Where it fails for an item
   beside it in the folder (which would leave the drive, left out with it) the folder's sync
   stops, failing, till it works.
 - **The folder gone** (moved, deleted, a disk not mounted: its marker missing): nothing

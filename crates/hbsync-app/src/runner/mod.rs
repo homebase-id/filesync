@@ -59,6 +59,10 @@ const ANSWER_DROPPED_SET_UP: &str = "Your answer to the deletions to review wasn
 /// The ignore rules are read this long after their file was last touched: not half written.
 const RULES_QUIET: Duration = Duration::from_secs(1);
 
+/// A folder of shares that couldn't be made is asked for again after a look's time this many
+/// times, then after [`RunnerConfig::shares_again`].
+const UNMADE_SOON: u32 = 3;
+
 /// [`RunnerConfig::shares_again`], unless a test says otherwise.
 const SHARES_AGAIN: Duration = Duration::from_secs(600);
 
@@ -746,6 +750,8 @@ impl Runner {
         // When the folder of shares is asked again: to give way (it couldn't, or nothing was
         // found to give way to: the item stays masked meanwhile), or to be made.
         let mut shares_at: Option<Instant> = None;
+        // How often in a row the folder of shares couldn't be made.
+        let mut unmade_tries = 0u32;
         // When to read the ignore rules, touched a moment ago.
         let mut rules_at: Option<Instant> = None;
         // After taking local changes failed: not again before then.
@@ -875,17 +881,36 @@ impl Runner {
             if shares_at.is_some_and(|at| now >= at) {
                 shares_at = None;
                 let again = now + self.cfg.shares_again;
-                let placed = parts.as_ref().map(|p| self.place_again(p));
+                // Not while paused: nothing in the folder is touched then, and its watcher
+                // stays. Asked once it syncs again.
+                let placed = match schedule.paused() {
+                    true => {
+                        shares_at = Some(again);
+                        None
+                    }
+                    false => parts.as_ref().map(|p| self.place_again(p)),
+                };
                 match (placed, &mut parts) {
                     // Made, or out of the way: opened again with it.
                     (Some(Ok(placed)), _) if placed.made.is_some() || !placed.moved.is_empty() => {
                         parts = None;
                         schedule.want(Why::Rules);
                     }
-                    // It still can't (as found now, not as the folder was opened).
-                    (Some(Ok(placed)), _) if placed.stuck.is_some() || placed.unmade.is_some() => {
-                        shares_at = Some(again);
+                    // It still can't (as found now, not as the folder was opened). One that
+                    // couldn't be made is asked sooner the first few times (what is in the
+                    // way of a making is often gone a moment later: a scanner in the new
+                    // folder), then as rarely as the rest.
+                    (Some(Ok(placed)), _) if placed.unmade.is_some() => {
+                        unmade_tries += 1;
+                        let soon = unmade_tries <= UNMADE_SOON;
+                        let wait = if soon {
+                            self.cfg.look
+                        } else {
+                            self.cfg.shares_again
+                        };
+                        shares_at = Some(now + wait.min(self.cfg.shares_again));
                     }
+                    (Some(Ok(placed)), _) if placed.stuck.is_some() => shares_at = Some(again),
                     // Nothing to do any more (what it was to give way to is gone, or nothing
                     // was found when it was asked): the engine asks again, should it find
                     // something.
@@ -1016,9 +1041,21 @@ impl Runner {
                         // Asked to give way and didn't (it can't just now, or nothing was
                         // found to give way to): not asked again at every sync.
                         let asked = std::mem::take(&mut yielding);
-                        if p.stuck || p.unmade || (asked && !p.gave_way) {
+                        if p.unmade {
+                            // (Counted on: a folder opened again and again for other
+                            // reasons isn't asked soon each time.)
+                            unmade_tries += 1;
+                            let soon = unmade_tries <= UNMADE_SOON;
+                            let wait = if soon {
+                                self.cfg.look
+                            } else {
+                                self.cfg.shares_again
+                            };
+                            shares_at = Some(Instant::now() + wait.min(self.cfg.shares_again));
+                        } else if p.stuck || (asked && !p.gave_way) {
                             shares_at = Some(Instant::now() + self.cfg.shares_again);
                         } else {
+                            unmade_tries = 0;
                             p.engine.yield_shares(true);
                             shares_at = None;
                         }

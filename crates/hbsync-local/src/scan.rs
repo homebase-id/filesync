@@ -473,26 +473,24 @@ fn rescan_diff(
 /// Links are never followed, so a rescan can't reach outside the root through one. Nor does
 /// it start in a folder with a file id on record for the folder of shares (moved below the
 /// top, which the DB may know from a time it wasn't one) or below it: it starts in the folder
-/// that one is in, whose listing leaves it out (one more `stat` a folder on the way, only
-/// where an id is on record).
+/// that one is in, whose listing leaves it out (the id comes with the look at each folder on
+/// the way: nothing more is read but for one that has an id on record).
 fn real_dir_prefix(root: &Path, dir: &RelPath, filter: &Filter) -> RelPath {
     let mut real = RelPath::default();
     for name in dir.components() {
         let Ok(next) = real.join(name) else { break };
         let at = next.to_native(root);
-        match std::fs::symlink_metadata(&at) {
-            Ok(m) if m.is_dir() => {}
+        // (One look: a link isn't a folder, and the folder's id comes with it.)
+        let id = match hbsync_platform::meta::stat(&at) {
+            Ok(m) if m.kind == EntryKind::Dir => m.file_id,
             _ => break,
-        }
+        };
         // (One with such an id that holds no marker is a folder of the user's own: gone
         // through. Where that can't be told, the walk of the folder it is in says so.)
-        let shares = filter.knows_shares_by_id()
-            && hbsync_platform::meta::stat(&at).is_ok_and(|m| {
-                filter.is_shares_id(m.file_id.file)
-                    && crate::shares::Record::read(root)
-                        .and_then(|record| record.holds(m.file_id, &at))
-                        .unwrap_or(true)
-            });
+        let shares = filter.is_shares_id(id.file)
+            && crate::shares::Record::read(root)
+                .and_then(|record| record.holds(id, &at))
+                .unwrap_or(true);
         if shares {
             break;
         }
