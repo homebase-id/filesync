@@ -1324,6 +1324,8 @@ fn a_folder_of_shares_back_as_a_copy_is_taken_again_while_syncing() -> R {
     let mut names = live_names(&server);
     names.sort();
     assert_eq!(names, ["more.txt", "notes.txt"]);
+    let removed = server.lock().map_err(|_| "poisoned")?.removed().count();
+    assert_eq!(removed, 0, "sent, then taken away");
     assert!(a.has("Shared/tom/theirs.txt"));
     Ok(())
 }
@@ -1555,7 +1557,6 @@ fn a_folder_whose_disk_is_not_mounted_is_left_alone() -> R {
     Ok(())
 }
 
-/// Renames a folder, retrying while Windows still has a handle open in it (the watcher).
 /// A folder nothing can be made, renamed or removed in (its mode, on Unix), until dropped:
 /// also when the test ends early.
 #[cfg(unix)]
@@ -1586,6 +1587,7 @@ impl Drop for Locked {
     }
 }
 
+/// Renames a folder, retrying while Windows still has a handle open in it (the watcher).
 fn rename_with_retries(from: &Path, to: &Path) -> std::io::Result<()> {
     let mut tries = 0;
     loop {

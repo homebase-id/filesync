@@ -245,9 +245,18 @@ fn keep(
     if reads_only(&event.kind) && !rescan {
         return None;
     }
+    // A marker of the folder of shares made, removed or renamed anywhere is kept where an id
+    // is on record (junk by its name otherwise): the folder it is in may be the folder of
+    // shares below the top again, or no more, and the rescan it leads to says which.
+    let marker = |rel: &Path| {
+        filter.knows_shares_by_id()
+            && rel
+                .file_name()
+                .is_some_and(|name| name == crate::layout::SHARED_MARKER)
+    };
     event.paths.retain(|path| {
         path.strip_prefix(root)
-            .is_ok_and(|rel| !excluded(rel, filter))
+            .is_ok_and(|rel| !excluded(rel, filter) || marker(rel))
     });
     (rescan || !event.paths.is_empty()).then_some(Ok(event))
 }
@@ -777,6 +786,27 @@ mod tests {
     /// What may make or unmake a folder of shares: its marker made, removed or renamed in a
     /// folder at the top, and an entry of the top made, removed or renamed. Not a write to a
     /// file there, a read, or anything deeper.
+    /// A marker's event below the top is junk by its name, and dropped; kept where an id is
+    /// on record for the folder of shares, which may be the folder it is in.
+    #[test]
+    fn a_markers_event_below_the_top_is_kept_where_an_id_is_on_record() -> std::io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path();
+        let marker = root.join("Work/Shared").join(crate::layout::SHARED_MARKER);
+        let made = || Ok(Event::new(EventKind::Create(CreateKind::File)).add_path(marker.clone()));
+        assert!(keep(root, &Filter::default(), made()).is_none());
+        crate::shares::make(root, "Shared")?;
+        let filter = Filter::load(root, false).map_err(std::io::Error::other)?;
+        assert_eq!(
+            keep(root, &filter, made()).is_some(),
+            filter.knows_shares_by_id()
+        );
+        let other =
+            Event::new(EventKind::Create(CreateKind::File)).add_path(root.join("Work/.DS_Store"));
+        assert!(keep(root, &filter, Ok(other)).is_none());
+        Ok(())
+    }
+
     #[test]
     fn a_marker_or_an_entry_at_the_top_touches_the_folders_of_shares() {
         let root = Path::new("/sync");

@@ -164,8 +164,9 @@ type Folders = Vec<(String, FileId)>;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Top {
     /// The folder of shares, by name, sorted: the folder on record ([`Record::holds`]). Found
-    /// by the record, never by a name: the user may rename it. More than one only where the
-    /// volume's file ids aren't stable (the module's words).
+    /// by the record, never by a name: the user may rename it. More than one where the
+    /// volume's file ids aren't stable (the module's words), or where a folder that was on
+    /// record before is at the top beside the one on record now.
     pub shares: Vec<String>,
     /// What else is there, by name (the state folder left out).
     pub others: Vec<String>,
@@ -289,8 +290,11 @@ pub fn make(root: &Path, name: &str) -> io::Result<Made> {
         let token = hbsync_types::Uuid::new_v4().simple().to_string();
         // On disk before the record names it (the record is): a power cut must not leave a
         // record whose folder holds an empty marker, which reads as a folder of shares that
-        // is gone, for good.
-        hbsync_fileio::write_atomic(&marker, token.as_bytes())?;
+        // is gone, for good. Written in place (no temporary file beside it: one left by a
+        // crash would keep the prepared folder from being cleared).
+        let mut file = std::fs::File::create(&marker)?;
+        std::io::Write::write_all(&mut file, token.as_bytes())?;
+        file.sync_all()?;
         // Only looks (a leading dot hides it elsewhere): a marker that can't be hidden still
         // works.
         let _ = hbsync_platform::ops::set_hidden(&marker);
@@ -324,8 +328,9 @@ pub struct Placed {
     /// One is on record and isn't at the top (moved away, deleted, its marker gone): none
     /// was made in its place.
     pub missing: bool,
-    /// The folders of shares at the top now, by name, as [`Top::shares`]: where they were,
-    /// gave way to, or were made.
+    /// The folders of shares at the top now, by name: where they were, gave way to, or were
+    /// made. The one on record now first (where what is shared is synced), then any that
+    /// was on record before it, by name.
     pub at: Vec<String>,
 }
 
@@ -503,6 +508,20 @@ pub fn place<E: From<io::Error>>(
         }
     }
     placed.at.sort_unstable();
+    // More than one (the one on record now, and one that was before, back at the top): the
+    // one on record now first, which is where what is shared is synced.
+    if placed.at.len() > 1
+        && let Some(now) = Record::read(root)?
+            .0
+            .and_then(|known| known.ids.first().copied())
+    {
+        let is_now = |name: &String| {
+            hbsync_platform::stat(&root.join(name)).is_ok_and(|meta| meta.file_id.file == now)
+        };
+        if let Some(at) = placed.at.iter().position(is_now) {
+            placed.at[..=at].rotate_right(1);
+        }
+    }
     Ok(placed)
 }
 
@@ -760,9 +779,10 @@ mod tests {
         let record = Record::read(root)?;
         assert!(record.is(&root.join("Copy"))? && record.is(&root.join("Work/Shared"))?);
         assert_eq!(folders(root)?, ["Copy"]);
-        // Back at the top beside it, both are left out.
-        fs::rename(root.join("Work/Shared"), root.join("Shared"))?;
-        assert_eq!(folders(root)?, ["Copy", "Shared"]);
+        // Back at the top beside it, both are left out; the one on record now is told first.
+        fs::rename(root.join("Work/Shared"), root.join("A earlier"))?;
+        assert_eq!(folders(root)?, ["A earlier", "Copy"]);
+        assert_eq!(place(root, None, false, nothing)?.at, ["Copy", "A earlier"]);
         Ok(())
     }
 

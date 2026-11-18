@@ -484,8 +484,15 @@ fn real_dir_prefix(root: &Path, dir: &RelPath, filter: &Filter) -> RelPath {
             Ok(m) if m.is_dir() => {}
             _ => break,
         }
+        // (One with such an id that holds no marker is a folder of the user's own: gone
+        // through. Where that can't be told, the walk of the folder it is in says so.)
         let shares = filter.knows_shares_by_id()
-            && hbsync_platform::meta::stat(&at).is_ok_and(|m| filter.is_shares_id(m.file_id.file));
+            && hbsync_platform::meta::stat(&at).is_ok_and(|m| {
+                filter.is_shares_id(m.file_id.file)
+                    && crate::shares::Record::read(root)
+                        .and_then(|record| record.holds(m.file_id, &at))
+                        .unwrap_or(true)
+            });
         if shares {
             break;
         }

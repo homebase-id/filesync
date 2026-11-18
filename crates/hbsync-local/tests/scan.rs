@@ -948,6 +948,16 @@ fn the_folder_of_shares_moved_into_another_folder_never_reaches_the_db() -> R {
     fs::remove_file(&marker)?;
     let (report, _) = f.scan()?;
     assert_eq!(report.added, 3, "{report:?}"); // Shared, tom, theirs
+    // (While it is one of the user's own, a rescan asked for in it is done in it, though its
+    // id is on record.)
+    f.write("Work/Shared/tom/sub/new.txt", b"n")?;
+    let report = rescan_dirs(
+        &mut f.db,
+        &root,
+        &[RelPath::new("Work/Shared/tom")?],
+        &f.opts,
+    )?;
+    assert_eq!((report.added, report.removed), (2, 0), "{report:?}"); // sub, new
     fs::write(&marker, &token)?;
     let report = rescan_dirs(
         &mut f.db,
@@ -955,7 +965,7 @@ fn the_folder_of_shares_moved_into_another_folder_never_reaches_the_db() -> R {
         &[RelPath::new("Work/Shared/tom")?],
         &f.opts,
     )?;
-    assert_eq!((report.added, report.removed), (0, 3), "{report:?}");
+    assert_eq!((report.added, report.removed), (0, 5), "{report:?}");
 
     std::fs::rename(root.join("Work/Shared"), root.join("Shared"))?;
     assert_eq!(folders(&root)?, ["Shared"]);

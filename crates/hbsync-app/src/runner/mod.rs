@@ -614,14 +614,13 @@ impl Runner {
 
     /// Puts the folder of shares in its place again while the folder is open, as
     /// [`Runner::open_once`] does when it opens it (made where it couldn't be, renamed where
-    /// it couldn't give way): whether that did something, for the folder to be opened again
-    /// with it. Costs a connection to the state DB, the record's read and a listing of the
+    /// it couldn't give way): what that did, for the folder to be opened again where it did
+    /// something. Costs a connection to the state DB, the record's read and a listing of the
     /// top.
-    fn place_again(&self, parts: &Parts) -> Result<bool, RunnerError> {
+    fn place_again(&self, parts: &Parts) -> Result<hbsync_local::shares::Placed, RunnerError> {
         let root = SyncRoot::open(&self.cfg.db, &self.cfg.identity, &self.cfg.folder)?;
         let caseless = parts.engine.config().folder.case_insensitive;
-        let placed = root.place_shares(self.cfg.shares.as_deref(), caseless)?;
-        Ok(placed.made.is_some() || !placed.moved.is_empty())
+        Ok(root.place_shares(self.cfg.shares.as_deref(), caseless)?)
     }
 
     fn open_once(&self) -> Result<Parts, RunnerError> {
@@ -876,19 +875,22 @@ impl Runner {
             if shares_at.is_some_and(|at| now >= at) {
                 shares_at = None;
                 let again = now + self.cfg.shares_again;
-                let waits = parts
-                    .as_ref()
-                    .map(|p| (p.stuck || p.unmade, self.place_again(p)));
-                match (waits, &mut parts) {
-                    (Some((_, Ok(true))), _) => {
+                let placed = parts.as_ref().map(|p| self.place_again(p));
+                match (placed, &mut parts) {
+                    // Made, or out of the way: opened again with it.
+                    (Some(Ok(placed)), _) if placed.made.is_some() || !placed.moved.is_empty() => {
                         parts = None;
                         schedule.want(Why::Rules);
                     }
-                    (Some((true, Ok(false))), _) => shares_at = Some(again),
-                    // Nothing was found to give way to when it was asked: the engine asks
-                    // again, should it still find something.
-                    (Some((false, Ok(false))), Some(p)) => p.engine.yield_shares(true),
-                    (Some((_, Err(e))), _) => {
+                    // It still can't (as found now, not as the folder was opened).
+                    (Some(Ok(placed)), _) if placed.stuck.is_some() || placed.unmade.is_some() => {
+                        shares_at = Some(again);
+                    }
+                    // Nothing to do any more (what it was to give way to is gone, or nothing
+                    // was found when it was asked): the engine asks again, should it find
+                    // something.
+                    (Some(Ok(_)), Some(p)) => p.engine.yield_shares(true),
+                    (Some(Err(e)), _) => {
                         tracing::warn!("the folder of shares can't be put in its place: {e}");
                         shares_at = Some(again);
                     }

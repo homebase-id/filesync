@@ -1040,8 +1040,11 @@ would name nothing), any other is made anew.
 - Moved into another folder (a slip of the hand in the file manager; the same volume, so
   its file id stays) it is left alone there too: a walk knows it by the file id on record,
   which each listing has, and looks for its marker before it reports or enters it (one
-  whose marker can't be looked for just then is left out all the same, by its id; a rescan
-  asked for below it starts in the folder it is in). A folder of the drive is never made
+  whose marker can't be looked for just then is neither reported nor entered that time, and
+  what the DB has of it stays: a folder of the user's own that was the folder of shares
+  once has such an id too; a rescan asked for in the folder of shares or below it starts in
+  the folder it is in; and a marker made or removed below the top leads to such a rescan,
+  where an id is on record). A folder of the drive is never made
   out of it there either: nothing gives way below the top, so that folder can't be held
   here until the folder of shares is moved back, said in a note. Nothing of it is
   sent; back at the top it is the folder of shares as before, and nothing of it was on the
@@ -1055,7 +1058,8 @@ would name nothing), any other is made anew.
   (the folder is opened again for it, also when one such folder goes and another comes).
   The record keeps the ids it had before beside the new one (the last few): the folder a
   copy is taken for may still be in the sync folder, moved into another folder, and is the
-  folder of shares where it is as well. Taken is the only folder there that holds the marker
+  folder of shares where it is as well. Back at the top beside the one on record
+  now, both are left out, and what is shared is synced into the one on record now. Taken is the only folder there that holds the marker
   and isn't synced: one the state DB has a base for (agreed with the drive), under its name
   as names compare or by its file id (a synced folder a marker was copied into stays the
   user's own, renamed or not). One only scanned so far (it came whole, a rename into

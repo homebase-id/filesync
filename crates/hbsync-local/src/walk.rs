@@ -253,14 +253,13 @@ impl Iterator for Walker<'_> {
                             reason: SkipReason::Excluded,
                         });
                     }
-                    // Its marker can't be looked for, and it has an id on record: left out as
-                    // the folder of shares it most likely is (reported, it would have a row,
-                    // and a rescan below it would start in it).
-                    Some(Err(_)) if known => {
-                        return Some(WalkEvent::Skipped {
-                            path: path.components().collect(),
-                            reason: SkipReason::Excluded,
-                        });
+                    // Its marker can't be looked for, and it has an id on record: not known
+                    // this time. Neither reported (the folder of shares would get a row, and
+                    // a rescan below it would start in it) nor left out (a folder of the
+                    // user's own that was the folder of shares once would lose its rows, and
+                    // leave the drive): what the DB has of it stays as it is.
+                    Some(Err(error)) if known => {
+                        return Some(WalkEvent::Unreadable { path, error });
                     }
                     // Not known to hold none: reported, not entered.
                     Some(Err(error)) => {
