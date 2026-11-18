@@ -88,11 +88,12 @@ fn a_file_of_the_same_name_on_the_drive_stays_out() {
     assert_eq!(sim.local_paths(0), ["a", "d", "d/a"]);
 }
 
-/// A folder of shares that loses its marker is a plain folder: synced, beside the drive's of
-/// its name. One that gets a marker (as the first gets its own back) leaves the drive and the
-/// other devices, kept where the marker is.
+/// The folder of shares that loses its marker is a plain folder: synced, beside the drive's of
+/// its name. With its own back (it stays the one on record) it leaves the drive and the other
+/// devices, kept where it is. A marker in any other folder does nothing, which the simulator
+/// has no action for: its filter holds the folder of shares, as read from the record.
 #[test]
-fn a_marker_lost_makes_the_folder_plain_and_one_gained_takes_it_off_the_drive() {
+fn a_marker_lost_makes_the_folder_plain_and_its_own_back_takes_it_off_the_drive() {
     use Action::*;
     let mut sim = sharing_beside_a_d();
 

@@ -22,6 +22,11 @@ pub fn ignore_file(root: &Path) -> PathBuf {
     state_dir(root).join(IGNORE_FILE)
 }
 
+/// Which folder at the top is the folder of shares ([`crate::shares::Record`]).
+pub fn shares_file(root: &Path) -> PathBuf {
+    state_dir(root).join("shares")
+}
+
 /// Downloads in progress: on the folder's volume, so they land with an atomic rename.
 pub fn tmp_dir(root: &Path) -> PathBuf {
     state_dir(root).join("tmp")
@@ -115,9 +120,9 @@ pub fn parked_name(node: NodeId) -> String {
 pub const IGNORE_FILE: &str = "ignore";
 
 /// The marker, a file, of the folder at a sync folder's top that holds what other identities
-/// share with the account (sync semantics §10): the folder is this device's own, found by its
-/// marker under any name ([`crate::shared_folders`]). On the junk list: never synced, so a
-/// marker never comes from the drive.
+/// share with the account (sync semantics §10): the folder is this device's own, under any
+/// name. A file anyone can copy: it counts in the folder on record only
+/// ([`crate::shares`]). On the junk list: never synced, so a marker never comes from the drive.
 pub const SHARED_MARKER: &str = ".hbsync-shared";
 
 /// The [`SHARED_MARKER`] of `folder`.

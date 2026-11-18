@@ -308,7 +308,8 @@ fn a_file_moved_into_a_folder_one_device_ignores_leaves_that_device_only() -> R 
 /// out, and it comes once the folder of shares has another name.
 #[test]
 fn a_folder_of_shares_the_filter_doesnt_know_yet_is_neither_sent_nor_merged() -> R {
-    use hbsync_local::{Filter, layout::shared_marker};
+    use hbsync_local::Filter;
+    use hbsync_local::shares::{Made, make};
     let server = server();
     let mut a = Client::new(&server, "a")?;
     let mut b = Client::new(&server, "b")?;
@@ -316,14 +317,11 @@ fn a_folder_of_shares_the_filter_doesnt_know_yet_is_neither_sent_nor_merged() ->
     b.write("readme.txt", "r")?;
     b.sync()?;
 
+    assert_eq!(make(&a.root, "Team")?, Made::Made);
     a.write("Team/tom/theirs.txt", "shared with me")?;
-    fs::write(shared_marker(&a.root.join("Team")), "")?;
+    let mine = a.tree_text("Team");
+    assert_eq!(mine.len(), 3, "{mine:?}"); // its marker, tom, theirs.txt
     a.sync()?;
-    let mine = [
-        ".hbsync-shared = ",
-        "tom/",
-        "tom/theirs.txt = shared with me",
-    ];
     assert_eq!(a.tree_text("Team"), mine, "the drive's folder was merged");
     assert_eq!(a.read_text("readme.txt")?, "r");
     b.sync()?;
@@ -346,6 +344,51 @@ fn a_folder_of_shares_the_filter_doesnt_know_yet_is_neither_sent_nor_merged() ->
     assert_eq!(a.read_text("Team-2/tom/theirs.txt")?, "shared with me");
     b.sync()?;
     assert_eq!(b.tree_text(""), drive);
+    Ok(())
+}
+
+/// A marker copied out of the folder of shares into a synced folder (§10) does nothing: the
+/// folder isn't the one on record. It stays synced, with what is in it and what comes; the
+/// marker itself is junk.
+#[test]
+fn a_marker_copied_into_a_synced_folder_leaves_it_synced() -> R {
+    use hbsync_local::layout::shared_marker;
+    use hbsync_local::shares::{Made, make};
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("Projects/plan.txt", "p")?;
+    assert_eq!(make(&a.root, "Shared")?, Made::Made);
+    a.write("Shared/tom/theirs.txt", "shared with me")?;
+    let load = |cfg: &mut hbsync_engine::EngineConfig| {
+        let filter = hbsync_local::Filter::load(&cfg.folder.root, false).expect("the rules");
+        cfg.folder.filter = std::sync::Arc::new(filter);
+    };
+    assert!(restart_with(&mut a, load)?, "the filter changed");
+    a.sync()?;
+    b.sync()?;
+    let drive = ["Projects/", "Projects/plan.txt = p"];
+    assert_eq!(b.tree_text(""), drive);
+
+    fs::copy(
+        shared_marker(&a.root.join("Shared")),
+        shared_marker(&a.root.join("Projects")),
+    )?;
+    assert!(!restart_with(&mut a, load)?, "the same folder of shares");
+    a.write("Projects/more.txt", "m")?;
+    b.write("Projects/theirs.txt", "t")?;
+    b.sync()?;
+    a.sync()?;
+    b.sync()?;
+    let both = [
+        "Projects/",
+        "Projects/more.txt = m",
+        "Projects/plan.txt = p",
+        "Projects/theirs.txt = t",
+    ];
+    assert_eq!(b.tree_text(""), both);
+    assert_eq!(a.read_text("Projects/theirs.txt")?, "t");
+    assert_eq!(a.read_text("Shared/tom/theirs.txt")?, "shared with me");
     Ok(())
 }
 

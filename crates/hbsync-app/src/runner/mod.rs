@@ -429,8 +429,9 @@ impl Parts {
             .map_or(true, |f| f.fingerprint() != folder.filter.fingerprint())
     }
 
-    /// [`Parts::rules_changed`] for the folders of shares alone, the rules neither read nor
-    /// compiled: one listing of the top and a look into each folder there.
+    /// [`Parts::rules_changed`] for the folder of shares alone, the rules neither read nor
+    /// compiled: its record's read, and where one is on record a listing of the top and a
+    /// look for its marker.
     fn shares_changed(&self, root: &Path) -> bool {
         self.engine.config().folder.filter.shared_changed(root)
     }
@@ -559,15 +560,28 @@ impl Runner {
         let mut cfg = EngineConfig::new(root, &self.cfg.device);
         cfg.guard.min = self.cfg.mass_delete.min_files;
         cfg.guard.fraction = self.cfg.mass_delete.fraction;
+        // A folder belongs to one identity (its marker says which): never mix two drives
+        // through one folder.
+        let sync_root = SyncRoot::open(&self.cfg.db, &self.cfg.identity, root)?;
+        // Before the rules are read: a folder of shares taken now is left out by them.
+        // What can't be told of it (its record, the top's listing, a marker) stops the sync
+        // as rules that can't be read do: failing, tried again at the next look.
+        let adopted = sync_root.adopt_shares().map_err(|e| match e {
+            RootError::Io(source) => RunnerError::Filter(FilterError::Read {
+                path: root.clone(),
+                source,
+            }),
+            e => e.into(),
+        })?;
+        if let Some(name) = adopted {
+            tracing::info!("{name}: taken as the folder of shares (the one on record is gone)");
+        }
         cfg.folder.filter = Arc::new(Filter::load(root, cfg.folder.case_insensitive)?);
         cfg.folder.read_only.clone_from(&self.cfg.read_only);
         if let Some(tweak) = self.cfg.tweak {
             tweak(&mut cfg);
         }
         let rules = cfg.folder.filter.rule_count();
-        // A folder belongs to one identity (its marker says which): never mix two drives
-        // through one folder.
-        let sync_root = SyncRoot::open(&self.cfg.db, &self.cfg.identity, root)?;
         let mut engine = Engine::open(&sync_root, Arc::clone(&self.drive), cfg)?;
         engine.set_stop(Arc::clone(&self.stop));
         engine.set_progress(Arc::clone(&self.progress));

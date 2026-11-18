@@ -3,7 +3,7 @@
 //! Junk is disposable (OS metadata, lock and swap files, partial downloads): a junk file goes
 //! with its folder. Ignored items are the user's data kept on this device only: they
 //! keep their folder. Both are invisible to sync in either direction (sync semantics §10), as
-//! is the folder at the top that holds what other identities share ([`shared_folders`]).
+//! is the folder at the top that holds what other identities share ([`crate::shares`]).
 
 use std::borrow::Cow;
 use std::io;
@@ -98,46 +98,11 @@ pub fn is_state_dir(name: &str) -> bool {
         && name_key(name) == state_dir_key()
 }
 
-/// The folders at the top of `root` that hold what other identities share with the account, by
-/// name: the real folders there (no link) holding a [`crate::layout::SHARED_MARKER`], a file.
-/// Found by the marker, never by a name: the user may rename one. None in a root that isn't
-/// there. An entry gone since it was listed is skipped; a marker that can't be looked for
-/// ([`holds_marker`]) is an error, as a root that can't be listed: a folder of shares taken
-/// for a plain one would be sent.
-///
-/// One listing of the root and one `stat` per folder at its top.
-pub fn shared_folders(root: &Path) -> io::Result<Vec<String>> {
-    let entries = match std::fs::read_dir(root) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(e) => return Err(e),
-    };
-    let mut found = Vec::new();
-    for entry in entries {
-        let entry = entry?;
-        match entry.file_type() {
-            Ok(kind) if kind.is_dir() => {}
-            Ok(_) => continue,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e),
-        }
-        // One whose name isn't Unicode is never synced anyway ([`crate::SkipReason`]).
-        let Ok(name) = entry.file_name().into_string() else {
-            continue;
-        };
-        if !is_state_dir(&name) && holds_marker(&entry.path())? {
-            found.push(name);
-        }
-    }
-    found.sort_unstable();
-    Ok(found)
-}
-
-/// Whether the folder at `dir` holds a [`crate::layout::SHARED_MARKER`], a file: at a sync
-/// folder's top, what makes it a folder that holds what other identities share. A folder that
-/// isn't there, or that this user may not look into (the walk can't read it either), holds
-/// none; any other error is one: the marker may be there.
-pub fn holds_marker(dir: &Path) -> io::Result<bool> {
+/// Whether the folder at `dir` holds a [`crate::layout::SHARED_MARKER`], a file: in the folder
+/// on record ([`crate::shares`]), what makes it the one that holds what other identities
+/// share. A folder that isn't there, or that this user may not look into (the walk can't read
+/// it either), holds none; any other error is one: the marker may be there.
+pub(crate) fn holds_marker(dir: &Path) -> io::Result<bool> {
     use io::ErrorKind::{NotADirectory, NotFound, PermissionDenied};
     match std::fs::symlink_metadata(crate::layout::shared_marker(dir)) {
         Ok(meta) => Ok(meta.is_file()),
@@ -164,7 +129,7 @@ pub enum Verdict {
     Sync,
     /// The client's own: a state folder ([`crate::STATE_DIR`], this sync root's at its top or
     /// one below it, of a sync root moved or copied in), and at the top a folder that holds
-    /// what other identities share ([`shared_folders`]).
+    /// what other identities share ([`crate::shares`]).
     Excluded,
     Junk,
     Ignored,
@@ -227,7 +192,7 @@ pub struct Filter {
     case_insensitive: bool,
     /// Lines that aren't valid rules, in order.
     skipped: Vec<SkippedRule>,
-    /// The folders at the top that hold what other identities share ([`shared_folders`]), as
+    /// The folders at the top that hold what other identities share ([`crate::shares`]), as
     /// their names compare ([`Filter::top_key`]), in order.
     shared: Vec<String>,
 }
@@ -247,9 +212,9 @@ impl Default for Filter {
 impl Filter {
     /// The user's rules from `.hbsync/ignore` under `root`, if the file exists; built-ins only
     /// otherwise. A line that isn't a valid rule is skipped ([`Filter::skipped`]); a file that
-    /// can't be read is an error: its rules are unknown, not mistyped. With the folders at the
-    /// top of `root` that hold what other identities share ([`shared_folders`]), left out; a
-    /// root that can't be listed is an error too.
+    /// can't be read is an error: its rules are unknown, not mistyped. With the folder at the
+    /// top of `root` that holds what other identities share ([`crate::shares::folders`]) left
+    /// out; one that can't be told is an error too.
     pub fn load(root: &Path, case_insensitive: bool) -> Result<Self, FilterError> {
         let path = crate::layout::ignore_file(root);
         let text = match std::fs::read_to_string(&path) {
@@ -257,7 +222,7 @@ impl Filter {
             Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
             Err(source) => return Err(FilterError::Read { path, source }),
         };
-        let shared = shared_folders(root).map_err(|source| FilterError::Read {
+        let shared = crate::shares::folders(root).map_err(|source| FilterError::Read {
             path: root.to_owned(),
             source,
         })?;
@@ -307,17 +272,17 @@ impl Filter {
     }
 
     /// The filter leaving out the folders named `names` at the top too: those that hold what
-    /// other identities share ([`shared_folders`]), instead of any it left out so before.
+    /// other identities share ([`crate::shares`]), instead of any it left out so before.
     pub fn with_shared<S: AsRef<str>>(mut self, names: impl IntoIterator<Item = S>) -> Self {
         self.shared = self.top_keys(names);
         self
     }
 
-    /// Whether the folders at the top of `root` that hold what other identities share aren't
-    /// the ones this filter leaves out (or can't be told): [`shared_folders`] alone, the rules
-    /// not read again.
+    /// Whether the folder at the top of `root` that holds what other identities share isn't
+    /// what this filter leaves out (or can't be told): [`crate::shares::folders`] alone, the
+    /// rules not read again.
     pub fn shared_changed(&self, root: &Path) -> bool {
-        shared_folders(root).map_or(true, |names| self.top_keys(names) != self.shared)
+        crate::shares::folders(root).map_or(true, |names| self.top_keys(names) != self.shared)
     }
 
     /// The folders at the top left out as holding what other identities share
@@ -673,35 +638,39 @@ mod tests {
         assert_eq!(ok.names(["build", "keep"], false), Verdict::Sync);
     }
 
-    /// A folder at the top holding the marker is the client's own, whatever its name, with all
-    /// in it; the marker itself is junk wherever it is. Not a folder deeper, a link, or one
-    /// whose marker is a folder.
+    /// The folder of shares is the client's own, whatever its name, with all in it; the marker
+    /// itself is junk wherever it is. A marker elsewhere makes no folder one: not at the top
+    /// (copied into a plain folder), deeper, or in the root.
     #[test]
-    fn a_folder_holding_the_marker_is_left_out_at_the_top_only() -> io::Result<()> {
+    fn the_folder_of_shares_is_left_out_and_a_marker_elsewhere_does_nothing() -> io::Result<()> {
         use crate::layout::{SHARED_MARKER, shared_marker};
+        use crate::shares::{Made, make};
         let dir = tempfile::tempdir()?;
         let root = dir.path();
-        assert!(shared_folders(&root.join("missing"))?.is_empty());
-        for folder in ["Shared", "Renamed by hand", "plain", "deep/Shared", "odd"] {
+        for folder in ["plain", "deep/Shared", "odd"] {
             std::fs::create_dir_all(root.join(folder))?;
         }
-        for folder in ["Shared", "Renamed by hand", "deep/Shared"] {
-            std::fs::write(shared_marker(&root.join(folder)), "")?;
+        assert_eq!(make(root, "Shared")?, Made::Made);
+        for folder in ["plain", "deep/Shared"] {
+            std::fs::copy(
+                shared_marker(&root.join("Shared")),
+                shared_marker(&root.join(folder)),
+            )?;
         }
         std::fs::create_dir(shared_marker(&root.join("odd")))?;
         std::fs::write(shared_marker(root), "")?;
         #[cfg(unix)]
         std::os::unix::fs::symlink(root.join("Shared"), root.join("link"))?;
-        assert_eq!(shared_folders(root)?, ["Renamed by hand", "Shared"]);
 
         let f = Filter::load(root, false).map_err(io::Error::other)?;
-        assert_eq!(f.shared(), ["Renamed by hand", "Shared"]);
+        assert_eq!(f.shared(), ["Shared"]);
         assert_eq!(f.in_folder("", "Shared", true), Verdict::Excluded);
         assert_eq!(f.path(&rel("Shared/tom/a.txt"), false), Verdict::Excluded);
         // The name is held there, whatever would take it.
         assert_eq!(f.in_folder("", "Shared", false), Verdict::Excluded);
         assert_eq!(f.in_folder("", "shared", true), Verdict::Sync);
         assert_eq!(f.in_folder("", "plain", true), Verdict::Sync);
+        assert_eq!(f.in_folder("", "link", true), Verdict::Sync);
         assert_eq!(f.in_folder("", "deep", true), Verdict::Sync);
         assert_eq!(f.in_folder("deep", "Shared", true), Verdict::Sync);
         assert_eq!(f.in_folder("", "odd", true), Verdict::Sync);
@@ -709,11 +678,16 @@ mod tests {
             assert_eq!(f.in_folder(folder, SHARED_MARKER, false), Verdict::Junk);
         }
 
-        // Asked without the rules read again: the same folders or not.
+        // Asked without the rules read again: the same folder or not.
         assert!(!f.shared_changed(root));
         assert!(Filter::default().shared_changed(root));
-        std::fs::rename(root.join("Shared"), root.join("Shared-2"))?;
+        std::fs::rename(root.join("Shared"), root.join("Renamed by hand"))?;
         assert!(f.shared_changed(root));
+        let f = Filter::load(root, false).map_err(io::Error::other)?;
+        assert_eq!(f.shared(), ["Renamed by hand"]);
+        std::fs::remove_file(shared_marker(&root.join("Renamed by hand")))?;
+        assert!(f.shared_changed(root));
+        assert!(!Filter::default().shared_changed(root));
         Ok(())
     }
 
@@ -731,15 +705,17 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             assert!(holds_marker(&root.join("x".repeat(300))).is_err());
+            assert_eq!(
+                crate::shares::make(root, "closed")?,
+                crate::shares::Made::Made
+            );
             let closed = root.join("closed");
-            std::fs::create_dir(&closed)?;
-            std::fs::write(crate::layout::shared_marker(&closed), "")?;
             std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000))?;
             // Root looks into anything: nothing to see then.
             let seen = holds_marker(&closed)?;
-            let listed = shared_folders(root)?;
+            let found = crate::shares::folders(root)?;
             std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o700))?;
-            assert_eq!(listed.is_empty(), !seen);
+            assert_eq!(found.is_empty(), !seen);
         }
         Ok(())
     }
