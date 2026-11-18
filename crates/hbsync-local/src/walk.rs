@@ -129,7 +129,8 @@ impl<'a> Walker<'a> {
         walker
     }
 
-    /// Whether the folder at `at` with `id`, at the top, is the folder of shares
+    /// Whether the folder at `at` with `id` (at the top, or one with the id on record) is the
+    /// folder of shares
     /// ([`crate::shares::Record::holds`]): the record read once a walk, the marker looked for
     /// in the one folder it names.
     fn holds_shares(&mut self, id: hbsync_platform::FileId, at: &Path) -> io::Result<bool> {
@@ -236,8 +237,12 @@ impl Iterator for Walker<'_> {
                 // The folder at the top that holds what other identities share is neither
                 // reported nor entered: by the record and its marker, whatever the filter
                 // knows of it (it came, or took another name, since the filter was read).
+                // Nor is it below the top, moved into another folder: known there by the
+                // file id on record (the listing has each folder's: nothing more is read
+                // but for the one that has it).
                 let id = meta.file_id;
-                let held = match dir.is_root() {
+                let known = self.filter.is_shares_id(id.file);
+                let held = match dir.is_root() || known {
                     true => self.native(&path).map(|at| self.holds_shares(id, &at)),
                     false => None,
                 };
@@ -247,6 +252,14 @@ impl Iterator for Walker<'_> {
                             path: path.components().collect(),
                             reason: SkipReason::Excluded,
                         });
+                    }
+                    // Its marker can't be looked for, and it has an id on record: not known
+                    // this time. Neither reported (the folder of shares would get a row, and
+                    // a rescan below it would start in it) nor left out (a folder of the
+                    // user's own that was the folder of shares once would lose its rows, and
+                    // leave the drive): what the DB has of it stays as it is.
+                    Some(Err(error)) if known => {
+                        return Some(WalkEvent::Unreadable { path, error });
                     }
                     // Not known to hold none: reported, not entered.
                     Some(Err(error)) => {

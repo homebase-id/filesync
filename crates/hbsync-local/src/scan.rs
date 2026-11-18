@@ -296,10 +296,28 @@ pub fn rescan_entries(
     let mut report = ScanReport::default();
     let mut diff = rescan_diff(db, root, &dirs, opts, &mut report)?;
     if !alone.is_empty() {
-        // An entry below a folder the rescan walked in full (or found gone) is its too.
+        // An entry below a folder the rescan walked in full (or found gone) is its too. So
+        // is a new one below a folder whose row the rescan takes away (left out now: the
+        // folder of shares with its marker back), which has no row to be in.
         let mine: HashSet<&RelPath> = alone.paths().collect();
         let walked: HashSet<RelPath> = diff.paths().filter(|p| mine.contains(p)).cloned().collect();
-        alone.retain(|p| !walked.contains(p));
+        let folders = diff.removed.iter().filter(|r| r.kind == NodeKind::Folder);
+        let gone: HashSet<RelPath> = folders.map(|r| r.path.clone()).collect();
+        let below_gone = |path: &RelPath| {
+            // (Nothing is built to ask where no folder is taken away.)
+            if gone.is_empty() {
+                return false;
+            }
+            let mut dir = path.parent();
+            while let Some(at) = dir {
+                if gone.contains(&at) {
+                    return true;
+                }
+                dir = at.parent();
+            }
+            false
+        };
+        alone.retain(|p| !walked.contains(p) && !below_gone(p));
         diff.append(alone);
     }
     let plan = resolve(db, root, diff, opts, &mut report)?;
@@ -402,7 +420,7 @@ fn rescan_diff(
         }
         // A folder the DB doesn't know yet is new: its parent's rescan finds it and walks it in
         // full (its own creation event may come in a later batch, or never).
-        let mut dir = real_dir_prefix(root, dir);
+        let mut dir = real_dir_prefix(root, dir, &opts.filter);
         while db.read(|s| known_folder(s, &dir))?.is_none() {
             dir = dir.parent().unwrap_or_default();
         }
@@ -470,15 +488,41 @@ fn rescan_diff(
 
 /// The longest leading part of `dir` that is a real folder: a folder that no longer exists, or
 /// that a symlink (or junction) now stands in for, is replaced by its nearest real ancestor.
-/// Links are never followed, so a rescan can't reach outside the root through one.
-fn real_dir_prefix(root: &Path, dir: &RelPath) -> RelPath {
+/// Links are never followed, so a rescan can't reach outside the root through one. Nor does
+/// it start in a folder with a file id on record for the folder of shares (moved below the
+/// top, which the DB may know from a time it wasn't one) or below it: it starts in the folder
+/// that one is in, whose listing leaves it out (the id comes with the look at each folder on
+/// the way: nothing more is read but for one that has an id on record).
+fn real_dir_prefix(root: &Path, dir: &RelPath, filter: &Filter) -> RelPath {
     let mut real = RelPath::default();
     for name in dir.components() {
         let Ok(next) = real.join(name) else { break };
-        match std::fs::symlink_metadata(next.to_native(root)) {
-            Ok(m) if m.is_dir() => real = next,
-            _ => break,
+        let at = next.to_native(root);
+        // One look a folder: a link isn't one. Where an id is on record for the folder of
+        // shares the look gives the folder's id too (on Windows that look costs more: not
+        // made where none is on record).
+        let id = match filter.knows_shares_by_id() {
+            true => match hbsync_platform::meta::stat(&at) {
+                Ok(m) if m.kind == EntryKind::Dir => Some(m.file_id),
+                _ => break,
+            },
+            false => match std::fs::symlink_metadata(&at) {
+                Ok(m) if m.is_dir() => None,
+                _ => break,
+            },
+        };
+        // (One with such an id that holds no marker is a folder of the user's own: gone
+        // through. Where that can't be told, the walk of the folder it is in says so.)
+        let shares = id.is_some_and(|id| {
+            filter.is_shares_id(id.file)
+                && crate::shares::Record::read(root)
+                    .and_then(|record| record.holds(id, &at))
+                    .unwrap_or(true)
+        });
+        if shares {
+            break;
         }
+        real = next;
     }
     real
 }
@@ -531,8 +575,9 @@ fn merge(
 ) -> Result<Diff, StateError> {
     let mut diff = Diff::default();
     let mut unknown: Vec<RelPath> = Vec::new();
-    let under_unknown =
-        |unknown: &[RelPath], p: &RelPath| unknown.iter().any(|u| p != u && p.starts_with(u));
+    // (The folder's own row too: one the walk couldn't tell anything of comes without an
+    // entry, and its row stays as it is; one that came with its entry has had its row taken.)
+    let under_unknown = |unknown: &[RelPath], p: &RelPath| unknown.iter().any(|u| p.starts_with(u));
 
     for event in events {
         let (path, meta) = match event {

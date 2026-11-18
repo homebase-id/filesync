@@ -996,8 +996,10 @@ leaves the drive and the other devices by rule 1, and stays here).
 
 The client makes it so that it is never at the top without its marker, nor before it is on
 record (`shares::make`): prepared in `.hbsync/tmp` with a marker holding a new token,
-recorded, then renamed into place, never over anything; a crash in between leaves a
-prepared folder, which the next try makes anew.
+recorded, then renamed into place, never over anything (the marker is on disk before the
+record names it). A crash in between leaves a prepared folder: one that is on record is put
+into place as it is by the next try (never taken apart first: stopped there, the record
+would name nothing), any other is made anew.
 
 - Its name is excluded at the top, as the volume compares names (on macOS in any
   normalization, whatever the volume's case), and by rules 1 and 2: it is
@@ -1035,6 +1037,45 @@ prepared folder, which the next try makes anew.
   and is masked once the filter is read). Nothing in it is sent, and the drive's folder of
   its name isn't put into it (engine
   `a_folder_of_shares_the_filter_doesnt_know_yet_is_neither_sent_nor_merged`).
+- Moved into another folder (a slip of the hand in the file manager; the same volume, so
+  its file id stays) it is left alone there too: a walk knows it by the file id on record,
+  which each listing has, and looks for its marker before it reports or enters it (one
+  whose marker can't be looked for just then is neither reported nor entered that time, and
+  what the DB has of it stays: a folder of the user's own that was the folder of shares
+  once has such an id too; a rescan asked for in the folder of shares or below it starts in
+  the folder it is in; and a marker made or removed below the top leads to such a rescan,
+  where an id is on record, while the watcher runs: a marker removed there while nothing
+  ran is found by the next whole walk, or when the folder it is in changes, as the
+  journal of Windows names a folder by an id the DB has no row for). A folder of the drive is never made
+  out of it there either: nothing gives way below the top, so that folder can't be held
+  here until the folder of shares is moved back, said in a note. Nothing of it is
+  sent; back at the top it is the folder of shares as before, and nothing of it was on the
+  drive to take away (scan `the_folder_of_shares_moved_into_another_folder_never_reaches_the_db`,
+  engine `the_folder_of_shares_moved_into_a_synced_folder_is_neither_sent_nor_merged`).
+  Where the volume's file ids aren't stable no id is on record: there it is known at the
+  top only, and moved into a folder it syncs as the user's own (a known limit). So it does
+  where it gets another file id while it is below the top (the folder it is in moved to
+  another volume and back, or restored from a backup): only at the top is one looked for
+  by its marker (filesync #417).
+- Back as a copy (moved to another volume and back, restored from a backup: another file
+  id, its marker in it) it is taken as the folder of shares again: as the sync folder
+  opens, and while it is synced as soon as a folder at the top holds the record's marker
+  (the folder is opened again for it, also when one such folder goes and another comes).
+  The record keeps the ids it had before beside the new one (the last few): the folder a
+  copy is taken for may still be in the sync folder, moved into another folder, and is the
+  folder of shares where it is as well. Back at the top beside the one on record
+  now, both are left out, and what is shared is synced into the one on record now. Taken is the only folder there that holds the marker
+  and isn't synced: one the state DB has a base for (agreed with the drive), under its name
+  as names compare or by its file id (a synced folder a marker was copied into stays the
+  user's own, renamed or not). One only scanned so far (it came whole, a rename into
+  place) isn't synced: taken, it leaves the DB with the next scan and never reaches the
+  drive (runner `a_folder_of_shares_back_as_a_copy_is_taken_again_while_syncing`). A known
+  limit: copied back piece by piece, the folder is sent as the user's own from the moment
+  its first items are (a sync may begin before the marker is copied), and isn't taken
+  afterwards; nor is one renamed into the top whole in the middle of a running sync that
+  lists the top (a placement there, a rescan the sync asks for), which that sync may send
+  before the folder is opened again. The log says that a folder holding the marker wasn't
+  taken.
 - A marker anywhere else does nothing (junk): copied into a synced folder at the top, that
   folder stays synced, with what is in it and what comes (scan
   `the_folder_of_shares_never_reaches_the_db_and_a_copied_marker_does_nothing`, engine

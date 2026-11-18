@@ -1172,7 +1172,6 @@ fn the_folder_of_shares_gives_way_before_a_synced_folder_that_took_its_name_is_p
 #[test]
 fn a_folder_of_shares_that_cant_give_way_leaves_the_item_out_and_syncs_on() -> R {
     use hbsync_local::shares::folders;
-    use std::os::unix::fs::PermissionsExt;
     let server = server();
     let a = Device::start(&server, "a")?;
     let b = Device::start(&server, "b")?;
@@ -1184,14 +1183,9 @@ fn a_folder_of_shares_that_cant_give_way_leaves_the_item_out_and_syncs_on() -> R
     wait_until("notes.txt is up", || on_server(&server, "notes.txt"))?;
     a.wait_idle()?;
 
-    // Nothing at the folder's top can be renamed.
-    let mode = |mode| std::fs::set_permissions(&a.root, std::fs::Permissions::from_mode(mode));
-    mode(0o555)?;
-    if std::fs::write(a.root.join("probe"), "").is_ok() {
-        // Whoever runs this may write anywhere (root): nothing can be refused.
-        std::fs::remove_file(a.root.join("probe"))?;
-        return Ok(mode(0o755)?);
-    }
+    let Some(locked) = Locked::new(&a.root)? else {
+        return Ok(());
+    };
     b.write("Shared/cloud.txt", "from the drive")?;
     b.handle.send(Command::SyncNow);
     wait_until("the drive's Shared is up", || {
@@ -1202,7 +1196,7 @@ fn a_folder_of_shares_that_cant_give_way_leaves_the_item_out_and_syncs_on() -> R
     let quiet = a.settled(Duration::from_millis(500), PATIENCE, || a.feed_reads());
     let left_out = !a.has("Shared/cloud.txt") && folders(&a.root)? == ["Shared"];
     let idle = a.status().state == State::Idle;
-    mode(0o755)?;
+    drop(locked);
     quiet?;
     assert!(left_out && idle);
 
@@ -1212,6 +1206,135 @@ fn a_folder_of_shares_that_cant_give_way_leaves_the_item_out_and_syncs_on() -> R
     wait_until("the drive's Shared is here", || a.has("Shared/cloud.txt"))?;
     a.wait_idle()?;
     assert_eq!(folders(&a.root)?, ["Shared-2"]);
+    Ok(())
+}
+
+/// Its rename refused, the folder of shares is asked again by itself after a while, also on
+/// a folder with nothing else to sync: once the rename works it gives way, and the drive's
+/// item comes, with nothing changed here to start a sync. Not while the folder is paused.
+#[cfg(unix)]
+#[test]
+fn a_folder_of_shares_that_couldnt_give_way_is_asked_again_by_itself() -> R {
+    use hbsync_local::shares::folders;
+    let server = server();
+    let again = |c: &mut RunnerConfig| c.shares_again = Duration::from_millis(400);
+    let a = Device::start_with(&server, "a", again)?;
+    let b = Device::start(&server, "b")?;
+    a.started()?;
+    b.started()?;
+    assert_eq!(make(&a.root, "Shared")?, Made::Made);
+    a.wait_idle()?;
+    let Some(locked) = Locked::new(&a.root)? else {
+        return Ok(());
+    };
+    b.write("Shared/cloud.txt", "from the drive")?;
+    b.handle.send(Command::SyncNow);
+    wait_until("the drive's Shared is up", || {
+        on_server(&server, "cloud.txt")
+    })?;
+    a.sync_reported()?;
+    let left_out = !a.has("Shared/cloud.txt");
+    // Paused, it isn't asked: nothing in a paused folder is renamed, though it could be now.
+    a.handle.send(Command::Pause(Pause::UNTIL_RESUMED));
+    // (The runner takes the pause at its next turn, and a placing begun before it may still
+    // end: the folder stays locked a second more, in which no such placing can rename.)
+    std::thread::sleep(Duration::from_millis(1000));
+    drop(locked);
+    assert!(left_out);
+    std::thread::sleep(Duration::from_millis(1500));
+    assert_eq!(folders(&a.root)?, ["Shared"], "renamed while paused");
+    a.handle.send(Command::Resume);
+    wait_until("it gave way by itself", || a.has("Shared/cloud.txt"))?;
+    a.wait_idle()?;
+    assert_eq!(folders(&a.root)?, ["Shared-2"]);
+    Ok(())
+}
+
+/// A folder of shares that can't be made keeps nothing of the account's own from syncing:
+/// there is none, said in the log, and it is made by itself once it can be (asked again after
+/// a while, the folder opened anew only when that made it).
+#[test]
+fn a_folder_of_shares_that_cant_be_made_doesnt_stop_the_folder() -> R {
+    use hbsync_local::shares::folders;
+    let server = server();
+    let a = Device::start_with(&server, "a", |c| {
+        c.shares = Some("Shared".into());
+        c.shares_again = Duration::from_millis(400);
+        // In the way of its making, and not this program's to clear.
+        let stray = hbsync_local::layout::tmp_dir(&c.folder)
+            .join("shares")
+            .join("stray");
+        std::fs::create_dir_all(stray).expect("stray");
+    })?;
+    a.write("notes.txt", "mine")?;
+    wait_until("notes.txt is up", || on_server(&server, "notes.txt"))?;
+    a.wait_idle()?;
+    assert_eq!(a.status().state, State::Idle);
+    assert!(folders(&a.root)?.is_empty());
+    // Asked again and again meanwhile, the folder isn't opened anew for it: nothing is read
+    // of the drive.
+    a.settled(Duration::from_millis(1200), PATIENCE, || a.feed_reads())?;
+
+    // By itself once it can be, with nothing changed in the folder to start a sync.
+    let stray = hbsync_local::layout::tmp_dir(&a.root).join("shares");
+    std::fs::remove_dir_all(stray)?;
+    wait_until("the folder of shares is made", || {
+        folders(&a.root).is_ok_and(|f| f == ["Shared"])
+    })?;
+    a.wait_idle()?;
+    assert_eq!(live_names(&server), ["notes.txt"]);
+    Ok(())
+}
+
+/// The folder of shares that comes back as a copy while the folder is synced (moved to
+/// another volume and back, restored: another file id, its marker in it) is taken as the
+/// folder of shares again, though the scan saw it first: nothing of it reaches the drive.
+#[test]
+fn a_folder_of_shares_back_as_a_copy_is_taken_again_while_syncing() -> R {
+    use hbsync_local::layout::shared_marker;
+    use hbsync_local::shares::folders;
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    if !a.watching()? {
+        return Ok(());
+    }
+    assert_eq!(make(&a.root, "Shared")?, Made::Made);
+    a.write("Shared/tom/theirs.txt", "shared with me")?;
+    a.write("notes.txt", "mine")?;
+    wait_until("notes.txt is up", || on_server(&server, "notes.txt"))?;
+    a.wait_idle()?;
+    let marker = std::fs::read(shared_marker(&a.root.join("Shared")))?;
+
+    // Away (out of the sync folder), and a copy of it made beside the sync folder.
+    let beside = a.root.parent().ok_or("no parent")?;
+    rename_with_retries(&a.root.join("Shared"), &beside.join("away"))?;
+    a.handle.send(Command::SyncNow);
+    a.sync_reported()?;
+    a.wait_idle()?;
+    assert!(folders(&a.root)?.is_empty());
+    let copy = beside.join("copy");
+    std::fs::create_dir_all(copy.join("tom"))?;
+    std::fs::write(copy.join("tom/theirs.txt"), "shared with me")?;
+    std::fs::write(shared_marker(&copy), &marker)?;
+    if hbsync_platform::stat(&copy)?.file_id == hbsync_platform::stat(&beside.join("away"))?.file_id
+    {
+        return Err("the copy has the folder's file id".into());
+    }
+
+    // Back, whole: seen by the watcher, taken before anything of it is sent.
+    std::fs::rename(&copy, a.root.join("Shared"))?;
+    wait_until("it is the folder of shares again", || {
+        folders(&a.root).is_ok_and(|f| f == ["Shared"])
+    })?;
+    a.write("more.txt", "mine too")?;
+    wait_until("more.txt is up", || on_server(&server, "more.txt"))?;
+    a.wait_idle()?;
+    let mut names = live_names(&server);
+    names.sort();
+    assert_eq!(names, ["more.txt", "notes.txt"]);
+    let removed = server.lock().map_err(|_| "poisoned")?.removed().count();
+    assert_eq!(removed, 0, "sent, then taken away");
+    assert!(a.has("Shared/tom/theirs.txt"));
     Ok(())
 }
 
@@ -1440,6 +1563,36 @@ fn a_folder_whose_disk_is_not_mounted_is_left_alone() -> R {
     handle.send(Command::Stop);
     thread.join().map_err(|_| "panicked")??;
     Ok(())
+}
+
+/// A folder nothing can be made, renamed or removed in (its mode, on Unix), until dropped:
+/// also when the test ends early.
+#[cfg(unix)]
+struct Locked(PathBuf);
+
+#[cfg(unix)]
+impl Locked {
+    /// `dir` locked; `None` where whoever runs this may write anywhere (root): nothing can
+    /// be refused there.
+    fn new(dir: &Path) -> std::io::Result<Option<Locked>> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555))?;
+        let locked = Locked(dir.to_path_buf());
+        let probe = dir.join("probe");
+        if std::fs::write(&probe, "").is_ok() {
+            std::fs::remove_file(&probe)?;
+            return Ok(None);
+        }
+        Ok(Some(locked))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Locked {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
 }
 
 /// Renames a folder, retrying while Windows still has a handle open in it (the watcher).

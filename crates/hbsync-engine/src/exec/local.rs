@@ -113,12 +113,23 @@ impl Executor<'_> {
         // Never the folder at the top that holds what other identities share, which the filter
         // this run was planned with doesn't know yet (it came, or took this name, since): what
         // is on the drive under its name would be put into it. The folder is opened again
-        // with it left out before the next sync.
-        if adopt && target.depth() == 1 {
+        // with it left out before the next sync. Nor that folder below the top (moved into
+        // another folder; asked there only where an id is on record): nothing gives way
+        // there, so the drive's folder can't be held here until the folder of shares is moved
+        // back to the top, said so.
+        let filter = &self.folder.filter;
+        if adopt && (target.depth() == 1 || filter.knows_shares_by_id()) {
             let shares = hbsync_local::shares::Record::read(&self.folder.root);
             match shares.and_then(|record| record.is(&abs)) {
                 Ok(false) => {}
-                Ok(true) => return Ok(Outcome::Retry("a folder of shares has the name".into())),
+                Ok(true) if target.depth() == 1 => {
+                    return Ok(Outcome::Retry("a folder of shares has the name".into()));
+                }
+                Ok(true) => {
+                    let why = "the folder of shares is at its place: move that one back to \
+                               the top of the sync folder";
+                    return Ok(Outcome::Skip(Skip::Unsyncable(why.into())));
+                }
                 Err(e) => return Ok(io_outcome(e)),
             }
         }

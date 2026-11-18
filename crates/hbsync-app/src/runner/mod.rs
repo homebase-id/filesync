@@ -59,9 +59,12 @@ const ANSWER_DROPPED_SET_UP: &str = "Your answer to the deletions to review wasn
 /// The ignore rules are read this long after their file was last touched: not half written.
 const RULES_QUIET: Duration = Duration::from_secs(1);
 
-/// How long after the folder of shares couldn't give way to the drive's item of its name
-/// (the item masked meanwhile) a sync asks it to again: each asking opens the folder anew.
-const GIVE_WAY_AGAIN: Duration = Duration::from_secs(600);
+/// A folder of shares that couldn't be made is asked for again after a look's time this many
+/// times, then after [`RunnerConfig::shares_again`].
+const UNMADE_SOON: u32 = 3;
+
+/// [`RunnerConfig::shares_again`], unless a test says otherwise.
+const SHARES_AGAIN: Duration = Duration::from_secs(600);
 
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
@@ -145,6 +148,10 @@ pub struct RunnerConfig {
     /// same deletes are held: what the identity said once wasn't there is gone for good when
     /// it says so again a minute on (sync semantics §8b).
     pub put_back_again: Duration,
+    /// How long after the folder of shares couldn't give way to the drive's item of its name
+    /// (the item masked meanwhile) a sync is run to ask it again, and after it couldn't be
+    /// made the folder is opened again to make it: each asking opens the folder anew.
+    pub shares_again: Duration,
     /// Tests: adjusts the engine's config.
     pub tweak: Option<fn(&mut EngineConfig)>,
     /// Raised when its status may have changed (the daemon pushes it to the tray).
@@ -195,6 +202,7 @@ impl RunnerConfig {
             look: Duration::from_secs(60),
             once: false,
             put_back_again: hbsync_engine::gone::ASK_AGAIN,
+            shares_again: SHARES_AGAIN,
             tweak: None,
             changed: Arc::default(),
             end_if_unusable: false,
@@ -457,6 +465,9 @@ struct Parts {
     gave_way: bool,
     /// It couldn't, to the drive's item of its name ([`hbsync_local::shares::Placed::stuck`]).
     stuck: bool,
+    /// The folder of shares was to be made and couldn't be
+    /// ([`hbsync_local::shares::Placed::unmade`]): made as the folder opens again.
+    unmade: bool,
 }
 
 impl Parts {
@@ -465,9 +476,7 @@ impl Parts {
     /// differ (sync semantics §10).
     fn rules_changed(&self, root: &Path) -> bool {
         let folder = &self.engine.config().folder;
-        Filter::load(root, folder.case_insensitive).map_or(true, |f| {
-            f.fingerprint() != folder.filter.fingerprint() || f.in_the_way()
-        })
+        Filter::load(root, folder.case_insensitive).map_or(true, |f| folder.filter.changed_from(&f))
     }
 
     /// [`Parts::rules_changed`] for the folder of shares alone, the rules neither read nor
@@ -607,6 +616,17 @@ impl Runner {
             && std::fs::symlink_metadata(&self.cfg.folder).is_ok_and(|meta| meta.is_dir())
     }
 
+    /// Puts the folder of shares in its place again while the folder is open, as
+    /// [`Runner::open_once`] does when it opens it (made where it couldn't be, renamed where
+    /// it couldn't give way): what that did, for the folder to be opened again where it did
+    /// something. Costs a connection to the state DB, the record's read and a listing of the
+    /// top.
+    fn place_again(&self, parts: &Parts) -> Result<hbsync_local::shares::Placed, RunnerError> {
+        let root = SyncRoot::open(&self.cfg.db, &self.cfg.identity, &self.cfg.folder)?;
+        let caseless = parts.engine.config().folder.case_insensitive;
+        Ok(root.place_shares(self.cfg.shares.as_deref(), caseless)?)
+    }
+
     fn open_once(&self) -> Result<Parts, RunnerError> {
         let root = &self.cfg.folder;
         let mut cfg = EngineConfig::new(root, &self.cfg.device);
@@ -635,7 +655,9 @@ impl Runner {
             }),
             e => e.into(),
         };
-        let adopted = sync_root.adopt_shares().map_err(unread)?;
+        let adopted = sync_root
+            .adopt_shares(cfg.folder.case_insensitive)
+            .map_err(unread)?;
         if let Some(name) = adopted {
             tracing::info!("{name}: taken as the folder of shares (the one on record is gone)");
         }
@@ -654,6 +676,9 @@ impl Runner {
         if let Some(why) = &placed.stuck {
             tracing::warn!("{why}: the item stays out of this folder meanwhile");
         }
+        if let Some(why) = &placed.unmade {
+            tracing::warn!("{why}: tried again later; what is the account's own syncs on");
+        }
         if placed.missing && make_as.is_some() {
             tracing::warn!(
                 "the folder of shares on record isn't at the top of the folder: none is made in its place"
@@ -668,6 +693,13 @@ impl Runner {
             });
         }
         cfg.folder.filter = Arc::new(Filter::load(root, cfg.folder.case_insensitive)?);
+        if !cfg.folder.filter.returned().is_empty() {
+            tracing::warn!(
+                "the folder of shares on record isn't at the top of the folder, and what holds \
+                 its marker there wasn't taken as it: it is synced as the account's own, or \
+                 more than one holds it"
+            );
+        }
         cfg.folder.read_only.clone_from(&self.cfg.read_only);
         if let Some(tweak) = self.cfg.tweak {
             tweak(&mut cfg);
@@ -696,6 +728,7 @@ impl Runner {
             drive_changed,
             gave_way: !placed.moved.is_empty(),
             stuck: placed.stuck.is_some(),
+            unmade: placed.unmade.is_some(),
         })
     }
 
@@ -714,8 +747,13 @@ impl Runner {
         // The folder is opened again for the folder of shares to give way to the drive's item
         // of its name ([`SyncReport::in_the_way`]).
         let mut yielding = false;
-        // It didn't: the item stays masked, and the engine asks again from then on.
-        let mut yield_at: Option<Instant> = None;
+        // When the folder of shares is asked again: to give way (it couldn't, or nothing was
+        // found to give way to: the item stays masked meanwhile), or to be made.
+        let mut shares_at: Option<Instant> = None;
+        // How often in a row the folder of shares couldn't be made.
+        let mut unmade_tries = 0u32;
+        // Its timer came round while the folder was paused.
+        let mut shares_held = false;
         // When to read the ignore rules, touched a moment ago.
         let mut rules_at: Option<Instant> = None;
         // After taking local changes failed: not again before then.
@@ -744,6 +782,7 @@ impl Runner {
                     observer,
                     rules_at,
                     put_back_again.as_ref().map(|(at, _)| *at),
+                    shares_at,
                 ]
                 .into_iter()
                 .flatten(),
@@ -838,14 +877,61 @@ impl Runner {
                 rules_at = None;
                 check_rules = true;
             }
+            // The folder of shares is asked again, to give way or to be made, by itself (its
+            // record, a listing, a lookup, a rename): an idle folder is asked too, and the
+            // folder is opened again only where that did something, never to find out.
+            // (Come round while the folder was paused: asked now that it syncs again.)
+            if shares_held && !schedule.paused() {
+                shares_held = false;
+                shares_at = Some(now);
+            }
+            if shares_at.is_some_and(|at| now >= at) {
+                shares_at = None;
+                let again = now + self.cfg.shares_again;
+                // Not while paused: nothing in the folder is touched then, and its watcher
+                // stays. Held till the folder syncs again (no timer runs meanwhile: a paused
+                // folder isn't woken for it).
+                let placed = match schedule.paused() {
+                    true => {
+                        shares_held = true;
+                        None
+                    }
+                    false => parts.as_ref().map(|p| self.place_again(p)),
+                };
+                match (placed, &mut parts) {
+                    // Made, or out of the way: opened again with it.
+                    (Some(Ok(placed)), _) if placed.made.is_some() || !placed.moved.is_empty() => {
+                        parts = None;
+                        schedule.want(Why::Rules);
+                    }
+                    // It still can't (as found now, not as the folder was opened). One that
+                    // couldn't be made is asked sooner the first few times (what is in the
+                    // way of a making is often gone a moment later: a scanner in the new
+                    // folder), then as rarely as the rest.
+                    (Some(Ok(placed)), _) if placed.unmade.is_some() => {
+                        unmade_tries += 1;
+                        let soon = unmade_tries <= UNMADE_SOON;
+                        let wait = if soon {
+                            self.cfg.look
+                        } else {
+                            self.cfg.shares_again
+                        };
+                        shares_at = Some(now + wait.min(self.cfg.shares_again));
+                    }
+                    (Some(Ok(placed)), _) if placed.stuck.is_some() => shares_at = Some(again),
+                    // Nothing to do any more (what it was to give way to is gone, or nothing
+                    // was found when it was asked): the engine asks again, should it find
+                    // something.
+                    (Some(Ok(_)), Some(p)) => p.engine.yield_shares(true),
+                    (Some(Err(e)), _) => {
+                        tracing::warn!("the folder of shares can't be put in its place: {e}");
+                        shares_at = Some(again);
+                    }
+                    _ => {}
+                }
+            }
             if schedule.look_due(now) {
                 check_rules = true;
-                if yield_at.is_some_and(|at| now >= at)
-                    && let Some(p) = &mut parts
-                {
-                    p.engine.yield_shares(true);
-                    yield_at = None;
-                }
                 // Without a watcher, one is asked for again (its error gone: inotify's
                 // instances freed); the folder's changes are found by scanning it, and once
                 // one is back, what changed while there was none.
@@ -963,12 +1049,26 @@ impl Runner {
                         // Asked to give way and didn't (it can't just now, or nothing was
                         // found to give way to): not asked again at every sync.
                         let asked = std::mem::take(&mut yielding);
-                        if p.stuck || (asked && !p.gave_way) {
-                            yield_at = Some(Instant::now() + GIVE_WAY_AGAIN);
+                        if p.unmade {
+                            // (Counted on: a folder opened again and again for other
+                            // reasons isn't asked soon each time.)
+                            unmade_tries += 1;
+                            let soon = unmade_tries <= UNMADE_SOON;
+                            let wait = if soon {
+                                self.cfg.look
+                            } else {
+                                self.cfg.shares_again
+                            };
+                            shares_at = Some(Instant::now() + wait.min(self.cfg.shares_again));
+                        } else if p.stuck || (asked && !p.gave_way) {
+                            shares_at = Some(Instant::now() + self.cfg.shares_again);
                         } else {
+                            unmade_tries = 0;
                             p.engine.yield_shares(true);
-                            yield_at = None;
+                            shares_at = None;
                         }
+                        // (Its timer is set anew by this opening.)
+                        shares_held = false;
                         self.tell_rules(Some(&p.engine.config().folder.filter));
                         self.watcher_is(p.observer.watcher_error.clone());
                         started = false;

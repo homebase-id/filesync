@@ -198,6 +198,12 @@ pub struct Filter {
     /// Something else at the top had one's name when the filter was read
     /// ([`Filter::in_the_way`]).
     in_the_way: bool,
+    /// The file ids on record for the folder of shares when the filter was read
+    /// ([`Filter::is_shares_id`]).
+    shares_ids: Vec<u128>,
+    /// How many folders at the top held the record's marker when the filter was read, the
+    /// folder on record not there ([`Filter::returned`]), by name, in order.
+    returned: Vec<String>,
 }
 
 /// `name` as names at the top compare with a folder's that holds what other identities
@@ -214,6 +220,14 @@ pub fn top_key(name: &str, case_insensitive: bool) -> Cow<'_, str> {
     }
 }
 
+/// The names of `top`'s folders that may be the folder of shares, back
+/// ([`crate::shares::Top::returned`]), in order.
+fn returned(top: &crate::shares::Top) -> Vec<String> {
+    let mut names: Vec<String> = top.returned.iter().map(|(name, _)| name.clone()).collect();
+    names.sort_unstable();
+    names
+}
+
 impl Default for Filter {
     fn default() -> Self {
         Filter {
@@ -223,6 +237,8 @@ impl Default for Filter {
             skipped: Vec::new(),
             shared: Vec::new(),
             in_the_way: false,
+            shares_ids: Vec::new(),
+            returned: Vec::new(),
         }
     }
 }
@@ -246,6 +262,8 @@ impl Filter {
         })?;
         let mut filter = Self::from_rules(&text, case_insensitive)?.with_shared(&top.shares);
         filter.in_the_way = filter.left_out_with(&top);
+        filter.returned = returned(&top);
+        filter.shares_ids = top.ids;
         Ok(filter)
     }
 
@@ -289,6 +307,8 @@ impl Filter {
             skipped,
             shared: Vec::new(),
             in_the_way: false,
+            shares_ids: Vec::new(),
+            returned: Vec::new(),
         })
     }
 
@@ -305,8 +325,17 @@ impl Filter {
     /// read again.
     pub fn shared_changed(&self, root: &Path) -> bool {
         crate::shares::Top::read(root).map_or(true, |top| {
-            self.top_keys(&top.shares) != self.shared || self.left_out_with(&top)
+            let shared = self.top_keys(&top.shares);
+            self.top_differs(&shared, self.left_out_with(&top), &returned(&top))
         })
+    }
+
+    /// Whether the top, as found now, isn't the one this filter was read at, or has the
+    /// folder of shares give way: other folders of shares (`shared`, as their names
+    /// compare), something of its name beside it (`in_the_way`), or other folders that may
+    /// be it, back (`returned`: by name, so one gone and another come count).
+    fn top_differs(&self, shared: &[String], in_the_way: bool, returned: &[String]) -> bool {
+        shared != self.shared || in_the_way || returned != self.returned
     }
 
     /// Whether something else at `top` has the name of a folder of shares this filter leaves
@@ -322,6 +351,38 @@ impl Filter {
     /// folder of shares gives way ([`crate::shares::place`], as the sync folder opens).
     pub fn in_the_way(&self) -> bool {
         self.in_the_way
+    }
+
+    /// Whether this filter, read a while ago, is to be read again given `fresh`, read now:
+    /// it decides otherwise ([`Filter::fingerprint`]), or the folder of shares is to give
+    /// way ([`Filter::in_the_way`]) or may be back ([`Filter::returned`]).
+    pub fn changed_from(&self, fresh: &Filter) -> bool {
+        fresh.fingerprint() != self.fingerprint()
+            || self.top_differs(&fresh.shared, fresh.in_the_way, &fresh.returned)
+    }
+
+    /// The folders at the top that held the marker of the folder of shares on record when
+    /// the filter was read, that folder not being there ([`crate::shares::Top::returned`]),
+    /// by name: each may be it, back as a copy. Others now mean the sync folder is to be
+    /// opened again, for one to be taken ([`crate::shares::adopt`]); the same, that none was
+    /// (it is synced as the user's own, or there are several).
+    pub fn returned(&self) -> &[String] {
+        &self.returned
+    }
+
+    /// Whether `file` is a file id on record for the folder of shares when the filter was
+    /// read ([`Filter::load`]), wherever that folder is: at the top it is left out by its
+    /// name ([`Filter::shared`]); moved into another folder (a slip of the hand) it has no
+    /// name to go by, and a walk knows it by its id, to look for its marker
+    /// ([`crate::shares::Record::holds`]) before it reports or enters it. Never where none is
+    /// on record, or the volume's file ids aren't stable ([`Filter::knows_shares_by_id`]).
+    pub fn is_shares_id(&self, file: u128) -> bool {
+        self.shares_ids.contains(&file)
+    }
+
+    /// Whether a file id is on record for the folder of shares ([`Filter::is_shares_id`]).
+    pub fn knows_shares_by_id(&self) -> bool {
+        !self.shares_ids.is_empty()
     }
 
     /// The folders at the top left out as holding what other identities share
@@ -352,10 +413,17 @@ impl Filter {
     }
 
     /// Changes whenever the filter would decide differently: other rules, another junk list,
-    /// another case sensitivity, other folders that hold what other identities share.
+    /// another case sensitivity, other folders that hold what other identities share, other
+    /// file ids on record for that folder (it is left out by them below the top: a walk of
+    /// the whole folder takes out what the DB has of it there from before). Nothing is added
+    /// where no id is on record: such a folder's fingerprint is as it was.
     pub fn fingerprint(&self) -> String {
+        let ids = match self.shares_ids.is_empty() {
+            true => String::new(),
+            false => format!("; shares' ids {:?}", self.shares_ids),
+        };
         format!(
-            "junk {JUNK_VERSION}; case-insensitive {}; shared {:?}; rules:\n{}",
+            "junk {JUNK_VERSION}; case-insensitive {}; shared {:?}{ids}; rules:\n{}",
             self.case_insensitive, self.shared, self.text
         )
     }
@@ -713,7 +781,20 @@ mod tests {
         assert_eq!(f.shared(), ["Renamed by hand"]);
         std::fs::remove_file(shared_marker(&root.join("Renamed by hand")))?;
         assert!(f.shared_changed(root));
-        assert!(!Filter::default().shared_changed(root));
+        // The one on record is a plain folder now, and another there holds its marker: it
+        // may be the folder of shares back as a copy, to be judged as the sync folder opens
+        // again, once.
+        assert!(Filter::default().shared_changed(root));
+        let f = Filter::load(root, false).map_err(io::Error::other)?;
+        if f.knows_shares_by_id() {
+            assert_eq!(f.returned(), ["plain"]);
+        }
+        // The ids on record are part of what the filter decides by (below the top), and
+        // nothing of them is in the fingerprint of a folder without.
+        let ids = |f: &Filter| f.fingerprint().contains("shares' ids");
+        assert_eq!(ids(&f), f.knows_shares_by_id());
+        assert!(!ids(&Filter::default()));
+        assert!(f.shared().is_empty() && !f.shared_changed(root));
         Ok(())
     }
 

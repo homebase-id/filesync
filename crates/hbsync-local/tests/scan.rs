@@ -889,6 +889,111 @@ fn the_folder_of_shares_never_reaches_the_db_and_a_copied_marker_does_nothing() 
     Ok(())
 }
 
+/// The folder of shares moved into another folder (a slip of the hand in the file manager) is
+/// left alone there too, known by the file id on record: nothing of it reaches the DB, by a
+/// whole scan, by a rescan of the folder it is in, or by one of a folder inside it. Back at
+/// the top it is the folder of shares as before, and nothing was ever there to take away.
+#[test]
+fn the_folder_of_shares_moved_into_another_folder_never_reaches_the_db() -> R {
+    use hbsync_local::shares::{Made, folders, make};
+    let mut f = Fixture::new()?;
+    assert_eq!(make(f.root(), "Shared")?, Made::Made);
+    f.write("Shared/tom/theirs.txt", b"t")?;
+    f.write("Work/notes.txt", b"n")?;
+    f.opts.filter = Arc::new(Filter::load(f.root(), false)?);
+    if !f.opts.filter.knows_shares_by_id() {
+        // A volume without stable file ids: the folder is known at the top only.
+        return Ok(());
+    }
+    let (report, _) = f.scan()?;
+    assert_eq!(report.added, 2, "{report:?}"); // Work, notes
+
+    let root = f.root().to_path_buf();
+    std::fs::rename(root.join("Shared"), root.join("Work/Shared"))?;
+    // As the runner opens the folder again: none at the top, the id still on record.
+    f.opts.filter = Arc::new(Filter::load(&root, false)?);
+    assert!(f.opts.filter.shared().is_empty() && f.opts.filter.knows_shares_by_id());
+    let (report, dirty) = f.scan()?;
+    assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
+    assert!(dirty.is_empty(), "{dirty:?}");
+    for dir in ["Work", "Work/Shared", "Work/Shared/tom"] {
+        let report = rescan_dirs(&mut f.db, &root, &[RelPath::new(dir)?], &f.opts)?;
+        assert_eq!((report.added, report.removed), (0, 0), "{dir}: {report:?}");
+    }
+    let entry = [RelPath::new("Work/Shared/tom/theirs.txt")?];
+    let report = hbsync_local::rescan_entries(&mut f.db, &root, &[], &entry, &f.opts)?;
+    assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
+
+    // A folder that only has its name there is the user's own.
+    f.write("Work/Other/Shared/mine.txt", b"m")?;
+    let (report, _) = f.scan()?;
+    assert_eq!(report.added, 3, "{report:?}"); // Other, Shared, mine
+
+    // Its marker unreadable for a moment: left out all the same, by its id.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let marker = hbsync_local::layout::shared_marker(&root.join("Work/Shared"));
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o000))?;
+        let scanned = f.scan();
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o600))?;
+        let (report, _) = scanned?;
+        assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
+    }
+
+    // Known to the DB from a time it had no marker (a plain folder then): with its marker
+    // back, a rescan asked for below it starts above it, and takes it out again.
+    let marker = hbsync_local::layout::shared_marker(&root.join("Work/Shared"));
+    let token = fs::read(&marker)?;
+    fs::remove_file(&marker)?;
+    let (report, _) = f.scan()?;
+    assert_eq!(report.added, 3, "{report:?}"); // Shared, tom, theirs
+    // (While it is one of the user's own, a rescan asked for in it is done in it, though its
+    // id is on record.)
+    f.write("Work/Shared/tom/sub/new.txt", b"n")?;
+    let report = rescan_dirs(
+        &mut f.db,
+        &root,
+        &[RelPath::new("Work/Shared/tom")?],
+        &f.opts,
+    )?;
+    assert_eq!((report.added, report.removed), (2, 0), "{report:?}"); // sub, new
+    fs::write(&marker, &token)?;
+    // Its marker there and unreadable: not known this time. Nothing the DB has of it is
+    // taken away (it may be one of the user's own), nothing is added.
+    #[cfg(unix)]
+    let kept = {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o000))?;
+        let scanned = f.scan();
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o600))?;
+        let (report, _) = scanned?;
+        assert_eq!(report.added, 0, "{report:?}");
+        // (Whoever may read anything reads the marker: left out at once then.)
+        assert!(report.removed == 0 || report.removed == 5, "{report:?}");
+        5 - report.removed
+    };
+    #[cfg(not(unix))]
+    let kept = 5;
+    // As the watcher tells it: the marker back, and in the same batch a new file in a folder
+    // of it the DB still knows. The file is the folder of shares' too: not added below the
+    // rows the rescan takes away (which would fail the whole batch, and keep the rows).
+    f.write("Work/Shared/tom/sub/more.txt", b"m")?;
+    let entries = [
+        RelPath::new("Work/Shared/.hbsync-shared")?,
+        RelPath::new("Work/Shared/tom/sub/more.txt")?,
+    ];
+    let report = hbsync_local::rescan_entries(&mut f.db, &root, &[], &entries, &f.opts)?;
+    assert_eq!((report.added, report.removed), (0, kept), "{report:?}");
+
+    std::fs::rename(root.join("Work/Shared"), root.join("Shared"))?;
+    assert_eq!(folders(&root)?, ["Shared"]);
+    f.opts.filter = Arc::new(Filter::load(&root, false)?);
+    let (report, _) = f.scan()?;
+    assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
+    Ok(())
+}
+
 /// A folder of shares that came since the filter was read (a sync was running) is left alone
 /// as well, by the record and its marker: neither its own rescan nor its parent's, nor a whole walk, brings
 /// what is in it into the DB.

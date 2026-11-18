@@ -130,6 +130,13 @@ pub fn shared_marker(folder: &Path) -> PathBuf {
     folder.join(SHARED_MARKER)
 }
 
+/// Whether `name` is a marker's ([`SHARED_MARKER`]), in any case: a volume that ignores case
+/// takes another spelling for it.
+pub fn is_shared_marker(name: &std::ffi::OsStr) -> bool {
+    name.to_str()
+        .is_some_and(|name| name.eq_ignore_ascii_case(SHARED_MARKER))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

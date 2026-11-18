@@ -245,9 +245,15 @@ fn keep(
     if reads_only(&event.kind) && !rescan {
         return None;
     }
+    // A marker of the folder of shares made, removed or renamed anywhere is kept where an id
+    // is on record (junk by its name otherwise): the folder it is in may be the folder of
+    // shares below the top again, or no more, and the rescan it leads to says which.
+    let marker = |rel: &Path| {
+        filter.knows_shares_by_id() && rel.file_name().is_some_and(crate::layout::is_shared_marker)
+    };
     event.paths.retain(|path| {
         path.strip_prefix(root)
-            .is_ok_and(|rel| !excluded(rel, filter))
+            .is_ok_and(|rel| !excluded(rel, filter) || marker(rel))
     });
     (rescan || !event.paths.is_empty()).then_some(Ok(event))
 }
@@ -280,10 +286,7 @@ fn touches_shared(root: &Path, event: &Event) -> bool {
             let mut names = rel.components();
             match (names.next(), names.next(), names.next()) {
                 (Some(_), None, _) => entry,
-                (Some(_), Some(name), None) => name
-                    .as_os_str()
-                    .to_str()
-                    .is_some_and(|n| n.eq_ignore_ascii_case(crate::layout::SHARED_MARKER)),
+                (Some(_), Some(name), None) => crate::layout::is_shared_marker(name.as_os_str()),
                 _ => false,
             }
         })
@@ -772,6 +775,27 @@ mod tests {
             paths: paths.iter().map(PathBuf::from).collect(),
             attrs: Default::default(),
         }
+    }
+
+    /// A marker's event below the top is junk by its name, and dropped; kept where an id is
+    /// on record for the folder of shares, which may be the folder it is in.
+    #[test]
+    fn a_markers_event_below_the_top_is_kept_where_an_id_is_on_record() -> std::io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path();
+        let marker = root.join("Work/Shared").join(crate::layout::SHARED_MARKER);
+        let made = || Ok(Event::new(EventKind::Create(CreateKind::File)).add_path(marker.clone()));
+        assert!(keep(root, &Filter::default(), made()).is_none());
+        crate::shares::make(root, "Shared")?;
+        let filter = Filter::load(root, false).map_err(std::io::Error::other)?;
+        assert_eq!(
+            keep(root, &filter, made()).is_some(),
+            filter.knows_shares_by_id()
+        );
+        let other =
+            Event::new(EventKind::Create(CreateKind::File)).add_path(root.join("Work/.DS_Store"));
+        assert!(keep(root, &filter, Ok(other)).is_none());
+        Ok(())
     }
 
     /// What may make or unmake a folder of shares: its marker made, removed or renamed in a
