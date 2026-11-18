@@ -614,6 +614,12 @@ impl Account {
         cfg.kind = root.kind;
         cfg.paused = paused;
         cfg.end_if_unusable = heals;
+        // A folder beside the main one knows the folder of shares by the main folder's
+        // record: dragged in here, it is left alone as it is below the main folder's top.
+        if !root.is_main() {
+            let main = config.roots.iter().find(|r| r.is_main());
+            cfg.shares_main = main.map(|main| main.folder.clone());
+        }
         if shared && root.is_main() {
             cfg.shares = Some(SHARES.to_owned());
             let (folder, tell) = (root.folder.clone(), self.requests.clone());

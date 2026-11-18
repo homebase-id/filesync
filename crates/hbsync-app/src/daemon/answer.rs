@@ -14,7 +14,7 @@ use crate::protocol::{
     Ask, Control, DaemonControl, DaemonStatus, DeletedItem, DeletedList, FolderControl, Reply,
     Request,
 };
-use crate::runner::Command;
+use crate::runner::{Command, SharesAsk};
 use crate::words;
 
 pub(super) fn answer(request: Request, daemon: &Daemon) -> Reply {
@@ -215,12 +215,16 @@ fn control(control: Control, accounts: &[Arc<Account>], daemon: &Daemon) -> Repl
                 Some(Err(why)) => return Reply::Refused(why),
                 Some(Ok(runner)) => runner,
             };
-            let (answer, token) = match &control {
-                FolderControl::ConfirmDeletes { token } => (HeldAnswer::Delete, token),
-                FolderControl::PutBack { token } => (HeldAnswer::PutBack, token),
-            };
             // Checked by the runner, against what it holds: Done means it was taken.
-            match runner.answer(answer, token) {
+            let taken = match control {
+                FolderControl::ConfirmDeletes { token } => {
+                    runner.answer(HeldAnswer::Delete, &token)
+                }
+                FolderControl::PutBack { token } => runner.answer(HeldAnswer::PutBack, &token),
+                FolderControl::MakeShares => runner.shares(SharesAsk::Make),
+                FolderControl::TakeShares { name } => runner.shares(SharesAsk::Take(name)),
+            };
+            match taken {
                 Ok(()) => Reply::Done,
                 Err(why) => Reply::Refused(why),
             }

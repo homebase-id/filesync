@@ -119,15 +119,17 @@ impl Executor<'_> {
         // back to the top, said so.
         let filter = &self.folder.filter;
         if adopt && (target.depth() == 1 || filter.knows_shares_by_id()) {
-            let shares = hbsync_local::shares::Record::read(&self.folder.root);
+            let shares = filter.shares_record(&self.folder.root);
             match shares.and_then(|record| record.is(&abs)) {
                 Ok(false) => {}
-                Ok(true) if target.depth() == 1 => {
+                // (Only where it has its place: in a folder beside the main one it is
+                // never left out by its name, and nothing gives way.)
+                Ok(true) if target.depth() == 1 && filter.has_shares_place() => {
                     return Ok(Outcome::Retry("a folder of shares has the name".into()));
                 }
                 Ok(true) => {
                     let why = "the folder of shares is at its place: move that one back to \
-                               the top of the sync folder";
+                               the top of the main sync folder";
                     return Ok(Outcome::Skip(Skip::Unsyncable(why.into())));
                 }
                 Err(e) => return Ok(io_outcome(e)),

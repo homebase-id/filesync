@@ -37,7 +37,7 @@ use hbsync_state::{StateError, Unusable};
 use hbsync_types::NodeId;
 use hbsync_types::unix_now;
 
-use crate::protocol::{FolderStatus, HeldAnswer, HeldDeletes, Pause, State};
+use crate::protocol::{FolderStatus, HeldAnswer, HeldDeletes, Pause, SharesFolder, State};
 use crate::sync::{OnDrop, Wakeup, lock, wait_for};
 use crate::{Identity, MassDelete};
 
@@ -162,6 +162,10 @@ pub struct RunnerConfig {
     /// Told where the folder of shares is, each time the folder opens ([`Shares`]): its
     /// account runs the shares' folders in it.
     pub(crate) shares_told: Option<SharesTold>,
+    /// The account's main folder, for a folder it syncs beside it (a role folder, a
+    /// Desktop): the folder of shares, dragged in here, is known by the record there and
+    /// left alone ([`Filter::load_beside`]).
+    pub(crate) shares_main: Option<PathBuf>,
 }
 
 /// Where a folder's folder of shares is (sync semantics §10), as its runner found it when the
@@ -207,6 +211,7 @@ impl RunnerConfig {
             changed: Arc::default(),
             end_if_unusable: false,
             shares_told: None,
+            shares_main: None,
         }
     }
 }
@@ -236,6 +241,19 @@ impl Held {
     }
 }
 
+/// The filter of the sync folder at `root`: its own ([`Filter::load`]), or for a folder
+/// beside the account's main folder `main` ([`Filter::load_beside`]).
+fn load_filter(
+    root: &Path,
+    case_insensitive: bool,
+    main: Option<&Path>,
+) -> Result<Filter, FilterError> {
+    match main {
+        Some(main) => Filter::load_beside(root, case_insensitive, main),
+        None => Filter::load(root, case_insensitive),
+    }
+}
+
 /// Requests to the runner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
@@ -254,6 +272,17 @@ pub enum Command {
     Woke,
     /// Stop the runner (between operations).
     Stop,
+    /// The user's word on the main folder's folder of shares ([`Handle::shares`]).
+    Shares(SharesAsk),
+}
+
+/// What the user asks of the main folder's folder of shares (sync semantics §10).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SharesAsk {
+    /// Make it again: the one on record isn't at the top.
+    Make,
+    /// Take this folder at the top as it.
+    Take(String),
 }
 
 /// What the runner's thread waits for, on one channel.
@@ -329,6 +358,45 @@ impl Handle {
             self.changed.raise();
         }
         sent
+    }
+
+    /// Asks `ask` of the main folder's folder of shares. Checked against what the folder
+    /// shows now: refused for a folder nothing is shared into, while a folder of shares is
+    /// at its top, and (to take one) for anything but a folder there. Taken, the runner does
+    /// it between syncs, and tells in a note if it couldn't.
+    pub fn shares(&self, ask: SharesAsk) -> Result<(), String> {
+        let status = lock(&self.status).clone();
+        match &status.shares {
+            None => {
+                return Err(format!(
+                    "nothing is shared with {} into {}",
+                    status.identity,
+                    status.path.display()
+                ));
+            }
+            Some(SharesFolder::At { name }) => {
+                return Err(format!("the folder of shares is there: {name}"));
+            }
+            Some(SharesFolder::Gone | SharesFolder::Unmade { .. }) => {}
+        }
+        if let SharesAsk::Take(name) = &ask {
+            let mut parts = Path::new(name).components();
+            let plain = matches!(
+                (parts.next(), parts.next()),
+                (Some(std::path::Component::Normal(_)), None)
+            );
+            let dir = status.path.join(name);
+            if !plain || !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
+                return Err(format!(
+                    "{name} isn't a folder at the top of {}",
+                    status.path.display()
+                ));
+            }
+        }
+        match self.send(Command::Shares(ask)) {
+            true => Ok(()),
+            false => Err("the sync has stopped".to_owned()),
+        }
     }
 
     /// Answers the held deletes named by `token` (as the user saw them) with `answer`. Checked
@@ -426,6 +494,8 @@ pub struct Runner {
     probing: bool,
     /// The folder without a live watcher: told, asked for again, caught up on.
     unwatched: Unwatched,
+    /// Asked of the folder of shares, and not done yet ([`Command::Shares`]).
+    asked: Option<SharesAsk>,
 }
 
 /// A folder without a live watcher ([`Runner::watcher_is`]): its changes are found by the
@@ -474,9 +544,10 @@ impl Parts {
     /// Whether the ignore rules on disk, or the folders at the top that hold what other
     /// identities share, differ from the ones in use (or can't be read): their fingerprints
     /// differ (sync semantics §10).
-    fn rules_changed(&self, root: &Path) -> bool {
+    fn rules_changed(&self, root: &Path, main: Option<&Path>) -> bool {
         let folder = &self.engine.config().folder;
-        Filter::load(root, folder.case_insensitive).map_or(true, |f| folder.filter.changed_from(&f))
+        load_filter(root, folder.case_insensitive, main)
+            .map_or(true, |f| folder.filter.changed_from(&f))
     }
 
     /// [`Parts::rules_changed`] for the folder of shares alone, the rules neither read nor
@@ -549,6 +620,7 @@ impl Runner {
             retry_refused: false,
             probing: false,
             unwatched: Unwatched::default(),
+            asked: None,
         };
         let thread = std::thread::Builder::new()
             .name("hbsync-runner".into())
@@ -599,7 +671,8 @@ impl Runner {
             gave_way |= parts.gave_way;
             parts.gave_way = gave_way;
             let watching = parts.observer.watcher_error.is_none();
-            if last || !watching || !parts.rules_changed(&self.cfg.folder) {
+            let main = self.cfg.shares_main.as_deref();
+            if last || !watching || !parts.rules_changed(&self.cfg.folder, main) {
                 return Ok(parts);
             }
             tracing::info!(
@@ -684,15 +757,27 @@ impl Runner {
                 "the folder of shares on record isn't at the top of the folder: none is made in its place"
             );
         }
-        if let Some(SharesTold(told)) = &self.cfg.shares_told {
-            // Where the volume's file ids aren't stable there may be more than one: the first.
-            told(match placed.at.first() {
-                Some(name) => Shares::At(name.clone()),
-                None if placed.missing => Shares::Gone,
-                None => Shares::None,
-            });
+        // Where there is more than one: the one on record now, or the first.
+        let at = match placed.at.first() {
+            Some(name) => Shares::At(name.clone()),
+            None if placed.missing => Shares::Gone,
+            None => Shares::None,
+        };
+        // Shown while anything is shared with the account (one is to be there).
+        if make_as.is_some() {
+            let shown = match (&at, &placed.unmade) {
+                (Shares::At(name), _) => Some(SharesFolder::At { name: name.clone() }),
+                (Shares::Gone, _) => Some(SharesFolder::Gone),
+                (Shares::None, Some(why)) => Some(SharesFolder::Unmade { why: why.clone() }),
+                (Shares::None, None) => None,
+            };
+            self.set(|s| s.shares.clone_from(&shown));
         }
-        cfg.folder.filter = Arc::new(Filter::load(root, cfg.folder.case_insensitive)?);
+        if let Some(SharesTold(told)) = &self.cfg.shares_told {
+            told(at);
+        }
+        let main = self.cfg.shares_main.as_deref();
+        cfg.folder.filter = Arc::new(load_filter(root, cfg.folder.case_insensitive, main)?);
         if !cfg.folder.filter.returned().is_empty() {
             tracing::warn!(
                 "the folder of shares on record isn't at the top of the folder, and what holds \
@@ -961,12 +1046,16 @@ impl Runner {
                     }
                 }
             }
+            // (With the folder open: one that can't be opened keeps the ask till it can.)
+            if let (Some(p), Some(ask)) = (&parts, self.asked.take_if(|_| parts.is_some())) {
+                check_rules |= self.shares_asked(ask, p);
+            }
             let check = (
                 std::mem::take(&mut check_rules),
                 std::mem::take(&mut check_shares),
             );
             if parts.as_ref().is_some_and(|p| match check {
-                (true, _) => p.rules_changed(&self.cfg.folder),
+                (true, _) => p.rules_changed(&self.cfg.folder, self.cfg.shares_main.as_deref()),
                 (false, true) => p.shares_changed(&self.cfg.folder),
                 (false, false) => false,
             }) {
@@ -1283,6 +1372,44 @@ impl Runner {
                 }
             }
             Command::Stop => {}
+            Command::Shares(ask) => self.asked = Some(ask),
+        }
+    }
+
+    /// Does what the user asked of the folder of shares ([`Command::Shares`]) while the
+    /// folder is open: whether it was done (the folder is then opened again with it, as for
+    /// rules that changed). One that fails is told as a note.
+    fn shares_asked(&mut self, ask: SharesAsk, parts: &Parts) -> bool {
+        let caseless = parts.engine.config().folder.case_insensitive;
+        let done =
+            SyncRoot::open(&self.cfg.db, &self.cfg.identity, &self.cfg.folder).and_then(|root| {
+                match (&ask, self.cfg.shares.as_deref()) {
+                    (SharesAsk::Take(name), _) => {
+                        hbsync_local::shares::take(&self.cfg.folder, name)?;
+                        Ok(name.clone())
+                    }
+                    (SharesAsk::Make, Some(name)) => root.make_shares_again(name, caseless),
+                    (SharesAsk::Make, None) => Err(RootError::Io(std::io::Error::other(
+                        "nothing is shared with this account",
+                    ))),
+                }
+            });
+        match done {
+            Ok(name) => {
+                tracing::info!("{name}: the folder of shares now, as asked");
+                true
+            }
+            Err(e) => {
+                let what = match &ask {
+                    SharesAsk::Make => "The folder of shares couldn't be made again".to_owned(),
+                    SharesAsk::Take(name) => {
+                        format!("{name} couldn't be taken as the folder of shares")
+                    }
+                };
+                tracing::warn!("{what}: {e}");
+                self.tell(vec![format!("{what}: {e}")]);
+                false
+            }
         }
     }
 

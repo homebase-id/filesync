@@ -136,7 +136,7 @@ impl<'a> Walker<'a> {
     fn holds_shares(&mut self, id: hbsync_platform::FileId, at: &Path) -> io::Result<bool> {
         let record = match &mut self.shares {
             Some(record) => record,
-            none => none.insert(crate::shares::Record::read(&self.root)?),
+            none => none.insert(self.filter.shares_record(&self.root)?),
         };
         record.holds(id, at)
     }

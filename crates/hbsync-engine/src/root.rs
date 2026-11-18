@@ -273,6 +273,25 @@ impl SyncRoot {
         })
     }
 
+    /// Makes the folder of shares again on the user's word, the one on record not being at
+    /// the top ([`hbsync_local::shares::make_again`]): under `name`, or the next number no
+    /// item at the top here or of this folder's part of the drive has. Its name.
+    pub fn make_shares_again(
+        &self,
+        name: &str,
+        case_insensitive: bool,
+    ) -> Result<String, RootError> {
+        let mut db = None;
+        hbsync_local::shares::make_again(&self.path, name, case_insensitive, |name| {
+            let db = match &mut db {
+                Some(db) => db,
+                none => none.insert(self.state()?),
+            };
+            let scope = crate::scope::Scope::of(self.top);
+            Ok(db.read(|s| drive_has(s, &scope, name, case_insensitive))?)
+        })
+    }
+
     /// Whether `identity`'s DB at `db` has a folder at `path` (whatever its marker says).
     pub fn knows_path(db: &Path, identity: &str, path: &Path) -> Result<bool, RootError> {
         let Some(mut account) = AccountReader::open(db, identity)? else {

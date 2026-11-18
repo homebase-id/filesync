@@ -40,7 +40,7 @@ pub use protocol::{Control, DaemonStatus, FolderStatus, HeldAnswer, State};
 #[cfg(target_os = "linux")]
 pub use reap::adopt_children;
 pub use reap::reap;
-pub use runner::{Command, Handle, Runner, RunnerConfig};
+pub use runner::{Command, Handle, Runner, RunnerConfig, SharesAsk};
 pub use secrets::CredentialError;
 #[cfg(target_os = "macos")]
 pub use secrets::share_credentials;

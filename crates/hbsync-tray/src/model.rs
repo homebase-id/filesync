@@ -241,6 +241,10 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
             let count: usize = notes.iter().map(|n| n.len()).sum();
             items.push(Item::Submenu(format!("Problems ({count})"), problems));
         }
+        // (How to get them back is the command line's, for now: `hbsync shared-folder`.)
+        if let Some(off) = s.shares.as_ref().and_then(words::shares_off) {
+            items.push(Item::Label(cut(&off)));
+        }
         if let Some(h) = view
             .daemon
             .held_or_main()

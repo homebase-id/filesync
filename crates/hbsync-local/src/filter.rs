@@ -204,6 +204,9 @@ pub struct Filter {
     /// How many folders at the top held the record's marker when the filter was read, the
     /// folder on record not there ([`Filter::returned`]), by name, in order.
     returned: Vec<String>,
+    /// The sync folder whose record tells of the folder of shares, where that isn't the
+    /// filter's own ([`Filter::load_beside`]).
+    record: Option<PathBuf>,
 }
 
 /// `name` as names at the top compare with a folder's that holds what other identities
@@ -239,6 +242,7 @@ impl Default for Filter {
             in_the_way: false,
             shares_ids: Vec::new(),
             returned: Vec::new(),
+            record: None,
         }
     }
 }
@@ -265,6 +269,40 @@ impl Filter {
         filter.returned = returned(&top);
         filter.shares_ids = top.ids;
         Ok(filter)
+    }
+
+    /// [`Filter::load`] for a folder the account syncs beside its main folder `main` (a role
+    /// folder, a Desktop): the folder of shares is the main folder's, by the record there. It
+    /// has no place here, but may be dragged here: left out then by the ids on record,
+    /// wherever it is in `root` (at its top also where no id is on record, by its marker), as
+    /// below the top of the main folder. Nothing is made, renamed or taken here. Costs the
+    /// record's read (an open that fails, where the account has none).
+    pub fn load_beside(
+        root: &Path,
+        case_insensitive: bool,
+        main: &Path,
+    ) -> Result<Self, FilterError> {
+        let mut filter = Self::load(root, case_insensitive)?;
+        let record = crate::shares::Record::read(main).map_err(|source| FilterError::Read {
+            path: main.to_owned(),
+            source,
+        })?;
+        filter.shares_ids = record.ids().to_vec();
+        filter.record = Some(main.to_owned());
+        Ok(filter)
+    }
+
+    /// The record that tells of the folder of shares for the sync folder at `root`, which
+    /// this filter is of: its own, or the main folder's ([`Filter::load_beside`]).
+    pub fn shares_record(&self, root: &Path) -> io::Result<crate::shares::Record> {
+        crate::shares::Record::read(self.record.as_deref().unwrap_or(root))
+    }
+
+    /// Whether the folder of shares has its place in this filter's sync folder (the main
+    /// folder: left out by its name at the top, and made to give way there), not only
+    /// known should it be dragged in ([`Filter::load_beside`]).
+    pub fn has_shares_place(&self) -> bool {
+        self.record.is_none()
     }
 
     /// The built-ins plus `text` (gitignore syntax, paths relative to the sync root). A line
@@ -309,6 +347,7 @@ impl Filter {
             in_the_way: false,
             shares_ids: Vec::new(),
             returned: Vec::new(),
+            record: None,
         })
     }
 

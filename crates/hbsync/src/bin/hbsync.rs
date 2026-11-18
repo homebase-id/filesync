@@ -9,7 +9,7 @@ use hbsync_app::control::{running, start, stop_syncing};
 use hbsync_app::daemon::UNANNOUNCED_READ;
 use hbsync_app::folders::{self, Own, Taken};
 use hbsync_app::protocol::{
-    DaemonControl, DaemonStatus, DeletedItem, FolderStatus, Hints, Note, Pause,
+    DaemonControl, DaemonStatus, DeletedItem, FolderStatus, Hints, Note, Pause, SharesFolder,
 };
 use hbsync_app::{
     APP_NAME, Config, HeldAnswer, Paths, Root, State, autostart, control as daemon, setup, words,
@@ -139,6 +139,20 @@ enum Command {
     /// Puts the deletions to review back: what was deleted here comes back, what
     /// another device removed is restored on Homebase.
     PutBack {
+        /// Don't ask.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Shows the folder what others share with you is synced into; with `--make` or
+    /// `--take`, sets one up where it is gone.
+    SharedFolder {
+        /// Make a new one (the one there was is gone for good).
+        #[arg(long, conflicts_with = "take")]
+        make: bool,
+        /// Take this folder at the top of your Homebase folder as it: what was synced of it
+        /// leaves your Homebase cloud and stays on this computer.
+        #[arg(long, value_name = "FOLDER")]
+        take: Option<PathBuf>,
         /// Don't ask.
         #[arg(long)]
         yes: bool,
@@ -340,6 +354,7 @@ fn run(command: Command) -> Res<ExitCode> {
         }
         Command::ConfirmDeletes { yes } => answer_held(&paths, yes, HeldAnswer::Delete)?,
         Command::PutBack { yes } => answer_held(&paths, yes, HeldAnswer::PutBack)?,
+        Command::SharedFolder { make, take, yes } => shared_folder(&paths, make, take, yes)?,
         Command::Start => {
             let was = running(&paths)?;
             // Also ends a stop that didn't go through.
@@ -510,6 +525,95 @@ fn ask_yes(question: &str) -> Res<bool> {
     Ok(matches!(answer.trim(), "y" | "Y" | "yes"))
 }
 
+/// `hbsync shared-folder`: where what others share is synced into, and setting that folder
+/// up again where it is gone.
+fn shared_folder(paths: &Paths, make: bool, take: Option<PathBuf>, yes: bool) -> Res<()> {
+    let Some(status) = daemon::status(paths)? else {
+        return Err("the daemon isn't running (`hbsync start` starts it)".into());
+    };
+    let mains = status.folders.iter().filter(|f| f.is_main());
+    let shared: Vec<(&FolderStatus, &SharesFolder)> = mains
+        .filter_map(|f| Some((f, f.shares.as_ref()?)))
+        .collect();
+    if shared.is_empty() {
+        println!("Nothing is shared with you here.");
+        return Ok(());
+    }
+    // Those whose folder isn't there: the ones to make or take one for.
+    let off = || {
+        shared
+            .iter()
+            .filter(|(_, s)| !matches!(s, SharesFolder::At { .. }))
+    };
+    if make {
+        if off().next().is_none() {
+            println!("Nothing to make: the folder is there.");
+        }
+        for (folder, _) in off() {
+            daemon::make_shares(paths, &folder.path)?;
+            println!(
+                "A new folder for what {} is shared with is made in {}.",
+                folder.identity,
+                folder.path.display()
+            );
+        }
+        return Ok(());
+    }
+    if let Some(take) = take {
+        // A path names its Homebase folder; a bare name is in the one whose shares are off.
+        let name = take.file_name().and_then(|n| n.to_str());
+        let name = name.ok_or("give the folder's name")?.to_owned();
+        let within = take.parent().filter(|p| !p.as_os_str().is_empty());
+        let folder = match within {
+            Some(within) => {
+                let within = std::path::absolute(within)?;
+                let found = shared.iter().find(|(f, _)| f.path == within);
+                found.ok_or_else(|| format!("{} isn't a Homebase folder", within.display()))?
+            }
+            None => {
+                let mut off = off();
+                match (off.next(), off.next()) {
+                    (Some(one), None) => one,
+                    (None, _) => return Err("the folder is there: nothing to take".into()),
+                    _ => return Err("say which Homebase folder: give the folder's path".into()),
+                }
+            }
+        };
+        let (folder, _) = folder;
+        let question = format!(
+            "Take {name} in {} as the folder for what is shared with {}? What was synced of \
+             it leaves your Homebase cloud (it stays on this computer, and in Recently deleted).",
+            folder.path.display(),
+            folder.identity
+        );
+        if !yes && !ask_yes(&question)? {
+            println!("Nothing done.");
+            return Ok(());
+        }
+        daemon::take_shares(paths, &folder.path, name.clone())?;
+        println!(
+            "{name} is the folder for what is shared with {} now.",
+            folder.identity
+        );
+        return Ok(());
+    }
+    for (folder, shares) in &shared {
+        match shares {
+            SharesFolder::At { name } => println!(
+                "What is shared with {} is in {}",
+                folder.identity,
+                folder.path.join(name).display()
+            ),
+            off => {
+                let line = words::shares_off(off).unwrap_or_default();
+                let way = words::shares_way_out(off, "hbsync shared-folder");
+                println!("{}: {line} ({})", folder.identity, way.unwrap_or_default());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn answer_held(paths: &Paths, yes: bool, answer: HeldAnswer) -> Res<()> {
     let Some(status) = daemon::status(paths)? else {
         return Err("the daemon isn't running (`hbsync start` starts it)".into());
@@ -641,6 +745,12 @@ fn print_folder(s: &FolderStatus) {
              `hbsync put-back` puts them back",
             h.here, h.remotely
         );
+    }
+    if let Some(off) = &s.shares
+        && let Some(line) = words::shares_off(off)
+    {
+        let way = words::shares_way_out(off, "hbsync shared-folder").unwrap_or_default();
+        println!("  {line}: {way}");
     }
     if let Some(why) = &s.watcher_error {
         let every = s

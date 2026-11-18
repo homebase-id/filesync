@@ -148,6 +148,20 @@ pub fn confirm_deletes(paths: &Paths, path: &std::path::Path, token: String) -> 
     )
 }
 
+/// Makes the folder of shares of the main folder at `path` again
+/// ([`FolderControl::MakeShares`]).
+pub fn make_shares(paths: &Paths, path: &std::path::Path) -> Result<()> {
+    let (path, control) = (path.to_path_buf(), FolderControl::MakeShares);
+    self::control(paths, Control::Folder { path, control })
+}
+
+/// Takes the folder `name` at the top of the main folder at `path` as its folder of shares
+/// ([`FolderControl::TakeShares`]).
+pub fn take_shares(paths: &Paths, path: &std::path::Path, name: String) -> Result<()> {
+    let (path, control) = (path.to_path_buf(), FolderControl::TakeShares { name });
+    self::control(paths, Control::Folder { path, control })
+}
+
 /// Puts the held deletes of the folder at `path` back: `token` names those the user saw.
 pub fn put_back(paths: &Paths, path: &std::path::Path, token: String) -> Result<()> {
     self::control(

@@ -889,6 +889,46 @@ fn the_folder_of_shares_never_reaches_the_db_and_a_copied_marker_does_nothing() 
     Ok(())
 }
 
+/// The folder of shares dragged into another folder the account syncs (a role folder, a
+/// Desktop) is left alone there too: that folder's filter knows it by the main folder's
+/// record, at its top and below it, and nothing of it reaches that folder's DB.
+#[test]
+fn the_folder_of_shares_dragged_into_another_synced_folder_never_reaches_its_db() -> R {
+    use hbsync_local::shares::{Made, make};
+    let main = tempfile::tempdir()?;
+    assert_eq!(make(main.path(), "Shared")?, Made::Made);
+    std::fs::create_dir(main.path().join("Shared/tom"))?;
+    std::fs::write(main.path().join("Shared/tom/theirs.txt"), "t")?;
+    let mut f = Fixture::new()?;
+    f.write("Work/notes.txt", b"n")?;
+    f.opts.filter = Arc::new(Filter::load_beside(f.root(), false, main.path())?);
+    let (report, _) = f.scan()?;
+    assert_eq!(report.added, 2, "{report:?}"); // Work, notes
+
+    // At the top: by the record's marker, whatever the volume's ids are worth.
+    let root = f.root().to_path_buf();
+    std::fs::rename(main.path().join("Shared"), root.join("Shared"))?;
+    let (report, dirty) = f.scan()?;
+    assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
+    assert!(dirty.is_empty(), "{dirty:?}");
+    // (One read without the main folder's record takes it for a folder of this one's own.)
+    let own = Filter::load(&root, false)?;
+    assert!(!own.knows_shares_by_id() && own.shared().is_empty());
+
+    // Below the top: by the ids on record.
+    std::fs::rename(root.join("Shared"), root.join("Work/Shared"))?;
+    if !f.opts.filter.knows_shares_by_id() {
+        return Ok(());
+    }
+    assert_ne!(f.opts.filter.fingerprint(), own.fingerprint());
+    let (report, _) = f.scan()?;
+    assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
+    let dirs = [RelPath::new("Work")?, RelPath::new("Work/Shared/tom")?];
+    let report = rescan_dirs(&mut f.db, &root, &dirs, &f.opts)?;
+    assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
+    Ok(())
+}
+
 /// The folder of shares moved into another folder (a slip of the hand in the file manager) is
 /// left alone there too, known by the file id on record: nothing of it reaches the DB, by a
 /// whole scan, by a rescan of the folder it is in, or by one of a folder inside it. Back at
