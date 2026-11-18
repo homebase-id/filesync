@@ -75,6 +75,30 @@ impl Sharing {
         })
     }
 
+    /// `shares` to run, each sharer once, each under a folder's name of its own: one more of
+    /// a sharer, or of a name another has (as names compare here), is left out, told once.
+    /// Two runners on one folder would each take the other's files for changes made here.
+    pub(super) fn each(shares: Vec<Share>) -> Vec<Sharing> {
+        let mut each: Vec<Sharing> = Vec::new();
+        for share in shares.into_iter().filter_map(Sharing::new) {
+            let key = hbsync_platform::name_key(&share.local);
+            let taken = |other: &Sharing| {
+                other.share.sharer == share.share.sharer
+                    || hbsync_platform::name_key(&other.local) == key
+            };
+            if each.iter().any(taken) {
+                tracing::error!(
+                    "what {} shares isn't synced: its folder {} is another share's",
+                    share.share.sharer,
+                    share.local
+                );
+                continue;
+            }
+            each.push(share);
+        }
+        each
+    }
+
     /// Whether `folder` is its folder in the folder of shares `dir`.
     pub(super) fn is_at(&self, dir: &Path, folder: &Path) -> bool {
         folder.parent() == Some(dir) && folder.file_name().is_some_and(|name| name == &*self.local)

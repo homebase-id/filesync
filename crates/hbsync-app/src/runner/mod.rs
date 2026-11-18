@@ -614,12 +614,16 @@ impl Runner {
         cfg.guard.fraction = self.cfg.mass_delete.fraction;
         // A folder belongs to one identity (its marker says which): never mix two drives
         // through one folder.
-        let sync_root = match self.cfg.sharer {
-            None => SyncRoot::open(&self.cfg.db, &self.cfg.identity, root)?,
+        let sync_root = match SyncRoot::open(&self.cfg.db, &self.cfg.identity, root) {
             // A share's folder, which its account made in the folder of shares, is set up
-            // here (on this thread: its DB may be busy), and again when its marker or its
-            // DB's row is gone: what it holds that the sharer's drive doesn't moves out.
-            Some(_) => SyncRoot::open_or_create(&self.cfg.db, &self.cfg.identity, root)?,
+            // here (on this thread: its DB may be busy) while it holds no marker: what is
+            // in it that the sharer's drive doesn't have moves out. One that holds a marker
+            // its DB doesn't know (another folder renamed into its place, or the share's
+            // DB lost) is never taken over: its sync fails, saying so.
+            Err(RootError::NoMarker(_)) if self.cfg.sharer.is_some() => {
+                SyncRoot::create(&self.cfg.db, &self.cfg.identity, root)?
+            }
+            opened => opened?,
         };
         // Before the rules are read: a folder of shares taken now is left out by them.
         // What can't be told of it (its record, the top's listing, a marker) stops the sync
@@ -904,19 +908,22 @@ impl Runner {
                 (Some(_), true) => self.drive.allow(),
                 (None, _) => {}
             }
-            let marker = match SyncRoot::check(&self.cfg.folder, &self.cfg.identity) {
+            let checked = SyncRoot::check(&self.cfg.folder, &self.cfg.identity);
+            // A share's folder is a real folder at its place in the folder of shares, never a
+            // link to one: what a link leads to (another folder of the account's, say) isn't
+            // the share's, whatever marker it holds.
+            if self.cfg.sharer.is_some() && !self.shares_folder_is_there() {
+                // Gone (deleted, renamed, the folder of shares with it), or something else
+                // there: it ends, for its account to make it again where the folder of
+                // shares is now, or not at all.
+                let gone = format!("{}: not the share's folder", self.cfg.folder.display());
+                return Err(std::io::Error::new(std::io::ErrorKind::NotFound, gone).into());
+            }
+            let marker = match checked {
                 Ok(marker) => marker.id,
-                // A share's folder is its account's to make, in the folder of shares, and
-                // set up as it opens: one just made (a real folder, no link, without a
-                // marker yet) has none to compare.
-                Err(RootError::NoMarker(_)) if self.shares_folder_is_there() => String::new(),
-                // Gone (deleted, renamed, the folder of shares with it): it ends, for its
-                // account to make it again where the folder of shares is now, or not at all.
-                Err(e @ (RootError::NoMarker(_) | RootError::Io(_)))
-                    if self.cfg.sharer.is_some() =>
-                {
-                    return Err(e.into());
-                }
+                // A share's folder is its account's to make and set up as it opens: one
+                // just made has no marker yet to compare.
+                Err(RootError::NoMarker(_)) if self.cfg.sharer.is_some() => String::new(),
                 // Unmounted, moved or deleted: syncing would take everything off the drive,
                 // or fill an empty mount point. Wait for it to come back.
                 Err(RootError::NoMarker(_) | RootError::Io(_)) => {

@@ -510,9 +510,13 @@ included (service managers restart it then).
   account where the folder of shares is each time it opens the folder; the account makes
   the share's folder there (never where its place isn't in the folder of shares any more,
   by the record; never where something else has its place, a link to a folder neither) and
-  starts its runner, which sets the folder up in the share's DB as it opens it, and again
-  when its marker or its row there is gone (what it holds that the sharer's drive doesn't
-  moves out then, as any change there). When the folder of shares has another name (the
+  starts its runner, which sets the folder up in the share's DB as it opens it, while it
+  holds no marker (what it holds that the sharer's drive doesn't moves out then, as any
+  change there). A folder there that holds a marker the share's DB doesn't know (another
+  folder renamed into its place; the share's DB lost) is never taken over: the share's sync
+  fails, saying so, until the folder is moved away or deleted (it is made again then). Each
+  sharer is synced once, under a name of its own: one more of a sharer, or of a name
+  another has, is left out, told in the log. When the folder of shares has another name (the
   user's, or one it gave way to), is gone, or the main folder is removed, the runner stops,
   and starts in the new place once it has ended (the folder is found again by its marker).
   A share's runner whose folder is gone (deleted, renamed) doesn't wait for it as the
@@ -525,6 +529,11 @@ included (service managers restart it then).
   minutes), and one whose DB can't be used backs off, the account's folders syncing on
   (its DB isn't set aside for it yet). Its drive is read on a timer (5 minutes) and at Sync
   now, until its changes are announced, and only while a runner syncs it.
+
+  On Windows a folder can't be renamed while a folder in it is watched, as each share's is
+  by its runner: there the folder of shares can't be renamed by hand while a share syncs,
+  and one that is to give way to the drive's item of its name can't either (the item stays
+  out, as said above, until the daemon starts again with the name free).
 
   Known limit, until the engine never makes a folder again that is gone: a share's runner
   that is downloading when the folder of shares is renamed keeps its old path until it is

@@ -294,7 +294,7 @@ impl Account {
             shares,
         } = parts;
         // What other identities share, each synced by a runner of its own.
-        let mut shares: Vec<Sharing> = shares.into_iter().filter_map(Sharing::new).collect();
+        let mut shares = Sharing::each(shares);
         // The main folder and its folder of shares, as its runner told last where that is.
         let mut shares_at: Option<(PathBuf, PathBuf)> = None;
         let notifier = match notifier {

@@ -1026,29 +1026,27 @@ mod tests {
             })?;
             assert_eq!(own_names()?.len(), 2, "{:?}", own_names()?);
 
-            // The folder of shares renamed: the share is synced there from then on.
-            std::fs::rename(folder.join("Shared"), folder.join("From others"))?;
-            let at = folder.join("From others").join("tom.example");
-            let _ = started.account.sync_now();
-            started.wait_all("the share follows the folder of shares", &|s, folders| {
-                both(s, folders) && folders[1].path == at
-            })?;
-            std::fs::write(tom_folder.join("later.txt"), "later")?;
-            let _ = theirs.account.sync_now();
-            share(&["later.txt"])?;
-            let _ = started.account.sync_now();
-            started.wait_all("what the sharer shares later comes there", &|s, folders| {
-                both(s, folders) && at.join("later.txt").exists()
-            })?;
-            assert!(!folder.join("Shared").exists());
-            assert_eq!(read(at.join("docs/plan.txt"))?, "the plan");
-            assert_eq!(own_names()?.len(), 2, "{:?}", own_names()?);
+            // The folder of shares renamed: the share is synced there from then on. (Not
+            // on Windows while it is: a folder can't be renamed there while a folder in it
+            // is watched, as the share's is by its runner.)
+            if !cfg!(windows) {
+                std::fs::rename(folder.join("Shared"), folder.join("From others"))?;
+                let at = folder.join("From others").join("tom.example");
+                let _ = started.account.sync_now();
+                started.wait_all("the share follows the folder of shares", &|s, folders| {
+                    both(s, folders) && folders[1].path == at
+                })?;
+            }
             Ok(())
         };
         let checked = checks();
         started.stop(checked)??;
+        if cfg!(windows) {
+            std::fs::rename(folder.join("Shared"), folder.join("From others"))?;
+        }
 
-        // Stopped and started: as it was.
+        // Stopped and started: as it was, where the folder of shares is now, and what the
+        // sharer shares from now on comes there.
         let started = start();
         let checks = || -> Result<(), Box<dyn std::error::Error>> {
             let at = folder.join("From others").join("tom.example");
@@ -1056,7 +1054,16 @@ mod tests {
                 both(s, folders) && folders[1].path == at
             })?;
             assert_eq!(read(at.join("notes.txt"))?, "from tom");
+            assert_eq!(read(at.join("docs/plan.txt"))?, "the plan");
+            std::fs::write(tom_folder.join("later.txt"), "later")?;
+            let _ = theirs.account.sync_now();
+            share(&["later.txt"])?;
+            let _ = started.account.sync_now();
+            started.wait_all("what the sharer shares later comes there", &|s, folders| {
+                both(s, folders) && at.join("later.txt").exists()
+            })?;
             assert_eq!(read(at.join("later.txt"))?, "later");
+            assert!(!folder.join("Shared").exists());
             assert_eq!(own_names()?.len(), 2, "{:?}", own_names()?);
             let removed = tom_server.lock().map_err(|_| "poisoned")?.removed().count();
             assert_eq!(removed, 0, "the sharer's drive is as it was");
@@ -1066,6 +1073,46 @@ mod tests {
         started.stop(checked)??;
         theirs.stop(())?;
         Ok(())
+    }
+
+    /// A folder at a share's place that holds a marker the share's DB doesn't know (another
+    /// folder renamed into its place, say) is never taken over: the share's sync fails,
+    /// saying so, and what the folder holds stays where it is, nothing of it moved out or
+    /// sent.
+    #[test]
+    fn a_folder_with_a_marker_of_its_own_at_a_shares_place_is_never_taken_over()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let tom_server = FakeServer::new(ServerConfig::default());
+        let (_, folder, server, start) = shared_with(home.path(), &tom_server)?;
+        use hbsync_local::shares::{Made, make};
+        assert_eq!(make(&folder, "Shared")?, Made::Made);
+        let at = folder.join("Shared").join("tom.example");
+        std::fs::create_dir(&at)?;
+        std::fs::write(at.join("theirs.txt"), "another folder's")?;
+        let other = home.path().join("other.db");
+        hbsync_engine::root::SyncRoot::create(&other, "me.example", &at)?;
+        let started = start();
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            started.wait_all("the share fails, the account's own syncs", &|s, folders| {
+                folders.len() == 2
+                    && synced(s, &folders[0])
+                    && folders[1].state == State::Failing
+                    && folders[1].error.is_some()
+            })?;
+            assert_eq!(
+                std::fs::read_to_string(at.join("theirs.txt"))?,
+                "another folder's"
+            );
+            assert!(!folder.join("theirs.txt").exists(), "moved out");
+            assert_eq!(
+                server.lock().map_err(|_| "poisoned")?.live_names(),
+                ["mine.txt"]
+            );
+            Ok(())
+        };
+        let checked = checks();
+        started.stop(checked)?
     }
 
     /// An account `me.example` on a new drive whose main folder holds `mine.txt`, with what
@@ -1188,7 +1235,12 @@ mod tests {
         let at = folder.join("Shared").join("tom.example");
         let checks = || -> Result<(), Box<dyn std::error::Error>> {
             started.wait_all("both sync", &both_synced)?;
-            std::fs::remove_dir_all(&at)?;
+            // (On Windows a folder its runner is in may take a moment to go.)
+            wait_until(|| {
+                let gone = std::fs::remove_dir_all(&at).is_ok() || !at.exists();
+                gone.then_some(())
+            })
+            .ok_or("the share's folder can't be deleted")?;
             let _ = started.account.sync_now();
             started.wait_all(
                 "the share's folder is gone for its runner",
