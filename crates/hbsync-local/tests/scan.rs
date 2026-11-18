@@ -959,13 +959,29 @@ fn the_folder_of_shares_moved_into_another_folder_never_reaches_the_db() -> R {
     )?;
     assert_eq!((report.added, report.removed), (2, 0), "{report:?}"); // sub, new
     fs::write(&marker, &token)?;
+    // Its marker there and unreadable: not known this time. Nothing the DB has of it is
+    // taken away (it may be one of the user's own), nothing is added.
+    #[cfg(unix)]
+    let kept = {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o000))?;
+        let scanned = f.scan();
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o600))?;
+        let (report, _) = scanned?;
+        assert_eq!(report.added, 0, "{report:?}");
+        // (Whoever may read anything reads the marker: left out at once then.)
+        assert!(report.removed == 0 || report.removed == 5, "{report:?}");
+        5 - report.removed
+    };
+    #[cfg(not(unix))]
+    let kept = 5;
     let report = rescan_dirs(
         &mut f.db,
         &root,
         &[RelPath::new("Work/Shared/tom")?],
         &f.opts,
     )?;
-    assert_eq!((report.added, report.removed), (0, 5), "{report:?}");
+    assert_eq!((report.added, report.removed), (0, kept), "{report:?}");
 
     std::fs::rename(root.join("Work/Shared"), root.join("Shared"))?;
     assert_eq!(folders(&root)?, ["Shared"]);

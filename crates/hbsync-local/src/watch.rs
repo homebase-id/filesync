@@ -249,10 +249,10 @@ fn keep(
     // is on record (junk by its name otherwise): the folder it is in may be the folder of
     // shares below the top again, or no more, and the rescan it leads to says which.
     let marker = |rel: &Path| {
+        // (In any case: the volume may take another spelling for it.)
+        let name = rel.file_name().and_then(|name| name.to_str());
         filter.knows_shares_by_id()
-            && rel
-                .file_name()
-                .is_some_and(|name| name == crate::layout::SHARED_MARKER)
+            && name.is_some_and(|n| n.eq_ignore_ascii_case(crate::layout::SHARED_MARKER))
     };
     event.paths.retain(|path| {
         path.strip_prefix(root)

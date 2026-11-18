@@ -549,8 +549,9 @@ fn merge(
 ) -> Result<Diff, StateError> {
     let mut diff = Diff::default();
     let mut unknown: Vec<RelPath> = Vec::new();
-    let under_unknown =
-        |unknown: &[RelPath], p: &RelPath| unknown.iter().any(|u| p != u && p.starts_with(u));
+    // (The folder's own row too: one the walk couldn't tell anything of comes without an
+    // entry, and its row stays as it is; one that came with its entry has had its row taken.)
+    let under_unknown = |unknown: &[RelPath], p: &RelPath| unknown.iter().any(|u| p.starts_with(u));
 
     for event in events {
         let (path, meta) = match event {
