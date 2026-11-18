@@ -555,7 +555,8 @@ mod tests {
     #[test]
     fn a_restored_folder_of_shares_is_taken_when_it_is_the_only_one() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
-        let root = dir.path();
+        let root = &dir.path().join("sync");
+        fs::create_dir(root)?;
         fs::create_dir(root.join("Loose"))?;
         fs::write(shared_marker(&root.join("Loose")), "")?;
         assert_eq!(adopt(root, never)?, None, "nothing is on record");
@@ -564,7 +565,9 @@ mod tests {
             return Ok(());
         }
         let token = fs::read(shared_marker(&root.join("Shared")))?;
-        fs::remove_dir_all(root.join("Shared"))?;
+        // Out of the sync folder, not deleted: a folder made next could get its id (ext4 and
+        // XFS give a freed one out again), and would be the one on record, by id and token.
+        fs::rename(root.join("Shared"), dir.path().join("gone"))?;
         for name in ["Restored", "Projects", "plain"] {
             fs::create_dir(root.join(name))?;
         }
@@ -579,10 +582,9 @@ mod tests {
         assert_eq!(folders(root)?, ["Restored"]);
         assert_eq!(adopt(root, never)?, None);
 
-        fs::rename(root.join("Restored"), root.join("old"))?;
+        fs::rename(root.join("Restored"), dir.path().join("gone too"))?;
         fs::create_dir(root.join("Again"))?;
         fs::write(shared_marker(&root.join("Again")), &token)?;
-        fs::remove_dir_all(root.join("old"))?;
         assert_eq!(adopt(root, |_, _| io::Result::Ok(true))?, None);
         assert_eq!(adopt(root, by_name)?.as_deref(), Some("Again"));
         Ok(())
