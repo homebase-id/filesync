@@ -255,7 +255,7 @@ impl Filter {
         let mut filter = Self::from_rules(&text, case_insensitive)?.with_shared(&top.shares);
         filter.in_the_way = filter.left_out_with(&top);
         filter.shares_id = top.id;
-        filter.returned = top.returned;
+        filter.returned = top.returned.len();
         Ok(filter)
     }
 
@@ -319,7 +319,7 @@ impl Filter {
         crate::shares::Top::read(root).map_or(true, |top| {
             self.top_keys(&top.shares) != self.shared
                 || self.left_out_with(&top)
-                || top.returned != self.returned
+                || top.returned.len() != self.returned
         })
     }
 
@@ -336,6 +336,15 @@ impl Filter {
     /// folder of shares gives way ([`crate::shares::place`], as the sync folder opens).
     pub fn in_the_way(&self) -> bool {
         self.in_the_way
+    }
+
+    /// Whether this filter, read a while ago, is to be read again given `fresh`, read now:
+    /// it decides otherwise ([`Filter::fingerprint`]), or the folder of shares is to give
+    /// way ([`Filter::in_the_way`]) or may be back ([`Filter::returned`]).
+    pub fn changed_from(&self, fresh: &Filter) -> bool {
+        fresh.fingerprint() != self.fingerprint()
+            || fresh.in_the_way
+            || fresh.returned != self.returned
     }
 
     /// How many folders at the top held the marker of the folder of shares on record when
@@ -746,7 +755,15 @@ mod tests {
         assert_eq!(f.shared(), ["Renamed by hand"]);
         std::fs::remove_file(shared_marker(&root.join("Renamed by hand")))?;
         assert!(f.shared_changed(root));
-        assert!(!Filter::default().shared_changed(root));
+        // The one on record is a plain folder now, and another there holds its marker: it
+        // may be the folder of shares back as a copy, to be judged as the sync folder opens
+        // again, once.
+        assert!(Filter::default().shared_changed(root));
+        let f = Filter::load(root, false).map_err(io::Error::other)?;
+        if f.shares_id().is_some() {
+            assert_eq!(f.returned(), 1);
+        }
+        assert!(f.shared().is_empty() && !f.shared_changed(root));
         Ok(())
     }
 

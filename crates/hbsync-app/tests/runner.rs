@@ -1172,7 +1172,6 @@ fn the_folder_of_shares_gives_way_before_a_synced_folder_that_took_its_name_is_p
 #[test]
 fn a_folder_of_shares_that_cant_give_way_leaves_the_item_out_and_syncs_on() -> R {
     use hbsync_local::shares::folders;
-    use std::os::unix::fs::PermissionsExt;
     let server = server();
     let a = Device::start(&server, "a")?;
     let b = Device::start(&server, "b")?;
@@ -1184,14 +1183,9 @@ fn a_folder_of_shares_that_cant_give_way_leaves_the_item_out_and_syncs_on() -> R
     wait_until("notes.txt is up", || on_server(&server, "notes.txt"))?;
     a.wait_idle()?;
 
-    // Nothing at the folder's top can be renamed.
-    let mode = |mode| std::fs::set_permissions(&a.root, std::fs::Permissions::from_mode(mode));
-    mode(0o555)?;
-    if std::fs::write(a.root.join("probe"), "").is_ok() {
-        // Whoever runs this may write anywhere (root): nothing can be refused.
-        std::fs::remove_file(a.root.join("probe"))?;
-        return Ok(mode(0o755)?);
-    }
+    let Some(locked) = Locked::new(&a.root)? else {
+        return Ok(());
+    };
     b.write("Shared/cloud.txt", "from the drive")?;
     b.handle.send(Command::SyncNow);
     wait_until("the drive's Shared is up", || {
@@ -1202,7 +1196,7 @@ fn a_folder_of_shares_that_cant_give_way_leaves_the_item_out_and_syncs_on() -> R
     let quiet = a.settled(Duration::from_millis(500), PATIENCE, || a.feed_reads());
     let left_out = !a.has("Shared/cloud.txt") && folders(&a.root)? == ["Shared"];
     let idle = a.status().state == State::Idle;
-    mode(0o755)?;
+    drop(locked);
     quiet?;
     assert!(left_out && idle);
 
@@ -1222,7 +1216,6 @@ fn a_folder_of_shares_that_cant_give_way_leaves_the_item_out_and_syncs_on() -> R
 #[test]
 fn a_folder_of_shares_that_couldnt_give_way_is_asked_again_by_itself() -> R {
     use hbsync_local::shares::folders;
-    use std::os::unix::fs::PermissionsExt;
     let server = server();
     let again = |c: &mut RunnerConfig| c.shares_again = Duration::from_millis(400);
     let a = Device::start_with(&server, "a", again)?;
@@ -1231,12 +1224,9 @@ fn a_folder_of_shares_that_couldnt_give_way_is_asked_again_by_itself() -> R {
     b.started()?;
     assert_eq!(make(&a.root, "Shared")?, Made::Made);
     a.wait_idle()?;
-    let mode = |mode| std::fs::set_permissions(&a.root, std::fs::Permissions::from_mode(mode));
-    mode(0o555)?;
-    if std::fs::write(a.root.join("probe"), "").is_ok() {
-        std::fs::remove_file(a.root.join("probe"))?;
-        return Ok(mode(0o755)?);
-    }
+    let Some(locked) = Locked::new(&a.root)? else {
+        return Ok(());
+    };
     b.write("Shared/cloud.txt", "from the drive")?;
     b.handle.send(Command::SyncNow);
     wait_until("the drive's Shared is up", || {
@@ -1244,7 +1234,7 @@ fn a_folder_of_shares_that_couldnt_give_way_is_asked_again_by_itself() -> R {
     })?;
     a.sync_reported()?;
     let left_out = !a.has("Shared/cloud.txt");
-    mode(0o755)?;
+    drop(locked);
     assert!(left_out);
     wait_until("it gave way by itself", || a.has("Shared/cloud.txt"))?;
     a.wait_idle()?;
@@ -1562,6 +1552,36 @@ fn a_folder_whose_disk_is_not_mounted_is_left_alone() -> R {
 }
 
 /// Renames a folder, retrying while Windows still has a handle open in it (the watcher).
+/// A folder nothing can be made, renamed or removed in (its mode, on Unix), until dropped:
+/// also when the test ends early.
+#[cfg(unix)]
+struct Locked(PathBuf);
+
+#[cfg(unix)]
+impl Locked {
+    /// `dir` locked; `None` where whoever runs this may write anywhere (root): nothing can
+    /// be refused there.
+    fn new(dir: &Path) -> std::io::Result<Option<Locked>> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555))?;
+        let locked = Locked(dir.to_path_buf());
+        let probe = dir.join("probe");
+        if std::fs::write(&probe, "").is_ok() {
+            std::fs::remove_file(&probe)?;
+            return Ok(None);
+        }
+        Ok(Some(locked))
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Locked {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
 fn rename_with_retries(from: &Path, to: &Path) -> std::io::Result<()> {
     let mut tries = 0;
     loop {

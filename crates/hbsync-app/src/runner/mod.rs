@@ -472,11 +472,7 @@ impl Parts {
     /// differ (sync semantics §10).
     fn rules_changed(&self, root: &Path) -> bool {
         let folder = &self.engine.config().folder;
-        Filter::load(root, folder.case_insensitive).map_or(true, |f| {
-            f.fingerprint() != folder.filter.fingerprint()
-                || f.in_the_way()
-                || f.returned() != folder.filter.returned()
-        })
+        Filter::load(root, folder.case_insensitive).map_or(true, |f| folder.filter.changed_from(&f))
     }
 
     /// [`Parts::rules_changed`] for the folder of shares alone, the rules neither read nor
@@ -736,8 +732,9 @@ impl Runner {
         // The folder is opened again for the folder of shares to give way to the drive's item
         // of its name ([`SyncReport::in_the_way`]).
         let mut yielding = false;
-        // It didn't: the item stays masked, and the engine asks again from then on.
-        let mut yield_at: Option<Instant> = None;
+        // When the folder of shares is asked again: to give way (it couldn't, or nothing was
+        // found to give way to: the item stays masked meanwhile), or to be made.
+        let mut shares_at: Option<Instant> = None;
         // When to read the ignore rules, touched a moment ago.
         let mut rules_at: Option<Instant> = None;
         // After taking local changes failed: not again before then.
@@ -766,7 +763,7 @@ impl Runner {
                     observer,
                     rules_at,
                     put_back_again.as_ref().map(|(at, _)| *at),
-                    yield_at,
+                    shares_at,
                 ]
                 .into_iter()
                 .flatten(),
@@ -864,8 +861,8 @@ impl Runner {
             // The folder of shares is asked again: to give way (the next sync asks it, and one
             // is wanted for that: an idle folder would never ask), or to be made (as the
             // folder opens again).
-            if yield_at.is_some_and(|at| now >= at) {
-                yield_at = None;
+            if shares_at.is_some_and(|at| now >= at) {
+                shares_at = None;
                 match &mut parts {
                     Some(p) if p.unmade => parts = None,
                     Some(p) => p.engine.yield_shares(true),
@@ -993,10 +990,10 @@ impl Runner {
                         // found to give way to): not asked again at every sync.
                         let asked = std::mem::take(&mut yielding);
                         if p.stuck || p.unmade || (asked && !p.gave_way) {
-                            yield_at = Some(Instant::now() + self.cfg.shares_again);
+                            shares_at = Some(Instant::now() + self.cfg.shares_again);
                         } else {
                             p.engine.yield_shares(true);
-                            yield_at = None;
+                            shares_at = None;
                         }
                         self.tell_rules(Some(&p.engine.config().folder.filter));
                         self.watcher_is(p.observer.watcher_error.clone());

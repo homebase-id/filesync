@@ -207,28 +207,25 @@ impl ReadTx<'_> {
     }
 
     pub fn local_by_file_id(&self, id: &FileId) -> Result<Vec<LocalRow>> {
-        let (lo, hi) = codec::file_id_parts(id);
-        let raw = self.raw_local(
-            &format!(
-                "SELECT {LOCAL_COLS} {LOCAL_FROM} \
-                 WHERE l.file_id = ?1 AND l.file_id_hi IS ?2 AND l.volume = ?3"
-            ),
-            params![lo, hi, id.volume as i64],
-        )?;
-        self.with_paths(raw)
+        self.local_by_file(id, Some(id.volume))
     }
 
     /// [`ReadTx::local_by_file_id`] whatever the volume's number: for an item of the folder's
     /// own volume, whose number may be another after a restart (on Unix), while a file's id
     /// on it stays.
     pub fn local_by_file_on_any_volume(&self, id: &FileId) -> Result<Vec<LocalRow>> {
+        self.local_by_file(id, None)
+    }
+
+    /// The rows with `id`'s file part, on `volume` or on any.
+    fn local_by_file(&self, id: &FileId, volume: Option<u64>) -> Result<Vec<LocalRow>> {
         let (lo, hi) = codec::file_id_parts(id);
         let raw = self.raw_local(
             &format!(
                 "SELECT {LOCAL_COLS} {LOCAL_FROM} \
-                 WHERE l.file_id = ?1 AND l.file_id_hi IS ?2"
+                 WHERE l.file_id = ?1 AND l.file_id_hi IS ?2 AND (?3 IS NULL OR l.volume = ?3)"
             ),
-            params![lo, hi],
+            params![lo, hi, volume.map(|v| v as i64)],
         )?;
         self.with_paths(raw)
     }
