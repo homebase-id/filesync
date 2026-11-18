@@ -141,6 +141,19 @@ impl Paths {
             .join(identity.file_key())
             .join("state.db")
     }
+
+    /// The state DB of what `sharer` shares with `identity`'s account, another identity's
+    /// drive (sync semantics §13): `<state>/accounts/<identity's key>/shared/<sharer's
+    /// key>/state.db`, beside the account's own, of which it is no part (a DB holds one
+    /// drive).
+    pub fn shared_db(&self, identity: &Identity, sharer: &Identity) -> PathBuf {
+        self.state
+            .join("accounts")
+            .join(identity.file_key())
+            .join("shared")
+            .join(sharer.file_key())
+            .join("state.db")
+    }
 }
 
 #[cfg(test)]
