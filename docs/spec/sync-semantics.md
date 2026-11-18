@@ -1051,14 +1051,18 @@ would name nothing), any other is made anew.
   Nor is anything put into it where it took the place of a synced folder (that one deleted,
   the folder of shares renamed onto its name) and a sync runs before a scan has seen either
   (a watcher that tells late, as macOS's does): before an item is placed in a folder, or
-  moved into it, the folder on disk is looked at (once a run for each folder, and again as a
-  download is placed, however long its transfer took), and where it is no longer the one
+  moved into it, the folder on disk is looked at (once a run for each folder when a
+  transfer is prepared, and again as a download is placed, however long its transfer took,
+  as a folder is made in it, and as an item is moved to it), and where it is no longer the one
   the DB has there (nothing there, no folder, another file id) the item isn't placed: the
   next plan decides, once a scan has seen what is there. No scan of that place alone is
   asked for: it would take a folder moved elsewhere for deleted, where the watcher's own
   scan sees both ends of the move. That holds for any folder, not only this one: what the
   drive has for a folder goes into that folder, never into another that has its path now;
-  an item put back from aside goes to the folder's top instead. Told by the file id where
+  an item put back from aside goes to the folder's top instead (and stays aside for the next
+  sync where its folder can't be looked at). Older paths of the executor still ask for a
+  scan of an item's old place when it changed on disk, which takes a folder moved before a
+  scan for deleted (filesync #421). Told by the file id where
   ids tell an item (not on FAT, exFAT, a network or FUSE volume: a folder there is taken
   for it). (Engine `a_folder_of_shares_at_a_synced_folders_place_gets_nothing_of_the_drive`,
   `a_folder_moved_before_a_scan_isnt_taken_for_deleted`; a stat for each folder something
