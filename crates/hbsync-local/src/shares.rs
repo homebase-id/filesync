@@ -119,7 +119,7 @@ fn token_in(dir: &Path) -> io::Result<Option<String>> {
 /// real folders (no links) with their file ids, and the names of all else. Nothing in a root
 /// that isn't there. An item whose name isn't Unicode is never synced anyway
 /// ([`crate::SkipReason`]).
-fn list_top(root: &Path) -> io::Result<(Vec<(String, FileId)>, Vec<String>)> {
+fn list_top(root: &Path) -> io::Result<(Folders, Vec<String>)> {
     let items = match hbsync_platform::listdir::list_dir(root) {
         Ok(items) => items,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Default::default()),
@@ -137,10 +137,8 @@ fn list_top(root: &Path) -> io::Result<(Vec<(String, FileId)>, Vec<String>)> {
     Ok((folders, rest))
 }
 
-/// The real folders (no links) at the top of `root` ([`list_top`]).
-fn top_folders(root: &Path) -> io::Result<Vec<(String, FileId)>> {
-    Ok(list_top(root)?.0)
-}
+/// Folders by name, each with its file id.
+type Folders = Vec<(String, FileId)>;
 
 /// The top of a sync folder, as its folder of shares is told there ([`Top::read`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -180,23 +178,6 @@ impl Top {
         }
         shares.sort_unstable();
         Ok(Top { shares, others })
-    }
-
-    /// Whether something else at the top has a folder of shares' name, as names compare
-    /// there ([`top_key`]): what the volume tells apart and the client doesn't (`Straße`
-    /// beside `STRASSE`). It would be left out with the folder of shares, till that one gives
-    /// way ([`place`]).
-    pub fn in_the_way(&self, case_insensitive: bool) -> bool {
-        let keys: Vec<_> = self
-            .shares
-            .iter()
-            .map(|s| top_key(s, case_insensitive))
-            .collect();
-        !keys.is_empty()
-            && self
-                .others
-                .iter()
-                .any(|o| keys.contains(&top_key(o, case_insensitive)))
     }
 }
 
@@ -416,7 +397,7 @@ pub fn adopt<E: From<io::Error>>(
     let Some(known) = &record.0 else {
         return Ok(None);
     };
-    let top = top_folders(root)?;
+    let (top, _) = list_top(root)?;
     // The one on record first: where it is there, no other folder is looked into.
     for (name, id) in &top {
         if record.holds(*id, &root.join(name))? {
@@ -653,13 +634,14 @@ mod tests {
             // A volume that doesn't tell the two apart: nothing to give way to.
             return Ok(());
         }
-        assert!(!Top::read(root)?.in_the_way(false));
-        assert!(Top::read(root)?.in_the_way(true));
+        let in_the_way = |caseless| crate::Filter::load(root, caseless).map(|f| f.in_the_way());
+        assert!(!in_the_way(false).expect("read"));
+        assert!(in_the_way(true).expect("read"));
         assert_eq!(place(root, None, false, nothing)?, Placed::default());
         let placed = place(root, None, true, nothing)?;
         assert_eq!(placed.moved, [("Straße".into(), "Straße-2".into())]);
         assert_eq!(folders(root)?, ["Straße-2"]);
-        assert!(!Top::read(root)?.in_the_way(true));
+        assert!(!in_the_way(true).expect("read"));
         assert!(root.join("STRASSE").is_dir());
 
         let other = tempfile::tempdir()?;

@@ -245,7 +245,7 @@ impl Filter {
             source,
         })?;
         let mut filter = Self::from_rules(&text, case_insensitive)?.with_shared(&top.shares);
-        filter.in_the_way = top.in_the_way(case_insensitive);
+        filter.in_the_way = filter.left_out_with(&top);
         Ok(filter)
     }
 
@@ -305,8 +305,15 @@ impl Filter {
     /// read again.
     pub fn shared_changed(&self, root: &Path) -> bool {
         crate::shares::Top::read(root).map_or(true, |top| {
-            self.top_keys(&top.shares) != self.shared || top.in_the_way(self.case_insensitive)
+            self.top_keys(&top.shares) != self.shared || self.left_out_with(&top)
         })
+    }
+
+    /// Whether something else at `top` has the name of a folder of shares this filter leaves
+    /// out, as names compare there: what the volume tells apart and the client doesn't
+    /// (`STRASSE` beside `Straße`).
+    fn left_out_with(&self, top: &crate::shares::Top) -> bool {
+        top.others.iter().any(|other| self.is_shared(other))
     }
 
     /// Whether, when the filter was read ([`Filter::load`]), something else at the top had the
@@ -315,12 +322,6 @@ impl Filter {
     /// folder of shares gives way ([`crate::shares::place`], as the sync folder opens).
     pub fn in_the_way(&self) -> bool {
         self.in_the_way
-    }
-
-    /// Whether `name`, at the top, is left out as the name of a folder that holds what other
-    /// identities share ([`Filter::shared`]).
-    pub fn is_shared(&self, name: &str) -> bool {
-        self.holds_shares(name)
     }
 
     /// The folders at the top left out as holding what other identities share
@@ -417,7 +418,7 @@ impl Filter {
     /// would be this client's own folder there, and what is in it would land in it (an
     /// `ignore` file setting this device's rules).
     fn by_name(&self, name: &str, at_root: bool) -> Option<Verdict> {
-        if is_state_dir(name) || (at_root && self.holds_shares(name)) {
+        if is_state_dir(name) || (at_root && self.is_shared(name)) {
             Some(Verdict::Excluded)
         } else if is_junk(name) {
             Some(Verdict::Junk)
@@ -426,8 +427,9 @@ impl Filter {
         }
     }
 
-    /// Whether `name`, at the top, is a folder's that holds what other identities share.
-    fn holds_shares(&self, name: &str) -> bool {
+    /// Whether `name`, at the top, is left out as the name of a folder that holds what other
+    /// identities share ([`Filter::shared`]).
+    pub fn is_shared(&self, name: &str) -> bool {
         if self.shared.is_empty() {
             return false;
         }
