@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+pub use crate::login::Paste;
 use hbsync_engine::root::{RootError, SyncRoot};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::{Client, app};
@@ -33,11 +34,26 @@ pub fn authorize(
     browser: Option<&str>,
     show: impl FnOnce(&str),
 ) -> Result<Credentials, HomebaseError> {
+    authorize_or_pasted(identity, device, browser, show, None)
+}
+
+/// [`authorize`], the owner's answer taken also from the address the browser ended on,
+/// pasted (`paste`): for a browser on another computer ([`Paste`]).
+pub fn authorize_or_pasted(
+    identity: &str,
+    device: &str,
+    browser: Option<&str>,
+    show: impl FnOnce(&str),
+    paste: Option<Paste<'_>>,
+) -> Result<Credentials, HomebaseError> {
     let login = begin(identity, device)?;
     show(login.authorize_url());
     // The URL was shown: a browser that doesn't start isn't an error.
     let _ = open_browser(browser, login.authorize_url());
-    login.finish(APPROVAL_TIMEOUT)
+    match paste {
+        Some(paste) => login.finish_or_pasted(APPROVAL_TIMEOUT, paste),
+        None => login.finish(APPROVAL_TIMEOUT),
+    }
 }
 
 /// Starts authorizing this device (named after `device` in the owner's list) on `identity`:
@@ -66,6 +82,9 @@ pub trait Owner {
 pub struct InBrowser<'a> {
     pub browser: Option<&'a str>,
     pub say: &'a dyn Fn(&str),
+    /// Lines typed meanwhile, where the browser may be on another computer (this one has
+    /// none): the address it ends on, pasted, is the owner's answer ([`Paste::typed`]).
+    pub typed: Option<&'a dyn Fn() -> Option<String>>,
 }
 
 impl std::fmt::Debug for InBrowser<'_> {
@@ -79,15 +98,46 @@ impl std::fmt::Debug for InBrowser<'_> {
 impl InBrowser<'_> {
     fn visit(&self, url: &str) {
         (self.say)(&format!("If it doesn't open, visit:\n{url}\n"));
+        if self.typed.is_some() {
+            (self.say)(PASTE_HOW);
+        }
+    }
+
+    fn paste(&self) -> Option<Paste<'_>> {
+        let (typed, say) = (self.typed?, self.say);
+        Some(Paste { typed, say })
     }
 }
+
+/// Whether the browser the owner approves in is most likely on another computer: this one
+/// is used over SSH, or (Linux) isn't in a graphical session. An address pasted is offered
+/// then ([`InBrowser::typed`]).
+pub fn browser_elsewhere() -> bool {
+    let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
+    #[cfg(target_os = "linux")]
+    let no_desktop = !crate::unit::desktop();
+    #[cfg(not(target_os = "linux"))]
+    let no_desktop = false;
+    set("SSH_CONNECTION") || set("SSH_TTY") || no_desktop
+}
+
+/// How to answer from a browser on another computer ([`InBrowser::typed`]).
+const PASTE_HOW: &str = "On another computer: open it there and approve. The browser then goes \
+to a page on localhost that won't load. Copy that page's address from the address bar, paste it \
+here and press Enter.\n";
 
 impl Owner for InBrowser<'_> {
     fn authorize(&mut self, identity: &str, device: &str) -> Result<Credentials, HomebaseError> {
         (self.say)(&format!(
             "Opening your browser to authorize this computer on {identity}..."
         ));
-        authorize(identity, device, self.browser, |url| self.visit(url))
+        authorize_or_pasted(
+            identity,
+            device,
+            self.browser,
+            |url| self.visit(url),
+            self.paste(),
+        )
     }
 
     fn restore_drive(&mut self, identity: &str) -> Result<bool, HomebaseError> {
@@ -98,7 +148,10 @@ impl Owner for InBrowser<'_> {
         self.visit(restore.url());
         // The URL was shown: a browser that doesn't start isn't an error.
         let _ = open_browser(self.browser, restore.url());
-        restore.finish(APPROVAL_TIMEOUT)
+        match self.paste() {
+            Some(paste) => restore.finish_or_pasted(APPROVAL_TIMEOUT, paste),
+            None => restore.finish(APPROVAL_TIMEOUT),
+        }
     }
 }
 
