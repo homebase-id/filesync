@@ -830,16 +830,11 @@ mod tests {
             what: &str,
             done: &dyn Fn(&AccountStatus, &[FolderStatus]) -> bool,
         ) -> Result<(), String> {
-            let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
-            loop {
-                let (status, folders) = self.account.status();
-                if done(&status, &folders) {
-                    return Ok(());
-                }
-                if std::time::Instant::now() > until {
-                    return Err(format!("timed out: {what}: {status:?} {folders:?}"));
-                }
-                std::thread::sleep(std::time::Duration::from_millis(20));
+            let seen =
+                |(status, folders): &(AccountStatus, Vec<FolderStatus>)| done(status, folders);
+            match wait_until(|| Some(self.account.status()).filter(seen)) {
+                Some(_) => Ok(()),
+                None => Err(format!("timed out: {what}: {:?}", self.account.status())),
             }
         }
 
@@ -859,9 +854,27 @@ mod tests {
         }
     }
 
+    /// What `found` gives, asked every 20 ms for up to 30 s; `None` when it never did.
+    fn wait_until<T>(mut found: impl FnMut() -> Option<T>) -> Option<T> {
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match found() {
+                None if std::time::Instant::now() < until => {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                found => return found,
+            }
+        }
+    }
+
     /// Its folder synced, idle, nothing pending.
     fn synced(_: &AccountStatus, f: &FolderStatus) -> bool {
         f.state == State::Idle && f.last_sync.is_some() && f.pending == 0
+    }
+
+    /// Both its folders are ([`synced`]): its own, and what another identity shares with it.
+    fn both_synced(status: &AccountStatus, folders: &[FolderStatus]) -> bool {
+        folders.len() == 2 && folders.iter().all(|f| synced(status, f))
     }
 
     /// How many DBs were set aside beside `db` for `why`.
@@ -924,24 +937,16 @@ mod tests {
         // Shares what is named so on its drive, once it is there.
         let share = |names: &[&str]| -> Result<(), Box<dyn std::error::Error>> {
             for name in names {
-                let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
-                let id = loop {
-                    let found = {
-                        let server = tom_server.lock().map_err(|_| "poisoned")?;
-                        let named = |h: &&hbsync_remote::RemoteHeader| {
-                            matches!(&h.body, hbsync_remote::RemoteBody::Live { content, .. }
-                                if content.name == *name)
-                        };
-                        server.live().find(named).map(|h| h.file_id)
-                    };
-                    match found {
-                        Some(id) => break id,
-                        None if std::time::Instant::now() > until => {
-                            return Err(format!("{name} never reached the sharer's drive").into());
-                        }
-                        None => std::thread::sleep(std::time::Duration::from_millis(20)),
-                    }
+                let named = |h: &&hbsync_remote::RemoteHeader| {
+                    matches!(&h.body, hbsync_remote::RemoteBody::Live { content, .. }
+                        if content.name == *name)
                 };
+                let on_drive = || {
+                    let server = tom_server.lock().ok()?;
+                    server.live().find(named).map(|h| h.file_id)
+                };
+                let id = wait_until(on_drive)
+                    .ok_or_else(|| format!("{name} never reached the sharer's drive"))?;
                 tom_remote.share(id)?;
             }
             tom_server.lock().map_err(|_| "poisoned")?.tick();
@@ -950,30 +955,9 @@ mod tests {
 
         // The account, with what the sharer shares read as its member reads it.
         let home = tempfile::tempdir()?;
-        let (paths, folder, _) = set_up(home.path(), &me, &[("mine.txt", "mine")])?;
-        let server = FakeServer::new(ServerConfig::default());
+        let (paths, folder, server, start) = shared_with(home.path(), &tom_server)?;
         let shared_db = paths.shared_db(&me, &tom);
-        std::fs::create_dir_all(shared_db.parent().ok_or("no parent")?)?;
-        let start = || {
-            let (server, tom_server) = (server.clone(), tom_server.clone());
-            let (me, tom, shared_db) = (me.clone(), tom.clone(), shared_db.clone());
-            Started::sharing(&paths, Root::main(&me, &folder), move |db| {
-                let drive = Drive::open(db, &me, Arc::new(FakeRemote::new(server.clone())))?;
-                let member = Arc::new(FakeRemote::member(tom_server.clone()));
-                let theirs = Drive::open(&shared_db, &me, member)?;
-                let puller = feed::Puller::spawn(Arc::clone(&theirs));
-                let share = parts::Share {
-                    sharer: tom.clone(),
-                    drive: theirs,
-                    db: shared_db.clone(),
-                    notifications: feed::Notifications::new(puller, std::time::Instant::now()),
-                };
-                Ok((drive, vec![share]))
-            })
-        };
-        let both = |_: &AccountStatus, folders: &[FolderStatus]| {
-            folders.len() == 2 && folders.iter().all(|f| synced(&AccountStatus::new(&me), f))
-        };
+        let both = both_synced;
         let own_names = || -> Result<Vec<String>, Box<dyn std::error::Error>> {
             let mut names = server.lock().map_err(|_| "poisoned")?.live_names();
             names.sort();
@@ -1084,22 +1068,31 @@ mod tests {
         Ok(())
     }
 
-    /// An account `me` on a new drive whose main folder holds `mine.txt`, with what `tom`
-    /// shares: nothing yet, read as its member reads it. Its paths, its folder, and how to
-    /// start it.
+    /// An account `me.example` on a new drive whose main folder holds `mine.txt`, with what
+    /// `tom.example` shares of the drive on `tom_server`, read as its member reads it. Its
+    /// paths, its folder, its drive's server, and how to start it.
     #[allow(clippy::type_complexity)]
     fn shared_with(
         home: &Path,
-    ) -> Result<(Paths, PathBuf, impl Fn() -> Started), Box<dyn std::error::Error>> {
+        tom_server: &Arc<std::sync::Mutex<FakeServer>>,
+    ) -> Result<
+        (
+            Paths,
+            PathBuf,
+            Arc<std::sync::Mutex<FakeServer>>,
+            impl Fn() -> Started,
+        ),
+        Box<dyn std::error::Error>,
+    > {
         let (me, tom): (Identity, Identity) = ("me.example".into(), "tom.example".into());
         let (paths, folder, _) = set_up(home, &me, &[("mine.txt", "mine")])?;
         let server = FakeServer::new(ServerConfig::default());
-        let tom_server = FakeServer::new(ServerConfig::default());
         let shared_db = paths.shared_db(&me, &tom);
         std::fs::create_dir_all(shared_db.parent().ok_or("no parent")?)?;
         let (starting, root) = (paths.clone(), Root::main(&me, &folder));
+        let (own, theirs) = (server.clone(), tom_server.clone());
         let start = move || {
-            let (server, tom_server) = (server.clone(), tom_server.clone());
+            let (server, tom_server) = (own.clone(), theirs.clone());
             let (me, tom, shared_db) = (me.clone(), tom.clone(), shared_db.clone());
             Started::sharing(&starting, root.clone(), move |db| {
                 let drive = Drive::open(db, &me, Arc::new(FakeRemote::new(server.clone())))?;
@@ -1115,7 +1108,7 @@ mod tests {
                 Ok((drive, vec![share]))
             })
         };
-        Ok((paths, folder, start))
+        Ok((paths, folder, server, start))
     }
 
     /// A share whose folder can't be set up (something else has its place in the folder of
@@ -1125,7 +1118,8 @@ mod tests {
     fn a_share_that_cant_start_is_tried_again_and_the_account_syncs_on()
     -> Result<(), Box<dyn std::error::Error>> {
         let home = tempfile::tempdir()?;
-        let (_, folder, start) = shared_with(home.path())?;
+        let tom_server = FakeServer::new(ServerConfig::default());
+        let (_, folder, _, start) = shared_with(home.path(), &tom_server)?;
         use hbsync_local::shares::{Made, make};
         assert_eq!(make(&folder, "Shared")?, Made::Made);
         let at = folder.join("Shared").join("tom.example");
@@ -1139,12 +1133,7 @@ mod tests {
             assert!(at.is_file());
 
             std::fs::remove_file(&at)?;
-            started.wait_all("the share syncs once its place is free", &|_, folders| {
-                folders.len() == 2
-                    && folders
-                        .iter()
-                        .all(|f| synced(&AccountStatus::new(&"me.example".into()), f))
-            })?;
+            started.wait_all("the share syncs once its place is free", &both_synced)?;
             assert!(at.is_dir());
             Ok(())
         };
@@ -1157,21 +1146,13 @@ mod tests {
     #[test]
     fn the_shares_stop_with_the_main_folder() -> Result<(), Box<dyn std::error::Error>> {
         let home = tempfile::tempdir()?;
-        let (_, folder, start) = shared_with(home.path())?;
+        let tom_server = FakeServer::new(ServerConfig::default());
+        let (_, folder, _, start) = shared_with(home.path(), &tom_server)?;
         let started = start();
         let at = folder.join("Shared").join("tom.example");
-        let run = started.wait_all("both sync", &|_, folders| {
-            folders.len() == 2
-                && folders
-                    .iter()
-                    .all(|f| synced(&AccountStatus::new(&"me.example".into()), f))
-        });
+        let run = started.wait_all("both sync", &both_synced);
         started.account.remove_folder(&folder);
-        let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while !started.thread.is_finished() && std::time::Instant::now() < until {
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        let ended = started.thread.is_finished();
+        let ended = wait_until(|| started.thread.is_finished().then_some(())).is_some();
         let (_, folders) = started.account.status();
         started.stop(())?;
         run?;

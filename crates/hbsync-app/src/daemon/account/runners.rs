@@ -8,9 +8,8 @@ use std::time::{Duration, Instant};
 
 use hbsync_state::Unusable;
 
-use hbsync_engine::Drive;
+use std::path::Path;
 
-use super::feed::Notifications;
 use super::parts::Share;
 use crate::runner::{Backoff, Command, Handle, RunnerError};
 use crate::{Identity, Root};
@@ -41,18 +40,16 @@ pub(super) enum Life {
     Gone,
 }
 
-/// What another identity shares with the account ([`Share`]), on the account's thread: its
-/// runner ([`Running::sharer`]) syncs it into `<the folder of shares>/<local>` while the main
+/// What another identity shares with the account, on the account's thread: its runner
+/// ([`Running::sharer`]) syncs it into `<the folder of shares>/<local>` while the main
 /// folder's runner shows and has told where the folder of shares is.
 pub(super) struct Sharing {
-    pub(super) sharer: Identity,
+    pub(super) share: Share,
     /// The sharer's name as a folder's here.
     pub(super) local: String,
-    pub(super) drive: Arc<Drive>,
-    pub(super) db: std::path::PathBuf,
-    pub(super) notifications: Notifications,
     /// Its runner couldn't start: tried again at this time.
     pub(super) retry: Option<Instant>,
+    /// The pauses between such tries, from the first again once it started.
     pub(super) backoff: Backoff,
 }
 
@@ -71,14 +68,16 @@ impl Sharing {
             }
         };
         Some(Sharing {
-            sharer: share.sharer,
+            share,
             local,
-            drive: share.drive,
-            db: share.db,
-            notifications: share.notifications,
             retry: None,
             backoff: Backoff::new(),
         })
+    }
+
+    /// Whether `folder` is its folder in the folder of shares `dir`.
+    pub(super) fn is_at(&self, dir: &Path, folder: &Path) -> bool {
+        folder.parent() == Some(dir) && folder.file_name().is_some_and(|name| name == &*self.local)
     }
 }
 
