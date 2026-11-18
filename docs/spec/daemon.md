@@ -574,20 +574,22 @@ included (service managers restart it then).
   (its DB isn't set aside for it yet). Its drive is read on a timer (5 minutes) and at Sync
   now, until its changes are announced, and only while a runner syncs it.
 
-  On Windows a folder can't be renamed while a folder in it is watched, as each share's is
-  by its runner: there the folder of shares can't be renamed by hand while a share syncs,
-  and one that is to give way to the drive's item of its name can't either (the item stays
-  out, as said above, until the daemon starts again with the name free).
+  A share's folder is watched by the main folder's watcher, which is recursive and has its
+  events anyway: the share's runner holds no watcher of its own, and takes what lies in its
+  folder from that one (`hbsync_local::Feeds`; filesync #414). So nothing is held open
+  below the folder of shares, which Windows wouldn't let be renamed otherwise (by hand, or
+  to give way), and a folder there costs one inotify watch on Linux, not two. While the
+  main folder has no watcher (it couldn't start one) a share has none either: woken as it
+  goes, it walks its folder at each look as any folder without one, with no note of its
+  own (the main folder's says it). Once the main folder has one (again), each share is told
+  that events were lost, and walks its folder once: so each opening of the main folder
+  (its rules changed, the folder of shares came or went) costs each share one walk.
 
   Known limit, until the engine never makes a folder again that is gone: a share's runner
   that is downloading when the folder of shares is renamed keeps its old path until it is
   stopped (a second with a watcher, up to a minute without), and a download begun then
   makes `<old name>/<sharer>` again as plain folders, which the main folder would send.
 
-  On Linux the main folder's watcher is recursive and also holds a watch on each folder in
-  the folder of shares, whose events it drops: a folder there costs two inotify watches,
-  not one (measured: 4 of 4 in a share with one sub-folder; `notify` can't leave a
-  sub-tree out).
 - **Notes:** each conflict and failure is noted once; one that comes back sync after sync (a
   file that can't be read) isn't noted again until it has gone away. An operation left for the
   next plan is noted only when this device can't do it (a name or path it can't hold, access

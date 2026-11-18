@@ -162,6 +162,9 @@ pub struct RunnerConfig {
     /// Told where the folder of shares is, each time the folder opens ([`SharesTold`]): its
     /// account runs the shares' folders in it.
     pub(crate) shares_told: Option<SharesTold>,
+    /// Whose watcher the folder's is ([`hbsync_local::Feed`]): the main folder's gives to
+    /// those of what is shared into its folder of shares, which hold none of their own.
+    pub(crate) feed: Option<hbsync_local::Feed>,
     /// The account's main folder, for a folder it syncs beside it (a role folder, a
     /// Desktop): the folder of shares, dragged in here, is known by the record there and
     /// left alone ([`Filter::load_beside`]).
@@ -201,6 +204,7 @@ impl RunnerConfig {
             changed: Arc::default(),
             end_if_unusable: false,
             shares_told: None,
+            feed: None,
             shares_main: None,
         }
     }
@@ -799,7 +803,8 @@ impl Runner {
         let bell: Bell = Arc::new(move || {
             let _ = wakes.send(Msg::Local);
         });
-        let observer = LocalObserver::ringing(root, engine.scan_options().clone(), Some(bell));
+        let (opts, feed) = (engine.scan_options().clone(), self.cfg.feed.clone());
+        let observer = LocalObserver::watching(root, opts, Some(bell), feed);
         self.set(|s| s.rules = rules);
         let drive_changed = Arc::new(AtomicBool::new(false));
         let (alive, wakes) = (Arc::downgrade(&drive_changed), self.wakes.clone());
