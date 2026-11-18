@@ -466,7 +466,11 @@ included (service managers restart it then).
   stops, failing, till it works.
 - **The folder gone** (moved, deleted, a disk not mounted: its marker missing): nothing
   syncs, the status says why, and the loop waits for it to come back. It never creates a
-  marker: only `hbsync setup` does.
+  marker: only `hbsync setup` does. A folder that goes while a sync runs isn't made again by
+  it either: the client makes its own folders in it (`.hbsync`, the downloads' `tmp` there)
+  only where the folder they are in is there (`make_dir_in_place`), so a download begun then
+  fails instead of landing in a new folder at the old place (engine
+  `a_folder_that_is_gone_isnt_made_again_by_a_sync`).
 - **Held deletes:** the status shows how many (deleted here, to go from the drive; removed
   elsewhere, every synced file), some paths, and a token naming exactly these deletes and
   which way each goes, until they are answered (nothing expires; a held removal of every file

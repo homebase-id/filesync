@@ -93,9 +93,11 @@ pub struct PartialFile {
 
 impl PartialFile {
     /// Opens or resumes `<dir>/<key>.partial`. An existing partial file is re-hashed so the
-    /// final hash covers every byte.
+    /// final hash covers every byte. `dir` is made in the folder it is in, which must be
+    /// there ([`crate::make_dir_in_place`]: a sync folder that is gone isn't made again by a
+    /// download into it).
     pub fn open(dir: &Path, key: &str, algorithm: HashAlgorithm) -> io::Result<Self> {
-        fs::create_dir_all(dir)?;
+        crate::make_dir_in_place(dir)?;
         let path = partial_path(dir, key);
         let mut file = OpenOptions::new()
             .read(true)
@@ -471,6 +473,24 @@ mod tests {
             .finish(hash_bytes(b"v2 from remote", ALG), 14)?
             .persist_over(&target, &current, None)?;
         assert_eq!(fs::read(&target)?, b"v2 from remote");
+        Ok(())
+    }
+
+    /// The downloads' folder is made where the folder it is in is there, never with it: a
+    /// sync folder that is gone isn't made again by a download into it.
+    #[test]
+    fn a_partial_file_never_makes_the_folder_above_its_own() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let gone = dir.path().join("gone");
+        let opened = PartialFile::open(&gone.join("tmp"), "k", ALG);
+        assert_eq!(
+            opened.err().map(|e| e.kind()),
+            Some(io::ErrorKind::NotFound)
+        );
+        assert!(!gone.exists());
+        fs::create_dir(&gone)?;
+        PartialFile::open(&gone.join("tmp"), "k", ALG)?;
+        PartialFile::open(&gone.join("tmp"), "k2", ALG)?;
         Ok(())
     }
 }
