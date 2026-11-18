@@ -73,6 +73,8 @@ impl Record {
         if stable {
             text += &format!("folder {}\n", hbsync_platform::stat(dir)?.file_id.file);
         }
+        // (The state folder in the sync folder that is there, never that one with it.)
+        hbsync_fileio::make_dir_in_place(&crate::layout::state_dir(root))?;
         hbsync_fileio::write_atomic(&shares_file(root), text.as_bytes())
     }
 
@@ -617,6 +619,18 @@ mod tests {
         fs::write(shared_marker(&root.join("Shared")), "t\n")?;
         assert_eq!(folders(root)?, ["Shared"]);
         assert_eq!(make(root, "Shared-2")?, Made::Kept("Shared".into()));
+        Ok(())
+    }
+
+    /// A sync folder that is gone isn't made again for its folder of shares: neither as one
+    /// is made, nor as one is put on record.
+    #[test]
+    fn a_sync_folder_that_is_gone_isnt_made_again() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let gone = dir.path().join("gone");
+        assert!(make(&gone, "Shared").is_err());
+        assert!(Record::write(&gone, "token", &gone.join("Shared")).is_err());
+        assert!(!gone.exists());
         Ok(())
     }
 

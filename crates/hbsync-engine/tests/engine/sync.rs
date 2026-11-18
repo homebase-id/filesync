@@ -979,6 +979,14 @@ fn a_folder_that_is_gone_isnt_made_again_by_a_sync() -> R {
     let synced = b.engine.sync_once("2026-10-08");
     assert!(!b.root.exists(), "made again: {synced:?}");
     assert!(!away.join("top.txt").exists());
+    // It tried, and what it tried failed: nothing was skipped unseen.
+    let failed = synced
+        .as_ref()
+        .map_or(true, |report| !report.failed.is_empty());
+    assert!(failed, "nothing failed: {synced:?}");
+    // Nor by an engine's config made for it (its state folder, its volume's probe).
+    hbsync_engine::EngineConfig::new(&b.root, "b");
+    assert!(!b.root.exists());
 
     fs::rename(&away, &b.root)?;
     b.sync()?;
