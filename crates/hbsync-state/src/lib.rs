@@ -628,6 +628,16 @@ impl StateDb {
             rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
             true,
         )?;
+        // A statement's plan never depends on the values bound to it (SQLite's "query planner
+        // stability guarantee"). Without it SQLite marks a statement whose plan looked at a
+        // bound value, and prepares it again (parses and plans it) at the next run after
+        // another value is bound: from SQLite 3.54 the lookups by a node's id are marked so,
+        // and every run of them was prepared again (half as much CPU again on the engine's
+        // tests). Each statement here has one plan, whatever is bound.
+        conn.set_db_config(
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_ENABLE_QPSG,
+            true,
+        )?;
         // A sync on macOS stops at the drive's cache unless it is a full one.
         #[cfg(target_os = "macos")]
         conn.pragma_update(None, "fullfsync", true)?;
