@@ -1004,12 +1004,16 @@ app its drive back, told by the random part of its path.
   to open whatever the case.
 - **When the terminal is read for an address:** with `--paste` (from a pipe too), and where
   no browser is opened here and standard input is a terminal. Never from a terminal the
-  command is in the background of (reading it would stop the job), nor beside a browser
-  named with `--browser` (one in the terminal reads it itself). Where it isn't read, the
-  link comes with a line saying that `--paste` has it read: a guess that goes wrong (a tmux
-  pane from a graphical session, used over SSH) costs running the command again.
-- The reading starts with the first link shown and goes on till the command ends: a line
-  typed ahead for the shell after the answer was taken is lost with it.
+  command is in the background of (reading it would stop the job; with `--paste` the link
+  comes with a line saying so), and `--paste` and `--browser` exclude each other (a browser
+  in the terminal reads it itself). Where it isn't read, the link comes with a line saying
+  that `--paste` has it read: a guess that goes wrong (a tmux pane from a graphical
+  session, used over SSH) costs running the command again.
+- The reading starts with the first link shown and goes on till the command ends: what
+  was typed before it is passed over (it comes within a moment of the start; a line is an
+  answer only to a link shown before it), and a line typed ahead for the shell after the
+  answer was taken is lost with it. A line is read up to 8 KiB, and from a pipe no faster
+  than it is taken.
 
 Nothing on the server changes; a code typed into the owner app instead of a pasted address
 would need odin-core.

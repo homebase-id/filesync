@@ -68,7 +68,7 @@ pub fn authorize(
 }
 
 /// Starts authorizing this device (named after `device` in the owner's list) on `identity`:
-/// the caller takes the browser to `authorize_url` and waits with `finish`
+/// the caller takes the browser to `authorize_url` and waits with `finish_unless`
 /// ([`APPROVAL_TIMEOUT`]).
 pub fn begin(identity: &str, device: &str) -> Result<crate::login::Login, HomebaseError> {
     crate::login::begin(identity, &format!("{APP_NAME} on {device}"))
@@ -96,6 +96,8 @@ pub struct InBrowser<'a> {
     /// Lines typed meanwhile, where the browser may be on another computer: the address it
     /// ends on, pasted, is the owner's answer ([`Paste::typed`]).
     pub typed: Option<&'a dyn Fn() -> Option<String>>,
+    /// Said with the link where none are read ([`PASTE_HINT`], or why they can't be).
+    pub unread: &'a str,
 }
 
 impl std::fmt::Debug for InBrowser<'_> {
@@ -117,7 +119,7 @@ impl InBrowser<'_> {
         };
         let elsewhere = match self.typed {
             Some(_) => PASTE_HOW,
-            None => PASTE_HINT,
+            None => self.unread,
         };
         (self.say)(&format!("{visit}\n{elsewhere}"));
     }
@@ -140,12 +142,17 @@ pub fn browser_here() -> bool {
     }
 }
 
-/// Whether lines can be read from the terminal standard input is: this process is in its
-/// foreground (one in the background that reads it is stopped by the system).
+/// Whether lines can be read from the terminal standard input is: not by a process in its
+/// background, which the system stops for reading it. One for which it isn't the
+/// controlling terminal (started in a session of its own: `su -c`, `setsid`) has no
+/// foreground to be out of, and reads it as it is.
 pub fn terminal_in_foreground() -> bool {
     #[cfg(unix)]
     // SAFETY: both only ask the system for a process group's id.
-    return unsafe { libc::tcgetpgrp(0) == libc::getpgrp() };
+    return unsafe {
+        let foreground = libc::tcgetpgrp(0);
+        foreground == -1 || foreground == libc::getpgrp()
+    };
     #[cfg(not(unix))]
     true
 }
@@ -155,8 +162,8 @@ const PASTE_HOW: &str = "Open it in a browser on any computer and approve. From 
 the browser then goes to a page on localhost that won't load: copy that page's address from the \
 address bar, paste it here and press Enter.\n";
 
-/// Said where no address is read from the terminal.
-const PASTE_HINT: &str =
+/// Said where no address is read from the terminal ([`InBrowser::unread`]).
+pub const PASTE_HINT: &str =
     "(Approving in a browser on another computer? Run this again with --paste.)\n";
 
 impl Owner for InBrowser<'_> {

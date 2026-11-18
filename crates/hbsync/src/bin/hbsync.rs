@@ -1,6 +1,6 @@
 //! The Homebase Filesync command line: sets syncing up and controls the daemon (`hbsyncd`).
 
-use std::io::{BufRead, IsTerminal, Write};
+use std::io::{BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc::Receiver;
@@ -626,7 +626,7 @@ struct Approve {
     /// Approve in a browser on another computer: none is opened here, and the address that
     /// one ends on is pasted here [default: when this computer has no display, or is used
     /// over SSH, and you are at its terminal].
-    #[arg(long)]
+    #[arg(long, conflicts_with = "browser")]
     paste: bool,
 }
 
@@ -648,8 +648,8 @@ impl Approve {
     /// The lines typed at the terminal, where the owner's answer is taken from a pasted
     /// address too: asked for (`--paste`, also from a pipe), or no browser is opened here
     /// and someone is at the terminal. Never from a terminal this process is in the
-    /// background of, nor beside a browser named to run in it. Read by a thread of their
-    /// own, from the first asking on (neither command reads anything else).
+    /// background of ([`Approve::unread`] says so). Read by a thread of their own, from the
+    /// first asking on (neither command reads anything else).
     fn typed(&self) -> Option<Typed> {
         let terminal = std::io::stdin().is_terminal();
         let wanted = self.paste || (self.opens() == setup::Opens::No && terminal);
@@ -663,24 +663,46 @@ impl Approve {
         }))
     }
 
+    /// What the link comes with where no address is read: that `--paste` has it read, or,
+    /// asked for and not read (the command is in the terminal's background), why.
+    fn unread(&self) -> &'static str {
+        match self.paste {
+            true => {
+                "(--paste: the terminal can't be read while this runs in the background. Bring \
+                 it to the foreground, or run it again there.)\n"
+            }
+            false => setup::PASTE_HINT,
+        }
+    }
+
     /// The owner's answers in the browser, as asked for, with `typed` ([`Approve::typed`]).
     fn owner<'a>(&'a self, typed: Option<&'a Typed>) -> setup::InBrowser<'a> {
         setup::InBrowser {
             opens: self.opens(),
             say: &|line| println!("{line}"),
             typed: typed.map(|typed| &**typed),
+            unread: self.unread(),
         }
     }
 }
 
-/// The lines of standard input from now on, read by a thread of its own till the input
-/// ends; one that isn't text is passed over.
+/// The lines of standard input from now on, read by a thread of its own till the input ends
+/// (or till nobody takes them any more). What was typed before it began comes at once, and
+/// isn't an answer to a link not shown yet: passed over ([`TYPED_AHEAD`]). A line that isn't
+/// text is too; one longer than an address can be comes in pieces; and where more come than
+/// are taken (a pipe), the reading waits.
 fn typed_lines() -> Receiver<String> {
-    let (tx, rx) = std::sync::mpsc::channel();
+    let (tx, rx) = std::sync::mpsc::sync_channel(64);
     std::thread::spawn(move || {
-        for line in std::io::stdin().lock().lines() {
-            let sent = match line {
-                Ok(line) => tx.send(line).is_ok(),
+        let began = std::time::Instant::now();
+        let mut input = std::io::stdin().lock();
+        loop {
+            let mut line = String::new();
+            let read = (&mut input).take(LINE_AT_MOST).read_line(&mut line);
+            let ahead = began.elapsed() < TYPED_AHEAD;
+            let sent = match read {
+                Ok(0) => false,
+                Ok(_) => ahead || tx.send(line).is_ok(),
                 Err(e) => e.kind() == std::io::ErrorKind::InvalidData,
             };
             if !sent {
@@ -690,6 +712,13 @@ fn typed_lines() -> Receiver<String> {
     });
     rx
 }
+
+/// How long after the reading began a line counts as typed before it ([`typed_lines`]): what
+/// waits in the terminal comes within a millisecond, and nobody pastes an address this fast.
+const TYPED_AHEAD: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// A line read is at most this long (an address is about 450 bytes).
+const LINE_AT_MOST: u64 = 8192;
 
 fn answer_held(paths: &Paths, yes: bool, answer: HeldAnswer) -> Res<()> {
     let Some(status) = daemon::status(paths)? else {
