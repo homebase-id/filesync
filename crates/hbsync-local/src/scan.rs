@@ -304,6 +304,10 @@ pub fn rescan_entries(
         let folders = diff.removed.iter().filter(|r| r.kind == NodeKind::Folder);
         let gone: HashSet<RelPath> = folders.map(|r| r.path.clone()).collect();
         let below_gone = |path: &RelPath| {
+            // (Nothing is built to ask where no folder is taken away.)
+            if gone.is_empty() {
+                return false;
+            }
             let mut dir = path.parent();
             while let Some(at) = dir {
                 if gone.contains(&at) {

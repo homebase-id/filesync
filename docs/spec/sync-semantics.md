@@ -1072,7 +1072,10 @@ would name nothing), any other is made anew.
   drive (runner `a_folder_of_shares_back_as_a_copy_is_taken_again_while_syncing`). A known
   limit: copied back piece by piece, the folder is sent as the user's own from the moment
   its first items are (a sync may begin before the marker is copied), and isn't taken
-  afterwards; the log says that a folder holding the marker wasn't taken.
+  afterwards; nor is one renamed into the top whole in the middle of a running sync that
+  lists the top (a placement there, a rescan the sync asks for), which that sync may send
+  before the folder is opened again. The log says that a folder holding the marker wasn't
+  taken.
 - A marker anywhere else does nothing (junk): copied into a synced folder at the top, that
   folder stays synced, with what is in it and what comes (scan
   `the_folder_of_shares_never_reaches_the_db_and_a_copied_marker_does_nothing`, engine
