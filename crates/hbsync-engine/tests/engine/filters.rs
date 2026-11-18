@@ -387,6 +387,36 @@ fn a_folder_of_shares_at_a_synced_folders_place_gets_nothing_of_the_drive() -> R
     Ok(())
 }
 
+/// A synced folder moved into another, and a sync before a scan has seen it: what the drive
+/// has for it isn't placed where it was, and it isn't taken for deleted (no scan of that
+/// place alone is asked for). The scan that follows sees the move, and the drive's file comes
+/// into the folder where it is now.
+#[test]
+fn a_folder_moved_before_a_scan_isnt_taken_for_deleted() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("Team/plan.txt", "ours")?;
+    a.write("Archive/old.txt", "o")?;
+    a.sync()?;
+    b.sync()?;
+    b.write("Team/new.txt", "another device's")?;
+    b.sync()?;
+
+    fs::rename(a.root.join("Team"), a.root.join("Archive/Team"))?;
+    // (No scan before it.)
+    a.engine.sync("2026-10-08", true)?;
+    assert!(!a.root.join("Team").exists(), "made again where it was");
+    a.sync()?;
+    b.sync()?;
+    let moved = ["new.txt = another device's", "plan.txt = ours"];
+    assert_eq!(a.tree_text("Archive/Team"), moved);
+    assert_eq!(b.tree_text("Archive/Team"), moved);
+    let removed = server.lock().map_err(|_| "poisoned")?.removed().count();
+    assert_eq!(removed, 0, "taken for deleted, and sent again");
+    Ok(())
+}
+
 /// The folder of shares moved into a synced folder (a slip of the hand, §10): nothing of it
 /// is sent, also when it is changed there, and a folder of its name the drive has in that
 /// folder isn't put into it (it waits). Moved back to the top it is the folder of shares as

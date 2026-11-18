@@ -93,9 +93,9 @@ pub(crate) struct Executor<'a> {
     progress: Arc<Counters>,
     /// The transfers already in `progress`'s total.
     counted: HashSet<NodeId>,
-    /// The folders found on disk as their rows have them, this run
-    /// ([`Executor::target_path`]).
-    parents: HashSet<NodeId>,
+    /// The folders something goes into, looked at this run: whether each is on disk the one
+    /// its row has ([`Executor::target_path`]).
+    parents: HashMap<NodeId, bool>,
     /// The folder's refusals of the operations planned ([`crate::refused`]).
     refusals: Refusals,
     /// The sync root, written only through it.
@@ -189,7 +189,7 @@ impl<'a> Executor<'a> {
             stop: None,
             progress: Arc::default(),
             counted: HashSet::new(),
-            parents: HashSet::new(),
+            parents: HashMap::new(),
             refusals: Refusals::default(),
             disk: Disk::new(folder, &cfg.hooks),
             moved_out: None,
@@ -736,24 +736,20 @@ impl<'a> Executor<'a> {
         } else {
             match self.db.read(|s| s.local_by_node(parent))? {
                 Some(row) if row.kind == NodeKind::Folder => {
-                    // The folder there is the row's still: one that took its place since
-                    // the last scan (the folder of shares renamed onto the name of a synced
-                    // folder just deleted, before the watcher told: what the drive has for
-                    // that folder would be put into it) gets nothing, and the place is
-                    // scanned again. Looked at once a run for each folder something goes
-                    // into: a stat.
-                    if !self.parents.contains(&parent) {
-                        // (By the file's id, without the volume's number, which a restart
-                        // may change before a scan has the rows anew.)
-                        let there = hbsync_platform::stat(&self.disk.abs(&row.path));
-                        let same = there.is_ok_and(|meta| {
-                            meta.kind == EntryKind::Dir
-                                && meta.file_id.file == row.fingerprint.file_id.file
-                        });
-                        if !same {
-                            return Err(rescan(&mut self.report, &row.path));
+                    // The folder there is the row's still ([`folder_still`]): looked at
+                    // once a run for each folder something goes into (a stat), and again
+                    // as a download is placed ([`Executor::still_goes_into`]).
+                    let still = match self.parents.get(&parent) {
+                        Some(still) => *still,
+                        None => {
+                            let still = folder_still(&self.disk, self.folder, &row);
+                            let still = still.map_err(io_outcome)?;
+                            self.parents.insert(parent, still);
+                            still
                         }
-                        self.parents.insert(parent);
+                    };
+                    if !still {
+                        return Err(not_its_folder(&row.path));
                     }
                     row.path
                 }
@@ -762,6 +758,17 @@ impl<'a> Executor<'a> {
         };
         spell(&parent_path, name, self.folder.os)
             .map_err(|e| Outcome::unsyncable(format!("name can't be used here: {e}")))
+    }
+
+    /// [`Executor::target_path`]'s look at the folder an item goes into, once more as the
+    /// item is placed at `target` (its transfer may have taken long; nothing is cached
+    /// here): the row there, and a stat.
+    fn still_goes_into(&mut self, target: &RelPath) -> Step<()> {
+        match in_its_folder(self.db, &self.disk, self.folder, target)? {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(not_its_folder(&target.parent().unwrap_or_default())),
+            Err(e) => Err(io_outcome(e)),
+        }
     }
 
     /// Whether the item on disk still matches its row.
@@ -895,6 +902,47 @@ pub use recover::{
 use recover::{complete_fork, download_key};
 use schedule::{Retried, Schedule};
 pub use transfer_ops::{never_had, removal_forgotten, tags_lost};
+
+/// Whether the folder at `row`'s place is `row`'s still: a folder is there, with the row's
+/// file id. One that took its place since the last scan gets nothing of what the drive has
+/// for the folder that was there (the folder of shares renamed onto the name of a synced
+/// folder just deleted, before the watcher told: sync semantics §10). By the file's id
+/// without the volume's number (a restart may change that before a scan has the rows anew),
+/// and only where ids tell an item ([`FolderCtx::ids_stable`]: a folder there is taken for
+/// it elsewhere). An error where it can't be looked at.
+fn folder_still(disk: &Disk<'_>, folder: &FolderCtx, row: &LocalRow) -> io::Result<bool> {
+    match hbsync_platform::stat(&disk.abs(&row.path)) {
+        Ok(meta) => Ok(meta.kind == EntryKind::Dir
+            && (!folder.ids_stable() || meta.file_id.file == row.fingerprint.file_id.file)),
+        Err(e) if hbsync_platform::meta::nothing_there(&e) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+/// [`folder_still`] for the folder `target` is in, by its row (the root always is; a folder
+/// without a row isn't).
+fn in_its_folder(
+    db: &mut StateDb,
+    disk: &Disk<'_>,
+    folder: &FolderCtx,
+    target: &RelPath,
+) -> Result<io::Result<bool>, StateError> {
+    let Some(parent) = target.parent().filter(|parent| !parent.is_root()) else {
+        return Ok(Ok(true));
+    };
+    Ok(match db.read(|s| s.get_local(&parent))? {
+        Some(row) if row.kind == NodeKind::Folder => folder_still(disk, folder, &row),
+        _ => Ok(false),
+    })
+}
+
+/// The skip for an item that isn't placed in `folder`, which is no longer the one synced
+/// there: the next plan decides, once a scan has seen what is. No scan is asked for here:
+/// one of that place alone would take a folder moved elsewhere for deleted, where the
+/// watcher's own tells both of its ends.
+fn not_its_folder(folder: &RelPath) -> Outcome {
+    Outcome::stale(format!("{folder} isn't the folder synced there any more"))
+}
 
 /// Whether `meta` (from disk) is what `row` recorded: folders by kind and file id, files by
 /// their full fingerprint.

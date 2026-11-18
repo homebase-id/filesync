@@ -510,6 +510,11 @@ impl Executor<'_> {
             done.keep_for_retry();
             return Ok(Outcome::stale("local item changed during the transfer"));
         }
+        // Nor into another folder that has its folder's place now.
+        if let Err(not_there) = self.still_goes_into(target) {
+            done.keep_for_retry();
+            return Ok(not_there);
+        }
         // The tags go on before the file is in place: a scan in between would read none, and
         // take that for the user removing them. Where they turn out other than its record
         // claims (the write failed, or the volume keeps none), the record says so before the
