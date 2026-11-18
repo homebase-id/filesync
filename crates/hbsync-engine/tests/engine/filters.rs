@@ -363,7 +363,7 @@ fn the_folder_of_shares_moved_into_a_synced_folder_is_neither_sent_nor_merged() 
     a.write("Shared/tom/theirs.txt", "shared with me")?;
     a.write("Work/plan.txt", "mine")?;
     assert!(restart_with(&mut a, load_filter)?, "the filter changed");
-    if a.engine.config().folder.filter.shares_id().is_none() {
+    if !a.engine.config().folder.filter.knows_shares_by_id() {
         // A volume without stable file ids: the folder is known at the top only.
         return Ok(());
     }

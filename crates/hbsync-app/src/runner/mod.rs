@@ -612,6 +612,18 @@ impl Runner {
             && std::fs::symlink_metadata(&self.cfg.folder).is_ok_and(|meta| meta.is_dir())
     }
 
+    /// Puts the folder of shares in its place again while the folder is open, as
+    /// [`Runner::open_once`] does when it opens it (made where it couldn't be, renamed where
+    /// it couldn't give way): whether that did something, for the folder to be opened again
+    /// with it. Costs a connection to the state DB, the record's read and a listing of the
+    /// top.
+    fn place_again(&self, parts: &Parts) -> Result<bool, RunnerError> {
+        let root = SyncRoot::open(&self.cfg.db, &self.cfg.identity, &self.cfg.folder)?;
+        let caseless = parts.engine.config().folder.case_insensitive;
+        let placed = root.place_shares(self.cfg.shares.as_deref(), caseless)?;
+        Ok(placed.made.is_some() || !placed.moved.is_empty())
+    }
+
     fn open_once(&self) -> Result<Parts, RunnerError> {
         let root = &self.cfg.folder;
         let mut cfg = EngineConfig::new(root, &self.cfg.device);
@@ -678,7 +690,7 @@ impl Runner {
             });
         }
         cfg.folder.filter = Arc::new(Filter::load(root, cfg.folder.case_insensitive)?);
-        if cfg.folder.filter.returned() > 0 {
+        if !cfg.folder.filter.returned().is_empty() {
             tracing::warn!(
                 "the folder of shares on record isn't at the top of the folder, and what holds \
                  its marker there wasn't taken as it: it is synced as the account's own, or \
@@ -858,17 +870,30 @@ impl Runner {
                 rules_at = None;
                 check_rules = true;
             }
-            // The folder of shares is asked again: to give way (the next sync asks it, and one
-            // is wanted for that: an idle folder would never ask), or to be made (as the
-            // folder opens again).
+            // The folder of shares is asked again, to give way or to be made, by itself (its
+            // record, a listing, a lookup, a rename): an idle folder is asked too, and the
+            // folder is opened again only where that did something, never to find out.
             if shares_at.is_some_and(|at| now >= at) {
                 shares_at = None;
-                match &mut parts {
-                    Some(p) if p.unmade => parts = None,
-                    Some(p) => p.engine.yield_shares(true),
-                    None => {}
+                let again = now + self.cfg.shares_again;
+                let waits = parts
+                    .as_ref()
+                    .map(|p| (p.stuck || p.unmade, self.place_again(p)));
+                match (waits, &mut parts) {
+                    (Some((_, Ok(true))), _) => {
+                        parts = None;
+                        schedule.want(Why::Rules);
+                    }
+                    (Some((true, Ok(false))), _) => shares_at = Some(again),
+                    // Nothing was found to give way to when it was asked: the engine asks
+                    // again, should it still find something.
+                    (Some((false, Ok(false))), Some(p)) => p.engine.yield_shares(true),
+                    (Some((_, Err(e))), _) => {
+                        tracing::warn!("the folder of shares can't be put in its place: {e}");
+                        shares_at = Some(again);
+                    }
+                    _ => {}
                 }
-                schedule.want(Why::Retry);
             }
             if schedule.look_due(now) {
                 check_rules = true;

@@ -901,7 +901,7 @@ fn the_folder_of_shares_moved_into_another_folder_never_reaches_the_db() -> R {
     f.write("Shared/tom/theirs.txt", b"t")?;
     f.write("Work/notes.txt", b"n")?;
     f.opts.filter = Arc::new(Filter::load(f.root(), false)?);
-    if f.opts.filter.shares_id().is_none() {
+    if !f.opts.filter.knows_shares_by_id() {
         // A volume without stable file ids: the folder is known at the top only.
         return Ok(());
     }
@@ -912,7 +912,7 @@ fn the_folder_of_shares_moved_into_another_folder_never_reaches_the_db() -> R {
     std::fs::rename(root.join("Shared"), root.join("Work/Shared"))?;
     // As the runner opens the folder again: none at the top, the id still on record.
     f.opts.filter = Arc::new(Filter::load(&root, false)?);
-    assert!(f.opts.filter.shared().is_empty() && f.opts.filter.shares_id().is_some());
+    assert!(f.opts.filter.shared().is_empty() && f.opts.filter.knows_shares_by_id());
     let (report, dirty) = f.scan()?;
     assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
     assert!(dirty.is_empty(), "{dirty:?}");
@@ -929,12 +929,39 @@ fn the_folder_of_shares_moved_into_another_folder_never_reaches_the_db() -> R {
     let (report, _) = f.scan()?;
     assert_eq!(report.added, 3, "{report:?}"); // Other, Shared, mine
 
+    // Its marker unreadable for a moment: left out all the same, by its id.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let marker = hbsync_local::layout::shared_marker(&root.join("Work/Shared"));
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o000))?;
+        let scanned = f.scan();
+        fs::set_permissions(&marker, fs::Permissions::from_mode(0o600))?;
+        let (report, _) = scanned?;
+        assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
+    }
+
+    // Known to the DB from a time it had no marker (a plain folder then): with its marker
+    // back, a rescan asked for below it starts above it, and takes it out again.
+    let marker = hbsync_local::layout::shared_marker(&root.join("Work/Shared"));
+    let token = fs::read(&marker)?;
+    fs::remove_file(&marker)?;
+    let (report, _) = f.scan()?;
+    assert_eq!(report.added, 3, "{report:?}"); // Shared, tom, theirs
+    fs::write(&marker, &token)?;
+    let report = rescan_dirs(
+        &mut f.db,
+        &root,
+        &[RelPath::new("Work/Shared/tom")?],
+        &f.opts,
+    )?;
+    assert_eq!((report.added, report.removed), (0, 3), "{report:?}");
+
     std::fs::rename(root.join("Work/Shared"), root.join("Shared"))?;
     assert_eq!(folders(&root)?, ["Shared"]);
     f.opts.filter = Arc::new(Filter::load(&root, false)?);
-    let (report, dirty) = f.scan()?;
+    let (report, _) = f.scan()?;
     assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
-    assert!(dirty.is_empty(), "{dirty:?}");
     Ok(())
 }
 

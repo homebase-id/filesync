@@ -996,8 +996,10 @@ leaves the drive and the other devices by rule 1, and stays here).
 
 The client makes it so that it is never at the top without its marker, nor before it is on
 record (`shares::make`): prepared in `.hbsync/tmp` with a marker holding a new token,
-recorded, then renamed into place, never over anything; a crash in between leaves a
-prepared folder, which the next try makes anew.
+recorded, then renamed into place, never over anything (the marker is on disk before the
+record names it). A crash in between leaves a prepared folder: one that is on record is put
+into place as it is by the next try (never taken apart first: stopped there, the record
+would name nothing), any other is made anew.
 
 - Its name is excluded at the top, as the volume compares names (on macOS in any
   normalization, whatever the volume's case), and by rules 1 and 2: it is
@@ -1037,8 +1039,11 @@ prepared folder, which the next try makes anew.
   `a_folder_of_shares_the_filter_doesnt_know_yet_is_neither_sent_nor_merged`).
 - Moved into another folder (a slip of the hand in the file manager; the same volume, so
   its file id stays) it is left alone there too: a walk knows it by the file id on record,
-  which each listing has, and looks for its marker before it reports or enters it, and a
-  folder of the drive is never made out of it there either (it waits). Nothing of it is
+  which each listing has, and looks for its marker before it reports or enters it (one
+  whose marker can't be looked for just then is left out all the same, by its id; a rescan
+  asked for below it starts in the folder it is in). A folder of the drive is never made
+  out of it there either: nothing gives way below the top, so that folder can't be held
+  here until the folder of shares is moved back, said in a note. Nothing of it is
   sent; back at the top it is the folder of shares as before, and nothing of it was on the
   drive to take away (scan `the_folder_of_shares_moved_into_another_folder_never_reaches_the_db`,
   engine `the_folder_of_shares_moved_into_a_synced_folder_is_neither_sent_nor_merged`).
@@ -1047,7 +1052,10 @@ prepared folder, which the next try makes anew.
 - Back as a copy (moved to another volume and back, restored from a backup: another file
   id, its marker in it) it is taken as the folder of shares again: as the sync folder
   opens, and while it is synced as soon as a folder at the top holds the record's marker
-  (the folder is opened again for it). Taken is the only folder there that holds the marker
+  (the folder is opened again for it, also when one such folder goes and another comes).
+  The record keeps the ids it had before beside the new one (the last few): the folder a
+  copy is taken for may still be in the sync folder, moved into another folder, and is the
+  folder of shares where it is as well. Taken is the only folder there that holds the marker
   and isn't synced: one the state DB has a base for (agreed with the drive), under its name
   as names compare or by its file id (a synced folder a marker was copied into stays the
   user's own, renamed or not). One only scanned so far (it came whole, a rename into

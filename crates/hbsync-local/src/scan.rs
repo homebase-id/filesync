@@ -402,7 +402,7 @@ fn rescan_diff(
         }
         // A folder the DB doesn't know yet is new: its parent's rescan finds it and walks it in
         // full (its own creation event may come in a later batch, or never).
-        let mut dir = real_dir_prefix(root, dir);
+        let mut dir = real_dir_prefix(root, dir, &opts.filter);
         while db.read(|s| known_folder(s, &dir))?.is_none() {
             dir = dir.parent().unwrap_or_default();
         }
@@ -470,15 +470,26 @@ fn rescan_diff(
 
 /// The longest leading part of `dir` that is a real folder: a folder that no longer exists, or
 /// that a symlink (or junction) now stands in for, is replaced by its nearest real ancestor.
-/// Links are never followed, so a rescan can't reach outside the root through one.
-fn real_dir_prefix(root: &Path, dir: &RelPath) -> RelPath {
+/// Links are never followed, so a rescan can't reach outside the root through one. Nor does
+/// it start in a folder with a file id on record for the folder of shares (moved below the
+/// top, which the DB may know from a time it wasn't one) or below it: it starts in the folder
+/// that one is in, whose listing leaves it out (one more `stat` a folder on the way, only
+/// where an id is on record).
+fn real_dir_prefix(root: &Path, dir: &RelPath, filter: &Filter) -> RelPath {
     let mut real = RelPath::default();
     for name in dir.components() {
         let Ok(next) = real.join(name) else { break };
-        match std::fs::symlink_metadata(next.to_native(root)) {
-            Ok(m) if m.is_dir() => real = next,
+        let at = next.to_native(root);
+        match std::fs::symlink_metadata(&at) {
+            Ok(m) if m.is_dir() => {}
             _ => break,
         }
+        let shares = filter.knows_shares_by_id()
+            && hbsync_platform::meta::stat(&at).is_ok_and(|m| filter.is_shares_id(m.file_id.file));
+        if shares {
+            break;
+        }
+        real = next;
     }
     real
 }

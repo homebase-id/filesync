@@ -1243,13 +1243,15 @@ fn a_folder_of_shares_that_couldnt_give_way_is_asked_again_by_itself() -> R {
 }
 
 /// A folder of shares that can't be made keeps nothing of the account's own from syncing:
-/// there is none, said in the log, and it is made when the folder opens again and it can be.
+/// there is none, said in the log, and it is made by itself once it can be (asked again after
+/// a while, the folder opened anew only when that made it).
 #[test]
 fn a_folder_of_shares_that_cant_be_made_doesnt_stop_the_folder() -> R {
     use hbsync_local::shares::folders;
     let server = server();
     let a = Device::start_with(&server, "a", |c| {
         c.shares = Some("Shared".into());
+        c.shares_again = Duration::from_millis(400);
         // In the way of its making, and not this program's to clear.
         let stray = hbsync_local::layout::tmp_dir(&c.folder)
             .join("shares")
@@ -1261,11 +1263,13 @@ fn a_folder_of_shares_that_cant_be_made_doesnt_stop_the_folder() -> R {
     a.wait_idle()?;
     assert_eq!(a.status().state, State::Idle);
     assert!(folders(&a.root)?.is_empty());
+    // Asked again and again meanwhile, the folder isn't opened anew for it: nothing is read
+    // of the drive.
+    a.settled(Duration::from_millis(1200), PATIENCE, || a.feed_reads())?;
 
+    // By itself once it can be, with nothing changed in the folder to start a sync.
     let stray = hbsync_local::layout::tmp_dir(&a.root).join("shares");
     std::fs::remove_dir_all(stray)?;
-    a.write(".hbsync/ignore", "*.tmp\n")?;
-    a.handle.send(Command::SyncNow);
     wait_until("the folder of shares is made", || {
         folders(&a.root).is_ok_and(|f| f == ["Shared"])
     })?;

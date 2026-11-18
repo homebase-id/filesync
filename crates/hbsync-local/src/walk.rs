@@ -241,12 +241,22 @@ impl Iterator for Walker<'_> {
                 // file id on record (the listing has each folder's: nothing more is read
                 // but for the one that has it).
                 let id = meta.file_id;
-                let held = match dir.is_root() || self.filter.shares_id() == Some(id.file) {
+                let known = self.filter.is_shares_id(id.file);
+                let held = match dir.is_root() || known {
                     true => self.native(&path).map(|at| self.holds_shares(id, &at)),
                     false => None,
                 };
                 match held {
                     Some(Ok(true)) => {
+                        return Some(WalkEvent::Skipped {
+                            path: path.components().collect(),
+                            reason: SkipReason::Excluded,
+                        });
+                    }
+                    // Its marker can't be looked for, and it has an id on record: left out as
+                    // the folder of shares it most likely is (reported, it would have a row,
+                    // and a rescan below it would start in it).
+                    Some(Err(_)) if known => {
                         return Some(WalkEvent::Skipped {
                             path: path.components().collect(),
                             reason: SkipReason::Excluded,
