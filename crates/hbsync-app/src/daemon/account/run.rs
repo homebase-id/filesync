@@ -431,9 +431,6 @@ impl Account {
                 }
             }
             notifications.tick(Instant::now(), paused);
-            for share in &mut shares {
-                share.share.notifications.tick(Instant::now(), paused);
-            }
             keeper.paused(paused);
             // Not while paused: no deletes for good, no pulls. On the keeper's thread: this one
             // never waits for it.
@@ -553,8 +550,11 @@ impl Account {
                 }
                 changed = true;
             }
+            // (Not while it ends: every runner stops, and nothing of the shares is due.)
+            let mut shares_next = None;
             if !ending && !shares.is_empty() {
-                changed |= self.run_shares(paths, &mut shares, shares_at.as_ref(), now);
+                let (moved, next) = self.run_shares(paths, &mut shares, shares_at.as_ref(), now);
+                (changed, shares_next) = (changed | moved, next);
             }
             if changed {
                 self.changed.raise();
@@ -580,11 +580,9 @@ impl Account {
                 (!paused).then_some(next_purge),
                 config_again,
                 restart,
+                shares_next,
             ];
-            let of_shares = shares
-                .iter()
-                .flat_map(|s| [s.share.notifications.deadline(now, paused), s.retry]);
-            let wait = wait_for(now, deadlines.into_iter().chain(of_shares).flatten());
+            let wait = wait_for(now, deadlines.into_iter().flatten());
             msgs.extend(requests.recv_timeout(wait).ok());
             msgs.extend(requests.try_iter());
         }
@@ -628,8 +626,10 @@ impl Account {
 
     /// Starts syncing what `share`'s identity shares into its folder in `dir`, the folder of
     /// shares of the main folder `main`: one way, what changes there moving out to the main
-    /// folder's top (sync semantics §13). The folder is made where missing, and set up in the
-    /// share's own DB (found there again when the folder of shares was renamed).
+    /// folder's top (sync semantics §13). The folder is made where missing; its runner sets
+    /// it up in the share's own DB as it opens it (found there again when the folder of
+    /// shares was renamed). Never where something else has its place, a link to a folder
+    /// neither: what that leads to isn't the share's.
     fn start_share(
         &self,
         share: &Sharing,
@@ -642,10 +642,13 @@ impl Account {
             Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(e.into()),
             _ => {}
         }
+        if !std::fs::symlink_metadata(&folder)?.is_dir() {
+            let taken = format!("{} isn't a folder", folder.display());
+            return Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, taken).into());
+        }
         let Share {
             sharer, drive, db, ..
         } = &share.share;
-        hbsync_engine::root::SyncRoot::open_or_create(db, &self.identity, &folder)?;
         let device = config.device_name();
         let mut cfg = RunnerConfig::new(&folder, db, &self.identity, &device);
         cfg.mass_delete = config.mass_delete;
@@ -683,27 +686,32 @@ impl Account {
 
     /// Has each of `shares` synced by a runner in the folder of shares the main folder's
     /// runner told (`at`: the main folder, and the folder of shares in it), while that runner
-    /// shows: started there, started again after it failed, and stopped where that isn't its
-    /// place any more (the folder of shares has another name or is gone, the main folder is
-    /// removed), to start in the new place once it has ended. One that can't start is tried
-    /// again after a pause; the account's own folders sync on. Whether the folders shown
-    /// changed.
+    /// shows: started there, started again after it failed (its folder gone: made again), and
+    /// stopped where that isn't its place any more (the folder of shares has another name or
+    /// is gone, the main folder is removed), to start in the new place once it has ended. One
+    /// that can't start is tried again after a pause; the account's own folders sync on. A
+    /// share's drive is read (its notifications' timer) only while a runner syncs it.
+    ///
+    /// Whether the folders shown changed, and when to look again at the latest: a start to
+    /// try again, a drive to read.
     fn run_shares(
         &self,
         paths: &Paths,
         shares: &mut [Sharing],
         at: Option<&(PathBuf, PathBuf)>,
         now: Instant,
-    ) -> bool {
+    ) -> (bool, Option<Instant>) {
         let mut changed = false;
         // The shares to start, each with the pauses of the runner it starts again for.
         let mut starting: Vec<(usize, Option<Backoff>)> = Vec::new();
         let (at, paused) = {
             let mut shown = lock(&self.shown);
+            let paused = shown.paused();
             // While the main folder that holds the folder of shares is synced.
             let at = at.filter(|(main, _)| shown.own().any(|r| r.root.folder == *main));
-            for (i, share) in shares.iter().enumerate() {
-                let theirs = |r: &&mut Running| r.sharer.as_ref() == Some(&share.share.sharer);
+            for (i, share) in shares.iter_mut().enumerate() {
+                let sharer = share.share.sharer.clone();
+                let theirs = |r: &&mut Running| r.sharer.as_ref() == Some(&sharer);
                 // One at most: the next starts once the last has ended.
                 let again = match shown.runners.iter_mut().find(theirs) {
                     Some(r) if !at.is_some_and(|(_, dir)| share.is_at(dir, &r.root.folder)) => {
@@ -711,69 +719,94 @@ impl Account {
                             r.stop_for_good();
                             changed = true;
                         }
-                        continue;
+                        // Still ending: started in the new place once it has (it wakes the
+                        // account). One that only waited to start again is gone at once.
+                        if !matches!(r.life, Life::Gone) {
+                            continue;
+                        }
+                        None
                     }
                     // Started again where it was, below: this one goes.
                     Some(r) if r.due(now) => {
                         r.life = Life::Gone;
                         Some(r.backoff)
                     }
-                    Some(_) => continue,
+                    Some(_) => {
+                        share.share.notifications.tick(now, paused.is_some());
+                        continue;
+                    }
                     None => None,
                 };
-                if at.is_some() && share.retry.is_none_or(|at| now >= at) {
-                    starting.push((i, again));
+                match at {
+                    Some(_) if share.retry.is_none_or(|at| now >= at) => starting.push((i, again)),
+                    Some(_) => {}
+                    // No place to start in: nothing to try again.
+                    None => share.retry = None,
                 }
             }
             let before = shown.runners.len();
             shown.runners.retain(|r| !matches!(r.life, Life::Gone));
             changed |= shown.runners.len() != before;
-            (at, shown.paused())
+            (at, paused)
         };
-        let (Some((main, dir)), false) = (at, starting.is_empty()) else {
-            return changed;
-        };
-        // Started without the lock, as the account's own. Never into a folder of that name
-        // that isn't the folder of shares (gone, or renamed, since its runner told): what the
-        // identities share would be the account's own there, and sent.
-        let config = Config::now(paths);
-        let within = hbsync_local::shares::Record::read(main).and_then(|r| r.is(dir));
-        for (i, again) in starting {
-            let share = &mut shares[i];
-            let started = match (&config, &within) {
-                (None, _) => {
-                    share.retry = Some(now + CONFIG_AGAIN);
-                    continue;
-                }
-                (Some(config), Ok(true)) => self.start_share(share, config, (main, dir), paused),
-                (Some(_), _) => {
-                    let gone = format!("{} isn't the folder of shares", dir.display());
-                    Err(std::io::Error::new(std::io::ErrorKind::NotFound, gone).into())
-                }
-            };
-            match started {
-                Ok(new) => {
-                    (share.retry, share.backoff) = (None, Backoff::new());
-                    let mut shown = lock(&self.shown);
-                    if let Some(command) = shown.missed(paused) {
-                        new.handle.send(command);
+        if let Some((main, dir)) = at.filter(|_| !starting.is_empty()) {
+            // Started without the lock, as the account's own. Never into a folder of that
+            // name that isn't the folder of shares (gone, or renamed, since its runner told):
+            // what the identities share would be the account's own there, and sent.
+            let config = Config::now(paths);
+            let within = hbsync_local::shares::Record::read(main).and_then(|r| r.is(dir));
+            for (i, again) in starting {
+                let share = &mut shares[i];
+                let started = match (&config, &within) {
+                    (None, _) => {
+                        share.retry = Some(now + CONFIG_AGAIN);
+                        continue;
                     }
-                    let backoff = again.unwrap_or(new.backoff);
-                    shown.runners.push(Running { backoff, ..new });
-                    changed = true;
-                }
-                Err(e) => {
-                    let pause = share.backoff.next();
-                    tracing::warn!(
-                        "what {} shares can't be synced into {} ({e}): trying again in {pause:?}",
-                        share.share.sharer,
-                        dir.display()
-                    );
-                    share.retry = Some(now + pause);
+                    (Some(config), Ok(true)) => {
+                        self.start_share(share, config, (main, dir), paused)
+                    }
+                    (Some(_), _) => {
+                        let gone = format!("{} isn't the folder of shares", dir.display());
+                        Err(std::io::Error::new(std::io::ErrorKind::NotFound, gone).into())
+                    }
+                };
+                match started {
+                    Ok(new) => {
+                        (share.retry, share.backoff) = (None, Backoff::new());
+                        let mut shown = lock(&self.shown);
+                        if let Some(command) = shown.missed(paused) {
+                            new.handle.send(command);
+                        }
+                        let backoff = again.unwrap_or(new.backoff);
+                        shown.runners.push(Running { backoff, ..new });
+                        changed = true;
+                    }
+                    Err(e) => {
+                        let pause = share.backoff.next();
+                        tracing::warn!(
+                            "what {} shares can't be synced into {} ({e}): trying again in {pause:?}",
+                            share.share.sharer,
+                            dir.display()
+                        );
+                        share.retry = Some(now + pause);
+                    }
                 }
             }
         }
-        changed
+        // A start to try again (only where there is a place: cleared above otherwise), and
+        // the drives of those a runner syncs.
+        let shown = lock(&self.shown);
+        let synced = |s: &&Sharing| {
+            shown
+                .shown()
+                .any(|r| r.sharer.as_ref() == Some(&s.share.sharer))
+        };
+        let reads = shares
+            .iter()
+            .filter(synced)
+            .filter_map(|s| s.share.notifications.deadline(now, paused.is_some()));
+        let next = shares.iter().filter_map(|s| s.retry).chain(reads).min();
+        (changed, next)
     }
 
     /// The credentials, waiting while the keychain can't be read; `None` when stopped first.

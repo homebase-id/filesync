@@ -25,6 +25,8 @@ pub struct AccountParts {
     pub notifications: Notifications,
     /// What other identities share with the account, each a drive of its own: synced into a
     /// folder of its own in the main folder's folder of shares (sync semantics §10, §13).
+    /// Whoever makes them leaves out a share whose drive or DB can't be opened (told), and
+    /// tries it again: that is never the account's error, whose own folders sync on.
     pub shares: Vec<Share>,
 }
 

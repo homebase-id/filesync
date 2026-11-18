@@ -508,17 +508,28 @@ included (service managers restart it then).
   sharer's identity spelled as a folder's name here). What changes there moves out to the
   main folder's top, where it is the account's own. The main folder's runner tells the
   account where the folder of shares is each time it opens the folder; the account makes
-  the share's folder there (never where its place isn't in the folder of shares any more),
-  sets it up in the share's DB, and starts its runner. When the folder of shares has another
-  name (the user's, or one it gave way to), is gone, or the main folder is removed, the
-  runner stops, and starts in the new place once it has ended (the folder is found again by
-  its marker). It never counts as one of the account's folders: not its main folder, not in
-  the config, not set up again with the account's DB, not removed by `hbsync remove`; the
-  status lists it after the account's own, pause and Sync now reach it, and Recently
-  deleted is the account's drive's alone. A share's runner that can't start (something else
-  has its place) is tried again after a pause, and one whose DB can't be used backs off,
-  the account's folders syncing on (its DB isn't set aside for it yet). Its drive is read
-  on a timer (5 minutes) and at Sync now, until its changes are announced.
+  the share's folder there (never where its place isn't in the folder of shares any more,
+  by the record; never where something else has its place, a link to a folder neither) and
+  starts its runner, which sets the folder up in the share's DB as it opens it, and again
+  when its marker or its row there is gone (what it holds that the sharer's drive doesn't
+  moves out then, as any change there). When the folder of shares has another name (the
+  user's, or one it gave way to), is gone, or the main folder is removed, the runner stops,
+  and starts in the new place once it has ended (the folder is found again by its marker).
+  A share's runner whose folder is gone (deleted, renamed) doesn't wait for it as the
+  account's own do: it ends, and the account starts it again after a pause, the folder made
+  again and synced anew; one renamed stays where it is, unsynced. It never counts as one of
+  the account's folders: not its main folder, not in the config, not set up again with the
+  account's DB, not removed by `hbsync remove`; the status lists it after the account's
+  own, pause and Sync now reach it, and Recently deleted is the account's drive's alone. A
+  share's runner that can't start is tried again after a pause (5 s, doubling to 5
+  minutes), and one whose DB can't be used backs off, the account's folders syncing on
+  (its DB isn't set aside for it yet). Its drive is read on a timer (5 minutes) and at Sync
+  now, until its changes are announced, and only while a runner syncs it.
+
+  Known limit, until the engine never makes a folder again that is gone: a share's runner
+  that is downloading when the folder of shares is renamed keeps its old path until it is
+  stopped (a second with a watcher, up to a minute without), and a download begun then
+  makes `<old name>/<sharer>` again as plain folders, which the main folder would send.
 
   On Linux the main folder's watcher is recursive and also holds a watch on each folder in
   the folder of shares, whose events it drops: a folder there costs two inotify watches,

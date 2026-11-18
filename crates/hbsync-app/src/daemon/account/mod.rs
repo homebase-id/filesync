@@ -1141,6 +1141,70 @@ mod tests {
         started.stop(checked)?
     }
 
+    /// A link to a folder at a share's place isn't the share's folder: what it leads to is
+    /// left as it is, nothing of it synced or moved.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_a_shares_place_is_never_synced_into() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let tom_server = FakeServer::new(ServerConfig::default());
+        let (_, folder, server, start) = shared_with(home.path(), &tom_server)?;
+        use hbsync_local::shares::{Made, make};
+        assert_eq!(make(&folder, "Shared")?, Made::Made);
+        let elsewhere = home.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere)?;
+        std::fs::write(elsewhere.join("private.txt"), "not the share's")?;
+        let at = folder.join("Shared").join("tom.example");
+        std::os::unix::fs::symlink(&elsewhere, &at)?;
+        let started = start();
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            started.wait("its own folder syncs", &synced)?;
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            let (_, folders) = started.account.status();
+            assert_eq!(folders.len(), 1, "{folders:?}");
+            assert_eq!(
+                std::fs::read_to_string(elsewhere.join("private.txt"))?,
+                "not the share's"
+            );
+            assert!(!elsewhere.join(".hbsync").exists());
+            assert_eq!(
+                server.lock().map_err(|_| "poisoned")?.live_names(),
+                ["mine.txt"]
+            );
+            Ok(())
+        };
+        let checked = checks();
+        started.stop(checked)?
+    }
+
+    /// A share's folder deleted while it is synced is made again, in the folder of shares,
+    /// and synced anew (its runner ends for it, and its account starts it again).
+    #[test]
+    fn a_shares_folder_deleted_is_made_again() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let tom_server = FakeServer::new(ServerConfig::default());
+        let (_, folder, _, start) = shared_with(home.path(), &tom_server)?;
+        let started = start();
+        let at = folder.join("Shared").join("tom.example");
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            started.wait_all("both sync", &both_synced)?;
+            std::fs::remove_dir_all(&at)?;
+            let _ = started.account.sync_now();
+            started.wait_all(
+                "the share's folder is gone for its runner",
+                &|_, folders| {
+                    folders.get(1).is_some_and(|f| f.state == State::Failing) && !at.exists()
+                },
+            )?;
+            started.wait_all("made again and synced", &|s, folders| {
+                both_synced(s, folders) && at.join(".hbsync").is_dir()
+            })?;
+            Ok(())
+        };
+        let checked = checks();
+        started.stop(checked)?
+    }
+
     /// The main folder removed: what others share stops with it (its folder of shares is no
     /// synced folder's any more), its files left where they are, and the account ends.
     #[test]
