@@ -1439,77 +1439,96 @@ fn a_delete_while_the_download_is_in_flight_is_taken() -> R {
     Ok(())
 }
 
-/// A download in folder `d` put in place, and its commit failing after (the folder's row gone
-/// meanwhile, as another engine could have removed it): its record stays, for recovery to
-/// settle what is in place. Only one that failed before its item was in place goes.
+/// A download in folder `d` put in place, and its commit failing after: its record stays, for
+/// recovery to settle what is in place. Only one that failed before its item was in place
+/// goes: so where the folder's row went during the transfer (another engine removed it), which
+/// the look at its folder finds as it is placed ([`Executor::still_goes_into`]).
 #[test]
 fn a_record_stays_when_the_commit_fails_after_placing() -> R {
-    let dir = tempfile::tempdir()?;
-    let path = dir.path().join("state.db");
-    let root = dir.path().join("root");
-    fs::create_dir_all(root.join("d"))?;
-    let (ctx, cfg) = (FolderCtx::new(&root), ExecConfig::default());
-    let mut db = StateDb::open(&path)?;
-    let fake = FakeRemote::new(FakeServer::new(ServerConfig::default()));
-    let folder = NodeId::new();
-    let (node, at) = fake.server().seed_file(folder, "f", b"A", ctx.algorithm)?;
-    let content = FileContent {
-        hash: hash_bytes(b"A", ctx.algorithm),
-        size: 1,
-        mtime_ms: 0,
-        executable: false,
-    };
-    db.write(|s| {
-        s.folder().put_local(&LocalRow {
-            path: RelPath::new("d").expect("a path"),
-            node: folder,
-            kind: NodeKind::Folder,
-            fingerprint: hbsync_platform::stat(&root.join("d"))
-                .expect("the folder")
-                .fingerprint(),
-            executable: None,
-            hash: None,
-            tags: None,
-            send_hash: false,
+    // Whether it was put in place, and how many records are left.
+    let download = |row_goes: bool| -> Result<(bool, usize), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("state.db");
+        let root = dir.path().join("root");
+        fs::create_dir_all(root.join("d"))?;
+        let (ctx, cfg) = (FolderCtx::new(&root), ExecConfig::default());
+        if !row_goes {
+            cfg.hooks.faults.fail(FailPoint::Commit, 1);
+        }
+        let mut db = StateDb::open(&path)?;
+        let fake = FakeRemote::new(FakeServer::new(ServerConfig::default()));
+        let folder = NodeId::new();
+        let (node, at) = fake.server().seed_file(folder, "f", b"A", ctx.algorithm)?;
+        let content = FileContent {
+            hash: hash_bytes(b"A", ctx.algorithm),
+            size: 1,
+            mtime_ms: 0,
+            executable: false,
+        };
+        db.write(|s| {
+            s.folder().put_local(&LocalRow {
+                path: RelPath::new("d").expect("a path"),
+                node: folder,
+                kind: NodeKind::Folder,
+                fingerprint: hbsync_platform::stat(&root.join("d"))
+                    .expect("the folder")
+                    .fingerprint(),
+                executable: None,
+                hash: None,
+                tags: None,
+                send_hash: false,
+            })?;
+            s.account().put_mirror(&MirrorRow::from_content(
+                at,
+                node,
+                folder,
+                NodeKind::File,
+                &NodeContent::file("f", 0, 1, false),
+                Some(content.hash),
+            ))
         })?;
-        s.account().put_mirror(&MirrorRow::from_content(
+        let hook_path = path.clone();
+        let remote = ReadHook {
+            inner: fake,
+            hook: std::sync::Mutex::new(Some(Box::new(move || {
+                if !row_goes {
+                    return;
+                }
+                let gone = StateDb::open(&hook_path)
+                    .and_then(|mut other| other.write(|s| s.folder().delete_local(folder)));
+                assert!(gone.is_ok(), "{gone:?}");
+            }))),
+        };
+        let drive = DriveVersion {
+            state: NodeState::file(folder, "f", content),
             at,
+            base_at: None,
+        };
+        let _ = Executor::new(&mut db, &remote, &ctx, &cfg).run(vec![Op::LocalDownload {
             node,
-            folder,
-            NodeKind::File,
-            &NodeContent::file("f", 0, 1, false),
-            Some(content.hash),
-        ))
-    })?;
-    let hook_path = path.clone();
-    let remote = ReadHook {
-        inner: fake,
-        hook: std::sync::Mutex::new(Some(Box::new(move || {
-            let gone = StateDb::open(&hook_path)
-                .and_then(|mut other| other.write(|s| s.folder().delete_local(folder)));
-            assert!(gone.is_ok(), "{gone:?}");
-        }))),
+            parent: folder,
+            name: "f".into(),
+            replace: false,
+            tags: Tags::default(),
+            drive: Some(Box::new(drive)),
+        }]);
+        assert_eq!(db.read(|s| s.local_by_node(node))?, None, "committed");
+        let placed = match fs::read(root.join("d/f")) {
+            Ok(bytes) => bytes == b"A",
+            Err(_) => false,
+        };
+        Ok((placed, db.read(|s| s.all_placing())?.len()))
     };
-    let drive = DriveVersion {
-        state: NodeState::file(folder, "f", content),
-        at,
-        base_at: None,
-    };
-    let _ = Executor::new(&mut db, &remote, &ctx, &cfg).run(vec![Op::LocalDownload {
-        node,
-        parent: folder,
-        name: "f".into(),
-        replace: false,
-        tags: Tags::default(),
-        drive: Some(Box::new(drive)),
-    }]);
-    assert_eq!(fs::read(root.join("d/f"))?, b"A", "put in place");
     assert_eq!(
-        db.read(|s| s.local_by_node(node))?,
-        None,
-        "the commit failed"
+        download(false)?,
+        (true, 1),
+        "in place, its commit failed: the record stays"
     );
-    assert_eq!(db.read(|s| s.all_placing())?.len(), 1, "the record went");
+    assert_eq!(
+        download(true)?,
+        (false, 0),
+        "its folder's row gone: not placed, no record"
+    );
     Ok(())
 }
 
