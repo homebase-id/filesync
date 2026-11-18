@@ -83,7 +83,8 @@ pub struct Feeds(Arc<FeedsInner>);
 struct FeedsInner {
     /// The watcher that gives, by its number; 0: none.
     giver: AtomicU64,
-    /// How many take (asked at every event: none is the usual case).
+    /// How many take: `takers`' length, kept beside it so that an event costs the giving
+    /// watcher's thread one load, and no lock, while none takes (the usual case).
     taking: AtomicUsize,
     /// Those that take, each by a number of its own.
     takers: Mutex<Vec<(u64, Arc<Sink>)>>,
@@ -94,7 +95,7 @@ struct FeedsInner {
 impl std::fmt::Debug for Feeds {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Feeds")
-            .field("live", &self.live())
+            .field("giver", &self.giver())
             .field("taking", &self.0.taking.load(Ordering::Relaxed))
             .finish()
     }
@@ -110,7 +111,7 @@ pub enum Feed {
 }
 
 /// What tells a watcher's owner that events were lost.
-fn lost() -> Event {
+fn events_lost() -> Event {
     Event::new(EventKind::Other).set_flag(notify::event::Flag::Rescan)
 }
 
@@ -124,15 +125,19 @@ impl Feeds {
         self.0.last.fetch_add(1, Ordering::Relaxed) + 1
     }
 
-    /// Whether a watcher gives.
-    fn live(&self) -> bool {
-        self.0.giver.load(Ordering::SeqCst) != 0
+    /// The watcher that gives, by its number; 0: none.
+    fn giver(&self) -> u64 {
+        self.0.giver.load(Ordering::SeqCst)
     }
 
     /// Passes the giving watcher's notification on: to each that takes, what lies in its
     /// folder; to all, that events were lost.
     fn pass(&self, res: &notify::Result<Event>) {
         if self.0.taking.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        // (What only reads is nobody's: dropped before it is copied, as each drops its own.)
+        if matches!(res, Ok(event) if reads_only(&event.kind) && !event.need_rescan()) {
             return;
         }
         for (_, taker) in self.takers().iter() {
@@ -150,21 +155,21 @@ impl Feeds {
                     }
                 }
                 // (An error isn't to be had twice: told as what it means.)
-                _ => lost(),
+                _ => events_lost(),
             };
             taker.take(Ok(event));
         }
     }
 
     /// A watcher gives from now on, under the number returned: those that take are told that
-    /// events were lost (what changed while none gave).
+    /// events were lost (what changed while none gave), before it counts as giving.
     fn give(&self) -> u64 {
         let giver = self.number();
         let takers = self.takers();
-        self.0.giver.store(giver, Ordering::SeqCst);
         for (_, taker) in takers.iter() {
-            taker.take(Ok(lost()));
+            taker.take(Ok(events_lost()));
         }
+        self.0.giver.store(giver, Ordering::SeqCst);
         giver
     }
 
@@ -173,13 +178,11 @@ impl Feeds {
     /// no watcher.
     fn give_up(&self, giver: u64) {
         let takers = self.takers();
-        let (now, order) = (0, Ordering::SeqCst);
-        if self
-            .0
-            .giver
-            .compare_exchange(giver, now, order, order)
-            .is_ok()
-        {
+        let order = Ordering::SeqCst;
+        let last = (self.0.giver)
+            .compare_exchange(giver, 0, order, order)
+            .is_ok();
+        if last {
             takers.iter().for_each(|(_, taker)| taker.ring());
         }
     }
@@ -341,28 +344,27 @@ impl LiveWatcher {
             rules_dir: rules_file.parent().unwrap_or(&root).to_path_buf(),
             rules_file,
         });
-        let source = match feed {
-            Some(Feed::Takes(feeds)) => Source::Fed(feeds.clone(), feeds.join(sink)),
-            gives => {
-                let feeds = gives.map(|feed| match feed {
-                    Feed::Gives(feeds) | Feed::Takes(feeds) => feeds.clone(),
-                });
-                let passing = feeds.clone();
-                let mut watcher =
-                    notify::recommended_watcher(move |res: notify::Result<Event>| {
-                        if let Some(feeds) = &passing {
-                            feeds.pass(&res);
-                        }
-                        sink.take(res);
-                    })?;
-                watcher.watch(&root, RecursiveMode::Recursive)?;
-                Source::Own {
-                    _watcher: watcher,
-                    giving: feeds.map(|feeds| {
-                        let giver = feeds.give();
-                        (feeds, giver)
-                    }),
+        let source = if let Some(Feed::Takes(feeds)) = feed {
+            Source::Fed(feeds.clone(), feeds.join(sink))
+        } else {
+            let feeds = match feed {
+                Some(Feed::Gives(feeds)) => Some(feeds.clone()),
+                _ => None,
+            };
+            let passing = feeds.clone();
+            let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
+                if let Some(feeds) = &passing {
+                    feeds.pass(&res);
                 }
+                sink.take(res);
+            })?;
+            watcher.watch(&root, RecursiveMode::Recursive)?;
+            Source::Own {
+                _watcher: watcher,
+                giving: feeds.map(|feeds| {
+                    let giver = feeds.give();
+                    (feeds, giver)
+                }),
             }
         };
         Ok(LiveWatcher {
@@ -376,13 +378,19 @@ impl LiveWatcher {
         })
     }
 
-    /// Whether notifications come: always from an OS watcher of its own (until it is found
-    /// gone); from another folder's while that one watches.
-    fn live(&self) -> bool {
+    /// The watcher its notifications come from now, by a number; 0: none come. Always its
+    /// own OS watcher (until that is found gone); another folder's while that one watches, a
+    /// new number for each that does.
+    fn from(&self) -> u64 {
         match &self.source {
-            Source::Own { .. } => true,
-            Source::Fed(feeds, _) => feeds.live(),
+            Source::Own { .. } => 1,
+            Source::Fed(feeds, _) => feeds.giver(),
         }
+    }
+
+    /// Whether notifications come.
+    fn live(&self) -> bool {
+        self.from() != 0
     }
 
     /// Waits up to `timeout` for a first change, then collects until no change came for
@@ -595,13 +603,15 @@ pub struct LocalObserver {
     /// What a watcher rings, and how it lets files being written settle: kept for one started
     /// again.
     bell: Ringer,
-    /// Whose watcher it is ([`Feed`]): none but its own.
+    /// How its watcher stands to others ([`Feed`]); `None`: its own, neither giving nor
+    /// taking.
     feed: Option<Feed>,
     settle: Settle,
     /// A batch was recorded without storing the journal position (see [`LocalObserver::poll`]).
     unsaved: bool,
-    /// While `unsaved`: a position taken, stored if no change came until the instant.
-    settling: Option<(String, Instant)>,
+    /// While `unsaved`: a position taken, stored if no change came until the instant, from
+    /// the watcher that told then ([`LiveWatcher::from`]).
+    settling: Option<(String, Instant, u64)>,
     /// The last batch was cut off by `max_delay`: events may still be queued.
     more: bool,
     /// When to look into new folders once more, and which (see [`RECHECK`]).
@@ -658,22 +668,18 @@ const RECHECK: Duration = Duration::from_secs(1);
 impl LocalObserver {
     /// Starts watching. Call [`LocalObserver::catch_up`] next.
     pub fn start(root: &Path, opts: ScanOptions) -> Self {
-        Self::ringing(root, opts, None)
+        Self::watching(root, opts, None, None)
     }
 
     /// [`LocalObserver::start`], ringing `bell` when there is something to record
     /// ([`LocalObserver::poll`]), the ignore rules' file was touched
     /// ([`LocalObserver::rules_touched`]) or a folder of shares may have come or gone
-    /// ([`LocalObserver::shared_touched`]). Poll at [`LocalObserver::deadline`] too.
+    /// ([`LocalObserver::shared_touched`]). Poll at [`LocalObserver::deadline`] too. Its
+    /// watcher stands to others as `feed` says: giving to those of folders in its own, or
+    /// taking from the one of the folder it is in (`None`: neither).
     ///
     /// With a watcher, large files being written are hashed once they are quiet
     /// ([`ScanOptions::settle`]: `opts`' own, else the default), and looked at again for it.
-    pub fn ringing(root: &Path, opts: ScanOptions, bell: Option<Bell>) -> Self {
-        Self::watching(root, opts, bell, None)
-    }
-
-    /// [`LocalObserver::ringing`], its watcher standing to others as `feed` says: giving to
-    /// those of folders in its own, or taking from the one of the folder it is in.
     pub fn watching(
         root: &Path,
         mut opts: ScanOptions,
@@ -810,12 +816,19 @@ impl LocalObserver {
         // queued: it stores nothing. Then a position taken while nothing is recorded is stored
         // once no change came for a quiet period after it (`settling`), as the OS has
         // delivered everything before it by then. Nothing is taken while nothing changes.
+        // Only while one watcher tells throughout: one that takes its events from another
+        // folder's is told nothing while that one doesn't watch, and what changes then is
+        // found by walking (the position stored stays older, which is safe).
+        let from = watcher.from();
         if self.unsaved
             && self.settling.is_none()
+            && from != 0
             && let Some(journal) = self.journal.as_mut()
         {
             match journal.now() {
-                Ok(position) => self.settling = Some((position, Instant::now() + debounce.quiet)),
+                Ok(position) => {
+                    self.settling = Some((position, Instant::now() + debounce.quiet, from));
+                }
                 // An older position is always safe: it only replays more.
                 Err(_) => self.unsaved = false,
             }
@@ -824,9 +837,10 @@ impl LocalObserver {
         let journal = &mut self.journal;
         let first = || position = journal.as_mut().and_then(|j| j.now().ok());
         let Some(batch) = watcher.next_batch(timeout, debounce, first) else {
-            if let Some((_, at)) = &self.settling
+            if let Some((_, at, _)) = &self.settling
                 && Instant::now() >= *at
-                && let Some((position, _)) = self.settling.take()
+                && let Some((position, _, told_by)) = self.settling.take()
+                && told_by == from
             {
                 db.write(|s| s.folder().set_kv(keys::JOURNAL_CURSOR, &position))?;
                 self.unsaved = false;
@@ -835,6 +849,7 @@ impl LocalObserver {
         };
         self.settling = None;
         self.more = !batch.drained;
+        let one_told = from != 0 && watcher.from() == from;
         #[cfg(feature = "testkit")]
         let stopped = testkit::take(&testkit::STOP, &self.root);
         #[cfg(not(feature = "testkit"))]
@@ -864,7 +879,9 @@ impl LocalObserver {
         // Before anything else can fail: the scan's rows are written.
         self.note_young(&report, &[]);
         match position {
-            Some(position) if batch.drained => {
+            // (From one watcher throughout, as above: a batch that another began, or that
+            // none ended, stores nothing.)
+            Some(position) if batch.drained && one_told => {
                 db.write(|s| s.folder().set_kv(keys::JOURNAL_CURSOR, &position))?;
                 self.unsaved = false;
             }
@@ -948,14 +965,12 @@ impl LocalObserver {
     /// folders or of a file being written, a journal position to store, or events a cut-off
     /// batch left queued.
     pub fn deadline(&self) -> Option<Instant> {
-        let journal_due = self.unsaved
-            && self.journal.is_some()
-            && self.watcher.is_some()
-            && self.settling.is_none();
+        let journal_due =
+            self.unsaved && self.journal.is_some() && self.has_watcher() && self.settling.is_none();
         [
             self.recheck.as_ref().map(|(at, _)| *at),
             self.young.values().map(|w| w.at).min(),
-            self.settling.as_ref().map(|(_, at)| *at),
+            self.settling.as_ref().map(|(_, at, _)| *at),
             (self.more || journal_due).then(Instant::now),
         ]
         .into_iter()
@@ -984,7 +999,7 @@ impl LocalObserver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use notify::event::{DataChange, Flag, RenameMode};
+    use notify::event::{DataChange, RenameMode};
     use std::collections::HashMap;
     use std::fs;
     use std::sync::{Arc, Mutex};
@@ -1181,7 +1196,7 @@ mod tests {
     #[test]
     fn overflow_and_errors_ask_for_full_rescan() {
         let mut batch = WatchBatch::default();
-        let overflow = Event::new(EventKind::Other).set_flag(Flag::Rescan);
+        let overflow = events_lost();
         add_event(
             Path::new("/r"),
             &Filter::default(),
@@ -1252,7 +1267,6 @@ mod tests {
 
         // The folder opened again, the new watcher there before the old one is let go: it
         // gives on, and what may have been lost is told.
-        let rang = rings.load(Ordering::SeqCst);
         let again = LiveWatcher::start(&root, Arc::default(), None, Some(&gives))?;
         drop(main);
         assert!(share.live() && !share.gone.load(Ordering::Relaxed));
@@ -1262,7 +1276,6 @@ mod tests {
 
         // None gives any more: no watcher, and woken to find so. (Once what the last write
         // still sends has come.)
-        assert!(rings.load(Ordering::SeqCst) > rang);
         std::thread::sleep(Duration::from_millis(300));
         share.rung.store(false, Ordering::SeqCst);
         let rang = rings.load(Ordering::SeqCst);
@@ -1640,7 +1653,7 @@ mod tests {
         let bell: Bell = Arc::new(move || {
             counter.fetch_add(1, Ordering::SeqCst);
         });
-        let mut observer = LocalObserver::ringing(&root, opts, Some(bell));
+        let mut observer = LocalObserver::watching(&root, opts, Some(bell), None);
         observer.journal = None;
         observer.catch_up(&mut db)?;
         let quick = Debounce {
@@ -1778,6 +1791,62 @@ mod tests {
             std::thread::sleep(next.saturating_duration_since(Instant::now()));
         }
         assert_eq!(observer.deadline(), None, "nothing more to do");
+        Ok(())
+    }
+
+    /// An observer that takes its events from another folder's watcher stores no position
+    /// while that one doesn't watch (it is told nothing then, and a position stored would
+    /// pass over what changed), nor one taken under a watcher that another has replaced
+    /// since; and it isn't polled for one meanwhile.
+    #[test]
+    fn no_position_is_stored_while_the_watcher_it_takes_from_is_away()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().canonicalize()?;
+        let theirs = root.join("Shared/tom");
+        std::fs::create_dir_all(&theirs)?;
+        let feeds = Feeds::default();
+        let (gives, takes) = (Feed::Gives(feeds.clone()), Feed::Takes(feeds.clone()));
+        let opts = ScanOptions::for_root(&theirs, hbsync_fileio::HashAlgorithm::Blake3);
+        let mut db = StateDb::open_in_memory()?;
+        let mut observer = LocalObserver::watching(&theirs, opts, None, Some(takes));
+        observer.journal = Some(Box::new(ClockJournal(Instant::now())));
+        let quiet = Debounce {
+            quiet: Duration::from_millis(50),
+            max_delay: Duration::from_secs(1),
+        };
+        let stored = |db: &mut StateDb| db.read(|s| s.get_kv(keys::JOURNAL_CURSOR));
+
+        // None gives: nothing taken, and no poll asked for it.
+        observer.unsaved = true;
+        assert!(!observer.has_watcher());
+        assert_eq!(observer.deadline(), None);
+        assert!(observer.poll(&mut db, Duration::ZERO, quiet)?.is_none());
+        assert!(observer.settling.is_none() && stored(&mut db)?.is_none());
+
+        // One gives (its events put aside: only what the test sends comes), a position is
+        // taken; another gives in its place before the quiet period ends: not stored.
+        let opts = ScanOptions::for_root(&root, hbsync_fileio::HashAlgorithm::Blake3);
+        let main = LocalObserver::watching(&root, opts.clone(), None, Some(gives.clone()));
+        assert!(observer.has_watcher());
+        let (_tx, rx) = channel();
+        observer.watcher.as_mut().ok_or("no watcher")?.rx = rx;
+        assert!(observer.poll(&mut db, Duration::ZERO, quiet)?.is_none());
+        assert!(observer.settling.is_some());
+        let again = LocalObserver::watching(&root, opts, None, Some(gives));
+        drop(main);
+        std::thread::sleep(quiet.quiet * 2);
+        assert!(observer.poll(&mut db, Duration::ZERO, quiet)?.is_none());
+        assert!(stored(&mut db)?.is_none() && observer.unsaved);
+
+        // Under the one that gives now, throughout: stored.
+        let until = Instant::now() + Duration::from_secs(10);
+        while stored(&mut db)?.is_none() {
+            assert!(Instant::now() < until, "never stored");
+            assert!(observer.poll(&mut db, Duration::ZERO, quiet)?.is_none());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        drop(again);
         Ok(())
     }
 

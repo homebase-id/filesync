@@ -177,6 +177,15 @@ pub struct RunnerConfig {
 #[derive(Clone)]
 pub(crate) struct SharesTold(pub(crate) Arc<dyn Fn(Option<String>) + Send + Sync>);
 
+/// Tells the account where the folder of shares is ([`SharesTold`]) as it is dropped.
+struct TellShares<'a>(&'a SharesTold, Option<String>);
+
+impl Drop for TellShares<'_> {
+    fn drop(&mut self) {
+        (self.0.0)(self.1.take());
+    }
+}
+
 impl std::fmt::Debug for SharesTold {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("SharesTold")
@@ -778,10 +787,12 @@ impl Runner {
             );
         }
         self.show_shares(&placed);
-        if let Some(SharesTold(told)) = &self.cfg.shares_told {
-            // Where there is more than one: the one on record now, or the first.
-            told(placed.at.first().cloned());
-        }
+        // Told as this opening ends, with the watcher there (or failed): a share started on
+        // it takes its events from that watcher, and one that began before it would walk its
+        // folder a second time for what it may have missed. Where there is more than one:
+        // the one on record now, or the first.
+        let _told = (self.cfg.shares_told.as_ref())
+            .map(|told| TellShares(told, placed.at.first().cloned()));
         let main = self.cfg.shares_main.as_deref();
         cfg.folder.filter = Arc::new(load_filter(root, cfg.folder.case_insensitive, main)?);
         if !cfg.folder.filter.returned().is_empty() {

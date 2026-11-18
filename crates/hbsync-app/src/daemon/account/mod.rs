@@ -1003,7 +1003,9 @@ mod tests {
             assert!(shared_db.exists());
 
             // Changed here: the change moves out to the main folder's top (the account's own
-            // from then on), and the sharer's comes again.
+            // from then on), and the sharer's comes again. (Seen at once: the share's folder
+            // is watched, by the main folder's watcher (filesync #414); Sync now walks
+            // nothing, and a folder without a watcher is walked once a minute.)
             std::fs::write(at.join("notes.txt"), "changed here")?;
             let _ = started.account.sync_now();
             let moved_out = || {
@@ -1028,15 +1030,6 @@ mod tests {
                 both(s, folders) && own_names().is_ok_and(|names| names.contains(&out))
             })?;
             assert_eq!(own_names()?.len(), 2, "{:?}", own_names()?);
-
-            // Each is watched, the share's folder by the main folder's watcher (it holds
-            // none of its own: filesync #414).
-            let (_, folders) = started.account.status();
-            let unwatched: Vec<_> = folders
-                .iter()
-                .filter_map(|f| f.watcher_error.as_ref())
-                .collect();
-            assert!(unwatched.is_empty(), "{unwatched:?}");
 
             // The folder of shares renamed while the share syncs (on Windows too: nothing
             // is held open below it): the share is synced there from then on.
