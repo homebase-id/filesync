@@ -71,6 +71,8 @@ impl Executor<'_> {
             return Ok(Outcome::stale("an earlier placement isn't settled yet"));
         }
         let target = self.target_path(parent, name)?;
+        // (Looked at now, not as an earlier operation of the run found it.)
+        self.still_goes_into(&target)?;
         let abs = self.disk.abs(&target);
         // No version of the drive live when planned: its version in Recently deleted, if any
         // (never synced here: made from there, its folder restored, its RemoteCreate to follow).
@@ -393,6 +395,8 @@ impl Executor<'_> {
             return Ok(rescan(&mut self.report, &row.path));
         }
         let target = self.target_path(parent, name)?;
+        // (Looked at now, not as an earlier operation of the run found it.)
+        self.still_goes_into(&target)?;
         if target == row.path {
             // Already there: nothing was put in place.
             return self.finish(&[Settle::acted(node, drive, TagWrite::Nothing)], |s| {

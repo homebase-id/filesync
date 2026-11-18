@@ -761,12 +761,13 @@ impl<'a> Executor<'a> {
     }
 
     /// [`Executor::target_path`]'s look at the folder an item goes into, once more as the
-    /// item is placed at `target` (its transfer may have taken long; nothing is cached
-    /// here): the row there, and a stat.
+    /// item is placed at `target`, a folder made there, or an item moved to it (a transfer
+    /// may have taken long, and a run goes on while the user does; nothing is cached here):
+    /// the row there, and a stat. A folder with no row any more isn't it either.
     fn still_goes_into(&mut self, target: &RelPath) -> Step<()> {
         match in_its_folder(self.db, &self.disk, self.folder, target)? {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(not_its_folder(&target.parent().unwrap_or_default())),
+            Ok(Some(true)) => Ok(()),
+            Ok(_) => Err(not_its_folder(&target.parent().unwrap_or_default())),
             Err(e) => Err(io_outcome(e)),
         }
     }
@@ -919,20 +920,20 @@ fn folder_still(disk: &Disk<'_>, folder: &FolderCtx, row: &LocalRow) -> io::Resu
     }
 }
 
-/// [`folder_still`] for the folder `target` is in, by its row (the root always is; a folder
-/// without a row isn't).
+/// [`folder_still`] for the folder `target` is in, by its row (the root always is); `None`
+/// where no folder has a row at that path.
 fn in_its_folder(
     db: &mut StateDb,
     disk: &Disk<'_>,
     folder: &FolderCtx,
     target: &RelPath,
-) -> Result<io::Result<bool>, StateError> {
+) -> Result<io::Result<Option<bool>>, StateError> {
     let Some(parent) = target.parent().filter(|parent| !parent.is_root()) else {
-        return Ok(Ok(true));
+        return Ok(Ok(Some(true)));
     };
     Ok(match db.read(|s| s.get_local(&parent))? {
-        Some(row) if row.kind == NodeKind::Folder => folder_still(disk, folder, &row),
-        _ => Ok(false),
+        Some(row) if row.kind == NodeKind::Folder => folder_still(disk, folder, &row).map(Some),
+        _ => Ok(None),
     })
 }
 
