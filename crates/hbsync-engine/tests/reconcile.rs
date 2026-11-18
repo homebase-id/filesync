@@ -3387,6 +3387,28 @@ fn read_only_a_name_clash_leaves_the_newcomer_out() {
     assert!(plan.deferred.contains(&new));
 }
 
+/// Two of the drive's items meet on a name that a third, synced here, holds on disk, and one
+/// of the two is the folder that third is in on the drive now: the folder takes the name (it
+/// is made, and the item here moves into it), whatever the ids say. With the name given to
+/// the other, its download would wait for the name the item here holds, which would wait for
+/// its folder, which waited for the name: for good (filesync #419).
+#[test]
+fn read_only_the_folder_the_holder_of_a_name_moves_into_takes_it() {
+    let [newcomer, held, dir] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(held, file(ROOT, "a", "x"))
+        .remote(held, Some(file(dir, "a", "x")))
+        .remote(dir, Some(folder(ROOT, "a")))
+        .remote(newcomer, Some(file(ROOT, "a", "y")));
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    assert_eq!(kinds(&plan.ops), ["mkdir", "move"], "{:?}", plan.ops);
+    assert_eq!(plan.conflicts, [Conflict::NameTaken { node: newcomer }]);
+    assert!(plan.deferred.contains(&newcomer));
+}
+
 /// The item synced here keeps its name though this device renamed it meanwhile: the rename is
 /// undone, and the newcomer (the lower id) is the one left out.
 #[test]

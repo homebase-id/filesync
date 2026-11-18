@@ -828,10 +828,28 @@ impl Reconciler<'_> {
                 // (Read-only, what is synced here comes first, what is on the name on disk
                 // before what was synced there and isn't now: a new item still being written
                 // moves out once it is read, and never takes a name.)
+                // (Read-only, with none of them on the name on disk and another item of the
+                // folder there that is: the one that item moves into, its folder on the drive
+                // now, goes first. It is made, the item moved into it, and the name is its.
+                // Any other would wait for the name that item holds, which waits for its
+                // folder, which waited for the name: for good.)
+                let makes_way = (self.masking.read_only)
+                    .then(|| self.input.local.children(parent).find(|c| on_disk(c)))
+                    .flatten()
+                    .filter(|holder| !group.contains(holder))
+                    .and_then(|holder| {
+                        let mut into = self.merged.ancestors_iter(holder);
+                        into.find(|folder| group.contains(folder))
+                    });
                 group.sort_by_cached_key(|n| {
                     let arriving = self.adopted.contains(n) || n.is_fixed_folder();
                     let leaving = self.evicted.contains(n);
-                    let first = (!here(n), !on_disk(n), leaving);
+                    let made_way_for = makes_way == Some(*n);
+                    let first = (
+                        !(here(n) || made_way_for),
+                        !(on_disk(n) || made_way_for),
+                        leaving,
+                    );
                     (first, !self.deferred.contains(n), arriving, *n)
                 });
                 // The folder's path here, for the filter (`None`: not connected), read once
