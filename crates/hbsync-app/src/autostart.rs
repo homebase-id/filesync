@@ -219,15 +219,6 @@ pub(crate) fn daemon_exe() -> io::Result<PathBuf> {
     program_of(crate::lock::DAEMON)
 }
 
-/// Whether this is a graphical session: on Linux as [`crate::unit::desktop`] tells (not SSH,
-/// even with X forwarding); elsewhere a logon is one.
-pub(crate) fn graphical_session() -> bool {
-    #[cfg(target_os = "linux")]
-    return crate::unit::desktop();
-    #[cfg(not(target_os = "linux"))]
-    true
-}
-
 /// What starts at logon: the tray of this installation if it is there (it starts the daemon),
 /// else the daemon. On Linux the tray only when asked from a graphical session
 /// ([`starts_tray`]).
@@ -236,7 +227,11 @@ pub fn logon_program() -> io::Result<Program> {
         return Err(io::Error::other(why));
     }
     let tray = program_of(TRAY)?;
-    if starts_tray(tray.is_file(), graphical_session()) {
+    #[cfg(target_os = "linux")]
+    let desktop = crate::unit::desktop();
+    #[cfg(not(target_os = "linux"))]
+    let desktop = true;
+    if starts_tray(tray.is_file(), desktop) {
         return Ok(Program::Tray(tray));
     }
     Ok(Program::Daemon(daemon_exe()?))

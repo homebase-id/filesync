@@ -991,15 +991,28 @@ the command waits for it. A computer set up over SSH has no browser to come back
 link is printed, opened on any other computer and approved there, and that browser then
 goes to `http://localhost:<port>/…`, which is the other computer and doesn't load. Its
 address holds the answer all the same. Pasted into the terminal it is taken as the browser's
-request would be: the whole address, or from its path on; a line that isn't the address
-of this login's answer (another try's, something else) is said, and waited on; the browser
-coming back by itself still works meanwhile (an SSH port forward). No browser is opened on
-this computer then, unless one is named with `--browser`: what a system without a screen
-opens is a browser in the terminal, where the address is to be pasted. So is the answer to giving the
-app its drive back. Offered with `--paste`, and by itself when someone is at the terminal
-and the computer is used over SSH (`SSH_CONNECTION`, `SSH_TTY`) or, on Linux, isn't in a
-graphical session (`XDG_SESSION_TYPE` neither `wayland` nor `x11`). Nothing on the server
-changes; a code typed into the owner app instead of a pasted address would need odin-core.
+request would be: the whole address, or from its path on. A line that isn't this trip's
+answer is said (once for what was typed at one go) and waited on: another address, another
+try's (a login's is told by its state), or this one with a part lost; the browser coming
+back by itself still works meanwhile (an SSH port forward). So is the answer to giving the
+app its drive back, told by the random part of its path.
+
+- **When no browser is opened here:** with `--paste`; and where one opened here wouldn't be
+  one the owner sees: on Linux without `DISPLAY`, `WAYLAND_DISPLAY` and `BROWSER` (X
+  forwarded over SSH has a display, and its browser asks this computer's localhost), on
+  macOS and Windows when used over SSH (`SSH_CONNECTION`, `SSH_TTY`). `--browser` names one
+  to open whatever the case.
+- **When the terminal is read for an address:** with `--paste` (from a pipe too), and where
+  no browser is opened here and standard input is a terminal. Never from a terminal the
+  command is in the background of (reading it would stop the job), nor beside a browser
+  named with `--browser` (one in the terminal reads it itself). Where it isn't read, the
+  link comes with a line saying that `--paste` has it read: a guess that goes wrong (a tmux
+  pane from a graphical session, used over SSH) costs running the command again.
+- The reading starts with the first link shown and goes on till the command ends: a line
+  typed ahead for the shell after the answer was taken is lost with it.
+
+Nothing on the server changes; a code typed into the owner app instead of a pasted address
+would need odin-core.
 
 ## Not yet
 

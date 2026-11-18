@@ -47,6 +47,9 @@ impl std::fmt::Debug for Paste<'_> {
     }
 }
 
+/// How many typed lines are taken at one look (more wait for the next: a tenth of a second).
+const LINES_A_LOOK: usize = 64;
+
 /// The query the owner's answer came with.
 type Query = HashMap<String, String>;
 
@@ -93,6 +96,12 @@ impl Callback {
     ) -> Result<(Query, Option<TcpStream>), HomebaseError> {
         let deadline = Instant::now() + timeout;
         self.listener.set_nonblocking(true)?;
+        // (What was typed before this trip began isn't its answer: an address pasted twice,
+        // or after the browser came back by itself.)
+        if let Some(paste) = paste {
+            let before = std::iter::from_fn(paste.typed).take(LINES_A_LOOK).count();
+            tracing::debug!("{before} lines typed before the browser was waited for: passed over");
+        }
         loop {
             let (mut stream, _) = match self.listener.accept() {
                 Ok(conn) => conn,
@@ -105,14 +114,19 @@ impl Callback {
                             "no answer from the browser in time".into(),
                         ));
                     }
-                    let line = paste.and_then(|paste| Some((paste, (paste.typed)()?)));
-                    match line {
-                        Some((_, line)) if line.trim().is_empty() => {}
-                        Some((paste, line)) => match self.pasted(line.trim()).filter(&ours) {
-                            Some(query) => return Ok((query, None)),
-                            None => (paste.say)(NOT_THE_ADDRESS),
-                        },
-                        None => {}
+                    // Every line typed since the last look: the answer among them is taken;
+                    // else, whatever was pasted, it is said once that it wasn't the address.
+                    if let Some(paste) = paste {
+                        let mut wrong = false;
+                        for line in std::iter::from_fn(paste.typed).take(LINES_A_LOOK) {
+                            match self.pasted(line.trim()).filter(&ours) {
+                                Some(query) => return Ok((query, None)),
+                                None => wrong |= !line.trim().is_empty(),
+                            }
+                        }
+                        if wrong {
+                            (paste.say)(NOT_THE_ADDRESS);
+                        }
                     }
                     std::thread::sleep(Duration::from_millis(100));
                     continue;
@@ -192,12 +206,8 @@ impl Login {
         self
     }
 
-    /// Waits up to `timeout` for the browser's callback, then exchanges it for credentials.
-    pub fn finish(self, timeout: Duration) -> Result<Credentials, HomebaseError> {
-        self.finish_unless(timeout, &AtomicBool::new(false))
-    }
-
-    /// [`Login::finish`], given up as soon as `cancel` is set (the user started over).
+    /// Waits up to `timeout` for the browser's callback, then exchanges it for credentials;
+    /// given up as soon as `cancel` is set (the user started over).
     pub fn finish_unless(
         self,
         timeout: Duration,
@@ -208,7 +218,8 @@ impl Login {
 
     /// [`Login::finish_unless`], the owner's answer taken also from the address the browser
     /// ended on, pasted (`paste`): for a browser on another computer, which can't come back
-    /// to this one. An address of another login is said, and waited on.
+    /// to this one. An address of another login, or one with a part lost, is said, and
+    /// waited on ([`Pending::answers`]).
     pub(crate) fn finish_with(
         self,
         timeout: Duration,
@@ -263,12 +274,7 @@ impl DriveRestore {
     }
 
     /// Waits up to `timeout` for the owner's answer: `false` unless they gave it. Whether the
-    /// drive is there is for looking up afterwards.
-    pub fn finish(self, timeout: Duration) -> Result<bool, HomebaseError> {
-        self.finish_unless(timeout, &AtomicBool::new(false))
-    }
-
-    /// [`DriveRestore::finish`], given up as soon as `cancel` is set.
+    /// drive is there is for looking up afterwards. Given up as soon as `cancel` is set.
     pub fn finish_unless(
         self,
         timeout: Duration,
@@ -335,16 +341,18 @@ mod tests {
             let back = return_url(restore.url())?;
             let path = back.trim_start_matches("http://localhost");
             let path = &path[path.find('/').ok_or("no path")?..];
-            // (As typed, the last first.)
+            // (As typed, the last first; `None`: nothing more just then.)
             let lines = RefCell::new(vec![
-                format!("  {path}{query}\n"),
-                "http://localhost:1/drive-callback/another".to_owned(),
-                String::new(),
-                "what was that again".to_owned(),
+                Some(format!("  {path}{query}\n")),
+                None,
+                Some("http://localhost:1/drive-callback/another".to_owned()),
+                Some(String::new()),
+                Some("what was that again".to_owned()),
+                None,
             ]);
             let said = RefCell::new(Vec::new());
             let paste = Paste {
-                typed: &|| lines.borrow_mut().pop(),
+                typed: &|| lines.borrow_mut().pop().flatten(),
                 say: &|why| said.borrow_mut().push(why.to_owned()),
             };
             assert_eq!(
@@ -355,14 +363,16 @@ mod tests {
                 )?,
                 given
             );
-            assert_eq!(said.borrow().len(), 2, "{said:?}");
+            // (Said once for what was typed at one go.)
+            assert_eq!(*said.borrow(), [NOT_THE_ADDRESS]);
             assert!(lines.borrow().is_empty());
         }
         // The whole address, whatever its host says: it is the path that is this one's.
         let restore = begin_restore("anna.example.com")?;
         let back = return_url(restore.url())?.replace("localhost", "127.0.0.1");
+        let typed = RefCell::new(vec![Some(back), None]);
         let paste = Paste {
-            typed: &|| Some(back.clone()),
+            typed: &|| typed.borrow_mut().pop().flatten(),
             say: &|_| {},
         };
         assert!(restore.finish_with(
@@ -370,6 +380,70 @@ mod tests {
             &AtomicBool::new(false),
             Some(paste)
         )?);
+        Ok(())
+    }
+
+    /// What counts as the address the browser was sent back to: this callback's path, on any
+    /// host and port, the whole address or from its path on.
+    #[test]
+    fn the_pasted_address_is_told_by_its_path() -> R {
+        let (back, url) = Callback::bind("/back/1".to_owned())?;
+        let query = |line: &str| back.pasted(line).map(|q| q.get("a").cloned());
+        let a = Some(Some("1".to_owned()));
+        for taken in [
+            format!("{url}?a=1"),
+            "http://localhost:9/back/1?a=1#top".to_owned(),
+            "https://example.com/back/1?a=1".to_owned(),
+            "/back/1?a=1".to_owned(),
+        ] {
+            assert_eq!(query(&taken), a, "{taken}");
+        }
+        assert_eq!(query("/back/1"), Some(None), "no query");
+        for not_it in [
+            "?a=1",
+            "a=1",
+            "localhost:9/back/1?a=1",
+            "http://localhost:9/back/2?a=1",
+            "http://localhost:9/back/1/?a=1",
+            "http://localhost:9//back/1?a=1",
+            "http://localhost:9",
+            "http://localhost:9/?x=/back/1?a=1",
+        ] {
+            assert_eq!(query(not_it), None, "{not_it}");
+        }
+        Ok(())
+    }
+
+    /// While an address can be pasted, the browser coming back by itself (a port forwarded)
+    /// is the answer as before, and lines typed before the trip began are none of its.
+    #[test]
+    fn the_browser_comes_back_while_an_address_can_be_pasted() -> R {
+        use std::cell::RefCell;
+        let restore = begin_restore("anna.example.com")?;
+        let back = return_url(restore.url())?;
+        // (As typed before: this trip's own address among them, as if pasted for an earlier one.)
+        let early = RefCell::new(vec![
+            Some(format!("{back}?status=canceled")),
+            Some("x".to_owned()),
+        ]);
+        let said = RefCell::new(0);
+        let paste = Paste {
+            typed: &|| early.borrow_mut().pop().flatten(),
+            say: &|_| *said.borrow_mut() += 1,
+        };
+        let browser = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            come_back(&back, "")
+        });
+        let never = AtomicBool::new(false);
+        assert!(restore.finish_with(Duration::from_secs(10), &never, Some(paste))?);
+        assert!(
+            browser
+                .join()
+                .map_err(|_| "browser")??
+                .contains("goes on setting up")
+        );
+        assert_eq!(*said.borrow(), 0);
         Ok(())
     }
 
@@ -385,12 +459,18 @@ mod tests {
         let (state, back) = (&asked["state"], &asked["redirect_uri"]);
         // (As typed, the last first.)
         let lines = RefCell::new(vec![
-            format!("{back}?state={state}&error=access_denied&error_description=no"),
-            format!("{back}?state=another&public_key=x&salt=y"),
+            Some(format!(
+                "{back}?state={state}&error=access_denied&error_description=no"
+            )),
+            None,
+            // (This login's, a part of it lost: waited on too, not the end of the login.)
+            Some(format!("{back}?state={state}&public_key=x")),
+            Some(format!("{back}?state=another&public_key=x&salt=eQ==")),
+            None,
         ]);
         let said = RefCell::new(Vec::new());
         let paste = Paste {
-            typed: &|| lines.borrow_mut().pop(),
+            typed: &|| lines.borrow_mut().pop().flatten(),
             say: &|why| said.borrow_mut().push(why.to_owned()),
         };
         let refused = login.finish_with(
@@ -415,7 +495,7 @@ mod tests {
             let restore = begin_restore("anna.example.com")?.return_to("http://x/done");
             let back = return_url(restore.url())?;
             let browser = std::thread::spawn(move || come_back(&back, query));
-            let answer = restore.finish(Duration::from_secs(10))?;
+            let answer = restore.finish_unless(Duration::from_secs(10), &AtomicBool::new(false))?;
             assert_eq!(answer, given);
             let page = browser.join().map_err(|_| "browser")??;
             let expected = if given {

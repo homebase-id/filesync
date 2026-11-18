@@ -3,6 +3,7 @@
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::mpsc::Receiver;
 
 use clap::{Parser, Subcommand};
 use hbsync_app::control::{running, start, stop_syncing};
@@ -622,8 +623,9 @@ struct Approve {
     /// The browser to open the authorize page with.
     #[arg(long, value_name = "COMMAND")]
     browser: Option<String>,
-    /// Approve in a browser on another computer: paste the address it ends on here
-    /// [default: when this computer has no graphical session, or is used over SSH].
+    /// Approve in a browser on another computer: none is opened here, and the address that
+    /// one ends on is pasted here [default: when this computer has no display, or is used
+    /// over SSH, and you are at its terminal].
     #[arg(long)]
     paste: bool,
 }
@@ -632,34 +634,61 @@ struct Approve {
 type Typed = Box<dyn Fn() -> Option<String>>;
 
 impl Approve {
-    /// The lines typed at the terminal from now on, where the owner's answer is taken from
-    /// a pasted address too: asked for (`--paste`), or this computer most likely has no
-    /// browser to come back to ([`setup::browser_elsewhere`]) and someone is at the
-    /// terminal. Read by a thread of their own (neither command asks anything else).
+    /// Whether a browser is opened here, and with what: the one named; else the system's,
+    /// unless the owner's browser is elsewhere (`--paste`, or none opened here would be one
+    /// they see: [`setup::browser_here`]).
+    fn opens(&self) -> setup::Opens<'_> {
+        match &self.browser {
+            Some(command) => setup::Opens::With(command),
+            None if self.paste || !setup::browser_here() => setup::Opens::No,
+            None => setup::Opens::System,
+        }
+    }
+
+    /// The lines typed at the terminal, where the owner's answer is taken from a pasted
+    /// address too: asked for (`--paste`, also from a pipe), or no browser is opened here
+    /// and someone is at the terminal. Never from a terminal this process is in the
+    /// background of, nor beside a browser named to run in it. Read by a thread of their
+    /// own, from the first asking on (neither command reads anything else).
     fn typed(&self) -> Option<Typed> {
-        let at_terminal = || std::io::stdin().is_terminal();
-        if !self.paste && !(setup::browser_elsewhere() && at_terminal()) {
+        let terminal = std::io::stdin().is_terminal();
+        let wanted = self.paste || (self.opens() == setup::Opens::No && terminal);
+        if !wanted || (terminal && !setup::terminal_in_foreground()) {
             return None;
         }
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            for line in std::io::stdin().lock().lines() {
-                if !line.is_ok_and(|line| tx.send(line).is_ok()) {
-                    break;
-                }
-            }
-        });
-        Some(Box::new(move || rx.try_recv().ok()))
+        let lines = std::cell::OnceCell::new();
+        Some(Box::new(move || {
+            let lines: &Receiver<String> = lines.get_or_init(typed_lines);
+            lines.try_recv().ok()
+        }))
     }
 
     /// The owner's answers in the browser, as asked for, with `typed` ([`Approve::typed`]).
     fn owner<'a>(&'a self, typed: Option<&'a Typed>) -> setup::InBrowser<'a> {
         setup::InBrowser {
-            browser: self.browser.as_deref(),
+            opens: self.opens(),
             say: &|line| println!("{line}"),
             typed: typed.map(|typed| &**typed),
         }
     }
+}
+
+/// The lines of standard input from now on, read by a thread of its own till the input
+/// ends; one that isn't text is passed over.
+fn typed_lines() -> Receiver<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for line in std::io::stdin().lock().lines() {
+            let sent = match line {
+                Ok(line) => tx.send(line).is_ok(),
+                Err(e) => e.kind() == std::io::ErrorKind::InvalidData,
+            };
+            if !sent {
+                break;
+            }
+        }
+    });
+    rx
 }
 
 fn answer_held(paths: &Paths, yes: bool, answer: HeldAnswer) -> Res<()> {

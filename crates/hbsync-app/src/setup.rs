@@ -26,32 +26,45 @@ use crate::{control, folders};
 /// How long the owner has to approve in the browser.
 pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(1800);
 
-/// Authorizes this device for Filesync on `identity`: opens the authorize page in `browser`
-/// (the system's default when `None`), passes its URL to `show` for when no browser opens,
-/// and waits for the owner to approve. A new app is registered on the way. With `paste` the
-/// owner's answer is taken also from the address the browser ended on, pasted: for a browser
-/// on another computer ([`Paste`]); none is opened here then, unless one was named.
+/// Whether, and with what, a page for the owner is opened in a browser on this computer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Opens<'a> {
+    /// Not: the link is shown, for a browser on another computer ([`Paste`]).
+    No,
+    /// With the system's opener.
+    System,
+    /// With this command.
+    With(&'a str),
+}
+
+impl Opens<'_> {
+    /// Opens `url`, where one is opened. The URL was shown: a browser that doesn't start
+    /// isn't an error.
+    fn open(self, url: &str) {
+        let _ = match self {
+            Opens::No => return,
+            Opens::System => open_browser(None, url),
+            Opens::With(command) => open_browser(Some(command), url),
+        };
+    }
+}
+
+/// Authorizes this device for Filesync on `identity`: opens the authorize page as `opens`
+/// says, passes its URL to `show` for when no browser opens, and waits for the owner to
+/// approve. A new app is registered on the way. With `paste` the owner's answer is taken
+/// also from the address the browser ended on, pasted: for a browser on another computer
+/// ([`Paste`]).
 pub fn authorize(
     identity: &str,
     device: &str,
-    browser: Option<&str>,
+    opens: Opens<'_>,
     show: impl FnOnce(&str),
     paste: Option<Paste<'_>>,
 ) -> Result<Credentials, HomebaseError> {
     let login = begin(identity, device)?;
     show(login.authorize_url());
-    open_unless_elsewhere(browser, login.authorize_url(), paste.is_some());
+    opens.open(login.authorize_url());
     login.finish_with(APPROVAL_TIMEOUT, &AtomicBool::new(false), paste)
-}
-
-/// Opens `url` in `browser` (the system's when `None`). Not where the owner's browser is on
-/// another computer (`elsewhere`) and none was named: what the system opens without a
-/// screen is a browser in the terminal, where the address is to be pasted. The URL was shown:
-/// a browser that doesn't start isn't an error.
-fn open_unless_elsewhere(browser: Option<&str>, url: &str, elsewhere: bool) {
-    if browser.is_some() || !elsewhere {
-        let _ = open_browser(browser, url);
-    }
 }
 
 /// Starts authorizing this device (named after `device` in the owner's list) on `identity`:
@@ -75,42 +88,38 @@ pub trait Owner {
     fn restore_drive(&mut self, identity: &str) -> Result<bool, HomebaseError>;
 }
 
-/// The owner's answers in a browser this opens (`browser`, the system's when `None`), each
-/// page's URL passed to `say` too, for when none opens.
+/// The owner's answers in the browser, for the command line: each page opened as `opens`
+/// says, its URL passed to `say` too, for when none opens.
 pub struct InBrowser<'a> {
-    pub browser: Option<&'a str>,
+    pub opens: Opens<'a>,
     pub say: &'a dyn Fn(&str),
-    /// Lines typed meanwhile, where the browser may be on another computer (this one has
-    /// none): the address it ends on, pasted, is the owner's answer ([`Paste::typed`]).
+    /// Lines typed meanwhile, where the browser may be on another computer: the address it
+    /// ends on, pasted, is the owner's answer ([`Paste::typed`]).
     pub typed: Option<&'a dyn Fn() -> Option<String>>,
 }
 
 impl std::fmt::Debug for InBrowser<'_> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InBrowser")
-            .field("browser", &self.browser)
+            .field("opens", &self.opens)
             .finish_non_exhaustive()
     }
 }
 
 impl InBrowser<'_> {
-    /// Says that the owner is to `what` (authorize this computer…) in the browser, and where:
-    /// in the one this opens, or, where the address it ends on can be pasted, in one on any
-    /// computer.
+    /// Says that the owner is to `what` (authorize this computer…) in the browser, where,
+    /// and how a browser on another computer answers: by its address pasted here, or, where
+    /// none is read, that `--paste` has it read.
     fn visit(&self, what: &str, url: &str) {
-        match (self.typed.is_some(), self.browser.is_some()) {
-            (false, _) => (self.say)(&format!(
-                "Opening your browser to {what}...\nIf it doesn't open, visit:\n{url}\n"
-            )),
-            (true, opens) => {
-                let here = if opens {
-                    "Opening your browser to"
-                } else {
-                    "To"
-                };
-                (self.say)(&format!("{here} {what}, visit:\n{url}\n\n{PASTE_HOW}"));
-            }
-        }
+        let visit = match self.opens {
+            Opens::No => format!("To {what}, visit:\n{url}\n"),
+            _ => format!("Opening your browser to {what}...\nIf it doesn't open, visit:\n{url}\n"),
+        };
+        let elsewhere = match self.typed {
+            Some(_) => PASTE_HOW,
+            None => PASTE_HINT,
+        };
+        (self.say)(&format!("{visit}\n{elsewhere}"));
     }
 
     fn paste(&self) -> Option<Paste<'_>> {
@@ -119,12 +128,26 @@ impl InBrowser<'_> {
     }
 }
 
-/// Whether the browser the owner approves in is most likely on another computer: this one
-/// is used over SSH, or (Linux) isn't in a graphical session. An address pasted is offered
-/// then ([`InBrowser::typed`]).
-pub fn browser_elsewhere() -> bool {
+/// Whether a browser opened on this computer is one its user sees, and comes back to it: on
+/// Linux where a display is there (`DISPLAY`, `WAYLAND_DISPLAY`; X forwarded over SSH too: its
+/// browser asks this computer's localhost) or `BROWSER` names one (the opener's own way);
+/// on macOS and Windows unless this computer is used over SSH.
+pub fn browser_here() -> bool {
     let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
-    set("SSH_CONNECTION") || set("SSH_TTY") || !autostart::graphical_session()
+    match cfg!(any(target_os = "macos", windows)) {
+        true => !(set("SSH_CONNECTION") || set("SSH_TTY")),
+        false => set("DISPLAY") || set("WAYLAND_DISPLAY") || set("BROWSER"),
+    }
+}
+
+/// Whether lines can be read from the terminal standard input is: this process is in its
+/// foreground (one in the background that reads it is stopped by the system).
+pub fn terminal_in_foreground() -> bool {
+    #[cfg(unix)]
+    // SAFETY: both only ask the system for a process group's id.
+    return unsafe { libc::tcgetpgrp(0) == libc::getpgrp() };
+    #[cfg(not(unix))]
+    true
 }
 
 /// How to answer from a browser on another computer ([`InBrowser::typed`]).
@@ -132,24 +155,22 @@ const PASTE_HOW: &str = "Open it in a browser on any computer and approve. From 
 the browser then goes to a page on localhost that won't load: copy that page's address from the \
 address bar, paste it here and press Enter.\n";
 
+/// Said where no address is read from the terminal.
+const PASTE_HINT: &str =
+    "(Approving in a browser on another computer? Run this again with --paste.)\n";
+
 impl Owner for InBrowser<'_> {
     fn authorize(&mut self, identity: &str, device: &str) -> Result<Credentials, HomebaseError> {
         let what = format!("authorize this computer on {identity}");
-        let (browser, paste) = (self.browser, self.paste());
-        authorize(
-            identity,
-            device,
-            browser,
-            |url| self.visit(&what, url),
-            paste,
-        )
+        let (opens, paste) = (self.opens, self.paste());
+        authorize(identity, device, opens, |url| self.visit(&what, url), paste)
     }
 
     fn restore_drive(&mut self, identity: &str) -> Result<bool, HomebaseError> {
         let restore = begin_restore(identity)?;
         let what = format!("give {APP_NAME} its drive back on {identity}");
         self.visit(&what, restore.url());
-        open_unless_elsewhere(self.browser, restore.url(), self.typed.is_some());
+        self.opens.open(restore.url());
         restore.finish_with(APPROVAL_TIMEOUT, &AtomicBool::new(false), self.paste())
     }
 }

@@ -49,7 +49,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 hbsync_app::APP_NAME
             );
             let show = |url: &str| println!("If it doesn't open, visit:\n{url}\n");
-            let creds = setup::authorize(&identity, &device, browser.as_deref(), show, None)?;
+            let opens = match browser.as_deref() {
+                Some(command) => setup::Opens::With(command),
+                None => setup::Opens::System,
+            };
+            let creds = setup::authorize(&identity, &device, opens, show, None)?;
             creds.save(&path)?;
             println!("Authorized. Credentials saved to {}", path.display());
             creds
