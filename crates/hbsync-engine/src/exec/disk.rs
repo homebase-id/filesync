@@ -336,7 +336,8 @@ fn check_out(out: &Path, root: &Path, db: &mut StateDb) -> Result<(), String> {
     // tmp, renamed there and removed (where none can be made, it is taken as working).
     let probe = format!(".hbsync-probe-{}", hbsync_types::NodeId::new());
     let (from, to) = (layout::tmp_dir(root).join(&probe), out.join(&probe));
-    let made = fs::create_dir_all(layout::tmp_dir(root)).and_then(|()| fs::create_dir(&from));
+    let tmp = hbsync_fileio::make_dir_in_place(&layout::tmp_dir(root));
+    let made = tmp.and_then(|()| fs::create_dir(&from));
     if made.is_ok() {
         let moved = fs::rename(&from, &to);
         let _ = fs::remove_dir(if moved.is_ok() { &to } else { &from });

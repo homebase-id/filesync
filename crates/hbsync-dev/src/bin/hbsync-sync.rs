@@ -70,10 +70,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         (AccountParts::open_drive(identity, remote, &db)?, None)
     } else {
         let (tx, events) = mpsc::channel();
+        // (What others share with the identity is the daemon's to sync.)
         let AccountParts {
             drive,
             notifier,
             mut notifications,
+            shares: _,
         } = AccountParts::open(identity, remote, &db, tx)?;
         let notifier = notifier?;
         std::thread::spawn(move || {

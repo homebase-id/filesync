@@ -16,6 +16,18 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// Makes the folder `dir` in the folder it is in, which must be there; whatever has its name
+/// already is left as it is (a folder, as a rule: what is made in it next fails otherwise). For a folder of the client's own inside a sync folder (its state folder,
+/// the downloads' folder in it): never made with the folders above it, or a sync folder that
+/// is gone (renamed, deleted, its disk unmounted) would be made again, empty, at its old
+/// place, and what was being written put into it.
+pub fn make_dir_in_place(dir: &Path) -> io::Result<()> {
+    match std::fs::create_dir(dir) {
+        Err(e) if e.kind() != io::ErrorKind::AlreadyExists => Err(e),
+        _ => Ok(()),
+    }
+}
+
 /// Writes `bytes` to `path` in place (its folder made if needed), unless it holds them
 /// already; whether it wrote. For files other programs read (autostart entries, launchers): the
 /// usual permissions, and through a symlink (dotfiles kept elsewhere).

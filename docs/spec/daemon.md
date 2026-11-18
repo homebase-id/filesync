@@ -39,7 +39,10 @@ sync costs, and why it ran, can be read there.
 Each account has one state DB, `<state>/accounts/<identity>/state.db` (the identity in lower
 case, a port's `:` as `_`), for every folder it syncs on this computer: the drive's side (its
 mirror, Recently deleted) once, each folder's own rows (what it has, what was agreed) keyed by
-the folder. It records its identity (`account.identity`).
+the folder. It records its identity (`account.identity`). What another identity shares with
+the account is that identity's drive, in a DB of its own beside it (a DB holds one drive):
+`<state>/accounts/<identity>/shared/<sharer>/state.db` (`Paths::shared_db`), which records the
+account's identity too. Logging out and unlinking leave it, as they leave the account's.
 
 A sync folder keeps the rest in `<folder>/.hbsync` (temp files, and an item being deleted or
 replaced for the moment it is checked, in `.hbsync/aside`, on the folder's disk for atomic
@@ -434,8 +437,9 @@ included (service managers restart it then).
 
   As the folder opens too, before the rules are read (`shares::place`): where the account
   has shares and no folder of shares is on record, one is made, named `Shared`, or the first
-  of `Shared-2`, `Shared-3`, … (up to 99) that nothing has (which accounts have shares comes
-  with the runners of the shares: until then none is made). Never where one is on record,
+  of `Shared-2`, `Shared-3`, … (up to 99) that nothing has (the main folder's runner makes
+  it, for an account other identities share with: which those are comes with the share
+  markers, so until then none is made). Never where one is on record,
   at the top or not: one moved into another folder, or whose marker can't be read for a
   moment, would be a plain folder for good once another took its place on record, and
   what it holds would be sent. The log says that none is made. (One on record that never
@@ -462,7 +466,11 @@ included (service managers restart it then).
   stops, failing, till it works.
 - **The folder gone** (moved, deleted, a disk not mounted: its marker missing): nothing
   syncs, the status says why, and the loop waits for it to come back. It never creates a
-  marker: only `hbsync setup` does.
+  marker: only `hbsync setup` does. A folder that goes while a sync runs isn't made again by
+  it either: the client makes its own folders in it (`.hbsync`, the downloads' `tmp` there)
+  only where the folder they are in is there (`make_dir_in_place`), so a download begun then
+  fails instead of landing in a new folder at the old place (engine
+  `a_folder_that_is_gone_isnt_made_again_by_a_sync`).
 - **Held deletes:** the status shows how many (deleted here, to go from the drive; removed
   elsewhere, every synced file), some paths, and a token naming exactly these deletes and
   which way each goes, until they are answered (nothing expires; a held removal of every file
@@ -496,8 +504,50 @@ included (service managers restart it then).
   not possible, and nothing is asked of the drive. A runner says whose drive it syncs when
   another identity's, and only then: one that doesn't isn't started (a share never passes
   for the account's own folder; `hbsync status` shows a share with `->`, and it is never
-  the folder shown first). Built so far: the runner and the drive. The daemon doesn't start
-  one yet.
+  the folder shown first).
+- **What another identity shares** (the account's `shares`, `AccountParts`: none in the
+  product until the identity's share markers are read) is synced by a runner of its own on
+  the account's thread, read-only, on that identity's drive and its DB
+  (`Paths::shared_db`), into `<the main folder>/<the folder of shares>/<the sharer>` (the
+  sharer's identity spelled as a folder's name here). What changes there moves out to the
+  main folder's top, where it is the account's own. The main folder's runner tells the
+  account where the folder of shares is each time it opens the folder; the account makes
+  the share's folder there (never where its place isn't in the folder of shares any more,
+  by the record; never where something else has its place, a link to a folder neither) and
+  starts its runner, which sets the folder up in the share's DB as it opens it, while it
+  holds no marker (what it holds that the sharer's drive doesn't moves out then, as any
+  change there). A folder there that holds a marker the share's DB doesn't know (another
+  folder renamed into its place; the share's DB lost) is never taken over: the share's sync
+  fails, saying so, until the folder is moved away or deleted (it is made again then). Each
+  sharer is synced once, under a name of its own: one more of a sharer, or of a name
+  another has, is left out, told in the log. When the folder of shares has another name (the
+  user's, or one it gave way to), is gone, or the main folder is removed, the runner stops,
+  and starts in the new place once it has ended (the folder is found again by its marker).
+  A share's runner whose folder is gone (deleted, renamed) doesn't wait for it as the
+  account's own do: it ends, and the account starts it again after a pause, the folder made
+  again and synced anew; one renamed stays where it is, unsynced. It never counts as one of
+  the account's folders: not its main folder, not in the config, not set up again with the
+  account's DB, not removed by `hbsync remove`; the status lists it after the account's
+  own, pause and Sync now reach it, and Recently deleted is the account's drive's alone. A
+  share's runner that can't start is tried again after a pause (5 s, doubling to 5
+  minutes), and one whose DB can't be used backs off, the account's folders syncing on
+  (its DB isn't set aside for it yet). Its drive is read on a timer (5 minutes) and at Sync
+  now, until its changes are announced, and only while a runner syncs it.
+
+  On Windows a folder can't be renamed while a folder in it is watched, as each share's is
+  by its runner: there the folder of shares can't be renamed by hand while a share syncs,
+  and one that is to give way to the drive's item of its name can't either (the item stays
+  out, as said above, until the daemon starts again with the name free).
+
+  Known limit, until the engine never makes a folder again that is gone: a share's runner
+  that is downloading when the folder of shares is renamed keeps its old path until it is
+  stopped (a second with a watcher, up to a minute without), and a download begun then
+  makes `<old name>/<sharer>` again as plain folders, which the main folder would send.
+
+  On Linux the main folder's watcher is recursive and also holds a watch on each folder in
+  the folder of shares, whose events it drops: a folder there costs two inotify watches,
+  not one (measured: 4 of 4 in a share with one sub-folder; `notify` can't leave a
+  sub-tree out).
 - **Notes:** each conflict and failure is noted once; one that comes back sync after sync (a
   file that can't be read) isn't noted again until it has gone away. An operation left for the
   next plan is noted only when this device can't do it (a name or path it can't hold, access

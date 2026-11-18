@@ -1601,6 +1601,7 @@ dependencies = [
  "hbsync-fileio",
  "hbsync-homebase",
  "hbsync-local",
+ "hbsync-namemap",
  "hbsync-platform",
  "hbsync-remote",
  "hbsync-state",

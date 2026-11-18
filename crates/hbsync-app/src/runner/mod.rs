@@ -152,6 +152,31 @@ pub struct RunnerConfig {
     /// Its account sets the state DB aside when it can't be used ([`RunnerError::unusable`]):
     /// the runner ends for that, rather than backing off as after any failed sync.
     pub(crate) end_if_unusable: bool,
+    /// Told where the folder of shares is, each time the folder opens ([`Shares`]): its
+    /// account runs the shares' folders in it.
+    pub(crate) shares_told: Option<SharesTold>,
+}
+
+/// Where a folder's folder of shares is (sync semantics §10), as its runner found it when the
+/// folder opened and it was put in its place ([`SyncRoot::place_shares`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Shares {
+    /// None on record, and none was to be made.
+    None,
+    /// At the folder's top, under this name.
+    At(String),
+    /// On record and not at the top: none is made in its place (it may be back).
+    Gone,
+}
+
+/// What a runner calls with its folder's [`Shares`] ([`RunnerConfig::shares_told`]).
+#[derive(Clone)]
+pub(crate) struct SharesTold(pub(crate) Arc<dyn Fn(Shares) + Send + Sync>);
+
+impl std::fmt::Debug for SharesTold {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SharesTold")
+    }
 }
 
 impl RunnerConfig {
@@ -173,6 +198,7 @@ impl RunnerConfig {
             tweak: None,
             changed: Arc::default(),
             end_if_unusable: false,
+            shares_told: None,
         }
     }
 }
@@ -574,6 +600,13 @@ impl Runner {
         unreachable!("the last one is returned")
     }
 
+    /// Whether this is a share's runner whose folder is there: a real folder, not a link to
+    /// one (what a link leads to is never synced as the share's).
+    fn shares_folder_is_there(&self) -> bool {
+        self.cfg.sharer.is_some()
+            && std::fs::symlink_metadata(&self.cfg.folder).is_ok_and(|meta| meta.is_dir())
+    }
+
     fn open_once(&self) -> Result<Parts, RunnerError> {
         let root = &self.cfg.folder;
         let mut cfg = EngineConfig::new(root, &self.cfg.device);
@@ -581,7 +614,17 @@ impl Runner {
         cfg.guard.fraction = self.cfg.mass_delete.fraction;
         // A folder belongs to one identity (its marker says which): never mix two drives
         // through one folder.
-        let sync_root = SyncRoot::open(&self.cfg.db, &self.cfg.identity, root)?;
+        let sync_root = match SyncRoot::open(&self.cfg.db, &self.cfg.identity, root) {
+            // A share's folder, which its account made in the folder of shares, is set up
+            // here (on this thread: its DB may be busy) while it holds no marker: what is
+            // in it that the sharer's drive doesn't have moves out. One that holds a marker
+            // its DB doesn't know (another folder renamed into its place, or the share's
+            // DB lost) is never taken over: its sync fails, saying so.
+            Err(RootError::NoMarker(_)) if self.cfg.sharer.is_some() => {
+                SyncRoot::create(&self.cfg.db, &self.cfg.identity, root)?
+            }
+            opened => opened?,
+        };
         // Before the rules are read: a folder of shares taken now is left out by them.
         // What can't be told of it (its record, the top's listing, a marker) stops the sync
         // as rules that can't be read do: failing, tried again at the next look.
@@ -615,6 +658,14 @@ impl Runner {
             tracing::warn!(
                 "the folder of shares on record isn't at the top of the folder: none is made in its place"
             );
+        }
+        if let Some(SharesTold(told)) = &self.cfg.shares_told {
+            // Where the volume's file ids aren't stable there may be more than one: the first.
+            told(match placed.at.first() {
+                Some(name) => Shares::At(name.clone()),
+                None if placed.missing => Shares::Gone,
+                None => Shares::None,
+            });
         }
         cfg.folder.filter = Arc::new(Filter::load(root, cfg.folder.case_insensitive)?);
         cfg.folder.read_only.clone_from(&self.cfg.read_only);
@@ -857,8 +908,22 @@ impl Runner {
                 (Some(_), true) => self.drive.allow(),
                 (None, _) => {}
             }
-            let marker = match SyncRoot::check(&self.cfg.folder, &self.cfg.identity) {
+            let checked = SyncRoot::check(&self.cfg.folder, &self.cfg.identity);
+            // A share's folder is a real folder at its place in the folder of shares, never a
+            // link to one: what a link leads to (another folder of the account's, say) isn't
+            // the share's, whatever marker it holds.
+            if self.cfg.sharer.is_some() && !self.shares_folder_is_there() {
+                // Gone (deleted, renamed, the folder of shares with it), or something else
+                // there: it ends, for its account to make it again where the folder of
+                // shares is now, or not at all.
+                let gone = format!("{}: not the share's folder", self.cfg.folder.display());
+                return Err(std::io::Error::new(std::io::ErrorKind::NotFound, gone).into());
+            }
+            let marker = match checked {
                 Ok(marker) => marker.id,
+                // A share's folder is its account's to make and set up as it opens: one
+                // just made has no marker yet to compare.
+                Err(RootError::NoMarker(_)) if self.cfg.sharer.is_some() => String::new(),
                 // Unmounted, moved or deleted: syncing would take everything off the drive,
                 // or fill an empty mount point. Wait for it to come back.
                 Err(RootError::NoMarker(_) | RootError::Io(_)) => {
@@ -907,7 +972,12 @@ impl Runner {
                         self.tell_rules(Some(&p.engine.config().folder.filter));
                         self.watcher_is(p.observer.watcher_error.clone());
                         started = false;
-                        opened = Some(marker);
+                        // (A share's folder set up as it opened has its marker now.)
+                        let set_up = || SyncRoot::check(&self.cfg.folder, &self.cfg.identity);
+                        opened = Some(match marker.is_empty() {
+                            true => set_up().map(|m| m.id).unwrap_or_default(),
+                            false => marker,
+                        });
                         parts.insert(p)
                     }
                     // Rules that can't be read, or with a negation that isn't a valid rule

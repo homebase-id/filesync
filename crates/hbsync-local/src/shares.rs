@@ -73,6 +73,8 @@ impl Record {
         if stable {
             text += &format!("folder {}\n", hbsync_platform::stat(dir)?.file_id.file);
         }
+        // (The state folder in the sync folder that is there, never that one with it.)
+        hbsync_fileio::make_dir_in_place(&crate::layout::state_dir(root))?;
         hbsync_fileio::write_atomic(&shares_file(root), text.as_bytes())
     }
 
@@ -210,8 +212,10 @@ pub fn make(root: &Path, name: &str) -> io::Result<Made> {
     if let Some(kept) = folders(root)?.into_iter().next() {
         return Ok(Made::Kept(kept));
     }
+    // (Each in the folder it is in: the sync folder isn't made again where it is gone.)
     let tmp = tmp_dir(root);
-    std::fs::create_dir_all(&tmp)?;
+    hbsync_fileio::make_dir_in_place(&crate::layout::state_dir(root))?;
+    hbsync_fileio::make_dir_in_place(&tmp)?;
     let prepared = tmp.join(PREPARED);
     let marker = shared_marker(&prepared);
     // One left by a crash: this program's own, holding its marker and nothing else.
@@ -255,6 +259,9 @@ pub struct Placed {
     /// One is on record and isn't at the top (moved away, deleted, its marker gone): none
     /// was made in its place.
     pub missing: bool,
+    /// The folders of shares at the top now, by name, as [`Top::shares`]: where they were,
+    /// gave way to, or were made.
+    pub at: Vec<String>,
 }
 
 /// How many names [`place`] tries for one folder: `Shared`, `Shared-2`, … `Shared-99`.
@@ -359,6 +366,7 @@ pub fn place<E: From<io::Error>>(
         case_insensitive,
         on_drive: &mut on_drive,
     };
+    placed.at.clone_from(&top.shares);
     for name in &top.shares {
         let here = others.contains(&key(name));
         if !here && !(names.on_drive)(name)? {
@@ -376,7 +384,11 @@ pub fn place<E: From<io::Error>>(
             },
         )?;
         match moved {
-            Ok(to) => placed.moved.push((name.clone(), to)),
+            Ok(to) => {
+                placed.at.retain(|at| at != name);
+                placed.at.push(to.clone());
+                placed.moved.push((name.clone(), to));
+            }
             // An item of the user's own would be left out with it, and leave the drive.
             Err(e) if here => {
                 let what = format!(
@@ -401,14 +413,14 @@ pub fn place<E: From<io::Error>>(
     let unplaced = top.shares.is_empty() && record.is(&tmp_dir(root).join(PREPARED))?;
     placed.missing = record.0.is_some() && top.shares.is_empty() && !unplaced;
     if let Some(name) = make_as.filter(|_| record.0.is_none() || unplaced) {
-        let mut kept = false;
+        let mut kept = None;
         let made = names.free(name, 1, |to| {
             Ok(match make(root, to)? {
                 Made::Made => true,
                 Made::Taken => false,
                 // Made by another since the listing: there, which is all that was asked.
-                Made::Kept(_) => {
-                    kept = true;
+                Made::Kept(name) => {
+                    kept = Some(name);
                     true
                 }
             })
@@ -419,8 +431,15 @@ pub fn place<E: From<io::Error>>(
                 format!("the folder of shares {name} can't be made: {e}"),
             )
         })?;
-        placed.made = (!kept).then_some(made);
+        match kept {
+            Some(kept) => placed.at.push(kept),
+            None => {
+                placed.at.push(made.clone());
+                placed.made = Some(made);
+            }
+        }
     }
+    placed.at.sort_unstable();
     Ok(placed)
 }
 
@@ -618,6 +637,18 @@ mod tests {
         Ok(())
     }
 
+    /// A sync folder that is gone isn't made again for its folder of shares: neither as one
+    /// is made, nor as one is put on record.
+    #[test]
+    fn a_sync_folder_that_is_gone_isnt_made_again() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let gone = dir.path().join("gone");
+        assert!(make(&gone, "Shared").is_err());
+        assert!(Record::write(&gone, "token", &gone.join("Shared")).is_err());
+        assert!(!gone.exists());
+        Ok(())
+    }
+
     fn nothing(_: &str) -> io::Result<bool> {
         Ok(false)
     }
@@ -638,9 +669,14 @@ mod tests {
         assert_eq!(placed.made.as_deref(), Some("Shared-3"));
         assert!(placed.moved.is_empty());
         assert_eq!(folders(root)?, ["Shared-3"]);
+        assert_eq!(placed.at, ["Shared-3"]);
+        let there = |name: &str| Placed {
+            at: vec![name.to_owned()],
+            ..Placed::default()
+        };
         assert_eq!(
             place(root, Some("Shared"), false, nothing)?,
-            Placed::default()
+            there("Shared-3")
         );
 
         fs::create_dir(root.join("Shared-4"))?;
@@ -651,6 +687,7 @@ mod tests {
         })?;
         assert_eq!(placed.made, None);
         assert_eq!(placed.moved, [("Shared-3".into(), "Shared-5".into())]);
+        assert_eq!(placed.at, ["Shared-5"]);
         assert_eq!(
             asked,
             ["Shared-3", "Shared-5"],
@@ -673,13 +710,10 @@ mod tests {
         fs::create_dir(root.join("Work"))?;
         fs::rename(root.join("From 2024-2025-2"), root.join("Work/Shared"))?;
         let placed = place(root, Some("Shared"), false, nothing)?;
-        assert!(placed.missing && placed.made.is_none());
+        assert!(placed.missing && placed.made.is_none() && placed.at.is_empty());
         assert!(folders(root)?.is_empty());
         fs::rename(root.join("Work/Shared"), root.join("Back"))?;
-        assert_eq!(
-            place(root, Some("Shared"), false, nothing)?,
-            Placed::default()
-        );
+        assert_eq!(place(root, Some("Shared"), false, nothing)?, there("Back"));
         assert_eq!(folders(root)?, ["Back"]);
 
         // No name free: for the drive's item it stays where it is, and says so.
@@ -717,8 +751,9 @@ mod tests {
         let in_the_way = |caseless| crate::Filter::load(root, caseless).map(|f| f.in_the_way());
         assert!(!in_the_way(false).expect("read"));
         assert!(in_the_way(true).expect("read"));
-        assert_eq!(place(root, None, false, nothing)?, Placed::default());
+        assert_eq!(place(root, None, false, nothing)?.at, ["Straße"]);
         let placed = place(root, None, true, nothing)?;
+        assert_eq!(placed.at, ["Straße-2"]);
         assert_eq!(placed.moved, [("Straße".into(), "Straße-2".into())]);
         assert_eq!(folders(root)?, ["Straße-2"]);
         assert!(!in_the_way(true).expect("read"));
