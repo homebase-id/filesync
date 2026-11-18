@@ -467,6 +467,9 @@ fn run(command: Command) -> Res<ExitCode> {
             Some(OnOff::On) => {
                 autostart::install(&autostart::logon_program()?)?;
                 println!("{APP_NAME} starts at logon.");
+                if let Some(hint) = autostart::hint() {
+                    println!("{hint}.");
+                }
             }
             Some(OnOff::Off) => {
                 autostart::uninstall()?;

@@ -824,6 +824,16 @@ service manager at logout), nor with `HBSYNC_HOME` set; a move that fails leaves
 where it was. The launcher stays after Log out, as
 the way to log in again. Elsewhere the installer will do this (not built yet).
 
+What starts at logon is the tray where it is installed (it starts the daemon), else the daemon
+(`autostart::logon_program`). On Linux the tray only when autostart is turned on from a
+graphical session (`XDG_SESSION_TYPE` `wayland` or `x11`): the packages install the tray on a
+server too, where nobody logs in to a desktop and nothing reads its entry, so from a terminal
+without one (SSH) the daemon's systemd unit is installed instead. A user's units start when
+the user first logs in, over SSH too, not with the computer, unless lingering is on for the
+user: setup and `hbsync autostart on` say so where it is off (`loginctl enable-linger` turns it
+on; they don't, it is the system's setting for all the user's services). Turning autostart on
+from the tray later replaces the unit with the tray's entry.
+
 `hbsync setup` turns autostart on, `logout` and `unlink` turn it off, `hbsync autostart on|off`
 by hand. With the daemon starting at logon, `hbsync start` goes through launchd or systemd so
 that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches the user's logon entry.

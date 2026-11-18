@@ -76,7 +76,7 @@ fn start_scope(pid: u32) -> zbus::Result<()> {
 }
 
 /// Whether this is a graphical session (not SSH, even with X forwarding).
-fn desktop() -> bool {
+pub(crate) fn desktop() -> bool {
     std::env::var("XDG_SESSION_TYPE").is_ok_and(|t| t == "wayland" || t == "x11")
 }
 
