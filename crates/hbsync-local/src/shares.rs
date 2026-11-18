@@ -396,8 +396,11 @@ pub fn place<E: From<io::Error>>(
     // Only where nothing is on record: one on record that isn't at the top (moved into
     // another folder for a moment, its marker unreadable just now) stays the one on record,
     // or it would be a plain folder for good when it is back, and sent.
-    placed.missing = record.0.is_some() && top.shares.is_empty();
-    if let (Some(name), None) = (make_as, &record.0) {
+    // But one on record that never got to the top ([`make`] stopped before its rename: a
+    // crash, a rename refused) is nothing to keep: made anew.
+    let unplaced = top.shares.is_empty() && record.is(&tmp_dir(root).join(PREPARED))?;
+    placed.missing = record.0.is_some() && top.shares.is_empty() && !unplaced;
+    if let Some(name) = make_as.filter(|_| record.0.is_none() || unplaced) {
         let mut kept = false;
         let made = names.free(name, 1, |to| {
             Ok(match make(root, to)? {
@@ -682,6 +685,18 @@ mod tests {
         assert!(placed.moved.is_empty());
         assert!(placed.stuck.is_some_and(|why| why.contains("Back")));
         assert_eq!(folders(root)?, ["Back"]);
+
+        // One whose making stopped before it was in place (on record, still prepared) is
+        // made anew.
+        let other = tempfile::tempdir()?;
+        let root = other.path();
+        assert_eq!(make(root, "Shared")?, Made::Made);
+        fs::create_dir_all(tmp_dir(root))?;
+        fs::rename(root.join("Shared"), tmp_dir(root).join(PREPARED))?;
+        let placed = place(root, Some("Shared"), false, nothing)?;
+        assert_eq!(placed.made.as_deref(), Some("Shared"));
+        assert!(!placed.missing);
+        assert_eq!(folders(root)?, ["Shared"]);
         Ok(())
     }
 

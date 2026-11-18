@@ -933,6 +933,10 @@ impl Runner {
                 let again = std::mem::take(&mut held.again);
                 (held.answer.take(), again)
             };
+            // The engine keeps it for its next plan only: given again if that one isn't made.
+            let confirmed = answer
+                .clone()
+                .filter(|(answer, _)| *answer == HeldAnswer::Delete);
             match answer {
                 Some((HeldAnswer::Delete, seen)) => p.engine.confirm_deletes(seen.iter().copied()),
                 Some((HeldAnswer::PutBack, seen)) => {
@@ -997,7 +1001,25 @@ impl Runner {
             };
             let took = began.elapsed();
             self.log_sync(&result, took, &why, catch_up, io_before);
-            let in_the_way = result.as_ref().is_ok_and(|report| report.in_the_way);
+            // The drive has an item at its top under the folder of shares' name, and nothing
+            // was planned with it masked: not a sync to show or to schedule by. Opened again,
+            // the folder of shares gives way (a run that syncs once goes on too).
+            if result.as_ref().is_ok_and(|report| report.in_the_way) {
+                tracing::info!(
+                    "the drive has an item of the folder of shares' name: starting over"
+                );
+                if let Some(answer) = confirmed {
+                    let mut held = lock(&self.held);
+                    if held.answer.is_none() {
+                        held.answer = Some(answer);
+                        held.again = once_more;
+                    }
+                }
+                parts = None;
+                yielding = true;
+                schedule.want(Why::Rules);
+                continue;
+            }
             match result {
                 Ok(report) => {
                     started = true;
@@ -1034,16 +1056,6 @@ impl Runner {
                     let (class, refusal, after) = (e.class(), e.refusal(), e.retry_after());
                     self.backs_off(&mut schedule, "the sync", class, refusal, &e, after);
                 }
-            }
-            // The drive has an item at its top under the folder of shares' name, and nothing
-            // was planned with it masked: opened again, the folder of shares gives way.
-            if in_the_way {
-                tracing::info!(
-                    "the drive has an item of the folder of shares' name: starting over"
-                );
-                parts = None;
-                yielding = true;
-                schedule.want(Why::Rules);
             }
             if self.cfg.once {
                 return Ok(());

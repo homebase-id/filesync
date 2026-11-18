@@ -438,7 +438,8 @@ included (service managers restart it then).
   with the runners of the shares: until then none is made). Never where one is on record,
   at the top or not: one moved into another folder, or whose marker can't be read for a
   moment, would be a plain folder for good once another took its place on record, and
-  what it holds would be sent. The log says that none is made.
+  what it holds would be sent. The log says that none is made. (One on record that never
+  got to the top, its making stopped before the rename into place, is made anew.)
 
   And the folder of shares gives way: when an item at the top of the folder's part of the
   drive (as the account's DB has it; not a role folder, whose name is free in the main
@@ -450,7 +451,8 @@ included (service managers restart it then).
 
   It gives way to the drive's item whenever that one comes: a sync that finds one under its
   name, after reading the drive and before planning anything (one lookup by name, only where
-  a folder of shares is there), plans nothing; the engine restarts, and gives way as it
+  a folder of shares is there), plans nothing and isn't shown as a sync (an answer to held
+  deletes given for it is kept for the next); the engine restarts, and gives way as it
   opens. So an item this device has synced that takes the name on the drive (renamed on
   another device) is renamed here as anywhere, never taken from here as masked. Where the
   rename fails (a file in it in use on Windows, no number free) the drive's item is masked

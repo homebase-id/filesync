@@ -1165,6 +1165,56 @@ fn the_folder_of_shares_gives_way_before_a_synced_folder_that_took_its_name_is_p
     Ok(())
 }
 
+/// Where the folder of shares can't give way to the drive's item of its name (its rename is
+/// refused), the item stays out, which loses nothing: the folder syncs on, and isn't opened
+/// over and over for it. It gives way when the folder next opens and the rename works.
+#[cfg(unix)]
+#[test]
+fn a_folder_of_shares_that_cant_give_way_leaves_the_item_out_and_syncs_on() -> R {
+    use hbsync_local::shares::folders;
+    use std::os::unix::fs::PermissionsExt;
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    let b = Device::start(&server, "b")?;
+    a.started()?;
+    b.started()?;
+    assert_eq!(make(&a.root, "Shared")?, Made::Made);
+    a.write("notes.txt", "mine")?;
+    a.handle.send(Command::SyncNow);
+    wait_until("notes.txt is up", || on_server(&server, "notes.txt"))?;
+    a.wait_idle()?;
+
+    // Nothing at the folder's top can be renamed.
+    let mode = |mode| std::fs::set_permissions(&a.root, std::fs::Permissions::from_mode(mode));
+    mode(0o555)?;
+    if std::fs::write(a.root.join("probe"), "").is_ok() {
+        // Whoever runs this may write anywhere (root): nothing can be refused.
+        std::fs::remove_file(a.root.join("probe"))?;
+        return Ok(mode(0o755)?);
+    }
+    b.write("Shared/cloud.txt", "from the drive")?;
+    b.handle.send(Command::SyncNow);
+    wait_until("the drive's Shared is up", || {
+        on_server(&server, "cloud.txt")
+    })?;
+    a.sync_reported()?;
+    a.wait_idle()?;
+    let quiet = a.settled(Duration::from_millis(500), PATIENCE, || a.feed_reads());
+    let left_out = !a.has("Shared/cloud.txt") && folders(&a.root)? == ["Shared"];
+    let idle = a.status().state == State::Idle;
+    mode(0o755)?;
+    quiet?;
+    assert!(left_out && idle);
+
+    // Opened again (its rules changed): it gives way now.
+    a.write(".hbsync/ignore", "*.tmp\n")?;
+    a.handle.send(Command::SyncNow);
+    wait_until("the drive's Shared is here", || a.has("Shared/cloud.txt"))?;
+    a.wait_idle()?;
+    assert_eq!(folders(&a.root)?, ["Shared-2"]);
+    Ok(())
+}
+
 /// A folder of the user's own that the volume tells apart from the folder of shares and the
 /// client doesn't (`STRASSE` beside `Straße`, where the volume ignores case) stays synced: the
 /// folder of shares gives way before the filter holds its name. Where the volume tells case
