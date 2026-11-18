@@ -3,8 +3,6 @@
 use std::io::{BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::mpsc::Receiver;
-use std::sync::{Mutex, OnceLock};
 
 use clap::{Parser, Subcommand};
 use hbsync_app::control::{running, start, stop_syncing};
@@ -45,13 +43,8 @@ enum Command {
         /// Sync a folder that already has files in it (they are merged with the drive).
         #[arg(long)]
         existing: bool,
-        /// The browser to open the authorize page with.
-        #[arg(long, value_name = "COMMAND")]
-        browser: Option<String>,
-        /// Approve in a browser on another computer: paste the address it ends on here
-        /// [default: when this computer has no graphical session, or is used over SSH].
-        #[arg(long)]
-        paste: bool,
+        #[command(flatten)]
+        approve: Approve,
         /// Don't start the daemon.
         #[arg(long)]
         no_start: bool,
@@ -64,13 +57,8 @@ enum Command {
     Login {
         /// The identity [default: the one set up].
         identity: Option<String>,
-        /// The browser to open the authorize page with.
-        #[arg(long, value_name = "COMMAND")]
-        browser: Option<String>,
-        /// Approve in a browser on another computer: paste the address it ends on here
-        /// [default: when this computer has no graphical session, or is used over SSH].
-        #[arg(long)]
-        paste: bool,
+        #[command(flatten)]
+        approve: Approve,
     },
     /// Syncs one of your own folders where this computer keeps it (documents, pictures,
     /// music, videos, downloads) with the drive's folder of that kind: joined if another device
@@ -214,8 +202,7 @@ fn run(command: Command) -> Res<ExitCode> {
             identity,
             folder,
             existing,
-            browser,
-            paste,
+            approve,
             no_start,
             no_autostart,
         } => {
@@ -239,11 +226,8 @@ fn run(command: Command) -> Res<ExitCode> {
                 };
             request.start = !no_start;
             request.at_logon = !no_autostart;
-            let mut owner = setup::InBrowser {
-                browser: browser.as_deref(),
-                say: &|line| println!("{line}"),
-                typed: pasting(paste).then_some(&typed_line),
-            };
+            let typed = approve.typed();
+            let mut owner = approve.owner(typed.as_ref());
             setup::set_up(&paths, &request, &mut owner, &mut |line| println!("{line}"))?;
         }
         Command::Status { json } => match daemon::status(&paths)? {
@@ -411,18 +395,11 @@ fn run(command: Command) -> Res<ExitCode> {
                 root.identity
             );
         }
-        Command::Login {
-            identity,
-            browser,
-            paste,
-        } => {
+        Command::Login { identity, approve } => {
             let config = Config::load(&paths.config_file())?.unwrap_or_default();
             let identity = config.identity(identity.as_deref())?;
-            let mut owner = setup::InBrowser {
-                browser: browser.as_deref(),
-                say: &|line| println!("{line}"),
-                typed: pasting(paste).then_some(&typed_line),
-            };
+            let typed = approve.typed();
+            let mut owner = approve.owner(typed.as_ref());
             setup::sign_in_again(&paths, &identity, &mut owner)?;
             println!("Signed in again on {identity}.");
         }
@@ -538,8 +515,8 @@ fn described(items: &[DeletedItem]) -> Vec<String> {
 fn ask_yes(question: &str) -> Res<bool> {
     print!("{question} [y/N] ");
     std::io::stdout().flush()?;
-    // (None: the input ended. No.)
-    let answer = lock(typed()).recv().unwrap_or_default();
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
     Ok(matches!(answer.trim(), "y" | "Y" | "yes"))
 }
 
@@ -639,41 +616,50 @@ fn shared_folder(
 /// The command that shows and sets up the folder what others share is synced into.
 const SHARED_FOLDER: &str = "hbsync shared-folder";
 
-/// The lines typed at the terminal, read by one thread from the first asking on: a line
-/// waited for while the browser is (an address pasted, [`typed_line`]) and the answer to a
-/// question never take each other's.
-fn typed() -> &'static Mutex<Receiver<String>> {
-    static LINES: OnceLock<Mutex<Receiver<String>>> = OnceLock::new();
-    LINES.get_or_init(|| {
+/// How the owner approves in the browser (`hbsync setup`, `hbsync login`).
+#[derive(Debug, clap::Args)]
+struct Approve {
+    /// The browser to open the authorize page with.
+    #[arg(long, value_name = "COMMAND")]
+    browser: Option<String>,
+    /// Approve in a browser on another computer: paste the address it ends on here
+    /// [default: when this computer has no graphical session, or is used over SSH].
+    #[arg(long)]
+    paste: bool,
+}
+
+/// Asked for a line typed since the last asking ([`setup::InBrowser::typed`]).
+type Typed = Box<dyn Fn() -> Option<String>>;
+
+impl Approve {
+    /// The lines typed at the terminal from now on, where the owner's answer is taken from
+    /// a pasted address too: asked for (`--paste`), or this computer most likely has no
+    /// browser to come back to ([`setup::browser_elsewhere`]) and someone is at the
+    /// terminal. Read by a thread of their own (neither command asks anything else).
+    fn typed(&self) -> Option<Typed> {
+        let at_terminal = || std::io::stdin().is_terminal();
+        if !self.paste && !(setup::browser_elsewhere() && at_terminal()) {
+            return None;
+        }
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             for line in std::io::stdin().lock().lines() {
-                let sent = line.is_ok_and(|line| tx.send(line).is_ok());
-                if !sent {
+                if !line.is_ok_and(|line| tx.send(line).is_ok()) {
                     break;
                 }
             }
         });
-        Mutex::new(rx)
-    })
-}
+        Some(Box::new(move || rx.try_recv().ok()))
+    }
 
-/// A line typed since the last asking, if there is one.
-fn typed_line() -> Option<String> {
-    lock(typed()).try_recv().ok()
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-}
-
-/// Whether the owner's answer is taken from a pasted address too (`hbsync setup --paste`):
-/// asked for, or this computer most likely has no browser to come back to
-/// ([`setup::browser_elsewhere`]) and someone is at the terminal.
-fn pasting(asked: bool) -> bool {
-    asked || (setup::browser_elsewhere() && std::io::stdin().is_terminal())
+    /// The owner's answers in the browser, as asked for, with `typed` ([`Approve::typed`]).
+    fn owner<'a>(&'a self, typed: Option<&'a Typed>) -> setup::InBrowser<'a> {
+        setup::InBrowser {
+            browser: self.browser.as_deref(),
+            say: &|line| println!("{line}"),
+            typed: typed.map(|typed| &**typed),
+        }
+    }
 }
 
 fn answer_held(paths: &Paths, yes: bool, answer: HeldAnswer) -> Res<()> {

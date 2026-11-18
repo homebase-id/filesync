@@ -150,11 +150,17 @@ pub fn begin(
 }
 
 impl Pending {
+    /// Whether `query` is the identity's answer to this request (by its state), whatever
+    /// it says: not one to another request.
+    pub fn answers(&self, query: &HashMap<String, String>) -> bool {
+        query.get("state").map(String::as_str) == Some(self.state.as_str())
+    }
+
     /// The identity's answer, the query of the request it sent the browser back with,
     /// exchanged for credentials.
     pub fn complete(&self, query: &HashMap<String, String>) -> Result<Credentials, HomebaseError> {
         let get = |name: &str| query.get(name).map(String::as_str);
-        if get("state") != Some(self.state.as_str()) {
+        if !self.answers(query) {
             return Err(HomebaseError::Protocol(
                 "callback for another request".into(),
             ));

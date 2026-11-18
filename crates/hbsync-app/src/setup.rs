@@ -4,6 +4,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
 pub use crate::login::Paste;
@@ -27,19 +28,10 @@ pub const APPROVAL_TIMEOUT: Duration = Duration::from_secs(1800);
 
 /// Authorizes this device for Filesync on `identity`: opens the authorize page in `browser`
 /// (the system's default when `None`), passes its URL to `show` for when no browser opens,
-/// and waits for the owner to approve. A new app is registered on the way.
+/// and waits for the owner to approve. A new app is registered on the way. With `paste` the
+/// owner's answer is taken also from the address the browser ended on, pasted: for a browser
+/// on another computer ([`Paste`]); none is opened here then, unless one was named.
 pub fn authorize(
-    identity: &str,
-    device: &str,
-    browser: Option<&str>,
-    show: impl FnOnce(&str),
-) -> Result<Credentials, HomebaseError> {
-    authorize_or_pasted(identity, device, browser, show, None)
-}
-
-/// [`authorize`], the owner's answer taken also from the address the browser ended on,
-/// pasted (`paste`): for a browser on another computer ([`Paste`]).
-pub fn authorize_or_pasted(
     identity: &str,
     device: &str,
     browser: Option<&str>,
@@ -48,11 +40,17 @@ pub fn authorize_or_pasted(
 ) -> Result<Credentials, HomebaseError> {
     let login = begin(identity, device)?;
     show(login.authorize_url());
-    // The URL was shown: a browser that doesn't start isn't an error.
-    let _ = open_browser(browser, login.authorize_url());
-    match paste {
-        Some(paste) => login.finish_or_pasted(APPROVAL_TIMEOUT, paste),
-        None => login.finish(APPROVAL_TIMEOUT),
+    open_unless_elsewhere(browser, login.authorize_url(), paste.is_some());
+    login.finish_with(APPROVAL_TIMEOUT, &AtomicBool::new(false), paste)
+}
+
+/// Opens `url` in `browser` (the system's when `None`). Not where the owner's browser is on
+/// another computer (`elsewhere`) and none was named: what the system opens without a
+/// screen is a browser in the terminal, where the address is to be pasted. The URL was shown:
+/// a browser that doesn't start isn't an error.
+fn open_unless_elsewhere(browser: Option<&str>, url: &str, elsewhere: bool) {
+    if browser.is_some() || !elsewhere {
+        let _ = open_browser(browser, url);
     }
 }
 
@@ -96,10 +94,22 @@ impl std::fmt::Debug for InBrowser<'_> {
 }
 
 impl InBrowser<'_> {
-    fn visit(&self, url: &str) {
-        (self.say)(&format!("If it doesn't open, visit:\n{url}\n"));
-        if self.typed.is_some() {
-            (self.say)(PASTE_HOW);
+    /// Says that the owner is to `what` (authorize this computer…) in the browser, and where:
+    /// in the one this opens, or, where the address it ends on can be pasted, in one on any
+    /// computer.
+    fn visit(&self, what: &str, url: &str) {
+        match (self.typed.is_some(), self.browser.is_some()) {
+            (false, _) => (self.say)(&format!(
+                "Opening your browser to {what}...\nIf it doesn't open, visit:\n{url}\n"
+            )),
+            (true, opens) => {
+                let here = if opens {
+                    "Opening your browser to"
+                } else {
+                    "To"
+                };
+                (self.say)(&format!("{here} {what}, visit:\n{url}\n\n{PASTE_HOW}"));
+            }
         }
     }
 
@@ -114,44 +124,33 @@ impl InBrowser<'_> {
 /// then ([`InBrowser::typed`]).
 pub fn browser_elsewhere() -> bool {
     let set = |name: &str| std::env::var_os(name).is_some_and(|value| !value.is_empty());
-    #[cfg(target_os = "linux")]
-    let no_desktop = !crate::unit::desktop();
-    #[cfg(not(target_os = "linux"))]
-    let no_desktop = false;
-    set("SSH_CONNECTION") || set("SSH_TTY") || no_desktop
+    set("SSH_CONNECTION") || set("SSH_TTY") || !autostart::graphical_session()
 }
 
 /// How to answer from a browser on another computer ([`InBrowser::typed`]).
-const PASTE_HOW: &str = "On another computer: open it there and approve. The browser then goes \
-to a page on localhost that won't load. Copy that page's address from the address bar, paste it \
-here and press Enter.\n";
+const PASTE_HOW: &str = "Open it in a browser on any computer and approve. From another computer \
+the browser then goes to a page on localhost that won't load: copy that page's address from the \
+address bar, paste it here and press Enter.\n";
 
 impl Owner for InBrowser<'_> {
     fn authorize(&mut self, identity: &str, device: &str) -> Result<Credentials, HomebaseError> {
-        (self.say)(&format!(
-            "Opening your browser to authorize this computer on {identity}..."
-        ));
-        authorize_or_pasted(
+        let what = format!("authorize this computer on {identity}");
+        let (browser, paste) = (self.browser, self.paste());
+        authorize(
             identity,
             device,
-            self.browser,
-            |url| self.visit(url),
-            self.paste(),
+            browser,
+            |url| self.visit(&what, url),
+            paste,
         )
     }
 
     fn restore_drive(&mut self, identity: &str) -> Result<bool, HomebaseError> {
-        (self.say)(&format!(
-            "Opening your browser to give {APP_NAME} its drive back on {identity}..."
-        ));
         let restore = begin_restore(identity)?;
-        self.visit(restore.url());
-        // The URL was shown: a browser that doesn't start isn't an error.
-        let _ = open_browser(self.browser, restore.url());
-        match self.paste() {
-            Some(paste) => restore.finish_or_pasted(APPROVAL_TIMEOUT, paste),
-            None => restore.finish(APPROVAL_TIMEOUT),
-        }
+        let what = format!("give {APP_NAME} its drive back on {identity}");
+        self.visit(&what, restore.url());
+        open_unless_elsewhere(self.browser, restore.url(), self.typed.is_some());
+        restore.finish_with(APPROVAL_TIMEOUT, &AtomicBool::new(false), self.paste())
     }
 }
 

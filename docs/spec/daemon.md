@@ -991,9 +991,11 @@ the command waits for it. A computer set up over SSH has no browser to come back
 link is printed, opened on any other computer and approved there, and that browser then
 goes to `http://localhost:<port>/…`, which is the other computer and doesn't load. Its
 address holds the answer all the same. Pasted into the terminal it is taken as the browser's
-request would be: the whole address, or from its path on; an address that isn't this
-login's answer (another try's, a part cut off) is said, and waited on; the browser coming
-back by itself still works meanwhile (an SSH port forward). So is the answer to giving the
+request would be: the whole address, or from its path on; a line that isn't the address
+of this login's answer (another try's, something else) is said, and waited on; the browser
+coming back by itself still works meanwhile (an SSH port forward). No browser is opened on
+this computer then, unless one is named with `--browser`: what a system without a screen
+opens is a browser in the terminal, where the address is to be pasted. So is the answer to giving the
 app its drive back. Offered with `--paste`, and by itself when someone is at the terminal
 and the computer is used over SSH (`SSH_CONNECTION`, `SSH_TTY`) or, on Linux, isn't in a
 graphical session (`XDG_SESSION_TYPE` neither `wayland` nor `x11`). Nothing on the server

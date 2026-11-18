@@ -15,7 +15,7 @@ use hbsync_homebase::{Credentials, HomebaseError, Pending};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 
 use crate::APP_NAME;
-use crate::local_http::{self, Request};
+use crate::local_http;
 
 const CALLBACK_PATH: &str = "/authorization-code-callback";
 const DRIVE_PATH: &str = "/drive-callback";
@@ -32,7 +32,7 @@ struct Callback {
 }
 
 /// What the user types while the browser is waited for: the address a browser on another
-/// computer ended on ([`Login::finish_or_pasted`]).
+/// computer ended on ([`Login::finish_with`]).
 #[derive(Clone, Copy)]
 pub struct Paste<'a> {
     /// A line typed since the last asking, if there is one (asked ten times a second).
@@ -47,39 +47,25 @@ impl std::fmt::Debug for Paste<'_> {
     }
 }
 
-/// The owner's answer, as it came back.
-enum Back {
-    /// The browser came to this computer: it waits for an answer.
-    Browser(TcpStream, Request),
-    /// The address it ended on elsewhere was pasted: its query.
-    Pasted(HashMap<String, String>),
-}
+/// The query the owner's answer came with.
+type Query = HashMap<String, String>;
+
+/// Said of a pasted line that isn't the address the browser was sent back to.
+const NOT_THE_ADDRESS: &str = "That isn't the address the browser ended on after you approved: \
+paste the whole address, starting with http://localhost";
 
 impl Callback {
-    /// The query of the address `line`, if that is the one the browser was sent back to
-    /// (this callback's path, on any host and port: the answer in it says whose it is);
-    /// `None` for an empty line, and why not for anything else. An address alone, or from its
-    /// path on, or its query alone.
-    fn pasted(&self, line: &str) -> Result<Option<HashMap<String, String>>, String> {
-        let line = line.trim();
-        if line.is_empty() {
-            return Ok(None);
-        }
-        let (address, query) = line.split_once('?').unwrap_or((line, ""));
-        let query = query.split_once('#').map_or(query, |(query, _)| query);
+    /// The query of the address `line`, if that is the one the browser was sent back to:
+    /// this callback's path, on any host and port. The whole address, or from its path on;
+    /// `None` for anything else.
+    fn pasted(&self, line: &str) -> Option<Query> {
         // (After the host, where there is one.)
-        let path = match address.split_once("://") {
-            Some((_, rest)) => rest.find('/').map_or("", |at| &rest[at..]),
-            None => address,
+        let from_path = match line.split_once("://") {
+            Some((_, rest)) => &rest[rest.find('/')?..],
+            None => line,
         };
-        if !path.is_empty() && path != self.path {
-            return Err(
-                "That isn't the address the browser ended on after you approved: paste the \
-                 whole address, starting with http://localhost"
-                    .to_owned(),
-            );
-        }
-        Ok(Some(local_http::parse_form(query.as_bytes())))
+        let (path, query) = local_http::target(from_path);
+        (path == self.path).then_some(query)
     }
 
     /// Listens on a free port for `path`; the URL the browser is sent back to.
@@ -94,14 +80,18 @@ impl Callback {
         Ok((back, url))
     }
 
-    /// Waits till `deadline` for the browser's request, or for its address pasted (`paste`),
-    /// given up as soon as `cancel` is set.
+    /// Waits up to `timeout` for the owner's answer, given up as soon as `cancel` is set:
+    /// its query, and the browser that brought it, waiting for an answer of its own; or the
+    /// query of its address pasted (`paste`), where `ours` says it is this trip's answer.
+    /// A line pasted that isn't is said, and waited on; an empty one is passed over.
     fn wait(
         &self,
-        deadline: Instant,
+        timeout: Duration,
         cancel: &AtomicBool,
         paste: Option<Paste<'_>>,
-    ) -> Result<Back, HomebaseError> {
+        ours: impl Fn(&Query) -> bool,
+    ) -> Result<(Query, Option<TcpStream>), HomebaseError> {
+        let deadline = Instant::now() + timeout;
         self.listener.set_nonblocking(true)?;
         loop {
             let (mut stream, _) = match self.listener.accept() {
@@ -115,14 +105,14 @@ impl Callback {
                             "no answer from the browser in time".into(),
                         ));
                     }
-                    if let Some(paste) = paste
-                        && let Some(line) = (paste.typed)()
-                    {
-                        match self.pasted(&line) {
-                            Ok(Some(query)) => return Ok(Back::Pasted(query)),
-                            Ok(None) => {}
-                            Err(why) => (paste.say)(&why),
-                        }
+                    let line = paste.and_then(|paste| Some((paste, (paste.typed)()?)));
+                    match line {
+                        Some((_, line)) if line.trim().is_empty() => {}
+                        Some((paste, line)) => match self.pasted(line.trim()).filter(&ours) {
+                            Some(query) => return Ok((query, None)),
+                            None => (paste.say)(NOT_THE_ADDRESS),
+                        },
+                        None => {}
                     }
                     std::thread::sleep(Duration::from_millis(100));
                     continue;
@@ -134,7 +124,7 @@ impl Callback {
             // that tries https first (Firefox's HTTPS-First) before falling back to http.
             let request = local_http::read_request(&mut stream).ok().flatten();
             match request.filter(|r| r.method == "GET" && r.path == self.path) {
-                Some(request) => return Ok(Back::Browser(stream, request)),
+                Some(request) => return Ok((request.query, Some(stream))),
                 None => {
                     let _ = local_http::message(&mut stream, 404, "Not here.");
                 }
@@ -142,10 +132,14 @@ impl Callback {
         }
     }
 
-    /// Answers the browser that came back: sent on to `return_to` (with `?error=<why>` on
-    /// failure), else a line of text. A browser gone meanwhile (the tab closed) changes
-    /// nothing: the owner's answer came.
-    fn answer(&self, stream: &mut TcpStream, outcome: Result<&str, String>) {
+    /// Answers the browser that came back (none: its address was pasted): sent on to
+    /// `return_to` (with `?error=<why>` on failure), else a line of text. A browser gone
+    /// meanwhile (the tab closed) changes nothing: the owner's answer came.
+    fn answer(&self, stream: Option<TcpStream>, outcome: Result<&str, String>) {
+        let Some(mut stream) = stream else {
+            return;
+        };
+        let stream = &mut stream;
         let answered = match (&self.return_to, outcome) {
             (Some(url), Ok(_)) => local_http::redirect(stream, url),
             (Some(url), Err(why)) => {
@@ -212,46 +206,24 @@ impl Login {
         self.finish_with(timeout, cancel, None)
     }
 
-    /// [`Login::finish`], the owner's answer taken also from the address the browser ended
-    /// on, pasted (`paste`): for a browser on another computer, which can't come back to
-    /// this one. An address that isn't this login's answer is said, and waited on.
-    pub fn finish_or_pasted(
-        self,
-        timeout: Duration,
-        paste: Paste<'_>,
-    ) -> Result<Credentials, HomebaseError> {
-        self.finish_with(timeout, &AtomicBool::new(false), Some(paste))
-    }
-
-    fn finish_with(
+    /// [`Login::finish_unless`], the owner's answer taken also from the address the browser
+    /// ended on, pasted (`paste`): for a browser on another computer, which can't come back
+    /// to this one. An address of another login is said, and waited on.
+    pub(crate) fn finish_with(
         self,
         timeout: Duration,
         cancel: &AtomicBool,
         paste: Option<Paste<'_>>,
     ) -> Result<Credentials, HomebaseError> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let query = match self.back.wait(deadline, cancel, paste)? {
-                Back::Browser(mut stream, request) => {
-                    let result = self.pending.complete(&request.query);
-                    let outcome = match &result {
-                        Ok(_) => Ok("is connected"),
-                        Err(e) => Err(format!("{APP_NAME} could not connect: {e}")),
-                    };
-                    self.back.answer(&mut stream, outcome);
-                    return result;
-                }
-                Back::Pasted(query) => query,
-            };
-            match (self.pending.complete(&query), paste) {
-                // Not this login's answer (another try's address, a part of it cut off).
-                (Err(HomebaseError::Protocol(why)), Some(paste)) => (paste.say)(&format!(
-                    "That address doesn't answer this login ({why}). Paste the one the \
-                     browser ended on."
-                )),
-                (result, _) => return result,
-            }
-        }
+        let ours = |query: &Query| self.pending.answers(query);
+        let (query, browser) = self.back.wait(timeout, cancel, paste, ours)?;
+        let result = self.pending.complete(&query);
+        let outcome = match &result {
+            Ok(_) => Ok("is connected"),
+            Err(e) => Err(format!("{APP_NAME} could not connect: {e}")),
+        };
+        self.back.answer(browser, outcome);
+        result
     }
 }
 
@@ -305,37 +277,24 @@ impl DriveRestore {
         self.finish_with(timeout, cancel, None)
     }
 
-    /// [`DriveRestore::finish`], the owner's answer taken also from the address the browser
-    /// ended on, pasted ([`Login::finish_or_pasted`]).
-    pub fn finish_or_pasted(
-        self,
-        timeout: Duration,
-        paste: Paste<'_>,
-    ) -> Result<bool, HomebaseError> {
-        self.finish_with(timeout, &AtomicBool::new(false), Some(paste))
-    }
-
-    fn finish_with(
+    /// [`DriveRestore::finish_unless`], the owner's answer taken also from the address the
+    /// browser ended on, pasted ([`Login::finish_with`]): this trip's by its path alone.
+    pub(crate) fn finish_with(
         self,
         timeout: Duration,
         cancel: &AtomicBool,
         paste: Option<Paste<'_>>,
     ) -> Result<bool, HomebaseError> {
+        let (query, browser) = self.back.wait(timeout, cancel, paste, |_| true)?;
         // Given comes back without a status; cancelled (or anything else) with one.
-        let given = |query: &HashMap<String, String>| !query.contains_key("status");
-        match self.back.wait(Instant::now() + timeout, cancel, paste)? {
-            Back::Browser(mut stream, request) => {
-                let given = given(&request.query);
-                let outcome = if given {
-                    Ok("goes on setting up")
-                } else {
-                    Err(format!("{APP_NAME} didn't get its drive back."))
-                };
-                self.back.answer(&mut stream, outcome);
-                Ok(given)
-            }
-            Back::Pasted(query) => Ok(given(&query)),
-        }
+        let given = !query.contains_key("status");
+        let outcome = if given {
+            Ok("goes on setting up")
+        } else {
+            Err(format!("{APP_NAME} didn't get its drive back."))
+        };
+        self.back.answer(browser, outcome);
+        Ok(given)
     }
 }
 
@@ -389,7 +348,11 @@ mod tests {
                 say: &|why| said.borrow_mut().push(why.to_owned()),
             };
             assert_eq!(
-                restore.finish_or_pasted(Duration::from_secs(10), paste)?,
+                restore.finish_with(
+                    Duration::from_secs(10),
+                    &AtomicBool::new(false),
+                    Some(paste)
+                )?,
                 given
             );
             assert_eq!(said.borrow().len(), 2, "{said:?}");
@@ -402,7 +365,11 @@ mod tests {
             typed: &|| Some(back.clone()),
             say: &|_| {},
         };
-        assert!(restore.finish_or_pasted(Duration::from_secs(10), paste)?);
+        assert!(restore.finish_with(
+            Duration::from_secs(10),
+            &AtomicBool::new(false),
+            Some(paste)
+        )?);
         Ok(())
     }
 
@@ -426,16 +393,17 @@ mod tests {
             typed: &|| lines.borrow_mut().pop(),
             say: &|why| said.borrow_mut().push(why.to_owned()),
         };
-        let refused = login.finish_or_pasted(Duration::from_secs(10), paste);
+        let refused = login.finish_with(
+            Duration::from_secs(10),
+            &AtomicBool::new(false),
+            Some(paste),
+        );
         assert!(
             matches!(&refused, Err(HomebaseError::Denied(why)) if why.contains("access_denied")),
             "{refused:?}"
         );
         let said = said.borrow();
-        assert!(
-            said.len() == 1 && said[0].contains("doesn't answer this login"),
-            "{said:?}"
-        );
+        assert_eq!(*said, [NOT_THE_ADDRESS]);
         Ok(())
     }
 
