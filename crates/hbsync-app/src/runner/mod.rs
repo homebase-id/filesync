@@ -752,6 +752,8 @@ impl Runner {
         let mut shares_at: Option<Instant> = None;
         // How often in a row the folder of shares couldn't be made.
         let mut unmade_tries = 0u32;
+        // Its timer came round while the folder was paused.
+        let mut shares_held = false;
         // When to read the ignore rules, touched a moment ago.
         let mut rules_at: Option<Instant> = None;
         // After taking local changes failed: not again before then.
@@ -878,15 +880,20 @@ impl Runner {
             // The folder of shares is asked again, to give way or to be made, by itself (its
             // record, a listing, a lookup, a rename): an idle folder is asked too, and the
             // folder is opened again only where that did something, never to find out.
+            // (Come round while the folder was paused: asked now that it syncs again.)
+            if shares_held && !schedule.paused() {
+                shares_held = false;
+                shares_at = Some(now);
+            }
             if shares_at.is_some_and(|at| now >= at) {
                 shares_at = None;
                 let again = now + self.cfg.shares_again;
                 // Not while paused: nothing in the folder is touched then, and its watcher
-                // stays. Asked within a look's time of its syncing again (till then the
-                // timer only comes round: nothing is read).
+                // stays. Held till the folder syncs again (no timer runs meanwhile: a paused
+                // folder isn't woken for it).
                 let placed = match schedule.paused() {
                     true => {
-                        shares_at = Some(now + self.cfg.look.min(self.cfg.shares_again));
+                        shares_held = true;
                         None
                     }
                     false => parts.as_ref().map(|p| self.place_again(p)),
@@ -1060,6 +1067,8 @@ impl Runner {
                             p.engine.yield_shares(true);
                             shares_at = None;
                         }
+                        // (Its timer is set anew by this opening.)
+                        shares_held = false;
                         self.tell_rules(Some(&p.engine.config().folder.filter));
                         self.watcher_is(p.observer.watcher_error.clone());
                         started = false;

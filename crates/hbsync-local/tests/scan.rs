@@ -975,12 +975,15 @@ fn the_folder_of_shares_moved_into_another_folder_never_reaches_the_db() -> R {
     };
     #[cfg(not(unix))]
     let kept = 5;
-    let report = rescan_dirs(
-        &mut f.db,
-        &root,
-        &[RelPath::new("Work/Shared/tom")?],
-        &f.opts,
-    )?;
+    // As the watcher tells it: the marker back, and in the same batch a new file in a folder
+    // of it the DB still knows. The file is the folder of shares' too: not added below the
+    // rows the rescan takes away (which would fail the whole batch, and keep the rows).
+    f.write("Work/Shared/tom/sub/more.txt", b"m")?;
+    let entries = [
+        RelPath::new("Work/Shared/.hbsync-shared")?,
+        RelPath::new("Work/Shared/tom/sub/more.txt")?,
+    ];
+    let report = hbsync_local::rescan_entries(&mut f.db, &root, &[], &entries, &f.opts)?;
     assert_eq!((report.added, report.removed), (0, kept), "{report:?}");
 
     std::fs::rename(root.join("Work/Shared"), root.join("Shared"))?;

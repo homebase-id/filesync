@@ -453,7 +453,8 @@ included (service managers restart it then).
   `.hbsync/tmp`) stops nothing: there is none, the log says why, the account's own items
   sync on, and it is tried again after a minute the first three times, then every ten
   minutes (the making alone: the folder is opened anew only once that made it), and whenever
-  the folder opens. Not while the folder is paused: nothing in it is made or renamed then.
+  the folder opens. Not while the folder is paused: nothing in it is made or renamed then, and
+  no timer wakes it; it is asked as it syncs again.
 
   And the folder of shares gives way: when an item at the top of the folder's part of the
   drive (as the account's DB has it; not a role folder, whose name is free in the main

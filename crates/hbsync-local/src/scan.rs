@@ -296,10 +296,24 @@ pub fn rescan_entries(
     let mut report = ScanReport::default();
     let mut diff = rescan_diff(db, root, &dirs, opts, &mut report)?;
     if !alone.is_empty() {
-        // An entry below a folder the rescan walked in full (or found gone) is its too.
+        // An entry below a folder the rescan walked in full (or found gone) is its too. So
+        // is a new one below a folder whose row the rescan takes away (left out now: the
+        // folder of shares with its marker back), which has no row to be in.
         let mine: HashSet<&RelPath> = alone.paths().collect();
         let walked: HashSet<RelPath> = diff.paths().filter(|p| mine.contains(p)).cloned().collect();
-        alone.retain(|p| !walked.contains(p));
+        let folders = diff.removed.iter().filter(|r| r.kind == NodeKind::Folder);
+        let gone: HashSet<RelPath> = folders.map(|r| r.path.clone()).collect();
+        let below_gone = |path: &RelPath| {
+            let mut dir = path.parent();
+            while let Some(at) = dir {
+                if gone.contains(&at) {
+                    return true;
+                }
+                dir = at.parent();
+            }
+            false
+        };
+        alone.retain(|p| !walked.contains(p) && !below_gone(p));
         diff.append(alone);
     }
     let plan = resolve(db, root, diff, opts, &mut report)?;
