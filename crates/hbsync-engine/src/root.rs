@@ -226,6 +226,33 @@ impl SyncRoot {
         })
     }
 
+    /// Puts the folder of shares where it holds no name against anything, as the folder opens
+    /// and before its filter is read ([`hbsync_local::shares::place`]): made as `make_as` where
+    /// one is wanted and none is there, and renamed where something else at the top, or an item
+    /// at the top of this folder's part of the drive (as the DB has it), has its name as names
+    /// compare (`case_insensitive`: the volume's). The DB is opened only where a folder of
+    /// shares is there or to be made: one lookup by name then, more for a name taken.
+    pub fn place_shares(
+        &self,
+        make_as: Option<&str>,
+        case_insensitive: bool,
+    ) -> Result<hbsync_local::shares::Placed, RootError> {
+        let mut db = None;
+        hbsync_local::shares::place(&self.path, make_as, case_insensitive, |name| {
+            let db = match &mut db {
+                Some(db) => db,
+                none => none.insert(self.state()?),
+            };
+            let key = hbsync_local::top_key(name, case_insensitive);
+            let named =
+                db.read(|s| s.mirror_named(self.top, hbsync_namemap::sibling_hash(name)))?;
+            let same = |row: &hbsync_state::MirrorRow| {
+                hbsync_local::top_key(&row.name, case_insensitive) == key
+            };
+            Ok(named.iter().any(same))
+        })
+    }
+
     /// Whether `identity`'s DB at `db` has a folder at `path` (whatever its marker says).
     pub fn knows_path(db: &Path, identity: &str, path: &Path) -> Result<bool, RootError> {
         let Some(mut account) = AccountReader::open(db, identity)? else {

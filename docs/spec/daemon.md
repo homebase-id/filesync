@@ -430,8 +430,21 @@ included (service managers restart it then).
   the folder opens, a folder of shares the record no longer finds (the sync folder restored
   from a backup) is taken again, if it is the only folder at the top that isn't synced and
   holds the record's marker; the log says so. A record that can't be read stops the
-  folder's sync, failing, till it can. Making the folder for an account, and giving its name to
-  an item of the drive, come with the runners of the shares.
+  folder's sync, failing, till it can.
+
+  As the folder opens too, before the rules are read (`shares::place`): where the account
+  has shares and no folder of shares is there, one is made, named `Shared`, or the first of
+  `Shared-2`, `Shared-3`, … (up to 99) that nothing has (which accounts have shares comes
+  with the runners of the shares: until then none is made). And the folder of shares gives
+  way: when an item at the top of the drive (as the account's DB has it) or another item at
+  the top of the folder has its name, as names compare there, it is renamed to its next free
+  number (`Shared` to `Shared-2`, `Shared-2` to `Shared-3`; a name of the user's own gets
+  `-2`), its marker and its file id with it, so it stays the one on record; the log says so.
+  It gives way to the drive's item whenever that one comes: after each sync that finds one
+  masked by its name (one lookup by name, only where a folder of shares is there) the engine
+  restarts, and gives way as it opens. A rename that fails stops the folder's sync, failing,
+  till it works. A new name is another filter (sync semantics §10, rule 4: the folder is
+  walked whole once).
 - **The folder gone** (moved, deleted, a disk not mounted: its marker missing): nothing
   syncs, the status says why, and the loop waits for it to come back. It never creates a
   marker: only `hbsync setup` does.

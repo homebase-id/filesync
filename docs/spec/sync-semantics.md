@@ -1005,11 +1005,21 @@ prepared folder, which the next try makes anew.
   the top of the drive (a folder or a file, another device's) is masked on this device while
   the folder holds the name: not downloaded, not deleted from here, and nothing on the drive
   changes. It comes once the folder of shares has another name (sim
-  `a_folder_of_the_same_name_on_the_drive_comes_once_the_folder_of_shares_yields`); giving
-  way is the daemon's to do (`docs/spec/daemon.md`). Where the volume ignores case, names
-  compare as everywhere in the client (`name_key`: `ß` as `ss`), which is stricter than the
-  volume: a folder of the user's own beside it that the volume tells apart and the client
-  doesn't is left out with it (a known limit, the daemon's giving way to mend).
+  `a_folder_of_the_same_name_on_the_drive_comes_once_the_folder_of_shares_yields`), which
+  the daemon gives it: the folder of shares gives way to the drive's item, renamed to its
+  next free number (`Shared-2`; `docs/spec/daemon.md`, runner
+  `the_folder_of_shares_is_made_and_gives_way_to_the_drives_item_of_its_name`). Where the
+  volume ignores case, names compare as everywhere in the client (`name_key`: `ß` as `ss`),
+  which is stricter than the volume: an item of the user's own beside it that the volume
+  tells apart and the client doesn't would be left out with it, and by rule 1 leave the
+  drive. So the folder of shares gives way to such an item too, as the folder opens and
+  before a filter that holds its name is read (the folder is opened again at once when the
+  folder of shares is renamed or such an item is made): the order matters (sim
+  `a_folder_of_shares_yields_before_a_plan_holds_a_name_a_synced_item_has`, runner
+  `the_folder_of_shares_gives_way_to_a_folder_the_client_cant_tell_from_it`). The names
+  compared are the drive's top as the DB has it and what is at the folder's top on disk: an
+  item that is neither yet (made on another device and not read here) is masked once it is
+  read, and the folder of shares gives way after that sync.
 - One the filter doesn't know yet (it came, or took another name, while a sync was running;
   the filter is read again before the next sync) is left alone as well, by the record and
   its marker on disk: the walk reads the record once when it meets a folder at the top,

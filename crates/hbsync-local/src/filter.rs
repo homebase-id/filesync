@@ -193,8 +193,25 @@ pub struct Filter {
     /// Lines that aren't valid rules, in order.
     skipped: Vec<SkippedRule>,
     /// The folders at the top that hold what other identities share ([`crate::shares`]), as
-    /// their names compare ([`Filter::top_key`]), in order.
+    /// their names compare ([`top_key`]), in order.
     shared: Vec<String>,
+    /// Something else at the top had one's name when the filter was read
+    /// ([`Filter::in_the_way`]).
+    in_the_way: bool,
+}
+
+/// `name` as names at the top compare with a folder's that holds what other identities
+/// share: caseless and normalization-insensitive (`name_key`) where the volume ignores case
+/// (`case_insensitive`), as it is elsewhere. macOS takes a name in any normalization for the
+/// same one on a volume that tells case apart too: in NFC there.
+pub fn top_key(name: &str, case_insensitive: bool) -> Cow<'_, str> {
+    if case_insensitive {
+        Cow::Owned(name_key(name))
+    } else if cfg!(target_os = "macos") && !name.is_ascii() {
+        Cow::Owned(hbsync_platform::name::nfc(name))
+    } else {
+        Cow::Borrowed(name)
+    }
 }
 
 impl Default for Filter {
@@ -205,6 +222,7 @@ impl Default for Filter {
             case_insensitive: false,
             skipped: Vec::new(),
             shared: Vec::new(),
+            in_the_way: false,
         }
     }
 }
@@ -213,7 +231,7 @@ impl Filter {
     /// The user's rules from `.hbsync/ignore` under `root`, if the file exists; built-ins only
     /// otherwise. A line that isn't a valid rule is skipped ([`Filter::skipped`]); a file that
     /// can't be read is an error: its rules are unknown, not mistyped. With the folder at the
-    /// top of `root` that holds what other identities share ([`crate::shares::folders`]) left
+    /// top of `root` that holds what other identities share ([`crate::shares::Top`]) left
     /// out; one that can't be told is an error too.
     pub fn load(root: &Path, case_insensitive: bool) -> Result<Self, FilterError> {
         let path = crate::layout::ignore_file(root);
@@ -222,11 +240,13 @@ impl Filter {
             Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
             Err(source) => return Err(FilterError::Read { path, source }),
         };
-        let shared = crate::shares::folders(root).map_err(|source| FilterError::Read {
+        let top = crate::shares::Top::read(root).map_err(|source| FilterError::Read {
             path: root.to_owned(),
             source,
         })?;
-        Ok(Self::from_rules(&text, case_insensitive)?.with_shared(shared))
+        let mut filter = Self::from_rules(&text, case_insensitive)?.with_shared(&top.shares);
+        filter.in_the_way = top.in_the_way(case_insensitive);
+        Ok(filter)
     }
 
     /// The built-ins plus `text` (gitignore syntax, paths relative to the sync root). A line
@@ -268,6 +288,7 @@ impl Filter {
             case_insensitive,
             skipped,
             shared: Vec::new(),
+            in_the_way: false,
         })
     }
 
@@ -279,10 +300,27 @@ impl Filter {
     }
 
     /// Whether the folder at the top of `root` that holds what other identities share isn't
-    /// what this filter leaves out (or can't be told): [`crate::shares::folders`] alone, the
-    /// rules not read again.
+    /// what this filter leaves out, or is to give way to something else there of its name
+    /// ([`Filter::in_the_way`]), or can't be told: [`crate::shares::Top`] alone, the rules not
+    /// read again.
     pub fn shared_changed(&self, root: &Path) -> bool {
-        crate::shares::folders(root).map_or(true, |names| self.top_keys(names) != self.shared)
+        crate::shares::Top::read(root).map_or(true, |top| {
+            self.top_keys(&top.shares) != self.shared || top.in_the_way(self.case_insensitive)
+        })
+    }
+
+    /// Whether, when the filter was read ([`Filter::load`]), something else at the top had the
+    /// name of a folder that holds what other identities share, as names compare there: what
+    /// the volume tells apart and the client doesn't. This filter leaves it out too, until the
+    /// folder of shares gives way ([`crate::shares::place`], as the sync folder opens).
+    pub fn in_the_way(&self) -> bool {
+        self.in_the_way
+    }
+
+    /// Whether `name`, at the top, is left out as the name of a folder that holds what other
+    /// identities share ([`Filter::shared`]).
+    pub fn is_shared(&self, name: &str) -> bool {
+        self.holds_shares(name)
     }
 
     /// The folders at the top left out as holding what other identities share
@@ -295,25 +333,11 @@ impl Filter {
     fn top_keys<S: AsRef<str>>(&self, names: impl IntoIterator<Item = S>) -> Vec<String> {
         let keys = names.into_iter();
         let mut keys: Vec<String> = keys
-            .map(|name| self.top_key(name.as_ref()).into_owned())
+            .map(|name| top_key(name.as_ref(), self.case_insensitive).into_owned())
             .collect();
         keys.sort_unstable();
         keys.dedup();
         keys
-    }
-
-    /// `name` as names at the top compare with a folder's that holds what other identities
-    /// share: caseless and normalization-insensitive (`name_key`) where the volume ignores
-    /// case, as it is elsewhere. macOS takes a name in any normalization for the same one on
-    /// a volume that tells case apart too: in NFC there.
-    fn top_key<'a>(&self, name: &'a str) -> Cow<'a, str> {
-        if self.case_insensitive {
-            Cow::Owned(name_key(name))
-        } else if cfg!(target_os = "macos") && !name.is_ascii() {
-            Cow::Owned(hbsync_platform::name::nfc(name))
-        } else {
-            Cow::Borrowed(name)
-        }
     }
 
     /// The lines of the rules that aren't valid rules, skipped.
@@ -416,7 +440,7 @@ impl Filter {
             };
             return self.shared.iter().any(same);
         }
-        let key = self.top_key(name);
+        let key = top_key(name, self.case_insensitive);
         self.shared.iter().any(|s| *s == key)
     }
 

@@ -532,6 +532,28 @@ impl Engine {
         })
     }
 
+    /// Whether an item at the top of the folder's part of the drive (as the DB has it) has the
+    /// name of a folder that holds what other identities share, and is masked by it (§10): the
+    /// folder of shares is to give way ([`SyncRoot::place_shares`], as the folder opens). One
+    /// lookup by name a folder of shares; nothing is read without one.
+    pub fn shares_in_the_way(&mut self) -> Result<bool, StateError> {
+        let filter = &self.cfg.folder.filter;
+        if filter.shared().is_empty() {
+            return Ok(false);
+        }
+        self.db.read(|s| {
+            let top = s.coords()?.top;
+            for key in filter.shared() {
+                // A name's sibling hash is its key's.
+                let named = s.mirror_named(top, hbsync_namemap::sibling_hash(key))?;
+                if named.iter().any(|row| filter.is_shared(&row.name)) {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })
+    }
+
     /// Where `node` is, for people: its local path, or else the path it had when last synced
     /// (a node deleted here). `None` for a node this device never had.
     pub fn path_of(&mut self, node: NodeId) -> Result<Option<String>, StateError> {

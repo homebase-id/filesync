@@ -122,6 +122,11 @@ pub struct RunnerConfig {
     /// moves out to this folder (outside `folder`, on its volume; made where missing).
     /// `None`: it syncs both ways.
     pub read_only: Option<PathBuf>,
+    /// The folder at the top that holds what other identities share with the account (sync
+    /// semantics §10) is made under this name where none is there, as the folder opens (or
+    /// under the first free of `<name>-2`, …). `None`: none is made (one that is there is
+    /// left alone all the same, and gives way to what else has its name).
+    pub shares: Option<String>,
     /// Shown in conflict-copy names.
     pub device: String,
     pub mass_delete: MassDelete,
@@ -154,6 +159,7 @@ impl RunnerConfig {
             kind: crate::RootKind::Main,
             sharer: None,
             read_only: None,
+            shares: None,
             device: device.to_owned(),
             mass_delete: MassDelete::default(),
             paused: None,
@@ -425,8 +431,9 @@ impl Parts {
     /// differ (sync semantics §10).
     fn rules_changed(&self, root: &Path) -> bool {
         let folder = &self.engine.config().folder;
-        Filter::load(root, folder.case_insensitive)
-            .map_or(true, |f| f.fingerprint() != folder.filter.fingerprint())
+        Filter::load(root, folder.case_insensitive).map_or(true, |f| {
+            f.fingerprint() != folder.filter.fingerprint() || f.in_the_way()
+        })
     }
 
     /// [`Parts::rules_changed`] for the folder of shares alone, the rules neither read nor
@@ -566,15 +573,28 @@ impl Runner {
         // Before the rules are read: a folder of shares taken now is left out by them.
         // What can't be told of it (its record, the top's listing, a marker) stops the sync
         // as rules that can't be read do: failing, tried again at the next look.
-        let adopted = sync_root.adopt_shares().map_err(|e| match e {
+        let unread = |e| match e {
             RootError::Io(source) => RunnerError::Filter(FilterError::Read {
                 path: root.clone(),
                 source,
             }),
             e => e.into(),
-        })?;
+        };
+        let adopted = sync_root.adopt_shares().map_err(unread)?;
         if let Some(name) = adopted {
             tracing::info!("{name}: taken as the folder of shares (the one on record is gone)");
+        }
+        // Before the rules are read too: with a filter that holds its name, what else has the
+        // name (on the drive, or here beside it) would be left out with it.
+        let make_as = self.cfg.shares.as_deref();
+        let placed = sync_root
+            .place_shares(make_as, cfg.folder.case_insensitive)
+            .map_err(unread)?;
+        if let Some(name) = placed.made {
+            tracing::info!("{name}: made as the folder of shares");
+        }
+        for (from, to) in placed.moved {
+            tracing::info!("the folder of shares {from} is now {to}: something else has its name");
         }
         cfg.folder.filter = Arc::new(Filter::load(root, cfg.folder.case_insensitive)?);
         cfg.folder.read_only.clone_from(&self.cfg.read_only);
@@ -935,6 +955,7 @@ impl Runner {
             };
             let took = began.elapsed();
             self.log_sync(&result, took, &why, catch_up, io_before);
+            let synced = result.is_ok();
             match result {
                 Ok(report) => {
                     started = true;
@@ -971,6 +992,26 @@ impl Runner {
                     let (class, refusal, after) = (e.class(), e.refusal(), e.retry_after());
                     self.backs_off(&mut schedule, "the sync", class, refusal, &e, after);
                 }
+            }
+            // An item the drive has at its top under the folder of shares' name (it came with
+            // this sync, or before the folder of shares took the name) stays out while that
+            // one holds the name: opened again, the folder of shares gives way.
+            if synced
+                && parts.as_mut().is_some_and(|p| {
+                    let masked = p.engine.shares_in_the_way();
+                    masked.unwrap_or_else(|e| {
+                        tracing::warn!(
+                            "can't tell whether the folder of shares is in the way: {e}"
+                        );
+                        false
+                    })
+                })
+            {
+                tracing::info!(
+                    "the drive has an item of the folder of shares' name: starting over"
+                );
+                parts = None;
+                schedule.want(Why::Rules);
             }
             if self.cfg.once {
                 return Ok(());
