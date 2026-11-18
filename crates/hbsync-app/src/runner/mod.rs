@@ -59,6 +59,10 @@ const ANSWER_DROPPED_SET_UP: &str = "Your answer to the deletions to review wasn
 /// The ignore rules are read this long after their file was last touched: not half written.
 const RULES_QUIET: Duration = Duration::from_secs(1);
 
+/// How long after the folder of shares couldn't give way to the drive's item of its name
+/// (the item masked meanwhile) a sync asks it to again: each asking opens the folder anew.
+const GIVE_WAY_AGAIN: Duration = Duration::from_secs(600);
+
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
     #[error(transparent)]
@@ -423,6 +427,10 @@ struct Parts {
     /// Set when the drive changed for the folder ([`Drive::subscribe_with`], which wakes the
     /// runner while this lives).
     drive_changed: Arc<AtomicBool>,
+    /// The folder of shares gave way as the folder opened.
+    gave_way: bool,
+    /// It couldn't, to the drive's item of its name ([`hbsync_local::shares::Placed::stuck`]).
+    stuck: bool,
 }
 
 impl Parts {
@@ -550,16 +558,20 @@ impl Runner {
         // between would wait for the next look (a minute). Read again once it is (one read
         // more an open); changed, opened again with them.
         // Edited all the while: the watcher, there now, sees the next edit.
-        for _ in 0..2 {
-            let parts = self.open_once()?;
-            if parts.observer.watcher_error.is_some() || !parts.rules_changed(&self.cfg.folder) {
+        let mut gave_way = false;
+        for last in [false, false, true] {
+            let mut parts = self.open_once()?;
+            gave_way |= parts.gave_way;
+            parts.gave_way = gave_way;
+            let watching = parts.observer.watcher_error.is_none();
+            if last || !watching || !parts.rules_changed(&self.cfg.folder) {
                 return Ok(parts);
             }
             tracing::info!(
                 "the ignore rules or the folder of shares changed as the folder opened: opening it again"
             );
         }
-        self.open_once()
+        unreachable!("the last one is returned")
     }
 
     fn open_once(&self) -> Result<Parts, RunnerError> {
@@ -590,11 +602,19 @@ impl Runner {
         let placed = sync_root
             .place_shares(make_as, cfg.folder.case_insensitive)
             .map_err(unread)?;
-        if let Some(name) = placed.made {
+        if let Some(name) = &placed.made {
             tracing::info!("{name}: made as the folder of shares");
         }
-        for (from, to) in placed.moved {
+        for (from, to) in &placed.moved {
             tracing::info!("the folder of shares {from} is now {to}: something else has its name");
+        }
+        if let Some(why) = &placed.stuck {
+            tracing::warn!("{why}: the item stays out of this folder meanwhile");
+        }
+        if placed.missing && make_as.is_some() {
+            tracing::warn!(
+                "the folder of shares on record isn't at the top of the folder: none is made in its place"
+            );
         }
         cfg.folder.filter = Arc::new(Filter::load(root, cfg.folder.case_insensitive)?);
         cfg.folder.read_only.clone_from(&self.cfg.read_only);
@@ -623,6 +643,8 @@ impl Runner {
             engine,
             observer,
             drive_changed,
+            gave_way: !placed.moved.is_empty(),
+            stuck: placed.stuck.is_some(),
         })
     }
 
@@ -638,6 +660,11 @@ impl Runner {
         let mut check_rules = false;
         // The folders of shares alone ([`Parts::shares_changed`]).
         let mut check_shares = false;
+        // The folder is opened again for the folder of shares to give way to the drive's item
+        // of its name ([`SyncReport::in_the_way`]).
+        let mut yielding = false;
+        // It didn't: the item stays masked, and the engine asks again from then on.
+        let mut yield_at: Option<Instant> = None;
         // When to read the ignore rules, touched a moment ago.
         let mut rules_at: Option<Instant> = None;
         // After taking local changes failed: not again before then.
@@ -762,6 +789,12 @@ impl Runner {
             }
             if schedule.look_due(now) {
                 check_rules = true;
+                if yield_at.is_some_and(|at| now >= at)
+                    && let Some(p) = &mut parts
+                {
+                    p.engine.yield_shares(true);
+                    yield_at = None;
+                }
                 // Without a watcher, one is asked for again (its error gone: inotify's
                 // instances freed); the folder's changes are found by scanning it, and once
                 // one is back, what changed while there was none.
@@ -861,7 +894,16 @@ impl Runner {
             let p = match &mut parts {
                 Some(p) => p,
                 None => match self.open() {
-                    Ok(p) => {
+                    Ok(mut p) => {
+                        // Asked to give way and didn't (it can't just now, or nothing was
+                        // found to give way to): not asked again at every sync.
+                        let asked = std::mem::take(&mut yielding);
+                        if p.stuck || (asked && !p.gave_way) {
+                            yield_at = Some(Instant::now() + GIVE_WAY_AGAIN);
+                        } else {
+                            p.engine.yield_shares(true);
+                            yield_at = None;
+                        }
                         self.tell_rules(Some(&p.engine.config().folder.filter));
                         self.watcher_is(p.observer.watcher_error.clone());
                         started = false;
@@ -955,7 +997,7 @@ impl Runner {
             };
             let took = began.elapsed();
             self.log_sync(&result, took, &why, catch_up, io_before);
-            let synced = result.is_ok();
+            let in_the_way = result.as_ref().is_ok_and(|report| report.in_the_way);
             match result {
                 Ok(report) => {
                     started = true;
@@ -993,24 +1035,14 @@ impl Runner {
                     self.backs_off(&mut schedule, "the sync", class, refusal, &e, after);
                 }
             }
-            // An item the drive has at its top under the folder of shares' name (it came with
-            // this sync, or before the folder of shares took the name) stays out while that
-            // one holds the name: opened again, the folder of shares gives way.
-            if synced
-                && parts.as_mut().is_some_and(|p| {
-                    let masked = p.engine.shares_in_the_way();
-                    masked.unwrap_or_else(|e| {
-                        tracing::warn!(
-                            "can't tell whether the folder of shares is in the way: {e}"
-                        );
-                        false
-                    })
-                })
-            {
+            // The drive has an item at its top under the folder of shares' name, and nothing
+            // was planned with it masked: opened again, the folder of shares gives way.
+            if in_the_way {
                 tracing::info!(
                     "the drive has an item of the folder of shares' name: starting over"
                 );
                 parts = None;
+                yielding = true;
                 schedule.want(Why::Rules);
             }
             if self.cfg.once {

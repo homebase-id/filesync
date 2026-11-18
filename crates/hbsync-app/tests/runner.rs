@@ -981,6 +981,15 @@ fn a_folder_of_shares_is_left_alone_without_a_restart() -> R {
     let mut names = live_names(&server);
     names.sort();
     assert_eq!(names, ["Shared", "cloud.txt", "notes.txt"]);
+
+    // Renamed by hand: followed by the watcher, with no sync asked for. The name it had is
+    // free for a folder of the user's own, which a filter still holding it would leave out.
+    std::fs::rename(a.root.join("Shared-2"), a.root.join("From others"))?;
+    a.write("Shared-2/mine.txt", "mine")?;
+    wait_until("mine.txt is up", || on_server(&server, "mine.txt"))?;
+    a.wait_idle()?;
+    assert_eq!(hbsync_local::shares::folders(&a.root)?, ["From others"]);
+    assert!(!on_server(&server, "theirs.txt"));
     Ok(())
 }
 
@@ -1112,6 +1121,47 @@ fn the_folder_of_shares_is_made_and_gives_way_to_the_drives_item_of_its_name() -
     let mut names = live_names(&server);
     names.sort();
     assert_eq!(names, ["Shared", "Shared-2", "cloud.txt", "more.txt"]);
+    Ok(())
+}
+
+/// A folder this device has synced takes the folder of shares' name on the drive (renamed on
+/// another device): the folder of shares gives way before anything is planned with the name
+/// masked, so the folder is renamed here as anywhere, its files neither taken from here nor
+/// downloaded again.
+#[test]
+fn the_folder_of_shares_gives_way_before_a_synced_folder_that_took_its_name_is_planned() -> R {
+    use hbsync_local::shares::folders;
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    let b = Device::start(&server, "b")?;
+    a.started()?;
+    b.started()?;
+    assert_eq!(make(&a.root, "Shared")?, Made::Made);
+    a.write("Shared/tom/theirs.txt", "shared with me")?;
+    a.write("Team/plan.txt", "ours")?;
+    a.handle.send(Command::SyncNow);
+    wait_until("plan.txt is up", || on_server(&server, "plan.txt"))?;
+    a.wait_idle()?;
+    b.handle.send(Command::SyncNow);
+    wait_until("Team is on b", || b.has("Team/plan.txt"))?;
+    b.wait_idle()?;
+    let id = hbsync_platform::stat(&a.root.join("Team/plan.txt"))?.file_id;
+
+    std::fs::rename(b.root.join("Team"), b.root.join("Shared"))?;
+    b.handle.send(Command::SyncNow);
+    wait_until("the rename is up", || {
+        header_named(&server, "Shared").is_some()
+    })?;
+    a.handle.send(Command::SyncNow);
+    wait_until("the rename is here", || a.has("Shared/plan.txt"))?;
+    a.wait_idle()?;
+    assert_eq!(folders(&a.root)?, ["Shared-2"]);
+    assert!(a.has("Shared-2/tom/theirs.txt") && !a.has("Team"));
+    let now = hbsync_platform::stat(&a.root.join("Shared/plan.txt"))?.file_id;
+    assert_eq!(now, id, "the file was taken from here and brought again");
+    let mut names = live_names(&server);
+    names.sort();
+    assert_eq!(names, ["Shared", "plan.txt"]);
     Ok(())
 }
 

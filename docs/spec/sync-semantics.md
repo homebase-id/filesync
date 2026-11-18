@@ -1014,12 +1014,18 @@ prepared folder, which the next try makes anew.
   tells apart and the client doesn't would be left out with it, and by rule 1 leave the
   drive. So the folder of shares gives way to such an item too, as the folder opens and
   before a filter that holds its name is read (the folder is opened again at once when the
-  folder of shares is renamed or such an item is made): the order matters (sim
+  folder of shares is renamed, or such a folder is made or an item renamed to it; a file
+  made under such a name is found at the next look, left out till then and never on the
+  drive before): the order matters (sim
   `a_folder_of_shares_yields_before_a_plan_holds_a_name_a_synced_item_has`, runner
   `the_folder_of_shares_gives_way_to_a_folder_the_client_cant_tell_from_it`). The names
   compared are the drive's top as the DB has it and what is at the folder's top on disk: an
-  item that is neither yet (made on another device and not read here) is masked once it is
-  read, and the folder of shares gives way after that sync.
+  item that is neither yet (made on another device and not read here) is found by the sync
+  that reads it, which plans nothing with it masked: the folder of shares gives way first
+  (runner
+  `the_folder_of_shares_gives_way_before_a_synced_folder_that_took_its_name_is_planned`).
+  Masked it is only where the folder of shares can't give way (its rename fails), and
+  where nothing gives way at all (the engine alone).
 - One the filter doesn't know yet (it came, or took another name, while a sync was running;
   the filter is read again before the next sync) is left alone as well, by the record and
   its marker on disk: the walk reads the record once when it meets a folder at the top,

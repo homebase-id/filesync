@@ -248,6 +248,13 @@ pub struct Placed {
     pub made: Option<String>,
     /// The folders of shares that gave way: the name each had, and the one it has now.
     pub moved: Vec<(String, String)>,
+    /// A folder of shares couldn't give way to the drive's item of its name (in use, no name
+    /// free), with why: the item stays masked, which loses nothing, and the next open tries
+    /// again.
+    pub stuck: Option<String>,
+    /// One is on record and isn't at the top (moved away, deleted, its marker gone): none
+    /// was made in its place.
+    pub missing: bool,
 }
 
 /// How many names [`place`] tries for one folder: `Shared`, `Shared-2`, … `Shared-99`.
@@ -255,7 +262,8 @@ const NAMES: usize = 99;
 
 /// `name` as [`place`] numbers it: what it is without its number, and the number (1 for a
 /// name without). `Shared-2` is `Shared`'s second, so it gives way to `Shared-3`; a number
-/// [`place`] wouldn't give (`From 2024-2025`) is part of the name.
+/// [`place`] wouldn't give (`From 2024-2025`) is part of the name. A name the user gave that
+/// ends as one of ours (`Team-7`) is numbered on too (`Team-8`): which it is isn't known.
 fn numbered(name: &str) -> (&str, usize) {
     let ours = name.rsplit_once('-').and_then(|(base, n)| {
         let plain =
@@ -277,13 +285,14 @@ struct Names<'a, E> {
 
 impl<E: From<io::Error>> Names<'_, E> {
     /// The first of `name` (as number 1), `<name>-2`, `<name>-3`, … from number `first` on
-    /// that nothing has and `put` takes (`false`: taken on disk since the listing).
+    /// that nothing has and `put` takes (`false`: taken on disk since the listing). Within:
+    /// why `put` failed, or that no name is free.
     fn free(
         &mut self,
         name: &str,
         first: usize,
         mut put: impl FnMut(&str) -> io::Result<bool>,
-    ) -> Result<String, E> {
+    ) -> Result<io::Result<String>, E> {
         for n in first..=NAMES {
             let to = match n {
                 1 => name.to_owned(),
@@ -293,23 +302,30 @@ impl<E: From<io::Error>> Names<'_, E> {
             if self.here.contains(&key) || (self.on_drive)(&to)? {
                 continue;
             }
-            if put(&to)? {
-                self.here.push(key);
-                return Ok(to);
+            match put(&to) {
+                Ok(true) => {
+                    self.here.push(key);
+                    return Ok(Ok(to));
+                }
+                Ok(false) => {}
+                Err(e) => return Ok(Err(e)),
             }
         }
-        let what = format!("no free name for the folder of shares (up to {name}-{NAMES})");
-        Err(io::Error::new(io::ErrorKind::AlreadyExists, what).into())
+        let what = format!("no name is free up to {name}-{NAMES}");
+        Ok(Err(io::Error::new(io::ErrorKind::AlreadyExists, what)))
     }
 }
 
 /// Puts the folder of shares of the sync folder at `root` where it holds no name against
 /// anything, as the sync folder opens and before its filter is read:
 ///
-/// - With `make_as` and none at the top, one is made under that name ([`make`]), or the
-///   first of `<name>-2`, `<name>-3`, … that is free.
+/// - With `make_as` and none on record, one is made under that name ([`make`]), or the
+///   first of `<name>-2`, `<name>-3`, … that is free. Never where one is on record, at the
+///   top or not ([`Placed::missing`]).
 /// - One whose name something else has gives way: renamed (its marker and its file id go with
-///   it, so it stays the one on record) to the first free `<its name>-2`, `<its name>-3`, ….
+///   it, so it stays the one on record) to the next free number ([`numbered`]). Where that
+///   fails for an item beside it, an error (that item would leave the drive); for the drive's
+///   item, [`Placed::stuck`].
 ///
 /// A name is taken by another item at the top, and by an item at the top of the drive
 /// (`on_drive`, asked by name), as names compare there ([`top_key`]; `case_insensitive`: the
@@ -344,12 +360,13 @@ pub fn place<E: From<io::Error>>(
         on_drive: &mut on_drive,
     };
     for name in &top.shares {
-        if !others.contains(&key(name)) && !(names.on_drive)(name)? {
+        let here = others.contains(&key(name));
+        if !here && !(names.on_drive)(name)? {
             continue;
         }
         let from = root.join(name);
         let (base, number) = numbered(name);
-        let to = names.free(
+        let moved = names.free(
             base,
             number + 1,
             |to| match hbsync_platform::ops::rename_noreplace(&from, &root.join(to)) {
@@ -358,9 +375,29 @@ pub fn place<E: From<io::Error>>(
                 Err(e) => Err(e),
             },
         )?;
-        placed.moved.push((name.clone(), to));
+        match moved {
+            Ok(to) => placed.moved.push((name.clone(), to)),
+            // An item of the user's own would be left out with it, and leave the drive.
+            Err(e) if here => {
+                let what = format!(
+                    "the folder of shares {name} can't give way to the item beside it that \
+                     compares as the same name: {e}"
+                );
+                return Err(io::Error::new(e.kind(), what).into());
+            }
+            Err(e) => {
+                placed.stuck = Some(format!(
+                    "the folder of shares {name} can't give way to the drive's item of its \
+                     name: {e}"
+                ));
+            }
+        }
     }
-    if let (Some(name), true) = (make_as, top.shares.is_empty()) {
+    // Only where nothing is on record: one on record that isn't at the top (moved into
+    // another folder for a moment, its marker unreadable just now) stays the one on record,
+    // or it would be a plain folder for good when it is back, and sent.
+    placed.missing = record.0.is_some() && top.shares.is_empty();
+    if let (Some(name), None) = (make_as, &record.0) {
         let mut kept = false;
         let made = names.free(name, 1, |to| {
             Ok(match make(root, to)? {
@@ -372,6 +409,12 @@ pub fn place<E: From<io::Error>>(
                     true
                 }
             })
+        })?;
+        let made = made.map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("the folder of shares {name} can't be made: {e}"),
+            )
         })?;
         placed.made = (!kept).then_some(made);
     }
@@ -619,6 +662,26 @@ mod tests {
         })?;
         let moved = [("From 2024-2025".into(), "From 2024-2025-2".into())];
         assert_eq!(placed.moved, moved);
+
+        // One on record that isn't at the top stays the one on record: none is made in its
+        // place, and back at the top it is the folder of shares as before.
+        fs::create_dir(root.join("Work"))?;
+        fs::rename(root.join("From 2024-2025-2"), root.join("Work/Shared"))?;
+        let placed = place(root, Some("Shared"), false, nothing)?;
+        assert!(placed.missing && placed.made.is_none());
+        assert!(folders(root)?.is_empty());
+        fs::rename(root.join("Work/Shared"), root.join("Back"))?;
+        assert_eq!(
+            place(root, Some("Shared"), false, nothing)?,
+            Placed::default()
+        );
+        assert_eq!(folders(root)?, ["Back"]);
+
+        // No name free: for the drive's item it stays where it is, and says so.
+        let placed = place(root, None, false, |_| Ok::<_, io::Error>(true))?;
+        assert!(placed.moved.is_empty());
+        assert!(placed.stuck.is_some_and(|why| why.contains("Back")));
+        assert_eq!(folders(root)?, ["Back"]);
         Ok(())
     }
 
