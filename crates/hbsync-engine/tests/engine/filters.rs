@@ -349,6 +349,44 @@ fn a_folder_of_shares_the_filter_doesnt_know_yet_is_neither_sent_nor_merged() ->
     Ok(())
 }
 
+/// The folder of shares renamed onto the name of a synced folder that was deleted a moment
+/// before, and a sync that runs before a scan has seen either (a watcher that tells late, as
+/// macOS's does): what the drive has for that folder isn't put into the folder of shares.
+#[test]
+fn a_folder_of_shares_at_a_synced_folders_place_gets_nothing_of_the_drive() -> R {
+    use hbsync_local::shares::{Made, make};
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    assert_eq!(make(&a.root, "Shared")?, Made::Made);
+    a.write("Shared/tom/theirs.txt", "shared with me")?;
+    a.write("Team/plan.txt", "ours")?;
+    assert!(restart_with(&mut a, load_filter)?, "the filter changed");
+    a.sync()?;
+    b.sync()?;
+    b.write("Team/new.txt", "another device's")?;
+    b.sync()?;
+
+    fs::remove_dir_all(a.root.join("Team"))?;
+    fs::rename(a.root.join("Shared"), a.root.join("Team"))?;
+    let mine = a.tree_text("Team");
+    // (No scan before it.)
+    let report = a.engine.sync("2026-10-08", true)?;
+    assert_eq!(
+        a.tree_text("Team"),
+        mine,
+        "put into the folder of shares: {report:?}"
+    );
+    // Scanned, and the filter read again: still nothing of it there, and the other device's
+    // file stays on the drive (what was deleted here goes).
+    assert!(restart_with(&mut a, load_filter)?, "the filter changed");
+    a.sync()?;
+    assert_eq!(a.tree_text("Team"), mine);
+    b.sync()?;
+    assert_eq!(b.tree_text("Team"), ["new.txt = another device's"]);
+    Ok(())
+}
+
 /// The folder of shares moved into a synced folder (a slip of the hand, §10): nothing of it
 /// is sent, also when it is changed there, and a folder of its name the drive has in that
 /// folder isn't put into it (it waits). Moved back to the top it is the folder of shares as

@@ -1048,6 +1048,15 @@ would name nothing), any other is made anew.
   and is masked once the filter is read). Nothing in it is sent, and the drive's folder of
   its name isn't put into it (engine
   `a_folder_of_shares_the_filter_doesnt_know_yet_is_neither_sent_nor_merged`).
+  Nor is anything put into it where it took the place of a synced folder (that one deleted,
+  the folder of shares renamed onto its name) and a sync runs before a scan has seen either
+  (a watcher that tells late, as macOS's does): before an item is placed in a folder, or
+  moved into it, the folder on disk is looked at once a run, and where it is no longer the
+  one the DB has there (another file id) the item isn't placed, and the place is scanned
+  again. That holds for any folder, not only this one: what the drive has for a folder
+  goes into that folder, never into another that has its path now (engine
+  `a_folder_of_shares_at_a_synced_folders_place_gets_nothing_of_the_drive`; a stat a folder
+  something goes into, a run).
 - Moved into another folder (a slip of the hand in the file manager; the same volume, so
   its file id stays) it is left alone there too: a walk knows it by the file id on record,
   which each listing has, and looks for its marker before it reports or enters it (one
