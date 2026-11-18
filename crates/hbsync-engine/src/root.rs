@@ -269,7 +269,7 @@ impl SyncRoot {
                 none => none.insert(self.state()?),
             };
             let scope = crate::scope::Scope::of(self.top);
-            Ok(db.read(|s| drive_has(s, &scope, name, case_insensitive))?)
+            Ok(db.read(|s| drive_has(s, &scope, &self.path, name, case_insensitive))?)
         })
     }
 
@@ -288,7 +288,7 @@ impl SyncRoot {
                 none => none.insert(self.state()?),
             };
             let scope = crate::scope::Scope::of(self.top);
-            Ok(db.read(|s| drive_has(s, &scope, name, case_insensitive))?)
+            Ok(db.read(|s| drive_has(s, &scope, &self.path, name, case_insensitive))?)
         })
     }
 
@@ -637,23 +637,42 @@ impl AccountReader {
     }
 }
 
-/// Whether the folder with `scope` has an item named as `name` at the top of its part of the
-/// drive, as `s` (the folder's view) has the drive and as names compare with a folder of
-/// shares' ([`hbsync_local::top_key`]): one the folder of shares gives way to. Not what the
-/// folder leaves out (a role folder at the drive's top isn't the main folder's, and its name
-/// stays free there, §12). One lookup by name.
+/// Whether the folder at `root` with `scope` has an item named as `name` at the top of its
+/// part of the drive, as `s` (the folder's view) has the drive and as names compare with a
+/// folder of shares' ([`hbsync_local::top_key`]): one the folder of shares gives way to. Not
+/// what the folder leaves out (a role folder at the drive's top isn't the main folder's, and
+/// its name stays free there, §12). Nor an item this device synced and is taking off the
+/// drive (§10 rules 1 and 2), whose name is about to be free: one it no longer has (deleted
+/// here), and the very folder that is the folder of shares now (named as it on the user's
+/// word: left out, what was sent of it leaves the drive). Giving way to that one would
+/// rename the folder the user named, for an item that is going. One lookup by name; for an
+/// item found, its base and its row, and a look at the folder.
 pub(crate) fn drive_has(
     s: &hbsync_state::ReadTx<'_>,
     scope: &crate::scope::Scope,
+    root: &Path,
     name: &str,
     case_insensitive: bool,
 ) -> Result<bool, StateError> {
     let key = hbsync_local::top_key(name, case_insensitive);
-    let named = s.mirror_named(NodeId::ROOT, hbsync_namemap::sibling_hash(name))?;
-    Ok(named.iter().any(|row| {
-        !scope.outside.contains(&row.node)
-            && hbsync_local::top_key(&row.name, case_insensitive) == key
-    }))
+    let same = |name: &str| hbsync_local::top_key(name, case_insensitive) == key;
+    for item in s.mirror_named(NodeId::ROOT, hbsync_namemap::sibling_hash(name))? {
+        if scope.outside.contains(&item.node) || !same(&item.name) {
+            continue;
+        }
+        let leaving = s.get_base(item.node)?.is_some()
+            && s.local_by_node(item.node)?.is_none_or(|row| {
+                // At the top under this name, and the folder there is the row's still.
+                row.path.depth() == 1
+                    && row.path.name().is_some_and(same)
+                    && hbsync_platform::stat(&row.path.to_native(root))
+                        .is_ok_and(|meta| meta.file_id == row.fingerprint.file_id)
+            });
+        if !leaving {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 #[cfg(test)]

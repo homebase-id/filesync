@@ -437,6 +437,32 @@ mod tests {
         out
     }
 
+    /// Shares that are off (their folder gone, or not made) are said in the menu; nothing is
+    /// said while their folder is there, or for an account nothing is shared with.
+    #[test]
+    fn shares_that_are_off_are_said_in_the_menu() {
+        use hbsync_app::protocol::SharesFolder;
+        let said = |shares: Option<SharesFolder>| {
+            let mut folder = status(State::Idle);
+            folder.shares = shares;
+            let items = menu(&view(&running(folder), &[]));
+            let off =
+                |item: &Item| matches!(item, Item::Label(l) if l.starts_with("Shares are off"));
+            items.iter().find(|item| off(item)).cloned()
+        };
+        assert_eq!(said(None), None);
+        assert_eq!(
+            said(Some(SharesFolder::At {
+                name: "Shared".into()
+            })),
+            None
+        );
+        let gone = Item::Label("Shares are off: their folder is gone".into());
+        assert_eq!(said(Some(SharesFolder::Gone)), Some(gone));
+        let why = "the folder of shares Shared can't be made: no room".to_owned();
+        assert!(said(Some(SharesFolder::Unmade { why })).is_some());
+    }
+
     /// A role folder's held deletes, or the Desktop's, are reviewed from the menu as the main
     /// folder's are; its failure is what the status line says.
     #[test]

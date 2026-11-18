@@ -1257,6 +1257,203 @@ mod tests {
         started.stop(checked)?
     }
 
+    /// The main folder's folder of shares, as its status shows it.
+    fn shares_shown(folders: &[FolderStatus]) -> Option<crate::protocol::SharesFolder> {
+        folders.iter().find(|f| f.is_main())?.shares.clone()
+    }
+
+    /// The folder of shares `name`, as a status shows it.
+    fn shares_at(name: &str) -> Option<crate::protocol::SharesFolder> {
+        Some(crate::protocol::SharesFolder::At { name: name.into() })
+    }
+
+    /// Removes the folder of shares `dir` while its shares are synced into it. (On Windows a
+    /// folder a runner is in may take a moment to go.)
+    fn remove_shares(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let gone = || (std::fs::remove_dir_all(dir).is_ok() || !dir.exists()).then_some(());
+        Ok(wait_until(gone).ok_or("the folder of shares can't be deleted")?)
+    }
+
+    /// The folder of shares gone from the main folder: shares are off, said in the main
+    /// folder's status, and none is made in its place by itself (it may be back). On the
+    /// user's word one is made again, and what is shared is synced into it anew. Refused
+    /// while one is there.
+    #[test]
+    fn shares_are_off_while_their_folder_is_gone_and_on_again_once_one_is_made()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::protocol::SharesFolder;
+        use crate::runner::SharesAsk;
+
+        let home = tempfile::tempdir()?;
+        let tom_server = FakeServer::new(ServerConfig::default());
+        let (_, folder, server, start) = shared_with(home.path(), &tom_server)?;
+        let started = start();
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            started.wait_all("both sync, the folder of shares shown", &|s, folders| {
+                both_synced(s, folders) && shares_shown(folders) == shares_at("Shared")
+            })?;
+            let main = started.account.runner(&folder).ok_or("no runner")??;
+            let refused = main.shares(SharesAsk::Make);
+            assert!(refused.is_err_and(|why| why.contains("is there")));
+
+            remove_shares(&folder.join("Shared"))?;
+            let _ = started.account.sync_now();
+            started.wait_all("shares are off", &|_, folders| {
+                shares_shown(folders) == Some(SharesFolder::Gone)
+            })?;
+            // Not by itself, also over a sync.
+            let _ = started.account.sync_now();
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            assert!(!folder.join("Shared").exists());
+
+            main.shares(SharesAsk::Make)?;
+            started.wait_all(
+                "made again, and the shares synced into it",
+                &|s, folders| {
+                    both_synced(s, folders)
+                        && shares_shown(folders) == shares_at("Shared")
+                        && folder.join("Shared").join("tom.example").is_dir()
+                },
+            )?;
+            let names = server.lock().map_err(|_| "poisoned")?.live_names();
+            assert_eq!(
+                names,
+                ["mine.txt"],
+                "nothing of the shares is the account's own"
+            );
+            Ok(())
+        };
+        let checked = checks();
+        started.stop(checked)?
+    }
+
+    /// A folder at the top of the main folder named as its folder of shares on the user's
+    /// word, where the one on record is gone: what was sent of it leaves the drive, all of
+    /// it stays on disk, and what is shared is synced into it. Refused for what isn't a
+    /// folder there.
+    #[test]
+    fn a_folder_named_as_the_folder_of_shares_leaves_the_drive_and_takes_the_shares()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::protocol::SharesFolder;
+        use crate::runner::SharesAsk;
+
+        let home = tempfile::tempdir()?;
+        let tom_server = FakeServer::new(ServerConfig::default());
+        let (_, folder, server, start) = shared_with(home.path(), &tom_server)?;
+        std::fs::create_dir(folder.join("Theirs"))?;
+        std::fs::write(
+            folder.join("Theirs").join("old.txt"),
+            "sent before it was named",
+        )?;
+        let started = start();
+        let on_drive = || -> Result<Vec<String>, Box<dyn std::error::Error>> {
+            let mut names = server.lock().map_err(|_| "poisoned")?.live_names();
+            names.sort();
+            Ok(names)
+        };
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            started.wait_all("both sync", &both_synced)?;
+            assert_eq!(on_drive()?, ["Theirs", "mine.txt", "old.txt"]);
+            remove_shares(&folder.join("Shared"))?;
+            let _ = started.account.sync_now();
+            started.wait_all("shares are off", &|_, folders| {
+                shares_shown(folders) == Some(SharesFolder::Gone)
+            })?;
+
+            let main = started.account.runner(&folder).ok_or("no runner")??;
+            for not_one in ["mine.txt", "Theirs/old.txt", "none"] {
+                let refused = main.shares(SharesAsk::Take(not_one.into()));
+                assert!(
+                    refused.is_err_and(|why| why.contains("isn't a folder")),
+                    "{not_one}"
+                );
+            }
+            main.shares(SharesAsk::Take("Theirs".into()))?;
+            started.wait_all("taken, and the shares synced into it", &|s, folders| {
+                both_synced(s, folders)
+                    && shares_shown(folders) == shares_at("Theirs")
+                    && folder.join("Theirs").join("tom.example").is_dir()
+                    && on_drive().is_ok_and(|names| names == ["mine.txt"])
+            })?;
+            assert!(folder.join("Theirs").join("old.txt").is_file());
+            assert!(!folder.join("Shared").exists());
+            Ok(())
+        };
+        let checked = checks();
+        started.stop(checked)?
+    }
+
+    /// The folder of shares dragged into a role folder of the account is left alone there:
+    /// that folder knows it by the main folder's record, and nothing of it is sent. Shares
+    /// are off meanwhile; moved back, they are synced again. (Not on Windows, where a folder
+    /// with a watched folder in it can't be renamed: filesync #414.)
+    #[cfg(not(windows))]
+    #[test]
+    fn the_folder_of_shares_dragged_into_a_role_folder_is_left_alone_there()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use crate::protocol::SharesFolder;
+
+        let home = tempfile::tempdir()?;
+        let me: Identity = "me.example".into();
+        let tom_server = FakeServer::new(ServerConfig::default());
+        let (paths, folder, server, start) = shared_with(home.path(), &tom_server)?;
+        let documents = home.path().join("Documents");
+        std::fs::create_dir(&documents)?;
+        std::fs::write(documents.join("letter.txt"), "mine too")?;
+        let role = Root::role(&me, &documents, hbsync_types::Role::Documents);
+        let (top, kind) = (role.kind.top(), role.kind.folder_kind());
+        let db = paths.account_db(&me);
+        hbsync_engine::root::SyncRoot::create_for(&db, &me, &documents, top, kind)?;
+        let started = start();
+        started.account.add_folder(&role);
+        let all_synced = |s: &AccountStatus, folders: &[FolderStatus], n: usize| {
+            folders.len() == n && folders.iter().all(|f| synced(s, f))
+        };
+        let on_drive = || -> Result<Vec<String>, Box<dyn std::error::Error>> {
+            let mut names = server.lock().map_err(|_| "poisoned")?.live_names();
+            names.sort();
+            Ok(names)
+        };
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            started.wait_all("all three sync", &|s, folders| {
+                all_synced(s, folders, 3) && shares_shown(folders) == shares_at("Shared")
+            })?;
+            let own = on_drive()?;
+            assert!(own.contains(&"letter.txt".to_owned()), "{own:?}");
+            std::fs::write(folder.join("Shared").join("loose.txt"), "not the account's")?;
+
+            std::fs::rename(folder.join("Shared"), documents.join("Shared"))?;
+            let _ = started.account.sync_now();
+            started.wait_all("shares are off, the role folder synced", &|s, folders| {
+                shares_shown(folders) == Some(SharesFolder::Gone)
+                    && folders.iter().all(|f| synced(s, f))
+            })?;
+            // A change beside it in the role folder is sent; nothing of it is.
+            std::fs::write(documents.join("more.txt"), "mine as well")?;
+            let _ = started.account.sync_now();
+            let sent = wait_until(|| on_drive().ok().filter(|n| n.contains(&"more.txt".into())));
+            let mut want = own.clone();
+            want.push("more.txt".into());
+            want.sort();
+            assert_eq!(
+                sent,
+                Some(want),
+                "something of the folder of shares was sent"
+            );
+
+            std::fs::rename(documents.join("Shared"), folder.join("Shared"))?;
+            let _ = started.account.sync_now();
+            started.wait_all("back at the top, the shares synced again", &|s, folders| {
+                all_synced(s, folders, 3) && shares_shown(folders) == shares_at("Shared")
+            })?;
+            assert_eq!(on_drive()?.len(), own.len() + 1);
+            assert!(folder.join("Shared").join("loose.txt").is_file());
+            Ok(())
+        };
+        let checked = checks();
+        started.stop(checked)?
+    }
+
     /// The main folder removed: what others share stops with it (its folder of shares is no
     /// synced folder's any more), its files left where they are, and the account ends.
     #[test]

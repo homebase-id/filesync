@@ -456,6 +456,24 @@ included (service managers restart it then).
   the folder opens. Not while the folder is paused: nothing in it is made or renamed then, and
   no timer wakes it; it is asked as it syncs again.
 
+  While the folder of shares on record isn't at the top, **shares are off**: nothing of
+  what others share syncs (their runners stop: there is no folder to sync into), and the
+  main folder's status says so (`shares`: `gone`; `hbsync status`, the tray's menu). There
+  are three ways back, all the user's: move the folder back to the top (it is known by its
+  record, under any name); `hbsync shared-folder --make` (`make_shares`), which makes a new
+  one under the usual name, or its next free number, with the record's token and file ids
+  kept beside the new folder's, so the one that was on record is the folder of shares
+  wherever it still is in the sync folder, and never sent; or
+  `hbsync shared-folder --take <folder>` (`take_shares`), which names a folder at the top
+  as it: its marker is written and it goes on record, the same way. A folder taken that was
+  synced as the account's own is left out from then on, so what was sent of it leaves the
+  drive (sync semantics §10, rules 1 and 2: held over the mass-delete limit, and in
+  Recently deleted) and all of it stays on disk; that is the way out for a folder of shares
+  that was sent before it could be taken back (§10, "Back as a copy"). Both are refused
+  while a folder of shares is at the top, and for an account nothing is shared with; to
+  take, also for anything but a folder at the top. The runner does them between syncs and
+  opens the folder again; one that fails is told as a note.
+
   And the folder of shares gives way: when an item at the top of the folder's part of the
   drive (as the account's DB has it; not a role folder, whose name is free in the main
   folder) or another item at the top of the folder has its name, as names compare there, it
@@ -463,6 +481,11 @@ included (service managers restart it then).
   name ending in a number from 2 to 98 after a `-` counts as numbered, the user's own too),
   its marker and its file id with it, so it stays the one on record; the log says so. A new
   name is another filter (sync semantics §10, rule 4: the folder is walked whole once).
+  Not to an item of the drive this device synced and is taking off it, whose name is about
+  to be free: one deleted here, and the very folder that was named as the folder of shares
+  (`take_shares`), which keeps the name the user gave it (the item is deleted on the drive
+  though its name is filtered: §10 rule 2; once it isn't going after all, put back or
+  changed on the drive meanwhile, its base is gone, and the folder of shares gives way).
 
   It gives way to the drive's item whenever that one comes: a sync that finds one under its
   name, after reading the drive and before planning anything (one lookup by name, only where
@@ -666,28 +689,30 @@ same in its note.
 One request line, one reply line (JSON), then the connection closes; but `watch`, answered with
 the status now and again each time it changes (at most once a second while a folder syncs: its
 progress changes without telling), on the open connection until either side closes it (what
-the tray shows). Requests carry the protocol version (now 11); a daemon refuses another one
+the tray shows). Requests carry the protocol version (now 12); a daemon refuses another one
 with the reason (after an update: restart it). The
 wire types are `hbsync-app/src/protocol.rs`. A control goes to the daemon (every folder), to an
 account (its Recently deleted) or to one folder (its held deletes):
 
 ```json
-{"protocol":11,"ask":"status"}
-{"protocol":11,"ask":"watch"}                                        // a status line now, then one per change
-{"protocol":11,"ask":"stop"}                                         // taken whatever the protocol
-{"protocol":11,"ask":{"control":{"daemon":"sync_now"}}}            // resume
-{"protocol":11,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}   // "until":null: until resumed
-{"protocol":11,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}}}
-{"protocol":11,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"put_back":{"token":"<held_deletes.token>"}}}}}}
-{"protocol":11,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"restore":{"nodes":["<node id>"]}}}}}}
-{"protocol":11,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted":{"nodes":["<node id>"],"db":"<db id>","seq":4711}}}}}}  // the items as listed
-{"protocol":11,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_listed":{"db":"<db id>","seq":4711}}}}}}  // all it held when listed
-{"protocol":11,"ask":{"recent":{"limit":10}}}
-{"protocol":11,"ask":{"deleted":{"limit":100}}}                    // the newest 100 deletes
-{"protocol":11,"ask":{"find_deleted":{"items":["Photos/2024","<node id>"]}}}
-{"protocol":11,"ask":{"add_folder":{"root":{"identity":"anna.example.com","folder":"/home/anna/Homebase"}}}}  // a [[roots]] entry (role, or desktop); a Desktop also takes "name"
-{"protocol":11,"ask":{"remove_folder":{"path":"/home/anna/Homebase"}}}
-{"protocol":11,"ask":{"start_over":{"identity":"anna.example.com"}}}  // new credentials
+{"protocol":12,"ask":"status"}
+{"protocol":12,"ask":"watch"}                                        // a status line now, then one per change
+{"protocol":12,"ask":"stop"}                                         // taken whatever the protocol
+{"protocol":12,"ask":{"control":{"daemon":"sync_now"}}}            // resume
+{"protocol":12,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}   // "until":null: until resumed
+{"protocol":12,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}}}
+{"protocol":12,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"put_back":{"token":"<held_deletes.token>"}}}}}}
+{"protocol":12,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":"make_shares"}}}}  // the folder of shares, gone, made again
+{"protocol":12,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"take_shares":{"name":"Theirs"}}}}}}  // that folder at its top is it
+{"protocol":12,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"restore":{"nodes":["<node id>"]}}}}}}
+{"protocol":12,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted":{"nodes":["<node id>"],"db":"<db id>","seq":4711}}}}}}  // the items as listed
+{"protocol":12,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_listed":{"db":"<db id>","seq":4711}}}}}}  // all it held when listed
+{"protocol":12,"ask":{"recent":{"limit":10}}}
+{"protocol":12,"ask":{"deleted":{"limit":100}}}                    // the newest 100 deletes
+{"protocol":12,"ask":{"find_deleted":{"items":["Photos/2024","<node id>"]}}}
+{"protocol":12,"ask":{"add_folder":{"root":{"identity":"anna.example.com","folder":"/home/anna/Homebase"}}}}  // a [[roots]] entry (role, or desktop); a Desktop also takes "name"
+{"protocol":12,"ask":{"remove_folder":{"path":"/home/anna/Homebase"}}}
+{"protocol":12,"ask":{"start_over":{"identity":"anna.example.com"}}}  // new credentials
 ```
 
 A request of another protocol is refused (`this daemon speaks protocol N, …`), except `stop`,
@@ -711,7 +736,10 @@ Replies:
   §13, and never the main folder, whatever its `kind`), `state`, `progress` (while `starting` or
   `syncing`, once the sync has a plan; its totals grow as each batch of up to 20,000 items is
   planned), `paused_until`, `held_deletes`, and the counts `notes_added` and `synced_added`
-  that tell a client what is new.
+  that tell a client what is new. The main folder of an account other identities share with
+  has `shares`, where its folder of shares is: `{"at":{"name":"Shared"}}`, `"gone"` (on
+  record and not at its top: shares are off), or `{"unmade":{"why":"…"}}` (it couldn't be
+  made, tried again); left out for an account nothing is shared with.
 - `{"recent":[…]}` (each entry with its `folder`, and `main` when that is the main folder),
   newest first.
 - `{"deleted":{"items":[…],"accounts":[…]}}`: the newest `limit` deletes, newest first, each an
@@ -814,7 +842,7 @@ Linux (rfd's, without GTK) needs `zenity`, which KDE doesn't install.
   runs ("Emptying Recently deleted: 3,000 of 22,367"), Open Homebase folder, Browse files online (chat's web app on the
   identity, opened on its Filesync mini-app: `https://<identity>/apps/chat/#filesync`),
   Recently synced (the last 10; clicking one shows it
-  in the file manager), Problems (the main folder's notes and its account's, newest first), Review N deletions…, Recently deleted…, Set up this computer…, Log
+  in the file manager), Problems (the main folder's notes and its account's, newest first), a line when shares are off (their folder gone or not made; setting one up again is the command line's, `hbsync shared-folder`), Review N deletions…, Recently deleted…, Set up this computer…, Log
   in again… (refused), Pause syncing (1 h, 8 h, 24 h, until resumed) or Resume, Sync now, Start
   at login, Open logs, Log out, Quit (keep syncing in the background, or stop syncing too).
   Syncing stopped: Start syncing, Open Homebase folder, Start at login, Open logs, Quit.
@@ -941,6 +969,7 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 | `hbsync recent [-n N]` | what was synced lately, newest first |
 | `hbsync confirm-deletes [--yes]` | shows the deletions to review (held deletes) and lets them through |
 | `hbsync put-back [--yes]` | shows the deletions to review and puts them back (sync semantics §7) |
+| `hbsync shared-folder [--make \| --take <folder>] [--yes]` | shows the folder what others share is synced into; where it is gone (shares are off), `--make` makes a new one and `--take` names the folder at the top of the Homebase folder that is it (what was synced of that folder leaves the Homebase cloud, and stays on this computer) |
 | `hbsync start`, `stop` | `stop` stops syncing on this computer until `start` (or the tray's Start syncing), also across logins: neither the tray nor the service manager starts the daemon meanwhile |
 | `hbsync autostart [on\|off]` | |
 | `hbsync login [IDENTITY]` | signs this computer in again in the browser (also the tray's Log in again, for a login from before private drives); the daemon's account starts over with the new login; the folders, the drive and autostart stay as they are; the old login isn't revoked |

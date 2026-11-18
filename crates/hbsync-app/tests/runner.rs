@@ -1165,6 +1165,38 @@ fn the_folder_of_shares_gives_way_before_a_synced_folder_that_took_its_name_is_p
     Ok(())
 }
 
+/// A synced folder deleted here, and the folder of shares renamed to its name before the
+/// delete was sent: the folder of shares keeps the name (the drive's item is leaving, its
+/// name about to be free: nothing gives way to it), and the delete is sent though the name is
+/// left out now.
+#[test]
+fn the_folder_of_shares_keeps_a_name_this_device_is_taking_off_the_drive() -> R {
+    use hbsync_local::shares::folders;
+    let server = server();
+    let a = Device::start_with(&server, "a", |c| c.shares = Some("Shared".into()))?;
+    a.write("Team/plan.txt", "ours")?;
+    a.write("notes.txt", "mine")?;
+    wait_until("plan.txt is up", || on_server(&server, "plan.txt"))?;
+    a.wait_idle()?;
+    assert_eq!(folders(&a.root)?, ["Shared"]);
+    a.write("Shared/tom/theirs.txt", "shared with me")?;
+
+    // Both before the next sync.
+    a.handle.send(Command::Pause(Pause::UNTIL_RESUMED));
+    std::thread::sleep(Duration::from_millis(300));
+    std::fs::remove_dir_all(a.root.join("Team"))?;
+    rename_with_retries(&a.root.join("Shared"), &a.root.join("Team"))?;
+    a.handle.send(Command::Resume);
+    wait_until("the drive's Team is gone", || {
+        live_names(&server) == ["notes.txt"]
+    })?;
+    a.wait_idle()?;
+    assert_eq!(folders(&a.root)?, ["Team"]);
+    assert!(a.has("Team/tom/theirs.txt") && !a.has("Team/plan.txt"));
+    assert_eq!(a.status().state, State::Idle);
+    Ok(())
+}
+
 /// Where the folder of shares can't give way to the drive's item of its name (its rename is
 /// refused), the item stays out, which loses nothing: the folder syncs on, and isn't opened
 /// over and over for it. It gives way when the folder next opens and the rename works.

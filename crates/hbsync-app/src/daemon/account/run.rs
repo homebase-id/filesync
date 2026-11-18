@@ -340,9 +340,11 @@ impl Account {
             // Under the lock: no pause or folder gets lost between waiting and running.
             let mut shown = lock(&self.shown);
             let roots = shown.waiting.take().map(|w| w.roots).unwrap_or_default();
+            let main = roots.iter().find(|r| r.is_main()).map(|r| r.folder.clone());
             for root in roots {
                 let paused = shown.paused();
-                match self.start(&drive, config, &root, paused, can_heal, !shares.is_empty()) {
+                let shared = (!shares.is_empty(), main.as_deref());
+                match self.start(&drive, config, &root, paused, can_heal, shared) {
                     Ok(r) => shown.runners.push(r),
                     Err(e) => {
                         result = Err(e.into());
@@ -506,9 +508,10 @@ impl Account {
                 // can't be read, restarts wait a while and new folders wait a moment.
                 let config = Config::now(paths);
                 let paused = lock(&self.shown).paused();
+                let main = self.main_folder();
                 let start = |root: &Root| {
                     let config = config.as_ref()?;
-                    let shared = !shares.is_empty();
+                    let shared = (!shares.is_empty(), main.as_deref());
                     Some(self.start(&drive, config, root, paused, can_heal, shared))
                 };
                 let restarted: Vec<_> = due.iter().map(start).collect();
@@ -590,8 +593,9 @@ impl Account {
 
     /// Starts syncing the folder `root` on the account's `drive`, with `config`'s settings,
     /// paused when `paused`; ending when the DB can't be used if the account `heals` it. The
-    /// main folder of an account other identities share with (`shared`) makes the folder of
-    /// shares, and tells the account where it is.
+    /// main folder of an account other identities share with (`shared`, with the account's
+    /// main folder where it syncs one) makes the folder of shares, and tells the account
+    /// where it is; a folder beside it knows that one by the main folder's record.
     fn start(
         &self,
         drive: &Arc<Drive>,
@@ -599,7 +603,7 @@ impl Account {
         root: &Root,
         paused: Option<Pause>,
         heals: bool,
-        shared: bool,
+        (shared, main): (bool, Option<&Path>),
     ) -> Result<Running, RunnerError> {
         let mut cfg = RunnerConfig::new(
             &root.folder,
@@ -617,8 +621,7 @@ impl Account {
         // A folder beside the main one knows the folder of shares by the main folder's
         // record: dragged in here, it is left alone as it is below the main folder's top.
         if !root.is_main() {
-            let main = config.roots.iter().find(|r| r.is_main());
-            cfg.shares_main = main.map(|main| main.folder.clone());
+            cfg.shares_main = main.map(Path::to_path_buf);
         }
         if shared && root.is_main() {
             cfg.shares = Some(SHARES.to_owned());

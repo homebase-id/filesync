@@ -509,6 +509,20 @@ mod tests {
             }))?,
             r#"{"protocol":12,"ask":{"control":{"folder":{"path":"/h","control":{"confirm_deletes":{"token":"t"}}}}}}"#
         );
+        let folder = |control| {
+            let path = PathBuf::from("/h");
+            json(Ask::Control(Control::Folder { path, control }))
+        };
+        assert_eq!(
+            folder(FolderControl::MakeShares)?,
+            r#"{"protocol":12,"ask":{"control":{"folder":{"path":"/h","control":"make_shares"}}}}"#
+        );
+        assert_eq!(
+            folder(FolderControl::TakeShares {
+                name: "Theirs".into()
+            })?,
+            r#"{"protocol":12,"ask":{"control":{"folder":{"path":"/h","control":{"take_shares":{"name":"Theirs"}}}}}}"#
+        );
         let node = hbsync_types::NodeId(hbsync_types::Uuid::from_u128(1));
         assert_eq!(
             json(Ask::Control(Control::Account {

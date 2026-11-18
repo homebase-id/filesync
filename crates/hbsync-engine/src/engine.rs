@@ -562,7 +562,8 @@ impl Engine {
         self.db.read(|s| {
             // The names as they compare: such a name compares as itself.
             for key in folder.filter.shared() {
-                if crate::root::drive_has(s, &folder.scope, key, folder.case_insensitive)? {
+                let ci = folder.case_insensitive;
+                if crate::root::drive_has(s, &folder.scope, &folder.root, key, ci)? {
                     return Ok(true);
                 }
             }

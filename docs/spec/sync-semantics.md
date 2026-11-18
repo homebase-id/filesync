@@ -1027,7 +1027,12 @@ would name nothing), any other is made anew.
   (runner
   `the_folder_of_shares_gives_way_before_a_synced_folder_that_took_its_name_is_planned`).
   Masked it is only where the folder of shares can't give way (its rename fails), and
-  where nothing gives way at all (the engine alone).
+  where nothing gives way at all (the engine alone). It doesn't give way to an item this
+  device synced and is taking off the drive (deleted here; or the very folder named as the
+  folder of shares on the user's word, `docs/spec/daemon.md`): that item is leaving by
+  rules 1 and 2 (deleted on the drive though its name is filtered), and its name is free
+  once it is gone (account
+  `a_folder_named_as_the_folder_of_shares_leaves_the_drive_and_takes_the_shares`).
 - One the filter doesn't know yet (it came, or took another name, while a sync was running;
   the filter is read again before the next sync) is left alone as well, by the record and
   its marker on disk: the walk reads the record once when it meets a folder at the top,
@@ -1057,6 +1062,15 @@ would name nothing), any other is made anew.
   where it gets another file id while it is below the top (the folder it is in moved to
   another volume and back, or restored from a backup): only at the top is one looked for
   by its marker (filesync #417).
+- Dragged into another folder the account syncs (a role folder, this computer's Desktop)
+  it is left alone there as well: such a folder's filter knows it by the main folder's
+  record (`Filter::load_beside`), by the file ids on record wherever it is in that folder,
+  and at its top also by its marker where no id is on record. It has no place there:
+  nothing is made, renamed or taken, and a folder of the drive at its path can't be held
+  until it is moved back (a note). The main folder meanwhile has none at its top: shares
+  are off (`docs/spec/daemon.md`). Moved to a folder on another volume it is a copy with
+  another file id, and isn't known there (the limit above, filesync #417) (scan
+  `the_folder_of_shares_dragged_into_another_synced_folder_never_reaches_its_db`).
 - Back as a copy (moved to another volume and back, restored from a backup: another file
   id, its marker in it) it is taken as the folder of shares again: as the sync folder
   opens, and while it is synced as soon as a folder at the top holds the record's marker
@@ -1075,7 +1089,9 @@ would name nothing), any other is made anew.
   afterwards; nor is one renamed into the top whole in the middle of a running sync that
   lists the top (a placement there, a rescan the sync asks for), which that sync may send
   before the folder is opened again. The log says that a folder holding the marker wasn't
-  taken.
+  taken. The user names it as the folder of shares then
+  (`hbsync shared-folder --take`, `docs/spec/daemon.md`): what was sent of it leaves the
+  drive, and it stays on disk.
 - A marker anywhere else does nothing (junk): copied into a synced folder at the top, that
   folder stays synced, with what is in it and what comes (scan
   `the_folder_of_shares_never_reaches_the_db_and_a_copied_marker_does_nothing`, engine
