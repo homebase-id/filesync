@@ -118,7 +118,13 @@ impl Executor<'_> {
         // there, so the drive's folder can't be held here until the folder of shares is moved
         // back to the top, said so.
         let filter = &self.folder.filter;
-        if adopt && (target.depth() == 1 || filter.knows_shares_by_id()) {
+        // (Below the top the record is read only for a folder whose id is on record: a look
+        // at the folder, where any is.)
+        let known = |abs: &Path| {
+            filter.knows_shares_by_id()
+                && hbsync_platform::stat(abs).is_ok_and(|m| filter.is_shares_id(m.file_id.file))
+        };
+        if adopt && (target.depth() == 1 || known(&abs)) {
             let shares = filter.shares_record(&self.folder.root);
             match shares.and_then(|record| record.is(&abs)) {
                 Ok(false) => {}

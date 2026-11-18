@@ -14,7 +14,7 @@
 //! tells: there a copied marker makes its folder one too (a known limit).
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use hbsync_platform::{EntryKind, FileId};
 
@@ -367,27 +367,31 @@ pub fn make_again<E: From<io::Error>>(
         case_insensitive,
         on_drive: &mut on_drive,
     };
-    let mut kept = None;
-    let made = names.free(name, 1, |to| {
-        Ok(match make_with(root, to, true)? {
-            Made::Made => true,
-            Made::Taken => false,
-            Made::Kept(name) => {
-                kept = Some(name);
-                true
-            }
-        })
-    })?;
-    Ok(match kept {
-        Some(kept) => kept,
-        None => made?,
-    })
+    let (name, _) = names.make(root, name, true)??;
+    Ok(name)
 }
 
-/// Why [`make_again`] and [`take`] refuse while a folder of shares is at the top.
-fn there(at: &str) -> io::Error {
+/// Why [`make_again`] and [`take`] refuse while the folder of shares `at` is at the top.
+pub fn there(at: &str) -> io::Error {
     let what = format!("the folder of shares is there: {at}");
     io::Error::new(io::ErrorKind::AlreadyExists, what)
+}
+
+/// The folder `name` at the top of the sync folder at `root`, if it is one that can be
+/// taken as its folder of shares ([`take`]): a folder there by its name, never a path, a
+/// link or the state folder.
+pub fn takeable(root: &Path, name: &str) -> io::Result<PathBuf> {
+    let mut parts = Path::new(name).components();
+    let plain = matches!(
+        (parts.next(), parts.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    );
+    let dir = root.join(name);
+    if plain && !is_state_dir(name) && std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
+        return Ok(dir);
+    }
+    let what = format!("{name} isn't a folder at the top of {}", root.display());
+    Err(io::Error::new(io::ErrorKind::InvalidInput, what))
 }
 
 /// Takes the folder `name` at the top of the sync folder at `root` as its folder of shares,
@@ -402,20 +406,7 @@ pub fn take(root: &Path, name: &str) -> io::Result<()> {
     if let Some(at) = Top::told(root, &record)?.shares.first() {
         return Err(there(at));
     }
-    let refuse = |what: String| io::Error::new(io::ErrorKind::InvalidInput, what);
-    let mut parts = Path::new(name).components();
-    let plain = matches!(
-        (parts.next(), parts.next()),
-        (Some(std::path::Component::Normal(_)), None)
-    );
-    let dir = root.join(name);
-    let state = top_key(name, true) == top_key(crate::STATE_DIR, true);
-    if !plain || state || !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
-        return Err(refuse(format!(
-            "{name} isn't a folder at the top of {}",
-            root.display()
-        )));
-    }
+    let dir = takeable(root, name)?;
     let (token, before) = match &record.0 {
         Some(known) => (known.token.clone(), known.ids.as_slice()),
         None => (new_token(), &[][..]),
@@ -507,6 +498,32 @@ impl<E: From<io::Error>> Names<'_, E> {
         }
         let what = format!("no name is free up to {name}-{NAMES}");
         Ok(Err(io::Error::new(io::ErrorKind::AlreadyExists, what)))
+    }
+
+    /// Makes the folder of shares of the sync folder at `root` under the first free name
+    /// from `name` on ([`Names::free`], [`make_with`]): where it is, and whether this made
+    /// it (not: another made one since the listing, there, which is all that was asked).
+    fn make(
+        &mut self,
+        root: &Path,
+        name: &str,
+        again: bool,
+    ) -> Result<io::Result<(String, bool)>, E> {
+        let mut kept = None;
+        let made = self.free(name, 1, |to| {
+            Ok(match make_with(root, to, again)? {
+                Made::Made => true,
+                Made::Taken => false,
+                Made::Kept(name) => {
+                    kept = Some(name);
+                    true
+                }
+            })
+        })?;
+        Ok(made.map(|made| match kept {
+            Some(kept) => (kept, false),
+            None => (made, true),
+        }))
     }
 }
 
@@ -605,25 +622,12 @@ pub fn place<E: From<io::Error>>(
     let unplaced = top.shares.is_empty() && record.is(&tmp_dir(root).join(PREPARED))?;
     placed.missing = record.0.is_some() && top.shares.is_empty() && !unplaced;
     if let Some(name) = make_as.filter(|_| record.0.is_none() || unplaced) {
-        let mut kept = None;
-        let made = names.free(name, 1, |to| {
-            Ok(match make(root, to)? {
-                Made::Made => true,
-                Made::Taken => false,
-                // Made by another since the listing: there, which is all that was asked.
-                Made::Kept(name) => {
-                    kept = Some(name);
-                    true
-                }
-            })
-        })?;
-        match (made, kept) {
-            (Ok(_), Some(kept)) => placed.at.push(kept),
-            (Ok(made), None) => {
-                placed.at.push(made.clone());
-                placed.made = Some(made);
+        match names.make(root, name, false)? {
+            Ok((at, made)) => {
+                placed.at.push(at.clone());
+                placed.made = made.then_some(at);
             }
-            (Err(e), _) => {
+            Err(e) => {
                 let why = format!("the folder of shares {name} can't be made: {e}");
                 placed.unmade = Some(why);
             }

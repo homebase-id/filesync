@@ -292,17 +292,17 @@ pub fn shares_off(shares: &SharesFolder) -> Option<String> {
     }
 }
 
-/// What to do about shares that are off ([`shares_off`]), for the command line: `command`
-/// is the command that makes or takes their folder.
-pub fn shares_way_out(shares: &SharesFolder, command: &str) -> Option<String> {
-    match shares {
-        SharesFolder::At { .. } => None,
-        SharesFolder::Gone => Some(format!(
-            "move it back to the top of the folder, or `{command} --make` makes a new one, or \
-             `{command} --take <folder>` names the folder that is it"
-        )),
-        SharesFolder::Unmade { .. } => Some("tried again by itself".into()),
-    }
+/// [`shares_off`] with what to do about it, for the command line: `command` is the command
+/// that makes or takes their folder.
+pub fn shares_off_and_how(shares: &SharesFolder, command: &str) -> Option<String> {
+    let off = shares_off(shares)?;
+    Some(match shares {
+        SharesFolder::Gone => format!(
+            "{off}: move it back to the top of the folder, or `{command} --make` makes a new \
+             one, or `{command} --take <folder>` names the folder that is it"
+        ),
+        _ => format!("{off}: tried again by itself"),
+    })
 }
 
 /// The reply to an answer to held deletes the runner took: it goes with the next sync, or,

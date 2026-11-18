@@ -159,7 +159,7 @@ pub struct RunnerConfig {
     /// Its account sets the state DB aside when it can't be used ([`RunnerError::unusable`]):
     /// the runner ends for that, rather than backing off as after any failed sync.
     pub(crate) end_if_unusable: bool,
-    /// Told where the folder of shares is, each time the folder opens ([`Shares`]): its
+    /// Told where the folder of shares is, each time the folder opens ([`SharesTold`]): its
     /// account runs the shares' folders in it.
     pub(crate) shares_told: Option<SharesTold>,
     /// The account's main folder, for a folder it syncs beside it (a role folder, a
@@ -168,21 +168,11 @@ pub struct RunnerConfig {
     pub(crate) shares_main: Option<PathBuf>,
 }
 
-/// Where a folder's folder of shares is (sync semantics §10), as its runner found it when the
-/// folder opened and it was put in its place ([`SyncRoot::place_shares`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Shares {
-    /// None on record, and none was to be made.
-    None,
-    /// At the folder's top, under this name.
-    At(String),
-    /// On record and not at the top: none is made in its place (it may be back).
-    Gone,
-}
-
-/// What a runner calls with its folder's [`Shares`] ([`RunnerConfig::shares_told`]).
+/// What a runner calls with the name of its folder's folder of shares, each time the folder
+/// opens and that one was put in its place ([`RunnerConfig::shares_told`]): `None` where
+/// none is at the top (none on record, gone, or not made).
 #[derive(Clone)]
-pub(crate) struct SharesTold(pub(crate) Arc<dyn Fn(Shares) + Send + Sync>);
+pub(crate) struct SharesTold(pub(crate) Arc<dyn Fn(Option<String>) + Send + Sync>);
 
 impl std::fmt::Debug for SharesTold {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -365,33 +355,25 @@ impl Handle {
     /// at its top, and (to take one) for anything but a folder there. Taken, the runner does
     /// it between syncs, and tells in a note if it couldn't.
     pub fn shares(&self, ask: SharesAsk) -> Result<(), String> {
-        let status = lock(&self.status).clone();
-        match &status.shares {
+        use hbsync_local::shares::{takeable, there};
+        let (shares, path, identity) = {
+            let status = lock(&self.status);
+            (
+                status.shares.clone(),
+                status.path.clone(),
+                status.identity.clone(),
+            )
+        };
+        match &shares {
             None => {
-                return Err(format!(
-                    "nothing is shared with {} into {}",
-                    status.identity,
-                    status.path.display()
-                ));
+                let into = path.display();
+                return Err(format!("nothing is shared with {identity} into {into}"));
             }
-            Some(SharesFolder::At { name }) => {
-                return Err(format!("the folder of shares is there: {name}"));
-            }
+            Some(SharesFolder::At { name }) => return Err(there(name).to_string()),
             Some(SharesFolder::Gone | SharesFolder::Unmade { .. }) => {}
         }
         if let SharesAsk::Take(name) = &ask {
-            let mut parts = Path::new(name).components();
-            let plain = matches!(
-                (parts.next(), parts.next()),
-                (Some(std::path::Component::Normal(_)), None)
-            );
-            let dir = status.path.join(name);
-            if !plain || !std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
-                return Err(format!(
-                    "{name} isn't a folder at the top of {}",
-                    status.path.display()
-                ));
-            }
+            takeable(&path, name).map_err(|e| e.to_string())?;
         }
         match self.send(Command::Shares(ask)) {
             true => Ok(()),
@@ -697,7 +679,29 @@ impl Runner {
     fn place_again(&self, parts: &Parts) -> Result<hbsync_local::shares::Placed, RunnerError> {
         let root = SyncRoot::open(&self.cfg.db, &self.cfg.identity, &self.cfg.folder)?;
         let caseless = parts.engine.config().folder.case_insensitive;
-        Ok(root.place_shares(self.cfg.shares.as_deref(), caseless)?)
+        let placed = root.place_shares(self.cfg.shares.as_deref(), caseless)?;
+        self.show_shares(&placed);
+        Ok(placed)
+    }
+
+    /// Shows where the folder of shares is, as `placed` found or put it
+    /// ([`FolderStatus::shares`]), while anything is shared with the account (one is to be
+    /// there); told only when it is another than shown.
+    fn show_shares(&self, placed: &hbsync_local::shares::Placed) {
+        if self.cfg.shares.is_none() {
+            return;
+        }
+        let shown = match placed.at.first() {
+            Some(name) => Some(SharesFolder::At { name: name.clone() }),
+            None if placed.missing => Some(SharesFolder::Gone),
+            None => placed
+                .unmade
+                .clone()
+                .map(|why| SharesFolder::Unmade { why }),
+        };
+        if lock(&self.status).shares != shown {
+            self.set(|s| s.shares = shown);
+        }
     }
 
     fn open_once(&self) -> Result<Parts, RunnerError> {
@@ -757,24 +761,10 @@ impl Runner {
                 "the folder of shares on record isn't at the top of the folder: none is made in its place"
             );
         }
-        // Where there is more than one: the one on record now, or the first.
-        let at = match placed.at.first() {
-            Some(name) => Shares::At(name.clone()),
-            None if placed.missing => Shares::Gone,
-            None => Shares::None,
-        };
-        // Shown while anything is shared with the account (one is to be there).
-        if make_as.is_some() {
-            let shown = match (&at, &placed.unmade) {
-                (Shares::At(name), _) => Some(SharesFolder::At { name: name.clone() }),
-                (Shares::Gone, _) => Some(SharesFolder::Gone),
-                (Shares::None, Some(why)) => Some(SharesFolder::Unmade { why: why.clone() }),
-                (Shares::None, None) => None,
-            };
-            self.set(|s| s.shares.clone_from(&shown));
-        }
+        self.show_shares(&placed);
         if let Some(SharesTold(told)) = &self.cfg.shares_told {
-            told(at);
+            // Where there is more than one: the one on record now, or the first.
+            told(placed.at.first().cloned());
         }
         let main = self.cfg.shares_main.as_deref();
         cfg.folder.filter = Arc::new(load_filter(root, cfg.folder.case_insensitive, main)?);
@@ -1047,7 +1037,9 @@ impl Runner {
                 }
             }
             // (With the folder open: one that can't be opened keeps the ask till it can.)
-            if let (Some(p), Some(ask)) = (&parts, self.asked.take_if(|_| parts.is_some())) {
+            if let Some(p) = &parts
+                && let Some(ask) = self.asked.take()
+            {
                 check_rules |= self.shares_asked(ask, p);
             }
             let check = (
@@ -1380,20 +1372,21 @@ impl Runner {
     /// folder is open: whether it was done (the folder is then opened again with it, as for
     /// rules that changed). One that fails is told as a note.
     fn shares_asked(&mut self, ask: SharesAsk, parts: &Parts) -> bool {
-        let caseless = parts.engine.config().folder.case_insensitive;
-        let done =
-            SyncRoot::open(&self.cfg.db, &self.cfg.identity, &self.cfg.folder).and_then(|root| {
-                match (&ask, self.cfg.shares.as_deref()) {
-                    (SharesAsk::Take(name), _) => {
-                        hbsync_local::shares::take(&self.cfg.folder, name)?;
-                        Ok(name.clone())
-                    }
-                    (SharesAsk::Make, Some(name)) => root.make_shares_again(name, caseless),
-                    (SharesAsk::Make, None) => Err(RootError::Io(std::io::Error::other(
-                        "nothing is shared with this account",
-                    ))),
-                }
-            });
+        let folder = &self.cfg.folder;
+        let done = match (&ask, self.cfg.shares.as_deref()) {
+            (SharesAsk::Take(name), _) => hbsync_local::shares::take(folder, name)
+                .map(|()| name.clone())
+                .map_err(RootError::Io),
+            // (The drive's names are asked for it: the state DB.)
+            (SharesAsk::Make, Some(name)) => {
+                let caseless = parts.engine.config().folder.case_insensitive;
+                SyncRoot::open(&self.cfg.db, &self.cfg.identity, folder)
+                    .and_then(|root| root.make_shares_again(name, caseless))
+            }
+            (SharesAsk::Make, None) => Err(RootError::Io(std::io::Error::other(
+                "nothing is shared with this account",
+            ))),
+        };
         match done {
             Ok(name) => {
                 tracing::info!("{name}: the folder of shares now, as asked");

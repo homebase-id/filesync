@@ -262,15 +262,23 @@ impl SyncRoot {
         make_as: Option<&str>,
         case_insensitive: bool,
     ) -> Result<hbsync_local::shares::Placed, RootError> {
+        let on_drive = self.on_drive(case_insensitive);
+        hbsync_local::shares::place(&self.path, make_as, case_insensitive, on_drive)
+    }
+
+    /// Whether an item at the top of this folder's part of the drive (as the DB has it) has
+    /// a name, for the folder of shares to stay clear of ([`drive_has`]): the DB opened at
+    /// the first name asked.
+    fn on_drive(&self, case_insensitive: bool) -> impl FnMut(&str) -> Result<bool, RootError> + '_ {
         let mut db = None;
-        hbsync_local::shares::place(&self.path, make_as, case_insensitive, |name| {
+        move |name| {
             let db = match &mut db {
                 Some(db) => db,
                 none => none.insert(self.state()?),
             };
             let scope = crate::scope::Scope::of(self.top);
             Ok(db.read(|s| drive_has(s, &scope, &self.path, name, case_insensitive))?)
-        })
+        }
     }
 
     /// Makes the folder of shares again on the user's word, the one on record not being at
@@ -281,15 +289,8 @@ impl SyncRoot {
         name: &str,
         case_insensitive: bool,
     ) -> Result<String, RootError> {
-        let mut db = None;
-        hbsync_local::shares::make_again(&self.path, name, case_insensitive, |name| {
-            let db = match &mut db {
-                Some(db) => db,
-                none => none.insert(self.state()?),
-            };
-            let scope = crate::scope::Scope::of(self.top);
-            Ok(db.read(|s| drive_has(s, &scope, &self.path, name, case_insensitive))?)
-        })
+        let on_drive = self.on_drive(case_insensitive);
+        hbsync_local::shares::make_again(&self.path, name, case_insensitive, on_drive)
     }
 
     /// Whether `identity`'s DB at `db` has a folder at `path` (whatever its marker says).
@@ -646,7 +647,10 @@ impl AccountReader {
 /// here), and the very folder that is the folder of shares now (named as it on the user's
 /// word: left out, what was sent of it leaves the drive). Giving way to that one would
 /// rename the folder the user named, for an item that is going. One lookup by name; for an
-/// item found, its base and its row, and a look at the folder.
+/// item found, its base and its row, and a look at the folder. (What leaves is decided by
+/// the plan's masks, [`crate::mask`], which this can't ask before a plan: it says what
+/// they will, short of an item the drive changed meanwhile, whose base then goes, and the
+/// folder of shares gives way at the next asking.)
 pub(crate) fn drive_has(
     s: &hbsync_state::ReadTx<'_>,
     scope: &crate::scope::Scope,

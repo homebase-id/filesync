@@ -21,9 +21,7 @@ use crate::daemon::DaemonError;
 use crate::daemon::keeper::Keeper;
 use crate::folders::{heal_account, ready_account};
 use crate::protocol::{AccountStatus, Hints, Pause, State};
-use crate::runner::{
-    Backoff, Command, Runner, RunnerConfig, RunnerError, Shares, SharesTold, Showing,
-};
+use crate::runner::{Backoff, Command, Runner, RunnerConfig, RunnerError, SharesTold, Showing};
 use crate::sync::{lock, wait_for};
 use crate::words;
 use crate::{Config, CredentialError, CredentialStore, Location, Paths, Root};
@@ -369,13 +367,10 @@ impl Account {
                     // Only while it connects ([`Account::try_connect`]).
                     Msg::Connected(_) => {}
                     Msg::Shares(main, at) => {
-                        shares_at = match at {
-                            Shares::At(name) => {
-                                let dir = main.join(name);
-                                Some((main, dir))
-                            }
-                            Shares::None | Shares::Gone => None,
-                        };
+                        shares_at = at.map(|name| {
+                            let dir = main.join(name);
+                            (main, dir)
+                        });
                     }
                     Msg::Hint(event) => {
                         let Some(hints) = notifications.event(event, Instant::now(), paused) else {

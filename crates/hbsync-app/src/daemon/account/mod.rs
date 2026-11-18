@@ -33,7 +33,6 @@ use crate::protocol::{
     AccountControl, AccountStatus, DeletedAccount, DeletedItem, FolderStatus, Pause, RecentItem,
     State,
 };
-use crate::runner::Shares;
 use crate::runner::{Command, Handle, add_notes};
 use crate::sync::{Wakeup, lock};
 use crate::words;
@@ -196,9 +195,9 @@ pub(crate) enum Msg {
     SyncNow,
     /// A try at connecting ended (its thread's answer, while the account connects).
     Connected(Box<Result<HomebaseRemote, hbsync_homebase::HomebaseError>>),
-    /// The runner of this folder (the main folder) opened it, and its folder of shares is
-    /// there ([`crate::runner::Shares`]).
-    Shares(PathBuf, Shares),
+    /// The runner of this folder (the main folder) opened it, and its folder of shares has
+    /// this name; none: none is at its top ([`crate::runner::SharesTold`]).
+    Shares(PathBuf, Option<String>),
 }
 
 /// What the account's thread is asked to do.
@@ -1235,12 +1234,7 @@ mod tests {
         let at = folder.join("Shared").join("tom.example");
         let checks = || -> Result<(), Box<dyn std::error::Error>> {
             started.wait_all("both sync", &both_synced)?;
-            // (On Windows a folder its runner is in may take a moment to go.)
-            wait_until(|| {
-                let gone = std::fs::remove_dir_all(&at).is_ok() || !at.exists();
-                gone.then_some(())
-            })
-            .ok_or("the share's folder can't be deleted")?;
+            remove_synced(&at)?;
             let _ = started.account.sync_now();
             started.wait_all(
                 "the share's folder is gone for its runner",
@@ -1267,11 +1261,28 @@ mod tests {
         Some(crate::protocol::SharesFolder::At { name: name.into() })
     }
 
-    /// Removes the folder of shares `dir` while its shares are synced into it. (On Windows a
-    /// folder a runner is in may take a moment to go.)
-    fn remove_shares(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    /// Removes the folder `dir` while something is synced into it. (On Windows a folder a
+    /// runner is in may take a moment to go.)
+    fn remove_synced(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
         let gone = || (std::fs::remove_dir_all(dir).is_ok() || !dir.exists()).then_some(());
-        Ok(wait_until(gone).ok_or("the folder of shares can't be deleted")?)
+        Ok(wait_until(gone).ok_or_else(|| format!("{} can't be deleted", dir.display()))?)
+    }
+
+    /// The names of what is live on `server`'s drive, sorted.
+    fn drive_names(
+        server: &Arc<std::sync::Mutex<FakeServer>>,
+    ) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+        Ok(server.lock().map_err(|_| "poisoned")?.live_names())
+    }
+
+    /// Removes the main folder `folder`'s folder of shares `Shared`, and waits till the
+    /// account shows its shares off.
+    fn shares_gone(started: &Started, folder: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        remove_synced(&folder.join("Shared"))?;
+        let _ = started.account.sync_now();
+        Ok(started.wait_all("shares are off", &|_, folders| {
+            shares_shown(folders) == Some(crate::protocol::SharesFolder::Gone)
+        })?)
     }
 
     /// The folder of shares gone from the main folder: shares are off, said in the main
@@ -1281,7 +1292,6 @@ mod tests {
     #[test]
     fn shares_are_off_while_their_folder_is_gone_and_on_again_once_one_is_made()
     -> Result<(), Box<dyn std::error::Error>> {
-        use crate::protocol::SharesFolder;
         use crate::runner::SharesAsk;
 
         let home = tempfile::tempdir()?;
@@ -1296,11 +1306,7 @@ mod tests {
             let refused = main.shares(SharesAsk::Make);
             assert!(refused.is_err_and(|why| why.contains("is there")));
 
-            remove_shares(&folder.join("Shared"))?;
-            let _ = started.account.sync_now();
-            started.wait_all("shares are off", &|_, folders| {
-                shares_shown(folders) == Some(SharesFolder::Gone)
-            })?;
+            shares_gone(&started, &folder)?;
             // Not by itself, also over a sync.
             let _ = started.account.sync_now();
             std::thread::sleep(std::time::Duration::from_millis(500));
@@ -1315,12 +1321,8 @@ mod tests {
                         && folder.join("Shared").join("tom.example").is_dir()
                 },
             )?;
-            let names = server.lock().map_err(|_| "poisoned")?.live_names();
-            assert_eq!(
-                names,
-                ["mine.txt"],
-                "nothing of the shares is the account's own"
-            );
+            let own = drive_names(&server)?;
+            assert_eq!(own, ["mine.txt"], "something of the shares was sent");
             Ok(())
         };
         let checked = checks();
@@ -1334,7 +1336,6 @@ mod tests {
     #[test]
     fn a_folder_named_as_the_folder_of_shares_leaves_the_drive_and_takes_the_shares()
     -> Result<(), Box<dyn std::error::Error>> {
-        use crate::protocol::SharesFolder;
         use crate::runner::SharesAsk;
 
         let home = tempfile::tempdir()?;
@@ -1346,19 +1347,11 @@ mod tests {
             "sent before it was named",
         )?;
         let started = start();
-        let on_drive = || -> Result<Vec<String>, Box<dyn std::error::Error>> {
-            let mut names = server.lock().map_err(|_| "poisoned")?.live_names();
-            names.sort();
-            Ok(names)
-        };
+        let on_drive = || drive_names(&server);
         let checks = || -> Result<(), Box<dyn std::error::Error>> {
             started.wait_all("both sync", &both_synced)?;
             assert_eq!(on_drive()?, ["Theirs", "mine.txt", "old.txt"]);
-            remove_shares(&folder.join("Shared"))?;
-            let _ = started.account.sync_now();
-            started.wait_all("shares are off", &|_, folders| {
-                shares_shown(folders) == Some(SharesFolder::Gone)
-            })?;
+            shares_gone(&started, &folder)?;
 
             let main = started.account.runner(&folder).ok_or("no runner")??;
             for not_one in ["mine.txt", "Theirs/old.txt", "none"] {
@@ -1409,11 +1402,7 @@ mod tests {
         let all_synced = |s: &AccountStatus, folders: &[FolderStatus], n: usize| {
             folders.len() == n && folders.iter().all(|f| synced(s, f))
         };
-        let on_drive = || -> Result<Vec<String>, Box<dyn std::error::Error>> {
-            let mut names = server.lock().map_err(|_| "poisoned")?.live_names();
-            names.sort();
-            Ok(names)
-        };
+        let on_drive = || drive_names(&server);
         let checks = || -> Result<(), Box<dyn std::error::Error>> {
             started.wait_all("all three sync", &|s, folders| {
                 all_synced(s, folders, 3) && shares_shown(folders) == shares_at("Shared")

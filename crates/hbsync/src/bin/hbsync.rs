@@ -529,7 +529,7 @@ fn ask_yes(question: &str) -> Res<bool> {
 /// up again where it is gone.
 fn shared_folder(paths: &Paths, make: bool, take: Option<PathBuf>, yes: bool) -> Res<()> {
     let Some(status) = daemon::status(paths)? else {
-        return Err("the daemon isn't running (`hbsync start` starts it)".into());
+        return Err(daemon::NotRunning.into());
     };
     let mains = status.folders.iter().filter(|f| f.is_main());
     let shared: Vec<(&FolderStatus, &SharesFolder)> = mains
@@ -540,19 +540,21 @@ fn shared_folder(paths: &Paths, make: bool, take: Option<PathBuf>, yes: bool) ->
         return Ok(());
     }
     // Those whose folder isn't there: the ones to make or take one for.
-    let off = || {
-        shared
-            .iter()
-            .filter(|(_, s)| !matches!(s, SharesFolder::At { .. }))
-    };
+    let there = |shares: &SharesFolder| matches!(shares, SharesFolder::At { .. });
+    let off: Vec<&FolderStatus> = shared
+        .iter()
+        .filter(|(_, s)| !there(s))
+        .map(|(f, _)| *f)
+        .collect();
+    // (Done by the daemon between syncs: one that can't be is told in `hbsync status`.)
     if make {
-        if off().next().is_none() {
+        if off.is_empty() {
             println!("Nothing to make: the folder is there.");
         }
-        for (folder, _) in off() {
+        for folder in off {
             daemon::make_shares(paths, &folder.path)?;
             println!(
-                "A new folder for what {} is shared with is made in {}.",
+                "A new folder for what is shared with {} is being made in {}.",
                 folder.identity,
                 folder.path.display()
             );
@@ -563,23 +565,18 @@ fn shared_folder(paths: &Paths, make: bool, take: Option<PathBuf>, yes: bool) ->
         // A path names its Homebase folder; a bare name is in the one whose shares are off.
         let name = take.file_name().and_then(|n| n.to_str());
         let name = name.ok_or("give the folder's name")?.to_owned();
-        let within = take.parent().filter(|p| !p.as_os_str().is_empty());
-        let folder = match within {
+        let folder = match take.parent().filter(|p| !p.as_os_str().is_empty()) {
             Some(within) => {
-                let within = std::path::absolute(within)?;
-                let found = shared.iter().find(|(f, _)| f.path == within);
+                let within = setup::resolve(within);
+                let found = shared.iter().map(|(f, _)| *f).find(|f| f.path == within);
                 found.ok_or_else(|| format!("{} isn't a Homebase folder", within.display()))?
             }
-            None => {
-                let mut off = off();
-                match (off.next(), off.next()) {
-                    (Some(one), None) => one,
-                    (None, _) => return Err("the folder is there: nothing to take".into()),
-                    _ => return Err("say which Homebase folder: give the folder's path".into()),
-                }
-            }
+            None => match off.as_slice() {
+                [one] => *one,
+                [] => return Err("the folder is there: nothing to take".into()),
+                _ => return Err("say which Homebase folder: give the folder's path".into()),
+            },
         };
-        let (folder, _) = folder;
         let question = format!(
             "Take {name} in {} as the folder for what is shared with {}? What was synced of \
              it leaves your Homebase cloud (it stays on this computer, and in Recently deleted).",
@@ -592,31 +589,30 @@ fn shared_folder(paths: &Paths, make: bool, take: Option<PathBuf>, yes: bool) ->
         }
         daemon::take_shares(paths, &folder.path, name.clone())?;
         println!(
-            "{name} is the folder for what is shared with {} now.",
+            "{name} is being taken as the folder for what is shared with {}.",
             folder.identity
         );
         return Ok(());
     }
     for (folder, shares) in &shared {
-        match shares {
-            SharesFolder::At { name } => println!(
+        match (shares, words::shares_off_and_how(shares, SHARED_FOLDER)) {
+            (SharesFolder::At { name }, _) => println!(
                 "What is shared with {} is in {}",
                 folder.identity,
                 folder.path.join(name).display()
             ),
-            off => {
-                let line = words::shares_off(off).unwrap_or_default();
-                let way = words::shares_way_out(off, "hbsync shared-folder");
-                println!("{}: {line} ({})", folder.identity, way.unwrap_or_default());
-            }
+            (_, off) => println!("{}: {}", folder.identity, off.unwrap_or_default()),
         }
     }
     Ok(())
 }
 
+/// The command that shows and sets up the folder what others share is synced into.
+const SHARED_FOLDER: &str = "hbsync shared-folder";
+
 fn answer_held(paths: &Paths, yes: bool, answer: HeldAnswer) -> Res<()> {
     let Some(status) = daemon::status(paths)? else {
-        return Err("the daemon isn't running (`hbsync start` starts it)".into());
+        return Err(daemon::NotRunning.into());
     };
     let held: Vec<_> = status
         .folders
@@ -747,10 +743,9 @@ fn print_folder(s: &FolderStatus) {
         );
     }
     if let Some(off) = &s.shares
-        && let Some(line) = words::shares_off(off)
+        && let Some(line) = words::shares_off_and_how(off, SHARED_FOLDER)
     {
-        let way = words::shares_way_out(off, "hbsync shared-folder").unwrap_or_default();
-        println!("  {line}: {way}");
+        println!("  {line}");
     }
     if let Some(why) = &s.watcher_error {
         let every = s
