@@ -940,9 +940,9 @@ fn an_edited_ignore_file_applies_without_a_restart() -> R {
 }
 
 /// The folder that holds what other identities share (sync semantics §10), put in place with
-/// its marker in it and on record, is this device's own from that moment: nothing of it is sent, and a
-/// folder of its name on the drive stays out until it yields the name. Seen by the watcher:
-/// no restart, nor a minute's look.
+/// its marker in it and on record, is this device's own from that moment: nothing of it is
+/// sent, and it gives way to a folder of its name that comes to the drive. Seen by the
+/// watcher: no restart, nor a minute's look.
 #[test]
 fn a_folder_of_shares_is_left_alone_without_a_restart() -> R {
     let server = server();
@@ -961,25 +961,19 @@ fn a_folder_of_shares_is_left_alone_without_a_restart() -> R {
     a.wait_idle()?;
     assert_eq!(live_names(&server), ["notes.txt"]);
 
-    // The drive's folder of that name isn't merged into it.
+    // The drive's folder of that name isn't merged into it: the folder of shares gives way
+    // (its marker and what it holds with it), and the drive's folder comes beside it.
     b.write("Shared/cloud.txt", "from the drive")?;
     b.handle.send(Command::SyncNow);
     wait_until("the drive's Shared is up", || {
         on_server(&server, "cloud.txt")
     })?;
-    a.sync_reported()?;
-    a.wait_idle()?;
-    assert!(
-        !a.has("Shared/cloud.txt"),
-        "merged into the folder of shares"
-    );
-    assert_eq!(a.status().state, State::Idle);
-
-    // Renamed, its marker with it: the drive's folder comes, the folder of shares stays this
-    // device's own under its new name.
-    std::fs::rename(a.root.join("Shared"), a.root.join("Shared-2"))?;
+    a.handle.send(Command::SyncNow);
     wait_until("the drive's Shared is here", || a.has("Shared/cloud.txt"))?;
     a.wait_idle()?;
+    assert!(!a.has("Shared/tom"), "merged into the folder of shares");
+    assert!(!a.has("Shared-2/cloud.txt"));
+    assert_eq!(a.status().state, State::Idle);
     assert!(a.has("Shared-2/tom/theirs.txt"));
     b.sync_reported()?;
     b.wait_idle()?;
@@ -987,6 +981,15 @@ fn a_folder_of_shares_is_left_alone_without_a_restart() -> R {
     let mut names = live_names(&server);
     names.sort();
     assert_eq!(names, ["Shared", "cloud.txt", "notes.txt"]);
+
+    // Renamed by hand: followed by the watcher, with no sync asked for. The name it had is
+    // free for a folder of the user's own, which a filter still holding it would leave out.
+    std::fs::rename(a.root.join("Shared-2"), a.root.join("From others"))?;
+    a.write("Shared-2/mine.txt", "mine")?;
+    wait_until("mine.txt is up", || on_server(&server, "mine.txt"))?;
+    a.wait_idle()?;
+    assert_eq!(hbsync_local::shares::folders(&a.root)?, ["From others"]);
+    assert!(!on_server(&server, "theirs.txt"));
     Ok(())
 }
 
@@ -1076,6 +1079,178 @@ fn a_record_of_the_folder_of_shares_that_cant_be_read_stops_the_sync_till_it_can
     wait_until("notes.txt is up", || on_server(&server, "notes.txt"))?;
     a.wait_idle()?;
     assert_eq!(live_names(&server), ["notes.txt"]);
+    Ok(())
+}
+
+/// The folder of shares is made as the account's folder opens, where one is wanted and none is
+/// there, and gives way to an item the drive has under its name (sync semantics §10): the one
+/// that was there before this device knew the drive, and one that comes later. Nothing of it
+/// is sent, and the drive's items come.
+#[test]
+fn the_folder_of_shares_is_made_and_gives_way_to_the_drives_item_of_its_name() -> R {
+    use hbsync_local::shares::folders;
+    let server = server();
+    let b = Device::start(&server, "b")?;
+    b.started()?;
+    b.write("Shared/cloud.txt", "from the drive")?;
+    b.handle.send(Command::SyncNow);
+    wait_until("the drive's Shared is up", || {
+        on_server(&server, "cloud.txt")
+    })?;
+
+    // Made as `Shared` (this device knows nothing of the drive yet), then out of the way.
+    let a = Device::start_with(&server, "a", |c| c.shares = Some("Shared".into()))?;
+    wait_until("the drive's Shared is here", || a.has("Shared/cloud.txt"))?;
+    a.wait_idle()?;
+    assert_eq!(folders(&a.root)?, ["Shared-2"]);
+    a.write("Shared-2/tom/theirs.txt", "shared with me")?;
+
+    b.write("Shared-2/more.txt", "from the drive too")?;
+    b.handle.send(Command::SyncNow);
+    wait_until("the drive's Shared-2 is up", || {
+        on_server(&server, "more.txt")
+    })?;
+    a.handle.send(Command::SyncNow);
+    wait_until("the drive's Shared-2 is here", || {
+        a.has("Shared-2/more.txt")
+    })?;
+    a.wait_idle()?;
+    assert_eq!(folders(&a.root)?, ["Shared-3"]);
+    assert!(a.has("Shared-3/tom/theirs.txt") && !a.has("Shared-2/tom"));
+    assert_eq!(a.status().state, State::Idle);
+    let mut names = live_names(&server);
+    names.sort();
+    assert_eq!(names, ["Shared", "Shared-2", "cloud.txt", "more.txt"]);
+    Ok(())
+}
+
+/// A folder this device has synced takes the folder of shares' name on the drive (renamed on
+/// another device): the folder of shares gives way before anything is planned with the name
+/// masked, so the folder is renamed here as anywhere, its files neither taken from here nor
+/// downloaded again.
+#[test]
+fn the_folder_of_shares_gives_way_before_a_synced_folder_that_took_its_name_is_planned() -> R {
+    use hbsync_local::shares::folders;
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    let b = Device::start(&server, "b")?;
+    a.started()?;
+    b.started()?;
+    assert_eq!(make(&a.root, "Shared")?, Made::Made);
+    a.write("Shared/tom/theirs.txt", "shared with me")?;
+    a.write("Team/plan.txt", "ours")?;
+    a.handle.send(Command::SyncNow);
+    wait_until("plan.txt is up", || on_server(&server, "plan.txt"))?;
+    a.wait_idle()?;
+    b.handle.send(Command::SyncNow);
+    wait_until("Team is on b", || b.has("Team/plan.txt"))?;
+    b.wait_idle()?;
+    let id = hbsync_platform::stat(&a.root.join("Team/plan.txt"))?.file_id;
+
+    std::fs::rename(b.root.join("Team"), b.root.join("Shared"))?;
+    b.handle.send(Command::SyncNow);
+    wait_until("the rename is up", || {
+        header_named(&server, "Shared").is_some()
+    })?;
+    a.handle.send(Command::SyncNow);
+    wait_until("the rename is here", || a.has("Shared/plan.txt"))?;
+    a.wait_idle()?;
+    assert_eq!(folders(&a.root)?, ["Shared-2"]);
+    assert!(a.has("Shared-2/tom/theirs.txt") && !a.has("Team"));
+    let now = hbsync_platform::stat(&a.root.join("Shared/plan.txt"))?.file_id;
+    assert_eq!(now, id, "the file was taken from here and brought again");
+    let mut names = live_names(&server);
+    names.sort();
+    assert_eq!(names, ["Shared", "plan.txt"]);
+    Ok(())
+}
+
+/// Where the folder of shares can't give way to the drive's item of its name (its rename is
+/// refused), the item stays out, which loses nothing: the folder syncs on, and isn't opened
+/// over and over for it. It gives way when the folder next opens and the rename works.
+#[cfg(unix)]
+#[test]
+fn a_folder_of_shares_that_cant_give_way_leaves_the_item_out_and_syncs_on() -> R {
+    use hbsync_local::shares::folders;
+    use std::os::unix::fs::PermissionsExt;
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    let b = Device::start(&server, "b")?;
+    a.started()?;
+    b.started()?;
+    assert_eq!(make(&a.root, "Shared")?, Made::Made);
+    a.write("notes.txt", "mine")?;
+    a.handle.send(Command::SyncNow);
+    wait_until("notes.txt is up", || on_server(&server, "notes.txt"))?;
+    a.wait_idle()?;
+
+    // Nothing at the folder's top can be renamed.
+    let mode = |mode| std::fs::set_permissions(&a.root, std::fs::Permissions::from_mode(mode));
+    mode(0o555)?;
+    if std::fs::write(a.root.join("probe"), "").is_ok() {
+        // Whoever runs this may write anywhere (root): nothing can be refused.
+        std::fs::remove_file(a.root.join("probe"))?;
+        return Ok(mode(0o755)?);
+    }
+    b.write("Shared/cloud.txt", "from the drive")?;
+    b.handle.send(Command::SyncNow);
+    wait_until("the drive's Shared is up", || {
+        on_server(&server, "cloud.txt")
+    })?;
+    a.sync_reported()?;
+    a.wait_idle()?;
+    let quiet = a.settled(Duration::from_millis(500), PATIENCE, || a.feed_reads());
+    let left_out = !a.has("Shared/cloud.txt") && folders(&a.root)? == ["Shared"];
+    let idle = a.status().state == State::Idle;
+    mode(0o755)?;
+    quiet?;
+    assert!(left_out && idle);
+
+    // Opened again (its rules changed): it gives way now.
+    a.write(".hbsync/ignore", "*.tmp\n")?;
+    a.handle.send(Command::SyncNow);
+    wait_until("the drive's Shared is here", || a.has("Shared/cloud.txt"))?;
+    a.wait_idle()?;
+    assert_eq!(folders(&a.root)?, ["Shared-2"]);
+    Ok(())
+}
+
+/// A folder of the user's own that the volume tells apart from the folder of shares and the
+/// client doesn't (`STRASSE` beside `Straße`, where the volume ignores case) stays synced: the
+/// folder of shares gives way before the filter holds its name. Where the volume tells case
+/// apart the client does too, and nothing moves.
+#[test]
+fn the_folder_of_shares_gives_way_to_a_folder_the_client_cant_tell_from_it() -> R {
+    use hbsync_local::shares::folders;
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    a.started()?;
+    a.write("STRASSE/mine.txt", "mine")?;
+    a.handle.send(Command::SyncNow);
+    wait_until("mine.txt is up", || on_server(&server, "mine.txt"))?;
+    a.wait_idle()?;
+
+    match make(&a.root, "Straße")? {
+        Made::Made => {}
+        // A volume that doesn't tell the two apart: nothing to give way to.
+        _ => return Ok(()),
+    }
+    let caseless = hbsync_engine::EngineConfig::new(&a.root, "a")
+        .folder
+        .case_insensitive;
+    let name = if caseless { "Straße-2" } else { "Straße" };
+    a.handle.send(Command::SyncNow);
+    wait_until("the folder of shares has its name", || {
+        folders(&a.root).is_ok_and(|f| f == [name]) && a.status().rules == 0
+    })?;
+    a.write("STRASSE/more.txt", "still synced")?;
+    a.handle.send(Command::SyncNow);
+    wait_until("more.txt is up", || on_server(&server, "more.txt"))?;
+    a.wait_idle()?;
+    assert_eq!(folders(&a.root)?, [name]);
+    let mut names = live_names(&server);
+    names.sort();
+    assert_eq!(names, ["STRASSE", "mine.txt", "more.txt"]);
     Ok(())
 }
 

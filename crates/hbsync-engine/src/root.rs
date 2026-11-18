@@ -226,6 +226,29 @@ impl SyncRoot {
         })
     }
 
+    /// Puts the folder of shares where it holds no name against anything, as the folder opens
+    /// and before its filter is read ([`hbsync_local::shares::place`]): made as `make_as` where
+    /// one is wanted and none is there, and renamed where something else at the top, or an item
+    /// at the top of this folder's part of the drive (as the DB has it), has its name as names
+    /// compare (`case_insensitive`: the volume's; [`drive_has`]). The DB is opened only where
+    /// a folder of shares is there or to be made: one lookup by name then, more for a name
+    /// taken.
+    pub fn place_shares(
+        &self,
+        make_as: Option<&str>,
+        case_insensitive: bool,
+    ) -> Result<hbsync_local::shares::Placed, RootError> {
+        let mut db = None;
+        hbsync_local::shares::place(&self.path, make_as, case_insensitive, |name| {
+            let db = match &mut db {
+                Some(db) => db,
+                none => none.insert(self.state()?),
+            };
+            let scope = crate::scope::Scope::of(self.top);
+            Ok(db.read(|s| drive_has(s, &scope, name, case_insensitive))?)
+        })
+    }
+
     /// Whether `identity`'s DB at `db` has a folder at `path` (whatever its marker says).
     pub fn knows_path(db: &Path, identity: &str, path: &Path) -> Result<bool, RootError> {
         let Some(mut account) = AccountReader::open(db, identity)? else {
@@ -569,6 +592,25 @@ impl AccountReader {
     pub fn recent_synced(&mut self, folder: i64, limit: usize) -> Result<Vec<Synced>, StateError> {
         self.db.read_folder(folder, |s| s.recent_synced(limit))
     }
+}
+
+/// Whether the folder with `scope` has an item named as `name` at the top of its part of the
+/// drive, as `s` (the folder's view) has the drive and as names compare with a folder of
+/// shares' ([`hbsync_local::top_key`]): one the folder of shares gives way to. Not what the
+/// folder leaves out (a role folder at the drive's top isn't the main folder's, and its name
+/// stays free there, §12). One lookup by name.
+pub(crate) fn drive_has(
+    s: &hbsync_state::ReadTx<'_>,
+    scope: &crate::scope::Scope,
+    name: &str,
+    case_insensitive: bool,
+) -> Result<bool, StateError> {
+    let key = hbsync_local::top_key(name, case_insensitive);
+    let named = s.mirror_named(NodeId::ROOT, hbsync_namemap::sibling_hash(name))?;
+    Ok(named.iter().any(|row| {
+        !scope.outside.contains(&row.node)
+            && hbsync_local::top_key(&row.name, case_insensitive) == key
+    }))
 }
 
 #[cfg(test)]

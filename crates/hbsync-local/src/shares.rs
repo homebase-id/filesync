@@ -18,7 +18,7 @@ use std::path::Path;
 
 use hbsync_platform::{EntryKind, FileId};
 
-use crate::filter::{holds_marker, is_state_dir};
+use crate::filter::{holds_marker, is_state_dir, top_key};
 use crate::layout::{shared_marker, shares_file, tmp_dir};
 
 /// The folder of shares on record for a sync folder, or none.
@@ -115,43 +115,75 @@ fn token_in(dir: &Path) -> io::Result<Option<String>> {
     }
 }
 
-/// The real folders (no links) at the top of `root`, the state folder left out, each with its
-/// file id: one listing, as the walk's. None in a root that isn't there. One whose name isn't
-/// Unicode is never synced anyway ([`crate::SkipReason`]).
-fn top_folders(root: &Path) -> io::Result<Vec<(String, FileId)>> {
+/// What is at the top of `root`, the state folder left out: one listing, as the walk's. The
+/// real folders (no links) with their file ids, and the names of all else. Nothing in a root
+/// that isn't there. An item whose name isn't Unicode is never synced anyway
+/// ([`crate::SkipReason`]).
+fn list_top(root: &Path) -> io::Result<(Folders, Vec<String>)> {
     let items = match hbsync_platform::listdir::list_dir(root) {
         Ok(items) => items,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Default::default()),
         Err(e) => return Err(e),
     };
-    let folders = items.into_iter().filter_map(|item| {
-        let name = item.name.into_string().ok()?;
-        (item.meta.kind == EntryKind::Dir && !is_state_dir(&name))
-            .then_some((name, item.meta.file_id))
-    });
-    Ok(folders.collect())
-}
-
-/// The folder of shares at the top of `root`, by name: the folder on record there
-/// ([`Record::holds`]). Found by the record, never by a name: the user may rename it. More
-/// than one only where the volume's file ids aren't stable (the module's words). A marker
-/// that can't be read is an error, as a root that can't be listed.
-///
-/// Nothing but the record's read where none is on record; else one listing of the root and
-/// one read of a marker (where no id is recorded: a look for one in each folder there).
-pub fn folders(root: &Path) -> io::Result<Vec<String>> {
-    let record = Record::read(root)?;
-    let mut found = Vec::new();
-    if record.0.is_none() {
-        return Ok(found);
-    }
-    for (name, id) in top_folders(root)? {
-        if record.holds(id, &root.join(&name))? {
-            found.push(name);
+    let (mut folders, mut rest) = (Vec::new(), Vec::new());
+    for item in items {
+        match item.name.into_string() {
+            Ok(name) if is_state_dir(&name) => {}
+            Ok(name) if item.meta.kind == EntryKind::Dir => folders.push((name, item.meta.file_id)),
+            Ok(name) => rest.push(name),
+            Err(_) => {}
         }
     }
-    found.sort_unstable();
-    Ok(found)
+    Ok((folders, rest))
+}
+
+/// Folders by name, each with its file id.
+type Folders = Vec<(String, FileId)>;
+
+/// The top of a sync folder, as its folder of shares is told there ([`Top::read`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Top {
+    /// The folder of shares, by name, sorted: the folder on record ([`Record::holds`]). Found
+    /// by the record, never by a name: the user may rename it. More than one only where the
+    /// volume's file ids aren't stable (the module's words).
+    pub shares: Vec<String>,
+    /// What else is there, by name (the state folder left out).
+    pub others: Vec<String>,
+}
+
+impl Top {
+    /// The top of `root`. A marker that can't be read is an error, as a root that can't be
+    /// listed.
+    ///
+    /// Nothing but the record's read where none is on record (and nothing is told of the top
+    /// then); else one listing of the root and one read of a marker (where no id is recorded:
+    /// a look for one in each folder there).
+    pub fn read(root: &Path) -> io::Result<Top> {
+        let record = Record::read(root)?;
+        if record.0.is_none() {
+            return Ok(Top::default());
+        }
+        Top::told(root, &record)
+    }
+
+    /// [`Top::read`] by `record`, the top listed also where nothing is on record.
+    fn told(root: &Path, record: &Record) -> io::Result<Top> {
+        let (folders, mut others) = list_top(root)?;
+        let mut shares = Vec::new();
+        for (name, id) in folders {
+            match record.holds(id, &root.join(&name))? {
+                true => shares.push(name),
+                false => others.push(name),
+            }
+        }
+        shares.sort_unstable();
+        Ok(Top { shares, others })
+    }
+}
+
+/// The folder of shares at the top of `root`, by name ([`Top::shares`]).
+pub fn folders(root: &Path) -> io::Result<Vec<String>> {
+    Ok(Top::read(root)?.shares)
 }
 
 /// What [`make`] did.
@@ -209,6 +241,189 @@ pub fn make(root: &Path, name: &str) -> io::Result<Made> {
 /// The name of the folder [`make`] prepares in the sync folder's tmp.
 const PREPARED: &str = "shares";
 
+/// What [`place`] did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Placed {
+    /// The name of the folder of shares it made.
+    pub made: Option<String>,
+    /// The folders of shares that gave way: the name each had, and the one it has now.
+    pub moved: Vec<(String, String)>,
+    /// A folder of shares couldn't give way to the drive's item of its name (in use, no name
+    /// free), with why: the item stays masked, which loses nothing, and the next open tries
+    /// again.
+    pub stuck: Option<String>,
+    /// One is on record and isn't at the top (moved away, deleted, its marker gone): none
+    /// was made in its place.
+    pub missing: bool,
+}
+
+/// How many names [`place`] tries for one folder: `Shared`, `Shared-2`, … `Shared-99`.
+const NAMES: usize = 99;
+
+/// `name` as [`place`] numbers it: what it is without its number, and the number (1 for a
+/// name without). `Shared-2` is `Shared`'s second, so it gives way to `Shared-3`; a number
+/// [`place`] wouldn't give (`From 2024-2025`) is part of the name. A name the user gave that
+/// ends as one of ours (`Team-7`) is numbered on too (`Team-8`): which it is isn't known.
+fn numbered(name: &str) -> (&str, usize) {
+    let ours = name.rsplit_once('-').and_then(|(base, n)| {
+        let plain =
+            !base.is_empty() && !n.starts_with('0') && n.bytes().all(|b| b.is_ascii_digit());
+        let n = n.parse().ok().filter(|n| plain && (2..NAMES).contains(n))?;
+        Some((base, n))
+    });
+    ours.unwrap_or((name, 1))
+}
+
+/// The names taken at a sync folder's top, for [`place`].
+struct Names<'a, E> {
+    /// Those on disk, as they compare ([`top_key`]).
+    here: Vec<String>,
+    case_insensitive: bool,
+    /// Whether the drive has an item of this name at its top.
+    on_drive: &'a mut dyn FnMut(&str) -> Result<bool, E>,
+}
+
+impl<E: From<io::Error>> Names<'_, E> {
+    /// The first of `name` (as number 1), `<name>-2`, `<name>-3`, … from number `first` on
+    /// that nothing has and `put` takes (`false`: taken on disk since the listing). Within:
+    /// why `put` failed, or that no name is free.
+    fn free(
+        &mut self,
+        name: &str,
+        first: usize,
+        mut put: impl FnMut(&str) -> io::Result<bool>,
+    ) -> Result<io::Result<String>, E> {
+        for n in first..=NAMES {
+            let to = match n {
+                1 => name.to_owned(),
+                n => format!("{name}-{n}"),
+            };
+            let key = top_key(&to, self.case_insensitive).into_owned();
+            if self.here.contains(&key) || (self.on_drive)(&to)? {
+                continue;
+            }
+            match put(&to) {
+                Ok(true) => {
+                    self.here.push(key);
+                    return Ok(Ok(to));
+                }
+                Ok(false) => {}
+                Err(e) => return Ok(Err(e)),
+            }
+        }
+        let what = format!("no name is free up to {name}-{NAMES}");
+        Ok(Err(io::Error::new(io::ErrorKind::AlreadyExists, what)))
+    }
+}
+
+/// Puts the folder of shares of the sync folder at `root` where it holds no name against
+/// anything, as the sync folder opens and before its filter is read:
+///
+/// - With `make_as` and none on record, one is made under that name ([`make`]), or the
+///   first of `<name>-2`, `<name>-3`, … that is free. Never where one is on record, at the
+///   top or not ([`Placed::missing`]).
+/// - One whose name something else has gives way: renamed (its marker and its file id go with
+///   it, so it stays the one on record) to the next free number ([`numbered`]). Where that
+///   fails for an item beside it, an error (that item would leave the drive); for the drive's
+///   item, [`Placed::stuck`].
+///
+/// A name is taken by another item at the top, and by an item at the top of the drive
+/// (`on_drive`, asked by name), as names compare there ([`top_key`]; `case_insensitive`: the
+/// volume's). Without this the folder of shares would mask the drive's item of its name for
+/// good, and an item of the user's own that the volume tells apart from it and the client
+/// doesn't would be left out with it, and leave the drive (sync semantics §10).
+///
+/// Costs the record's read; where one is on record or one is to be made, one listing of the
+/// root, a marker's read, and `on_drive` once a folder of shares (more only for a name taken).
+pub fn place<E: From<io::Error>>(
+    root: &Path,
+    make_as: Option<&str>,
+    case_insensitive: bool,
+    mut on_drive: impl FnMut(&str) -> Result<bool, E>,
+) -> Result<Placed, E> {
+    let record = Record::read(root)?;
+    let mut placed = Placed::default();
+    if record.0.is_none() && make_as.is_none() {
+        return Ok(placed);
+    }
+    let top = Top::told(root, &record)?;
+    let key = |name: &str| top_key(name, case_insensitive).into_owned();
+    let others: Vec<String> = top.others.iter().map(|n| key(n)).collect();
+    // Every name at the top, as it compares: the folders of shares' too (none takes another's).
+    let mut names = Names {
+        here: others
+            .iter()
+            .cloned()
+            .chain(top.shares.iter().map(|n| key(n)))
+            .collect(),
+        case_insensitive,
+        on_drive: &mut on_drive,
+    };
+    for name in &top.shares {
+        let here = others.contains(&key(name));
+        if !here && !(names.on_drive)(name)? {
+            continue;
+        }
+        let from = root.join(name);
+        let (base, number) = numbered(name);
+        let moved = names.free(
+            base,
+            number + 1,
+            |to| match hbsync_platform::ops::rename_noreplace(&from, &root.join(to)) {
+                Ok(()) => Ok(true),
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+                Err(e) => Err(e),
+            },
+        )?;
+        match moved {
+            Ok(to) => placed.moved.push((name.clone(), to)),
+            // An item of the user's own would be left out with it, and leave the drive.
+            Err(e) if here => {
+                let what = format!(
+                    "the folder of shares {name} can't give way to the item beside it that \
+                     compares as the same name: {e}"
+                );
+                return Err(io::Error::new(e.kind(), what).into());
+            }
+            Err(e) => {
+                placed.stuck = Some(format!(
+                    "the folder of shares {name} can't give way to the drive's item of its \
+                     name: {e}"
+                ));
+            }
+        }
+    }
+    // Only where nothing is on record: one on record that isn't at the top (moved into
+    // another folder for a moment, its marker unreadable just now) stays the one on record,
+    // or it would be a plain folder for good when it is back, and sent.
+    // But one on record that never got to the top ([`make`] stopped before its rename: a
+    // crash, a rename refused) is nothing to keep: made anew.
+    let unplaced = top.shares.is_empty() && record.is(&tmp_dir(root).join(PREPARED))?;
+    placed.missing = record.0.is_some() && top.shares.is_empty() && !unplaced;
+    if let Some(name) = make_as.filter(|_| record.0.is_none() || unplaced) {
+        let mut kept = false;
+        let made = names.free(name, 1, |to| {
+            Ok(match make(root, to)? {
+                Made::Made => true,
+                Made::Taken => false,
+                // Made by another since the listing: there, which is all that was asked.
+                Made::Kept(_) => {
+                    kept = true;
+                    true
+                }
+            })
+        })?;
+        let made = made.map_err(|e| {
+            io::Error::new(
+                e.kind(),
+                format!("the folder of shares {name} can't be made: {e}"),
+            )
+        })?;
+        placed.made = (!kept).then_some(made);
+    }
+    Ok(placed)
+}
+
 /// Takes a folder of shares whose record no longer finds it (a sync folder restored from a
 /// backup: every folder in it has a new id), as the sync folder opens: where one is on record
 /// and isn't at the top of `root`, and exactly one folder there that isn't synced (`synced`,
@@ -228,7 +443,7 @@ pub fn adopt<E: From<io::Error>>(
     let Some(known) = &record.0 else {
         return Ok(None);
     };
-    let top = top_folders(root)?;
+    let (top, _) = list_top(root)?;
     // The one on record first: where it is there, no other folder is looked into.
     for (name, id) in &top {
         if record.holds(*id, &root.join(name))? {
@@ -340,7 +555,8 @@ mod tests {
     #[test]
     fn a_restored_folder_of_shares_is_taken_when_it_is_the_only_one() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
-        let root = dir.path();
+        let root = &dir.path().join("sync");
+        fs::create_dir(root)?;
         fs::create_dir(root.join("Loose"))?;
         fs::write(shared_marker(&root.join("Loose")), "")?;
         assert_eq!(adopt(root, never)?, None, "nothing is on record");
@@ -349,7 +565,9 @@ mod tests {
             return Ok(());
         }
         let token = fs::read(shared_marker(&root.join("Shared")))?;
-        fs::remove_dir_all(root.join("Shared"))?;
+        // Out of the sync folder, not deleted: a folder made next could get its id (ext4 and
+        // XFS give a freed one out again), and would be the one on record, by id and token.
+        fs::rename(root.join("Shared"), dir.path().join("gone"))?;
         for name in ["Restored", "Projects", "plain"] {
             fs::create_dir(root.join(name))?;
         }
@@ -364,10 +582,9 @@ mod tests {
         assert_eq!(folders(root)?, ["Restored"]);
         assert_eq!(adopt(root, never)?, None);
 
-        fs::rename(root.join("Restored"), root.join("old"))?;
+        fs::rename(root.join("Restored"), dir.path().join("gone too"))?;
         fs::create_dir(root.join("Again"))?;
         fs::write(shared_marker(&root.join("Again")), &token)?;
-        fs::remove_dir_all(root.join("old"))?;
         assert_eq!(adopt(root, |_, _| io::Result::Ok(true))?, None);
         assert_eq!(adopt(root, by_name)?.as_deref(), Some("Again"));
         Ok(())
@@ -398,6 +615,120 @@ mod tests {
         fs::write(shared_marker(&root.join("Shared")), "t\n")?;
         assert_eq!(folders(root)?, ["Shared"]);
         assert_eq!(make(root, "Shared-2")?, Made::Kept("Shared".into()));
+        Ok(())
+    }
+
+    fn nothing(_: &str) -> io::Result<bool> {
+        Ok(false)
+    }
+
+    /// Made under the first name nothing has, here or on the drive; there, it gives way to an
+    /// item that takes its name, keeping its number's turn, and stays the one on record.
+    #[test]
+    fn it_is_made_under_a_free_name_and_gives_way_to_what_takes_its_name() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path();
+        assert_eq!(place(root, None, false, nothing)?, Placed::default());
+        assert!(fs::read_dir(root)?.next().is_none(), "nothing asked for");
+
+        fs::write(root.join("Shared"), "mine")?;
+        let placed = place(root, Some("Shared"), false, |name| {
+            Ok::<_, io::Error>(name == "Shared-2")
+        })?;
+        assert_eq!(placed.made.as_deref(), Some("Shared-3"));
+        assert!(placed.moved.is_empty());
+        assert_eq!(folders(root)?, ["Shared-3"]);
+        assert_eq!(
+            place(root, Some("Shared"), false, nothing)?,
+            Placed::default()
+        );
+
+        fs::create_dir(root.join("Shared-4"))?;
+        let mut asked = Vec::new();
+        let placed = place(root, Some("Shared"), false, |name| {
+            asked.push(name.to_owned());
+            Ok::<_, io::Error>(name == "Shared-3")
+        })?;
+        assert_eq!(placed.made, None);
+        assert_eq!(placed.moved, [("Shared-3".into(), "Shared-5".into())]);
+        assert_eq!(
+            asked,
+            ["Shared-3", "Shared-5"],
+            "one on disk isn't asked of the drive"
+        );
+        assert_eq!(folders(root)?, ["Shared-5"]);
+        assert_eq!(fs::read_to_string(root.join("Shared"))?, "mine");
+        assert!(root.join("Shared-4").is_dir());
+
+        // A name of the user's own that ends in no number of ours.
+        fs::rename(root.join("Shared-5"), root.join("From 2024-2025"))?;
+        let placed = place(root, None, false, |name| {
+            Ok::<_, io::Error>(name == "From 2024-2025")
+        })?;
+        let moved = [("From 2024-2025".into(), "From 2024-2025-2".into())];
+        assert_eq!(placed.moved, moved);
+
+        // One on record that isn't at the top stays the one on record: none is made in its
+        // place, and back at the top it is the folder of shares as before.
+        fs::create_dir(root.join("Work"))?;
+        fs::rename(root.join("From 2024-2025-2"), root.join("Work/Shared"))?;
+        let placed = place(root, Some("Shared"), false, nothing)?;
+        assert!(placed.missing && placed.made.is_none());
+        assert!(folders(root)?.is_empty());
+        fs::rename(root.join("Work/Shared"), root.join("Back"))?;
+        assert_eq!(
+            place(root, Some("Shared"), false, nothing)?,
+            Placed::default()
+        );
+        assert_eq!(folders(root)?, ["Back"]);
+
+        // No name free: for the drive's item it stays where it is, and says so.
+        let placed = place(root, None, false, |_| Ok::<_, io::Error>(true))?;
+        assert!(placed.moved.is_empty());
+        assert!(placed.stuck.is_some_and(|why| why.contains("Back")));
+        assert_eq!(folders(root)?, ["Back"]);
+
+        // One whose making stopped before it was in place (on record, still prepared) is
+        // made anew.
+        let other = tempfile::tempdir()?;
+        let root = other.path();
+        assert_eq!(make(root, "Shared")?, Made::Made);
+        fs::create_dir_all(tmp_dir(root))?;
+        fs::rename(root.join("Shared"), tmp_dir(root).join(PREPARED))?;
+        let placed = place(root, Some("Shared"), false, nothing)?;
+        assert_eq!(placed.made.as_deref(), Some("Shared"));
+        assert!(!placed.missing);
+        assert_eq!(folders(root)?, ["Shared"]);
+        Ok(())
+    }
+
+    /// What the volume tells apart and the client doesn't (`Straße` beside `STRASSE`, where
+    /// the volume ignores case) is in the way: the folder of shares gives way to it, and is
+    /// never made under such a name.
+    #[test]
+    fn it_gives_way_to_a_name_the_client_cant_tell_from_its_own() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path();
+        assert_eq!(make(root, "Straße")?, Made::Made);
+        if fs::create_dir(root.join("STRASSE")).is_err() {
+            // A volume that doesn't tell the two apart: nothing to give way to.
+            return Ok(());
+        }
+        let in_the_way = |caseless| crate::Filter::load(root, caseless).map(|f| f.in_the_way());
+        assert!(!in_the_way(false).expect("read"));
+        assert!(in_the_way(true).expect("read"));
+        assert_eq!(place(root, None, false, nothing)?, Placed::default());
+        let placed = place(root, None, true, nothing)?;
+        assert_eq!(placed.moved, [("Straße".into(), "Straße-2".into())]);
+        assert_eq!(folders(root)?, ["Straße-2"]);
+        assert!(!in_the_way(true).expect("read"));
+        assert!(root.join("STRASSE").is_dir());
+
+        let other = tempfile::tempdir()?;
+        let root = other.path();
+        fs::create_dir(root.join("shared"))?;
+        let placed = place(root, Some("Shared"), true, nothing)?;
+        assert_eq!(placed.made.as_deref(), Some("Shared-2"));
         Ok(())
     }
 }
