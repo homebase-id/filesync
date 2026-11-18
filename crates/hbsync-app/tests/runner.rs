@@ -1236,10 +1236,9 @@ fn a_folder_of_shares_that_couldnt_give_way_is_asked_again_by_itself() -> R {
     let left_out = !a.has("Shared/cloud.txt");
     // Paused, it isn't asked: nothing in a paused folder is renamed, though it could be now.
     a.handle.send(Command::Pause(Pause::UNTIL_RESUMED));
-    // (Taken by the runner before the folder can be renamed: a placing begun before the
-    // pause may still end.)
-    wait_until("it is paused", || a.status().state == State::Paused)?;
-    std::thread::sleep(Duration::from_millis(100));
+    // (The runner takes the pause at its next turn, and a placing begun before it may still
+    // end: the folder stays locked a second more, in which no such placing can rename.)
+    std::thread::sleep(Duration::from_millis(1000));
     drop(locked);
     assert!(left_out);
     std::thread::sleep(Duration::from_millis(1500));

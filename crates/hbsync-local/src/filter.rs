@@ -413,10 +413,17 @@ impl Filter {
     }
 
     /// Changes whenever the filter would decide differently: other rules, another junk list,
-    /// another case sensitivity, other folders that hold what other identities share.
+    /// another case sensitivity, other folders that hold what other identities share, other
+    /// file ids on record for that folder (it is left out by them below the top: a walk of
+    /// the whole folder takes out what the DB has of it there from before). Nothing is added
+    /// where no id is on record: such a folder's fingerprint is as it was.
     pub fn fingerprint(&self) -> String {
+        let ids = match self.shares_ids.is_empty() {
+            true => String::new(),
+            false => format!("; shares' ids {:?}", self.shares_ids),
+        };
         format!(
-            "junk {JUNK_VERSION}; case-insensitive {}; shared {:?}; rules:\n{}",
+            "junk {JUNK_VERSION}; case-insensitive {}; shared {:?}{ids}; rules:\n{}",
             self.case_insensitive, self.shared, self.text
         )
     }
@@ -782,6 +789,11 @@ mod tests {
         if f.knows_shares_by_id() {
             assert_eq!(f.returned(), ["plain"]);
         }
+        // The ids on record are part of what the filter decides by (below the top), and
+        // nothing of them is in the fingerprint of a folder without.
+        let ids = |f: &Filter| f.fingerprint().contains("shares' ids");
+        assert_eq!(ids(&f), f.knows_shares_by_id());
+        assert!(!ids(&Filter::default()));
         assert!(f.shared().is_empty() && !f.shared_changed(root));
         Ok(())
     }

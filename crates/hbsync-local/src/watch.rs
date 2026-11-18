@@ -777,9 +777,6 @@ mod tests {
         }
     }
 
-    /// What may make or unmake a folder of shares: its marker made, removed or renamed in a
-    /// folder at the top, and an entry of the top made, removed or renamed. Not a write to a
-    /// file there, a read, or anything deeper.
     /// A marker's event below the top is junk by its name, and dropped; kept where an id is
     /// on record for the folder of shares, which may be the folder it is in.
     #[test]
@@ -801,6 +798,9 @@ mod tests {
         Ok(())
     }
 
+    /// What may make or unmake a folder of shares: its marker made, removed or renamed in a
+    /// folder at the top, and an entry of the top made, removed or renamed. Not a write to a
+    /// file there, a read, or anything deeper.
     #[test]
     fn a_marker_or_an_entry_at_the_top_touches_the_folders_of_shares() {
         let root = Path::new("/sync");

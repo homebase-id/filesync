@@ -882,10 +882,11 @@ impl Runner {
                 shares_at = None;
                 let again = now + self.cfg.shares_again;
                 // Not while paused: nothing in the folder is touched then, and its watcher
-                // stays. Asked once it syncs again.
+                // stays. Asked within a look's time of its syncing again (till then the
+                // timer only comes round: nothing is read).
                 let placed = match schedule.paused() {
                     true => {
-                        shares_at = Some(again);
+                        shares_at = Some(now + self.cfg.look.min(self.cfg.shares_again));
                         None
                     }
                     false => parts.as_ref().map(|p| self.place_again(p)),
