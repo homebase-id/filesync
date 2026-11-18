@@ -430,8 +430,36 @@ included (service managers restart it then).
   the folder opens, a folder of shares the record no longer finds (the sync folder restored
   from a backup) is taken again, if it is the only folder at the top that isn't synced and
   holds the record's marker; the log says so. A record that can't be read stops the
-  folder's sync, failing, till it can. Making the folder for an account, and giving its name to
-  an item of the drive, come with the runners of the shares.
+  folder's sync, failing, till it can.
+
+  As the folder opens too, before the rules are read (`shares::place`): where the account
+  has shares and no folder of shares is on record, one is made, named `Shared`, or the first
+  of `Shared-2`, `Shared-3`, … (up to 99) that nothing has (which accounts have shares comes
+  with the runners of the shares: until then none is made). Never where one is on record,
+  at the top or not: one moved into another folder, or whose marker can't be read for a
+  moment, would be a plain folder for good once another took its place on record, and
+  what it holds would be sent. The log says that none is made. (One on record that never
+  got to the top, its making stopped before the rename into place, is made anew.)
+
+  And the folder of shares gives way: when an item at the top of the folder's part of the
+  drive (as the account's DB has it; not a role folder, whose name is free in the main
+  folder) or another item at the top of the folder has its name, as names compare there, it
+  is renamed to its next free number (`Shared` to `Shared-2`, `Shared-2` to `Shared-3`; a
+  name ending in a number from 2 to 98 after a `-` counts as numbered, the user's own too),
+  its marker and its file id with it, so it stays the one on record; the log says so. A new
+  name is another filter (sync semantics §10, rule 4: the folder is walked whole once).
+
+  It gives way to the drive's item whenever that one comes: a sync that finds one under its
+  name, after reading the drive and before planning anything (one lookup by name, only where
+  a folder of shares is there), plans nothing and isn't shown as a sync (an answer to held
+  deletes given for it is kept for the next); the engine restarts, and gives way as it
+  opens. So an item this device has synced that takes the name on the drive (renamed on
+  another device) is renamed here as anywhere, never taken from here as masked. Where the
+  rename fails (a file in it in use on Windows, no number free) the drive's item is masked
+  meanwhile, which loses nothing, the log says why, and it is tried again ten minutes on at
+  the earliest (and when the folder opens for another reason). Where it fails for an item
+  beside it in the folder (which would leave the drive, left out with it) the folder's sync
+  stops, failing, till it works.
 - **The folder gone** (moved, deleted, a disk not mounted: its marker missing): nothing
   syncs, the status says why, and the loop waits for it to come back. It never creates a
   marker: only `hbsync setup` does.

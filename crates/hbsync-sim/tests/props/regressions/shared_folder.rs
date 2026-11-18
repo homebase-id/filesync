@@ -113,3 +113,38 @@ fn a_marker_lost_makes_the_folder_plain_and_its_own_back_takes_it_off_the_drive(
     assert_eq!(sim.local_paths(1), left);
     assert_eq!(sim.local_paths(0), both);
 }
+
+/// Why the folder of shares gives way before a plan is made with a filter that holds its new
+/// name (the daemon's to do, as the folder opens: `shares::place`). Its name is held in any
+/// case, so one this client can't tell from a synced item's (`A` beside `a`) leaves that item
+/// out too, and by rule 1 it leaves the drive, kept here. With the yield first (the folder
+/// renamed again to a name nothing has, the filter read after) nothing leaves the drive.
+#[test]
+fn a_folder_of_shares_yields_before_a_plan_holds_a_name_a_synced_item_has() {
+    use Action::*;
+    // The yield first: `b` is free.
+    let mut sim = sharing();
+    let shares = sim.item(0, "d").expect("the folder of shares");
+    let node = sim.pick(0, shares, false).expect("its pick");
+    let parent = top(&sim, 0);
+    sim.run(&[act(
+        0,
+        Move {
+            node,
+            parent,
+            name: B,
+        },
+    )]);
+    let mut sim = sim.with_shared_folder_on(0, "b", "");
+    settle(&mut sim);
+    assert_eq!(sim.server_paths(), ["a"]);
+    assert_eq!(sim.local_paths(0), ["a", "b", "b/a"]);
+    assert_eq!(sim.local_paths(1), ["a"]);
+
+    // A plan with the name held first: the synced `a` is off the drive and the other device.
+    let mut sim = sharing().with_shared_folder_on(0, "A", "");
+    settle(&mut sim);
+    assert!(!sim.server_paths().contains(&"a".to_owned()));
+    assert!(!sim.local_paths(1).contains(&"a".to_owned()));
+    assert!(sim.local_paths(0).contains(&"a".to_owned()), "kept here");
+}

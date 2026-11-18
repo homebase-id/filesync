@@ -124,6 +124,10 @@ pub struct SyncReport {
     /// operations were skipped or failed with nodes still pending. Deletes held for a
     /// confirmation never count: another try doesn't let them through.
     pub unfinished: bool,
+    /// Nothing was planned: an item at the top of the drive has the name of the folder of
+    /// shares, which is to give way first ([`Engine::yield_shares`]). The folder is opened
+    /// again ([`SyncRoot::place_shares`]).
+    pub in_the_way: bool,
 }
 
 impl SyncReport {
@@ -251,6 +255,9 @@ pub struct Engine {
     refusals: FolderRefusals,
     /// What the folder holds of the drive, as set up ([`FolderKind`]).
     part: Part,
+    /// A sync plans nothing while the folder of shares is to give way
+    /// ([`Engine::yield_shares`]).
+    yields: bool,
     /// The main folder's scope as configured, before what this device's other folders hold
     /// is left out of it too ([`Engine::follow_folders`]).
     given: Arc<Scope>,
@@ -340,6 +347,7 @@ impl Engine {
             waited: Waited::default(),
             unreported: None,
             part,
+            yields: false,
             given,
         };
         engine.follow_folders()?;
@@ -414,6 +422,16 @@ impl Engine {
     /// What was done is kept; the rest stays dirty for a later sync.
     pub fn set_stop(&mut self, stop: Arc<AtomicBool>) {
         self.stop = stop;
+    }
+
+    /// Whether a sync that finds an item at the top of the drive under the name of the folder
+    /// of shares plans nothing and says so ([`SyncReport::in_the_way`]), for its caller to
+    /// have the folder of shares give way and open the folder again, instead of planning with
+    /// the item masked (§10): masked, an item this device has synced that took the name on
+    /// the drive would go from here, to come again once the name is free. Off at first: the
+    /// item is masked, as it is where nothing gives way.
+    pub fn yield_shares(&mut self, yields: bool) {
+        self.yields = yields;
     }
 
     /// Lets the held deletes of `nodes` (those of [`SyncReport::held`] the user was shown)
@@ -532,6 +550,26 @@ impl Engine {
         })
     }
 
+    /// Whether an item at the top of the folder's part of the drive (as the DB has it) has the
+    /// name of a folder that holds what other identities share, and is masked by it (§10): the
+    /// folder of shares is to give way ([`SyncRoot::place_shares`], as the folder opens). One
+    /// lookup by name a folder of shares; nothing is read without one.
+    fn shares_in_the_way(&mut self) -> Result<bool, StateError> {
+        let folder = &self.cfg.folder;
+        if folder.filter.shared().is_empty() {
+            return Ok(false);
+        }
+        self.db.read(|s| {
+            // The names as they compare: such a name compares as itself.
+            for key in folder.filter.shared() {
+                if crate::root::drive_has(s, &folder.scope, key, folder.case_insensitive)? {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })
+    }
+
     /// Where `node` is, for people: its local path, or else the path it had when last synced
     /// (a node deleted here). `None` for a node this device never had.
     pub fn path_of(&mut self, node: NodeId) -> Result<Option<String>, StateError> {
@@ -644,6 +682,11 @@ impl Engine {
             Part::Role(role) => self.drive.ensure_role(role)?,
             Part::Desktop => self.ensure_desktop(self.cfg.folder.scope.top)?,
             Part::Main => {}
+        }
+        // Before anything is planned from what was read.
+        if self.yields && self.shares_in_the_way()? {
+            report.in_the_way = true;
+            return Ok(());
         }
         report.adopted = adopt(&mut self.db, &self.cfg.folder)?;
         // What an earlier run held, or one the user answered since, is planned again.
