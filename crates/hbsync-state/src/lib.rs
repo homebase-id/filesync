@@ -321,7 +321,7 @@ thread_local! {
 }
 
 /// SQLite's log hook, called on the committing thread right after each commit.
-fn wal_size(_: &rusqlite::hooks::Wal, pages: std::ffi::c_int) -> rusqlite::Result<()> {
+fn wal_size(_: &mut rusqlite::hooks::Wal, pages: std::ffi::c_int) -> rusqlite::Result<()> {
     WAL_PAGES.set(pages);
     Ok(())
 }
@@ -622,7 +622,7 @@ impl StateDb {
         // 2 ms (NVMe) to 90 ms (a spinning disk) with each one synced.
         wal(&conn)?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        conn.wal_hook(Some(wal_size));
+        conn.wal_hook(Some(wal_size))?;
         conn.pragma_update(None, "journal_size_limit", LOG_LIMIT)?;
         conn.set_db_config(
             rusqlite::config::DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE,
