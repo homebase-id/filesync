@@ -566,9 +566,14 @@ pub fn set_up(
         } else {
             // Set up all the same: syncing doesn't depend on it, and it can be turned on later.
             match autostart::logon_program().and_then(|p| autostart::install(&p)) {
-                Ok(()) => say(&format!(
-                    "{APP_NAME} starts at logon (`hbsync autostart off` stops that)."
-                )),
+                Ok(()) => {
+                    say(&format!(
+                        "{APP_NAME} starts at logon (`hbsync autostart off` stops that)."
+                    ));
+                    if let Some(hint) = autostart::hint() {
+                        say(&format!("{hint}."));
+                    }
+                }
                 Err(e) => say(&format!("Not starting at logon: {e}.")),
             }
         }

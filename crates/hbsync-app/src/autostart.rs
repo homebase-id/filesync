@@ -220,16 +220,40 @@ pub(crate) fn daemon_exe() -> io::Result<PathBuf> {
 }
 
 /// What starts at logon: the tray of this installation if it is there (it starts the daemon),
-/// else the daemon.
+/// else the daemon. On Linux the tray only when asked from a graphical session
+/// ([`starts_tray`]).
 pub fn logon_program() -> io::Result<Program> {
     if let Some(why) = crate::install::Install::current().not_settled() {
         return Err(io::Error::other(why));
     }
     let tray = program_of(TRAY)?;
-    if tray.is_file() {
+    #[cfg(target_os = "linux")]
+    let desktop = crate::unit::desktop();
+    #[cfg(not(target_os = "linux"))]
+    let desktop = true;
+    if starts_tray(tray.is_file(), desktop) {
         return Ok(Program::Tray(tray));
     }
     Ok(Program::Daemon(daemon_exe()?))
+}
+
+/// Whether the tray is what starts at logon: where it is installed (`has_tray`) and logons
+/// are graphical (`desktop`: asked from a graphical session, on Linux). The packages install
+/// the tray on a server too, where nothing ever reads its desktop entry (nobody logs in to a
+/// desktop there): the daemon starts by itself then, as the user's service.
+fn starts_tray(has_tray: bool, desktop: bool) -> bool {
+    has_tray && desktop
+}
+
+/// What the user should know about how it starts at logon now, if anything: on Linux, where
+/// the daemon is the user's systemd service ([`UNIT`]) and the user's services start only once
+/// the user logs in (lingering is off), how to have it start with the computer. Not turned on
+/// here: it is a setting of the system's, for all the user's services.
+pub fn hint() -> Option<String> {
+    #[cfg(all(unix, not(target_os = "macos")))]
+    return os::hint();
+    #[cfg(not(all(unix, not(target_os = "macos"))))]
+    None
 }
 
 #[cfg(unix)]
@@ -408,6 +432,23 @@ mod os {
         }
         systemctl(&["start", UNIT])?;
         Ok(true)
+    }
+
+    pub(super) fn hint() -> Option<String> {
+        if !unit().is_ok_and(|unit| unit.exists()) {
+            return None;
+        }
+        // Not told where it can't be asked (no logind): nothing to turn on there.
+        let user = std::env::var("USER").ok().filter(|u| !u.is_empty())?;
+        let out = std::process::Command::new("loginctl")
+            .args(["show-user", &user, "--property=Linger", "--value"])
+            .output()
+            .ok()?;
+        (out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "no").then(|| {
+            "It starts when you log in to this computer (over SSH too). To have it start \
+             with the computer, run `loginctl enable-linger` once"
+                .to_owned()
+        })
     }
 }
 
@@ -675,6 +716,14 @@ mod tests {
         assert!(plist.contains(
             "<key>HBSYNC_HOME</key>\n    <string>/tmp/a b &amp; &lt;c&gt; 100% $x</string>"
         ));
+    }
+
+    #[test]
+    fn the_tray_starts_at_logon_only_where_logons_are_graphical() {
+        assert!(starts_tray(true, true));
+        // A server with the package's tray installed: the daemon, as the user's service.
+        assert!(!starts_tray(true, false));
+        assert!(!starts_tray(false, true));
     }
 
     #[test]
