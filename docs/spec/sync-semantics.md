@@ -1032,7 +1032,13 @@ would name nothing), any other is made anew.
   folder of shares on the user's word, `docs/spec/daemon.md`): that item is leaving by
   rules 1 and 2 (deleted on the drive though its name is filtered), and its name is free
   once it is gone (account
-  `a_folder_named_as_the_folder_of_shares_leaves_the_drive_and_takes_the_shares`).
+  `a_folder_named_as_the_folder_of_shares_leaves_the_drive_and_takes_the_shares`, runner
+  `the_folder_of_shares_keeps_a_name_this_device_is_taking_off_the_drive`). That is told
+  before the plan, by what a lookup can tell (the drive has the item as it was synced
+  here, and it isn't here any more); where the plan then keeps the item (another device
+  put something into it meanwhile: only its base goes) the sync says there is work left,
+  and the next one has the folder of shares give way (runner
+  `the_folder_of_shares_gives_way_to_an_item_that_stays_on_the_drive_after_all`).
 - One the filter doesn't know yet (it came, or took another name, while a sync was running;
   the filter is read again before the next sync) is left alone as well, by the record and
   its marker on disk: the walk reads the record once when it meets a folder at the top,
@@ -1064,10 +1070,15 @@ would name nothing), any other is made anew.
   by its marker (filesync #417).
 - Dragged into another folder the account syncs (a role folder, this computer's Desktop)
   it is left alone there as well: such a folder's filter knows it by the main folder's
-  record (`Filter::load_beside`), by the file ids on record wherever it is in that folder,
-  and at its top also by its marker where no id is on record. It has no place there:
-  nothing is made, renamed or taken, and a folder of the drive at its path can't be held
-  until it is moved back (a note). The main folder meanwhile has none at its top: shares
+  record (`Filter::load_beside`), by the file ids on record wherever it is in that folder
+  (where no id is on record it isn't known there: a marker alone tells nothing but at the
+  main folder's top). It has no place there: nothing is made, renamed or taken, and a
+  folder of the drive at its path can't be held until it is moved back (a note). Such a
+  folder reads the record again when the main folder opens (its record may say something
+  else then), and at its looks. While the main folder can't be asked (gone, not mounted,
+  its record unreadable) no folder beside it stops: a filter in use keeps the ids it
+  knows, and a walk that meets a folder with such an id leaves it as it is, neither
+  entered nor taken away; a folder opened anew meanwhile knows of none (a known limit). The main folder meanwhile has none at its top: shares
   are off (`docs/spec/daemon.md`). Moved to a folder on another volume it is a copy with
   another file id, and isn't known there (the limit above, filesync #417) (scan
   `the_folder_of_shares_dragged_into_another_synced_folder_never_reaches_its_db`).

@@ -895,37 +895,65 @@ fn the_folder_of_shares_never_reaches_the_db_and_a_copied_marker_does_nothing() 
 #[test]
 fn the_folder_of_shares_dragged_into_another_synced_folder_never_reaches_its_db() -> R {
     use hbsync_local::shares::{Made, make};
-    let main = tempfile::tempdir()?;
-    assert_eq!(make(main.path(), "Shared")?, Made::Made);
-    std::fs::create_dir(main.path().join("Shared/tom"))?;
-    std::fs::write(main.path().join("Shared/tom/theirs.txt"), "t")?;
+    let home = tempfile::tempdir()?;
+    let main = home.path().join("Homebase");
+    std::fs::create_dir(&main)?;
+    assert_eq!(make(&main, "Shared")?, Made::Made);
+    std::fs::create_dir(main.join("Shared/tom"))?;
+    std::fs::write(main.join("Shared/tom/theirs.txt"), "t")?;
     let mut f = Fixture::new()?;
     f.write("Work/notes.txt", b"n")?;
-    f.opts.filter = Arc::new(Filter::load_beside(f.root(), false, main.path())?);
+    f.opts.filter = Arc::new(Filter::load_beside(f.root(), false, &main)?);
+    if !f.opts.filter.knows_shares_by_id() {
+        // A volume without stable file ids: the folder is known at the main folder's top only.
+        return Ok(());
+    }
     let (report, _) = f.scan()?;
     assert_eq!(report.added, 2, "{report:?}"); // Work, notes
 
-    // At the top: by the record's marker, whatever the volume's ids are worth.
+    // At the top, and below it: by the ids on record.
     let root = f.root().to_path_buf();
-    std::fs::rename(main.path().join("Shared"), root.join("Shared"))?;
-    let (report, dirty) = f.scan()?;
-    assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
-    assert!(dirty.is_empty(), "{dirty:?}");
-    // (One read without the main folder's record takes it for a folder of this one's own.)
-    let own = Filter::load(&root, false)?;
-    assert!(!own.knows_shares_by_id() && own.shared().is_empty());
-
-    // Below the top: by the ids on record.
-    std::fs::rename(root.join("Shared"), root.join("Work/Shared"))?;
-    if !f.opts.filter.knows_shares_by_id() {
-        return Ok(());
+    for at in ["Shared", "Work/Shared"] {
+        let from = match at {
+            "Shared" => main.join("Shared"),
+            _ => root.join("Shared"),
+        };
+        std::fs::rename(from, root.join(at))?;
+        let (report, dirty) = f.scan()?;
+        assert_eq!((report.added, report.removed), (0, 0), "{at}: {report:?}");
+        assert!(dirty.is_empty(), "{at}: {dirty:?}");
     }
-    assert_ne!(f.opts.filter.fingerprint(), own.fingerprint());
-    let (report, _) = f.scan()?;
-    assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
     let dirs = [RelPath::new("Work")?, RelPath::new("Work/Shared/tom")?];
     let report = rescan_dirs(&mut f.db, &root, &dirs, &f.opts)?;
     assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
+    // (One read without the main folder's record takes it for a folder of this one's own.)
+    let own = Filter::load(&root, false)?;
+    assert!(!own.knows_shares_by_id() && own.shared().is_empty());
+    assert_ne!(f.opts.filter.fingerprint(), own.fingerprint());
+
+    // The main folder gone (renamed, not mounted): its record can't be asked, which is not
+    // "none on record". The filter in use isn't to be read again for it, and a walk leaves
+    // the folder with such an id as it is: not entered, nothing added.
+    let away = home.path().join("away");
+    std::fs::rename(&main, &away)?;
+    let fresh = Filter::load_beside(&root, false, &main)?;
+    assert!(!f.opts.filter.changed_from(&fresh));
+    let (report, _) = f.scan()?;
+    assert_eq!((report.added, report.removed), (0, 0), "{report:?}");
+    assert_eq!(report.unreadable, [RelPath::new("Work/Shared")?]);
+    // Back, and its record gone for good: read again, and the folder is this one's own.
+    std::fs::rename(&away, &main)?;
+    assert!(
+        !f.opts
+            .filter
+            .changed_from(&Filter::load_beside(&root, false, &main)?)
+    );
+    std::fs::remove_file(main.join(".hbsync/shares"))?;
+    assert!(
+        f.opts
+            .filter
+            .changed_from(&Filter::load_beside(&root, false, &main)?)
+    );
     Ok(())
 }
 

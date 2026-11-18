@@ -48,6 +48,11 @@ impl Known {
 }
 
 impl Record {
+    /// Whether nothing is on record.
+    pub fn is_none(&self) -> bool {
+        self.0.is_none()
+    }
+
     /// The file ids on record, the one of the folder on record now first: none where
     /// nothing is on record, or the volume's file ids aren't stable.
     pub fn ids(&self) -> &[u128] {
@@ -111,6 +116,21 @@ impl Record {
         match &self.0 {
             Some(known) if known.ids.is_empty() || known.ids.contains(&id.file) => known.marks(dir),
             _ => Ok(false),
+        }
+    }
+
+    /// Whether the folder at `dir` is the one on record NOW: [`Record::is`], by the first id
+    /// on record where ids are (not one that was on record before, which is the folder of
+    /// shares where it is, but isn't the one [`make`] prepares or [`place`] puts in place).
+    fn is_now(&self, dir: &Path) -> io::Result<bool> {
+        let Some(known) = &self.0 else {
+            return Ok(false);
+        };
+        match (known.ids.first(), hbsync_platform::stat(dir)) {
+            (Some(now), Ok(meta)) if *now != meta.file_id.file => Ok(false),
+            (_, Ok(_)) => known.marks(dir),
+            (_, Err(e)) if hbsync_platform::meta::nothing_there(&e) => Ok(false),
+            (_, Err(e)) => Err(e),
         }
     }
 
@@ -223,10 +243,7 @@ impl Top {
             }
         }
         shares.sort_unstable();
-        let ids = record
-            .0
-            .as_ref()
-            .map_or_else(Vec::new, |known| known.ids.clone());
+        let ids = record.ids().to_vec();
         // Looked for only while the folder on record isn't here (a marker a folder).
         let mut returned = Vec::new();
         if let (true, Some(known)) = (shares.is_empty(), &record.0)
@@ -294,7 +311,7 @@ fn make_with(root: &Path, name: &str, again: bool) -> io::Result<Made> {
     hbsync_fileio::make_dir_in_place(&crate::layout::state_dir(root))?;
     hbsync_fileio::make_dir_in_place(&tmp)?;
     let prepared = tmp.join(PREPARED);
-    if !record.is(&prepared)? {
+    if !record.is_now(&prepared)? {
         let marker = shared_marker(&prepared);
         // One left by a crash before it was on record: this program's own, holding its
         // marker and nothing else.
@@ -378,17 +395,14 @@ pub fn there(at: &str) -> io::Error {
 }
 
 /// The folder `name` at the top of the sync folder at `root`, if it is one that can be
-/// taken as its folder of shares ([`take`]): a folder there by its name, never a path, a
-/// link or the state folder.
+/// taken as its folder of shares ([`take`]): a folder there by its name as the top lists it,
+/// never a path, a link or the state folder. One listing of the top.
 pub fn takeable(root: &Path, name: &str) -> io::Result<PathBuf> {
-    let mut parts = Path::new(name).components();
-    let plain = matches!(
-        (parts.next(), parts.next()),
-        (Some(std::path::Component::Normal(_)), None)
-    );
-    let dir = root.join(name);
-    if plain && !is_state_dir(name) && std::fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir()) {
-        return Ok(dir);
+    // By the listing: a name is the folder's only as the top has it (never another spelling
+    // of the state folder's, a path, or what a trailing separator or dot resolves to).
+    let (folders, _) = list_top(root)?;
+    if folders.iter().any(|(folder, _)| folder == name) {
+        return Ok(root.join(name));
     }
     let what = format!("{name} isn't a folder at the top of {}", root.display());
     Err(io::Error::new(io::ErrorKind::InvalidInput, what))
@@ -412,7 +426,13 @@ pub fn take(root: &Path, name: &str) -> io::Result<()> {
         None => (new_token(), &[][..]),
     };
     mark(&dir, &token)?;
-    Record::write(root, &token, &dir, before)
+    Record::write(root, &token, &dir, before)?;
+    // One left prepared by a making that didn't end (its marker in it, nothing else) isn't
+    // wanted any more: gone, or it would be put in place once this one isn't at the top.
+    let prepared = tmp_dir(root).join(PREPARED);
+    let _ = std::fs::remove_file(shared_marker(&prepared));
+    let _ = std::fs::remove_dir(&prepared);
+    Ok(())
 }
 
 /// The name of the folder [`make`] prepares in the sync folder's tmp.
@@ -619,7 +639,9 @@ pub fn place<E: From<io::Error>>(
     // or it would be a plain folder for good when it is back, and sent.
     // But one on record that never got to the top ([`make`] stopped before its rename: a
     // crash, a rename refused) is no folder of shares yet: [`make`] puts it in place.
-    let unplaced = top.shares.is_empty() && record.is(&tmp_dir(root).join(PREPARED))?;
+    // (The one on record now: a prepared folder that was on record before another was
+    // named is no folder to put in place by itself.)
+    let unplaced = top.shares.is_empty() && record.is_now(&tmp_dir(root).join(PREPARED))?;
     placed.missing = record.0.is_some() && top.shares.is_empty() && !unplaced;
     if let Some(name) = make_as.filter(|_| record.0.is_none() || unplaced) {
         match names.make(root, name, false)? {
@@ -931,6 +953,27 @@ mod tests {
         Ok(())
     }
 
+    /// A folder left prepared by a making that didn't end, and another named as the folder
+    /// of shares since: once the named one is gone from the top, none is made by itself, the
+    /// prepared one neither.
+    #[test]
+    fn a_folder_left_prepared_isnt_placed_once_another_was_named() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (root, away) = (dir.path().join("sync"), dir.path().join("away"));
+        fs::create_dir(&root)?;
+        assert_eq!(make(&root, "Shared")?, Made::Made);
+        // As its making left it: on record, and not at the top.
+        fs::rename(root.join("Shared"), tmp_dir(&root).join(PREPARED))?;
+        fs::create_dir(root.join("Theirs"))?;
+        take(&root, "Theirs")?;
+        assert_eq!(folders(&root)?, ["Theirs"]);
+        fs::rename(root.join("Theirs"), &away)?;
+        let placed = place(&root, Some("Shared"), false, nothing)?;
+        assert!(placed.missing && placed.made.is_none(), "{placed:?}");
+        assert!(folders(&root)?.is_empty());
+        Ok(())
+    }
+
     /// A folder at the top is taken as the folder of shares on the user's word: its marker
     /// written, on record, the record's token and ids kept. Refused while one is at the top,
     /// and for anything but a folder there.
@@ -941,7 +984,17 @@ mod tests {
         fs::create_dir_all(root.join("Theirs/tom"))?;
         fs::create_dir(root.join(crate::STATE_DIR))?;
         fs::write(root.join("notes.txt"), "n")?;
-        for not_one in ["notes.txt", "Theirs/tom", "none", "..", crate::STATE_DIR] {
+        let state = crate::STATE_DIR;
+        let spelled = [
+            format!("{state}/"),
+            format!("{state}/."),
+            "Theirs/".to_owned(),
+        ];
+        let not_ones = ["notes.txt", "Theirs/tom", "none", "..", ".", state];
+        for not_one in not_ones
+            .into_iter()
+            .chain(spelled.iter().map(String::as_str))
+        {
             let refused = take(root, not_one);
             let invalid = refused.is_err_and(|e| e.kind() == io::ErrorKind::InvalidInput);
             assert!(invalid, "{not_one}");

@@ -264,6 +264,10 @@ pub enum Command {
     Stop,
     /// The user's word on the main folder's folder of shares ([`Handle::shares`]).
     Shares(SharesAsk),
+    /// Look at the ignore rules and the folder of shares now (the account's main folder
+    /// opened: its record may say something else of the folder of shares, which a folder
+    /// beside it goes by).
+    Look,
 }
 
 /// What the user asks of the main folder's folder of shares (sync semantics §10).
@@ -372,6 +376,10 @@ impl Handle {
             Some(SharesFolder::At { name }) => return Err(there(name).to_string()),
             Some(SharesFolder::Gone | SharesFolder::Unmade { .. }) => {}
         }
+        // (Nothing in a paused folder is made or marked.)
+        if self.status().state == State::Paused {
+            return Err("syncing is paused: resume it first".to_owned());
+        }
         if let SharesAsk::Take(name) = &ask {
             takeable(&path, name).map_err(|e| e.to_string())?;
         }
@@ -476,8 +484,8 @@ pub struct Runner {
     probing: bool,
     /// The folder without a live watcher: told, asked for again, caught up on.
     unwatched: Unwatched,
-    /// Asked of the folder of shares, and not done yet ([`Command::Shares`]).
-    asked: Option<SharesAsk>,
+    /// Asked of the folder of shares, and not done yet ([`Command::Shares`]), oldest first.
+    asked: Vec<SharesAsk>,
 }
 
 /// A folder without a live watcher ([`Runner::watcher_is`]): its changes are found by the
@@ -602,7 +610,7 @@ impl Runner {
             retry_refused: false,
             probing: false,
             unwatched: Unwatched::default(),
-            asked: None,
+            asked: Vec::new(),
         };
         let thread = std::thread::Builder::new()
             .name("hbsync-runner".into())
@@ -1036,11 +1044,13 @@ impl Runner {
                     }
                 }
             }
-            // (With the folder open: one that can't be opened keeps the ask till it can.)
-            if let Some(p) = &parts
-                && let Some(ask) = self.asked.take()
-            {
-                check_rules |= self.shares_asked(ask, p);
+            // What was asked of the folder of shares, in the order asked (the second of two
+            // finds the first done, and says so). Not while paused: nothing in a paused
+            // folder is made or marked; done as it syncs again (the resume wakes this).
+            if !schedule.paused() {
+                for ask in std::mem::take(&mut self.asked) {
+                    check_rules |= self.shares_asked(&ask);
+                }
             }
             let check = (
                 std::mem::take(&mut check_rules),
@@ -1364,29 +1374,33 @@ impl Runner {
                 }
             }
             Command::Stop => {}
-            Command::Shares(ask) => self.asked = Some(ask),
+            Command::Shares(ask) => self.asked.push(ask),
+            Command::Look => *check_rules = true,
         }
     }
 
-    /// Does what the user asked of the folder of shares ([`Command::Shares`]) while the
-    /// folder is open: whether it was done (the folder is then opened again with it, as for
-    /// rules that changed). One that fails is told as a note.
-    fn shares_asked(&mut self, ask: SharesAsk, parts: &Parts) -> bool {
+    /// Does what the user asked of the folder of shares ([`Command::Shares`]): whether it was
+    /// done (a folder that is open is then opened again with it, as for rules that changed).
+    /// One that fails is told as a note.
+    fn shares_asked(&mut self, ask: &SharesAsk) -> bool {
         let folder = &self.cfg.folder;
-        let done = match (&ask, self.cfg.shares.as_deref()) {
-            (SharesAsk::Take(name), _) => hbsync_local::shares::take(folder, name)
-                .map(|()| name.clone())
-                .map_err(RootError::Io),
-            // (The drive's names are asked for it: the state DB.)
+        // (Opened for both: only in the folder that is set up, by its marker.)
+        let root = SyncRoot::open(&self.cfg.db, &self.cfg.identity, folder);
+        let done = root.and_then(|root| match (ask, self.cfg.shares.as_deref()) {
+            (SharesAsk::Take(name), _) => {
+                hbsync_local::shares::take(folder, name)?;
+                Ok(name.clone())
+            }
             (SharesAsk::Make, Some(name)) => {
-                let caseless = parts.engine.config().folder.case_insensitive;
-                SyncRoot::open(&self.cfg.db, &self.cfg.identity, folder)
-                    .and_then(|root| root.make_shares_again(name, caseless))
+                let caseless = EngineConfig::new(folder, &self.cfg.device)
+                    .folder
+                    .case_insensitive;
+                root.make_shares_again(name, caseless)
             }
             (SharesAsk::Make, None) => Err(RootError::Io(std::io::Error::other(
                 "nothing is shared with this account",
             ))),
-        };
+        });
         match done {
             Ok(name) => {
                 tracing::info!("{name}: the folder of shares now, as asked");

@@ -1197,6 +1197,75 @@ fn the_folder_of_shares_keeps_a_name_this_device_is_taking_off_the_drive() -> R 
     Ok(())
 }
 
+/// An item under the folder of shares' name that this device took for leaving the drive and
+/// that stays on it (another device put something into it meanwhile: only what was synced
+/// here goes) is in the way after all: the folder of shares gives way at the next sync, by
+/// itself, and the item comes.
+#[test]
+fn the_folder_of_shares_gives_way_to_an_item_that_stays_on_the_drive_after_all() -> R {
+    use hbsync_local::shares::folders;
+    let server = server();
+    let a = Device::start_with(&server, "a", |c| c.shares = Some("Shared".into()))?;
+    let b = Device::start(&server, "b")?;
+    a.write("Team/plan.txt", "ours")?;
+    wait_until("plan.txt is up", || on_server(&server, "plan.txt"))?;
+    a.wait_idle()?;
+    b.handle.send(Command::SyncNow);
+    wait_until("Team is on b", || b.has("Team/plan.txt"))?;
+    b.wait_idle()?;
+
+    a.handle.send(Command::Pause(Pause::UNTIL_RESUMED));
+    std::thread::sleep(Duration::from_millis(300));
+    b.write("Team/new.txt", "another device's")?;
+    b.handle.send(Command::SyncNow);
+    wait_until("new.txt is up", || on_server(&server, "new.txt"))?;
+    std::fs::remove_dir_all(a.root.join("Team"))?;
+    rename_with_retries(&a.root.join("Shared"), &a.root.join("Team"))?;
+    a.handle.send(Command::Resume);
+    wait_until("the drive's Team is here", || a.has("Team/new.txt"))?;
+    a.wait_idle()?;
+    assert_eq!(folders(&a.root)?, ["Team-2"]);
+    assert!(on_server(&server, "new.txt"));
+    assert_eq!(a.status().state, State::Idle);
+    Ok(())
+}
+
+/// What is asked of the folder of shares is refused while one is at the top and while the
+/// folder is paused; asked twice in a row, one is made, not two.
+#[test]
+fn asks_of_the_folder_of_shares_are_refused_while_paused_and_never_done_twice() -> R {
+    use hbsync_app::SharesAsk;
+    use hbsync_app::protocol::SharesFolder;
+    use hbsync_local::shares::folders;
+    let server = server();
+    let a = Device::start_with(&server, "a", |c| c.shares = Some("Shared".into()))?;
+    let at = |name: &str| Some(SharesFolder::At { name: name.into() });
+    wait_until("the folder of shares is shown", || {
+        a.status().shares == at("Shared")
+    })?;
+    let refused = a.handle.shares(SharesAsk::Make);
+    assert!(refused.is_err_and(|why| why.contains("is there")));
+
+    std::fs::remove_dir_all(a.root.join("Shared"))?;
+    a.handle.send(Command::SyncNow);
+    wait_until("shares are off", || {
+        a.status().shares == Some(SharesFolder::Gone)
+    })?;
+    a.handle.send(Command::Pause(Pause::UNTIL_RESUMED));
+    let refused = a.handle.shares(SharesAsk::Make);
+    assert!(refused.is_err_and(|why| why.contains("paused")));
+    a.handle.send(Command::Resume);
+    wait_until("it syncs again", || a.status().state != State::Paused)?;
+
+    // (The second is refused at once, or finds the first done and is told as a note.)
+    a.handle.shares(SharesAsk::Make)?;
+    let _ = a.handle.shares(SharesAsk::Make);
+    wait_until("made again", || a.status().shares == at("Shared"))?;
+    a.wait_idle()?;
+    assert_eq!(folders(&a.root)?, ["Shared"]);
+    Ok(())
+}
+
 /// Where the folder of shares can't give way to the drive's item of its name (its rename is
 /// refused), the item stays out, which loses nothing: the folder syncs on, and isn't opened
 /// over and over for it. It gives way when the folder next opens and the rename works.

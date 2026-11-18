@@ -664,7 +664,12 @@ pub(crate) fn drive_has(
         if scope.outside.contains(&item.node) || !same(&item.name) {
             continue;
         }
-        let leaving = s.get_base(item.node)?.is_some()
+        // (As the plan decides it, [`crate::mask`], as far as a lookup can tell: the drive
+        // has it as it was synced here, and its absence here isn't one that is kept.)
+        let synced = s.get_base(item.node)?.is_some_and(|base| {
+            base.remote.version == item.version && !base.content_state.keeps_absence()
+        });
+        let leaving = synced
             && s.local_by_node(item.node)?.is_none_or(|row| {
                 // At the top under this name, and the folder there is the row's still.
                 row.path.depth() == 1

@@ -470,9 +470,10 @@ included (service managers restart it then).
   drive (sync semantics §10, rules 1 and 2: held over the mass-delete limit, and in
   Recently deleted) and all of it stays on disk; that is the way out for a folder of shares
   that was sent before it could be taken back (§10, "Back as a copy"). Both are refused
-  while a folder of shares is at the top, and for an account nothing is shared with; to
-  take, also for anything but a folder at the top. The runner does them between syncs and
-  opens the folder again; one that fails is told as a note.
+  while a folder of shares is at the top, while the folder is paused, and for an account
+  nothing is shared with; to take, also for anything but a folder at the top, by its name
+  as the top lists it. The runner does them between syncs, in the order asked, and opens
+  the folder again; one that fails is told as a note.
 
   And the folder of shares gives way: when an item at the top of the folder's part of the
   drive (as the account's DB has it; not a role folder, whose name is free in the main
@@ -969,7 +970,7 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 | `hbsync recent [-n N]` | what was synced lately, newest first |
 | `hbsync confirm-deletes [--yes]` | shows the deletions to review (held deletes) and lets them through |
 | `hbsync put-back [--yes]` | shows the deletions to review and puts them back (sync semantics §7) |
-| `hbsync shared-folder [--make \| --take <folder>] [--yes]` | shows the folder what others share is synced into; where it is gone (shares are off), `--make` makes a new one and `--take` names the folder at the top of the Homebase folder that is it (what was synced of that folder leaves the Homebase cloud, and stays on this computer) |
+| `hbsync shared-folder [--make [<Homebase folder>] \| --take <folder>] [--yes]` | shows the folder what others share is synced into; where it is gone (shares are off), `--make` makes a new one and `--take` names the folder at the top of the Homebase folder that is it (what was synced of that folder leaves the Homebase cloud, and stays on this computer; asked first, unless `--yes`). With more than one identity whose folder is gone, the Homebase folder is given: to `--make`, or as the path of the folder to take |
 | `hbsync start`, `stop` | `stop` stops syncing on this computer until `start` (or the tray's Start syncing), also across logins: neither the tray nor the service manager starts the daemon meanwhile |
 | `hbsync autostart [on\|off]` | |
 | `hbsync login [IDENTITY]` | signs this computer in again in the browser (also the tray's Log in again, for a login from before private drives); the daemon's account starts over with the new login; the folders, the drive and autostart stay as they are; the old login isn't revoked |

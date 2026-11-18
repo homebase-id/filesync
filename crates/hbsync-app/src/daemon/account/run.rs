@@ -371,6 +371,10 @@ impl Account {
                             let dir = main.join(name);
                             (main, dir)
                         });
+                        // The folders beside the main one know the folder of shares by its
+                        // record, which may say something else now: read again there (with a
+                        // watcher nothing else has them look).
+                        let _ = lock(&self.shown).send(&self.identity, &Command::Look);
                     }
                     Msg::Hint(event) => {
                         let Some(hints) = notifications.event(event, Instant::now(), paused) else {

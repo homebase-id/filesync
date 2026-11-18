@@ -124,13 +124,14 @@ impl Executor<'_> {
             filter.knows_shares_by_id()
                 && hbsync_platform::stat(abs).is_ok_and(|m| filter.is_shares_id(m.file_id.file))
         };
-        if adopt && (target.depth() == 1 || known(&abs)) {
+        let at_top = target.depth() == 1 && filter.has_shares_place();
+        if adopt && (at_top || known(&abs)) {
             let shares = filter.shares_record(&self.folder.root);
             match shares.and_then(|record| record.is(&abs)) {
                 Ok(false) => {}
                 // (Only where it has its place: in a folder beside the main one it is
                 // never left out by its name, and nothing gives way.)
-                Ok(true) if target.depth() == 1 && filter.has_shares_place() => {
+                Ok(true) if at_top => {
                     return Ok(Outcome::Retry("a folder of shares has the name".into()));
                 }
                 Ok(true) => {
