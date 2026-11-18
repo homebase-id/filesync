@@ -961,3 +961,28 @@ fn a_create_writes_few_log_pages_per_file() -> R {
     assert!(down <= 10.0, "downloader: {down:.2} pages per file");
     Ok(())
 }
+
+/// A sync folder that is gone when a sync runs (renamed away, its disk unmounted) isn't made
+/// again by it: no state folder at its old place, no download put there. Back, it syncs as
+/// if nothing had been.
+#[test]
+fn a_folder_that_is_gone_isnt_made_again_by_a_sync() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("Docs/report.txt", "quarterly")?;
+    a.write("top.txt", "top")?;
+    a.sync()?;
+
+    let away = b.root.with_file_name("away");
+    fs::rename(&b.root, &away)?;
+    let synced = b.engine.sync_once("2026-10-08");
+    assert!(!b.root.exists(), "made again: {synced:?}");
+    assert!(!away.join("top.txt").exists());
+
+    fs::rename(&away, &b.root)?;
+    b.sync()?;
+    assert_eq!(b.read_text("Docs/report.txt")?, "quarterly");
+    assert_eq!(b.tree_text(""), a.tree_text(""));
+    Ok(())
+}

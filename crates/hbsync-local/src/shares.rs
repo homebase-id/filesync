@@ -210,8 +210,10 @@ pub fn make(root: &Path, name: &str) -> io::Result<Made> {
     if let Some(kept) = folders(root)?.into_iter().next() {
         return Ok(Made::Kept(kept));
     }
+    // (Each in the folder it is in: the sync folder isn't made again where it is gone.)
     let tmp = tmp_dir(root);
-    std::fs::create_dir_all(&tmp)?;
+    hbsync_fileio::make_dir_in_place(&crate::layout::state_dir(root))?;
+    hbsync_fileio::make_dir_in_place(&tmp)?;
     let prepared = tmp.join(PREPARED);
     let marker = shared_marker(&prepared);
     // One left by a crash: this program's own, holding its marker and nothing else.

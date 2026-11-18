@@ -108,10 +108,10 @@ impl FolderCtx {
 
 /// Creates the client's state folder at the top of the sync root if needed, hidden on Windows
 /// (a leading dot hides it elsewhere). Done at every start, so folders from before are hidden
-/// too.
+/// too. Never the sync root with it: one that is gone isn't made again.
 fn ensure_state_dir(root: &Path) -> PathBuf {
     let dir = hbsync_local::layout::state_dir(root);
-    let _ = std::fs::create_dir_all(&dir);
+    let _ = hbsync_fileio::make_dir_in_place(&dir);
     // Only looks: a folder that can't be hidden still works.
     let _ = hbsync_platform::ops::set_hidden(&dir);
     dir

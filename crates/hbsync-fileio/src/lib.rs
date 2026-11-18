@@ -8,4 +8,4 @@ mod small;
 pub use file::{CompletedFile, FileIoError, HashedFile, PartialFile, hash_file, sync_completed};
 pub use hash::{Hasher, hash_bytes, hash_reader};
 pub use hbsync_types::{ContentHash, HashAlgorithm};
-pub use small::{write_atomic, write_if_changed};
+pub use small::{make_dir_in_place, write_atomic, write_if_changed};
