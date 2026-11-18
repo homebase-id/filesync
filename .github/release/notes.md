@@ -20,6 +20,25 @@ asks you to approve this computer. Or from a terminal: `hbsync setup <identity>`
 On Linux the tray icon shows in KDE, Xfce, Cinnamon and most panels; GNOME needs the
 AppIndicator extension (Ubuntu has it).
 
+## Ubuntu, Debian: `apt update` refuses the repository once
+
+The app was called Homebase Filesync before version 0.10.9, and so was its apt repository. On
+a computer that installed it under that name, `apt update` stops with "changed its 'Origin'
+value from 'Homebase Filesync' to 'Homebase Drive'", and the app isn't updated until the new
+name is accepted, once:
+
+```sh
+sudo apt-get update --allow-releaseinfo-change-origin
+```
+
+If it then says "File has unexpected size … Mirror sync in progress?", apt kept the
+repository's old index from the update it refused. Delete it and update again:
+
+```sh
+sudo sh -c 'rm -f /var/lib/apt/lists/partial/*filesync-release-production*'
+sudo apt-get update --allow-releaseinfo-change-origin
+```
+
 ## Check a download
 
 `SHA256SUMS` lists every file's checksum, and each file carries a build provenance attestation:

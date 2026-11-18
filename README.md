@@ -14,6 +14,9 @@ Windows, macOS and Linux. Like Dropbox, but the files live on your own Homebase.
      (Intel); drag the app to Applications. It updates itself.
    - **Ubuntu, Debian**: `sudo apt install ./homebase-filesync_amd64.deb` (or `_arm64`).
      Updates come with `apt upgrade` (the package adds its repository).
+     If `apt update` says the repository "changed its 'Origin' value" (the app had another
+     name before 0.10.9), accept it once:
+     `sudo apt-get update --allow-releaseinfo-change-origin`.
    - **Fedora, openSUSE**: `sudo dnf install ./homebase-filesync-*.x86_64.rpm` (or
      `.aarch64`; `sudo zypper install` on openSUSE). Updates by hand, for now.
    - **Other Linux, servers**: `homebase-filesync-*-linux-amd64.tar.gz` (or `-aarch64`), static
