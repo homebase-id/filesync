@@ -1044,14 +1044,19 @@ would name nothing), any other is made anew.
   what the DB has of it stays: a folder of the user's own that was the folder of shares
   once has such an id too; a rescan asked for in the folder of shares or below it starts in
   the folder it is in; and a marker made or removed below the top leads to such a rescan,
-  where an id is on record). A folder of the drive is never made
+  where an id is on record, while the watcher runs: a marker removed there while nothing
+  ran is found by the next whole walk, or when the folder it is in changes, as the
+  journal of Windows names a folder by an id the DB has no row for). A folder of the drive is never made
   out of it there either: nothing gives way below the top, so that folder can't be held
   here until the folder of shares is moved back, said in a note. Nothing of it is
   sent; back at the top it is the folder of shares as before, and nothing of it was on the
   drive to take away (scan `the_folder_of_shares_moved_into_another_folder_never_reaches_the_db`,
   engine `the_folder_of_shares_moved_into_a_synced_folder_is_neither_sent_nor_merged`).
   Where the volume's file ids aren't stable no id is on record: there it is known at the
-  top only, and moved into a folder it syncs as the user's own (a known limit).
+  top only, and moved into a folder it syncs as the user's own (a known limit). So it does
+  where it gets another file id while it is below the top (the folder it is in moved to
+  another volume and back, or restored from a backup): only at the top is one looked for
+  by its marker (filesync #417).
 - Back as a copy (moved to another volume and back, restored from a backup: another file
   id, its marker in it) it is taken as the folder of shares again: as the sync folder
   opens, and while it is synced as soon as a folder at the top holds the record's marker

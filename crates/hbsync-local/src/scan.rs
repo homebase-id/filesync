@@ -480,17 +480,27 @@ fn real_dir_prefix(root: &Path, dir: &RelPath, filter: &Filter) -> RelPath {
     for name in dir.components() {
         let Ok(next) = real.join(name) else { break };
         let at = next.to_native(root);
-        // (One look: a link isn't a folder, and the folder's id comes with it.)
-        let id = match hbsync_platform::meta::stat(&at) {
-            Ok(m) if m.kind == EntryKind::Dir => m.file_id,
-            _ => break,
+        // One look a folder: a link isn't one. Where an id is on record for the folder of
+        // shares the look gives the folder's id too (on Windows that look costs more: not
+        // made where none is on record).
+        let id = match filter.knows_shares_by_id() {
+            true => match hbsync_platform::meta::stat(&at) {
+                Ok(m) if m.kind == EntryKind::Dir => Some(m.file_id),
+                _ => break,
+            },
+            false => match std::fs::symlink_metadata(&at) {
+                Ok(m) if m.is_dir() => None,
+                _ => break,
+            },
         };
         // (One with such an id that holds no marker is a folder of the user's own: gone
         // through. Where that can't be told, the walk of the folder it is in says so.)
-        let shares = filter.is_shares_id(id.file)
-            && crate::shares::Record::read(root)
-                .and_then(|record| record.holds(id, &at))
-                .unwrap_or(true);
+        let shares = id.is_some_and(|id| {
+            filter.is_shares_id(id.file)
+                && crate::shares::Record::read(root)
+                    .and_then(|record| record.holds(id, &at))
+                    .unwrap_or(true)
+        });
         if shares {
             break;
         }
