@@ -629,9 +629,12 @@ impl Account {
             cfg.feed = Some(hbsync_local::Feed::Gives(self.feeds.clone()));
             cfg.shares = Some(SHARES.to_owned());
             let (folder, tell) = (root.folder.clone(), self.requests.clone());
-            cfg.shares_told = Some(SharesTold(Arc::new(move |at| {
-                let _ = tell.send(Msg::Shares(folder.clone(), at));
-            })));
+            cfg.shares_told = Some(SharesTold {
+                tell: Arc::new(move |at| {
+                    let _ = tell.send(Msg::Shares(folder.clone(), at));
+                }),
+                last: Arc::clone(&self.shares_told),
+            });
         }
         self.spawn(cfg, drive, root)
     }

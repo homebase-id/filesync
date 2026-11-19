@@ -175,7 +175,12 @@ pub struct RunnerConfig {
 /// opens and that one was put in its place ([`RunnerConfig::shares_told`]): `None` where
 /// none is at the top (none on record, gone, or not made).
 #[derive(Clone)]
-pub(crate) struct SharesTold(pub(crate) Arc<dyn Fn(Option<String>) + Send + Sync>);
+pub(crate) struct SharesTold {
+    pub(crate) tell: Arc<dyn Fn(Option<String>) + Send + Sync>,
+    /// What was told last, by any runner of the folder (its account keeps it through a
+    /// runner started again); `None`: nothing yet.
+    pub(crate) last: Arc<Mutex<Option<Option<String>>>>,
+}
 
 impl std::fmt::Debug for SharesTold {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -492,9 +497,6 @@ pub struct Runner {
     probing: bool,
     /// The folder without a live watcher: told, asked for again, caught up on.
     unwatched: Unwatched,
-    /// Where the folder of shares was when the account was last told ([`SharesTold`]);
-    /// `None`: not told yet.
-    shares_told_last: Mutex<Option<Option<String>>>,
     /// Asked of the folder of shares, and not done yet ([`Command::Shares`]), oldest first.
     asked: Vec<SharesAsk>,
 }
@@ -621,7 +623,6 @@ impl Runner {
             retry_refused: false,
             probing: false,
             unwatched: Unwatched::default(),
-            shares_told_last: Mutex::new(None),
             asked: Vec::new(),
         };
         let thread = std::thread::Builder::new()
@@ -790,18 +791,17 @@ impl Runner {
         // watcher, and one that began before it would walk its folder a second time for
         // what it may have missed.
         let at = placed.at.first().cloned();
-        let before = lock(&self.shares_told_last).replace(at.clone());
-        let moved = before
-            .as_ref()
-            .is_some_and(|before| before.is_some() && *before != at);
-        let told = (self.cfg.shares_told.as_ref()).map(|SharesTold(told)| move || told(at));
-        let _told = match (told, moved) {
-            (Some(tell), true) => {
+        let _told = self.cfg.shares_told.as_ref().and_then(|told| {
+            let before = lock(&told.last).replace(at.clone());
+            let moved = before.is_some_and(|before| before.is_some() && before != at);
+            let tell = Arc::clone(&told.tell);
+            let tell = move || tell(at);
+            if moved {
                 tell();
-                None
+                return None;
             }
-            (told, _) => told.map(|tell| OnDrop(Some(tell))),
-        };
+            Some(OnDrop(Some(tell)))
+        });
         let main = self.cfg.shares_main.as_deref();
         cfg.folder.filter = Arc::new(load_filter(root, cfg.folder.case_insensitive, main)?);
         if !cfg.folder.filter.returned().is_empty() {

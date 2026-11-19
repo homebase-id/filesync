@@ -142,9 +142,10 @@ impl Feeds {
         self.0.giver.load(Ordering::SeqCst)
     }
 
-    /// Passes the giving watcher's notification on: to each that takes, what lies in its
-    /// folder; to all, that events were lost.
-    fn pass(&self, res: &notify::Result<Event>) {
+    /// Passes on a notification of the watcher that gives as `giver`: to each that takes,
+    /// what lies in its folder; to all, that events were lost. Not one of a watcher that
+    /// doesn't give (yet, or any more: it may still send some as it stops).
+    fn pass(&self, giver: u64, res: &notify::Result<Event>) {
         if self.0.taking.load(Ordering::Relaxed) == 0 {
             return;
         }
@@ -152,10 +153,14 @@ impl Feeds {
         if matches!(res, Ok(event) if reads_only(&event.kind) && !event.need_rescan()) {
             return;
         }
-        for (_, taker) in self.takers().iter() {
+        let takers = self.takers();
+        if self.giver() != giver {
+            return;
+        }
+        for (_, taker) in takers.iter() {
             let event = match res {
                 Ok(event) if !event.need_rescan() => {
-                    let within = |path: &&PathBuf| path.starts_with(&taker.root);
+                    let within = |path: &&PathBuf| path.starts_with(&taker.told.root);
                     let paths: Vec<PathBuf> = event.paths.iter().filter(within).cloned().collect();
                     if paths.is_empty() {
                         continue;
@@ -173,16 +178,15 @@ impl Feeds {
         }
     }
 
-    /// A watcher gives from now on, under the number returned: those that take are told that
-    /// events were lost (what changed while none gave), before it counts as giving.
-    fn give(&self) -> u64 {
-        let giver = self.number();
+    /// The watcher numbered `giver` ([`Feeds::number`]) gives from now on: those that take
+    /// are told that events were lost (what changed while none gave), before it counts as
+    /// giving.
+    fn give(&self, giver: u64) {
         let takers = self.takers();
         for (_, taker) in takers.iter() {
             taker.take(Ok(events_lost()));
         }
         self.0.giver.store(giver, Ordering::SeqCst);
-        giver
     }
 
     /// The watcher that gave as `giver` is gone. Unless another gives by now (the folder
@@ -216,11 +220,9 @@ impl Feeds {
     }
 }
 
-/// Where one sync root's notifications go: its queue, and what they set and ring.
-struct Sink {
+/// What one sync root's notifications set, for its watcher's owner to read.
+struct Told {
     root: PathBuf,
-    filter: Arc<Filter>,
-    tx: Sender<notify::Result<Event>>,
     /// The bell rang since the queue was last drained: it won't ring again until then.
     rung: AtomicBool,
     /// The ignore rules' file was touched.
@@ -228,6 +230,15 @@ struct Sink {
     /// A folder that holds what other identities share may have come or gone
     /// ([`touches_shared`]).
     shared: AtomicBool,
+}
+
+/// Where one sync root's notifications go: its queue, and what they set and ring. Held by
+/// what sends them alone (the OS watcher's handler, or [`Feeds`]): the queue closes as that
+/// goes, which is how a watcher whose thread ended is found.
+struct Sink {
+    told: Arc<Told>,
+    filter: Arc<Filter>,
+    tx: Sender<notify::Result<Event>>,
     bell: Option<Bell>,
     rules_file: PathBuf,
     rules_dir: PathBuf,
@@ -246,18 +257,21 @@ impl Sink {
                     && (e.paths.iter()).any(|p| *p == self.rules_file || *p == self.rules_dir)
             });
         if rules_touched {
-            self.rules.store(true, Ordering::SeqCst);
+            self.told.rules.store(true, Ordering::SeqCst);
         }
         // So is what a folder of shares leaves out, found by its marker, not by the filter
         // in use.
-        let shared_touched = lost || res.as_ref().is_ok_and(|e| touches_shared(&self.root, e));
+        let shared_touched = lost
+            || res
+                .as_ref()
+                .is_ok_and(|e| touches_shared(&self.told.root, e));
         if shared_touched {
-            self.shared.store(true, Ordering::SeqCst);
+            self.told.shared.store(true, Ordering::SeqCst);
         }
         // Only changes are queued, and only their paths that sync: reads (a viewer, a
         // backup tool, the rescan itself) and filtered items (the client's own state,
         // junk, ignored folders) would otherwise flood the channel.
-        let kept = keep(&self.root, &self.filter, res);
+        let kept = keep(&self.told.root, &self.filter, res);
         let queued = kept.is_some();
         if let Some(res) = kept {
             // The receiver is gone only when the watcher is being dropped.
@@ -271,8 +285,8 @@ impl Sink {
 
     /// Rings the bell, unless it rang since the queue was last drained.
     fn ring(&self) {
-        if !self.rung.load(Ordering::Relaxed)
-            && !self.rung.swap(true, Ordering::SeqCst)
+        if !self.told.rung.load(Ordering::Relaxed)
+            && !self.told.rung.swap(true, Ordering::SeqCst)
             && let Some(bell) = &self.bell
         {
             bell();
@@ -295,8 +309,8 @@ enum Source {
 /// OS change notifications for one sync root.
 pub(crate) struct LiveWatcher {
     source: Source,
-    /// Where its notifications go, and what they set.
-    sink: Arc<Sink>,
+    /// What its notifications set.
+    told: Arc<Told>,
     rx: Receiver<notify::Result<Event>>,
     /// The OS watcher stopped sending (its channel closed).
     gone: AtomicBool,
@@ -305,7 +319,7 @@ pub(crate) struct LiveWatcher {
 impl std::fmt::Debug for LiveWatcher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LiveWatcher")
-            .field("root", &self.sink.root)
+            .field("root", &self.told.root)
             .field("fed", &matches!(self.source, Source::Fed(..)))
             .finish_non_exhaustive()
     }
@@ -342,31 +356,40 @@ impl LiveWatcher {
         }
         let (tx, rx) = channel();
         let rules_file = crate::layout::ignore_file(&root);
-        let sink = Arc::new(Sink {
-            filter,
-            tx,
+        let rules_dir = rules_file.parent().unwrap_or(&root).to_path_buf();
+        let told = Arc::new(Told {
+            root,
             rung: AtomicBool::new(false),
             rules: AtomicBool::new(false),
             shared: AtomicBool::new(false),
-            bell,
-            rules_dir: rules_file.parent().unwrap_or(&root).to_path_buf(),
-            rules_file,
-            root,
         });
-        let root = &sink.root;
+        let sink = Sink {
+            told: Arc::clone(&told),
+            filter,
+            tx,
+            bell,
+            rules_dir,
+            rules_file,
+        };
         let source = if let Some(Feed::Takes(feeds)) = feed {
-            Source::Fed(feeds.clone(), feeds.join(Arc::clone(&sink)), Instant::now())
+            Source::Fed(feeds.clone(), feeds.join(Arc::new(sink)), Instant::now())
         } else {
             let feeds = match feed {
                 Some(Feed::Gives(feeds)) => Some(feeds.clone()),
                 _ => None,
             };
-            let (passing, to) = (feeds.clone(), Arc::clone(&sink));
+            // (Its number before it is made: what it passes on counts only while it is the
+            // one that gives, not once another is, or as it stops.)
+            let giving = feeds.map(|feeds| {
+                let giver = feeds.number();
+                (feeds, giver)
+            });
+            let passing = giving.clone();
             let handler = move |res: notify::Result<Event>| {
-                if let Some(feeds) = &passing {
-                    feeds.pass(&res);
+                if let Some((feeds, giver)) = &passing {
+                    feeds.pass(*giver, &res);
                 }
-                to.take(res);
+                sink.take(res);
             };
             // Links aren't followed (inotify; the others watch by path or handle): the walker
             // follows none, and inotify names a folder by the last path it was reached by,
@@ -374,18 +397,18 @@ impl LiveWatcher {
             // nothing is synced, and where no folder that takes from this watcher is.
             let config = notify::Config::default().with_follow_symlinks(false);
             let mut watcher = RecommendedWatcher::new(handler, config)?;
-            watcher.watch(root, RecursiveMode::Recursive)?;
+            watcher.watch(&told.root, RecursiveMode::Recursive)?;
+            if let Some((feeds, giver)) = &giving {
+                feeds.give(*giver);
+            }
             Source::Own {
                 _watcher: watcher,
-                giving: feeds.map(|feeds| {
-                    let giver = feeds.give();
-                    (feeds, giver)
-                }),
+                giving,
             }
         };
         Ok(LiveWatcher {
             source,
-            sink,
+            told,
             rx,
             gone: AtomicBool::new(false),
         })
@@ -488,7 +511,7 @@ impl LiveWatcher {
 
     /// Folds `event` (one [`keep`] let through) into `batch`; `true` as it counts.
     fn add(&self, batch: &mut WatchBatch, event: notify::Result<Event>) -> bool {
-        fold(&self.sink.root, batch, event);
+        fold(&self.told.root, batch, event);
         true
     }
 }
@@ -782,7 +805,7 @@ impl LocalObserver {
     ) -> Result<Option<ScanReport>, StateError> {
         // Before draining: an event queued from now on rings again.
         if let Some(w) = &self.watcher {
-            w.sink.rung.store(false, Ordering::SeqCst);
+            w.told.rung.store(false, Ordering::SeqCst);
         }
         self.more = false;
         // New folders and files being written, due for another look (none without a watcher,
@@ -1022,7 +1045,7 @@ impl LocalObserver {
     pub fn rules_touched(&self) -> bool {
         self.watcher
             .as_ref()
-            .is_some_and(|w| w.sink.rules.swap(false, Ordering::SeqCst))
+            .is_some_and(|w| w.told.rules.swap(false, Ordering::SeqCst))
     }
 
     /// Whether a folder that holds what other identities share may have come or gone since
@@ -1031,7 +1054,7 @@ impl LocalObserver {
     pub fn shared_touched(&self) -> bool {
         self.watcher
             .as_ref()
-            .is_some_and(|w| w.sink.shared.swap(false, Ordering::SeqCst))
+            .is_some_and(|w| w.told.shared.swap(false, Ordering::SeqCst))
     }
 }
 
@@ -1285,7 +1308,7 @@ mod tests {
         };
         let wait = Duration::from_secs(10);
         let next = |watcher: &LiveWatcher| {
-            watcher.sink.rung.store(false, Ordering::SeqCst);
+            watcher.told.rung.store(false, Ordering::SeqCst);
             watcher.next_batch(wait, debounce, || {}).ok_or("no batch")
         };
 
@@ -1320,7 +1343,7 @@ mod tests {
         // None gives any more: no watcher, and woken to find so. (Once what the last write
         // still sends has come.)
         std::thread::sleep(Duration::from_millis(300));
-        share.sink.rung.store(false, Ordering::SeqCst);
+        share.told.rung.store(false, Ordering::SeqCst);
         let rang = rings.load(Ordering::SeqCst);
         drop(again);
         assert!(!share.live());
@@ -1810,6 +1833,25 @@ mod tests {
         fs::write(crate::layout::shared_marker(&root.join("Shared")), "")?;
         wait_for("the marker rings", &|| rang.load(Ordering::SeqCst) > before)?;
         wait_for("the marker is seen", &|| observer.shared_touched())?;
+        Ok(())
+    }
+
+    /// A watcher of its own whose OS watcher went (its thread ended) has its queue closed,
+    /// which is how it is found gone: nothing else holds the sending end.
+    #[test]
+    fn the_queue_closes_as_the_os_watcher_goes() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let root = dir.path().canonicalize()?;
+        let feeds = Feeds::default();
+        let gives = Feed::Gives(feeds.clone());
+        let mut watcher = LiveWatcher::start(&root, Arc::default(), None, Some(&gives))?;
+        // (The OS watcher let go, with the handler it holds; what is put in its place takes
+        // from nobody.)
+        let nobody = Source::Fed(Feeds::default(), 0, Instant::now());
+        drop(std::mem::replace(&mut watcher.source, nobody));
+        let batch = watcher.next_batch(Duration::from_secs(10), Debounce::default(), || {});
+        assert!(batch.is_some_and(|batch| batch.rescan_all));
+        assert!(watcher.gone.load(Ordering::Relaxed));
         Ok(())
     }
 

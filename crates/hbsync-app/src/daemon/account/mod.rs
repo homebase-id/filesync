@@ -80,6 +80,9 @@ pub(crate) struct Account {
     /// The main folder's watcher gives what other identities share its events: their
     /// folders, in its folder of shares, hold no watcher of their own (filesync #414).
     feeds: hbsync_local::Feeds,
+    /// Where the main folder's runner last told its folder of shares to be
+    /// ([`crate::runner::SharesTold`]): kept here, through that runner being started again.
+    shares_told: Arc<Mutex<Option<Option<String>>>>,
 }
 
 /// Sync now asked while an account isn't running yet, counted: a wait to try again ends for a
@@ -239,6 +242,7 @@ impl Account {
             ready: AtomicBool::new(false),
             reader: Mutex::new(None),
             feeds: hbsync_local::Feeds::default(),
+            shares_told: Arc::default(),
             changed,
             clicks: Clicks::default(),
         };
