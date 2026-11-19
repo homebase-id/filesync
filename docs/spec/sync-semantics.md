@@ -323,14 +323,15 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
      there. And below a folder that is live on the drive and masked, the folder and the
      node wait, as before.
    - No plan removes a folder the drive still has over a node it leaves there, or moves out
-     of it: a folder a device stopped syncing (§10, rule 1) that holds another device's
-     change isn't leaving (rule 2), connected to the top or not. Where an orphan is left to
-     other devices, the folders above it that the drive still has, and this plan would
-     remove as ones the device stopped syncing, stay, their bases dropped. Where it is
-     recovered, their removal waits for the plan after: cut short between the two, the
-     removal took the node along, another device's file gone from the drive and from that
-     device. (A folder left so is an orphan itself where its own folder is gone for good,
-     to any device that syncs where it would go.)
+     of it: a folder that holds another device's change isn't leaving (§10, rule 2),
+     connected to the top or not, whether the device stopped syncing it (rule 1) or the
+     user deleted it here. Where an orphan is left to other devices, the folders above it
+     that the drive still has, and this plan would remove, stay, their bases dropped.
+     Where it is recovered, their removal waits for the plan after: cut short between the
+     two, the removal took the node along, another device's file gone from the drive and
+     from that device. (A folder left so is an orphan itself where its own folder is gone
+     for good, to any device that syncs where it would go: it comes back there, empty of
+     what the device filters, as §10 rule 3 has it for a folder with masked children.)
    - **What a device holds of a node** (in the bullets here): an item of it here, in view. A
      base alone is no hold: its item was deleted here, or is the device's own since a rule
      hid it (§10, rule 1: the scanner no longer tells it). So a node the device synced in a

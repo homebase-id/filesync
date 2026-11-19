@@ -1758,7 +1758,7 @@ fn brings_into(plan: &hbsync_engine::Plan, folder: NodeId) -> bool {
 }
 
 /// A folder the drive has at a place (its folder is in the plan) that this device filters
-/// since it renamed that folder: not kept as one that hangs loose. Nothing is made or
+/// since it renamed that folder. Nothing is made or
 /// brought down into it here (unreported from then on, it left the drive at the next sync:
 /// another device's new file, deleted). The file is recovered, as before; and the folder
 /// isn't removed in the plan that moves the file out of it (cut short between the two, the
@@ -1822,9 +1822,10 @@ fn nor_is_the_folder_above_made_again_for_a_hidden_one() {
 
 /// A folder `cache` in the folder still on the drive, hidden by a rule of its own wherever it
 /// is, with another device's file in it and one beside it: nothing is made or brought down
-/// into `cache`, nor is `cache` or the folder it is in removed over a file. Whichever of the two files the plan comes to first (`first`: the one
-/// beside it).
-fn hidden_folder_in_the_one_still_there(first: bool) -> (hbsync_engine::Plan, [NodeId; 3]) {
+/// into `cache`, nor is `cache` or the folder it is in removed over a file. Whichever of the
+/// two files the plan comes to first (`first`: the one beside it). The plan, and the folder
+/// still there, `cache`, the file beside it and the file in it.
+fn hidden_folder_in_the_one_still_there(first: bool) -> (hbsync_engine::Plan, [NodeId; 4]) {
     let [b, sub, cache, lo, hi] = ids(5)[..] else {
         unreachable!()
     };
@@ -1846,19 +1847,25 @@ fn hidden_folder_in_the_one_still_there(first: bool) -> (hbsync_engine::Plan, [N
     }
     w.remote(keep, Some(file(sub, "keep.txt", "k2")));
     w.remote(x, Some(file(cache, "x.txt", "x2")));
-    (w.plan(), [sub, cache, x])
+    (w.plan(), [sub, cache, keep, x])
 }
 
 #[test]
 fn a_hidden_folder_in_the_one_still_there_isnt_filled_or_removed() {
     for first in [true, false] {
-        let (plan, [sub, cache, x]) = hidden_folder_in_the_one_still_there(first);
-        // (Each file is recovered by itself, or left: never brought down into the hidden
-        // folder, nor removed, nor a folder over it.)
+        let (plan, [sub, cache, keep, x]) = hidden_folder_in_the_one_still_there(first);
+        // Each file is recovered by itself: never brought down into the hidden folder, nor
+        // removed, nor a folder over it (their removal waits).
         assert!(!brings_into(&plan, cache), "{first}: {plan:?}");
-        for node in [sub, cache, x] {
+        for node in [sub, cache, keep, x] {
             assert!(!deletes_on_drive(&plan, node), "{first}: {plan:?}");
         }
+        assert!(
+            recovers(&plan, keep) && recovers(&plan, x),
+            "{first}: {plan:?}"
+        );
+        let waits = |folder| plan.deferred.contains(&folder);
+        assert!(waits(sub) && waits(cache), "{first}: {plan:?}");
     }
 }
 
