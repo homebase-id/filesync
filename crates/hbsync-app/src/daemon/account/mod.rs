@@ -39,6 +39,7 @@ use crate::sync::{Wakeup, lock};
 use crate::words;
 use crate::{Identity, Paths, Root};
 
+mod ending;
 mod feed;
 mod parts;
 mod run;
@@ -1206,6 +1207,8 @@ mod tests {
         /// How often they were read, and how often a share was tried to open.
         reads: usize,
         opens: usize,
+        /// Whose share was opened, ever (its state DB is this computer's from then on).
+        opened: Vec<Identity>,
     }
 
     /// `me.example`'s shares by its [`TestMarkers`]: each sharer's drive is the one on
@@ -1226,9 +1229,12 @@ mod tests {
                 return Err(std::io::Error::other("the markers don't read").into());
             }
             let unsure = |s: &&Identity| synced.contains(s);
+            // (Those it opened whose state DB is still there.)
+            let kept = |s: &&Identity| self.paths.shared_db(&self.me, s).exists();
             Ok(parts::Synced {
                 on: markers.on.clone(),
                 unsure: markers.unsure.iter().filter(unsure).cloned().collect(),
+                kept: markers.opened.iter().filter(kept).cloned().collect(),
             })
         }
 
@@ -1236,6 +1242,9 @@ mod tests {
             {
                 let mut markers = lock(&self.markers);
                 markers.opens += 1;
+                if !markers.opened.contains(sharer) {
+                    markers.opened.push(sharer.clone());
+                }
                 if markers.unopenable.contains(sharer) {
                     return Err(std::io::Error::other("no token yet").into());
                 }
@@ -1253,6 +1262,8 @@ mod tests {
         folder: PathBuf,
         markers: Arc<Mutex<TestMarkers>>,
         started: Started,
+        /// What it starts with, for [`Marked::again`].
+        with: (Identity, Paths, [Arc<std::sync::Mutex<FakeServer>>; 2]),
     }
 
     impl Marked {
@@ -1262,12 +1273,33 @@ mod tests {
         ) -> Result<Marked, Box<dyn std::error::Error>> {
             let me: Identity = "me.example".into();
             let (paths, folder, _) = set_up(home, &me, &[("mine.txt", "mine")])?;
-            let server = FakeServer::new(ServerConfig::default());
-            let tom_server = FakeServer::new(ServerConfig::default());
+            let servers = [(); 2].map(|()| FakeServer::new(ServerConfig::default()));
             let markers: Arc<Mutex<TestMarkers>> = Arc::default();
             set(&mut lock(&markers));
-            let (starting, root, told) = (paths.clone(), Root::main(&me, &folder), markers.clone());
-            let started = Started::sharing(&starting, root, move |db| {
+            let with = (me, paths, servers);
+            let started = Marked::account(&with, &folder, &markers);
+            Ok(Marked {
+                folder,
+                markers,
+                started,
+                with,
+            })
+        }
+
+        /// The account, started: its drive on the first server, its sharers' on the second.
+        fn account(
+            (me, paths, [server, tom_server]): &(
+                Identity,
+                Paths,
+                [Arc<std::sync::Mutex<FakeServer>>; 2],
+            ),
+            folder: &Path,
+            markers: &Arc<Mutex<TestMarkers>>,
+        ) -> Started {
+            let (me, paths, told) = (me.clone(), paths.clone(), markers.clone());
+            let (server, tom_server) = (server.clone(), tom_server.clone());
+            let (starting, root) = (paths.clone(), Root::main(&me, folder));
+            Started::sharing(&starting, root, move |db| {
                 let drive = Drive::open(db, &me, Arc::new(FakeRemote::new(server.clone())))?;
                 let by = ByMarkers {
                     markers: told.clone(),
@@ -1280,11 +1312,30 @@ mod tests {
                     Vec::new(),
                     Some(Box::new(by) as Box<dyn parts::Sharers>),
                 ))
-            });
+            })
+        }
+
+        /// The account stopped, `meanwhile` done to its folder and markers while nothing
+        /// runs, and the account started again (the daemon stopped and started: the same
+        /// folder, state and markers).
+        fn again(
+            self,
+            meanwhile: impl FnOnce(&Path, &mut TestMarkers) -> std::io::Result<()>,
+        ) -> Result<Marked, Box<dyn std::error::Error>> {
+            let Marked {
+                folder,
+                markers,
+                started,
+                with,
+            } = self;
+            started.stop(())?;
+            meanwhile(&folder, &mut lock(&markers))?;
+            let started = Marked::account(&with, &folder, &markers);
             Ok(Marked {
                 folder,
                 markers,
                 started,
+                with,
             })
         }
 
@@ -1318,8 +1369,9 @@ mod tests {
 
     /// Whose shares are synced follows the identity's share markers: none while none says
     /// so (no folder of shares is made); one turned on is synced into the folder of shares,
-    /// made for it (the main folder's runner told to hold one); turned off, its
-    /// runner stops and what it synced stays; turned on again, it is synced again.
+    /// made for it (the main folder's runner told to hold one); turned off, its runner
+    /// stops and its copy is taken off this computer, with its records; turned on again, it
+    /// is synced again.
     #[test]
     fn a_share_is_synced_while_its_marker_says_so() -> Result<(), Box<dyn std::error::Error>> {
         let home = tempfile::tempdir()?;
@@ -1339,14 +1391,72 @@ mod tests {
             let (_, folders) = f.started.account.status();
             assert_eq!(folders[1].sharer.as_ref(), Some(&tom));
 
+            // Turned off: its runner stops, and its copy is taken off this computer, with
+            // its records. Said in a note.
+            let shared_db = f.with.1.shared_db(&f.with.0, &tom);
+            assert!(shared_db.exists());
             f.marked(|m| m.on.clear());
             f.started
                 .wait_all("the share is no longer synced", &alone)?;
-            assert!(f.toms().is_dir(), "what was synced stays");
+            let gone = || Some(()).filter(|()| !f.toms().exists() && !shared_db.exists());
+            wait_until(gone).ok_or("its copy stays")?;
+            let said = words::share_ended(&tom, &f.toms(), &f.folder, 0, 0);
+            f.started
+                .wait_all("said", &|_, _| f.started.said(&said) == 1)?;
+            assert!(
+                f.folder.join("Shared").is_dir(),
+                "the folder of shares stays"
+            );
 
             f.marked(|m| m.on = vec![tom.clone()]);
             f.started
                 .wait_all("the share is synced again", &both_synced)?;
+            Ok(())
+        };
+        let checked = checks();
+        f.started.stop(checked)?
+    }
+
+    /// A share turned off while the daemon didn't run has its copy taken off this computer
+    /// as it starts (it is known by its records here): what was put into its folder
+    /// meanwhile isn't the sharer's, and moves out to the main folder; a link there is
+    /// moved, not followed.
+    #[test]
+    fn a_share_turned_off_while_stopped_has_its_copy_removed_at_the_start()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let tom: Identity = "tom.example".into();
+        let f = Marked::start(home.path(), |m| m.on = vec!["tom.example".into()])?;
+        let synced = f.started.wait_all("the share is synced", &both_synced);
+        let elsewhere = tempfile::tempdir()?;
+        std::fs::write(elsewhere.path().join("kept.txt"), "not ours")?;
+        let f = f.again(|folder, markers| {
+            let toms = folder.join("Shared").join("tom.example");
+            std::fs::write(toms.join("mine too.txt"), "put here while stopped")?;
+            #[cfg(unix)]
+            std::os::unix::fs::symlink(elsewhere.path(), toms.join("link"))?;
+            markers.on.clear();
+            Ok(())
+        })?;
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            synced?;
+            let gone = || Some(()).filter(|()| !f.toms().exists());
+            wait_until(gone).ok_or("its copy stays")?;
+            f.started.wait_all("its own folder syncs, alone", &alone)?;
+            // What was put there is in the main folder now, the link as a link.
+            let out = f.folder.join("mine too.txt");
+            assert_eq!(std::fs::read_to_string(out)?, "put here while stopped");
+            let moved = 1 + usize::from(cfg!(unix));
+            let said = words::share_ended(&tom, &f.toms(), &f.folder, moved, 0);
+            f.started
+                .wait_all("said", &|_, _| f.started.said(&said) == 1)?;
+            #[cfg(unix)]
+            assert!(f.folder.join("link").symlink_metadata()?.is_symlink());
+            assert_eq!(
+                std::fs::read_to_string(elsewhere.path().join("kept.txt"))?,
+                "not ours"
+            );
+            assert!(!f.with.1.shared_db(&f.with.0, &tom).exists());
             Ok(())
         };
         let checked = checks();

@@ -54,6 +54,10 @@ pub struct Synced {
     /// Those of the ones synced or being opened of whom the markers don't say (one that may
     /// be theirs didn't read): each stays as it is, never taken for off, nor for on again.
     pub unsure: Vec<crate::Identity>,
+    /// Whose shares have a state DB on this device: synced here before. One of them that
+    /// isn't `on` (turned off while the daemon didn't run, or its ending cut short) has
+    /// its copy taken off this device.
+    pub kept: Vec<crate::Identity>,
 }
 
 /// What another identity shares with the account: its drive as the account may read it.

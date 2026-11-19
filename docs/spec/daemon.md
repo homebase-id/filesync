@@ -588,8 +588,8 @@ included (service managers restart it then).
     of shares while nothing is shared: it is told to as the account's first share comes
     (made at once, and the folder opened again with it; where one is on record already,
     nothing is opened again).
-  - A share a marker turns off has its runner stopped. What it synced stays where it is, in
-    the folder of shares (not yet removed: that comes with guards of its own).
+  - A share a marker turns off has its runner stopped, and its copy is taken off this
+    computer (below).
   - A share whose marker doesn't read stays as it is (synced, being opened, or ending), and
     so does every share while the markers can't be read at all: never taken for turned
     off, nor for turned on again.
@@ -597,6 +597,25 @@ included (service managers restart it then).
     (the pauses above); the account's own folders and its other shares sync on. One that
     can't be synced here at all (no folder can have its sharer's name, or another share's
     folder has it) isn't opened: said in the log.
+
+  **A share that isn't synced any more has its copy removed**, once its runner has ended
+  and the folder of shares is known (it waits where not), on a thread of its own
+  (`account/ending.rs`; sync semantics §13, "A share that isn't synced here any more"):
+  - Only in the folder set up for this share's own state DB: its marker says so. A folder
+    with another's marker (renamed into its place) is left as it is, with all in it.
+  - What is there as it was synced is deleted; what was changed or put there, what is never
+    synced (a link is moved as a link, never followed) and what the user's rules keep on
+    this device moves out to the top of the main folder, never over anything.
+  - Then the folder itself goes, with the client's own state in it, where nothing is left
+    (junk at its top deleted with it), and after it the share's state DB. Where something
+    couldn't go, the folder and the DB stay, and it isn't tried again until the daemon
+    starts again (or the share is turned on).
+  - Said in a note: that the share isn't synced here any more, that its folder was removed,
+    how many items moved out and where to, or how many stay.
+  - A share turned off while the daemon didn't run, or whose removal was cut short (the
+    daemon stopped: it stops between two operations), is known by its state DB here, and
+    taken up as the markers are first read. One turned on again while its copy is being
+    removed is opened anew once that is done.
 
   Not in the released daemon yet: opening another identity's drive takes a token of its own
   that has to be kept (a new one each start would leave a row on the sharer's server each

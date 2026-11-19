@@ -151,6 +151,49 @@ pub(crate) fn share_unopened(sharer: &crate::Identity, why: &dyn std::fmt::Displ
     )
 }
 
+/// What is told when what `sharer` shared isn't synced any more and its copy in `folder` was
+/// taken off this computer: `moved_out` items that weren't the sharer's (changed or put
+/// there) are in `out` now; `left` items couldn't go, and the folder stays with them.
+pub(crate) fn share_ended(
+    sharer: &crate::Identity,
+    folder: &std::path::Path,
+    out: &std::path::Path,
+    moved_out: usize,
+    left: usize,
+) -> String {
+    let (folder, out) = (folder.display(), out.display());
+    let mut said = format!("What {sharer} shared with you is no longer synced here.");
+    said += &match left {
+        0 => format!(" Its folder {folder} was removed from this computer."),
+        n => format!(
+            " {} in {folder} couldn't be removed and stay there, unsynced.",
+            items(n as u64)
+        ),
+    };
+    if moved_out > 0 {
+        said += &format!(
+            " {} you had changed or added there {} in {out} now.",
+            items(moved_out as u64),
+            if moved_out == 1 { "is" } else { "are" }
+        );
+    }
+    said
+}
+
+/// What is told when the copy of what `sharer` shared couldn't be taken off this computer
+/// (`why`): it stays in `folder` as it is.
+pub(crate) fn share_not_ended(
+    sharer: &crate::Identity,
+    folder: &std::path::Path,
+    why: &dyn std::fmt::Display,
+) -> String {
+    format!(
+        "What {sharer} shared with you is no longer synced here. Its folder {} stays as it \
+         is ({why}).",
+        folder.display()
+    )
+}
+
 /// The note told once when an account's state DB was set aside (too old, damaged, or of a
 /// drive made again since) and its folders set up again: the tray's, the log's and setup's.
 pub fn set_aside(why: Unusable) -> String {

@@ -15,6 +15,7 @@ use hbsync_homebase::{Client, HomebaseError};
 use hbsync_remote::ErrorClass;
 use hbsync_state::Unusable;
 
+use super::ending::{self, Ending};
 use super::parts::{AccountParts, Share};
 use super::runners::{Life, Markers, Running, Sharing};
 use super::{Account, Msg, Request, Try, Waiting};
@@ -25,7 +26,7 @@ use crate::protocol::{AccountStatus, Hints, Pause, State};
 use crate::runner::{Backoff, Command, Runner, RunnerConfig, RunnerError, SharesTold, Showing};
 use crate::sync::{lock, wait_for};
 use crate::words;
-use crate::{Config, CredentialError, CredentialStore, Location, Paths, Root};
+use crate::{Config, CredentialError, CredentialStore, Identity, Location, Paths, Root};
 
 /// How an account readies its state DB ([`Account::ready_db`]).
 pub(super) enum Readying<'a> {
@@ -301,6 +302,10 @@ impl Account {
         let first_read = Instant::now() + notifier.as_ref().map_or(Duration::ZERO, |_| FIRST_READ);
         let mut markers = Markers::new(sharers, self.requests.clone(), first_read);
         let mut unannounced_reads = notifications.unannounced_reads();
+        // Shares not synced any more, each one's copy being taken off this device; told to
+        // stop as the account ends.
+        let mut endings: Vec<Ending> = Vec::new();
+        let ending_stop = Arc::new(AtomicBool::new(false));
         // The main folder and its folder of shares, as its runner told last where that is.
         let mut shares_at: Option<(PathBuf, PathBuf)> = None;
         let notifier = match notifier {
@@ -388,7 +393,10 @@ impl Account {
                         }
                     }
                     Msg::Sharers(id, answer) => {
-                        let notes = markers.answer(id, *answer, &mut shares, Instant::now());
+                        let busy: Vec<Identity> =
+                            endings.iter().map(|e| e.sharer.clone()).collect();
+                        let now = Instant::now();
+                        let notes = markers.answer(id, *answer, &mut shares, &busy, now);
                         self.push_notes(notes);
                     }
                     Msg::Hint(event) => {
@@ -600,8 +608,24 @@ impl Account {
                 }
             }
             if !ending && !shares.is_empty() {
-                let (moved, next) = self.run_shares(paths, &mut shares, shares_at.as_ref(), now);
+                let (moved, next, gone) =
+                    self.run_shares(paths, &mut shares, shares_at.as_ref(), now);
                 (changed, shares_next) = (changed | moved, next);
+                // Each one's copy is taken off this device, on a thread of its own.
+                if let Some(at) = &shares_at {
+                    let device = config.device_name();
+                    let end = |share| self.end_copy(share, device.clone(), at, &ending_stop);
+                    endings.extend(gone.into_iter().filter_map(end));
+                }
+            }
+            // A copy taken off (or not): said, and the markers read again (one turned on
+            // meanwhile is opened now).
+            ending_stop.store(ending, Ordering::SeqCst);
+            let done = |e: &mut Ending| e.thread.is_finished();
+            for ended in endings.extract_if(.., done).collect::<Vec<_>>() {
+                let main = shares_at.as_ref().map(|(main, _)| main.as_path());
+                let (sharer, all) = self.copy_ended(ended, main);
+                markers.ended(sharer, all, Instant::now());
             }
             if changed {
                 self.changed.raise();
@@ -611,6 +635,12 @@ impl Account {
                 let shown = lock(&self.shown);
                 if shown.runners.is_empty() {
                     drop(shown);
+                    // (A copy being taken off stops between two operations, and is taken up
+                    // at the next start: its records are kept until all of it went.)
+                    ending_stop.store(true, Ordering::SeqCst);
+                    for ended in endings.drain(..) {
+                        let _ = ended.thread.join();
+                    }
                     notifications.finish();
                     for share in &shares {
                         share.share.notifications.finish();
@@ -759,15 +789,16 @@ impl Account {
     /// `shares` once that has ended. A share's drive is read (its notifications' timer) only
     /// while a runner syncs it.
     ///
-    /// Whether the folders shown changed, and when to look again at the latest: a start to
-    /// try again, a drive to read.
+    /// Whether the folders shown changed, when to look again at the latest (a start to try
+    /// again, a drive to read), and the shares that aren't synced any more, taken out of
+    /// `shares`: each one's copy is to be taken off this device.
     fn run_shares(
         &self,
         paths: &Paths,
         shares: &mut Vec<Sharing>,
         at: Option<&(PathBuf, PathBuf)>,
         now: Instant,
-    ) -> (bool, Option<Instant>) {
+    ) -> (bool, Option<Instant>, Vec<Sharing>) {
         let mut changed = false;
         // The shares to start, each with the pauses of the runner it starts again for.
         let mut starting: Vec<(usize, Option<Backoff>)> = Vec::new();
@@ -864,16 +895,15 @@ impl Account {
                 }
             }
         }
-        // One its marker turned off goes once its runner has ended. (What it synced stays
-        // where it is, in the folder of shares.) Let go after the lock is: its puller's
-        // thread may be in a request, and ends by itself.
-        let gone: Vec<Sharing>;
+        // One its marker turned off goes once its runner has ended, where its place is known
+        // (it waits where not): its copy is the caller's to take off this device, off this
+        // thread and after the lock is let go (its puller's thread may be in a request).
         let shown = lock(&self.shown);
         let ended = |share: &mut Sharing| {
             let theirs = |r: &Running| r.sharer.as_ref() == Some(&share.share.sharer);
-            share.off && !shown.runners.iter().any(theirs)
+            share.off && at.is_some() && !shown.runners.iter().any(theirs)
         };
-        gone = shares.extract_if(.., ended).collect();
+        let gone: Vec<Sharing> = shares.extract_if(.., ended).collect();
         changed |= !gone.is_empty();
         // A start to try again (only where there is a place: cleared above otherwise), and
         // the drives of those a runner syncs.
@@ -887,7 +917,69 @@ impl Account {
             .filter(synced)
             .filter_map(|s| s.share.notifications.deadline(now, paused.is_some()));
         let next = shares.iter().filter_map(|s| s.retry).chain(reads).min();
-        (changed, next)
+        (changed, next, gone)
+    }
+
+    /// Takes the copy of `share`, which isn't synced any more, off this device
+    /// ([`ending::end`]): from its folder in the folder of shares `dir` of the main folder
+    /// `main`, where what isn't the sharer's moves out to. On a thread of its own, which
+    /// wakes the account as it ends; given up at once where `stop` is set. `None` where no
+    /// thread starts (said: its copy stays, taken up at the next start).
+    fn end_copy(
+        &self,
+        share: Sharing,
+        device: String,
+        (main, dir): &(PathBuf, PathBuf),
+        stop: &Arc<AtomicBool>,
+    ) -> Option<Ending> {
+        let (sharer, folder) = (share.share.sharer.clone(), dir.join(&share.local));
+        let (identity, out, at) = (self.identity.clone(), main.clone(), folder.clone());
+        let (stop, tell) = (Arc::clone(stop), self.requests.clone());
+        let end = move || {
+            let ended = ending::end(share.share, &identity, &device, &at, &out, stop);
+            let _ = tell.send(Msg::Wake);
+            ended
+        };
+        let spawned = std::thread::Builder::new()
+            .name("hbsync-share-end".into())
+            .spawn(end);
+        match spawned {
+            Ok(thread) => Some(Ending {
+                sharer,
+                folder,
+                thread,
+            }),
+            Err(e) => {
+                tracing::error!(
+                    "no thread to take the copy of what {sharer} shared off this computer \
+                     ({e}): it stays in {}",
+                    folder.display()
+                );
+                None
+            }
+        }
+    }
+
+    /// What the ending of a share's copy came to, told on the account's status: whether all
+    /// of it went.
+    fn copy_ended(&self, ending: Ending, main: Option<&Path>) -> (Identity, bool) {
+        let Ending {
+            sharer,
+            folder,
+            thread,
+        } = ending;
+        let ended = thread.join().unwrap_or(Err(RunnerError::Panicked));
+        let out = main.unwrap_or(Path::new(""));
+        let (note, all) = match ended {
+            Ok(ended) => {
+                let left = ended.left.len();
+                let note = words::share_ended(&sharer, &folder, out, ended.moved_out, left);
+                (note, ended.removed)
+            }
+            Err(e) => (words::share_not_ended(&sharer, &folder, &e), false),
+        };
+        self.note(vec![note]);
+        (sharer, all)
     }
 
     /// The credentials, waiting while the keychain can't be read; `None` when stopped first.
