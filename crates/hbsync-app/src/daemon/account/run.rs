@@ -296,7 +296,11 @@ impl Account {
         // What other identities share, each synced by a runner of its own: those the
         // identity's share markers turn on, read now and as they change.
         let mut shares = Sharing::each(shares);
-        let mut markers = Markers::new(sharers, Instant::now());
+        // (Read as the notifications connect, and when the drive is read for what they
+        // didn't announce; at once where there are none.)
+        let read_now = notifier.is_err();
+        let mut markers = Markers::new(sharers, self.requests.clone(), read_now, Instant::now());
+        let mut unannounced_reads = notifications.unannounced_reads();
         // The main folder and its folder of shares, as its runner told last where that is.
         let mut shares_at: Option<(PathBuf, PathBuf)> = None;
         let notifier = match notifier {
@@ -345,7 +349,7 @@ impl Account {
             let main = roots.iter().find(|r| r.is_main()).map(|r| r.folder.clone());
             for root in roots {
                 let paused = shown.paused();
-                let shared = (sharing(&shares), main.as_deref());
+                let shared = (shared_by(&shares, &markers), main.as_deref());
                 match self.start(&drive, config, &root, paused, can_heal, shared) {
                     Ok(r) => shown.runners.push(r),
                     Err(e) => {
@@ -383,9 +387,12 @@ impl Account {
                             beside.handle.send(Command::Look);
                         }
                     }
+                    Msg::Sharers(id, answer) => {
+                        let notes = markers.answer(id, *answer, &mut shares, Instant::now());
+                        self.push_notes(notes);
+                    }
                     Msg::Hint(event) => {
-                        // A marker changed, or may have while not connected: read again.
-                        if matches!(event, Event::Markers | Event::Connected) {
+                        if event == Event::Markers {
                             markers.changed(Instant::now());
                         }
                         let Some(hints) = notifications.event(event, Instant::now(), paused) else {
@@ -443,6 +450,12 @@ impl Account {
                 }
             }
             notifications.tick(Instant::now(), paused);
+            // A marker changed while not connected wasn't announced either: read whenever
+            // the drive is, for that.
+            let reads = notifications.unannounced_reads();
+            if std::mem::replace(&mut unannounced_reads, reads) != reads {
+                markers.changed(Instant::now());
+            }
             keeper.paused(paused);
             // Not while paused: no deletes for good, no pulls. On the keeper's thread: this one
             // never waits for it.
@@ -521,7 +534,7 @@ impl Account {
                 let main = self.main_folder();
                 let start = |root: &Root| {
                     let config = config.as_ref()?;
-                    let shared = (sharing(&shares), main.as_deref());
+                    let shared = (shared_by(&shares, &markers), main.as_deref());
                     Some(self.start(&drive, config, root, paused, can_heal, shared))
                 };
                 let restarted: Vec<_> = due.iter().map(start).collect();
@@ -566,14 +579,13 @@ impl Account {
             // (Not while it ends: every runner stops, and nothing of the shares is due.)
             let mut shares_next = None;
             if !ending {
-                let followed = markers.follow(&mut shares, now);
-                changed |= followed.changed;
-                if !followed.notes.is_empty() {
-                    self.note(followed.notes);
+                // (Nothing is asked of the identity while paused.)
+                if !paused {
+                    markers.ask(&shares, now);
                 }
-                // The main folder's runner started while nothing was shared holds no folder
-                // of shares: with a share to sync now, it is started again to hold one (once
-                // it has ended, as a folder added is).
+                // The main folder's runner started while nothing was shared, and nothing
+                // had been, holds no folder of shares: with a share to sync now, it is
+                // started again to hold one (once it has ended, as a folder added is).
                 if sharing(&shares) {
                     let mut shown = lock(&self.shown);
                     let main = |r: &&mut Running| r.sharer.is_none() && r.root.is_main();
@@ -617,7 +629,7 @@ impl Account {
                 config_again,
                 restart,
                 shares_next,
-                markers.deadline().filter(|_| !ending),
+                markers.deadline(paused).filter(|_| !ending),
             ];
             let wait = wait_for(now, deadlines.into_iter().flatten());
             msgs.extend(requests.recv_timeout(wait).ok());
@@ -637,7 +649,7 @@ impl Account {
         root: &Root,
         paused: Option<Pause>,
         heals: bool,
-        (shared, main): (bool, Option<&Path>),
+        (shared, main): (Shared, Option<&Path>),
     ) -> Result<Running, RunnerError> {
         let mut cfg = RunnerConfig::new(
             &root.folder,
@@ -657,6 +669,17 @@ impl Account {
         if !root.is_main() {
             cfg.shares_main = main.map(Path::to_path_buf);
         }
+        // (One that had a folder of shares holds it from its start, where shares may come:
+        // made later, the main folder would be opened a second time at every start.)
+        let recorded = || {
+            let record = hbsync_local::shares::Record::read(&root.folder);
+            record.is_ok_and(|record| !record.is_none())
+        };
+        let shared = match shared {
+            Shared::Now => true,
+            Shared::Maybe => root.is_main() && recorded(),
+            Shared::No => false,
+        };
         if shared && root.is_main() {
             cfg.feed = Some(hbsync_local::Feed::Gives(self.feeds.clone()));
             cfg.shares = Some(SHARES.to_owned());
@@ -752,29 +775,6 @@ impl Account {
         now: Instant,
     ) -> (bool, Option<Instant>) {
         let mut changed = false;
-        // First those the markers turned off: each one's runner stops, and it goes once that
-        // has ended. (What it synced stays where it is, in the folder of shares.)
-        {
-            let mut shown = lock(&self.shown);
-            for share in shares.iter().filter(|s| s.off) {
-                let theirs = |r: &&mut Running| r.sharer.as_ref() == Some(&share.share.sharer);
-                if let Some(r) = shown.runners.iter_mut().find(theirs).filter(|r| r.shows()) {
-                    r.stop_for_good();
-                    changed = true;
-                }
-            }
-            let before = (shares.len(), shown.runners.len());
-            shown.runners.retain(|r| !matches!(r.life, Life::Gone));
-            shares.retain(|share| {
-                let theirs = |r: &Running| r.sharer.as_ref() == Some(&share.share.sharer);
-                let gone = share.off && !shown.runners.iter().any(theirs);
-                if gone {
-                    share.share.notifications.finish();
-                }
-                !gone
-            });
-            changed |= before != (shares.len(), shown.runners.len());
-        }
         // The shares to start, each with the pauses of the runner it starts again for.
         let mut starting: Vec<(usize, Option<Backoff>)> = Vec::new();
         let (at, paused) = {
@@ -783,16 +783,15 @@ impl Account {
             // While the main folder that holds the folder of shares is synced.
             let at = at.filter(|(main, _)| shown.own().any(|r| r.root.folder == *main));
             for (i, share) in shares.iter_mut().enumerate() {
-                // (Turned off: its runner is ending, above.)
-                if share.off {
-                    share.retry = None;
-                    continue;
-                }
                 let sharer = share.share.sharer.clone();
                 let theirs = |r: &&mut Running| r.sharer.as_ref() == Some(&sharer);
                 // One at most: the next starts once the last has ended.
                 let again = match shown.runners.iter_mut().find(theirs) {
-                    Some(r) if !at.is_some_and(|(_, dir)| share.is_at(dir, &r.root.folder)) => {
+                    // Not its place any more, or its marker turned it off: stopped.
+                    Some(r)
+                        if share.off
+                            || !at.is_some_and(|(_, dir)| share.is_at(dir, &r.root.folder)) =>
+                    {
                         if r.shows() {
                             r.stop_for_good();
                             changed = true;
@@ -815,7 +814,7 @@ impl Account {
                     }
                     None => None,
                 };
-                match at {
+                match at.filter(|_| !share.off) {
                     Some(_) if share.retry.is_none_or(|at| now >= at) => starting.push((i, again)),
                     Some(_) => {}
                     // No place to start in: nothing to try again.
@@ -871,9 +870,19 @@ impl Account {
                 }
             }
         }
+        // One its marker turned off goes once its runner has ended. (What it synced stays
+        // where it is, in the folder of shares.)
+        let shown = lock(&self.shown);
+        shares.retain(|share| {
+            let theirs = |r: &Running| r.sharer.as_ref() == Some(&share.share.sharer);
+            let gone = share.off && !shown.runners.iter().any(theirs);
+            if gone {
+                share.share.notifications.finish();
+            }
+            !gone
+        });
         // A start to try again (only where there is a place: cleared above otherwise), and
         // the drives of those a runner syncs.
-        let shown = lock(&self.shown);
         let synced = |s: &&Sharing| {
             shown
                 .shown()
@@ -1032,6 +1041,25 @@ impl Account {
 /// Whether any of `shares` is to be synced: the main folder holds a folder of shares then.
 fn sharing(shares: &[Sharing]) -> bool {
     shares.iter().any(|share| !share.off)
+}
+
+/// Whether an account's main folder is to hold a folder of shares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shared {
+    /// A share is synced.
+    Now,
+    /// None is, but its markers may turn one on: where it held one before.
+    Maybe,
+    /// Nothing is shared with it.
+    No,
+}
+
+fn shared_by(shares: &[Sharing], markers: &Markers) -> Shared {
+    match (sharing(shares), markers.any()) {
+        (true, _) => Shared::Now,
+        (false, true) => Shared::Maybe,
+        (false, false) => Shared::No,
+    }
 }
 
 #[cfg(test)]

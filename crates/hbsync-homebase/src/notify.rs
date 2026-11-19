@@ -597,12 +597,13 @@ fn classify(body: &[u8]) -> Notification {
     if kind("deviceHandshakeSuccess") {
         Notification::Handshake
     } else if kind("fileAdded") || kind("fileModified") || kind("fileDeleted") {
-        match data.as_deref().map(|d| (d, named(d))) {
+        let data = data.as_deref();
+        match data.map(named) {
             // A share marker: who syncs is read again.
-            Some((_, Named::Marker)) => Notification::Markers,
+            Some(Named::Marker) => Notification::Markers,
             // Another app's file on the drive: not the client's, nothing to read or await.
-            Some((_, Named::Other)) => Notification::Other,
-            d => Notification::Changed(d.and_then(|(d, _)| change(d, kind("fileDeleted")))),
+            Some(Named::Other) => Notification::Other,
+            _ => Notification::Changed(data.and_then(|d| change(d, kind("fileDeleted")))),
         }
     } else if kind("authenticationError") {
         Notification::Refused(format!("refused: {}", data.as_deref().unwrap_or("")))

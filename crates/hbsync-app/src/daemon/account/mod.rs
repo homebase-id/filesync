@@ -204,6 +204,9 @@ pub(crate) enum Msg {
     /// The runner of this folder (the main folder) opened it, and its folder of shares has
     /// this name; none: none is at its top ([`crate::runner::SharesTold`]).
     Shares(PathBuf, Option<String>),
+    /// What its share markers say, or a share opened: the answer of the thread that asks
+    /// ([`runners::Markers`], which the number is of).
+    Sharers(u64, Box<runners::Answer>),
 }
 
 /// What the account's thread is asked to do.
@@ -856,9 +859,13 @@ mod tests {
 
         /// How often it told that its DB was set aside for `why`.
         fn told(&self, why: hbsync_state::Unusable) -> usize {
-            let set_aside = words::set_aside(why);
+            self.said(&words::set_aside(why))
+        }
+
+        /// How many of its notes say `text`.
+        fn said(&self, text: &str) -> usize {
             let (status, _) = self.account.status();
-            status.recent.iter().filter(|n| n.text == set_aside).count()
+            status.recent.iter().filter(|n| n.text == text).count()
         }
 
         /// Stops it, whatever `checked` found: nothing runs on into the other tests.
@@ -1236,19 +1243,19 @@ mod tests {
     }
 
     /// `me.example` on a new drive, its main folder holding `mine.txt`, whose shares follow
-    /// the markers returned: its folder, and the account started. [`Followed::marked`] sets
+    /// the markers returned: its folder, and the account started. [`Marked::marked`] sets
     /// them and tells the account that one changed.
-    struct Followed {
+    struct Marked {
         folder: PathBuf,
         markers: Arc<Mutex<TestMarkers>>,
         started: Started,
     }
 
-    impl Followed {
+    impl Marked {
         fn start(
             home: &Path,
             set: impl FnOnce(&mut TestMarkers),
-        ) -> Result<Followed, Box<dyn std::error::Error>> {
+        ) -> Result<Marked, Box<dyn std::error::Error>> {
             let me: Identity = "me.example".into();
             let (paths, folder, _) = set_up(home, &me, &[("mine.txt", "mine")])?;
             let server = FakeServer::new(ServerConfig::default());
@@ -1270,7 +1277,7 @@ mod tests {
                     Some(Box::new(by) as Box<dyn parts::Sharers>),
                 ))
             });
-            Ok(Followed {
+            Ok(Marked {
                 folder,
                 markers,
                 started,
@@ -1281,7 +1288,7 @@ mod tests {
         fn marked(&self, set: impl FnOnce(&mut TestMarkers)) {
             set(&mut lock(&self.markers));
             let changed = hbsync_homebase::notify::Event::Markers;
-            let _ = self.started.account.requests.send(Msg::Hint(changed));
+            self.started.account.tell(Msg::Hint(changed));
         }
 
         /// Waits until the markers were read once more than `before`.
@@ -1313,7 +1320,7 @@ mod tests {
     fn a_share_is_synced_while_its_marker_says_so() -> Result<(), Box<dyn std::error::Error>> {
         let home = tempfile::tempdir()?;
         let tom: Identity = "tom.example".into();
-        let f = Followed::start(home.path(), |_| {})?;
+        let f = Marked::start(home.path(), |_| {})?;
         let checks = || -> Result<(), Box<dyn std::error::Error>> {
             f.started.wait_all("its own folder syncs, alone", &alone)?;
             f.read_since(0)?;
@@ -1349,7 +1356,7 @@ mod tests {
     fn a_share_the_markers_dont_say_of_stays_synced() -> Result<(), Box<dyn std::error::Error>> {
         let home = tempfile::tempdir()?;
         let tom: Identity = "tom.example".into();
-        let f = Followed::start(home.path(), |m| m.on = vec!["tom.example".into()])?;
+        let f = Marked::start(home.path(), |m| m.on = vec!["tom.example".into()])?;
         let checks = || -> Result<(), Box<dyn std::error::Error>> {
             f.started.wait_all("the share is synced", &both_synced)?;
 
@@ -1377,6 +1384,31 @@ mod tests {
         f.started.stop(checked)?
     }
 
+    /// While the account is paused its markers aren't read (nothing is asked of the identity
+    /// then): a change of theirs is followed at the resume.
+    #[test]
+    fn the_markers_arent_read_while_paused() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let f = Marked::start(home.path(), |_| {})?;
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            f.started.wait_all("its own folder syncs, alone", &alone)?;
+            f.read_since(0)?;
+
+            f.started.account.pause(Some(Pause::UNTIL_RESUMED));
+            let before = f.reads();
+            f.marked(|m| m.on = vec!["tom.example".into()]);
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            assert_eq!(f.reads(), before, "read while paused");
+            assert!(!f.folder.join("Shared").exists());
+
+            f.started.account.pause(None);
+            f.started.wait_all("the share is synced", &both_synced)?;
+            Ok(())
+        };
+        let checked = checks();
+        f.started.stop(checked)?
+    }
+
     /// A share that can't be opened is left out, said once, and tried again by itself; the
     /// account's own folder syncs on meanwhile.
     #[test]
@@ -1384,23 +1416,20 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let home = tempfile::tempdir()?;
         let tom: Identity = "tom.example".into();
-        let f = Followed::start(home.path(), |m| {
+        let f = Marked::start(home.path(), |m| {
             (m.on, m.unopenable) = (vec!["tom.example".into()], vec!["tom.example".into()]);
         })?;
         let checks = || -> Result<(), Box<dyn std::error::Error>> {
             f.started.wait_all("its own folder syncs, alone", &alone)?;
             let said = words::share_unopened(&tom, &"no token yet");
-            let told =
-                |status: &AccountStatus| status.recent.iter().filter(|n| n.text == said).count();
             f.started
-                .wait_all("said why", &|status, _| told(status) == 1)?;
+                .wait_all("said why", &|_, _| f.started.said(&said) == 1)?;
             assert!(!f.folder.join("Shared").exists());
 
             // It can be opened: tried again by itself (no marker changed), and synced.
             lock(&f.markers).unopenable.clear();
             f.started.wait_all("the share is synced", &both_synced)?;
-            let (status, _) = f.started.account.status();
-            assert_eq!(told(&status), 1, "said once: {:?}", status.recent);
+            assert_eq!(f.started.said(&said), 1, "said once");
             assert!(lock(&f.markers).opens >= 2);
             Ok(())
         };

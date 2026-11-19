@@ -565,20 +565,30 @@ included (service managers restart it then).
   and starts in the new place once it has ended (the folder is found again by its marker).
 
   **Whose shares are synced** follows the identity's share markers (node schema, "Sync
-  markers"): read as the account starts, and again whenever one changed (the notification
-  socket tells a marker's event as its own, `Event::Markers`, **[inferred]** from a node's
-  event: it carries the file's type) or the notifications connected again (a change while
-  not connected isn't announced). No timer reads them.
+  markers"). They are read:
+  - whenever one changed: the notification socket tells a marker's event as its own
+    (`Event::Markers`, **[inferred]** from a node's event: it carries the file's type);
+  - whenever the drive is read for what wasn't announced (a marker's change isn't then
+    either): as the notifications connect, at the resume where they connected while
+    paused, and on the timer while not connected (5 minutes);
+  - at the account's start only where it has no notifications (they tell as they connect).
+
+  One request a read; no timer of their own. Never while the account is paused, and never
+  on the account's thread: a thread of its own reads them and opens shares (one at a time),
+  and the account takes its answers as messages. What they say:
   - A share a marker turns on is opened and synced. The main folder's runner started while
-    nothing was shared holds no folder of shares: it is started again to make one (one
-    opening of the main folder, when the account's first share comes).
+    nothing was shared, and nothing had been (no folder of shares on record), holds no
+    folder of shares: it is started again to make one, once, when the account's first
+    share comes. From then on it holds one from its start.
   - A share a marker turns off has its runner stopped. What it synced stays where it is, in
     the folder of shares (not yet removed: that comes with guards of its own).
   - A share whose marker doesn't read stays as it is, and so does every share while the
     markers can't be read at all (read again after a pause, 5 s doubling to 5 minutes):
     never taken for turned off.
   - A share that can't be opened is left out, said once in a note, and tried again by itself
-    (the same pauses); the account's own folders and its other shares sync on.
+    (the same pauses); the account's own folders and its other shares sync on. One that
+    can't be synced here at all (no folder can have its sharer's name, or another share's
+    folder has it) isn't opened: said in the log.
 
   Not in the released daemon yet: opening another identity's drive takes a token of its own
   that has to be kept (a new one each start would leave a row on the sharer's server each

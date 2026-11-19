@@ -2,7 +2,8 @@
 //! after a pause, backing off; one whose folder was removed stops for good.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{Sender, channel};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -10,7 +11,8 @@ use hbsync_state::Unusable;
 
 use std::path::Path;
 
-use super::parts::{Share, Sharers};
+use super::Msg;
+use super::parts::{Share, Sharers, Synced};
 use crate::runner::{Backoff, Command, Handle, RunnerError};
 use crate::{Identity, Root};
 
@@ -60,160 +62,277 @@ pub(super) struct Sharing {
 }
 
 /// What the identity's share markers say, followed on the account's thread: read when due,
-/// each share they turn on opened (tried again while it can't be).
+/// each share they turn on opened (tried again while it can't be). The reading and the
+/// opening ask the identity, and another's: done by a thread of their own
+/// ([`Sharers`]' calls), whose answers come to the account as messages
+/// ([`Msg::Sharers`]): its thread never waits for them.
 pub(super) struct Markers {
-    source: Option<Box<dyn Sharers>>,
-    /// When to read them (again): at the start, as one changed, after a read that failed.
-    pub(super) read_at: Option<Instant>,
+    /// What the worker is asked; `None`: nothing says whose shares are synced.
+    jobs: Option<Sender<Job>>,
+    /// Told apart from another account run's, whose answers may still come.
+    id: u64,
+    /// When to read them (again): as one changed or may have, after a read that failed.
+    read_at: Option<Instant>,
+    /// A read is under way; `again`: and something changed since it was asked.
+    reading: bool,
+    again: bool,
     read_backoff: Backoff,
     /// Shares to open: turned on, and not opened yet.
     opening: Vec<Opening>,
+    /// Shares turned on that can't be synced here (no folder can have the name, or another
+    /// share has it): said, and not opened, while their markers say so.
+    left_out: Vec<Identity>,
 }
 
 struct Opening {
     sharer: Identity,
-    at: Instant,
+    /// The name of its folder here.
+    local: String,
+    /// When to try (again); `None`: being tried.
+    at: Option<Instant>,
     backoff: Backoff,
     /// Why it can't be opened was told.
     told: bool,
 }
 
-/// What following the markers changed ([`Markers::follow`]).
-#[derive(Default)]
-pub(super) struct Followed {
-    /// The shares to run changed.
-    pub(super) changed: bool,
-    /// For the account's status: a share that can't be opened, said once.
-    pub(super) notes: Vec<String>,
+enum Job {
+    Read(Vec<Identity>),
+    Open(Identity),
+}
+
+/// What the worker found ([`Markers::answer`]).
+pub(crate) enum Answer {
+    Told(Result<Synced, RunnerError>),
+    Opened(Identity, Result<Share, RunnerError>),
 }
 
 impl Markers {
-    pub(super) fn new(source: Option<Box<dyn Sharers>>, now: Instant) -> Markers {
+    /// `source`'s markers, followed; its answers sent by `tell`. Read at once when
+    /// `read_now`; else first when the account says they may have changed
+    /// ([`Markers::changed`]: as its notifications connect).
+    pub(super) fn new(
+        source: Option<Box<dyn Sharers>>,
+        tell: Sender<Msg>,
+        read_now: bool,
+        now: Instant,
+    ) -> Markers {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let jobs = source.and_then(|source| {
+            let (jobs, asked) = channel::<Job>();
+            let work = move || {
+                for job in asked {
+                    let answer = match job {
+                        Job::Read(synced) => Answer::Told(source.told(&synced)),
+                        Job::Open(sharer) => {
+                            let opened = source.open(&sharer);
+                            Answer::Opened(sharer, opened)
+                        }
+                    };
+                    if tell.send(Msg::Sharers(id, Box::new(answer))).is_err() {
+                        break;
+                    }
+                }
+            };
+            let spawned = std::thread::Builder::new()
+                .name("hbsync-sharers".into())
+                .spawn(work);
+            match spawned {
+                Ok(_) => Some(jobs),
+                Err(e) => {
+                    tracing::error!("no thread to read the share markers on ({e}): none synced");
+                    None
+                }
+            }
+        });
         Markers {
-            read_at: source.as_ref().map(|_| now),
-            source,
+            read_at: jobs.as_ref().filter(|_| read_now).map(|_| now),
+            jobs,
+            id,
+            reading: false,
+            again: false,
             read_backoff: Backoff::new(),
             opening: Vec::new(),
+            left_out: Vec::new(),
         }
     }
 
-    /// A marker changed, or may have (the notifications connected again): read at once.
+    /// Whether anything says whose shares are synced.
+    pub(super) fn any(&self) -> bool {
+        self.jobs.is_some()
+    }
+
+    /// A marker changed, or may have (the drive is read for what wasn't announced): read.
     pub(super) fn changed(&mut self, now: Instant) {
-        if self.source.is_some() {
-            self.read_at = Some(now);
+        match self.reading {
+            true => self.again = true,
+            false if self.jobs.is_some() => self.read_at = Some(now),
+            false => {}
         }
     }
 
-    /// When to [`Markers::follow`] at the latest: a read, or a share to try opening again.
-    pub(super) fn deadline(&self) -> Option<Instant> {
-        let opening = self.opening.iter().map(|o| o.at);
-        self.read_at.into_iter().chain(opening).min()
+    /// When to [`Markers::ask`] at the latest: a read, or a share to try opening again.
+    /// Never while `paused`: nothing is asked then.
+    pub(super) fn deadline(&self, paused: bool) -> Option<Instant> {
+        let opening = self.opening.iter().filter_map(|o| o.at);
+        (self.read_at.into_iter().chain(opening).min()).filter(|_| !paused)
     }
 
-    /// Reads the markers if due, and has `shares` follow them: one they turn off is marked
-    /// ([`Sharing::off`]: its runner stops, and it goes), one they are unsure of stays, one
-    /// they turn on is opened and added (now, or at a later call while it can't be). While
-    /// they can't be read, all stays as it is.
-    pub(super) fn follow(&mut self, shares: &mut Vec<Sharing>, now: Instant) -> Followed {
-        let mut followed = Followed::default();
-        let Some(source) = &self.source else {
-            return followed;
+    /// Asks the worker for what is due: a read of the markers (`synced`: whose shares are
+    /// synced now), and each share to open.
+    pub(super) fn ask(&mut self, synced: &[Sharing], now: Instant) {
+        let Some(jobs) = &self.jobs else {
+            return;
         };
-        if self.read_at.is_some_and(|at| now >= at) {
-            let synced: Vec<Identity> = shares.iter().map(|s| s.share.sharer.clone()).collect();
-            match source.told(&synced) {
-                Ok(told) => {
-                    (self.read_at, self.read_backoff) = (None, Backoff::new());
-                    for share in shares.iter_mut() {
-                        let sharer = &share.share.sharer;
-                        let off = !told.on.contains(sharer) && !told.unsure.contains(sharer);
-                        if off != share.off {
-                            let now_is = if off {
-                                "no longer synced"
-                            } else {
-                                "synced again"
-                            };
-                            tracing::info!("what {sharer} shares is {now_is}, by its marker");
-                            (share.off, followed.changed) = (off, true);
+        if !self.reading && self.read_at.is_some_and(|at| now >= at) {
+            let synced = synced.iter().map(|s| s.share.sharer.clone()).collect();
+            (self.read_at, self.again) = (None, false);
+            self.reading = jobs.send(Job::Read(synced)).is_ok();
+        }
+        for opening in &mut self.opening {
+            if opening.at.is_some_and(|at| now >= at)
+                && jobs.send(Job::Open(opening.sharer.clone())).is_ok()
+            {
+                opening.at = None;
+            }
+        }
+    }
+
+    /// Takes the worker's `answer` (of the run `id`), and has `shares` follow it: one the
+    /// markers turn off is marked ([`Sharing::off`]: its runner stops, and it goes), one
+    /// they are unsure of stays, one they turn on is to be opened, and added once it is.
+    /// While they can't be read, all stays as it is. What to tell on the account's status.
+    pub(super) fn answer(
+        &mut self,
+        id: u64,
+        answer: Answer,
+        shares: &mut Vec<Sharing>,
+        now: Instant,
+    ) -> Vec<String> {
+        // (Another run's: its shares aren't this one's to sync.)
+        if id != self.id {
+            return Vec::new();
+        }
+        match answer {
+            Answer::Told(Ok(told)) => {
+                (self.reading, self.read_backoff) = (false, Backoff::new());
+                self.read_at = self.again.then_some(now);
+                self.told(told, shares, now);
+            }
+            Answer::Told(Err(e)) => {
+                let pause = self.read_backoff.next();
+                tracing::warn!(
+                    "the share markers can't be read ({e}): what is synced stays as it is; \
+                     read again in {pause:?}"
+                );
+                (self.reading, self.read_at) = (false, Some(now + pause));
+            }
+            Answer::Opened(sharer, opened) => {
+                // (Turned off since it was asked for: not synced.)
+                let Some(i) = self.opening.iter().position(|o| o.sharer == sharer) else {
+                    return Vec::new();
+                };
+                match opened {
+                    Ok(share) => {
+                        let opening = self.opening.swap_remove(i);
+                        if let Some(new) = Sharing::at(share, opening.local, shares) {
+                            shares.push(new);
                         }
                     }
-                    self.opening.retain(|o| told.on.contains(&o.sharer));
-                    for sharer in told.on {
-                        let known = shares.iter().any(|s| s.share.sharer == sharer)
-                            || self.opening.iter().any(|o| o.sharer == sharer);
-                        if !known {
-                            let (backoff, told) = (Backoff::new(), false);
-                            let at = now;
-                            self.opening.push(Opening {
-                                sharer,
-                                at,
-                                backoff,
-                                told,
-                            });
+                    Err(e) => {
+                        let opening = &mut self.opening[i];
+                        let pause = opening.backoff.next();
+                        tracing::warn!(
+                            "what {sharer} shares can't be opened ({e}): trying again in {pause:?}"
+                        );
+                        opening.at = Some(now + pause);
+                        if !std::mem::replace(&mut opening.told, true) {
+                            return vec![crate::words::share_unopened(&sharer, &e)];
                         }
                     }
-                }
-                Err(e) => {
-                    let pause = self.read_backoff.next();
-                    tracing::warn!(
-                        "the share markers can't be read ({e}): what is synced stays as it \
-                         is; read again in {pause:?}"
-                    );
-                    self.read_at = Some(now + pause);
                 }
             }
         }
-        // Each share to open that is due; one that can't be is tried again, the others and
-        // the account's own folders syncing on.
-        let mut waiting = Vec::new();
-        for mut opening in std::mem::take(&mut self.opening) {
-            if now < opening.at {
-                waiting.push(opening);
+        Vec::new()
+    }
+
+    /// What the markers say, `told`, followed by `shares` and by what is to be opened.
+    fn told(&mut self, told: Synced, shares: &mut [Sharing], now: Instant) {
+        for share in shares.iter_mut() {
+            let sharer = &share.share.sharer;
+            let off = !told.on.contains(sharer) && !told.unsure.contains(sharer);
+            if off != share.off {
+                let now_is = if off {
+                    "no longer synced"
+                } else {
+                    "synced again"
+                };
+                tracing::info!("what {sharer} shares is {now_is}, by its marker");
+                share.off = off;
+            }
+        }
+        self.opening.retain(|o| told.on.contains(&o.sharer));
+        self.left_out.retain(|sharer| told.on.contains(sharer));
+        for sharer in told.on {
+            let known = shares.iter().any(|s| s.share.sharer == sharer)
+                || self.opening.iter().any(|o| o.sharer == sharer)
+                || self.left_out.contains(&sharer);
+            if known {
                 continue;
             }
-            match source.open(&opening.sharer) {
-                Ok(share) => {
-                    if let Some(share) = Sharing::new(share).filter(|new| new.fits(shares)) {
-                        shares.push(share);
-                        followed.changed = true;
-                    }
-                }
-                Err(e) => {
-                    let pause = opening.backoff.next();
-                    let sharer = &opening.sharer;
-                    tracing::warn!(
-                        "what {sharer} shares can't be opened ({e}): trying again in {pause:?}"
-                    );
-                    if !std::mem::replace(&mut opening.told, true) {
-                        followed
-                            .notes
-                            .push(crate::words::share_unopened(sharer, &e));
-                    }
-                    opening.at = now + pause;
-                    waiting.push(opening);
-                }
+            // Before it is opened: one that can't be synced here is never asked for.
+            let names = shares.iter().map(|s| &s.local);
+            let names = names.chain(self.opening.iter().map(|o| &o.local));
+            match Sharing::local(&sharer).filter(|local| free(local, &sharer, names)) {
+                Some(local) => self.opening.push(Opening {
+                    sharer,
+                    local,
+                    at: Some(now),
+                    backoff: Backoff::new(),
+                    told: false,
+                }),
+                None => self.left_out.push(sharer),
             }
         }
-        self.opening = waiting;
-        followed
     }
 }
 
+/// Whether `sharer`'s folder can be named `local`: none of `names` is that name, as names
+/// compare here. Two runners on one folder would each take the other's files for changes
+/// made here. Said where not.
+fn free<'a>(local: &str, sharer: &Identity, mut names: impl Iterator<Item = &'a String>) -> bool {
+    let key = hbsync_platform::name_key(local);
+    let free = !names.any(|name| hbsync_platform::name_key(name) == key);
+    if !free {
+        tracing::error!("what {sharer} shares isn't synced: its folder {local} is another share's");
+    }
+    free
+}
+
 impl Sharing {
-    /// `share` to run; `None` for a sharer whose name no folder here can have (told once).
-    pub(super) fn new(share: Share) -> Option<Sharing> {
+    /// The name of `sharer`'s folder here; `None` where no folder here can have its name
+    /// (said).
+    fn local(sharer: &Identity) -> Option<String> {
         let os = hbsync_platform::name::Os::current();
-        let local = match hbsync_namemap::to_local(share.sharer.as_str(), os) {
-            Ok(local) => local.name,
+        match hbsync_namemap::to_local(sharer.as_str(), os) {
+            Ok(local) => Some(local.name),
             Err(e) => {
                 tracing::error!(
-                    "what {} shares isn't synced: no folder here can have its name ({e:?})",
-                    share.sharer
+                    "what {sharer} shares isn't synced: no folder here can have its name ({e:?})"
                 );
-                return None;
+                None
             }
-        };
-        Some(Sharing {
+        }
+    }
+
+    /// `share` to run in a folder named `local`, beside `others`; `None` where one of them
+    /// is its sharer's, or has that name (said: [`free`]).
+    fn at(share: Share, local: String, others: &[Sharing]) -> Option<Sharing> {
+        let taken = others
+            .iter()
+            .any(|other| other.share.sharer == share.sharer);
+        let names = others.iter().map(|other| &other.local);
+        (!taken && free(&local, &share.sharer, names)).then(|| Sharing {
             share,
             local,
             retry: None,
@@ -222,34 +341,14 @@ impl Sharing {
         })
     }
 
-    /// Whether it can run beside `others`: its sharer isn't among them, nor its folder's
-    /// name (as names compare here). Two runners on one folder would each take the other's
-    /// files for changes made here. Said where not.
-    fn fits(&self, others: &[Sharing]) -> bool {
-        let key = hbsync_platform::name_key(&self.local);
-        let taken = |other: &Sharing| {
-            other.share.sharer == self.share.sharer
-                || hbsync_platform::name_key(&other.local) == key
-        };
-        let fits = !others.iter().any(taken);
-        if !fits {
-            tracing::error!(
-                "what {} shares isn't synced: its folder {} is another share's",
-                self.share.sharer,
-                self.local
-            );
-        }
-        fits
-    }
-
-    /// `shares` to run, each sharer once, each under a folder's name of its own: one more of
-    /// a sharer, or of a name another has (as names compare here), is left out, told once.
-    /// Two runners on one folder would each take the other's files for changes made here.
+    /// `shares` to run, each sharer once, each under a folder's name of its own: the others
+    /// are left out ([`Sharing::at`]).
     pub(super) fn each(shares: Vec<Share>) -> Vec<Sharing> {
         let mut each: Vec<Sharing> = Vec::new();
-        for share in shares.into_iter().filter_map(Sharing::new) {
-            if share.fits(&each) {
-                each.push(share);
+        for share in shares {
+            let local = Sharing::local(&share.sharer);
+            if let Some(new) = local.and_then(|local| Sharing::at(share, local, &each)) {
+                each.push(new);
             }
         }
         each
@@ -333,6 +432,96 @@ mod tests {
 
     use crate::protocol::State;
     use crate::runner::{Runner, RunnerConfig};
+
+    /// A source whose reads wait to be let through, counted; no share of its opens.
+    #[derive(Debug)]
+    struct Held {
+        reads: Arc<std::sync::atomic::AtomicUsize>,
+        through: std::sync::Mutex<std::sync::mpsc::Receiver<Synced>>,
+    }
+
+    impl Sharers for Held {
+        fn told(&self, _: &[Identity]) -> Result<Synced, RunnerError> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            let through = self.through.lock().map_err(|_| RunnerError::Panicked)?;
+            through.recv().map_err(|_| RunnerError::Panicked)
+        }
+
+        fn open(&self, _: &Identity) -> Result<Share, RunnerError> {
+            Err(std::io::Error::other("not here").into())
+        }
+    }
+
+    /// The markers are read off the account's thread, one read at a time: a change told
+    /// while one is under way has them read once more after it; the answer of another run
+    /// is passed over; a share that can't be opened is said once and tried again.
+    #[test]
+    fn markers_are_read_one_at_a_time_and_again_for_a_change_meanwhile()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (reads, tom): (Arc<std::sync::atomic::AtomicUsize>, Identity) =
+            (Arc::default(), "tom.example".into());
+        let (let_through, through) = channel();
+        let source = Held {
+            reads: Arc::clone(&reads),
+            through: std::sync::Mutex::new(through),
+        };
+        let (tell, told) = channel();
+        let start = Instant::now();
+        let mut markers = Markers::new(Some(Box::new(source)), tell, true, start);
+        let mut shares = Vec::new();
+        let wait = Duration::from_secs(10);
+        let answer = |markers: &mut Markers, shares: &mut Vec<Sharing>| {
+            let Msg::Sharers(id, answer) = told.recv_timeout(wait)? else {
+                return Err("another message".into());
+            };
+            Ok::<_, Box<dyn std::error::Error>>(markers.answer(id, *answer, shares, start))
+        };
+
+        // One read, however often it is asked for meanwhile.
+        assert_eq!(markers.deadline(false), Some(start));
+        assert_eq!(
+            markers.deadline(true),
+            None,
+            "nothing is asked while paused"
+        );
+        markers.ask(&shares, start);
+        markers.changed(start);
+        markers.ask(&shares, start);
+        assert_eq!(markers.deadline(false), None, "a read is under way");
+        // Another run's answer: passed over.
+        let other = Answer::Told(Ok(Synced::default()));
+        assert!(
+            markers
+                .answer(markers.id + 1, other, &mut shares, start)
+                .is_empty()
+        );
+        assert!(markers.reading);
+
+        // Its answer turns a share on; and it is read once more, for the change meanwhile.
+        let on = Synced {
+            on: vec![tom.clone()],
+            unsure: Vec::new(),
+        };
+        let_through.send(on.clone())?;
+        assert!(answer(&mut markers, &mut shares)?.is_empty());
+        assert_eq!(markers.opening.len(), 1);
+        markers.ask(&shares, start);
+        let_through.send(on)?;
+        // (The second read and the share's opening, in the order asked.)
+        assert!(answer(&mut markers, &mut shares)?.is_empty());
+        let said = answer(&mut markers, &mut shares)?;
+        assert_eq!(said, [crate::words::share_unopened(&tom, &"not here")]);
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+        assert!(!markers.reading && markers.read_at.is_none());
+
+        // The share is tried again after a pause, and not said again.
+        let again = markers.deadline(false).ok_or("no retry")?;
+        assert!(again > start);
+        markers.ask(&shares, again);
+        assert!(answer(&mut markers, &mut shares)?.is_empty());
+        assert!(shares.is_empty() && markers.opening.len() == 1);
+        Ok(())
+    }
 
     /// A runner that fails is to start again after a pause, unless its folder was removed or
     /// the account is ending.
