@@ -206,13 +206,48 @@ impl Reconciler<'_> {
         filter.names(names.map(String::as_str), true).is_sync()
     }
 
-    /// Whether this device holds anything of `node` or below it here (a local item, a base).
-    fn holds_any(&self, node: NodeId) -> bool {
+    /// Whether the drive has `node` live, and no folder's removal took it along.
+    fn live_on_drive(&self, node: NodeId) -> bool {
+        self.input.remote.contains(node) && !self.taken.contains(&node)
+    }
+
+    /// The folders the drive still has above `node` there, up to the first in the plan, are
+    /// not removed by this plan as ones this device stopped syncing (§10, rule 1): `node`,
+    /// which it doesn't remove, is live in them. A removal took it along: another device's
+    /// file, gone with the folder. Where `node` stays there (`stays`: left to other
+    /// devices), so do they, and their bases go (a folder that holds what isn't leaving
+    /// isn't leaving: only its base is dropped, rule 2); where it is on its way out
+    /// (recovered), their removal waits for the plan after, when it has left.
+    fn keep_folders_above(&mut self, node: NodeId, stays: bool) {
         let i = self.input;
-        self.merged
-            .subtree(node)
-            .iter()
-            .any(|n| i.local.contains(*n) || i.base.contains(*n))
+        let mut at = i.remote.get(node).map(|state| state.parent);
+        let mut seen = HashSet::new();
+        while let Some(folder) = at.filter(|f| seen.insert(*f)) {
+            if !self.live_on_drive(folder) || self.merged.exists(folder) {
+                break;
+            }
+            if self.scope.remove(&folder) {
+                let own = i.base.contains(folder) && !i.local.contains(folder);
+                if stays && own && !self.elsewhere(folder) {
+                    self.released.insert(folder);
+                } else if i.dirty.contains(&folder) {
+                    self.deferred.insert(folder);
+                }
+            }
+            at = i.remote.get(folder).map(|state| state.parent);
+        }
+    }
+
+    /// Whether this device holds anything of `node` or below it here: an item, in view. A
+    /// base alone is no hold: its item was deleted here, or is the device's own since a rule
+    /// hid it (§10, rule 1: the scanner no longer tells it), and either way nothing here is
+    /// the node's. Taken for one, a base from before a rule brought the node's folder back at
+    /// the place the device filters since, tried at every sync, for good (#427); and it sent
+    /// an orphan where the device doesn't sync it, to leave the drive from there. (Not told
+    /// from the base's place: the bases above it go with their folders, in any order.)
+    fn holds_any(&self, node: NodeId) -> bool {
+        let local = &self.input.local;
+        self.merged.subtree(node).iter().any(|n| local.contains(*n))
     }
 
     /// What is below `node`, connected to the top again at `path` (an orphan recovered, a
@@ -325,9 +360,10 @@ impl Reconciler<'_> {
                 None => match self.known_state(parent) {
                     // Its folder comes back for it (§6.3), but not at a place this device
                     // filters since the folder synced here (§10), for a node it holds nothing
-                    // of: the folder would take over the item this device keeps to itself, and
-                    // the node would come down into it and leave the drive with it. This device
-                    // forgets that folder, and the node is an orphan as below.
+                    // of ([`Self::holds_any`]: an item, never a base alone): the folder would
+                    // take over the item this device keeps to itself, and the node would come
+                    // down into it and leave the drive with it. This device forgets that
+                    // folder, and the node is an orphan as below.
                     Some(state)
                         if state.kind == NodeKind::Folder
                             && (self.holds_any(node) || self.syncs_place(&state)) =>
@@ -397,6 +433,7 @@ impl Reconciler<'_> {
                 }
                 Parent::Recover => {
                     if let Some(mut state) = self.merged.get(node).cloned() {
+                        self.keep_folders_above(node, false);
                         let path = self.recovered_path(node);
                         state.parent = self.recovered_files(node);
                         self.retarget(node, state);
@@ -417,6 +454,15 @@ impl Reconciler<'_> {
                     self.scope.remove(&node);
                     left.insert(node);
                     self.unadopt(node);
+                    self.keep_folders_above(node, true);
+                    // A base of it with no item here goes (nothing here is the node's, and
+                    // no base outlives what it tells of): as that of a node the drive still
+                    // has at a place this device filters since (§10, rule 2). Not one another
+                    // page plans: its own page decides it.
+                    let i = self.input;
+                    if i.base.contains(node) && !i.local.contains(node) && !self.elsewhere(node) {
+                        self.released.insert(node);
+                    }
                 }
                 Parent::LetGo => {
                     // Out of the merged tree, in the plan: its item here goes, and so do its

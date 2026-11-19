@@ -206,6 +206,9 @@ struct Reconciler<'a> {
     deferred: BTreeSet<NodeId>,
     /// Orphans the repairs move into Recovered files (§6.3): they lose a name clash there.
     adopted: HashSet<NodeId>,
+    /// Orphans left to the devices that sync where they would go, of which this device has a
+    /// base and no item: the base goes with this plan (nothing here is the node's).
+    released: BTreeSet<NodeId>,
     /// Remote nodes a folder's removal takes along ([`merge::taken_along`]).
     taken: HashSet<NodeId>,
     /// What would take a name what waits holds: waits as a file not hashed yet does
@@ -263,6 +266,7 @@ impl<'a> Reconciler<'a> {
             rejudge: BTreeSet::new(),
             deferred: BTreeSet::new(),
             adopted: HashSet::new(),
+            released: BTreeSet::new(),
             taken,
             name_takers: &waits.name_takers,
             waits: &waits.waits,

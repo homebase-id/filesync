@@ -304,8 +304,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
      §10) its orphan: something written into it (a live child, which keeps it) that the device
      holds nothing of is left as it is, the business of the devices that sync that place, which
      bring the folder back with it. Taken for an orphan, it was moved into Recovered files on
-     the drive, and the folder stayed deleted for the others. One the device holds goes as
-     before. Where no device syncs that place, such a node stays inside its removed folder,
+     the drive, and the folder stayed deleted for the others. One the device holds (an item
+     here, below) goes as before. Where no device syncs that place, such a node stays inside its removed folder,
      ignored everywhere and never deleted: the purge deletes removed nodes only, so it keeps
      the folder, restorable, while it holds a live node.
    - Nor is a folder made again (rule 3's "re-created") at a place the device filters since
@@ -318,10 +318,33 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
      stopped syncing. A device that still syncs the folder makes it again for the node (rule
      3): whichever writes first decides where the node is, and the other follows (the folder
      back on the drive is masked on the device that filters it). Known limit: a node the
-     device does hold (synced before the rule) that changed on the drive in that same window
-     still brings the folder back there, and what else is live in the folder may come down
-     with it. And below a folder that is live on the drive and masked, the folder and the
+     device has an item of, in view, whose folder the drive has at a place the device
+     filters (renamed there by another device, then gone) still brings the folder back
+     there. And below a folder that is live on the drive and masked, the folder and the
      node wait, as before.
+   - No plan removes a folder the drive still has over a node it leaves there, or moves out
+     of it: a folder that holds another device's change isn't leaving (§10, rule 2),
+     connected to the top or not, whether the device stopped syncing it (rule 1) or the
+     user deleted it here. Where an orphan is left to other devices, the folders above it
+     that the drive still has, and this plan would remove, stay, their bases dropped.
+     Where it is recovered, their removal waits for the plan after: cut short between the
+     two, the removal took the node along, another device's file gone from the drive and
+     from that device. (A folder left so is an orphan itself where its own folder is gone
+     for good, to any device that syncs where it would go: it comes back there, empty of
+     what the device filters, as §10 rule 3 has it for a folder with masked children.)
+   - **What a device holds of a node** (in the bullets here): an item of it here, in view. A
+     base alone is no hold: its item was deleted here, or is the device's own since a rule
+     hid it (§10, rule 1: the scanner no longer tells it). So a node the device synced in a
+     folder before it filtered that folder, which another device changed in that window
+     (which keeps it on the drive; unchanged, it leaves the drive, rule 1), is to these
+     rules one the device never synced: its folder isn't made again for it, and it goes
+     into Recovered files in the drive's version, or is left where the device doesn't sync
+     that; left, its base goes with that plan (nothing here is the node's: as that of a
+     node the drive still has at the filtered place, §10 rule 2). Taken for a hold, the base brought the folder back at the filtered place, where
+     the node couldn't come down onto the name of the item the device keeps: tried again at
+     every sync, for good, where no other device repaired the drive (#427). Nothing is told
+     from where a base is: the bases of the folders above it go with those folders, in any
+     order, and a base whose place could no longer be told would be a hold again.
    - A folder that leaves the picture for good (deleted outright, announced) while nodes are
      live in it plans those again: they are orphans now, whichever of them changed.
 4. **Folder delete propagation** removes the folder on the drive first, then its descendants,

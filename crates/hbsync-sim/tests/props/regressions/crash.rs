@@ -678,3 +678,104 @@ fn regression_a_folder_ignored_since_isnt_made_again_for_what_the_drive_kept_of_
         assert!(sim.local_paths(c).is_empty(), "{:?}", sim.local_paths(c));
     }
 }
+
+/// As above, for a file the client synced in the folder before it ignored it (it holds a base
+/// of it). Client 0 makes the folder `d` with the file `a` in it, and both sync. On the drive,
+/// by other hands, `d` is put into the file `a` (no place any more), deleted with the delete
+/// stopped before `a`, and `a` is edited: live, in a folder that is nowhere. Client 0 starts
+/// ignoring `d`. It doesn't make `d` again for `a` at the place it filters: it forgets the
+/// folder, and `a` is an orphan like any other. No other client repairs the drive here
+/// (client 1 ignores `d` too, client 2 is read-only): client 0 made the folder again at
+/// every sync, on the name of the one it keeps to itself, and fetched the file each time,
+/// never idle (#427, `cc 932646ec…` of `a_read_only_folder_plans_as_the_sim_on_the_engines_path`).
+#[test]
+fn regression_nor_is_it_made_again_for_a_file_synced_there_before() {
+    use Action::*;
+    let act = |action| Event::Act { client: 0, action };
+    let mut sim = Sim::new(3).with_read_only(2).with_split_downloads();
+    sim.verbose = true;
+    sim.run(&[
+        act(CreateFolder {
+            parent: 0,
+            name: 13,
+        }),
+        act(CreateJunkFolder { parent: 0 }),
+        act(CreateFile { parent: 3, name: 0 }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        Event::Step { client: 0 },
+    ]);
+    assert_eq!(sim.server_paths(), ["d", "d/a"]);
+    sim.run(&[
+        act(IntoFile { pick: 8, file: 0 }),
+        act(DeleteStopped { pick: 0, done: 6 }),
+        act(EditTaken { pick: 0 }),
+        act(ToggleIgnore),
+    ]);
+    assert!(sim.quiesce(30), "{:#?}", sim.trace);
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    // The file is in Recovered files, on the drive and on every client; what client 0 keeps
+    // to itself is as it was.
+    let recovered = ["Recovered files", "Recovered files/a"];
+    assert_eq!(sim.server_paths(), recovered);
+    let kept = ["d", "d/$RECYCLE.BIN", "d/$RECYCLE.BIN/x", "d/a"];
+    assert_eq!(sim.local_paths(0), [&recovered[..], &kept[..]].concat());
+    for c in 1..3 {
+        assert_eq!(sim.local_paths(c), recovered, "client {c}");
+    }
+}
+
+/// A folder the drive still has, between a folder that is gone and a file another client
+/// changed. Client 2 makes `d`, `d/b` in it and the file `d/b/a`; all sync. Client 0 starts
+/// ignoring `d`; client 2 edits `a`; another app deletes `d` outright, so `b` and `a` stay
+/// live, with no folder. Client 0 doesn't remove `b` as a folder it stopped syncing in the
+/// plan that moves client 2's file out of it (cut short between the two, the removal took
+/// the file along: client 2's edit, gone from the drive and from client 2). The file ends in
+/// Recovered files, with client 2's edit, on the drive and on client 2.
+#[test]
+fn regression_a_folder_still_on_the_drive_isnt_removed_over_another_clients_file() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let mut sim = Sim::new(3);
+    sim.verbose = true;
+    sim.run(&[act(
+        2,
+        CreateFolder {
+            parent: 0,
+            name: 13,
+        },
+    )]);
+    let d = sim.item(2, "d").expect("d");
+    let parent = sim.pick(2, d, true).expect("d's pick");
+    sim.run(&[act(2, CreateFolder { parent, name: 1 })]);
+    let b = sim.item(2, "d/b").expect("d/b");
+    let parent = sim.pick(2, b, true).expect("b's pick");
+    sim.run(&[act(2, CreateFile { parent, name: 0 })]);
+    assert!(sim.quiesce(30), "{:#?}", sim.trace);
+    assert_eq!(sim.local_paths(0), ["d", "d/b", "d/b/a"]);
+    let a = sim.item(2, "d/b/a").expect("a");
+    let file = sim.file_pick(2, a).expect("a's pick");
+    let pick = sim.stopped_pick(d).expect("d's pick on the drive");
+    sim.run(&[
+        act(0, ToggleIgnore),
+        act(2, Edit { file }),
+        Event::Plan { client: 2 },
+        Event::Step { client: 2 },
+        act(1, DeleteOutright { pick }),
+    ]);
+    // (Live, with no folder: at no path.)
+    assert!(sim.server_paths().is_empty(), "{:?}", sim.server_paths());
+    assert!(sim.quiesce(30), "{:#?}", sim.trace);
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    // (By itself, or in its folder, as the clients' turns have it.)
+    let server = sim.server_paths();
+    assert!(server.iter().any(|p| p.ends_with("/a")), "{server:?}");
+    let recovered = |p: &String| p.starts_with("Recovered files");
+    assert!(server.iter().all(recovered), "{server:?}");
+    assert_eq!(sim.local_paths(2), server);
+    // (Client 0 keeps what it ignores to itself.)
+    let own = sim.local_paths(0);
+    for path in ["d", "d/b", "d/b/a"] {
+        assert!(own.iter().any(|p| p == path), "{own:?}");
+    }
+}

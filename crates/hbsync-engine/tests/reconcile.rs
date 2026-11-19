@@ -1500,6 +1500,402 @@ fn a_folder_below_one_a_new_rule_hides_isnt_made_again_either() {
     assert!(makes(&plan, p) && makes(&plan, b), "{plan:?}");
 }
 
+/// A file this device synced in `build` before a rule hid it, which another device changed
+/// since: the folder is gone on both sides (for good on the drive; no longer reported here),
+/// the file no longer reported here, and edited on the drive, which kept it. This device has
+/// a base of it and nothing else.
+fn held_from_before(mut w: World, b: NodeId, f: NodeId) -> World {
+    w.input.remote_complete = true;
+    w.synced(b, folder(ROOT, "build"));
+    w.synced(f, file(b, "out.o", "o"));
+    w.local(b, None).remote(b, None).local(f, None);
+    w.remote(f, Some(file(b, "out.o", "o2")));
+    w
+}
+
+/// Whether `plan` leaves `node` as it is, here and on the drive: nothing done to it but its
+/// base dropped (a forget that takes nothing here with it).
+fn leaves(plan: &hbsync_engine::Plan, node: NodeId) -> bool {
+    let its: Vec<&Op> = plan.ops.iter().filter(|op| op.node() == node).collect();
+    matches!(its[..], [Op::Forget { subtree, .. }] if subtree.is_empty())
+}
+
+/// As above, for a file this device synced there before the rule (it has a base of it; its
+/// item is its own now, no longer reported), which another device changed since: a base
+/// alone is no hold, so the folder isn't made again for it either.
+/// Made again, its name is taken by the item the device keeps: tried at every sync, for good
+/// (#427). The file is an orphan like any other: into Recovered files, in its version on the
+/// drive.
+#[test]
+fn nor_is_it_made_again_for_a_file_synced_there_before_the_rule() {
+    let [b, f] = ids(2)[..] else { unreachable!() };
+    let plan = held_from_before(World::ignoring_build(), b, f).plan();
+    assert!(!makes(&plan, b), "{plan:?}");
+    assert!(makes(&plan, NodeId::RECOVERED), "{plan:?}");
+    let moved = plan.ops.iter().find_map(|op| match op {
+        Op::RemoteUpdate { node, parent, .. } if *node == f => Some(*parent),
+        _ => None,
+    });
+    assert_eq!(moved, Some(NodeId::RECOVERED), "{plan:?}");
+    let kinds = kinds(&plan.ops);
+    assert!(kinds.contains(&"download"), "{plan:?}");
+    assert!(
+        !kinds.contains(&"delete"),
+        "nothing leaves the drive: {plan:?}"
+    );
+    // (The other device's edit wins over what reads as this device's delete, by the merge's
+    // own rule, said as such.)
+    let conflicts = [
+        Conflict::EditDelete { node: f },
+        Conflict::Orphan { node: f },
+    ];
+    assert_eq!(plan.conflicts, conflicts, "{plan:?}");
+    // Without the rule, the file keeps its folder: made again.
+    let plan = held_from_before(World::default(), b, f).plan();
+    assert!(makes(&plan, b), "{plan:?}");
+    assert_eq!(
+        plan.conflicts,
+        [Conflict::EditDelete { node: f }],
+        "{plan:?}"
+    );
+}
+
+/// With a second rule that hides the file wherever it is (`*.o`): Recovered files is no place
+/// this device syncs it at either, so the file is left as it is, on the drive, for a device
+/// that syncs it (§6.3, "Only into a place the device syncs"), and the base of it goes (no
+/// base outlives what it tells of). Taken for held, it went into Recovered files and came
+/// down there, unreported from then on: an item the device stopped syncing, which left the
+/// drive, the other device's edit with it.
+#[test]
+fn a_file_synced_before_the_rule_isnt_recovered_to_where_a_rule_hides_it() {
+    let [b, f] = ids(2)[..] else { unreachable!() };
+    let w = World {
+        filter: ignoring("build/\n*.o\n"),
+        ..World::default()
+    };
+    let plan = held_from_before(w, b, f).plan();
+    assert!(
+        !makes(&plan, b) && !makes(&plan, NodeId::RECOVERED),
+        "{plan:?}"
+    );
+    assert!(leaves(&plan, f), "{plan:?}");
+}
+
+/// So too where Recovered files itself is known from before only, in the folder the rule
+/// hides (the user had moved it there): where it would come back to isn't known down from
+/// the top, so there is no place to recover to. A file taken for held was sent into it,
+/// found no folder there (none is made again at a place the device filters), and was
+/// recovered into it again: a plan that never ended.
+#[test]
+fn nor_into_recovered_files_where_the_rule_hides_that_too() {
+    let [b, f] = ids(2)[..] else { unreachable!() };
+    let recovered = NodeId::RECOVERED;
+    let mut w = held_from_before(World::ignoring_build(), b, f);
+    w.synced(recovered, folder(b, "Recovered files"));
+    w.local(recovered, None).remote(recovered, None);
+    let plan = w.plan();
+    assert!(!makes(&plan, b) && !makes(&plan, recovered), "{plan:?}");
+    assert!(leaves(&plan, f), "{plan:?}");
+}
+
+/// And where a rule hides Recovered files itself, known from before at the top and gone
+/// since: no place this device syncs, the file left.
+#[test]
+fn nor_into_recovered_files_where_a_rule_hides_it_at_the_top() {
+    let [b, f] = ids(2)[..] else { unreachable!() };
+    let recovered = NodeId::RECOVERED;
+    let w = World {
+        filter: ignoring("build/\nRecovered files/\n"),
+        ..World::default()
+    };
+    let mut w = held_from_before(w, b, f);
+    w.synced(recovered, folder(ROOT, "Recovered files"));
+    w.local(recovered, None).remote(recovered, None);
+    let plan = w.plan();
+    assert!(!makes(&plan, b) && !makes(&plan, recovered), "{plan:?}");
+    assert!(leaves(&plan, f), "{plan:?}");
+}
+
+/// And where the folder is in Recently deleted (masked, where this device filters it), the
+/// file written since its removal: left for the devices that sync that place, which bring the
+/// folder back with it (§6.3, "Nor is what is in a folder in Recently deleted …"). Taken for
+/// held, it was moved into Recovered files, and the folder stayed deleted for the others.
+#[test]
+fn nor_is_it_recovered_from_a_removed_folder_the_rule_hides() {
+    let [b, f] = ids(2)[..] else { unreachable!() };
+    let mut w = held_from_before(World::ignoring_build(), b, f);
+    let removed = hbsync_engine::reconcile::Removed {
+        at: 1,
+        state: folder(ROOT, "build"),
+    };
+    w.input.removed.insert(b, removed);
+    // (Written after the removal: not taken along by it.)
+    w.input.changed_at.insert(f, 10);
+    let plan = w.plan();
+    assert!(
+        !makes(&plan, b) && !makes(&plan, NodeId::RECOVERED),
+        "{plan:?}"
+    );
+    assert!(leaves(&plan, f), "{plan:?}");
+}
+
+/// The file of [`held_from_before`] once its folder's base is gone (settled away by an
+/// earlier plan, the file's still there: its delete was held, or skipped), under the two
+/// rules; with an item of it here (`here`) or without.
+fn folder_base_gone(b: NodeId, f: NodeId, here: bool) -> World {
+    let mut w = World {
+        filter: ignoring("build/\n*.o\n"),
+        ..World::default()
+    };
+    w.input.remote_complete = true;
+    w.synced(f, file(b, "out.o", "o"));
+    if !here {
+        w.local(f, None);
+    }
+    w.remote(f, Some(file(b, "out.o", "o2")));
+    w
+}
+
+/// Whether `plan` moves `node` into Recovered files on the drive.
+fn recovers(plan: &hbsync_engine::Plan, node: NodeId) -> bool {
+    let into = |op: &Op| matches!(op, Op::RemoteUpdate { node: n, parent, .. } if *n == node && *parent == NodeId::RECOVERED);
+    plan.ops.iter().any(into)
+}
+
+/// And once the folder's base is gone, the file's still there: the file is no more held for
+/// that, and is left still. (Nothing is told from where a base is: the bases above it go in
+/// any order.)
+#[test]
+fn nor_once_its_folders_base_is_gone() {
+    let [b, f] = ids(2)[..] else { unreachable!() };
+    let plan = folder_base_gone(b, f, false).plan();
+    assert!(
+        !makes(&plan, b) && !makes(&plan, NodeId::RECOVERED),
+        "{plan:?}"
+    );
+    assert!(leaves(&plan, f), "{plan:?}");
+}
+
+/// What a device holds is an item here: with one (an input the scanner wouldn't give under
+/// these rules: it pins the definition), the same file is held, and recovered as before.
+#[test]
+fn an_item_here_is_a_hold_where_a_base_alone_is_none() {
+    let [b, f] = ids(2)[..] else { unreachable!() };
+    let plan = folder_base_gone(b, f, true).plan();
+    assert!(recovers(&plan, f), "{plan:?}");
+    assert_eq!(plan.conflicts, [Conflict::Orphan { node: f }], "{plan:?}");
+}
+
+/// The file of [`held_from_before`] in a folder `sub` of `build` that the drive still has
+/// (the delete of `build` stopped there), as it synced here: under `rules`.
+fn in_a_folder_still_there(rules: &str, b: NodeId, sub: NodeId, f: NodeId) -> World {
+    let mut w = World {
+        filter: ignoring(rules),
+        ..World::default()
+    };
+    w.input.remote_complete = true;
+    w.synced(b, folder(ROOT, "build"));
+    w.synced(sub, folder(b, "sub"));
+    w.synced(f, file(sub, "out.o", "o"));
+    w.local(b, None).remote(b, None);
+    w.local(sub, None).local(f, None);
+    w.remote(f, Some(file(sub, "out.o", "o2")));
+    w
+}
+
+/// Whether `plan` deletes `node` from the drive.
+fn deletes_on_drive(plan: &hbsync_engine::Plan, node: NodeId) -> bool {
+    let deleted = |op: &Op| matches!(op, Op::RemoteDelete { node: n, .. } if *n == node);
+    plan.ops.iter().any(deleted)
+}
+
+/// A folder the drive still has, between the folder that is gone and the file: it isn't
+/// removed as one this device stopped syncing in the plan that moves the other device's file
+/// out of it (cut short between the two, the removal took the file along: the other device's
+/// edit, gone with it). The file is recovered; the folder's removal waits for the plan after.
+#[test]
+fn a_folder_still_on_the_drive_isnt_removed_over_another_devices_file() {
+    let [b, sub, f] = ids(3)[..] else {
+        unreachable!()
+    };
+    let plan = in_a_folder_still_there("build/\n", b, sub, f).plan();
+    assert!(
+        !deletes_on_drive(&plan, sub) && !deletes_on_drive(&plan, f),
+        "{plan:?}"
+    );
+    assert!(!makes(&plan, b) && !makes(&plan, sub), "{plan:?}");
+    assert!(recovers(&plan, f), "{plan:?}");
+    assert!(plan.deferred.contains(&sub), "{plan:?}");
+}
+
+/// With a second rule that hides the file's name everywhere (`*.o`), the file is left where
+/// it is, and the folder stays on the drive with it (a folder that holds what isn't leaving
+/// isn't leaving, §10 rule 2): the bases of both go. Removed, the folder took the file
+/// along.
+#[test]
+fn nor_where_a_second_rule_hides_the_file_in_it() {
+    let [b, sub, f] = ids(3)[..] else {
+        unreachable!()
+    };
+    let plan = in_a_folder_still_there("build/\n*.o\n", b, sub, f).plan();
+    assert!(
+        !deletes_on_drive(&plan, sub) && !deletes_on_drive(&plan, f),
+        "{plan:?}"
+    );
+    assert!(!makes(&plan, NodeId::RECOVERED), "{plan:?}");
+    assert!(leaves(&plan, sub) && leaves(&plan, f), "{plan:?}");
+}
+
+/// Whether `plan` makes or fills anything here in the folder `folder`: a place this device
+/// filters, in these tests.
+fn brings_into(plan: &hbsync_engine::Plan, folder: NodeId) -> bool {
+    let into = |op: &Op| match op {
+        Op::LocalMkdir { node, parent, .. } => *node == folder || *parent == folder,
+        Op::LocalDownload { parent, .. } | Op::LocalMove { parent, .. } => *parent == folder,
+        _ => false,
+    };
+    plan.ops.iter().any(into)
+}
+
+/// A folder the drive has at a place (its folder is in the plan) that this device filters
+/// since it renamed that folder. Nothing is made or
+/// brought down into it here (unreported from then on, it left the drive at the next sync:
+/// another device's new file, deleted). The file is recovered, as before; and the folder
+/// isn't removed in the plan that moves the file out of it (cut short between the two, the
+/// removal took the file along): that waits for the plan after.
+#[test]
+fn a_folder_at_a_place_this_device_filters_isnt_filled_here() {
+    let [x, cache, c1, f] = ids(4)[..] else {
+        unreachable!()
+    };
+    let mut w = World {
+        filter: ignoring("a/cache/\n"),
+        ..World::default()
+    };
+    w.input.remote_complete = true;
+    w.synced(x, folder(ROOT, "x"));
+    w.synced(cache, folder(x, "cache"));
+    w.synced(c1, file(cache, "c1", "1"));
+    // Renamed here: `cache` is hidden now, with what is in it.
+    w.local(x, Some(folder(ROOT, "a")));
+    w.local(cache, None).local(c1, None);
+    // Another device added a file to it.
+    w.remote(f, Some(file(cache, "f", "new")));
+    let plan = w.plan();
+    assert!(!brings_into(&plan, cache), "{plan:?}");
+    assert!(recovers(&plan, f), "{plan:?}");
+    assert!(!deletes_on_drive(&plan, cache), "{plan:?}");
+    assert!(!deletes_on_drive(&plan, f), "{plan:?}");
+    assert!(plan.deferred.contains(&cache), "{plan:?}");
+}
+
+/// So too where the folder above it is gone for good on the drive, and still here, in view:
+/// that one isn't made again for a folder this device hides in it (made again, the hidden
+/// folder was made here and filled: what came down left the drive at the next sync). The
+/// file is recovered, and the hidden folder's removal waits.
+#[test]
+fn nor_is_the_folder_above_made_again_for_a_hidden_one() {
+    let [x, cache, c1, f] = ids(4)[..] else {
+        unreachable!()
+    };
+    let mut w = World {
+        filter: ignoring("cache/\n"),
+        ..World::default()
+    };
+    w.input.remote_complete = true;
+    w.synced(x, folder(ROOT, "x"));
+    w.synced(cache, folder(x, "cache"));
+    w.synced(c1, file(cache, "c1", "1"));
+    w.remote(x, None);
+    w.local(cache, None).local(c1, None);
+    w.remote(f, Some(file(cache, "f", "new")));
+    let plan = w.plan();
+    assert!(!makes(&plan, x), "{plan:?}");
+    assert!(!brings_into(&plan, cache), "{plan:?}");
+    assert!(recovers(&plan, f), "{plan:?}");
+    assert!(
+        !deletes_on_drive(&plan, cache) && !deletes_on_drive(&plan, f),
+        "{plan:?}"
+    );
+    assert!(plan.deferred.contains(&cache), "{plan:?}");
+}
+
+/// A folder `cache` in the folder still on the drive, hidden by a rule of its own wherever it
+/// is, with another device's file in it and one beside it: nothing is made or brought down
+/// into `cache`, nor is `cache` or the folder it is in removed over a file. Whichever of the
+/// two files the plan comes to first (`first`: the one beside it). The plan, and the folder
+/// still there, `cache`, the file beside it and the file in it.
+fn hidden_folder_in_the_one_still_there(first: bool) -> (hbsync_engine::Plan, [NodeId; 4]) {
+    let [b, sub, cache, lo, hi] = ids(5)[..] else {
+        unreachable!()
+    };
+    // (The plan takes the nodes from the last id down.)
+    let (keep, x) = if first { (hi, lo) } else { (lo, hi) };
+    let mut w = World {
+        filter: ignoring("build/\ncache/\n"),
+        ..World::default()
+    };
+    w.input.remote_complete = true;
+    w.synced(b, folder(ROOT, "build"));
+    w.synced(sub, folder(b, "sub"));
+    w.synced(cache, folder(sub, "cache"));
+    w.synced(keep, file(sub, "keep.txt", "k"));
+    w.synced(x, file(cache, "x.txt", "x"));
+    w.local(b, None).remote(b, None);
+    for hidden in [sub, cache, keep, x] {
+        w.local(hidden, None);
+    }
+    w.remote(keep, Some(file(sub, "keep.txt", "k2")));
+    w.remote(x, Some(file(cache, "x.txt", "x2")));
+    (w.plan(), [sub, cache, keep, x])
+}
+
+#[test]
+fn a_hidden_folder_in_the_one_still_there_isnt_filled_or_removed() {
+    for first in [true, false] {
+        let (plan, [sub, cache, keep, x]) = hidden_folder_in_the_one_still_there(first);
+        // Each file is recovered by itself: never brought down into the hidden folder, nor
+        // removed, nor a folder over it (their removal waits).
+        assert!(!brings_into(&plan, cache), "{first}: {plan:?}");
+        for node in [sub, cache, keep, x] {
+            assert!(!deletes_on_drive(&plan, node), "{first}: {plan:?}");
+        }
+        assert!(
+            recovers(&plan, keep) && recovers(&plan, x),
+            "{first}: {plan:?}"
+        );
+        let waits = |folder| plan.deferred.contains(&folder);
+        assert!(waits(sub) && waits(cache), "{first}: {plan:?}");
+    }
+}
+
+/// With nothing changed in it, the folder still leaves the drive with what is in it, as any
+/// folder this device stops syncing (§10, rule 1).
+#[test]
+fn a_folder_still_on_the_drive_with_nothing_changed_in_it_still_leaves() {
+    let [b, sub, f] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = in_a_folder_still_there("build/\n", b, sub, f);
+    w.remote(f, Some(file(sub, "out.o", "o")));
+    let plan = w.plan();
+    assert!(deletes_on_drive(&plan, sub), "{plan:?}");
+    assert!(!makes(&plan, NodeId::RECOVERED), "{plan:?}");
+}
+
+/// A file synced there before the rule that the drive has as it synced leaves the drive, as
+/// any item this device stops syncing (§10, rule 1): unchanged by the above.
+#[test]
+fn a_file_synced_before_the_rule_and_unchanged_since_still_leaves_the_drive() {
+    let [b, f] = ids(2)[..] else { unreachable!() };
+    let mut w = held_from_before(World::ignoring_build(), b, f);
+    w.remote(f, Some(file(b, "out.o", "o")));
+    let plan = w.plan();
+    assert!(!makes(&plan, b), "{plan:?}");
+    let deleted = |op: &Op| matches!(op, Op::RemoteDelete { node, .. } if *node == f);
+    assert!(plan.ops.iter().any(deleted), "{plan:?}");
+}
+
 #[test]
 fn a_folder_deleted_here_stays_deleted_when_what_it_held_leaves_the_drive() {
     let [p, b, f] = ids(3)[..] else {
