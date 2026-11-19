@@ -607,7 +607,8 @@ included (service managers restart it then).
   - its folder is in the folder of shares on the main folder's record, itself a folder and
     not a link to it (one renamed since is neither emptied nor taken for gone; a share is
     started under the same check);
-  - it is a folder: a link at its place is never followed, whatever it leads to;
+  - it is a folder, and so is its state folder (`.hbsync`): a link at the place of either
+    is never followed, whatever it leads to;
   - it is set up for this share's own state DB, by its marker: a folder with another's
     (renamed into its place) is left as it is, with all in it.
 
@@ -617,9 +618,10 @@ included (service managers restart it then).
     device, and the rules themselves (`.hbsync/ignore`) move out to the top of the main
     folder, never over anything.
   - Where nothing is left, junk files at the folder's top and in its state folder are
-    deleted, then the client's own state in it, piece by piece (its marker, what a
-    transfer left, the place it sets aside in, which must be empty), then the folder, and
-    after it the share's state DB. Left, and keeping the folder: whatever the client had
+    deleted (there also a probe of the volume a crash left), then the client's own state
+    in it, piece by piece (what a transfer left, the place it sets aside in, which must be
+    empty, and last its marker: cut short before, the folder is still proven this share's,
+    and the next try finishes it), then the folder, and after it the share's state DB. Left, and keeping the folder: whatever the client had
     set aside there (§8a), and whatever else is in its state folder (the ignore rules where
     they couldn't move out, a backup an editor left beside them). Junk is only deleted once
     nothing else is left (should the folder then not go, for something put there in that
@@ -627,9 +629,10 @@ included (service managers restart it then).
     is the user's.
   - Where something couldn't go, or it failed part of the way, the folder and the DB stay,
     and it isn't tried again until the daemon starts again (or the share is turned on). An
-    ending cut short after the folder's state went is taken up by the DB's word that the
-    folder is its own: with no marker to prove it, nothing in it is deleted then, junk
-    neither, and only an empty folder goes.
+    folder without a marker at the share's place (its own went with the last step of an
+    ending cut short there, or its runner never set it up) is proven nobody's: nothing in
+    it is deleted, junk neither, and only an empty one goes, the share's state DB with
+    it.
   - Said in a note: that the share isn't synced here any more; that its folder was
     removed, or why not, or how many items stay; and how many moved out, and where to
     (also where it failed after some had).
