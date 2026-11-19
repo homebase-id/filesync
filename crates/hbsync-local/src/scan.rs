@@ -515,7 +515,8 @@ fn real_dir_prefix(root: &Path, dir: &RelPath, filter: &Filter) -> RelPath {
         // through. Where that can't be told, the walk of the folder it is in says so.)
         let shares = id.is_some_and(|id| {
             filter.is_shares_id(id.file)
-                && crate::shares::Record::read(root)
+                && filter
+                    .shares_record(root)
                     .and_then(|record| record.holds(id, &at))
                     .unwrap_or(true)
         });

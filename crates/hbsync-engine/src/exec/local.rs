@@ -71,6 +71,8 @@ impl Executor<'_> {
             return Ok(Outcome::stale("an earlier placement isn't settled yet"));
         }
         let target = self.target_path(parent, name)?;
+        // (Looked at now, not as an earlier operation of the run found it.)
+        self.still_goes_into(&target)?;
         let abs = self.disk.abs(&target);
         // No version of the drive live when planned: its version in Recently deleted, if any
         // (never synced here: made from there, its folder restored, its RemoteCreate to follow).
@@ -118,16 +120,25 @@ impl Executor<'_> {
         // there, so the drive's folder can't be held here until the folder of shares is moved
         // back to the top, said so.
         let filter = &self.folder.filter;
-        if adopt && (target.depth() == 1 || filter.knows_shares_by_id()) {
-            let shares = hbsync_local::shares::Record::read(&self.folder.root);
+        // (Below the top the record is read only for a folder whose id is on record: a look
+        // at the folder, where any is.)
+        let known = |abs: &Path| {
+            filter.knows_shares_by_id()
+                && hbsync_platform::stat(abs).is_ok_and(|m| filter.is_shares_id(m.file_id.file))
+        };
+        let at_top = target.depth() == 1 && filter.has_shares_place();
+        if adopt && (at_top || known(&abs)) {
+            let shares = filter.shares_record(&self.folder.root);
             match shares.and_then(|record| record.is(&abs)) {
                 Ok(false) => {}
-                Ok(true) if target.depth() == 1 => {
+                // (Only where it has its place: in a folder beside the main one it is
+                // never left out by its name, and nothing gives way.)
+                Ok(true) if at_top => {
                     return Ok(Outcome::Retry("a folder of shares has the name".into()));
                 }
                 Ok(true) => {
                     let why = "the folder of shares is at its place: move that one back to \
-                               the top of the sync folder";
+                               the top of the main sync folder";
                     return Ok(Outcome::Skip(Skip::Unsyncable(why.into())));
                 }
                 Err(e) => return Ok(io_outcome(e)),
@@ -384,6 +395,8 @@ impl Executor<'_> {
             return Ok(rescan(&mut self.report, &row.path));
         }
         let target = self.target_path(parent, name)?;
+        // (Looked at now, not as an earlier operation of the run found it.)
+        self.still_goes_into(&target)?;
         if target == row.path {
             // Already there: nothing was put in place.
             return self.finish(&[Settle::acted(node, drive, TagWrite::Nothing)], |s| {

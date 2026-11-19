@@ -562,7 +562,8 @@ impl Engine {
         self.db.read(|s| {
             // The names as they compare: such a name compares as itself.
             for key in folder.filter.shared() {
-                if crate::root::drive_has(s, &folder.scope, key, folder.case_insensitive)? {
+                let ci = folder.case_insensitive;
+                if crate::root::drive_has(s, &folder.scope, &folder.root, key, ci)? {
                     return Ok(true);
                 }
             }
@@ -626,6 +627,14 @@ impl Engine {
                 // Gone well (the folder shows idle): the refusal shown ends, one for want of
                 // the key too ([`Drive::refused`]); a request that needs the key says so again.
                 self.drive.succeeded(since, true);
+                // An item under the folder of shares' name that was taken for leaving the
+                // drive and stays on it (changed there meanwhile, or holding what isn't
+                // leaving: only its base went) is in the way now: work left, and the next
+                // sync has the folder of shares give way. One lookup, where one is there.
+                // (A lookup that fails says the same: what the sync did is told either way.)
+                if self.yields && !report.in_the_way && self.shares_in_the_way().unwrap_or(true) {
+                    report.unfinished = true;
+                }
                 Ok(report)
             }
             // What it did before is told all the same (its conflicts: their copies are made):

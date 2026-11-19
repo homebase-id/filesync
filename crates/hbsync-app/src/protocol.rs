@@ -19,7 +19,7 @@ pub use hbsync_types::activity::Progress;
 
 /// The protocol version this build speaks: a daemon refuses a request in another (after an
 /// update, until it restarts).
-pub(crate) const PROTOCOL: u32 = 11;
+pub(crate) const PROTOCOL: u32 = 12;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
@@ -197,6 +197,32 @@ pub enum FolderControl {
     /// semantics §7): what was deleted here comes down again, what was removed elsewhere is
     /// restored on the drive. `token` as for [`FolderControl::ConfirmDeletes`].
     PutBack { token: String },
+    /// Make the main folder's folder of shares again, where the one on record isn't at its
+    /// top ([`SharesFolder::Gone`]: the daemon never does by itself, as that one may be
+    /// back). Refused where one is there, and for an account nothing is shared with.
+    MakeShares,
+    /// Take the folder `name` at the top of the main folder as its folder of shares (sync
+    /// semantics §10): what was sent of it leaves the drive, as anything left out does (a
+    /// lot at once is held for the user's word, and it is in Recently deleted); all of it
+    /// stays on disk. Refused as [`FolderControl::MakeShares`] is, and for anything but a
+    /// folder there.
+    TakeShares { name: String },
+}
+
+/// Where the main folder's folder of shares is (sync semantics §10: the folder what other
+/// identities share is synced into), while anything is shared with the account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SharesFolder {
+    /// At the folder's top, under this name.
+    At { name: String },
+    /// On record and not at the top (moved away, deleted): shares are off, nothing of them
+    /// syncs, and none is made in its place by itself (it may be back). The user moves it
+    /// back, has it made again ([`FolderControl::MakeShares`]) or names the folder that is
+    /// it ([`FolderControl::TakeShares`]).
+    Gone,
+    /// It couldn't be made, with why: shares are off till it can be (tried again).
+    Unmade { why: String },
 }
 
 /// An entry of a folder's recently synced list.
@@ -433,6 +459,9 @@ pub struct FolderStatus {
     pub rescan_secs: Option<u64>,
     /// Ignore rules in `.hbsync/ignore`.
     pub rules: usize,
+    /// The main folder's folder of shares, while anything is shared with the account.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shares: Option<SharesFolder>,
 }
 
 impl FolderStatus {
@@ -482,6 +511,7 @@ impl FolderStatus {
             watcher_error: None,
             rescan_secs: None,
             rules: 0,
+            shares: None,
         }
     }
 }

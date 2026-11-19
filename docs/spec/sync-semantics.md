@@ -1027,7 +1027,18 @@ would name nothing), any other is made anew.
   (runner
   `the_folder_of_shares_gives_way_before_a_synced_folder_that_took_its_name_is_planned`).
   Masked it is only where the folder of shares can't give way (its rename fails), and
-  where nothing gives way at all (the engine alone).
+  where nothing gives way at all (the engine alone). It doesn't give way to an item this
+  device synced and is taking off the drive (deleted here; or the very folder named as the
+  folder of shares on the user's word, `docs/spec/daemon.md`): that item is leaving by
+  rules 1 and 2 (deleted on the drive though its name is filtered), and its name is free
+  once it is gone (account
+  `a_folder_named_as_the_folder_of_shares_leaves_the_drive_and_takes_the_shares`, runner
+  `the_folder_of_shares_keeps_a_name_this_device_is_taking_off_the_drive`). That is told
+  before the plan, by what a lookup can tell (the drive has the item as it was synced
+  here, and it isn't here any more); where the plan then keeps the item (another device
+  put something into it meanwhile: only its base goes) the sync says there is work left,
+  and the next one has the folder of shares give way (runner
+  `the_folder_of_shares_gives_way_to_an_item_that_stays_on_the_drive_after_all`).
 - One the filter doesn't know yet (it came, or took another name, while a sync was running;
   the filter is read again before the next sync) is left alone as well, by the record and
   its marker on disk: the walk reads the record once when it meets a folder at the top,
@@ -1037,6 +1048,25 @@ would name nothing), any other is made anew.
   and is masked once the filter is read). Nothing in it is sent, and the drive's folder of
   its name isn't put into it (engine
   `a_folder_of_shares_the_filter_doesnt_know_yet_is_neither_sent_nor_merged`).
+  Nor is anything put into it where it took the place of a synced folder (that one deleted,
+  the folder of shares renamed onto its name) and a sync runs before a scan has seen either
+  (a watcher that tells late, as macOS's does): before an item is placed in a folder, or
+  moved into it, the folder on disk is looked at (once a run for each folder when a
+  transfer is prepared, and again as a download is placed, however long its transfer took,
+  as a folder is made in it, and as an item is moved to it), and where it is no longer the one
+  the DB has there (nothing there, no folder, another file id) the item isn't placed: the
+  next plan decides, once a scan has seen what is there. No scan of that place alone is
+  asked for: it would take a folder moved elsewhere for deleted, where the watcher's own
+  scan sees both ends of the move. That holds for any folder, not only this one: what the
+  drive has for a folder goes into that folder, never into another that has its path now;
+  an item put back from aside goes to the folder's top instead (and stays aside for the next
+  sync where its folder can't be looked at). Older paths of the executor still ask for a
+  scan of an item's old place when it changed on disk, which takes a folder moved before a
+  scan for deleted (filesync #421). Told by the file id where
+  ids tell an item (not on FAT, exFAT, a network or FUSE volume: a folder there is taken
+  for it). (Engine `a_folder_of_shares_at_a_synced_folders_place_gets_nothing_of_the_drive`,
+  `a_folder_moved_before_a_scan_isnt_taken_for_deleted`; a stat for each folder something
+  goes into, a run, and a row's read and a stat for each download placed in a folder.)
 - Moved into another folder (a slip of the hand in the file manager; the same volume, so
   its file id stays) it is left alone there too: a walk knows it by the file id on record,
   which each listing has, and looks for its marker before it reports or enters it (one
@@ -1057,6 +1087,20 @@ would name nothing), any other is made anew.
   where it gets another file id while it is below the top (the folder it is in moved to
   another volume and back, or restored from a backup): only at the top is one looked for
   by its marker (filesync #417).
+- Dragged into another folder the account syncs (a role folder, this computer's Desktop)
+  it is left alone there as well: such a folder's filter knows it by the main folder's
+  record (`Filter::load_beside`), by the file ids on record wherever it is in that folder
+  (where no id is on record it isn't known there: a marker alone tells nothing but at the
+  main folder's top). It has no place there: nothing is made, renamed or taken, and a
+  folder of the drive at its path can't be held until it is moved back (a note). Such a
+  folder reads the record again when the main folder opens (its record may say something
+  else then), and at its looks. While the main folder can't be asked (gone, not mounted,
+  its record unreadable) no folder beside it stops: a filter in use keeps the ids it
+  knows, and a walk that meets a folder with such an id leaves it as it is, neither
+  entered nor taken away; a folder opened anew meanwhile knows of none (a known limit). The main folder meanwhile has none at its top: shares
+  are off (`docs/spec/daemon.md`). Moved to a folder on another volume it is a copy with
+  another file id, and isn't known there (the limit above, filesync #417) (scan
+  `the_folder_of_shares_dragged_into_another_synced_folder_never_reaches_its_db`).
 - Back as a copy (moved to another volume and back, restored from a backup: another file
   id, its marker in it) it is taken as the folder of shares again: as the sync folder
   opens, and while it is synced as soon as a folder at the top holds the record's marker
@@ -1075,7 +1119,9 @@ would name nothing), any other is made anew.
   afterwards; nor is one renamed into the top whole in the middle of a running sync that
   lists the top (a placement there, a rescan the sync asks for), which that sync may send
   before the folder is opened again. The log says that a folder holding the marker wasn't
-  taken.
+  taken. The user names it as the folder of shares then
+  (`hbsync shared-folder --take`, `docs/spec/daemon.md`): what was sent of it leaves the
+  drive, and it stays on disk.
 - A marker anywhere else does nothing (junk): copied into a synced folder at the top, that
   folder stays synced, with what is in it and what comes (scan
   `the_folder_of_shares_never_reaches_the_db_and_a_copied_marker_does_nothing`, engine

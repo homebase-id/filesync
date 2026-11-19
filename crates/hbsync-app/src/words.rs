@@ -7,7 +7,9 @@ use hbsync_types::NodeKind;
 use hbsync_types::activity::{Deleted, Progress, Synced, SyncedKind};
 
 use crate::KEEP_DAYS;
-use crate::protocol::{DeletedItem, Emptying, FolderStatus, HeldAnswer, HeldDeletes, State};
+use crate::protocol::{
+    DeletedItem, Emptying, FolderStatus, HeldAnswer, HeldDeletes, SharesFolder, State,
+};
 
 /// Now, in Unix seconds.
 pub use hbsync_types::unix_now as now;
@@ -278,6 +280,29 @@ fn items(n: u64) -> String {
         1 => "1 item".into(),
         n => format!("{} items", count(n)),
     }
+}
+
+/// Why nothing of what other identities share syncs, where it doesn't, in one line: the
+/// folder it syncs into is gone, or can't be made (`hbsync status`, the tray's menu).
+pub fn shares_off(shares: &SharesFolder) -> Option<String> {
+    match shares {
+        SharesFolder::At { .. } => None,
+        SharesFolder::Gone => Some("Shares are off: their folder is gone".into()),
+        SharesFolder::Unmade { why } => Some(format!("Shares are off: {why}")),
+    }
+}
+
+/// [`shares_off`] with what to do about it, for the command line: `command` is the command
+/// that makes or takes their folder.
+pub fn shares_off_and_how(shares: &SharesFolder, command: &str) -> Option<String> {
+    let off = shares_off(shares)?;
+    Some(match shares {
+        SharesFolder::Gone => format!(
+            "{off}: move it back to the top of the folder, or `{command} --make` makes a new \
+             one, or `{command} --take <folder>` names the folder that is it"
+        ),
+        _ => format!("{off}: tried again by itself"),
+    })
 }
 
 /// The reply to an answer to held deletes the runner took: it goes with the next sync, or,

@@ -329,6 +329,14 @@ pub(super) fn return_to(
 ) -> Result<Option<RelPath>, StateError> {
     let at_top = place.name().and_then(|n| RelPath::new(n).ok());
     for wanted in [Some(place.clone()), at_top].into_iter().flatten() {
+        // Not into another folder that has its folder's place now: to the top then. Where
+        // that can't be told (the folder can't be looked at) it stays aside, for the next
+        // sync; a place whose folder has no row is as before (its own check is the name's).
+        match super::in_its_folder(db, disk, folder, &wanted)? {
+            Ok(Some(false)) => continue,
+            Ok(_) => {}
+            Err(_) => break,
+        }
         let Some(to) = release_place_for(db, folder, &wanted, own, is_dir)? else {
             continue;
         };

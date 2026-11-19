@@ -204,6 +204,12 @@ pub struct Filter {
     /// How many folders at the top held the record's marker when the filter was read, the
     /// folder on record not there ([`Filter::returned`]), by name, in order.
     returned: Vec<String>,
+    /// The sync folder whose record tells of the folder of shares, where that isn't the
+    /// filter's own ([`Filter::load_beside`]).
+    record: Option<PathBuf>,
+    /// That folder's record couldn't be asked when the filter was read (the folder gone,
+    /// not mounted, unreadable): the ids aren't known, not none ([`Filter::changed_from`]).
+    main_unknown: bool,
 }
 
 /// `name` as names at the top compare with a folder's that holds what other identities
@@ -218,6 +224,18 @@ pub fn top_key(name: &str, case_insensitive: bool) -> Cow<'_, str> {
     } else {
         Cow::Borrowed(name)
     }
+}
+
+/// The record of the main folder at `main`, for a folder beside it
+/// ([`Filter::load_beside`]). An error where the main folder isn't there to ask (gone, not
+/// mounted: no state folder in it): its record isn't known then, which is not "none".
+fn main_record(main: &Path) -> io::Result<crate::shares::Record> {
+    let record = crate::shares::Record::read(main)?;
+    if record.is_none() && !crate::layout::state_dir(main).is_dir() {
+        let what = format!("{}: the main folder isn't there", main.display());
+        return Err(io::Error::new(io::ErrorKind::NotFound, what));
+    }
+    Ok(record)
 }
 
 /// The names of `top`'s folders that may be the folder of shares, back
@@ -239,6 +257,8 @@ impl Default for Filter {
             in_the_way: false,
             shares_ids: Vec::new(),
             returned: Vec::new(),
+            record: None,
+            main_unknown: false,
         }
     }
 }
@@ -250,21 +270,70 @@ impl Filter {
     /// top of `root` that holds what other identities share ([`crate::shares::Top`]) left
     /// out; one that can't be told is an error too.
     pub fn load(root: &Path, case_insensitive: bool) -> Result<Self, FilterError> {
+        let top = crate::shares::Top::read(root).map_err(|source| FilterError::Read {
+            path: root.to_owned(),
+            source,
+        })?;
+        let mut filter = Self::rules_of(root, case_insensitive)?.with_shared(&top.shares);
+        filter.in_the_way = filter.left_out_with(&top);
+        filter.returned = returned(&top);
+        filter.shares_ids = top.ids;
+        Ok(filter)
+    }
+
+    /// [`Filter::load`] for a folder the account syncs beside its main folder `main` (a role
+    /// folder, a Desktop): the folder of shares is the main folder's, by the record there. It
+    /// has no place here, but may be dragged here: left out then by the ids on record,
+    /// wherever it is in `root`, as below the top of the main folder (where no id is on
+    /// record it isn't known here: a marker alone tells nothing but at the main folder's
+    /// top). Nothing is made, renamed or taken here. Costs the
+    /// record's read (an open that fails, where the account has none) in place of the one
+    /// of its own top: nothing more than a folder that knows of none.
+    pub fn load_beside(
+        root: &Path,
+        case_insensitive: bool,
+        main: &Path,
+    ) -> Result<Self, FilterError> {
+        // (Its own top isn't asked: no record is ever written there.)
+        let mut filter = Self::rules_of(root, case_insensitive)?;
+        filter.record = Some(main.to_owned());
+        match main_record(main) {
+            Ok(record) => filter.shares_ids = record.ids().to_vec(),
+            // The main folder can't be asked just now: no folder beside it stops for that.
+            // What a filter in use knows stays known ([`Filter::changed_from`]), and a walk
+            // that meets a folder with such an id leaves it as it is
+            // ([`Filter::shares_record`]). One read anew meanwhile knows of none.
+            Err(_) => filter.main_unknown = true,
+        }
+        Ok(filter)
+    }
+
+    /// The built-ins and the user's rules from `.hbsync/ignore` under `root`, the folder of
+    /// shares not looked for ([`Filter::load`], [`Filter::load_beside`]).
+    fn rules_of(root: &Path, case_insensitive: bool) -> Result<Self, FilterError> {
         let path = crate::layout::ignore_file(root);
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(e) if e.kind() == io::ErrorKind::NotFound => String::new(),
             Err(source) => return Err(FilterError::Read { path, source }),
         };
-        let top = crate::shares::Top::read(root).map_err(|source| FilterError::Read {
-            path: root.to_owned(),
-            source,
-        })?;
-        let mut filter = Self::from_rules(&text, case_insensitive)?.with_shared(&top.shares);
-        filter.in_the_way = filter.left_out_with(&top);
-        filter.returned = returned(&top);
-        filter.shares_ids = top.ids;
-        Ok(filter)
+        Self::from_rules(&text, case_insensitive)
+    }
+
+    /// The record that tells of the folder of shares for the sync folder at `root`, which
+    /// this filter is of: its own, or the main folder's ([`Filter::load_beside`]).
+    pub fn shares_record(&self, root: &Path) -> io::Result<crate::shares::Record> {
+        match &self.record {
+            Some(main) => main_record(main),
+            None => crate::shares::Record::read(root),
+        }
+    }
+
+    /// Whether the folder of shares has its place in this filter's sync folder (the main
+    /// folder: left out by its name at the top, and made to give way there), not only
+    /// known should it be dragged in ([`Filter::load_beside`]).
+    pub fn has_shares_place(&self) -> bool {
+        self.record.is_none()
     }
 
     /// The built-ins plus `text` (gitignore syntax, paths relative to the sync root). A line
@@ -309,6 +378,8 @@ impl Filter {
             in_the_way: false,
             shares_ids: Vec::new(),
             returned: Vec::new(),
+            record: None,
+            main_unknown: false,
         })
     }
 
@@ -324,10 +395,13 @@ impl Filter {
     /// ([`Filter::in_the_way`]), or can't be told: [`crate::shares::Top`] alone, the rules not
     /// read again.
     pub fn shared_changed(&self, root: &Path) -> bool {
-        crate::shares::Top::read(root).map_or(true, |top| {
-            let shared = self.top_keys(&top.shares);
-            self.top_differs(&shared, self.left_out_with(&top), &returned(&top))
-        })
+        // (None has its place beside the main folder: what the main folder's record says
+        // is read with the rules, [`Filter::changed_from`].)
+        self.has_shares_place()
+            && crate::shares::Top::read(root).map_or(true, |top| {
+                let shared = self.top_keys(&top.shares);
+                self.top_differs(&shared, self.left_out_with(&top), &returned(&top))
+            })
     }
 
     /// Whether the top, as found now, isn't the one this filter was read at, or has the
@@ -357,7 +431,12 @@ impl Filter {
     /// it decides otherwise ([`Filter::fingerprint`]), or the folder of shares is to give
     /// way ([`Filter::in_the_way`]) or may be back ([`Filter::returned`]).
     pub fn changed_from(&self, fresh: &Filter) -> bool {
-        fresh.fingerprint() != self.fingerprint()
+        // (One that couldn't ask the main folder knows no other ids than this one's.)
+        let ids = match fresh.main_unknown {
+            true => &self.shares_ids,
+            false => &fresh.shares_ids,
+        };
+        fresh.fingerprint_with(ids) != self.fingerprint()
             || self.top_differs(&fresh.shared, fresh.in_the_way, &fresh.returned)
     }
 
@@ -418,9 +497,14 @@ impl Filter {
     /// the whole folder takes out what the DB has of it there from before). Nothing is added
     /// where no id is on record: such a folder's fingerprint is as it was.
     pub fn fingerprint(&self) -> String {
-        let ids = match self.shares_ids.is_empty() {
+        self.fingerprint_with(&self.shares_ids)
+    }
+
+    /// [`Filter::fingerprint`], were `ids` the ids on record.
+    fn fingerprint_with(&self, ids: &[u128]) -> String {
+        let ids = match ids.is_empty() {
             true => String::new(),
-            false => format!("; shares' ids {:?}", self.shares_ids),
+            false => format!("; shares' ids {ids:?}"),
         };
         format!(
             "junk {JUNK_VERSION}; case-insensitive {}; shared {:?}{ids}; rules:\n{}",

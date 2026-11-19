@@ -136,7 +136,7 @@ impl<'a> Walker<'a> {
     fn holds_shares(&mut self, id: hbsync_platform::FileId, at: &Path) -> io::Result<bool> {
         let record = match &mut self.shares {
             Some(record) => record,
-            none => none.insert(crate::shares::Record::read(&self.root)?),
+            none => none.insert(self.filter.shares_record(&self.root)?),
         };
         record.holds(id, at)
     }
@@ -242,7 +242,10 @@ impl Iterator for Walker<'_> {
                 // but for the one that has it).
                 let id = meta.file_id;
                 let known = self.filter.is_shares_id(id.file);
-                let held = match dir.is_root() || known {
+                // (At the top only where the folder of shares has its place: the main
+                // folder. A folder beside it knows it by its id alone.)
+                let at_top = dir.is_root() && self.filter.has_shares_place();
+                let held = match at_top || known {
                     true => self.native(&path).map(|at| self.holds_shares(id, &at)),
                     false => None,
                 };

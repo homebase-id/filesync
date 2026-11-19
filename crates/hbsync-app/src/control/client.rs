@@ -139,24 +139,30 @@ pub fn daemon(paths: &Paths, control: DaemonControl) -> Result<()> {
 
 /// Lets the held deletes of the folder at `path` through: `token` names those the user saw.
 pub fn confirm_deletes(paths: &Paths, path: &std::path::Path, token: String) -> Result<()> {
-    self::control(
-        paths,
-        Control::Folder {
-            path: path.to_path_buf(),
-            control: FolderControl::ConfirmDeletes { token },
-        },
-    )
+    folder(paths, path, FolderControl::ConfirmDeletes { token })
+}
+
+/// Makes the folder of shares of the main folder at `path` again
+/// ([`FolderControl::MakeShares`]).
+pub fn make_shares(paths: &Paths, path: &std::path::Path) -> Result<()> {
+    folder(paths, path, FolderControl::MakeShares)
+}
+
+/// Sends `control` to the folder at `path`.
+fn folder(paths: &Paths, path: &std::path::Path, control: FolderControl) -> Result<()> {
+    let path = path.to_path_buf();
+    self::control(paths, Control::Folder { path, control })
+}
+
+/// Takes the folder `name` at the top of the main folder at `path` as its folder of shares
+/// ([`FolderControl::TakeShares`]).
+pub fn take_shares(paths: &Paths, path: &std::path::Path, name: String) -> Result<()> {
+    folder(paths, path, FolderControl::TakeShares { name })
 }
 
 /// Puts the held deletes of the folder at `path` back: `token` names those the user saw.
 pub fn put_back(paths: &Paths, path: &std::path::Path, token: String) -> Result<()> {
-    self::control(
-        paths,
-        Control::Folder {
-            path: path.to_path_buf(),
-            control: FolderControl::PutBack { token },
-        },
-    )
+    folder(paths, path, FolderControl::PutBack { token })
 }
 
 /// Restores `items` (each with what its delete took along), in their accounts.
