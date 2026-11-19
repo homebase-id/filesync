@@ -672,6 +672,13 @@ impl HomebaseRemote {
         // its key here, before a page that leaves its files out (until they reconnect, a
         // listing can't tell, as the feed can't).
         self.drive_key(false)?;
+        // A marker counts only on a private drive (node schema, "Sync markers", Trust): on one
+        // that isn't, whoever may write to it could rewrite the owner's marker, whose sender
+        // the server keeps. None is read there: nothing is turned on, and what is synced
+        // stays as it is.
+        if !self.key_state(false, |s| Ok(s.private))? {
+            return Ok(markers::Markers::untrusted(self.client.identity()));
+        }
         read_markers(
             self.client.identity(),
             self.client.key(),

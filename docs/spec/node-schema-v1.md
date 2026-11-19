@@ -124,7 +124,9 @@ them, into `~/Homebase/Shared/<their identity>` (read-only). Written by the owne
   owner's updates, **[verified]** `DriveStorageServiceBase.cs`) never turns sync on, whatever
   it names, and isn't opened; to sync that person, delete it (its tombstone frees the
   `uniqueId`, **[verified]** `DriveStorageServiceBase.TombstoneOf`) and write your own. A
-  marker whose `uniqueId` isn't its sharer's doesn't read.
+  marker whose `uniqueId` isn't its sharer's doesn't read. On a drive that isn't private
+  (`collaborative`: anyone with Write on it could rewrite the owner's marker) no marker
+  counts: computers turn nobody's sync on there, and leave what they sync as it is.
 - **Turning sync off** is `sync: false` in place: the marker isn't deleted, as it keeps the
   person listed in Shared with me. Computers then delete their local copy of that share.
 - A marker of the owner's that doesn't read leaves its sharer as the computer has it (the one
@@ -459,6 +461,9 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-11-19: a sync marker counts only on a private drive (Sync markers, Trust): on a
+  collaborative one computers turn nobody's sync on, and leave what they sync as it is.
+  Nothing new in a marker; an app writes them as before.
 - 2026-11-17: a version's time is the header's `versionUpdated` (odin-core PR #2143, V2 only),
   not the `updated` first read with its `versionTag`: read it for when a node was written or
   removed. A share given or withdrawn moves `updated` alone, so a client reading a file first
