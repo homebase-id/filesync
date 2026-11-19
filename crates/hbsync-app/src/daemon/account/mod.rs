@@ -77,6 +77,12 @@ pub(crate) struct Account {
     changed: Arc<Wakeup>,
     /// Sync now asked before its folders run ([`Clicks`]).
     clicks: Clicks,
+    /// The main folder's watcher gives what other identities share its events: their
+    /// folders, in its folder of shares, hold no watcher of their own (filesync #414).
+    feeds: hbsync_local::Feeds,
+    /// Where the main folder's runner last told its folder of shares to be
+    /// ([`crate::runner::SharesTold`]): kept here, through that runner being started again.
+    shares_told: Arc<Mutex<Option<Option<String>>>>,
 }
 
 /// Sync now asked while an account isn't running yet, counted: a wait to try again ends for a
@@ -235,6 +241,8 @@ impl Account {
             done: AtomicBool::new(false),
             ready: AtomicBool::new(false),
             reader: Mutex::new(None),
+            feeds: hbsync_local::Feeds::default(),
+            shares_told: Arc::default(),
             changed,
             clicks: Clicks::default(),
         };
@@ -999,7 +1007,9 @@ mod tests {
             assert!(shared_db.exists());
 
             // Changed here: the change moves out to the main folder's top (the account's own
-            // from then on), and the sharer's comes again.
+            // from then on), and the sharer's comes again. (Seen at once: the share's folder
+            // is watched, by the main folder's watcher (filesync #414); Sync now walks
+            // nothing, and a folder without a watcher is walked once a minute.)
             std::fs::write(at.join("notes.txt"), "changed here")?;
             let _ = started.account.sync_now();
             let moved_out = || {
@@ -1025,24 +1035,18 @@ mod tests {
             })?;
             assert_eq!(own_names()?.len(), 2, "{:?}", own_names()?);
 
-            // The folder of shares renamed: the share is synced there from then on. (Not
-            // on Windows while it is: a folder can't be renamed there while a folder in it
-            // is watched, as the share's is by its runner.)
-            if !cfg!(windows) {
-                std::fs::rename(folder.join("Shared"), folder.join("From others"))?;
-                let at = folder.join("From others").join("tom.example");
-                let _ = started.account.sync_now();
-                started.wait_all("the share follows the folder of shares", &|s, folders| {
-                    both(s, folders) && folders[1].path == at
-                })?;
-            }
+            // The folder of shares renamed while the share syncs (on Windows too: nothing
+            // is held open below it): the share is synced there from then on.
+            rename_synced(&folder.join("Shared"), &folder.join("From others"))?;
+            let at = folder.join("From others").join("tom.example");
+            let _ = started.account.sync_now();
+            started.wait_all("the share follows the folder of shares", &|s, folders| {
+                both(s, folders) && folders[1].path == at
+            })?;
             Ok(())
         };
         let checked = checks();
         started.stop(checked)??;
-        if cfg!(windows) {
-            std::fs::rename(folder.join("Shared"), folder.join("From others"))?;
-        }
 
         // Stopped and started: as it was, where the folder of shares is now, and what the
         // sharer shares from now on comes there.
@@ -1261,6 +1265,13 @@ mod tests {
         Some(crate::protocol::SharesFolder::At { name: name.into() })
     }
 
+    /// Renames the folder `from` while something is synced into it. (A file in it may be
+    /// open for a moment, which Windows refuses a rename for.)
+    fn rename_synced(from: &Path, to: &Path) -> Result<(), Box<dyn std::error::Error>> {
+        let renamed = || std::fs::rename(from, to).ok();
+        Ok(wait_until(renamed).ok_or_else(|| format!("{} can't be renamed", from.display()))?)
+    }
+
     /// Removes the folder `dir` while something is synced into it. (On Windows a folder a
     /// runner is in may take a moment to go.)
     fn remove_synced(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -1378,9 +1389,7 @@ mod tests {
 
     /// The folder of shares dragged into a role folder of the account is left alone there:
     /// that folder knows it by the main folder's record, and nothing of it is sent. Shares
-    /// are off meanwhile; moved back, they are synced again. (Not on Windows, where a folder
-    /// with a watched folder in it can't be renamed: filesync #414.)
-    #[cfg(not(windows))]
+    /// are off meanwhile; moved back, they are synced again.
     #[test]
     fn the_folder_of_shares_dragged_into_a_role_folder_is_left_alone_there()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -1411,7 +1420,7 @@ mod tests {
             assert!(own.contains(&"letter.txt".to_owned()), "{own:?}");
             std::fs::write(folder.join("Shared").join("loose.txt"), "not the account's")?;
 
-            std::fs::rename(folder.join("Shared"), documents.join("Shared"))?;
+            rename_synced(&folder.join("Shared"), &documents.join("Shared"))?;
             let _ = started.account.sync_now();
             started.wait_all("shares are off, the role folder synced", &|s, folders| {
                 shares_shown(folders) == Some(SharesFolder::Gone)
@@ -1430,7 +1439,7 @@ mod tests {
                 "something of the folder of shares was sent"
             );
 
-            std::fs::rename(documents.join("Shared"), folder.join("Shared"))?;
+            rename_synced(&documents.join("Shared"), &folder.join("Shared"))?;
             let _ = started.account.sync_now();
             started.wait_all("back at the top, the shares synced again", &|s, folders| {
                 all_synced(s, folders, 3) && shares_shown(folders) == shares_at("Shared")

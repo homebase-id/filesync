@@ -22,7 +22,7 @@ pub use scan::{ScanOptions, ScanReport, Settle, Young, rescan_dirs, rescan_entri
 pub use walk::{SkipReason, WalkEvent, Walker};
 #[cfg(feature = "testkit")]
 pub use watch::testkit as watch_testkit;
-pub use watch::{Bell, Debounce, LocalObserver};
+pub use watch::{Bell, Debounce, Feed, Feeds, LocalObserver};
 
 /// The client's own folder at the top of the sync root (its marker, ignore rules, temp files,
 /// what is aside for a moment). Never synced. The state DB is the account's, elsewhere.

@@ -1165,6 +1165,94 @@ fn the_folder_of_shares_gives_way_before_a_synced_folder_that_took_its_name_is_p
     Ok(())
 }
 
+/// A watcher that gives to those of folders in its own, as the main folder's runner holds
+/// one: over `root`. `None` on a machine out of watchers, where such a test can't run (said
+/// so, as [`Device::watching`] does; on CI that fails the test).
+fn giving(
+    root: &Path,
+    feeds: &hbsync_local::Feeds,
+) -> Result<Option<hbsync_local::LocalObserver>, Box<dyn std::error::Error>> {
+    let opts = hbsync_local::ScanOptions::for_root(root, hbsync_fileio::HashAlgorithm::Blake3);
+    let gives = hbsync_local::Feed::Gives(feeds.clone());
+    let observer = hbsync_local::LocalObserver::watching(root, opts, None, Some(gives));
+    match &observer.watcher_error {
+        None => Ok(Some(observer)),
+        Some(why) if std::env::var_os("CI").is_some() => Err(format!("no watcher: {why}").into()),
+        Some(why) => {
+            eprintln!("no live watcher here ({why}): skipped");
+            Ok(None)
+        }
+    }
+}
+
+/// A folder whose runner takes its events from another folder's watcher (a share's, from the
+/// main folder's: filesync #414) syncs a change as it is made while that one watches, and
+/// misses none made while it is away: the folder opened again, a new watcher in the old
+/// one's place. (Its looks are a minute apart: found by its events, and by the walk that
+/// lost events ask for.)
+#[test]
+fn a_folder_watched_by_anothers_watcher_misses_nothing_while_that_one_is_opened_again() -> R {
+    let (server, feeds) = (server(), hbsync_local::Feeds::default());
+    let takes = hbsync_local::Feed::Takes(feeds.clone());
+    let a = Device::start_with(&server, "a", |c| c.feed = Some(takes))?;
+    a.wait_idle()?;
+    assert_eq!(a.status().watcher_error, None);
+    let around = a.root.parent().ok_or("no folder around it")?;
+
+    let Some(watcher) = giving(around, &feeds)? else {
+        return Ok(());
+    };
+    a.write("live.txt", "seen as it is written")?;
+    wait_until("live.txt is up", || on_server(&server, "live.txt"))?;
+
+    drop(watcher);
+    a.write("gap.txt", "written while none watches")?;
+    std::thread::sleep(Duration::from_millis(300));
+    let Some(_watcher) = giving(around, &feeds)? else {
+        return Ok(());
+    };
+    wait_until("gap.txt is up", || on_server(&server, "gap.txt"))?;
+    a.write("after.txt", "seen as it is written")?;
+    wait_until("after.txt is up", || on_server(&server, "after.txt"))?;
+    assert_eq!(a.status().watcher_error, None);
+    Ok(())
+}
+
+/// While the watcher it takes from is away, such a folder is walked at its looks, as any
+/// without a watcher: not at once as that one goes (it is back in a moment where its folder
+/// is only opened again, and what changed is walked for then), and with no note of its own.
+#[test]
+fn a_folder_watched_by_anothers_watcher_is_walked_at_its_looks_while_that_one_is_away() -> R {
+    let (server, feeds) = (server(), hbsync_local::Feeds::default());
+    let takes = hbsync_local::Feed::Takes(feeds.clone());
+    let look = Duration::from_secs(2);
+    let a = Device::start_with(&server, "a", |c| {
+        c.feed = Some(takes);
+        c.look = look;
+    })?;
+    let Some(watcher) = giving(a.root.parent().ok_or("no folder around it")?, &feeds)? else {
+        return Ok(());
+    };
+    a.write("live.txt", "seen as it is written")?;
+    wait_until("live.txt is up", || on_server(&server, "live.txt"))?;
+    a.wait_idle()?;
+    // (A look is due by now: with a watcher none is woken for.)
+    std::thread::sleep(look + Duration::from_millis(200));
+
+    drop(watcher);
+    a.write("away.txt", "written while none watches")?;
+    std::thread::sleep(look / 4);
+    assert!(
+        !on_server(&server, "away.txt"),
+        "walked as the watcher went"
+    );
+    wait_until("away.txt is up", || on_server(&server, "away.txt"))?;
+    let status = a.status();
+    assert_eq!(status.watcher_error, None);
+    assert!(status.recent.is_empty(), "{:?}", status.recent);
+    Ok(())
+}
+
 /// A synced folder deleted here, and the folder of shares renamed to its name before the
 /// delete was sent: the folder of shares keeps the name (the drive's item is leaving, its
 /// name about to be free: nothing gives way to it), and the delete is sent though the name is

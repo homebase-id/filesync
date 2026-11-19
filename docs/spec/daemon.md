@@ -574,20 +574,42 @@ included (service managers restart it then).
   (its DB isn't set aside for it yet). Its drive is read on a timer (5 minutes) and at Sync
   now, until its changes are announced, and only while a runner syncs it.
 
-  On Windows a folder can't be renamed while a folder in it is watched, as each share's is
-  by its runner: there the folder of shares can't be renamed by hand while a share syncs,
-  and one that is to give way to the drive's item of its name can't either (the item stays
-  out, as said above, until the daemon starts again with the name free).
+  A share's folder is watched by the main folder's watcher, which is recursive and has its
+  events anyway: the share's runner holds no watcher of its own, and takes what lies in its
+  folder from that one (`hbsync_local::Feeds`; filesync #414). So nothing is held open
+  below the folder of shares, which Windows wouldn't let be renamed otherwise (by hand, or
+  to give way), and a folder there costs one inotify watch on Linux, not two (measured, a
+  share of 101 folders: 205 watches on two inotify instances before, 104 on one).
+
+  What that costs: a share is watched only while the main folder is.
+  - Each time the main folder is opened again (its rules changed, the folder of shares came
+    or went) its watcher is another: each share is told that events were lost, and walks its
+    folder once. It isn't walked as the old watcher goes (a share's watcher away for less
+    than half a look is taken to be back in a moment).
+  - While the main folder has no watcher (it couldn't start one), or isn't open (its rules
+    can't be read, its runner failed and is started again after a pause), a share is walked
+    at each look, as any folder without a watcher. Its own status says nothing of it: the
+    main folder's says what is wrong there.
+  - Events lost by the main folder's watcher (a burst anywhere in the main folder, ignored
+    folders too, that overflows the system's queue) are lost for each share: each walks its
+    folder. A share's events also wait behind the main folder's on the one watcher thread:
+    a share stores its journal position (what a start reads on from, macOS and Windows) only
+    after a quiet period in which that thread handled nothing, so none while the main folder
+    is busy (an older position only reads more at the next start).
+    (On Windows an overflow isn't told at all today, for any folder: #424.)
+  - Known limits: a share's folder renamed only in the case of its letters (Windows, macOS)
+    isn't watched under its new spelling until the daemon starts again (#426); folders made
+    once inotify's watches are used up aren't watched, for a share as for any folder (#425).
+
+  A watcher follows no link (Linux: inotify names a folder by the path it was reached by
+  last, so a folder also reached through a link in the tree had its events told under the
+  link, where nothing is synced: they were lost, for the main folder's own folders too).
 
   Known limit, until the engine never makes a folder again that is gone: a share's runner
   that is downloading when the folder of shares is renamed keeps its old path until it is
   stopped (a second with a watcher, up to a minute without), and a download begun then
   makes `<old name>/<sharer>` again as plain folders, which the main folder would send.
 
-  On Linux the main folder's watcher is recursive and also holds a watch on each folder in
-  the folder of shares, whose events it drops: a folder there costs two inotify watches,
-  not one (measured: 4 of 4 in a share with one sub-folder; `notify` can't leave a
-  sub-tree out).
 - **Notes:** each conflict and failure is noted once; one that comes back sync after sync (a
   file that can't be read) isn't noted again until it has gone away. An operation left for the
   next plan is noted only when this device can't do it (a name or path it can't hold, access

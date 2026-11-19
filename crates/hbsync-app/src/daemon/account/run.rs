@@ -626,11 +626,15 @@ impl Account {
             cfg.shares_main = main.map(Path::to_path_buf);
         }
         if shared && root.is_main() {
+            cfg.feed = Some(hbsync_local::Feed::Gives(self.feeds.clone()));
             cfg.shares = Some(SHARES.to_owned());
             let (folder, tell) = (root.folder.clone(), self.requests.clone());
-            cfg.shares_told = Some(SharesTold(Arc::new(move |at| {
-                let _ = tell.send(Msg::Shares(folder.clone(), at));
-            })));
+            cfg.shares_told = Some(SharesTold {
+                tell: Arc::new(move |at| {
+                    let _ = tell.send(Msg::Shares(folder.clone(), at));
+                }),
+                last: Arc::clone(&self.shares_told),
+            });
         }
         self.spawn(cfg, drive, root)
     }
@@ -665,6 +669,8 @@ impl Account {
         cfg.mass_delete = config.mass_delete;
         cfg.sharer = Some(sharer.clone());
         cfg.read_only = Some(main.to_path_buf());
+        // Its folder lies in the main folder: watched by that one's watcher.
+        cfg.feed = Some(hbsync_local::Feed::Takes(self.feeds.clone()));
         cfg.paused = paused;
         self.spawn(cfg, drive, Root::main(&self.identity, &folder))
     }

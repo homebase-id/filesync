@@ -162,6 +162,9 @@ pub struct RunnerConfig {
     /// Told where the folder of shares is, each time the folder opens ([`SharesTold`]): its
     /// account runs the shares' folders in it.
     pub(crate) shares_told: Option<SharesTold>,
+    /// Whose watcher the folder's is ([`hbsync_local::Feed`]): the main folder's gives to
+    /// those of what is shared into its folder of shares, which hold none of their own.
+    pub feed: Option<hbsync_local::Feed>,
     /// The account's main folder, for a folder it syncs beside it (a role folder, a
     /// Desktop): the folder of shares, dragged in here, is known by the record there and
     /// left alone ([`Filter::load_beside`]).
@@ -172,7 +175,12 @@ pub struct RunnerConfig {
 /// opens and that one was put in its place ([`RunnerConfig::shares_told`]): `None` where
 /// none is at the top (none on record, gone, or not made).
 #[derive(Clone)]
-pub(crate) struct SharesTold(pub(crate) Arc<dyn Fn(Option<String>) + Send + Sync>);
+pub(crate) struct SharesTold {
+    pub(crate) tell: Arc<dyn Fn(Option<String>) + Send + Sync>,
+    /// What was told last, by any runner of the folder (its account keeps it through a
+    /// runner started again); `None`: nothing yet.
+    pub(crate) last: Arc<Mutex<Option<Option<String>>>>,
+}
 
 impl std::fmt::Debug for SharesTold {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -201,6 +209,7 @@ impl RunnerConfig {
             changed: Arc::default(),
             end_if_unusable: false,
             shares_told: None,
+            feed: None,
             shares_main: None,
         }
     }
@@ -774,10 +783,25 @@ impl Runner {
             );
         }
         self.show_shares(&placed);
-        if let Some(SharesTold(told)) = &self.cfg.shares_told {
-            // Where there is more than one: the one on record now, or the first.
-            told(placed.at.first().cloned());
-        }
+        // Where the folder of shares is (where there is more than one: the one on record
+        // now, or the first), told to the account, which syncs each share there. At once
+        // where it was told another place before: a share's runner still syncs there, and
+        // is to stop before it makes that place again. Else as this opening ends, with the
+        // watcher there (or failed): a share started on it takes its events from that
+        // watcher, and one that began before it would walk its folder a second time for
+        // what it may have missed.
+        let at = placed.at.first().cloned();
+        let _told = self.cfg.shares_told.as_ref().and_then(|told| {
+            let before = lock(&told.last).replace(at.clone());
+            let moved = before.is_some_and(|before| before.is_some() && before != at);
+            let tell = Arc::clone(&told.tell);
+            let tell = move || tell(at);
+            if moved {
+                tell();
+                return None;
+            }
+            Some(OnDrop(Some(tell)))
+        });
         let main = self.cfg.shares_main.as_deref();
         cfg.folder.filter = Arc::new(load_filter(root, cfg.folder.case_insensitive, main)?);
         if !cfg.folder.filter.returned().is_empty() {
@@ -799,7 +823,8 @@ impl Runner {
         let bell: Bell = Arc::new(move || {
             let _ = wakes.send(Msg::Local);
         });
-        let observer = LocalObserver::ringing(root, engine.scan_options().clone(), Some(bell));
+        let (opts, feed) = (engine.scan_options().clone(), self.cfg.feed.clone());
+        let observer = LocalObserver::watching(root, opts, Some(bell), feed);
         self.set(|s| s.rules = rules);
         let drive_changed = Arc::new(AtomicBool::new(false));
         let (alive, wakes) = (Arc::downgrade(&drive_changed), self.wakes.clone());
@@ -1041,8 +1066,13 @@ impl Runner {
                         self.watcher_is(why);
                         self.unwatched.catch_up |= back;
                     }
-                    if self.unwatched.catch_up || (!p.observer.has_watcher() && !schedule.paused())
-                    {
+                    // (Not for a watcher that went a moment ago and may be back in one: a
+                    // share's, as the main folder is opened again. What changed meanwhile
+                    // is told as lost events then, and walked for once, not twice.)
+                    let look = self.cfg.look;
+                    let back_soon = (p.observer.unwatched_for()).is_some_and(|d| d < look / 2);
+                    let unwatched = !p.observer.has_watcher() && !schedule.paused() && !back_soon;
+                    if self.unwatched.catch_up || unwatched {
                         match p.engine.scan_local() {
                             Ok(scan) => {
                                 self.unwatched.catch_up = false;
