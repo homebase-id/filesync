@@ -60,6 +60,10 @@ pub(super) struct Sharing {
     /// The identity's share markers say it isn't synced any more: its runner stops, and it
     /// goes with it.
     pub(super) off: bool,
+    /// Opened only to take its copy off this device ([`Sharers::open`]: without its
+    /// sharer), never to sync: it stays off whatever its marker says since, and is opened
+    /// anew once its copy went.
+    pub(super) to_end: bool,
 }
 
 /// What the identity's share markers say, followed on the account's thread: read when due,
@@ -286,7 +290,7 @@ impl Markers {
                     Ok(share) => {
                         let opening = self.opening.swap_remove(i);
                         if let Some(mut new) = Sharing::at(share, opening.local, shares) {
-                            new.off = opening.end;
+                            (new.off, new.to_end) = (opening.end, opening.end);
                             shares.push(new);
                         }
                     }
@@ -316,7 +320,7 @@ impl Markers {
         let on = |sharer: &Identity| told.on.contains(sharer);
         for share in shares.iter_mut() {
             let sharer = &share.share.sharer;
-            let off = match unsure(sharer) {
+            let off = match unsure(sharer) || share.to_end {
                 true => share.off,
                 false => !on(sharer),
             };
@@ -426,6 +430,7 @@ impl Sharing {
             retry: None,
             backoff: Backoff::new(),
             off: false,
+            to_end: false,
         })
     }
 

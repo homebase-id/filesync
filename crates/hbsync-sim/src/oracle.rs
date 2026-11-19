@@ -458,7 +458,11 @@ impl Sim {
                 }
             }
             // A member's, of the drive as it reads it: what is shared with it.
-            let seen = client.member.then(|| self.member_reads());
+            // (Nothing, once it doesn't sync it any more: `Sim::end_share`.)
+            let seen = client.member.then(|| match client.ended {
+                true => self.server.holding(Default::default(), Default::default()),
+                false => self.member_reads(),
+            });
             let (mut synced, left) = match &seen {
                 Some(seen) => {
                     let taken = self.taken_along_on(seen);

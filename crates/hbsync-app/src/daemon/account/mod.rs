@@ -1228,13 +1228,14 @@ mod tests {
             if markers.unreadable {
                 return Err(std::io::Error::other("the markers don't read").into());
             }
-            let unsure = |s: &&Identity| synced.contains(s);
             // (Those it opened whose state DB is still there.)
             let kept = |s: &&Identity| self.paths.shared_db(&self.me, s).exists();
+            let kept: Vec<Identity> = markers.opened.iter().filter(kept).cloned().collect();
+            let unsure = |s: &&Identity| synced.contains(s) || kept.contains(s);
             Ok(parts::Synced {
                 on: markers.on.clone(),
                 unsure: markers.unsure.iter().filter(unsure).cloned().collect(),
-                kept: markers.opened.iter().filter(kept).cloned().collect(),
+                kept,
             })
         }
 
@@ -1411,7 +1412,7 @@ mod tests {
                 .wait_all("the share is no longer synced", &alone)?;
             let gone = || Some(()).filter(|()| !f.toms().exists() && !shared_db.exists());
             wait_until(gone).ok_or("its copy stays")?;
-            let said = words::share_ended(&tom, &f.toms(), &f.folder, 0, 0);
+            let said = words::share_ended(&tom, &f.toms(), &f.folder, (0, 0), None);
             f.started
                 .wait_all("said", &|_, _| f.started.said(&said) == 1)?;
             assert!(
@@ -1458,7 +1459,7 @@ mod tests {
             let out = f.folder.join("mine too.txt");
             assert_eq!(std::fs::read_to_string(out)?, "put here while stopped");
             let moved = 1 + usize::from(cfg!(unix));
-            let said = words::share_ended(&tom, &f.toms(), &f.folder, moved, 0);
+            let said = words::share_ended(&tom, &f.toms(), &f.folder, (moved, 0), None);
             f.started
                 .wait_all("said", &|_, _| f.started.said(&said) == 1)?;
             #[cfg(unix)]
@@ -1468,6 +1469,40 @@ mod tests {
                 "not ours"
             );
             assert!(!f.records_of(&tom).exists());
+            Ok(())
+        };
+        let checked = checks();
+        f.started.stop(checked)?
+    }
+
+    /// A share synced before whose marker doesn't read as the daemon starts keeps its copy:
+    /// not synced (nothing says so), and never taken for turned off. Once its marker reads,
+    /// and says no, the copy goes.
+    #[test]
+    fn a_share_kept_from_before_whose_marker_doesnt_read_keeps_its_copy()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let tom: Identity = "tom.example".into();
+        let f = Marked::start(home.path(), |m| m.on = vec!["tom.example".into()])?;
+        let synced = f.started.wait_all("the share is synced", &both_synced);
+        let mut read_before = 0;
+        let f = f.again(|_, markers| {
+            (markers.on, markers.unsure) = (Vec::new(), vec!["tom.example".into()]);
+            read_before = markers.reads;
+            Ok(())
+        })?;
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            synced?;
+            f.started.wait_all("its own folder syncs, alone", &alone)?;
+            f.read_since(read_before)?;
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            assert!(f.toms().is_dir() && f.records_of(&tom).exists());
+            let opens = lock(&f.markers).opens;
+            assert_eq!(opens, 1, "not opened to end either");
+
+            f.marked(|m| m.unsure.clear());
+            let gone = || Some(()).filter(|()| !f.toms().exists());
+            wait_until(gone).ok_or("its copy stays")?;
             Ok(())
         };
         let checked = checks();

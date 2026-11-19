@@ -618,21 +618,26 @@ impl Account {
             }
             // A copy taken off (or not): said, and the markers read again (one turned on
             // meanwhile is opened now). Not one that was stopped: the account is ending.
-            ending_stop.store(ending, Ordering::SeqCst);
-            if let Some(ended) = ending_copy.take_if(|e| e.thread.is_finished())
-                && let Some((sharer, all)) = self.copy_ended(ended)
-            {
-                markers.ended(sharer, all, Instant::now());
+            // (A pause holds it as it holds syncing: stopped between two operations, and
+            // taken up at the resume, found again by its records.)
+            ending_stop.store(ending || paused, Ordering::SeqCst);
+            if let Some(ended) = ending_copy.take_if(|e| e.thread.is_finished()) {
+                match self.copy_ended(ended) {
+                    Some((sharer, all)) => markers.ended(sharer, all, Instant::now()),
+                    None => markers.changed(Instant::now()),
+                }
             }
             // The next one's copy, on a thread of its own, where the folder of shares is
             // known (it waits where not).
             if !ending
+                && !paused
                 && ending_copy.is_none()
                 && !to_end.is_empty()
                 && let Some(at) = &shares_at
             {
                 let share = to_end.remove(0);
-                ending_copy = self.end_copy(share, config.device_name(), at, &ending_stop);
+                let device = config.device_name();
+                ending_copy = self.end_copy(share, paths, device, at, &ending_stop);
             }
             if changed {
                 self.changed.raise();
@@ -935,15 +940,22 @@ impl Account {
     fn end_copy(
         &self,
         share: Sharing,
+        paths: &Paths,
         device: String,
         (main, dir): &(PathBuf, PathBuf),
         stop: &Arc<AtomicBool>,
     ) -> Option<Ending> {
-        let (sharer, folder) = (share.share.sharer.clone(), dir.join(&share.local));
-        let (identity, out, at) = (self.identity.clone(), main.clone(), folder.clone());
-        let (stop, tell) = (Arc::clone(stop), self.requests.clone());
+        let sharer = share.share.sharer.clone();
+        let place = ending::Place {
+            identity: self.identity.clone(),
+            device,
+            folder: dir.join(&share.local),
+            out: main.clone(),
+            records: paths.shared_db(&self.identity, &sharer),
+        };
+        let (at, stop, tell) = (place.clone(), Arc::clone(stop), self.requests.clone());
         let end = move || {
-            let ended = ending::end(share.share, &identity, &device, &at, &out, stop);
+            let ended = ending::end(share.share, &at, stop);
             let _ = tell.send(Msg::Wake);
             ended
         };
@@ -953,15 +965,14 @@ impl Account {
         match spawned {
             Ok(thread) => Some(Ending {
                 sharer,
-                folder,
-                out: main.clone(),
+                place,
                 thread,
             }),
             Err(e) => {
                 tracing::error!(
                     "no thread to take the copy of what {sharer} shared off this computer \
                      ({e}): it stays in {}",
-                    folder.display()
+                    place.folder.display()
                 );
                 None
             }
@@ -969,27 +980,26 @@ impl Account {
     }
 
     /// What the ending of a share's copy came to, told on the account's status: whose it
-    /// was, and whether all of it went. `None` for one that was stopped (the account is
-    /// ending: nothing is said, and it is taken up at the next start).
+    /// was, and whether all of it went. `None` for one that was stopped (a pause, or the
+    /// account ending): nothing is said, and it is taken up again, found by its records.
     fn copy_ended(&self, ending: Ending) -> Option<(Identity, bool)> {
         let Ending {
             sharer,
-            folder,
-            out,
+            place,
             thread,
         } = ending;
-        let ended = thread.join().unwrap_or(Err(RunnerError::Panicked));
-        let (note, all) = match ended {
-            Ok(ended) if ended.stopped => return None,
-            Ok(ended) => {
-                let left = ended.left.len();
-                let note = words::share_ended(&sharer, &folder, &out, ended.moved_out, left);
-                (note, ended.all())
-            }
-            Err(e) => (words::share_not_ended(&sharer, &folder, &e), false),
-        };
+        let ended = thread.join().unwrap_or_else(|_| ending::Ended {
+            failed: Some(RunnerError::Panicked.to_string()),
+            ..Default::default()
+        });
+        if ended.stopped && ended.failed.is_none() {
+            return None;
+        }
+        let counts = (ended.moved_out, ended.left.len());
+        let why = ended.failed.as_deref();
+        let note = words::share_ended(&sharer, &place.folder, &place.out, counts, why);
         self.note(vec![note]);
-        Some((sharer, all))
+        Some((sharer, ended.all()))
     }
 
     /// The credentials, waiting while the keychain can't be read; `None` when stopped first.

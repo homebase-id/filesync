@@ -153,19 +153,24 @@ pub(crate) fn share_unopened(sharer: &crate::Identity, why: &dyn std::fmt::Displ
 
 /// What is told when what `sharer` shared isn't synced any more and its copy in `folder` was
 /// taken off this computer: `moved_out` items that weren't the sharer's (changed or put
-/// there) are in `out` now; `left` items couldn't go, and the folder stays with them.
+/// there) are in `out` now; `left` items couldn't go, and the folder stays with them; or it
+/// couldn't be done, or not all of it (`why`), and the folder stays as it is now.
 pub(crate) fn share_ended(
     sharer: &crate::Identity,
     folder: &std::path::Path,
     out: &std::path::Path,
-    moved_out: usize,
-    left: usize,
+    (moved_out, left): (usize, usize),
+    why: Option<&str>,
 ) -> String {
     let (folder, out) = (folder.display(), out.display());
     let mut said = format!("What {sharer} shared with you is no longer synced here.");
-    said += &match left {
-        0 => format!(" Its folder {folder} was removed from this computer."),
-        n => format!(
+    said += &match (why, left) {
+        (Some(why), _) => format!(
+            " Its folder {folder} couldn't be removed from this computer ({why}): what is \
+             in it isn't synced any more."
+        ),
+        (None, 0) => format!(" Its folder {folder} was removed from this computer."),
+        (None, n) => format!(
             " {} in {folder} couldn't be removed and stay there, unsynced.",
             items(n as u64)
         ),
@@ -178,20 +183,6 @@ pub(crate) fn share_ended(
         );
     }
     said
-}
-
-/// What is told when the copy of what `sharer` shared couldn't be taken off this computer
-/// (`why`): it stays in `folder` as it is.
-pub(crate) fn share_not_ended(
-    sharer: &crate::Identity,
-    folder: &std::path::Path,
-    why: &dyn std::fmt::Display,
-) -> String {
-    format!(
-        "What {sharer} shared with you is no longer synced here. Its folder {} stays as it \
-         is ({why}).",
-        folder.display()
-    )
 }
 
 /// The note told once when an account's state DB was set aside (too old, damaged, or of a

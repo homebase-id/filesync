@@ -615,7 +615,8 @@ impl Engine {
     ///
     /// What was done: [`SyncReport::moved_out`] with what step 3 moved, `stopped` where a
     /// stop was asked ([`Engine::set_stop`]) before the end, at any step, `unfinished` where
-    /// something stays that another try may take. Only for a read-only folder of another
+    /// something stays that another try may take. Where it fails part of the way, what was
+    /// done till then is [`Engine::take_unreported`]'s. Only for a read-only folder of another
     /// identity's drive: refused otherwise ([`EngineError::NotAShare`]), before anything is
     /// touched.
     pub fn end_share(&mut self, date: &str) -> Result<SyncReport, EngineError> {
@@ -633,7 +634,14 @@ impl Engine {
             report.stopped = true;
             return Ok(report);
         };
-        report.moved_out = self.move_out_unsynced(scan.skipped)?;
+        // The user's ignore rules for this folder are theirs too (in the client's state
+        // folder, which the walk doesn't enter): moved out with what they kept here.
+        let mut unsynced = scan.skipped;
+        let rules = Path::new(hbsync_local::STATE_DIR).join(hbsync_local::IGNORE_FILE);
+        if self.cfg.folder.root.join(&rules).is_file() {
+            unsynced.push((rules, hbsync_local::SkipReason::Ignored));
+        }
+        report.moved_out = self.move_out_unsynced(unsynced)?;
         let allowed = std::mem::replace(&mut self.cfg.guard.allow, true);
         let synced = loop {
             match self.sync_with(date, Pull::Done(FeedReport::default())) {
@@ -644,11 +652,24 @@ impl Engine {
                         break Ok(());
                     }
                 }
-                Err(e) => break Err(e),
+                // (What was done before it failed is kept for whoever tells it:
+                // [`Engine::take_unreported`].)
+                Err(e) => {
+                    if let Some(pass) = self.unreported.take() {
+                        report.absorb(pass);
+                    }
+                    break Err(e);
+                }
             }
         };
         self.cfg.guard.allow = allowed;
-        synced.map(|()| report)
+        match synced {
+            Ok(()) => Ok(report),
+            Err(e) => {
+                self.unreported = Some(report);
+                Err(e)
+            }
+        }
     }
 
     /// Moves out of the read-only folder, to its out folder, what a walk of it skipped

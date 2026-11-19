@@ -365,7 +365,7 @@ impl Sim {
         if !self.clients[c].member || self.whole.is_some() {
             return None;
         }
-        let seen = self.server.as_shared();
+        let seen = self.member_sees(c);
         let before = seen.snapshot();
         self.whole = Some(std::mem::replace(&mut self.server, seen));
         let done = f(self);
@@ -375,6 +375,24 @@ impl Sim {
         self.ledger
             .read_only_wrote(|| wrote.then(|| format!("{name}, a member, changed the drive")));
         Some(done)
+    }
+
+    /// The drive as member `c` plans from it: what is shared with it (`Server::as_shared`),
+    /// or nothing once it doesn't sync it any more ([`Sim::end_share`]).
+    fn member_sees(&self, c: usize) -> model::server::Server {
+        match self.clients[c].ended {
+            true => self.server.holding(Default::default(), Default::default()),
+            false => self.server.as_shared(),
+        }
+    }
+
+    /// Member `c` doesn't sync what is shared with it any more (its share ended, or it
+    /// turned it off): from now on it reads nothing of the drive, every file as one whose
+    /// share was withdrawn (sync semantics §13, "A share that isn't synced here any more";
+    /// the engine's `Engine::end_share`). Its copy leaves it at its next syncs: deleted as
+    /// synced, moved out where it changed there. Nothing for a client that isn't a member.
+    pub fn end_share(&mut self, c: usize) {
+        self.clients[c].ended = self.clients[c].member;
     }
 
     /// What moved out of client `c`'s read-only folder: each item's name, in order.

@@ -601,25 +601,41 @@ included (service managers restart it then).
   **A share that isn't synced any more has its copy removed**, once its runner has ended
   and the folder of shares is known (it waits where not), on a thread of its own, one
   share at a time (`account/ending.rs`; sync semantics §13, "A share that isn't synced here
-  any more"):
-  - Only in the folder set up for this share's own state DB: its marker says so. A folder
-    with another's marker (renamed into its place) is left as it is, with all in it.
+  any more"). Checked before anything is touched:
+  - the share's drive is another identity's, and its state DB is where this account keeps
+    that sharer's: nothing else is ever removed as its records;
+  - its folder is in the folder of shares on the main folder's record (one renamed since
+    is neither emptied nor taken for gone);
+  - it is a folder: a link at its place is never followed, whatever it leads to;
+  - it is set up for this share's own state DB, by its marker: a folder with another's
+    (renamed into its place) is left as it is, with all in it.
+
+  Then:
   - What is there as it was synced is deleted; what was changed or put there, what is never
-    synced (a link is moved as a link, never followed) and what the user's rules keep on
-    this device moves out to the top of the main folder, never over anything.
-  - Then the folder itself goes, with the client's own state in it, where nothing is left
-    (junk at its top deleted with it; what the client had set aside there and couldn't
-    place counts as left, §8a), and after it the share's state DB. Where something couldn't
-    go, the folder and the DB stay, and it isn't tried again until the daemon starts again
-    (or the share is turned on).
+    synced (a link is moved as a link, never followed), what the user's rules keep on this
+    device, and the rules themselves (`.hbsync/ignore`) move out to the top of the main
+    folder, never over anything.
+  - Where nothing is left (what the client had set aside there and couldn't place counts
+    as left, §8a), junk at the folder's top is deleted, then the client's own state in it,
+    then the folder, and after it the share's state DB. Junk is never deleted from a
+    folder that stays.
+  - Where something couldn't go, or it failed part of the way, the folder and the DB stay,
+    and it isn't tried again until the daemon starts again (or the share is turned on). An
+    ending cut short after the folder's state went is taken up by the DB's word that the
+    folder is its own.
+  - Said in a note: that the share isn't synced here any more; that its folder was
+    removed, or why not, or how many items stay; and how many moved out, and where to
+    (also where it failed after some had).
+  - A pause holds it as it holds syncing (none starts, one under way stops between two
+    operations and before its walk), and so does the daemon's stop: nothing is said, and
+    it is taken up again, found by its state DB here.
+  - A share turned off while the daemon didn't run is known the same way, as the markers
+    are first read. One whose marker doesn't read then keeps its copy: the source says
+    "unsure" for those it finds kept too. One turned on again while its copy is being
+    removed is opened anew once that is done (one opened only to remove its copy is never
+    synced as it is: it was opened without its sharer).
   - The source opens such a share without its sharer (`Sharers::open(.., to_end)`): one
     that ended gives no access any more, and nothing is asked of it.
-  - Said in a note: that the share isn't synced here any more, that its folder was removed,
-    how many items moved out and where to, or how many stay.
-  - A share turned off while the daemon didn't run, or whose removal was cut short (the
-    daemon stopped: it stops between two operations, and before its walk, and says
-    nothing), is known by its state DB here, and taken up as the markers are first read. One turned on again while its copy is being
-    removed is opened anew once that is done.
 
   Not in the released daemon yet: opening another identity's drive takes a token of its own
   that has to be kept (a new one each start would leave a row on the sharer's server each

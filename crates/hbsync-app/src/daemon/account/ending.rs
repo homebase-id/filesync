@@ -15,96 +15,154 @@ use hbsync_local::{Filter, is_junk, is_state_dir, layout};
 
 use super::parts::Share;
 use crate::Identity;
-use crate::runner::RunnerError;
 
 /// What became of a share's copy ([`end`]).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct Ended {
     /// How many items moved out to the main folder: changed or put there, or never synced.
     pub(super) moved_out: usize,
-    /// What is left in its folder, by name: what couldn't be deleted or moved. With none
-    /// (and not `stopped`), the folder and the share's records are gone.
+    /// What is left in its folder, by name: what couldn't be deleted or moved.
     pub(super) left: Vec<String>,
-    /// Stopped before the end: taken up again at the next start.
+    /// Stopped before the end: taken up again later.
     pub(super) stopped: bool,
+    /// Why it couldn't be done, or not all of it.
+    pub(super) failed: Option<String>,
 }
 
 impl Ended {
     /// Whether all of the copy went, the share's records with it.
     pub(super) fn all(&self) -> bool {
-        self.left.is_empty() && !self.stopped
+        self.left.is_empty() && !self.stopped && self.failed.is_none()
     }
 }
 
-/// Takes `share`'s copy in `folder` off this device, what isn't the sharer's moving out to
-/// `out` (the account's main folder), and removes the share's state DB. Stopped between
-/// operations once `stop` is set: what is left then is taken up at the next start.
+/// Where a share's copy is, and what its ending goes by ([`end`]).
+#[derive(Debug, Clone)]
+pub(super) struct Place {
+    pub(super) identity: Identity,
+    pub(super) device: String,
+    /// The share's folder, in the folder of shares.
+    pub(super) folder: PathBuf,
+    /// The account's main folder: where what isn't the sharer's moves out to.
+    pub(super) out: PathBuf,
+    /// Where this account keeps the share's state DB ([`crate::Paths::shared_db`]).
+    pub(super) records: PathBuf,
+}
+
+/// Takes `share`'s copy at `place` off this device, what isn't the sharer's moving out to
+/// the account's main folder, and removes the share's state DB. Stopped between operations
+/// once `stop` is set: what is left then is taken up later.
 ///
-/// Never in a folder that isn't set up for this share's DB: one whose marker names another
-/// (a folder renamed into its place) is left as it is, an error. A folder that is gone
-/// leaves only the DB to remove.
-pub(super) fn end(
-    share: Share,
-    identity: &Identity,
-    device: &str,
-    folder: &Path,
-    out: &Path,
-    stop: Arc<AtomicBool>,
-) -> Result<Ended, RunnerError> {
+/// Before anything is touched: the share's drive is another identity's and its DB is where
+/// this account keeps that sharer's (nothing else is ever removed as "its records"); its
+/// folder is in the folder of shares on the main folder's record; and it is a folder, not a
+/// link to one. Then only a folder set up for this share's DB (its marker) is emptied: one
+/// whose marker names another is left as it is. A folder that isn't there leaves only the
+/// DB to remove. What was done, and why not all of it, where it wasn't.
+pub(super) fn end(share: Share, place: &Place, stop: Arc<AtomicBool>) -> Ended {
     // Its puller's thread ends first (joined here, not on the account's thread).
     share.notifications.finish();
-    let Share { drive, db, .. } = share;
     let mut ended = Ended::default();
-    match SyncRoot::open(&db, identity, folder) {
-        Ok(root) => {
-            let mut cfg = EngineConfig::new(folder, device);
-            let filter = Filter::load(folder, cfg.folder.case_insensitive)?;
-            cfg.folder.filter = Arc::new(filter);
-            cfg.folder.read_only = Some(out.to_path_buf());
-            let mut engine = Engine::open(&root, Arc::clone(&drive), cfg)?;
-            engine.set_stop(stop);
-            let report = engine.end_share(&crate::today())?;
-            drop(engine);
-            ended.moved_out = report.moved_out.len();
-            ended.stopped = report.stopped;
-            if !ended.stopped {
-                ended.left = left_in(folder)?;
-            }
-            if ended.all() {
-                // (The client's own, in a folder its marker proved ours: its marker, and
-                // nothing aside. Then the folder, which holds nothing now.)
-                remove(&layout::state_dir(folder), true)?;
-                remove(folder, false)?;
-            }
-        }
-        // Gone already (removed by hand, or by an ending cut short after its last step).
-        Err(RootError::NoMarker(_)) if !folder.exists() => {}
-        Err(e) => return Err(e.into()),
+    match take_off(share, place, stop, &mut ended) {
+        Ok(()) => {}
+        Err(why) => ended.failed = Some(why),
     }
-    // Its records go only with its folder: one that stays is taken up again with them.
-    if ended.all() {
-        drop(drive);
-        if let Some(dir) = db.parent() {
-            remove(dir, true)?;
-        }
-    }
-    Ok(ended)
+    ended
 }
 
-/// What `folder` still holds, by name: at its top, junk files deleted on the way (they go
-/// with a folder, as in any delete: sync semantics §7), and what the client set aside
-/// there and couldn't place (§8a: left for the user). Nothing when all of the copy went.
-fn left_in(folder: &Path) -> Result<Vec<String>, RunnerError> {
-    let mut left = Vec::new();
+fn take_off(
+    share: Share,
+    place: &Place,
+    stop: Arc<AtomicBool>,
+    ended: &mut Ended,
+) -> Result<(), String> {
+    let Share { drive, db, .. } = share;
+    let (folder, out) = (place.folder.as_path(), place.out.as_path());
+    let said = |e: &dyn std::fmt::Display| e.to_string();
+    if !drive.shared() || db != place.records {
+        return Err("its records aren't those of what is shared with this account".into());
+    }
+    let dir = folder.parent().unwrap_or(folder);
+    let record = hbsync_local::shares::Record::read(out).and_then(|record| record.is(dir));
+    if !record.map_err(|e| said(&e))? {
+        return Err(format!("{} isn't the folder of shares now", dir.display()));
+    }
+    match std::fs::symlink_metadata(folder) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => return Err("it isn't a folder (a link to one is never followed)".into()),
+        // Gone already (removed by hand, or by an ending cut short after its last step):
+        // only its records are left.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            drop(drive);
+            return remove_records(&db);
+        }
+        Err(e) => return Err(said(&e)),
+    }
+    match SyncRoot::open(&db, &place.identity, folder) {
+        Ok(root) => {
+            let mut cfg = EngineConfig::new(folder, &place.device);
+            let filter = Filter::load(folder, cfg.folder.case_insensitive);
+            cfg.folder.filter = Arc::new(filter.map_err(|e| said(&e))?);
+            cfg.folder.read_only = Some(out.to_path_buf());
+            let mut engine = Engine::open(&root, Arc::clone(&drive), cfg).map_err(|e| said(&e))?;
+            engine.set_stop(stop);
+            let done = engine.end_share(&crate::today());
+            // (What it did before it failed moved out all the same: told.)
+            let report = match &done {
+                Ok(report) => Some(report.moved_out.len()),
+                Err(_) => engine.take_unreported().map(|r| r.moved_out.len()),
+            };
+            ended.moved_out = report.unwrap_or(0);
+            ended.stopped = done.map_err(|e| said(&e))?.stopped;
+        }
+        // Its marker went with the last step of an ending that was cut short there (the
+        // folder's own state goes before the folder): its DB still has the folder here.
+        Err(RootError::NoMarker(_))
+            if SyncRoot::knows_path(&db, &place.identity, folder).is_ok_and(|known| known) => {}
+        Err(e) => return Err(said(&e)),
+    }
+    if ended.stopped {
+        return Ok(());
+    }
+    let (left, junk) = left_in(folder).map_err(|e| said(&e))?;
+    ended.left = left;
+    if !ended.left.is_empty() {
+        return Ok(());
+    }
+    // Nothing is left: junk at its top goes with it (as in any delete: sync semantics §7),
+    // then the client's own state (its marker; nothing aside), then the folder. Something
+    // put there meanwhile keeps the folder: found again by its DB, which stays.
+    for path in junk {
+        std::fs::remove_file(path).map_err(|e| said(&e))?;
+    }
+    remove(&layout::state_dir(folder), true).map_err(|e| said(&e))?;
+    remove(folder, false).map_err(|e| said(&e))?;
+    drop(drive);
+    remove_records(&db)
+}
+
+/// Removes a share's state DB at `db`, with the directory this account keeps it in.
+fn remove_records(db: &Path) -> Result<(), String> {
+    let dir = db.parent().ok_or("its records have no place")?;
+    remove(dir, true).map_err(|e| e.to_string())
+}
+
+/// What `folder` still holds, by name (at its top, and what the client set aside there and
+/// couldn't place: §8a, left for the user), and the junk files at its top, which go with
+/// the folder when nothing else is left.
+fn left_in(folder: &Path) -> std::io::Result<(Vec<String>, Vec<PathBuf>)> {
+    let (mut left, mut junk) = (Vec::new(), Vec::new());
     for entry in std::fs::read_dir(folder)? {
         let entry = entry?;
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if is_state_dir(&name) {
+        // (A name that isn't text is nobody's junk: the user's, left.)
+        let name = entry.file_name();
+        let text = name.to_str();
+        if text.is_some_and(is_state_dir) {
             continue;
         }
-        let junk = is_junk(&name) && !entry.file_type()?.is_dir();
-        if !junk || std::fs::remove_file(entry.path()).is_err() {
-            left.push(name);
+        match text.is_some_and(is_junk) && !entry.file_type()?.is_dir() {
+            true => junk.push(entry.path()),
+            false => left.push(name.to_string_lossy().into_owned()),
         }
     }
     let aside = layout::aside_entries(folder);
@@ -113,7 +171,7 @@ fn left_in(folder: &Path) -> Result<Vec<String>, RunnerError> {
         layout::aside_shown(&name)
     }));
     left.sort();
-    Ok(left)
+    Ok((left, junk))
 }
 
 /// Removes the folder at `path`, with all in it when `all` (no link in it is followed);
@@ -132,26 +190,30 @@ fn remove(path: &Path, all: bool) -> std::io::Result<()> {
 /// A share's copy being taken off this device, on the account's thread.
 pub(super) struct Ending {
     pub(super) sharer: Identity,
-    /// Where its folder is, and where what isn't the sharer's moves out to.
-    pub(super) folder: PathBuf,
-    pub(super) out: PathBuf,
-    pub(super) thread: std::thread::JoinHandle<Result<Ended, RunnerError>>,
+    pub(super) place: Place,
+    pub(super) thread: std::thread::JoinHandle<Ended>,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use hbsync_engine::Drive;
+    use hbsync_local::shares::{Made, make};
     use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 
     use super::super::feed::{Notifications, Puller};
 
     type R = Result<(), Box<dyn std::error::Error>>;
 
-    /// What `me` reads of a sharer's (empty) drive, on the state DB `db`.
-    fn share(me: &Identity, db: &Path) -> Result<Share, Box<dyn std::error::Error>> {
+    /// What `me` reads of a sharer's (empty) drive, on the state DB `db`; or (`own`) its own.
+    fn share(me: &Identity, db: &Path, own: bool) -> Result<Share, Box<dyn std::error::Error>> {
         let server = FakeServer::new(ServerConfig::default());
-        let drive = Drive::open(db, me, Arc::new(FakeRemote::member(server)))?;
+        let remote = match own {
+            true => FakeRemote::new(server),
+            false => FakeRemote::member(server),
+        };
+        std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
+        let drive = Drive::open(db, me, Arc::new(remote))?;
         let puller = Puller::spawn(Arc::clone(&drive));
         Ok(Share {
             sharer: "tom.example".into(),
@@ -161,40 +223,44 @@ mod tests {
         })
     }
 
+    /// A main folder under `home` with its folder of shares, and where tom's share is.
+    fn place(home: &Path) -> Result<Place, Box<dyn std::error::Error>> {
+        let out = home.join("Homebase");
+        std::fs::create_dir_all(&out)?;
+        assert_eq!(make(&out, "Shared")?, Made::Made);
+        Ok(Place {
+            identity: "me.example".into(),
+            device: "pc".into(),
+            folder: out.join("Shared").join("tom.example"),
+            out,
+            records: home.join("state/shared/tom/state.db"),
+        })
+    }
+
+    fn end_now(share: Share, place: &Place) -> Ended {
+        end(share, place, Arc::new(AtomicBool::new(false)))
+    }
+
     /// Only the folder set up for the share's own records is touched: one that carries
     /// another's marker (renamed into its place) is left as it is, with all in it, and the
     /// share's records stay.
     #[test]
     fn a_folder_of_other_records_is_never_emptied() -> R {
         let home = tempfile::tempdir()?;
-        let me: Identity = "me.example".into();
-        let (folder, out) = (
-            home.path().join("Shared/tom.example"),
-            home.path().join("out"),
-        );
-        std::fs::create_dir_all(&folder)?;
-        std::fs::create_dir_all(&out)?;
+        let place = place(home.path())?;
+        std::fs::create_dir_all(&place.folder)?;
         // Set up for other records than the share's.
-        let (others, db) = (
-            home.path().join("other/state.db"),
-            home.path().join("tom/state.db"),
-        );
-        for db in [&others, &db] {
-            std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
-        }
-        drop(share(&me, &others)?);
-        SyncRoot::create(&others, &me, &folder)?;
-        std::fs::write(folder.join("theirs.txt"), "of another share")?;
+        let others = home.path().join("state/shared/other/state.db");
+        drop(share(&place.identity, &others, false)?);
+        SyncRoot::create(&others, &place.identity, &place.folder)?;
+        std::fs::write(place.folder.join("theirs.txt"), "of another share")?;
 
-        let stop = Arc::new(AtomicBool::new(false));
-        let ended = end(share(&me, &db)?, &me, "pc", &folder, &out, stop);
-        assert!(ended.is_err(), "{ended:?}");
-        assert_eq!(
-            std::fs::read_to_string(folder.join("theirs.txt"))?,
-            "of another share"
-        );
-        assert!(layout::state_dir(&folder).is_dir() && db.exists());
-        assert!(out.read_dir()?.next().is_none(), "nothing moved out");
+        let ended = end_now(share(&place.identity, &place.records, false)?, &place);
+        assert!(ended.failed.is_some() && !ended.all(), "{ended:?}");
+        let kept = std::fs::read_to_string(place.folder.join("theirs.txt"))?;
+        assert_eq!(kept, "of another share");
+        assert!(layout::state_dir(&place.folder).is_dir() && place.records.exists());
+        assert!(!place.out.join("theirs.txt").exists(), "nothing moved out");
         Ok(())
     }
 
@@ -202,18 +268,66 @@ mod tests {
     #[test]
     fn a_copy_gone_already_leaves_its_records_to_remove() -> R {
         let home = tempfile::tempdir()?;
-        let me: Identity = "me.example".into();
-        let (folder, out) = (
-            home.path().join("Shared/tom.example"),
-            home.path().join("out"),
-        );
-        let db = home.path().join("tom/state.db");
-        std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let ended = end(share(&me, &db)?, &me, "pc", &folder, &out, stop)?;
+        let place = place(home.path())?;
+        let ended = end_now(share(&place.identity, &place.records, false)?, &place);
         assert_eq!(ended, Ended::default());
-        assert!(ended.all());
-        assert!(!db.exists());
+        assert!(ended.all() && !place.records.exists());
+        Ok(())
+    }
+
+    /// Nothing is removed as a share's records that isn't: a drive that is the account's
+    /// own, or a DB that isn't where this account keeps that sharer's, is refused before
+    /// anything is touched, the folder missing or not.
+    #[test]
+    fn records_that_arent_a_shares_are_never_removed() -> R {
+        let home = tempfile::tempdir()?;
+        let place = place(home.path())?;
+        // The account's own drive, at the place of a share's records.
+        let own = end_now(share(&place.identity, &place.records, true)?, &place);
+        assert!(own.failed.is_some(), "{own:?}");
+        assert!(place.records.exists());
+        // A share's drive, but its DB somewhere else (beside something that isn't ours).
+        let elsewhere = home.path().join("state/accounts/me/state.db");
+        std::fs::create_dir_all(elsewhere.parent().ok_or("no parent")?)?;
+        let beside = elsewhere.with_file_name("precious.txt");
+        std::fs::write(&beside, "not a share's")?;
+        let other = end_now(share(&place.identity, &elsewhere, false)?, &place);
+        assert!(other.failed.is_some(), "{other:?}");
+        assert!(elsewhere.exists() && beside.exists());
+        Ok(())
+    }
+
+    /// A link at the share's place is never followed: what it leads to is left as it is,
+    /// though it is the share's own folder, moved away, with its marker.
+    #[cfg(unix)]
+    #[test]
+    fn a_link_at_the_shares_place_is_never_followed() -> R {
+        let home = tempfile::tempdir()?;
+        let place = place(home.path())?;
+        let moved = home.path().join("moved away");
+        std::fs::create_dir_all(&moved)?;
+        drop(share(&place.identity, &place.records, false)?);
+        SyncRoot::create(&place.records, &place.identity, &moved)?;
+        std::fs::write(moved.join("kept.txt"), "kept")?;
+        std::os::unix::fs::symlink(&moved, &place.folder)?;
+
+        let ended = end_now(share(&place.identity, &place.records, false)?, &place);
+        assert!(ended.failed.is_some(), "{ended:?}");
+        assert_eq!(std::fs::read_to_string(moved.join("kept.txt"))?, "kept");
+        assert!(layout::state_dir(&moved).is_dir() && place.records.exists());
+        Ok(())
+    }
+
+    /// A folder that isn't in the folder of shares on record (that one renamed since) is
+    /// neither emptied nor taken for gone: its records stay.
+    #[test]
+    fn a_place_that_isnt_in_the_folder_of_shares_is_left_alone() -> R {
+        let home = tempfile::tempdir()?;
+        let mut place = place(home.path())?;
+        place.folder = place.out.join("Not shares").join("tom.example");
+        let ended = end_now(share(&place.identity, &place.records, false)?, &place);
+        assert!(ended.failed.is_some(), "{ended:?}");
+        assert!(place.records.exists());
         Ok(())
     }
 }

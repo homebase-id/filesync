@@ -38,7 +38,8 @@ pub struct AccountParts {
 /// Whose shares an account syncs, and how each is opened.
 pub trait Sharers: Send + std::fmt::Debug {
     /// What the identity's share markers say now. `synced`: whose shares are synced or
-    /// being opened at present, for [`Synced::unsure`].
+    /// being opened at present, for [`Synced::unsure`] (with those it finds [`Synced::kept`]:
+    /// at a start nothing is synced yet).
     fn told(&self, synced: &[crate::Identity]) -> Result<Synced, RunnerError>;
 
     /// What `sharer` shares, opened to sync: its drive as the account may read it, on a
@@ -53,8 +54,9 @@ pub trait Sharers: Send + std::fmt::Debug {
 pub struct Synced {
     /// Whose shares to sync.
     pub on: Vec<crate::Identity>,
-    /// Those of the ones synced or being opened of whom the markers don't say (one that may
-    /// be theirs didn't read): each stays as it is, never taken for off, nor for on again.
+    /// Those of the ones synced, being opened or [`Synced::kept`] of whom the markers don't
+    /// say (one that may be theirs didn't read): each stays as it is, never taken for off
+    /// (a kept one's copy stays), nor for on again.
     pub unsure: Vec<crate::Identity>,
     /// Whose shares have a state DB on this device: synced here before. One of them that
     /// isn't `on` (turned off while the daemon didn't run, or its ending cut short) has

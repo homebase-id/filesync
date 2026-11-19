@@ -1542,9 +1542,13 @@ rules hold too:
     is moved as a link, never followed. Junk goes with its folder; the client's own state
     stays. One that can't move stays, and its folder with it. Not what lies in a folder
     made here: that folder moves out whole, as any item put here, with all in it where it
-    is.
+    is. The user's ignore rules for the folder (`.hbsync/ignore`) move out too.
   - The drive is read from its beginning the next time it is (the feed's cursor goes): a
     share synced again before its state DB went brings all of it back.
+
+  The simulator has it as a member that reads nothing of the drive from then on
+  (`Sim::end_share`; regression `a_share_that_ended_leaves_the_member_nothing_and_keeps_
+  what_was_its_own`).
 
   Only for a read-only folder of another identity's drive: refused anywhere else before
   anything is touched (`EngineError::NotAShare`), as an identity's own files read by these
