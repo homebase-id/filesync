@@ -678,3 +678,49 @@ fn regression_a_folder_ignored_since_isnt_made_again_for_what_the_drive_kept_of_
         assert!(sim.local_paths(c).is_empty(), "{:?}", sim.local_paths(c));
     }
 }
+
+/// As above, for a file the client synced in the folder before it ignored it (it holds a base
+/// of it). Client 0 makes the folder `d` with the file `a` in it, and both sync. On the drive,
+/// by other hands, `d` is put into the file `a` (no place any more), deleted with the delete
+/// stopped before `a`, and `a` is edited: live, in a folder that is nowhere. Client 0 starts
+/// ignoring `d`. It doesn't make `d` again for `a` at the place it filters: it forgets the
+/// folder, and `a` is an orphan like any other. No other client repairs the drive here
+/// (client 1 ignores `d` too, client 2 is read-only): client 0 made the folder again at
+/// every sync, on the name of the one it keeps to itself, and fetched the file each time,
+/// never idle (#427, `cc 932646ec…` of `a_read_only_folder_plans_as_the_sim_on_the_engines_path`).
+#[test]
+fn regression_nor_is_it_made_again_for_a_file_synced_there_before() {
+    use Action::*;
+    let act = |action| Event::Act { client: 0, action };
+    let mut sim = Sim::new(3).with_read_only(2).with_split_downloads();
+    sim.verbose = true;
+    sim.run(&[
+        act(CreateFolder {
+            parent: 0,
+            name: 13,
+        }),
+        act(CreateJunkFolder { parent: 0 }),
+        act(CreateFile { parent: 3, name: 0 }),
+        Event::Plan { client: 0 },
+        Event::Step { client: 0 },
+        Event::Step { client: 0 },
+    ]);
+    assert_eq!(sim.server_paths(), ["d", "d/a"]);
+    sim.run(&[
+        act(IntoFile { pick: 8, file: 0 }),
+        act(DeleteStopped { pick: 0, done: 6 }),
+        act(EditTaken { pick: 0 }),
+        act(ToggleIgnore),
+    ]);
+    assert!(sim.quiesce(30), "{:#?}", sim.trace);
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    // The file is in Recovered files, on the drive and on every client; what client 0 keeps
+    // to itself is as it was.
+    let recovered = ["Recovered files", "Recovered files/a"];
+    assert_eq!(sim.server_paths(), recovered);
+    let kept = ["d", "d/$RECYCLE.BIN", "d/$RECYCLE.BIN/x", "d/a"];
+    assert_eq!(sim.local_paths(0), [&recovered[..], &kept[..]].concat());
+    for c in 1..3 {
+        assert_eq!(sim.local_paths(c), recovered, "client {c}");
+    }
+}

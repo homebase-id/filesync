@@ -1500,6 +1500,52 @@ fn a_folder_below_one_a_new_rule_hides_isnt_made_again_either() {
     assert!(makes(&plan, p) && makes(&plan, b), "{plan:?}");
 }
 
+/// As above, for a file this device synced there before the rule and another device changed
+/// since (it holds a base of it; its item is its own now, no longer reported): the folder
+/// isn't made again for it either. Made again, its name is taken by the item the device
+/// keeps: tried at every sync, for good (#427). The file is an orphan like any other: into
+/// Recovered files, in its version on the drive.
+#[test]
+fn nor_is_it_made_again_for_a_file_synced_there_before_the_rule() {
+    let [b, f] = ids(2)[..] else { unreachable!() };
+    let world = |mut w: World| {
+        w.input.remote_complete = true;
+        w.synced(b, folder(ROOT, "build"));
+        w.synced(f, file(b, "out.o", "o"));
+        // The folder gone on both sides (for good on the drive; no longer reported here), the
+        // file no longer reported here, and edited on the drive, which kept it.
+        w.local(b, None).remote(b, None).local(f, None);
+        w.remote(f, Some(file(b, "out.o", "o2")));
+        w
+    };
+    let plan = world(World::ignoring_build()).plan();
+    assert!(!makes(&plan, b), "{plan:?}");
+    // (The other device's edit wins over what reads as this device's delete, by the merge's
+    // own rule, said as such.)
+    let conflicts = [
+        Conflict::EditDelete { node: f },
+        Conflict::Orphan { node: f },
+    ];
+    assert_eq!(plan.conflicts, conflicts, "{plan:?}");
+    let kinds = kinds(&plan.ops);
+    assert!(
+        kinds.contains(&"download") && kinds.contains(&"settle"),
+        "{plan:?}"
+    );
+    assert!(
+        !kinds.contains(&"delete"),
+        "nothing leaves the drive: {plan:?}"
+    );
+    // Without the rule, the file keeps its folder: made again.
+    let plan = world(World::default()).plan();
+    assert!(makes(&plan, b), "{plan:?}");
+    assert_eq!(
+        plan.conflicts,
+        [Conflict::EditDelete { node: f }],
+        "{plan:?}"
+    );
+}
+
 #[test]
 fn a_folder_deleted_here_stays_deleted_when_what_it_held_leaves_the_drive() {
     let [p, b, f] = ids(3)[..] else {

@@ -648,6 +648,53 @@ fn a_folder_ignored_since_isnt_made_again_for_what_the_drive_kept_of_it() -> R {
     Ok(())
 }
 
+/// As above, for a file a synced in build before its rule, which b changed since: a holds a
+/// base of it, and its own copy, which is a's alone now (§10). The folder isn't made again
+/// for it either: b's version is an orphan, into Recovered files, and a's copy stays as it
+/// is. Before, a made the folder again for it, and b's version couldn't come down onto the
+/// name of a's copy: a sync that failed at every run, for good (#427; in the simulator the
+/// folder was made again at every sync, the file fetched each time).
+#[test]
+fn nor_is_it_made_again_for_a_file_synced_there_before_the_rule() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("readme", "r")?;
+    a.write("build/out.o", "o")?;
+    a.sync()?;
+    b.sync()?;
+    b.write("build/out.o", "changed by b")?;
+    b.sync()?;
+    filters::restart_ignoring(&mut a, "build/\n")?;
+    deleted_for_good_announced(&server, &[&a, &b], &["build"])?;
+
+    let report = a.sync()?;
+    assert!(report.failed.is_empty(), "{report:?}");
+    let report = a.sync()?;
+    assert_eq!(report.ops_done, 0, "{report:?}");
+    assert_eq!(
+        a.tree_text(""),
+        [
+            "Recovered files/",
+            "Recovered files/out.o = changed by b",
+            "build/",
+            "build/out.o = o",
+            "readme = r"
+        ]
+    );
+    let (live, removed) = server_names(&server)?;
+    assert_eq!(live, ["Recovered files", "out.o", "readme"], "no build");
+    assert!(!removed, "nothing in Recently deleted");
+    b.sync()?;
+    let recovered = [
+        "Recovered files/",
+        "Recovered files/out.o = changed by b",
+        "readme = r",
+    ];
+    assert_eq!(b.tree_text(""), recovered);
+    Ok(())
+}
+
 /// b, which syncs the folder, is first: it makes the folder again for its file (§6.3). On the
 /// drive again, the folder is one a's filter masks, with b's file in it: a leaves both alone.
 #[test]

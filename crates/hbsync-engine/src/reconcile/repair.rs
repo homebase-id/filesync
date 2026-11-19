@@ -324,14 +324,14 @@ impl Reconciler<'_> {
                 None if withdrawn.contains(&parent) => Parent::Wait,
                 None => match self.known_state(parent) {
                     // Its folder comes back for it (§6.3), but not at a place this device
-                    // filters since the folder synced here (§10), for a node it holds nothing
-                    // of: the folder would take over the item this device keeps to itself, and
-                    // the node would come down into it and leave the drive with it. This device
-                    // forgets that folder, and the node is an orphan as below.
-                    Some(state)
-                        if state.kind == NodeKind::Folder
-                            && (self.holds_any(node) || self.syncs_place(&state)) =>
-                    {
+                    // filters since the folder synced here (§10): the folder would take over
+                    // the item this device keeps to itself, and the node would come down into
+                    // it and leave the drive with it; or, its name taken there by what the
+                    // device keeps, it is tried again at every sync, for good. This device
+                    // forgets that folder, and the node is an orphan as below: whether it holds
+                    // something of the node or not (a base from before the rule: its item here
+                    // is the device's own since, §10, no longer told by the scanner).
+                    Some(state) if state.kind == NodeKind::Folder && self.syncs_place(&state) => {
                         Parent::Folder(state)
                     }
                     // Nowhere, or known as a file only before (another writer's), though the
