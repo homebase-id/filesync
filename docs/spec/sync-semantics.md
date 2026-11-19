@@ -1539,7 +1539,8 @@ rules hold too:
   - What is never synced (a link, a special file, a name the drive can't have) and what the
     user's ignore rules keep on this device moves out too, before the sync: it is the
     user's, and a folder isn't removed over what its delete can't account for (§7). A link
-    is moved as a link, never followed. Junk goes with its folder; the client's own state
+    is moved as a link, never followed. A junk file goes with its folder, a folder on the
+    junk list moves out (it may hold what was never synced); the client's own state
     stays. One that can't move stays, and its folder with it. Not what lies in a folder
     made here: that folder moves out whole, as any item put here, with all in it where it
     is. The user's ignore rules for the folder (`.hbsync/ignore`) move out too.

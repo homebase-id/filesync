@@ -171,8 +171,9 @@ pub(crate) fn share_ended(
         ),
         (None, 0) => format!(" Its folder {folder} was removed from this computer."),
         (None, n) => format!(
-            " {} in {folder} couldn't be removed and stay there, unsynced.",
-            items(n as u64)
+            " {} in {folder} couldn't be removed and {} there, unsynced.",
+            items(n as u64),
+            if n == 1 { "stays" } else { "stay" }
         ),
     };
     if moved_out > 0 {

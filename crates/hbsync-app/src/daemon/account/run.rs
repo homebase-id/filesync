@@ -24,7 +24,7 @@ use crate::daemon::keeper::Keeper;
 use crate::folders::{heal_account, ready_account};
 use crate::protocol::{AccountStatus, Hints, Pause, State};
 use crate::runner::{Backoff, Command, Runner, RunnerConfig, RunnerError, SharesTold, Showing};
-use crate::sync::{lock, wait_for};
+use crate::sync::{OnDrop, lock, wait_for};
 use crate::words;
 use crate::{Config, CredentialError, CredentialStore, Identity, Location, Paths, Root};
 
@@ -395,11 +395,10 @@ impl Account {
                         }
                     }
                     Msg::Sharers(id, answer) => {
-                        let waiting = to_end.iter().map(|s| &s.share.sharer);
-                        let busy = ending_copy.iter().map(|e| &e.sharer).chain(waiting);
-                        let busy: Vec<Identity> = busy.cloned().collect();
+                        let ending = ending_copy.as_ref().map(|e| &e.sharer);
                         let now = Instant::now();
-                        let notes = markers.answer(id, *answer, &mut shares, &busy, now);
+                        let waiting = (&mut to_end, ending);
+                        let notes = markers.answer(id, *answer, &mut shares, waiting, now);
                         self.push_notes(notes);
                     }
                     Msg::Hint(event) => {
@@ -617,7 +616,7 @@ impl Account {
                 to_end.extend(gone);
             }
             // A copy taken off (or not): said, and the markers read again (one turned on
-            // meanwhile is opened now). Not one that was stopped: the account is ending.
+            // meanwhile is opened now; one that was stopped is found again by its records).
             // (A pause holds it as it holds syncing: stopped between two operations, and
             // taken up at the resume, found again by its records.)
             ending_stop.store(ending || paused, Ordering::SeqCst);
@@ -937,7 +936,7 @@ impl Account {
     /// ([`ending::end`]): from its folder in the folder of shares `dir` of the main folder
     /// `main`, where what isn't the sharer's moves out to. On a thread of its own, which
     /// wakes the account as it ends; given up at once where `stop` is set. `None` where no
-    /// thread starts (said: its copy stays, taken up at the next start).
+    /// thread starts (said: its copy stays, taken up when the markers are next read).
     fn end_copy(
         &self,
         share: Sharing,
@@ -958,12 +957,14 @@ impl Account {
         let done = Arc::new(AtomicBool::new(false));
         let finished = Arc::clone(&done);
         let end = move || {
-            let ended = ending::end(share.share, &at, stop);
-            // Before the wake: the account, woken, finds it done (its thread may not have
-            // ended yet as the account looks, and nothing would wake it again).
-            finished.store(true, Ordering::SeqCst);
-            let _ = tell.send(Msg::Wake);
-            ended
+            // Done, then the wake, also where it panics: the account, woken, finds it done
+            // (its thread may not have ended yet as the account looks, and nothing would
+            // wake it again), and takes what it came to.
+            let _done = OnDrop(Some(move || {
+                finished.store(true, Ordering::SeqCst);
+                let _ = tell.send(Msg::Wake);
+            }));
+            ending::end(share.share, &at, stop)
         };
         let spawned = std::thread::Builder::new()
             .name("hbsync-share-end".into())
@@ -988,7 +989,8 @@ impl Account {
 
     /// What the ending of a share's copy came to, told on the account's status: whose it
     /// was, and whether all of it went. `None` for one that was stopped (a pause, or the
-    /// account ending): nothing is said, and it is taken up again, found by its records.
+    /// account ending): it is taken up again, found by its records, and only what had
+    /// moved out by then is said.
     fn copy_ended(&self, ending: Ending) -> Option<(Identity, bool)> {
         let Ending {
             sharer,

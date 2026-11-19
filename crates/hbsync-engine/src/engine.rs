@@ -641,7 +641,7 @@ impl Engine {
         if self.cfg.folder.root.join(&rules).is_file() {
             unsynced.push((rules, hbsync_local::SkipReason::Ignored));
         }
-        report.moved_out = self.move_out_unsynced(unsynced)?;
+        report.moved_out = self.move_out_unsynced(unsynced);
         let allowed = std::mem::replace(&mut self.cfg.guard.allow, true);
         let synced = loop {
             match self.sync_with(date, Pull::Done(FeedReport::default())) {
@@ -673,9 +673,10 @@ impl Engine {
     }
 
     /// Moves out of the read-only folder, to its out folder, what a walk of it skipped
-    /// (`skipped`, a scan's) and isn't the client's own or junk: a link (moved as a link,
-    /// never followed), a special file, a name the drive can't have, and what the user's
-    /// ignore rules keep on this device (a folder so kept as a whole). It is the user's, and
+    /// (`skipped`, a scan's) and isn't the client's own or a junk file: a link (moved as a
+    /// link, never followed), a special file, a name the drive can't have, a folder on the
+    /// junk list, and what the user's ignore rules keep on this device (a folder so kept as
+    /// a whole). It is the user's, and
     /// a folder isn't removed over what its delete can't account for (§7). Not what lies in
     /// a folder made here: that one moves out whole by the sync that follows, with all in
     /// it where it is.
@@ -687,11 +688,11 @@ impl Engine {
     fn move_out_unsynced(
         &mut self,
         skipped: Vec<(PathBuf, hbsync_local::SkipReason)>,
-    ) -> Result<Vec<(String, PathBuf)>, StateError> {
+    ) -> Vec<(String, PathBuf)> {
         use hbsync_local::SkipReason;
         let folder = &self.cfg.folder;
         let Some(out) = folder.read_only.as_deref() else {
-            return Ok(Vec::new());
+            return Vec::new();
         };
         let from = folder
             .root
@@ -700,7 +701,16 @@ impl Engine {
             .to_string_lossy();
         let mut moved = Vec::new();
         for (rel, reason) in skipped {
-            if matches!(reason, SkipReason::Junk | SkipReason::Excluded) {
+            // (The client's own state stays; a junk file goes with its folder, a junk
+            // folder keeps the folder it is in, §7, and may hold what was never synced: the
+            // user's, moved.)
+            let at = folder.root.join(&rel);
+            let stays = match reason {
+                SkipReason::Excluded => true,
+                SkipReason::Junk => !at.symlink_metadata().is_ok_and(|meta| meta.is_dir()),
+                _ => false,
+            };
+            if stays {
                 continue;
             }
             // In a folder made here (no base): it leaves with that folder.
@@ -717,11 +727,15 @@ impl Engine {
                     }
                 }
                 Ok(false)
-            })?;
+            });
+            // (Its folder couldn't be told: it stays where it is, and its folder with it.)
+            let made_here = made_here.unwrap_or_else(|e: StateError| {
+                tracing::warn!("{}: it stays ({e})", rel.display());
+                true
+            });
             if made_here {
                 continue;
             }
-            let at = folder.root.join(&rel);
             let name = rel.file_name().unwrap_or_default().to_string_lossy();
             let to = crate::tree::moved_out_names(&name, &from).find_map(|candidate| {
                 let to = out.join(candidate);
@@ -740,7 +754,7 @@ impl Engine {
                 None => tracing::warn!("{}: no free name to move it out to", rel.display()),
             }
         }
-        Ok(moved)
+        moved
     }
 
     /// [`Engine::sync_once`], with the feed read as `pulled` says.

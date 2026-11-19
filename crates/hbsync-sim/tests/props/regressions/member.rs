@@ -399,7 +399,7 @@ fn a_share_after_a_stopped_delete_brings_nothing_back_on_a_device_reading_first_
 /// A share that isn't synced with the member any more (it ended, or the member turned it
 /// off) leaves the member with nothing of it: what is there as it was synced is deleted, a
 /// file the member changed and one it put there move out, kept, and the drive is as it was
-/// for its owner. Shared again later, all of it comes back.
+/// for its owner.
 #[test]
 fn a_share_that_ended_leaves_the_member_nothing_and_keeps_what_was_its_own() {
     use Action::*;

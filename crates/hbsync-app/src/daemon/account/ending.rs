@@ -134,7 +134,7 @@ fn take_off(
     if ended.stopped {
         return Ok(());
     }
-    let (left, mut junk) = left_in(folder).map_err(|e| said(&e))?;
+    let (left, mut junk) = left_in(folder, proven).map_err(|e| said(&e))?;
     ended.left = left;
     // (Without its marker nothing in it is deleted, junk neither: only an empty folder
     // goes.)
@@ -150,12 +150,14 @@ fn take_off(
         return Ok(());
     }
     // Nothing is left: junk at its top goes with it (as in any delete: sync semantics §7),
-    // then the client's own state (its marker; nothing aside), then the folder. Something
-    // put there meanwhile keeps the folder: found again by its DB, which stays.
+    // then the client's own state (its marker, what a transfer left, nothing aside: all
+    // else in it counted as left; without the marker it holds nothing, or it would have
+    // too), then the folder. Something put there meanwhile keeps the folder: found again
+    // by its DB, which stays.
     for path in junk {
         std::fs::remove_file(path).map_err(|e| said(&e))?;
     }
-    remove(&layout::state_dir(folder), true).map_err(|e| said(&e))?;
+    remove(&layout::state_dir(folder), proven).map_err(|e| said(&e))?;
     remove(folder, false).map_err(|e| said(&e))?;
     drop(drive);
     remove_records(&db)
@@ -179,10 +181,12 @@ fn remove_records(db: &Path) -> Result<(), String> {
 }
 
 /// What `folder` still holds, by name: at its top; what the client set aside there and
-/// couldn't place (§8a, left for the user); and the user's ignore rules, where they couldn't
-/// move out. And the junk files at its top, which go with the folder when nothing else is
-/// left.
-fn left_in(folder: &Path) -> std::io::Result<(Vec<String>, Vec<PathBuf>)> {
+/// couldn't place (§8a, left for the user); and what is in its state folder that isn't the
+/// client's own (the user's ignore rules where they couldn't move out, a backup an editor
+/// left beside them): with the folder `proven` this share's by its marker, the client's own
+/// are the marker, what a transfer left and what it set aside; without, nothing is. And the
+/// junk files at its top, which go with the folder when nothing else is left.
+fn left_in(folder: &Path, proven: bool) -> std::io::Result<(Vec<String>, Vec<PathBuf>)> {
     let (mut left, mut junk) = (Vec::new(), Vec::new());
     let state = layout::state_dir(folder);
     // (The folder's own state, under whatever spelling the volume shows it: another folder
@@ -209,14 +213,27 @@ fn left_in(folder: &Path) -> std::io::Result<(Vec<String>, Vec<PathBuf>)> {
         let name = path.file_name().unwrap_or_default().to_string_lossy();
         layout::aside_shown(&name)
     }));
-    if layout::ignore_file(folder).symlink_metadata().is_ok() {
-        left.push(format!(
-            "{}/{}",
-            hbsync_local::STATE_DIR,
-            hbsync_local::IGNORE_FILE
-        ));
+    let own = [
+        layout::marker_file(folder),
+        layout::tmp_dir(folder),
+        layout::aside_dir(folder),
+    ];
+    let in_state = match std::fs::read_dir(&state) {
+        Ok(entries) => Some(entries),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
+    for entry in in_state.into_iter().flatten() {
+        let entry = entry?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // (A probe of the volume a crash left: `.hbsync-…`.)
+        let ours = proven && (own.contains(&entry.path()) || name.starts_with(".hbsync-"));
+        if !ours {
+            left.push(format!("{}/{name}", hbsync_local::STATE_DIR));
+        }
     }
     left.sort();
+    left.dedup();
     Ok((left, junk))
 }
 
@@ -369,6 +386,26 @@ mod tests {
         let ended = end_now(share(&place.identity, &place.records, false)?, &place);
         assert!(ended.all(), "{ended:?}");
         assert!(!place.folder.exists() && !place.records.exists());
+        Ok(())
+    }
+
+    /// What is in the folder's state folder and isn't the client's own (a backup an editor
+    /// left beside the ignore rules) is never deleted with it: it counts as left, and the
+    /// folder stays, marker and all.
+    #[test]
+    fn the_users_own_in_the_state_folder_keeps_the_folder() -> R {
+        let home = tempfile::tempdir()?;
+        let place = place(home.path())?;
+        std::fs::create_dir_all(&place.folder)?;
+        drop(share(&place.identity, &place.records, false)?);
+        SyncRoot::create(&place.records, &place.identity, &place.folder)?;
+        let backup = layout::state_dir(&place.folder).join("ignore~");
+        std::fs::write(&backup, "*.log")?;
+
+        let ended = end_now(share(&place.identity, &place.records, false)?, &place);
+        assert_eq!(ended.left, [".hbsync/ignore~"], "{ended:?}");
+        assert_eq!(std::fs::read_to_string(&backup)?, "*.log");
+        assert!(layout::marker_file(&place.folder).exists() && place.records.exists());
         Ok(())
     }
 

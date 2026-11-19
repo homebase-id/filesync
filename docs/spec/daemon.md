@@ -616,10 +616,13 @@ included (service managers restart it then).
     synced (a link is moved as a link, never followed), what the user's rules keep on this
     device, and the rules themselves (`.hbsync/ignore`) move out to the top of the main
     folder, never over anything.
-  - Where nothing is left (what the client had set aside there and couldn't place counts
-    as left, §8a, and so do the ignore rules where they couldn't move out), junk at the
-    folder's top is deleted, then the client's own state in it, then the folder, and after
-    it the share's state DB. Junk is never deleted from a folder that stays.
+  - Where nothing is left, junk files at the folder's top are deleted, then the client's
+    own state in it (its marker, what a transfer left, an aside that holds nothing), then
+    the folder, and after it the share's state DB. Left, and keeping the folder: what the
+    client had set aside there and couldn't place (§8a), and whatever else is in its state
+    folder (the ignore rules where they couldn't move out, a backup an editor left beside
+    them). Junk is never deleted from a folder that stays; a folder on the junk list moves
+    out with the rest that is the user's.
   - Where something couldn't go, or it failed part of the way, the folder and the DB stay,
     and it isn't tried again until the daemon starts again (or the share is turned on). An
     ending cut short after the folder's state went is taken up by the DB's word that the
@@ -636,7 +639,8 @@ included (service managers restart it then).
     are first read. One whose marker doesn't read then keeps its copy: the source says
     "unsure" for those it finds kept too. One turned on again while its copy is being
     removed is opened anew once that is done (one opened only to remove its copy is never
-    synced as it is: it was opened without its sharer).
+    synced as it is: it was opened without its sharer). One turned on again while its copy
+    still waits its turn is synced on, as it is.
   - The source opens such a share without its sharer (`Sharers::open(.., to_end)`): one
     that ended gives no access any more, and nothing is asked of it.
 

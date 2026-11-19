@@ -478,6 +478,11 @@ fn a_share_that_ended_takes_its_copy_off_this_device() -> R {
     std::fs::write(elsewhere.path().join("kept.txt"), "not ours")?;
     #[cfg(unix)]
     std::os::unix::fs::symlink(elsewhere.path(), b.root.join("Docs/link"))?;
+    // A folder on the junk list, with something in it: the user's, to move out (a junk
+    // file goes with its folder).
+    std::fs::create_dir_all(b.root.join("Docs/.TemporaryItems"))?;
+    std::fs::write(b.root.join("Docs/.TemporaryItems/draft"), "never synced")?;
+    std::fs::write(b.root.join("Docs/.DS_Store"), "junk")?;
     // And a folder made here, with a link of its own: it is to leave whole.
     b.write("made here/notes.txt", "the user's own")?;
     #[cfg(unix)]
@@ -490,7 +495,9 @@ fn a_share_that_ended_takes_its_copy_off_this_device() -> R {
     // and the folder made here whole, with the link in it where it was.
     let left = b.tree_text("");
     assert!(left.is_empty(), "{left:?}");
-    assert_eq!(report.moved_out.len(), 3 + usize::from(cfg!(unix)));
+    assert_eq!(report.moved_out.len(), 4 + usize::from(cfg!(unix)));
+    let draft = out.path().join(".TemporaryItems/draft");
+    assert_eq!(std::fs::read_to_string(draft)?, "never synced");
     #[cfg(unix)]
     {
         assert!(out.path().join("link").symlink_metadata()?.is_symlink());
