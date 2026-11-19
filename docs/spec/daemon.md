@@ -578,12 +578,29 @@ included (service managers restart it then).
   events anyway: the share's runner holds no watcher of its own, and takes what lies in its
   folder from that one (`hbsync_local::Feeds`; filesync #414). So nothing is held open
   below the folder of shares, which Windows wouldn't let be renamed otherwise (by hand, or
-  to give way), and a folder there costs one inotify watch on Linux, not two. While the
-  main folder has no watcher (it couldn't start one) a share has none either: woken as it
-  goes, it walks its folder at each look as any folder without one, with no note of its
-  own (the main folder's says it). Once the main folder has one (again), each share is told
-  that events were lost, and walks its folder once: so each opening of the main folder
-  (its rules changed, the folder of shares came or went) costs each share one walk.
+  to give way), and a folder there costs one inotify watch on Linux, not two (measured, a
+  share of 101 folders: 205 watches on two inotify instances before, 104 on one).
+
+  What that costs: a share is watched only while the main folder is.
+  - Each time the main folder is opened again (its rules changed, the folder of shares came
+    or went) its watcher is another: each share is told that events were lost, and walks its
+    folder once. It isn't walked as the old watcher goes (a share's watcher away for less
+    than half a look is taken to be back in a moment).
+  - While the main folder has no watcher (it couldn't start one), or isn't open (its rules
+    can't be read, its runner failed and is started again after a pause), a share is walked
+    at each look, as any folder without a watcher. Its own status says nothing of it: the
+    main folder's says what is wrong there.
+  - Events lost by the main folder's watcher (a burst anywhere in the main folder, ignored
+    folders too, that overflows the system's queue) are lost for each share: each walks its
+    folder. A share's events also wait behind the main folder's on the one watcher thread.
+    (On Windows an overflow isn't told at all today, for any folder: #424.)
+  - Known limits: a share's folder renamed only in the case of its letters (Windows, macOS)
+    isn't watched under its new spelling until the daemon starts again (#426); folders made
+    once inotify's watches are used up aren't watched, for a share as for any folder (#425).
+
+  A watcher follows no link (Linux: inotify names a folder by the path it was reached by
+  last, so a folder also reached through a link in the tree had its events told under the
+  link, where nothing is synced: they were lost, for the main folder's own folders too).
 
   Known limit, until the engine never makes a folder again that is gone: a share's runner
   that is downloading when the folder of shares is renamed keeps its old path until it is
