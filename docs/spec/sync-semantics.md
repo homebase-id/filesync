@@ -1467,7 +1467,8 @@ whatever changed here, and the plan holds no operation on the drive:
   shared, or in a cycle, is one: an item whose folder isn't shared has a place, the top,
   below.) A name clash among the drive's items (case, normalization, or a name
   this device's ignored items hold) can't be renamed away: the item synced here keeps the name
-  (else the lowest id), and the others aren't synced here, each told so (by its place on the
+  (else the folder that the item on that name here is in on the drive now, see "Names that
+  meet at the top"; else the lowest id), and the others aren't synced here, each told so (by its place on the
   drive), as long as the clash lasts; each stays dirty, planned again at every sync (a page's
   work a clash, rare: what another writer made). What a folder's removal there took along is
   left there as it is, and a node no longer synced here with nothing of it here has its base
@@ -1510,6 +1511,13 @@ rules hold too:
   ends. One left out that was here already under an older name keeps that copy as it is
   meanwhile, and the older name stays taken here: a new item of that name waits for it in
   turn. A loser inside a folder whose share is withdrawn leaves with the folder.
+  Where none of them is here under the name and another item is (one synced here that the
+  drive has in a folder now), and that folder is one of them, the folder takes the name: it
+  is made, the item here moves into it, and the others wait. By the ids alone the name
+  could go to an item whose download waits for the name the item here holds, which waits
+  for its folder, which waited for the name: none of the three ever came (filesync #419;
+  plan `read_only_the_folder_the_holder_of_a_name_moves_into_takes_it`, and the simulator's
+  saved case of `a_member_in_pages_that_crash_has_what_is_shared_with_it`).
 - **A share withdrawn isn't a delete.** The drive tells it as a tombstone without a version
   (all zeros). The file leaves the picture and this device (deleted here as synced, moved out
   where it changed here), and nothing records it as gone: the share given again brings it
