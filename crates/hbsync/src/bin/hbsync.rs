@@ -1,8 +1,9 @@
 //! The Homebase Filesync command line: sets syncing up and controls the daemon (`hbsyncd`).
 
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::mpsc::Receiver;
 
 use clap::{Parser, Subcommand};
 use hbsync_app::control::{running, start, stop_syncing};
@@ -43,9 +44,8 @@ enum Command {
         /// Sync a folder that already has files in it (they are merged with the drive).
         #[arg(long)]
         existing: bool,
-        /// The browser to open the authorize page with.
-        #[arg(long, value_name = "COMMAND")]
-        browser: Option<String>,
+        #[command(flatten)]
+        approve: Approve,
         /// Don't start the daemon.
         #[arg(long)]
         no_start: bool,
@@ -58,9 +58,8 @@ enum Command {
     Login {
         /// The identity [default: the one set up].
         identity: Option<String>,
-        /// The browser to open the authorize page with.
-        #[arg(long, value_name = "COMMAND")]
-        browser: Option<String>,
+        #[command(flatten)]
+        approve: Approve,
     },
     /// Syncs one of your own folders where this computer keeps it (documents, pictures,
     /// music, videos, downloads) with the drive's folder of that kind: joined if another device
@@ -204,7 +203,7 @@ fn run(command: Command) -> Res<ExitCode> {
             identity,
             folder,
             existing,
-            browser,
+            approve,
             no_start,
             no_autostart,
         } => {
@@ -228,10 +227,8 @@ fn run(command: Command) -> Res<ExitCode> {
                 };
             request.start = !no_start;
             request.at_logon = !no_autostart;
-            let mut owner = setup::InBrowser {
-                browser: browser.as_deref(),
-                say: &|line| println!("{line}"),
-            };
+            let typed = approve.typed();
+            let mut owner = approve.owner(typed.as_ref());
             setup::set_up(&paths, &request, &mut owner, &mut |line| println!("{line}"))?;
         }
         Command::Status { json } => match daemon::status(&paths)? {
@@ -399,13 +396,11 @@ fn run(command: Command) -> Res<ExitCode> {
                 root.identity
             );
         }
-        Command::Login { identity, browser } => {
+        Command::Login { identity, approve } => {
             let config = Config::load(&paths.config_file())?.unwrap_or_default();
             let identity = config.identity(identity.as_deref())?;
-            let mut owner = setup::InBrowser {
-                browser: browser.as_deref(),
-                say: &|line| println!("{line}"),
-            };
+            let typed = approve.typed();
+            let mut owner = approve.owner(typed.as_ref());
             setup::sign_in_again(&paths, &identity, &mut owner)?;
             println!("Signed in again on {identity}.");
         }
@@ -621,6 +616,116 @@ fn shared_folder(
 
 /// The command that shows and sets up the folder what others share is synced into.
 const SHARED_FOLDER: &str = "hbsync shared-folder";
+
+/// How the owner approves in the browser (`hbsync setup`, `hbsync login`).
+#[derive(Debug, clap::Args)]
+struct Approve {
+    /// The browser to open the authorize page with.
+    #[arg(long, value_name = "COMMAND")]
+    browser: Option<String>,
+    /// Approve in a browser on another computer: none is opened here, and the address that
+    /// one ends on is pasted here [default: when this computer has no display, or is used
+    /// over SSH, and you are at its terminal].
+    #[arg(long, conflicts_with = "browser")]
+    paste: bool,
+}
+
+/// Asked for a line typed since the last asking ([`setup::InBrowser::typed`]).
+type Typed = Box<dyn Fn() -> Option<String>>;
+
+impl Approve {
+    /// Whether a browser is opened here, and with what: the one named; else the system's,
+    /// unless the owner's browser is elsewhere (`--paste`, or none opened here would be one
+    /// they see: [`setup::browser_here`]).
+    fn opens(&self) -> setup::Opens<'_> {
+        match &self.browser {
+            Some(command) => setup::Opens::With(command),
+            None if self.paste || !setup::browser_here() => setup::Opens::No,
+            None => setup::Opens::System,
+        }
+    }
+
+    /// The lines typed at the terminal, where the owner's answer is taken from a pasted
+    /// address too: asked for (`--paste`, also from a pipe), or no browser is opened here
+    /// and someone is at the terminal. Never from a terminal this process is in the
+    /// background of ([`Approve::unread`] says so). Read by a thread of their own, from the
+    /// first asking on (neither command reads anything else).
+    fn typed(&self) -> Option<Typed> {
+        let terminal = std::io::stdin().is_terminal();
+        let wanted = self.paste || (self.opens() == setup::Opens::No && terminal);
+        if !wanted || (terminal && !setup::terminal_in_foreground()) {
+            return None;
+        }
+        let lines = std::cell::OnceCell::new();
+        Some(Box::new(move || {
+            let lines: &Receiver<String> = lines.get_or_init(typed_lines);
+            lines.try_recv().ok()
+        }))
+    }
+
+    /// What the link comes with where no address is read: that `--paste` has it read, or,
+    /// asked for and not read (the command is in the terminal's background), why.
+    fn unread(&self) -> &'static str {
+        match (self.paste, &self.browser) {
+            (true, _) => {
+                "(--paste: the terminal can't be read while this runs in the background. Bring \
+                 it to the foreground, or run it again there.)\n"
+            }
+            // (The two exclude each other.)
+            (false, Some(_)) => {
+                "(Approving in a browser on another computer? Run this again with --paste in \
+                 place of --browser.)\n"
+            }
+            (false, None) => setup::PASTE_HINT,
+        }
+    }
+
+    /// The owner's answers in the browser, as asked for, with `typed` ([`Approve::typed`]).
+    fn owner<'a>(&'a self, typed: Option<&'a Typed>) -> setup::InBrowser<'a> {
+        setup::InBrowser {
+            opens: self.opens(),
+            say: &|line| println!("{line}"),
+            typed: typed.map(|typed| &**typed),
+            unread: self.unread(),
+        }
+    }
+}
+
+/// The lines of standard input from now on, read by a thread of its own till the input ends
+/// (or till nobody takes them any more). What was typed at a terminal before it began comes
+/// at once, and isn't an answer to a link not shown yet: passed over ([`TYPED_AHEAD`]; a
+/// pipe has nothing typed ahead, and a script may answer at once). A line that isn't text is
+/// too; one longer than an address can be comes in pieces; and where more come than are
+/// taken (a pipe), the reading waits.
+fn typed_lines() -> Receiver<String> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(64);
+    std::thread::spawn(move || {
+        let began = std::time::Instant::now();
+        let terminal = std::io::stdin().is_terminal();
+        let mut input = std::io::stdin().lock();
+        loop {
+            let mut line = String::new();
+            let read = (&mut input).take(LINE_AT_MOST).read_line(&mut line);
+            let ahead = terminal && began.elapsed() < TYPED_AHEAD;
+            let sent = match read {
+                Ok(0) => false,
+                Ok(_) => ahead || tx.send(line).is_ok(),
+                Err(e) => e.kind() == std::io::ErrorKind::InvalidData,
+            };
+            if !sent {
+                break;
+            }
+        }
+    });
+    rx
+}
+
+/// How long after the reading began a line counts as typed before it ([`typed_lines`]): what
+/// waits in the terminal comes within a millisecond, and nobody pastes an address this fast.
+const TYPED_AHEAD: std::time::Duration = std::time::Duration::from_millis(300);
+
+/// A line read is at most this long (an address is about 450 bytes).
+const LINE_AT_MOST: u64 = 8192;
 
 fn answer_held(paths: &Paths, yes: bool, answer: HeldAnswer) -> Res<()> {
     let Some(status) = daemon::status(paths)? else {

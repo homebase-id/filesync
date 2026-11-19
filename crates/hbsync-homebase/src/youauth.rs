@@ -150,6 +150,18 @@ pub fn begin(
 }
 
 impl Pending {
+    /// Whether `query` is the identity's answer to this request, whole: its state, and
+    /// either a refusal or the key and the salt the exchange needs. Not one to another
+    /// request, nor one with a part of it lost (an address pasted, cut off): asked before
+    /// such an answer is taken ([`Pending::complete`] says why each fails).
+    pub fn answers(&self, query: &HashMap<String, String>) -> bool {
+        let get = |name: &str| query.get(name).map(String::as_str);
+        let whole = || {
+            get("public_key").is_some() && get("salt").is_some_and(|s| STANDARD.decode(s).is_ok())
+        };
+        get("state") == Some(self.state.as_str()) && (get("error").is_some() || whole())
+    }
+
     /// The identity's answer, the query of the request it sent the browser back with,
     /// exchanged for credentials.
     pub fn complete(&self, query: &HashMap<String, String>) -> Result<Credentials, HomebaseError> {

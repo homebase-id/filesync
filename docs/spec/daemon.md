@@ -965,7 +965,7 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 
 | | |
 |---|---|
-| `hbsync setup <identity> [--folder P] [--existing] [--browser CMD] [--no-start] [--no-autostart]` | authorizes this computer (the owner approves in the browser) unless it already is and the identity still accepts it (credentials it refuses are authorized again once; a login just made, or the new one, without the private drive's key fails saying so), saving the credentials at once, prepares the folder (default: the identity's main folder already set up, wherever it is, so logging in again needs no `--folder`; else `~/Homebase`; it must be new, empty, already this identity's, or `--existing` to merge its files with the drive), turns autostart on, and has the daemon add the folder (starting it when it isn't running; restarting it when it logged in again, so the new credentials are used). When the app is registered but its drive is gone (deleted in the owner app), the owner is asked in the browser to give it back, only on a computer that never synced with the identity |
+| `hbsync setup <identity> [--folder P] [--existing] [--browser CMD] [--paste] [--no-start] [--no-autostart]` | authorizes this computer (the owner approves in the browser; from a browser on another computer with `--paste`, see below) unless it already is and the identity still accepts it (credentials it refuses are authorized again once; a login just made, or the new one, without the private drive's key fails saying so), saving the credentials at once, prepares the folder (default: the identity's main folder already set up, wherever it is, so logging in again needs no `--folder`; else `~/Homebase`; it must be new, empty, already this identity's, or `--existing` to merge its files with the drive), turns autostart on, and has the daemon add the folder (starting it when it isn't running; restarting it when it logged in again, so the new credentials are used). When the app is registered but its drive is gone (deleted in the owner app), the owner is asked in the browser to give it back, only on a computer that never synced with the identity |
 | `hbsync add <role> [--identity I] [--folder P]` | syncs one of the user's own folders (`documents`, `pictures`, `music`, `videos`, `downloads`) where the OS keeps it (Windows Known Folders, macOS home folders, XDG `user-dirs.dirs`), or at `--folder`, with the drive's role folder: joined if another device syncs it (identical files adopted), back from Recently deleted, or made. Refused where `setup` refuses a folder, inside or around another synced folder, when one of that role is synced already, and when OneDrive or iCloud syncs the folder. Without a running daemon it is set up for the next start |
 | `hbsync add desktop [--identity I] [--folder P] [--name N]` | syncs this computer's Desktop (where the OS keeps it, or at `--folder`) with a folder of its own in Desktops on the drive (sync semantics §12), named `N` there (default: the device name, made one the drive takes, else `Computer`; a name the drive won't take is refused); every other computer shows it in its main folder's `Desktops`. A Desktop synced here before (its marker known to the account's DB) keeps its folder on the drive. Refused as `add <role>` is, and when a Desktop is synced already at another folder. For the Desktop synced already (without `--folder`), `--name` renames its folder on the drive where it is, also back over a rename made elsewhere: a running daemon gives it the new name at once, by a sync of that folder; without `--name` it keeps the name it has. Its kind is kept with it in the config (`desktop = "<uuid>"`) and in the account's DB; its name in the account's DB alone |
 | `hbsync remove <role>`, `remove desktop` `[--identity I]` | stops syncing that role folder or the Desktop; its files and state stay (the Desktop's folder on the drive too), so adding it again resumes |
@@ -977,13 +977,46 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 | `hbsync shared-folder [--make [<Homebase folder>] \| --take <folder>] [--yes]` | shows the folder what others share is synced into; where it is gone (shares are off), `--make` makes a new one and `--take` names the folder at the top of the Homebase folder that is it (what was synced of that folder leaves the Homebase cloud, and stays on this computer; asked first, unless `--yes`). With more than one identity whose folder is gone, the Homebase folder is given: to `--make`, or as the path of the folder to take |
 | `hbsync start`, `stop` | `stop` stops syncing on this computer until `start` (or the tray's Start syncing), also across logins: neither the tray nor the service manager starts the daemon meanwhile |
 | `hbsync autostart [on\|off]` | |
-| `hbsync login [IDENTITY]` | signs this computer in again in the browser (also the tray's Log in again, for a login from before private drives); the daemon's account starts over with the new login; the folders, the drive and autostart stay as they are; the old login isn't revoked |
+| `hbsync login [IDENTITY] [--browser CMD] [--paste]` | signs this computer in again in the browser (also the tray's Log in again, for a login from before private drives); the daemon's account starts over with the new login; the folders, the drive and autostart stay as they are; the old login isn't revoked |
 | `hbsync logout` | stops the daemon, forgets the credentials, autostart off; the folder stays |
 | `hbsync unlink` | stops the daemon, removes the folder from the config, autostart off; its files, `.hbsync` and the account's DB stay, so setting it up again resumes |
 | `hbsync deleted [-n N]` | Recently deleted, newest first, with node ids |
 | `hbsync restore <path or node id>…` | restores removed items (a folder with what was deleted with it) |
 | `hbsync empty-deleted [<path or node id>…] [--yes]` | deletes everything in Recently deleted for good, or the items named as it shows them (nothing removed in them since), after asking |
 | `hbsync log` | the log folder (a daily file, a week kept) |
+
+**A browser on another computer** (`--paste`; filesync #409). The owner's answer comes back
+to a page on `localhost` of the computer that runs `hbsync setup` or `hbsync login`, where
+the command waits for it. A computer set up over SSH has no browser to come back to: the
+link is printed, opened on any other computer and approved there, and that browser then
+goes to `http://localhost:<port>/…`, which is the other computer and doesn't load. Its
+address holds the answer all the same. Pasted into the terminal it is taken as the browser's
+request would be: the whole address, or from its path on. A line that isn't this trip's
+answer is said (once for what was typed at one go) and waited on: another address, another
+try's (a login's is told by its state), or this one with a part lost; the browser coming
+back by itself still works meanwhile (an SSH port forward). So is the answer to giving the
+app its drive back, told by the random part of its path.
+
+- **When no browser is opened here:** with `--paste`; and where one opened here wouldn't be
+  one the owner sees: on Linux without `DISPLAY`, `WAYLAND_DISPLAY` and `BROWSER` (X
+  forwarded over SSH has a display, and its browser asks this computer's localhost), on
+  macOS and Windows when used over SSH (`SSH_CONNECTION`, `SSH_TTY`). `--browser` names one
+  to open whatever the case.
+- **When the terminal is read for an address:** with `--paste` (from a pipe too), and where
+  no browser is opened here and standard input is a terminal. Never from a terminal the
+  command is in the background of (reading it would stop the job; with `--paste` the link
+  comes with a line saying so), and `--paste` and `--browser` exclude each other (a browser
+  in the terminal reads it itself). Where it isn't read, the link comes with a line saying
+  that `--paste` has it read: a guess that goes wrong (a tmux pane from a graphical
+  session, used over SSH) costs running the command again.
+- The reading starts with the first link shown and goes on till the command ends: what
+  was typed at a terminal before it is passed over (it comes within a moment of the start;
+  a line is an answer only to a link shown before it; a pipe's lines are all taken), and a line typed ahead for the shell after the
+  answer was taken is lost with it. A line is read up to 8 KiB, and from a pipe no faster
+  than it is taken.
+
+Nothing on the server changes; a code typed into the owner app instead of a pasted address
+would need odin-core.
 
 ## Not yet
 

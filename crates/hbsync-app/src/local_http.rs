@@ -57,13 +57,21 @@ pub fn read_request(stream: &mut TcpStream) -> io::Result<Option<Request>> {
     }
     let mut body = vec![0; length];
     reader.read_exact(&mut body)?;
-    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let (path, query) = self::target(target);
     Ok(Some(Request {
         method: method.to_owned(),
         path: path.to_owned(),
-        query: parse_form(query.as_bytes()),
+        query,
         form: parse_form(&body),
     }))
+}
+
+/// A request's target, or an address from its path on: the path, and its query (what follows
+/// a `#` isn't part of either).
+pub fn target(target: &str) -> (&str, HashMap<String, String>) {
+    let target = target.split_once('#').map_or(target, |(target, _)| target);
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    (path, parse_form(query.as_bytes()))
 }
 
 /// `a=1&b=x%20y` (also `+` for spaces); bad escapes are read leniently.
