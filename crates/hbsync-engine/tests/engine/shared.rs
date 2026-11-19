@@ -524,6 +524,9 @@ fn a_share_that_ended_takes_its_copy_off_this_device() -> R {
     let cut = b.engine.end_share("2026-11-20")?;
     assert!(cut.stopped && cut.ops_done == 0);
     assert_eq!(b.tree_text("").len(), files);
+    // (Nor its picture: the files are still known as on the drive.)
+    let known = common::header_named(&server, "top.txt").file_id;
+    assert!(b.engine.db().read(|s| s.known_file(known))?.is_some());
     stop.store(false, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         std::fs::read_to_string(elsewhere.path().join("kept.txt"))?,

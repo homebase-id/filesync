@@ -620,13 +620,15 @@ impl Engine {
     /// identity's drive: refused otherwise ([`EngineError::NotAShare`]), before anything is
     /// touched.
     pub fn end_share(&mut self, date: &str) -> Result<SyncReport, EngineError> {
-        if self.cfg.folder.read_only.is_none() || !self.drive.unshare_all()? {
+        if self.cfg.folder.read_only.is_none() || !self.drive.shared() {
             return Err(EngineError::NotAShare);
         }
         let mut report = SyncReport::default();
         let stop = Arc::clone(&self.stop);
         let stopped = || stop.load(Ordering::Relaxed);
-        let scan = match stopped() {
+        // (A stop asked before it began touches nothing: the picture stays, and the share
+        // syncs on from where it was if it is turned on again.)
+        let scan = match stopped() || !self.drive.unshare_all()? {
             true => None,
             false => Some(self.scan_local()?),
         };

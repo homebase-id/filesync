@@ -616,13 +616,15 @@ included (service managers restart it then).
     synced (a link is moved as a link, never followed), what the user's rules keep on this
     device, and the rules themselves (`.hbsync/ignore`) move out to the top of the main
     folder, never over anything.
-  - Where nothing is left, junk files at the folder's top are deleted, then the client's
-    own state in it (its marker, what a transfer left, an aside that holds nothing), then
-    the folder, and after it the share's state DB. Left, and keeping the folder: what the
-    client had set aside there and couldn't place (§8a), and whatever else is in its state
-    folder (the ignore rules where they couldn't move out, a backup an editor left beside
-    them). Junk is never deleted from a folder that stays; a folder on the junk list moves
-    out with the rest that is the user's.
+  - Where nothing is left, junk files at the folder's top and in its state folder are
+    deleted, then the client's own state in it, piece by piece (its marker, what a
+    transfer left, the place it sets aside in, which must be empty), then the folder, and
+    after it the share's state DB. Left, and keeping the folder: whatever the client had
+    set aside there (§8a), and whatever else is in its state folder (the ignore rules where
+    they couldn't move out, a backup an editor left beside them). Junk is only deleted once
+    nothing else is left (should the folder then not go, for something put there in that
+    moment, it stays without it); a folder on the junk list moves out with the rest that
+    is the user's.
   - Where something couldn't go, or it failed part of the way, the folder and the DB stay,
     and it isn't tried again until the daemon starts again (or the share is turned on). An
     ending cut short after the folder's state went is taken up by the DB's word that the

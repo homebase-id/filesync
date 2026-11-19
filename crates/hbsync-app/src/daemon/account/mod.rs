@@ -1412,7 +1412,7 @@ mod tests {
                 .wait_all("the share is no longer synced", &alone)?;
             let gone = || Some(()).filter(|()| !f.toms().exists() && !shared_db.exists());
             wait_until(gone).ok_or("its copy stays")?;
-            let said = words::share_ended(&tom, &f.toms(), &f.folder, (0, 0), None);
+            let said = words::share_ended(&tom, &f.toms(), &f.folder, (0, 0), (None, false));
             f.started
                 .wait_all("said", &|_, _| f.started.said(&said) == 1)?;
             assert!(
@@ -1459,7 +1459,7 @@ mod tests {
             let out = f.folder.join("mine too.txt");
             assert_eq!(std::fs::read_to_string(out)?, "put here while stopped");
             let moved = 1 + usize::from(cfg!(unix));
-            let said = words::share_ended(&tom, &f.toms(), &f.folder, (moved, 0), None);
+            let said = words::share_ended(&tom, &f.toms(), &f.folder, (moved, 0), (None, false));
             f.started
                 .wait_all("said", &|_, _| f.started.said(&said) == 1)?;
             #[cfg(unix)]

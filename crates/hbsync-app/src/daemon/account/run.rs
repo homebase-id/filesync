@@ -1013,7 +1013,7 @@ impl Account {
             return None;
         }
         let counts = (ended.moved_out, ended.left.len());
-        let why = ended.failed.as_deref();
+        let why = (ended.failed.as_deref(), ended.folder_gone);
         let note = words::share_ended(&sharer, &place.folder, &place.out, counts, why);
         self.note(vec![note]);
         Some((sharer, ended.all()))

@@ -27,6 +27,9 @@ pub(super) struct Ended {
     pub(super) stopped: bool,
     /// Why it couldn't be done, or not all of it.
     pub(super) failed: Option<String>,
+    /// Its folder is gone from the folder of shares (removed now, or no more there): what
+    /// failed after that left only the share's records.
+    pub(super) folder_gone: bool,
 }
 
 impl Ended {
@@ -100,6 +103,7 @@ fn take_off(
         // Gone already (removed by hand, or by an ending cut short after its last step):
         // only its records are left.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            ended.folder_gone = true;
             drop(drive);
             return remove_records(&db);
         }
@@ -149,18 +153,61 @@ fn take_off(
     if !ended.left.is_empty() {
         return Ok(());
     }
-    // Nothing is left: junk at its top goes with it (as in any delete: sync semantics §7),
-    // then the client's own state (its marker, what a transfer left, nothing aside: all
-    // else in it counted as left; without the marker it holds nothing, or it would have
-    // too), then the folder. Something put there meanwhile keeps the folder: found again
-    // by its DB, which stays.
+    // Nothing is left: junk goes with the folder (as in any delete: sync semantics §7),
+    // then the client's own state, piece by piece (nothing in it is removed that wasn't
+    // looked at above), then the folder. Something put there in this moment keeps the
+    // folder, without its junk and its marker: found again by its DB, which stays.
     for path in junk {
         std::fs::remove_file(path).map_err(|e| said(&e))?;
     }
-    remove(&layout::state_dir(folder), proven).map_err(|e| said(&e))?;
+    remove_own_state(folder, proven).map_err(|e| said(&e))?;
     remove(folder, false).map_err(|e| said(&e))?;
+    ended.folder_gone = true;
     drop(drive);
     remove_records(&db)
+}
+
+/// The client's own in the state folder of `folder`, which is `proven` this share's by its
+/// marker: the marker, what a transfer left, and where it sets aside.
+fn own_state(folder: &Path) -> [PathBuf; 3] {
+    [
+        layout::marker_file(folder),
+        layout::tmp_dir(folder),
+        layout::aside_dir(folder),
+    ]
+}
+
+/// Removes the state folder of `folder`, which [`left_in`] found to hold nothing but the
+/// client's own: its marker, what a transfer left (with all in it: partial downloads), the
+/// place it sets aside in (empty, or it would have counted as left: removed only as an
+/// empty folder), a probe of the volume a crash left; then the folder itself, empty.
+/// Nothing is removed by name alone that wasn't accounted for: what appeared since keeps
+/// it. Without the marker (`!proven`) it holds nothing, and only goes empty.
+fn remove_own_state(folder: &Path, proven: bool) -> std::io::Result<()> {
+    let state = layout::state_dir(folder);
+    if proven {
+        let [marker, tmp, aside] = own_state(folder);
+        let gone = |removed: std::io::Result<()>| match removed {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
+            _ => Ok(()),
+        };
+        gone(std::fs::remove_file(marker))?;
+        gone(std::fs::remove_dir_all(tmp))?;
+        gone(std::fs::remove_dir(aside))?;
+        for entry in std::fs::read_dir(&state).into_iter().flatten() {
+            let entry = entry?;
+            if own_probe(&entry.file_name().to_string_lossy()) {
+                gone(std::fs::remove_file(entry.path()))?;
+            }
+        }
+    }
+    remove(&state, false)
+}
+
+/// Whether `name`, in a state folder, is a probe of the volume the client made there (one
+/// a crash left).
+fn own_probe(name: &str) -> bool {
+    name.starts_with(".hbsync-")
 }
 
 /// Whether `dir` is the folder of shares of the main folder `main`, by that one's record,
@@ -180,27 +227,35 @@ fn remove_records(db: &Path) -> Result<(), String> {
     remove(dir, true).map_err(|e| e.to_string())
 }
 
-/// What `folder` still holds, by name: at its top; what the client set aside there and
-/// couldn't place (§8a, left for the user); and what is in its state folder that isn't the
-/// client's own (the user's ignore rules where they couldn't move out, a backup an editor
-/// left beside them): with the folder `proven` this share's by its marker, the client's own
-/// are the marker, what a transfer left and what it set aside; without, nothing is. And the
-/// junk files at its top, which go with the folder when nothing else is left.
+/// What `folder` still holds, by name: at its top; what the client set aside there (§8a,
+/// left for the user: every entry, read with its errors told, as what isn't seen here is
+/// removed with the folder); and what is in its state folder that isn't the client's own
+/// (the user's ignore rules where they couldn't move out, a backup an editor left beside
+/// them): with the folder `proven` this share's by its marker, the client's own are
+/// [`own_state`] and a probe; without, nothing is. And the junk files at its top and in its
+/// state folder (a `.DS_Store` a file manager left), which go with the folder when nothing
+/// else is left.
 fn left_in(folder: &Path, proven: bool) -> std::io::Result<(Vec<String>, Vec<PathBuf>)> {
     let (mut left, mut junk) = (Vec::new(), Vec::new());
     let state = layout::state_dir(folder);
     // (The folder's own state, under whatever spelling the volume shows it: another folder
     // of such a name, where names differ by case, is the user's.)
-    let own_state = |path: &Path| match (path.canonicalize(), state.canonicalize()) {
+    let is_state = |path: &Path| match (path.canonicalize(), state.canonicalize()) {
         (Ok(path), Ok(state)) => path == state,
         _ => false,
+    };
+    // A folder's entries, or none where it isn't there; any other error is told.
+    let entries = |dir: &Path| match std::fs::read_dir(dir) {
+        Ok(entries) => Ok(Some(entries)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
     };
     for entry in std::fs::read_dir(folder)? {
         let entry = entry?;
         // (A name that isn't text is nobody's junk: the user's, left.)
         let name = entry.file_name();
         let text = name.to_str();
-        if text.is_some_and(is_state_dir) && own_state(&entry.path()) {
+        if text.is_some_and(is_state_dir) && is_state(&entry.path()) {
             continue;
         }
         match text.is_some_and(is_junk) && !entry.file_type()?.is_dir() {
@@ -208,28 +263,20 @@ fn left_in(folder: &Path, proven: bool) -> std::io::Result<(Vec<String>, Vec<Pat
             false => left.push(name.to_string_lossy().into_owned()),
         }
     }
-    let aside = layout::aside_entries(folder);
-    left.extend(aside.map(|(path, _)| {
-        let name = path.file_name().unwrap_or_default().to_string_lossy();
-        layout::aside_shown(&name)
-    }));
-    let own = [
-        layout::marker_file(folder),
-        layout::tmp_dir(folder),
-        layout::aside_dir(folder),
-    ];
-    let in_state = match std::fs::read_dir(&state) {
-        Ok(entries) => Some(entries),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-        Err(e) => return Err(e),
-    };
-    for entry in in_state.into_iter().flatten() {
+    for entry in entries(&layout::aside_dir(folder))?.into_iter().flatten() {
+        left.push(layout::aside_shown(&entry?.file_name().to_string_lossy()));
+    }
+    let own = own_state(folder);
+    for entry in entries(&state)?.into_iter().flatten() {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        // (A probe of the volume a crash left: `.hbsync-…`.)
-        let ours = proven && (own.contains(&entry.path()) || name.starts_with(".hbsync-"));
-        if !ours {
-            left.push(format!("{}/{name}", hbsync_local::STATE_DIR));
+        let ours = proven && (own.contains(&entry.path()) || own_probe(&name));
+        if ours {
+            continue;
+        }
+        match proven && is_junk(&name) && !entry.file_type()?.is_dir() {
+            true => junk.push(entry.path()),
+            false => left.push(format!("{}/{name}", hbsync_local::STATE_DIR)),
         }
     }
     left.sort();
@@ -289,6 +336,13 @@ mod tests {
         })
     }
 
+    /// The share's records made (its DB opened once), with nothing left open.
+    fn made(me: &Identity, db: &Path) -> R {
+        let share = share(me, db, false)?;
+        share.notifications.finish();
+        Ok(())
+    }
+
     /// A main folder under `home` with its folder of shares, and where tom's share is.
     fn place(home: &Path) -> Result<Place, Box<dyn std::error::Error>> {
         let out = home.join("Homebase");
@@ -317,7 +371,7 @@ mod tests {
         std::fs::create_dir_all(&place.folder)?;
         // Set up for other records than the share's.
         let others = home.path().join("state/shared/other/state.db");
-        drop(share(&place.identity, &others, false)?);
+        made(&place.identity, &others)?;
         SyncRoot::create(&others, &place.identity, &place.folder)?;
         std::fs::write(place.folder.join("theirs.txt"), "of another share")?;
 
@@ -336,7 +390,11 @@ mod tests {
         let home = tempfile::tempdir()?;
         let place = place(home.path())?;
         let ended = end_now(share(&place.identity, &place.records, false)?, &place);
-        assert_eq!(ended, Ended::default());
+        let gone = Ended {
+            folder_gone: true,
+            ..Ended::default()
+        };
+        assert_eq!(ended, gone);
         assert!(ended.all() && !place.records.exists());
         Ok(())
     }
@@ -372,7 +430,7 @@ mod tests {
         let place = place(home.path())?;
         std::fs::create_dir_all(&place.folder)?;
         // Set up, then its state gone: the DB still has the folder there.
-        drop(share(&place.identity, &place.records, false)?);
+        made(&place.identity, &place.records)?;
         SyncRoot::create(&place.records, &place.identity, &place.folder)?;
         std::fs::remove_dir_all(layout::state_dir(&place.folder))?;
         let download = place.folder.join("report.pdf.crdownload");
@@ -397,15 +455,34 @@ mod tests {
         let home = tempfile::tempdir()?;
         let place = place(home.path())?;
         std::fs::create_dir_all(&place.folder)?;
-        drop(share(&place.identity, &place.records, false)?);
+        made(&place.identity, &place.records)?;
         SyncRoot::create(&place.records, &place.identity, &place.folder)?;
         let backup = layout::state_dir(&place.folder).join("ignore~");
         std::fs::write(&backup, "*.log")?;
 
+        // (And junk a file manager left there: the client's to take with the folder.)
+        let finder = layout::state_dir(&place.folder).join(".DS_Store");
+        std::fs::write(&finder, "junk")?;
         let ended = end_now(share(&place.identity, &place.records, false)?, &place);
         assert_eq!(ended.left, [".hbsync/ignore~"], "{ended:?}");
         assert_eq!(std::fs::read_to_string(&backup)?, "*.log");
         assert!(layout::marker_file(&place.folder).exists() && place.records.exists());
+        assert!(finder.exists(), "junk stays with a folder that stays");
+
+        // What was set aside there is the user's too, whatever it is named.
+        std::fs::remove_file(&backup)?;
+        let aside = layout::aside_dir(&place.folder);
+        std::fs::create_dir_all(&aside)?;
+        std::fs::write(aside.join("kept"), "set aside")?;
+        let ended = end_now(share(&place.identity, &place.records, false)?, &place);
+        assert_eq!(ended.left, [layout::aside_shown("kept")], "{ended:?}");
+        assert_eq!(std::fs::read_to_string(aside.join("kept"))?, "set aside");
+
+        // With neither, all of it goes, the junk with it.
+        std::fs::remove_file(aside.join("kept"))?;
+        let ended = end_now(share(&place.identity, &place.records, false)?, &place);
+        assert!(ended.all(), "{ended:?}");
+        assert!(!place.folder.exists() && !place.records.exists());
         Ok(())
     }
 
@@ -418,7 +495,7 @@ mod tests {
         let place = place(home.path())?;
         let moved = home.path().join("moved away");
         std::fs::create_dir_all(&moved)?;
-        drop(share(&place.identity, &place.records, false)?);
+        made(&place.identity, &place.records)?;
         SyncRoot::create(&place.records, &place.identity, &moved)?;
         std::fs::write(moved.join("kept.txt"), "kept")?;
         std::os::unix::fs::symlink(&moved, &place.folder)?;

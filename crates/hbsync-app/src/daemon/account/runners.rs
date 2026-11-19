@@ -310,7 +310,10 @@ impl Markers {
                         );
                         opening.at = Some(now + pause);
                         if !std::mem::replace(&mut opening.told, true) {
-                            return vec![crate::words::share_unopened(&sharer, &e)];
+                            return vec![match opening.end {
+                                true => crate::words::share_copy_unopened(&sharer, &e),
+                                false => crate::words::share_unopened(&sharer, &e),
+                            }];
                         }
                     }
                 }
