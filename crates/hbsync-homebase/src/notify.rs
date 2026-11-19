@@ -619,7 +619,6 @@ struct KindOnly {
     notification_type: String,
 }
 
-/// The file a drive event announces; `None` if the event doesn't say.
 /// What kind of file a drive event names, by its type (now, or before).
 enum Named {
     /// A sync node, or the event doesn't say.
@@ -641,6 +640,7 @@ fn named(data: &str) -> Named {
     }
 }
 
+/// The file a drive event announces; `None` if the event doesn't say.
 fn change(data: &str, deleted: bool) -> Option<ChangeRef> {
     match serde_json::from_str::<DriveEvent>(data) {
         Ok(event) => match (event.file_ref, event.previous_file_ref) {

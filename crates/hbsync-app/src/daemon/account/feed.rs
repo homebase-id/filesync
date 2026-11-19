@@ -189,7 +189,8 @@ impl Notifications {
         }
         if self.reads_on_a_timer() && now >= self.next_read {
             self.next_read = now + UNANNOUNCED_READ;
-            self.unannounced += 1;
+            // (Not counted while the identity refuses the login: the read asks nothing.)
+            self.unannounced += u64::from(self.puller.drive.denied().is_none());
             self.puller.ask();
         }
     }

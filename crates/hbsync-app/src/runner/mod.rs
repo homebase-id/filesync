@@ -273,6 +273,10 @@ pub enum Command {
     Stop,
     /// The user's word on the main folder's folder of shares ([`Handle::shares`]).
     Shares(SharesAsk),
+    /// The account has a share to sync: its main folder is to hold a folder of shares, made
+    /// under this name where none is on record (placed at once, the folder opened again only
+    /// where one was made). For a runner started while nothing was shared.
+    HoldShares(String),
     /// Look at the ignore rules and the folder of shares now (the account's main folder
     /// opened: its record may say something else of the folder of shares, which a folder
     /// beside it goes by).
@@ -497,6 +501,8 @@ pub struct Runner {
     probing: bool,
     /// The folder without a live watcher: told, asked for again, caught up on.
     unwatched: Unwatched,
+    /// The folder of shares is to be placed at the loop's next turn ([`Command::HoldShares`]).
+    place_shares_now: bool,
     /// Asked of the folder of shares, and not done yet ([`Command::Shares`]), oldest first.
     asked: Vec<SharesAsk>,
 }
@@ -623,6 +629,7 @@ impl Runner {
             retry_refused: false,
             probing: false,
             unwatched: Unwatched::default(),
+            place_shares_now: false,
             asked: Vec::new(),
         };
         let thread = std::thread::Builder::new()
@@ -1003,7 +1010,7 @@ impl Runner {
             // record, a listing, a lookup, a rename): an idle folder is asked too, and the
             // folder is opened again only where that did something, never to find out.
             // (Come round while the folder was paused: asked now that it syncs again.)
-            if shares_held && !schedule.paused() {
+            if (shares_held && !schedule.paused()) || std::mem::take(&mut self.place_shares_now) {
                 shares_held = false;
                 shares_at = Some(now);
             }
@@ -1419,6 +1426,12 @@ impl Runner {
             }
             Command::Stop => {}
             Command::Shares(ask) => self.asked.push(ask),
+            Command::HoldShares(name) => {
+                if self.cfg.shares.is_none() {
+                    self.cfg.shares = Some(name);
+                    self.place_shares_now = true;
+                }
+            }
             Command::Look => *check_rules = true,
         }
     }

@@ -67,8 +67,9 @@ pub(super) struct Sharing {
 /// ([`Sharers`]' calls), whose answers come to the account as messages
 /// ([`Msg::Sharers`]): its thread never waits for them.
 pub(super) struct Markers {
-    /// What the worker is asked; `None`: nothing says whose shares are synced.
-    jobs: Option<Sender<Job>>,
+    /// What the worker is asked, and its thread; `None`: nothing says whose shares are
+    /// synced (or the thread ended: [`Markers::ask`]).
+    worker: Option<(Sender<Job>, JoinHandle<()>)>,
     /// Told apart from another account run's, whose answers may still come.
     id: u64,
     /// When to read them (again): as one changed or may have, after a read that failed.
@@ -107,18 +108,16 @@ pub(crate) enum Answer {
 }
 
 impl Markers {
-    /// `source`'s markers, followed; its answers sent by `tell`. Read at once when
-    /// `read_now`; else first when the account says they may have changed
-    /// ([`Markers::changed`]: as its notifications connect).
+    /// `source`'s markers, followed; its answers sent by `tell`. First read at `first_read`,
+    /// or sooner where the account says they may have changed ([`Markers::changed`]).
     pub(super) fn new(
         source: Option<Box<dyn Sharers>>,
         tell: Sender<Msg>,
-        read_now: bool,
-        now: Instant,
+        first_read: Instant,
     ) -> Markers {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
-        let jobs = source.and_then(|source| {
+        let worker = source.and_then(|source| {
             let (jobs, asked) = channel::<Job>();
             let work = move || {
                 for job in asked {
@@ -138,7 +137,7 @@ impl Markers {
                 .name("hbsync-sharers".into())
                 .spawn(work);
             match spawned {
-                Ok(_) => Some(jobs),
+                Ok(thread) => Some((jobs, thread)),
                 Err(e) => {
                     tracing::error!("no thread to read the share markers on ({e}): none synced");
                     None
@@ -146,8 +145,8 @@ impl Markers {
             }
         });
         Markers {
-            read_at: jobs.as_ref().filter(|_| read_now).map(|_| now),
-            jobs,
+            read_at: worker.as_ref().map(|_| first_read),
+            worker,
             id,
             reading: false,
             again: false,
@@ -159,14 +158,14 @@ impl Markers {
 
     /// Whether anything says whose shares are synced.
     pub(super) fn any(&self) -> bool {
-        self.jobs.is_some()
+        self.worker.is_some()
     }
 
     /// A marker changed, or may have (the drive is read for what wasn't announced): read.
     pub(super) fn changed(&mut self, now: Instant) {
         match self.reading {
             true => self.again = true,
-            false if self.jobs.is_some() => self.read_at = Some(now),
+            false if self.worker.is_some() => self.read_at = Some(now),
             false => {}
         }
     }
@@ -178,23 +177,34 @@ impl Markers {
         (self.read_at.into_iter().chain(opening).min()).filter(|_| !paused)
     }
 
-    /// Asks the worker for what is due: a read of the markers (`synced`: whose shares are
-    /// synced now), and each share to open.
-    pub(super) fn ask(&mut self, synced: &[Sharing], now: Instant) {
-        let Some(jobs) = &self.jobs else {
+    /// Asks the worker for what is due: a read of the markers (told whose shares are synced
+    /// or being opened: `shares`, and those to open), and each share to open. A worker whose
+    /// thread ended (the source panicked) is said, once, and nothing is asked any more: what
+    /// is synced stays as it is, and nothing is due.
+    pub(super) fn ask(&mut self, shares: &[Sharing], now: Instant) {
+        let Some((jobs, thread)) = &self.worker else {
             return;
         };
-        if !self.reading && self.read_at.is_some_and(|at| now >= at) {
-            let synced = synced.iter().map(|s| s.share.sharer.clone()).collect();
-            (self.read_at, self.again) = (None, false);
-            self.reading = jobs.send(Job::Read(synced)).is_ok();
+        let mut sent = !thread.is_finished();
+        if sent && !self.reading && self.read_at.is_some_and(|at| now >= at) {
+            let synced = shares.iter().map(|s| &s.share.sharer);
+            let synced = synced.chain(self.opening.iter().map(|o| &o.sharer));
+            sent = jobs.send(Job::Read(synced.cloned().collect())).is_ok();
+            (self.reading, self.read_at, self.again) = (sent, None, false);
         }
         for opening in &mut self.opening {
-            if opening.at.is_some_and(|at| now >= at)
-                && jobs.send(Job::Open(opening.sharer.clone())).is_ok()
-            {
+            if sent && opening.at.is_some_and(|at| now >= at) {
+                sent = jobs.send(Job::Open(opening.sharer.clone())).is_ok();
                 opening.at = None;
             }
+        }
+        if !sent {
+            tracing::error!(
+                "the thread that reads the share markers ended: whose shares are synced stays \
+                 as it is until the account starts again"
+            );
+            (self.worker, self.read_at, self.reading) = (None, None, false);
+            self.opening.clear();
         }
     }
 
@@ -220,7 +230,8 @@ impl Markers {
                 self.told(told, shares, now);
             }
             Answer::Told(Err(e)) => {
-                let pause = self.read_backoff.next();
+                // (As long as the user's to mend, where only they can: a login refused.)
+                let pause = self.read_backoff.after(e.class(), None);
                 tracing::warn!(
                     "the share markers can't be read ({e}): what is synced stays as it is; \
                      read again in {pause:?}"
@@ -241,7 +252,7 @@ impl Markers {
                     }
                     Err(e) => {
                         let opening = &mut self.opening[i];
-                        let pause = opening.backoff.next();
+                        let pause = opening.backoff.after(e.class(), None);
                         tracing::warn!(
                             "what {sharer} shares can't be opened ({e}): trying again in {pause:?}"
                         );
@@ -258,9 +269,14 @@ impl Markers {
 
     /// What the markers say, `told`, followed by `shares` and by what is to be opened.
     fn told(&mut self, told: Synced, shares: &mut [Sharing], now: Instant) {
+        // (One they are unsure of stays as it is: synced, being opened, or ending.)
+        let unsure = |sharer: &Identity| told.unsure.contains(sharer);
         for share in shares.iter_mut() {
             let sharer = &share.share.sharer;
-            let off = !told.on.contains(sharer) && !told.unsure.contains(sharer);
+            let off = match unsure(sharer) {
+                true => share.off,
+                false => !told.on.contains(sharer),
+            };
             if off != share.off {
                 let now_is = if off {
                     "no longer synced"
@@ -271,7 +287,8 @@ impl Markers {
                 share.off = off;
             }
         }
-        self.opening.retain(|o| told.on.contains(&o.sharer));
+        self.opening
+            .retain(|o| told.on.contains(&o.sharer) || unsure(&o.sharer));
         self.left_out.retain(|sharer| told.on.contains(sharer));
         for sharer in told.on {
             let known = shares.iter().any(|s| s.share.sharer == sharer)
@@ -467,7 +484,7 @@ mod tests {
         };
         let (tell, told) = channel();
         let start = Instant::now();
-        let mut markers = Markers::new(Some(Box::new(source)), tell, true, start);
+        let mut markers = Markers::new(Some(Box::new(source)), tell, start);
         let mut shares = Vec::new();
         let wait = Duration::from_secs(10);
         let answer = |markers: &mut Markers, shares: &mut Vec<Sharing>| {
@@ -521,6 +538,47 @@ mod tests {
         assert!(answer(&mut markers, &mut shares)?.is_empty());
         assert!(shares.is_empty() && markers.opening.len() == 1);
         Ok(())
+    }
+
+    /// A source that panics as it is read.
+    #[derive(Debug)]
+    struct Broken;
+
+    impl Sharers for Broken {
+        fn told(&self, _: &[Identity]) -> Result<Synced, RunnerError> {
+            panic!("as a source with a bug would (expected in this test)")
+        }
+
+        fn open(&self, _: &Identity) -> Result<Share, RunnerError> {
+            Err(RunnerError::Panicked)
+        }
+    }
+
+    /// The thread that reads the markers ended (its source panicked): nothing is asked any
+    /// more and nothing is due, so the account's loop doesn't turn for it.
+    #[test]
+    fn a_reader_that_ended_asks_nothing_more() {
+        let (tell, told) = channel();
+        let start = Instant::now();
+        let mut markers = Markers::new(Some(Box::new(Broken)), tell, start);
+        markers.ask(&[], start);
+        assert!(markers.reading);
+        // (Its end: the sender it held is gone.)
+        assert!(told.recv_timeout(Duration::from_secs(10)).is_err());
+        let ended = |markers: &Markers| {
+            let thread = markers.worker.as_ref().map(|(_, thread)| thread);
+            thread.is_none_or(|thread| thread.is_finished())
+        };
+        let until = Instant::now() + Duration::from_secs(10);
+        while !ended(&markers) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        markers.changed(start);
+        markers.ask(&[], start);
+        assert!(!markers.any() && !markers.reading);
+        assert_eq!(markers.deadline(false), None);
+        markers.changed(start);
+        assert_eq!(markers.deadline(false), None);
     }
 
     /// A runner that fails is to start again after a pause, unless its folder was removed or

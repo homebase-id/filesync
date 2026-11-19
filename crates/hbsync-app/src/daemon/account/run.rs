@@ -296,10 +296,10 @@ impl Account {
         // What other identities share, each synced by a runner of its own: those the
         // identity's share markers turn on, read now and as they change.
         let mut shares = Sharing::each(shares);
-        // (Read as the notifications connect, and when the drive is read for what they
-        // didn't announce; at once where there are none.)
-        let read_now = notifier.is_err();
-        let mut markers = Markers::new(sharers, self.requests.clone(), read_now, Instant::now());
+        // First read as the notifications connect (they tell what changes from then on), or
+        // after a moment where they don't; at once where there are none.
+        let first_read = Instant::now() + notifier.as_ref().map_or(Duration::ZERO, |_| FIRST_READ);
+        let mut markers = Markers::new(sharers, self.requests.clone(), first_read);
         let mut unannounced_reads = notifications.unannounced_reads();
         // The main folder and its folder of shares, as its runner told last where that is.
         let mut shares_at: Option<(PathBuf, PathBuf)> = None;
@@ -583,19 +583,16 @@ impl Account {
                 if !paused {
                     markers.ask(&shares, now);
                 }
-                // The main folder's runner started while nothing was shared, and nothing
-                // had been, holds no folder of shares: with a share to sync now, it is
-                // started again to hold one (once it has ended, as a folder added is).
+                // The main folder's runner started while nothing was shared makes no folder
+                // of shares: with a share to sync now, it is told to. (One waiting to start
+                // again starts with it.)
                 if sharing(&shares) {
                     let mut shown = lock(&self.shown);
                     let main = |r: &&mut Running| r.sharer.is_none() && r.root.is_main();
                     for r in shown.runners.iter_mut().filter(main) {
-                        if r.shows() && !r.shared {
-                            r.stop_for_good();
-                            if !adding.iter().any(|a| a.folder == r.root.folder) {
-                                adding.push(r.root.clone());
-                            }
-                            changed = true;
+                        if matches!(r.life, Life::Syncing(_)) && !r.shared {
+                            r.handle.send(Command::HoldShares(SHARES.to_owned()));
+                            r.shared = true;
                         }
                     }
                 }
@@ -669,20 +666,12 @@ impl Account {
         if !root.is_main() {
             cfg.shares_main = main.map(Path::to_path_buf);
         }
-        // (One that had a folder of shares holds it from its start, where shares may come:
-        // made later, the main folder would be opened a second time at every start.)
-        let recorded = || {
-            let record = hbsync_local::shares::Record::read(&root.folder);
-            record.is_ok_and(|record| !record.is_none())
-        };
-        let shared = match shared {
-            Shared::Now => true,
-            Shared::Maybe => root.is_main() && recorded(),
-            Shared::No => false,
-        };
-        if shared && root.is_main() {
+        // The main folder of an account shares may come to gives its watcher to theirs and
+        // tells where its folder of shares is, from its start; it makes one where a share
+        // is synced (told later for one that comes later: [`Command::HoldShares`]).
+        if shared != Shared::No && root.is_main() {
             cfg.feed = Some(hbsync_local::Feed::Gives(self.feeds.clone()));
-            cfg.shares = Some(SHARES.to_owned());
+            cfg.shares = (shared == Shared::Now).then(|| SHARES.to_owned());
             let (folder, tell) = (root.folder.clone(), self.requests.clone());
             cfg.shares_told = Some(SharesTold {
                 tell: Arc::new(move |at| {
@@ -871,16 +860,16 @@ impl Account {
             }
         }
         // One its marker turned off goes once its runner has ended. (What it synced stays
-        // where it is, in the folder of shares.)
+        // where it is, in the folder of shares.) Let go after the lock is: its puller's
+        // thread may be in a request, and ends by itself.
+        let gone: Vec<Sharing>;
         let shown = lock(&self.shown);
-        shares.retain(|share| {
+        let ended = |share: &mut Sharing| {
             let theirs = |r: &Running| r.sharer.as_ref() == Some(&share.share.sharer);
-            let gone = share.off && !shown.runners.iter().any(theirs);
-            if gone {
-                share.share.notifications.finish();
-            }
-            !gone
-        });
+            share.off && !shown.runners.iter().any(theirs)
+        };
+        gone = shares.extract_if(.., ended).collect();
+        changed |= !gone.is_empty();
         // A start to try again (only where there is a place: cleared above otherwise), and
         // the drives of those a runner syncs.
         let synced = |s: &&Sharing| {
@@ -1046,13 +1035,18 @@ fn sharing(shares: &[Sharing]) -> bool {
 /// Whether an account's main folder is to hold a folder of shares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Shared {
-    /// A share is synced.
+    /// A share is synced: one is made where none is on record.
     Now,
-    /// None is, but its markers may turn one on: where it held one before.
+    /// None is, but its markers may turn one on: none is made, one on record is told.
     Maybe,
-    /// Nothing is shared with it.
+    /// Nothing is shared with it, nor can be.
     No,
 }
+
+/// How long after an account's start its share markers are first read where its
+/// notifications haven't connected by then (a connect reads them, and tells their changes
+/// from then on: read before it, they would be read twice at every start).
+const FIRST_READ: Duration = Duration::from_secs(10);
 
 fn shared_by(shares: &[Sharing], markers: &Markers) -> Shared {
     match (sharing(shares), markers.any()) {

@@ -29,16 +29,16 @@ pub struct AccountParts {
     /// tries it again: that is never the account's error, whose own folders sync on.
     pub shares: Vec<Share>,
     /// Whose shares are synced, as the identity's share markers say, and how each is opened:
-    /// read as the account starts, and again whenever a marker changed
-    /// ([`hbsync_homebase::notify::Event::Markers`]) or the notifications connected. `None`:
-    /// only `shares`, for good.
+    /// read whenever a marker changed ([`hbsync_homebase::notify::Event::Markers`]) and
+    /// whenever the drive is read for what wasn't announced (as the notifications connect;
+    /// docs/spec/daemon.md, "Whose shares are synced"). `None`: only `shares`, for good.
     pub sharers: Option<Box<dyn Sharers>>,
 }
 
 /// Whose shares an account syncs, and how each is opened.
 pub trait Sharers: Send + std::fmt::Debug {
-    /// What the identity's share markers say now. `synced`: whose shares are synced at
-    /// present, for [`Synced::unsure`].
+    /// What the identity's share markers say now. `synced`: whose shares are synced or
+    /// being opened at present, for [`Synced::unsure`].
     fn told(&self, synced: &[crate::Identity]) -> Result<Synced, RunnerError>;
 
     /// What `sharer` shares, opened to sync: its drive as the account may read it, on a
@@ -51,8 +51,8 @@ pub trait Sharers: Send + std::fmt::Debug {
 pub struct Synced {
     /// Whose shares to sync.
     pub on: Vec<crate::Identity>,
-    /// Those synced at present of whom the markers don't say (one that may be theirs didn't
-    /// read): kept as they are, never taken for off.
+    /// Those of the ones synced or being opened of whom the markers don't say (one that may
+    /// be theirs didn't read): each stays as it is, never taken for off, nor for on again.
     pub unsure: Vec<crate::Identity>,
 }
 

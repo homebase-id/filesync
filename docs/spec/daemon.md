@@ -571,28 +571,34 @@ included (service managers restart it then).
   - whenever the drive is read for what wasn't announced (a marker's change isn't then
     either): as the notifications connect, at the resume where they connected while
     paused, and on the timer while not connected (5 minutes);
-  - at the account's start only where it has no notifications (they tell as they connect).
+  - at the account's start where it has no notifications, and 10 s after it where they
+    haven't connected by then (a connect reads them: read before it, they would be read
+    twice at every start).
 
   One request a read; no timer of their own. Never while the account is paused, and never
   on the account's thread: a thread of its own reads them and opens shares (one at a time),
-  and the account takes its answers as messages. What they say:
-  - A share a marker turns on is opened and synced. The main folder's runner started while
-    nothing was shared, and nothing had been (no folder of shares on record), holds no
-    folder of shares: it is started again to make one, once, when the account's first
-    share comes. From then on it holds one from its start.
+  and the account takes its answers as messages. A read or an opening that fails is tried
+  again after a pause (5 s doubling to 5 minutes; an hour where only the user can mend it,
+  as a login refused), and the drive's timer doesn't ask for a read while the login is
+  refused. What they say:
+  - A share a marker turns on is opened and synced. The main folder's runner makes no folder
+    of shares while nothing is shared: it is told to as the account's first share comes
+    (made at once, and the folder opened again with it; where one is on record already,
+    nothing is opened again).
   - A share a marker turns off has its runner stopped. What it synced stays where it is, in
     the folder of shares (not yet removed: that comes with guards of its own).
-  - A share whose marker doesn't read stays as it is, and so does every share while the
-    markers can't be read at all (read again after a pause, 5 s doubling to 5 minutes):
-    never taken for turned off.
+  - A share whose marker doesn't read stays as it is (synced, being opened, or ending), and
+    so does every share while the markers can't be read at all: never taken for turned
+    off, nor for turned on again.
   - A share that can't be opened is left out, said once in a note, and tried again by itself
-    (the same pauses); the account's own folders and its other shares sync on. One that
+    (the pauses above); the account's own folders and its other shares sync on. One that
     can't be synced here at all (no folder can have its sharer's name, or another share's
     folder has it) isn't opened: said in the log.
 
   Not in the released daemon yet: opening another identity's drive takes a token of its own
   that has to be kept (a new one each start would leave a row on the sharer's server each
   time), so until those are stored the daemon reads no markers and syncs no share.
+
   A share's runner whose folder is gone (deleted, renamed) doesn't wait for it as the
   account's own do: it ends, and the account starts it again after a pause, the folder made
   again and synced anew; one renamed stays where it is, unsynced. It never counts as one of

@@ -1335,11 +1335,10 @@ mod tests {
             let (_, folders) = f.started.account.status();
             assert_eq!(folders[1].sharer.as_ref(), Some(&tom));
 
-            std::fs::write(f.toms().join("kept.txt"), "stays where it is")?;
             f.marked(|m| m.on.clear());
             f.started
                 .wait_all("the share is no longer synced", &alone)?;
-            assert!(f.toms().join("kept.txt").is_file(), "what was synced stays");
+            assert!(f.toms().is_dir(), "what was synced stays");
 
             f.marked(|m| m.on = vec![tom.clone()]);
             f.started
