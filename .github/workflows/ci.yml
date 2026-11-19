@@ -62,6 +62,11 @@ jobs:
     runs-on: ${{ matrix.os }}
     # A hung test (a process waiting on another) fails the job instead of holding a runner.
     timeout-minutes: 30
+    env:
+      # A failing property's case is reduced for three minutes at most, then printed as it is:
+      # reduced to the end (8,000 runs of the case), a rare failure outlasted the job, which
+      # timed out without naming it (#432).
+      PROPTEST_MAX_SHRINK_TIME: "180000"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
