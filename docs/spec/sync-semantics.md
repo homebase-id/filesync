@@ -1529,8 +1529,9 @@ rules hold too:
 - **A share that isn't synced here any more** (it ended, or the member's own marker turned
   it off) has its copy taken off this device as a withdrawal takes a file off it, all of it
   at once (`Engine::end_share`): every file leaves the picture, as one whose share was
-  withdrawn; the folder is walked; and one sync follows that doesn't read the drive (the
-  files are still shared: it would bring them back). So what is here as it was synced is
+  withdrawn; the folder is walked; and it is synced without reading the drive (the files
+  are still shared: it would bring them back), again for as long as a sync does something
+  and work is left (a copy larger than one sync's rounds take). So what is here as it was synced is
   deleted, and what changed here, or was put here, moves out to the out folder. Three
   things differ from a withdrawal file by file:
   - The mass-delete guard (§7) doesn't hold it, however much goes: nothing is deleted for
@@ -1539,7 +1540,9 @@ rules hold too:
     user's ignore rules keep on this device moves out too, before the sync: it is the
     user's, and a folder isn't removed over what its delete can't account for (§7). A link
     is moved as a link, never followed. Junk goes with its folder; the client's own state
-    stays. One that can't move stays, and its folder with it.
+    stays. One that can't move stays, and its folder with it. Not what lies in a folder
+    made here: that folder moves out whole, as any item put here, with all in it where it
+    is.
   - The drive is read from its beginning the next time it is (the feed's cursor goes): a
     share synced again before its state DB went brings all of it back.
 

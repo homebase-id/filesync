@@ -42,8 +42,10 @@ pub trait Sharers: Send + std::fmt::Debug {
     fn told(&self, synced: &[crate::Identity]) -> Result<Synced, RunnerError>;
 
     /// What `sharer` shares, opened to sync: its drive as the account may read it, on a
-    /// state DB of its own.
-    fn open(&self, sharer: &crate::Identity) -> Result<Share, RunnerError>;
+    /// state DB of its own. Or (`to_end`) only to take its copy off this device: nothing is
+    /// asked of the sharer for that, so it is to open without them (a share that ended
+    /// gives no access any more).
+    fn open(&self, sharer: &crate::Identity, to_end: bool) -> Result<Share, RunnerError>;
 }
 
 /// What an identity's share markers say ([`Sharers::told`]).

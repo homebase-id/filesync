@@ -1238,14 +1238,19 @@ mod tests {
             })
         }
 
-        fn open(&self, sharer: &Identity) -> Result<parts::Share, crate::runner::RunnerError> {
+        fn open(
+            &self,
+            sharer: &Identity,
+            to_end: bool,
+        ) -> Result<parts::Share, crate::runner::RunnerError> {
             {
                 let mut markers = lock(&self.markers);
                 markers.opens += 1;
                 if !markers.opened.contains(sharer) {
                     markers.opened.push(sharer.clone());
                 }
-                if markers.unopenable.contains(sharer) {
+                // (What ended is opened without its sharer.)
+                if !to_end && markers.unopenable.contains(sharer) {
                     return Err(std::io::Error::other("no token yet").into());
                 }
             }
@@ -1356,6 +1361,12 @@ mod tests {
             lock(&self.markers).reads
         }
 
+        /// The state DB of what `sharer` shares with it.
+        fn records_of(&self, sharer: &Identity) -> PathBuf {
+            let (me, paths, _) = &self.with;
+            paths.shared_db(me, sharer)
+        }
+
         /// Where what `tom.example` shares is synced.
         fn toms(&self) -> PathBuf {
             self.folder.join("Shared").join("tom.example")
@@ -1393,7 +1404,7 @@ mod tests {
 
             // Turned off: its runner stops, and its copy is taken off this computer, with
             // its records. Said in a note.
-            let shared_db = f.with.1.shared_db(&f.with.0, &tom);
+            let shared_db = f.records_of(&tom);
             assert!(shared_db.exists());
             f.marked(|m| m.on.clear());
             f.started
@@ -1456,7 +1467,7 @@ mod tests {
                 std::fs::read_to_string(elsewhere.path().join("kept.txt"))?,
                 "not ours"
             );
-            assert!(!f.with.1.shared_db(&f.with.0, &tom).exists());
+            assert!(!f.records_of(&tom).exists());
             Ok(())
         };
         let checked = checks();

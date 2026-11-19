@@ -599,22 +599,26 @@ included (service managers restart it then).
     folder has it) isn't opened: said in the log.
 
   **A share that isn't synced any more has its copy removed**, once its runner has ended
-  and the folder of shares is known (it waits where not), on a thread of its own
-  (`account/ending.rs`; sync semantics §13, "A share that isn't synced here any more"):
+  and the folder of shares is known (it waits where not), on a thread of its own, one
+  share at a time (`account/ending.rs`; sync semantics §13, "A share that isn't synced here
+  any more"):
   - Only in the folder set up for this share's own state DB: its marker says so. A folder
     with another's marker (renamed into its place) is left as it is, with all in it.
   - What is there as it was synced is deleted; what was changed or put there, what is never
     synced (a link is moved as a link, never followed) and what the user's rules keep on
     this device moves out to the top of the main folder, never over anything.
   - Then the folder itself goes, with the client's own state in it, where nothing is left
-    (junk at its top deleted with it), and after it the share's state DB. Where something
-    couldn't go, the folder and the DB stay, and it isn't tried again until the daemon
-    starts again (or the share is turned on).
+    (junk at its top deleted with it; what the client had set aside there and couldn't
+    place counts as left, §8a), and after it the share's state DB. Where something couldn't
+    go, the folder and the DB stay, and it isn't tried again until the daemon starts again
+    (or the share is turned on).
+  - The source opens such a share without its sharer (`Sharers::open(.., to_end)`): one
+    that ended gives no access any more, and nothing is asked of it.
   - Said in a note: that the share isn't synced here any more, that its folder was removed,
     how many items moved out and where to, or how many stay.
   - A share turned off while the daemon didn't run, or whose removal was cut short (the
-    daemon stopped: it stops between two operations), is known by its state DB here, and
-    taken up as the markers are first read. One turned on again while its copy is being
+    daemon stopped: it stops between two operations, and before its walk, and says
+    nothing), is known by its state DB here, and taken up as the markers are first read. One turned on again while its copy is being
     removed is opened anew once that is done.
 
   Not in the released daemon yet: opening another identity's drive takes a token of its own

@@ -270,9 +270,9 @@ impl Drive {
     }
 
     /// The drive isn't synced here any more: every file leaves its picture as one no longer
-    /// shared with this identity ([`hbsync_state::AccountTx::unshare_all`]). How many;
-    /// `None` on an identity's own drive, where nothing is done.
-    pub(crate) fn unshare_all(&self) -> Result<Option<usize>, StateError> {
+    /// shared with this identity ([`hbsync_state::AccountTx::unshare_all`]). `false` on an
+    /// identity's own drive, where nothing is done.
+    pub(crate) fn unshare_all(&self) -> Result<bool, StateError> {
         self.account().write(|s| s.account().unshare_all())
     }
 

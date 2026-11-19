@@ -478,16 +478,27 @@ fn a_share_that_ended_takes_its_copy_off_this_device() -> R {
     std::fs::write(elsewhere.path().join("kept.txt"), "not ours")?;
     #[cfg(unix)]
     std::os::unix::fs::symlink(elsewhere.path(), b.root.join("Docs/link"))?;
+    // And a folder made here, with a link of its own: it is to leave whole.
+    b.write("made here/notes.txt", "the user's own")?;
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(elsewhere.path(), b.root.join("made here/inner link"))?;
 
-    let (report, unsynced) = b.engine.end_share("2026-11-20")?;
+    let report = b.engine.end_share("2026-11-20")?;
     assert!(report.held.is_empty(), "nothing held: {:?}", report.held);
-    // Nothing is left; what was the user's moved out, the link as a link.
+    assert!(!report.unfinished && !report.stopped);
+    // Nothing is left; what was the user's moved out: the two files, the link as a link,
+    // and the folder made here whole, with the link in it where it was.
     let left = b.tree_text("");
     assert!(left.is_empty(), "{left:?}");
-    assert_eq!(unsynced.len(), usize::from(cfg!(unix)), "{unsynced:?}");
-    for (_, to) in &unsynced {
-        assert!(to.symlink_metadata()?.file_type().is_symlink());
+    assert_eq!(report.moved_out.len(), 3 + usize::from(cfg!(unix)));
+    #[cfg(unix)]
+    {
+        assert!(out.path().join("link").symlink_metadata()?.is_symlink());
+        let inner = out.path().join("made here/inner link");
+        assert!(inner.symlink_metadata()?.is_symlink());
     }
+    let kept = std::fs::read_to_string(out.path().join("made here/notes.txt"))?;
+    assert_eq!(kept, "the user's own");
     let moved: Vec<String> = out
         .path()
         .read_dir()?
@@ -498,6 +509,15 @@ fn a_share_that_ended_takes_its_copy_off_this_device() -> R {
     assert!(moved.iter().any(|text| text == "mine now"), "{moved:?}");
     assert!(moved.iter().any(|text| text == "put here"), "{moved:?}");
     assert_eq!(moved.len(), 2, "{moved:?}");
+    // A stop asked before it began: nothing is touched.
+    b.sync()?;
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    b.engine.set_stop(Arc::clone(&stop));
+    let files = b.tree_text("").len();
+    let cut = b.engine.end_share("2026-11-20")?;
+    assert!(cut.stopped && cut.ops_done == 0);
+    assert_eq!(b.tree_text("").len(), files);
+    stop.store(false, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         std::fs::read_to_string(elsewhere.path().join("kept.txt"))?,
         "not ours"

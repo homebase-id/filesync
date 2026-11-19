@@ -104,7 +104,8 @@ struct Opening {
 
 enum Job {
     Read(Vec<Identity>),
-    Open(Identity),
+    /// A share to open: to sync, or (`true`) to take its copy off this device.
+    Open(Identity, bool),
 }
 
 /// What the worker found ([`Markers::answer`]).
@@ -129,8 +130,8 @@ impl Markers {
                 for job in asked {
                     let answer = match job {
                         Job::Read(synced) => Answer::Told(source.told(&synced)),
-                        Job::Open(sharer) => {
-                            let opened = source.open(&sharer);
+                        Job::Open(sharer, to_end) => {
+                            let opened = source.open(&sharer, to_end);
                             Answer::Opened(sharer, opened)
                         }
                     };
@@ -227,7 +228,9 @@ impl Markers {
         } else if sent && !asked {
             let due = |o: &&mut Opening| o.at.is_some_and(|at| now >= at);
             if let Some(opening) = self.opening.iter_mut().find(due) {
-                sent = jobs.send(Job::Open(opening.sharer.clone())).is_ok();
+                sent = jobs
+                    .send(Job::Open(opening.sharer.clone(), opening.end))
+                    .is_ok();
                 opening.at = None;
             }
         }
@@ -337,32 +340,28 @@ impl Markers {
         // unsure (one of those stays as it is).
         let to_end = (told.kept.iter()).filter(|sharer| !on(sharer) && !unsure(sharer));
         let wanted = told.on.iter().map(|sharer| (sharer, false));
-        let wanted: Vec<(Identity, bool)> = wanted
-            .chain(to_end.map(|sharer| (sharer, true)))
-            .map(|(sharer, end)| (sharer.clone(), end))
-            .collect();
-        for (sharer, end) in wanted {
-            let known = shares.iter().any(|s| s.share.sharer == sharer)
-                || self.opening.iter().any(|o| o.sharer == sharer)
-                || self.left_out.contains(&sharer)
-                || ending.contains(&sharer)
-                || (end && self.unended.contains(&sharer));
+        for (sharer, end) in wanted.chain(to_end.map(|sharer| (sharer, true))) {
+            let known = shares.iter().any(|s| s.share.sharer == *sharer)
+                || self.opening.iter().any(|o| o.sharer == *sharer)
+                || self.left_out.contains(sharer)
+                || ending.contains(sharer)
+                || (end && self.unended.contains(sharer));
             if known {
                 continue;
             }
             // Before it is opened: one that can't be synced here is never asked for.
             let names = shares.iter().map(|s| &s.local);
             let names = names.chain(self.opening.iter().map(|o| &o.local));
-            match Sharing::local(&sharer).filter(|local| free(local, &sharer, names)) {
+            match Sharing::local(sharer).filter(|local| free(local, sharer, names)) {
                 Some(local) => self.opening.push(Opening {
-                    sharer,
+                    sharer: sharer.clone(),
                     local,
                     at: Some(now),
                     backoff: Backoff::new(),
                     told: false,
                     end,
                 }),
-                None => self.left_out.push(sharer),
+                None => self.left_out.push(sharer.clone()),
             }
         }
     }
@@ -536,7 +535,7 @@ mod tests {
             through.recv().map_err(|_| RunnerError::Panicked)
         }
 
-        fn open(&self, _: &Identity) -> Result<Share, RunnerError> {
+        fn open(&self, _: &Identity, _: bool) -> Result<Share, RunnerError> {
             Err(std::io::Error::other("not here").into())
         }
     }
@@ -628,7 +627,7 @@ mod tests {
             panic!("as a source with a bug would (expected in this test)")
         }
 
-        fn open(&self, _: &Identity) -> Result<Share, RunnerError> {
+        fn open(&self, _: &Identity, _: bool) -> Result<Share, RunnerError> {
             Err(RunnerError::Panicked)
         }
     }

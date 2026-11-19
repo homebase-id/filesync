@@ -11,7 +11,7 @@ use std::sync::atomic::AtomicBool;
 
 use hbsync_engine::root::{RootError, SyncRoot};
 use hbsync_engine::{Engine, EngineConfig};
-use hbsync_local::{Filter, STATE_DIR, Verdict};
+use hbsync_local::{Filter, is_junk, is_state_dir, layout};
 
 use super::parts::Share;
 use crate::Identity;
@@ -20,12 +20,20 @@ use crate::runner::RunnerError;
 /// What became of a share's copy ([`end`]).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(super) struct Ended {
-    /// Its folder is gone from the folder of shares (or was no more).
-    pub(super) removed: bool,
     /// How many items moved out to the main folder: changed or put there, or never synced.
     pub(super) moved_out: usize,
-    /// What is left in its folder, by name: what couldn't be deleted or moved.
+    /// What is left in its folder, by name: what couldn't be deleted or moved. With none
+    /// (and not `stopped`), the folder and the share's records are gone.
     pub(super) left: Vec<String>,
+    /// Stopped before the end: taken up again at the next start.
+    pub(super) stopped: bool,
+}
+
+impl Ended {
+    /// Whether all of the copy went, the share's records with it.
+    pub(super) fn all(&self) -> bool {
+        self.left.is_empty() && !self.stopped
+    }
 }
 
 /// Takes `share`'s copy in `folder` off this device, what isn't the sharer's moving out to
@@ -53,27 +61,28 @@ pub(super) fn end(
             let filter = Filter::load(folder, cfg.folder.case_insensitive)?;
             cfg.folder.filter = Arc::new(filter);
             cfg.folder.read_only = Some(out.to_path_buf());
-            let filter = Arc::clone(&cfg.folder.filter);
             let mut engine = Engine::open(&root, Arc::clone(&drive), cfg)?;
             engine.set_stop(stop);
-            let (report, unsynced) = engine.end_share(&crate::today())?;
-            ended.moved_out = report.moved_out.len() + unsynced.len();
+            let report = engine.end_share(&crate::today())?;
             drop(engine);
-            ended.left = left_in(folder, &filter)?;
-            if ended.left.is_empty() {
-                // (The client's own, in a folder its marker proved ours: its marker, what a
-                // transfer left. Then the folder, which holds nothing now.)
-                remove(&folder.join(STATE_DIR), true)?;
+            ended.moved_out = report.moved_out.len();
+            ended.stopped = report.stopped;
+            if !ended.stopped {
+                ended.left = left_in(folder)?;
+            }
+            if ended.all() {
+                // (The client's own, in a folder its marker proved ours: its marker, and
+                // nothing aside. Then the folder, which holds nothing now.)
+                remove(&layout::state_dir(folder), true)?;
                 remove(folder, false)?;
-                ended.removed = true;
             }
         }
         // Gone already (removed by hand, or by an ending cut short after its last step).
-        Err(RootError::NoMarker(_)) if !folder.exists() => ended.removed = true,
+        Err(RootError::NoMarker(_)) if !folder.exists() => {}
         Err(e) => return Err(e.into()),
     }
     // Its records go only with its folder: one that stays is taken up again with them.
-    if ended.removed {
+    if ended.all() {
         drop(drive);
         if let Some(dir) = db.parent() {
             remove(dir, true)?;
@@ -82,23 +91,27 @@ pub(super) fn end(
     Ok(ended)
 }
 
-/// What `folder` still holds at its top, by name, junk files deleted on the way (they go
-/// with a folder, as in any delete: sync semantics §7): nothing but the client's own state
-/// when all of the copy went.
-fn left_in(folder: &Path, filter: &Filter) -> Result<Vec<String>, RunnerError> {
+/// What `folder` still holds, by name: at its top, junk files deleted on the way (they go
+/// with a folder, as in any delete: sync semantics §7), and what the client set aside
+/// there and couldn't place (§8a: left for the user). Nothing when all of the copy went.
+fn left_in(folder: &Path) -> Result<Vec<String>, RunnerError> {
     let mut left = Vec::new();
     for entry in std::fs::read_dir(folder)? {
         let entry = entry?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name == STATE_DIR {
+        if is_state_dir(&name) {
             continue;
         }
-        let is_dir = entry.file_type()?.is_dir();
-        let junk = !is_dir && filter.in_folder("", &name, false) == Verdict::Junk;
+        let junk = is_junk(&name) && !entry.file_type()?.is_dir();
         if !junk || std::fs::remove_file(entry.path()).is_err() {
             left.push(name);
         }
     }
+    let aside = layout::aside_entries(folder);
+    left.extend(aside.map(|(path, _)| {
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        layout::aside_shown(&name)
+    }));
     left.sort();
     Ok(left)
 }
@@ -119,8 +132,9 @@ fn remove(path: &Path, all: bool) -> std::io::Result<()> {
 /// A share's copy being taken off this device, on the account's thread.
 pub(super) struct Ending {
     pub(super) sharer: Identity,
-    /// Where its folder is.
+    /// Where its folder is, and where what isn't the sharer's moves out to.
     pub(super) folder: PathBuf,
+    pub(super) out: PathBuf,
     pub(super) thread: std::thread::JoinHandle<Result<Ended, RunnerError>>,
 }
 
@@ -179,7 +193,7 @@ mod tests {
             std::fs::read_to_string(folder.join("theirs.txt"))?,
             "of another share"
         );
-        assert!(folder.join(STATE_DIR).is_dir() && db.exists());
+        assert!(layout::state_dir(&folder).is_dir() && db.exists());
         assert!(out.read_dir()?.next().is_none(), "nothing moved out");
         Ok(())
     }
@@ -197,13 +211,8 @@ mod tests {
         std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
         let stop = Arc::new(AtomicBool::new(false));
         let ended = end(share(&me, &db)?, &me, "pc", &folder, &out, stop)?;
-        assert_eq!(
-            ended,
-            Ended {
-                removed: true,
-                ..Ended::default()
-            }
-        );
+        assert_eq!(ended, Ended::default());
+        assert!(ended.all());
         assert!(!db.exists());
         Ok(())
     }
