@@ -598,6 +598,28 @@ included (service managers restart it then).
     can't be synced here at all (no folder can have its sharer's name, or another share's
     folder has it) isn't opened: said in the log.
 
+  **How a share is opened** (`account/sharers.rs`, `hbsync-homebase` `drive/shared.rs`):
+  - A sharer is who a marker of the owner's names, if that is an identity's address and
+    nothing else (host labels of letters, digits and `-` joined by dots, and a port at most):
+    the name becomes a folder's, that of the share's records
+    (`<state>/accounts/<identity>/shared/<sharer>/`), so anything else isn't synced (said in
+    the log). The identity's marker for itself syncs nothing.
+  - Their drive is read on their server with a token it made for this identity's connection,
+    asked for through the identity's own server (one request; homebase-api-notes, "Shared
+    with you"). Each token asked for stays a row on their server, so it is **kept**: in the
+    file `token` beside the share's state DB, sealed under this login's shared secret (the
+    keychain's; the file opens nothing by itself), and it goes with those records when the
+    share ends. A token kept under another login (signed in again since) or a damaged file
+    is none: a new one is asked for. A file that can't be read fails the opening instead,
+    tried again: asking then would leave a row at every try.
+  - A token their server refuses (401) is replaced: a new one is asked for, kept, and the
+    request repeated with it, by whichever reader met the refusal (two at once ask for
+    one). Not again within an hour: a server that refuses every token it makes gets one an
+    hour, the share refused meanwhile.
+  - The shares with records on this computer are those folders holding a state DB: one of
+    them no marker turns on has its copy removed (below), opened for that without its
+    sharer, of whom nothing is asked.
+
   **A share that isn't synced any more has its copy removed**, once its runner has ended
   and the folder of shares is known (it waits where not), on a thread of its own, one
   share at a time (`account/ending.rs`; sync semantics §13, "A share that isn't synced here
