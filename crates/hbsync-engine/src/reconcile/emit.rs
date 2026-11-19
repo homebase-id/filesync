@@ -246,6 +246,19 @@ impl Reconciler<'_> {
             }
         }
 
+        // The bases of what was left to other devices ([`Reconciler::released`]): gone, the
+        // drive's node as it is. Not of one a later repair brought back into the plan.
+        for &node in &self.released {
+            if self.merged.exists(node) {
+                continue;
+            }
+            let op = Op::Forget {
+                node,
+                subtree: Vec::new(),
+            };
+            deletes.push((i.base.ancestors_iter(node).count(), op));
+        }
+
         // Parents before children for creates, all folders before the files; the local
         // operations first: the executor runs the others together on its pool, and each local
         // one between them would end a batch. Deletes: on the drive first, parents before

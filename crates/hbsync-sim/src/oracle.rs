@@ -842,9 +842,9 @@ impl Sim {
         let ignored: BTreeSet<NodeId> = filtered(&client.local, &client.filter)
             .into_iter()
             .collect();
-        let held = |n: &NodeId| {
-            client.base.contains(*n) || (client.local.contains(*n) && !ignored.contains(n))
-        };
+        // What the client holds: an item here, in view; never a base alone (§6.3, "What a
+        // device holds of a node").
+        let held = |n: &NodeId| client.local.contains(*n) && !ignored.contains(n);
         let names = |path: &[&str], is_dir| client.filter.names(path.iter().copied(), is_dir);
         // Where an orphan goes, as the engine's `recovered_path` finds it: Recovered files
         // where the tree has it; masked on the drive, the top; live but out of the tree

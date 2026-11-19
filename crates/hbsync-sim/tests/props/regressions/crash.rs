@@ -724,3 +724,58 @@ fn regression_nor_is_it_made_again_for_a_file_synced_there_before() {
         assert_eq!(sim.local_paths(c), recovered, "client {c}");
     }
 }
+
+/// A folder the drive still has, between a folder that is gone and a file another client
+/// changed. Client 2 makes `d`, `d/b` in it and the file `d/b/a`; all sync. Client 0 starts
+/// ignoring `d`; client 2 edits `a`; another app deletes `d` outright, so `b` and `a` stay
+/// live, with no folder. Client 0 doesn't remove `b` as a folder it stopped syncing in the
+/// plan that moves client 2's file out of it (cut short between the two, the removal took
+/// the file along: client 2's edit, gone from the drive and from client 2). The file ends in
+/// Recovered files, with client 2's edit, on the drive and on client 2.
+#[test]
+fn regression_a_folder_still_on_the_drive_isnt_removed_over_another_clients_file() {
+    use Action::*;
+    let act = |client, action| Event::Act { client, action };
+    let mut sim = Sim::new(3);
+    sim.verbose = true;
+    sim.run(&[act(
+        2,
+        CreateFolder {
+            parent: 0,
+            name: 13,
+        },
+    )]);
+    let d = sim.item(2, "d").expect("d");
+    let parent = sim.pick(2, d, true).expect("d's pick");
+    sim.run(&[act(2, CreateFolder { parent, name: 1 })]);
+    let b = sim.item(2, "d/b").expect("d/b");
+    let parent = sim.pick(2, b, true).expect("b's pick");
+    sim.run(&[act(2, CreateFile { parent, name: 0 })]);
+    assert!(sim.quiesce(30), "{:#?}", sim.trace);
+    assert_eq!(sim.local_paths(0), ["d", "d/b", "d/b/a"]);
+    let a = sim.item(2, "d/b/a").expect("a");
+    let file = sim.file_pick(2, a).expect("a's pick");
+    let pick = sim.stopped_pick(d).expect("d's pick on the drive");
+    sim.run(&[
+        act(0, ToggleIgnore),
+        act(2, Edit { file }),
+        Event::Plan { client: 2 },
+        Event::Step { client: 2 },
+        act(1, DeleteOutright { pick }),
+    ]);
+    // (Live, with no folder: at no path.)
+    assert!(sim.server_paths().is_empty(), "{:?}", sim.server_paths());
+    assert!(sim.quiesce(30), "{:#?}", sim.trace);
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    // (By itself, or in its folder, as the clients' turns have it.)
+    let server = sim.server_paths();
+    assert!(server.iter().any(|p| p.ends_with("/a")), "{server:?}");
+    let recovered = |p: &String| p.starts_with("Recovered files");
+    assert!(server.iter().all(recovered), "{server:?}");
+    assert_eq!(sim.local_paths(2), server);
+    // (Client 0 keeps what it ignores to itself.)
+    let own = sim.local_paths(0);
+    for path in ["d", "d/b", "d/b/a"] {
+        assert!(own.iter().any(|p| p == path), "{own:?}");
+    }
+}
