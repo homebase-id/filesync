@@ -60,8 +60,6 @@ pub(super) struct Place {
 /// whose marker names another is left as it is. A folder that isn't there leaves only the
 /// DB to remove. What was done, and why not all of it, where it wasn't.
 pub(super) fn end(share: Share, place: &Place, stop: Arc<AtomicBool>) -> Ended {
-    // Its puller's thread ends first (joined here, not on the account's thread).
-    share.notifications.finish();
     let mut ended = Ended::default();
     match take_off(share, place, stop, &mut ended) {
         Ok(()) => {}
@@ -76,15 +74,24 @@ fn take_off(
     stop: Arc<AtomicBool>,
     ended: &mut Ended,
 ) -> Result<(), String> {
-    let Share { drive, db, .. } = share;
+    // Its puller's thread ends first (joined here, not on the account's thread), and lets
+    // go of the drive: the share's DB is closed once `drive` is dropped below, which
+    // removing its file takes on Windows.
+    let Share {
+        drive,
+        db,
+        notifications,
+        ..
+    } = share;
+    notifications.finish();
+    drop(notifications);
     let (folder, out) = (place.folder.as_path(), place.out.as_path());
     let said = |e: &dyn std::fmt::Display| e.to_string();
     if !drive.shared() || db != place.records {
         return Err("its records aren't those of what is shared with this account".into());
     }
     let dir = folder.parent().unwrap_or(folder);
-    let record = hbsync_local::shares::Record::read(out).and_then(|record| record.is(dir));
-    if !record.map_err(|e| said(&e))? {
+    if !is_shares_folder(out, dir).map_err(|e| said(&e))? {
         return Err(format!("{} isn't the folder of shares now", dir.display()));
     }
     match std::fs::symlink_metadata(folder) {
@@ -98,8 +105,11 @@ fn take_off(
         }
         Err(e) => return Err(said(&e)),
     }
+    // Whether the folder is proven this share's by its marker (and the engine went over it).
+    let mut proven = false;
     match SyncRoot::open(&db, &place.identity, folder) {
         Ok(root) => {
+            proven = true;
             let mut cfg = EngineConfig::new(folder, &place.device);
             let filter = Filter::load(folder, cfg.folder.case_insensitive);
             cfg.folder.filter = Arc::new(filter.map_err(|e| said(&e))?);
@@ -124,8 +134,18 @@ fn take_off(
     if ended.stopped {
         return Ok(());
     }
-    let (left, junk) = left_in(folder).map_err(|e| said(&e))?;
+    let (left, mut junk) = left_in(folder).map_err(|e| said(&e))?;
     ended.left = left;
+    // (Without its marker nothing in it is deleted, junk neither: only an empty folder
+    // goes.)
+    if !proven {
+        let names = junk.drain(..).filter_map(|path| {
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            Some(name)
+        });
+        ended.left.extend(names);
+        ended.left.sort();
+    }
     if !ended.left.is_empty() {
         return Ok(());
     }
@@ -141,23 +161,42 @@ fn take_off(
     remove_records(&db)
 }
 
+/// Whether `dir` is the folder of shares of the main folder `main`, by that one's record,
+/// and a folder itself: not a link to it (where a volume tells no file ids the record goes
+/// by the marker in it, which a link would lead to). What a share is synced into, and what
+/// its copy is taken out of, is asked here.
+pub(super) fn is_shares_folder(main: &Path, dir: &Path) -> std::io::Result<bool> {
+    if !std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir()) {
+        return Ok(false);
+    }
+    hbsync_local::shares::Record::read(main)?.is(dir)
+}
+
 /// Removes a share's state DB at `db`, with the directory this account keeps it in.
 fn remove_records(db: &Path) -> Result<(), String> {
     let dir = db.parent().ok_or("its records have no place")?;
     remove(dir, true).map_err(|e| e.to_string())
 }
 
-/// What `folder` still holds, by name (at its top, and what the client set aside there and
-/// couldn't place: §8a, left for the user), and the junk files at its top, which go with
-/// the folder when nothing else is left.
+/// What `folder` still holds, by name: at its top; what the client set aside there and
+/// couldn't place (§8a, left for the user); and the user's ignore rules, where they couldn't
+/// move out. And the junk files at its top, which go with the folder when nothing else is
+/// left.
 fn left_in(folder: &Path) -> std::io::Result<(Vec<String>, Vec<PathBuf>)> {
     let (mut left, mut junk) = (Vec::new(), Vec::new());
+    let state = layout::state_dir(folder);
+    // (The folder's own state, under whatever spelling the volume shows it: another folder
+    // of such a name, where names differ by case, is the user's.)
+    let own_state = |path: &Path| match (path.canonicalize(), state.canonicalize()) {
+        (Ok(path), Ok(state)) => path == state,
+        _ => false,
+    };
     for entry in std::fs::read_dir(folder)? {
         let entry = entry?;
         // (A name that isn't text is nobody's junk: the user's, left.)
         let name = entry.file_name();
         let text = name.to_str();
-        if text.is_some_and(is_state_dir) {
+        if text.is_some_and(is_state_dir) && own_state(&entry.path()) {
             continue;
         }
         match text.is_some_and(is_junk) && !entry.file_type()?.is_dir() {
@@ -170,6 +209,13 @@ fn left_in(folder: &Path) -> std::io::Result<(Vec<String>, Vec<PathBuf>)> {
         let name = path.file_name().unwrap_or_default().to_string_lossy();
         layout::aside_shown(&name)
     }));
+    if layout::ignore_file(folder).symlink_metadata().is_ok() {
+        left.push(format!(
+            "{}/{}",
+            hbsync_local::STATE_DIR,
+            hbsync_local::IGNORE_FILE
+        ));
+    }
     left.sort();
     Ok((left, junk))
 }
@@ -191,6 +237,9 @@ fn remove(path: &Path, all: bool) -> std::io::Result<()> {
 pub(super) struct Ending {
     pub(super) sharer: Identity,
     pub(super) place: Place,
+    /// Set by its thread before it wakes the account: its result is ready to take (the
+    /// thread itself may not have ended yet as the account looks).
+    pub(super) done: Arc<AtomicBool>,
     pub(super) thread: std::thread::JoinHandle<Ended>,
 }
 
@@ -294,6 +343,32 @@ mod tests {
         let other = end_now(share(&place.identity, &elsewhere, false)?, &place);
         assert!(other.failed.is_some(), "{other:?}");
         assert!(elsewhere.exists() && beside.exists());
+        Ok(())
+    }
+
+    /// A folder at the share's place that holds no marker (its own went with an ending cut
+    /// short, or the user put another folder there) has nothing in it deleted, junk
+    /// neither: it stays, with its records. Empty, it goes.
+    #[test]
+    fn nothing_is_deleted_from_a_folder_without_its_marker() -> R {
+        let home = tempfile::tempdir()?;
+        let place = place(home.path())?;
+        std::fs::create_dir_all(&place.folder)?;
+        // Set up, then its state gone: the DB still has the folder there.
+        drop(share(&place.identity, &place.records, false)?);
+        SyncRoot::create(&place.records, &place.identity, &place.folder)?;
+        std::fs::remove_dir_all(layout::state_dir(&place.folder))?;
+        let download = place.folder.join("report.pdf.crdownload");
+        std::fs::write(&download, "half of it")?;
+
+        let ended = end_now(share(&place.identity, &place.records, false)?, &place);
+        assert_eq!(ended.left, ["report.pdf.crdownload"], "{ended:?}");
+        assert!(download.exists() && place.records.exists());
+
+        std::fs::remove_file(&download)?;
+        let ended = end_now(share(&place.identity, &place.records, false)?, &place);
+        assert!(ended.all(), "{ended:?}");
+        assert!(!place.folder.exists() && !place.records.exists());
         Ok(())
     }
 

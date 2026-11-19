@@ -185,6 +185,25 @@ pub(crate) fn share_ended(
     said
 }
 
+/// What is told when the removal of a share's copy was held up (a pause, the daemon
+/// stopping) after `moved_out` items that weren't the sharer's had moved to `out`: said
+/// then, as the removal that finishes it later has none of them to tell.
+pub(crate) fn share_moved_out(
+    sharer: &crate::Identity,
+    folder: &std::path::Path,
+    out: &std::path::Path,
+    moved_out: usize,
+) -> String {
+    format!(
+        "What {sharer} shared with you is no longer synced here. {} you had changed or \
+         added in {} {} in {} now; the rest of the folder is removed when syncing goes on.",
+        items(moved_out as u64),
+        folder.display(),
+        if moved_out == 1 { "is" } else { "are" },
+        out.display()
+    )
+}
+
 /// The note told once when an account's state DB was set aside (too old, damaged, or of a
 /// drive made again since) and its folders set up again: the tray's, the log's and setup's.
 pub fn set_aside(why: Unusable) -> String {

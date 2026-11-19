@@ -621,7 +621,7 @@ impl Account {
             // (A pause holds it as it holds syncing: stopped between two operations, and
             // taken up at the resume, found again by its records.)
             ending_stop.store(ending || paused, Ordering::SeqCst);
-            if let Some(ended) = ending_copy.take_if(|e| e.thread.is_finished()) {
+            if let Some(ended) = ending_copy.take_if(|e| e.done.load(Ordering::SeqCst)) {
                 match self.copy_ended(ended) {
                     Some((sharer, all)) => markers.ended(sharer, all, Instant::now()),
                     None => markers.changed(Instant::now()),
@@ -650,8 +650,9 @@ impl Account {
                     // (A copy being taken off stops between two operations, and is taken up
                     // at the next start: its records are kept until all of it went.)
                     ending_stop.store(true, Ordering::SeqCst);
+                    // (What it had moved out by then is told.)
                     if let Some(ended) = ending_copy.take() {
-                        let _ = ended.thread.join();
+                        let _ = self.copy_ended(ended);
                     }
                     notifications.finish();
                     for share in &shares {
@@ -868,7 +869,7 @@ impl Account {
             // name that isn't the folder of shares (gone, or renamed, since its runner told):
             // what the identities share would be the account's own there, and sent.
             let config = Config::now(paths);
-            let within = hbsync_local::shares::Record::read(main).and_then(|r| r.is(dir));
+            let within = ending::is_shares_folder(main, dir);
             for (i, again) in starting {
                 let share = &mut shares[i];
                 let started = match (&config, &within) {
@@ -954,8 +955,13 @@ impl Account {
             records: paths.shared_db(&self.identity, &sharer),
         };
         let (at, stop, tell) = (place.clone(), Arc::clone(stop), self.requests.clone());
+        let done = Arc::new(AtomicBool::new(false));
+        let finished = Arc::clone(&done);
         let end = move || {
             let ended = ending::end(share.share, &at, stop);
+            // Before the wake: the account, woken, finds it done (its thread may not have
+            // ended yet as the account looks, and nothing would wake it again).
+            finished.store(true, Ordering::SeqCst);
             let _ = tell.send(Msg::Wake);
             ended
         };
@@ -966,6 +972,7 @@ impl Account {
             Ok(thread) => Some(Ending {
                 sharer,
                 place,
+                done,
                 thread,
             }),
             Err(e) => {
@@ -987,12 +994,20 @@ impl Account {
             sharer,
             place,
             thread,
+            ..
         } = ending;
         let ended = thread.join().unwrap_or_else(|_| ending::Ended {
             failed: Some(RunnerError::Panicked.to_string()),
             ..Default::default()
         });
         if ended.stopped && ended.failed.is_none() {
+            // (What moved out before it was stopped is said now: the removal that goes on
+            // later has none of it to tell.)
+            if ended.moved_out > 0 {
+                let moved = ended.moved_out;
+                let note = words::share_moved_out(&sharer, &place.folder, &place.out, moved);
+                self.note(vec![note]);
+            }
             return None;
         }
         let counts = (ended.moved_out, ended.left.len());

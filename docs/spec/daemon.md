@@ -604,8 +604,9 @@ included (service managers restart it then).
   any more"). Checked before anything is touched:
   - the share's drive is another identity's, and its state DB is where this account keeps
     that sharer's: nothing else is ever removed as its records;
-  - its folder is in the folder of shares on the main folder's record (one renamed since
-    is neither emptied nor taken for gone);
+  - its folder is in the folder of shares on the main folder's record, itself a folder and
+    not a link to it (one renamed since is neither emptied nor taken for gone; a share is
+    started under the same check);
   - it is a folder: a link at its place is never followed, whatever it leads to;
   - it is set up for this share's own state DB, by its marker: a folder with another's
     (renamed into its place) is left as it is, with all in it.
@@ -616,19 +617,21 @@ included (service managers restart it then).
     device, and the rules themselves (`.hbsync/ignore`) move out to the top of the main
     folder, never over anything.
   - Where nothing is left (what the client had set aside there and couldn't place counts
-    as left, §8a), junk at the folder's top is deleted, then the client's own state in it,
-    then the folder, and after it the share's state DB. Junk is never deleted from a
-    folder that stays.
+    as left, §8a, and so do the ignore rules where they couldn't move out), junk at the
+    folder's top is deleted, then the client's own state in it, then the folder, and after
+    it the share's state DB. Junk is never deleted from a folder that stays.
   - Where something couldn't go, or it failed part of the way, the folder and the DB stay,
     and it isn't tried again until the daemon starts again (or the share is turned on). An
     ending cut short after the folder's state went is taken up by the DB's word that the
-    folder is its own.
+    folder is its own: with no marker to prove it, nothing in it is deleted then, junk
+    neither, and only an empty folder goes.
   - Said in a note: that the share isn't synced here any more; that its folder was
     removed, or why not, or how many items stay; and how many moved out, and where to
     (also where it failed after some had).
   - A pause holds it as it holds syncing (none starts, one under way stops between two
-    operations and before its walk), and so does the daemon's stop: nothing is said, and
-    it is taken up again, found by its state DB here.
+    operations and before its walk), and so does the daemon's stop: it is taken up again,
+    found by its state DB here. What had moved out by then is said then (the removal that
+    goes on later has none of it to tell).
   - A share turned off while the daemon didn't run is known the same way, as the markers
     are first read. One whose marker doesn't read then keeps its copy: the source says
     "unsure" for those it finds kept too. One turned on again while its copy is being

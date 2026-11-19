@@ -381,7 +381,7 @@ impl Sim {
     /// or nothing once it doesn't sync it any more ([`Sim::end_share`]).
     fn member_sees(&self, c: usize) -> model::server::Server {
         match self.clients[c].ended {
-            true => self.server.holding(Default::default(), Default::default()),
+            true => self.server.as_unshared(),
             false => self.server.as_shared(),
         }
     }

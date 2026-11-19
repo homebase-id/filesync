@@ -460,7 +460,7 @@ impl Sim {
             // A member's, of the drive as it reads it: what is shared with it.
             // (Nothing, once it doesn't sync it any more: `Sim::end_share`.)
             let seen = client.member.then(|| match client.ended {
-                true => self.server.holding(Default::default(), Default::default()),
+                true => self.server.as_unshared(),
                 false => self.member_reads(),
             });
             let (mut synced, left) = match &seen {
