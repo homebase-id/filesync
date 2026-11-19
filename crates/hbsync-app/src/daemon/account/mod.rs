@@ -1314,7 +1314,7 @@ mod tests {
 
     /// Whose shares are synced follows the identity's share markers: none while none says
     /// so (no folder of shares is made); one turned on is synced into the folder of shares,
-    /// made for it (the main folder's runner started again to hold one); turned off, its
+    /// made for it (the main folder's runner told to hold one); turned off, its
     /// runner stops and what it synced stays; turned on again, it is synced again.
     #[test]
     fn a_share_is_synced_while_its_marker_says_so() -> Result<(), Box<dyn std::error::Error>> {

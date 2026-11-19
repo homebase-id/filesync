@@ -1010,7 +1010,7 @@ impl Runner {
             // record, a listing, a lookup, a rename): an idle folder is asked too, and the
             // folder is opened again only where that did something, never to find out.
             // (Come round while the folder was paused: asked now that it syncs again.)
-            if (shares_held && !schedule.paused()) || std::mem::take(&mut self.place_shares_now) {
+            if std::mem::take(&mut self.place_shares_now) || (shares_held && !schedule.paused()) {
                 shares_held = false;
                 shares_at = Some(now);
             }

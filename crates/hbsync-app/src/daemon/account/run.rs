@@ -37,7 +37,7 @@ pub(super) enum Readying<'a> {
 }
 
 /// While what only the user can fix keeps an account from starting, how often it looks again.
-const NEEDS_USER_AGAIN: Duration = Duration::from_secs(3600);
+pub(super) const NEEDS_USER_AGAIN: Duration = Duration::from_secs(3600);
 
 /// How often the purge of Recently deleted is looked at (it runs once a day).
 const PURGE_LOOK: Duration = Duration::from_secs(600);

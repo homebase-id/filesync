@@ -30,8 +30,8 @@ pub(super) struct Running {
     pub(super) done: Arc<AtomicBool>,
     pub(super) started: Instant,
     pub(super) backoff: Backoff,
-    /// The main folder's: started to hold a folder of shares (the account had a share to
-    /// sync then).
+    /// The main folder's: it makes a folder of shares where none is on record (started so,
+    /// the account having a share to sync then, or told so since: `Command::HoldShares`).
     pub(super) shared: bool,
 }
 
@@ -174,7 +174,8 @@ impl Markers {
     /// Never while `paused`: nothing is asked then.
     pub(super) fn deadline(&self, paused: bool) -> Option<Instant> {
         let opening = self.opening.iter().filter_map(|o| o.at);
-        (self.read_at.into_iter().chain(opening).min()).filter(|_| !paused)
+        let due = self.read_at.into_iter().chain(opening).min();
+        due.filter(|_| !paused && self.worker.is_some())
     }
 
     /// Asks the worker for what is due: a read of the markers (told whose shares are synced
@@ -219,8 +220,9 @@ impl Markers {
         shares: &mut Vec<Sharing>,
         now: Instant,
     ) -> Vec<String> {
-        // (Another run's: its shares aren't this one's to sync.)
-        if id != self.id {
+        // (Another run's: its shares aren't this one's to sync. Or one that comes after its
+        // thread was found ended: all stays as it is from then on, as was said.)
+        if id != self.id || self.worker.is_none() {
             return Vec::new();
         }
         match answer {
@@ -230,8 +232,7 @@ impl Markers {
                 self.told(told, shares, now);
             }
             Answer::Told(Err(e)) => {
-                // (As long as the user's to mend, where only they can: a login refused.)
-                let pause = self.read_backoff.after(e.class(), None);
+                let pause = wait_after(&mut self.read_backoff, &e);
                 tracing::warn!(
                     "the share markers can't be read ({e}): what is synced stays as it is; \
                      read again in {pause:?}"
@@ -252,7 +253,7 @@ impl Markers {
                     }
                     Err(e) => {
                         let opening = &mut self.opening[i];
-                        let pause = opening.backoff.after(e.class(), None);
+                        let pause = wait_after(&mut opening.backoff, &e);
                         tracing::warn!(
                             "what {sharer} shares can't be opened ({e}): trying again in {pause:?}"
                         );
@@ -314,6 +315,15 @@ impl Markers {
     }
 }
 
+/// The wait before what failed with `e` is tried again: an hour where the identity refused
+/// the login (the user's to mend, as for the account's own connecting); else by its class.
+fn wait_after(backoff: &mut Backoff, e: &RunnerError) -> Duration {
+    match e.class() {
+        hbsync_remote::ErrorClass::Denied => super::run::NEEDS_USER_AGAIN,
+        class => backoff.after(class, None),
+    }
+}
+
 /// Whether `sharer`'s folder can be named `local`: none of `names` is that name, as names
 /// compare here. Two runners on one folder would each take the other's files for changes
 /// made here. Said where not.
@@ -348,6 +358,10 @@ impl Sharing {
         let taken = others
             .iter()
             .any(|other| other.share.sharer == share.sharer);
+        if taken {
+            let sharer = &share.sharer;
+            tracing::error!("what {sharer} shares is synced already: not a second time");
+        }
         let names = others.iter().map(|other| &other.local);
         (!taken && free(&local, &share.sharer, names)).then(|| Sharing {
             share,
@@ -579,6 +593,17 @@ mod tests {
         assert_eq!(markers.deadline(false), None);
         markers.changed(start);
         assert_eq!(markers.deadline(false), None);
+        // An answer it had sent before, taken only now: passed over, nothing due by it.
+        let on = Synced {
+            on: vec!["tom.example".into()],
+            unsure: Vec::new(),
+        };
+        let mut shares = Vec::new();
+        for late in [Ok(on), Err(RunnerError::Panicked)] {
+            let said = markers.answer(markers.id, Answer::Told(late), &mut shares, start);
+            assert!(said.is_empty() && markers.opening.is_empty());
+            assert_eq!(markers.deadline(false), None);
+        }
     }
 
     /// A runner that fails is to start again after a pause, unless its folder was removed or
