@@ -8,6 +8,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::ops::Range;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use hbsync_remote::{
@@ -60,6 +61,36 @@ impl PeerRemote {
             sharer,
             circles: Mutex::default(),
         })
+    }
+
+    /// `sharer`'s files shared with `own`'s identity, read with the token kept at `kept`
+    /// ([`PeerToken::kept`]) or, where none is that opens under this login, with a new one
+    /// asked for ([`HomebaseRemote::peer_token`]) and kept there: one request then, none
+    /// otherwise. A new token that couldn't be kept is used all the same (told): refusing it
+    /// would ask for another at the next try, a row on their server each time.
+    pub fn open(own: Arc<HomebaseRemote>, sharer: Sharer, kept: &Path) -> Result<PeerRemote> {
+        let token = match PeerToken::kept(own.client(), kept).map_err(remote_error)? {
+            Some(token) => token,
+            None => {
+                let token = own.peer_token(&sharer.odin_id)?;
+                if let Err(e) = token.keep(own.client(), kept) {
+                    tracing::warn!(
+                        "the token {}'s server gave couldn't be kept ({e}): a new one is asked \
+                         for at the next start",
+                        sharer.odin_id
+                    );
+                }
+                token
+            }
+        };
+        PeerRemote::new(own, sharer, &token).map_err(remote_error)
+    }
+
+    /// Which token it reads with, saying nothing of it (a fingerprint, as
+    /// [`crate::Credentials::login_id`]): what it sealed (the files' tokens) opens only under
+    /// the same one.
+    pub fn login_id(&self) -> &str {
+        self.client.login_id()
     }
 
     /// Their server's answer as the trait's error: refusing the token (401) is

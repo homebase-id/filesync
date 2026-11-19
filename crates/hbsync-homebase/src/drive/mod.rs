@@ -32,7 +32,7 @@ use crate::drive::sealed::{
 };
 use crate::drive::share_keys::CircleKey;
 use crate::multipart::{Multipart, Part, SourceEnded};
-use crate::peer::SealedKey;
+use crate::peer::{PeerToken, SealedKey};
 use crate::{ApiError, HomebaseError, app};
 
 pub mod markers;
@@ -628,6 +628,27 @@ impl HomebaseRemote {
         let member = markers::owner_of(self.client.identity());
         CircleKey::unseal(&sealed, &write_only, circle, sharer.drive_alias, &member)
             .map_err(remote_error)
+    }
+
+    /// A new token for `sharer`'s server ([`PeerToken::new`]: a row there that stays, so one
+    /// is kept, [`shared::PeerRemote::open`]): one request to this identity's server, which
+    /// asks theirs, and one more where the app may lack the permission to ask. The app's
+    /// want of it refuses ([`Refusal::Permission`], an approval), told from their refusal as
+    /// [`Self::circle_key`] tells it.
+    pub(crate) fn peer_token(&self, sharer: &str) -> Result<PeerToken> {
+        let permitted = self.key_state(false, |s| Ok(s.reads_shared))?;
+        let not_permitted = || RemoteError::Denied(NOT_PERMITTED.into(), Refusal::Permission);
+        if !permitted && !self.reads_shared_now()? {
+            return Err(not_permitted());
+        }
+        match PeerToken::new(&self.client, sharer) {
+            Ok(token) => Ok(token),
+            Err(e) if codeless_forbidden(&e) && permitted => match self.reads_shared_now()? {
+                false => Err(not_permitted()),
+                true => Err(remote_error(e)),
+            },
+            Err(e) => Err(remote_error(e)),
+        }
     }
 
     /// Whether the app may read what others share with this identity (an install from before it

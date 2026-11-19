@@ -18,6 +18,7 @@ use hbsync_state::Unusable;
 use super::ending::{self, Ending};
 use super::parts::{AccountParts, Share};
 use super::runners::{Life, Markers, Running, Sharing};
+use super::sharers::ByMarkers;
 use super::{Account, Msg, Request, Try, Waiting};
 use crate::daemon::DaemonError;
 use crate::daemon::keeper::Keeper;
@@ -138,7 +139,12 @@ impl Account {
             })
             .map_err(DaemonError::Ipc)?;
         self.sync(paths, config, requests, stop, &mut msgs, |db| {
-            AccountParts::open(&self.identity, Arc::clone(&remote), db, tx.clone())
+            let mut parts =
+                AccountParts::open(&self.identity, Arc::clone(&remote), db, tx.clone())?;
+            // Whose shares it syncs is what the identity's share markers say.
+            let sharers = ByMarkers::new(&self.identity, Arc::clone(&remote), paths);
+            parts.sharers = Some(Box::new(sharers));
+            Ok(parts)
         })
     }
 

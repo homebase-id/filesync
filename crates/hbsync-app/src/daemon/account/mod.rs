@@ -44,6 +44,7 @@ mod feed;
 mod parts;
 mod run;
 mod runners;
+mod sharers;
 
 use runners::Running;
 
