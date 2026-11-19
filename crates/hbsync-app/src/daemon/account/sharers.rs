@@ -164,7 +164,7 @@ impl Sharers for ByMarkers {
             };
             let peer = PeerRemote::open(Arc::clone(&self.own), sharer, &dir.join(TOKEN))
                 .map_err(hbsync_engine::EngineError::Remote)?;
-            let login = peer.login_id().to_owned();
+            let login = peer.login_id();
             (Arc::new(peer), Some(login))
         };
         let drive = Drive::open(&db, &self.me, remote)?;
