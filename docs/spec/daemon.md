@@ -592,7 +592,10 @@ included (service managers restart it then).
     main folder's says what is wrong there.
   - Events lost by the main folder's watcher (a burst anywhere in the main folder, ignored
     folders too, that overflows the system's queue) are lost for each share: each walks its
-    folder. A share's events also wait behind the main folder's on the one watcher thread.
+    folder. A share's events also wait behind the main folder's on the one watcher thread:
+    a share stores its journal position (what a start reads on from, macOS and Windows) only
+    after a quiet period in which that thread handled nothing, so none while the main folder
+    is busy (an older position only reads more at the next start).
     (On Windows an overflow isn't told at all today, for any folder: #424.)
   - Known limits: a share's folder renamed only in the case of its letters (Windows, macOS)
     isn't watched under its new spelling until the daemon starts again (#426); folders made

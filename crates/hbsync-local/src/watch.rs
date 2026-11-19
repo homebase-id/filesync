@@ -92,6 +92,10 @@ struct FeedsInner {
     last: AtomicU64,
     /// When the last watcher that gave went, none giving since.
     went: Mutex<Option<Instant>>,
+    /// How many notifications the giving watcher's thread has handled while any took
+    /// ([`LiveWatcher::from`]: none in a while means it is idle, with none waiting behind
+    /// others).
+    handled: AtomicU64,
 }
 
 impl std::fmt::Debug for Feeds {
@@ -149,6 +153,7 @@ impl Feeds {
         if self.0.taking.load(Ordering::Relaxed) == 0 {
             return;
         }
+        self.0.handled.fetch_add(1, Ordering::Relaxed);
         // (What only reads is nobody's: dropped before it is copied, as each drops its own.)
         if matches!(res, Ok(event) if reads_only(&event.kind) && !event.need_rescan()) {
             return;
@@ -414,13 +419,15 @@ impl LiveWatcher {
         })
     }
 
-    /// The watcher its notifications come from now, by a number; 0: none come. Always its
-    /// own OS watcher (until that is found gone); another folder's while that one watches, a
-    /// new number for each that does.
-    fn from(&self) -> u64 {
+    /// The watcher its notifications come from now, by a number (0: none come), and how
+    /// many that one has handled. Always its own OS watcher (until that is found gone), whose
+    /// thread has only its own to handle (counted as none); another folder's while that one
+    /// watches, a new number for each that does, and its count of all it handled, whoever
+    /// they were for. Equal at two times: one watcher throughout, its thread idle between.
+    fn from(&self) -> (u64, u64) {
         match &self.source {
-            Source::Own { .. } => 1,
-            Source::Fed(feeds, ..) => feeds.giver(),
+            Source::Own { .. } => (1, 0),
+            Source::Fed(feeds, ..) => (feeds.giver(), feeds.0.handled.load(Ordering::Relaxed)),
         }
     }
 
@@ -442,7 +449,7 @@ impl LiveWatcher {
 
     /// Whether notifications come.
     fn live(&self) -> bool {
-        self.from() != 0
+        self.from().0 != 0
     }
 
     /// Waits up to `timeout` for a first change, then collects until no change came for
@@ -661,9 +668,9 @@ pub struct LocalObserver {
     settle: Settle,
     /// A batch was recorded without storing the journal position (see [`LocalObserver::poll`]).
     unsaved: bool,
-    /// While `unsaved`: a position taken, stored if no change came until the instant, from
-    /// the watcher that told then ([`LiveWatcher::from`]).
-    settling: Option<(String, Instant, u64)>,
+    /// While `unsaved`: a position taken, stored if no change came until the instant, with
+    /// the watcher that told then and what it had handled ([`LiveWatcher::from`]).
+    settling: Option<(String, Instant, (u64, u64))>,
     /// The last batch was cut off by `max_delay`: events may still be queued.
     more: bool,
     /// When to look into new folders once more, and which (see [`RECHECK`]).
@@ -870,11 +877,16 @@ impl LocalObserver {
         // delivered everything before it by then. Nothing is taken while nothing changes.
         // Only while one watcher tells throughout: one that takes its events from another
         // folder's is told nothing while that one doesn't watch, and what changes then is
-        // found by walking (the position stored stays older, which is safe).
+        // found by walking (the position stored stays older, which is safe). And its events
+        // wait behind that folder's own on the one watcher thread: a quiet queue here says
+        // nothing while that thread is busy. So its position is stored only by settling, and
+        // only if that thread handled nothing in the quiet period (it is idle then, and
+        // what was made before the position has come).
         let from = watcher.from();
+        let fed = matches!(watcher.source, Source::Fed(..));
         if self.unsaved
             && self.settling.is_none()
-            && from != 0
+            && from.0 != 0
             && let Some(journal) = self.journal.as_mut()
         {
             match journal.now() {
@@ -892,7 +904,7 @@ impl LocalObserver {
             if let Some((_, at, _)) = &self.settling
                 && Instant::now() >= *at
                 && let Some((position, _, told_by)) = self.settling.take()
-                && told_by == from
+                && told_by == watcher.from()
             {
                 db.write(|s| s.folder().set_kv(keys::JOURNAL_CURSOR, &position))?;
                 self.unsaved = false;
@@ -901,7 +913,7 @@ impl LocalObserver {
         };
         self.settling = None;
         self.more = !batch.drained;
-        let one_told = from != 0 && watcher.from() == from;
+        let one_told = from.0 != 0 && !fed;
         #[cfg(feature = "testkit")]
         let stopped = testkit::take(&testkit::STOP, &self.root);
         #[cfg(not(feature = "testkit"))]
@@ -931,8 +943,7 @@ impl LocalObserver {
         // Before anything else can fail: the scan's rows are written.
         self.note_young(&report, &[]);
         match position {
-            // (From one watcher throughout, as above: a batch that another began, or that
-            // none ended, stores nothing.)
+            // (Not for a watcher that takes from another's, as above: left to settle.)
             Some(position) if batch.drained && one_told => {
                 db.write(|s| s.folder().set_kv(keys::JOURNAL_CURSOR, &position))?;
                 self.unsaved = false;
@@ -1343,8 +1354,9 @@ mod tests {
         // None gives any more: no watcher, and woken to find so. (Once what the last write
         // still sends has come.)
         std::thread::sleep(Duration::from_millis(300));
-        share.told.rung.store(false, Ordering::SeqCst);
+        // (Read before the bell may ring again: nothing rings between the two.)
         let rang = rings.load(Ordering::SeqCst);
+        share.told.rung.store(false, Ordering::SeqCst);
         drop(again);
         assert!(!share.live());
         assert_eq!(rings.load(Ordering::SeqCst), rang + 1);
@@ -1966,7 +1978,16 @@ mod tests {
         assert!(observer.poll(&mut db, Duration::ZERO, quiet)?.is_none());
         assert!(stored(&mut db)?.is_none() && observer.unsaved);
 
-        // Under the one that gives now, throughout: stored.
+        // Under the one that gives now, but its thread handled something meanwhile (what
+        // was made before the position may wait behind more): not stored.
+        assert!(observer.poll(&mut db, Duration::ZERO, quiet)?.is_none());
+        assert!(observer.settling.is_some());
+        feeds.0.handled.fetch_add(1, Ordering::Relaxed);
+        std::thread::sleep(quiet.quiet * 2);
+        assert!(observer.poll(&mut db, Duration::ZERO, quiet)?.is_none());
+        assert!(stored(&mut db)?.is_none() && observer.unsaved);
+
+        // Under it throughout, its thread idle: stored.
         let until = Instant::now() + Duration::from_secs(10);
         while stored(&mut db)?.is_none() {
             assert!(Instant::now() < until, "never stored");
