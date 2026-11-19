@@ -10,12 +10,13 @@ use std::time::{Duration, Instant};
 
 use hbsync_engine::Drive;
 use hbsync_homebase::drive::HomebaseRemote;
+use hbsync_homebase::notify::Event;
 use hbsync_homebase::{Client, HomebaseError};
 use hbsync_remote::ErrorClass;
 use hbsync_state::Unusable;
 
 use super::parts::{AccountParts, Share};
-use super::runners::{Life, Running, Sharing};
+use super::runners::{Life, Markers, Running, Sharing};
 use super::{Account, Msg, Request, Try, Waiting};
 use crate::daemon::DaemonError;
 use crate::daemon::keeper::Keeper;
@@ -290,9 +291,12 @@ impl Account {
             notifier,
             mut notifications,
             shares,
+            sharers,
         } = parts;
-        // What other identities share, each synced by a runner of its own.
+        // What other identities share, each synced by a runner of its own: those the
+        // identity's share markers turn on, read now and as they change.
         let mut shares = Sharing::each(shares);
+        let mut markers = Markers::new(sharers, Instant::now());
         // The main folder and its folder of shares, as its runner told last where that is.
         let mut shares_at: Option<(PathBuf, PathBuf)> = None;
         let notifier = match notifier {
@@ -341,7 +345,7 @@ impl Account {
             let main = roots.iter().find(|r| r.is_main()).map(|r| r.folder.clone());
             for root in roots {
                 let paused = shown.paused();
-                let shared = (!shares.is_empty(), main.as_deref());
+                let shared = (sharing(&shares), main.as_deref());
                 match self.start(&drive, config, &root, paused, can_heal, shared) {
                     Ok(r) => shown.runners.push(r),
                     Err(e) => {
@@ -380,6 +384,10 @@ impl Account {
                         }
                     }
                     Msg::Hint(event) => {
+                        // A marker changed, or may have while not connected: read again.
+                        if matches!(event, Event::Markers | Event::Connected) {
+                            markers.changed(Instant::now());
+                        }
                         let Some(hints) = notifications.event(event, Instant::now(), paused) else {
                             continue;
                         };
@@ -513,7 +521,7 @@ impl Account {
                 let main = self.main_folder();
                 let start = |root: &Root| {
                     let config = config.as_ref()?;
-                    let shared = (!shares.is_empty(), main.as_deref());
+                    let shared = (sharing(&shares), main.as_deref());
                     Some(self.start(&drive, config, root, paused, can_heal, shared))
                 };
                 let restarted: Vec<_> = due.iter().map(start).collect();
@@ -557,6 +565,29 @@ impl Account {
             }
             // (Not while it ends: every runner stops, and nothing of the shares is due.)
             let mut shares_next = None;
+            if !ending {
+                let followed = markers.follow(&mut shares, now);
+                changed |= followed.changed;
+                if !followed.notes.is_empty() {
+                    self.note(followed.notes);
+                }
+                // The main folder's runner started while nothing was shared holds no folder
+                // of shares: with a share to sync now, it is started again to hold one (once
+                // it has ended, as a folder added is).
+                if sharing(&shares) {
+                    let mut shown = lock(&self.shown);
+                    let main = |r: &&mut Running| r.sharer.is_none() && r.root.is_main();
+                    for r in shown.runners.iter_mut().filter(main) {
+                        if r.shows() && !r.shared {
+                            r.stop_for_good();
+                            if !adding.iter().any(|a| a.folder == r.root.folder) {
+                                adding.push(r.root.clone());
+                            }
+                            changed = true;
+                        }
+                    }
+                }
+            }
             if !ending && !shares.is_empty() {
                 let (moved, next) = self.run_shares(paths, &mut shares, shares_at.as_ref(), now);
                 (changed, shares_next) = (changed | moved, next);
@@ -586,6 +617,7 @@ impl Account {
                 config_again,
                 restart,
                 shares_next,
+                markers.deadline().filter(|_| !ending),
             ];
             let wait = wait_for(now, deadlines.into_iter().flatten());
             msgs.extend(requests.recv_timeout(wait).ok());
@@ -683,7 +715,7 @@ impl Account {
         root: Root,
     ) -> Result<Running, RunnerError> {
         cfg.changed = Arc::clone(&self.changed);
-        let sharer = cfg.sharer.clone();
+        let (sharer, shared) = (cfg.sharer.clone(), cfg.shares.is_some());
         let done = Arc::new(AtomicBool::new(false));
         let (ending, tell) = (Arc::clone(&done), self.requests.clone());
         let (handle, thread) = Runner::spawn_with(cfg, Arc::clone(drive), move || {
@@ -698,6 +730,7 @@ impl Account {
             done,
             started: Instant::now(),
             backoff: Backoff::new(),
+            shared,
         })
     }
 
@@ -714,11 +747,34 @@ impl Account {
     fn run_shares(
         &self,
         paths: &Paths,
-        shares: &mut [Sharing],
+        shares: &mut Vec<Sharing>,
         at: Option<&(PathBuf, PathBuf)>,
         now: Instant,
     ) -> (bool, Option<Instant>) {
         let mut changed = false;
+        // First those the markers turned off: each one's runner stops, and it goes once that
+        // has ended. (What it synced stays where it is, in the folder of shares.)
+        {
+            let mut shown = lock(&self.shown);
+            for share in shares.iter().filter(|s| s.off) {
+                let theirs = |r: &&mut Running| r.sharer.as_ref() == Some(&share.share.sharer);
+                if let Some(r) = shown.runners.iter_mut().find(theirs).filter(|r| r.shows()) {
+                    r.stop_for_good();
+                    changed = true;
+                }
+            }
+            let before = (shares.len(), shown.runners.len());
+            shown.runners.retain(|r| !matches!(r.life, Life::Gone));
+            shares.retain(|share| {
+                let theirs = |r: &Running| r.sharer.as_ref() == Some(&share.share.sharer);
+                let gone = share.off && !shown.runners.iter().any(theirs);
+                if gone {
+                    share.share.notifications.finish();
+                }
+                !gone
+            });
+            changed |= before != (shares.len(), shown.runners.len());
+        }
         // The shares to start, each with the pauses of the runner it starts again for.
         let mut starting: Vec<(usize, Option<Backoff>)> = Vec::new();
         let (at, paused) = {
@@ -727,6 +783,11 @@ impl Account {
             // While the main folder that holds the folder of shares is synced.
             let at = at.filter(|(main, _)| shown.own().any(|r| r.root.folder == *main));
             for (i, share) in shares.iter_mut().enumerate() {
+                // (Turned off: its runner is ending, above.)
+                if share.off {
+                    share.retry = None;
+                    continue;
+                }
                 let sharer = share.share.sharer.clone();
                 let theirs = |r: &&mut Running| r.sharer.as_ref() == Some(&sharer);
                 // One at most: the next starts once the last has ended.
@@ -966,6 +1027,11 @@ impl Account {
             }
         }
     }
+}
+
+/// Whether any of `shares` is to be synced: the main folder holds a folder of shares then.
+fn sharing(shares: &[Sharing]) -> bool {
+    shares.iter().any(|share| !share.off)
 }
 
 #[cfg(test)]

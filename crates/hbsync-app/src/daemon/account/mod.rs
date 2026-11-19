@@ -772,8 +772,16 @@ mod tests {
         thread: std::thread::JoinHandle<Result<(), crate::daemon::DaemonError>>,
     }
 
-    /// The account's drive, and what other identities share with it.
-    type Opened = Result<(Arc<Drive>, Vec<parts::Share>), crate::runner::RunnerError>;
+    /// The account's drive, what other identities share with it, and what says whose shares
+    /// are synced, if anything does.
+    type Opened = Result<
+        (
+            Arc<Drive>,
+            Vec<parts::Share>,
+            Option<Box<dyn parts::Sharers>>,
+        ),
+        crate::runner::RunnerError,
+    >;
 
     impl Started {
         fn new(
@@ -781,7 +789,7 @@ mod tests {
             root: Root,
             open: impl Fn(&Path) -> Result<Arc<Drive>, crate::runner::RunnerError> + Send + 'static,
         ) -> Started {
-            Started::sharing(paths, root, move |db| Ok((open(db)?, Vec::new())))
+            Started::sharing(paths, root, move |db| Ok((open(db)?, Vec::new(), None)))
         }
 
         /// [`Started::new`], `open` also making what other identities share with it.
@@ -803,13 +811,14 @@ mod tests {
                 running.ready_db(&paths, start, &stopping, &requests, &mut msgs)?;
                 let config = crate::Config::default();
                 running.sync(&paths, &config, &requests, &stopping, &mut msgs, |db| {
-                    let (drive, shares) = open(db)?;
+                    let (drive, shares, sharers) = open(db)?;
                     let puller = Puller::spawn(Arc::clone(&drive));
                     Ok(AccountParts {
                         drive,
                         notifier: Err(std::io::Error::other("none here")),
                         notifications: Notifications::new(puller, std::time::Instant::now()),
                         shares,
+                        sharers,
                     })
                 })
             });
@@ -1146,19 +1155,257 @@ mod tests {
             let (me, tom, shared_db) = (me.clone(), tom.clone(), shared_db.clone());
             Started::sharing(&starting, root.clone(), move |db| {
                 let drive = Drive::open(db, &me, Arc::new(FakeRemote::new(server.clone())))?;
-                let member = Arc::new(FakeRemote::member(tom_server.clone()));
-                let theirs = Drive::open(&shared_db, &me, member)?;
-                let puller = feed::Puller::spawn(Arc::clone(&theirs));
-                let share = parts::Share {
-                    sharer: tom.clone(),
-                    drive: theirs,
-                    db: shared_db.clone(),
-                    notifications: feed::Notifications::new(puller, std::time::Instant::now()),
-                };
-                Ok((drive, vec![share]))
+                let share = open_share(&me, &tom, &shared_db, &tom_server)?;
+                Ok((drive, vec![share], None))
             })
         };
         Ok((paths, folder, server, start))
+    }
+
+    /// What `sharer` shares of the drive on `server`, as its member `me` reads it, on the
+    /// state DB `db`.
+    fn open_share(
+        me: &Identity,
+        sharer: &Identity,
+        db: &Path,
+        server: &Arc<std::sync::Mutex<FakeServer>>,
+    ) -> Result<parts::Share, crate::runner::RunnerError> {
+        let member = Arc::new(FakeRemote::member(server.clone()));
+        let drive = Drive::open(db, me, member)?;
+        let puller = feed::Puller::spawn(Arc::clone(&drive));
+        Ok(parts::Share {
+            sharer: sharer.clone(),
+            drive,
+            db: db.to_path_buf(),
+            notifications: feed::Notifications::new(puller, std::time::Instant::now()),
+        })
+    }
+
+    /// An identity's share markers, as a test sets them.
+    #[derive(Debug, Default)]
+    struct TestMarkers {
+        /// Whose shares to sync.
+        on: Vec<Identity>,
+        /// Whose marker doesn't read.
+        unsure: Vec<Identity>,
+        /// None of them reads.
+        unreadable: bool,
+        /// Whose share can't be opened.
+        unopenable: Vec<Identity>,
+        /// How often they were read, and how often a share was tried to open.
+        reads: usize,
+        opens: usize,
+    }
+
+    /// `me.example`'s shares by its [`TestMarkers`]: each sharer's drive is the one on
+    /// `server` (nothing on it), read as its member reads it.
+    #[derive(Debug)]
+    struct ByMarkers {
+        markers: Arc<Mutex<TestMarkers>>,
+        me: Identity,
+        paths: Paths,
+        server: Arc<std::sync::Mutex<FakeServer>>,
+    }
+
+    impl parts::Sharers for ByMarkers {
+        fn told(&self, synced: &[Identity]) -> Result<parts::Synced, crate::runner::RunnerError> {
+            let mut markers = lock(&self.markers);
+            markers.reads += 1;
+            if markers.unreadable {
+                return Err(std::io::Error::other("the markers don't read").into());
+            }
+            let unsure = |s: &&Identity| synced.contains(s);
+            Ok(parts::Synced {
+                on: markers.on.clone(),
+                unsure: markers.unsure.iter().filter(unsure).cloned().collect(),
+            })
+        }
+
+        fn open(&self, sharer: &Identity) -> Result<parts::Share, crate::runner::RunnerError> {
+            {
+                let mut markers = lock(&self.markers);
+                markers.opens += 1;
+                if markers.unopenable.contains(sharer) {
+                    return Err(std::io::Error::other("no token yet").into());
+                }
+            }
+            let db = self.paths.shared_db(&self.me, sharer);
+            std::fs::create_dir_all(db.parent().unwrap_or(&db))?;
+            open_share(&self.me, sharer, &db, &self.server)
+        }
+    }
+
+    /// `me.example` on a new drive, its main folder holding `mine.txt`, whose shares follow
+    /// the markers returned: its folder, and the account started. [`Followed::marked`] sets
+    /// them and tells the account that one changed.
+    struct Followed {
+        folder: PathBuf,
+        markers: Arc<Mutex<TestMarkers>>,
+        started: Started,
+    }
+
+    impl Followed {
+        fn start(
+            home: &Path,
+            set: impl FnOnce(&mut TestMarkers),
+        ) -> Result<Followed, Box<dyn std::error::Error>> {
+            let me: Identity = "me.example".into();
+            let (paths, folder, _) = set_up(home, &me, &[("mine.txt", "mine")])?;
+            let server = FakeServer::new(ServerConfig::default());
+            let tom_server = FakeServer::new(ServerConfig::default());
+            let markers: Arc<Mutex<TestMarkers>> = Arc::default();
+            set(&mut lock(&markers));
+            let (starting, root, told) = (paths.clone(), Root::main(&me, &folder), markers.clone());
+            let started = Started::sharing(&starting, root, move |db| {
+                let drive = Drive::open(db, &me, Arc::new(FakeRemote::new(server.clone())))?;
+                let by = ByMarkers {
+                    markers: told.clone(),
+                    me: me.clone(),
+                    paths: paths.clone(),
+                    server: tom_server.clone(),
+                };
+                Ok((
+                    drive,
+                    Vec::new(),
+                    Some(Box::new(by) as Box<dyn parts::Sharers>),
+                ))
+            });
+            Ok(Followed {
+                folder,
+                markers,
+                started,
+            })
+        }
+
+        /// Sets the markers, and tells the account one changed, as its notifications do.
+        fn marked(&self, set: impl FnOnce(&mut TestMarkers)) {
+            set(&mut lock(&self.markers));
+            let changed = hbsync_homebase::notify::Event::Markers;
+            let _ = self.started.account.requests.send(Msg::Hint(changed));
+        }
+
+        /// Waits until the markers were read once more than `before`.
+        fn read_since(&self, before: usize) -> Result<(), String> {
+            let read = || Some(()).filter(|()| lock(&self.markers).reads > before);
+            wait_until(read).ok_or_else(|| "the markers weren't read again".to_owned())
+        }
+
+        fn reads(&self) -> usize {
+            lock(&self.markers).reads
+        }
+
+        /// Where what `tom.example` shares is synced.
+        fn toms(&self) -> PathBuf {
+            self.folder.join("Shared").join("tom.example")
+        }
+    }
+
+    /// The account's own folder synced alone: no share is.
+    fn alone(status: &AccountStatus, folders: &[FolderStatus]) -> bool {
+        folders.len() == 1 && synced(status, &folders[0])
+    }
+
+    /// Whose shares are synced follows the identity's share markers: none while none says
+    /// so (no folder of shares is made); one turned on is synced into the folder of shares,
+    /// made for it (the main folder's runner started again to hold one); turned off, its
+    /// runner stops and what it synced stays; turned on again, it is synced again.
+    #[test]
+    fn a_share_is_synced_while_its_marker_says_so() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let tom: Identity = "tom.example".into();
+        let f = Followed::start(home.path(), |_| {})?;
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            f.started.wait_all("its own folder syncs, alone", &alone)?;
+            f.read_since(0)?;
+            assert!(
+                !f.folder.join("Shared").exists(),
+                "no share, no folder of shares"
+            );
+
+            f.marked(|m| m.on = vec![tom.clone()]);
+            f.started.wait_all("the share is synced", &both_synced)?;
+            assert!(f.toms().is_dir());
+            let (_, folders) = f.started.account.status();
+            assert_eq!(folders[1].sharer.as_ref(), Some(&tom));
+
+            std::fs::write(f.toms().join("kept.txt"), "stays where it is")?;
+            f.marked(|m| m.on.clear());
+            f.started
+                .wait_all("the share is no longer synced", &alone)?;
+            assert!(f.toms().join("kept.txt").is_file(), "what was synced stays");
+
+            f.marked(|m| m.on = vec![tom.clone()]);
+            f.started
+                .wait_all("the share is synced again", &both_synced)?;
+            Ok(())
+        };
+        let checked = checks();
+        f.started.stop(checked)?
+    }
+
+    /// A share whose marker doesn't read stays as it is, synced, and so does every share
+    /// while the markers can't be read at all: never taken for turned off.
+    #[test]
+    fn a_share_the_markers_dont_say_of_stays_synced() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let tom: Identity = "tom.example".into();
+        let f = Followed::start(home.path(), |m| m.on = vec!["tom.example".into()])?;
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            f.started.wait_all("the share is synced", &both_synced)?;
+
+            let before = f.reads();
+            f.marked(|m| (m.on, m.unsure) = (Vec::new(), vec![tom.clone()]));
+            f.read_since(before)?;
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            f.started
+                .wait_all("still synced: its marker didn't read", &both_synced)?;
+
+            let before = f.reads();
+            f.marked(|m| (m.unsure, m.unreadable) = (Vec::new(), true));
+            f.read_since(before)?;
+            std::thread::sleep(std::time::Duration::from_millis(300));
+            f.started
+                .wait_all("still synced: no marker read", &both_synced)?;
+
+            // They read again, and say no: now it stops.
+            f.marked(|m| m.unreadable = false);
+            f.started
+                .wait_all("the share is no longer synced", &alone)?;
+            Ok(())
+        };
+        let checked = checks();
+        f.started.stop(checked)?
+    }
+
+    /// A share that can't be opened is left out, said once, and tried again by itself; the
+    /// account's own folder syncs on meanwhile.
+    #[test]
+    fn a_share_that_cant_be_opened_is_left_out_and_tried_again()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let tom: Identity = "tom.example".into();
+        let f = Followed::start(home.path(), |m| {
+            (m.on, m.unopenable) = (vec!["tom.example".into()], vec!["tom.example".into()]);
+        })?;
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            f.started.wait_all("its own folder syncs, alone", &alone)?;
+            let said = words::share_unopened(&tom, &"no token yet");
+            let told =
+                |status: &AccountStatus| status.recent.iter().filter(|n| n.text == said).count();
+            f.started
+                .wait_all("said why", &|status, _| told(status) == 1)?;
+            assert!(!f.folder.join("Shared").exists());
+
+            // It can be opened: tried again by itself (no marker changed), and synced.
+            lock(&f.markers).unopenable.clear();
+            f.started.wait_all("the share is synced", &both_synced)?;
+            let (status, _) = f.started.account.status();
+            assert_eq!(told(&status), 1, "said once: {:?}", status.recent);
+            assert!(lock(&f.markers).opens >= 2);
+            Ok(())
+        };
+        let checked = checks();
+        f.started.stop(checked)?
     }
 
     /// A share whose folder can't be set up (something else has its place in the folder of

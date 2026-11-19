@@ -10,7 +10,7 @@ use hbsync_state::Unusable;
 
 use std::path::Path;
 
-use super::parts::Share;
+use super::parts::{Share, Sharers};
 use crate::runner::{Backoff, Command, Handle, RunnerError};
 use crate::{Identity, Root};
 
@@ -28,6 +28,9 @@ pub(super) struct Running {
     pub(super) done: Arc<AtomicBool>,
     pub(super) started: Instant,
     pub(super) backoff: Backoff,
+    /// The main folder's: started to hold a folder of shares (the account had a share to
+    /// sync then).
+    pub(super) shared: bool,
 }
 
 pub(super) enum Life {
@@ -51,6 +54,149 @@ pub(super) struct Sharing {
     pub(super) retry: Option<Instant>,
     /// The pauses between such tries, from the first again once it started.
     pub(super) backoff: Backoff,
+    /// The identity's share markers say it isn't synced any more: its runner stops, and it
+    /// goes with it.
+    pub(super) off: bool,
+}
+
+/// What the identity's share markers say, followed on the account's thread: read when due,
+/// each share they turn on opened (tried again while it can't be).
+pub(super) struct Markers {
+    source: Option<Box<dyn Sharers>>,
+    /// When to read them (again): at the start, as one changed, after a read that failed.
+    pub(super) read_at: Option<Instant>,
+    read_backoff: Backoff,
+    /// Shares to open: turned on, and not opened yet.
+    opening: Vec<Opening>,
+}
+
+struct Opening {
+    sharer: Identity,
+    at: Instant,
+    backoff: Backoff,
+    /// Why it can't be opened was told.
+    told: bool,
+}
+
+/// What following the markers changed ([`Markers::follow`]).
+#[derive(Default)]
+pub(super) struct Followed {
+    /// The shares to run changed.
+    pub(super) changed: bool,
+    /// For the account's status: a share that can't be opened, said once.
+    pub(super) notes: Vec<String>,
+}
+
+impl Markers {
+    pub(super) fn new(source: Option<Box<dyn Sharers>>, now: Instant) -> Markers {
+        Markers {
+            read_at: source.as_ref().map(|_| now),
+            source,
+            read_backoff: Backoff::new(),
+            opening: Vec::new(),
+        }
+    }
+
+    /// A marker changed, or may have (the notifications connected again): read at once.
+    pub(super) fn changed(&mut self, now: Instant) {
+        if self.source.is_some() {
+            self.read_at = Some(now);
+        }
+    }
+
+    /// When to [`Markers::follow`] at the latest: a read, or a share to try opening again.
+    pub(super) fn deadline(&self) -> Option<Instant> {
+        let opening = self.opening.iter().map(|o| o.at);
+        self.read_at.into_iter().chain(opening).min()
+    }
+
+    /// Reads the markers if due, and has `shares` follow them: one they turn off is marked
+    /// ([`Sharing::off`]: its runner stops, and it goes), one they are unsure of stays, one
+    /// they turn on is opened and added (now, or at a later call while it can't be). While
+    /// they can't be read, all stays as it is.
+    pub(super) fn follow(&mut self, shares: &mut Vec<Sharing>, now: Instant) -> Followed {
+        let mut followed = Followed::default();
+        let Some(source) = &self.source else {
+            return followed;
+        };
+        if self.read_at.is_some_and(|at| now >= at) {
+            let synced: Vec<Identity> = shares.iter().map(|s| s.share.sharer.clone()).collect();
+            match source.told(&synced) {
+                Ok(told) => {
+                    (self.read_at, self.read_backoff) = (None, Backoff::new());
+                    for share in shares.iter_mut() {
+                        let sharer = &share.share.sharer;
+                        let off = !told.on.contains(sharer) && !told.unsure.contains(sharer);
+                        if off != share.off {
+                            let now_is = if off {
+                                "no longer synced"
+                            } else {
+                                "synced again"
+                            };
+                            tracing::info!("what {sharer} shares is {now_is}, by its marker");
+                            (share.off, followed.changed) = (off, true);
+                        }
+                    }
+                    self.opening.retain(|o| told.on.contains(&o.sharer));
+                    for sharer in told.on {
+                        let known = shares.iter().any(|s| s.share.sharer == sharer)
+                            || self.opening.iter().any(|o| o.sharer == sharer);
+                        if !known {
+                            let (backoff, told) = (Backoff::new(), false);
+                            let at = now;
+                            self.opening.push(Opening {
+                                sharer,
+                                at,
+                                backoff,
+                                told,
+                            });
+                        }
+                    }
+                }
+                Err(e) => {
+                    let pause = self.read_backoff.next();
+                    tracing::warn!(
+                        "the share markers can't be read ({e}): what is synced stays as it \
+                         is; read again in {pause:?}"
+                    );
+                    self.read_at = Some(now + pause);
+                }
+            }
+        }
+        // Each share to open that is due; one that can't be is tried again, the others and
+        // the account's own folders syncing on.
+        let mut waiting = Vec::new();
+        for mut opening in std::mem::take(&mut self.opening) {
+            if now < opening.at {
+                waiting.push(opening);
+                continue;
+            }
+            match source.open(&opening.sharer) {
+                Ok(share) => {
+                    if let Some(share) = Sharing::new(share).filter(|new| new.fits(shares)) {
+                        shares.push(share);
+                        followed.changed = true;
+                    }
+                }
+                Err(e) => {
+                    let pause = opening.backoff.next();
+                    let sharer = &opening.sharer;
+                    tracing::warn!(
+                        "what {sharer} shares can't be opened ({e}): trying again in {pause:?}"
+                    );
+                    if !std::mem::replace(&mut opening.told, true) {
+                        followed
+                            .notes
+                            .push(crate::words::share_unopened(sharer, &e));
+                    }
+                    opening.at = now + pause;
+                    waiting.push(opening);
+                }
+            }
+        }
+        self.opening = waiting;
+        followed
+    }
 }
 
 impl Sharing {
@@ -72,7 +218,28 @@ impl Sharing {
             local,
             retry: None,
             backoff: Backoff::new(),
+            off: false,
         })
+    }
+
+    /// Whether it can run beside `others`: its sharer isn't among them, nor its folder's
+    /// name (as names compare here). Two runners on one folder would each take the other's
+    /// files for changes made here. Said where not.
+    fn fits(&self, others: &[Sharing]) -> bool {
+        let key = hbsync_platform::name_key(&self.local);
+        let taken = |other: &Sharing| {
+            other.share.sharer == self.share.sharer
+                || hbsync_platform::name_key(&other.local) == key
+        };
+        let fits = !others.iter().any(taken);
+        if !fits {
+            tracing::error!(
+                "what {} shares isn't synced: its folder {} is another share's",
+                self.share.sharer,
+                self.local
+            );
+        }
+        fits
     }
 
     /// `shares` to run, each sharer once, each under a folder's name of its own: one more of
@@ -81,20 +248,9 @@ impl Sharing {
     pub(super) fn each(shares: Vec<Share>) -> Vec<Sharing> {
         let mut each: Vec<Sharing> = Vec::new();
         for share in shares.into_iter().filter_map(Sharing::new) {
-            let key = hbsync_platform::name_key(&share.local);
-            let taken = |other: &Sharing| {
-                other.share.sharer == share.share.sharer
-                    || hbsync_platform::name_key(&other.local) == key
-            };
-            if each.iter().any(taken) {
-                tracing::error!(
-                    "what {} shares isn't synced: its folder {} is another share's",
-                    share.share.sharer,
-                    share.local
-                );
-                continue;
+            if share.fits(&each) {
+                each.push(share);
             }
-            each.push(share);
         }
         each
     }
@@ -205,6 +361,7 @@ mod tests {
                 done: Arc::default(),
                 started: Instant::now(),
                 backoff: Backoff::new(),
+                shared: false,
             };
             if removed {
                 r.stop_for_good();

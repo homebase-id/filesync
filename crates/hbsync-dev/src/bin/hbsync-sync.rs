@@ -76,6 +76,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             notifier,
             mut notifications,
             shares: _,
+            sharers: _,
         } = AccountParts::open(identity, remote, &db, tx)?;
         let notifier = notifier?;
         std::thread::spawn(move || {

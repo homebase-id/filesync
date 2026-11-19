@@ -563,6 +563,26 @@ included (service managers restart it then).
   another has, is left out, told in the log. When the folder of shares has another name (the
   user's, or one it gave way to), is gone, or the main folder is removed, the runner stops,
   and starts in the new place once it has ended (the folder is found again by its marker).
+
+  **Whose shares are synced** follows the identity's share markers (node schema, "Sync
+  markers"): read as the account starts, and again whenever one changed (the notification
+  socket tells a marker's event as its own, `Event::Markers`, **[inferred]** from a node's
+  event: it carries the file's type) or the notifications connected again (a change while
+  not connected isn't announced). No timer reads them.
+  - A share a marker turns on is opened and synced. The main folder's runner started while
+    nothing was shared holds no folder of shares: it is started again to make one (one
+    opening of the main folder, when the account's first share comes).
+  - A share a marker turns off has its runner stopped. What it synced stays where it is, in
+    the folder of shares (not yet removed: that comes with guards of its own).
+  - A share whose marker doesn't read stays as it is, and so does every share while the
+    markers can't be read at all (read again after a pause, 5 s doubling to 5 minutes):
+    never taken for turned off.
+  - A share that can't be opened is left out, said once in a note, and tried again by itself
+    (the same pauses); the account's own folders and its other shares sync on.
+
+  Not in the released daemon yet: opening another identity's drive takes a token of its own
+  that has to be kept (a new one each start would leave a row on the sharer's server each
+  time), so until those are stored the daemon reads no markers and syncs no share.
   A share's runner whose folder is gone (deleted, renamed) doesn't wait for it as the
   account's own do: it ends, and the account starts it again after a pause, the folder made
   again and synced anew; one renamed stays where it is, unsynced. It never counts as one of

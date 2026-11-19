@@ -28,6 +28,32 @@ pub struct AccountParts {
     /// Whoever makes them leaves out a share whose drive or DB can't be opened (told), and
     /// tries it again: that is never the account's error, whose own folders sync on.
     pub shares: Vec<Share>,
+    /// Whose shares are synced, as the identity's share markers say, and how each is opened:
+    /// read as the account starts, and again whenever a marker changed
+    /// ([`hbsync_homebase::notify::Event::Markers`]) or the notifications connected. `None`:
+    /// only `shares`, for good.
+    pub sharers: Option<Box<dyn Sharers>>,
+}
+
+/// Whose shares an account syncs, and how each is opened.
+pub trait Sharers: Send + std::fmt::Debug {
+    /// What the identity's share markers say now. `synced`: whose shares are synced at
+    /// present, for [`Synced::unsure`].
+    fn told(&self, synced: &[crate::Identity]) -> Result<Synced, RunnerError>;
+
+    /// What `sharer` shares, opened to sync: its drive as the account may read it, on a
+    /// state DB of its own.
+    fn open(&self, sharer: &crate::Identity) -> Result<Share, RunnerError>;
+}
+
+/// What an identity's share markers say ([`Sharers::told`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Synced {
+    /// Whose shares to sync.
+    pub on: Vec<crate::Identity>,
+    /// Those synced at present of whom the markers don't say (one that may be theirs didn't
+    /// read): kept as they are, never taken for off.
+    pub unsure: Vec<crate::Identity>,
 }
 
 /// What another identity shares with the account: its drive as the account may read it.
@@ -58,8 +84,10 @@ impl AccountParts {
             notifier,
             notifications: Notifications::new(Puller::spawn(Arc::clone(&drive)), Instant::now()),
             drive,
-            // Told by the identity's share markers, once they are read.
+            // By the identity's share markers, once each share can be opened with a token
+            // of its own that is kept (not yet: none is synced).
             shares: Vec::new(),
+            sharers: None,
         })
     }
 

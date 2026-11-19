@@ -112,6 +112,8 @@ impl Notifications {
                 }
                 None
             }
+            // The account's, read by it (who shares is synced): nothing of the drive's feed.
+            Event::Markers => None,
             Event::Lost(why) => {
                 tracing::info!("notifications lost ({why}); reconnecting");
                 self.disconnected(now);
