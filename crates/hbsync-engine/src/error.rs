@@ -34,6 +34,10 @@ pub enum EngineError {
     /// Asked to write to the drive from a read-only folder (sync semantics §13).
     #[error("this folder is read-only: {0}")]
     ReadOnly(&'static str),
+    /// Asked to end a share ([`crate::Engine::end_share`]) in a folder that isn't a
+    /// read-only one of another identity's drive.
+    #[error("this folder isn't what another identity shares: nothing of it is taken away")]
+    NotAShare,
 }
 
 /// "Homebase says one item isn't there", or "… 3 items aren't there".
@@ -54,7 +58,7 @@ impl EngineError {
             EngineError::Stopped(e) => e.class(),
             EngineError::Remote(e) => e.class(),
             EngineError::NotThereOnce { .. } => ErrorClass::Gone,
-            EngineError::ReadOnly(_) => ErrorClass::Refused,
+            EngineError::ReadOnly(_) | EngineError::NotAShare => ErrorClass::Refused,
         }
     }
 

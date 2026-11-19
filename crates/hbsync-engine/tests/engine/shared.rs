@@ -435,3 +435,109 @@ fn a_shared_drive_is_not_synced_both_ways() -> R {
         Ok(_) => Err("opened".into()),
     }
 }
+
+/// A share that isn't synced here any more (it ended, or its marker turned it off) has its
+/// copy taken off this device as a share withdrawn does it, all at once, with nothing read
+/// from the drive or said to it: what is here as it was synced is deleted (however much:
+/// the mass-delete guard doesn't hold it, as nothing is deleted for anyone), what was
+/// changed or put here moves out, what a link leads to is left alone, and no file is
+/// recorded gone: synced again later, all of it comes back.
+#[test]
+fn a_share_that_ended_takes_its_copy_off_this_device() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    for i in 0..30 {
+        a.write(&format!("Docs/n{i:02}.txt"), "as shared")?;
+    }
+    a.write("Docs/edited.txt", "theirs")?;
+    a.write("top.txt", "at the top")?;
+    a.sync()?;
+    share_all(&a, &server)?;
+    server.lock().map_err(|_| "poisoned")?.tick();
+    // (The guard would hold these: few files allowed.)
+    let out = tempfile::tempdir()?;
+    let to = out.path().to_path_buf();
+    let mut b = Client::on(
+        hbsync_remote::fake::FakeRemote::member(server.clone()),
+        "b",
+        move |cfg| {
+            cfg.folder.read_only = Some(to.clone());
+            (cfg.guard.min, cfg.guard.fraction) = (2, 0.0);
+        },
+    )?;
+    b.sync()?;
+    // (The files, and their folder.)
+    assert_eq!(b.tree_text("").len(), 33);
+    let on_drive = |server: &Server| server.lock().map(|s| s.live().count()).unwrap_or(0);
+    let before = on_drive(&server);
+
+    // Changed here, put here, and a link out of the folder: none of them seen by a scan yet.
+    b.write("Docs/edited.txt", "mine now")?;
+    b.write("Docs/new.txt", "put here")?;
+    let elsewhere = tempfile::tempdir()?;
+    std::fs::write(elsewhere.path().join("kept.txt"), "not ours")?;
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(elsewhere.path(), b.root.join("Docs/link"))?;
+
+    let (report, unsynced) = b.engine.end_share("2026-11-20")?;
+    assert!(report.held.is_empty(), "nothing held: {:?}", report.held);
+    // Nothing is left; what was the user's moved out, the link as a link.
+    let left = b.tree_text("");
+    assert!(left.is_empty(), "{left:?}");
+    assert_eq!(unsynced.len(), usize::from(cfg!(unix)), "{unsynced:?}");
+    for (_, to) in &unsynced {
+        assert!(to.symlink_metadata()?.file_type().is_symlink());
+    }
+    let moved: Vec<String> = out
+        .path()
+        .read_dir()?
+        .flatten()
+        .filter(|e| e.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .collect();
+    assert!(moved.iter().any(|text| text == "mine now"), "{moved:?}");
+    assert!(moved.iter().any(|text| text == "put here"), "{moved:?}");
+    assert_eq!(moved.len(), 2, "{moved:?}");
+    assert_eq!(
+        std::fs::read_to_string(elsewhere.path().join("kept.txt"))?,
+        "not ours"
+    );
+    // The drive is as it was, and none of its files is taken for gone.
+    assert_eq!(on_drive(&server), before);
+    let top = common::header_named(&server, "top.txt").file_id;
+    assert!(!b.engine.db().read(|s| s.file_gone(top))?);
+
+    // Synced again (its marker turned on again): all of it comes back.
+    b.sync()?;
+    let back = b.tree_text("");
+    assert_eq!(
+        back.iter().filter(|l| l.contains(".txt")).count(),
+        32,
+        "{back:?}"
+    );
+    Ok(())
+}
+
+/// Only what another identity shares is ended so: an identity's own folder is refused, and
+/// nothing in it is touched.
+#[test]
+fn ending_a_share_is_refused_for_an_identitys_own_folder() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("mine.txt", "mine")?;
+    a.sync()?;
+    assert!(matches!(
+        a.engine.end_share("2026-11-20"),
+        Err(hbsync_engine::EngineError::NotAShare)
+    ));
+    // (Read-only, but its own drive: refused too.)
+    let (mut own, _out) = Client::read_only(&server, "b")?;
+    own.sync()?;
+    assert!(matches!(
+        own.engine.end_share("2026-11-20"),
+        Err(hbsync_engine::EngineError::NotAShare)
+    ));
+    assert_eq!(a.tree_text(""), ["mine.txt = mine"]);
+    assert_eq!(own.tree_text(""), ["mine.txt = mine"]);
+    Ok(())
+}

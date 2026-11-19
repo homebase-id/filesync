@@ -160,6 +160,27 @@ impl AccountTx<'_> {
         self.drop_file(file_id)
     }
 
+    /// Another identity's drive isn't synced here any more (its share ended, or its marker
+    /// turned it off): every file the store has of it leaves the picture as one no longer
+    /// shared with this identity ([`AccountTx::unshared`]), each planned again where it was
+    /// held, and none recorded gone: synced again later, all of it comes back (the feed is
+    /// read from its beginning then: [`AccountTx::start_reread`]). How many left; `None` on
+    /// an identity's own drive, where nothing is done (read by its rules,
+    /// its files would be taken for gone).
+    pub fn unshare_all(&self) -> Result<Option<usize>> {
+        if !self.shared()? {
+            return Ok(None);
+        }
+        let files = self.drive_file_ids()?;
+        for file_id in &files {
+            self.unshared(*file_id)?;
+        }
+        // Read again later (synced again before its DB went), the drive is read from its
+        // beginning: from where the feed was read up to, nothing of this would come.
+        self.start_reread()?;
+        Ok(Some(files.len()))
+    }
+
     /// The picture without file `file_id`, live or in Recently deleted, with nothing said
     /// about the file itself: gone for good ([`AccountTx::forget_file`]), or no longer shared
     /// with this identity ([`ReadTx::withdrawn`]), which a share given again undoes.
