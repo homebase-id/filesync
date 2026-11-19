@@ -576,11 +576,14 @@ included (service managers restart it then).
     twice at every start).
 
   One request a read; no timer of their own. Never while the account is paused, and never
-  on the account's thread: a thread of its own reads them and opens shares (one at a time),
-  and the account takes its answers as messages. A read or an opening that fails is tried
-  again after a pause (5 s doubling to 5 minutes; an hour where the identity refused the
-  login), and the drive's timer doesn't ask for a read while the login is refused. What
-  they say:
+  on the account's thread: a thread of its own reads them and opens shares, asked for one
+  thing at a time (so a pause, or the account's end, holds back all but what is under
+  way), and the account takes its answers as messages. A read or an opening that fails is
+  tried again after a pause: 5 s doubling to 5 minutes; 5 minutes at once where only the
+  user can mend it; an hour where the identity refused the login; never sooner than the
+  server asked. A share waiting so is tried at once at Sync now, as the machine wakes, and
+  whenever the markers are read. The drive's timer doesn't ask for a read while the login
+  is refused. What they say:
   - A share a marker turns on is opened and synced. The main folder's runner makes no folder
     of shares while nothing is shared: it is told to as the account's first share comes
     (made at once, and the folder opened again with it; where one is on record already,

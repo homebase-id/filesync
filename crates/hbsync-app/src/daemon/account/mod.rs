@@ -11,7 +11,8 @@
 //! runners), and the answers it gives; `run.rs` its loop (the credentials, connecting, serving
 //! its channel); `parts.rs` the account's wiring once connected, shared with the dev tool
 //! `hbsync-sync`; `feed.rs` the notifications and the puller that bring the drive's changes;
-//! `runners.rs` its folders' runners and their restarts.
+//! `runners.rs` its folders' runners and their restarts, and whose shares are synced, as
+//! the identity's share markers say.
 
 use std::collections::HashSet;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -338,6 +339,9 @@ impl Account {
             if waiting.connecting {
                 return Err(words::trying_to_connect(&self.identity));
             }
+        } else {
+            // (Its thread tries what waits of its shares now.)
+            self.tell(Msg::SyncNow);
         }
         shown.send(&self.identity, &Command::SyncNow)
     }
@@ -1359,22 +1363,27 @@ mod tests {
         let checks = || -> Result<(), Box<dyn std::error::Error>> {
             f.started.wait_all("the share is synced", &both_synced)?;
 
-            let before = f.reads();
-            f.marked(|m| (m.on, m.unsure) = (Vec::new(), vec![tom.clone()]));
-            f.read_since(before)?;
-            std::thread::sleep(std::time::Duration::from_millis(300));
+            // Its marker doesn't read, while another's turns its share on: once that one
+            // is synced, the answer was followed, and tom's is as it was.
+            let sam: Identity = "sam.example".into();
+            f.marked(|m| (m.on, m.unsure) = (vec![sam.clone()], vec![tom.clone()]));
+            let three = |status: &AccountStatus, folders: &[FolderStatus]| {
+                folders.len() == 3 && folders.iter().all(|f| synced(status, f))
+            };
             f.started
-                .wait_all("still synced: its marker didn't read", &both_synced)?;
+                .wait_all("another's share is synced too", &three)?;
+            let (_, folders) = f.started.account.status();
+            let whose: Vec<_> = folders.iter().filter_map(|f| f.sharer.clone()).collect();
+            assert!(whose.contains(&tom) && whose.contains(&sam), "{whose:?}");
 
             let before = f.reads();
             f.marked(|m| (m.unsure, m.unreadable) = (Vec::new(), true));
             f.read_since(before)?;
             std::thread::sleep(std::time::Duration::from_millis(300));
-            f.started
-                .wait_all("still synced: no marker read", &both_synced)?;
+            f.started.wait_all("still synced: no marker read", &three)?;
 
-            // They read again, and say no: now it stops.
-            f.marked(|m| m.unreadable = false);
+            // They read again, and say no for both: now they stop.
+            f.marked(|m| (m.on, m.unreadable) = (Vec::new(), false));
             f.started
                 .wait_all("the share is no longer synced", &alone)?;
             Ok(())

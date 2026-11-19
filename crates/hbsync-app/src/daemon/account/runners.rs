@@ -1,5 +1,6 @@
 //! The account's folders' runners, on the account's thread: one that failed starts again
-//! after a pause, backing off; one whose folder was removed stops for good.
+//! after a pause, backing off; one whose folder was removed stops for good. And whose
+//! shares are synced ([`Sharing`]), as the identity's share markers say ([`Markers`]).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -161,40 +162,55 @@ impl Markers {
         self.worker.is_some()
     }
 
-    /// A marker changed, or may have (the drive is read for what wasn't announced): read.
+    /// A marker changed, or may have (the drive is read for what wasn't announced, as its
+    /// notifications connect): read; and what waits to be opened is tried now.
     pub(super) fn changed(&mut self, now: Instant) {
         match self.reading {
             true => self.again = true,
             false if self.worker.is_some() => self.read_at = Some(now),
             false => {}
         }
+        self.hurry(now);
+    }
+
+    /// A share waiting to be tried again is tried now: the user asked to sync, the machine
+    /// woke, or the identity can be reached again (what kept it may be mended).
+    pub(super) fn hurry(&mut self, now: Instant) {
+        for opening in &mut self.opening {
+            opening.at = opening.at.map(|at| at.min(now));
+        }
     }
 
     /// When to [`Markers::ask`] at the latest: a read, or a share to try opening again.
-    /// Never while `paused`: nothing is asked then.
+    /// Never while `paused` (nothing is asked then), nor while an answer is awaited (its
+    /// coming has the account ask for the next).
     pub(super) fn deadline(&self, paused: bool) -> Option<Instant> {
         let opening = self.opening.iter().filter_map(|o| o.at);
         let due = self.read_at.into_iter().chain(opening).min();
-        due.filter(|_| !paused && self.worker.is_some())
+        let asked = self.reading || self.opening.iter().any(|o| o.at.is_none());
+        due.filter(|_| !paused && !asked && self.worker.is_some())
     }
 
-    /// Asks the worker for what is due: a read of the markers (told whose shares are synced
-    /// or being opened: `shares`, and those to open), and each share to open. A worker whose
-    /// thread ended (the source panicked) is said, once, and nothing is asked any more: what
-    /// is synced stays as it is, and nothing is due.
+    /// Asks the worker for what is due, one thing at a time (the next once its answer came:
+    /// nothing waits in its queue that a pause, or the account's end, should hold back): a
+    /// read of the markers (told whose shares are synced or being opened: `shares`, and those
+    /// to open), else a share to open. A worker whose thread ended (the source panicked) is
+    /// said, once, and nothing is asked any more: what is synced stays as it is, and
+    /// nothing is due.
     pub(super) fn ask(&mut self, shares: &[Sharing], now: Instant) {
         let Some((jobs, thread)) = &self.worker else {
             return;
         };
         let mut sent = !thread.is_finished();
-        if sent && !self.reading && self.read_at.is_some_and(|at| now >= at) {
+        let asked = self.reading || self.opening.iter().any(|o| o.at.is_none());
+        if sent && !asked && self.read_at.is_some_and(|at| now >= at) {
             let synced = shares.iter().map(|s| &s.share.sharer);
             let synced = synced.chain(self.opening.iter().map(|o| &o.sharer));
             sent = jobs.send(Job::Read(synced.cloned().collect())).is_ok();
             (self.reading, self.read_at, self.again) = (sent, None, false);
-        }
-        for opening in &mut self.opening {
-            if sent && opening.at.is_some_and(|at| now >= at) {
+        } else if sent && !asked {
+            let due = |o: &&mut Opening| o.at.is_some_and(|at| now >= at);
+            if let Some(opening) = self.opening.iter_mut().find(due) {
                 sent = jobs.send(Job::Open(opening.sharer.clone())).is_ok();
                 opening.at = None;
             }
@@ -316,11 +332,16 @@ impl Markers {
 }
 
 /// The wait before what failed with `e` is tried again: an hour where the identity refused
-/// the login (the user's to mend, as for the account's own connecting); else by its class.
+/// the login (the user's to mend, as for the account's own connecting); else by its class,
+/// and not sooner than the server asked.
 fn wait_after(backoff: &mut Backoff, e: &RunnerError) -> Duration {
+    let asked = match e {
+        RunnerError::Engine(e) => e.retry_after(),
+        _ => None,
+    };
     match e.class() {
         hbsync_remote::ErrorClass::Denied => super::run::NEEDS_USER_AGAIN,
-        class => backoff.after(class, None),
+        class => backoff.after(class, asked),
     }
 }
 
@@ -536,19 +557,25 @@ mod tests {
         let_through.send(on.clone())?;
         assert!(answer(&mut markers, &mut shares)?.is_empty());
         assert_eq!(markers.opening.len(), 1);
+        // One thing asked at a time: the second read, then the share's opening.
         markers.ask(&shares, start);
+        assert!(markers.reading && markers.opening[0].at.is_some());
         let_through.send(on)?;
-        // (The second read and the share's opening, in the order asked.)
         assert!(answer(&mut markers, &mut shares)?.is_empty());
+        markers.ask(&shares, start);
+        assert_eq!(markers.deadline(false), None, "its answer is awaited");
         let said = answer(&mut markers, &mut shares)?;
         assert_eq!(said, [crate::words::share_unopened(&tom, &"not here")]);
         assert_eq!(reads.load(Ordering::SeqCst), 2);
         assert!(!markers.reading && markers.read_at.is_none());
 
-        // The share is tried again after a pause, and not said again.
+        // The share is tried again after a pause, or at once where asked to hurry, and not
+        // said again.
         let again = markers.deadline(false).ok_or("no retry")?;
         assert!(again > start);
-        markers.ask(&shares, again);
+        markers.hurry(start);
+        assert_eq!(markers.deadline(false), Some(start));
+        markers.ask(&shares, start);
         assert!(answer(&mut markers, &mut shares)?.is_empty());
         assert!(shares.is_empty() && markers.opening.len() == 1);
         Ok(())

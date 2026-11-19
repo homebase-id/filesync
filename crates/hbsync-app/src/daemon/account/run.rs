@@ -294,7 +294,7 @@ impl Account {
             sharers,
         } = parts;
         // What other identities share, each synced by a runner of its own: those the
-        // identity's share markers turn on, read now and as they change.
+        // identity's share markers turn on.
         let mut shares = Sharing::each(shares);
         // First read as the notifications connect (they tell what changes from then on), or
         // after a moment where they don't; at once where there are none.
@@ -407,6 +407,7 @@ impl Account {
                         changed = true;
                     }
                     Msg::Woke => {
+                        markers.hurry(Instant::now());
                         if let Some(n) = &notifier {
                             n.reconnect();
                             notifications.reconnecting();
@@ -443,8 +444,9 @@ impl Account {
                         changed = true;
                     }
                     // Asked as its runners started (they sync at their start), or while its DB
-                    // was looked at: nothing to do.
-                    Msg::SyncNow => {}
+                    // was looked at: nothing to do for them. A share waiting to be opened
+                    // again is tried now.
+                    Msg::SyncNow => markers.hurry(Instant::now()),
                     // Looked at below.
                     Msg::Wake => {}
                 }
@@ -636,9 +638,10 @@ impl Account {
 
     /// Starts syncing the folder `root` on the account's `drive`, with `config`'s settings,
     /// paused when `paused`; ending when the DB can't be used if the account `heals` it. The
-    /// main folder of an account other identities share with (`shared`, with the account's
-    /// main folder where it syncs one) makes the folder of shares, and tells the account
-    /// where it is; a folder beside it knows that one by the main folder's record.
+    /// main folder of an account other identities share with, or may ([`Shared`], with the
+    /// account's main folder where it syncs one), tells the account where its folder of
+    /// shares is, and makes one where a share is synced; a folder beside it knows that one
+    /// by the main folder's record.
     fn start(
         &self,
         drive: &Arc<Drive>,
@@ -751,8 +754,10 @@ impl Account {
     /// shows: started there, started again after it failed (its folder gone: made again), and
     /// stopped where that isn't its place any more (the folder of shares has another name or
     /// is gone, the main folder is removed), to start in the new place once it has ended. One
-    /// that can't start is tried again after a pause; the account's own folders sync on. A
-    /// share's drive is read (its notifications' timer) only while a runner syncs it.
+    /// that can't start is tried again after a pause; the account's own folders sync on. One
+    /// its marker turned off ([`Sharing::off`]) has its runner stopped, and is taken out of
+    /// `shares` once that has ended. A share's drive is read (its notifications' timer) only
+    /// while a runner syncs it.
     ///
     /// Whether the folders shown changed, and when to look again at the latest: a start to
     /// try again, a drive to read.
