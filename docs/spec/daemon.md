@@ -628,11 +628,11 @@ included (service managers restart it then).
     moment, it stays without it); a folder on the junk list moves out with the rest that
     is the user's.
   - Where something couldn't go, or it failed part of the way, the folder and the DB stay,
-    and it isn't tried again until the daemon starts again (or the share is turned on). An
+    and it isn't tried again until the daemon starts again (or the share is turned on). A
     folder without a marker at the share's place (its own went with the last step of an
-    ending cut short there, or its runner never set it up) is proven nobody's: nothing in
-    it is deleted, junk neither, and only an empty one goes, the share's state DB with
-    it.
+    ending cut short there, or its runner never set it up) isn't proven this share's:
+    nothing in it is deleted, junk neither, and only an empty one goes, the share's state
+    DB with it.
   - Said in a note: that the share isn't synced here any more; that its folder was
     removed, or why not, or how many items stay; and how many moved out, and where to
     (also where it failed after some had).
