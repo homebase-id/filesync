@@ -160,6 +160,24 @@ impl AccountTx<'_> {
         self.drop_file(file_id)
     }
 
+    /// Another identity's drive isn't synced here any more (sync semantics §13): every file
+    /// the store has of it leaves the picture as one no longer shared with this identity
+    /// ([`AccountTx::unshared`]), each planned again where it was held, and none recorded
+    /// gone. Synced again later, all of it comes back: the feed is read from its beginning
+    /// then ([`AccountTx::start_reread`]; from where it was read up to, nothing of this
+    /// would come). `false` on an identity's own drive, where nothing is done (read by its
+    /// rules, its files would be taken for gone).
+    pub fn unshare_all(&self) -> Result<bool> {
+        if !self.shared()? {
+            return Ok(false);
+        }
+        for file_id in self.drive_file_ids()? {
+            self.unshared(file_id)?;
+        }
+        self.start_reread()?;
+        Ok(true)
+    }
+
     /// The picture without file `file_id`, live or in Recently deleted, with nothing said
     /// about the file itself: gone for good ([`AccountTx::forget_file`]), or no longer shared
     /// with this identity ([`ReadTx::withdrawn`]), which a share given again undoes.

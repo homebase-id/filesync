@@ -221,6 +221,9 @@ pub(crate) struct Client {
     /// shares ([`crate::Sim::with_member`]): read-only, and of the drive as
     /// `Server::as_shared` has it.
     pub(crate) member: bool,
+    /// A member that doesn't sync what is shared any more ([`crate::Sim::end_share`]): it
+    /// reads nothing of the drive, as if every share were withdrawn.
+    pub(crate) ended: bool,
     /// What moved out of it, read-only, to keep what changed here: each item with what was
     /// below it (`Op::LocalEvict`).
     pub(crate) moved_out: Vec<Tree>,
@@ -309,6 +312,7 @@ impl Client {
             desktop_named: None,
             read_only: false,
             member: false,
+            ended: false,
             moved_out: Vec::new(),
         }
     }

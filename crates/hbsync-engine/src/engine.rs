@@ -602,6 +602,163 @@ impl Engine {
         self.sync_with(date, if read { Pull::Now } else { Pull::IfBehind })
     }
 
+    /// What another identity shares isn't synced into this folder any more: the copy here
+    /// is taken off this device (sync semantics §13, "A share that isn't synced here any
+    /// more"). In order:
+    ///
+    /// 1. every file leaves the picture as one no longer shared ([`Drive::unshare_all`]);
+    /// 2. the folder is walked, so what changed here is known as changed;
+    /// 3. what the walk skipped moves out ([`Engine::move_out_unsynced`]);
+    /// 4. it is synced without reading the drive (that would bring the files back), the
+    ///    mass-delete guard not holding it, for as long as a sync does something and work
+    ///    is left (a copy larger than one sync's rounds take).
+    ///
+    /// What was done: [`SyncReport::moved_out`] with what step 3 moved, `stopped` where a
+    /// stop was asked ([`Engine::set_stop`]) before the end, at any step, `unfinished` where
+    /// something stays that another try may take. Where it fails part of the way, what was
+    /// done till then is [`Engine::take_unreported`]'s. Only for a read-only folder of another
+    /// identity's drive: refused otherwise ([`EngineError::NotAShare`]), before anything is
+    /// touched.
+    pub fn end_share(&mut self, date: &str) -> Result<SyncReport, EngineError> {
+        if self.cfg.folder.read_only.is_none() || !self.drive.shared() {
+            return Err(EngineError::NotAShare);
+        }
+        let mut report = SyncReport::default();
+        let stop = Arc::clone(&self.stop);
+        let stopped = || stop.load(Ordering::Relaxed);
+        // (A stop asked before it began touches nothing: the picture stays, and the share
+        // syncs on from where it was if it is turned on again.)
+        let scan = match stopped() || !self.drive.unshare_all()? {
+            true => None,
+            false => Some(self.scan_local()?),
+        };
+        let Some(scan) = scan.filter(|_| !stopped()) else {
+            report.stopped = true;
+            return Ok(report);
+        };
+        // The user's ignore rules for this folder are theirs too (in the client's state
+        // folder, which the walk doesn't enter): moved out with what they kept here.
+        let mut unsynced = scan.skipped;
+        let rules = Path::new(hbsync_local::STATE_DIR).join(hbsync_local::IGNORE_FILE);
+        if self.cfg.folder.root.join(&rules).is_file() {
+            unsynced.push((rules, hbsync_local::SkipReason::Ignored));
+        }
+        report.moved_out = self.move_out_unsynced(unsynced);
+        let allowed = std::mem::replace(&mut self.cfg.guard.allow, true);
+        let synced = loop {
+            match self.sync_with(date, Pull::Done(FeedReport::default())) {
+                Ok(pass) => {
+                    let more = pass.unfinished && !pass.stopped && pass.ops_done > 0;
+                    report.absorb(pass);
+                    if !more {
+                        break Ok(());
+                    }
+                }
+                // (What was done before it failed is kept for whoever tells it:
+                // [`Engine::take_unreported`].)
+                Err(e) => {
+                    if let Some(pass) = self.unreported.take() {
+                        report.absorb(pass);
+                    }
+                    break Err(e);
+                }
+            }
+        };
+        self.cfg.guard.allow = allowed;
+        match synced {
+            Ok(()) => Ok(report),
+            Err(e) => {
+                self.unreported = Some(report);
+                Err(e)
+            }
+        }
+    }
+
+    /// Moves out of the read-only folder, to its out folder, what a walk of it skipped
+    /// (`skipped`, a scan's) and isn't the client's own or a junk file: a link (moved as a
+    /// link, never followed), a special file, a name the drive can't have, a folder on the
+    /// junk list, and what the user's ignore rules keep on this device (a folder so kept as
+    /// a whole). It is the user's, and
+    /// a folder isn't removed over what its delete can't account for (§7). Not what lies in
+    /// a folder made here: that one moves out whole by the sync that follows, with all in
+    /// it where it is.
+    ///
+    /// Under the names an item moved out gets ([`moved_out_names`]), never over anything.
+    /// (Not by the executor's move out: that one is ordered with the commits of the rows it
+    /// moves, and these have none.) One that can't move stays, said in the log: the folder
+    /// it is in stays with it. Each one's path in the folder, and where it is now.
+    fn move_out_unsynced(
+        &mut self,
+        skipped: Vec<(PathBuf, hbsync_local::SkipReason)>,
+    ) -> Vec<(String, PathBuf)> {
+        use hbsync_local::SkipReason;
+        let folder = &self.cfg.folder;
+        let Some(out) = folder.read_only.as_deref() else {
+            return Vec::new();
+        };
+        let from = folder
+            .root
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
+        let mut moved = Vec::new();
+        for (rel, reason) in skipped {
+            // (The client's own state stays; a junk file goes with its folder, a junk
+            // folder keeps the folder it is in, §7, and may hold what was never synced: the
+            // user's, moved.)
+            let at = folder.root.join(&rel);
+            let stays = match reason {
+                SkipReason::Excluded => true,
+                SkipReason::Junk => !at.symlink_metadata().is_ok_and(|meta| meta.is_dir()),
+                _ => false,
+            };
+            if stays {
+                continue;
+            }
+            // In a folder made here (no base): it leaves with that folder.
+            let made_here = self.db.read(|s| {
+                for above in rel.ancestors().skip(1) {
+                    let above = hbsync_local::journal::relpath_prefix(above);
+                    if above.is_root() {
+                        break;
+                    }
+                    if let Some(node) = s.local_node_at(&above)?
+                        && s.get_base(node)?.is_none()
+                    {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            });
+            // (Its folder couldn't be told: it stays where it is, and its folder with it.)
+            let made_here = made_here.unwrap_or_else(|e: StateError| {
+                tracing::warn!("{}: it stays ({e})", rel.display());
+                true
+            });
+            if made_here {
+                continue;
+            }
+            let name = rel.file_name().unwrap_or_default().to_string_lossy();
+            let to = crate::tree::moved_out_names(&name, &from).find_map(|candidate| {
+                let to = out.join(candidate);
+                // (Never onto what is there: a link there counts.)
+                match to.symlink_metadata().is_ok() {
+                    true => None,
+                    false => Some(hbsync_platform::ops::rename_noreplace(&at, &to).map(|()| to)),
+                }
+            });
+            match to {
+                Some(Ok(to)) => {
+                    tracing::info!("{}: moved out, to {}", rel.display(), to.display());
+                    moved.push((rel.to_string_lossy().into_owned(), to));
+                }
+                Some(Err(e)) => tracing::warn!("{}: it can't move out ({e})", rel.display()),
+                None => tracing::warn!("{}: no free name to move it out to", rel.display()),
+            }
+        }
+        moved
+    }
+
     /// [`Engine::sync_once`], with the feed read as `pulled` says.
     fn sync_with(&mut self, date: &str, pulled: Pull) -> Result<SyncReport, EngineError> {
         // What earlier syncs did is durable before this one puts anything back on disk

@@ -588,8 +588,8 @@ included (service managers restart it then).
     of shares while nothing is shared: it is told to as the account's first share comes
     (made at once, and the folder opened again with it; where one is on record already,
     nothing is opened again).
-  - A share a marker turns off has its runner stopped. What it synced stays where it is, in
-    the folder of shares (not yet removed: that comes with guards of its own).
+  - A share a marker turns off has its runner stopped, and its copy is taken off this
+    computer (below).
   - A share whose marker doesn't read stays as it is (synced, being opened, or ending), and
     so does every share while the markers can't be read at all: never taken for turned
     off, nor for turned on again.
@@ -597,6 +597,57 @@ included (service managers restart it then).
     (the pauses above); the account's own folders and its other shares sync on. One that
     can't be synced here at all (no folder can have its sharer's name, or another share's
     folder has it) isn't opened: said in the log.
+
+  **A share that isn't synced any more has its copy removed**, once its runner has ended
+  and the folder of shares is known (it waits where not), on a thread of its own, one
+  share at a time (`account/ending.rs`; sync semantics §13, "A share that isn't synced here
+  any more"). Checked before anything is touched:
+  - the share's drive is another identity's, and its state DB is where this account keeps
+    that sharer's: nothing else is ever removed as its records;
+  - its folder is in the folder of shares on the main folder's record, itself a folder and
+    not a link to it (one renamed since is neither emptied nor taken for gone; a share is
+    started under the same check);
+  - it is a folder, and so is its state folder (`.hbsync`): a link at the place of either
+    is never followed, whatever it leads to;
+  - it is set up for this share's own state DB, by its marker: a folder with another's
+    (renamed into its place) is left as it is, with all in it.
+
+  Then:
+  - What is there as it was synced is deleted; what was changed or put there, what is never
+    synced (a link is moved as a link, never followed), what the user's rules keep on this
+    device, and the rules themselves (`.hbsync/ignore`) move out to the top of the main
+    folder, never over anything.
+  - Where nothing is left, junk files at the folder's top and in its state folder are
+    deleted (there also a probe of the volume a crash left), then the client's own state
+    in it, piece by piece (what a transfer left, the place it sets aside in, which must be
+    empty, and last its marker: cut short before, the folder is still proven this share's,
+    and the next try finishes it), then the folder, and after it the share's state DB. Left, and keeping the folder: whatever the client had
+    set aside there (§8a), and whatever else is in its state folder (the ignore rules where
+    they couldn't move out, a backup an editor left beside them). Junk is only deleted once
+    nothing else is left (should the folder then not go, for something put there in that
+    moment, it stays without it); a folder on the junk list moves out with the rest that
+    is the user's.
+  - Where something couldn't go, or it failed part of the way, the folder and the DB stay,
+    and it isn't tried again until the daemon starts again (or the share is turned on). A
+    folder without a marker at the share's place (its own went with the last step of an
+    ending cut short there, or its runner never set it up) isn't proven this share's:
+    nothing in it is deleted, junk neither, and only an empty one goes, the share's state
+    DB with it.
+  - Said in a note: that the share isn't synced here any more; that its folder was
+    removed, or why not, or how many items stay; and how many moved out, and where to
+    (also where it failed after some had).
+  - A pause holds it as it holds syncing (none starts, one under way stops between two
+    operations and before its walk), and so does the daemon's stop: it is taken up again,
+    found by its state DB here. What had moved out by then is said then (the removal that
+    goes on later has none of it to tell).
+  - A share turned off while the daemon didn't run is known the same way, as the markers
+    are first read. One whose marker doesn't read then keeps its copy: the source says
+    "unsure" for those it finds kept too. One turned on again while its copy is being
+    removed is opened anew once that is done (one opened only to remove its copy is never
+    synced as it is: it was opened without its sharer). One turned on again while its copy
+    still waits its turn is synced on, as it is.
+  - The source opens such a share without its sharer (`Sharers::open(.., to_end)`): one
+    that ended gives no access any more, and nothing is asked of it.
 
   Not in the released daemon yet: opening another identity's drive takes a token of its own
   that has to be kept (a new one each start would leave a row on the sharer's server each

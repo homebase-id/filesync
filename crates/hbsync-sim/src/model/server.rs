@@ -304,6 +304,12 @@ impl Server {
         self.holding(live, removed)
     }
 
+    /// The drive as a member reads it that doesn't sync what is shared any more
+    /// (`Sim::end_share`): nothing of it.
+    pub(crate) fn as_unshared(&self) -> Server {
+        self.holding(BTreeMap::new(), BTreeMap::new())
+    }
+
     /// This drive holding `live` and `removed` in place of what it holds: the rest as it is.
     pub(crate) fn holding(
         &self,

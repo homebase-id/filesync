@@ -60,6 +60,10 @@ pub(super) struct Sharing {
     /// The identity's share markers say it isn't synced any more: its runner stops, and it
     /// goes with it.
     pub(super) off: bool,
+    /// Opened only to take its copy off this device ([`Sharers::open`]: without its
+    /// sharer), never to sync: it stays off whatever its marker says since, and is opened
+    /// anew once its copy went.
+    pub(super) to_end: bool,
 }
 
 /// What the identity's share markers say, followed on the account's thread: read when due,
@@ -84,6 +88,12 @@ pub(super) struct Markers {
     /// Shares turned on that can't be synced here (no folder can have the name, or another
     /// share has it): said, and not opened, while their markers say so.
     left_out: Vec<Identity>,
+    /// Shares not synced any more whose copy couldn't be taken off this device (all of it):
+    /// not tried again in this run, unless their markers turn them on.
+    unended: Vec<Identity>,
+    /// Shares whose copy went while a read was under way: that read may still name them
+    /// kept (their records were there as it looked), which they aren't any more.
+    ended_meanwhile: Vec<Identity>,
 }
 
 struct Opening {
@@ -95,11 +105,14 @@ struct Opening {
     backoff: Backoff,
     /// Why it can't be opened was told.
     told: bool,
+    /// Opened to take its copy off this device, not to sync it ([`Synced::kept`]).
+    end: bool,
 }
 
 enum Job {
     Read(Vec<Identity>),
-    Open(Identity),
+    /// A share to open: to sync, or (`true`) to take its copy off this device.
+    Open(Identity, bool),
 }
 
 /// What the worker found ([`Markers::answer`]).
@@ -124,8 +137,8 @@ impl Markers {
                 for job in asked {
                     let answer = match job {
                         Job::Read(synced) => Answer::Told(source.told(&synced)),
-                        Job::Open(sharer) => {
-                            let opened = source.open(&sharer);
+                        Job::Open(sharer, to_end) => {
+                            let opened = source.open(&sharer, to_end);
                             Answer::Opened(sharer, opened)
                         }
                     };
@@ -154,7 +167,21 @@ impl Markers {
             read_backoff: Backoff::new(),
             opening: Vec::new(),
             left_out: Vec::new(),
+            unended: Vec::new(),
+            ended_meanwhile: Vec::new(),
         }
+    }
+
+    /// The copy of what `sharer` shared was taken off this device, or (`!all`) not all of
+    /// it: not tried again in this run then. The markers are read again either way: turned
+    /// on meanwhile, the share is opened anew.
+    pub(super) fn ended(&mut self, sharer: Identity, all: bool, now: Instant) {
+        match all {
+            true if self.reading => self.ended_meanwhile.push(sharer),
+            true => {}
+            false => self.unended.push(sharer),
+        }
+        self.changed(now);
     }
 
     /// Whether anything says whose shares are synced.
@@ -208,10 +235,13 @@ impl Markers {
             let synced = synced.chain(self.opening.iter().map(|o| &o.sharer));
             sent = jobs.send(Job::Read(synced.cloned().collect())).is_ok();
             (self.reading, self.read_at, self.again) = (sent, None, false);
+            self.ended_meanwhile.clear();
         } else if sent && !asked {
             let due = |o: &&mut Opening| o.at.is_some_and(|at| now >= at);
             if let Some(opening) = self.opening.iter_mut().find(due) {
-                sent = jobs.send(Job::Open(opening.sharer.clone())).is_ok();
+                sent = jobs
+                    .send(Job::Open(opening.sharer.clone(), opening.end))
+                    .is_ok();
                 opening.at = None;
             }
         }
@@ -228,12 +258,16 @@ impl Markers {
     /// Takes the worker's `answer` (of the run `id`), and has `shares` follow it: one the
     /// markers turn off is marked ([`Sharing::off`]: its runner stops, and it goes), one
     /// they are unsure of stays, one they turn on is to be opened, and added once it is.
-    /// While they can't be read, all stays as it is. What to tell on the account's status.
+    /// While they can't be read, all stays as it is. `waiting`: the shares turned off whose
+    /// copies wait to be taken off this device, and whose is being now; none of them is
+    /// opened meanwhile, and one that waits and is on again is synced on. What to tell on
+    /// the account's status.
     pub(super) fn answer(
         &mut self,
         id: u64,
         answer: Answer,
         shares: &mut Vec<Sharing>,
+        waiting: (&mut Vec<Sharing>, Option<&Identity>),
         now: Instant,
     ) -> Vec<String> {
         // (Another run's: its shares aren't this one's to sync. Or one that comes after its
@@ -245,7 +279,7 @@ impl Markers {
             Answer::Told(Ok(told)) => {
                 (self.reading, self.read_backoff) = (false, Backoff::new());
                 self.read_at = self.again.then_some(now);
-                self.told(told, shares, now);
+                self.told(told, shares, waiting, now);
             }
             Answer::Told(Err(e)) => {
                 let pause = wait_after(&mut self.read_backoff, &e);
@@ -263,7 +297,8 @@ impl Markers {
                 match opened {
                     Ok(share) => {
                         let opening = self.opening.swap_remove(i);
-                        if let Some(new) = Sharing::at(share, opening.local, shares) {
+                        if let Some(mut new) = Sharing::at(share, opening.local, shares) {
+                            (new.off, new.to_end) = (opening.end, opening.end);
                             shares.push(new);
                         }
                     }
@@ -275,7 +310,10 @@ impl Markers {
                         );
                         opening.at = Some(now + pause);
                         if !std::mem::replace(&mut opening.told, true) {
-                            return vec![crate::words::share_unopened(&sharer, &e)];
+                            return vec![match opening.end {
+                                true => crate::words::share_copy_unopened(&sharer, &e),
+                                false => crate::words::share_unopened(&sharer, &e),
+                            }];
                         }
                     }
                 }
@@ -284,15 +322,34 @@ impl Markers {
         Vec::new()
     }
 
-    /// What the markers say, `told`, followed by `shares` and by what is to be opened.
-    fn told(&mut self, told: Synced, shares: &mut [Sharing], now: Instant) {
+    /// What the markers say, `told`, followed by `shares` and by what is to be opened: to
+    /// sync, or (one with a state DB here that isn't synced any more) to take its copy off
+    /// this device. None of `ending` meanwhile.
+    fn told(
+        &mut self,
+        told: Synced,
+        shares: &mut Vec<Sharing>,
+        (waiting, ending): (&mut Vec<Sharing>, Option<&Identity>),
+        now: Instant,
+    ) {
         // (One they are unsure of stays as it is: synced, being opened, or ending.)
         let unsure = |sharer: &Identity| told.unsure.contains(sharer);
+        let on = |sharer: &Identity| told.on.contains(sharer);
+        // One whose copy waits its turn to be taken off, and that is on again: synced on,
+        // as it is.
+        let back = waiting.extract_if(.., |share| on(&share.share.sharer));
+        shares.extend(back.map(|mut share| {
+            share.off = false;
+            share
+        }));
+        // One opened only to end (without its sharer), whose ending hasn't begun, and that
+        // is on again: let go, and opened anew to sync, below.
+        shares.retain(|share| !(share.to_end && on(&share.share.sharer)));
         for share in shares.iter_mut() {
             let sharer = &share.share.sharer;
-            let off = match unsure(sharer) {
+            let off = match unsure(sharer) || share.to_end {
                 true => share.off,
-                false => !told.on.contains(sharer),
+                false => !on(sharer),
             };
             if off != share.off {
                 let now_is = if off {
@@ -304,28 +361,40 @@ impl Markers {
                 share.off = off;
             }
         }
-        self.opening
-            .retain(|o| told.on.contains(&o.sharer) || unsure(&o.sharer));
-        self.left_out.retain(|sharer| told.on.contains(sharer));
-        for sharer in told.on {
-            let known = shares.iter().any(|s| s.share.sharer == sharer)
-                || self.opening.iter().any(|o| o.sharer == sharer)
-                || self.left_out.contains(&sharer);
+        self.opening.retain(|o| match o.end {
+            true => !on(&o.sharer) && told.kept.contains(&o.sharer),
+            false => on(&o.sharer) || unsure(&o.sharer),
+        });
+        self.left_out.retain(on);
+        self.unended.retain(|sharer| !on(sharer));
+        // Those to sync, then those to end: with a state DB here, and neither synced nor
+        // unsure (one of those stays as it is).
+        let to_end = (told.kept.iter()).filter(|sharer| !on(sharer) && !unsure(sharer));
+        let wanted = told.on.iter().map(|sharer| (sharer, false));
+        for (sharer, end) in wanted.chain(to_end.map(|sharer| (sharer, true))) {
+            let known = shares.iter().any(|s| s.share.sharer == *sharer)
+                || self.opening.iter().any(|o| o.sharer == *sharer)
+                || self.left_out.contains(sharer)
+                || waiting.iter().any(|s| s.share.sharer == *sharer)
+                || ending == Some(sharer)
+                || (end && self.unended.contains(sharer))
+                || (end && self.ended_meanwhile.contains(sharer));
             if known {
                 continue;
             }
             // Before it is opened: one that can't be synced here is never asked for.
             let names = shares.iter().map(|s| &s.local);
             let names = names.chain(self.opening.iter().map(|o| &o.local));
-            match Sharing::local(&sharer).filter(|local| free(local, &sharer, names)) {
+            match Sharing::local(sharer).filter(|local| free(local, sharer, names)) {
                 Some(local) => self.opening.push(Opening {
-                    sharer,
+                    sharer: sharer.clone(),
                     local,
                     at: Some(now),
                     backoff: Backoff::new(),
                     told: false,
+                    end,
                 }),
-                None => self.left_out.push(sharer),
+                None => self.left_out.push(sharer.clone()),
             }
         }
     }
@@ -390,6 +459,7 @@ impl Sharing {
             retry: None,
             backoff: Backoff::new(),
             off: false,
+            to_end: false,
         })
     }
 
@@ -499,7 +569,7 @@ mod tests {
             through.recv().map_err(|_| RunnerError::Panicked)
         }
 
-        fn open(&self, _: &Identity) -> Result<Share, RunnerError> {
+        fn open(&self, _: &Identity, _: bool) -> Result<Share, RunnerError> {
             Err(std::io::Error::other("not here").into())
         }
     }
@@ -526,7 +596,13 @@ mod tests {
             let Msg::Sharers(id, answer) = told.recv_timeout(wait)? else {
                 return Err("another message".into());
             };
-            Ok::<_, Box<dyn std::error::Error>>(markers.answer(id, *answer, shares, start))
+            Ok::<_, Box<dyn std::error::Error>>(markers.answer(
+                id,
+                *answer,
+                shares,
+                (&mut Vec::new(), None),
+                start,
+            ))
         };
 
         // One read, however often it is asked for meanwhile.
@@ -544,7 +620,13 @@ mod tests {
         let other = Answer::Told(Ok(Synced::default()));
         assert!(
             markers
-                .answer(markers.id + 1, other, &mut shares, start)
+                .answer(
+                    markers.id + 1,
+                    other,
+                    &mut shares,
+                    (&mut Vec::new(), None),
+                    start
+                )
                 .is_empty()
         );
         assert!(markers.reading);
@@ -553,6 +635,7 @@ mod tests {
         let on = Synced {
             on: vec![tom.clone()],
             unsure: Vec::new(),
+            kept: Vec::new(),
         };
         let_through.send(on.clone())?;
         assert!(answer(&mut markers, &mut shares)?.is_empty());
@@ -581,6 +664,61 @@ mod tests {
         Ok(())
     }
 
+    /// What `sharer` shares, read as its member reads it, on a state DB under `home`.
+    fn shared_by(home: &Path, sharer: &str) -> Result<Sharing, Box<dyn std::error::Error>> {
+        use super::super::feed::{Notifications, Puller};
+        let db = home.join(sharer).join("state.db");
+        std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
+        let server = FakeServer::new(ServerConfig::default());
+        let drive = Drive::open(&db, "me.example", Arc::new(FakeRemote::member(server)))?;
+        let puller = Puller::spawn(Arc::clone(&drive));
+        let share = Share {
+            sharer: sharer.into(),
+            drive,
+            db,
+            notifications: Notifications::new(puller, Instant::now()),
+        };
+        Ok(Sharing::at(share, sharer.to_owned(), &[]).ok_or("no place")?)
+    }
+
+    /// A share turned off whose copy waits its turn to be taken off, and that its marker
+    /// turns on again, is synced on as it is. One that was opened only to end is let go,
+    /// and opened anew to sync. One that stays off waits on.
+    #[test]
+    fn a_share_waiting_to_end_that_is_on_again_is_synced_on()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let (tell, _told) = channel();
+        let now = Instant::now();
+        let mut markers = Markers::new(Some(Box::new(Broken)), tell, now);
+        let off = |sharer: &str, to_end: bool| {
+            shared_by(home.path(), sharer).map(|mut share| {
+                (share.off, share.to_end) = (true, to_end);
+                share
+            })
+        };
+        let mut waiting = vec![off("tom.example", false)?, off("ann.example", false)?];
+        let mut shares = vec![off("sam.example", true)?];
+        let on = Synced {
+            on: vec!["tom.example".into(), "sam.example".into()],
+            ..Synced::default()
+        };
+        markers.told(on, &mut shares, (&mut waiting, None), now);
+        let names = |list: &[Sharing]| -> Vec<String> {
+            list.iter().map(|s| s.share.sharer.to_string()).collect()
+        };
+        assert_eq!(names(&waiting), ["ann.example"]);
+        assert_eq!(names(&shares), ["tom.example"]);
+        assert!(!shares[0].off);
+        let opening: Vec<_> = markers
+            .opening
+            .iter()
+            .map(|o| (o.sharer.to_string(), o.end))
+            .collect();
+        assert_eq!(opening, [("sam.example".to_owned(), false)]);
+        Ok(())
+    }
+
     /// A source that panics as it is read.
     #[derive(Debug)]
     struct Broken;
@@ -590,7 +728,7 @@ mod tests {
             panic!("as a source with a bug would (expected in this test)")
         }
 
-        fn open(&self, _: &Identity) -> Result<Share, RunnerError> {
+        fn open(&self, _: &Identity, _: bool) -> Result<Share, RunnerError> {
             Err(RunnerError::Panicked)
         }
     }
@@ -624,10 +762,17 @@ mod tests {
         let on = Synced {
             on: vec!["tom.example".into()],
             unsure: Vec::new(),
+            kept: Vec::new(),
         };
         let mut shares = Vec::new();
         for late in [Ok(on), Err(RunnerError::Panicked)] {
-            let said = markers.answer(markers.id, Answer::Told(late), &mut shares, start);
+            let said = markers.answer(
+                markers.id,
+                Answer::Told(late),
+                &mut shares,
+                (&mut Vec::new(), None),
+                start,
+            );
             assert!(said.is_empty() && markers.opening.is_empty());
             assert_eq!(markers.deadline(false), None);
         }

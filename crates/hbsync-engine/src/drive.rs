@@ -269,6 +269,13 @@ impl Drive {
         self.freshness.current()
     }
 
+    /// The drive isn't synced here any more: every file leaves its picture as one no longer
+    /// shared with this identity ([`hbsync_state::AccountTx::unshare_all`]). `false` on an
+    /// identity's own drive, where nothing is done.
+    pub(crate) fn unshare_all(&self) -> Result<bool, StateError> {
+        self.account().write(|s| s.account().unshare_all())
+    }
+
     /// Reads the feed ([`Drive::pull`]) unless the picture is [`Drive::current`].
     pub fn catch_up(&self, from: Option<i64>) -> Result<FeedReport, FeedError> {
         if self.current() {

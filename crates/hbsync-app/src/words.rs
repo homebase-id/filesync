@@ -143,11 +143,79 @@ pub fn rescan_every(secs: u64) -> String {
     }
 }
 
+/// What is told once while the copy of what `sharer` shared, which isn't synced any more,
+/// can't be opened to take it off this computer (`why`).
+pub(crate) fn share_copy_unopened(sharer: &crate::Identity, why: &dyn std::fmt::Display) -> String {
+    format!(
+        "What {sharer} shared with you is no longer synced here, but its copy on this \
+         computer couldn't be removed yet ({why}). It is tried again by itself."
+    )
+}
+
 /// What is told once while what `sharer` shares can't be opened to sync (`why`).
 pub(crate) fn share_unopened(sharer: &crate::Identity, why: &dyn std::fmt::Display) -> String {
     format!(
         "What {sharer} shares with you can't be synced yet ({why}). It is tried again by \
          itself; your own files sync on."
+    )
+}
+
+/// What is told when what `sharer` shared isn't synced any more and its copy in `folder` was
+/// taken off this computer: `moved_out` items that weren't the sharer's (changed or put
+/// there) are in `out` now; `left` items couldn't go, and the folder stays with them; or it
+/// couldn't be done, or not all of it (`why`: with the folder gone or not, `folder_gone`),
+/// and what is there stays as it is now.
+pub(crate) fn share_ended(
+    sharer: &crate::Identity,
+    folder: &std::path::Path,
+    out: &std::path::Path,
+    (moved_out, left): (usize, usize),
+    (why, folder_gone): (Option<&str>, bool),
+) -> String {
+    let (folder, out) = (folder.display(), out.display());
+    let mut said = format!("What {sharer} shared with you is no longer synced here.");
+    said += &match (why, left) {
+        (Some(why), _) if folder_gone => format!(
+            " Its folder {folder} was removed from this computer; its sync records \
+             couldn't be yet ({why})."
+        ),
+        (Some(why), _) => format!(
+            " Its folder {folder} couldn't be removed from this computer ({why}): what is \
+             in it isn't synced any more."
+        ),
+        (None, 0) => format!(" Its folder {folder} was removed from this computer."),
+        (None, n) => format!(
+            " {} in {folder} couldn't be removed and {} there, unsynced.",
+            items(n as u64),
+            if n == 1 { "stays" } else { "stay" }
+        ),
+    };
+    if moved_out > 0 {
+        said += &format!(
+            " {} you had changed or added there {} in {out} now.",
+            items(moved_out as u64),
+            if moved_out == 1 { "is" } else { "are" }
+        );
+    }
+    said
+}
+
+/// What is told when the removal of a share's copy was held up (a pause, the daemon
+/// stopping) after `moved_out` items that weren't the sharer's had moved to `out`: said
+/// then, as the removal that finishes it later has none of them to tell.
+pub(crate) fn share_moved_out(
+    sharer: &crate::Identity,
+    folder: &std::path::Path,
+    out: &std::path::Path,
+    moved_out: usize,
+) -> String {
+    format!(
+        "What {sharer} shared with you is no longer synced here. {} you had changed or \
+         added in {} {} in {} now; the rest of the folder is removed when syncing goes on.",
+        items(moved_out as u64),
+        folder.display(),
+        if moved_out == 1 { "is" } else { "are" },
+        out.display()
     )
 }
 
