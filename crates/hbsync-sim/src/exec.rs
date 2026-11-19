@@ -631,11 +631,13 @@ impl Sim {
                 .count();
         }
         // A taken-along file gone there is outside the page unless it is in it, or this plan's
-        // delete here takes it (what that expects: not what the plan moves out of it first).
+        // delete here takes it (what that expects: not what the plan moves out of it first),
+        // held or not: a held one's files are counted with what is held.
         if !taken_there.is_empty() {
             let deleted: HashSet<NodeId> = plan
                 .ops
                 .iter()
+                .chain(&plan.held)
                 .filter_map(|op| match op {
                     Op::LocalDelete { subtree, .. } => Some(subtree.iter().copied()),
                     _ => None,
