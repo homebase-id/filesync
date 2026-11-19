@@ -43,6 +43,10 @@ pub enum Event {
     /// A file on the drive changed: which, as a slim feed row has it (`deleted` also for a hard
     /// delete, which leaves no row in the feed), when the event says (`None`: read the feed).
     Changed(Option<ChangeRef>),
+    /// One of the drive's share markers (node schema, "Sync markers") was written or removed:
+    /// whose shares are synced is to be read again ([`crate::drive::HomebaseRemote::markers`]).
+    /// Not a node: nothing of it is in the feed.
+    Markers,
     /// The connection broke; it is retried with backoff.
     Lost(String),
     /// The identity refused the subscription (credentials revoked, no access to the drive):
@@ -365,6 +369,7 @@ fn session(
                         Event::Connected
                     }
                     Notification::Changed(change) => Event::Changed(change),
+                    Notification::Markers => Event::Markers,
                     Notification::Refused(why) => {
                         let _ = socket.close(None);
                         let _ = events.send(Event::Refused(why.clone()));
@@ -530,6 +535,7 @@ fn send(socket: &mut Socket, client: &Client, command: &str, data: &str) -> Resu
 enum Notification {
     Handshake,
     Changed(Option<ChangeRef>),
+    Markers,
     Refused(String),
     Other,
 }
@@ -591,10 +597,13 @@ fn classify(body: &[u8]) -> Notification {
     if kind("deviceHandshakeSuccess") {
         Notification::Handshake
     } else if kind("fileAdded") || kind("fileModified") || kind("fileDeleted") {
-        match data.as_deref() {
+        let data = data.as_deref();
+        match data.map(named) {
+            // A share marker: who syncs is read again.
+            Some(Named::Marker) => Notification::Markers,
             // Another app's file on the drive: not the client's, nothing to read or await.
-            Some(d) if not_a_node(d) => Notification::Other,
-            d => Notification::Changed(d.and_then(|d| change(d, kind("fileDeleted")))),
+            Some(Named::Other) => Notification::Other,
+            _ => Notification::Changed(data.and_then(|d| change(d, kind("fileDeleted")))),
         }
     } else if kind("authenticationError") {
         Notification::Refused(format!("refused: {}", data.as_deref().unwrap_or("")))
@@ -610,17 +619,28 @@ struct KindOnly {
     notification_type: String,
 }
 
-/// The file a drive event announces; `None` if the event doesn't say.
-/// Whether a drive event names a file that isn't a sync node (its type, now or before).
-fn not_a_node(data: &str) -> bool {
-    serde_json::from_str::<DriveEvent>(data).is_ok_and(|e| {
-        e.file_ref
-            .as_ref()
-            .or(e.previous_file_ref.as_ref())
-            .is_some_and(FileRef::not_a_node)
-    })
+/// What kind of file a drive event names, by its type (now, or before).
+enum Named {
+    /// A sync node, or the event doesn't say.
+    Node,
+    /// A share marker.
+    Marker,
+    /// Another app's file.
+    Other,
 }
 
+fn named(data: &str) -> Named {
+    let Ok(event) = serde_json::from_str::<DriveEvent>(data) else {
+        return Named::Node;
+    };
+    match event.file_ref.as_ref().or(event.previous_file_ref.as_ref()) {
+        Some(file) if file.is_marker() => Named::Marker,
+        Some(file) if file.not_a_node() => Named::Other,
+        _ => Named::Node,
+    }
+}
+
+/// The file a drive event announces; `None` if the event doesn't say.
 fn change(data: &str, deleted: bool) -> Option<ChangeRef> {
     match serde_json::from_str::<DriveEvent>(data) {
         Ok(event) => match (event.file_ref, event.previous_file_ref) {
@@ -793,6 +813,8 @@ mod tests {
             )
         };
         assert_eq!(event(100), Notification::Other);
+        // A share marker: neither a node nor nothing.
+        assert_eq!(event(7103), Notification::Markers);
         assert!(matches!(event(7102), Notification::Changed(Some(_))));
         assert!(matches!(event(7101), Notification::Changed(Some(_))));
     }

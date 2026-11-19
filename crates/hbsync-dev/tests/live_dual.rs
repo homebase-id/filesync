@@ -480,7 +480,8 @@ impl Harness {
                     }
                     Event::Changed(None) => unsaid += 1,
                     Event::Lost(why) | Event::Refused(why) => lost.push(why.clone()),
-                    Event::Connected => {}
+                    // (Share markers: none is written here.)
+                    Event::Connected | Event::Markers => {}
                 }
             }
             // Others' writes, each announced? Own ones, each not?

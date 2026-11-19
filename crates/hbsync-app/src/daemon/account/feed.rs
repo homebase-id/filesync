@@ -38,6 +38,10 @@ pub struct Notifications {
     connect_read: bool,
     /// While not connected: the next read of the drive.
     next_read: Instant,
+    /// How often the drive was read for what wasn't announced (as it connected, on the
+    /// timer): what else isn't announced then is read at those times too
+    /// ([`Notifications::unannounced_reads`]).
+    unannounced: u64,
     /// The drive's refusals ([`Drive::refusals`]) when the notifications' try to connect began,
     /// as far as the account sees it (they started, lost or were refused their connection, or
     /// were told to reconnect): one since isn't ended by their connecting.
@@ -61,8 +65,15 @@ impl Notifications {
             connected: None,
             connect_read: false,
             next_read: now + UNANNOUNCED_READ,
+            unannounced: 0,
             trying_since,
         }
+    }
+
+    /// How often the drive was read for what its notifications didn't announce: as they
+    /// connected (at the resume, where paused then), and on the timer while not connected.
+    pub fn unannounced_reads(&self) -> u64 {
+        self.unannounced
     }
 
     /// The notifications are told to connect again.
@@ -112,6 +123,8 @@ impl Notifications {
                 }
                 None
             }
+            // The account's, read by it (who shares is synced): nothing of the drive's feed.
+            Event::Markers => None,
             Event::Lost(why) => {
                 tracing::info!("notifications lost ({why}); reconnecting");
                 self.disconnected(now);
@@ -140,6 +153,7 @@ impl Notifications {
     /// The read that follows connecting.
     fn read_connected(&mut self) {
         self.connect_read = false;
+        self.unannounced += 1;
         self.puller.send(Vec::new(), true, self.connected);
     }
 
@@ -175,6 +189,8 @@ impl Notifications {
         }
         if self.reads_on_a_timer() && now >= self.next_read {
             self.next_read = now + UNANNOUNCED_READ;
+            // (Not counted while the identity refuses the login: the read asks nothing.)
+            self.unannounced += u64::from(self.puller.drive.denied().is_none());
             self.puller.ask();
         }
     }

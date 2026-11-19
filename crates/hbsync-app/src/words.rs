@@ -143,6 +143,14 @@ pub fn rescan_every(secs: u64) -> String {
     }
 }
 
+/// What is told once while what `sharer` shares can't be opened to sync (`why`).
+pub(crate) fn share_unopened(sharer: &crate::Identity, why: &dyn std::fmt::Display) -> String {
+    format!(
+        "What {sharer} shares with you can't be synced yet ({why}). It is tried again by \
+         itself; your own files sync on."
+    )
+}
+
 /// The note told once when an account's state DB was set aside (too old, damaged, or of a
 /// drive made again since) and its folders set up again: the tray's, the log's and setup's.
 pub fn set_aside(why: Unusable) -> String {

@@ -294,6 +294,11 @@ impl FileRef {
     pub(crate) fn not_a_node(&self) -> bool {
         self.file_type.is_some_and(|t| !node_type(t))
     }
+
+    /// Whether the row is a share marker (node schema, "Sync markers").
+    pub(crate) fn is_marker(&self) -> bool {
+        self.file_type == Some(hbsync_types::schema::FILE_TYPE_MARKER)
+    }
 }
 
 impl FileRef {
