@@ -6,8 +6,11 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::path::Path;
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
+use crate::crypto::Envelope;
 use crate::{Client, HomebaseError};
 
 /// A token for one sharer's server, made by it for this identity's connection: it reads there
@@ -42,6 +45,35 @@ impl PeerToken {
     /// retried blindly: a call whose answer is lost may still have left a row there.
     pub fn new(own: &Client, sharer: &str) -> Result<PeerToken, HomebaseError> {
         own.post("/api/v2/peer/notify/token", &json!({ "identity": sharer }))
+    }
+
+    /// Keeps the token at `path`, sealed under `own`'s shared secret (this login's, which the
+    /// keychain holds): the file opens nothing by itself. Written in one step, readable by
+    /// this user only.
+    pub fn keep(&self, own: &Client, path: &Path) -> Result<(), HomebaseError> {
+        let plain = Zeroizing::new(serde_json::to_vec(self)?);
+        let sealed = Envelope::seal(own.key(), &plain)?;
+        hbsync_fileio::write_atomic(path, &serde_json::to_vec(&sealed)?)?;
+        Ok(())
+    }
+
+    /// The token kept at `path` ([`PeerToken::keep`]), if there is one that opens under
+    /// `own`'s login. None was kept, it was kept under another login (signed in again since)
+    /// or the file is damaged: `None`, and a new one is asked for. Only a file that can't be
+    /// read is an error: asking again then would leave a row on their server at every try.
+    pub fn kept(own: &Client, path: &Path) -> Result<Option<PeerToken>, HomebaseError> {
+        let bytes = match std::fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        let Ok(sealed) = serde_json::from_slice::<Envelope>(&bytes) else {
+            return Ok(None);
+        };
+        let Ok(plain) = sealed.open(own.key()).map(Zeroizing::new) else {
+            return Ok(None);
+        };
+        Ok(serde_json::from_slice(&plain).ok())
     }
 }
 
@@ -99,5 +131,63 @@ mod tests {
         .expect("a token");
         assert_eq!(token.token, "dG9rZW4=");
         assert_eq!(format!("{token:?}"), "PeerToken(..)");
+    }
+
+    fn login(shared_secret: &str) -> Client {
+        Client::new(&crate::Credentials {
+            identity: "tom.example".into(),
+            client_auth_token: "dG9rZW4=".into(),
+            shared_secret: shared_secret.into(),
+            zk_app_key: None,
+        })
+        .expect("a client")
+    }
+
+    fn token() -> PeerToken {
+        PeerToken {
+            token: "dGhlaXIgdG9rZW4=".into(),
+            shared_secret: "AQEBAQEBAQEBAQEBAQEBAQ==".into(),
+        }
+    }
+
+    /// A token kept is read back under the same login, and the file shows nothing of it.
+    #[test]
+    fn a_token_kept_opens_under_its_login_and_the_file_shows_nothing() -> Result<(), HomebaseError>
+    {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("token");
+        let own = login("AAAAAAAAAAAAAAAAAAAAAA==");
+        assert_eq!(PeerToken::kept(&own, &path)?, None, "none kept yet");
+        token().keep(&own, &path)?;
+        assert_eq!(PeerToken::kept(&own, &path)?, Some(token()));
+        let file = std::fs::read_to_string(&path)?;
+        assert!(!file.contains(&token().token) && !file.contains(&token().shared_secret));
+        Ok(())
+    }
+
+    /// Another login's token, or a damaged file, is none: a new one is asked for.
+    #[test]
+    fn a_token_of_another_login_or_a_damaged_one_is_none() -> Result<(), HomebaseError> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("token");
+        token().keep(&login("AAAAAAAAAAAAAAAAAAAAAA=="), &path)?;
+        let again = login("AgICAgICAgICAgICAgICAg==");
+        assert_eq!(PeerToken::kept(&again, &path)?, None);
+        for damaged in ["", "{", "{\"iv\":\"x\",\"data\":\"y\"}", "[]"] {
+            std::fs::write(&path, damaged)?;
+            assert_eq!(PeerToken::kept(&again, &path)?, None, "{damaged:?}");
+        }
+        Ok(())
+    }
+
+    /// A file that can't be read is an error, not a reason to ask their server again.
+    #[test]
+    fn a_token_that_cant_be_read_is_an_error() -> Result<(), HomebaseError> {
+        let dir = tempfile::tempdir()?;
+        // A folder where the file would be.
+        let path = dir.path().join("token");
+        std::fs::create_dir(&path)?;
+        assert!(PeerToken::kept(&login("AAAAAAAAAAAAAAAAAAAAAA=="), &path).is_err());
+        Ok(())
     }
 }
