@@ -799,6 +799,7 @@ impl Engine {
             Err(e) => {
                 // Refused: the account asks nothing more until the user acts ([`Drive::deny`]).
                 self.drive.latch(e.refusal(), &e);
+                self.drive.hold(e.retry_after());
                 let tell = !(report.conflicts.is_empty()
                     && report.failed.is_empty()
                     && report.skipped.is_empty()

@@ -63,6 +63,10 @@ pub(crate) struct Showing {
     pub state: State,
     pub why: String,
     pub lacks_key: bool,
+    /// Waiting for the owner's approval of the app ([`FolderStatus::needs_approval`]).
+    ///
+    /// [`FolderStatus::needs_approval`]: crate::protocol::FolderStatus::needs_approval
+    pub needs_approval: bool,
 }
 
 impl Showing {
@@ -88,6 +92,43 @@ impl Showing {
             state: State::Denied,
             why,
             lacks_key: refusal == Refusal::NoKey,
+            needs_approval: false,
+        }
+    }
+
+    /// As [`Showing::failed`], of what another identity shares. It waits
+    /// ([`State::Waiting`]) where this computer's login isn't what stands in the way:
+    /// someone else is waited for (`waiting`: who and what, the failure's own words,
+    /// [`hbsync_engine::EngineError::waiting`]), which is the newest word and shown before
+    /// anything kept; or the refusal in force (this failure's, or one kept through what
+    /// would show offline) is its sharer's server refusing the token it gave, or the app
+    /// wanting the owner's approval. Logging in again lifts none of these, and nothing says
+    /// so. A server only busy shows offline, and this login refused as refused.
+    pub(crate) fn shared(
+        class: ErrorClass,
+        refusal: Option<Refusal>,
+        (waiting, why): (Option<&str>, String),
+        kept: Option<(String, Refusal)>,
+    ) -> Showing {
+        let waits = |why: String, needs_approval| Showing {
+            state: State::Waiting,
+            why,
+            lacks_key: false,
+            needs_approval,
+        };
+        if let Some(who) = waiting {
+            return waits(who.to_owned(), false);
+        }
+        let offline = policy(class).shown == Shown::Offline;
+        let in_force = match refusal {
+            Some(refusal) => Some((why.clone(), refusal)),
+            None => kept.clone().filter(|_| offline),
+        };
+        match in_force {
+            Some((why, refusal)) if !refusal.login_lifts() => {
+                waits(why, refusal == Refusal::Permission)
+            }
+            _ => Showing::failed(class, refusal, why, kept),
         }
     }
 
@@ -97,6 +138,7 @@ impl Showing {
             state,
             why,
             lacks_key: false,
+            needs_approval: false,
         }
     }
 }
@@ -610,6 +652,60 @@ mod tests {
             hbsync_remote::Refusal::Credentials,
         ));
         assert_eq!(shown(denied.class()), State::Denied);
+    }
+
+    /// What another identity shares waits where someone else is waited for (the newest
+    /// word: before a refusal kept), where its sharer's server refuses the token, or where the
+    /// app wants the owner's approval, a kept one of those through what would show offline
+    /// too. A server only busy shows offline; this login refused (its credentials, the
+    /// drive's key) shows refused; any other failure as it would.
+    #[test]
+    fn a_share_waits_where_this_login_isnt_what_is_refused() {
+        use ErrorClass::{Denied, RateLimited, Refused as Odd, Transient};
+        let shared = |class, refusal, waiting, kept: Option<(&str, Refusal)>| {
+            let kept = kept.map(|(why, r)| (why.to_owned(), r));
+            let s = Showing::shared(class, refusal, (waiting, "now".into()), kept);
+            (s.state, s.why, s.needs_approval, s.lacks_key)
+        };
+        let waits = |why: &str, approval| (State::Waiting, why.to_owned(), approval, false);
+        let (token, approval) = (Refusal::Token, Refusal::Permission);
+        assert_eq!(shared(Denied, Some(token), None, None), waits("now", false));
+        assert_eq!(
+            shared(Denied, Some(approval), None, None),
+            waits("now", true)
+        );
+        assert_eq!(
+            shared(RateLimited, None, Some("for tom"), None),
+            waits("for tom", false)
+        );
+        // Someone waited for now, an approval kept from before: given since, or theirs would
+        // not have been asked.
+        assert_eq!(
+            shared(
+                RateLimited,
+                None,
+                Some("for tom"),
+                Some(("not given", approval))
+            ),
+            waits("for tom", false)
+        );
+        // Kept, and nothing answers now: still waiting. Kept, and something else fails: that.
+        assert_eq!(
+            shared(Transient, None, None, Some(("not given", approval))),
+            waits("not given", true)
+        );
+        let failing = shared(Odd, None, None, Some(("not given", approval)));
+        assert_eq!((failing.0, failing.2), (State::Failing, false));
+        // A server only busy, which says nothing of whom to wait for: offline, as ever.
+        let busy = shared(RateLimited, None, None, None);
+        assert_eq!((busy.0, busy.1.as_str()), (State::Offline, "now"));
+        // This login's: refused.
+        for (refusal, key) in [(Refusal::Credentials, false), (Refusal::NoKey, true)] {
+            let refused = shared(Denied, Some(refusal), None, None);
+            assert_eq!(refused, (State::Denied, "now".to_owned(), false, key));
+            let kept = shared(Transient, None, None, Some(("401", refusal)));
+            assert_eq!(kept, (State::Denied, "401".to_owned(), false, key));
+        }
     }
 
     /// A refusal kept shows through what would show offline (a 503 with `Retry-After` too),

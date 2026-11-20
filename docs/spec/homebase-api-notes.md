@@ -558,7 +558,8 @@ server answers the rest, to a token their server made for this identity's connec
   ask again only once their server refuses it (401: unknown, or the connection gone or
   blocked). The own server retries the call to theirs, and an answer lost on the way may still
   have left a row: don't retry blindly. Refusals: not connected here, 400
-  `notAConnectedIdentity`; their server unreachable, 400 with no code (503 from it:
+  `notAConnectedIdentity` (this client then waits an hour, `RemoteError::Waiting`, saying
+  so: no failure, and no token asked of theirs); their server unreachable, 400 with no code (503 from it:
   `remoteServerReturnedUnavailable`); their 400, 400 `invalidGlobalTransitId`; their 500, 400
   `remoteServerReturnedInternalServerError`; their 403 (they disconnected or blocked this
   identity), 403 with no code.
@@ -649,7 +650,7 @@ server answers the rest, to a token their server made for this identity's connec
   live check is the daemon syncing what the chat app shared (**[verified]** 2026-11-20 on
   the dev server: a folder with a subfolder and 20 files, a member's token kept and reused). Refusals: 401 the token (unknown,
   the connection gone, their keys invalid), 403 a file not (or no longer) shared, 404 none
-  there. A share-key answer not sealed yet or not reviewed waits (`RemoteError::Later`, asked
+  there. A share-key answer not sealed yet or not reviewed waits (`RemoteError::Waiting`, asked
   again in 15 minutes); reads never write: every write refuses before a request.
 
 ## Conventions

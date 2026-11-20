@@ -65,7 +65,9 @@ impl EngineError {
     /// When the server said to ask again, if it is busy or paused.
     pub fn retry_after(&self) -> Option<std::time::Duration> {
         match self {
-            EngineError::Stopped(Stopped::Later(_, after)) => Some(*after),
+            EngineError::Stopped(Stopped::Later(_, after) | Stopped::Waiting(_, after)) => {
+                Some(*after)
+            }
             EngineError::Feed(FeedError::Remote(e)) | EngineError::Remote(e)
                 if e.class() == ErrorClass::RateLimited =>
             {
@@ -81,6 +83,17 @@ impl EngineError {
             EngineError::Remote(e) => e.refusal(),
             EngineError::Feed(e) => e.refusal(),
             EngineError::Stopped(Stopped::Denied(_, refusal)) => Some(*refusal),
+            _ => None,
+        }
+    }
+
+    /// Who is waited for and for what, where someone else has to act first
+    /// ([`RemoteError::Waiting`]): what a status says of what another identity shares.
+    pub fn waiting(&self) -> Option<&str> {
+        match self {
+            EngineError::Remote(e) => e.waiting(),
+            EngineError::Feed(e) => e.waiting(),
+            EngineError::Stopped(Stopped::Waiting(why, _)) => Some(why),
             _ => None,
         }
     }

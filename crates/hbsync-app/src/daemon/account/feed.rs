@@ -405,8 +405,10 @@ fn start(
                     |c| mine.announced(c).map_err(|e| e.to_string()),
                     || {
                         // Refused: the drive isn't asked (nor the folders woken to ask it)
-                        // until the user acts or the notifications connect.
-                        if mine.is_denied() {
+                        // until the user acts or the notifications connect. Nor what another
+                        // identity shares while it is put off (its sharer waited for, their
+                        // server busy): the same answer would come, a request each time.
+                        if mine.is_denied() || mine.put_off() {
                             return Ok(false);
                         }
                         match mine.pull(None) {

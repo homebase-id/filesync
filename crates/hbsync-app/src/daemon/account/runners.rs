@@ -320,9 +320,18 @@ impl Markers {
                         );
                         opening.at = Some(now + pause);
                         if !std::mem::replace(&mut opening.told, true) {
+                            // (Who is waited for, where that is all: in those words.)
+                            let waiting = match &e {
+                                RunnerError::Engine(e) => e.waiting(),
+                                _ => None,
+                            };
+                            let why: &dyn std::fmt::Display = match &waiting {
+                                Some(who) => who,
+                                None => &e,
+                            };
                             return vec![match opening.end {
-                                true => crate::words::share_copy_unopened(&sharer, &e),
-                                false => crate::words::share_unopened(&sharer, &e),
+                                true => crate::words::share_copy_unopened(&sharer, why),
+                                false => crate::words::share_unopened(&sharer, why),
                             }];
                         }
                     }

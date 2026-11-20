@@ -4596,6 +4596,30 @@ fn errors_go_through_the_policy() {
         retry_after: Some(Duration::from_secs(60)),
     });
     assert!(matches!(full, Outcome::Full(Some(_))));
+    // Someone waited for stops the run as that, in their words; a refusal with its reason
+    // as it is (the stop says "access denied" itself, once).
+    let waiting = remote_outcome(RemoteError::Waiting {
+        why: "waiting for tom".into(),
+        retry_after: Duration::from_secs(900),
+    });
+    match waiting {
+        Outcome::Stop(stopped @ Stopped::Waiting(..)) => {
+            assert_eq!(stopped.to_string(), "waiting for tom");
+            assert_eq!(stopped.class(), hbsync_remote::ErrorClass::RateLimited);
+            let e = crate::EngineError::from(stopped);
+            assert_eq!(e.waiting(), Some("waiting for tom"));
+            assert_eq!(e.retry_after(), Some(Duration::from_secs(900)));
+        }
+        other => panic!("{other:?}"),
+    }
+    let token = hbsync_remote::Refusal::Token;
+    let refused = remote_outcome(RemoteError::Denied("no more".into(), token));
+    match refused {
+        Outcome::Stop(stopped @ Stopped::Denied(_, hbsync_remote::Refusal::Token)) => {
+            assert_eq!(stopped.to_string(), "access denied: no more");
+        }
+        other => panic!("{other:?}"),
+    }
 }
 
 /// The drive removes a file and a plan here deletes it; before the delete runs, the drive brings

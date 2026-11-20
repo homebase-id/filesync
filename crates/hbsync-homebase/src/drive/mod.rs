@@ -70,6 +70,10 @@ const NO_WRITE_ONLY_KEY: &str =
 /// connection they haven't reviewed) before it is asked about again.
 const SHARER_WAIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
+/// How long a share waits before it asks again where this identity isn't connected to its
+/// sharer: connecting is done by people, in their Homebase.
+const NOT_CONNECTED_WAIT: std::time::Duration = std::time::Duration::from_secs(3600);
+
 /// The largest file uploaded: 50 GiB. Not the server's limit (odin-core counts an upload's
 /// bytes in 64 bits since PR #1932, #1893, **[verified]**), a sanity cap for one upload: it has no resume, so
 /// one that fails is sent again from the start (resumable upload is a tabled odin-core ask). A
@@ -590,7 +594,7 @@ impl HomebaseRemote {
     /// one request to this identity's server (which asks theirs), and one more where the app
     /// may lack the permission to ask ([`HomebaseRemote::reads_shared_now`]).
     ///
-    /// None sealed yet, or the connection not reviewed by them, is [`RemoteError::Later`]: they
+    /// None sealed yet, or the connection not reviewed by them, is [`RemoteError::Waiting`]: they
     /// do it on their own time (a device of theirs seals it when next online). What only the
     /// owner lifts refuses, in this order: a drive without a write-only key that opens
     /// ([`Refusal::NoKey`]: a drive made before them, a grant without the copy, or a drive that
@@ -606,7 +610,7 @@ impl HomebaseRemote {
         let write_only = locked
             .and_then(|(key, locked)| open_write_only(&key, &locked))
             .ok_or_else(no_key)?;
-        let answer = self.ask_peer(permitted, || {
+        let answer = self.ask_peer(&sharer.odin_id, permitted, || {
             SealedKey::ask(&self.client, &sharer.odin_id, circle)
         })?;
         let sealed = sealed_or_wait(answer, &sharer.odin_id)?;
@@ -622,10 +626,10 @@ impl HomebaseRemote {
     /// [`Self::circle_key`] tells it.
     pub(crate) fn peer_token(&self, sharer: &str) -> Result<PeerToken> {
         let permitted = self.key_state(false, |s| Ok(s.reads_shared))?;
-        self.ask_peer(permitted, || PeerToken::new(&self.client, sharer))
+        self.ask_peer(sharer, permitted, || PeerToken::new(&self.client, sharer))
     }
 
-    /// What `ask` answers of another identity's server through this one's, which the app
+    /// What `ask` answers of `sharer`'s server through this one's, which the app
     /// needs a permission for (`permitted`: whether it held it when the context was last
     /// read). Without it the ask is refused ([`Refusal::Permission`]): the context read again
     /// first (right after a reconnect, a second read of it: one request, rarely). A codeless
@@ -633,6 +637,7 @@ impl HomebaseRemote {
     /// read again (unless just read for a permission lacking before), says which.
     fn ask_peer<T>(
         &self,
+        sharer: &str,
         permitted: bool,
         ask: impl FnOnce() -> std::result::Result<T, HomebaseError>,
     ) -> Result<T> {
@@ -642,6 +647,15 @@ impl HomebaseRemote {
         }
         match ask() {
             Ok(answer) => Ok(answer),
+            // Not connected to them (any more): this identity's own answer, before theirs is
+            // asked. Theirs to mend or the owner's, and nothing a retry in minutes changes.
+            Err(e) if not_connected(&e) => Err(RemoteError::Waiting {
+                why: format!(
+                    "not connected to {sharer}: what they share with you can't be read \
+                     until you are"
+                ),
+                retry_after: NOT_CONNECTED_WAIT,
+            }),
             Err(e) if codeless_forbidden(&e) && permitted => match self.reads_shared_now()? {
                 false => Err(not_permitted()),
                 true => Err(remote_error(e)),
@@ -1097,6 +1111,12 @@ impl Remote for HomebaseRemote {
     }
 }
 
+/// This identity's server saying it isn't connected to the one asked of (400
+/// `notAConnectedIdentity`, odin-core `CircleNetworkService`, **[verified]** live 2026-11-19).
+fn not_connected(e: &HomebaseError) -> bool {
+    matches!(e, HomebaseError::Api { error, .. } if error.is("notAConnectedIdentity"))
+}
+
 /// A 403 without a code: on a peer route, the other identity's refusal, or this app's want of
 /// the permission to ask (`Client::whose`).
 fn codeless_forbidden(e: &HomebaseError) -> bool {
@@ -1113,7 +1133,7 @@ fn sealed_or_wait(answer: SealedKey, sharer: &str) -> Result<Vec<u8>> {
         ),
         SealedKey::NotReviewed => format!("waiting for {sharer} to review your connection"),
     };
-    Err(RemoteError::Later {
+    Err(RemoteError::Waiting {
         why,
         retry_after: SHARER_WAIT,
     })
@@ -2104,6 +2124,31 @@ mod tests {
         Ok(())
     }
 
+    /// This identity's server saying it isn't connected to the sharer puts the share off an
+    /// hour, in words that name them: nothing a retry in minutes changes, and no failure.
+    #[test]
+    fn not_connected_to_the_sharer_waits_an_hour_and_says_so() -> Result<(), HomebaseError> {
+        let own = unreachable_remote(KeyState {
+            reads_shared: true,
+            ..KeyState::default()
+        })?;
+        let not_connected = || Err::<(), _>(api(400, Some("notAConnectedIdentity")));
+        match own.ask_peer("sam.example", true, not_connected) {
+            Err(RemoteError::Waiting { why, retry_after }) => {
+                assert!(why.starts_with("not connected to sam.example"), "{why}");
+                assert_eq!(retry_after, NOT_CONNECTED_WAIT);
+            }
+            other => panic!("{other:?}"),
+        }
+        // Another 400 of theirs stays the failure it is.
+        let other = || Err::<(), _>(api(400, Some("invalidGlobalTransitId")));
+        assert!(matches!(
+            own.ask_peer("sam.example", true, other),
+            Err(RemoteError::Fatal(_))
+        ));
+        Ok(())
+    }
+
     /// Only a 403 without a code may be for want of the permission to read shares.
     #[test]
     fn only_a_codeless_403_may_be_the_permission() {
@@ -2126,7 +2171,7 @@ mod tests {
             (SealedKey::NotReviewed, "review your connection"),
         ] {
             match sealed_or_wait(answer, "sam.example") {
-                Err(RemoteError::Later { why, retry_after }) => {
+                Err(RemoteError::Waiting { why, retry_after }) => {
                     assert!(why.contains("sam.example") && why.contains(says), "{why}");
                     assert_eq!(retry_after, SHARER_WAIT);
                 }

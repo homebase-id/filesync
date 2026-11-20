@@ -953,6 +953,16 @@ pub struct Faults {
     /// What `denied` refuses for: the drive private and this login without its key
     /// ([`Refusal::NoKey`]), not the credentials.
     pub deny_key: bool,
+    /// What `denied` refuses for instead, where it is neither: a sharer's server refusing
+    /// its token ([`Refusal::Token`]), the app wanting the owner's approval
+    /// ([`Refusal::Permission`]).
+    pub deny_as: Option<Refusal>,
+    /// Every request is put off with [`RemoteError::Waiting`]: who is waited for, and after
+    /// how long to ask again (a sharer whose device hasn't opened the share to this identity
+    /// yet, say).
+    pub waiting: Option<(String, Duration)>,
+    /// Every request is put off with [`RemoteError::Later`] for this long: a busy server.
+    pub later: Option<Duration>,
     /// Creates, updates, deletes and share changes are refused with [`RemoteError::Denied`]
     /// (the app lost write access to the drive); reads still work.
     pub deny_writes: bool,
@@ -1090,15 +1100,22 @@ impl FakeRemote {
             let mut f = self.faults();
             f.requests += 1;
             if f.denied {
-                let refusal = if f.deny_key {
-                    Refusal::NoKey
-                } else {
-                    Refusal::Credentials
+                let refusal = match f.deny_as {
+                    Some(refusal) => refusal,
+                    None if f.deny_key => Refusal::NoKey,
+                    None => Refusal::Credentials,
                 };
                 return Err(RemoteError::Denied(
                     "injected: not authorized".into(),
                     refusal,
                 ));
+            }
+            if let Some((why, retry_after)) = f.waiting.clone() {
+                return Err(RemoteError::Waiting { why, retry_after });
+            }
+            if let Some(retry_after) = f.later {
+                let why = "injected: busy".into();
+                return Err(RemoteError::Later { why, retry_after });
             }
             let scripted = f.script.pop_front().unwrap_or(false);
             if scripted || f.fail_next > 0 {

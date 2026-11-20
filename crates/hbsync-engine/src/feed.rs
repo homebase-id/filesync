@@ -36,6 +36,24 @@ impl FeedError {
         }
     }
 
+    /// When the remote said to ask again, where it is busy or waits for someone
+    /// ([`RemoteError::retry_after`]; not a drive that is full, as
+    /// [`crate::EngineError::retry_after`]).
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            FeedError::Remote(e) if e.class() == ErrorClass::RateLimited => e.retry_after(),
+            _ => None,
+        }
+    }
+
+    /// Who is waited for, where someone else has to act first ([`RemoteError::waiting`]).
+    pub fn waiting(&self) -> Option<&str> {
+        match self {
+            FeedError::Remote(e) => e.waiting(),
+            FeedError::State(_) => None,
+        }
+    }
+
     /// What it means ([`ErrorClass`]).
     pub fn class(&self) -> ErrorClass {
         match self {

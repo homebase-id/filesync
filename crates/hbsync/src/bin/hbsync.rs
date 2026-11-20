@@ -829,7 +829,9 @@ fn print_folder(s: &FolderStatus) {
     let arrow = if s.sharer.is_some() { "->" } else { "<->" };
     println!("  {who} {arrow} {}", s.path.display());
     // The status line has the progress, the pause, the next try and a failure's problem.
-    if let Some(e) = s.error.as_ref().filter(|_| s.state != State::Failing) {
+    // (As it does who a share waits for.)
+    let said = matches!(s.state, State::Failing | State::Waiting);
+    if let Some(e) = s.error.as_ref().filter(|_| !said) {
         println!("  problem: {e}");
     }
     // The status line says to log in again, and why where it is known: here is how (as the
