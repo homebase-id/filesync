@@ -666,18 +666,11 @@ mod tests {
 
     /// What `sharer` shares, read as its member reads it, on a state DB under `home`.
     fn shared_by(home: &Path, sharer: &str) -> Result<Sharing, Box<dyn std::error::Error>> {
-        use super::super::feed::{Notifications, Puller};
         let db = home.join(sharer).join("state.db");
         std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
         let server = FakeServer::new(ServerConfig::default());
         let drive = Drive::open(&db, "me.example", Arc::new(FakeRemote::member(server)))?;
-        let puller = Puller::spawn(Arc::clone(&drive));
-        let share = Share {
-            sharer: sharer.into(),
-            drive,
-            db,
-            notifications: Notifications::new(puller, Instant::now()),
-        };
+        let share = Share::new(&sharer.into(), drive, db);
         Ok(Sharing::at(share, sharer.to_owned(), &[]).ok_or("no place")?)
     }
 

@@ -601,29 +601,14 @@ impl HomebaseRemote {
         let (locked, permitted) =
             self.key_state(false, |s| Ok((s.write_only()?, s.reads_shared)))?;
         let no_key = || RemoteError::Denied(NO_WRITE_ONLY_KEY.into(), Refusal::NoKey);
-        let not_permitted = || RemoteError::Denied(NOT_PERMITTED.into(), Refusal::Permission);
         // The write-only key first: without one that opens, the permission wouldn't help (and it
-        // costs no request). Without the permission the ask is refused: the context read again
-        // first (right after a reconnect, a second read of it: one request, rarely).
+        // costs no request).
         let write_only = locked
             .and_then(|(key, locked)| open_write_only(&key, &locked))
             .ok_or_else(no_key)?;
-        if !permitted && !self.reads_shared_now()? {
-            return Err(not_permitted());
-        }
-        let answer = match SealedKey::ask(&self.client, &sharer.odin_id, circle) {
-            Ok(answer) => answer,
-            // A codeless 403 is theirs, or the app's want of the permission (`Client::whose`):
-            // the context, read again (unless just read for a permission lacking before), says
-            // which.
-            Err(e) if codeless_forbidden(&e) && permitted => {
-                return match self.reads_shared_now()? {
-                    false => Err(not_permitted()),
-                    true => Err(remote_error(e)),
-                };
-            }
-            Err(e) => return Err(remote_error(e)),
-        };
+        let answer = self.ask_peer(permitted, || {
+            SealedKey::ask(&self.client, &sharer.odin_id, circle)
+        })?;
         let sealed = sealed_or_wait(answer, &sharer.odin_id)?;
         let member = markers::owner_of(self.client.identity());
         CircleKey::unseal(&sealed, &write_only, circle, sharer.drive_alias, &member)
@@ -637,12 +622,26 @@ impl HomebaseRemote {
     /// [`Self::circle_key`] tells it.
     pub(crate) fn peer_token(&self, sharer: &str) -> Result<PeerToken> {
         let permitted = self.key_state(false, |s| Ok(s.reads_shared))?;
+        self.ask_peer(permitted, || PeerToken::new(&self.client, sharer))
+    }
+
+    /// What `ask` answers of another identity's server through this one's, which the app
+    /// needs a permission for (`permitted`: whether it held it when the context was last
+    /// read). Without it the ask is refused ([`Refusal::Permission`]): the context read again
+    /// first (right after a reconnect, a second read of it: one request, rarely). A codeless
+    /// 403 is theirs, or the app's want of the permission (`Client::whose`): the context,
+    /// read again (unless just read for a permission lacking before), says which.
+    fn ask_peer<T>(
+        &self,
+        permitted: bool,
+        ask: impl FnOnce() -> std::result::Result<T, HomebaseError>,
+    ) -> Result<T> {
         let not_permitted = || RemoteError::Denied(NOT_PERMITTED.into(), Refusal::Permission);
         if !permitted && !self.reads_shared_now()? {
             return Err(not_permitted());
         }
-        match PeerToken::new(&self.client, sharer) {
-            Ok(token) => Ok(token),
+        match ask() {
+            Ok(answer) => Ok(answer),
             Err(e) if codeless_forbidden(&e) && permitted => match self.reads_shared_now()? {
                 false => Err(not_permitted()),
                 true => Err(remote_error(e)),
@@ -671,12 +670,12 @@ impl HomebaseRemote {
         // A drive made private since the notifications last connected refuses a login without
         // its key here, before a page that leaves its files out (until they reconnect, a
         // listing can't tell, as the feed can't).
-        self.drive_key(false)?;
+        let private = self.key_state(false, |s| s.key().map(|_| s.private))?;
         // A marker counts only on a private drive (node schema, "Sync markers", Trust): on one
         // that isn't, whoever may write to it could rewrite the owner's marker, whose sender
         // the server keeps. None is read there: nothing is turned on, and what is synced
         // stays as it is.
-        if !self.key_state(false, |s| Ok(s.private))? {
+        if !private {
             return Ok(markers::Markers::untrusted(self.client.identity()));
         }
         read_markers(

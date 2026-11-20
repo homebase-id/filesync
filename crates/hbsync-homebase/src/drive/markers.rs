@@ -241,8 +241,8 @@ fn sharer_of(
 /// Whether `name` (lower case) is a domain name: labels of letters, digits and inner hyphens,
 /// joined by dots, at least two, the last not all digits (an IP address). It becomes a host, so
 /// nothing else passes (no port, no path, no `..`); as a folder's name it is spelled as any
-/// name is on its OS (Windows reserves `nul.example`).
-fn is_domain(name: &str) -> bool {
+/// name is on its OS (Windows reserves `nul.example`). Every [`Sharer`] read is named so.
+pub fn is_domain(name: &str) -> bool {
     let label = |l: &str| {
         (1..=63).contains(&l.len())
             && l.bytes()

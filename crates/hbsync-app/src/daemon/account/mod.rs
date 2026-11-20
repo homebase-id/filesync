@@ -1185,13 +1185,7 @@ mod tests {
     ) -> Result<parts::Share, crate::runner::RunnerError> {
         let member = Arc::new(FakeRemote::member(server.clone()));
         let drive = Drive::open(db, me, member)?;
-        let puller = feed::Puller::spawn(Arc::clone(&drive));
-        Ok(parts::Share {
-            sharer: sharer.clone(),
-            drive,
-            db: db.to_path_buf(),
-            notifications: feed::Notifications::new(puller, std::time::Instant::now()),
-        })
+        Ok(parts::Share::new(sharer, drive, db.to_path_buf()))
     }
 
     /// An identity's share markers, as a test sets them.
@@ -1215,14 +1209,14 @@ mod tests {
     /// `me.example`'s shares by its [`TestMarkers`]: each sharer's drive is the one on
     /// `server` (nothing on it), read as its member reads it.
     #[derive(Debug)]
-    struct ByMarkers {
+    struct FakeSharers {
         markers: Arc<Mutex<TestMarkers>>,
         me: Identity,
         paths: Paths,
         server: Arc<std::sync::Mutex<FakeServer>>,
     }
 
-    impl parts::Sharers for ByMarkers {
+    impl parts::Sharers for FakeSharers {
         fn told(&self, synced: &[Identity]) -> Result<parts::Synced, crate::runner::RunnerError> {
             let mut markers = lock(&self.markers);
             markers.reads += 1;
@@ -1308,7 +1302,7 @@ mod tests {
             let (starting, root) = (paths.clone(), Root::main(&me, folder));
             Started::sharing(&starting, root, move |db| {
                 let drive = Drive::open(db, &me, Arc::new(FakeRemote::new(server.clone())))?;
-                let by = ByMarkers {
+                let by = FakeSharers {
                     markers: told.clone(),
                     me: me.clone(),
                     paths: paths.clone(),

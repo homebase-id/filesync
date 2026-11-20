@@ -31,19 +31,14 @@ use super::{
 use crate::peer::{self, PeerToken};
 use crate::{Client, HomebaseError};
 
-/// One sharer's files shared with this identity, on their server.
 /// How long after a new token was asked for, in place of one their server refused, the next
 /// is: each stays a row on their server, so a server that refuses every one it makes gets one
 /// an hour, not one a request.
 const RENEW_AFTER: Duration = Duration::from_secs(3600);
 
-/// Where a new token comes from when theirs is refused ([`PeerRemote::renewed`]).
-struct Renewal {
-    /// Asks for one, and keeps it.
-    ask: Box<dyn Fn() -> Result<PeerToken> + Send + Sync>,
-    /// When one was last asked for.
-    asked: Mutex<Option<Instant>>,
-}
+/// Where a new token comes from when theirs is refused ([`PeerRemote::renewed`]): asks for
+/// one, and keeps it.
+struct Renewal(Box<dyn Fn() -> Result<PeerToken> + Send + Sync>);
 
 impl std::fmt::Debug for Renewal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -51,12 +46,21 @@ impl std::fmt::Debug for Renewal {
     }
 }
 
+/// Their server with the token held, and when a new one was last asked for in place of one
+/// it refused.
+#[derive(Debug)]
+struct Held {
+    client: Arc<Client>,
+    renewed: Option<Instant>,
+}
+
+/// One sharer's files shared with this identity, on their server.
 #[derive(Debug)]
 pub struct PeerRemote {
     /// Their server, with the token it made for this identity: replaced by one with a new
     /// token when they refuse this one's ([`PeerRemote::renewed`]). An answer is opened with
     /// the client that asked: its token's secret is the key.
-    client: RwLock<Arc<Client>>,
+    held: RwLock<Held>,
     /// This identity's own drive, whose server asks theirs for a circle's key, and whose
     /// write-only key opens it.
     own: Arc<HomebaseRemote>,
@@ -94,7 +98,10 @@ impl PeerRemote {
         token: &PeerToken,
     ) -> Result<PeerRemote, HomebaseError> {
         Ok(PeerRemote {
-            client: RwLock::new(Arc::new(Client::for_peer(&sharer.odin_id, token)?)),
+            held: RwLock::new(Held {
+                client: Arc::new(Client::for_peer(&sharer.odin_id, token)?),
+                renewed: None,
+            }),
             own,
             sharer,
             circles: Mutex::default(),
@@ -116,10 +123,7 @@ impl PeerRemote {
             move || new_token(&own, &sharer, &kept)
         };
         let mut remote = PeerRemote::new(own, sharer, &token).map_err(remote_error)?;
-        remote.renewal = Some(Renewal {
-            ask: Box::new(ask),
-            asked: Mutex::default(),
-        });
+        remote.renewal = Some(Renewal(Box::new(ask)));
         Ok(remote)
     }
 
@@ -132,7 +136,7 @@ impl PeerRemote {
 
     /// Their server, with the token held now.
     fn client(&self) -> Arc<Client> {
-        Arc::clone(&self.client.read().unwrap_or_else(|e| e.into_inner()))
+        Arc::clone(&self.held.read().unwrap_or_else(|e| e.into_inner()).client)
     }
 
     /// What `ask` answers with the token held; where their server refuses that token
@@ -155,28 +159,25 @@ impl PeerRemote {
     /// [`RENEW_AFTER`]. Held while asking: the others wait for the answer, refused as they
     /// would be.
     fn renewed(&self, refused: &Arc<Client>) -> Result<Option<Arc<Client>>> {
-        let mut held = self.client.write().unwrap_or_else(|e| e.into_inner());
-        if !Arc::ptr_eq(&held, refused) {
-            return Ok(Some(Arc::clone(&held)));
+        let mut held = self.held.write().unwrap_or_else(|e| e.into_inner());
+        if !Arc::ptr_eq(&held.client, refused) {
+            return Ok(Some(Arc::clone(&held.client)));
         }
-        let Some(renewal) = &self.renewal else {
+        let Some(Renewal(ask)) = &self.renewal else {
             return Ok(None);
         };
-        {
-            let mut asked = renewal.asked.lock().unwrap_or_else(|e| e.into_inner());
-            if asked.is_some_and(|at| at.elapsed() < RENEW_AFTER) {
-                return Ok(None);
-            }
-            *asked = Some(Instant::now());
+        if held.renewed.is_some_and(|at| at.elapsed() < RENEW_AFTER) {
+            return Ok(None);
         }
-        let token = (renewal.ask)()?;
+        held.renewed = Some(Instant::now());
+        let token = ask()?;
         let client = Client::for_peer(&self.sharer.odin_id, &token).map_err(remote_error)?;
         tracing::info!(
             "{}'s server refused the token it gave: reading with a new one",
             self.sharer.odin_id
         );
-        *held = Arc::new(client);
-        Ok(Some(Arc::clone(&held)))
+        held.client = Arc::new(client);
+        Ok(Some(Arc::clone(&held.client)))
     }
 
     /// Their server's answer as the trait's error: refusing the token (401) is
@@ -258,6 +259,39 @@ impl PeerRemote {
     }
 
     /// Writes nothing: what they share is theirs to change.
+    /// [`Remote::read`], asking as `client`.
+    fn read_with(
+        &self,
+        client: &Client,
+        file_id: RemoteFileId,
+        range: Option<Range<u64>>,
+        sink: &mut dyn Write,
+    ) -> Result<u64> {
+        let header = self.raw_header(client, file_id)?;
+        let circle = self.circle_for(&header)?;
+        let keys = Self::keys(client, circle.as_deref());
+        let key = payload_key(&header, keys)?;
+        let range = match range {
+            Some(r) => r,
+            // The engine always names a range: this opens the content too.
+            None => 0..plain_size(&wire::to_remote(header, keys).map_err(RemoteError::Fatal)?)?,
+        };
+        if range.is_empty() {
+            return Ok(0);
+        }
+        let len = range.end - range.start;
+        let path = format!(
+            "{}/payload/{PAYLOAD_KEY}",
+            file_route(self.sharer.drive_alias, file_id)
+        );
+        let at = CipherRange::of(&range);
+        let response = fetch(client, &path, at.fetch.clone()).map_err(|e| self.error(e))?;
+        if !response.encrypted {
+            return Err(RemoteError::Fatal(format!("{path}: not encrypted")));
+        }
+        decrypt(response, &key, &at, len, &path, sink)
+    }
+
     fn read_only(&self) -> RemoteError {
         RemoteError::read_only(&self.sharer.odin_id)
     }
@@ -336,43 +370,11 @@ impl Remote for PeerRemote {
     }
 }
 
-impl PeerRemote {
-    /// [`Remote::read`], asking as `client`.
-    fn read_with(
-        &self,
-        client: &Client,
-        file_id: RemoteFileId,
-        range: Option<Range<u64>>,
-        sink: &mut dyn Write,
-    ) -> Result<u64> {
-        let header = self.raw_header(client, file_id)?;
-        let circle = self.circle_for(&header)?;
-        let keys = Self::keys(client, circle.as_deref());
-        let key = payload_key(&header, keys)?;
-        let range = match range {
-            Some(r) => r,
-            // The engine always names a range: this opens the content too.
-            None => 0..plain_size(&wire::to_remote(header, keys).map_err(RemoteError::Fatal)?)?,
-        };
-        if range.is_empty() {
-            return Ok(0);
-        }
-        let len = range.end - range.start;
-        let path = format!(
-            "{}/payload/{PAYLOAD_KEY}",
-            file_route(self.sharer.drive_alias, file_id)
-        );
-        let at = CipherRange::of(&range);
-        let response = fetch(client, &path, at.fetch.clone()).map_err(|e| self.error(e))?;
-        if !response.encrypted {
-            return Err(RemoteError::Fatal(format!("{path}: not encrypted")));
-        }
-        decrypt(response, &key, &at, len, &path, sink)
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering::SeqCst;
+
     use super::*;
     use serde_json::json;
 
@@ -467,19 +469,16 @@ mod tests {
 
     /// `sam`, a refused token of whose is replaced by `new` tokens: how often one was asked
     /// for.
-    fn renewing(mut sam: PeerRemote) -> (PeerRemote, Arc<std::sync::atomic::AtomicUsize>) {
-        let asked = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    fn renewing(mut sam: PeerRemote) -> (PeerRemote, Arc<AtomicUsize>) {
+        let asked = Arc::new(AtomicUsize::new(0));
         let count = Arc::clone(&asked);
-        sam.renewal = Some(Renewal {
-            ask: Box::new(move || {
-                count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Ok(PeerToken {
-                    token: "bmV3".into(),
-                    shared_secret: "AQEBAQEBAQEBAQEBAQEBAQ==".into(),
-                })
-            }),
-            asked: Mutex::default(),
-        });
+        sam.renewal = Some(Renewal(Box::new(move || {
+            count.fetch_add(1, SeqCst);
+            Ok(PeerToken {
+                token: "bmV3".into(),
+                shared_secret: "AQEBAQEBAQEBAQEBAQEBAQ==".into(),
+            })
+        })));
         (sam, asked)
     }
 
@@ -500,11 +499,11 @@ mod tests {
         let new = answer.expect("answered with the new token");
         assert_ne!(new, old);
         assert_eq!(sam.login_id(), new);
-        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(asked.load(SeqCst), 1);
         // Held: the next ask goes out with it, nothing asked for.
         let again = sam.with_token(|client| Ok(client.login_id().to_owned()));
         assert_eq!(again.expect("answered"), new);
-        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(asked.load(SeqCst), 1);
         Ok(())
     }
 
@@ -520,7 +519,7 @@ mod tests {
                 Err(RemoteError::Denied(_, Refusal::Token))
             ));
         }
-        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(asked.load(SeqCst), 1);
         Ok(())
     }
 
@@ -538,7 +537,7 @@ mod tests {
             answer,
             Err(RemoteError::Denied(_, Refusal::Permission))
         ));
-        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(asked.load(SeqCst), 0);
         let plain = self::sam()?;
         let (old, mut asks) = (plain.login_id(), 0);
         let answer: Result<()> = plain.with_token(|_| {
@@ -568,7 +567,7 @@ mod tests {
             .expect("taken")
             .expect("the same");
         assert!(Arc::ptr_eq(&first, &second));
-        assert_eq!(asked.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(asked.load(SeqCst), 1);
         Ok(())
     }
 }

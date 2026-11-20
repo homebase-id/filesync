@@ -599,11 +599,11 @@ included (service managers restart it then).
     folder has it) isn't opened: said in the log.
 
   **How a share is opened** (`account/sharers.rs`, `hbsync-homebase` `drive/shared.rs`):
-  - A sharer is who a marker of the owner's names, if that is an identity's address and
-    nothing else (host labels of letters, digits and `-` joined by dots, and a port at most):
-    the name becomes a folder's, that of the share's records
-    (`<state>/accounts/<identity>/shared/<sharer>/`), so anything else isn't synced (said in
-    the log). The identity's marker for itself syncs nothing.
+  - A sharer is who a marker of the owner's names: a domain name and nothing else, which
+    the marker's reading sees to (node schema, "Sync markers": a marker naming anything
+    else doesn't read, nor does the owner's marker for itself sync anything). The name
+    becomes a host, and a folder's: that of the share's records
+    (`<state>/accounts/<identity>/shared/<sharer>/`).
   - Their drive is read on their server with a token it made for this identity's connection,
     asked for through the identity's own server (one request; homebase-api-notes, "Shared
     with you"). Each token asked for stays a row on their server, so it is **kept**: in the

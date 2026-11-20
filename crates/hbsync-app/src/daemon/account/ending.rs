@@ -230,7 +230,8 @@ pub(super) fn is_shares_folder(main: &Path, dir: &Path) -> std::io::Result<bool>
     hbsync_local::shares::Record::read(main)?.is(dir)
 }
 
-/// Removes a share's state DB at `db`, with the directory this account keeps it in.
+/// Removes a share's state DB at `db`, with the directory this account keeps it in
+/// ([`crate::Paths::shared_dir`]: the sharer's token, kept beside it, goes with it).
 fn remove_records(db: &Path) -> Result<(), String> {
     let dir = db.parent().ok_or("its records have no place")?;
     remove(dir, true).map_err(|e| e.to_string())
@@ -320,8 +321,6 @@ mod tests {
     use hbsync_local::shares::{Made, make};
     use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 
-    use super::super::feed::{Notifications, Puller};
-
     type R = Result<(), Box<dyn std::error::Error>>;
 
     /// What `me` reads of a sharer's (empty) drive, on the state DB `db`; or (`own`) its own.
@@ -333,13 +332,7 @@ mod tests {
         };
         std::fs::create_dir_all(db.parent().ok_or("no parent")?)?;
         let drive = Drive::open(db, me, Arc::new(remote))?;
-        let puller = Puller::spawn(Arc::clone(&drive));
-        Ok(Share {
-            sharer: "tom.example".into(),
-            drive,
-            db: db.to_path_buf(),
-            notifications: Notifications::new(puller, std::time::Instant::now()),
-        })
+        Ok(Share::new(&"tom.example".into(), drive, db.to_path_buf()))
     }
 
     /// The share's records made (its DB opened once), with nothing left open.
