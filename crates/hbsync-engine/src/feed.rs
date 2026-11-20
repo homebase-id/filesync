@@ -183,14 +183,14 @@ fn read_pages<G: DerefMut<Target = StateDb>>(
     // short of the new one: the whole page that follows then starts on known rows).
     let mut known_rows: Option<usize> = None;
     loop {
-        let cursor = db().read(|s| s.account_kv(keys::REMOTE_CURSOR))?;
+        let (cursor, share_end) =
+            db().read(|s| Ok((s.account_kv(keys::REMOTE_CURSOR)?, s.share_end()?)))?;
         let cursor = cursor.as_deref();
-        // What another identity shares is read whole (but in a re-read, which only asks
-        // what is still there): a file in the feed again at the version known is a share
-        // given or changed, and only its header says until when (`mirror::apply` keeps it).
-        // An empty page costs the same either way.
-        let whole_only = remote.shared() && reread.is_none();
-        let page = if !whole_only && *slim.get_or_insert(cursor.is_some()) {
+        // What another identity shares is read whole, never the refs first: only a header
+        // says until when its file is shared (`mirror::apply` keeps the earliest), and a
+        // share given or changed puts the file in the feed again at the version known.
+        // In a re-read too, which so reads every end anew. An empty page costs the same.
+        let page = if !remote.shared() && *slim.get_or_insert(cursor.is_some()) {
             let rows = known_rows.unwrap_or(slim_rows);
             Page::Slim(with_retries(|| remote.change_refs(cursor, rows))?)
         } else {
@@ -201,30 +201,18 @@ fn read_pages<G: DerefMut<Target = StateDb>>(
         if let Some(r) = reread.as_mut() {
             r.since.get_or_insert(now);
         }
-        if let Some(from) = away_from.take()
-            && now.saturating_sub(from) > REREAD_MS
-        {
+        // Read from its beginning instead: away too long; or a share that was read ended
+        // (another identity's drive: the server wrote nothing as it did, so nothing after
+        // the cursor says so, and from its beginning the feed shows the file as one no
+        // longer shared, sync semantics §13). The second also where a re-read is on its
+        // way: it began before the end.
+        let away = away_from
+            .take()
+            .is_some_and(|from| now.saturating_sub(from) > REREAD_MS);
+        if away || share_end.is_some_and(|end| end <= now) {
             *reread = Some(Reread {
                 since: Some(now),
                 ..db().write(|s| Reread::begin(s.account()))?
-            });
-            slim = None;
-            continue;
-        }
-        // A share that ended since it was last read (another identity's drive): the server
-        // wrote nothing as it did, so nothing in the feed after the cursor says so. Read
-        // from its beginning, the feed shows the file as one no longer shared (sync
-        // semantics §13). Also where a re-read is on its way: it began before the end.
-        // (Looked up without a write: nearly every page finds none.)
-        let ended = |ends: Vec<i64>| ends.first().is_some_and(|&end| end <= now);
-        if db().read(|s| s.share_ends().map(ended))? {
-            let begun = db().write(|s| {
-                s.account().take_share_ends(now)?;
-                Reread::begin(s.account())
-            })?;
-            *reread = Some(Reread {
-                since: Some(now),
-                ..begun
             });
             slim = None;
             continue;

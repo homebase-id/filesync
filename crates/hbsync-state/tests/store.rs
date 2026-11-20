@@ -1091,45 +1091,26 @@ mod mirror {
         Ok(())
     }
 
-    /// The ends of shares are kept by the whole minute they end by, earliest first, each once,
-    /// and only so many; one that has passed is taken, once.
+    /// The earliest end of the shares read is kept, as the whole minute it ends by, until the
+    /// feed is read from its beginning (which reads every end anew).
     #[test]
-    fn the_ends_of_shares_are_kept_by_the_minute_and_taken_once_passed() -> R {
+    fn the_first_end_of_the_shares_read_is_kept_until_a_reread() -> R {
         const MINUTE: i64 = 60_000;
         let mut db = StateDb::open_in_memory()?;
-        assert!(db.read(|s| s.share_ends())?.is_empty());
-        assert!(!db.write(|s| s.account().take_share_ends(i64::MAX))?);
-        db.write(|s| {
-            // Out of order, two in one minute, one on the minute.
-            for end in [5 * MINUTE + 1, 2 * MINUTE, 5 * MINUTE + 30_000, MINUTE + 1] {
-                s.account().note_share_end(end)?;
-            }
-            Ok(())
-        })?;
-        let kept = [2 * MINUTE, 6 * MINUTE];
-        assert_eq!(db.read(|s| s.share_ends())?, kept);
-        // Not before its time; at it, taken, and not again.
-        assert!(!db.write(|s| s.account().take_share_ends(2 * MINUTE - 1))?);
-        assert!(db.write(|s| s.account().take_share_ends(2 * MINUTE))?);
-        assert_eq!(db.read(|s| s.share_ends())?, [6 * MINUTE]);
-        assert!(!db.write(|s| s.account().take_share_ends(2 * MINUTE))?);
-        assert!(db.write(|s| s.account().take_share_ends(i64::MAX))?);
-        assert!(db.read(|s| s.share_ends())?.is_empty());
-
-        // The earliest are kept: a later one than fits is left out, an earlier one pushes
-        // the last out.
-        db.write(|s| {
-            for minute in 10..200 {
-                s.account().note_share_end(minute * MINUTE)?;
-            }
-            s.account().note_share_end(3 * MINUTE)
-        })?;
-        let kept = db.read(|s| s.share_ends())?;
-        assert_eq!(kept.len(), 64);
-        assert_eq!(
-            (kept[0], kept[1], kept[63]),
-            (3 * MINUTE, 10 * MINUTE, 72 * MINUTE)
-        );
+        assert_eq!(db.read(|s| s.share_end())?, None);
+        let mut note = |end: i64| -> Result<Option<i64>, StateError> {
+            db.write(|s| s.account().note_share_end(end))?;
+            db.read(|s| s.share_end())
+        };
+        // Up to the whole minute; one on the minute is that minute.
+        assert_eq!(note(5 * MINUTE + 1)?, Some(6 * MINUTE));
+        // A later one changes nothing; an earlier one is the first now.
+        assert_eq!(note(9 * MINUTE)?, Some(6 * MINUTE));
+        assert_eq!(note(2 * MINUTE)?, Some(2 * MINUTE));
+        assert_eq!(note(2 * MINUTE + 1)?, Some(2 * MINUTE));
+        // A re-read learns them anew.
+        db.write(|s| s.account().start_reread())?;
+        assert_eq!(db.read(|s| s.share_end())?, None);
         Ok(())
     }
 

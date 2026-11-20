@@ -34,6 +34,9 @@ fn share_for(a: &Client, server: &Server, name: &str, ms: i64) -> R {
     Ok(())
 }
 
+/// A minute of the server's clock, which a share's end is asked by.
+const MINUTE: i64 = 60_000;
+
 /// The server's clock moves on by `ms`.
 fn later(server: &Server, ms: i64) -> R {
     server.lock().map_err(|_| "poisoned")?.advance(ms);
@@ -148,7 +151,6 @@ fn a_share_given_again_brings_the_file_back() -> R {
 /// end stays; nothing is asked before the time; and the share given again brings it back.
 #[test]
 fn a_share_that_reached_its_end_takes_the_file_off_this_device() -> R {
-    const MINUTE: i64 = 60_000;
     let server = server();
     let mut a = Client::new(&server, "a")?;
     a.write("stay.txt", "stay")?;
@@ -174,11 +176,8 @@ fn a_share_that_reached_its_end_takes_the_file_off_this_device() -> R {
     b.sync()?;
     assert_eq!(b.tree_text(""), all);
 
-    // Past it: nothing was written to the drive (its feed ends where it did), and the
-    // member's next sync finds them gone.
-    let feed = hbsync_remote::feed_end(&a.remote, None)?;
+    // Past it (nothing was written to the drive): the member's next sync finds them gone.
     later(&server, 6 * MINUTE)?;
-    assert_eq!(hbsync_remote::feed_end(&a.remote, None)?, feed);
     b.sync()?;
     assert_eq!(b.tree_text(""), ["stay.txt = stay"]);
     nothing_moved_out(&out)?;
@@ -198,7 +197,6 @@ fn a_share_that_reached_its_end_takes_the_file_off_this_device() -> R {
 /// anew after the last one passed, before the member looked.
 #[test]
 fn an_end_given_to_a_share_later_is_learned() -> R {
-    const MINUTE: i64 = 60_000;
     let server = server();
     let mut a = Client::new(&server, "a")?;
     a.write("doc.txt", "doc")?;
@@ -217,6 +215,33 @@ fn an_end_given_to_a_share_later_is_learned() -> R {
     b.sync()?;
     assert_eq!(b.tree_text(""), ["doc.txt = doc"]);
     later(&server, 11 * MINUTE)?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), Vec::<String>::new());
+    nothing_moved_out(&out)
+}
+
+/// An end changed to an earlier one isn't lost where another share's end is what the member
+/// finds first: reading the feed from its beginning reads every header, and with it every
+/// end as it is now.
+#[test]
+fn an_end_made_earlier_is_learned_by_the_read_another_end_starts() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("long.txt", "long")?;
+    a.write("short.txt", "short")?;
+    a.sync()?;
+    share_for(&a, &server, "long.txt", 30 * MINUTE)?;
+    share_for(&a, &server, "short.txt", 5 * MINUTE)?;
+    let (mut b, out) = Client::member(&server, "b")?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["long.txt = long", "short.txt = short"]);
+
+    // The long one is to end sooner; before the member looks, the short one ends.
+    share_for(&a, &server, "long.txt", 10 * MINUTE)?;
+    later(&server, 6 * MINUTE)?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["long.txt = long"]);
+    later(&server, 5 * MINUTE)?;
     b.sync()?;
     assert_eq!(b.tree_text(""), Vec::<String>::new());
     nothing_moved_out(&out)
