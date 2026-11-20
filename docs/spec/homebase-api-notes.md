@@ -103,7 +103,23 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   nothing (`CircleMembershipService.CreateAppCircleAsync`); without a slug every call makes a
   new circle. Circles made before had slugs made from their names (`CircleSlugGenerator`:
   "Filesync" is `filesync`, a second one `filesync-2`). Filesync's circle (`filesync`) grants
-  Read on its drive and starts empty.
+  Read, React and Comment on its drive (13) and starts empty; for that the app asks for all
+  four on the drive (15): a circle is given no more than the app holds
+  (`AssertRegistrationMayGrantDrivesAsync` at install, where the owner console has made the
+  drive, owned by the app, just before; `AssertAppMayGrantDrivesAsync` for `circles/create`,
+  **[verified]**). The chat app's Drive asks for the drive and declares the circle the same
+  way (it asks for no permission key at install, this client for 305), and shares only at an
+  access the circle grants. An install made by this client before 2026-11-20 holds Read and
+  Write and has a circle with Read (or none, from before circles were declared: this
+  client's `circles/create` at setup is refused then, as the app holds less than the circle
+  is to give, said in the log). Neither changes at a sign-in. The drive's grant is the
+  owner's to widen, on `/owner/appupdate` with `d` (the page replaces the app's grant on that
+  drive by the one asked for, **[verified]** in odin-js `ExtendAppPermissions.tsx`) or on the
+  app's page in the console. The circle's is the owner's too, in the console; or the app,
+  once it holds the access, deletes the circle and makes it again (`circles/delete`: an app
+  may delete a circle it owns, refused while it has members unless asked with
+  `removeMembers`, **[verified]**), under a new id: what was kept by the old one (a circle's
+  sealed key, share rows) no longer fits.
 - **Permission keys** **[verified]**: registration asks for them in `p`, numbers joined by
   commas (odin-js `permissionParamToPermissionSet`); an installed app gets no more at a sign-in
   (`YouAuthUnifiedService.AppNeedsRegistration` is false once registered), only on
