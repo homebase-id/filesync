@@ -183,12 +183,13 @@ fn read_pages<G: DerefMut<Target = StateDb>>(
     // as the server returned them (a row filtered out for this client may make the read stop
     // short of the new one: the whole page that follows then starts on known rows).
     let mut known_rows: Option<usize> = None;
+    let mut first_page = true;
     loop {
         let (cursor, share_end) =
             db().read(|s| Ok((s.account_kv(keys::REMOTE_CURSOR)?, s.share_end()?)))?;
         let cursor = cursor.as_deref();
         // What another identity shares is read whole, never the refs first: only a header
-        // says until when its file is shared (`mirror::apply` keeps the earliest), and a
+        // says until when its file is shared ([`note_share_end`] keeps the earliest), and a
         // share given or changed puts the file in the feed again at the version known.
         // In a re-read too, which so reads every end anew. An empty page costs the same.
         let page = if !remote.shared() && *slim.get_or_insert(cursor.is_some()) {
@@ -205,13 +206,15 @@ fn read_pages<G: DerefMut<Target = StateDb>>(
         // Read from its beginning instead: away too long; or a share that was read ended
         // (another identity's drive: the server wrote nothing as it did, so nothing after
         // the cursor says so, and from its beginning the feed shows the file as one no
-        // longer shared, sync semantics §13). Not for an end while a re-read is on its
-        // way: that one is read to its end first, and the next pull starts another (a
-        // pull so always gets somewhere, however many shares end one after the other).
+        // longer shared, sync semantics §13). For an end only at a pull's first page: one
+        // that passes while the pages are read waits for the next pull, so a pull always
+        // gets to the feed's end, however many shares end one after the other. A re-read
+        // left open by an earlier pull (a file it asks about can't be answered) is
+        // started over for it all the same: it began before the end.
         let away = away_from
             .take()
             .is_some_and(|from| now.saturating_sub(from) > REREAD_MS);
-        let ended = reread.is_none() && share_end.is_some_and(|end| end <= now);
+        let ended = std::mem::take(&mut first_page) && share_end.is_some_and(|end| end <= now);
         if away || ended {
             *reread = Some(Reread {
                 since: Some(now),

@@ -1569,9 +1569,11 @@ rules hold too:
   a node says its end all the same (`Skipped::expires`).
   Only an end still to come is kept: a row the drive shows as shared ends after the time of
   its answer, so one that doesn't is the server's mistake, and asking for it would read the
-  whole feed at every pull. And a re-read on its way isn't started over for an end that
-  passes meanwhile: it is read to its end, and the next pull starts another, so a pull
-  always gets somewhere, however many shares end one after the other.
+  whole feed at every pull. And the feed is started over for an end only at a pull's
+  first page: an end that passes while the pages are read waits for the next pull, so a
+  pull always gets to the feed's end, however many shares end one after the other, and a
+  re-read an earlier pull left open (a file it asks about can't be answered) doesn't keep
+  an end from being asked for.
   What it costs: an idle read costs what it did; a read that brings changes saves the
   request for the refs; a page of rows the member has costs their headers (about 2.5 kB a
   row for 0.6, and less than 1.8 for 0.5 where the sharer changes a file whose share ended,
