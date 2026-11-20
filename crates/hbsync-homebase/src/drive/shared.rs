@@ -205,7 +205,8 @@ impl PeerRemote {
     /// for: this remote has nowhere to ask ([`PeerRemote::new`]), or it asked within
     /// [`RENEW_AFTER`] (in this run: a start doesn't know of the last one's). An ask that
     /// this identity's own server refused ([`RemoteError::Denied`]: this login, or the app's
-    /// permission) made no token, and doesn't count as one asked for; any other failure
+    /// permission) or put off ([`RemoteError::Waiting`]: not connected to them) made no
+    /// token, and doesn't count as one asked for; any other failure
     /// (their server's refusal to give one too) may have left a row there, and does. Held
     /// while asking: the others wait for the answer, refused as they would be.
     fn renewed(&self, refused: &Arc<Client>) -> Result<Option<Arc<Client>>> {
@@ -283,10 +284,13 @@ impl PeerRemote {
         if !header.needs_circle_key() {
             return Ok(None);
         }
-        let circle = header.share_circle().ok_or_else(|| RemoteError::Later {
+        // (Theirs to mend, and lasting until they do: waited for, in words, not a busy
+        // server's "come back later".)
+        let circle = header.share_circle().ok_or_else(|| RemoteError::Waiting {
             why: format!(
-                "file {}: shared with you, but through no circle it names",
-                header.file_id
+                "waiting for {}: a file of theirs is shared with you, but through no circle \
+                 it names (file {})",
+                self.sharer.odin_id, header.file_id
             ),
             retry_after: SHARER_WAIT,
         })?;
@@ -502,7 +506,9 @@ mod tests {
                 "shares": shares,
             }))?;
             match sam.to_remote(&sam.client(), header) {
-                Err(RemoteError::Later { why, .. }) => assert!(why.contains("no circle"), "{why}"),
+                Err(RemoteError::Waiting { why, .. }) => {
+                    assert!(why.contains("no circle"), "{why}")
+                }
                 other => panic!("{other:?}"),
             }
         }

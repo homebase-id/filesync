@@ -594,7 +594,7 @@ impl HomebaseRemote {
     /// one request to this identity's server (which asks theirs), and one more where the app
     /// may lack the permission to ask ([`HomebaseRemote::reads_shared_now`]).
     ///
-    /// None sealed yet, or the connection not reviewed by them, is [`RemoteError::Later`]: they
+    /// None sealed yet, or the connection not reviewed by them, is [`RemoteError::Waiting`]: they
     /// do it on their own time (a device of theirs seals it when next online). What only the
     /// owner lifts refuses, in this order: a drive without a write-only key that opens
     /// ([`Refusal::NoKey`]: a drive made before them, a grant without the copy, or a drive that

@@ -2250,8 +2250,17 @@ fn a_share_waits_where_its_login_isnt_what_is_refused() -> R {
         "Waiting for sharer.example to review your connection"
     );
     assert!(s.retry_at.is_some(), "tried again by itself");
-    // Nothing reads their drive on a timer meanwhile: the same answer would come.
+    // Nothing reads their drive on a timer meanwhile: the same answer would come. (Waking
+    // asks once, as it does for every folder.)
     assert!(b.drive.put_off());
+    let asked = b.remote.faults().requests;
+    let puller = b.puller();
+    for _ in 0..3 {
+        puller.ask();
+    }
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(b.remote.faults().requests, asked, "asked while put off");
+    assert_eq!(b.status().state, State::Waiting);
     b.remote.faults().waiting = None;
     syncs_again()?;
     assert!(!b.drive.put_off());

@@ -266,6 +266,7 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
         // What others share that waits for them, or for the owner: said here, as the status
         // line is the main folder's while that is fine (not the one the status line is of).
         let shown = view.daemon.most_urgent().map(|f| &f.path);
+        let shown = shown.filter(|_| view.busy.is_none());
         for share in view.daemon.waiting_shares(&s.identity) {
             if Some(&share.path) != shown {
                 items.push(Item::Label(cut(&words::waiting(share))));

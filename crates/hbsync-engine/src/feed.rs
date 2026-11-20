@@ -36,11 +36,13 @@ impl FeedError {
         }
     }
 
-    /// When the remote said to ask again, if it did ([`RemoteError::retry_after`]).
+    /// When the remote said to ask again, where it is busy or waits for someone
+    /// ([`RemoteError::retry_after`]; not a drive that is full, as
+    /// [`crate::EngineError::retry_after`]).
     pub fn retry_after(&self) -> Option<std::time::Duration> {
         match self {
-            FeedError::Remote(e) => e.retry_after(),
-            FeedError::State(_) => None,
+            FeedError::Remote(e) if e.class() == ErrorClass::RateLimited => e.retry_after(),
+            _ => None,
         }
     }
 
