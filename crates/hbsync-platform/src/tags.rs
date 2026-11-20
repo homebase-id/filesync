@@ -89,17 +89,6 @@ impl Tags {
         self.0.iter().map(|t| t.name.len() + 16).sum::<usize>() <= MAX_BYTES
     }
 
-    /// The tags both have, as in `self`.
-    pub fn intersection(&self, other: &Tags) -> Tags {
-        Tags(
-            self.0
-                .iter()
-                .filter(|t| other.get(&t.name) == Some(t))
-                .cloned()
-                .collect(),
-        )
-    }
-
     /// The tags here that `other` holds too, by name, as here: what stays agreed of a base's
     /// tags once the drive holds the node as another file, with `other`
     /// (sync-semantics §11, a node made again).
@@ -529,10 +518,6 @@ mod tests {
         // Whoever wrote them: names in NFC, and a colour Finder doesn't have is none.
         let odd = tags(&[("e\u{301}", 9)]);
         assert_eq!(odd, tags(&[("\u{e9}", 0)]));
-        assert_eq!(
-            t.intersection(&tags(&[("a", 0), ("b", 2)])),
-            tags(&[("a", 0)])
-        );
     }
 
     #[test]

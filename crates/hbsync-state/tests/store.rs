@@ -1763,18 +1763,35 @@ fn a_node_made_again_leaves_the_base_only_the_tags_its_new_file_has() -> R {
             s.folder().put_base(&untagged)
         })?;
     }
-    let again = RemoteFileId(Uuid::new_v4());
+    // The drive's row of `node` as file `file_id`, with `tags`.
+    let drive = |node: NodeId, file_id: RemoteFileId, tags: &Tags| {
+        let mut content = hbsync_types::schema::NodeContent::folder("Shared");
+        content.set_tags(tags);
+        let at = RemoteRef {
+            file_id,
+            ..remote()
+        };
+        hbsync_state::MirrorRow::from_content(
+            at,
+            node,
+            NodeId::ROOT,
+            NodeKind::Folder,
+            &content,
+            None,
+        )
+    };
+    let (again, none) = (RemoteFileId(Uuid::new_v4()), Tags::default());
     // Its own file, with fewer tags (the drive's removal): the base stays.
     main.write(|s| {
         s.account()
-            .made_again(row.node, row.remote.file_id, &Tags::default())
+            .made_again(&drive(row.node, row.remote.file_id, &none))
     })?;
     assert_eq!(main.read(|s| s.get_base(row.node))?, Some(row.clone()));
     // Another file, with one of the two, in another colour, and one more.
     let held = Tags::new([Tag::new("Red", 2), Tag::new("New", 0)]);
     main.write(|s| {
-        s.account().made_again(row.node, again, &held)?;
-        s.account().made_again(untagged.node, again, &held)
+        s.account().made_again(&drive(row.node, again, &held))?;
+        s.account().made_again(&drive(untagged.node, again, &held))
     })?;
     let mut narrowed = row.clone();
     narrowed.state.tags = Tags::new([red]);
@@ -1789,11 +1806,11 @@ fn a_node_made_again_leaves_the_base_only_the_tags_its_new_file_has() -> R {
     let gone = RemoteFileId(Uuid::new_v4());
     main.write(|s| {
         s.account().forget_file(gone, None)?;
-        s.account().made_again(row.node, gone, &Tags::default())
+        s.account().made_again(&drive(row.node, gone, &none))
     })?;
     assert_eq!(main.read(|s| s.get_base(row.node))?, Some(narrowed.clone()));
     // With none of them: none agreed.
-    main.write(|s| s.account().made_again(row.node, again, &Tags::default()))?;
+    main.write(|s| s.account().made_again(&drive(row.node, again, &none)))?;
     narrowed.state.tags = Tags::default();
     assert_eq!(docs_db.read(|s| s.get_base(row.node))?, Some(narrowed));
     Ok(())

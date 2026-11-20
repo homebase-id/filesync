@@ -1200,9 +1200,9 @@ fn regression_an_unhashed_orphan_keeps_its_tags() {
 /// folders, and was gone everywhere.)
 #[test]
 fn regression_a_tag_stays_where_its_folder_is_made_again_without_it() {
+    use super::{act, settle};
     use Action::*;
     use Event::{Plan, Step};
-    let act = |client, action| Event::Act { client, action };
     let work = Some(vec!["Work:0".to_owned()]);
     let mut sim = Sim::new(3);
     let root = sim.pick(0, NodeId::ROOT, true).expect("the root");
@@ -1238,8 +1238,7 @@ fn regression_a_tag_stays_where_its_folder_is_made_again_without_it() {
         Step { client: 2 },
     ]);
     assert_eq!(sim.server_tags("a"), Some(Vec::new()));
-    assert!(sim.quiesce(10));
-    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    settle(&mut sim);
     assert_eq!(sim.server_tags("a"), work);
     assert_eq!(sim.local_tags(0, "a"), work);
     assert_eq!(sim.local_tags(1, "a"), work);

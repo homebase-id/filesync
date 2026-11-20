@@ -87,37 +87,37 @@ impl ReadTx<'_> {
 }
 
 impl AccountTx<'_> {
-    /// The drive holds `node` as file `file_id`, with `tags`: where that isn't the file a
-    /// folder's base of it was agreed with (deleted for good and made again, by a device that
-    /// may never have seen the tags the old one held), the tags the new file lacks are agreed
-    /// no more, in every folder's base ([`Tags::held_in`]). An item that holds one then reads
-    /// as having added it, and sends it up; left in the base, its absence on the drive read as
-    /// a removal there, and took it off the item (sync semantics §11). A file deleted for good
-    /// changes nothing (a page fetched before: the mirror doesn't take it either). One read by
-    /// the node's key; more only where such a base has a tag.
-    pub fn made_again(&self, node: NodeId, file_id: RemoteFileId, tags: &Tags) -> Result<()> {
-        let agreed: Vec<(i64, i64, String)> = self
-            .prep(
-                "SELECT b.folder, b.id, b.tags FROM base b JOIN nodes n ON n.id = b.id \
-                 WHERE n.uuid = ?1 AND b.remote_file_id != ?2 AND b.tags IS NOT NULL",
-            )?
-            .query_map(params![node.0.as_bytes(), file_id.0.as_bytes()], |r| {
-                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            })?
-            .collect::<rusqlite::Result<_>>()?;
-        if agreed.is_empty() || self.file_gone(file_id)? {
+    /// The picture takes `row`, a file new to it: where that isn't the file a folder's base of
+    /// its node was agreed with (deleted for good and made again, by a device that may never
+    /// have seen the tags the old one held), the tags the new file lacks are agreed no more, in
+    /// every folder's base ([`Tags::held_in`]). An item that holds one then reads as having
+    /// added it, and sends it up; left in the base, its absence on the drive read as a removal
+    /// there, and took it off the item (sync semantics §11). A file deleted for good changes
+    /// nothing (a page fetched before: the mirror doesn't take it either). One read by the
+    /// node's key; more (the row's tags read, the write) only where such a base has a tag.
+    pub fn made_again(&self, row: &MirrorRow) -> Result<()> {
+        // (Written out, not formatted with `ID_OF`: once for every file new to the picture.)
+        let agreed = self.many(
+            "SELECT folder, tags FROM base WHERE id = (SELECT id FROM nodes WHERE uuid = ?1) \
+             AND remote_file_id != ?2 AND tags IS NOT NULL",
+            params![row.node.0.as_bytes(), row.file_id.0.as_bytes()],
+            |r| Ok((r.get::<_, i64>(0)?, tags_from_str(&r.get::<_, String>(1)?))),
+        )?;
+        if agreed.is_empty() || self.file_gone(row.file_id)? {
             return Ok(());
         }
-        for (folder, id, was) in agreed {
-            let was = tags_from_str(&was);
-            let held = was.held_in(tags);
+        let tags = row.tags();
+        for (folder, was) in agreed {
+            let held = was.held_in(&tags);
             if held != was {
-                self.prep("UPDATE base SET tags = ?3 WHERE folder = ?1 AND id = ?2")?
-                    .execute(params![
-                        folder,
-                        id,
-                        (!held.is_empty()).then(|| tags_to_string(&held)),
-                    ])?;
+                self.prep(&format!(
+                    "UPDATE base SET tags = ?3 WHERE folder = ?2 AND id = {ID_OF}"
+                ))?
+                .execute(params![
+                    row.node.0.as_bytes(),
+                    folder,
+                    (!held.is_empty()).then(|| tags_to_string(&held)),
+                ])?;
             }
         }
         Ok(())

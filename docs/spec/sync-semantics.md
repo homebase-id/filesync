@@ -1346,10 +1346,6 @@ That loses a removal, not a tag.
   add. (A conflict copy no longer leads here: its wanted base settles from the drive's tags,
   §5.)
 
-(A third, *added back to the base*, ended with "A node made again" above: a tag removed and
-added back here matches the base, so nothing goes up, and where the node was deleted and made
-again without it meanwhile, the drive's state came down over the add.)
-
 Two lose a removal (the tag comes back):
 - *Own tag write in flight*: a tag removed while this device's plan still writes it (onto the
   item, or up): the write, planned before, lands over the removal. A colour given then is lost

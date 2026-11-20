@@ -62,7 +62,7 @@ pub fn apply(s: AccountTx<'_>, header: &RemoteHeader) -> Result<Applied, StateEr
     // A file new to the picture: where it isn't the one a base of the node was agreed with, the
     // node was made again, and what the new file lacks of the base's tags is no removal (§11).
     if known.is_none() {
-        s.made_again(row.node, row.file_id, &row.tags())?;
+        s.made_again(&row)?;
     }
     if header.removed {
         // Out of the tree for the reconciler, as a tombstone is; restorable meanwhile; its time

@@ -1200,9 +1200,7 @@ impl Sim {
                 .map(|n| &n.state),
         );
         // The add restores what the base holds while its own removal is still to land
-        // (`Limit::OwnRemovalInFlight`). With none on its way nothing goes up, and the add
-        // stands: a node made again without the tag meanwhile leaves the base without it
-        // (`Sim::made_again`, §11).
+        // (`Limit::OwnRemovalInFlight`).
         let own = (synced && planned(client)).then_some(Limit::OwnRemovalInFlight);
         (pending || (synced && stale), own)
     }
