@@ -76,20 +76,28 @@ pub struct PeerRemote {
 }
 
 /// `sharer`'s server with a new token asked for through `own`
-/// ([`HomebaseRemote::peer_token`]), kept at `kept`. Only a token that makes a client is
-/// kept: one that doesn't would be found there at every later try, and never replaced. One
-/// that couldn't be kept is used all the same (told): refusing it would ask for another at
-/// the next try, a row on their server each time.
+/// ([`HomebaseRemote::peer_token`]), kept at `kept`: one that makes no client too (a secret
+/// that isn't a key), which says when it was asked for ([`PeerRemote::open`]). One that
+/// couldn't be kept is used all the same (told): refusing it would ask for another at the
+/// next try, a row on their server each time.
 fn new_client(own: &HomebaseRemote, sharer: &str, kept: &Path) -> Result<Client> {
     let token = own.peer_token(sharer)?;
-    let client = Client::for_peer(sharer, &token).map_err(remote_error)?;
     if let Err(e) = token.keep(own.client(), kept) {
         tracing::warn!(
             "the token {sharer}'s server gave couldn't be kept ({e}): a new one is asked for \
              at the next start"
         );
     }
-    Ok(client)
+    Client::for_peer(sharer, &token).map_err(remote_error)
+}
+
+/// Whether the file at `kept` was written within [`RENEW_AFTER`].
+fn kept_lately(kept: &Path) -> bool {
+    let written = std::fs::metadata(kept).and_then(|file| file.modified());
+    written
+        .ok()
+        .and_then(|at| at.elapsed().ok())
+        .is_some_and(|age| age < RENEW_AFTER)
 }
 
 impl PeerRemote {
@@ -125,15 +133,20 @@ impl PeerRemote {
     }
 
     /// `sharer`'s files shared with `own`'s identity, read with the token kept at `kept`
-    /// ([`PeerToken::kept`]) or, where none is that opens under this login and makes a
-    /// client, with a new one asked for and kept there ([`new_client`]): one request then,
-    /// none otherwise. A token their server refuses later is replaced the same way
-    /// ([`PeerRemote::renewed`]); one asked for here counts as asked for just now, so one
-    /// refused at once isn't replaced within [`RENEW_AFTER`].
+    /// ([`PeerToken::kept`]) or, where none is that opens under this login, with a new one
+    /// asked for and kept there ([`new_client`]): one request then, none otherwise. A token
+    /// their server refuses later is replaced the same way ([`PeerRemote::renewed`]); one
+    /// asked for here counts as asked for just now, so one refused at once isn't replaced
+    /// within [`RENEW_AFTER`]. One kept that makes no client fails the opening for that long
+    /// after it was asked for, and is asked for again then: their server is given no row a
+    /// try for the tokens it gets wrong.
     pub fn open(own: Arc<HomebaseRemote>, sharer: Sharer, kept: &Path) -> Result<PeerRemote> {
-        let held = PeerToken::kept(own.client(), kept)
-            .map_err(remote_error)?
-            .and_then(|token| Client::for_peer(&sharer.odin_id, &token).ok());
+        let token = PeerToken::kept(own.client(), kept).map_err(remote_error)?;
+        let held = match token.map(|token| Client::for_peer(&sharer.odin_id, &token)) {
+            Some(Ok(client)) => Some(client),
+            Some(Err(e)) if kept_lately(kept) => return Err(remote_error(e)),
+            Some(Err(_)) | None => None,
+        };
         let (client, renewed) = match held {
             Some(client) => (client, None),
             None => (
@@ -164,13 +177,24 @@ impl PeerRemote {
 
     /// What `ask` answers with the token held; where their server refuses that token
     /// ([`Refusal::Token`]), once more with a new one, if one is had ([`PeerRemote::renewed`]).
-    /// Every ask here only reads, and a refusal comes before any of its answer.
+    /// Where none is, the refusal stays what it is; but an ask for one that this identity's
+    /// own server refused (the app's permission, this login) is the answer: that is what
+    /// the user can lift. Every ask here only reads, and a refusal comes before any of its
+    /// answer.
     fn with_token<T>(&self, mut ask: impl FnMut(&Client) -> Result<T>) -> Result<T> {
         let client = self.client();
         match ask(&client) {
-            Err(RemoteError::Denied(why, Refusal::Token)) => match self.renewed(&client)? {
-                Some(new) => ask(&new),
-                None => Err(RemoteError::Denied(why, Refusal::Token)),
+            Err(RemoteError::Denied(why, Refusal::Token)) => match self.renewed(&client) {
+                Ok(Some(new)) => ask(&new),
+                Ok(None) => Err(RemoteError::Denied(why, Refusal::Token)),
+                Err(ours @ RemoteError::Denied(..)) => Err(ours),
+                Err(e) => {
+                    tracing::warn!(
+                        "no new token for {}'s server, which refused the one it gave: {e}",
+                        self.sharer.odin_id
+                    );
+                    Err(RemoteError::Denied(why, Refusal::Token))
+                }
             },
             answer => answer,
         }
@@ -179,10 +203,11 @@ impl PeerRemote {
     /// Their server with a new token, after it refused `refused`'s: the one another thread
     /// got meanwhile, or one asked for now and held from here on. `None` where none is asked
     /// for: this remote has nowhere to ask ([`PeerRemote::new`]), or it asked within
-    /// [`RENEW_AFTER`]. An ask that was refused ([`RemoteError::Denied`]: this login or the
-    /// app's permission by this identity's server, or a token by theirs) made no token, and
-    /// doesn't count as one asked for; any other failure may have left a row there, and
-    /// does. Held while asking: the others wait for the answer, refused as they would be.
+    /// [`RENEW_AFTER`] (in this run: a start doesn't know of the last one's). An ask that
+    /// this identity's own server refused ([`RemoteError::Denied`]: this login, or the app's
+    /// permission) made no token, and doesn't count as one asked for; any other failure
+    /// (their server's refusal to give one too) may have left a row there, and does. Held
+    /// while asking: the others wait for the answer, refused as they would be.
     fn renewed(&self, refused: &Arc<Client>) -> Result<Option<Arc<Client>>> {
         let mut held = self.held.write().unwrap_or_else(|e| e.into_inner());
         if !Arc::ptr_eq(&held.client, refused) {
@@ -606,11 +631,13 @@ mod tests {
         Ok(())
     }
 
-    /// A token kept that makes no client is none: a new one is asked for (of an identity
-    /// that can't be reached here, which fails the opening: nothing made, the file as it
-    /// was). One kept that makes one opens with no request.
+    /// A token kept that makes no client fails the opening while it is new (asked for
+    /// within the hour: their server isn't asked again); once it is older a new one is asked
+    /// for (of an identity that can't be reached here, which fails the opening too: nothing
+    /// made, the file as it was). One kept that makes one opens with no request.
     #[test]
-    fn a_kept_token_that_makes_no_client_is_asked_for_again() -> Result<(), HomebaseError> {
+    fn a_kept_token_that_makes_no_client_is_asked_for_again_in_an_hour() -> Result<(), HomebaseError>
+    {
         let dir = tempfile::tempdir()?;
         let path = dir.path().join("token");
         let own = Arc::new(unreachable_remote(Default::default())?);
@@ -625,6 +652,15 @@ mod tests {
         // (Eight bytes: not a key.)
         token("AAAAAAAAAAA=").keep(own.client(), &path)?;
         let before = std::fs::read(&path)?;
+        match PeerRemote::open(Arc::clone(&own), sharer(), &path) {
+            Err(RemoteError::Fatal(_)) => {}
+            other => panic!("asked for again at once: {other:?}"),
+        }
+        let old = std::time::SystemTime::now() - 2 * RENEW_AFTER;
+        std::fs::File::options()
+            .write(true)
+            .open(&path)?
+            .set_modified(old)?;
         match PeerRemote::open(Arc::clone(&own), sharer(), &path) {
             Err(RemoteError::Fatal(why)) => panic!("not asked for again: {why}"),
             Err(_) => {}
@@ -642,6 +678,32 @@ mod tests {
                 .renewed
                 .is_none()
         );
+        Ok(())
+    }
+
+    /// Where no new token is had, the refusal stays the token's; but this identity's own
+    /// server refusing the ask (the app's permission) is the answer, which the user can lift.
+    #[test]
+    fn a_failed_ask_for_a_new_token_leaves_the_refusal_unless_it_is_ours()
+    -> Result<(), HomebaseError> {
+        let failing = |with: fn() -> RemoteError| -> Result<RemoteError, HomebaseError> {
+            let mut sam = sam()?;
+            sam.renewal = Some(Renewal(Box::new(move || Err(with()))));
+            let answer: Result<()> = sam.with_token(|_| refused());
+            Ok(answer.expect_err("refused"))
+        };
+        assert!(matches!(
+            failing(|| RemoteError::Fatal("not connected".into()))?,
+            RemoteError::Denied(_, Refusal::Token)
+        ));
+        assert!(matches!(
+            failing(|| RemoteError::Transient("cut".into()))?,
+            RemoteError::Denied(_, Refusal::Token)
+        ));
+        assert!(matches!(
+            failing(|| RemoteError::Denied("no".into(), Refusal::Permission))?,
+            RemoteError::Denied(_, Refusal::Permission)
+        ));
         Ok(())
     }
 

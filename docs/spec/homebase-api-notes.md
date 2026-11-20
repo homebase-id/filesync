@@ -628,8 +628,10 @@ server answers the rest, to a token their server made for this identity's connec
   file's withdrawal raises it too, at the tombstone's unchanged time (PR #2141,
   `PublishChangedAsync`: **[verified]** at aa560aea9).
   `FakeRemote::member` (`hbsync-remote`) models this member's view, and the contract's
-  read-only subset (`Bench::shared`) checks the fake now; it runs live against `PeerRemote`
-  with the wiring PR. Refusals: 401 the token (unknown,
+  read-only subset (`Bench::shared`) checks the fake now. Live it needs a sharer that writes
+  share rows, which this client doesn't do yet (the chat app shares): until it does, the
+  live check is the daemon syncing what the chat app shared (**[verified]** 2026-11-20 on
+  the dev server: a folder with a subfolder and 20 files, a member's token kept and reused). Refusals: 401 the token (unknown,
   the connection gone, their keys invalid), 403 a file not (or no longer) shared, 404 none
   there. A share-key answer not sealed yet or not reviewed waits (`RemoteError::Later`, asked
   again in 15 minutes); reads never write: every write refuses before a request.
