@@ -4,7 +4,7 @@
 use super::process::{autostart_off_unless_dev, stop};
 use super::{Result, configured};
 use crate::config::ConfigLock;
-use crate::{CredentialStore, Paths, Root};
+use crate::{CredentialStore, Identity, Paths, Root};
 
 /// What [`log_out`] did.
 #[derive(Debug)]
@@ -15,8 +15,9 @@ pub struct LoggedOut {
     pub autostart_was_on: bool,
 }
 
-/// Stops the daemon and forgets this computer's credentials. The folder and its files stay.
-/// `None` when nothing is set up.
+/// Stops the daemon and forgets this computer's credentials, and the tokens its sharers'
+/// servers gave it ([`forget_tokens`]). The folder and its files stay. `None` when nothing
+/// is set up.
 pub fn log_out(paths: &Paths) -> Result<Option<LoggedOut>> {
     let Some(root) = configured(paths)? else {
         return Ok(None);
@@ -26,7 +27,9 @@ pub fn log_out(paths: &Paths) -> Result<Option<LoggedOut>> {
         // (the tray's) waits, and finds none.
         let _held = ConfigLock::take(&paths.config_file())?;
         stop(paths)?;
-        CredentialStore::open(paths).delete(&root.identity)?
+        let unreachable = CredentialStore::open(paths).delete(&root.identity)?;
+        forget_tokens(paths, &root.identity);
+        unreachable
     };
     let autostart_was_on = autostart_off_unless_dev()?;
     Ok(Some(LoggedOut {
@@ -34,6 +37,25 @@ pub fn log_out(paths: &Paths) -> Result<Option<LoggedOut>> {
         keychain_unreachable,
         autostart_was_on,
     }))
+}
+
+/// Removes the token kept for each of `identity`'s sharers ([`Paths::shared_token`]): sealed
+/// under the credentials that just went, it opens nothing any more, and the next login asks
+/// for one of its own. Tidying only, so one that can't be removed stays (as useless), and
+/// logging out goes on. The shares' records stay, as the account's do. Nothing is taken off
+/// a sharer's server: there is no way to (homebase-api-notes.md, "Shared with you").
+fn forget_tokens(paths: &Paths, identity: &Identity) {
+    let Ok(shares) = std::fs::read_dir(paths.shares_dir(identity)) else {
+        return;
+    };
+    for share in shares.flatten() {
+        let token = share.path().join(Paths::SHARED_TOKEN);
+        match std::fs::remove_file(&token) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => tracing::debug!("{} stays, of no use: {e}", token.display()),
+        }
+    }
 }
 
 /// What [`unlink`] did.

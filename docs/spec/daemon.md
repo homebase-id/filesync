@@ -609,7 +609,9 @@ included (service managers restart it then).
     with you"). Each token asked for stays a row on their server, so it is **kept**: in the
     file `token` beside the share's state DB, sealed under this login's shared secret (the
     keychain's; the file opens nothing by itself), and it goes with those records when the
-    share ends. A token kept under another login (signed in again since) or a damaged file
+    share ends. Logging out removes it too (it opens nothing once the credentials are
+    forgotten; one that can't be removed stays, as useless); unlinking keeps it with the
+    credentials, so setting up again asks for none. A token kept under another login (signed in again since) or a damaged file
     is none: a new one is asked for. A file that can't be read fails the opening instead,
     tried again: asking then would leave a row at every try. A token that makes no client
     (their server gave a secret that isn't a key) is kept too, and fails the opening for an
@@ -1119,7 +1121,7 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 | `hbsync start`, `stop` | `stop` stops syncing on this computer until `start` (or the tray's Start syncing), also across logins: neither the tray nor the service manager starts the daemon meanwhile |
 | `hbsync autostart [on\|off]` | |
 | `hbsync login [IDENTITY] [--browser CMD] [--paste]` | signs this computer in again in the browser (also the tray's Log in again, for a login from before private drives); the daemon's account starts over with the new login; the folders, the drive and autostart stay as they are; the old login isn't revoked |
-| `hbsync logout` | stops the daemon, forgets the credentials, autostart off; the folder stays |
+| `hbsync logout` | stops the daemon, forgets the credentials (and the tokens kept for its sharers, which they sealed), autostart off; the folder stays |
 | `hbsync unlink` | stops the daemon, removes the folder from the config, autostart off; its files, `.hbsync` and the account's DB stay, so setting it up again resumes |
 | `hbsync deleted [-n N]` | Recently deleted, newest first, with node ids |
 | `hbsync restore <path or node id>…` | restores removed items (a folder with what was deleted with it) |

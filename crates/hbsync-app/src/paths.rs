@@ -169,8 +169,11 @@ impl Paths {
     /// The file `sharer`'s token is kept in, beside the state DB of what they share
     /// (`docs/spec/daemon.md`, "How a share is opened").
     pub fn shared_token(&self, identity: &Identity, sharer: &Identity) -> PathBuf {
-        self.shared_dir(identity, sharer).join("token")
+        self.shared_dir(identity, sharer).join(Self::SHARED_TOKEN)
     }
+
+    /// The name of [`Paths::shared_token`]'s file in a share's records.
+    pub(crate) const SHARED_TOKEN: &'static str = "token";
 }
 
 #[cfg(test)]
