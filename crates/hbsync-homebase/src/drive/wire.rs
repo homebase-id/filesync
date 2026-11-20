@@ -584,8 +584,10 @@ impl FileHeader {
     /// the live shares it reaches them through, none where one of them has no end (or on
     /// this identity's own drive, which has no rows).
     pub(crate) fn share_ends(&self) -> Option<i64> {
-        let ends = self.shares.as_ref()?.iter().map(|row| row.expires_at);
-        ends.collect::<Option<Vec<i64>>>()?.into_iter().max()
+        let mut rows = self.shares.as_ref()?.iter();
+        rows.try_fold(None, |latest: Option<i64>, row| {
+            Some(latest.max(Some(row.expires_at?)))
+        })?
     }
 
     /// The circle a shared file's key header is locked for: the one its first share names.

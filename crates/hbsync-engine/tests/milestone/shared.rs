@@ -97,7 +97,13 @@ fn folder_tree(c: &Client) -> BTreeMap<String, Item> {
 /// as failed ([`Behind::Allowed`]: a known limit, filesync #400).
 #[test]
 fn randomized_shares_show_what_is_shared() -> R {
-    let compared = each_seed(seeds(), |seed| shares_of(seed, Behind::Allowed, Ends::None))?;
+    compared_mostly(Ends::Never)
+}
+
+/// Every seed of [`shares_of`] with `ends`, the member's folder compared after most of its
+/// syncs.
+fn compared_mostly(ends: Ends) -> R {
+    let compared = each_seed(seeds(), |seed| shares_of(seed, Behind::Allowed, ends))?;
     let (compared, synced) = compared
         .iter()
         .fold((0, 0), |sum, c| (sum.0 + c.0, sum.1 + c.1));
@@ -111,12 +117,7 @@ fn randomized_shares_show_what_is_shared() -> R {
 /// just what is shared with it at its every sync (sync semantics §13, "A share that ends").
 #[test]
 fn randomized_shares_that_end_show_what_is_shared() -> R {
-    let compared = each_seed(seeds(), |seed| shares_of(seed, Behind::Allowed, Ends::Some))?;
-    let (compared, of): (usize, usize) = compared
-        .into_iter()
-        .fold((0, 0), |(c, o), (compared, of)| (c + compared, o + of));
-    assert!(compared * 2 > of, "compared {compared} of {of} syncs");
-    Ok(())
+    compared_mostly(Ends::Pass)
 }
 
 /// Seeds of [`randomized_shares_show_what_is_shared`] that failed:
@@ -128,7 +129,7 @@ fn randomized_shares_that_end_show_what_is_shared() -> R {
 #[test]
 fn regression_shares_seeds() -> R {
     each_seed([194, 5_403_755_731_358_821_085], |seed| {
-        shares_of(seed, Behind::Refused, Ends::None)
+        shares_of(seed, Behind::Refused, Ends::Never)
     })
     .map(drop)
 }
@@ -143,7 +144,7 @@ fn regression_shares_seeds() -> R {
 #[ignore = "known limit: a download behind a name clash at a share's top shows as failed (#400)"]
 fn known_limit_a_download_behind_a_clash_shows_as_failed() -> R {
     each_seed([7_425_484_525_444_276_840], |seed| {
-        shares_of(seed, Behind::Refused, Ends::None)
+        shares_of(seed, Behind::Refused, Ends::Never)
     })
     .map(drop)
 }
@@ -151,8 +152,10 @@ fn known_limit_a_download_behind_a_clash_shows_as_failed() -> R {
 /// Whether [`shares_of`] gives shares that end, and lets the time pass that ends them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Ends {
-    None,
-    Some,
+    /// No share has an end.
+    Never,
+    /// Some are given one, and it passes.
+    Pass,
 }
 
 /// Whether [`shares_of`] takes an operation tried again for a taken name while a clash at the
@@ -168,10 +171,7 @@ enum Behind {
 fn shares_of(seed: u64, behind_a_clash: Behind, ends: Ends) -> Res<(usize, usize)> {
     const MINUTE: i64 = 60_000;
     // (With no ends, the seeds draw as they did before there were any: the saved ones hold.)
-    let (steps, ending) = match ends {
-        Ends::None => (5, false),
-        Ends::Some => (6, true),
-    };
+    let ending = ends == Ends::Pass;
     let mut compared = (0, 0);
     let server = server();
     let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
@@ -179,7 +179,7 @@ fn shares_of(seed: u64, behind_a_clash: Behind, ends: Ends) -> Res<(usize, usize
     let mut rng = Rng(seed);
     let mut ledger = Ledger::default();
     for step in 0..40 {
-        match rng.below(steps) {
+        match rng.below(5 + usize::from(ending)) {
             0 | 1 => act(&a.root, &mut rng, &mut ledger)?,
             // Time passes on the server: nothing is written, and shares given until then end.
             5 => {
