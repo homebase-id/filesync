@@ -2584,16 +2584,18 @@ impl Sim {
     ) -> Option<VersionTag> {
         // It reads the drive as it is now: as a pull brought it.
         self.made_again(c, node);
-        let before = self.clients[c].base.get(node).cloned();
-        let at = self.settle_as_read(c, node, against, same_bytes, tags, ours);
-        // A base it wrote, agreed with another file than the drive's now (§11).
-        if self.clients[c].base.get(node) != before.as_ref() {
+        let mut wrote = false;
+        let at = self.settle_as_read(c, node, against, same_bytes, tags, ours, &mut wrote);
+        // A base it wrote, the same or not, agreed with another file than the drive's (§11).
+        if wrote {
             self.agreed_with_drive(c, node);
         }
         at
     }
 
-    /// [`Sim::settle_against`], on the drive as the client has read it.
+    /// [`Sim::settle_against`], on the drive as the client has read it; `wrote`: it wrote the
+    /// client's base of `node`.
+    #[allow(clippy::too_many_arguments)]
     fn settle_as_read(
         &mut self,
         c: usize,
@@ -2602,6 +2604,7 @@ impl Sim {
         same_bytes: bool,
         tags: TagWrite<'_>,
         ours: Option<VersionTag>,
+        wrote: &mut bool,
     ) -> Option<VersionTag> {
         let server = self.server_state(c, node);
         let remote_ref = self.server.live.get(&node).map(|n| n.remote);
@@ -2678,6 +2681,7 @@ impl Sim {
             // None here yet (wanted, §5): the base follows the drive, as the executor's.
             (None, _) if keeps_absence => {
                 let (r, version) = server.zip(live)?;
+                *wrote = true;
                 client.base.insert(node, r);
                 if let Some(e) = client.extra.get_mut(&node) {
                     e.version = Some(version);
@@ -2689,6 +2693,7 @@ impl Sim {
                 if let (Some(b), Some(d)) = (client.base.get(node).cloned(), drive) {
                     let prior = prior_tags(state.unwrap_or_default(), &b.tags, &d.state.tags);
                     let tags = tags.settle(prior, &l.tags, &d.state.tags);
+                    *wrote = true;
                     client.base.insert(node, NodeState { tags, ..b });
                 }
                 None
@@ -2718,6 +2723,7 @@ impl Sim {
                         e.version = Some(version);
                         e.content_state = placed;
                     }
+                    *wrote = true;
                     client.base.insert(node, b);
                     return Some(version);
                 }

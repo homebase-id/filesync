@@ -1271,7 +1271,7 @@ picture's file lacks (by name: `Tags::held_in`):
   own write that made it, `AccountTx::answered`) for a node whose base was agreed with
   another, the tags the new file lacks leave the base, in every folder's base of the node, in
   that same commit (`AccountTx::made_again`). Once a file: a tag removed from it later is the
-  drive's removal.
+  drive's removal, unless a base is written against the earlier file meanwhile (next).
 - **When a base is written while the picture holds another file of its node** (a write
   planned before the new file came settles against the version it acted on; recovery settles
   a record against the version it placed from), it takes only the tags that file has
@@ -1380,9 +1380,9 @@ Three lose a removal (the tag comes back):
   before its answer was recorded (§8a, Answers): the base never records the tag as on the
   drive, so it goes up again, over another device's later removal.
 - *Base at an earlier file*: a tag removed from a node made again while another device's base
-  is still agreed with the earlier file and holds the tag, as its item does: what the new
-  file lacks is agreed there no more ("A node made again", above), so that device's tag reads
-  as its add, and comes back.
+  is still agreed with the earlier file and holds the tag, as its item does (or its plan
+  still writes the tag from that file): what the new file lacks is agreed there no more ("A
+  node made again", above), so that device's tag reads as its add, and comes back.
 
 A write up is on its way until its answer is recorded. The engine reads the folder between
 plans only, so its own write up lands over nothing it has seen; what leaves a node in this

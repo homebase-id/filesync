@@ -1166,8 +1166,10 @@ impl Sim {
     }
 
     /// The known limit a removal of tag `name` from `node` on client `c` meets where another
-    /// client's base of the node was agreed with an earlier file than the drive's (the node
-    /// made again since), and holds the tag as its item does ([`Limit::BaseAtEarlierFile`]).
+    /// client's base of the node isn't agreed with the drive's file yet (agreed with an
+    /// earlier one, the node made again since; or none, its folder still to be made here), and
+    /// the tag is that client's to send up once it is: its base and item hold it, or its plan
+    /// still writes it, from the earlier file ([`Limit::BaseAtEarlierFile`]).
     fn held_at_earlier_file(&self, c: usize, node: NodeId, name: &str) -> Option<Limit> {
         let server = &self.server;
         let drive = server.live.get(&node).or(server.removed.get(&node))?;
@@ -1176,10 +1178,9 @@ impl Sim {
         (self.clients.iter().enumerate())
             .any(|(d, client)| {
                 let agreed = client.extra.get(&node).and_then(|e| e.version);
-                d != c
-                    && agreed.is_some_and(|version| time(version) < made)
-                    && client.base_tag(node, name).is_some()
-                    && holds(client.local.get(node))
+                let earlier = agreed.is_none_or(|version| time(version) < made);
+                let held = client.base_tag(node, name).is_some() && holds(client.local.get(node));
+                d != c && earlier && (held || self.writes_tag(d, node, name))
             })
             .then_some(Limit::BaseAtEarlierFile)
     }
