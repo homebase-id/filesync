@@ -111,6 +111,16 @@ impl Markers {
         }
     }
 
+    /// The markers of `identity`'s drive that isn't private, where none counts
+    /// ([`crate::drive::HomebaseRemote::markers`]): nobody is turned on, and nobody is known
+    /// to be off ([`Markers::unsure`] of everyone).
+    pub(crate) fn untrusted(identity: &str) -> Markers {
+        Markers {
+            unknown: true,
+            ..Markers::of(identity)
+        }
+    }
+
     /// Whether it is unknown if `sharer` syncs: a marker of the owner's that may be theirs
     /// didn't read. A caller keeps them as they are, never reads them as off.
     pub fn unsure(&self, sharer: &str) -> bool {
@@ -231,8 +241,8 @@ fn sharer_of(
 /// Whether `name` (lower case) is a domain name: labels of letters, digits and inner hyphens,
 /// joined by dots, at least two, the last not all digits (an IP address). It becomes a host, so
 /// nothing else passes (no port, no path, no `..`); as a folder's name it is spelled as any
-/// name is on its OS (Windows reserves `nul.example`).
-fn is_domain(name: &str) -> bool {
+/// name is on its OS (Windows reserves `nul.example`). Every [`Sharer`] read is named so.
+pub fn is_domain(name: &str) -> bool {
     let label = |l: &str| {
         (1..=63).contains(&l.len())
             && l.bytes()
@@ -322,6 +332,14 @@ mod tests {
         );
         assert_ne!(marker_id("sam.test", OWNER), marker_id(OWNER, "sam.test"));
         assert_eq!(owner_of("Frodo.Test:8443"), OWNER);
+    }
+
+    /// On a drive that isn't private no marker counts: nobody is turned on, nobody off.
+    #[test]
+    fn a_drive_that_isnt_private_turns_nobody_on_or_off() {
+        let markers = Markers::untrusted("Frodo.test");
+        assert!(markers.synced.is_empty());
+        assert!(markers.unsure("sam.test") && markers.unsure("anyone.test"));
     }
 
     #[test]

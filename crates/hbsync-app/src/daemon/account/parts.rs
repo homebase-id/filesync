@@ -77,6 +77,19 @@ pub struct Share {
     pub notifications: Notifications,
 }
 
+impl Share {
+    /// What `sharer` shares, as `drive` on its state DB at `db`: read on a timer from now,
+    /// by a puller of its own.
+    pub fn new(sharer: &crate::Identity, drive: Arc<Drive>, db: PathBuf) -> Share {
+        Share {
+            sharer: sharer.clone(),
+            notifications: Notifications::new(Puller::spawn(Arc::clone(&drive)), Instant::now()),
+            drive,
+            db,
+        }
+    }
+}
+
 impl AccountParts {
     /// The account `identity`, its state DB at `db`, on `remote`, its notifications' events
     /// sent to `events`.
@@ -92,8 +105,8 @@ impl AccountParts {
             notifier,
             notifications: Notifications::new(Puller::spawn(Arc::clone(&drive)), Instant::now()),
             drive,
-            // By the identity's share markers, once each share can be opened with a token
-            // of its own that is kept (not yet: none is synced).
+            // By the identity's share markers, where the caller sets `sharers` (the daemon's
+            // account does: `sharers::ByMarkers`).
             shares: Vec::new(),
             sharers: None,
         })

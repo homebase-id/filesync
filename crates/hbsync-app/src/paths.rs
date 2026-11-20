@@ -147,12 +147,29 @@ impl Paths {
     /// key>/state.db`, beside the account's own, of which it is no part (a DB holds one
     /// drive).
     pub fn shared_db(&self, identity: &Identity, sharer: &Identity) -> PathBuf {
+        self.shared_dir(identity, sharer).join("state.db")
+    }
+
+    /// Where `identity`'s account keeps its records of the shares it syncs, a folder per
+    /// sharer ([`Paths::shared_dir`]): `<state>/accounts/<identity's key>/shared`.
+    pub fn shares_dir(&self, identity: &Identity) -> PathBuf {
         self.state
             .join("accounts")
             .join(identity.file_key())
             .join("shared")
-            .join(sharer.file_key())
-            .join("state.db")
+    }
+
+    /// The records `identity`'s account keeps of what `sharer` shares with it, removed whole
+    /// when the share ends: its state DB ([`Paths::shared_db`]) and the token their server
+    /// gave ([`Paths::shared_token`]). Named by the sharer's file key.
+    pub fn shared_dir(&self, identity: &Identity, sharer: &Identity) -> PathBuf {
+        self.shares_dir(identity).join(sharer.file_key())
+    }
+
+    /// The file `sharer`'s token is kept in, beside the state DB of what they share
+    /// (`docs/spec/daemon.md`, "How a share is opened").
+    pub fn shared_token(&self, identity: &Identity, sharer: &Identity) -> PathBuf {
+        self.shared_dir(identity, sharer).join("token")
     }
 }
 
@@ -168,6 +185,19 @@ mod tests {
                 .account_db(&"Anna.Example.com:8443".into())
                 .ends_with("accounts/anna.example.com_8443/state.db")
         );
+    }
+
+    /// A share's records are one folder beside the account's DB, named after its sharer: its
+    /// state DB and the sharer's token are in it, so removing it removes both.
+    #[test]
+    fn a_shares_records_are_one_folder_named_after_its_sharer() {
+        let paths = Paths::under(Path::new("/h"));
+        let (me, tom) = ("anna.example.com:8443".into(), "tom.example".into());
+        let dir = paths.shared_dir(&me, &tom);
+        assert!(dir.ends_with("accounts/anna.example.com_8443/shared/tom.example"));
+        assert_eq!(dir.parent(), Some(paths.shares_dir(&me).as_path()));
+        assert_eq!(paths.shared_db(&me, &tom), dir.join("state.db"));
+        assert_eq!(paths.shared_token(&me, &tom), dir.join("token"));
     }
 
     /// The MSIX keeps these folders out of its virtualization (packaging/conveyor.conf), so the
