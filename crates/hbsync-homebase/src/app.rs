@@ -54,7 +54,7 @@ pub(crate) struct DriveSpec {
     pub description: &'static str,
     pub slug: &'static str,
     pub type_slug: &'static str,
-    /// Read = 1, Write = 2.
+    /// Read = 1, Write = 2, React = 4, Comment = 8.
     pub permission: u32,
     /// How the drive is made, when it is (`sm`); a drive that exists stays as it is.
     pub sharing_model: SharingModel,
@@ -78,7 +78,12 @@ pub(crate) const SYNC_DRIVE: DriveSpec = DriveSpec {
     description: "Files synced with your computers by Homebase Filesync",
     slug: "filesync",
     type_slug: "filesync",
-    permission: 3,
+    // Read and Write for syncing; React and Comment only to pass on: an app gives a circle
+    // no more than it holds (odin-core `AssertRegistrationMayGrantDrivesAsync`, verified),
+    // and the members of [`CIRCLE`] react to and comment on what is shared with them. As
+    // the chat app's Drive registers the app (chat-kmp `filesyncAppRegistration`): whichever
+    // installs it first, the app is the same.
+    permission: 15,
     // Private from the start: only the owner's devices hold its key (encryption.md, "A
     // private drive"). An older console ignores it and makes a shared one, which syncs too.
     sharing_model: SharingModel::SelectiveShare,
@@ -92,11 +97,15 @@ pub struct CircleSpec {
     name: &'static str,
     description: &'static str,
     emoji: &'static str,
-    /// What members get on the sync drive (Read = 1).
+    /// What members get on the sync drive (as [`DriveSpec::permission`]).
     drive_permission: u32,
 }
 
-/// The app's circle: people the files can be shared with, Read on the sync drive, empty at first.
+/// The app's circle: people the files can be shared with, empty at first. Its members read,
+/// react to and comment on what is shared with them (Read, React, Comment: 13); never Write,
+/// which would let a member add files anywhere on the drive, whatever is shared with them.
+/// The chat app's Drive, which does the sharing, offers no access a member's circle doesn't
+/// grant: with Read alone it shares nothing (chat-kmp `FilesyncSharing.offeredAccess`).
 /// Declared at registration ([`circle_declaration`]), so installing the app creates it; found again
 /// by its slug ([`circle_request`]).
 pub const CIRCLE: CircleSpec = CircleSpec {
@@ -104,7 +113,7 @@ pub const CIRCLE: CircleSpec = CircleSpec {
     name: "Filesync",
     description: "People who can see the files you share through Homebase Filesync",
     emoji: "📁",
-    drive_permission: 1,
+    drive_permission: 13,
 };
 
 /// The drive request entry (`d`) for `drive`, in the keys the owner app reads.
@@ -124,7 +133,7 @@ pub(crate) fn drive_request(drive: &DriveSpec) -> serde_json::Value {
 /// [`CIRCLE`] as the app declares it at registration (`ac`), in the keys the owner app reads
 /// (odin-js `AppCircleAuthorizationParams`, verified in `util.ts`): `s` slug, `n` name, `d`
 /// description, `e` emoji, `g` drive grants (`a` alias, `t` type, `p` permission). It may grant
-/// only what the registration grants the app (`AssertDeclaredCirclesAsync`): Read on its drive.
+/// only what the registration grants the app (`AssertDeclaredCirclesAsync`) on its drive.
 pub(crate) fn circle_declaration() -> serde_json::Value {
     json!({
         "s": CIRCLE.slug,
@@ -262,7 +271,7 @@ mod tests {
             serde_json::from_str(request["d"].as_str().unwrap_or_default())?;
         assert_eq!(drives[0]["ds"], "filesync");
         assert_eq!(drives[0]["sm"], "selectiveShare");
-        assert_eq!(drives[0]["p"], 3);
+        assert_eq!(drives[0]["p"], 15);
         assert_eq!(request["appId"], "03ae1a49cdae483f9da7fedc0e8f20b9");
         Ok(())
     }
@@ -319,6 +328,13 @@ mod tests {
         let declared: Value = serde_json::from_str(request["ac"].as_str().unwrap_or_default())?;
         assert_eq!(declared, json!([circle_declaration()]));
         assert_eq!(declared[0]["s"], "filesync");
+        // What a member gets: Read, React and Comment, never Write. The app holds each of
+        // them on the drive it asks for: it can give a circle no more than it holds.
+        let (granted, held) = (CIRCLE.drive_permission, SYNC_DRIVE.permission);
+        assert_eq!(granted, 1 | 4 | 8);
+        assert_eq!(granted & held, granted);
+        let asked: Value = serde_json::from_str(request["d"].as_str().unwrap_or_default())?;
+        assert_eq!(asked[0]["p"], held);
         Ok(())
     }
 }

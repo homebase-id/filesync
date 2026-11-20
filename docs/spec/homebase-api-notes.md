@@ -103,7 +103,15 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   nothing (`CircleMembershipService.CreateAppCircleAsync`); without a slug every call makes a
   new circle. Circles made before had slugs made from their names (`CircleSlugGenerator`:
   "Filesync" is `filesync`, a second one `filesync-2`). Filesync's circle (`filesync`) grants
-  Read on its drive and starts empty.
+  Read, React and Comment on its drive (13) and starts empty; for that the app asks for all
+  four on the drive (15): a circle is given no more than the app holds
+  (`AssertRegistrationMayGrantDrivesAsync`, and `AssertAppMayGrantDrivesAsync` for
+  `circles/create`, **[verified]**). The chat app's Drive registers the app the same way, and
+  shares only at an access the circle grants. An install from before 2026-11-20 holds Read
+  and Write and has a circle with Read: neither changes at a sign-in, the drive's grant
+  only on `/owner/appupdate`, the circle's only in the owner console, or by the app deleting
+  it while it has no members (`circles/delete` refuses one with members) and making it
+  again.
 - **Permission keys** **[verified]**: registration asks for them in `p`, numbers joined by
   commas (odin-js `permissionParamToPermissionSet`); an installed app gets no more at a sign-in
   (`YouAuthUnifiedService.AppNeedsRegistration` is false once registered), only on
