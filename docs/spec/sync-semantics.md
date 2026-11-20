@@ -1265,23 +1265,47 @@ purge) and made again is another file of the same node: by a device that still h
 (Recovered files). Whoever made it may never have seen the tags the old file held. The base's
 tags were agreed with the old file, so against them the new file's lack of a tag reads as the
 drive's removal, and took the tag off every device that held it: gone everywhere, though nobody
-removed it (#439). So when the feed brings a file new to this device for a node whose base was
-agreed with another, the tags the new file lacks leave the base, in every folder's base of the
-node, in the pull's own commit (`AccountTx::made_again`, by name: `Tags::held_in`). The item's
-tag then reads as added here and goes up; a tag removed here stays removed (the new file holds
-it, and so the base still does); a colour is the new file's. The plan, the write's own merge
-and the settle all read that base. What it costs:
-- A tag another device removed from the new file before this device first read it comes back
-  (the feed shows a file's last version only, so that removal can't be told from never having
-  had the tag). It errs to the tag, never to its loss.
-- One read of the base by the node's key for each file new to the mirror (a first sync: one
-  per file, each finding nothing), and a write only where a base holds a tag the file lacks.
+removed it (#439). So a base holds no tag agreed with another file of its node that the
+picture's file lacks (by name: `Tags::held_in`):
+- **When the picture takes a file new to it** (the feed's row, `mirror::apply`; this device's
+  own write that made it, `AccountTx::answered`) for a node whose base was agreed with
+  another, the tags the new file lacks leave the base, in every folder's base of the node, in
+  that same commit (`AccountTx::made_again`). Once a file: a tag removed from it later is the
+  drive's removal.
+- **When a base is written while the picture holds another file of its node** (a write
+  planned before the new file came settles against the version it acted on; recovery settles
+  a record against the version it placed from), it takes only the tags that file has
+  (`FolderTx::put_base`). Agreed anew with the old file, the tag read as removed on the drive
+  again.
+
+The item's tag then reads as added here and goes up; a tag removed here stays removed (the new
+file holds it, and so the base still does); a colour is the new file's. The plan, the write's
+own merge and the settle all read that base. What it costs:
+- A tag another device removed from the new file while this device's base was still agreed
+  with the earlier one comes back (the feed shows a file's last version only, so that removal
+  can't be told from never having had the tag). It errs to the tag, never to its loss; the
+  simulator names it (*base at an earlier file*, below).
+- A tag only Linux devices still hold goes up without its colour (they hold none, and the new
+  file has none to keep): where a Mac holds it too and the Linux device's write lands first,
+  the Mac's colour goes with it (both added the tag: the drive's colour wins).
+- One read of the base by the node's key for each file new to the picture (a first sync: one
+  per file, each finding nothing; 0.5 µs each, 1.2 µs with 100,000 bases, a release build), a
+  write only where a base holds a tag the file lacks; and one read of the picture for each
+  base written with tags.
+
+Listed, not handled (each needs the node made again and something rarer on top): a file made
+again and removed before this device pulled, while its mirror still holds the earlier file
+live (deleted for good without a trace), narrows the base against the removed file, so a tag
+removed here and not sent yet comes back from the stale live row; a Windows device that puts
+such a node up anew once it is gone again sends the base's tags, now without the one the file
+in between lacked.
 
 Tests: simulator `regression_a_tag_stays_where_its_folder_is_made_again_without_it`,
 `regression_a_tag_added_back_to_the_base_stands_where_the_folder_is_made_again` and the
 saved case of `orphans_are_recovered_without_loss`; engine
 `a_tag_stays_where_its_folder_is_made_again_without_it`; store
-`a_node_made_again_leaves_the_base_only_the_tags_its_new_file_has`.
+`a_node_made_again_leaves_the_base_only_the_tags_its_new_file_has`,
+`a_base_written_against_another_file_than_the_pictures_takes_only_its_tags`.
 
 **Local changes** are noticed by the change time a tag write moves (scan, watcher); the scan
 then reads the tags. Tags that couldn't be read are tried again at the next scan.
@@ -1346,7 +1370,7 @@ That loses a removal, not a tag.
   add. (A conflict copy no longer leads here: its wanted base settles from the drive's tags,
   §5.)
 
-Two lose a removal (the tag comes back):
+Three lose a removal (the tag comes back):
 - *Own tag write in flight*: a tag removed while this device's plan still writes it (onto the
   item, or up): the write, planned before, lands over the removal. A colour given then is lost
   the same way: both sides changed it since the base, and the merge takes the drive's. So is
@@ -1355,6 +1379,10 @@ Two lose a removal (the tag comes back):
 - *Answer superseded*: a write carrying a tag landed, but another device changed the node
   before its answer was recorded (§8a, Answers): the base never records the tag as on the
   drive, so it goes up again, over another device's later removal.
+- *Base at an earlier file*: a tag removed from a node made again while another device's base
+  is still agreed with the earlier file and holds the tag, as its item does: what the new
+  file lacks is agreed there no more ("A node made again", above), so that device's tag reads
+  as its add, and comes back.
 
 A write up is on its way until its answer is recorded. The engine reads the folder between
 plans only, so its own write up lands over nothing it has seen; what leaves a node in this

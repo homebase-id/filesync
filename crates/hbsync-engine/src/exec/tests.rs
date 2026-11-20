@@ -197,6 +197,15 @@ fn some_version() -> RemoteRef {
     }
 }
 
+/// Another version of the file of `of` (a node's file is one for its life: another file of it
+/// is the node made again, which a base written against the earlier one is narrowed for).
+fn version_of(of: RemoteRef) -> RemoteRef {
+    RemoteRef {
+        file_id: of.file_id,
+        ..some_version()
+    }
+}
+
 /// The mirror's row of folder `name`, or of file `name` holding `f`, in `parent`, written at
 /// `at`.
 fn mirror_row(
@@ -1854,12 +1863,8 @@ fn a_tag_the_drive_removed_after_a_write_goes() -> R {
     h.scanned_with("f", Tags::default())?;
     let c = h.content(b"A");
     let file = NodeState::file(NodeId::ROOT, "f", c);
-    let (v0, v1, v2, v3) = (
-        some_version(),
-        some_version(),
-        some_version(),
-        some_version(),
-    );
+    let v0 = some_version();
+    let (v1, v2, v3) = (version_of(v0), version_of(v0), version_of(v0));
     let mirror = |at: RemoteRef, tags: &Tags| {
         let mut content = NodeContent::file("f", 0, 1, false);
         content.set_tags(tags);
@@ -4025,7 +4030,7 @@ fn a_download_whose_tag_write_fails_keeps_a_tag_change_not_sent_up() -> R {
         h.local_file("x", node, b"A")?;
         h.scanned_with("x", here.clone())?;
         let (a, b) = (h.content(b"A"), h.content(b"B"));
-        let before = some_version();
+        let before = version_of(at);
         h.db.write(|s| {
             s.folder().put_base(&BaseRow {
                 local_hash: Some(a.hash),

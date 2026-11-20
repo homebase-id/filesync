@@ -424,6 +424,15 @@ mod tests {
         }
     }
 
+    /// Another version of the file of `of` (a node's file is one for its life: another file of
+    /// it is the node made again, which a base written against the earlier one is narrowed for).
+    fn later(of: RemoteRef) -> RemoteRef {
+        RemoteRef {
+            file_id: of.file_id,
+            ..version()
+        }
+    }
+
     /// A download of a node that fetched `fetched` at `at`, committed with the mirror holding
     /// `mirror` by then (none: another engine pulled its removal): the base it leaves.
     /// The rows of `node`, a file `f` at the top: local holding `local`, the mirror's at
@@ -541,7 +550,8 @@ mod tests {
     #[test]
     fn a_write_on_an_older_version_records_only_its_tags() -> Result<(), StateError> {
         let node = NodeId::new();
-        let (c, older, newer, newest) = (content("one"), version(), version(), version());
+        let (c, older) = (content("one"), version());
+        let (newer, newest) = (later(older), later(older));
         let mut db = StateDb::open_in_memory()?;
         db.write(|s| {
             rows(s, node, c, Some((c, newest)))?;
@@ -592,7 +602,8 @@ mod tests {
     #[test]
     fn a_base_moved_by_another_keeps_all_but_the_written_tags() -> Result<(), StateError> {
         let node = NodeId::new();
-        let (c, older, other) = (content("one"), version(), version());
+        let (c, older) = (content("one"), version());
+        let other = later(older);
         let mut db = StateDb::open_in_memory()?;
         db.write(|s| {
             rows(s, node, c, Some((c, older)))?;

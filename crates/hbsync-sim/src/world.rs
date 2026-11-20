@@ -22,7 +22,7 @@ use hbsync_types::{
 use crate::Sim;
 use crate::action::{Action, JUNK, JUNK_FOLDER, LAUNCHERS, NAMES, TAGS};
 use crate::model::client::Client;
-use crate::model::server::{Server, ServerNode};
+use crate::model::server::{Server, ServerNode, time};
 use crate::oracle::Seen;
 use crate::tagbook::Limit;
 
@@ -493,8 +493,11 @@ impl Sim {
                         if book {
                             let synced = self.clients[c].base_tag(node, name).is_some();
                             let now = synced.then(|| self.server.now());
-                            let in_flight = self.writes_tag(c, node, name);
-                            self.ledger.tags.remove(c, node, name, now, in_flight);
+                            let limit = match self.writes_tag(c, node, name) {
+                                true => Some(Limit::OwnTagWriteInFlight),
+                                false => self.held_at_earlier_file(c, node, name),
+                            };
+                            self.ledger.tags.remove(c, node, name, now, limit);
                         }
                     }
                     (Action::Tag { .. }, None) => {
@@ -1160,6 +1163,25 @@ impl Sim {
         seen.is_some()
             && drive.is_some_and(|t| Some(t.colour) != seen)
             && self.ledger.tags.recoloured_in_flight(c, node, name) == seen
+    }
+
+    /// The known limit a removal of tag `name` from `node` on client `c` meets where another
+    /// client's base of the node was agreed with an earlier file than the drive's (the node
+    /// made again since), and holds the tag as its item does ([`Limit::BaseAtEarlierFile`]).
+    fn held_at_earlier_file(&self, c: usize, node: NodeId, name: &str) -> Option<Limit> {
+        let server = &self.server;
+        let drive = server.live.get(&node).or(server.removed.get(&node))?;
+        let made = drive.remote.file_id.0.as_u128() as i64;
+        let holds = |s: Option<&NodeState>| s.is_some_and(|s| s.tags.get(name).is_some());
+        (self.clients.iter().enumerate())
+            .any(|(d, client)| {
+                let agreed = client.extra.get(&node).and_then(|e| e.version);
+                d != c
+                    && agreed.is_some_and(|version| time(version) < made)
+                    && client.base_tag(node, name).is_some()
+                    && holds(client.local.get(node))
+            })
+            .then_some(Limit::BaseAtEarlierFile)
     }
 
     /// Whether a removal of tag `name` from `node` is under way that client `c`'s add may lose

@@ -338,8 +338,12 @@ impl Sim {
         self.release_filtered(c);
         self.hear_not_theres(c);
         let remote = self.drive_seen(c);
-        // The pull before the plan: what was made again since its base was agreed (§11).
-        for node in self.clients[c].base.ids().collect::<Vec<_>>() {
+        // The pull before the plan: the files it brings that the client hadn't read (§11).
+        let server = &self.server;
+        let on_drive: Vec<NodeId> = (server.live.keys().chain(server.removed.keys()))
+            .copied()
+            .collect();
+        for node in on_drive {
             self.made_again(c, node);
         }
         // Left to be hashed on send: a new file, till its first upload's commit. One that
@@ -943,8 +947,10 @@ impl Sim {
             return false;
         };
         let node = op.node();
-        // What a pull brought since the plan (the account's, another folder's).
-        self.made_again(c, node);
+        // What a pull brought since the plan, where the run reads the drive as it is.
+        if self.clients[c].pulls {
+            self.made_again(c, node);
+        }
         // Every remote write that lands stays in the folder's part of the drive (§12): what it
         // writes, and where to (judged before it runs; one refused on its version wrote nothing).
         let breach = self.breaches(c, &op);
@@ -2447,13 +2453,28 @@ impl Sim {
         Tags::merge_onto(&base.unwrap_or_default(), ours, drive, client.os)
     }
 
-    /// Client `c` reads the drive's version of `node`, live or in Recently deleted: where that
-    /// is another file than its base was agreed with (the node deleted for good and made
-    /// again), the tags the new file lacks are agreed no more, as the engine's feed takes it
-    /// (`AccountTx::made_again`, sync semantics §11): once, at its first read of that file (a
-    /// tag removed from it later is the drive's removal). Every id is the server's clock
-    /// ([`time`]): a base agreed before the drive's file was made was agreed with another.
+    /// Client `c` reads the drive's file of `node`, live or in Recently deleted, for the first
+    /// time: where that is another file than its base was agreed with (the node deleted for
+    /// good and made again), the tags the new file lacks are agreed no more, as the engine's
+    /// picture takes a file new to it (`AccountTx::made_again`, sync semantics §11). Once a
+    /// file, base or none: a tag removed from it later is the drive's removal.
     fn made_again(&mut self, c: usize, node: NodeId) {
+        let server = &self.server;
+        let Some(drive) = server.live.get(&node).or(server.removed.get(&node)) else {
+            return;
+        };
+        let (file, client) = (drive.remote.file_id, &mut self.clients[c]);
+        if !client.gone.contains(&file) && client.read_files.insert(file) {
+            self.agreed_with_drive(c, node);
+        }
+    }
+
+    /// Client `c`'s base of `node` holds only the tags the drive's file of it has, live or in
+    /// Recently deleted, where it was agreed with another: as [`Sim::made_again`] leaves it,
+    /// and as the engine writes a base while its picture holds another file (`put_base`: a
+    /// write that settled against the version it acted on). Every id is the server's clock
+    /// ([`time`]): a base agreed before the drive's file was made was agreed with another.
+    fn agreed_with_drive(&mut self, c: usize, node: NodeId) {
         let server = &self.server;
         let Some(drive) = server.live.get(&node).or(server.removed.get(&node)) else {
             return;
@@ -2461,10 +2482,7 @@ impl Sim {
         let client = &mut self.clients[c];
         let agreed = client.extra.get(&node).and_then(|e| e.version);
         let made = drive.remote.file_id.0.as_u128() as i64;
-        if agreed.is_none_or(|version| time(version) >= made)
-            || client.gone.contains(&drive.remote.file_id)
-            || !client.made_again.insert(drive.remote.file_id)
-        {
+        if agreed.is_none_or(|version| time(version) >= made) {
             return;
         }
         if let Some(b) = client.base.get(node).cloned() {
@@ -2564,8 +2582,27 @@ impl Sim {
         tags: TagWrite<'_>,
         ours: Option<VersionTag>,
     ) -> Option<VersionTag> {
-        // It reads the drive as it is now (below): as a pull brought it.
+        // It reads the drive as it is now: as a pull brought it.
         self.made_again(c, node);
+        let before = self.clients[c].base.get(node).cloned();
+        let at = self.settle_as_read(c, node, against, same_bytes, tags, ours);
+        // A base it wrote, agreed with another file than the drive's now (§11).
+        if self.clients[c].base.get(node) != before.as_ref() {
+            self.agreed_with_drive(c, node);
+        }
+        at
+    }
+
+    /// [`Sim::settle_against`], on the drive as the client has read it.
+    fn settle_as_read(
+        &mut self,
+        c: usize,
+        node: NodeId,
+        against: Against<'_>,
+        same_bytes: bool,
+        tags: TagWrite<'_>,
+        ours: Option<VersionTag>,
+    ) -> Option<VersionTag> {
         let server = self.server_state(c, node);
         let remote_ref = self.server.live.get(&node).map(|n| n.remote);
         let live = remote_ref.map(|r| r.version);

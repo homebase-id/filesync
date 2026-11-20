@@ -126,13 +126,20 @@ impl AccountTx<'_> {
 }
 
 impl FolderTx<'_> {
-    /// Inserts or replaces the base row of `row.node`.
+    /// Inserts or replaces the base row of `row.node`. Its tags: `row`'s; but where the
+    /// picture holds the node as another file than `row` was agreed with (made again since: a
+    /// write settles against the version it acted on), only those that file has too, as
+    /// [`AccountTx::made_again`] leaves a base when the file comes. Agreed anew with the old
+    /// file, a tag the new one lacks read as removed on the drive again (sync semantics §11).
+    /// One read of the picture more, for a row with tags.
     pub fn put_base(&self, row: &BaseRow) -> Result<()> {
         let c = row.state.content.as_ref();
         let (id, parent) = (
             self.key_or_insert(row.node)?,
             self.key_or_insert(row.state.parent)?,
         );
+        let narrowed = self.agreed_with_picture(id, row)?;
+        let tags = narrowed.as_ref().unwrap_or(&row.state.tags);
         self.wrote_base();
         self.prep(
                 "INSERT INTO base (folder, id, parent, name, kind, hash, size, mtime_ms, \
@@ -158,10 +165,36 @@ impl FolderTx<'_> {
                 codec::content_state_to(row.content_state),
                 row.local_name,
                 row.local_hash.as_ref().map(codec::hash_to),
-                (!row.state.tags.is_empty()).then(|| tags_to_string(&row.state.tags)),
+                (!tags.is_empty()).then(|| tags_to_string(tags)),
                 sibling_hash(&row.state.name),
             ])?;
         Ok(())
+    }
+
+    /// The tags of `row` (its node's key `id`) that the picture's file of the node has too,
+    /// live or in Recently deleted, where that is another file than `row`'s and lacks one of
+    /// them; `None` where it is the same, or the picture has none ([`FolderTx::put_base`]).
+    fn agreed_with_picture(&self, id: i64, row: &BaseRow) -> Result<Option<Tags>> {
+        if row.state.tags.is_empty() {
+            return Ok(None);
+        }
+        let other: Option<Option<String>> = self
+            .prep(
+                "SELECT content_extra FROM remote WHERE id = ?1 AND file_id != ?3 \
+                 UNION ALL SELECT content_extra FROM removed WHERE node = ?2 AND file_id != ?3 \
+                 AND NOT EXISTS (SELECT 1 FROM remote WHERE id = ?1) LIMIT 1",
+            )?
+            .query_row(
+                params![id, row.node.0.as_bytes(), row.remote.file_id.0.as_bytes()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(keys) = other else {
+            return Ok(None);
+        };
+        let held = keys.as_deref().map(tags_in_keys).unwrap_or_default();
+        let agreed = row.state.tags.held_in(&held);
+        Ok((agreed != row.state.tags).then_some(agreed))
     }
 
     pub fn delete_base(&self, node: NodeId) -> Result<bool> {
