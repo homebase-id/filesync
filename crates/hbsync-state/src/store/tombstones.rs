@@ -120,7 +120,9 @@ impl AccountTx<'_> {
     /// end anew: one taken back since (the share given a later end, or withdrawn) costs
     /// that one read, which finds nothing.
     pub fn note_share_end(&self, end: i64) -> Result<()> {
-        let minutes = end.saturating_add(SHARE_END_MS - 1).div_euclid(SHARE_END_MS);
+        let minutes = end
+            .saturating_add(SHARE_END_MS - 1)
+            .div_euclid(SHARE_END_MS);
         let minute = minutes.saturating_mul(SHARE_END_MS);
         if self.share_end()?.is_some_and(|kept| kept <= minute) {
             return Ok(());
@@ -139,4 +141,3 @@ impl ReadTx<'_> {
         Ok(kept.and_then(|end| end.parse().ok()))
     }
 }
-
