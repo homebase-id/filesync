@@ -74,12 +74,14 @@ fn kept(paths: &Paths, me: &Identity) -> std::io::Result<Vec<Identity>> {
 /// What the markers say of whose shares to sync (`on`: the sharers they turn on, each with
 /// their drive; `unsure`: whether a marker that may be a sharer's didn't read), for an
 /// account syncing or opening `synced` with records `kept`: [`Sharers::told`]'s answer, and
-/// the drive of each one on.
+/// the drive of each one on. One who is unsure stays on the drive named `before`, if one
+/// was: an opening of theirs under way goes on as it was told.
 fn following(
     on: &[Sharer],
     unsure: impl Fn(&Identity) -> bool,
     synced: &[Identity],
     kept: Vec<Identity>,
+    before: &HashMap<Identity, Uuid>,
 ) -> (Synced, HashMap<Identity, Uuid>) {
     let mut drives = HashMap::new();
     let mut named = Vec::new();
@@ -92,12 +94,19 @@ fn following(
         }
     }
     // Of those synced, being opened or kept: whose marker may be one that didn't read.
-    let unsure = synced
+    let unsure: Vec<Identity> = synced
         .iter()
         .chain(&kept)
         .filter(|s| unsure(s))
         .cloned()
         .collect();
+    for sharer in &unsure {
+        if let (Entry::Vacant(drive), Some(named)) =
+            (drives.entry(sharer.clone()), before.get(sharer))
+        {
+            drive.insert(*named);
+        }
+    }
     let told = Synced {
         on: named,
         unsure,
@@ -112,13 +121,16 @@ impl Sharers for ByMarkers {
             .own
             .markers()
             .map_err(hbsync_engine::EngineError::Remote)?;
+        let kept = kept(&self.paths, &self.me)?;
+        let mut named = self.drives.lock().unwrap_or_else(|e| e.into_inner());
         let (told, drives) = following(
             &markers.synced,
             |sharer| markers.unsure(sharer),
             synced,
-            kept(&self.paths, &self.me)?,
+            kept,
+            &named,
         );
-        *self.drives.lock().unwrap_or_else(|e| e.into_inner()) = drives;
+        *named = drives;
         Ok(told)
     }
 
@@ -155,7 +167,7 @@ impl Sharers for ByMarkers {
 /// A share that ended, opened only to take its copy off this device: its sharer's drive,
 /// which answers nothing any more. Nothing is asked of it.
 #[derive(Debug)]
-struct Ended(Identity);
+pub(super) struct Ended(pub(super) Identity);
 
 impl Ended {
     fn gone<T>(&self) -> hbsync_remote::Result<T> {
@@ -244,22 +256,30 @@ mod tests {
         let synced = ids(&["tom.example", "ann.example"]);
         let kept = ids(&["ann.example", "bob.example", "tom.example"]);
         let unsure = |s: &Identity| ["ann.example", "sam.example"].contains(&s.as_str());
-        let (told, drives) = following(&on, unsure, &synced, kept.clone());
+        let before = HashMap::from([
+            (Identity::new("ann.example"), Uuid::from_u128(7)),
+            (Identity::new("bob.example"), Uuid::from_u128(8)),
+            (Identity::new("tom.example"), Uuid::from_u128(9)),
+        ]);
+        let (told, drives) = following(&on, unsure, &synced, kept.clone(), &before);
         assert_eq!(told.on, ids(&["tom.example", "sam.example"]));
-        // (sam isn't synced, being opened or kept: of them nothing is to be kept as it is.)
-        assert!(told.unsure.iter().all(|s| s.as_str() == "ann.example"));
-        assert!(!told.unsure.is_empty());
+        // (sam isn't synced, being opened or kept: of them nothing is to be kept as it is.
+        // ann is both synced and kept: named for each, which nothing minds.)
+        assert_eq!(told.unsure, ids(&["ann.example", "ann.example"]));
         assert_eq!(told.kept, kept);
         assert_eq!(drives[&Identity::new("tom.example")], Uuid::from_u128(1));
         assert_eq!(drives[&Identity::new("sam.example")], Uuid::from_u128(2));
-        assert_eq!(drives.len(), 2);
+        // ann, whose marker didn't read, stays on the drive named before; bob, who is off,
+        // on none.
+        assert_eq!(drives[&Identity::new("ann.example")], Uuid::from_u128(7));
+        assert_eq!(drives.len(), 3);
     }
 
     /// A sharer named twice is one share, on the drive named first.
     #[test]
     fn a_sharer_named_twice_is_synced_once() {
         let on = [sharer("tom.example", 1), sharer("tom.example", 2)];
-        let (told, drives) = following(&on, |_| false, &[], Vec::new());
+        let (told, drives) = following(&on, |_| false, &[], Vec::new(), &HashMap::new());
         assert_eq!(told.on, vec![Identity::new("tom.example")]);
         assert_eq!(drives[&Identity::new("tom.example")], Uuid::from_u128(1));
         assert_eq!(told.unsure, []);

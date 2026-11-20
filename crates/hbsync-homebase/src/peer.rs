@@ -162,6 +162,14 @@ mod tests {
         assert_eq!(PeerToken::kept(&own, &path)?, Some(token()));
         let file = std::fs::read_to_string(&path)?;
         assert!(!file.contains(&token().token) && !file.contains(&token().shared_secret));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path)?.permissions().mode() & 0o777,
+                0o600
+            );
+        }
         Ok(())
     }
 
@@ -177,6 +185,10 @@ mod tests {
             std::fs::write(&path, damaged)?;
             assert_eq!(PeerToken::kept(&again, &path)?, None, "{damaged:?}");
         }
+        // Sealed under this login, but not a token.
+        let sealed = Envelope::seal(again.key(), b"{\"not\":\"a token\"}")?;
+        std::fs::write(&path, serde_json::to_vec(&sealed)?)?;
+        assert_eq!(PeerToken::kept(&again, &path)?, None);
         Ok(())
     }
 

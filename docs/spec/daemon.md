@@ -609,13 +609,17 @@ included (service managers restart it then).
     with you"). Each token asked for stays a row on their server, so it is **kept**: in the
     file `token` beside the share's state DB, sealed under this login's shared secret (the
     keychain's; the file opens nothing by itself), and it goes with those records when the
-    share ends. A token kept under another login (signed in again since) or a damaged file
-    is none: a new one is asked for. A file that can't be read fails the opening instead,
-    tried again: asking then would leave a row at every try.
+    share ends. A token kept under another login (signed in again since), a damaged file,
+    or a token that makes no client (its secret isn't a key) is none: a new one is asked
+    for. A file that can't be read fails the opening instead, tried again: asking then
+    would leave a row at every try. A token is kept only once it makes a client.
   - A token their server refuses (401) is replaced: a new one is asked for, kept, and the
     request repeated with it, by whichever reader met the refusal (two at once ask for
-    one). Not again within an hour: a server that refuses every token it makes gets one an
-    hour, the share refused meanwhile.
+    one). Not again within an hour of the last one asked for, the one the opening asked
+    for too: a server that refuses every token it makes gets one an hour, the share
+    refused meanwhile. An ask that was itself refused (this login, the app's permission,
+    or their server giving none) made no token and doesn't count; one that failed any
+    other way may have left a row there, and counts.
   - The shares with records on this computer are those folders holding a state DB: one of
     them no marker turns on has its copy removed (below), opened for that without its
     sharer, of whom nothing is asked.

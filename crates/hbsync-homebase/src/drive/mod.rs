@@ -2086,6 +2086,24 @@ mod tests {
         Ok(())
     }
 
+    /// On a drive that isn't private the markers aren't read: nobody is turned on, nobody
+    /// off, and nothing is asked (the identity is unreachable here). On a private one they
+    /// are read, which fails here.
+    #[test]
+    fn markers_are_read_on_a_private_drive_only() -> Result<(), HomebaseError> {
+        let open = unreachable_remote(KeyState::default())?;
+        let markers = open.markers().expect("nothing asked");
+        assert!(markers.synced.is_empty());
+        assert!(markers.unsure("sam.example"));
+        let private = unreachable_remote(KeyState {
+            private: true,
+            key: Some([9; 16]),
+            ..KeyState::default()
+        })?;
+        assert!(private.markers().is_err());
+        Ok(())
+    }
+
     /// Only a 403 without a code may be for want of the permission to read shares.
     #[test]
     fn only_a_codeless_403_may_be_the_permission() {

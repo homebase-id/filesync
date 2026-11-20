@@ -1252,6 +1252,12 @@ mod tests {
             }
             let db = self.paths.shared_db(&self.me, sharer);
             std::fs::create_dir_all(db.parent().unwrap_or(&db))?;
+            if to_end {
+                // As the daemon's own: on a drive that answers nothing.
+                let ended = Arc::new(sharers::Ended(sharer.clone()));
+                let drive = Drive::open(&db, &self.me, ended)?;
+                return Ok(parts::Share::new(sharer, drive, db));
+            }
             open_share(&self.me, sharer, &db, &self.server)
         }
     }

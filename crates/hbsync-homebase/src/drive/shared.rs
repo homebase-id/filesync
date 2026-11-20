@@ -37,8 +37,8 @@ use crate::{Client, HomebaseError};
 const RENEW_AFTER: Duration = Duration::from_secs(3600);
 
 /// Where a new token comes from when theirs is refused ([`PeerRemote::renewed`]): asks for
-/// one, and keeps it.
-struct Renewal(Box<dyn Fn() -> Result<PeerToken> + Send + Sync>);
+/// one, and keeps it ([`new_client`]).
+struct Renewal(Box<dyn Fn() -> Result<Client> + Send + Sync>);
 
 impl std::fmt::Debug for Renewal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -75,18 +75,21 @@ pub struct PeerRemote {
     renewal: Option<Renewal>,
 }
 
-/// A new token for `sharer`'s server through `own` ([`HomebaseRemote::peer_token`]), kept at
-/// `kept`. One that couldn't be kept is used all the same (told): refusing it would ask for
-/// another at the next try, a row on their server each time.
-fn new_token(own: &HomebaseRemote, sharer: &str, kept: &Path) -> Result<PeerToken> {
+/// `sharer`'s server with a new token asked for through `own`
+/// ([`HomebaseRemote::peer_token`]), kept at `kept`. Only a token that makes a client is
+/// kept: one that doesn't would be found there at every later try, and never replaced. One
+/// that couldn't be kept is used all the same (told): refusing it would ask for another at
+/// the next try, a row on their server each time.
+fn new_client(own: &HomebaseRemote, sharer: &str, kept: &Path) -> Result<Client> {
     let token = own.peer_token(sharer)?;
+    let client = Client::for_peer(sharer, &token).map_err(remote_error)?;
     if let Err(e) = token.keep(own.client(), kept) {
         tracing::warn!(
             "the token {sharer}'s server gave couldn't be kept ({e}): a new one is asked for \
              at the next start"
         );
     }
-    Ok(token)
+    Ok(client)
 }
 
 impl PeerRemote {
@@ -97,32 +100,52 @@ impl PeerRemote {
         sharer: Sharer,
         token: &PeerToken,
     ) -> Result<PeerRemote, HomebaseError> {
-        Ok(PeerRemote {
+        let client = Client::for_peer(&sharer.odin_id, token)?;
+        Ok(PeerRemote::with(own, sharer, client, None))
+    }
+
+    /// As [`PeerRemote::new`], on `client`; `renewed`: when its token was asked for, if just
+    /// now.
+    fn with(
+        own: Arc<HomebaseRemote>,
+        sharer: Sharer,
+        client: Client,
+        renewed: Option<Instant>,
+    ) -> PeerRemote {
+        PeerRemote {
             held: RwLock::new(Held {
-                client: Arc::new(Client::for_peer(&sharer.odin_id, token)?),
-                renewed: None,
+                client: Arc::new(client),
+                renewed,
             }),
             own,
             sharer,
             circles: Mutex::default(),
             renewal: None,
-        })
+        }
     }
 
     /// `sharer`'s files shared with `own`'s identity, read with the token kept at `kept`
-    /// ([`PeerToken::kept`]) or, where none is that opens under this login, with a new one
-    /// asked for and kept there ([`new_token`]): one request then, none otherwise. A token
-    /// their server refuses later is replaced the same way ([`PeerRemote::renewed`]).
+    /// ([`PeerToken::kept`]) or, where none is that opens under this login and makes a
+    /// client, with a new one asked for and kept there ([`new_client`]): one request then,
+    /// none otherwise. A token their server refuses later is replaced the same way
+    /// ([`PeerRemote::renewed`]); one asked for here counts as asked for just now, so one
+    /// refused at once isn't replaced within [`RENEW_AFTER`].
     pub fn open(own: Arc<HomebaseRemote>, sharer: Sharer, kept: &Path) -> Result<PeerRemote> {
-        let token = match PeerToken::kept(own.client(), kept).map_err(remote_error)? {
-            Some(token) => token,
-            None => new_token(&own, &sharer.odin_id, kept)?,
+        let held = PeerToken::kept(own.client(), kept)
+            .map_err(remote_error)?
+            .and_then(|token| Client::for_peer(&sharer.odin_id, &token).ok());
+        let (client, renewed) = match held {
+            Some(client) => (client, None),
+            None => (
+                new_client(&own, &sharer.odin_id, kept)?,
+                Some(Instant::now()),
+            ),
         };
         let ask = {
             let (own, sharer, kept) = (Arc::clone(&own), sharer.odin_id.clone(), kept.to_owned());
-            move || new_token(&own, &sharer, &kept)
+            move || new_client(&own, &sharer, &kept)
         };
-        let mut remote = PeerRemote::new(own, sharer, &token).map_err(remote_error)?;
+        let mut remote = PeerRemote::with(own, sharer, client, renewed);
         remote.renewal = Some(Renewal(Box::new(ask)));
         Ok(remote)
     }
@@ -156,8 +179,10 @@ impl PeerRemote {
     /// Their server with a new token, after it refused `refused`'s: the one another thread
     /// got meanwhile, or one asked for now and held from here on. `None` where none is asked
     /// for: this remote has nowhere to ask ([`PeerRemote::new`]), or it asked within
-    /// [`RENEW_AFTER`]. Held while asking: the others wait for the answer, refused as they
-    /// would be.
+    /// [`RENEW_AFTER`]. An ask that was refused ([`RemoteError::Denied`]: this login or the
+    /// app's permission by this identity's server, or a token by theirs) made no token, and
+    /// doesn't count as one asked for; any other failure may have left a row there, and
+    /// does. Held while asking: the others wait for the answer, refused as they would be.
     fn renewed(&self, refused: &Arc<Client>) -> Result<Option<Arc<Client>>> {
         let mut held = self.held.write().unwrap_or_else(|e| e.into_inner());
         if !Arc::ptr_eq(&held.client, refused) {
@@ -169,9 +194,11 @@ impl PeerRemote {
         if held.renewed.is_some_and(|at| at.elapsed() < RENEW_AFTER) {
             return Ok(None);
         }
-        held.renewed = Some(Instant::now());
-        let token = ask()?;
-        let client = Client::for_peer(&self.sharer.odin_id, &token).map_err(remote_error)?;
+        let asked = ask();
+        if !matches!(asked, Err(RemoteError::Denied(..))) {
+            held.renewed = Some(Instant::now());
+        }
+        let client = asked?;
         tracing::info!(
             "{}'s server refused the token it gave: reading with a new one",
             self.sharer.odin_id
@@ -474,10 +501,11 @@ mod tests {
         let count = Arc::clone(&asked);
         sam.renewal = Some(Renewal(Box::new(move || {
             count.fetch_add(1, SeqCst);
-            Ok(PeerToken {
+            let new = PeerToken {
                 token: "bmV3".into(),
                 shared_secret: "AQEBAQEBAQEBAQEBAQEBAQ==".into(),
-            })
+            };
+            Client::for_peer("sam.invalid", &new).map_err(remote_error)
         })));
         (sam, asked)
     }
@@ -549,6 +577,71 @@ mod tests {
             Err(RemoteError::Denied(_, Refusal::Token))
         ));
         assert_eq!((asks, plain.login_id()), (1, old));
+        Ok(())
+    }
+
+    /// An ask for a new token that is refused made none, and the next refusal asks again;
+    /// one that failed otherwise may have left a row on their server, and none is asked for
+    /// within the hour.
+    #[test]
+    fn only_an_ask_that_may_have_made_a_token_holds_the_next_back() -> Result<(), HomebaseError> {
+        let failing = |with: fn() -> RemoteError| -> Result<usize, HomebaseError> {
+            let mut sam = sam()?;
+            let asked = Arc::new(AtomicUsize::new(0));
+            let count = Arc::clone(&asked);
+            sam.renewal = Some(Renewal(Box::new(move || {
+                count.fetch_add(1, SeqCst);
+                Err(with())
+            })));
+            for _ in 0..3 {
+                let answer: Result<()> = sam.with_token(|_| refused());
+                assert!(answer.is_err());
+            }
+            Ok(asked.load(SeqCst))
+        };
+        let not_permitted = || RemoteError::Denied("no".into(), Refusal::Permission);
+        assert_eq!(failing(not_permitted)?, 3);
+        assert_eq!(failing(|| RemoteError::Transient("cut".into()))?, 1);
+        assert_eq!(failing(|| RemoteError::Fatal("not a token".into()))?, 1);
+        Ok(())
+    }
+
+    /// A token kept that makes no client is none: a new one is asked for (of an identity
+    /// that can't be reached here, which fails the opening: nothing made, the file as it
+    /// was). One kept that makes one opens with no request.
+    #[test]
+    fn a_kept_token_that_makes_no_client_is_asked_for_again() -> Result<(), HomebaseError> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("token");
+        let own = Arc::new(unreachable_remote(Default::default())?);
+        let sharer = || Sharer {
+            odin_id: "sam.invalid".into(),
+            drive_alias: Uuid::new_v4(),
+        };
+        let token = |secret: &str| PeerToken {
+            token: "dG9rZW4=".into(),
+            shared_secret: secret.into(),
+        };
+        // (Eight bytes: not a key.)
+        token("AAAAAAAAAAA=").keep(own.client(), &path)?;
+        let before = std::fs::read(&path)?;
+        match PeerRemote::open(Arc::clone(&own), sharer(), &path) {
+            Err(RemoteError::Fatal(why)) => panic!("not asked for again: {why}"),
+            Err(_) => {}
+            Ok(_) => panic!("opened with a token that makes no client"),
+        }
+        assert_eq!(std::fs::read(&path)?, before);
+        token("AAAAAAAAAAAAAAAAAAAAAA==").keep(own.client(), &path)?;
+        let opened = PeerRemote::open(own, sharer(), &path).expect("opened, nothing asked");
+        // Kept from before: one refused may be replaced at once.
+        assert!(
+            opened
+                .held
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .renewed
+                .is_none()
+        );
         Ok(())
     }
 
