@@ -63,8 +63,8 @@ enum Command {
     },
     /// Lets Filesync read what others share with you: your Homebase asks you to approve it
     /// in the browser. Needed once, where Filesync was installed on your identity before it
-    /// asked for this (the status says "hasn't given Filesync the permission"); then what
-    /// others share with you syncs.
+    /// asked for this (`hbsync status` says it needs your approval); then what others share
+    /// with you syncs.
     #[command(name = "approve")]
     ApproveSharing {
         /// The identity [default: the one set up].
@@ -425,7 +425,10 @@ fn run(command: Command) -> Res<ExitCode> {
                     "{APP_NAME} may already read what others share with you on {identity}."
                 ),
                 setup::Approved::Given => {
-                    println!("Approved on {identity}: what others share with you syncs now.")
+                    println!(
+                        "Approved on {identity}: {APP_NAME} may now read what others share \
+                         with you."
+                    )
                 }
                 setup::Approved::Declined => {
                     return Err("Not approved: what others share with you isn't synced.".into());
@@ -825,7 +828,8 @@ fn print_status(status: &DaemonStatus) {
                 a.identity
             )
         });
-        // What others share that can't be opened yet for want of the owner's approval.
+        // What others share waits for the owner's approval of the app (a share synced
+        // before says why itself; one that can't be opened yet has no folder to).
         let approval = a.needs_approval.then(|| {
             format!(
                 "sharing: {APP_NAME} needs your approval to read what others share with you: \
@@ -876,9 +880,6 @@ fn print_folder(s: &FolderStatus) {
     // tray's Log in again does it).
     if s.refused() {
         println!("  log in again: hbsync setup {}", s.identity);
-    }
-    if s.needs_approval {
-        println!("  approve it: hbsync approve {}", s.identity);
     }
     if let Some(at) = s.retry_at.filter(|_| s.state != State::Offline) {
         println!("  next try {}", when(at));

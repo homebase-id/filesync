@@ -1648,7 +1648,11 @@ mod tests {
             f.started
                 .wait_all("said why", &|_, _| f.started.said(&said) == 1)?;
             assert!(!f.folder.join("Shared").exists());
-            // (Not for want of the owner's approval: none is asked for.)
+            // Not for want of the owner's approval: none is asked for (looked at once it
+            // was tried a second time: what the first try found has been told by then).
+            f.started.account.sync_now()?;
+            f.started
+                .wait_all("tried again", &|_, _| lock(&f.markers).opens >= 2)?;
             assert!(!f.started.account.status().0.needs_approval);
 
             // It can be opened: tried again by itself (no marker changed), and synced.

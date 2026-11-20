@@ -177,7 +177,7 @@ impl Server {
                     "{APP_NAME} may already read what others share with you on {identity}."
                 )),
                 setup::Approved::Given => Ok(format!(
-                    "{APP_NAME} syncs what others share with you on {identity} now."
+                    "{APP_NAME} may now read what others share with you on {identity}."
                 )),
                 setup::Approved::Declined => Err(format!(
                     "{APP_NAME} wasn't given the permission to read what others share with you."
@@ -224,11 +224,14 @@ impl Server {
                 Ok(done) => tracing::info!("logged in: {done}"),
                 Err(e) => tracing::warn!("logging in failed: {e}"),
             }
-            // Unless given up (started over): then a later login's page is showing.
-            if !cancel.load(Ordering::Relaxed) {
+            // Unless given up (started over): then a later login's page is showing. (Looked
+            // at under the lock starting over takes: not between its giving up and the next.)
+            {
                 let mut s = lock(&pages.shared);
-                s.phase = Phase::Done(result);
-                s.cancel = None;
+                if !cancel.load(Ordering::Relaxed) {
+                    s.phase = Phase::Done(result);
+                    s.cancel = None;
+                }
             }
             send(Event::Wake);
         });

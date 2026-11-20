@@ -291,6 +291,14 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
                 items.push(Item::Label(cut(&words::waiting(share))));
             }
         }
+        // The owner's approval of the app, wanted by a share that has no line to say so
+        // (it can't be opened yet): said here; asked for below.
+        let unapproved = view.daemon.needs_approval(&s.identity);
+        let said = |f: &FolderStatus| f.needs_approval;
+        if unapproved && !view.daemon.waiting_shares(&s.identity).any(said) {
+            let why = format!("{APP_NAME} needs your approval to read what others share");
+            items.push(Item::Label(cut(&why)));
+        }
         if let Some(h) = view
             .daemon
             .held_or_main()
@@ -313,14 +321,8 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
         if s.refused() || view.daemon.login_without_key(&s.identity) {
             items.push(Item::Action(Action::LogInAgain, "Log in again…".into()));
         }
-        // What others share waits for the owner's approval of the app: asked for here (and
-        // said, where no share's line above does: one that can't be opened has none).
-        if view.daemon.needs_approval(&s.identity) {
-            let said = |f: &FolderStatus| f.needs_approval;
-            if !view.daemon.waiting_shares(&s.identity).any(said) {
-                let why = format!("{APP_NAME} needs your approval to read what others share");
-                items.push(Item::Label(cut(&why)));
-            }
+        // What others share waits for the owner's approval of the app: asked for here.
+        if unapproved {
             items.push(Item::Action(
                 Action::Approve,
                 "Approve reading shared files…".into(),
@@ -536,8 +538,12 @@ mod tests {
         let v = view(&d, &[]);
         assert_eq!(look(&v), Look::Attention);
         assert!(status_line(&v).starts_with("Your Homebase cloud hasn't given"));
-        let offered = actions(&menu(&v));
+        let m = menu(&v);
+        let offered = actions(&m);
         assert!(!offered.contains(&Action::LogInAgain) && offered.contains(&Action::Approve));
+        // (The share's own line says why: not said a second time.)
+        let why = |i: &Item| matches!(i, Item::Label(l) if l.contains("needs your approval"));
+        assert!(!m.iter().any(why), "{m:?}");
 
         // A share that can't be opened for it has no folder: the account says so, and the
         // approval is offered all the same, with the warning dot and a line saying why.
@@ -557,7 +563,6 @@ mod tests {
         let m = menu(&v);
         assert!(actions(&m).contains(&Action::Approve));
         assert_eq!(look(&v), Look::Attention);
-        let why = |i: &Item| matches!(i, Item::Label(l) if l.contains("needs your approval"));
         assert!(m.iter().any(why), "{m:?}");
     }
 

@@ -861,7 +861,9 @@ with a capital):
   once (a daemon that isn't running reads the permission as it starts). Where the app may
   already (approved in the owner console since: one read of the login's context says),
   nothing is asked and only the sync is: the page would add the permission a second time.
-  Where this computer's login is what is refused, it says to log in again first.
+  Where this computer's login is what is refused, it says to log in again first. While
+  the account is paused nothing is asked of the identity, so what waited is tried, and the
+  status stops saying the approval is wanted, once it syncs again.
 
 The first two are the remote's `RemoteError::Waiting` (the engine's `Stopped::Waiting`): no
 failure, and not a busy server (`Later`, which shows `offline` for a share as for the

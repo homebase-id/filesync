@@ -248,7 +248,10 @@ impl Account {
                 opened => opened?,
             };
             let config = now.as_ref().unwrap_or(config);
-            let found = self.serve(paths, config, requests, stop, msgs, parts, !healed)?;
+            let found = self.serve(paths, config, requests, stop, msgs, parts, !healed);
+            // (What that run found of the shares isn't the next one's to say.)
+            lock(&self.shown).status.needs_approval = false;
+            let found = found?;
             let Some(why) = found.filter(|_| !self.stopping(stop)) else {
                 return Ok(());
             };

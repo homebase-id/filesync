@@ -561,6 +561,49 @@ mod tests {
         Ok(())
     }
 
+    /// The owner's approval of reading what others share is asked on the page that follows
+    /// along, in its own words; starting over gives the asking up and asks anew; and what it
+    /// came to isn't shown to a login that follows.
+    #[test]
+    fn the_approval_follows_along_in_its_own_words_and_starts_over() -> R {
+        let dir = tempfile::tempdir()?;
+        let send: Sender = Arc::new(|_| {});
+        let pages = Pages::start(Paths::under(&dir.path().join("home")), send)?;
+        let cancel = Arc::new(AtomicBool::new(false));
+        let show = |phase: Phase| -> Result<String, Box<dyn std::error::Error>> {
+            {
+                let mut s = lock(&pages.shared);
+                (s.phase, s.approval) = (phase, true);
+                s.cancel = Some(Arc::clone(&cancel));
+            }
+            Ok(request(&pages.url("setup/done"), "GET", "")?)
+        };
+        let waiting = show(Phase::Connecting)?;
+        assert!(waiting.contains("Waiting for your approval"), "{waiting}");
+        assert!(waiting.contains(&pages.url("approve/again")), "{waiting}");
+        assert!(show(Phase::Done(Ok("May read.".into())))?.contains("<h1>Approved</h1>"));
+        let refused = show(Phase::Done(Err("Not given.".into())))?;
+        assert!(refused.contains("<h1>Not approved</h1>"), "{refused}");
+        assert!(refused.contains(&pages.url("approve/again")), "{refused}");
+
+        // Starting over gives the asking up, and asks anew.
+        show(Phase::Connecting)?;
+        let again = request(&pages.url("approve/again"), "POST", "")?;
+        assert!(
+            again.contains(&format!("Location: {}", pages.url("approve"))),
+            "{again}"
+        );
+        assert!(cancel.load(Ordering::Relaxed));
+        assert_eq!(lock(&pages.shared).phase, Phase::Form);
+
+        // A login after it starts from its form, not from what the approval came to.
+        show(Phase::Done(Ok("May read.".into())))?;
+        pages.prepare_setup("anna.example.com", None);
+        let s = lock(&pages.shared);
+        assert_eq!((s.phase.clone(), s.approval), (Phase::Form, false));
+        Ok(())
+    }
+
     /// Giving the app its drive back goes on from the page that follows along: it sends the
     /// browser to the owner app's page once, then follows along again.
     #[test]
