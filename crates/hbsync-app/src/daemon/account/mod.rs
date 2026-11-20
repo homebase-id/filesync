@@ -1204,6 +1204,9 @@ mod tests {
         opens: usize,
         /// Whose share was opened, ever (its state DB is this computer's from then on).
         opened: Vec<Identity>,
+        /// How long after a read that says a share is off a second one confirms it (none:
+        /// the first read does), as the account starts.
+        confirm: std::time::Duration,
     }
 
     /// `me.example`'s shares by its [`TestMarkers`]: each sharer's drive is the one on
@@ -1259,6 +1262,10 @@ mod tests {
                 return Ok(parts::Share::new(sharer, drive, db));
             }
             open_share(&self.me, sharer, &db, &self.server)
+        }
+
+        fn confirm_after(&self) -> std::time::Duration {
+            lock(&self.markers).confirm
         }
     }
 
@@ -1424,6 +1431,44 @@ mod tests {
             f.marked(|m| m.on = vec![tom.clone()]);
             f.started
                 .wait_all("the share is synced again", &both_synced)?;
+            Ok(())
+        };
+        let checked = checks();
+        f.started.stop(checked)?
+    }
+
+    /// A share its marker turns off is off once a second read of the markers, after the
+    /// time its source names, says so too: the account reads them again by itself, and only
+    /// then takes the copy off this computer.
+    #[test]
+    fn a_share_is_turned_off_by_a_second_read_of_the_markers()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let tom: Identity = "tom.example".into();
+        let confirm = std::time::Duration::from_millis(600);
+        let f = Marked::start(home.path(), |m| {
+            m.on = vec![tom.clone()];
+            m.confirm = confirm;
+        })?;
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            f.started.wait_all("the share is synced", &both_synced)?;
+            let before = lock(&f.markers).reads;
+            let off_at = std::time::Instant::now();
+            f.marked(|m| m.on.clear());
+            // The read that says so first: the share is synced on.
+            f.read_since(before)?;
+            let (_, folders) = f.started.account.status();
+            if off_at.elapsed() < confirm / 2 {
+                assert_eq!(folders.len(), 2, "one read turned it off");
+                assert!(f.toms().is_dir());
+            }
+            // No change is told again: the second read is the account's own.
+            f.started
+                .wait_all("the share is no longer synced", &alone)?;
+            assert!(off_at.elapsed() >= confirm, "off before a second read");
+            assert!(lock(&f.markers).reads >= before + 2);
+            let gone = || Some(()).filter(|()| !f.toms().exists());
+            wait_until(gone).ok_or("its copy stays")?;
             Ok(())
         };
         let checked = checks();

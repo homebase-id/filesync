@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use hbsync_engine::Drive;
 use hbsync_homebase::drive::HomebaseRemote;
@@ -47,7 +47,21 @@ pub trait Sharers: Send + std::fmt::Debug {
     /// asked of the sharer for that, so it is to open without them (a share that ended
     /// gives no access any more).
     fn open(&self, sharer: &crate::Identity, to_end: bool) -> Result<Share, RunnerError>;
+
+    /// How long after a read that says a share is off a second one is to say so too, before
+    /// it is taken for off ([`OFF_CONFIRM`]).
+    fn confirm_after(&self) -> Duration {
+        OFF_CONFIRM
+    }
 }
+
+/// A share the markers turn off is off once two reads, this long apart at least, say so: its
+/// copy leaves this device then, all of it, and one answer that left a marker out (a listing
+/// from before it was written) would take it off only to bring it back. A minute at least,
+/// as for a file found gone (sync semantics §8b); unlike there, no longest time, and a
+/// restart starts anew. It costs one more read of the markers each time a share is turned
+/// off.
+pub(super) const OFF_CONFIRM: Duration = Duration::from_secs(60);
 
 /// What an identity's share markers say ([`Sharers::told`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
