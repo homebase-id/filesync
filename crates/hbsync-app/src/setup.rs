@@ -237,7 +237,8 @@ pub struct Prepared<R = HomebaseRemote> {
 
 /// Gets the identity ready for syncing once this device is authorized: finds the sync drive,
 /// reads its change feed, and finds the app's circle by its slug (installing the app created it;
-/// made now if not).
+/// made now if not, where the app holds what the circle is to give: an install from before
+/// it asked for that has none made, which is said).
 pub fn prepare(creds: &Credentials) -> Result<Prepared, HomebaseError> {
     let remote = HomebaseRemote::connect(Client::new(creds)?)?;
     prepared(
