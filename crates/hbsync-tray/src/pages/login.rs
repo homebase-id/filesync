@@ -135,7 +135,7 @@ impl Server {
 
         let paths = self.paths.clone();
         let identity = request.identity.to_string();
-        Some(self.run_login(identity, move |owner| {
+        Some(self.run_login(identity, false, move |owner| {
             setup::set_up(&paths, &request, owner, &mut |line| {
                 tracing::info!("{line}")
             })
@@ -156,10 +156,33 @@ impl Server {
     pub(super) fn start_login(&self) -> String {
         let identity = lock(&self.pages.shared).identity.clone();
         let paths = self.paths.clone();
-        self.run_login(identity.clone(), move |owner| {
+        self.run_login(identity.clone(), false, move |owner| {
             setup::sign_in_again(&paths, &hbsync_app::Identity::new(&identity), owner)
                 .map(|()| format!("This computer is signed in again on {identity}."))
                 .map_err(|e| e.to_string())
+        })
+    }
+
+    /// Asks the owner of the identity the tray prepared to let the app read what others
+    /// share with them ([`setup::approve`]: nothing is asked where it may already, and what
+    /// waited syncs at once). The browser goes to the identity's approval page, or the
+    /// outcome.
+    pub(super) fn start_approval(&self) -> String {
+        let identity = lock(&self.pages.shared).identity.clone();
+        let paths = self.paths.clone();
+        self.run_login(identity.clone(), true, move |owner| {
+            let asked = setup::approve(&paths, &hbsync_app::Identity::new(&identity), owner);
+            match asked.map_err(|e| e.to_string())? {
+                setup::Approved::Already => Ok(format!(
+                    "{APP_NAME} may already read what others share with you on {identity}."
+                )),
+                setup::Approved::Given => Ok(format!(
+                    "{APP_NAME} syncs what others share with you on {identity} now."
+                )),
+                setup::Approved::Declined => Err(format!(
+                    "{APP_NAME} wasn't given the permission to read what others share with you."
+                )),
+            }
         })
     }
 
@@ -170,6 +193,7 @@ impl Server {
     fn run_login(
         &self,
         identity: String,
+        approval: bool,
         login: impl FnOnce(&mut InTray) -> Result<String, String> + Send + 'static,
     ) -> String {
         let cancel = {
@@ -180,6 +204,7 @@ impl Server {
             }
             s.clear_form();
             s.identity = identity;
+            s.approval = approval;
             s.phase = Phase::Connecting;
             let cancel = Arc::new(AtomicBool::new(false));
             s.cancel = Some(Arc::clone(&cancel));
@@ -215,6 +240,9 @@ impl Server {
 
     pub(super) fn done_page(&self) -> String {
         let s = lock(&self.pages.shared);
+        if s.approval {
+            return self.approval_page(&s.phase);
+        }
         match &s.phase {
             Phase::Form => "<h1>Not connected yet</h1>".to_owned(),
             Phase::Connecting => format!(
@@ -235,6 +263,34 @@ impl Server {
                  <form method=post action=\"{}\"><button>Try again</button></form>",
                 escape(why),
                 self.pages.url("setup/again")
+            ),
+        }
+    }
+}
+
+impl Server {
+    /// The page that follows along while the owner is asked to let the app read what others
+    /// share with them ([`Server::start_approval`]), and its outcome.
+    fn approval_page(&self, phase: &Phase) -> String {
+        let again = self.pages.url("approve/again");
+        match phase {
+            Phase::Form => "<h1>Not asked yet</h1>".to_owned(),
+            Phase::Connecting => format!(
+                "<meta http-equiv=refresh content=2>\
+                 <h1>Waiting for your approval…</h1><p>Approve on your Homebase, in the page \
+                 that opened: {APP_NAME} reading what others share with you. This page \
+                 follows along.</p>\
+                 <form method=post action=\"{again}\"><p class=small>The page closed? \
+                 <button class=secondary>Start over</button></p></form>"
+            ),
+            Phase::Done(Ok(what)) => format!(
+                "<h1>Approved</h1><p>{}</p><p>You can close this page.</p>",
+                escape(what)
+            ),
+            Phase::Done(Err(why)) => format!(
+                "<h1>Not approved</h1><p class=error>{}</p>\
+                 <form method=post action=\"{again}\"><button>Try again</button></form>",
+                escape(why)
             ),
         }
     }
@@ -287,9 +343,21 @@ impl setup::Owner for InTray {
     }
 
     fn restore_drive(&mut self, identity: &str) -> Result<bool, setup::HomebaseError> {
-        let restore = setup::begin_restore(identity)?.return_to(&self.pages.url("setup/done"));
-        self.show(restore.url());
-        let given = restore.finish_unless(setup::APPROVAL_TIMEOUT, &self.cancel);
+        self.ask(setup::begin_restore(identity)?)
+    }
+
+    fn approve_sharing(&mut self, identity: &str) -> Result<bool, setup::HomebaseError> {
+        self.ask(setup::begin_approval(identity)?)
+    }
+}
+
+impl InTray {
+    /// Sends the browser to the app-update page of `asked`, which comes back to the page that
+    /// follows along, and waits for the owner's answer: whether they gave it.
+    fn ask(&mut self, asked: setup::Asked) -> Result<bool, setup::HomebaseError> {
+        let asked = asked.return_to(&self.pages.url("setup/done"));
+        self.show(asked.url());
+        let given = asked.finish_unless(setup::APPROVAL_TIMEOUT, &self.cancel);
         // Not taken (the page wasn't looked at again): not sent there later.
         self.set_owner_page(None);
         given

@@ -302,7 +302,7 @@ impl Account {
     /// Its status and its folders'.
     pub(super) fn status(&self) -> (AccountStatus, Vec<FolderStatus>) {
         let shown = lock(&self.shown);
-        let folders = match &shown.waiting {
+        let folders: Vec<FolderStatus> = match &shown.waiting {
             // Its own first, then what others share with it.
             None => (shown
                 .own()
@@ -315,7 +315,11 @@ impl Account {
                 .map(|root| waiting.status(root, shown.paused()))
                 .collect(),
         };
-        (shown.status.clone(), folders)
+        let mut status = shown.status.clone();
+        // The app's want of the owner's approval is the account's to say, whichever share
+        // met it: one that can't be opened (kept here) or one that is synced (its own).
+        status.needs_approval |= folders.iter().any(|f| f.needs_approval);
+        (status, folders)
     }
 
     /// The runner of its folder at `path`: `None` when it doesn't sync it; refused, saying
@@ -1644,6 +1648,8 @@ mod tests {
             f.started
                 .wait_all("said why", &|_, _| f.started.said(&said) == 1)?;
             assert!(!f.folder.join("Shared").exists());
+            // (Not for want of the owner's approval: none is asked for.)
+            assert!(!f.started.account.status().0.needs_approval);
 
             // It can be opened: tried again by itself (no marker changed), and synced.
             lock(&f.markers).unopenable.clear();
@@ -1671,8 +1677,9 @@ mod tests {
             f.started.wait_all("its own folder syncs, alone", &alone)?;
             let wanted = |status: &AccountStatus, _: &[FolderStatus]| status.needs_approval;
             f.started.wait_all("the approval is wanted", &wanted)?;
-            // Given: the next try (a marker's change hurries it; Sync now does too) opens it.
-            f.marked(|m| m.unopenable.clear());
+            // Given: Sync now (what the approval sends) tries it at once, and opens it.
+            lock(&f.markers).unopenable.clear();
+            f.started.account.sync_now()?;
             f.started.wait_all("the share is synced", &both_synced)?;
             let (account, _) = f.started.account.status();
             assert!(!account.needs_approval);

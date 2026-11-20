@@ -42,6 +42,9 @@ struct Shared {
     merge_asked: bool,
     error: Option<String>,
     phase: Phase,
+    /// What goes on in the browser isn't a login: the owner is asked to let the app read
+    /// what others share with them (the page that follows along says so).
+    approval: bool,
     /// Gives up the login in progress (starting over): set, that login's outcome is ignored.
     cancel: Option<Arc<AtomicBool>>,
     /// A page of the identity's owner app the login goes on to (giving the app its drive
@@ -55,6 +58,7 @@ impl Shared {
     /// The form, fresh.
     fn clear_form(&mut self) {
         self.phase = Phase::Form;
+        self.approval = false;
         self.owner_page = None;
         self.error = None;
         self.merge_asked = false;
@@ -96,6 +100,7 @@ impl Pages {
                 error: None,
                 phase: Phase::Form,
                 cancel: None,
+                approval: false,
                 owner_page: None,
                 status: None,
             })),
@@ -190,6 +195,13 @@ impl Server {
             ("GET", "setup") => self.html(&mut stream, self.setup_page()),
             // Signing in again (the tray opens it), unless a login goes on already.
             ("GET", "login") => redirect(&mut stream, &self.start_login()),
+            // The owner's approval of reading what others share (the tray opens it), likewise.
+            ("GET", "approve") => redirect(&mut stream, &self.start_approval()),
+            ("POST", "approve/again") => {
+                self.pages.start_over();
+                (self.send)(Event::Wake);
+                redirect(&mut stream, &self.pages.url("approve"))
+            }
             ("POST", "setup/folder") => {
                 self.choose_folder(&request.form);
                 redirect(&mut stream, &self.pages.url("setup"))

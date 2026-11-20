@@ -406,12 +406,6 @@ impl Account {
                         let waiting = (&mut to_end, ending);
                         let notes = markers.answer(id, *answer, &mut shares, waiting, now);
                         self.push_notes(notes);
-                        let mut shown = lock(&self.shown);
-                        let unapproved = markers.needs_approval();
-                        if shown.status.needs_approval != unapproved {
-                            shown.status.needs_approval = unapproved;
-                            changed = true;
-                        }
                     }
                     Msg::Hint(event) => {
                         if event == Event::Markers {
@@ -606,6 +600,15 @@ impl Account {
                 // (Nothing is asked of the identity while paused.)
                 if !paused {
                     markers.ask(&shares, now);
+                }
+                // A share that can't be opened for want of the owner's approval has no
+                // folder to say so: the account's status does (looked at here, after what
+                // was answered and asked: an opening given up counts no more).
+                let unapproved = markers.needs_approval();
+                {
+                    // (A scope of its own: the lock is taken again below.)
+                    let told = &mut lock(&self.shown).status.needs_approval;
+                    changed |= std::mem::replace(told, unapproved) != unapproved;
                 }
                 // The main folder's runner started while nothing was shared makes no folder
                 // of shares: with a share to sync now, it is told to. (One waiting to start

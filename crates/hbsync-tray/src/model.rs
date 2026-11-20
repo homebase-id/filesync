@@ -55,14 +55,10 @@ impl Daemon {
         self.account(identity).is_some_and(|a| a.login_without_key)
     }
 
-    /// What others share with `identity` waits for the owner's approval of the app: a share
-    /// that can't be opened for it (the account says so), or one synced before.
+    /// What others share with `identity` waits for the owner's approval of the app (the
+    /// account says so, whichever share met it).
     pub fn needs_approval(&self, identity: &hbsync_app::Identity) -> bool {
-        let Daemon::Running(s) = self else {
-            return false;
-        };
-        let theirs = |f: &FolderStatus| f.identity == *identity && f.needs_approval;
-        self.account(identity).is_some_and(|a| a.needs_approval) || s.folders.iter().any(theirs)
+        self.account(identity).is_some_and(|a| a.needs_approval)
     }
 
     /// The status of the account `identity`.
@@ -171,7 +167,18 @@ pub(crate) fn look(view: &View) -> Look {
         Daemon::NotSetUp | Daemon::Stopped => Look::Quiet,
         Daemon::Starting(Some(_)) => Look::Attention,
         Daemon::Starting(None) => Look::Busy,
-        Daemon::Running(_) => view.daemon.most_urgent().map_or(Look::Quiet, folder_look),
+        Daemon::Running(_) => {
+            let look = view.daemon.most_urgent().map_or(Look::Quiet, folder_look);
+            // The owner's to approve: asked for, whether the share that waits has a folder
+            // to show it or can't be opened yet (the menu says which, and asks).
+            let main = view.daemon.status();
+            let unapproved = main.is_some_and(|s| view.daemon.needs_approval(&s.identity));
+            if unapproved {
+                look.max(Look::Attention)
+            } else {
+                look
+            }
+        }
     }
 }
 
@@ -306,9 +313,18 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
         if s.refused() || view.daemon.login_without_key(&s.identity) {
             items.push(Item::Action(Action::LogInAgain, "Log in again…".into()));
         }
-        // What others share waits for the owner's approval of the app: asked for here.
+        // What others share waits for the owner's approval of the app: asked for here (and
+        // said, where no share's line above does: one that can't be opened has none).
         if view.daemon.needs_approval(&s.identity) {
-            items.push(Item::Action(Action::Approve, words::APPROVE.into()));
+            let said = |f: &FolderStatus| f.needs_approval;
+            if !view.daemon.waiting_shares(&s.identity).any(said) {
+                let why = format!("{APP_NAME} needs your approval to read what others share");
+                items.push(Item::Label(cut(&why)));
+            }
+            items.push(Item::Action(
+                Action::Approve,
+                "Approve reading shared files…".into(),
+            ));
         }
         items.push(Item::Separator);
         if s.state == State::Paused {
@@ -495,6 +511,10 @@ mod tests {
                 panic!("running");
             };
             both.folders.push(share);
+            // (As the daemon tells it: the account says the app wants the approval.)
+            let mut account = hbsync_app::protocol::AccountStatus::new(&"anna.example.com".into());
+            account.needs_approval = needs_approval;
+            both.accounts.push(account);
             Daemon::Running(both)
         };
         let d = waiting("waiting for tom.example to review your connection", false);
@@ -520,17 +540,25 @@ mod tests {
         assert!(!offered.contains(&Action::LogInAgain) && offered.contains(&Action::Approve));
 
         // A share that can't be opened for it has no folder: the account says so, and the
-        // approval is offered all the same. Not where nothing waits for it.
+        // approval is offered all the same, with the warning dot and a line saying why.
+        // Not where nothing waits for it.
+        let fine = running(status(State::Idle));
+        let v = view(&fine, &[]);
+        assert!(!actions(&menu(&v)).contains(&Action::Approve));
+        assert_eq!(look(&v), Look::UpToDate);
         let Daemon::Running(mut unopened) = running(status(State::Idle)) else {
             panic!("running");
         };
-        let fine = Daemon::Running(unopened.clone());
-        assert!(!actions(&menu(&view(&fine, &[]))).contains(&Action::Approve));
         let mut account = hbsync_app::protocol::AccountStatus::new(&"anna.example.com".into());
         account.needs_approval = true;
         unopened.accounts.push(account);
         let d = Daemon::Running(unopened);
-        assert!(actions(&menu(&view(&d, &[]))).contains(&Action::Approve));
+        let v = view(&d, &[]);
+        let m = menu(&v);
+        assert!(actions(&m).contains(&Action::Approve));
+        assert_eq!(look(&v), Look::Attention);
+        let why = |i: &Item| matches!(i, Item::Label(l) if l.contains("needs your approval"));
+        assert!(m.iter().any(why), "{m:?}");
     }
 
     /// Shares that are off (their folder gone, or not made) are said in the menu; nothing is

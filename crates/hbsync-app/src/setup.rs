@@ -7,7 +7,7 @@ use std::process::Command;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-pub use crate::login::Paste;
+pub use crate::login::{Asked, Paste};
 use hbsync_engine::root::{RootError, SyncRoot};
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::{Client, app};
@@ -96,18 +96,54 @@ pub fn sharing_approved(paths: &Paths, identity: &Identity) -> crate::Result<boo
         let none = format!("this computer isn't signed in on {identity}: `hbsync setup` does");
         return Err(Refusal::No(none).into());
     };
-    Ok(hbsync_homebase::drive::reads_shared(&Client::new(&creds)?)?)
+    match hbsync_homebase::drive::reads_shared(&Client::new(&creds)?) {
+        // The login is what is refused: an approval asked for now would be for nothing.
+        Err(e) if e.refusal().is_some() => {
+            let again = format!(
+                "{identity} no longer accepts this computer's login: log in again first \
+                 (`hbsync setup {identity}`, or Log in again… in the tray)"
+            );
+            Err(Refusal::No(again).into())
+        }
+        approved => Ok(approved?),
+    }
 }
 
-/// Asks the owner of `identity` to let the app read what others share with them, in the
-/// browser as the command line shows it (`owner`): whether they did. Nothing is asked where
-/// the app may already ([`sharing_approved`]); that is for the caller to look up first.
-pub fn approve_sharing(identity: &Identity, owner: &InBrowser<'_>) -> crate::Result<bool> {
-    let ask = begin_approval(identity)?;
-    let what = format!("let {APP_NAME} read what others share with you on {identity}");
-    owner.visit(&what, ask.url());
-    owner.opens.open(ask.url());
-    Ok(ask.finish_with(APPROVAL_TIMEOUT, &AtomicBool::new(false), owner.paste())?)
+/// How the owner's approval of the app's reading what others share came out ([`approve`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Approved {
+    /// The app may already (approved elsewhere since): nothing was asked.
+    Already,
+    /// The owner gave it just now.
+    Given,
+    /// The owner said no.
+    Declined,
+}
+
+/// Has the owner of `identity` let the app read what others share with them, through
+/// `owner` (the browser), and what waited for it tried at once: Sync now, where a daemon
+/// runs (one that doesn't reads the permission as it starts; one that refuses the sync, its
+/// account still connecting, looks again by itself within the hour). Nothing is asked where
+/// the app may already ([`sharing_approved`]): the page would store the permission a second
+/// time. Whoever asks for the approval comes through here.
+pub fn approve(
+    paths: &Paths,
+    identity: &Identity,
+    owner: &mut dyn Owner,
+) -> crate::Result<Approved> {
+    let approved = if sharing_approved(paths, identity)? {
+        Approved::Already
+    } else if owner.approve_sharing(identity)? {
+        Approved::Given
+    } else {
+        return Ok(Approved::Declined);
+    };
+    if let Err(e) = control::daemon(paths, crate::protocol::DaemonControl::SyncNow)
+        && !e.is::<control::NotRunning>()
+    {
+        tracing::info!("what waited for the approval isn't tried at once: {e}");
+    }
+    Ok(approved)
 }
 
 /// The owner's answers in the browser that setting up may need ([`set_up`]).
@@ -116,6 +152,9 @@ pub trait Owner {
     fn authorize(&mut self, identity: &str, device: &str) -> Result<Credentials, HomebaseError>;
     /// Asks for the app's drive on `identity` again, waiting for the answer (`false`: no).
     fn restore_drive(&mut self, identity: &str) -> Result<bool, HomebaseError>;
+    /// Asks the owner of `identity` to let the app read what others share with them, waiting
+    /// for the answer (`false`: no).
+    fn approve_sharing(&mut self, identity: &str) -> Result<bool, HomebaseError>;
 }
 
 /// The owner's answers in the browser, for the command line: each page opened as `opens`
@@ -157,6 +196,14 @@ impl InBrowser<'_> {
     fn paste(&self) -> Option<Paste<'_>> {
         let (typed, say) = (self.typed?, self.say);
         Some(Paste { typed, say })
+    }
+
+    /// Takes the owner to the app-update page of `asked` (to `what`), and waits for their
+    /// answer: whether they gave it.
+    fn ask(&self, what: &str, asked: crate::login::Asked) -> Result<bool, HomebaseError> {
+        self.visit(what, asked.url());
+        self.opens.open(asked.url());
+        asked.finish_with(APPROVAL_TIMEOUT, &AtomicBool::new(false), self.paste())
     }
 }
 
@@ -204,11 +251,13 @@ impl Owner for InBrowser<'_> {
     }
 
     fn restore_drive(&mut self, identity: &str) -> Result<bool, HomebaseError> {
-        let restore = begin_restore(identity)?;
         let what = format!("give {APP_NAME} its drive back on {identity}");
-        self.visit(&what, restore.url());
-        self.opens.open(restore.url());
-        restore.finish_with(APPROVAL_TIMEOUT, &AtomicBool::new(false), self.paste())
+        self.ask(&what, begin_restore(identity)?)
+    }
+
+    fn approve_sharing(&mut self, identity: &str) -> Result<bool, HomebaseError> {
+        let what = format!("let {APP_NAME} read what others share with you on {identity}");
+        self.ask(&what, begin_approval(identity)?)
     }
 }
 
@@ -816,6 +865,10 @@ mod tests {
         }
 
         fn restore_drive(&mut self, _: &str) -> Result<bool, HomebaseError> {
+            Ok(self.0)
+        }
+
+        fn approve_sharing(&mut self, _: &str) -> Result<bool, HomebaseError> {
             Ok(self.0)
         }
     }

@@ -851,13 +851,17 @@ with a capital):
   from before it asked for that): "Access denied: your Homebase cloud hasn't given Filesync
   the permission…"; looked at again hourly, and at Sync now. **The approval is asked for**
   by `hbsync approve` and the tray's Approve reading shared files…, offered while a share
-  waits for it (a synced one's `needs_approval`, or the account's where a share can't be
-  opened for it: such a share has no folder in the status): the owner's app-update page
-  for that one permission (`/owner/appupdate?p=305`), which comes back to this computer
-  as the page that gives the drive back does (below; `--paste` and `--browser` as
-  `hbsync login`); given, Sync now tries what waited at once. Where the app may already
-  (approved in the owner console since: one read of the login's context says), nothing is
-  asked and only the sync is: the page would add the permission a second time.
+  waits for it. The account's status says so (`needs_approval`), whichever share met it:
+  one that can't be opened (it has no folder in the status) or one that is synced. The
+  tray shows the warning dot, and a line saying why where no share's line does. Both ask
+  through one function (`setup::approve`): the owner's app-update page for that one
+  permission (`/owner/appupdate?p=305`), which comes back to this computer as the page
+  that gives the drive back does (`--paste` and `--browser` as `hbsync login`; in the tray,
+  the page that follows along, which can start over); given, Sync now tries what waited at
+  once (a daemon that isn't running reads the permission as it starts). Where the app may
+  already (approved in the owner console since: one read of the login's context says),
+  nothing is asked and only the sync is: the page would add the permission a second time.
+  Where this computer's login is what is refused, it says to log in again first.
 
 The first two are the remote's `RemoteError::Waiting` (the engine's `Stopped::Waiting`): no
 failure, and not a busy server (`Later`, which shows `offline` for a share as for the
@@ -1178,7 +1182,8 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 | `hbsync log` | the log folder (a daily file, a week kept) |
 
 **A browser on another computer** (`--paste`; filesync #409). The owner's answer comes back
-to a page on `localhost` of the computer that runs `hbsync setup` or `hbsync login`, where
+to a page on `localhost` of the computer that runs `hbsync setup`, `hbsync login` or
+`hbsync approve`, where
 the command waits for it. A computer set up over SSH has no browser to come back to: the
 link is printed, opened on any other computer and approved there, and that browser then
 goes to `http://localhost:<port>/…`, which is the other computer and doesn't load. Its

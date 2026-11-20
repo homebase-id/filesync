@@ -678,8 +678,7 @@ impl HomebaseRemote {
     /// permission update closes no socket). Kept for [`Self::circle_key`]'s next look; an
     /// answer overtaken by another read costs that look one more read, no more.
     fn reads_shared_now(&self) -> Result<bool> {
-        let context = security_context(&self.client).map_err(remote_error)?;
-        let reads = holds_key(&context, app::USE_TRANSIT_READ);
+        let reads = reads_shared(&self.client).map_err(remote_error)?;
         self.drive_key.lock().reads_shared = reads;
         Ok(reads)
     }

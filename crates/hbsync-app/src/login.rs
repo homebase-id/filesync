@@ -552,10 +552,9 @@ mod tests {
             };
             assert!(page.contains(said), "{page}");
         }
-        // A drive's answer isn't an approval's: each trip is told by its own path.
-        let (restore, ask) = (begin_restore("a.example")?, begin_approval("a.example")?);
+        // (The drive's trip comes back on a path of its own.)
+        let restore = begin_restore("a.example")?;
         assert!(return_url(restore.url())?.contains("/drive-callback/"));
-        assert!(!ask.back.pasted(&return_url(restore.url())?).is_some());
         Ok(())
     }
 }

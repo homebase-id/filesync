@@ -324,11 +324,12 @@ impl Markers {
                     }
                     Err(e) => {
                         let opening = &mut self.opening[i];
-                        opening.unapproved = matches!(
-                            &e,
-                            RunnerError::Engine(e)
-                                if e.refusal() == Some(hbsync_remote::Refusal::Permission)
-                        );
+                        let engine = match &e {
+                            RunnerError::Engine(e) => Some(e),
+                            _ => None,
+                        };
+                        let refusal = engine.and_then(|e| e.refusal());
+                        opening.unapproved = refusal == Some(hbsync_remote::Refusal::Permission);
                         let pause = wait_after(&mut opening.backoff, &e);
                         tracing::warn!(
                             "what {sharer} shares can't be opened ({e}): trying again in {pause:?}"
@@ -336,10 +337,7 @@ impl Markers {
                         opening.at = Some(now + pause);
                         if !std::mem::replace(&mut opening.told, true) {
                             // (Who is waited for, where that is all: in those words.)
-                            let waiting = match &e {
-                                RunnerError::Engine(e) => e.waiting(),
-                                _ => None,
-                            };
+                            let waiting = engine.and_then(|e| e.waiting());
                             let why: &dyn std::fmt::Display = match &waiting {
                                 Some(who) => who,
                                 None => &e,

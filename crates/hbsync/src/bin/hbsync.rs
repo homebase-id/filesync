@@ -418,22 +418,18 @@ fn run(command: Command) -> Res<ExitCode> {
         Command::ApproveSharing { identity, approve } => {
             let config = Config::load(&paths.config_file())?.unwrap_or_default();
             let identity = config.identity(identity.as_deref())?;
-            if setup::sharing_approved(&paths, &identity)? {
-                println!("{APP_NAME} may already read what others share with you on {identity}.");
-            } else {
-                let typed = approve.typed();
-                let owner = approve.owner(typed.as_ref());
-                if !setup::approve_sharing(&identity, &owner)? {
+            let typed = approve.typed();
+            let mut owner = approve.owner(typed.as_ref());
+            match setup::approve(&paths, &identity, &mut owner)? {
+                setup::Approved::Already => println!(
+                    "{APP_NAME} may already read what others share with you on {identity}."
+                ),
+                setup::Approved::Given => {
+                    println!("Approved on {identity}: what others share with you syncs now.")
+                }
+                setup::Approved::Declined => {
                     return Err("Not approved: what others share with you isn't synced.".into());
                 }
-                println!("Approved on {identity}.");
-            }
-            // What waited for it is tried now (a daemon that isn't running reads it as it
-            // starts).
-            match daemon::daemon(&paths, DaemonControl::SyncNow) {
-                Ok(()) => println!("Syncing what others share with you."),
-                Err(e) if e.is::<daemon::NotRunning>() => {}
-                Err(e) => return Err(e),
             }
         }
         Command::Add {
@@ -830,7 +826,13 @@ fn print_status(status: &DaemonStatus) {
             )
         });
         // What others share that can't be opened yet for want of the owner's approval.
-        let approval = a.needs_approval.then(words::approve_how);
+        let approval = a.needs_approval.then(|| {
+            format!(
+                "sharing: {APP_NAME} needs your approval to read what others share with you: \
+                 `hbsync approve {}` asks your Homebase for it",
+                a.identity
+            )
+        });
         // Recently deleted being deleted for good, in the background.
         let emptying = a.emptying.as_ref().map(words::emptying_status);
         if hints.is_none()
@@ -876,7 +878,7 @@ fn print_folder(s: &FolderStatus) {
         println!("  log in again: hbsync setup {}", s.identity);
     }
     if s.needs_approval {
-        println!("  approve it: hbsync approve");
+        println!("  approve it: hbsync approve {}", s.identity);
     }
     if let Some(at) = s.retry_at.filter(|_| s.state != State::Offline) {
         println!("  next try {}", when(at));

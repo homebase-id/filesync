@@ -341,9 +341,9 @@ pub struct AccountStatus {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub login_without_key: bool,
     /// The app lacks the owner's approval to read what others share with the identity (an
-    /// install from before it asked for that), and a share can't be opened for it: one
-    /// that is synced says so itself ([`FolderStatus::needs_approval`]). `hbsync approve`
-    /// and the tray's menu ask for it.
+    /// install from before it asked for that), and a share waits for it: one that can't be
+    /// opened (it has no folder to say so), or one that is synced
+    /// ([`FolderStatus::needs_approval`]). `hbsync approve` and the tray's menu ask for it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub needs_approval: bool,
     /// The account's own notes, newest last: a request of Recently deleted that failed, a file
