@@ -247,6 +247,38 @@ fn an_end_made_earlier_is_learned_by_the_read_another_end_starts() -> R {
     nothing_moved_out(&out)
 }
 
+/// A file whose newest version this client can't read still ends with its share: the row
+/// that doesn't read says until when, so the end isn't lost where another share's end has
+/// the feed read from its beginning (which reads every end anew).
+#[test]
+fn a_file_that_doesnt_read_any_more_still_ends_with_its_share() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("odd.txt", "odd")?;
+    a.write("short.txt", "short")?;
+    a.sync()?;
+    share_for(&a, &server, "odd.txt", 30 * MINUTE)?;
+    share_for(&a, &server, "short.txt", 5 * MINUTE)?;
+    let (mut b, _out) = Client::member(&server, "b")?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["odd.txt = odd", "short.txt = short"]);
+
+    // Its rows don't read from now on; the member keeps what it has of it.
+    let odd = common::header_named(&server, "odd.txt").file_id;
+    server
+        .lock()
+        .map_err(|_| "poisoned")?
+        .set_unreadable(odd, true);
+    later(&server, 6 * MINUTE)?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["odd.txt = odd"]);
+    // Its own end, learned again from the row that doesn't read.
+    later(&server, 25 * MINUTE)?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), Vec::<String>::new());
+    Ok(())
+}
+
 /// Two items of one name, each shared without its folder: one is at the top, the other left
 /// out until its folder is shared.
 #[test]

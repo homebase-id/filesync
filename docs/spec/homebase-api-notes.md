@@ -591,7 +591,7 @@ server answers the rest, to a token their server made for this identity's connec
   app's are (payloads aren't). A member's query lists only files with a share row for one of
   its circles, with the same cursor, hold-back and `resultShape` as the owner's, never cached;
   a header carries `shares` (the live rows the file reaches them through, by circle id) and no
-  server metadata. Each of those rows has `expiresAt` (Unix ms, absent where the share has
+  server metadata. Each of those rows has `expiresAt` (Unix ms, `null` where the share has
   no end), and a row is live while `expiresAt` is after the server's now (**[verified]**
   odin-core 139c0f618: `ShareRow.From`, `TableDriveAclIndex.IsLive`, `CallerShares.LiveRowsOf`;
   the file is read until its last live row ends). **Nothing is written when a share

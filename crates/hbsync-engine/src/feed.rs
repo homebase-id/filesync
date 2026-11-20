@@ -115,7 +115,8 @@ pub fn pull<G: DerefMut<Target = StateDb>>(
     let mut report = read_pages(&db, remote, pages.into(), reread)?;
     // A re-read open: what is left of it asked about (once nothing is, it ends).
     if let Some(asking) = reread.as_ref().map(Reread::to_ask) {
-        let (gone, mut skipped) = record_answers(&db, reread, ask(remote, &asking))?;
+        let asked = ask(remote, &asking);
+        let (gone, mut skipped) = record_answers(&db, reread, asked, report.server_time)?;
         report.deleted += gone;
         report.skipped.append(&mut skipped);
     }
@@ -204,12 +205,14 @@ fn read_pages<G: DerefMut<Target = StateDb>>(
         // Read from its beginning instead: away too long; or a share that was read ended
         // (another identity's drive: the server wrote nothing as it did, so nothing after
         // the cursor says so, and from its beginning the feed shows the file as one no
-        // longer shared, sync semantics §13). The second also where a re-read is on its
-        // way: it began before the end.
+        // longer shared, sync semantics §13). Not for an end while a re-read is on its
+        // way: that one is read to its end first, and the next pull starts another (a
+        // pull so always gets somewhere, however many shares end one after the other).
         let away = away_from
             .take()
             .is_some_and(|from| now.saturating_sub(from) > REREAD_MS);
-        if away || share_end.is_some_and(|end| end <= now) {
+        let ended = reread.is_none() && share_end.is_some_and(|end| end <= now);
+        if away || ended {
             *reread = Some(Reread {
                 since: Some(now),
                 ..db().write(|s| Reread::begin(s.account()))?
@@ -372,8 +375,13 @@ fn record_answers<G: DerefMut<Target = StateDb>>(
     db: &impl Fn() -> G,
     reread: &mut Option<Reread>,
     mut asked: Asked,
+    now: Option<i64>,
 ) -> Result<(usize, Vec<Skipped>), FeedError> {
     let (confirmed, refused) = db().write(|s| {
+        // (The headers have no time of their own: the pull's last page's.)
+        if let Some(now) = now {
+            note_share_end(s.account(), asked.found.iter().map(|h| h.expires), now)?;
+        }
         let mut confirmed = Vec::new();
         for &file_id in &asked.not_there {
             if gone::heard(s.account(), file_id, Said::NotThere)? {
@@ -481,11 +489,32 @@ fn apply_whole<G: DerefMut<Target = StateDb>>(
         for header in &page.entries {
             report.count(header.at(), apply(s.account(), header)?);
         }
+        let ends =
+            (page.entries.iter().map(|h| h.expires)).chain(page.skipped.iter().map(|r| r.expires));
+        note_share_end(s.account(), ends, page.server_time)?;
         save_cursor(s.account(), cursor, !page.entries.is_empty(), &page.cursor)?;
         Ok(nothing_new)
     })?;
     report.skipped.extend(page.skipped);
     Ok((page.has_more, nothing_new))
+}
+
+/// Keeps the first of the `ends` of shares read at `now` of the server's clock
+/// ([`RemoteHeader::expires`], [`AccountTx::note_share_end`]): the feed is read from its
+/// beginning once it passes ([`read_pages`]). Only one still to come: a row the server shows
+/// as shared ends after the time of its answer (**[verified]** odin-core 139c0f618,
+/// `DriveQueryServiceBase`: `QueryTime` is taken before the rows are judged), so one that
+/// doesn't is a server's mistake (a time in seconds, say), and asking for it would read the
+/// whole feed at every pull, to find the file shared as before.
+fn note_share_end(
+    s: AccountTx<'_>,
+    ends: impl Iterator<Item = Option<i64>>,
+    now: i64,
+) -> Result<(), StateError> {
+    match ends.flatten().filter(|end| *end > now).min() {
+        Some(first) => s.note_share_end(first),
+        None => Ok(()),
+    }
 }
 
 impl FeedReport {
@@ -648,6 +677,26 @@ mod tests {
     use hbsync_types::{NodeId, NodeKind, RemoteFileId, VersionTag};
 
     use super::*;
+
+    /// Of the ends of the shares read, the first still to come is kept: one that isn't after
+    /// the server's time of the read (a server's mistake) is never asked for.
+    #[test]
+    fn only_an_end_still_to_come_is_kept() -> Result<(), Box<dyn std::error::Error>> {
+        let mut db = StateDb::open_in_memory()?;
+        let now = 1_000_000;
+        let mut note = |ends: &[Option<i64>]| -> Result<Option<i64>, StateError> {
+            db.write(|s| note_share_end(s.account(), ends.iter().copied(), now))?;
+            db.read(|s| s.share_end())
+        };
+        assert_eq!(note(&[Some(now), Some(now - 5), Some(0), None])?, None);
+        // (Kept as the whole minute it ends by.)
+        assert_eq!(
+            note(&[Some(now + 120_000), None, Some(now + 1)])?,
+            Some(1_020_000)
+        );
+        assert_eq!(note(&[Some(i64::MAX), Some(-1)])?, Some(1_020_000));
+        Ok(())
+    }
 
     /// An announced soft delete records its tombstone, as the feed's row would; only a delete
     /// for good (a ref without a time: a hard delete) of that version clears it.

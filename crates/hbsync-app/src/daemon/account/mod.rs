@@ -2147,6 +2147,7 @@ mod tests {
         let (account, _requests) = Account::new(&paths, &main, None, Arc::default());
         let file = RemoteFileId(Uuid::new_v4());
         let row = |version: VersionTag| Skipped {
+            expires: None,
             at: Some(RemoteRef {
                 file_id: file,
                 version,

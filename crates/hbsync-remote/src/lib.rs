@@ -184,6 +184,9 @@ pub struct Skipped {
     /// Its `uniqueId` and `groupId`, if they read.
     pub node: Option<NodeId>,
     pub parent: Option<NodeId>,
+    /// Until when the file is shared with this identity, where the row says
+    /// ([`RemoteHeader::expires`]): a row that doesn't read as a node ends all the same.
+    pub expires: Option<i64>,
     pub why: String,
 }
 
@@ -194,6 +197,7 @@ impl Skipped {
             at: None,
             node: None,
             parent: None,
+            expires: None,
             why: why.into(),
         }
     }

@@ -29,11 +29,6 @@ pub fn apply(s: AccountTx<'_>, header: &RemoteHeader) -> Result<Applied, StateEr
         s.tombstone(header.at(), header.changed_at)?;
         return Ok(Applied::Left);
     }
-    // What another identity shares until a time: the time is kept, as the drive says
-    // nothing when it passes (the feed asks then, `feed::read_pages`).
-    if let Some(end) = header.expires {
-        s.note_share_end(end)?;
-    }
     if let Some(why) = misplaced(header) {
         // There all the same; its ids are none this device takes. Recovered files' id is kept
         // with it: taken so, no device can make Recovered files on the drive (§6.3, orphans go

@@ -82,6 +82,12 @@ fn a_share_that_ends_is_seen_as_withdrawn_and_nothing_is_written() -> R {
     let shared = create_file(&sharer, &file("shared", NodeId::ROOT, b"ours"), b"ours")?;
     let file_id = shared.at().file_id;
     let until = sharer.server().now() + 1_000;
+    // (An end that isn't to come is refused, as Homebase refuses it.)
+    let now = sharer.server().now();
+    assert!(matches!(
+        sharer.share_until(file_id, now),
+        Err(RemoteError::Fatal(_))
+    ));
     sharer.share_until(file_id, until)?;
     sharer.server().tick();
     let (members, owners) = (member.subscribe(false), sharer.subscribe(false));

@@ -750,6 +750,10 @@ impl FakeServer {
                     at: Some(header.at()),
                     node: header.node(),
                     parent: Some(header.parent),
+                    expires: match how {
+                        Seen::Shared(until) => until,
+                        _ => None,
+                    },
                     why: format!("{file_id:?}: unreadable (test)"),
                 });
             } else {
@@ -1503,6 +1507,10 @@ impl FakeRemote {
     /// ([`FakeServer::now`]): as [`crate::contract::Shares::share`], with an end. As the
     /// clock passes it nothing is written or announced; the member reads the file no more.
     pub fn share_until(&self, file_id: RemoteFileId, until: i64) -> Result<()> {
+        // (**[verified]** odin-core 139c0f618, `DriveShareService.AssertShape`: a 400.)
+        if until <= self.server().now() {
+            return Err(RemoteError::Fatal("A share expires in the future".into()));
+        }
         self.set_share(file_id, true, Some(until))
     }
 

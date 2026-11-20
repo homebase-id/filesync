@@ -150,7 +150,7 @@ lists it follows the desktops:
   expired, not that the file is gone: drop it from the list and record nothing as deleted,
   as the share given again brings it back.
 - A share may end at a time: each row of a shared file's `shares` has `expiresAt` (Unix
-  ms; absent where it has no end), and the file is yours to read until the last of them.
+  ms; `null` where it has no end), and the file is yours to read until the last of them.
   The server writes nothing when that passes: no change in the feed, no notification. A
   read of the file is refused from then on, and a listing made anew leaves it out (a
   query from the beginning shows the tombstone above). A list you keep goes stale
