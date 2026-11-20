@@ -24,6 +24,25 @@ fn withdraw(a: &Client, server: &Server, name: &str) -> R {
     Ok(())
 }
 
+/// The owner `a` shares what is named `name` on its drive for `ms` from now, by the server's
+/// clock.
+fn share_for(a: &Client, server: &Server, name: &str, ms: i64) -> R {
+    let until = server.lock().map_err(|_| "poisoned")?.now() + ms;
+    a.remote
+        .share_until(common::header_named(server, name).file_id, until)?;
+    server.lock().map_err(|_| "poisoned")?.tick();
+    Ok(())
+}
+
+/// A minute of the server's clock, which a share's end is asked by.
+const MINUTE: i64 = 60_000;
+
+/// The server's clock moves on by `ms`.
+fn later(server: &Server, ms: i64) -> R {
+    server.lock().map_err(|_| "poisoned")?.advance(ms);
+    Ok(())
+}
+
 /// The owner `a` shares all its drive has.
 fn share_all(a: &Client, server: &Server) -> R {
     let all: Vec<_> = {
@@ -122,6 +141,141 @@ fn a_share_given_again_brings_the_file_back() -> R {
     share(&a, &server, "top.txt")?;
     b.sync()?;
     assert_eq!(b.tree_text(""), ["stay.txt = stay", "top.txt = newer"]);
+    Ok(())
+}
+
+/// A share given until a time ends as the time passes. The drive writes nothing then (its
+/// feed doesn't move), so the member asks: it kept the time its header gave, and reads the
+/// feed from its beginning once the server's clock is past it, which shows the file as one no
+/// longer shared. It leaves this device as a share withdrawn does; what is shared without an
+/// end stays; nothing is asked before the time; and the share given again brings it back.
+#[test]
+fn a_share_that_reached_its_end_takes_the_file_off_this_device() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("stay.txt", "stay")?;
+    a.write("until.txt", "until")?;
+    a.write("dir/in.txt", "in")?;
+    a.sync()?;
+    share(&a, &server, "stay.txt")?;
+    for name in ["until.txt", "dir", "in.txt"] {
+        share_for(&a, &server, name, 10 * MINUTE)?;
+    }
+    let (mut b, out) = Client::member(&server, "b")?;
+    b.sync()?;
+    let all = [
+        "dir/",
+        "dir/in.txt = in",
+        "stay.txt = stay",
+        "until.txt = until",
+    ];
+    assert_eq!(b.tree_text(""), all);
+
+    // Before the time all is as it was.
+    later(&server, 5 * MINUTE)?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), all);
+
+    // Past it (nothing was written to the drive): the member's next sync finds them gone.
+    later(&server, 6 * MINUTE)?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["stay.txt = stay"]);
+    nothing_moved_out(&out)?;
+
+    // Given again, without an end: back, and it stays.
+    share(&a, &server, "until.txt")?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["stay.txt = stay", "until.txt = until"]);
+    later(&server, 60 * MINUTE)?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["stay.txt = stay", "until.txt = until"]);
+    Ok(())
+}
+
+/// An end a share is given later is learned, though the file's version is the one the member
+/// has: the file is in the feed again, and its header is read for until when. So is one given
+/// anew after the last one passed, before the member looked.
+#[test]
+fn an_end_given_to_a_share_later_is_learned() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("doc.txt", "doc")?;
+    a.sync()?;
+    share(&a, &server, "doc.txt")?;
+    let (mut b, out) = Client::member(&server, "b")?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["doc.txt = doc"]);
+
+    // Shared without an end so far: now until a time.
+    share_for(&a, &server, "doc.txt", 10 * MINUTE)?;
+    b.sync()?;
+    later(&server, 11 * MINUTE)?;
+    // It ended, and is given again until a later time before the member looks.
+    share_for(&a, &server, "doc.txt", 10 * MINUTE)?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["doc.txt = doc"]);
+    later(&server, 11 * MINUTE)?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), Vec::<String>::new());
+    nothing_moved_out(&out)
+}
+
+/// An end changed to an earlier one isn't lost where another share's end is what the member
+/// finds first: reading the feed from its beginning reads every header, and with it every
+/// end as it is now.
+#[test]
+fn an_end_made_earlier_is_learned_by_the_read_another_end_starts() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("long.txt", "long")?;
+    a.write("short.txt", "short")?;
+    a.sync()?;
+    share_for(&a, &server, "long.txt", 30 * MINUTE)?;
+    share_for(&a, &server, "short.txt", 5 * MINUTE)?;
+    let (mut b, out) = Client::member(&server, "b")?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["long.txt = long", "short.txt = short"]);
+
+    // The long one is to end sooner; before the member looks, the short one ends.
+    share_for(&a, &server, "long.txt", 10 * MINUTE)?;
+    later(&server, 6 * MINUTE)?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["long.txt = long"]);
+    later(&server, 5 * MINUTE)?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), Vec::<String>::new());
+    nothing_moved_out(&out)
+}
+
+/// A file whose newest version this client can't read still ends with its share: the row
+/// that doesn't read says until when, so the end isn't lost where another share's end has
+/// the feed read from its beginning (which reads every end anew).
+#[test]
+fn a_file_that_doesnt_read_any_more_still_ends_with_its_share() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("odd.txt", "odd")?;
+    a.write("short.txt", "short")?;
+    a.sync()?;
+    share_for(&a, &server, "odd.txt", 30 * MINUTE)?;
+    share_for(&a, &server, "short.txt", 5 * MINUTE)?;
+    let (mut b, _out) = Client::member(&server, "b")?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["odd.txt = odd", "short.txt = short"]);
+
+    // Its rows don't read from now on; the member keeps what it has of it.
+    let odd = common::header_named(&server, "odd.txt").file_id;
+    server
+        .lock()
+        .map_err(|_| "poisoned")?
+        .set_unreadable(odd, true);
+    later(&server, 6 * MINUTE)?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["odd.txt = odd"]);
+    // Its own end, learned again from the row that doesn't read.
+    later(&server, 25 * MINUTE)?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), Vec::<String>::new());
     Ok(())
 }
 

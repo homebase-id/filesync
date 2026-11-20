@@ -1026,6 +1026,49 @@ fn a_reread_asks_again_what_the_server_couldnt_tell_about() -> common::Res<()> {
     Ok(())
 }
 
+/// A share's end is asked for though a re-read an earlier pull left open can't end (a file it
+/// asks about can't be answered): the feed is started over at the next pull's first page, and
+/// shows the file as no longer shared (sync semantics §13, "A share that ends").
+#[test]
+fn a_shares_end_is_asked_for_though_a_reread_is_left_open() -> common::Res<()> {
+    const MINUTE: i64 = 60_000;
+    let server = server();
+    let stuck = seed(&server, "stuck.txt")?;
+    let ending = seed(&server, "ending.txt")?;
+    let sharer = FakeRemote::new(server.clone());
+    sharer.share(stuck)?;
+    let until = server.lock().map_err(|_| "poisoned")?.now() + 5 * MINUTE;
+    sharer.share_until(ending, until)?;
+    server.lock().map_err(|_| "poisoned")?.tick();
+    let member = FakeRemote::member(server.clone());
+    let db = std::cell::RefCell::new(StateDb::open_in_memory()?);
+    db.borrow_mut().write(|s| s.account().set_shared(true))?;
+    let mut reread = None;
+    feed::pull(|| db.borrow_mut(), &member, 1000, &mut reread)?;
+    let kept = |file| db.borrow_mut().read(|s| s.mirror_by_file(file));
+    assert!(kept(ending)?.is_some() && kept(stuck)?.is_some());
+
+    // A re-read that can't end: the feed leaves one file out, and its header doesn't read.
+    db.borrow_mut().write(|s| s.account().start_reread())?;
+    server.lock().map_err(|_| "poisoned")?.unlist(stuck);
+    member.faults().script = [false, true].into();
+    feed::pull(|| db.borrow_mut(), &member, 1000, &mut reread)?;
+    assert!(db.borrow_mut().read(|s| s.rereading())?, "open");
+    // (It read the end anew, from the header.)
+    assert!(db.borrow_mut().read(|s| s.share_end())?.is_some());
+
+    // The share ends. The page read first is given up for the feed from its beginning,
+    // which shows the file no longer shared; the one left out still can't be asked about.
+    server.lock().map_err(|_| "poisoned")?.advance(6 * MINUTE);
+    member.faults().script = [false, false, true].into();
+    feed::pull(|| db.borrow_mut(), &member, 1000, &mut reread)?;
+    assert!(kept(ending)?.is_none(), "no longer shared");
+    assert!(kept(stuck)?.is_some());
+    assert!(db.borrow_mut().read(|s| s.rereading())?, "still open");
+    assert_eq!(db.borrow_mut().read(|s| s.share_end())?, None);
+    Ok(())
+}
+
 /// A re-read cut short and taken up again after as long an absence starts over: what it had
 /// seen may have gone for good since, without a trace.
 #[test]

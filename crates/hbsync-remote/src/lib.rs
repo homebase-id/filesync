@@ -57,6 +57,13 @@ pub struct RemoteHeader {
     pub changed_at: Option<i64>,
     /// The file's [`FileToken`], where the remote has one (a tombstone has none).
     pub token: Option<FileToken>,
+    /// When what another identity shares stops being shared with this one, Unix ms by the
+    /// remote's clock: the end of the share it is read through, the latest where there are
+    /// several, `None` where one of them has no end (or on an identity's own drive). The
+    /// remote writes nothing as it passes: the file's place in the feed stays, a read of it
+    /// is refused from then on, and the feed read from its beginning shows it as a share
+    /// withdrawn ([`RemoteHeader::is_unshared`]; homebase-api-notes, "Shared with you").
+    pub expires: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -177,6 +184,9 @@ pub struct Skipped {
     /// Its `uniqueId` and `groupId`, if they read.
     pub node: Option<NodeId>,
     pub parent: Option<NodeId>,
+    /// Until when the file is shared with this identity, where the row says
+    /// ([`RemoteHeader::expires`]): a row that doesn't read as a node ends all the same.
+    pub expires: Option<i64>,
     pub why: String,
 }
 
@@ -187,6 +197,7 @@ impl Skipped {
             at: None,
             node: None,
             parent: None,
+            expires: None,
             why: why.into(),
         }
     }

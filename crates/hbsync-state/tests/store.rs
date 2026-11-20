@@ -1091,6 +1091,29 @@ mod mirror {
         Ok(())
     }
 
+    /// The earliest end of the shares read is kept, as the whole minute it ends by, until the
+    /// feed is read from its beginning (which reads every end anew).
+    #[test]
+    fn the_first_end_of_the_shares_read_is_kept_until_a_reread() -> R {
+        const MINUTE: i64 = 60_000;
+        let mut db = StateDb::open_in_memory()?;
+        assert_eq!(db.read(|s| s.share_end())?, None);
+        let mut note = |end: i64| -> Result<Option<i64>, StateError> {
+            db.write(|s| s.account().note_share_end(end))?;
+            db.read(|s| s.share_end())
+        };
+        // Up to the whole minute; one on the minute is that minute.
+        assert_eq!(note(5 * MINUTE + 1)?, Some(6 * MINUTE));
+        // A later one changes nothing; an earlier one is the first now.
+        assert_eq!(note(9 * MINUTE)?, Some(6 * MINUTE));
+        assert_eq!(note(2 * MINUTE)?, Some(2 * MINUTE));
+        assert_eq!(note(2 * MINUTE + 1)?, Some(2 * MINUTE));
+        // A re-read learns them anew.
+        db.write(|s| s.account().start_reread())?;
+        assert_eq!(db.read(|s| s.share_end())?, None);
+        Ok(())
+    }
+
     /// Reading the whole feed again starts from its beginning, the files the store has listed;
     /// tombstones are kept with their time until deleted hard.
     #[test]

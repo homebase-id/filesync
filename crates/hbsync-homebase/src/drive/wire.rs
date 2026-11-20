@@ -74,8 +74,17 @@ where
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareRow {
-    /// None in a row that doesn't read ([`share_rows`]).
+    /// None in a row that doesn't read ([`share_rows`]), or whose circle doesn't.
+    #[serde(default, deserialize_with = "lenient")]
     pub circle_id: Option<Uuid>,
+    /// When the share ends, Unix ms by the server's clock (`null` where it has no end). One
+    /// that doesn't read is taken for no end: the file is kept past it, not taken off this
+    /// device on a guess. The row still names its circle, and a row whose circle doesn't
+    /// read still says when it ends. The server writes nothing as it
+    /// passes (**[verified]** odin-core 139c0f618: `ShareRow.ExpiresAt`, a number of ms,
+    /// `UnixTimeUtcConverter`; `TableDriveAclIndex.IsLive`).
+    #[serde(default, deserialize_with = "lenient")]
+    pub expires_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -223,6 +232,8 @@ pub(crate) fn skipped_row(row: &str, why: String) -> Skipped {
     struct Row {
         file_id: Uuid,
         file_metadata: Meta,
+        #[serde(default, deserialize_with = "share_rows")]
+        shares: Option<Vec<ShareRow>>,
     }
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -252,6 +263,7 @@ pub(crate) fn skipped_row(row: &str, why: String) -> Skipped {
         }),
         node: unique_id.map(NodeId),
         parent: group_id.map(NodeId),
+        expires: share_ends(row.shares.as_deref()),
         why,
     }
 }
@@ -429,6 +441,7 @@ pub(crate) fn children_query(folders: &[NodeId], cursor: Option<&str>, limit: us
 /// sync node.
 pub(crate) fn to_remote(header: FileHeader, keys: Keys<'_>) -> Result<RemoteHeader, String> {
     let id = header.file_id;
+    let expires = header.share_ends();
     let meta = &header.file_metadata;
     let kind = match meta.app_data.file_type {
         FILE_TYPE_FOLDER => NodeKind::Folder,
@@ -518,7 +531,17 @@ pub(crate) fn to_remote(header: FileHeader, keys: Keys<'_>) -> Result<RemoteHead
         removed: times.removed,
         changed_at: times.changed_at,
         token,
+        expires,
     })
+}
+
+/// The latest end of the share `rows` of a header, none where one of them has no end (or
+/// there are none): [`FileHeader::share_ends`].
+fn share_ends(rows: Option<&[ShareRow]>) -> Option<i64> {
+    let mut rows = rows?.iter();
+    rows.try_fold(None, |latest: Option<i64>, row| {
+        Some(latest.max(Some(row.expires_at?)))
+    })?
 }
 
 /// `T` if the value is one, else `None`.
@@ -569,6 +592,13 @@ impl FileHeader {
                 .shared_secret_encrypted_key_header
                 .as_ref()
                 .is_some_and(SealedKeyHeader::locked_for_share)
+    }
+
+    /// When a member stops reading the file ([`RemoteHeader::expires`]): the latest end of
+    /// the live shares it reaches them through, none where one of them has no end (or on
+    /// this identity's own drive, which has no rows).
+    pub(crate) fn share_ends(&self) -> Option<i64> {
+        share_ends(self.shares.as_deref())
     }
 
     /// The circle a shared file's key header is locked for: the one its first share names.
@@ -896,6 +926,7 @@ mod tests {
                 header.file_metadata.global_transit_id = Some(v::id(v::GTID));
                 header.shares = Some(vec![ShareRow {
                     circle_id: Some(v::id(v::CIRCLE)),
+                    expires_at: None,
                 }]);
                 header.shared_secret_encrypted_key_header = Some(serde_json::from_value(json!({
                     "encryptionVersion": 1, "type": kind,
@@ -919,6 +950,13 @@ mod tests {
             let file = to_remote(header.clone(), keys)?;
             assert_eq!(file.state().ok_or("state")?.name, "Résumé.txt");
             assert!(file.token.is_none());
+            // Shared without an end; with one, the header read says until when.
+            assert_eq!(file.expires, None);
+            let mut until = header.clone();
+            for row in until.shares.iter_mut().flatten() {
+                row.expires_at = Some(1_700_000_000_000);
+            }
+            assert_eq!(to_remote(until, keys)?.expires, Some(1_700_000_000_000));
             let why = to_remote(header, SHARED)
                 .err()
                 .ok_or("opened without the key")?;
@@ -933,12 +971,16 @@ mod tests {
         other.shares = Some(vec![
             ShareRow {
                 circle_id: Some(elsewhere),
+                expires_at: Some(2_000),
             },
             ShareRow {
                 circle_id: Some(v::id(v::CIRCLE)),
+                expires_at: Some(5_000),
             },
         ]);
         assert_eq!(other.share_circle(), Some(elsewhere));
+        // Read until the last of them ends: the file reaches the member through each.
+        assert_eq!(other.share_ends(), Some(5_000));
         let mut moved = shared(v::LOCKED, json!("share"))?;
         moved.file_id = Uuid::new_v4();
         assert!(to_remote(moved, keys).is_err());
@@ -957,6 +999,27 @@ mod tests {
         assert_eq!(shares.len(), 3);
         assert_eq!(shares[2].circle_id, Some(v::id(v::CIRCLE)));
         assert_eq!(rows.share_circle(), None);
+        // One of them has no end (the rows that don't read are taken so): neither has the file.
+        assert_eq!(rows.share_ends(), None);
+        let ending: FileHeader = serde_json::from_value({
+            let mut row = fixture_value("file-node.json");
+            row["shares"] = json!([{ "circleId": v::CIRCLE, "expiresAt": 1_700_000_000_000_i64 }]);
+            row
+        })?;
+        assert_eq!(ending.share_ends(), Some(1_700_000_000_000));
+        // A time that doesn't read is no end, and the row names its circle all the same.
+        let odd: FileHeader = serde_json::from_value({
+            let mut row = fixture_value("file-node.json");
+            row["shares"] = json!([{ "circleId": v::CIRCLE, "expiresAt": "soon" }]);
+            row
+        })?;
+        assert_eq!(
+            (odd.share_ends(), odd.share_circle()),
+            (None, Some(v::id(v::CIRCLE)))
+        );
+        // This identity's own drive has no rows, and no end.
+        let own: FileHeader = serde_json::from_value(fixture_value("file-node.json"))?;
+        assert_eq!(own.share_ends(), None);
 
         // A share withdrawn: a tombstone without its version, parent or key, read as gone.
         let gone: FileHeader = serde_json::from_value(json!({
@@ -1086,7 +1149,11 @@ mod tests {
     fn a_skipped_row_keeps_what_reads() -> R {
         let mut row = fixture_value("file-node.json");
         row["fileMetadata"]["appData"]["content"] = json!("not sealed");
+        // (Shared until a time: the row that doesn't read says so all the same; so does a
+        // row whose circle doesn't read.)
+        row["shares"] = json!([{ "circleId": "not an id", "expiresAt": 1_700_000_000_000_i64 }]);
         let skipped = skipped_row(&row.to_string(), "why".into());
+        assert_eq!(skipped.expires, Some(1_700_000_000_000));
         let header: FileHeader = serde_json::from_value(row.clone())?;
         let meta = &header.file_metadata;
         assert_eq!(

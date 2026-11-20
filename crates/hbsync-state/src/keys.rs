@@ -19,6 +19,9 @@ pub const REMOTE_CURSOR: AccountKey = AccountKey("remote.cursor");
 pub const READ_AT: AccountKey = AccountKey("remote.read_at");
 /// The whole feed is being read again ([`crate::AccountTx::start_reread`]).
 pub(crate) const REREADING: AccountKey = AccountKey("remote.rereading");
+/// When the first share of a file on another identity's drive ends, as the headers read said
+/// ([`crate::AccountTx::note_share_end`]): Unix ms by the server's clock, a whole minute.
+pub(crate) const SHARE_END: AccountKey = AccountKey("remote.share_end");
 /// When Recently deleted was last purged (Unix s).
 pub const PURGED_AT: AccountKey = AccountKey("deleted.purged_at");
 /// The last removal's place in this device's order of recording them ([`crate::Recorded::seq`]).

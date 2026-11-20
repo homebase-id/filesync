@@ -230,6 +230,7 @@ mod tests {
             removed: false,
             changed_at: None,
             token: None,
+            expires: None,
         };
         assert_eq!(db.write(|s| apply(s.account(), &header))?, Applied::Live);
         if let RemoteBody::Live { payload, .. } = &mut header.body {
@@ -269,6 +270,7 @@ mod tests {
             removed: false,
             changed_at: Some(100),
             token: None,
+            expires: None,
         };
         db.write(|s| apply(s.account(), &header))?;
         header.changed_at = Some(200);
@@ -307,6 +309,7 @@ mod tests {
             removed: false,
             changed_at: None,
             token: None,
+            expires: None,
         };
         let size = mirror_row(&header).and_then(|r| r.file).map(|f| f.size);
         assert_eq!(size, Some(3));
@@ -587,6 +590,7 @@ mod tests {
             removed: false,
             changed_at: None,
             token: None,
+            expires: None,
         }
     }
 }

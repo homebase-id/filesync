@@ -119,9 +119,18 @@ pub struct FakeServer {
     next_id: u64,
     subscribers: Vec<Subscriber>,
     next_client: u64,
-    /// The member's share rows ([`FakeRemote::member`]): live (`true`) or withdrawn. A hard
-    /// delete takes a file's row with it.
-    shares: HashMap<RemoteFileId, bool>,
+    /// The member's share rows ([`FakeRemote::member`]). A hard delete takes a file's row
+    /// with it.
+    shares: HashMap<RemoteFileId, Share>,
+}
+
+/// A share row of the member's: live or withdrawn, and where it has an end, until when by
+/// the server's clock ([`FakeRemote::share_until`]). Nothing is written as that passes: from
+/// then on the member sees the row as one withdrawn ([`seen_by`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Share {
+    live: bool,
+    until: Option<i64>,
 }
 
 /// Whose view of the drive a client has: its owner's, or the member's ([`FakeRemote::member`]).
@@ -136,8 +145,9 @@ enum View {
 enum Seen {
     /// The owner: as it is.
     Owner,
-    /// The member, shared: as it is, without the file's token.
-    Shared,
+    /// The member, shared: as it is, without the file's token, and with when its share ends
+    /// (if it does).
+    Shared(Option<i64>),
     /// The member, a share withdrawn: a tombstone without a version.
     Unshared,
 }
@@ -171,6 +181,11 @@ impl FakeServer {
     /// Sets [`ServerConfig::quota`].
     pub fn set_quota(&mut self, quota: Option<u64>) {
         self.config.quota = quota;
+    }
+
+    /// The server's clock, Unix ms.
+    pub fn now(&self) -> i64 {
+        self.clock_ms
     }
 
     /// Advances the server clock, making writes from the previous millisecond visible.
@@ -238,7 +253,8 @@ impl FakeServer {
         let Some(f) = self.files.get(&file_id) else {
             return;
         };
-        let (header, modified, shares) = (&f.header, f.modified, &self.shares);
+        let (header, modified) = (&f.header, f.modified);
+        let (shares, now) = (&self.shares, self.clock_ms);
         let (owner, member) = (OnceCell::new(), OnceCell::new());
         // A subscriber that went away is dropped.
         self.subscribers.retain(|s| {
@@ -248,7 +264,7 @@ impl FakeServer {
             let change = match s.view {
                 View::Owner => Some(*owner.get_or_init(|| ChangeRef::of(header))),
                 View::Member => *member.get_or_init(|| {
-                    seen_by(shares, file_id, View::Member)
+                    seen_by(shares, now, file_id, View::Member)
                         .map(|how| seen_ref(header, modified, how))
                 }),
             };
@@ -360,6 +376,7 @@ impl FakeServer {
             // Its time and place in the feed come with the write ([`FakeServer::touch`]).
             changed_at: None,
             token: Some(token_of(file_id)),
+            expires: None,
         };
         self.files.insert(
             file_id,
@@ -548,9 +565,10 @@ impl FakeServer {
     /// its time, its place in the feed and the age it is purged by; the change is announced at
     /// that time (odin-core PR #2141: `WithdrawShareAsync`, `FileShares.MovesModified`,
     /// `PublishChangedAsync`; **[verified]** in odin-core at aa560aea9).
-    fn set_share(&mut self, writer: ClientId, file_id: RemoteFileId, live: bool) -> Result<()> {
+    fn set_share(&mut self, writer: ClientId, file_id: RemoteFileId, share: Share) -> Result<()> {
         let refused = |why: String| Err(RemoteError::Fatal(why));
-        let deleted = match (live, self.files.get(&file_id), self.shares.get(&file_id)) {
+        let (live, had) = (share.live, self.shares.get(&file_id).map(|had| had.live));
+        let deleted = match (live, self.files.get(&file_id), had) {
             (true, None, _) => return refused(format!("No file {file_id:?} on the drive")),
             (true, Some(f), _) if f.header.is_deleted() => {
                 return refused(format!("File {file_id:?} is deleted or isn't a file"));
@@ -559,7 +577,7 @@ impl FakeServer {
             (false, _, Some(false)) => return Ok(()),
             (_, f, _) => f.is_some_and(|f| f.header.is_deleted()),
         };
-        self.shares.insert(file_id, live);
+        self.shares.insert(file_id, share);
         match deleted {
             true => self.announce(file_id, Some(writer)),
             false => self.touch_keeping_version(file_id, writer),
@@ -579,7 +597,7 @@ impl FakeServer {
         let Some(file) = self.files.get(&file_id) else {
             return Err(RemoteError::NotFound);
         };
-        match seen_by(&self.shares, file_id, view) {
+        match seen_by(&self.shares, self.clock_ms, file_id, view) {
             Some(how) if how.reads() => Ok((file, how)),
             _ => Err(RemoteError::Fatal(format!(
                 "{file_id:?}: not shared with you"
@@ -667,7 +685,8 @@ impl FakeServer {
             .filter(|h| {
                 !h.is_deleted()
                     && holds.counts(h.at(), h.removed)
-                    && seen_by(&self.shares, h.file_id, view).is_some_and(Seen::reads)
+                    && seen_by(&self.shares, self.clock_ms, h.file_id, view)
+                        .is_some_and(Seen::reads)
             })
             .map(|h| h.parent)
             .filter(|p| folders.contains(p))
@@ -709,7 +728,10 @@ impl FakeServer {
         }
         // A file the feed leaves out (unlisted), or one the view doesn't see, isn't in it.
         .filter(|(_, file_id)| !self.unlisted.contains(*file_id))
-        .filter_map(|(key, file_id)| Some((key, file_id, seen_by(&self.shares, *file_id, view)?)));
+        .filter_map(|(key, file_id)| {
+            let how = seen_by(&self.shares, self.clock_ms, *file_id, view)?;
+            Some((key, file_id, how))
+        });
         let mut entries = Vec::new();
         let mut skipped = Vec::new();
         let mut last = after;
@@ -728,6 +750,10 @@ impl FakeServer {
                     at: Some(header.at()),
                     node: header.node(),
                     parent: Some(header.parent),
+                    expires: match how {
+                        Seen::Shared(until) => until,
+                        _ => None,
+                    },
                     why: format!("{file_id:?}: unreadable (test)"),
                 });
             } else {
@@ -837,6 +863,7 @@ impl FakeServer {
             // Its time comes with the write ([`FakeServer::touch`]).
             changed_at: None,
             token: None,
+            expires: None,
         };
         let file_id = match over {
             Some(file_id) => {
@@ -910,9 +937,10 @@ impl FakeServer {
         self.shares.keys().copied()
     }
 
-    /// Whether the member reads `file_id`: shared with it, the share not withdrawn.
+    /// Whether the member reads `file_id`: shared with it, the share not withdrawn and not
+    /// ended.
     pub fn shared_live(&self, file_id: RemoteFileId) -> bool {
-        self.shares.get(&file_id) == Some(&true)
+        seen_by(&self.shares, self.clock_ms, file_id, View::Member).is_some_and(Seen::reads)
     }
 
     pub fn file_id_of(&self, node: NodeId) -> Option<RemoteFileId> {
@@ -1466,20 +1494,31 @@ impl Remote for FakeRemote {
 /// The sharer's share rows for the member, through its own client.
 impl crate::contract::Shares for FakeRemote {
     fn share(&self, file_id: RemoteFileId) -> Result<()> {
-        self.set_share(file_id, true)
+        self.set_share(file_id, true, None)
     }
 
     fn withdraw(&self, file_id: RemoteFileId) -> Result<()> {
-        self.set_share(file_id, false)
+        self.set_share(file_id, false, None)
     }
 }
 
 impl FakeRemote {
+    /// Shares `file_id` with the member until `until`, by the server's clock
+    /// ([`FakeServer::now`]): as [`crate::contract::Shares::share`], with an end. As the
+    /// clock passes it nothing is written or announced; the member reads the file no more.
+    pub fn share_until(&self, file_id: RemoteFileId, until: i64) -> Result<()> {
+        // (**[verified]** odin-core 139c0f618, `DriveShareService.AssertShape`: a 400.)
+        if until <= self.server().now() {
+            return Err(RemoteError::Fatal("A share expires in the future".into()));
+        }
+        self.set_share(file_id, true, Some(until))
+    }
+
     /// Shares `file_id` (`live`) or withdraws its share, refused by the faults on every write
     /// first, as Homebase checks the caller may write to the drive before it looks at the file
     /// (**[verified]** odin-core `DriveShareService.WriteSharesAsync`, `WithdrawShareAsync`:
     /// `AssertCallerMayWrite`).
-    fn set_share(&self, file_id: RemoteFileId, live: bool) -> Result<()> {
+    fn set_share(&self, file_id: RemoteFileId, live: bool, until: Option<i64>) -> Result<()> {
         self.writable()?;
         self.gate()?;
         let name = self
@@ -1488,22 +1527,29 @@ impl FakeRemote {
             .unwrap_or_default()
             .to_owned();
         self.gate_name(&name)?;
-        self.server().set_share(self.client, file_id, live)
+        let share = Share { live, until };
+        self.server().set_share(self.client, file_id, share)
     }
 }
 
-/// How `view` sees `file_id`'s row, if at all, by the member's share rows `shares`: the owner
-/// every row as it is, the member only the rows shared with it.
+/// How `view` sees `file_id`'s row, if at all, by the member's share rows `shares` at `now`
+/// of the server's clock: the owner every row as it is, the member only the rows shared with
+/// it, one that ended as one withdrawn (a row is live while its end is after now:
+/// **[verified]** odin-core 139c0f618, `TableDriveAclIndex.IsLive`).
 fn seen_by(
-    shares: &HashMap<RemoteFileId, bool>,
+    shares: &HashMap<RemoteFileId, Share>,
+    now: i64,
     file_id: RemoteFileId,
     view: View,
 ) -> Option<Seen> {
     match view {
         View::Owner => Some(Seen::Owner),
-        View::Member => shares
-            .get(&file_id)
-            .map(|&live| if live { Seen::Shared } else { Seen::Unshared }),
+        View::Member => shares.get(&file_id).map(|share| {
+            match share.live && share.until.is_none_or(|until| until > now) {
+                true => Seen::Shared(share.until),
+                false => Seen::Unshared,
+            }
+        }),
     }
 }
 
@@ -1515,8 +1561,9 @@ fn seen_by(
 fn seen(header: RemoteHeader, modified: Option<i64>, how: Seen) -> RemoteHeader {
     match how {
         Seen::Owner => header,
-        Seen::Shared => RemoteHeader {
+        Seen::Shared(expires) => RemoteHeader {
             token: None,
+            expires,
             ..header
         },
         Seen::Unshared => RemoteHeader {
@@ -1536,7 +1583,7 @@ fn seen(header: RemoteHeader, modified: Option<i64>, how: Seen) -> RemoteHeader 
 fn seen_ref(header: &RemoteHeader, modified: Option<i64>, how: Seen) -> ChangeRef {
     let as_is = ChangeRef::of(header);
     match how {
-        Seen::Owner | Seen::Shared => as_is,
+        Seen::Owner | Seen::Shared(_) => as_is,
         Seen::Unshared => ChangeRef {
             version: VersionTag(Uuid::nil()),
             deleted: true,
@@ -1631,6 +1678,7 @@ mod tests {
             removed: true,
             changed_at: Some(1_000),
             token: None,
+            expires: None,
         };
         let live = RemoteHeader {
             body: RemoteBody::Live {
@@ -1642,7 +1690,7 @@ mod tests {
             ..header.clone()
         };
         for h in [header, live] {
-            for how in [Seen::Owner, Seen::Shared, Seen::Unshared] {
+            for how in [Seen::Owner, Seen::Shared(None), Seen::Unshared] {
                 assert_eq!(
                     seen_ref(&h, Some(2_000), how),
                     ChangeRef::of(&seen(h.clone(), Some(2_000), how)),
@@ -1681,6 +1729,7 @@ mod tests {
             (modified, place == modified.map(|t| (t, row)))
         };
         let version_at = |s: &FakeServer| s.files[&file_id].header.changed_at;
+        let share = |live| Share { live, until: None };
         let mut time = s.clock_ms;
         assert_eq!(created.changed_at, Some(time));
         assert_eq!(at(&s), (Some(time), true));
@@ -1696,7 +1745,7 @@ mod tests {
             (removed.changed_at, at(&s)),
             (Some(time), (Some(time), true))
         );
-        s.set_share(sharer.client(), file_id, true)?;
+        s.set_share(sharer.client(), file_id, share(true))?;
         time += 1;
         assert_eq!(at(&s), (Some(time), true));
         assert_eq!(
@@ -1708,11 +1757,11 @@ mod tests {
         time += 1;
         assert_eq!((deleted, at(&s)), (Some(time), (Some(time), true)));
         // Withdrawing a deleted file's share keeps the tombstone's time (odin-core PR #2141).
-        s.set_share(sharer.client(), file_id, false)?;
+        s.set_share(sharer.client(), file_id, share(false))?;
         assert_eq!(at(&s), (Some(time), true));
         assert_eq!(
-            s.shares.get(&file_id),
-            Some(&false),
+            s.shares.get(&file_id).map(|share| share.live),
+            Some(false),
             "withdrawn all the same"
         );
         assert_eq!(s.feed.keys().last().map(|k| k.0), Some(time));

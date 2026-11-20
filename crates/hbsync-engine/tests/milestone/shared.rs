@@ -97,13 +97,27 @@ fn folder_tree(c: &Client) -> BTreeMap<String, Item> {
 /// as failed ([`Behind::Allowed`]: a known limit, filesync #400).
 #[test]
 fn randomized_shares_show_what_is_shared() -> R {
-    let compared = each_seed(seeds(), |seed| shares_of(seed, Behind::Allowed))?;
+    compared_mostly(Ends::Never)
+}
+
+/// Every seed of [`shares_of`] with `ends`, the member's folder compared after most of its
+/// syncs.
+fn compared_mostly(ends: Ends) -> R {
+    let compared = each_seed(seeds(), |seed| shares_of(seed, Behind::Allowed, ends))?;
     let (compared, synced) = compared
         .iter()
         .fold((0, 0), |sum, c| (sum.0 + c.0, sum.1 + c.1));
     eprintln!("milestone: the member's folder compared after {compared} of {synced} syncs");
     assert!(compared * 2 > synced, "{compared} of {synced}");
     Ok(())
+}
+
+/// [`randomized_shares_show_what_is_shared`], with shares given until a time and the time
+/// passing: the drive writes nothing as a share ends, and the member's folder still shows
+/// just what is shared with it at its every sync (sync semantics §13, "A share that ends").
+#[test]
+fn randomized_shares_that_end_show_what_is_shared() -> R {
+    compared_mostly(Ends::Pass)
 }
 
 /// Seeds of [`randomized_shares_show_what_is_shared`] that failed:
@@ -115,7 +129,7 @@ fn randomized_shares_show_what_is_shared() -> R {
 #[test]
 fn regression_shares_seeds() -> R {
     each_seed([194, 5_403_755_731_358_821_085], |seed| {
-        shares_of(seed, Behind::Refused)
+        shares_of(seed, Behind::Refused, Ends::Never)
     })
     .map(drop)
 }
@@ -130,9 +144,18 @@ fn regression_shares_seeds() -> R {
 #[ignore = "known limit: a download behind a name clash at a share's top shows as failed (#400)"]
 fn known_limit_a_download_behind_a_clash_shows_as_failed() -> R {
     each_seed([7_425_484_525_444_276_840], |seed| {
-        shares_of(seed, Behind::Refused)
+        shares_of(seed, Behind::Refused, Ends::Never)
     })
     .map(drop)
+}
+
+/// Whether [`shares_of`] gives shares that end, and lets the time pass that ends them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ends {
+    /// No share has an end.
+    Never,
+    /// Some are given one, and it passes.
+    Pass,
 }
 
 /// Whether [`shares_of`] takes an operation tried again for a taken name while a clash at the
@@ -145,7 +168,10 @@ enum Behind {
 
 /// One seed of [`randomized_shares_show_what_is_shared`]: after how many of the member's
 /// syncs its folder was compared, and how many it had.
-fn shares_of(seed: u64, behind_a_clash: Behind) -> Res<(usize, usize)> {
+fn shares_of(seed: u64, behind_a_clash: Behind, ends: Ends) -> Res<(usize, usize)> {
+    const MINUTE: i64 = 60_000;
+    // (With no ends, the seeds draw as they did before there were any: the saved ones hold.)
+    let ending = ends == Ends::Pass;
     let mut compared = (0, 0);
     let server = server();
     let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
@@ -153,8 +179,16 @@ fn shares_of(seed: u64, behind_a_clash: Behind) -> Res<(usize, usize)> {
     let mut rng = Rng(seed);
     let mut ledger = Ledger::default();
     for step in 0..40 {
-        match rng.below(5) {
+        match rng.below(5 + usize::from(ending)) {
             0 | 1 => act(&a.root, &mut rng, &mut ledger)?,
+            // Time passes on the server: nothing is written, and shares given until then end.
+            5 => {
+                let minutes = 1 + rng.below(3) as i64;
+                server
+                    .lock()
+                    .map_err(|_| "poisoned")?
+                    .advance(minutes * MINUTE);
+            }
             2 => {
                 a.sync()?;
             }
@@ -176,6 +210,13 @@ fn shares_of(seed: u64, behind_a_clash: Behind) -> Res<(usize, usize)> {
                 let (.., file_id, shared) = on_drive[rng.below(on_drive.len())];
                 match shared && rng.below(2) == 0 {
                     true => a.remote.withdraw(file_id)?,
+                    // Until a whole minute a few on (the member asks by the minute), whether
+                    // it is shared now or not: an end given, changed, or given anew.
+                    false if ending && rng.below(2) == 0 => {
+                        let now = server.lock().map_err(|_| "poisoned")?.now();
+                        let minutes = now.div_euclid(MINUTE) + 1 + rng.below(3) as i64;
+                        a.remote.share_until(file_id, minutes * MINUTE)?;
+                    }
                     false => a.remote.share(file_id)?,
                 }
                 server.lock().map_err(|_| "poisoned")?.tick();

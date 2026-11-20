@@ -97,15 +97,47 @@ impl AccountTx<'_> {
             .execute([before_ms])?)
     }
 
-    /// Starts reading the whole feed again, from its beginning: the cursor goes, and
+    /// Starts reading the whole feed again, from its beginning: the cursor goes (and when
+    /// the first share read ends, [`ReadTx::share_end`]), and
     /// [`keys::REREADING`] says so until [`AccountTx::end_reread`] (a re-read a crash cut short
     /// starts over).
     pub fn start_reread(&self) -> Result<()> {
         self.delete_account_kv(crate::keys::REMOTE_CURSOR)?;
+        // (Read anew with it: [`AccountTx::note_share_end`].)
+        self.delete_account_kv(crate::keys::SHARE_END)?;
         self.set_account_kv(crate::keys::REREADING, "1")
     }
 
     pub fn end_reread(&self) -> Result<()> {
         self.delete_account_kv(crate::keys::REREADING)
+    }
+
+    /// A file another identity shares is shared until `end` (Unix ms, the server's clock):
+    /// the earliest such time is kept, as the whole minute it ends by (files shared together
+    /// end together), since the server says nothing when it passes ([`ReadTx::share_end`]:
+    /// the feed asks then). Kept until the feed is next read from its beginning
+    /// ([`AccountTx::start_reread`]), which reads every shared file's header and so every
+    /// end anew: one taken back since (the share given a later end, or withdrawn) costs
+    /// that one read, which finds nothing.
+    pub fn note_share_end(&self, end: i64) -> Result<()> {
+        let minutes = end
+            .saturating_add(SHARE_END_MS - 1)
+            .div_euclid(SHARE_END_MS);
+        let minute = minutes.saturating_mul(SHARE_END_MS);
+        if self.share_end()?.is_some_and(|kept| kept <= minute) {
+            return Ok(());
+        }
+        self.set_account_kv(crate::keys::SHARE_END, &minute.to_string())
+    }
+}
+
+/// The minute a share's end is kept by ([`AccountTx::note_share_end`]).
+const SHARE_END_MS: i64 = 60_000;
+
+impl ReadTx<'_> {
+    /// When the first of the shares read ends ([`AccountTx::note_share_end`]), if any does.
+    pub fn share_end(&self) -> Result<Option<i64>> {
+        let kept = self.account_kv(crate::keys::SHARE_END)?;
+        Ok(kept.and_then(|end| end.parse().ok()))
     }
 }
