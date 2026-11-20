@@ -1381,8 +1381,9 @@ Three lose a removal (the tag comes back):
   drive, so it goes up again, over another device's later removal.
 - *Base at an earlier file*: a tag removed from a node made again while another device's base
   is still agreed with the earlier file and holds the tag, as its item does (or its plan
-  still writes the tag from that file): what the new file lacks is agreed there no more ("A
-  node made again", above), so that device's tag reads as its add, and comes back.
+  still writes the tag from that file, its base without it yet, or none): what the new file
+  lacks is agreed there no more ("A node made again", above), so that device's tag reads as
+  its add, and comes back.
 
 A write up is on its way until its answer is recorded. The engine reads the folder between
 plans only, so its own write up lands over nothing it has seen; what leaves a node in this

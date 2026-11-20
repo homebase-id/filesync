@@ -39,10 +39,12 @@ pub(crate) enum Limit {
     /// (the in-flight family; seed bf84d30f).
     AnswerSuperseded,
     /// A tag removed from a node made again (another file of it, after a delete for good)
-    /// while another client's base was still agreed with the earlier file and held the tag, as
-    /// its item does, or its plan still wrote the tag from that file: what the new file lacks
-    /// is agreed there no more, so that client's tag reads as its add, and comes back. A removal made on the new file can't be told from the
-    /// new file never having had the tag (sync semantics §11, a node made again).
+    /// while it was another client's to send up: its base was still agreed with the earlier
+    /// file and held the tag, as its item does, or its plan still wrote the tag from that file
+    /// (its base without it yet, or none). What the new file lacks is agreed there no more, so
+    /// that client's tag reads as its add, and comes back. A removal made on the new file can't
+    /// be told from the new file never having had the tag (sync semantics §11, a node made
+    /// again).
     BaseAtEarlierFile,
 }
 
