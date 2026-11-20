@@ -61,6 +61,17 @@ enum Command {
         #[command(flatten)]
         approve: Approve,
     },
+    /// Lets Filesync read what others share with you: your Homebase asks you to approve it
+    /// in the browser. Needed once, where Filesync was installed on your identity before it
+    /// asked for this (`hbsync status` says it needs your approval); then what others share
+    /// with you syncs.
+    #[command(name = "approve")]
+    ApproveSharing {
+        /// The identity [default: the one set up].
+        identity: Option<String>,
+        #[command(flatten)]
+        approve: Approve,
+    },
     /// Syncs one of your own folders where this computer keeps it (documents, pictures,
     /// music, videos, downloads) with the drive's folder of that kind: joined if another device
     /// syncs it already (identical files are adopted, not copied), made if not. `desktop` syncs
@@ -403,6 +414,26 @@ fn run(command: Command) -> Res<ExitCode> {
             let mut owner = approve.owner(typed.as_ref());
             setup::sign_in_again(&paths, &identity, &mut owner)?;
             println!("Signed in again on {identity}.");
+        }
+        Command::ApproveSharing { identity, approve } => {
+            let config = Config::load(&paths.config_file())?.unwrap_or_default();
+            let identity = config.identity(identity.as_deref())?;
+            let typed = approve.typed();
+            let mut owner = approve.owner(typed.as_ref());
+            match setup::approve(&paths, &identity, &mut owner)? {
+                setup::Approved::Already => println!(
+                    "{APP_NAME} may already read what others share with you on {identity}."
+                ),
+                setup::Approved::Given => {
+                    println!(
+                        "Approved on {identity}: {APP_NAME} may now read what others share \
+                         with you."
+                    )
+                }
+                setup::Approved::Declined => {
+                    return Err("Not approved: what others share with you isn't synced.".into());
+                }
+            }
         }
         Command::Add {
             what,
@@ -797,11 +828,21 @@ fn print_status(status: &DaemonStatus) {
                 a.identity
             )
         });
+        // What others share waits for the owner's approval of the app (a share synced
+        // before says why itself; one that can't be opened yet has no folder to).
+        let approval = a.needs_approval.then(|| {
+            format!(
+                "sharing: {APP_NAME} needs your approval to read what others share with you: \
+                 `hbsync approve {}` asks your Homebase for it",
+                a.identity
+            )
+        });
         // Recently deleted being deleted for good, in the background.
         let emptying = a.emptying.as_ref().map(words::emptying_status);
         if hints.is_none()
             && credentials.is_none()
             && login.is_none()
+            && approval.is_none()
             && emptying.is_none()
             && a.recent.is_empty()
         {
@@ -814,6 +855,7 @@ fn print_status(status: &DaemonStatus) {
             .chain(&hints)
             .chain(&credentials)
             .chain(&login)
+            .chain(&approval)
         {
             println!("  {line}");
         }

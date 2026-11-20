@@ -849,7 +849,21 @@ with a capital):
   the share is looked at again hourly;
 - the app lacks the owner's approval to read what others share (`needs_approval`: an install
   from before it asked for that): "Access denied: your Homebase cloud hasn't given Filesync
-  the permission…"; looked at again hourly, and at Sync now.
+  the permission…"; looked at again hourly, and at Sync now. **The approval is asked for**
+  by `hbsync approve` and the tray's Approve reading shared files…, offered while a share
+  waits for it. The account's status says so (`needs_approval`), whichever share met it:
+  one that can't be opened (it has no folder in the status) or one that is synced. The
+  tray shows the warning dot, and a line saying why where no share's line does. Both ask
+  through one function (`setup::approve`): the owner's app-update page for that one
+  permission (`/owner/appupdate?p=305`), which comes back to this computer as the page
+  that gives the drive back does (`--paste` and `--browser` as `hbsync login`; in the tray,
+  the page that follows along, which can start over); given, Sync now tries what waited at
+  once (a daemon that isn't running reads the permission as it starts). Where the app may
+  already (approved in the owner console since: one read of the login's context says),
+  nothing is asked and only the sync is: the page would add the permission a second time.
+  Where this computer's login is what is refused, it says to log in again first. While
+  the account is paused nothing is asked of the identity, so what waited is tried, and the
+  status stops saying the approval is wanted, once it syncs again.
 
 The first two are the remote's `RemoteError::Waiting` (the engine's `Stopped::Waiting`): no
 failure, and not a busy server (`Later`, which shows `offline` for a share as for the
@@ -1161,6 +1175,7 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 | `hbsync start`, `stop` | `stop` stops syncing on this computer until `start` (or the tray's Start syncing), also across logins: neither the tray nor the service manager starts the daemon meanwhile |
 | `hbsync autostart [on\|off]` | |
 | `hbsync login [IDENTITY] [--browser CMD] [--paste]` | signs this computer in again in the browser (also the tray's Log in again, for a login from before private drives); the daemon's account starts over with the new login; the folders, the drive and autostart stay as they are; the old login isn't revoked |
+| `hbsync approve [IDENTITY] [--browser CMD] [--paste]` | asks the owner, in the browser, to let Filesync read what others share with them (also the tray's Approve reading shared files…): for an install from before the app asked for that; nothing is asked where it may already; then Sync now, so what waited for it syncs |
 | `hbsync logout` | stops the daemon, forgets the credentials (and the sharers' tokens sealed under them), autostart off; the folder stays |
 | `hbsync unlink` | stops the daemon, removes the folder from the config, autostart off; its files, `.hbsync` and the account's DB stay, so setting it up again resumes |
 | `hbsync deleted [-n N]` | Recently deleted, newest first, with node ids |
@@ -1169,7 +1184,8 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 | `hbsync log` | the log folder (a daily file, a week kept) |
 
 **A browser on another computer** (`--paste`; filesync #409). The owner's answer comes back
-to a page on `localhost` of the computer that runs `hbsync setup` or `hbsync login`, where
+to a page on `localhost` of the computer that runs `hbsync setup`, `hbsync login` or
+`hbsync approve`, where
 the command waits for it. A computer set up over SSH has no browser to come back to: the
 link is printed, opened on any other computer and approved there, and that browser then
 goes to `http://localhost:<port>/…`, which is the other computer and doesn't load. Its

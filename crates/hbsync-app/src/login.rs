@@ -11,6 +11,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use hbsync_homebase::app::Update;
 use hbsync_homebase::{Credentials, HomebaseError, Pending};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 
@@ -19,6 +20,7 @@ use crate::local_http;
 
 const CALLBACK_PATH: &str = "/authorization-code-callback";
 const DRIVE_PATH: &str = "/drive-callback";
+const APPROVAL_PATH: &str = "/approval-callback";
 
 /// Where on localhost the identity sends the browser back to: one path, waited for, and where
 /// the browser goes on to from there.
@@ -238,30 +240,43 @@ impl Login {
     }
 }
 
-/// The owner giving the app its drive again ([`hbsync_homebase::app::Update::Drive`]),
+/// The owner giving the installed app more on their Homebase's app-update page
+/// ([`Update`]: its drive again, or the permission to read what others share with them),
 /// waiting for the browser to come back.
 #[derive(Debug)]
-pub struct DriveRestore {
+pub struct Asked {
     url: String,
     back: Callback,
+    what: Update,
 }
 
 /// Starts asking the owner of `identity` to give the app its drive again.
-pub(crate) fn begin_restore(identity: &str) -> Result<DriveRestore, HomebaseError> {
+pub(crate) fn begin_restore(identity: &str) -> Result<Asked, HomebaseError> {
+    begin_update(identity, Update::Drive)
+}
+
+/// Starts asking the owner of `identity` to let the app read what others share with them
+/// ([`Update::Permission`]: an install from before it asked for that).
+pub(crate) fn begin_approval(identity: &str) -> Result<Asked, HomebaseError> {
+    begin_update(identity, Update::Permission)
+}
+
+fn begin_update(identity: &str, what: Update) -> Result<Asked, HomebaseError> {
+    let at = match what {
+        Update::Drive => DRIVE_PATH,
+        Update::Permission => APPROVAL_PATH,
+    };
     // A random part in the path: the answer carries nothing else only the owner app knows.
-    let path = format!("{DRIVE_PATH}/{}", uuid::Uuid::new_v4().simple());
+    let path = format!("{at}/{}", uuid::Uuid::new_v4().simple());
     let (back, return_url) = Callback::bind(path)?;
-    Ok(DriveRestore {
-        url: hbsync_homebase::app::update_url(
-            identity,
-            &return_url,
-            hbsync_homebase::app::Update::Drive,
-        ),
+    Ok(Asked {
+        url: hbsync_homebase::app::update_url(identity, &return_url, what),
         back,
+        what,
     })
 }
 
-impl DriveRestore {
+impl Asked {
     /// Open this in the browser.
     pub fn url(&self) -> &str {
         &self.url
@@ -274,7 +289,8 @@ impl DriveRestore {
     }
 
     /// Waits up to `timeout` for the owner's answer: `false` unless they gave it. Whether the
-    /// drive is there is for looking up afterwards. Given up as soon as `cancel` is set.
+    /// drive is there (or the permission held) is for looking up afterwards. Given up as soon
+    /// as `cancel` is set.
     pub fn finish_unless(
         self,
         timeout: Duration,
@@ -283,7 +299,7 @@ impl DriveRestore {
         self.finish_with(timeout, cancel, None)
     }
 
-    /// [`DriveRestore::finish_unless`], the owner's answer taken also from the address the
+    /// [`Asked::finish_unless`], the owner's answer taken also from the address the
     /// browser ended on, pasted ([`Login::finish_with`]): this trip's by its path alone.
     pub(crate) fn finish_with(
         self,
@@ -294,10 +310,13 @@ impl DriveRestore {
         let (query, browser) = self.back.wait(timeout, cancel, paste, |_| true)?;
         // Given comes back without a status; cancelled (or anything else) with one.
         let given = !query.contains_key("status");
-        let outcome = if given {
-            Ok("goes on setting up")
-        } else {
-            Err(format!("{APP_NAME} didn't get its drive back."))
+        let outcome = match (self.what, given) {
+            (Update::Drive, true) => Ok("goes on setting up"),
+            (Update::Drive, false) => Err(format!("{APP_NAME} didn't get its drive back.")),
+            (Update::Permission, true) => Ok("may now read what others share with you"),
+            (Update::Permission, false) => Err(format!(
+                "{APP_NAME} wasn't given the permission to read what others share with you."
+            )),
         };
         self.back.answer(browser, outcome);
         Ok(given)
@@ -505,6 +524,37 @@ mod tests {
             };
             assert!(page.contains(expected), "{page}");
         }
+        Ok(())
+    }
+
+    /// Asking the owner to let the app read what others share with them is its own trip on
+    /// the app-update page: for the permission alone (no drive), back on a path of its own,
+    /// given unless they cancelled, and the browser told which in the app's words.
+    #[test]
+    fn approving_what_others_share_waits_for_the_owner() -> R {
+        for (query, given) in [("", true), ("?status=canceled", false)] {
+            let ask = begin_approval("anna.example.com")?;
+            assert!(
+                ask.url()
+                    .starts_with("https://anna.example.com/owner/appupdate?")
+            );
+            assert!(ask.url().contains("p=305") && !ask.url().contains("&d="));
+            let back = return_url(ask.url())?;
+            assert!(back.contains("/approval-callback/"), "{back}");
+            let browser = std::thread::spawn(move || come_back(&back, query));
+            let answer = ask.finish_unless(Duration::from_secs(10), &AtomicBool::new(false))?;
+            assert_eq!(answer, given);
+            let page = browser.join().map_err(|_| "browser")??;
+            let said = if given {
+                "may now read what others share with you"
+            } else {
+                "wasn't given the permission"
+            };
+            assert!(page.contains(said), "{page}");
+        }
+        // (The drive's trip comes back on a path of its own.)
+        let restore = begin_restore("a.example")?;
+        assert!(return_url(restore.url())?.contains("/drive-callback/"));
         Ok(())
     }
 }

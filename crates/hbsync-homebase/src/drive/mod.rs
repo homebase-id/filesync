@@ -247,6 +247,13 @@ impl KeyState {
     }
 }
 
+/// Whether the app may read what others share with this identity now (the permission an
+/// install from before it asked for it lacks until the owner approves: [`app::update_url`]):
+/// one read of the login's security context.
+pub fn reads_shared(client: &Client) -> Result<bool, HomebaseError> {
+    Ok(holds_key(&security_context(client)?, app::USE_TRANSIT_READ))
+}
+
 /// The login's security context: its grants and permissions.
 fn security_context(client: &Client) -> Result<serde_json::Value, HomebaseError> {
     client.get("/api/v2/auth/context", &[])
@@ -671,8 +678,7 @@ impl HomebaseRemote {
     /// permission update closes no socket). Kept for [`Self::circle_key`]'s next look; an
     /// answer overtaken by another read costs that look one more read, no more.
     fn reads_shared_now(&self) -> Result<bool> {
-        let context = security_context(&self.client).map_err(remote_error)?;
-        let reads = holds_key(&context, app::USE_TRANSIT_READ);
+        let reads = reads_shared(&self.client).map_err(remote_error)?;
         self.drive_key.lock().reads_shared = reads;
         Ok(reads)
     }

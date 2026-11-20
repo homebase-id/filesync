@@ -248,7 +248,10 @@ impl Account {
                 opened => opened?,
             };
             let config = now.as_ref().unwrap_or(config);
-            let found = self.serve(paths, config, requests, stop, msgs, parts, !healed)?;
+            let found = self.serve(paths, config, requests, stop, msgs, parts, !healed);
+            // (What that run found of the shares isn't the next one's to say.)
+            lock(&self.shown).status.needs_approval = false;
+            let found = found?;
             let Some(why) = found.filter(|_| !self.stopping(stop)) else {
                 return Ok(());
             };
@@ -600,6 +603,15 @@ impl Account {
                 // (Nothing is asked of the identity while paused.)
                 if !paused {
                     markers.ask(&shares, now);
+                }
+                // A share that can't be opened for want of the owner's approval has no
+                // folder to say so: the account's status does (looked at here, after what
+                // was answered and asked: an opening given up counts no more).
+                let unapproved = markers.needs_approval();
+                {
+                    // (A scope of its own: the lock is taken again below.)
+                    let told = &mut lock(&self.shown).status.needs_approval;
+                    changed |= std::mem::replace(told, unapproved) != unapproved;
                 }
                 // The main folder's runner started while nothing was shared makes no folder
                 // of shares: with a share to sync now, it is told to. (One waiting to start

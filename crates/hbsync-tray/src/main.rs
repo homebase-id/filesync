@@ -317,6 +317,15 @@ impl App {
                 }
                 os::open(self.pages.url(page));
             }
+            // The owner's approval of reading what others share: asked on the page that
+            // follows along, as a login is (one at a time; it can be started over).
+            Action::Approve => {
+                if let Some(s) = self.status() {
+                    let (identity, folder) = (s.identity.clone(), s.path.clone());
+                    self.pages.prepare_setup(&identity, Some(folder));
+                }
+                os::open(self.pages.url("approve"));
+            }
             Action::OpenFolder => {
                 let folder = match self.status() {
                     Some(s) => Some(s.path.clone()),
