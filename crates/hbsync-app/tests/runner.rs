@@ -2240,7 +2240,7 @@ fn a_share_waits_where_its_login_isnt_what_is_refused() -> R {
 
     // Put off by its sharer.
     let why = "waiting for sharer.example to review your connection";
-    b.remote.faults().later = Some((why.into(), Duration::from_secs(900)));
+    b.remote.faults().waiting = Some((why.into(), Duration::from_secs(900)));
     waits()?;
     let s = b.status();
     assert_eq!(s.error.as_deref(), Some(why));
@@ -2250,6 +2250,17 @@ fn a_share_waits_where_its_login_isnt_what_is_refused() -> R {
         "Waiting for sharer.example to review your connection"
     );
     assert!(s.retry_at.is_some(), "tried again by itself");
+    // Nothing reads their drive on a timer meanwhile: the same answer would come.
+    assert!(b.drive.put_off());
+    b.remote.faults().waiting = None;
+    syncs_again()?;
+    assert!(!b.drive.put_off());
+
+    // Their server only busy: offline, as a server of this identity's would show.
+    b.remote.faults().later = Some(Duration::from_secs(900));
+    b.handle.send(Command::SyncNow);
+    wait_until("it shows offline", || b.status().state == State::Offline)?;
+    assert!(b.drive.put_off());
     b.remote.faults().later = None;
     syncs_again()?;
 
@@ -2263,6 +2274,10 @@ fn a_share_waits_where_its_login_isnt_what_is_refused() -> R {
         let s = b.status();
         assert!(!s.refused(), "{s:?}");
         assert_eq!(s.needs_approval, approval, "{s:?}");
+        assert_eq!(
+            hbsync_app::words::status_line(&s, 0),
+            "Access denied: injected: not authorized"
+        );
         b.handle.send(Command::Pause(Pause::UNTIL_RESUMED));
         wait_until("paused", || b.status().state == State::Paused)?;
         let paused = b.status();
@@ -2274,7 +2289,6 @@ fn a_share_waits_where_its_login_isnt_what_is_refused() -> R {
             (faults.denied, faults.deny_as) = (false, None);
         }
         syncs_again()?;
-        assert!(!b.status().needs_approval);
     }
 
     // This login refused: logging in again is the way out, as ever.

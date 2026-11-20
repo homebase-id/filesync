@@ -36,6 +36,22 @@ impl FeedError {
         }
     }
 
+    /// When the remote said to ask again, if it did ([`RemoteError::retry_after`]).
+    pub fn retry_after(&self) -> Option<std::time::Duration> {
+        match self {
+            FeedError::Remote(e) => e.retry_after(),
+            FeedError::State(_) => None,
+        }
+    }
+
+    /// Who is waited for, where someone else has to act first ([`RemoteError::waiting`]).
+    pub fn waiting(&self) -> Option<&str> {
+        match self {
+            FeedError::Remote(e) => e.waiting(),
+            FeedError::State(_) => None,
+        }
+    }
+
     /// What it means ([`ErrorClass`]).
     pub fn class(&self) -> ErrorClass {
         match self {

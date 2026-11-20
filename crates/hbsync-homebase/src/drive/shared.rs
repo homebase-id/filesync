@@ -187,7 +187,7 @@ impl PeerRemote {
             Err(RemoteError::Denied(why, Refusal::Token)) => match self.renewed(&client) {
                 Ok(Some(new)) => ask(&new),
                 Ok(None) => Err(RemoteError::Denied(why, Refusal::Token)),
-                Err(ours @ (RemoteError::Denied(..) | RemoteError::Later { .. })) => Err(ours),
+                Err(ours @ (RemoteError::Denied(..) | RemoteError::Waiting { .. })) => Err(ours),
                 Err(e) => {
                     tracing::warn!(
                         "no new token for {}'s server, which refused the one it gave: {e}",
@@ -222,7 +222,7 @@ impl PeerRemote {
         let asked = ask();
         let unasked = matches!(
             asked,
-            Err(RemoteError::Denied(..) | RemoteError::Later { .. })
+            Err(RemoteError::Denied(..) | RemoteError::Waiting { .. })
         );
         if !unasked {
             held.renewed = Some(Instant::now());
@@ -620,7 +620,7 @@ mod tests {
         let count = Arc::clone(&asked);
         sam.renewal = Some(Renewal(Box::new(move || {
             count.fetch_add(1, SeqCst);
-            Err(RemoteError::Later {
+            Err(RemoteError::Waiting {
                 why: "not connected to sam.invalid".into(),
                 retry_after: Duration::from_secs(3600),
             })
@@ -628,7 +628,7 @@ mod tests {
         for _ in 0..2 {
             let answer: Result<()> = sam.with_token(|_| refused());
             match answer {
-                Err(RemoteError::Later { why, retry_after }) => {
+                Err(RemoteError::Waiting { why, retry_after }) => {
                     assert_eq!(why, "not connected to sam.invalid");
                     assert_eq!(retry_after, Duration::from_secs(3600));
                 }

@@ -50,6 +50,10 @@ pub enum Stopped {
     /// The server is busy or paused, and said when to ask again.
     #[error("the server asks to come back in {secs}s: {0}", secs = .1.as_secs())]
     Later(String, Duration),
+    /// Someone else has to act first ([`RemoteError::Waiting`]): who and what, and when to
+    /// ask again.
+    #[error("{0}")]
+    Waiting(String, Duration),
     /// The caller asked the run to stop (pause, shutdown).
     #[error("stopped on request")]
     Requested,
@@ -141,7 +145,7 @@ impl Stopped {
         match self {
             Stopped::Denied(..) => ErrorClass::Denied,
             Stopped::Unreachable(_) => ErrorClass::Transient,
-            Stopped::Later(..) => ErrorClass::RateLimited,
+            Stopped::Later(..) | Stopped::Waiting(..) => ErrorClass::RateLimited,
             // Not an error: a run stopped on request ends well.
             Stopped::Requested => ErrorClass::Bug,
         }
@@ -183,8 +187,12 @@ pub(super) fn io_outcome(e: io::Error) -> Outcome {
 }
 
 pub(super) fn remote_outcome(e: RemoteError) -> Outcome {
-    if let Some(refusal) = e.refusal() {
-        return Outcome::Stop(Stopped::Denied(e.to_string(), refusal));
+    match e {
+        // (Their reasons as they are: each says "access denied" or who is waited for once.)
+        RemoteError::Denied(why, refusal) => Outcome::Stop(Stopped::Denied(why, refusal)),
+        RemoteError::Waiting { why, retry_after } => {
+            Outcome::Stop(Stopped::Waiting(why, retry_after))
+        }
+        e => Outcome::of(e.class(), e.to_string(), e.retry_after()),
     }
-    Outcome::of(e.class(), e.to_string(), e.retry_after())
 }

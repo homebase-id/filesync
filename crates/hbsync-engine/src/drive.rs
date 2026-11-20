@@ -60,6 +60,8 @@ pub struct Drive {
     server_time: AtomicI64,
     /// A re-read of the whole feed on its way, between pulls ([`feed::Reread`]).
     reread: Mutex<Option<feed::Reread>>,
+    /// Until when what another identity shares is put off ([`Drive::put_off`]).
+    put_off: Mutex<Option<Instant>>,
 }
 
 /// Wakes a folder's engine ([`Drive::subscribe_with`]).
@@ -225,6 +227,7 @@ impl Drive {
             freshness: Freshness::default(),
             server_time: AtomicI64::new(0),
             reread: Mutex::default(),
+            put_off: Mutex::default(),
         }))
     }
 
@@ -313,6 +316,23 @@ impl Drive {
         }
     }
 
+    /// What another identity shares was put off (`after`: for how long, where the failure
+    /// said): nothing reads its drive on a timer before then ([`Drive::put_off`]). Its own
+    /// drive isn't held so: its changes are announced, and read as they are.
+    pub(crate) fn hold(&self, after: Option<Duration>) {
+        if let Some(after) = after.filter(|_| self.shared()) {
+            *lock(&self.put_off) = Some(Instant::now() + after);
+        }
+    }
+
+    /// Whether what another identity shares is put off for now: its sharer, or a connection,
+    /// is waited for, or their server said when to come back, and a read before then would
+    /// ask for the same answer. A folder's sync asks when its own wait is over, and Sync now
+    /// at once ([`Drive::allow`]); a pull that goes well ends it.
+    pub fn put_off(&self) -> bool {
+        lock(&self.put_off).is_some_and(|until| Instant::now() < until)
+    }
+
     /// Why the identity refused this computer, while that holds ([`Drive::deny`]).
     pub fn denied(&self) -> Option<(String, Refusal)> {
         lock(&self.denied).latch.clone()
@@ -327,6 +347,7 @@ impl Drive {
     /// well ([`Drive::refused`]).
     pub fn allow(&self) {
         lock(&self.denied).latch = None;
+        *lock(&self.put_off) = None;
     }
 
     /// The identity's last refusal of this computer, and why, until a request goes well since:
@@ -436,6 +457,7 @@ impl Drive {
                 self.freshness.answered(doubts);
                 // The login works; the key, a slim page needn't show.
                 self.succeeded(since, false);
+                *lock(&self.put_off) = None;
                 *answered = covers;
                 if let Some(now) = report.server_time {
                     self.server_time.store(now, Ordering::SeqCst);
@@ -444,6 +466,7 @@ impl Drive {
             Err(e) => {
                 self.set_behind();
                 self.latch(e.refusal(), e);
+                self.hold(e.retry_after());
             }
         }
         // Still one at a time: what it touched is its to wake, the pages it committed before a

@@ -957,9 +957,12 @@ pub struct Faults {
     /// its token ([`Refusal::Token`]), the app wanting the owner's approval
     /// ([`Refusal::Permission`]).
     pub deny_as: Option<Refusal>,
-    /// Every request is put off with [`RemoteError::Later`]: its reason, and after how long to
-    /// ask again (a sharer whose device hasn't opened the share to this identity yet, say).
-    pub later: Option<(String, Duration)>,
+    /// Every request is put off with [`RemoteError::Waiting`]: who is waited for, and after
+    /// how long to ask again (a sharer whose device hasn't opened the share to this identity
+    /// yet, say).
+    pub waiting: Option<(String, Duration)>,
+    /// Every request is put off with [`RemoteError::Later`] for this long: a busy server.
+    pub later: Option<Duration>,
     /// Creates, updates, deletes and share changes are refused with [`RemoteError::Denied`]
     /// (the app lost write access to the drive); reads still work.
     pub deny_writes: bool,
@@ -1107,7 +1110,11 @@ impl FakeRemote {
                     refusal,
                 ));
             }
-            if let Some((why, retry_after)) = f.later.clone() {
+            if let Some((why, retry_after)) = f.waiting.clone() {
+                return Err(RemoteError::Waiting { why, retry_after });
+            }
+            if let Some(retry_after) = f.later {
+                let why = "injected: busy".into();
                 return Err(RemoteError::Later { why, retry_after });
             }
             let scripted = f.script.pop_front().unwrap_or(false);

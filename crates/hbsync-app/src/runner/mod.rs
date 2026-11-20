@@ -457,9 +457,8 @@ impl Handle {
             // request goes well, as running.
             // (Not what another identity shares, where its sharer's server or the owner's
             // approval is what it waits for: paused, and no login is asked for.)
-            let theirs = |refusal| matches!(refusal, Refusal::Token | Refusal::Permission);
             let refused = self.drive.refused();
-            let refused = refused.filter(|(_, r)| status.sharer.is_none() || !theirs(*r));
+            let refused = refused.filter(|(_, r)| status.sharer.is_none() || r.login_lifts());
             if let Some(refused) = refused {
                 let shown = Showing::refused(refused);
                 status.refused_paused = true;
@@ -1135,7 +1134,7 @@ impl Runner {
                     // The identity's answer, as shown (a refused login keeps one for want of
                     // the key shown, [`Drive::login_refused`]).
                     let (why, refusal) = self.drive.refused().unwrap_or(latched);
-                    let failed = (ErrorClass::Denied, Some(refusal), Some(why.as_str()));
+                    let failed = (ErrorClass::Denied, Some(refusal), None);
                     self.backs_off(&mut schedule, "the sync", failed, &why, Some(DENIED_LOOK));
                     self.probing = true;
                     continue;
@@ -1372,7 +1371,7 @@ impl Runner {
                     if self.ends_for(e.unusable()) {
                         return Err(e.into());
                     }
-                    let failed = (e.class(), e.refusal(), e.reason());
+                    let failed = (e.class(), e.refusal(), e.waiting());
                     self.backs_off(&mut schedule, "the sync", failed, &e, e.retry_after());
                 }
             }
@@ -1485,15 +1484,15 @@ impl Runner {
     }
 
     /// `what` failed with `e`, of `class` (`refusal`: why the identity refused, if it did;
-    /// `reason`: the failure's own words for a person, where it has them; the server said to
+    /// `waiting`: who is waited for, where someone else has to act first; the server said to
     /// ask again after `retry_after`): the folder shows it (the account's refusal through what
     /// would show offline, [`Drive::refused`]; what another identity shares as waiting, where
-    /// this login isn't what is refused: [`Showing::shared`]) and backs off.
+    /// this login isn't what stands in the way: [`Showing::shared`]) and backs off.
     fn backs_off(
         &self,
         schedule: &mut Schedule,
         what: &str,
-        (class, refusal, reason): (ErrorClass, Option<Refusal>, Option<&str>),
+        (class, refusal, waiting): (ErrorClass, Option<Refusal>, Option<&str>),
         e: &dyn std::fmt::Display,
         retry_after: Option<Duration>,
     ) -> Duration {
@@ -1501,7 +1500,7 @@ impl Runner {
         tracing::warn!("{what} failed ({e}); trying again in {wait:?}");
         let kept = self.drive.refused();
         let showing = match self.cfg.sharer {
-            Some(_) => Showing::shared(class, refusal, (reason, e.to_string()), kept),
+            Some(_) => Showing::shared(class, refusal, (waiting, e.to_string()), kept),
             None => Showing::failed(class, refusal, e.to_string(), kept),
         };
         self.failing(showing, wait);

@@ -320,14 +320,13 @@ impl Markers {
                         );
                         opening.at = Some(now + pause);
                         if !std::mem::replace(&mut opening.told, true) {
-                            // (In the answer's own words, where it has them: who is waited
-                            // for, not how many seconds a server said.)
-                            let reason = match &e {
-                                RunnerError::Engine(e) => e.reason(),
+                            // (Who is waited for, where that is all: in those words.)
+                            let waiting = match &e {
+                                RunnerError::Engine(e) => e.waiting(),
                                 _ => None,
                             };
-                            let why: &dyn std::fmt::Display = match &reason {
-                                Some(reason) => reason,
+                            let why: &dyn std::fmt::Display = match &waiting {
+                                Some(who) => who,
                                 None => &e,
                             };
                             return vec![match opening.end {

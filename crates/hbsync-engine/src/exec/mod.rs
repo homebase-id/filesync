@@ -432,7 +432,8 @@ impl<'a> Executor<'a> {
                 self.db.write(|s| s.folder().mark_dirty(node))?;
                 // A write the server answered busy may have landed before (a 5xx): planned
                 // again from the feed, read first.
-                if matches!(stopped, Stopped::Later(..)) && op.writes_remote() {
+                let busy = matches!(stopped, Stopped::Later(..) | Stopped::Waiting(..));
+                if busy && op.writes_remote() {
                     self.report.news.behind = true;
                 }
                 self.report.stopped.get_or_insert(stopped);

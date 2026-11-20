@@ -421,6 +421,14 @@ pub enum Refusal {
     Permission,
 }
 
+impl Refusal {
+    /// Whether logging in again is the way out: this login's credentials, or its want of the
+    /// drive's key. Not another identity's refusal of its token, nor the owner's approval.
+    pub fn login_lifts(self) -> bool {
+        matches!(self, Refusal::Credentials | Refusal::NoKey)
+    }
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RemoteError {
     /// A live file with this node id exists (Homebase 4105): a retried create already landed.
@@ -463,6 +471,15 @@ pub enum RemoteError {
     /// `Retry-After`).
     #[error("asked to come back in {}s: {why}", retry_after.as_secs())]
     Later {
+        why: String,
+        retry_after: std::time::Duration,
+    },
+    /// Someone else has to act before this is answered, and it is asked again after
+    /// `retry_after`: who and what, in words for the user (`why`: another identity's device
+    /// that hasn't opened what they share yet, their review of a connection, a connection
+    /// that isn't there). No failure, and not a server that is busy ([`RemoteError::Later`]).
+    #[error("{why}")]
+    Waiting {
         why: String,
         retry_after: std::time::Duration,
     },
@@ -604,7 +621,8 @@ impl RemoteError {
     pub fn class(&self) -> ErrorClass {
         match self {
             RemoteError::Transient(_) => ErrorClass::Transient,
-            RemoteError::Later { .. } => ErrorClass::RateLimited,
+            // (Asked again when it says, as a busy server is.)
+            RemoteError::Later { .. } | RemoteError::Waiting { .. } => ErrorClass::RateLimited,
             RemoteError::Denied(..) => ErrorClass::Denied,
             RemoteError::Full { .. } => ErrorClass::Full,
             // The remote moved on, or rejected the bytes (changed mid-upload), or the file grew
@@ -631,11 +649,10 @@ impl RemoteError {
         }
     }
 
-    /// The reason itself, where the answer is one for a person: why access is refused
-    /// ([`RemoteError::Denied`]), or what is waited for ([`RemoteError::Later`]).
-    pub fn reason(&self) -> Option<&str> {
+    /// Who is waited for and for what ([`RemoteError::Waiting`]), in words for the user.
+    pub fn waiting(&self) -> Option<&str> {
         match self {
-            RemoteError::Denied(why, _) | RemoteError::Later { why, .. } => Some(why),
+            RemoteError::Waiting { why, .. } => Some(why),
             _ => None,
         }
     }
@@ -648,7 +665,9 @@ impl RemoteError {
     /// When the server said to ask again (`Retry-After`).
     pub fn retry_after(&self) -> Option<std::time::Duration> {
         match self {
-            RemoteError::Later { retry_after, .. } => Some(*retry_after),
+            RemoteError::Later { retry_after, .. } | RemoteError::Waiting { retry_after, .. } => {
+                Some(*retry_after)
+            }
             RemoteError::Full { retry_after, .. } => *retry_after,
             _ => None,
         }
@@ -669,6 +688,10 @@ impl RemoteError {
             RemoteError::Transient(why) => RemoteError::Transient(why.clone()),
             RemoteError::Io(e) => RemoteError::Io(std::io::Error::new(e.kind(), e.to_string())),
             RemoteError::Later { why, retry_after } => RemoteError::Later {
+                why: why.clone(),
+                retry_after: *retry_after,
+            },
+            RemoteError::Waiting { why, retry_after } => RemoteError::Waiting {
                 why: why.clone(),
                 retry_after: *retry_after,
             },

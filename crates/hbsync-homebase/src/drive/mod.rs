@@ -649,7 +649,7 @@ impl HomebaseRemote {
             Ok(answer) => Ok(answer),
             // Not connected to them (any more): this identity's own answer, before theirs is
             // asked. Theirs to mend or the owner's, and nothing a retry in minutes changes.
-            Err(e) if not_connected(&e) => Err(RemoteError::Later {
+            Err(e) if not_connected(&e) => Err(RemoteError::Waiting {
                 why: format!(
                     "not connected to {sharer}: what they share with you can't be read \
                      until you are"
@@ -1133,7 +1133,7 @@ fn sealed_or_wait(answer: SealedKey, sharer: &str) -> Result<Vec<u8>> {
         ),
         SealedKey::NotReviewed => format!("waiting for {sharer} to review your connection"),
     };
-    Err(RemoteError::Later {
+    Err(RemoteError::Waiting {
         why,
         retry_after: SHARER_WAIT,
     })
@@ -2134,7 +2134,7 @@ mod tests {
         })?;
         let not_connected = || Err::<(), _>(api(400, Some("notAConnectedIdentity")));
         match own.ask_peer("sam.example", true, not_connected) {
-            Err(RemoteError::Later { why, retry_after }) => {
+            Err(RemoteError::Waiting { why, retry_after }) => {
                 assert!(why.starts_with("not connected to sam.example"), "{why}");
                 assert_eq!(retry_after, NOT_CONNECTED_WAIT);
             }
@@ -2171,7 +2171,7 @@ mod tests {
             (SealedKey::NotReviewed, "review your connection"),
         ] {
             match sealed_or_wait(answer, "sam.example") {
-                Err(RemoteError::Later { why, retry_after }) => {
+                Err(RemoteError::Waiting { why, retry_after }) => {
                     assert!(why.contains("sam.example") && why.contains(says), "{why}");
                     assert_eq!(retry_after, SHARER_WAIT);
                 }

@@ -837,25 +837,36 @@ status`'s) says what to do: "Not syncing: log in again to get your private drive
 "Paused · log in again to …". The tray shows either with its warning dot, Log in again… and
 the notification (a paused one keeps Resume syncing).
 
-What another identity shares is `waiting` where this computer's login isn't what is refused,
-`error` saying who is waited for and for what, in the answer's words (the status line is
-those, with a capital):
+What another identity shares is `waiting` where this computer's login isn't what stands in
+the way, `error` saying who is waited for and for what (the status line is those words,
+with a capital):
 - its sharer put it off: a device of theirs opens the share to this identity when next online,
   or they haven't reviewed the connection (asked again after 15 minutes);
 - this identity isn't connected to them (its own server says so; asked again after an hour:
   connecting is people's doing, and no token is asked of theirs for it);
-- their server refuses the token it gave (the connection ended there, say): a new one is
-  asked for as "How a share is opened" says, and the share is looked at again hourly;
+- their server refuses the token it gave (the connection ended there, say): "Access denied:
+  refused by their server…"; a new token is asked for as "How a share is opened" says, and
+  the share is looked at again hourly;
 - the app lacks the owner's approval to read what others share (`needs_approval`: an install
-  from before it asked for that; looked at again hourly, and at Sync now).
+  from before it asked for that): "Access denied: your Homebase cloud hasn't given Filesync
+  the permission…"; looked at again hourly, and at Sync now.
+
+The first two are the remote's `RemoteError::Waiting` (the engine's `Stopped::Waiting`): no
+failure, and not a busy server (`Later`, which shows `offline` for a share as for the
+account). Someone waited for is the newest word, shown before a refusal kept from earlier.
+While a share is put off (waiting, or its sharer's server busy), nothing reads its drive on
+the timer either (`Drive::put_off`): the same answer would come, a request or two each
+time. Its folder's sync asks when the wait is over, and Sync now, waking and coming back
+online at once.
 
 Logging in again lifts none of them, so nothing says to: no `refused_paused` while paused,
-no Log in again… in the tray, no notification. Waiting for a sharer says nothing of this
-computer's own files: the tray's icon and status line stay the main folder's, and the menu
-names each share that waits; one that needs the owner's approval shows the warning dot.
-`hbsync status` lists it with the same line. Its login refused (the credentials, the
-drive's key) shows `denied`, as the account's own folders do. A share that can't be opened
-yet has no folder in the status: the account's note says why, in the same words.
+no Log in again… in the tray, no notification for the folder. Waiting for a sharer says
+nothing of this computer's own files: the tray's icon and status line stay the main
+folder's, and the menu names each share that waits; one that needs the owner's approval
+shows the warning dot, and its line is the status line. `hbsync status` lists it with the
+same line. Its login refused (the credentials, the drive's key) shows `denied`, as the
+account's own folders do. A share that can't be opened yet has no folder in the status:
+the account's note says why, once, in the same words (the tray tells a new note).
 
 A
 request of Recently deleted (a restore, emptying, the purge) the identity refused says the
