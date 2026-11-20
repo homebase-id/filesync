@@ -273,7 +273,7 @@ fn read_pages<G: DerefMut<Target = StateDb>>(
                         .filter_map(|r| r.at.map(|at| at.file_id));
                     r.shown(whole.entries.iter().map(|h| h.file_id).chain(unread));
                 }
-                apply_whole(&db, whole, cursor, &mut report)?
+                apply_whole(&db, whole, cursor, remote.shared(), &mut report)?
             }
         };
         slim = Some(nothing_new);
@@ -485,11 +485,13 @@ fn apply_slim<G: DerefMut<Target = StateDb>>(
     })?)
 }
 
-/// A whole page, applied: whether more follow, and whether it held nothing new.
+/// A whole page, applied: whether more follow, and whether it held nothing new. `shared`:
+/// the page is of another identity's drive ([`Remote::shared`]).
 fn apply_whole<G: DerefMut<Target = StateDb>>(
     db: &impl Fn() -> G,
     page: ChangesPage,
     cursor: Option<&str>,
+    shared: bool,
     report: &mut FeedReport,
 ) -> Result<(bool, bool), FeedError> {
     let nothing_new = db().write(|s| {
@@ -503,9 +505,10 @@ fn apply_whole<G: DerefMut<Target = StateDb>>(
         }
         let ends =
             (page.entries.iter().map(|h| h.expires)).chain(page.skipped.iter().map(|r| r.expires));
-        // Another identity's drive, read from its beginning: again a week on.
-        let week = (cursor.is_none() && s.shared()?)
-            .then(|| page.server_time.saturating_add(SHARED_REREAD_MS));
+        // Another identity's drive, read from its beginning: again a week on. (By the
+        // remote, as [`read_pages`] goes by it where no time is kept.)
+        let week =
+            (shared && cursor.is_none()).then(|| page.server_time.saturating_add(SHARED_REREAD_MS));
         note_reread(s.account(), ends.chain([week]), page.server_time)?;
         save_cursor(s.account(), cursor, !page.entries.is_empty(), &page.cursor)?;
         Ok(nothing_new)

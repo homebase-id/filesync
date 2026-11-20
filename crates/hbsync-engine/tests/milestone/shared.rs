@@ -251,26 +251,52 @@ fn shares_of(seed: u64, behind_a_clash: Behind, besides: Besides) -> Res<(usize,
             }
             _ => {
                 // A week on the member reads the share whole again, and asks about what the
-                // feed no longer shows: not there, said twice a minute apart (§8b).
-                if std::mem::take(&mut unheard) {
+                // feed no longer shows: not there, said twice a minute apart (§8b). So it
+                // syncs twice then, each sync held to the same, its folder compared after
+                // the second.
+                let a_week_on = std::mem::take(&mut unheard);
+                if a_week_on {
                     (server.lock().map_err(|_| "poisoned")?).advance(WEEK + MINUTE);
-                    b.sync()?;
-                    b.a_minute_on()?;
                 }
-                let report = b.sync()?;
-                assert!(out.path().read_dir()?.next().is_none(), "moved out");
-                let shared = shared_tree(&*server.lock().map_err(|_| "poisoned")?)?;
-                let clash = shared.values().any(|items| items.len() > 1);
-                let waits = clash && behind_a_clash == Behind::Allowed;
-                assert!(
-                    (report.failed.iter()).all(|(_, why)| waits && why == "name taken"),
-                    "step {step}: {report:?}"
-                );
-                assert_eq!(
-                    !report.conflicts.is_empty(),
-                    clash,
-                    "step {step}: {report:?}"
-                );
+                let syncs: &[bool] = if a_week_on { &[true, false] } else { &[false] };
+                let mut told = None;
+                for &asks in syncs {
+                    let due = b.engine.db().read(|s| s.reread_due())?;
+                    let report = b.sync()?;
+                    assert!(out.path().read_dir()?.next().is_none(), "moved out");
+                    if asks {
+                        // Told "not there" once, the member still has what went for good,
+                        // which may hold a name at the top: nothing else may fail.
+                        let waits = behind_a_clash == Behind::Allowed;
+                        assert!(
+                            (report.failed.iter()).all(|(_, why)| waits && why == "name taken"),
+                            "step {step}, a week on: {report:?}"
+                        );
+                        b.a_minute_on()?;
+                        continue;
+                    }
+                    let shared = shared_tree(&*server.lock().map_err(|_| "poisoned")?)?;
+                    let clash = shared.values().any(|items| items.len() > 1);
+                    let waits = clash && behind_a_clash == Behind::Allowed;
+                    assert!(
+                        (report.failed.iter()).all(|(_, why)| waits && why == "name taken"),
+                        "step {step}: {report:?}"
+                    );
+                    assert_eq!(
+                        !report.conflicts.is_empty(),
+                        clash,
+                        "step {step}: {report:?}"
+                    );
+                    // A time to read the share from its beginning by is kept, and only a
+                    // week gone by (or an end) has it read so: no other sync moves the time.
+                    let after = b.engine.db().read(|s| s.reread_due())?;
+                    assert!(after.is_some(), "step {step}: no time kept");
+                    if !ending && due.is_some() {
+                        assert_eq!(after, due, "step {step}: read whole");
+                    }
+                    told = Some((shared, clash));
+                }
+                let (shared, clash) = told.ok_or("no sync")?;
                 compared.1 += 1;
                 if clash {
                     continue;

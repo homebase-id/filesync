@@ -1603,7 +1603,7 @@ rules hold too:
   for by its header, a hundred a pull, and is gone once the identity says "not there" a
   second time, a minute to an hour on. It then leaves this device as any file the sharer
   deleted does (removed here; moved out where it changed here). Until then the member
-  keeps it: for up to a week and two syncs. Every item of the sharer's Recently deleted
+  keeps it: for up to a week and two syncs (more where over a hundred went). Every item of the sharer's Recently deleted
   ends that way (their purge deletes it for good after 30 days): its row stays in this
   device's Recently deleted until that re-read, and a file here whose folder is such a row
   stays hidden in it till then.
@@ -1619,7 +1619,8 @@ rules hold too:
   before the purge, node schema, "The purge").
   What it costs: one read of the share's feed from its beginning a week, headers and all
   (a share of 10,000 files: 20 requests, about 25 MB; of 1,000 files: 2 requests, 2.5 MB),
-  and two header reads for each file found gone. An idle read costs what it did (no value
+  the page read first that week, which is given up, and two header reads for each file
+  found gone. An idle read costs what it did (no value
   more is read or written). The period is the trade: at 29 days (as for a
   device away) it would cost a quarter, and a file deleted for good would stay up to 29
   days on a device that is always on. With each file's end in the mirror (filesync #445)

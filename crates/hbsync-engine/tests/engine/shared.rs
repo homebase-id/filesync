@@ -327,10 +327,12 @@ fn what_the_sharer_deleted_for_good_leaves_a_week_on() -> R {
     later(&server, DAY + MINUTE)?;
     b.sync()?;
     assert_eq!(b.tree_text(""), all, "not there once: kept");
+    // (A time is kept as the whole minute it is over by: a tick of the server's clock
+    // between the two reads would make it the next.)
+    let a_week_on = 7 * DAY + MINUTE..=7 * DAY + 2 * MINUTE;
     let second = reread_due(&mut b)?;
-    assert_eq!(
-        second - first,
-        7 * DAY + MINUTE,
+    assert!(
+        a_week_on.contains(&(second - first)),
         "read whole: again a week on"
     );
     assert_eq!(b.a_minute_on()?, 3);
@@ -348,7 +350,7 @@ fn what_the_sharer_deleted_for_good_leaves_a_week_on() -> R {
     later(&server, 2 * MINUTE)?;
     b.sync()?;
     let third = reread_due(&mut b)?;
-    assert_eq!(third - second, 7 * DAY + MINUTE);
+    assert!(a_week_on.contains(&(third - second)));
     assert_eq!(b.tree_text(""), ["stay.txt = stay"]);
 
     // A store that keeps no such time (one from before) reads it whole once.
@@ -360,6 +362,8 @@ fn what_the_sharer_deleted_for_good_leaves_a_week_on() -> R {
     b.sync()?;
     assert_eq!(reread_due(&mut b)?, third);
     assert_eq!(b.remote.faults().requests, asked + 2, "from the beginning");
+    b.sync()?;
+    assert_eq!(b.remote.faults().requests, asked + 3, "once");
     Ok(())
 }
 
