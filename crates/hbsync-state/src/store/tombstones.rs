@@ -108,4 +108,62 @@ impl AccountTx<'_> {
     pub fn end_reread(&self) -> Result<()> {
         self.delete_account_kv(crate::keys::REREADING)
     }
+
+    /// A file another identity shares is shared until `end` (Unix ms, the server's clock):
+    /// kept, as the server says nothing when that passes ([`AccountTx::take_share_ends`]
+    /// asks then). Kept as the whole minute it ends by (files shared together end together:
+    /// one asking for them all), the earliest [`SHARE_ENDS_KEPT`] of them: a later one that
+    /// doesn't fit is found by the next whole re-read. An end isn't taken back where the
+    /// share is given a later one, or withdrawn: it costs one re-read that finds nothing.
+    pub fn note_share_end(&self, end: i64) -> Result<()> {
+        let minutes = end
+            .saturating_add(SHARE_END_MS - 1)
+            .div_euclid(SHARE_END_MS);
+        let minute = minutes.saturating_mul(SHARE_END_MS);
+        let mut ends = self.share_ends()?;
+        let Err(at) = ends.binary_search(&minute) else {
+            return Ok(());
+        };
+        if at >= SHARE_ENDS_KEPT {
+            return Ok(());
+        }
+        ends.insert(at, minute);
+        ends.truncate(SHARE_ENDS_KEPT);
+        self.set_share_ends(&ends)
+    }
+
+    /// Whether a share's end kept ([`AccountTx::note_share_end`]) has passed by `now` (the
+    /// server's clock): those that have are forgotten. The feed read from its beginning
+    /// then shows what is no longer shared.
+    pub fn take_share_ends(&self, now: i64) -> Result<bool> {
+        let ends = self.share_ends()?;
+        let passed = ends.partition_point(|&end| end <= now);
+        if passed > 0 {
+            self.set_share_ends(&ends[passed..])?;
+        }
+        Ok(passed > 0)
+    }
+
+    fn set_share_ends(&self, ends: &[i64]) -> Result<()> {
+        if ends.is_empty() {
+            return self.delete_account_kv(crate::keys::SHARE_ENDS);
+        }
+        let ends: Vec<String> = ends.iter().map(i64::to_string).collect();
+        self.set_account_kv(crate::keys::SHARE_ENDS, &ends.join(","))
+    }
+}
+
+/// The minute a share's end is kept by ([`AccountTx::note_share_end`]).
+const SHARE_END_MS: i64 = 60_000;
+/// How many ends of shares are kept at most ([`AccountTx::note_share_end`]).
+const SHARE_ENDS_KEPT: usize = 64;
+
+impl ReadTx<'_> {
+    /// The ends of shares kept ([`AccountTx::note_share_end`]), earliest first. What doesn't
+    /// read as a time is left out.
+    pub fn share_ends(&self) -> Result<Vec<i64>> {
+        let kept = self.account_kv(crate::keys::SHARE_ENDS)?;
+        let ends = kept.iter().flat_map(|kept| kept.split(','));
+        Ok(ends.filter_map(|end| end.parse().ok()).collect())
+    }
 }

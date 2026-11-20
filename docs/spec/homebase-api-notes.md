@@ -591,7 +591,16 @@ server answers the rest, to a token their server made for this identity's connec
   app's are (payloads aren't). A member's query lists only files with a share row for one of
   its circles, with the same cursor, hold-back and `resultShape` as the owner's, never cached;
   a header carries `shares` (the live rows the file reaches them through, by circle id) and no
-  server metadata. A share withdrawn or expired (or above an unreviewed connection's level)
+  server metadata. Each of those rows has `expiresAt` (Unix ms, absent where the share has
+  no end), and a row is live while `expiresAt` is after the server's now (**[verified]**
+  odin-core 139c0f618: `ShareRow.From`, `TableDriveAclIndex.IsLive`, `CallerShares.LiveRowsOf`;
+  the file is read until its last live row ends). **Nothing is written when a share
+  expires** (**[verified]**: the row stays, only `IsLive` changes; there is no job for it):
+  the file doesn't move in the feed and nobody is notified, a read by id is refused from
+  then on (the codeless 403 of a file not shared), and the query shows the tombstone below
+  only where it reaches the file's row: from its beginning, or after the file's next
+  change. The client therefore keeps the time and asks (sync semantics §13, "A share that
+  ends"). A share withdrawn or expired (or above an unreviewed connection's level)
   comes as a tombstone without its version (all zeros), parent, node id or key; a soft delete
   by the sharer as the usual tombstone; a hard delete takes the rows with it, so the file just
   isn't listed any more, and no notification tells the member (the rows go in the delete's own

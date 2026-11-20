@@ -185,7 +185,12 @@ fn read_pages<G: DerefMut<Target = StateDb>>(
     loop {
         let cursor = db().read(|s| s.account_kv(keys::REMOTE_CURSOR))?;
         let cursor = cursor.as_deref();
-        let page = if *slim.get_or_insert(cursor.is_some()) {
+        // What another identity shares is read whole (but in a re-read, which only asks
+        // what is still there): a file in the feed again at the version known is a share
+        // given or changed, and only its header says until when (`mirror::apply` keeps it).
+        // An empty page costs the same either way.
+        let whole_only = remote.shared() && reread.is_none();
+        let page = if !whole_only && *slim.get_or_insert(cursor.is_some()) {
             let rows = known_rows.unwrap_or(slim_rows);
             Page::Slim(with_retries(|| remote.change_refs(cursor, rows))?)
         } else {
@@ -202,6 +207,24 @@ fn read_pages<G: DerefMut<Target = StateDb>>(
             *reread = Some(Reread {
                 since: Some(now),
                 ..db().write(|s| Reread::begin(s.account()))?
+            });
+            slim = None;
+            continue;
+        }
+        // A share that ended since it was last read (another identity's drive): the server
+        // wrote nothing as it did, so nothing in the feed after the cursor says so. Read
+        // from its beginning, the feed shows the file as one no longer shared (sync
+        // semantics §13). Also where a re-read is on its way: it began before the end.
+        // (Looked up without a write: nearly every page finds none.)
+        let ended = |ends: Vec<i64>| ends.first().is_some_and(|&end| end <= now);
+        if db().read(|s| s.share_ends().map(ended))? {
+            let begun = db().write(|s| {
+                s.account().take_share_ends(now)?;
+                Reread::begin(s.account())
+            })?;
+            *reread = Some(Reread {
+                since: Some(now),
+                ..begun
             });
             slim = None;
             continue;
@@ -689,6 +712,7 @@ mod tests {
             removed: false,
             changed_at: Some(5),
             token: None,
+            expires: None,
         }
     }
 

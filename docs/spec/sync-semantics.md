@@ -1549,6 +1549,27 @@ rules hold too:
   left to the feed (one read), as the share may have been given again since. What was noted
   of the file goes with it (a version this client couldn't read, a doubt whether it was
   there). The sharer's own delete keeps its version, and is final as on any drive.
+- **A share that ends** (given until a time) is a share withdrawn at that time, but the
+  drive writes nothing as it passes: the file keeps its place in the feed, so nothing after
+  the cursor says so, and a read of the file is refused from then on. The member asks. A
+  shared file's header says until when it is shared (`RemoteHeader::expires`: the latest
+  end of the shares it is read through, none where one has no end), and the store keeps the
+  times (`AccountTx::note_share_end`: by the whole minute, the earliest 64). Once the
+  server's clock, as a feed page gives it, is past one, the feed is read from its beginning
+  (a re-read, §8b), where the drive shows the file as no longer shared; it then leaves this
+  device as a share withdrawn does (removed here; moved out where it changed here). The time
+  is the server's, never this device's: a clock that is wrong here removes nothing. So the
+  end is always learned, what another identity shares is read in whole pages (not the refs
+  first): a share given an end later, or another one, puts the file in the feed again at
+  the version the member has, and only its header says until when. An idle read costs the
+  same; a page of rows the member has costs their headers. What it costs: one read of the
+  share's feed from its beginning per minute in which a share ends (a kept end that was
+  taken back since costs one that finds nothing), and the file stays until the share is next
+  read after its end (every 5 min while the daemon runs). An end beyond the 64 kept is found
+  by the next whole re-read. Engine tests `a_share_that_reached_its_end_takes_the_file_off_
+  this_device`, `an_end_given_to_a_share_later_is_learned`, and the randomized
+  `randomized_shares_that_end_show_what_is_shared` (shares given until a time, the time
+  passing; the simulator's member has no feed, and reads an end as the withdrawal it is).
 - **A share that isn't synced here any more** (it ended, or the member's own marker turned
   it off) has its copy taken off this device as a withdrawal takes a file off it, all of it
   at once (`Engine::end_share`): every file leaves the picture, as one whose share was

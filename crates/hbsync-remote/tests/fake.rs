@@ -71,6 +71,59 @@ fn rows_after(r: &FakeRemote, cursor: Option<&str>) -> Result<Vec<RemoteHeader>,
         .map(|(rows, _)| rows)
 }
 
+/// A share given until a time: the member's header says until when, and as the server's clock
+/// reaches it nothing is written or announced. The file's place in the feed stays, a read of
+/// it by id is refused, and the feed read from its beginning shows it as a share withdrawn
+/// (homebase-api-notes, "Shared with you"). The owner's view doesn't change.
+#[test]
+fn a_share_that_ends_is_seen_as_withdrawn_and_nothing_is_written() -> R {
+    let sharer = remote();
+    let member = FakeRemote::member(sharer.server_handle());
+    let shared = create_file(&sharer, &file("shared", NodeId::ROOT, b"ours"), b"ours")?;
+    let file_id = shared.at().file_id;
+    let until = sharer.server().now() + 1_000;
+    sharer.share_until(file_id, until)?;
+    sharer.server().tick();
+    let (members, owners) = (member.subscribe(false), sharer.subscribe(false));
+
+    let live = member.header(file_id)?;
+    assert_eq!((live.expires, live.is_deleted()), (Some(until), false));
+    assert_eq!(
+        sharer.header(file_id)?.expires,
+        None,
+        "the owner's own file"
+    );
+    let (seen, end) = (rows_after(&member, None)?, feed_end(&member, None)?);
+    assert_eq!(seen, [live]);
+
+    // A millisecond before: still read. At the time: no more.
+    let now = sharer.server().now();
+    sharer.server().advance(until - 1 - now);
+    assert!(member.header(file_id).is_ok());
+    sharer.server().advance(1);
+    assert!(matches!(member.header(file_id), Err(RemoteError::Fatal(_))));
+    assert!(!sharer.server().shared_live(file_id));
+    // Nothing was written: no one hears of it, and the feed ends where it did.
+    assert_eq!(members.try_iter().count() + owners.try_iter().count(), 0);
+    assert_eq!(feed_end(&member, None)?, end);
+    assert!(rows_after(&member, Some(&end))?.is_empty());
+    // From its beginning, the member's feed shows it no longer shared.
+    let gone = rows_after(&member, None)?;
+    assert_eq!(gone.len(), 1, "{gone:?}");
+    assert!(
+        gone[0].is_unshared() && gone[0].expires.is_none(),
+        "{gone:?}"
+    );
+    assert!(!sharer.header(file_id)?.is_deleted());
+
+    // Given again without an end, it is back at its version, for good.
+    sharer.share(file_id)?;
+    sharer.server().advance(10_000);
+    let back = member.header(file_id)?;
+    assert_eq!((back.at(), back.expires), (shared.at(), None));
+    Ok(())
+}
+
 /// A member's subscription hears what its feed shows: nothing of a file not shared with it, a
 /// shared one as it is, and a share withdrawn as the tombstone without a version.
 #[test]

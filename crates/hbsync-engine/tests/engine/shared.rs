@@ -24,6 +24,22 @@ fn withdraw(a: &Client, server: &Server, name: &str) -> R {
     Ok(())
 }
 
+/// The owner `a` shares what is named `name` on its drive for `ms` from now, by the server's
+/// clock.
+fn share_for(a: &Client, server: &Server, name: &str, ms: i64) -> R {
+    let until = server.lock().map_err(|_| "poisoned")?.now() + ms;
+    a.remote
+        .share_until(common::header_named(server, name).file_id, until)?;
+    server.lock().map_err(|_| "poisoned")?.tick();
+    Ok(())
+}
+
+/// The server's clock moves on by `ms`.
+fn later(server: &Server, ms: i64) -> R {
+    server.lock().map_err(|_| "poisoned")?.advance(ms);
+    Ok(())
+}
+
 /// The owner `a` shares all its drive has.
 fn share_all(a: &Client, server: &Server) -> R {
     let all: Vec<_> = {
@@ -123,6 +139,87 @@ fn a_share_given_again_brings_the_file_back() -> R {
     b.sync()?;
     assert_eq!(b.tree_text(""), ["stay.txt = stay", "top.txt = newer"]);
     Ok(())
+}
+
+/// A share given until a time ends as the time passes. The drive writes nothing then (its
+/// feed doesn't move), so the member asks: it kept the time its header gave, and reads the
+/// feed from its beginning once the server's clock is past it, which shows the file as one no
+/// longer shared. It leaves this device as a share withdrawn does; what is shared without an
+/// end stays; nothing is asked before the time; and the share given again brings it back.
+#[test]
+fn a_share_that_reached_its_end_takes_the_file_off_this_device() -> R {
+    const MINUTE: i64 = 60_000;
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("stay.txt", "stay")?;
+    a.write("until.txt", "until")?;
+    a.write("dir/in.txt", "in")?;
+    a.sync()?;
+    share(&a, &server, "stay.txt")?;
+    for name in ["until.txt", "dir", "in.txt"] {
+        share_for(&a, &server, name, 10 * MINUTE)?;
+    }
+    let (mut b, out) = Client::member(&server, "b")?;
+    b.sync()?;
+    let all = [
+        "dir/",
+        "dir/in.txt = in",
+        "stay.txt = stay",
+        "until.txt = until",
+    ];
+    assert_eq!(b.tree_text(""), all);
+
+    // Before the time all is as it was.
+    later(&server, 5 * MINUTE)?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), all);
+
+    // Past it: nothing was written to the drive (its feed ends where it did), and the
+    // member's next sync finds them gone.
+    let feed = hbsync_remote::feed_end(&a.remote, None)?;
+    later(&server, 6 * MINUTE)?;
+    assert_eq!(hbsync_remote::feed_end(&a.remote, None)?, feed);
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["stay.txt = stay"]);
+    nothing_moved_out(&out)?;
+
+    // Given again, without an end: back, and it stays.
+    share(&a, &server, "until.txt")?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["stay.txt = stay", "until.txt = until"]);
+    later(&server, 60 * MINUTE)?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["stay.txt = stay", "until.txt = until"]);
+    Ok(())
+}
+
+/// An end a share is given later is learned, though the file's version is the one the member
+/// has: the file is in the feed again, and its header is read for until when. So is one given
+/// anew after the last one passed, before the member looked.
+#[test]
+fn an_end_given_to_a_share_later_is_learned() -> R {
+    const MINUTE: i64 = 60_000;
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("doc.txt", "doc")?;
+    a.sync()?;
+    share(&a, &server, "doc.txt")?;
+    let (mut b, out) = Client::member(&server, "b")?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["doc.txt = doc"]);
+
+    // Shared without an end so far: now until a time.
+    share_for(&a, &server, "doc.txt", 10 * MINUTE)?;
+    b.sync()?;
+    later(&server, 11 * MINUTE)?;
+    // It ended, and is given again until a later time before the member looks.
+    share_for(&a, &server, "doc.txt", 10 * MINUTE)?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["doc.txt = doc"]);
+    later(&server, 11 * MINUTE)?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), Vec::<String>::new());
+    nothing_moved_out(&out)
 }
 
 /// Two items of one name, each shared without its folder: one is at the top, the other left
