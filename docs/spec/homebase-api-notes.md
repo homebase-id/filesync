@@ -607,7 +607,10 @@ server answers the rest, to a token their server made for this identity's connec
   transaction, before it is announced, and the socket then finds no row naming the member:
   **[verified]** `DriveStorageServiceBase.HardDeleteHeaderAsync`,
   `MainIndexMeta.DeleteEntryAsync`, `DriveEventMessage.MessageForAsync`): only a full re-read
-  finds it gone. The "no longer shared" tombstone keeps the file's id, `fileType` and its own
+  finds it gone, which a member does a week after its last (sync semantics §13, "Deleted for
+  good by the sharer": the header of a file gone so is a 404 for the member too,
+  **[verified]** `DriveStorageServiceBase.ReadForCallerAsync`, the peer header routes of
+  `V2PeerAppDriveReadControllers`). The "no longer shared" tombstone keeps the file's id, `fileType` and its own
   `updated` (**[verified]** `DriveStorageServiceBase.NoLongerSharedTombstoneOf`), and is sent
   again after every change of the file while a row still names the member; sharing or
   withdrawing moves the file's `modified` and keeps its version, so a share given again brings

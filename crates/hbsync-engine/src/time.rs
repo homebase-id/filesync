@@ -16,6 +16,11 @@ pub const TRACE_MS: i64 = 30 * DAY_MS;
 /// server answer's time and its clock that differ.
 pub(crate) const REREAD_MS: i64 = TRACE_MS - DAY_MS;
 
+/// Another identity's drive is read whole again this long after it last was (sync semantics
+/// §13): the drive tells a member nothing of a file its owner deleted for good, and only the
+/// whole feed shows that it is there no more.
+pub(crate) const SHARED_REREAD_MS: i64 = 7 * DAY_MS;
+
 /// The days Recently deleted keeps an item (the same 30 days as [`TRACE_MS`], by the node
 /// schema's two rules): the purge is the whole account's, and every client keeps 30 (node
 /// schema, The purge). Not a setting: one device can't keep longer or shorter.

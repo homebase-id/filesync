@@ -17,6 +17,10 @@ pub const REMOTE_CURSOR: AccountKey = AccountKey("remote.cursor");
 /// Until when the feed was read to its end, at the latest (Unix ms, the server's clock; kept
 /// a day at a time): with the cursor's time, how long this device was away.
 pub const READ_AT: AccountKey = AccountKey("remote.read_at");
+/// When the feed was last read from its beginning (Unix ms, the server's clock; set with that
+/// read's first page): a first read, or a whole re-read. What another identity shares is read
+/// so again a week on.
+pub const REREAD_AT: AccountKey = AccountKey("remote.reread_at");
 /// The whole feed is being read again ([`crate::AccountTx::start_reread`]).
 pub(crate) const REREADING: AccountKey = AccountKey("remote.rereading");
 /// When the first share of a file on another identity's drive ends, as the headers read said

@@ -55,6 +55,12 @@ fn share_all(a: &Client, server: &Server) -> R {
     Ok(())
 }
 
+/// When `c` last read its drive's feed from its beginning, by the server's clock.
+fn whole_read_at(c: &mut Client) -> Result<i64, Box<dyn std::error::Error>> {
+    let at = (c.engine.db()).read(|s| s.account_kv(hbsync_state::keys::REREAD_AT))?;
+    Ok(at.ok_or("never read")?.parse()?)
+}
+
 /// Nothing was moved out of the member's folder.
 fn nothing_moved_out(out: &tempfile::TempDir) -> R {
     assert!(out.path().read_dir()?.next().is_none(), "nothing moved out");
@@ -276,6 +282,90 @@ fn a_file_that_doesnt_read_any_more_still_ends_with_its_share() -> R {
     later(&server, 25 * MINUTE)?;
     b.sync()?;
     assert_eq!(b.tree_text(""), Vec::<String>::new());
+    Ok(())
+}
+
+/// What the sharer deleted for good leaves the member's folder within a week. The drive
+/// tells a member nothing of such a file (no row in its feed, no notice), so the member reads
+/// the feed from its beginning a week after it last did and asks about each file it has that
+/// the feed no longer shows: not there, said twice a minute apart (§8b), and it goes. Before
+/// the week nothing is asked, and after the re-read the feed is read as before.
+#[test]
+fn what_the_sharer_deleted_for_good_leaves_a_week_on() -> R {
+    const DAY: i64 = 24 * 60 * MINUTE;
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("gone.txt", "gone")?;
+    a.write("stay.txt", "stay")?;
+    a.write("dir/in.txt", "in")?;
+    a.sync()?;
+    share_all(&a, &server)?;
+    server.lock().map_err(|_| "poisoned")?.tick();
+    let (mut b, out) = Client::member(&server, "b")?;
+    b.sync()?;
+    let all = [
+        "dir/",
+        "dir/in.txt = in",
+        "gone.txt = gone",
+        "stay.txt = stay",
+    ];
+    assert_eq!(b.tree_text(""), all);
+    let first = whole_read_at(&mut b)?;
+
+    // Another app deletes a file for good, and a folder with what is in it (as the sharer's
+    // purge does): nothing in the feed says so.
+    for name in ["gone.txt", "in.txt", "dir"] {
+        let h = common::header_named(&server, name);
+        (server.lock().map_err(|_| "poisoned")?).hard_delete(h.file_id, h.version)?;
+    }
+    later(&server, 6 * DAY)?;
+    let asked = b.remote.faults().requests;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), all, "not a week yet");
+    assert_eq!(whole_read_at(&mut b)?, first);
+    assert_eq!(b.remote.faults().requests, asked + 1, "the feed's end only");
+
+    later(&server, DAY + MINUTE)?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), all, "not there once: kept");
+    let second = whole_read_at(&mut b)?;
+    assert_eq!(second - first, 7 * DAY + MINUTE, "read whole again");
+    assert_eq!(b.a_minute_on()?, 3);
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["stay.txt = stay"]);
+    nothing_moved_out(&out)?;
+
+    // Read as before from then on, until the next week is over.
+    let asked = b.remote.faults().requests;
+    b.sync()?;
+    assert_eq!(b.remote.faults().requests, asked + 1);
+    later(&server, 7 * DAY)?;
+    b.sync()?;
+    assert_eq!(whole_read_at(&mut b)?, second);
+    later(&server, MINUTE)?;
+    b.sync()?;
+    assert_eq!(whole_read_at(&mut b)? - second, 7 * DAY + MINUTE);
+    assert_eq!(b.tree_text(""), ["stay.txt = stay"]);
+
+    // A store that doesn't say when it last did (one from before) reads it whole once.
+    (b.engine.db()).write(|s| s.account().delete_account_kv(hbsync_state::keys::REREAD_AT))?;
+    b.sync()?;
+    assert_eq!(whole_read_at(&mut b)? - second, 7 * DAY + MINUTE);
+    Ok(())
+}
+
+/// An identity's own drive is never read whole again for a week gone by: it hears of every
+/// delete for good (its notices; the feed's trace of the removal before it).
+#[test]
+fn an_own_drive_is_not_read_whole_again_a_week_on() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("x.txt", "x")?;
+    a.sync()?;
+    let first = whole_read_at(&mut a)?;
+    later(&server, 8 * 24 * 60 * MINUTE)?;
+    a.sync()?;
+    assert_eq!(whole_read_at(&mut a)?, first);
     Ok(())
 }
 

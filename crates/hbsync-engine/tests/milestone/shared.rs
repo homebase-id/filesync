@@ -97,13 +97,13 @@ fn folder_tree(c: &Client) -> BTreeMap<String, Item> {
 /// as failed ([`Behind::Allowed`]: a known limit, filesync #400).
 #[test]
 fn randomized_shares_show_what_is_shared() -> R {
-    compared_mostly(Ends::Never)
+    compared_mostly(Besides::Nothing)
 }
 
-/// Every seed of [`shares_of`] with `ends`, the member's folder compared after most of its
-/// syncs.
-fn compared_mostly(ends: Ends) -> R {
-    let compared = each_seed(seeds(), |seed| shares_of(seed, Behind::Allowed, ends))?;
+/// Every seed of [`shares_of`] with `besides`, the member's folder compared after most of
+/// its syncs.
+fn compared_mostly(besides: Besides) -> R {
+    let compared = each_seed(seeds(), |seed| shares_of(seed, Behind::Allowed, besides))?;
     let (compared, synced) = compared
         .iter()
         .fold((0, 0), |sum, c| (sum.0 + c.0, sum.1 + c.1));
@@ -117,7 +117,16 @@ fn compared_mostly(ends: Ends) -> R {
 /// just what is shared with it at its every sync (sync semantics §13, "A share that ends").
 #[test]
 fn randomized_shares_that_end_show_what_is_shared() -> R {
-    compared_mostly(Ends::Pass)
+    compared_mostly(Besides::Ends)
+}
+
+/// [`randomized_shares_show_what_is_shared`], with items of the drive deleted for good behind
+/// everyone's back (another app's delete, the sharer's purge): the drive tells the member
+/// nothing of them, and a week on, having read the share whole again, its folder shows just
+/// what is shared with it (sync semantics §13, "Deleted for good by the sharer").
+#[test]
+fn randomized_shares_deleted_for_good_show_what_is_shared() -> R {
+    compared_mostly(Besides::GoneForGood)
 }
 
 /// Seeds of [`randomized_shares_show_what_is_shared`] that failed:
@@ -129,7 +138,7 @@ fn randomized_shares_that_end_show_what_is_shared() -> R {
 #[test]
 fn regression_shares_seeds() -> R {
     each_seed([194, 5_403_755_731_358_821_085], |seed| {
-        shares_of(seed, Behind::Refused, Ends::Never)
+        shares_of(seed, Behind::Refused, Besides::Nothing)
     })
     .map(drop)
 }
@@ -144,18 +153,19 @@ fn regression_shares_seeds() -> R {
 #[ignore = "known limit: a download behind a name clash at a share's top shows as failed (#400)"]
 fn known_limit_a_download_behind_a_clash_shows_as_failed() -> R {
     each_seed([7_425_484_525_444_276_840], |seed| {
-        shares_of(seed, Behind::Refused, Ends::Never)
+        shares_of(seed, Behind::Refused, Besides::Nothing)
     })
     .map(drop)
 }
 
-/// Whether [`shares_of`] gives shares that end, and lets the time pass that ends them.
+/// What happens in [`shares_of`] besides shares given and withdrawn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Ends {
-    /// No share has an end.
-    Never,
-    /// Some are given one, and it passes.
-    Pass,
+enum Besides {
+    Nothing,
+    /// Some shares are given an end, and the time passes that ends them.
+    Ends,
+    /// Items of the drive are deleted for good, and a week passes before the member syncs.
+    GoneForGood,
 }
 
 /// Whether [`shares_of`] takes an operation tried again for a taken name while a clash at the
@@ -168,10 +178,13 @@ enum Behind {
 
 /// One seed of [`randomized_shares_show_what_is_shared`]: after how many of the member's
 /// syncs its folder was compared, and how many it had.
-fn shares_of(seed: u64, behind_a_clash: Behind, ends: Ends) -> Res<(usize, usize)> {
+fn shares_of(seed: u64, behind_a_clash: Behind, besides: Besides) -> Res<(usize, usize)> {
     const MINUTE: i64 = 60_000;
-    // (With no ends, the seeds draw as they did before there were any: the saved ones hold.)
-    let ending = ends == Ends::Pass;
+    const WEEK: i64 = 7 * 24 * 60 * MINUTE;
+    // (With nothing besides, the seeds draw as they did before: the saved ones hold.)
+    let ending = besides == Besides::Ends;
+    // Something went for good that the member hasn't read the share whole for since.
+    let mut unheard = false;
     let mut compared = (0, 0);
     let server = server();
     let mut a = Client::with_config(&server, "a", |c| c.guard.allow = true)?;
@@ -179,8 +192,23 @@ fn shares_of(seed: u64, behind_a_clash: Behind, ends: Ends) -> Res<(usize, usize
     let mut rng = Rng(seed);
     let mut ledger = Ledger::default();
     for step in 0..40 {
-        match rng.below(5 + usize::from(ending)) {
+        match rng.below(5 + usize::from(besides != Besides::Nothing)) {
             0 | 1 => act(&a.root, &mut rng, &mut ledger)?,
+            // An item of the drive, live or in Recently deleted, is deleted for good: no row
+            // in the feed, nothing announced.
+            5 if besides == Besides::GoneForGood => {
+                let mut s = server.lock().map_err(|_| "poisoned")?;
+                let mut on_drive: Vec<_> = (s.live().chain(s.removed()))
+                    .filter_map(|h| Some((h.state()?.name, h.changed_at, h.file_id, h.version)))
+                    .collect();
+                on_drive.sort();
+                if on_drive.is_empty() {
+                    continue;
+                }
+                let (.., file_id, version) = on_drive[rng.below(on_drive.len())];
+                s.hard_delete(file_id, version)?;
+                unheard = true;
+            }
             // Time passes on the server: nothing is written, and shares given until then end.
             5 => {
                 let minutes = 1 + rng.below(3) as i64;
@@ -222,6 +250,13 @@ fn shares_of(seed: u64, behind_a_clash: Behind, ends: Ends) -> Res<(usize, usize
                 server.lock().map_err(|_| "poisoned")?.tick();
             }
             _ => {
+                // A week on the member reads the share whole again, and asks about what the
+                // feed no longer shows: not there, said twice a minute apart (§8b).
+                if std::mem::take(&mut unheard) {
+                    (server.lock().map_err(|_| "poisoned")?).advance(WEEK + MINUTE);
+                    b.sync()?;
+                    b.a_minute_on()?;
+                }
                 let report = b.sync()?;
                 assert!(out.path().read_dir()?.next().is_none(), "moved out");
                 let shared = shared_tree(&*server.lock().map_err(|_| "poisoned")?)?;

@@ -17,7 +17,7 @@ use hbsync_types::{RemoteFileId, RemoteRef};
 
 use crate::gone::{self, Said};
 use crate::mirror::{self, Applied, apply};
-use crate::time::{DAY_MS, REREAD_MS};
+use crate::time::{DAY_MS, REREAD_MS, SHARED_REREAD_MS};
 
 #[derive(Debug, thiserror::Error)]
 pub enum FeedError {
@@ -100,7 +100,9 @@ impl std::ops::AddAssign for FeedReport {
 /// [`TRACE_MS`](crate::time::TRACE_MS) (node schema, Recently deleted): a device that hasn't
 /// read the feed for nearly that long (by the server's clock: the cursor's time, or
 /// [`keys::READ_AT`], against the first page's; decided before that page is applied) reads all
-/// of it again ([`Reread`]).
+/// of it again ([`Reread`]). Another identity's drive is read so again a week after it last
+/// was ([`SHARED_REREAD_MS`], [`keys::REREAD_AT`]): it tells a member nothing of a file its
+/// owner deleted for good.
 ///
 /// Slim pages may be longer than whole ones ([`Pages`]): after a whole page they are as long,
 /// and each slim page applied doubles them. A slim page read again whole is read as far as a
@@ -151,12 +153,14 @@ fn read_pages<G: DerefMut<Target = StateDb>>(
     reread: &mut Option<Reread>,
 ) -> Result<FeedReport, FeedError> {
     let mut report = FeedReport::default();
-    let (rereading, cursor, read_at) = db().read(|s| {
+    let (rereading, cursor, read_at, reread_at) = db().read(|s| {
+        let time =
+            |key| Ok::<_, StateError>(s.account_kv(key)?.and_then(|v| v.parse::<i64>().ok()));
         Ok((
             s.rereading()?,
             s.account_kv(keys::REMOTE_CURSOR)?,
-            s.account_kv(keys::READ_AT)?
-                .and_then(|v| v.parse::<i64>().ok()),
+            time(keys::READ_AT)?,
+            time(keys::REREAD_AT)?,
         ))
     })?;
     if !rereading {
@@ -214,8 +218,17 @@ fn read_pages<G: DerefMut<Target = StateDb>>(
         let away = away_from
             .take()
             .is_some_and(|from| now.saturating_sub(from) > REREAD_MS);
-        let ended = std::mem::take(&mut first_page) && share_end.is_some_and(|end| end <= now);
-        if away || ended {
+        let first = std::mem::take(&mut first_page);
+        let ended = first && share_end.is_some_and(|end| end <= now);
+        // Or it is another identity's drive, last read from its beginning a week ago: the
+        // drive tells a member nothing of a file its owner deleted for good, and only the
+        // whole feed shows that it is there no more (§13). At a pull's first page, as for
+        // an end; a read without a cursor is one from the beginning itself.
+        let due = first
+            && remote.shared()
+            && cursor.is_some()
+            && reread_at.is_none_or(|at| now.saturating_sub(at) > SHARED_REREAD_MS);
+        if away || ended || due {
             *reread = Some(Reread {
                 since: Some(now),
                 ..db().write(|s| Reread::begin(s.account()))?
@@ -495,6 +508,11 @@ fn apply_whole<G: DerefMut<Target = StateDb>>(
         let ends =
             (page.entries.iter().map(|h| h.expires)).chain(page.skipped.iter().map(|r| r.expires));
         note_share_end(s.account(), ends, page.server_time)?;
+        if cursor.is_none() {
+            // The feed's beginning: when it was last read from there.
+            s.account()
+                .set_account_kv(keys::REREAD_AT, &page.server_time.to_string())?;
+        }
         save_cursor(s.account(), cursor, !page.entries.is_empty(), &page.cursor)?;
         Ok(nothing_new)
     })?;
