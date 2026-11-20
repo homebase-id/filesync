@@ -1659,7 +1659,10 @@ mod tests {
             lock(&f.markers).unopenable.clear();
             f.started.wait_all("the share is synced", &both_synced)?;
             assert_eq!(f.started.said(&said), 1, "said once");
-            assert!(lock(&f.markers).opens >= 2);
+            assert!(
+                lock(&f.markers).opens >= 3,
+                "by itself, after the two that failed"
+            );
             Ok(())
         };
         let checked = checks();

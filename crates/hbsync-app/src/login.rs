@@ -313,7 +313,7 @@ impl Asked {
         let outcome = match (self.what, given) {
             (Update::Drive, true) => Ok("goes on setting up"),
             (Update::Drive, false) => Err(format!("{APP_NAME} didn't get its drive back.")),
-            (Update::Permission, true) => Ok("syncs what others share with you"),
+            (Update::Permission, true) => Ok("may now read what others share with you"),
             (Update::Permission, false) => Err(format!(
                 "{APP_NAME} wasn't given the permission to read what others share with you."
             )),
@@ -546,7 +546,7 @@ mod tests {
             assert_eq!(answer, given);
             let page = browser.join().map_err(|_| "browser")??;
             let said = if given {
-                "syncs what others share with you"
+                "may now read what others share with you"
             } else {
                 "wasn't given the permission"
             };

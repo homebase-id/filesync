@@ -165,8 +165,7 @@ impl Server {
 
     /// Asks the owner of the identity the tray prepared to let the app read what others
     /// share with them ([`setup::approve`]: nothing is asked where it may already, and what
-    /// waited syncs at once). The browser goes to the identity's approval page, or the
-    /// outcome.
+    /// waited is tried). The browser goes to the identity's approval page, or the outcome.
     pub(super) fn start_approval(&self) -> String {
         let identity = lock(&self.pages.shared).identity.clone();
         let paths = self.paths.clone();

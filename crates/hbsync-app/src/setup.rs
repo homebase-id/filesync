@@ -121,9 +121,10 @@ pub enum Approved {
 }
 
 /// Has the owner of `identity` let the app read what others share with them, through
-/// `owner` (the browser), and what waited for it tried at once: Sync now, where a daemon
-/// runs (one that doesn't reads the permission as it starts; one that refuses the sync, its
-/// account still connecting, looks again by itself within the hour). Nothing is asked where
+/// `owner` (the browser), and what waited for it tried: Sync now, where a daemon runs (one
+/// that doesn't reads the permission as it starts; one that refuses the sync, its account
+/// still connecting, looks again by itself within the hour; a paused account tries once it
+/// syncs again). Nothing is asked where
 /// the app may already ([`sharing_approved`]): the page would store the permission a second
 /// time. Whoever asks for the approval comes through here.
 pub fn approve(
