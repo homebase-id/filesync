@@ -294,15 +294,25 @@ fn the_daemon_sets_an_old_state_db_aside_and_refuses_a_newer_one() -> R {
     Ok(())
 }
 
+/// Logging out forgets the credentials, and with them the tokens kept for the account's
+/// sharers (sealed under them: of no use any more); the shares' records stay, as the
+/// account's do.
 #[test]
 fn logout_and_unlink_keep_the_files() -> R {
     let home = Home::new()?;
     let folder = home.set_up()?;
     std::fs::write(folder.join("mine.txt"), "mine")?;
+    let paths = hbsync_app::Paths::under(home.path());
+    let (me, tom) = (IDENTITY.into(), "tom.example".into());
+    let (records, token) = (paths.shared_db(&me, &tom), paths.shared_token(&me, &tom));
+    std::fs::create_dir_all(paths.shared_dir(&me, &tom))?;
+    std::fs::write(&records, "")?;
+    std::fs::write(&token, "sealed")?;
 
     let out = home.hbsync(&["logout"])?;
     assert!(out.status.success(), "{}", text(&out));
     assert!(!home.credentials().exists());
+    assert!(!token.exists() && records.exists());
     let out = home.hbsync(&["unlink"])?;
     assert!(out.status.success(), "{}", text(&out));
     assert!(text(&out).contains("no longer synced"), "{}", text(&out));
