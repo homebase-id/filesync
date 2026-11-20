@@ -575,7 +575,8 @@ included (service managers restart it then).
     haven't connected by then (a connect reads them: read before it, they would be read
     twice at every start).
 
-  One request a read; no timer of their own. Never while the account is paused, and never
+  One request a read; no timer of their own but the second read before a share is off
+  (below). Never while the account is paused, and never
   on the account's thread: a thread of its own reads them and opens shares, asked for one
   thing at a time (so a pause, or the account's end, holds back all but what is under
   way), and the account takes its answers as messages. A read or an opening that fails is
@@ -589,7 +590,13 @@ included (service managers restart it then).
     (made at once, and the folder opened again with it; where one is on record already,
     nothing is opened again).
   - A share a marker turns off has its runner stopped, and its copy is taken off this
-    computer (below).
+    computer (below), once two reads at least a minute apart say so: a share synced here,
+    and one with records here that isn't (turned off while the daemon didn't run). After
+    the first the share stays as it is and the markers are read again a minute later (the
+    one timer of theirs); a read between that says it is on, or that can't say, starts the
+    minute anew. One answer that left a marker out (a listing from before it was written)
+    would take the whole copy off only to download it again; it costs one request each
+    time a share is turned off.
   - A share whose marker doesn't read stays as it is (synced, being opened, or ending), and
     so does every share while the markers can't be read at all: never taken for turned
     off, nor for turned on again.

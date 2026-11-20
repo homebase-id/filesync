@@ -94,6 +94,10 @@ pub(super) struct Markers {
     /// Shares whose copy went while a read was under way: that read may still name them
     /// kept (their records were there as it looked), which they aren't any more.
     ended_meanwhile: Vec<Identity>,
+    /// Shares a read said are off, and when the first one in a row did: off once another
+    /// says so `confirm` later ([`Markers::twice`]).
+    doubted: Vec<(Identity, Instant)>,
+    confirm: Duration,
 }
 
 struct Opening {
@@ -131,6 +135,9 @@ impl Markers {
     ) -> Markers {
         static NEXT: AtomicU64 = AtomicU64::new(1);
         let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        let confirm = source
+            .as_ref()
+            .map_or(Duration::ZERO, |s| s.confirm_after());
         let worker = source.and_then(|source| {
             let (jobs, asked) = channel::<Job>();
             let work = move || {
@@ -169,6 +176,8 @@ impl Markers {
             left_out: Vec::new(),
             unended: Vec::new(),
             ended_meanwhile: Vec::new(),
+            doubted: Vec::new(),
+            confirm,
         }
     }
 
@@ -279,6 +288,7 @@ impl Markers {
             Answer::Told(Ok(told)) => {
                 (self.reading, self.read_backoff) = (false, Backoff::new());
                 self.read_at = self.again.then_some(now);
+                let told = self.twice(told, shares, now);
                 self.told(told, shares, waiting, now);
             }
             Answer::Told(Err(e)) => {
@@ -320,6 +330,38 @@ impl Markers {
             }
         }
         Vec::new()
+    }
+
+    /// `told`, with a share it says is off held as it is (named unsure) until a read at
+    /// least [`Markers::confirm`] after the first that said so says so again: a share synced
+    /// here, or one with records here. The markers are read again by then. One that a read
+    /// between says is on, or can't say of, starts anew.
+    fn twice(&mut self, mut told: Synced, shares: &[Sharing], now: Instant) -> Synced {
+        let synced = shares.iter().filter(|s| !s.off && !s.to_end);
+        let mut off: Vec<Identity> = (synced.map(|s| &s.share.sharer))
+            .chain(&told.kept)
+            .filter(|s| !told.on.contains(s) && !told.unsure.contains(s))
+            .cloned()
+            .collect();
+        off.sort();
+        off.dedup();
+        self.doubted.retain(|(sharer, _)| off.contains(sharer));
+        for sharer in off {
+            let said = self.doubted.iter().find(|(s, _)| *s == sharer);
+            let since = match said {
+                Some((_, since)) => *since,
+                None => {
+                    self.doubted.push((sharer.clone(), now));
+                    now
+                }
+            };
+            let again = since + self.confirm;
+            if now < again {
+                told.unsure.push(sharer);
+                self.read_at = Some(self.read_at.map_or(again, |at| at.min(again)));
+            }
+        }
+        told
     }
 
     /// What the markers say, `told`, followed by `shares` and by what is to be opened: to
@@ -661,6 +703,78 @@ mod tests {
         markers.ask(&shares, start);
         assert!(answer(&mut markers, &mut shares)?.is_empty());
         assert!(shares.is_empty() && markers.opening.len() == 1);
+        Ok(())
+    }
+
+    /// A share the markers say is off stays synced until a second read, a minute after the
+    /// first that said so, says so too; the markers are read again by then. A read between
+    /// that says it is on, or can't say, starts the minute anew.
+    #[test]
+    fn a_share_is_off_once_two_reads_a_minute_apart_say_so()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use super::super::parts::OFF_CONFIRM;
+        let home = tempfile::tempdir()?;
+        let tom: Identity = "tom.example".into();
+        let (let_through, through) = channel();
+        let source = Held {
+            reads: Arc::default(),
+            through: std::sync::Mutex::new(through),
+        };
+        let (tell, told) = channel();
+        let start = Instant::now();
+        let mut markers = Markers::new(Some(Box::new(source)), tell, start);
+        let mut shares = vec![shared_by(home.path(), "tom.example")?];
+        // The markers read at `at`, saying `says`.
+        let read = |markers: &mut Markers,
+                    shares: &mut Vec<Sharing>,
+                    says: &Synced,
+                    at: Instant|
+         -> Result<(), Box<dyn std::error::Error>> {
+            markers.changed(at);
+            markers.ask(shares, at);
+            let_through.send(says.clone())?;
+            let Msg::Sharers(id, answer) = told.recv_timeout(Duration::from_secs(10))? else {
+                return Err("another message".into());
+            };
+            markers.answer(id, *answer, shares, (&mut Vec::new(), None), at);
+            Ok(())
+        };
+        let says = |on: bool, unsure: bool| Synced {
+            on: Vec::from_iter(on.then(|| tom.clone())),
+            unsure: Vec::from_iter(unsure.then(|| tom.clone())),
+            kept: vec![tom.clone()],
+        };
+        let (on, off, unsure) = (says(true, false), says(false, false), says(false, true));
+        let secs = Duration::from_secs;
+
+        read(&mut markers, &mut shares, &on, start)?;
+        assert!(!shares[0].off);
+        // Off, said once: synced on, and read again in a minute.
+        let first = start + secs(10);
+        read(&mut markers, &mut shares, &off, first)?;
+        assert!(!shares[0].off, "one read turns nothing off");
+        assert_eq!(markers.deadline(false), Some(first + OFF_CONFIRM));
+        // Said again too soon: still on, the same minute counting.
+        read(&mut markers, &mut shares, &off, first + secs(30))?;
+        assert!(!shares[0].off);
+        assert_eq!(markers.deadline(false), Some(first + OFF_CONFIRM));
+        // On again, or not known, between: the minute starts anew.
+        for between in [&on, &unsure] {
+            read(&mut markers, &mut shares, between, first + secs(40))?;
+            let anew = first + secs(70);
+            read(&mut markers, &mut shares, &off, anew)?;
+            assert!(!shares[0].off, "a new first read");
+            assert_eq!(markers.deadline(false), Some(anew + OFF_CONFIRM));
+        }
+        // Said again a minute after the first: off.
+        read(
+            &mut markers,
+            &mut shares,
+            &off,
+            first + secs(70) + OFF_CONFIRM,
+        )?;
+        assert!(shares[0].off);
+        assert_eq!(markers.deadline(false), None, "nothing more to read for");
         Ok(())
     }
 
