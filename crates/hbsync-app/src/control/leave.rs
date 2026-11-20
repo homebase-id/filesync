@@ -48,12 +48,11 @@ fn forget_tokens(paths: &Paths, identity: &Identity) {
     let Ok(shares) = std::fs::read_dir(paths.shares_dir(identity)) else {
         return;
     };
+    // (Every folder there, one with a token and no state DB yet too: opened, never synced.)
     for share in shares.flatten() {
         let token = share.path().join(Paths::SHARED_TOKEN);
-        match std::fs::remove_file(&token) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => tracing::debug!("{} stays, of no use: {e}", token.display()),
+        if let Err(e) = crate::paths::remove_if_exists(&token) {
+            tracing::debug!("{} stays, of no use: {e}", token.display());
         }
     }
 }
