@@ -19,7 +19,7 @@ pub use hbsync_types::activity::Progress;
 
 /// The protocol version this build speaks: a daemon refuses a request in another (after an
 /// update, until it restarts).
-pub(crate) const PROTOCOL: u32 = 12;
+pub(crate) const PROTOCOL: u32 = 13;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Request {
@@ -406,6 +406,12 @@ pub enum State {
     Failing,
     /// The identity refused this device: authorize it again.
     Denied,
+    /// What another identity shares, which can't be read until someone else acts
+    /// ([`FolderStatus::error`] says who and what): its sharer (a device of theirs opening
+    /// the share, their review of the connection, their connection itself), or the owner's
+    /// approval of the app ([`FolderStatus::needs_approval`]). This computer's login is
+    /// fine: logging in again changes nothing. Tried again by itself.
+    Waiting,
     Stopped,
 }
 
@@ -433,6 +439,10 @@ pub struct FolderStatus {
     /// login holds no key that opens it. Logging in again gets it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub lacks_key: bool,
+    /// `Waiting` for the owner: the app lacks a permission only they give, by approving it
+    /// in their Homebase (reading what others share with them).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_approval: bool,
     /// `Paused`, and the identity refuses this computer meanwhile ([`FolderStatus::refused`]):
     /// shown paused, with its resume, and refused.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -500,6 +510,7 @@ impl FolderStatus {
             progress: None,
             error: None,
             lacks_key: false,
+            needs_approval: false,
             refused_paused: false,
             retry_at: None,
             last_sync: None,

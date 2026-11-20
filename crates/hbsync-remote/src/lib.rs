@@ -631,6 +631,15 @@ impl RemoteError {
         }
     }
 
+    /// The reason itself, where the answer is one for a person: why access is refused
+    /// ([`RemoteError::Denied`]), or what is waited for ([`RemoteError::Later`]).
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            RemoteError::Denied(why, _) | RemoteError::Later { why, .. } => Some(why),
+            _ => None,
+        }
+    }
+
     /// Whether it is [`ErrorClass::Transient`].
     pub fn is_transient(&self) -> bool {
         self.class() == ErrorClass::Transient

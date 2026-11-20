@@ -469,7 +469,20 @@ pub fn status_line(s: &FolderStatus, now: u64) -> String {
             s.error.as_deref().unwrap_or("syncing failed")
         ),
         State::Denied => refused(s.lacks_key),
+        State::Waiting => waiting(s),
         State::Stopped => "Stopped".into(),
+    }
+}
+
+/// Why what another identity shares isn't synced for now ([`State::Waiting`]): who is
+/// waited for, and for what, as the answer said it (its first letter a capital). This
+/// computer's login is fine, so nothing here says to log in again.
+pub fn waiting(s: &FolderStatus) -> String {
+    let why = s.error.as_deref().unwrap_or("waiting");
+    let mut letters = why.chars();
+    match letters.next() {
+        Some(first) => first.to_uppercase().chain(letters).collect(),
+        None => "Waiting".into(),
     }
 }
 

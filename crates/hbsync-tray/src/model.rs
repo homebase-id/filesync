@@ -63,6 +63,20 @@ impl Daemon {
         s.accounts.iter().find(|a| a.identity == *identity)
     }
 
+    /// What others share with `identity` that waits ([`State::Waiting`]).
+    pub fn waiting_shares<'a>(
+        &'a self,
+        identity: &'a hbsync_app::Identity,
+    ) -> impl Iterator<Item = &'a FolderStatus> {
+        let folders = match self {
+            Daemon::Running(s) => &s.folders[..],
+            _ => &[],
+        };
+        (folders.iter()).filter(move |f| {
+            f.identity == *identity && f.sharer.is_some() && f.state == State::Waiting
+        })
+    }
+
     /// The status of the folder that most needs the user (the main folder among equals): what
     /// the status line and the icon say.
     pub fn most_urgent(&self) -> Option<&FolderStatus> {
@@ -154,6 +168,10 @@ fn folder_look(s: &FolderStatus) -> Look {
         // Refused (paused too) first: before the arms below that would show it quiet.
         _ if s.refused() || s.held_deletes.is_some() => Look::Attention,
         State::Failing | State::Denied => Look::Attention,
+        // The owner's to approve: theirs to do. Waiting for a sharer isn't, and says nothing
+        // of this computer's own files: as up to date (the menu names who is waited for).
+        State::Waiting if s.needs_approval => Look::Attention,
+        State::Waiting => Look::UpToDate,
         State::Paused | State::Offline | State::Stopped => Look::Quiet,
         State::Starting | State::Syncing => Look::Busy,
         State::Idle if s.pending > 0 => Look::Busy,
@@ -244,6 +262,11 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
         // (How to get them back is the command line's, for now: `hbsync shared-folder`.)
         if let Some(off) = s.shares.as_ref().and_then(words::shares_off) {
             items.push(Item::Label(cut(&off)));
+        }
+        // What others share that waits for them, or for the owner: said here, as the status
+        // line is the main folder's while that is fine.
+        for share in view.daemon.waiting_shares(&s.identity) {
+            items.push(Item::Label(cut(&words::waiting(share))));
         }
         if let Some(h) = view
             .daemon
@@ -435,6 +458,45 @@ mod tests {
             }
         }
         out
+    }
+
+    /// A share that waits for its sharer changes neither the icon nor the status line (this
+    /// computer's own files are what they say of), and is named in the menu; one that wants
+    /// the owner's approval asks for attention. Neither offers to log in again.
+    #[test]
+    fn a_waiting_share_is_named_in_the_menu_and_leaves_the_status_alone() {
+        let waiting = |why: &str, needs_approval| {
+            let mut share = status(State::Waiting);
+            share.sharer = Some("tom.example".into());
+            share.path = "/home/anna/Homebase/Shared/tom.example".into();
+            share.error = Some(why.into());
+            share.needs_approval = needs_approval;
+            let Daemon::Running(mut both) = running(status(State::Idle)) else {
+                panic!("running");
+            };
+            both.folders.push(share);
+            Daemon::Running(both)
+        };
+        let d = waiting("waiting for tom.example to review your connection", false);
+        let v = view(&d, &[]);
+        assert_eq!(look(&v), Look::UpToDate);
+        assert_eq!(status_line(&v), "Up to date");
+        let m = menu(&v);
+        let said = "Waiting for tom.example to review your connection";
+        assert!(
+            m.iter().any(|i| matches!(i, Item::Label(l) if l == said)),
+            "{m:?}"
+        );
+        assert!(!actions(&m).contains(&Action::LogInAgain));
+
+        let d = waiting(
+            "your Homebase cloud hasn't given Filesync the permission",
+            true,
+        );
+        let v = view(&d, &[]);
+        assert_eq!(look(&v), Look::Attention);
+        assert!(status_line(&v).starts_with("Your Homebase cloud hasn't given"));
+        assert!(!actions(&menu(&v)).contains(&Action::LogInAgain));
     }
 
     /// Shares that are off (their folder gone, or not made) are said in the menu; nothing is

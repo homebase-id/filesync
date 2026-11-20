@@ -178,8 +178,8 @@ impl PeerRemote {
     /// What `ask` answers with the token held; where their server refuses that token
     /// ([`Refusal::Token`]), once more with a new one, if one is had ([`PeerRemote::renewed`]).
     /// Where none is, the refusal stays what it is; but an ask for one that this identity's
-    /// own server refused (the app's permission, this login) is the answer: that is what
-    /// the user can lift. Every ask here only reads, and a refusal comes before any of its
+    /// own server refused (the app's permission, this login) or put off (not connected to
+    /// them) is the answer: that says what would lift it. Every ask here only reads, and a refusal comes before any of its
     /// answer.
     fn with_token<T>(&self, mut ask: impl FnMut(&Client) -> Result<T>) -> Result<T> {
         let client = self.client();
@@ -187,7 +187,7 @@ impl PeerRemote {
             Err(RemoteError::Denied(why, Refusal::Token)) => match self.renewed(&client) {
                 Ok(Some(new)) => ask(&new),
                 Ok(None) => Err(RemoteError::Denied(why, Refusal::Token)),
-                Err(ours @ RemoteError::Denied(..)) => Err(ours),
+                Err(ours @ (RemoteError::Denied(..) | RemoteError::Later { .. })) => Err(ours),
                 Err(e) => {
                     tracing::warn!(
                         "no new token for {}'s server, which refused the one it gave: {e}",
@@ -220,7 +220,11 @@ impl PeerRemote {
             return Ok(None);
         }
         let asked = ask();
-        if !matches!(asked, Err(RemoteError::Denied(..))) {
+        let unasked = matches!(
+            asked,
+            Err(RemoteError::Denied(..) | RemoteError::Later { .. })
+        );
+        if !unasked {
             held.renewed = Some(Instant::now());
         }
         let client = asked?;
@@ -236,8 +240,10 @@ impl PeerRemote {
     /// [`Refusal::Token`], which a new token may lift ([`peer::refused`]).
     fn error(&self, e: HomebaseError) -> RemoteError {
         if peer::refused(&e) {
+            tracing::debug!("{}'s server refused the token: {e}", self.sharer.odin_id);
             let why = format!(
-                "{} refuses the token their server gave you: {e}",
+                "refused by {}'s server: it no longer accepts this computer for what they \
+                 share with you (your connection with them may have ended)",
                 self.sharer.odin_id
             );
             return RemoteError::Denied(why, Refusal::Token);
@@ -602,6 +608,34 @@ mod tests {
             Err(RemoteError::Denied(_, Refusal::Token))
         ));
         assert_eq!((asks, plain.login_id()), (1, old));
+        Ok(())
+    }
+
+    /// An ask for a new token that this identity's server puts off (not connected to them) is
+    /// the answer, in its words, and made no token: the next refusal asks again.
+    #[test]
+    fn an_ask_put_off_is_the_answer_and_no_token_asked_for() -> Result<(), HomebaseError> {
+        let mut sam = sam()?;
+        let asked = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&asked);
+        sam.renewal = Some(Renewal(Box::new(move || {
+            count.fetch_add(1, SeqCst);
+            Err(RemoteError::Later {
+                why: "not connected to sam.invalid".into(),
+                retry_after: Duration::from_secs(3600),
+            })
+        })));
+        for _ in 0..2 {
+            let answer: Result<()> = sam.with_token(|_| refused());
+            match answer {
+                Err(RemoteError::Later { why, retry_after }) => {
+                    assert_eq!(why, "not connected to sam.invalid");
+                    assert_eq!(retry_after, Duration::from_secs(3600));
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        assert_eq!(asked.load(SeqCst), 2);
         Ok(())
     }
 

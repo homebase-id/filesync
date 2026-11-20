@@ -85,6 +85,16 @@ impl EngineError {
         }
     }
 
+    /// The reason itself of a refusal or of a wait asked for ([`RemoteError::reason`]): what
+    /// a status says of a folder that waits for someone else.
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            EngineError::Remote(e) | EngineError::Feed(FeedError::Remote(e)) => e.reason(),
+            EngineError::Stopped(Stopped::Denied(why, _) | Stopped::Later(why, _)) => Some(why),
+            _ => None,
+        }
+    }
+
     /// Why the state DB can't be used at all, if that is what it means
     /// ([`StateError::unusable`]).
     pub fn unusable(&self) -> Option<hbsync_state::Unusable> {

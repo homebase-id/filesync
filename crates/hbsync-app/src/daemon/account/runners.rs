@@ -320,9 +320,19 @@ impl Markers {
                         );
                         opening.at = Some(now + pause);
                         if !std::mem::replace(&mut opening.told, true) {
+                            // (In the answer's own words, where it has them: who is waited
+                            // for, not how many seconds a server said.)
+                            let reason = match &e {
+                                RunnerError::Engine(e) => e.reason(),
+                                _ => None,
+                            };
+                            let why: &dyn std::fmt::Display = match &reason {
+                                Some(reason) => reason,
+                                None => &e,
+                            };
                             return vec![match opening.end {
-                                true => crate::words::share_copy_unopened(&sharer, &e),
-                                false => crate::words::share_unopened(&sharer, &e),
+                                true => crate::words::share_copy_unopened(&sharer, why),
+                                false => crate::words::share_unopened(&sharer, why),
                             }];
                         }
                     }

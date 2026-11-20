@@ -690,10 +690,6 @@ included (service managers restart it then).
   - The source opens such a share without its sharer (`Sharers::open(.., to_end)`): one
     that ended gives no access any more, and nothing is asked of it.
 
-  Not in the released daemon yet: opening another identity's drive takes a token of its own
-  that has to be kept (a new one each start would leave a row on the sharer's server each
-  time), so until those are stored the daemon reads no markers and syncs no share.
-
   A share's runner whose folder is gone (deleted, renamed) doesn't wait for it as the
   account's own do: it ends, and the account starts it again after a pause, the folder made
   again and synced anew; one renamed stays where it is, unsynced. It never counts as one of
@@ -833,12 +829,35 @@ included (service managers restart it then).
 `starting` (catching up, then the first sync, with its progress), `syncing`, `idle`, `paused`, `offline` (can't
 reach the identity), `failing` (another failure, or the folder gone), `denied` (the identity
 refused this device: log in again, `hbsync setup`; `lacks_key` when the drive is private and
-this login holds no key that opens it), `stopped`. A `paused` folder the identity refuses
+this login holds no key that opens it), `waiting` (what another identity shares, below),
+`stopped`. A `paused` folder the identity refuses
 meanwhile has `refused_paused`. The status line of a `denied` folder (the tray's, `hbsync
 status`'s) says what to do: "Not syncing: log in again to get your private drive's key"
 (`lacks_key`), else "Not syncing: log in again to authorize this computer"; a paused one says
 "Paused · log in again to …". The tray shows either with its warning dot, Log in again… and
-the notification (a paused one keeps Resume syncing). A
+the notification (a paused one keeps Resume syncing).
+
+What another identity shares is `waiting` where this computer's login isn't what is refused,
+`error` saying who is waited for and for what, in the answer's words (the status line is
+those, with a capital):
+- its sharer put it off: a device of theirs opens the share to this identity when next online,
+  or they haven't reviewed the connection (asked again after 15 minutes);
+- this identity isn't connected to them (its own server says so; asked again after an hour:
+  connecting is people's doing, and no token is asked of theirs for it);
+- their server refuses the token it gave (the connection ended there, say): a new one is
+  asked for as "How a share is opened" says, and the share is looked at again hourly;
+- the app lacks the owner's approval to read what others share (`needs_approval`: an install
+  from before it asked for that; looked at again hourly, and at Sync now).
+
+Logging in again lifts none of them, so nothing says to: no `refused_paused` while paused,
+no Log in again… in the tray, no notification. Waiting for a sharer says nothing of this
+computer's own files: the tray's icon and status line stay the main folder's, and the menu
+names each share that waits; one that needs the owner's approval shows the warning dot.
+`hbsync status` lists it with the same line. Its login refused (the credentials, the
+drive's key) shows `denied`, as the account's own folders do. A share that can't be opened
+yet has no folder in the status: the account's note says why, in the same words.
+
+A
 request of Recently deleted (a restore, emptying, the purge) the identity refused says the
 same in its note.
 
@@ -847,30 +866,30 @@ same in its note.
 One request line, one reply line (JSON), then the connection closes; but `watch`, answered with
 the status now and again each time it changes (at most once a second while a folder syncs: its
 progress changes without telling), on the open connection until either side closes it (what
-the tray shows). Requests carry the protocol version (now 12); a daemon refuses another one
+the tray shows). Requests carry the protocol version (now 13); a daemon refuses another one
 with the reason (after an update: restart it). The
 wire types are `hbsync-app/src/protocol.rs`. A control goes to the daemon (every folder), to an
 account (its Recently deleted) or to one folder (its held deletes):
 
 ```json
-{"protocol":12,"ask":"status"}
-{"protocol":12,"ask":"watch"}                                        // a status line now, then one per change
-{"protocol":12,"ask":"stop"}                                         // taken whatever the protocol
-{"protocol":12,"ask":{"control":{"daemon":"sync_now"}}}            // resume
-{"protocol":12,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}   // "until":null: until resumed
-{"protocol":12,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}}}
-{"protocol":12,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"put_back":{"token":"<held_deletes.token>"}}}}}}
-{"protocol":12,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":"make_shares"}}}}  // the folder of shares, gone, made again
-{"protocol":12,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"take_shares":{"name":"Theirs"}}}}}}  // that folder at its top is it
-{"protocol":12,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"restore":{"nodes":["<node id>"]}}}}}}
-{"protocol":12,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted":{"nodes":["<node id>"],"db":"<db id>","seq":4711}}}}}}  // the items as listed
-{"protocol":12,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_listed":{"db":"<db id>","seq":4711}}}}}}  // all it held when listed
-{"protocol":12,"ask":{"recent":{"limit":10}}}
-{"protocol":12,"ask":{"deleted":{"limit":100}}}                    // the newest 100 deletes
-{"protocol":12,"ask":{"find_deleted":{"items":["Photos/2024","<node id>"]}}}
-{"protocol":12,"ask":{"add_folder":{"root":{"identity":"anna.example.com","folder":"/home/anna/Homebase"}}}}  // a [[roots]] entry (role, or desktop); a Desktop also takes "name"
-{"protocol":12,"ask":{"remove_folder":{"path":"/home/anna/Homebase"}}}
-{"protocol":12,"ask":{"start_over":{"identity":"anna.example.com"}}}  // new credentials
+{"protocol":13,"ask":"status"}
+{"protocol":13,"ask":"watch"}                                        // a status line now, then one per change
+{"protocol":13,"ask":"stop"}                                         // taken whatever the protocol
+{"protocol":13,"ask":{"control":{"daemon":"sync_now"}}}            // resume
+{"protocol":13,"ask":{"control":{"daemon":{"pause":{"until":1800000000}}}}}   // "until":null: until resumed
+{"protocol":13,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"confirm_deletes":{"token":"<held_deletes.token>"}}}}}}
+{"protocol":13,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"put_back":{"token":"<held_deletes.token>"}}}}}}
+{"protocol":13,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":"make_shares"}}}}  // the folder of shares, gone, made again
+{"protocol":13,"ask":{"control":{"folder":{"path":"/home/anna/Homebase","control":{"take_shares":{"name":"Theirs"}}}}}}  // that folder at its top is it
+{"protocol":13,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"restore":{"nodes":["<node id>"]}}}}}}
+{"protocol":13,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_deleted":{"nodes":["<node id>"],"db":"<db id>","seq":4711}}}}}}  // the items as listed
+{"protocol":13,"ask":{"control":{"account":{"identity":"anna.example.com","control":{"empty_listed":{"db":"<db id>","seq":4711}}}}}}  // all it held when listed
+{"protocol":13,"ask":{"recent":{"limit":10}}}
+{"protocol":13,"ask":{"deleted":{"limit":100}}}                    // the newest 100 deletes
+{"protocol":13,"ask":{"find_deleted":{"items":["Photos/2024","<node id>"]}}}
+{"protocol":13,"ask":{"add_folder":{"root":{"identity":"anna.example.com","folder":"/home/anna/Homebase"}}}}  // a [[roots]] entry (role, or desktop); a Desktop also takes "name"
+{"protocol":13,"ask":{"remove_folder":{"path":"/home/anna/Homebase"}}}
+{"protocol":13,"ask":{"start_over":{"identity":"anna.example.com"}}}  // new credentials
 ```
 
 A request of another protocol is refused (`this daemon speaks protocol N, …`), except `stop`,
