@@ -592,9 +592,10 @@ included (service managers restart it then).
   - A share a marker turns off has its runner stopped, and its copy is taken off this
     computer (below), once two reads at least a minute apart say so: a share synced here,
     and one with records here that isn't (turned off while the daemon didn't run). After
-    the first the share stays as it is and the markers are read again a minute later (the
-    one timer of theirs); a read between that says it is on, or that can't say, starts the
-    minute anew. One answer that left a marker out (a listing from before it was written)
+    the first the share stays as it is (synced on; one not synced is neither opened nor
+    ended) and the markers are read again a minute later (the one timer of theirs); a read
+    between that says it is on, or whose marker for it doesn't read, starts the minute
+    anew; a read that fails changes nothing. One answer that left a marker out (a listing from before it was written)
     would take the whole copy off only to download it again; it costs one request each
     time a share is turned off.
   - A share whose marker doesn't read stays as it is (synced, being opened, or ending), and

@@ -57,9 +57,10 @@ pub trait Sharers: Send + std::fmt::Debug {
 
 /// A share the markers turn off is off once two reads, this long apart at least, say so: its
 /// copy leaves this device then, all of it, and one answer that left a marker out (a listing
-/// from before it was written) would take it off only to bring it back. As a file found
-/// gone is asked for twice a minute apart (sync semantics §8b). It costs one more read of
-/// the markers each time a share is turned off.
+/// from before it was written) would take it off only to bring it back. A minute at least,
+/// as for a file found gone (sync semantics §8b); unlike there, no longest time, and a
+/// restart starts anew. It costs one more read of the markers each time a share is turned
+/// off.
 pub(super) const OFF_CONFIRM: Duration = Duration::from_secs(60);
 
 /// What an identity's share markers say ([`Sharers::told`]).
