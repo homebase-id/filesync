@@ -340,6 +340,12 @@ pub struct AccountStatus {
     /// drive is made private, this computer can't read it till it logs in again. Asked now.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub login_without_key: bool,
+    /// The app lacks the owner's approval to read what others share with the identity (an
+    /// install from before it asked for that), and a share can't be opened for it: one
+    /// that is synced says so itself ([`FolderStatus::needs_approval`]). `hbsync approve`
+    /// and the tray's menu ask for it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub needs_approval: bool,
     /// The account's own notes, newest last: a request of Recently deleted that failed, a file
     /// on the drive this client can't read. Its folders' are theirs ([`FolderStatus::recent`]).
     pub recent: Vec<Note>,
@@ -357,6 +363,7 @@ impl AccountStatus {
             hints: Hints::Off,
             credentials_warning: None,
             login_without_key: false,
+            needs_approval: false,
             recent: Vec::new(),
             notes_added: 0,
             emptying: None,

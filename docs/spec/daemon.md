@@ -849,7 +849,15 @@ with a capital):
   the share is looked at again hourly;
 - the app lacks the owner's approval to read what others share (`needs_approval`: an install
   from before it asked for that): "Access denied: your Homebase cloud hasn't given Filesync
-  the permission…"; looked at again hourly, and at Sync now.
+  the permission…"; looked at again hourly, and at Sync now. **The approval is asked for**
+  by `hbsync approve` and the tray's Approve reading shared files…, offered while a share
+  waits for it (a synced one's `needs_approval`, or the account's where a share can't be
+  opened for it: such a share has no folder in the status): the owner's app-update page
+  for that one permission (`/owner/appupdate?p=305`), which comes back to this computer
+  as the page that gives the drive back does (below; `--paste` and `--browser` as
+  `hbsync login`); given, Sync now tries what waited at once. Where the app may already
+  (approved in the owner console since: one read of the login's context says), nothing is
+  asked and only the sync is: the page would add the permission a second time.
 
 The first two are the remote's `RemoteError::Waiting` (the engine's `Stopped::Waiting`): no
 failure, and not a busy server (`Later`, which shows `offline` for a share as for the
@@ -1161,6 +1169,7 @@ that they supervise it. With `HBSYNC_HOME` set, only `hbsync autostart` touches 
 | `hbsync start`, `stop` | `stop` stops syncing on this computer until `start` (or the tray's Start syncing), also across logins: neither the tray nor the service manager starts the daemon meanwhile |
 | `hbsync autostart [on\|off]` | |
 | `hbsync login [IDENTITY] [--browser CMD] [--paste]` | signs this computer in again in the browser (also the tray's Log in again, for a login from before private drives); the daemon's account starts over with the new login; the folders, the drive and autostart stay as they are; the old login isn't revoked |
+| `hbsync approve [IDENTITY] [--browser CMD] [--paste]` | asks the owner, in the browser, to let Filesync read what others share with them (also the tray's Approve reading shared files…): for an install from before the app asked for that; nothing is asked where it may already; then Sync now, so what waited for it syncs |
 | `hbsync logout` | stops the daemon, forgets the credentials (and the sharers' tokens sealed under them), autostart off; the folder stays |
 | `hbsync unlink` | stops the daemon, removes the folder from the config, autostart off; its files, `.hbsync` and the account's DB stay, so setting it up again resumes |
 | `hbsync deleted [-n N]` | Recently deleted, newest first, with node ids |

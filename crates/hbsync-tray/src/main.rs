@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 
 use hbsync_app::lock::{InstanceLock, LockError};
 use hbsync_app::protocol::{DaemonControl, Pause, RecentItem};
-use hbsync_app::{APP_NAME, Paths, autostart, control, shell, words};
+use hbsync_app::{APP_NAME, Paths, autostart, control, setup, shell, words};
 use hbsync_app::{FolderStatus, State};
 use tray_icon::menu::{
     CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
@@ -160,6 +160,9 @@ struct App {
     /// A stop found at the watcher's first look is told; not after restarting into an update
     /// ([`hbsync_app::install::RESTARTED`]).
     tell_stopped: bool,
+    /// The owner is being asked to approve the app's reading what others share
+    /// ([`App::approve`]): one asking at a time.
+    approving: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// What the tray shows now, to change only what changed.
@@ -214,6 +217,7 @@ impl App {
             told_denied: HashMap::new(),
             decorated: None,
             tell_stopped: !hbsync_app::install::restarted(),
+            approving: Arc::default(),
         })
     }
 
@@ -317,6 +321,11 @@ impl App {
                 }
                 os::open(self.pages.url(page));
             }
+            Action::Approve => {
+                if let Some(identity) = self.status().map(|s| s.identity.clone()) {
+                    self.approve(identity);
+                }
+            }
             Action::OpenFolder => {
                 let folder = match self.status() {
                     Some(s) => Some(s.path.clone()),
@@ -406,6 +415,41 @@ impl App {
     }
 
     /// Sends `c` to the daemon from a thread (it may take a moment), then looks again.
+    /// Asks the owner of `identity`, in the browser, to let the app read what others share
+    /// with them (`hbsync approve`'s: an install from before it asked for that), on a thread
+    /// of its own; given, what waited for it syncs now. Not asked where the app may already
+    /// (approved elsewhere since): then only the sync. One asking at a time.
+    fn approve(&self, identity: hbsync_app::Identity) {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        if self.approving.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let (paths, send) = (self.paths.clone(), self.send.clone());
+        let approving = Arc::clone(&self.approving);
+        std::thread::spawn(move || {
+            let approved = || -> hbsync_app::Result<bool> {
+                if setup::sharing_approved(&paths, &identity)? {
+                    return Ok(true);
+                }
+                let ask = setup::begin_approval(&identity)?;
+                os::open(ask.url());
+                Ok(ask.finish_unless(setup::APPROVAL_TIMEOUT, &AtomicBool::new(false))?)
+            };
+            match approved() {
+                Ok(true) => {
+                    if let Err(e) = control::daemon(&paths, DaemonControl::SyncNow) {
+                        os::notify(APP_NAME.into(), e.to_string());
+                    }
+                }
+                // (Said in the browser, where they declined.)
+                Ok(false) => {}
+                Err(e) => os::notify(APP_NAME.into(), e.to_string()),
+            }
+            approving.store(false, Ordering::SeqCst);
+            send(Event::Wake);
+        });
+    }
+
     fn send_control(&self, c: DaemonControl) {
         let (paths, send) = (self.paths.clone(), self.send.clone());
         std::thread::spawn(move || {

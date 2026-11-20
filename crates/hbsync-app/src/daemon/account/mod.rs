@@ -1199,6 +1199,9 @@ mod tests {
         unreadable: bool,
         /// Whose share can't be opened.
         unopenable: Vec<Identity>,
+        /// Why not: the app wants the owner's approval to read what others share (else, a
+        /// failure of its own).
+        unapproved: bool,
         /// How often they were read, and how often a share was tried to open.
         reads: usize,
         opens: usize,
@@ -1250,6 +1253,12 @@ mod tests {
                 }
                 // (What ended is opened without its sharer.)
                 if !to_end && markers.unopenable.contains(sharer) {
+                    if markers.unapproved {
+                        let why = "the owner hasn't approved it".to_owned();
+                        let refused = hbsync_remote::Refusal::Permission;
+                        let e = hbsync_remote::RemoteError::Denied(why, refused);
+                        return Err(hbsync_engine::EngineError::Remote(e).into());
+                    }
                     return Err(std::io::Error::other("no token yet").into());
                 }
             }
@@ -1641,6 +1650,32 @@ mod tests {
             f.started.wait_all("the share is synced", &both_synced)?;
             assert_eq!(f.started.said(&said), 1, "said once");
             assert!(lock(&f.markers).opens >= 2);
+            Ok(())
+        };
+        let checked = checks();
+        f.started.stop(checked)?
+    }
+
+    /// A share that can't be opened because the app wants the owner's approval (to read what
+    /// others share) has no folder to say so: the account's status does, so the approval can
+    /// be asked for; opened once it is given, it no longer does.
+    #[test]
+    fn a_share_unopened_for_want_of_the_approval_is_told_by_the_account()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let f = Marked::start(home.path(), |m| {
+            (m.on, m.unopenable) = (vec!["tom.example".into()], vec!["tom.example".into()]);
+            m.unapproved = true;
+        })?;
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            f.started.wait_all("its own folder syncs, alone", &alone)?;
+            let wanted = |status: &AccountStatus, _: &[FolderStatus]| status.needs_approval;
+            f.started.wait_all("the approval is wanted", &wanted)?;
+            // Given: the next try (a marker's change hurries it; Sync now does too) opens it.
+            f.marked(|m| m.unopenable.clear());
+            f.started.wait_all("the share is synced", &both_synced)?;
+            let (account, _) = f.started.account.status();
+            assert!(!account.needs_approval);
             Ok(())
         };
         let checked = checks();

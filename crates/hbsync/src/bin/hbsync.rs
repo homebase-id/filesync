@@ -61,6 +61,17 @@ enum Command {
         #[command(flatten)]
         approve: Approve,
     },
+    /// Lets Filesync read what others share with you: your Homebase asks you to approve it
+    /// in the browser. Needed once, where Filesync was installed on your identity before it
+    /// asked for this (the status says "hasn't given Filesync the permission"); then what
+    /// others share with you syncs.
+    #[command(name = "approve")]
+    ApproveSharing {
+        /// The identity [default: the one set up].
+        identity: Option<String>,
+        #[command(flatten)]
+        approve: Approve,
+    },
     /// Syncs one of your own folders where this computer keeps it (documents, pictures,
     /// music, videos, downloads) with the drive's folder of that kind: joined if another device
     /// syncs it already (identical files are adopted, not copied), made if not. `desktop` syncs
@@ -403,6 +414,27 @@ fn run(command: Command) -> Res<ExitCode> {
             let mut owner = approve.owner(typed.as_ref());
             setup::sign_in_again(&paths, &identity, &mut owner)?;
             println!("Signed in again on {identity}.");
+        }
+        Command::ApproveSharing { identity, approve } => {
+            let config = Config::load(&paths.config_file())?.unwrap_or_default();
+            let identity = config.identity(identity.as_deref())?;
+            if setup::sharing_approved(&paths, &identity)? {
+                println!("{APP_NAME} may already read what others share with you on {identity}.");
+            } else {
+                let typed = approve.typed();
+                let owner = approve.owner(typed.as_ref());
+                if !setup::approve_sharing(&identity, &owner)? {
+                    return Err("Not approved: what others share with you isn't synced.".into());
+                }
+                println!("Approved on {identity}.");
+            }
+            // What waited for it is tried now (a daemon that isn't running reads it as it
+            // starts).
+            match daemon::daemon(&paths, DaemonControl::SyncNow) {
+                Ok(()) => println!("Syncing what others share with you."),
+                Err(e) if e.is::<daemon::NotRunning>() => {}
+                Err(e) => return Err(e),
+            }
         }
         Command::Add {
             what,
@@ -797,11 +829,14 @@ fn print_status(status: &DaemonStatus) {
                 a.identity
             )
         });
+        // What others share that can't be opened yet for want of the owner's approval.
+        let approval = a.needs_approval.then(words::approve_how);
         // Recently deleted being deleted for good, in the background.
         let emptying = a.emptying.as_ref().map(words::emptying_status);
         if hints.is_none()
             && credentials.is_none()
             && login.is_none()
+            && approval.is_none()
             && emptying.is_none()
             && a.recent.is_empty()
         {
@@ -814,6 +849,7 @@ fn print_status(status: &DaemonStatus) {
             .chain(&hints)
             .chain(&credentials)
             .chain(&login)
+            .chain(&approval)
         {
             println!("  {line}");
         }
@@ -838,6 +874,9 @@ fn print_folder(s: &FolderStatus) {
     // tray's Log in again does it).
     if s.refused() {
         println!("  log in again: hbsync setup {}", s.identity);
+    }
+    if s.needs_approval {
+        println!("  approve it: hbsync approve");
     }
     if let Some(at) = s.retry_at.filter(|_| s.state != State::Offline) {
         println!("  next try {}", when(at));

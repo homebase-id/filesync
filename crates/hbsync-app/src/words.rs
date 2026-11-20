@@ -6,10 +6,10 @@ use hbsync_state::Unusable;
 use hbsync_types::NodeKind;
 use hbsync_types::activity::{Deleted, Progress, Synced, SyncedKind};
 
-use crate::KEEP_DAYS;
 use crate::protocol::{
     DeletedItem, Emptying, FolderStatus, HeldAnswer, HeldDeletes, SharesFolder, State,
 };
+use crate::{APP_NAME, KEEP_DAYS};
 
 /// Now, in Unix seconds.
 pub use hbsync_types::unix_now as now;
@@ -473,6 +473,18 @@ pub fn status_line(s: &FolderStatus, now: u64) -> String {
         State::Stopped => "Stopped".into(),
     }
 }
+
+/// What `hbsync status` says where what others share waits for the owner's approval of the
+/// app ([`crate::protocol::AccountStatus::needs_approval`]), and how to give it.
+pub fn approve_how() -> String {
+    format!(
+        "sharing: {APP_NAME} needs your approval to read what others share with you: \
+         `hbsync approve` asks your Homebase for it"
+    )
+}
+
+/// The tray's menu item that asks for it ([`approve_how`]).
+pub const APPROVE: &str = "Approve reading shared files…";
 
 /// Why what another identity shares isn't synced for now ([`State::Waiting`]): who is
 /// waited for, and for what, as the answer said it (its first letter a capital). This

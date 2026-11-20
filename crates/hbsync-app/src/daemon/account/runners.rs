@@ -111,6 +111,9 @@ struct Opening {
     told: bool,
     /// Opened to take its copy off this device, not to sync it ([`Synced::kept`]).
     end: bool,
+    /// Its last try was refused for want of the owner's approval of the app
+    /// ([`Markers::needs_approval`]).
+    unapproved: bool,
 }
 
 enum Job {
@@ -191,6 +194,13 @@ impl Markers {
             false => self.unended.push(sharer),
         }
         self.changed(now);
+    }
+
+    /// Whether a share waits to be opened for want of the owner's approval of the app (to
+    /// read what others share): the account's status says so
+    /// ([`crate::protocol::AccountStatus::needs_approval`]).
+    pub(super) fn needs_approval(&self) -> bool {
+        self.opening.iter().any(|o| o.unapproved)
     }
 
     /// Whether anything says whose shares are synced.
@@ -314,6 +324,11 @@ impl Markers {
                     }
                     Err(e) => {
                         let opening = &mut self.opening[i];
+                        opening.unapproved = matches!(
+                            &e,
+                            RunnerError::Engine(e)
+                                if e.refusal() == Some(hbsync_remote::Refusal::Permission)
+                        );
                         let pause = wait_after(&mut opening.backoff, &e);
                         tracing::warn!(
                             "what {sharer} shares can't be opened ({e}): trying again in {pause:?}"
@@ -450,6 +465,7 @@ impl Markers {
                     backoff: Backoff::new(),
                     told: false,
                     end,
+                    unapproved: false,
                 }),
                 None => self.left_out.push(sharer.clone()),
             }

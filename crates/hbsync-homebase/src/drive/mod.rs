@@ -247,6 +247,13 @@ impl KeyState {
     }
 }
 
+/// Whether the app may read what others share with this identity now (the permission an
+/// install from before it asked for it lacks until the owner approves: [`app::update_url`]):
+/// one read of the login's security context.
+pub fn reads_shared(client: &Client) -> Result<bool, HomebaseError> {
+    Ok(holds_key(&security_context(client)?, app::USE_TRANSIT_READ))
+}
+
 /// The login's security context: its grants and permissions.
 fn security_context(client: &Client) -> Result<serde_json::Value, HomebaseError> {
     client.get("/api/v2/auth/context", &[])

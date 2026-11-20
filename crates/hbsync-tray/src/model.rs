@@ -55,6 +55,16 @@ impl Daemon {
         self.account(identity).is_some_and(|a| a.login_without_key)
     }
 
+    /// What others share with `identity` waits for the owner's approval of the app: a share
+    /// that can't be opened for it (the account says so), or one synced before.
+    pub fn needs_approval(&self, identity: &hbsync_app::Identity) -> bool {
+        let Daemon::Running(s) = self else {
+            return false;
+        };
+        let theirs = |f: &FolderStatus| f.identity == *identity && f.needs_approval;
+        self.account(identity).is_some_and(|a| a.needs_approval) || s.folders.iter().any(theirs)
+    }
+
     /// The status of the account `identity`.
     pub fn account(&self, identity: &hbsync_app::Identity) -> Option<&AccountStatus> {
         let Daemon::Running(s) = self else {
@@ -118,6 +128,8 @@ pub(crate) enum Look {
 pub(crate) enum Action {
     LogIn,
     LogInAgain,
+    /// Ask the owner, in the browser, to let the app read what others share with them.
+    Approve,
     OpenFolder,
     /// Open this page in the browser.
     OpenOnline(String),
@@ -293,6 +305,10 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
         // Refused, or a login from before private drives: asked before the drive is made one.
         if s.refused() || view.daemon.login_without_key(&s.identity) {
             items.push(Item::Action(Action::LogInAgain, "Log in again…".into()));
+        }
+        // What others share waits for the owner's approval of the app: asked for here.
+        if view.daemon.needs_approval(&s.identity) {
+            items.push(Item::Action(Action::Approve, words::APPROVE.into()));
         }
         items.push(Item::Separator);
         if s.state == State::Paused {
@@ -500,7 +516,21 @@ mod tests {
         let v = view(&d, &[]);
         assert_eq!(look(&v), Look::Attention);
         assert!(status_line(&v).starts_with("Your Homebase cloud hasn't given"));
-        assert!(!actions(&menu(&v)).contains(&Action::LogInAgain));
+        let offered = actions(&menu(&v));
+        assert!(!offered.contains(&Action::LogInAgain) && offered.contains(&Action::Approve));
+
+        // A share that can't be opened for it has no folder: the account says so, and the
+        // approval is offered all the same. Not where nothing waits for it.
+        let Daemon::Running(mut unopened) = running(status(State::Idle)) else {
+            panic!("running");
+        };
+        let fine = Daemon::Running(unopened.clone());
+        assert!(!actions(&menu(&view(&fine, &[]))).contains(&Action::Approve));
+        let mut account = hbsync_app::protocol::AccountStatus::new(&"anna.example.com".into());
+        account.needs_approval = true;
+        unopened.accounts.push(account);
+        let d = Daemon::Running(unopened);
+        assert!(actions(&menu(&view(&d, &[]))).contains(&Action::Approve));
     }
 
     /// Shares that are off (their folder gone, or not made) are said in the menu; nothing is

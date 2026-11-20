@@ -76,8 +76,38 @@ pub fn begin(identity: &str, device: &str) -> Result<crate::login::Login, Homeba
 
 /// Starts asking the owner of `identity` to give the app its drive again: the caller takes the
 /// browser to `url` and waits with `finish_unless` ([`APPROVAL_TIMEOUT`]).
-pub fn begin_restore(identity: &str) -> Result<crate::login::DriveRestore, HomebaseError> {
+pub fn begin_restore(identity: &str) -> Result<crate::login::Asked, HomebaseError> {
     crate::login::begin_restore(identity)
+}
+
+/// Starts asking the owner of `identity` to let the app read what others share with them
+/// (an install from before the app asked for that lacks the permission: what others share
+/// waits for it, [`crate::protocol::FolderStatus::needs_approval`]). The caller takes the
+/// browser to `url` and waits with `finish_unless` ([`APPROVAL_TIMEOUT`]).
+pub fn begin_approval(identity: &str) -> Result<crate::login::Asked, HomebaseError> {
+    crate::login::begin_approval(identity)
+}
+
+/// Whether the app may read what others share with `identity` now, by this computer's
+/// login: asked before the owner is (the page adds a permission the app holds a second
+/// time). One request.
+pub fn sharing_approved(paths: &Paths, identity: &Identity) -> crate::Result<bool> {
+    let Some((creds, _)) = CredentialStore::open(paths).load(identity)? else {
+        let none = format!("this computer isn't signed in on {identity}: `hbsync setup` does");
+        return Err(Refusal::No(none).into());
+    };
+    Ok(hbsync_homebase::drive::reads_shared(&Client::new(&creds)?)?)
+}
+
+/// Asks the owner of `identity` to let the app read what others share with them, in the
+/// browser as the command line shows it (`owner`): whether they did. Nothing is asked where
+/// the app may already ([`sharing_approved`]); that is for the caller to look up first.
+pub fn approve_sharing(identity: &Identity, owner: &InBrowser<'_>) -> crate::Result<bool> {
+    let ask = begin_approval(identity)?;
+    let what = format!("let {APP_NAME} read what others share with you on {identity}");
+    owner.visit(&what, ask.url());
+    owner.opens.open(ask.url());
+    Ok(ask.finish_with(APPROVAL_TIMEOUT, &AtomicBool::new(false), owner.paste())?)
 }
 
 /// The owner's answers in the browser that setting up may need ([`set_up`]).

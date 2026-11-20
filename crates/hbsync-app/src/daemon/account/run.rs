@@ -406,6 +406,12 @@ impl Account {
                         let waiting = (&mut to_end, ending);
                         let notes = markers.answer(id, *answer, &mut shares, waiting, now);
                         self.push_notes(notes);
+                        let mut shown = lock(&self.shown);
+                        let unapproved = markers.needs_approval();
+                        if shown.status.needs_approval != unapproved {
+                            shown.status.needs_approval = unapproved;
+                            changed = true;
+                        }
                     }
                     Msg::Hint(event) => {
                         if event == Event::Markers {
