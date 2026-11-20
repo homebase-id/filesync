@@ -1054,8 +1054,9 @@ fn a_shares_end_is_asked_for_though_a_reread_is_left_open() -> common::Res<()> {
     member.faults().script = [false, true].into();
     feed::pull(|| db.borrow_mut(), &member, 1000, &mut reread)?;
     assert!(db.borrow_mut().read(|s| s.rereading())?, "open");
-    // (It read the end anew, from the header.)
-    assert!(db.borrow_mut().read(|s| s.share_end())?.is_some());
+    // (It read the end anew, from the header: sooner than the week.)
+    let due = |at: Option<i64>| at.ok_or("no time kept");
+    assert!(due(db.borrow_mut().read(|s| s.reread_due())?)? <= until + MINUTE);
 
     // The share ends. The page read first is given up for the feed from its beginning,
     // which shows the file no longer shared; the one left out still can't be asked about.
@@ -1065,7 +1066,8 @@ fn a_shares_end_is_asked_for_though_a_reread_is_left_open() -> common::Res<()> {
     assert!(kept(ending)?.is_none(), "no longer shared");
     assert!(kept(stuck)?.is_some());
     assert!(db.borrow_mut().read(|s| s.rereading())?, "still open");
-    assert_eq!(db.borrow_mut().read(|s| s.share_end())?, None);
+    // (No end is kept now: the week.)
+    assert!(due(db.borrow_mut().read(|s| s.reread_due())?)? > until + 24 * 60 * MINUTE);
     Ok(())
 }
 

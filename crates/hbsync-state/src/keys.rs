@@ -17,15 +17,12 @@ pub const REMOTE_CURSOR: AccountKey = AccountKey("remote.cursor");
 /// Until when the feed was read to its end, at the latest (Unix ms, the server's clock; kept
 /// a day at a time): with the cursor's time, how long this device was away.
 pub const READ_AT: AccountKey = AccountKey("remote.read_at");
-/// When the feed was last read from its beginning (Unix ms, the server's clock; set with that
-/// read's first page): a first read, or a whole re-read. What another identity shares is read
-/// so again a week on.
-pub const REREAD_AT: AccountKey = AccountKey("remote.reread_at");
 /// The whole feed is being read again ([`crate::AccountTx::start_reread`]).
 pub(crate) const REREADING: AccountKey = AccountKey("remote.rereading");
-/// When the first share of a file on another identity's drive ends, as the headers read said
-/// ([`crate::AccountTx::note_share_end`]): Unix ms by the server's clock, a whole minute.
-pub(crate) const SHARE_END: AccountKey = AccountKey("remote.share_end");
+/// When the feed of another identity's drive is read from its beginning next, at the latest
+/// ([`crate::AccountTx::reread_by`]): when the first share of a file read ends, or a week
+/// after it was last read so. Unix ms by the server's clock, a whole minute.
+pub const REREAD_DUE: AccountKey = AccountKey("remote.reread_due");
 /// When Recently deleted was last purged (Unix s).
 pub const PURGED_AT: AccountKey = AccountKey("deleted.purged_at");
 /// The last removal's place in this device's order of recording them ([`crate::Recorded::seq`]).

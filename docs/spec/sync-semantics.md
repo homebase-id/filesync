@@ -1555,7 +1555,7 @@ rules hold too:
   the cursor says so, and a read of the file is refused from then on. The member asks. A
   shared file's header says until when it is shared (`RemoteHeader::expires`: the latest
   end of the shares it is read through, none where one has no end), and the store keeps the
-  earliest of the ends read (`AccountTx::note_share_end`, as the whole minute it ends by).
+  earliest of the ends read (`AccountTx::reread_by`, as the whole minute it ends by).
   Once the server's clock, as a feed page gives it, is past that, the feed is read from its
   beginning (a re-read, §8b), where the drive shows the file as no longer shared; it then
   leaves this device as a share withdrawn does (removed here; moved out where it changed
@@ -1585,8 +1585,8 @@ rules hold too:
   an end taken back since (the share given a later one, or withdrawn) costs one that finds
   nothing; files that each end in another minute cost one each, at most one a pull. The file stays until the
   share is next read after its end: every 5 min while the daemon runs. A puller that no
-  longer reads on a timer (the peer socket, W4) must wake at the end kept
-  (`ReadTx::share_end`, by the server's clock: `FeedReport::server_time` gives the offset).
+  longer reads on a timer (the peer socket, W4) must wake at the time kept
+  (`ReadTx::reread_due`, by the server's clock: `FeedReport::server_time` gives the offset).
   Engine tests `a_share_that_reached_its_end_takes_the_file_off_this_device`,
   `an_end_given_to_a_share_later_is_learned`,
   `an_end_made_earlier_is_learned_by_the_read_another_end_starts`,
@@ -1599,9 +1599,7 @@ rules hold too:
 - **Deleted for good by the sharer.** The drive tells a member nothing of a file deleted
   for good: its rows go with it, so no row of the member's feed and no notice names it (API
   notes, "Shared with you"). The member asks. It reads the feed from its beginning a week
-  after it last did (`SHARED_REREAD_MS`, against `keys::REREAD_AT`: the server's time of
-  the first page of its last read from the beginning, a first read or any re-read), which
-  is a re-read as any (§8b): each file the store has that the feed no longer shows is asked
+  after it last did (`SHARED_REREAD_MS`), which is a re-read as any (§8b): each file the store has that the feed no longer shows is asked
   for by its header, a hundred a pull, and is gone once the identity says "not there" a
   second time, a minute to an hour on. It then leaves this device as any file the sharer
   deleted does (removed here; moved out where it changed here). Until then the member
@@ -1609,19 +1607,25 @@ rules hold too:
   ends that way (their purge deletes it for good after 30 days): its row stays in this
   device's Recently deleted until that re-read, and a file here whose folder is such a row
   stays hidden in it till then.
-  It starts at a pull's first page only, as for an end, whether or not an earlier re-read
-  is still open (one that old starts over). A store that doesn't say when it last read
-  from the beginning (one from before) does so once. An identity's own drive isn't read
-  so: its devices hear of every delete for good (the notice; the feed's trace of the
-  removal before the purge, node schema, "The purge").
+  The week is one more time by which the feed is read from its beginning, kept as a
+  share's end is (above): the first page of every read from the beginning, a first read
+  or any re-read, notes a week after its server time, and the store keeps the earliest of
+  that and the ends read (`AccountTx::reread_by`, `ReadTx::reread_due`). So one time and
+  one rule serve both: it starts at a pull's first page only, whether or not an earlier
+  re-read is still open (one that old starts over), and a read from the beginning for an
+  end starts the week over. A share's store that keeps no time though it has a cursor
+  (one from before) reads so once. An identity's own drive keeps no such time: its
+  devices hear of every delete for good (the notice; the feed's trace of the removal
+  before the purge, node schema, "The purge").
   What it costs: one read of the share's feed from its beginning a week, headers and all
   (a share of 10,000 files: 20 requests, about 25 MB; of 1,000 files: 2 requests, 2.5 MB),
-  and two header reads for each file found gone. A read from the beginning for a share's
-  end counts: the week starts over with it. The period is the trade: at 29 days (as for a
+  and two header reads for each file found gone. An idle read costs what it did (no value
+  more is read or written). The period is the trade: at 29 days (as for a
   device away) it would cost a quarter, and a file deleted for good would stay up to 29
   days on a device that is always on. With each file's end in the mirror (filesync #445)
   this read could go by the refs, at about a quarter of the bytes. A puller that no longer
-  reads on a timer (the peer socket, W4) must still read once the week is over.
+  reads on a timer (the peer socket, W4) wakes for the week as for an end: the one time
+  kept.
   Engine tests `what_the_sharer_deleted_for_good_leaves_a_week_on`,
   `an_own_drive_is_not_read_whole_again_a_week_on`, and the randomized
   `randomized_shares_deleted_for_good_show_what_is_shared` (items deleted for good behind
