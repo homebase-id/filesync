@@ -21,6 +21,12 @@ impl ReadTx<'_> {
             .optional()?)
     }
 
+    /// [`ReadTx::account_kv`] read as a `T` (a time, a count); none where it doesn't read as
+    /// one.
+    pub fn account_kv_as<T: std::str::FromStr>(&self, key: AccountKey) -> Result<Option<T>> {
+        Ok(self.account_kv(key)?.and_then(|v| v.parse().ok()))
+    }
+
     /// Whether this DB is of another identity's drive, read as a member of what they share
     /// with this one ([`AccountTx::set_shared`]): its feed lists only what is shared, so the
     /// mirror may hold a node without its folder (shown at the top, [`ReadTx::mirror_children`]),

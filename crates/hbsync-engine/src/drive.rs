@@ -759,10 +759,10 @@ impl Drive {
     /// one was made ([`keys::READ_AT`]).
     pub fn other_drive(&self, made: i64) -> Result<bool, StateError> {
         let (known, read_at) = self.account().read(|s| {
-            let time = |key| -> Result<_, StateError> {
-                Ok(s.account_kv(key)?.and_then(|v| v.parse::<i64>().ok()))
-            };
-            Ok((time(keys::DRIVE_MADE)?, time(keys::READ_AT)?))
+            Ok((
+                s.account_kv_as::<i64>(keys::DRIVE_MADE)?,
+                s.account_kv_as::<i64>(keys::READ_AT)?,
+            ))
         })?;
         match known {
             Some(known) => Ok(known != made),
@@ -887,8 +887,7 @@ impl Drive {
         let now = hbsync_types::unix_now();
         let last = self
             .account()
-            .read(|s| s.account_kv(keys::PURGED_AT))?
-            .and_then(|v| v.parse::<u64>().ok());
+            .read(|s| s.account_kv_as::<u64>(keys::PURGED_AT))?;
         if last.is_some_and(|last| now < last + crate::time::DAY_S) {
             return Ok(None);
         }

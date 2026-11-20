@@ -36,6 +36,7 @@ fn share_for(a: &Client, server: &Server, name: &str, ms: i64) -> R {
 
 /// A minute of the server's clock, which a share's end is asked by.
 const MINUTE: i64 = 60_000;
+const DAY: i64 = 24 * 60 * MINUTE;
 
 /// The server's clock moves on by `ms`.
 fn later(server: &Server, ms: i64) -> R {
@@ -292,7 +293,6 @@ fn a_file_that_doesnt_read_any_more_still_ends_with_its_share() -> R {
 /// the week nothing is asked, and after the re-read the feed is read as before.
 #[test]
 fn what_the_sharer_deleted_for_good_leaves_a_week_on() -> R {
-    const DAY: i64 = 24 * 60 * MINUTE;
     let server = server();
     let mut a = Client::new(&server, "a")?;
     a.write("gone.txt", "gone")?;
@@ -363,7 +363,7 @@ fn an_own_drive_is_not_read_whole_again_a_week_on() -> R {
     a.write("x.txt", "x")?;
     a.sync()?;
     let first = whole_read_at(&mut a)?;
-    later(&server, 8 * 24 * 60 * MINUTE)?;
+    later(&server, 8 * DAY)?;
     a.sync()?;
     assert_eq!(whole_read_at(&mut a)?, first);
     Ok(())

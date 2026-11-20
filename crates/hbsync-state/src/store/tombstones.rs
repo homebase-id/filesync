@@ -137,7 +137,6 @@ const SHARE_END_MS: i64 = 60_000;
 impl ReadTx<'_> {
     /// When the first of the shares read ends ([`AccountTx::note_share_end`]), if any does.
     pub fn share_end(&self) -> Result<Option<i64>> {
-        let kept = self.account_kv(crate::keys::SHARE_END)?;
-        Ok(kept.and_then(|end| end.parse().ok()))
+        self.account_kv_as(crate::keys::SHARE_END)
     }
 }

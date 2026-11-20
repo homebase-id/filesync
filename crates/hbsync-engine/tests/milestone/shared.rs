@@ -210,7 +210,7 @@ fn shares_of(seed: u64, behind_a_clash: Behind, besides: Besides) -> Res<(usize,
                 unheard = true;
             }
             // Time passes on the server: nothing is written, and shares given until then end.
-            5 => {
+            5 if ending => {
                 let minutes = 1 + rng.below(3) as i64;
                 server
                     .lock()

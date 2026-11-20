@@ -154,13 +154,11 @@ fn read_pages<G: DerefMut<Target = StateDb>>(
 ) -> Result<FeedReport, FeedError> {
     let mut report = FeedReport::default();
     let (rereading, cursor, read_at, reread_at) = db().read(|s| {
-        let time =
-            |key| Ok::<_, StateError>(s.account_kv(key)?.and_then(|v| v.parse::<i64>().ok()));
         Ok((
             s.rereading()?,
             s.account_kv(keys::REMOTE_CURSOR)?,
-            time(keys::READ_AT)?,
-            time(keys::REREAD_AT)?,
+            s.account_kv_as::<i64>(keys::READ_AT)?,
+            s.account_kv_as::<i64>(keys::REREAD_AT)?,
         ))
     })?;
     if !rereading {

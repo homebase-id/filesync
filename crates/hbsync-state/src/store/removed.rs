@@ -31,10 +31,7 @@ impl ReadTx<'_> {
         if let Some((seq, _)) = self.removed_seq.get() {
             return Ok(seq);
         }
-        let seq = self
-            .account_kv(crate::keys::REMOVED_SEQ)?
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(0);
+        let seq = self.account_kv_as(crate::keys::REMOVED_SEQ)?.unwrap_or(0);
         self.removed_seq.set(Some((seq, false)));
         Ok(seq)
     }
