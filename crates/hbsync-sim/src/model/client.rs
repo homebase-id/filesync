@@ -188,6 +188,10 @@ pub(crate) struct Client {
     pub(crate) suspects: BTreeMap<crate::gone::File, hbsync_state::GoneSuspect>,
     pub(crate) gone: BTreeSet<hbsync_types::RemoteFileId>,
     pub(crate) syncs: i64,
+    /// The files it first read as a node made again, its base agreed with an earlier one: each
+    /// narrows the base's tags once, at that read ([`crate::Sim::made_again`]), as the engine's
+    /// does when its picture takes a file new to it.
+    pub(crate) made_again: BTreeSet<hbsync_types::RemoteFileId>,
     /// Another device changes the node of the next remote write once it landed
     /// ([`crate::Action::Meanwhile`], its `op`).
     pub(crate) meanwhile: Option<usize>,
@@ -301,6 +305,7 @@ impl Client {
             suspects: BTreeMap::new(),
             gone: BTreeSet::new(),
             syncs: 0,
+            made_again: BTreeSet::new(),
             meanwhile: None,
             pull_mid_local: None,
             trusted: HashSet::new(),

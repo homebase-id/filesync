@@ -1809,8 +1809,9 @@ fn a_node_made_again_leaves_the_base_only_the_tags_its_new_file_has() -> R {
         s.account().made_again(&drive(row.node, gone, &none))
     })?;
     assert_eq!(main.read(|s| s.get_base(row.node))?, Some(narrowed.clone()));
-    // With none of them: none agreed.
-    main.write(|s| s.account().made_again(&drive(row.node, again, &none)))?;
+    // With none of them, made by this device's own write (its answer): none agreed.
+    let made = hbsync_state::Answer::live(None, drive(row.node, again, &none));
+    main.write(|s| s.account().answered(&made))?;
     narrowed.state.tags = Tags::default();
     assert_eq!(docs_db.read(|s| s.get_base(row.node))?, Some(narrowed));
     Ok(())

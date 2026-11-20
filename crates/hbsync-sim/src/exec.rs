@@ -2450,7 +2450,8 @@ impl Sim {
     /// Client `c` reads the drive's version of `node`, live or in Recently deleted: where that
     /// is another file than its base was agreed with (the node deleted for good and made
     /// again), the tags the new file lacks are agreed no more, as the engine's feed takes it
-    /// (`AccountTx::made_again`, sync semantics §11). Every id is the server's clock
+    /// (`AccountTx::made_again`, sync semantics §11): once, at its first read of that file (a
+    /// tag removed from it later is the drive's removal). Every id is the server's clock
     /// ([`time`]): a base agreed before the drive's file was made was agreed with another.
     fn made_again(&mut self, c: usize, node: NodeId) {
         let server = &self.server;
@@ -2462,6 +2463,7 @@ impl Sim {
         let made = drive.remote.file_id.0.as_u128() as i64;
         if agreed.is_none_or(|version| time(version) >= made)
             || client.gone.contains(&drive.remote.file_id)
+            || !client.made_again.insert(drive.remote.file_id)
         {
             return;
         }

@@ -87,7 +87,8 @@ impl ReadTx<'_> {
 }
 
 impl AccountTx<'_> {
-    /// The picture takes `row`, a file new to it: where that isn't the file a folder's base of
+    /// The picture takes `row`, a file new to it (the feed's, `hbsync-engine`'s `mirror::apply`;
+    /// this device's own write's, [`AccountTx::answered`]): where that isn't the file a folder's base of
     /// its node was agreed with (deleted for good and made again, by a device that may never
     /// have seen the tags the old one held), the tags the new file lacks are agreed no more, in
     /// every folder's base ([`Tags::held_in`]). An item that holds one then reads as having
