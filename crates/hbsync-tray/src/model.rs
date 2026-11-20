@@ -14,6 +14,8 @@ pub(crate) const RECENT_SHOWN: usize = 10;
 const PROBLEMS_SHOWN: usize = 8;
 /// Menu text is cut to this many characters.
 const WIDTH: usize = 60;
+/// Said where a share that has no line of its own waits for the owner's approval of the app.
+const NEEDS_APPROVAL: &str = "Your approval is needed to read what others share";
 
 /// What the tray knows about the daemon.
 #[derive(Debug, Clone, PartialEq)]
@@ -296,8 +298,8 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
         let unapproved = view.daemon.needs_approval(&s.identity);
         let said = |f: &FolderStatus| f.needs_approval;
         if unapproved && !view.daemon.waiting_shares(&s.identity).any(said) {
-            let why = format!("{APP_NAME} needs your approval to read what others share");
-            items.push(Item::Label(cut(&why)));
+            // (Short enough for the menu under any name the app goes by: never cut.)
+            items.push(Item::Label(NEEDS_APPROVAL.into()));
         }
         if let Some(h) = view
             .daemon
@@ -542,7 +544,8 @@ mod tests {
         let offered = actions(&m);
         assert!(!offered.contains(&Action::LogInAgain) && offered.contains(&Action::Approve));
         // (The share's own line says why: not said a second time.)
-        let why = |i: &Item| matches!(i, Item::Label(l) if l.contains("needs your approval"));
+        let why = |i: &Item| matches!(i, Item::Label(l) if l == NEEDS_APPROVAL);
+        assert!(NEEDS_APPROVAL.chars().count() <= WIDTH);
         assert!(!m.iter().any(why), "{m:?}");
 
         // A share that can't be opened for it has no folder: the account says so, and the
