@@ -265,8 +265,8 @@ impl Markers {
     }
 
     /// Takes the worker's `answer` (of the run `id`), and has `shares` follow it: one the
-    /// markers turn off is marked ([`Sharing::off`]: its runner stops, and it goes), one
-    /// they are unsure of stays, one they turn on is to be opened, and added once it is.
+    /// markers turn off is marked ([`Sharing::off`]: its runner stops, and it goes) once a
+    /// second read says so too ([`Markers::twice`]), one they are unsure of stays, one they turn on is to be opened, and added once it is.
     /// While they can't be read, all stays as it is. `waiting`: the shares turned off whose
     /// copies wait to be taken off this device, and whose is being now; none of them is
     /// opened meanwhile, and one that waits and is on again is synced on. What to tell on
@@ -416,7 +416,7 @@ impl Markers {
         self.left_out.retain(on);
         self.unended.retain(|sharer| !on(sharer));
         // Those to sync, then those to end: with a state DB here, and neither synced nor
-        // unsure (one of those stays as it is).
+        // unsure or held (one of those stays as it is).
         let to_end = (told.kept.iter()).filter(|sharer| !on(sharer) && !stays(sharer));
         let wanted = told.on.iter().map(|sharer| (sharer, false));
         for (sharer, end) in wanted.chain(to_end.map(|sharer| (sharer, true))) {
@@ -714,7 +714,9 @@ mod tests {
 
     /// A share the markers say is off stays synced until a second read, a minute after the
     /// first that said so, says so too; the markers are read again by then. A read between
-    /// that says it is on, or can't say, starts the minute anew.
+    /// that says it is on, or whose marker doesn't read, starts the minute anew. One with
+    /// records here that isn't synced is opened to end only after the second read, and not
+    /// opened to sync meanwhile.
     #[test]
     fn a_share_is_off_once_two_reads_a_minute_apart_say_so()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -779,9 +781,9 @@ mod tests {
         assert!(shares[0].off);
         assert_eq!(markers.deadline(false), None, "nothing more to read for");
 
-        // One with records here that isn't synced (turned off while the daemon didn't run),
-        // and one about to be opened to sync: the first read that says off opens neither
-        // (not to end, nor to sync); the second opens the first to take its copy off.
+        // One with records here that isn't synced (turned off while the daemon didn't run)
+        // and is about to be opened to sync: after the first read that says off it is
+        // opened neither to sync nor to end; after the second, to take its copy off.
         let sam: Identity = "sam.example".into();
         let mut none = Vec::new();
         let kept = |on: bool| Synced {

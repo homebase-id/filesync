@@ -595,9 +595,9 @@ included (service managers restart it then).
     the first the share stays as it is (synced on; one not synced is neither opened nor
     ended) and the markers are read again a minute later (the one timer of theirs); a read
     between that says it is on, or whose marker for it doesn't read, starts the minute
-    anew; a read that fails changes nothing. One answer that left a marker out (a listing from before it was written)
-    would take the whole copy off only to download it again; it costs one request each
-    time a share is turned off.
+    anew; a read that fails changes nothing. One answer that left a marker out (a listing
+    from before it was written) would take the whole copy off only to download it again;
+    it costs one request each time a share is turned off.
   - A share whose marker doesn't read stays as it is (synced, being opened, or ending), and
     so does every share while the markers can't be read at all: never taken for turned
     off, nor for turned on again.
