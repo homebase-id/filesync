@@ -1259,6 +1259,30 @@ Linux's colours too: its plan took those from the drive it saw, which may be old
 planned while the node was deleted, sent after another device brought it back with a tag and
 deleted it again).
 
+**A node made again.** A file deleted for good on the drive (another app's hard delete, the
+purge) and made again is another file of the same node: by a device that still held the item
+(a folder with something new in it, an edited file), or under an id every device derives
+(Recovered files). Whoever made it may never have seen the tags the old file held. The base's
+tags were agreed with the old file, so against them the new file's lack of a tag reads as the
+drive's removal, and took the tag off every device that held it: gone everywhere, though nobody
+removed it (#439). So when the feed brings a file new to this device for a node whose base was
+agreed with another, the tags the new file lacks leave the base, in every folder's base of the
+node, in the pull's own commit (`AccountTx::made_again`, by name: `Tags::held_in`). The item's
+tag then reads as added here and goes up; a tag removed here stays removed (the new file holds
+it, and so the base still does); a colour is the new file's. The plan, the write's own merge
+and the settle all read that base. What it costs:
+- A tag another device removed from the new file before this device first read it comes back
+  (the feed shows a file's last version only, so that removal can't be told from never having
+  had the tag). It errs to the tag, never to its loss.
+- One read of the base by the node's key for each file new to the mirror (a first sync: one
+  per file, each finding nothing), and a write only where a base holds a tag the file lacks.
+
+Tests: simulator `regression_a_tag_stays_where_its_folder_is_made_again_without_it`,
+`regression_a_tag_added_back_to_the_base_stands_where_the_folder_is_made_again` and the
+saved case of `orphans_are_recovered_without_loss`; engine
+`a_tag_stays_where_its_folder_is_made_again_without_it`; store
+`a_node_made_again_leaves_the_base_only_the_tags_its_new_file_has`.
+
 **Local changes** are noticed by the change time a tag write moves (scan, watcher); the scan
 then reads the tags. Tags that couldn't be read are tried again at the next scan.
 Downloads write the tags onto the temp file before it is put in place: a file without them
@@ -1312,7 +1336,7 @@ wrote reads as this device adding it, so a tag another device removed meanwhile 
 That loses a removal, not a tag.
 
 **Known limits** (the user's call, 2026-10-21: not now). The simulator names each one
-(`hbsync-sim` `tagbook::Limit`) and excuses only that case. Three lose an add:
+(`hbsync-sim` `tagbook::Limit`) and excuses only that case. Two lose an add:
 - *Own removal in flight*: a tag added back while this device's removal of it is still on its
   way. The removal's write settles the base on what both sides hold after it, so the add then
   reads as the drive's removal, and goes.
@@ -1321,9 +1345,10 @@ That loses a removal, not a tag.
   neither side holds any more then reads as this device's removal, and is sent over a later
   add. (A conflict copy no longer leads here: its wanted base settles from the drive's tags,
   §5.)
-- *Added back to the base*: a tag removed and added back here matches the base, so nothing goes
-  up; where the drive dropped it meanwhile (another device's delete, the node made again
-  without it), the drive's state comes down over the add.
+
+(A third, *added back to the base*, ended with "A node made again" above: a tag removed and
+added back here matches the base, so nothing goes up, and where the node was deleted and made
+again without it meanwhile, the drive's state came down over the add.)
 
 Two lose a removal (the tag comes back):
 - *Own tag write in flight*: a tag removed while this device's plan still writes it (onto the

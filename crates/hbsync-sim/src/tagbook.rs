@@ -12,7 +12,7 @@ use hbsync_types::{NodeId, Tags};
 /// A tag add: the client, the node, the tag's name.
 pub(crate) type Add = (usize, NodeId, String);
 
-/// A known limit of the engine's tag sync (sync semantics §11): three lose an add, two a
+/// A known limit of the engine's tag sync (sync semantics §11): two lose an add, two a
 /// removal (the tag comes back), one of those a colour too. Named, so each case stays visible
 /// (the user's call, 2026-10-21: not now). Each excuses only its own case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -33,11 +33,6 @@ pub(crate) enum Limit {
     /// seed f9ca4128; for a colour, seed 5317e937). A colour given after such a write landed
     /// over one, before a plan settles it, is lost the same way (seed 328c6cf9).
     OwnTagWriteInFlight,
-    /// A client adds back a tag its base holds (after removing it here): the item is as the
-    /// base has it, so nothing goes up, and where the drive dropped the tag meanwhile (another
-    /// device's delete, the node made again without it) the drive's state comes down over the
-    /// add (the revert-to-base family; seed 353c4a5d).
-    AddBackToBase,
     /// A client's remote write carrying its add landed, but another device changed the node
     /// before the answer was recorded ([`crate::Action::Meanwhile`]): its base never recorded
     /// the add as on the drive, so the add goes up again, over another client's later removal

@@ -1740,6 +1740,65 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
     Ok(())
 }
 
+/// A node the drive holds as another file than a folder's base of it was agreed with (made
+/// again): the tags that file lacks leave the base, in every folder that has one of the node;
+/// its place, version and file stay. The file the base was agreed with changes nothing.
+#[test]
+fn a_node_made_again_leaves_the_base_only_the_tags_its_new_file_has() -> R {
+    let dir = tempfile::tempdir().map_err(|e| StateError::Corrupt(e.to_string()))?;
+    let db_path = dir.path().join("state.db");
+    let mut main = StateDb::open(&db_path)?;
+    let docs = main.write(|s| {
+        s.account()
+            .add_folder(NodeId::new(), FolderKind::Role, "/home/a/Documents", "m2")
+    })?;
+    let mut docs_db = StateDb::open_folder(&db_path, docs)?;
+    let (red, work) = (Tag::new("Red", 6), Tag::new("Work", 0));
+    let mut row = base(NodeState::folder(NodeId::ROOT, "Shared"));
+    row.state.tags = Tags::new([red.clone(), work.clone()]);
+    let untagged = base(NodeState::folder(NodeId::ROOT, "Plain"));
+    for db in [&mut main, &mut docs_db] {
+        db.write(|s| {
+            s.folder().put_base(&row)?;
+            s.folder().put_base(&untagged)
+        })?;
+    }
+    let again = RemoteFileId(Uuid::new_v4());
+    // Its own file, with fewer tags (the drive's removal): the base stays.
+    main.write(|s| {
+        s.account()
+            .made_again(row.node, row.remote.file_id, &Tags::default())
+    })?;
+    assert_eq!(main.read(|s| s.get_base(row.node))?, Some(row.clone()));
+    // Another file, with one of the two, in another colour, and one more.
+    let held = Tags::new([Tag::new("Red", 2), Tag::new("New", 0)]);
+    main.write(|s| {
+        s.account().made_again(row.node, again, &held)?;
+        s.account().made_again(untagged.node, again, &held)
+    })?;
+    let mut narrowed = row.clone();
+    narrowed.state.tags = Tags::new([red]);
+    for db in [&mut main, &mut docs_db] {
+        assert_eq!(db.read(|s| s.get_base(row.node))?, Some(narrowed.clone()));
+        assert_eq!(
+            db.read(|s| s.get_base(untagged.node))?,
+            Some(untagged.clone())
+        );
+    }
+    // A file deleted for good is no file of the node (a row of it fetched before).
+    let gone = RemoteFileId(Uuid::new_v4());
+    main.write(|s| {
+        s.account().forget_file(gone, None)?;
+        s.account().made_again(row.node, gone, &Tags::default())
+    })?;
+    assert_eq!(main.read(|s| s.get_base(row.node))?, Some(narrowed.clone()));
+    // With none of them: none agreed.
+    main.write(|s| s.account().made_again(row.node, again, &Tags::default()))?;
+    narrowed.state.tags = Tags::default();
+    assert_eq!(docs_db.read(|s| s.get_base(row.node))?, Some(narrowed));
+    Ok(())
+}
+
 /// Two folders of one account in one DB: each has its own rows of the same node, its own
 /// names and settings; the drive's mirror is shared. Forgetting a folder takes its rows along,
 /// and the ids nothing else holds go too.

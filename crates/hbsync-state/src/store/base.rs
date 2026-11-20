@@ -86,6 +86,44 @@ impl ReadTx<'_> {
     }
 }
 
+impl AccountTx<'_> {
+    /// The drive holds `node` as file `file_id`, with `tags`: where that isn't the file a
+    /// folder's base of it was agreed with (deleted for good and made again, by a device that
+    /// may never have seen the tags the old one held), the tags the new file lacks are agreed
+    /// no more, in every folder's base ([`Tags::held_in`]). An item that holds one then reads
+    /// as having added it, and sends it up; left in the base, its absence on the drive read as
+    /// a removal there, and took it off the item (sync semantics §11). A file deleted for good
+    /// changes nothing (a page fetched before: the mirror doesn't take it either). One read by
+    /// the node's key; more only where such a base has a tag.
+    pub fn made_again(&self, node: NodeId, file_id: RemoteFileId, tags: &Tags) -> Result<()> {
+        let agreed: Vec<(i64, i64, String)> = self
+            .prep(
+                "SELECT b.folder, b.id, b.tags FROM base b JOIN nodes n ON n.id = b.id \
+                 WHERE n.uuid = ?1 AND b.remote_file_id != ?2 AND b.tags IS NOT NULL",
+            )?
+            .query_map(params![node.0.as_bytes(), file_id.0.as_bytes()], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        if agreed.is_empty() || self.file_gone(file_id)? {
+            return Ok(());
+        }
+        for (folder, id, was) in agreed {
+            let was = tags_from_str(&was);
+            let held = was.held_in(tags);
+            if held != was {
+                self.prep("UPDATE base SET tags = ?3 WHERE folder = ?1 AND id = ?2")?
+                    .execute(params![
+                        folder,
+                        id,
+                        (!held.is_empty()).then(|| tags_to_string(&held)),
+                    ])?;
+            }
+        }
+        Ok(())
+    }
+}
+
 impl FolderTx<'_> {
     /// Inserts or replaces the base row of `row.node`.
     pub fn put_base(&self, row: &BaseRow) -> Result<()> {

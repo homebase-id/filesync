@@ -1199,13 +1199,11 @@ impl Sim {
                 .or(server.removed.get(&node))
                 .map(|n| &n.state),
         );
-        // The add restores what the base holds: nothing to send (`Limit::AddBackToBase`),
-        // unless its own removal is still to land (`Limit::OwnRemovalInFlight`).
-        let own = match (synced, planned(client)) {
-            (true, true) => Some(Limit::OwnRemovalInFlight),
-            (true, false) => Some(Limit::AddBackToBase),
-            _ => None,
-        };
+        // The add restores what the base holds while its own removal is still to land
+        // (`Limit::OwnRemovalInFlight`). With none on its way nothing goes up, and the add
+        // stands: a node made again without the tag meanwhile leaves the base without it
+        // (`Sim::made_again`, §11).
+        let own = (synced && planned(client)).then_some(Limit::OwnRemovalInFlight);
         (pending || (synced && stale), own)
     }
 

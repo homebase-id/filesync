@@ -224,3 +224,4 @@ cc 0928477742560706eb2ba211860b018af44393450fbaea94b0a802b64f410aeb
 cc 6921bac8669a8c9f88609bcb85ac01a07d6891fb1ff37fa9e1d9035f34dd6303
 cc f0b79d79010cc1d4fe5e47fd85eb7c416721445a4cb7f11dd0f9c22d0999bf57
 cc 12da5b11ffb062860fd511b0ebf6b2eef3380e3e51744a20fc4071c7c3c21c34 # guarded_clients_in_pages_hold_the_whole_delete: a taken-along file a page's held folder delete takes was counted outside the page too (the model's guard totals, #433)
+cc 2222c5c697bc2f9d88c422718f66299cb0e7fc8ace394c1378afcdf1f6e554f2 # orphans_are_recovered_without_loss: a tagged folder deleted for good and made again by a device that never saw the tag lost it on the others (the new file read against the old one's base, #439)

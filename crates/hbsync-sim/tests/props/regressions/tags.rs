@@ -1191,63 +1191,118 @@ fn regression_an_unhashed_orphan_keeps_its_tags() {
     }
 }
 
-/// Seed 353c4a5d, a known limit (the revert-to-base family, the user's call: not now): c1's
-/// tag write lands, another device removes the folder meanwhile, and the folder is made again
-/// without the tag; c1's user had removed Red and added it back, to what its base holds, so
-/// nothing went up, and the drive's state comes down over it. The oracle names it.
+/// #439 (seeds 92d10a23 and 2222c5c6, each a longer way to this): a folder tagged Work on two
+/// devices is deleted for good on the drive (another app's: no trace in the feed) and made again
+/// by a third, which never saw the tag and holds something new in the folder. The folder made
+/// again is another file than the two devices' bases were agreed with, so what it lacks of
+/// their tags is agreed no more (§11): Work stays on their folders and goes up. (Read against
+/// the old file's base, the new one's lack of Work was the drive's removal: it came off both
+/// folders, and was gone everywhere.)
 #[test]
-fn regression_a_tag_added_back_to_the_base_is_a_known_limit() {
+fn regression_a_tag_stays_where_its_folder_is_made_again_without_it() {
+    use Action::*;
+    use Event::{Plan, Step};
+    let act = |client, action| Event::Act { client, action };
+    let work = Some(vec!["Work:0".to_owned()]);
+    let mut sim = Sim::new(3);
+    let root = sim.pick(0, NodeId::ROOT, true).expect("the root");
+    sim.run(&[act(
+        0,
+        CreateFolder {
+            parent: root,
+            name: 0,
+        },
+    )]);
+    assert!(sim.quiesce(10));
+    let folder = sim.item(0, "a").expect("the folder");
+    // Tagged on client 0, taken by client 1; client 2 doesn't sync.
+    let it = sim.pick(0, folder, false).expect("on client 0");
+    sim.run(&[
+        act(0, Tag { node: it, tag: 1 }), // Work
+        Plan { client: 0 },
+        Step { client: 0 },
+        Plan { client: 1 },
+        Step { client: 1 },
+    ]);
+    assert_eq!(sim.server_tags("a"), work);
+    assert_eq!(sim.local_tags(1, "a"), work);
+    // Client 2 saves a file into the folder; the folder is deleted for good, and client 2
+    // makes it again, with the file.
+    let parent = sim.pick(2, folder, true).expect("on client 2");
+    let pick = sim.stopped_pick(folder).expect("the folder's pick");
+    sim.run(&[
+        act(2, CreateFile { parent, name: 1 }),
+        act(0, DeleteOutright { pick }),
+        Plan { client: 2 },
+        Step { client: 2 },
+        Step { client: 2 },
+    ]);
+    assert_eq!(sim.server_tags("a"), Some(Vec::new()));
+    assert!(sim.quiesce(10));
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(sim.server_tags("a"), work);
+    assert_eq!(sim.local_tags(0, "a"), work);
+    assert_eq!(sim.local_tags(1, "a"), work);
+    assert!(sim.item(0, "a/b").is_some(), "client 2's file");
+}
+
+/// Seed 353c4a5d, once a known limit (the revert-to-base family), gone with #439: c1's tag
+/// write lands, another device removes the folder meanwhile, and the folder is made again
+/// without the tag; c1's user had removed Red and added it back, to what its base holds, so
+/// nothing went up. The folder made again is another file than c1's base was agreed with: what
+/// it lacks of the base's tags is agreed no more (§11), so the add reads as one, and goes up.
+/// (Read against the old file's base, the new one's lack of Red was the drive's removal, and
+/// came down over the add.)
+#[test]
+fn regression_a_tag_added_back_to_the_base_stands_where_the_folder_is_made_again() {
     use Action::*;
     use Event::*;
-    let limits = known_limits_of(
-        2,
-        &[
-            Act {
-                client: 1,
-                action: CreateFolder { parent: 0, name: 0 },
-            },
-            Plan { client: 1 },
-            Step { client: 1 },
-            Act {
-                client: 1,
-                action: Meanwhile { op: 0 },
-            },
-            Act {
-                client: 1,
-                action: Tag { node: 0, tag: 4 },
-            },
-            Plan { client: 1 },
-            Plan { client: 0 },
-            Step { client: 1 },
-            Act {
-                client: 0,
-                action: ListDeleted,
-            },
-            Act {
-                client: 0,
-                action: EmptyListed,
-            },
-            Act {
-                client: 1,
-                action: Tag { node: 0, tag: 4 },
-            },
-            Step { client: 0 },
-            Act {
-                client: 1,
-                action: Tag { node: 0, tag: 12 },
-            },
-            Act {
-                client: 0,
-                action: CreateFolder { parent: 2, name: 0 },
-            },
-        ],
-    );
-    // That case alone.
-    assert_eq!(limits.len(), 1, "{limits:?}");
-    assert!(
-        limits[0].starts_with("AddBackToBase") && limits[0].ends_with(" Red"),
-        "{limits:?}"
-    );
+    let mut sim = Sim::new(2);
+    sim.run(&[
+        Act {
+            client: 1,
+            action: CreateFolder { parent: 0, name: 0 },
+        },
+        Plan { client: 1 },
+        Step { client: 1 },
+        Act {
+            client: 1,
+            action: Meanwhile { op: 0 },
+        },
+        Act {
+            client: 1,
+            action: Tag { node: 0, tag: 4 },
+        },
+        Plan { client: 1 },
+        Plan { client: 0 },
+        Step { client: 1 },
+        Act {
+            client: 0,
+            action: ListDeleted,
+        },
+        Act {
+            client: 0,
+            action: EmptyListed,
+        },
+        Act {
+            client: 1,
+            action: Tag { node: 0, tag: 4 },
+        },
+        Step { client: 0 },
+        Act {
+            client: 1,
+            action: Tag { node: 0, tag: 12 },
+        },
+        Act {
+            client: 0,
+            action: CreateFolder { parent: 2, name: 0 },
+        },
+    ]);
+    assert!(sim.quiesce(30), "no convergence");
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+    let limits = sim.tags_lost_to_known_limits();
+    assert!(limits.is_empty(), "{limits:?}");
+    assert_eq!(sim.server_tags("a"), Some(vec!["Red:0".to_owned()]));
 }
 
 /// Seed 4c8098b5, seed 0a9df7c6's case through a lost commit: client 1 forks its edited `a`

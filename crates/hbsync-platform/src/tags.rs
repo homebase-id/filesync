@@ -100,6 +100,19 @@ impl Tags {
         )
     }
 
+    /// The tags here that `other` holds too, by name, as here: what stays agreed of a base's
+    /// tags once the drive holds the node as another file, with `other`
+    /// (sync-semantics §11, a node made again).
+    pub fn held_in(&self, other: &Tags) -> Tags {
+        Tags(
+            self.0
+                .iter()
+                .filter(|t| other.get(&t.name).is_some())
+                .cloned()
+                .collect(),
+        )
+    }
+
     /// A base's tags after settling, per tag: one `local` and `remote` agree on (both hold it,
     /// in one colour, or both lack it) takes that value; one they differ on keeps `base`'s.
     pub fn agreed(base: &Tags, local: &Tags, remote: &Tags) -> Tags {
@@ -532,6 +545,36 @@ mod tests {
             // Both added, both kept, both dropped; a colour they differ on and a tag only one
             // side added keep the base's (none for `mine`).
             tags(&[("added", 4), ("kept", 1), ("recoloured", 3)])
+        );
+    }
+
+    /// A node made again as another file (§11): of the base's tags, those the new file has
+    /// stay agreed, by name, as the base has them. Merged from there, a tag only the item
+    /// holds is its add, and one removed here stays removed.
+    #[test]
+    fn what_a_file_made_again_lacks_is_agreed_no_more() {
+        let base = tags(&[
+            ("kept", 1),
+            ("lacking", 2),
+            ("recoloured", 3),
+            ("removed", 0),
+        ]);
+        let local = tags(&[("kept", 1), ("lacking", 2), ("recoloured", 3)]);
+        let made_again = tags(&[("kept", 1), ("recoloured", 7), ("removed", 0), ("new", 0)]);
+        let agreed = base.held_in(&made_again);
+        assert_eq!(
+            agreed,
+            tags(&[("kept", 1), ("recoloured", 3), ("removed", 0)])
+        );
+        assert_eq!(
+            Tags::merge(&agreed, &local, &made_again),
+            tags(&[("kept", 1), ("lacking", 2), ("new", 0), ("recoloured", 7)])
+        );
+        // Read against the base as it was, what the new file lacks was its removal.
+        assert!(
+            Tags::merge(&base, &local, &made_again)
+                .get("lacking")
+                .is_none()
         );
     }
 

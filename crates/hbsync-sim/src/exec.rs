@@ -338,6 +338,10 @@ impl Sim {
         self.release_filtered(c);
         self.hear_not_theres(c);
         let remote = self.drive_seen(c);
+        // The pull before the plan: what was made again since its base was agreed (§11).
+        for node in self.clients[c].base.ids().collect::<Vec<_>>() {
+            self.made_again(c, node);
+        }
         // Left to be hashed on send: a new file, till its first upload's commit. One that
         // isn't free to send so is read first (the engine reads it and plans again).
         let client = &mut self.clients[c];
@@ -939,6 +943,8 @@ impl Sim {
             return false;
         };
         let node = op.node();
+        // What a pull brought since the plan (the account's, another folder's).
+        self.made_again(c, node);
         // Every remote write that lands stays in the folder's part of the drive (§12): what it
         // writes, and where to (judged before it runs; one refused on its version wrote nothing).
         let breach = self.breaches(c, &op);
@@ -2441,6 +2447,30 @@ impl Sim {
         Tags::merge_onto(&base.unwrap_or_default(), ours, drive, client.os)
     }
 
+    /// Client `c` reads the drive's version of `node`, live or in Recently deleted: where that
+    /// is another file than its base was agreed with (the node deleted for good and made
+    /// again), the tags the new file lacks are agreed no more, as the engine's feed takes it
+    /// (`AccountTx::made_again`, sync semantics §11). Every id is the server's clock
+    /// ([`time`]): a base agreed before the drive's file was made was agreed with another.
+    fn made_again(&mut self, c: usize, node: NodeId) {
+        let server = &self.server;
+        let Some(drive) = server.live.get(&node).or(server.removed.get(&node)) else {
+            return;
+        };
+        let client = &mut self.clients[c];
+        let agreed = client.extra.get(&node).and_then(|e| e.version);
+        let made = drive.remote.file_id.0.as_u128() as i64;
+        if agreed.is_none_or(|version| time(version) >= made)
+            || client.gone.contains(&drive.remote.file_id)
+        {
+            return;
+        }
+        if let Some(b) = client.base.get(node).cloned() {
+            let tags = b.tags.held_in(&drive.state.tags);
+            client.base.insert(node, NodeState { tags, ..b });
+        }
+    }
+
     /// Moves parked nodes back where they came from, when that name is free again.
     fn unpark(&mut self, c: usize) {
         let client = &mut self.clients[c];
@@ -2532,6 +2562,8 @@ impl Sim {
         tags: TagWrite<'_>,
         ours: Option<VersionTag>,
     ) -> Option<VersionTag> {
+        // It reads the drive as it is now (below): as a pull brought it.
+        self.made_again(c, node);
         let server = self.server_state(c, node);
         let remote_ref = self.server.live.get(&node).map(|n| n.remote);
         let live = remote_ref.map(|r| r.version);
