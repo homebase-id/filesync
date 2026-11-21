@@ -319,6 +319,9 @@ impl Markers {
                         let opening = self.opening.swap_remove(i);
                         if let Some(mut new) = Sharing::at(share, opening.local, shares) {
                             (new.off, new.to_end) = (opening.end, opening.end);
+                            // Taken in: its sharer's notifications start, their events
+                            // coming after this answer on the account's channel.
+                            new.share.listen();
                             shares.push(new);
                         }
                     }

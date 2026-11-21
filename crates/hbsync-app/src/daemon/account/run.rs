@@ -415,9 +415,12 @@ impl Account {
                         changed = true;
                     }
                     // A share's own: what its sharer's server announces, or that it
-                    // doesn't for now. One no longer synced has none to take it.
+                    // doesn't for now. One whose copy waits its turn to be taken off hears
+                    // on (it may be on again before its turn comes); one gone has none to
+                    // take it.
                     Msg::ShareHint(sharer, event) => {
-                        if let Some(s) = shares.iter_mut().find(|s| s.share.sharer == sharer) {
+                        let mut all = shares.iter_mut().chain(to_end.iter_mut());
+                        if let Some(s) = all.find(|s| s.share.sharer == sharer) {
                             s.share.notifications.event(event, Instant::now(), paused);
                         }
                     }

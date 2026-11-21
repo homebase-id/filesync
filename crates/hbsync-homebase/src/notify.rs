@@ -358,8 +358,10 @@ fn run(
         };
         // A refusal is told whatever was asked of the notifier meanwhile.
         let refused = matches!(ended, Ended::Refused(_));
-        if let Ended::Refused(why) = &ended {
-            events.send(Event::Refused(why.clone()));
+        if let Ended::Refused(why) = &ended
+            && !events.send(Event::Refused(why.clone()))
+        {
+            return;
         }
         if control.stopping() {
             return;

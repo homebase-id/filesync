@@ -1211,6 +1211,8 @@ mod tests {
         /// How often they were read, and how often a share was tried to open.
         reads: usize,
         opens: usize,
+        /// How often a share's notifications were started.
+        listens: usize,
         /// Whose share was opened, ever (its state DB is this computer's from then on).
         opened: Vec<Identity>,
         /// How long after a read that says a share is off a second one confirms it (none:
@@ -1276,7 +1278,13 @@ mod tests {
                 let drive = Drive::open(&db, &self.me, ended)?;
                 return Ok(parts::Share::new(sharer, drive, db));
             }
-            open_share(&self.me, sharer, &db, &self.server)
+            let markers = self.markers.clone();
+            let share = open_share(&self.me, sharer, &db, &self.server)?;
+            // (None to start here: only that the account asks for them is counted.)
+            Ok(share.hearing(move || {
+                lock(&markers).listens += 1;
+                None
+            }))
         }
 
         fn confirm_after(&self) -> std::time::Duration {
@@ -1790,6 +1798,21 @@ mod tests {
         };
         let checked = checks();
         started.stop(checked)?
+    }
+
+    /// A share's notifications are started as the account takes the share in (their events
+    /// come to it from then on), once.
+    #[test]
+    fn a_shares_notifications_start_as_it_is_taken_in() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let f = Marked::start(home.path(), |m| m.on = vec!["tom.example".into()])?;
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            f.started.wait_all("the share is synced", &both_synced)?;
+            assert_eq!(lock(&f.markers).listens, 1);
+            Ok(())
+        };
+        let checked = checks();
+        f.started.stop(checked)?
     }
 
     /// What a sharer's server announces is taken as it is announced, by the share's own

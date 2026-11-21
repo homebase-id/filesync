@@ -61,25 +61,25 @@ impl ByMarkers {
             to_account,
         }
     }
+}
 
-    /// `sharer`'s notifications, read on `peer` (their server), their events sent to the
-    /// account under the sharer's name. `None` where their thread couldn't start (told): the
-    /// share is read on a timer.
-    fn listen(&self, sharer: &Identity, peer: &Arc<PeerRemote>) -> Option<Notifier> {
-        let (to_account, from) = (self.to_account.clone(), sharer.clone());
-        let hints = Events::to(move |event| {
-            let hint = Msg::ShareHint(from.clone(), event);
-            to_account.send(hint).is_ok()
-        });
-        peer.notifier(hints)
-            .inspect_err(|e| {
-                tracing::error!(
-                    "can't start {sharer}'s notifications ({e}); reading what they share now \
-                     and then"
-                )
-            })
-            .ok()
-    }
+/// `sharer`'s notifications, read on `peer` (their server), their events sent to the account
+/// (`to_account`) under the sharer's name. `None` where their thread couldn't start (told):
+/// the share is read on a timer.
+fn listen(sharer: &Identity, peer: &Arc<PeerRemote>, to_account: Sender<Msg>) -> Option<Notifier> {
+    let from = sharer.clone();
+    let hints = Events::to(move |event| {
+        let hint = Msg::ShareHint(from.clone(), event);
+        to_account.send(hint).is_ok()
+    });
+    peer.notifier(hints)
+        .inspect_err(|e| {
+            tracing::error!(
+                "can't start {sharer}'s notifications ({e}); reading what they share now \
+                 and then"
+            )
+        })
+        .ok()
 }
 
 /// Whose shares `me`'s account has records of on this device: a state DB in a folder named
@@ -193,9 +193,9 @@ impl Sharers for ByMarkers {
         if drive.tokens_sealed_by(&login)? {
             tracing::info!("a new token for {sharer}'s server: the files' tokens are read again");
         }
-        let mut share = Share::new(sharer, drive, db);
-        share.notifier = self.listen(sharer, &peer);
-        Ok(share)
+        let (from, to_account) = (sharer.clone(), self.to_account.clone());
+        let start = move || listen(&from, &peer, to_account);
+        Ok(Share::new(sharer, drive, db).hearing(start))
     }
 }
 

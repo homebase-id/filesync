@@ -714,6 +714,46 @@ mod tests {
         Ok(())
     }
 
+    /// A file the sharer deleted for good goes once their server says "not there" twice, a
+    /// minute to an hour apart. Connected, nothing else reads the share in that hour: the
+    /// week's read that heard it once is followed by one five minutes on, which takes the
+    /// file off.
+    #[test]
+    fn a_file_deleted_for_good_goes_at_the_read_after_the_weeks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use hbsync_remote::Remote;
+        let home = tempfile::tempdir()?;
+        let (month, t0) = (Duration::from_secs(30 * 24 * 3600), Instant::now());
+        let (mut n, puller, drive, member, server) = connected_share(home.path(), month, t0)?;
+        let week = drive.reread_at().ok_or("no time kept")?;
+        let shared = member.changes(None, 10)?.entries.remove(0);
+        lock(&server).hard_delete(shared.file_id, shared.version)?;
+        lock(&server).advance(8 * 24 * 3_600_000);
+        n.tick(week, false);
+        wait_for("the week's read", || puller.rounds() == 2)?;
+        let mut db = hbsync_state::StateDb::open_account(&home.path().join("state.db"))?;
+        let held = |db: &mut hbsync_state::StateDb| {
+            db.read(|s| s.mirror_by_file(shared.file_id))
+                .map(|row| row.is_some())
+        };
+        assert!(held(&mut db)?, "not there once: kept");
+        // Read on: the drive asks for it in a minute, and the share isn't read sooner than
+        // five minutes after its last such read.
+        let soon = drive
+            .reread_at()
+            .is_some_and(|at| at < t0 + UNANNOUNCED_READ);
+        assert!(soon, "read on, not in a week");
+        let on = week + UNANNOUNCED_READ;
+        assert_eq!(n.deadline(week, false), Some(on));
+
+        // (A minute on by this computer's clock, which the two sayings are told apart by.)
+        assert_eq!(hbsync_engine::testkit::a_minute_on(&mut db)?, 1);
+        n.tick(on, false);
+        wait_for("the read after it", || puller.rounds() == 3)?;
+        assert!(!held(&mut db)?, "not there twice: gone");
+        Ok(())
+    }
+
     /// A read at its time that fails leaves the time as it was: asked again an
     /// [`UNANNOUNCED_READ`] later, not at every turn.
     #[test]

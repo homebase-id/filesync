@@ -1685,7 +1685,8 @@ rules hold too:
   this read could go by the refs, at about a quarter of the bytes. While the sharer's
   notifications are connected nothing reads on a timer, and the daemon reads for the week
   as for an end, at the one time kept (`Drive::reread_at`; it costs one read of that stored
-  time after each pull of another identity's drive).
+  time after each pull of another identity's drive), and reads on 5 minutes later while
+  that read is left open, which is what gives a file its second "not there".
   Engine tests `what_the_sharer_deleted_for_good_leaves_a_week_on`,
   `an_own_drive_is_not_read_whole_again_a_week_on`, and the randomized
   `randomized_shares_deleted_for_good_show_what_is_shared` (items deleted for good behind

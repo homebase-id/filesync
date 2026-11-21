@@ -181,7 +181,9 @@ fn a_notice_of_a_shared_file_reads_the_feed_for_its_end() -> R {
 
 /// When another identity's drive is read from its beginning next (a share's end, the week)
 /// is by their server's clock, and nothing announces it: the drive says when that is by this
-/// computer's clock, as each pull leaves it. An identity's own drive has no such time.
+/// computer's clock, as each pull leaves it. A read from the beginning left open (a file
+/// said "not there" once) is read on about a minute later, when the second saying can take
+/// the file off: without that read, nothing would. An identity's own drive has no such time.
 #[test]
 fn a_shares_drive_says_when_it_is_next_read_from_its_beginning() -> R {
     use std::time::{Duration, Instant};
@@ -189,8 +191,10 @@ fn a_shares_drive_says_when_it_is_next_read_from_its_beginning() -> R {
     let server = server();
     let mut a = Client::new(&server, "a")?;
     a.write("top.txt", "top")?;
+    a.write("gone.txt", "gone")?;
     a.sync()?;
     share(&a, &server, "top.txt")?;
+    share(&a, &server, "gone.txt")?;
     let (mut b, _out) = Client::member(&server, "b")?;
     assert_eq!(b.engine.drive().reread_at(), None, "not read yet");
     // `ms` from now, give or take the minute a time is kept to and the test's own time.
@@ -219,6 +223,19 @@ fn a_shares_drive_says_when_it_is_next_read_from_its_beginning() -> R {
     // Over: read from its beginning, and the week is what is kept.
     later(&server, 11 * MINUTE)?;
     b.sync()?;
+    in_about(&b, 7 * DAY);
+
+    // The week's read finds a file deleted for good "not there", once: read on in a
+    // minute, not in a week. Said a second time, the file goes, and the week is kept.
+    let h = common::header_named(&server, "gone.txt");
+    (server.lock().map_err(|_| "poisoned")?).hard_delete(h.file_id, h.version)?;
+    later(&server, 7 * DAY + 2 * MINUTE)?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["gone.txt = gone"], "not there once: kept");
+    in_about(&b, MINUTE);
+    b.a_minute_on()?;
+    b.sync()?;
+    assert!(b.tree_text("").is_empty(), "{:?}", b.tree_text(""));
     in_about(&b, 7 * DAY);
 
     assert_eq!(a.engine.drive().reread_at(), None, "an own drive");

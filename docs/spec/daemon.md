@@ -709,14 +709,20 @@ included (service managers restart it then).
     (sync semantics §13: both are read for from the feed's beginning). So a connected
     share is read once more when the time kept for that is over, by this computer's clock
     as the last read left it (`Drive::reread_at`); where that read leaves the time as it
-    was (it failed), again 5 minutes later.
+    was (it failed), again 5 minutes later. Such a read may be left open: the files the
+    feed no longer shows are asked about a hundred a read, and one said "not there" goes
+    only when that is said a second time, a minute to an hour later (sync semantics §8b).
+    So the share is read on, 5 minutes later each time, until nothing is left open:
+    without that, a file the sharer deleted for good would never leave this device.
   - A refusal there is of the token their server gave, never of this login: nothing of
     the account's is held back, and the share is read on its timer all the same, as a
     read is what asks for a new token (the socket never does). A connection their server
     ends before subscribing it is made again once, a second later, and taken for refused
     the second time running; then asked again after 5 minutes, doubling to an hour.
   While not connected (not yet, a refusal, their server down, a proxy) the share is read
-  every 5 minutes, and at Sync now; only while a runner syncs it. A share no longer synced
+  every 5 minutes, and at Sync now; only while a runner syncs it. The socket is started
+  as the account takes the share in, so that its first event finds someone to take it. A
+  share no longer synced
   ends its socket as its copy starts to be taken off this device (one turned on again
   while it waited its turn goes on listening). It costs one socket per sharer, pinged
   every 30 s, on a thread that blocks, in place of 288 reads a day. It needs odin-core #2132 (a token subscribes more than once an hour).

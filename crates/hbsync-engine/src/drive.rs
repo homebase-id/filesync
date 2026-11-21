@@ -18,6 +18,7 @@ use hbsync_types::{NodeId, NodeKind, Role, VersionTag, Written};
 use crate::deleted;
 use crate::error::EngineError;
 use crate::feed::{self, FeedError, FeedReport};
+use crate::gone;
 use crate::lock;
 use crate::mirror;
 pub use crate::news::DriveNews;
@@ -330,31 +331,44 @@ impl Drive {
     }
 
     /// When another identity's drive is to be read next though nothing is announced, by this
-    /// computer's clock: the time kept for reading its feed from its beginning (a share's
-    /// end, the week: [`hbsync_state::ReadTx::reread_due`], sync semantics §13), which is by
-    /// their server's clock, as far from now as it was from that clock at the last pull.
-    /// Nothing announces it: whoever reads the drive only when its changes are announced
-    /// reads it then too. `None` on an identity's own drive, and before the first pull.
+    /// computer's clock, as the last pull left it. Nothing announces these; whoever reads
+    /// the drive only when its changes are announced reads it then too:
+    /// - the time kept for reading its feed from its beginning (a share's end, the week:
+    ///   [`hbsync_state::ReadTx::reread_due`], sync semantics §13), which is by their
+    ///   server's clock: as far from now as it was from that clock at the pull;
+    /// - sooner, [`gone::ASK_AGAIN`] after a pull that left such a read open: it asks about
+    ///   the files the feed no longer shows a hundred a pull, and takes one for gone only
+    ///   when told "not there" a second time, a minute to an hour after the first
+    ///   ([`gone::judge`]). Without a pull in that hour the file would never go.
     ///
-    /// The time is never early by more than the two clocks drift apart meanwhile (the pull
-    /// then finds it not due, and leaves a new one), and late by no more than the pull
-    /// took.
+    /// `None` on an identity's own drive, and before the first pull.
+    ///
+    /// The time may come early or late by what the two clocks drift apart meanwhile, and
+    /// late by a suspend and by what the pull took. Early, the pull finds nothing due and
+    /// leaves a new time; a wake-up or a lost connection is followed by a read, which goes
+    /// by their server's clock.
     pub fn reread_at(&self) -> Option<Instant> {
         *lock(&self.reread_at)
     }
 
     /// Keeps [`Drive::reread_at`] after a pull, `now` being their server's clock at its last
-    /// page: one read of the account's DB, for another identity's drive only.
-    fn note_reread_at(&self, now: i64) {
+    /// page and `open` whether it left a read from the beginning open: one read of the
+    /// account's DB, for another identity's drive only.
+    fn note_reread_at(&self, now: i64, open: bool) {
         if !self.shared() {
             return;
         }
-        let due = self.account().read(|s| s.reread_due());
-        let Ok(due) = due else {
-            return; // as it was: the next pull says
-        };
+        let soon = Instant::now() + gone::ASK_AGAIN;
         let left = |due: i64| Duration::from_millis(due.saturating_sub(now).max(0) as u64);
-        *lock(&self.reread_at) = due.map(|due| Instant::now() + left(due));
+        let due = match self.account().read(|s| s.reread_due()) {
+            Ok(due) => due.map(|due| Instant::now() + left(due)),
+            // Not known: asked again soon, as nothing else would.
+            Err(_) => Some(soon),
+        };
+        *lock(&self.reread_at) = match open {
+            true => Some(due.map_or(soon, |due| due.min(soon))),
+            false => due,
+        };
     }
 
     /// Whether what another identity shares is put off for now: its sharer, or a connection,
@@ -479,9 +493,10 @@ impl Drive {
         let covers = self.asked.load(Ordering::SeqCst);
         let doubts = self.freshness.doubts();
         let since = self.refusals();
-        let pulled = {
+        let (pulled, open) = {
             let mut reread = lock(&self.reread);
-            feed::pull(|| self.account(), self.remote(), FEED_PAGES, &mut reread)
+            let pulled = feed::pull(|| self.account(), self.remote(), FEED_PAGES, &mut reread);
+            (pulled, reread.is_some())
         };
         match &pulled {
             // What was in doubt when it started is answered; a doubt since isn't.
@@ -493,7 +508,7 @@ impl Drive {
                 *answered = covers;
                 if let Some(now) = report.server_time {
                     self.server_time.store(now, Ordering::SeqCst);
-                    self.note_reread_at(now);
+                    self.note_reread_at(now, open);
                 }
             }
             Err(e) => {
