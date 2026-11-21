@@ -15,7 +15,7 @@ use crate::sync::lock;
 
 /// While the notifications aren't connected (not yet, not any more, or never: a proxy, a
 /// refusal), the drive is read this often. While they are, only when the drive itself says
-/// so ([`Drive::reread_at`]), and then no more often than this.
+/// so ([`Drive::reread_at`]), and from one such read to the next no more often than this.
 pub const UNANNOUNCED_READ: Duration = Duration::from_secs(300);
 
 /// What the identity's notifications do to its drive: changes announced are taken once the
@@ -52,7 +52,7 @@ pub struct Notifications {
     /// announced before it ([`Notifications::next_unannounced`]).
     next_read: Instant,
     /// How often the drive was read for what wasn't announced (as it connected, on the
-    /// timer): what else isn't announced then is read at those times too
+    /// timer while not connected): what else isn't announced then is read at those times too
     /// ([`Notifications::unannounced_reads`]).
     unannounced: u64,
     /// The drive's refusals ([`Drive::refusals`]) when the notifications' try to connect began,
@@ -218,9 +218,9 @@ impl Notifications {
 
     /// When the drive is next read for what isn't announced: every [`UNANNOUNCED_READ`]
     /// while not connected (refused, a read asks nothing: [`Drive::deny`]); connected, only
-    /// when the drive says so ([`Drive::reread_at`]), and never before `next_read`: so a read that left that time
-    /// as it was (it failed) is asked again an [`UNANNOUNCED_READ`] later, not at every
-    /// turn. (`next_read` may also lie ahead from before it connected; the read as it
+    /// when the drive says so ([`Drive::reread_at`]), and never before `next_read`: so a
+    /// read that left the drive's time as it was (it failed) is asked again an
+    /// [`UNANNOUNCED_READ`] later, not at every turn. (`next_read` may also lie ahead from before it connected; the read as it
     /// connected has looked at the time by then.)
     fn next_unannounced(&self) -> Option<Instant> {
         match self.connected {
