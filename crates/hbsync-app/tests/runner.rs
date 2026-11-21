@@ -2350,10 +2350,23 @@ fn a_shares_held_deletes_are_never_put_back() -> R {
         b.status().held_deletes.is_some_and(|h| h.remotely == 60)
     })?;
     let held = b.status().held_deletes.ok_or("held")?;
+    assert_eq!(
+        (held.here, held.unfinished),
+        (0, 0),
+        "only ever the sharer's"
+    );
     let refused = b.handle.answer(HeldAnswer::PutBack, &held.token);
     assert!(
         refused.as_ref().is_err_and(|why| why.contains("read-only")),
         "{refused:?}"
+    );
+    // (An answer to what was held before is told that, whatever it asks.)
+    let stale = b.handle.answer(HeldAnswer::PutBack, "another");
+    assert!(
+        stale
+            .as_ref()
+            .is_err_and(|why| why.contains("changed since")),
+        "{stale:?}"
     );
     assert_eq!(b.status().held_deletes, Some(held.clone()), "held on");
     assert!(b.has("f07.txt"));

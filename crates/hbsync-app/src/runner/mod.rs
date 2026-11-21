@@ -415,9 +415,6 @@ impl Handle {
     /// A read-only folder (what another identity shares) never puts back: refused here, so
     /// the user is told as they ask, not by a note after the next sync.
     pub fn answer(&self, answer: HeldAnswer, token: &str) -> Result<(), String> {
-        if answer == HeldAnswer::PutBack && self.drive.shared() {
-            return Err(crate::words::NO_PUT_BACK.into());
-        }
         {
             let mut held = lock(&self.held);
             if held.nodes.is_empty() || held.token != token {
@@ -426,6 +423,10 @@ impl Handle {
                             look at them again"
                         .into(),
                 );
+            }
+            // (After the token: an answer to deletes held elsewhere before is told so.)
+            if answer == HeldAnswer::PutBack && self.drive.shared() {
+                return Err(crate::words::NO_PUT_BACK.into());
             }
             if held.answered {
                 return Err(
