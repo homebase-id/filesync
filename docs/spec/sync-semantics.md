@@ -1637,6 +1637,13 @@ rules hold too:
   share is next read after its end: every 5 min while the daemon runs. A puller that no
   longer reads on a timer (the peer socket, W4) must wake at the time kept
   (`ReadTx::reread_due`, by the server's clock: `FeedReport::server_time` gives the offset).
+  A notice of a live file on another identity's drive is read from the feed, also where the
+  store knows the version (`feed::announced`): a share given another end keeps the file's
+  version, and a notice says no end, so only the header the feed brings tells it. That
+  costs one feed read per burst of notices, of the rows that changed; an identity's own
+  drive takes a known version without a read, as before (engine test
+  `a_notice_of_a_shared_file_reads_the_feed_for_its_end`; the simulator's member has no
+  feed and hears no notices, so there is nothing to model).
   Engine tests `a_share_that_reached_its_end_takes_the_file_off_this_device`,
   `an_end_given_to_a_share_later_is_learned`,
   `an_end_made_earlier_is_learned_by_the_read_another_end_starts`,
