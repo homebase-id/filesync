@@ -173,9 +173,7 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        if hbsync_platform::ops::is_read_only(&path) {
-            hbsync_platform::ops::set_read_only(&path, false)?;
-        }
+        let _ = hbsync_platform::ops::set_read_only(&path, false);
         fs::write(path, data)
     }
 

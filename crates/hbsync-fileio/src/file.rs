@@ -273,14 +273,14 @@ impl CompletedFile {
         Ok(())
     }
 
-    /// The file, to be read-only once in place ([`ops::set_read_only`]): what the user isn't
+    /// The file, to be read-only once in place where `read_only` ([`ops::set_read_only`]): what the user isn't
     /// to change by accident (another identity's file, whose changes here aren't synced).
     /// Set at the target, not here: one kept for a retry is opened again to be checked. Best
     /// effort: a file system that won't take it fails nothing. A file placed so before is
     /// replaced all the same (Windows refuses to replace a read-only file: it is made
     /// writable first).
-    pub fn read_only(mut self) -> Self {
-        self.read_only = true;
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
         self
     }
 

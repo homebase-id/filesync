@@ -165,10 +165,10 @@ impl<'a> Disk<'a> {
             return Ok(Err(io::ErrorKind::AlreadyExists.into()));
         }
         let moved = rename_ordered(db, &self.abs(from), to)?;
-        // Out of the read-only folder it is the user's own: writable again, where it was
-        // placed read-only (best effort; a folder's files stay as they are).
+        // Out of the read-only folder it is the user's own: writable again, where it (or a
+        // file in it) kept the bits of one placed read-only (a copy made there does).
         if moved.is_ok() {
-            let _ = ops::set_read_only(to, false);
+            ops::make_writable(to);
         }
         Ok(moved)
     }
@@ -181,22 +181,27 @@ impl<'a> Disk<'a> {
         tags::CAN_TAG && self.folder.tags_kept.get() != Some(&false)
     }
 
+    /// [`Disk::write_tags`] on an item in its place. A file placed read-only (a read-only
+    /// folder's, §13) takes no tags as it is: made writable for the write, and read-only
+    /// again.
+    pub(super) fn write_tags_in_place(&self, path: &Path, tags: &Tags) -> TagsLeft {
+        let unlocked = tags::CAN_TAG
+            && self.folder.read_only.is_some()
+            && ops::set_read_only(path, false).unwrap_or(false);
+        let left = self.write_tags(path, tags);
+        if unlocked {
+            let _ = ops::set_read_only(path, true);
+        }
+        left
+    }
+
     /// Writes `tags` on the item at `path` ([`tags::write_on`]), noting whether the volume
     /// keeps tags, and says what that left ([`TagsLeft`]).
     pub(super) fn write_tags(&self, path: &Path, tags: &Tags) -> TagsLeft {
-        // A file placed read-only (a read-only folder's, §13) takes no tags as it is: made
-        // writable for the write, and read-only again.
-        let locked = tags::CAN_TAG && self.folder.read_only.is_some() && ops::is_read_only(path);
-        if locked {
-            let _ = ops::set_read_only(path, false);
-        }
         let written = match self.fails(FailPoint::TagWrite) {
             true => Err(io::Error::other("its tag write failed (a test)")),
             false => tags::write_on(path, tags),
         };
-        if locked {
-            let _ = ops::set_read_only(path, true);
-        }
         match written {
             Ok(tags::Written::Unsupported) => {
                 let _ = self.folder.tags_kept.set(false);

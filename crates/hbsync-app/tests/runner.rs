@@ -211,9 +211,7 @@ impl Device {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        if hbsync_platform::ops::is_read_only(&path) {
-            hbsync_platform::ops::set_read_only(&path, false)?;
-        }
+        let _ = hbsync_platform::ops::set_read_only(&path, false);
         std::fs::write(path, data)
     }
 

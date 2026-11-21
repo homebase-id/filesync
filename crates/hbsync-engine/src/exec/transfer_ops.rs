@@ -547,10 +547,7 @@ impl Executor<'_> {
         let tags = self.disk.on_item_after(left, Tags::default());
         // In a read-only folder (§13) a file is placed read-only: a save over it, which
         // would only move out, is kept from happening by accident.
-        let done = match self.folder.read_only {
-            Some(_) => done.read_only(),
-            None => done,
-        };
+        let done = done.read_only(self.folder.read_only.is_some());
         // The old version a download replaces from another folder: aside till the commit.
         let mut old_aside = None;
         let placed = match &mut current {

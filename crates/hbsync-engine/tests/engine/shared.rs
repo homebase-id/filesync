@@ -226,12 +226,17 @@ fn a_shares_files_are_read_only_on_this_device() -> R {
     }
     assert!(!b.root.join("bye.txt").exists());
 
-    // A copy made here keeps the file's bits, and moves out: the user's own there.
+    // A copy made here keeps the file's bits, and moves out: the user's own there, a
+    // folder of copies with what is in it.
     fs::copy(b.root.join("doc.txt"), b.root.join("copy.txt"))?;
+    fs::create_dir(b.root.join("copies"))?;
+    fs::copy(b.root.join("doc.txt"), b.root.join("copies/doc.txt"))?;
     b.sync()?;
-    let copy = out.path().join("copy.txt");
-    assert_eq!(fs::read_to_string(&copy)?, "two");
-    assert!(!is_read_only(&copy), "moved out: writable");
+    for copy in ["copy.txt", "copies/doc.txt"] {
+        let copy = out.path().join(copy);
+        assert_eq!(fs::read_to_string(&copy)?, "two");
+        assert!(!is_read_only(&copy), "moved out: writable");
+    }
     assert_eq!(b.tree_text(""), a.tree_text(""));
     Ok(())
 }

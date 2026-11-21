@@ -337,7 +337,7 @@ impl Executor<'_> {
         }
         // A failed write leaves the item what it held: read so, not as not known (which reads
         // as the drive's tags, and a tag only the item has would never go up).
-        let left = self.disk.write_tags(&abs, tags);
+        let left = self.disk.write_tags_in_place(&abs, tags);
         let unread = self.disk.unread(&left);
         // Writing tags moves the change time only (a folder's mtime moves with its children).
         // If anything else moved, the item changed meanwhile: the old row stays, and the
