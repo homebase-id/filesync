@@ -717,9 +717,9 @@ included (service managers restart it then).
     the second time running; then asked again after 5 minutes, doubling to an hour.
   While not connected (not yet, a refusal, their server down, a proxy) the share is read
   every 5 minutes, and at Sync now; only while a runner syncs it. A share no longer synced
-  ends its socket at once. It costs one socket per sharer, pinged every 30 s, with two
-  threads that block (the socket's, and one passing its events to the account), in place
-  of 288 reads a day. It needs odin-core #2132 (a token subscribes more than once an hour).
+  ends its socket as its copy starts to be taken off this device (one turned on again
+  while it waited its turn goes on listening). It costs one socket per sharer, pinged
+  every 30 s, on a thread that blocks, in place of 288 reads a day. It needs odin-core #2132 (a token subscribes more than once an hour).
   Not done: a token replaced by a read isn't told to the socket, which then connects at its
   next try (within its refused pause: some minutes of reading on the timer meanwhile).
 

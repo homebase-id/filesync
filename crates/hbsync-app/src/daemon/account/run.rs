@@ -633,12 +633,7 @@ impl Account {
                 let (moved, next, gone) =
                     self.run_shares(paths, &mut shares, shares_at.as_ref(), now);
                 (changed, shares_next) = (changed | moved, next);
-                // (No longer synced: its sharer's notifications end now, not when its copy
-                // has gone.)
-                to_end.extend(gone.into_iter().map(|mut share| {
-                    share.share.notifier = None;
-                    share
-                }));
+                to_end.extend(gone);
             }
             // A copy taken off (or not): said, and the markers read again (one turned on
             // meanwhile is opened now; one that was stopped is found again by its records).
@@ -659,7 +654,10 @@ impl Account {
                 && !to_end.is_empty()
                 && let Some(at) = &shares_at
             {
-                let share = to_end.remove(0);
+                let mut share = to_end.remove(0);
+                // Its sharer's notifications end here, not as it stopped being synced: one
+                // that waited its turn and is on again is synced on as it is, listening.
+                share.share.notifier = None;
                 let device = config.device_name();
                 ending_copy = self.end_copy(share, paths, device, at, &ending_stop);
             }
