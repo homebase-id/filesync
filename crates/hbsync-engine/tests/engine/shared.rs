@@ -150,6 +150,35 @@ fn a_share_given_again_brings_the_file_back() -> R {
     Ok(())
 }
 
+/// A share given another end keeps the file's version, and a notice of the file says no end.
+/// So on another identity's drive a notice of a live file is read from the feed, though the
+/// store knows the version: the header there gives the new end
+/// (`an_end_made_earlier_is_learned_by_the_read_another_end_starts`). The owner's own device
+/// takes the same notice without a read (its own writes coming back).
+#[test]
+fn a_notice_of_a_shared_file_reads_the_feed_for_its_end() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("top.txt", "top")?;
+    a.sync()?;
+    share_for(&a, &server, "top.txt", 60 * MINUTE)?;
+    let (mut b, _out) = Client::member(&server, "b")?;
+    b.sync()?;
+
+    // The share ends sooner now: the file is as it was.
+    let before = common::header_named(&server, "top.txt");
+    share_for(&a, &server, "top.txt", 10 * MINUTE)?;
+    let now = common::header_named(&server, "top.txt");
+    assert_eq!(now.version, before.version, "a share keeps the version");
+    let notice = hbsync_remote::ChangeRef::of(&now);
+    assert!(
+        !b.engine.drive().announced(&[notice])?,
+        "a version known, but the end isn't: read the feed"
+    );
+    assert!(a.engine.drive().announced(&[notice])?, "the owner's: known");
+    Ok(())
+}
+
 /// A share given until a time ends as the time passes. The drive writes nothing then (its
 /// feed doesn't move), so the member asks: it kept the time its header gave, and reads the
 /// feed from its beginning once the server's clock is past it, which shows the file as one no

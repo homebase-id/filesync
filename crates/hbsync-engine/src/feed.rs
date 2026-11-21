@@ -589,6 +589,11 @@ fn save_cursor(
 /// is gone at once (a hard delete leaves no row in the feed), and when the store knows every
 /// other version (this device's own writes coming back) they are applied as a slim page's,
 /// without reading the feed. Whether that was all; else the feed has to be read.
+///
+/// On another identity's drive a live file's notice is never this device's own write, and
+/// may be its share given another end: that keeps the file's version, and no ref says until
+/// when a file is shared. So the feed is read for it, whose header does (sync semantics §13,
+/// "A share that ends").
 pub(crate) fn announced(s: AccountTx<'_>, refs: &[ChangeRef]) -> Result<bool, StateError> {
     if withdrawal_in_doubt(&s, refs)? {
         return Ok(false);
@@ -602,7 +607,8 @@ pub(crate) fn announced(s: AccountTx<'_>, refs: &[ChangeRef]) -> Result<bool, St
             None => s.hard_deleted(r.at())?,
         }
     }
-    if !sure || !known(&s, &refs)? {
+    let live = refs.iter().any(|r| !r.deleted);
+    if !sure || (live && s.shared()?) || !known(&s, &refs)? {
         return Ok(false);
     }
     for r in refs.iter().filter(|r| !r.deleted) {
