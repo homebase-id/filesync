@@ -783,16 +783,13 @@ fn answer_held(paths: &Paths, yes: bool, answer: HeldAnswer) -> Res<()> {
         if held.more_than_shown() {
             println!("  ...");
         }
-        // What another identity shares can't be put back: said, not asked.
-        if answer == HeldAnswer::PutBack && sharer.is_some() {
-            println!("Nothing done; they are still to review.");
-            continue;
-        }
         let question = match answer {
             HeldAnswer::Delete => "Delete them?",
             HeldAnswer::PutBack => "Put them back?",
         };
-        if !yes && !ask_yes(question)? {
+        // What another identity shares can't be put back: said above, not asked.
+        let unasked = answer == HeldAnswer::PutBack && sharer.is_some();
+        if unasked || (!yes && !ask_yes(question)?) {
             println!("Nothing done; they are still to review.");
             continue;
         }

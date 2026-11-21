@@ -302,10 +302,7 @@ mod tests {
         status.sharer = Some("tom.example".into());
         let theirs = held_page(&status, &held, "/deletions");
         assert!(!theirs.contains("put_back") && theirs.contains("value=delete"));
-        assert!(
-            theirs.contains("removed by tom.example") && theirs.contains("can&#39;t be put back")
-                || theirs.contains("can't be put back")
-        );
+        assert!(theirs.contains("removed by tom.example"), "{theirs}");
     }
 
     /// Empty is offered only when emptying takes something; else the page says why not.

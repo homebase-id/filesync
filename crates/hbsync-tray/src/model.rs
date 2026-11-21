@@ -493,6 +493,16 @@ mod tests {
         }))
     }
 
+    /// What the daemon tells with the main folder idle and `share`, what another identity
+    /// shares with it.
+    fn with_share(share: FolderStatus) -> Box<DaemonStatus> {
+        let Daemon::Running(mut both) = running(status(State::Idle)) else {
+            unreachable!("running");
+        };
+        both.folders.push(share);
+        both
+    }
+
     fn view<'a>(daemon: &'a Daemon, recent: &'a [RecentItem]) -> View<'a> {
         View {
             daemon,
@@ -529,11 +539,7 @@ mod tests {
             at: NOW - 60,
             text: "a.txt: moved to /home/anna/Homebase, as this folder is read-only".into(),
         }];
-        let Daemon::Running(mut both) = running(status(State::Idle)) else {
-            panic!("running");
-        };
-        both.folders.push(share);
-        let d = Daemon::Running(both);
+        let d = Daemon::Running(with_share(share));
         let v = view(&d, &[]);
         assert_eq!(status_line(&v), "tom.example: Problem: its folder is gone");
         let listed = menu(&v).iter().any(|item| match item {
@@ -557,10 +563,7 @@ mod tests {
             share.path = "/home/anna/Homebase/Shared/tom.example".into();
             share.error = Some(why.into());
             share.needs_approval = needs_approval;
-            let Daemon::Running(mut both) = running(status(State::Idle)) else {
-                panic!("running");
-            };
-            both.folders.push(share);
+            let mut both = with_share(share);
             // (As the daemon tells it: the account says the app wants the approval.)
             let mut account = hbsync_app::protocol::AccountStatus::new(&"anna.example.com".into());
             account.needs_approval = needs_approval;

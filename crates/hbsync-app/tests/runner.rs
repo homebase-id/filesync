@@ -54,6 +54,18 @@ impl Device {
         Self::start_on(FakeRemote::new(server.clone()), name, tweak)
     }
 
+    /// A device of the member `sharer.example` shares what is on `server` with: its folder
+    /// read-only, what changes there moved out to `moved out` beside it.
+    fn share_of(
+        server: &Arc<Mutex<FakeServer>>,
+        name: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Device::start_on(FakeRemote::member(server.clone()), name, |cfg| {
+            cfg.sharer = Some("sharer.example".into());
+            cfg.read_only = Some(cfg.folder.with_file_name("moved out"));
+        })
+    }
+
     /// [`Device::start_with`], its drive read through `remote`.
     fn start_on(
         remote: FakeRemote,
@@ -2223,10 +2235,7 @@ fn a_share_waits_where_its_login_isnt_what_is_refused() -> R {
     a.wait_idle()?;
     let report = header_named(&server, "report.txt").map(|h| h.at());
     a.remote.share(report.ok_or("report.txt is up")?.file_id)?;
-    let b = Device::start_on(FakeRemote::member(server.clone()), "b", |cfg| {
-        cfg.sharer = Some("sharer.example".into());
-        cfg.read_only = Some(cfg.folder.with_file_name("moved out"));
-    })?;
+    let b = Device::share_of(&server, "b")?;
     wait_until("b has what is shared", || b.has("report.txt"))?;
     b.wait_idle()?;
     let waits = || -> R {
@@ -2329,10 +2338,7 @@ fn a_shares_held_deletes_are_never_put_back() -> R {
     for id in &ids {
         a.remote.share(*id)?;
     }
-    let b = Device::start_on(FakeRemote::member(server.clone()), "b", |cfg| {
-        cfg.sharer = Some("sharer.example".into());
-        cfg.read_only = Some(cfg.folder.with_file_name("moved out"));
-    })?;
+    let b = Device::share_of(&server, "b")?;
     wait_until("b has what is shared", || b.has("f59.txt"))?;
     b.wait_idle()?;
 
@@ -2382,10 +2388,7 @@ fn a_runner_of_another_identitys_share_is_read_only_and_says_whose() -> R {
     let shared = report().ok_or("report.txt is up")?;
     a.remote.share(shared.file_id)?;
 
-    let b = Device::start_on(FakeRemote::member(server.clone()), "b", |cfg| {
-        cfg.sharer = Some("sharer.example".into());
-        cfg.read_only = Some(cfg.folder.with_file_name("moved out"));
-    })?;
+    let b = Device::share_of(&server, "b")?;
     let out = b.root.with_file_name("moved out");
     wait_until("b has what is shared", || b.has("report.txt"))?;
     b.wait_idle()?;
