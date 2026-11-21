@@ -620,6 +620,31 @@ server answers the rest, to a token their server made for this identity's connec
   last changed in the feed, not when its version was written: a removed node's moves with a
   share change too. The client therefore reads no time from `updated` (but the "no longer
   shared" tombstone's, which has no version): "A version's own time", next.
+- **Their notification socket** (`notify.rs`, `Notifier::spawn_shared`; **[verified]**
+  odin-core `V2PeerNotificationSocketController`, `PeerAppNotificationHandler`,
+  `EstablishConnectionOptions.ApplyTo`, and **[tried]** on the dev server 2026-11-21, tom's
+  device on pippin's server): `wss://<sharer>/api/v2/peer/notify/ws-token`, upgraded with no
+  credentials. The first frame says who connects and subscribes at once, in the clear:
+  `{"clientAuthToken64": <the token>, "sharedSecretEncryptedOptions": {iv, data}}`, the
+  second an envelope of the `establishConnectionRequest` command sealed with the token's
+  shared secret; every later frame, either way, is as on the identity's own socket
+  ("Notifications", above). It is the token the files are read with; the socket's context is
+  cached apart from the reads'. `excludeOwnWrites` is refused there (`InvalidQuery`); the
+  shapes are the same, and this client asks for `minimal`. Tried: subscribed 80 ms after the
+  connect; a change to a file shared with the member came 40 ms after the write, as a
+  minimal `fileRef` with the new version, the parent and `versionUpdated` (1,719 B for the
+  handshake and that event together); a change to a file not shared with it brought nothing.
+  A token their server doesn't take gets no `authenticationError`: the server means to send
+  one unsealed, but closes the socket first (a normal close, no frame before it; **[tried]**
+  with a token it never made). The client reads a close before the subscription as the
+  refusal it is, and asks again as for a refused login, not at once. Every notification of
+  their server that isn't a drive's goes to every peer socket (**[verified]**
+  `PeerAppNotificationDispatcher.WsPublishAsync`; none came in 70 idle seconds): unread here.
+  Before odin-core #2132 (merged 2026-11-19 as 625085b90, #2144) a token subscribed once an
+  hour only: the handler set the socket's name on the token's cached context, so every
+  later handshake with the token failed until the cache dropped it (**[tried]** at
+  139c0f618: a reconnect a second later, a second socket, and a new process five minutes
+  later were each closed).
 - **A version's own time** (`versionUpdated`, odin-core PR #2143, merged as 5e4cd493f on
   2026-11-17, #2142; **[verified]** there: `DriveFileUtility.VersionUpdatedOf` and
   `AnswersVersionUpdated`, `ClientFileMetadata.VersionUpdated`, `FileRef.VersionUpdated`,

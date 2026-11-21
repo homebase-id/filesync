@@ -13,6 +13,21 @@
 //! - with `excludeOwnWrites` (odin-core #1971) the socket isn't told of writes made with its
 //!   own token: this client records each of its writes from the write's answer, its server
 //!   time included (`daemon.md`, the sync loop).
+//!
+//! Another identity's server tells a member of what it shares the same way, on a socket of
+//! its own ([`Notifier::spawn_shared`]; verified in odin-core
+//! `V2PeerNotificationSocketController`, `PeerAppNotificationHandler`,
+//! `EstablishConnectionOptions`):
+//! - `wss://{sharer}/api/v2/peer/notify/ws-token`, upgraded by anyone: the token it made for
+//!   this identity's connection ([`crate::peer::PeerToken`], the one the files are read with)
+//!   goes in the first frame, in the clear beside the subscription sealed with its secret:
+//!   `{clientAuthToken64, sharedSecretEncryptedOptions}`; a token it doesn't take is answered
+//!   by an unsealed `authenticationError`;
+//! - every later frame is as on the identity's own socket;
+//! - `excludeOwnWrites` is refused there (a member writes nothing as a device), and an event
+//!   comes only for a file shared with the member: one whose share was withdrawn or ended as
+//!   `fileDeleted` with the file as it now reads to them (`homebase-api-notes.md`, "Shared
+//!   with you").
 
 use std::borrow::Cow;
 use std::io;
@@ -113,7 +128,24 @@ impl Notifier {
     /// `client`'s own token aren't announced (`excludeOwnWrites`). An error: its thread
     /// couldn't start (then never connected: the caller reads the drive on a timer).
     pub fn spawn(client: Client, drive: TargetDrive, events: Sender<Event>) -> io::Result<Self> {
-        Self::subscribe(client, Subscription { drive, own: false }, events)
+        Self::subscribe(
+            move || client.clone(),
+            Subscription { drive, own: false },
+            events,
+        )
+    }
+
+    /// As [`Notifier::spawn`], for what another identity shares: connects to their server as
+    /// the client `theirs` gives ([`Client::for_peer`]) and subscribes to `drive`, theirs.
+    /// `theirs` is asked at every connect: the token their server takes may have been
+    /// replaced since the last. [`Event::Refused`]: their server doesn't take the token.
+    pub fn spawn_shared(
+        theirs: impl Fn() -> Client + Send + 'static,
+        drive: TargetDrive,
+        events: Sender<Event>,
+    ) -> io::Result<Self> {
+        // Their server offers no leaving out of own writes: a member makes none there.
+        Self::subscribe(theirs, Subscription { drive, own: true }, events)
     }
 
     /// [`Notifier::spawn`], hearing this client's `own` writes or not (measurements).
@@ -125,11 +157,12 @@ impl Notifier {
         events: Sender<Event>,
     ) -> io::Result<Self> {
         let own = own == OwnWrites::Heard;
-        Self::subscribe(client, Subscription { drive, own }, events)
+        Self::subscribe(move || client.clone(), Subscription { drive, own }, events)
     }
 
+    /// `client`: who each connection speaks as, asked as it is made.
     fn subscribe(
-        client: Client,
+        client: impl Fn() -> Client + Send + 'static,
         subscription: Subscription,
         events: Sender<Event>,
     ) -> io::Result<Self> {
@@ -229,7 +262,8 @@ impl Control {
 #[derive(Debug, Clone, Copy)]
 struct Subscription {
     drive: TargetDrive,
-    /// Hears this client's own writes too (measurements).
+    /// Hears this client's own writes too (measurements; and on another identity's server,
+    /// which offers nothing else).
     own: bool,
 }
 
@@ -248,7 +282,7 @@ impl Subscription {
 }
 
 fn run(
-    client: &Client,
+    client: &dyn Fn() -> Client,
     subscription: Subscription,
     events: &Sender<Event>,
     control: &Control,
@@ -258,17 +292,17 @@ fn run(
     let mut backoff = FIRST;
     let mut refused_wait = REFUSED_PAUSE;
     while !control.stopping() {
-        let (mut connected, mut refused) = (false, false);
+        let mut came = Came::default();
         let result = session(
-            client,
+            &client(),
             subscription,
             events,
             control,
             received,
-            &mut connected,
-            &mut refused,
+            &mut came,
         );
         control.release();
+        let Came { connected, refused } = came;
         if connected {
             backoff = FIRST;
             refused_wait = REFUSED_PAUSE;
@@ -307,6 +341,15 @@ fn run(
 
 type Socket = WebSocket<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>;
 
+/// How far one connection came.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct Came {
+    /// The server subscribed it.
+    connected: bool,
+    /// The server refused it: its upgrade, or what it said who it is.
+    refused: bool,
+}
+
 /// One connection, until it breaks or is `refused` (`Err`) or the notifier stops (`Ok`).
 fn session(
     client: &Client,
@@ -314,8 +357,7 @@ fn session(
     events: &Sender<Event>,
     control: &Control,
     received: &Received,
-    connected: &mut bool,
-    refused: &mut bool,
+    came: &mut Came,
 ) -> Result<(), String> {
     let mut socket = match connect(client, control) {
         Ok(socket) => socket,
@@ -323,16 +365,47 @@ fn session(
         // The upgrade answered 401 or 403: the identity refused the credentials.
         Err(Unopened::Refused(why)) => {
             let _ = events.send(Event::Refused(why.clone()));
-            *refused = true;
+            came.refused = true;
             return Err(why);
         }
     };
-    send(
+    converse(
         &mut socket,
         client,
-        "establishConnectionRequest",
-        &subscription.request().to_string(),
-    )?;
+        subscription,
+        events,
+        control,
+        received,
+        came,
+    )
+}
+
+/// A connection's stream, whose reads can be given a timeout.
+trait Timed {
+    fn wait_at_most(&self, wait: Duration) -> io::Result<()>;
+}
+
+impl Timed for rustls::StreamOwned<rustls::ClientConnection, TcpStream> {
+    fn wait_at_most(&self, wait: Duration) -> io::Result<()> {
+        self.get_ref().set_read_timeout(Some(wait))
+    }
+}
+
+/// What is said on an open connection: subscribes, then hears the server until the
+/// connection breaks or is `refused` (`Err`) or the notifier stops (`Ok`).
+fn converse<S: io::Read + io::Write + Timed>(
+    socket: &mut WebSocket<S>,
+    client: &Client,
+    subscription: Subscription,
+    events: &Sender<Event>,
+    control: &Control,
+    received: &Received,
+    came: &mut Came,
+) -> Result<(), String> {
+    let first = opening(client, &subscription.request().to_string())?;
+    socket
+        .send(Message::text(first))
+        .map_err(|e| format!("subscribing: {e}"))?;
     let opened = Instant::now();
     let (mut last_frame, mut last_ping) = (Instant::now(), Instant::now());
     // Told to stop or reconnect: the socket is shut down, or about to be.
@@ -347,11 +420,16 @@ fn session(
         }
         // Blocks until a frame comes or the next check is due (the socket is shut down when
         // told).
-        let wait = next_check(Instant::now(), opened, *connected, last_frame, last_ping);
+        let wait = next_check(
+            Instant::now(),
+            opened,
+            came.connected,
+            last_frame,
+            last_ping,
+        );
         socket
             .get_ref()
-            .get_ref()
-            .set_read_timeout(Some(wait))
+            .wait_at_most(wait)
             .map_err(|e| e.to_string())?;
         match socket.read() {
             Ok(Message::Text(text)) => {
@@ -361,8 +439,8 @@ fn session(
                     .bytes
                     .fetch_add(text.len() as u64, Ordering::Relaxed);
                 let event = match notification(client, text.as_str()) {
-                    Notification::Handshake if !*connected => {
-                        *connected = true;
+                    Notification::Handshake if !came.connected => {
+                        came.connected = true;
                         if control.connected_before.swap(true, Ordering::SeqCst) {
                             client.connected();
                         }
@@ -373,7 +451,7 @@ fn session(
                     Notification::Refused(why) => {
                         let _ = socket.close(None);
                         let _ = events.send(Event::Refused(why.clone()));
-                        *refused = true;
+                        came.refused = true;
                         return Err(why);
                     }
                     _ => continue,
@@ -383,7 +461,15 @@ fn session(
                 }
             }
             Ok(Message::Close(frame)) => {
-                return Err(format!("closed by the server: {frame:?}"));
+                let why = format!("closed by the server: {frame:?}");
+                // Another identity's server closes a connection whose token it doesn't take
+                // without a word (verified live: `homebase-api-notes.md`, "Shared with you";
+                // the `authenticationError` it means to send first doesn't arrive).
+                if client.peer() && !came.connected {
+                    let _ = events.send(Event::Refused(why.clone()));
+                    came.refused = true;
+                }
+                return Err(why);
             }
             Ok(_) => last_frame = Instant::now(),
             Err(tungstenite::Error::Io(e))
@@ -394,14 +480,14 @@ fn session(
             Err(_) if control.told() => return told(),
             Err(e) => return Err(e.to_string()),
         }
-        if !*connected && opened.elapsed() > HANDSHAKE {
+        if !came.connected && opened.elapsed() > HANDSHAKE {
             return Err("no handshake from the server".into());
         }
         if last_frame.elapsed() > SILENCE {
             return Err("the connection went silent".into());
         }
         if last_ping.elapsed() > PING_EVERY {
-            send(&mut socket, client, "ping", "ping")?;
+            send(socket, client, "ping", "ping")?;
             last_ping = Instant::now();
         }
     }
@@ -465,6 +551,25 @@ fn connect(client: &Client, control: &Control) -> Result<Socket, Unopened> {
     let tls = rustls::ClientConnection::new(TLS.clone()?, name).map_err(|e| e.to_string())?;
     let stream = rustls::StreamOwned::new(tls, tcp);
 
+    let (socket, _) = tungstenite::client(upgrade(client)?, stream).map_err(|e| match e {
+        tungstenite::HandshakeError::Failure(e) => unopened(host, &e),
+        tungstenite::HandshakeError::Interrupted(_) => {
+            Unopened::Lost("handshake timed out".to_owned())
+        }
+    })?;
+    Ok(socket)
+}
+
+/// The request that upgrades a connection to `client`'s server to the notification socket:
+/// the identity's own with the token as a subprotocol, another identity's with nothing of it
+/// (it goes in the first frame: [`opening`]).
+fn upgrade(client: &Client) -> Result<tungstenite::handshake::client::Request, String> {
+    let host = client.identity();
+    if client.peer() {
+        return format!("wss://{host}/api/v2/peer/notify/ws-token")
+            .into_client_request()
+            .map_err(|e| e.to_string());
+    }
     let mut request = format!("wss://{host}/api/v2/notify/ws-token")
         .into_client_request()
         .map_err(|e| e.to_string())?;
@@ -480,13 +585,7 @@ fn connect(client: &Client, control: &Control) -> Result<Socket, Unopened> {
     request
         .headers_mut()
         .insert("Sec-WebSocket-Protocol", protocols);
-    let (socket, _) = tungstenite::client(request, stream).map_err(|e| match e {
-        tungstenite::HandshakeError::Failure(e) => unopened(host, &e),
-        tungstenite::HandshakeError::Interrupted(_) => {
-            Unopened::Lost("handshake timed out".to_owned())
-        }
-    })?;
-    Ok(socket)
+    Ok(request)
 }
 
 /// Why the upgrade to `host` failed with `e`: refused for the credentials (401, 403) only in the
@@ -522,10 +621,33 @@ static TLS: LazyLock<Result<Arc<rustls::ClientConfig>, String>> = LazyLock::new(
     ))
 });
 
-fn send(socket: &mut Socket, client: &Client, command: &str, data: &str) -> Result<(), String> {
+/// `command` with `data`, sealed with `client`'s secret: a client frame.
+fn sealed(client: &Client, command: &str, data: &str) -> Result<Envelope, String> {
     let plain = json!({ "command": command, "data": data }).to_string();
-    let sealed = Envelope::seal(client.key(), plain.as_bytes()).map_err(|e| e.to_string())?;
-    let text = serde_json::to_string(&sealed).map_err(|e| e.to_string())?;
+    Envelope::seal(client.key(), plain.as_bytes()).map_err(|e| e.to_string())
+}
+
+/// A connection's first frame, which subscribes as `request` says: the sealed command, and
+/// to another identity's server the token beside it (its upgrade carried none: [`upgrade`]).
+fn opening(client: &Client, request: &str) -> Result<String, String> {
+    let subscription = sealed(client, "establishConnectionRequest", request)?;
+    let frame = match client.peer() {
+        true => serde_json::to_string(&json!({
+            "clientAuthToken64": client.token(),
+            "sharedSecretEncryptedOptions": subscription,
+        })),
+        false => serde_json::to_string(&subscription),
+    };
+    frame.map_err(|e| e.to_string())
+}
+
+fn send<S: io::Read + io::Write>(
+    socket: &mut WebSocket<S>,
+    client: &Client,
+    command: &str,
+    data: &str,
+) -> Result<(), String> {
+    let text = serde_json::to_string(&sealed(client, command, data)?).map_err(|e| e.to_string())?;
     socket
         .send(Message::text(text))
         .map_err(|e| format!("sending {command}: {e}"))
@@ -796,6 +918,230 @@ mod tests {
             "00000000000000000000000000000001"
         );
         assert_eq!(request(true)["excludeOwnWrites"], false);
+    }
+
+    fn client_of(identity: &str) -> Client {
+        Client::new(&crate::Credentials {
+            identity: identity.into(),
+            client_auth_token: "dG9rZW4/Pz8+".into(),
+            shared_secret: "AAAAAAAAAAAAAAAAAAAAAA==".into(),
+            zk_app_key: None,
+        })
+        .expect("a client")
+    }
+
+    fn peer_of(identity: &str) -> Client {
+        let token = crate::peer::PeerToken {
+            token: "dGhlaXIgdG9rZW4/Pg==".into(),
+            shared_secret: "AQEBAQEBAQEBAQEBAQEBAQ==".into(),
+        };
+        Client::for_peer(identity, &token).expect("a client")
+    }
+
+    /// The identity's own socket is upgraded with the token as a subprotocol; another
+    /// identity's by its peer route with no token at all (its first frame carries it).
+    #[test]
+    fn a_sharers_socket_is_upgraded_without_the_token() -> Result<(), String> {
+        let own = upgrade(&client_of("tom.example"))?;
+        assert_eq!(
+            own.uri().to_string(),
+            "wss://tom.example/api/v2/notify/ws-token"
+        );
+        let protocols = own.headers()["Sec-WebSocket-Protocol"]
+            .to_str()
+            .unwrap_or("");
+        // base64url of the token's bytes, no padding.
+        assert_eq!(protocols, "odin.notify.v1, odin.bearer.dG9rZW4_Pz8-");
+
+        let theirs = upgrade(&peer_of("pippin.example"))?;
+        assert_eq!(
+            theirs.uri().to_string(),
+            "wss://pippin.example/api/v2/peer/notify/ws-token"
+        );
+        assert!(!theirs.headers().contains_key("Sec-WebSocket-Protocol"));
+        assert!(!format!("{theirs:?}").contains("dGhlaXIgdG9rZW4"));
+        Ok(())
+    }
+
+    /// The first frame: the identity's own server gets the subscription sealed; another
+    /// identity's the token in the clear beside it, and the subscription sealed with that
+    /// token's secret, asking for every write (their server offers nothing else).
+    #[test]
+    fn a_sharers_socket_opens_with_the_token_beside_the_subscription()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let drive = TargetDrive {
+            alias: uuid::Uuid::from_u128(1),
+            drive_type: uuid::Uuid::from_u128(2),
+        };
+        let opened = |client: &Client, sealed: &serde_json::Value| {
+            let envelope: Envelope = serde_json::from_value(sealed.clone())?;
+            let command: serde_json::Value = serde_json::from_slice(&envelope.open(client.key())?)?;
+            assert_eq!(command["command"], "establishConnectionRequest");
+            let data = command["data"].as_str().ok_or("data isn't a string")?;
+            Ok::<serde_json::Value, Box<dyn std::error::Error>>(serde_json::from_str(data)?)
+        };
+
+        let own = client_of("tom.example");
+        let request = Subscription { drive, own: false }.request().to_string();
+        let frame: serde_json::Value = serde_json::from_str(&opening(&own, &request)?)?;
+        assert!(frame.get("clientAuthToken64").is_none(), "{frame}");
+        assert_eq!(opened(&own, &frame)?["excludeOwnWrites"], true);
+
+        let theirs = peer_of("pippin.example");
+        // As `Notifier::spawn_shared` subscribes.
+        let request = Subscription { drive, own: true }.request().to_string();
+        let frame: serde_json::Value = serde_json::from_str(&opening(&theirs, &request)?)?;
+        assert_eq!(frame["clientAuthToken64"], "dGhlaXIgdG9rZW4/Pg==");
+        let options = opened(&theirs, &frame["sharedSecretEncryptedOptions"])?;
+        assert_eq!(options["excludeOwnWrites"], false);
+        assert_eq!(options["resultShape"], "minimal");
+        assert_eq!(
+            options["drives"][0]["alias"],
+            "00000000000000000000000000000001"
+        );
+        // Sealed with their token's secret, not readable without it.
+        let sealed: Envelope =
+            serde_json::from_value(frame["sharedSecretEncryptedOptions"].clone())?;
+        assert!(
+            sealed
+                .open(own.key())
+                .ok()
+                .and_then(|plain| serde_json::from_slice::<serde_json::Value>(&plain).ok())
+                .is_none()
+        );
+        Ok(())
+    }
+
+    impl Timed for TcpStream {
+        fn wait_at_most(&self, wait: Duration) -> io::Result<()> {
+            self.set_read_timeout(Some(wait))
+        }
+    }
+
+    /// A server frame in the clear.
+    fn frame(body: serde_json::Value) -> Message {
+        Message::text(json!({"isEncrypted": false, "payload": body.to_string()}).to_string())
+    }
+
+    /// What a connection comes to as `client`, against a server on this machine that reads
+    /// its first frame, sends `answers` and closes: that first frame, how the connection
+    /// ended, how far it came, and what it told.
+    #[allow(clippy::type_complexity)]
+    fn conversed(
+        client: &Client,
+        answers: Vec<Message>,
+    ) -> Result<(serde_json::Value, Result<(), String>, Came, Vec<Event>), Box<dyn std::error::Error>>
+    {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = std::thread::spawn(move || -> Result<String, String> {
+            let (tcp, _) = listener.accept().map_err(|e| e.to_string())?;
+            let mut socket = tungstenite::accept(tcp).map_err(|e| e.to_string())?;
+            let first = socket.read().map_err(|e| e.to_string())?;
+            for answer in answers {
+                socket.send(answer).map_err(|e| e.to_string())?;
+            }
+            socket.close(None).map_err(|e| e.to_string())?;
+            // Until the client has answered the close.
+            while socket.read().is_ok() {}
+            first
+                .into_text()
+                .map(|t| t.to_string())
+                .map_err(|e| e.to_string())
+        });
+        let tcp = TcpStream::connect(addr)?;
+        let (mut socket, _) =
+            tungstenite::client(format!("ws://{addr}/"), tcp).map_err(|e| e.to_string())?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let drive = TargetDrive {
+            alias: uuid::Uuid::from_u128(1),
+            drive_type: uuid::Uuid::from_u128(2),
+        };
+        let subscription = Subscription {
+            drive,
+            own: client.peer(),
+        };
+        let mut came = Came::default();
+        let ended = converse(
+            &mut socket,
+            client,
+            subscription,
+            &tx,
+            &Control::default(),
+            &Received::default(),
+            &mut came,
+        );
+        // Hung up: the server's last read ends.
+        drop(socket);
+        drop(tx);
+        let first = server.join().map_err(|_| "the server panicked")??;
+        Ok((
+            serde_json::from_str(&first)?,
+            ended,
+            came,
+            rx.iter().collect(),
+        ))
+    }
+
+    /// Another identity's server closes a connection whose token it doesn't take without a
+    /// word: a refusal, asked again later, not a connection lost and tried again at once. The
+    /// identity's own server closing is a connection lost, as before.
+    #[test]
+    fn a_sharers_server_closing_before_it_subscribes_refuses()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (first, ended, came, told) = conversed(&peer_of("pippin.example"), Vec::new())?;
+        assert_eq!(first["clientAuthToken64"], "dGhlaXIgdG9rZW4/Pg==");
+        assert!(ended.is_err(), "{ended:?}");
+        let refused = Came {
+            connected: false,
+            refused: true,
+        };
+        assert_eq!(came, refused);
+        assert!(matches!(told[..], [Event::Refused(_)]), "{told:?}");
+
+        let (first, ended, came, told) = conversed(&client_of("tom.example"), Vec::new())?;
+        assert!(first.get("clientAuthToken64").is_none(), "{first}");
+        assert!(ended.is_err(), "{ended:?}");
+        assert_eq!(came, Came::default());
+        assert!(told.is_empty(), "{told:?}");
+        Ok(())
+    }
+
+    /// Their server subscribes the connection and tells of a file as the identity's own
+    /// does; closing after that is a connection lost, not a refusal.
+    #[test]
+    fn a_sharers_server_subscribes_and_tells() -> Result<(), Box<dyn std::error::Error>> {
+        let file = json!({"fileRef": {"fileId": uuid::Uuid::new_v4(),
+            "versionTag": uuid::Uuid::new_v4(), "fileState": "active", "updated": 1,
+            "fileType": 7101}});
+        let answers = vec![
+            frame(json!({"notificationType": "deviceHandshakeSuccess"})),
+            frame(json!({"notificationType": "fileModified", "data": file.to_string()})),
+        ];
+        let (_, ended, came, told) = conversed(&peer_of("pippin.example"), answers)?;
+        assert!(ended.is_err(), "{ended:?}");
+        let subscribed = Came {
+            connected: true,
+            refused: false,
+        };
+        assert_eq!(came, subscribed);
+        assert!(
+            matches!(told[..], [Event::Connected, Event::Changed(Some(_))]),
+            "{told:?}"
+        );
+        Ok(())
+    }
+
+    /// A token their server doesn't take is answered in the clear (it has no secret to seal
+    /// with): a refusal.
+    #[test]
+    fn a_token_refused_in_the_clear_is_a_refusal() {
+        let frame = json!({"isEncrypted": false, "payload":
+            json!({"notificationType": "authenticationError", "data": "Invalid Token"}).to_string()});
+        assert_eq!(
+            notification(&peer_of("pippin.example"), &frame.to_string()),
+            Notification::Refused("refused: Invalid Token".into())
+        );
     }
 
     /// An event of another app's file on the drive (a type not a sync node's) is no change of

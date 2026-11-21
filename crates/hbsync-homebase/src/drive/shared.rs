@@ -9,6 +9,7 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::ops::Range;
 use std::path::Path;
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -25,9 +26,11 @@ use super::sealed::CipherRange;
 use super::share_keys::CircleKey;
 use super::wire::{self, FileHeader, Keys};
 use super::{
-    HOLD_BACK, HomebaseRemote, SHARER_WAIT, changes_page, decrypt, feed_page, fetch, file_route,
-    holding, payload_key, plain_size, query_batch, raw_header, refs_page, remote_error,
+    HOLD_BACK, HomebaseRemote, SHARER_WAIT, TargetDrive, changes_page, decrypt, feed_page, fetch,
+    file_route, holding, payload_key, plain_size, query_batch, raw_header, refs_page, remote_error,
 };
+use crate::app::SYNC_DRIVE;
+use crate::notify::{Event, Notifier};
 use crate::peer::{self, PeerToken};
 use crate::{Client, HomebaseError};
 
@@ -168,6 +171,19 @@ impl PeerRemote {
     /// the same one.
     pub fn login_id(&self) -> String {
         self.client().login_id().to_owned()
+    }
+
+    /// What their server tells of the files shared, sent to `events` as an identity's own
+    /// drive's is ([`Notifier::spawn_shared`]). Each connection is made with the token held
+    /// then: one their server refuses is replaced by the next read ([`PeerRemote::renewed`]),
+    /// never by the connection, which waits and asks again.
+    pub fn notifier(self: &Arc<Self>, events: Sender<Event>) -> std::io::Result<Notifier> {
+        let drive = TargetDrive {
+            alias: self.sharer.drive_alias,
+            drive_type: SYNC_DRIVE.drive_type,
+        };
+        let remote = Arc::clone(self);
+        Notifier::spawn_shared(move || (*remote.client()).clone(), drive, events)
     }
 
     /// Their server, with the token held now.
