@@ -540,8 +540,14 @@ included (service managers restart it then).
   is one, its status naming that identity as its `sharer`): the runner is given the folder
   that what changes here moves out to, outside the folder and on its volume, and tells each
   move in a note ("report.txt: moved to …, as this folder is read-only (what changes here
-  isn't synced)"). Held deletes there are only confirmed or left held: a put back is told as
-  not possible, and nothing is asked of the drive. A runner says whose drive it syncs when
+  isn't synced)"). Held deletes there are only confirmed or left held: a put back is refused
+  as it is asked ("This folder is read-only: what it holds back can't be put back on
+  Homebase, only deleted here or left held"), and nothing is asked of the drive. They are
+  said as the sharer's doing ("Everything here was removed by tom.example, or is no longer
+  shared with you: 80 items. Delete removes them from this computer too. They can't be put
+  back: only tom.example can change what they share with you. To keep any of them, copy
+  them to another folder first."), with **Delete** alone on the tray's page, and
+  `hbsync put-back` saying so and asking nothing. A runner says whose drive it syncs when
   another identity's, and only then: one that doesn't isn't started (a share never passes
   for the account's own folder; `hbsync status` shows a share with `->`, and it is never
   the folder shown first).
@@ -1039,12 +1045,12 @@ Linux (rfd's, without GTK) needs `zenity`, which KDE doesn't install.
   date, cyan syncing, grey paused or offline or not set up, magenta when something needs the
   user (a failure, held deletes, a refused login). On macOS the cloud in one colour; a problem
   shows the tile with its magenta dot. The files: `crates/hbsync-tray/assets/README.md`.
-- **Menu:** version, identity, a status line (with progress while syncing, the first sync after
+- **Menu:** version, identity, a status line (of the folder that most needs the user; of what another identity shares, with its sharer's name before it, unless it waits and says for whom itself; with progress while syncing, the first sync after
   starting included), how far emptying Recently deleted (or the daily purge) has got while it
   runs ("Emptying Recently deleted: 3,000 of 22,367"), Open Homebase folder, Browse files online (chat's web app on the
   identity, opened on its Filesync mini-app: `https://<identity>/apps/chat/#filesync`),
   Recently synced (the last 10; clicking one shows it
-  in the file manager), Problems (the main folder's notes and its account's, newest first), a line when shares are off (their folder gone or not made; setting one up again is the command line's, `hbsync shared-folder`), Review N deletions…, Recently deleted…, Set up this computer…, Log
+  in the file manager), Problems (the main folder's notes, its account's and those of what others share with it, newest first: what moved out of a read-only folder is among them), a line when shares are off (their folder gone or not made; setting one up again is the command line's, `hbsync shared-folder`), Review N deletions…, Recently deleted…, Set up this computer…, Log
   in again… (refused), Pause syncing (1 h, 8 h, 24 h, until resumed) or Resume, Sync now, Start
   at login, Open logs, Log out, Quit (keep syncing in the background, or stop syncing too).
   Syncing stopped: Start syncing, Open Homebase folder, Start at login, Open logs, Quit.

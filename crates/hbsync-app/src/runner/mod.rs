@@ -411,7 +411,13 @@ impl Handle {
     /// gone (nothing is held there). Taken, it goes with the next sync (after one in progress;
     /// paused, once syncing resumes), for exactly the deletes it named: any held since stay
     /// held, shown again.
+    ///
+    /// A read-only folder (what another identity shares) never puts back: refused here, so
+    /// the user is told as they ask, not by a note after the next sync.
     pub fn answer(&self, answer: HeldAnswer, token: &str) -> Result<(), String> {
+        if answer == HeldAnswer::PutBack && self.drive.shared() {
+            return Err(crate::words::NO_PUT_BACK.into());
+        }
         {
             let mut held = lock(&self.held);
             if held.nodes.is_empty() || held.token != token {
@@ -1261,11 +1267,10 @@ impl Runner {
                     match p.engine.put_back(&seen) {
                         Ok(_) => {}
                         // A read-only folder never puts back (§13): nothing to try again.
-                        Err(hbsync_engine::EngineError::ReadOnly(_)) => self.tell(vec![
-                            "This folder is read-only: what it holds back can't be put back on \
-                             Homebase, only deleted here or left held"
-                                .into(),
-                        ]),
+                        // (Refused as it is asked, [`Handle::answer`]: not come by here.)
+                        Err(hbsync_engine::EngineError::ReadOnly(_)) => {
+                            self.tell(vec![crate::words::NO_PUT_BACK.into()])
+                        }
                         // What it didn't put back is still held, and shown again; the first
                         // time, it runs once more a minute on (a file the identity said once
                         // isn't there is gone for good then, and goes up again from here).

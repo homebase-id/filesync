@@ -765,16 +765,16 @@ fn answer_held(paths: &Paths, yes: bool, answer: HeldAnswer) -> Res<()> {
     let held: Vec<_> = status
         .folders
         .into_iter()
-        .filter_map(|f| Some((f.path, f.state == State::Paused, f.held_deletes?)))
+        .filter_map(|f| Some((f.path, f.sharer, f.state == State::Paused, f.held_deletes?)))
         .collect();
     if held.is_empty() {
         println!("No deletions to review.");
         return Ok(());
     }
-    for (path, paused, held) in held {
+    for (path, sharer, paused, held) in held {
         println!("{}:", path.display());
         let (delete, put_back) = ("`hbsync confirm-deletes`", "`hbsync put-back`");
-        for line in words::held_deletes(&held, delete, put_back) {
+        for line in words::held_deletes(&held, sharer.as_ref(), delete, put_back) {
             println!("{line}");
         }
         for example in &held.examples {
@@ -782,6 +782,11 @@ fn answer_held(paths: &Paths, yes: bool, answer: HeldAnswer) -> Res<()> {
         }
         if held.more_than_shown() {
             println!("  ...");
+        }
+        // What another identity shares can't be put back: said, not asked.
+        if answer == HeldAnswer::PutBack && sharer.is_some() {
+            println!("Nothing done; they are still to review.");
+            continue;
         }
         let question = match answer {
             HeldAnswer::Delete => "Delete them?",
