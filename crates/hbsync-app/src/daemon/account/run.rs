@@ -898,7 +898,7 @@ impl Account {
             // name that isn't the folder of shares (gone, or renamed, since its runner told):
             // what the identities share would be the account's own there, and sent.
             let config = Config::now(paths);
-            let within = ending::is_shares_folder(main, dir);
+            let within = hbsync_local::shares::is_folder(main, dir);
             for (i, again) in starting {
                 let share = &mut shares[i];
                 let started = match (&config, &within) {

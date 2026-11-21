@@ -94,7 +94,7 @@ fn take_off(
         return Err("its records aren't those of what is shared with this account".into());
     }
     let dir = folder.parent().unwrap_or(folder);
-    if !is_shares_folder(out, dir).map_err(|e| said(&e))? {
+    if !hbsync_local::shares::is_folder(out, dir).map_err(|e| said(&e))? {
         return Err(format!("{} isn't the folder of shares now", dir.display()));
     }
     match std::fs::symlink_metadata(folder) {
@@ -217,17 +217,6 @@ fn gone(removed: std::io::Result<()>) -> std::io::Result<()> {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => Err(e),
         _ => Ok(()),
     }
-}
-
-/// Whether `dir` is the folder of shares of the main folder `main`, by that one's record,
-/// and a folder itself: not a link to it (where a volume tells no file ids the record goes
-/// by the marker in it, which a link would lead to). What a share is synced into, and what
-/// its copy is taken out of, is asked here.
-pub(super) fn is_shares_folder(main: &Path, dir: &Path) -> std::io::Result<bool> {
-    if !std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir()) {
-        return Ok(false);
-    }
-    hbsync_local::shares::Record::read(main)?.is(dir)
 }
 
 /// Removes a share's state DB at `db`, with the directory this account keeps it in

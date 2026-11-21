@@ -1123,11 +1123,16 @@ Linux (rfd's, without GTK) needs `zenity`, which KDE doesn't install.
   icon of its own while it is there: the Filesync cloud with a second, smaller dot (another
   identity's beside yours; `shares-<hash>.ico`, `.png` in the state folder). The icon alone,
   the same way, and no shortcut: its place is in the main folder. Only that folder, not each
-  sharer's folder in it; never what a link of its name leads to. Given once, again when a
-  new version brings another, and again when the folder has none (the user removed the
-  folder and it was made anew: the note says done, the file that carries the icon isn't in
-  it; one look at the tray's start). A folder of shares renamed gets it under its new name
-  as the tray next hears of it. Unlinking takes it off with the main folder's.
+  sharer's folder in it; only the folder on the main folder's record as the icon is given
+  (never another folder that took its name, nor what a link of its name leads to). Given
+  once, again when a new version brings another, and again when the folder has none (the
+  user removed the folder and it was made anew: the note says done, the file that carries
+  the icon isn't in it). The tray looks when the daemon's status tells of the folder of
+  shares at another place than before (at its start; renamed; gone and back): it gets the
+  icon under its new name, and what is left by the path it left is forgotten once it isn't
+  the folder of shares there (its note; on Linux the GIO metadata, which is kept by the path
+  and would show on whatever folder comes there next, as the drive's own folder of that name
+  where the folder of shares gave way to it). Unlinking takes it off with the main folder's.
 - **Explorer's navigation pane (Windows):** at every start the tray registers the folder as a
   Cloud Files sync root named "Homebase" (`HomebaseFilesync!<user SID>!<identity>~<hash of the
   folder>`), at the top of the pane as OneDrive's and Dropbox's are. Only the registration, no

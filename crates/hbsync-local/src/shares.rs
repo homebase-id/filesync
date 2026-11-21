@@ -266,6 +266,17 @@ impl Top {
     }
 }
 
+/// Whether `dir` is the folder of shares of the sync folder at `root`, by that one's record,
+/// and a folder itself: not a link to it (where a volume tells no file ids the record goes
+/// by the marker in it, which a link would lead to). What a share is synced into, what its
+/// copy is taken out of, and what gets the folder of shares' icon is asked here.
+pub fn is_folder(root: &Path, dir: &Path) -> io::Result<bool> {
+    if !std::fs::symlink_metadata(dir).is_ok_and(|meta| meta.is_dir()) {
+        return Ok(false);
+    }
+    Record::read(root)?.is(dir)
+}
+
 /// The folder of shares at the top of `root`, by name ([`Top::shares`]).
 pub fn folders(root: &Path) -> io::Result<Vec<String>> {
     Ok(Top::read(root)?.shares)
