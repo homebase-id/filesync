@@ -14,7 +14,8 @@ use crate::protocol::Hints;
 use crate::sync::lock;
 
 /// While the notifications aren't connected (not yet, not any more, or never: a proxy, a
-/// refusal), the drive is read this often; never while they are.
+/// refusal), the drive is read this often. While they are, only when the drive itself says
+/// so ([`Drive::reread_at`]), and then no more often than this.
 pub const UNANNOUNCED_READ: Duration = Duration::from_secs(300);
 
 /// What the identity's notifications do to its drive: changes announced are taken once the
@@ -24,12 +25,16 @@ pub const UNANNOUNCED_READ: Duration = Duration::from_secs(300);
 /// the drive is read every [`UNANNOUNCED_READ`]. Nothing is pulled while paused. A pull wakes
 /// the folders its changes concern.
 ///
+/// Connected, a drive is read once more when it says so ([`Drive::reread_at`]): while a read
+/// of the feed from its beginning is left open (this device back after long; what it asks
+/// about takes a second answer some minutes on), and, what another identity shares, when
+/// its time for such a read is over (a share's end, the week), which their server doesn't
+/// announce.
+///
 /// What another identity shares has notifications of its own, from their server, and is
-/// taken the same way, with two differences. Their refusal is of the token their server
+/// taken the same way, with one difference. Their refusal is of the token their server
 /// gave, not of this login: the drive is read on its timer all the same, as the read is
-/// what gets a new token. And while connected it is read once more when the time kept for
-/// reading it from its beginning is over ([`Drive::reread_at`]: a share's end, the week),
-/// which their server doesn't announce.
+/// what gets a new token.
 #[derive(Debug)]
 pub struct Notifications {
     puller: Puller,
@@ -187,8 +192,9 @@ impl Notifications {
             .send(std::mem::take(&mut self.changes), read, self.connected);
     }
 
-    /// Pulls what was announced once it has quieted, and the drive every [`UNANNOUNCED_READ`]
-    /// while not connected; nothing while `paused` (a resume syncs every folder anyway).
+    /// Pulls what was announced once it has quieted, and the drive when it is next due
+    /// unannounced ([`Notifications::next_unannounced`]); nothing while `paused` (a resume
+    /// syncs every folder anyway).
     pub fn tick(&mut self, now: Instant, paused: bool) {
         if paused {
             return;
@@ -201,17 +207,18 @@ impl Notifications {
         }
         if self.next_unannounced().is_some_and(|at| now >= at) {
             self.next_read = now + UNANNOUNCED_READ;
-            // (Not counted while the identity refuses the login: the read asks nothing.)
-            self.unannounced += u64::from(self.puller.drive.denied().is_none());
+            // Counted where what else isn't announced is to be read with it: not connected.
+            // (Connected, that is announced: this read is the drive's own, for itself. Nor
+            // while the identity refuses the login: the read asks nothing.)
+            let counts = self.connected.is_none() && self.puller.drive.denied().is_none();
+            self.unannounced += u64::from(counts);
             self.puller.ask();
         }
     }
 
     /// When the drive is next read for what isn't announced: every [`UNANNOUNCED_READ`]
     /// while not connected (refused, a read asks nothing: [`Drive::deny`]); connected, only
-    /// when the drive says so ([`Drive::reread_at`]: what another identity shares, when its
-    /// time to be read from its beginning is over; any drive, while such a read is left
-    /// open), and never before `next_read`: so a read that left that time
+    /// when the drive says so ([`Drive::reread_at`]), and never before `next_read`: so a read that left that time
     /// as it was (it failed) is asked again an [`UNANNOUNCED_READ`] later, not at every
     /// turn. (`next_read` may also lie ahead from before it connected; the read as it
     /// connected has looked at the time by then.)
@@ -801,6 +808,9 @@ mod tests {
             None,
             "read when announced, as before"
         );
+        // The read on was the drive's own: nothing else is read with it (the share markers
+        // are, with a read for what isn't announced; connected, their changes are).
+        assert_eq!(n.unannounced_reads(), 1, "the read as it connected alone");
         Ok(())
     }
 

@@ -384,20 +384,16 @@ impl Drive {
             self.stuck_asks.store(0, Ordering::SeqCst);
         }
         let left = |due: i64| Duration::from_millis(due.saturating_sub(now).max(0) as u64);
-        let due = match self
-            .shared()
-            .then(|| self.account().read(|s| s.reread_due()))
-        {
-            // An identity's own drive: none is kept.
-            None => None,
-            Some(Ok(due)) => due.map(left),
-            // Not known: asked again soon, as nothing else would.
-            Some(Err(_)) => Some(gone::ASK_AGAIN),
+        let due = if !self.shared() {
+            None // an identity's own drive keeps no time
+        } else {
+            match self.account().read(|s| s.reread_due()) {
+                Ok(due) => due.map(left),
+                // Not known: asked again soon, as nothing else would.
+                Err(_) => Some(gone::ASK_AGAIN),
+            }
         };
-        let wait = match (due, on) {
-            (Some(due), Some(on)) => Some(due.min(on)),
-            (due, on) => due.or(on),
-        };
+        let wait = [due, on].into_iter().flatten().min();
         *lock(&self.reread_at) = wait.map(|wait| Instant::now() + wait);
     }
 

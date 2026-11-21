@@ -173,8 +173,9 @@ fn a_device_away_longer_than_the_trace_reads_the_feed_again() -> common::Res<()>
     // as nothing else would while its changes are announced.
     let on = b.engine.drive().reread_at().ok_or("no read asked for")?;
     let left = on.saturating_duration_since(std::time::Instant::now());
+    let asked = hbsync_engine::gone::ASK_AGAIN;
     assert!(
-        (50..=62).contains(&left.as_secs()),
+        left <= asked && left + std::time::Duration::from_secs(10) >= asked,
         "{left:?}, not about a minute"
     );
     assert_eq!(b.a_minute_on()?, 1);
