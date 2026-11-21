@@ -552,11 +552,17 @@ own server answers the peer routes, which need `UseTransitRead` ("Permission key
 server answers the rest, to a token their server made for this identity's connection.
 - **A token for their server** **[verified]** (`V2PeerNotificationController`,
   `PeerAppNotificationService`, `CircleNetworkService.CreatePeerIcrClientForCallerAsync`): `POST
-  /api/v2/peer/notify/token` `{"identity": "<sharer>"}` (needs `UseTransitRead` or
-  `UseTransitWrite`) answers `{authenticationToken64, sharedSecret}`. Each call adds a client
-  registration on their server that is never removed (20-year life, no revoke route): keep it,
-  ask again only once their server refuses it (401: unknown, or the connection gone or
-  blocked). The own server retries the call to theirs, and an answer lost on the way may still
+  /api/v2/peer/notify/token` `{"identity": "<sharer>"}` (needs `UseTransitRead`) answers
+  `{authenticationToken64, sharedSecret}`. Each call adds a client registration on their
+  server. It lives 30 days from its last use and goes with the connection it was made under;
+  one made under an earlier connection with the same identity is refused (odin-core #2132,
+  **[verified]** at 625085b90: `PeerIcrClient.TimeToLiveSeconds` and `ConnectionCreated`,
+  `CircleNetworkStorage.GetPeerIcrClientAsync`, `PeerAppNotificationService`; before it a
+  token lived 20 years and was never removed). So keep it, and ask again only once their
+  server refuses it (401: unknown, run out, or the connection gone or blocked): a device
+  that was off for more than 30 days asks at its first read. **[tried]** on the dev server:
+  one token read a share every five minutes for 24 hours (2026-11-20), and a token from
+  before #2132 was answered 401 and replaced with one request (2026-11-21). The own server retries the call to theirs, and an answer lost on the way may still
   have left a row: don't retry blindly. Refusals: not connected here, 400
   `notAConnectedIdentity` (this client then waits an hour, `RemoteError::Waiting`, saying
   so: no failure, and no token asked of theirs); their server unreachable, 400 with no code (503 from it:
@@ -640,11 +646,12 @@ server answers the rest, to a token their server made for this identity's connec
   refusal it is, and asks again as for a refused login, not at once. Every notification of
   their server that isn't a drive's goes to every peer socket (**[verified]**
   `PeerAppNotificationDispatcher.WsPublishAsync`; none came in 70 idle seconds): unread here.
-  Before odin-core #2132 (merged 2026-11-19 as 625085b90, #2144) a token subscribed once an
-  hour only: the handler set the socket's name on the token's cached context, so every
-  later handshake with the token failed until the cache dropped it (**[tried]** at
-  139c0f618: a reconnect a second later, a second socket, and a new process five minutes
-  later were each closed).
+  A reconnect with the same token subscribes at once, and so does a second socket beside
+  the first (**[tried]** at d347a25a6). It needs odin-core #2132 (merged 2026-11-19 as
+  625085b90, #2144): before it a token subscribed once an hour only, as the handler set the
+  socket's name on the token's cached context and every later handshake with the token
+  failed until the cache dropped it (**[tried]** at 139c0f618: a reconnect a second later, a
+  second socket, and a new process five minutes later were each closed).
 - **A version's own time** (`versionUpdated`, odin-core PR #2143, merged as 5e4cd493f on
   2026-11-17, #2142; **[verified]** there: `DriveFileUtility.VersionUpdatedOf` and
   `AnswersVersionUpdated`, `ClientFileMetadata.VersionUpdated`, `FileRef.VersionUpdated`,
