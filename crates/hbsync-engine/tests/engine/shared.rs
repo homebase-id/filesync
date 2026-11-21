@@ -221,6 +221,11 @@ fn a_file_that_cant_be_asked_about_is_asked_less_and_less_often() -> R {
     b.sync()?;
     assert_eq!(b.tree_text(""), ["gone.txt = gone"], "not there once: kept");
     in_about(&b, MINUTE);
+    // Stuck anew, the pauses start over.
+    b.remote.faults().failing_headers = true;
+    b.sync()?;
+    in_about(&b, 5 * MINUTE);
+    b.remote.faults().failing_headers = false;
     b.a_minute_on()?;
     b.sync()?;
     assert!(b.tree_text("").is_empty(), "{:?}", b.tree_text(""));

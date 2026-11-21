@@ -72,7 +72,8 @@ pub struct FeedReport {
     pub skipped: Vec<Skipped>,
     /// The server's clock at the last page read, Unix ms.
     pub server_time: Option<i64>,
-    /// How a read from the beginning stands after the pull.
+    /// How a read from the beginning stands after the pull: one pull's own. (A sum of
+    /// reports has its last one's, which says nothing where that one read no page.)
     pub rereading: Rereading,
 }
 
