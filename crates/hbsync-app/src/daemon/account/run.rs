@@ -5,12 +5,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use hbsync_engine::Drive;
 use hbsync_homebase::drive::HomebaseRemote;
-use hbsync_homebase::notify::Event;
+use hbsync_homebase::notify::{Event, Events};
 use hbsync_homebase::{Client, HomebaseError};
 use hbsync_remote::ErrorClass;
 use hbsync_state::Unusable;
@@ -124,25 +124,14 @@ impl Account {
         let Some(remote) = self.connect(&client, stop, requests, &mut msgs) else {
             return Ok(());
         };
-        // The notifications' events reach this thread's channel through a thread of their own,
-        // which ends with them.
-        let (tx, events) = channel();
-        let to_account = self.requests.clone();
-        std::thread::Builder::new()
-            .name("hbsync-hints".into())
-            .spawn(move || {
-                for event in events {
-                    if to_account.send(Msg::Hint(event)).is_err() {
-                        return;
-                    }
-                }
-            })
-            .map_err(DaemonError::Ipc)?;
         self.sync(paths, config, requests, stop, &mut msgs, |db| {
-            let mut parts =
-                AccountParts::open(&self.identity, Arc::clone(&remote), db, tx.clone())?;
+            // The notifications' events go to this thread's channel, from their own thread.
+            let to_account = self.requests.clone();
+            let hints = Events::to(move |event| to_account.send(Msg::Hint(event)).is_ok());
+            let mut parts = AccountParts::open(&self.identity, Arc::clone(&remote), db, hints)?;
             // Whose shares it syncs is what the identity's share markers say.
-            let sharers = ByMarkers::new(&self.identity, Arc::clone(&remote), paths);
+            let to_account = self.requests.clone();
+            let sharers = ByMarkers::new(&self.identity, Arc::clone(&remote), paths, to_account);
             parts.sharers = Some(Box::new(sharers));
             Ok(parts)
         })
@@ -425,11 +414,31 @@ impl Account {
                         shown.status.hints = hints;
                         changed = true;
                     }
+                    // A share's own: what its sharer's server announces, or that it
+                    // doesn't for now. One whose copy waits its turn to be taken off hears
+                    // on (it may be on again before its turn comes); one gone has none to
+                    // take it.
+                    Msg::ShareHint(sharer, event) => {
+                        let theirs = |s: &&mut Sharing| s.share.sharer == sharer;
+                        let now = Instant::now();
+                        if let Some(s) = shares.iter_mut().find(theirs) {
+                            s.share.notifications.event(event, now, paused);
+                        } else if let Some(s) = to_end.iter_mut().find(theirs) {
+                            // (As paused: nothing is read for a copy about to go.)
+                            s.share.notifications.event(event, now, true);
+                        }
+                    }
                     Msg::Woke => {
                         markers.hurry(Instant::now());
                         if let Some(n) = &notifier {
                             n.reconnect();
                             notifications.reconnecting();
+                        }
+                        for share in &mut shares {
+                            if let Some(n) = &share.share.notifier {
+                                n.reconnect();
+                                share.share.notifications.reconnecting();
+                            }
                         }
                         let _ = lock(&self.shown).send(&self.identity, &Command::Woke);
                     }
@@ -652,7 +661,10 @@ impl Account {
                 && !to_end.is_empty()
                 && let Some(at) = &shares_at
             {
-                let share = to_end.remove(0);
+                let mut share = to_end.remove(0);
+                // Its sharer's notifications end here, not as it stopped being synced: one
+                // that waited its turn and is on again is synced on as it is, listening.
+                share.share.notifier = None;
                 let device = config.device_name();
                 ending_copy = self.end_copy(share, paths, device, at, &ending_stop);
             }

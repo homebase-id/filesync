@@ -195,6 +195,8 @@ pub(crate) enum Msg {
     Request(Request),
     /// From its notifications.
     Hint(Event),
+    /// From the notifications of what another identity shares with it.
+    ShareHint(Identity, Event),
     /// The machine woke up.
     Woke,
     /// Look again: it is to end, the daemon stops, its pause changed, or a runner is ending.
@@ -1209,6 +1211,8 @@ mod tests {
         /// How often they were read, and how often a share was tried to open.
         reads: usize,
         opens: usize,
+        /// How often a share's notifications were started.
+        listens: usize,
         /// Whose share was opened, ever (its state DB is this computer's from then on).
         opened: Vec<Identity>,
         /// How long after a read that says a share is off a second one confirms it (none:
@@ -1274,7 +1278,13 @@ mod tests {
                 let drive = Drive::open(&db, &self.me, ended)?;
                 return Ok(parts::Share::new(sharer, drive, db));
             }
-            open_share(&self.me, sharer, &db, &self.server)
+            let markers = self.markers.clone();
+            let share = open_share(&self.me, sharer, &db, &self.server)?;
+            // (None to start here: only that the account asks for them is counted.)
+            Ok(share.hearing(move || {
+                lock(&markers).listens += 1;
+                None
+            }))
         }
 
         fn confirm_after(&self) -> std::time::Duration {
@@ -1784,6 +1794,52 @@ mod tests {
             started.wait_all("made again and synced", &|s, folders| {
                 both_synced(s, folders) && at.join(".hbsync").is_dir()
             })?;
+            Ok(())
+        };
+        let checked = checks();
+        started.stop(checked)?
+    }
+
+    /// A share's notifications are started as the account takes the share in (their events
+    /// come to it from then on), once.
+    #[test]
+    fn a_shares_notifications_start_as_it_is_taken_in() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let f = Marked::start(home.path(), |m| m.on = vec!["tom.example".into()])?;
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            f.started.wait_all("the share is synced", &both_synced)?;
+            assert_eq!(lock(&f.markers).listens, 1);
+            Ok(())
+        };
+        let checked = checks();
+        f.started.stop(checked)?
+    }
+
+    /// What a sharer's server announces is taken as it is announced, by the share's own
+    /// notifications: the change is in the share's folder within seconds, not at the next
+    /// read on its timer (five minutes).
+    #[test]
+    fn a_sharers_notice_brings_its_change_in_at_once() -> Result<(), Box<dyn std::error::Error>> {
+        use hbsync_remote::contract::Shares;
+        use hbsync_remote::{ChangeRef, Remote};
+
+        let home = tempfile::tempdir()?;
+        let tom_server = FakeServer::new(ServerConfig::default());
+        let (_, folder, _, start) = shared_with(home.path(), &tom_server)?;
+        let started = start();
+        let tom: Identity = "tom.example".into();
+        let at = folder.join("Shared").join("tom.example");
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            started.wait_all("both sync", &both_synced)?;
+            let owner = FakeRemote::new(tom_server.clone());
+            let plans = hbsync_remote::contract::folder("Plans", hbsync_types::NodeId::ROOT);
+            let plans = owner.create(&plans, None)?;
+            owner.share(plans.at().file_id)?;
+            let notice = ChangeRef::of(&owner.header(plans.at().file_id)?);
+            let said = Event::Changed(Some(notice));
+            started.account.tell(Msg::ShareHint(tom.clone(), said));
+            wait_until(|| at.join("Plans").is_dir().then_some(()))
+                .ok_or("the change announced didn't come in")?;
             Ok(())
         };
         let checked = checks();

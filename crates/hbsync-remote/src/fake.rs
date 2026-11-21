@@ -1005,6 +1005,9 @@ pub struct Faults {
     /// Headers answer [`RemoteError::NotFound`] though the file is there: the identity's own
     /// 404 for a moment (a server's hiccup), which must not make a live file gone.
     pub not_found_headers: bool,
+    /// Headers fail with [`RemoteError::Transient`] (a connection that breaks at them); the
+    /// feed still reads.
+    pub failing_headers: bool,
     /// Requests seen, for assertions.
     pub requests: usize,
     /// Headers read ([`Remote::header`]), for assertions.
@@ -1304,11 +1307,14 @@ impl Remote for FakeRemote {
 
     fn header(&self, file_id: RemoteFileId) -> Result<RemoteHeader> {
         self.gate()?;
-        let not_found = {
+        let (not_found, failing) = {
             let mut faults = self.faults();
             faults.headers += 1;
-            faults.not_found_headers
+            (faults.not_found_headers, faults.failing_headers)
         };
+        if failing {
+            return Err(RemoteError::Transient("the header's read broke".into()));
+        }
         if not_found {
             return Err(RemoteError::NotFound);
         }

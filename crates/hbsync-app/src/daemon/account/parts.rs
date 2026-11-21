@@ -3,12 +3,11 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use hbsync_engine::Drive;
 use hbsync_homebase::drive::HomebaseRemote;
-use hbsync_homebase::notify::{Event, Notifier};
+use hbsync_homebase::notify::{Events, Notifier};
 use hbsync_remote::Remote;
 
 use super::feed::{Notifications, Puller};
@@ -89,6 +88,22 @@ pub struct Share {
     pub db: PathBuf,
     /// What brings it the drive's changes: read on a timer until they are announced.
     pub notifications: Notifications,
+    /// The sharer's notifications ([`hbsync_homebase::drive::shared::PeerRemote::notifier`]),
+    /// whose events the account hands to `notifications`; `None`: none were started (not
+    /// yet: [`Share::listen`]; they couldn't be; or the share is only opened to end), and
+    /// the drive is read on a timer. Stops when the share is dropped.
+    pub notifier: Option<Notifier>,
+    /// What starts them ([`Share::hearing`]), until it has.
+    to_listen: Option<Listen>,
+}
+
+/// Starts a share's notifications ([`Share::listen`]); `None`: they couldn't be.
+struct Listen(Box<dyn FnOnce() -> Option<Notifier> + Send>);
+
+impl std::fmt::Debug for Listen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Listen(..)")
+    }
 }
 
 impl Share {
@@ -100,6 +115,25 @@ impl Share {
             notifications: Notifications::new(Puller::spawn(Arc::clone(&drive)), Instant::now()),
             drive,
             db,
+            notifier: None,
+            to_listen: None,
+        }
+    }
+
+    /// The share, to hear its sharer's notifications: `start` starts them when the account
+    /// has taken the share in ([`Share::listen`]).
+    pub fn hearing(mut self, start: impl FnOnce() -> Option<Notifier> + Send + 'static) -> Share {
+        self.to_listen = Some(Listen(Box::new(start)));
+        self
+    }
+
+    /// Starts its sharer's notifications, where it has any to start and hasn't yet: called
+    /// by the account's thread once it takes the share's events. Started before, a
+    /// `Connected` could come while nobody takes it, and the share would be read on its
+    /// timer for as long as that connection holds.
+    pub fn listen(&mut self) {
+        if let Some(Listen(start)) = self.to_listen.take() {
+            self.notifier = start();
         }
     }
 }
@@ -111,7 +145,7 @@ impl AccountParts {
         identity: &str,
         remote: Arc<HomebaseRemote>,
         db: &Path,
-        events: Sender<Event>,
+        events: impl Into<Events>,
     ) -> Result<Self, RunnerError> {
         let drive = Self::open_drive(identity, Arc::clone(&remote), db)?;
         let notifier = Notifier::spawn(remote.client().clone(), remote.drive(), events);

@@ -32,7 +32,10 @@ is read from the header's `versionUpdated` (a share change moves `updated`, not 
 PR #2143 (merged as 5e4cd493f, not released yet; filesync #385): a server without it tells no
 such time, so nothing there is purged, and a removed folder takes along all that is live below
 it, what was written after its removal too (**[verified]** `along::by_removal`): don't release
-the client to an identity before its server has it. Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
+the client to an identity before its server has it. What another identity shares is heard
+on a socket to their server, which needs odin-core v0.1.995 or newer there (PR #2132;
+**[verified]** live): a server without it subscribes a token once an hour only, and the
+share is read every 5 min meanwhile. Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
 sync semantics §10): built-in junk, and per-device ignore rules in `.hbsync/ignore` (gitignore
 syntax, picked up a second after an edit, within a minute without a watcher); an ignored item
 is kept on its device only.
