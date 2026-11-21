@@ -179,6 +179,52 @@ fn a_notice_of_a_shared_file_reads_the_feed_for_its_end() -> R {
     Ok(())
 }
 
+/// When another identity's drive is read from its beginning next (a share's end, the week)
+/// is by their server's clock, and nothing announces it: the drive says when that is by this
+/// computer's clock, as each pull leaves it. An identity's own drive has no such time.
+#[test]
+fn a_shares_drive_says_when_it_is_next_read_from_its_beginning() -> R {
+    use std::time::{Duration, Instant};
+
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("top.txt", "top")?;
+    a.sync()?;
+    share(&a, &server, "top.txt")?;
+    let (mut b, _out) = Client::member(&server, "b")?;
+    assert_eq!(b.engine.drive().reread_at(), None, "not read yet");
+    // `ms` from now, give or take the minute a time is kept to and the test's own time.
+    let in_about = |b: &Client, ms: i64| {
+        let left = b
+            .engine
+            .drive()
+            .reread_at()
+            .map(|at| at.saturating_duration_since(Instant::now()));
+        let (least, most) = ((ms - 10_000) as u64, (ms + MINUTE + 1_000) as u64);
+        let fits = left.is_some_and(|left| {
+            (Duration::from_millis(least)..=Duration::from_millis(most)).contains(&left)
+        });
+        assert!(fits, "{left:?}, not about {ms} ms");
+    };
+    b.sync()?;
+    in_about(&b, 7 * DAY);
+
+    share_for(&a, &server, "top.txt", 60 * MINUTE)?;
+    b.sync()?;
+    in_about(&b, 60 * MINUTE);
+    // Their clock moved on: the next pull says what is left.
+    later(&server, 50 * MINUTE)?;
+    b.sync()?;
+    in_about(&b, 10 * MINUTE);
+    // Over: read from its beginning, and the week is what is kept.
+    later(&server, 11 * MINUTE)?;
+    b.sync()?;
+    in_about(&b, 7 * DAY);
+
+    assert_eq!(a.engine.drive().reread_at(), None, "an own drive");
+    Ok(())
+}
+
 /// A share given until a time ends as the time passes. The drive writes nothing then (its
 /// feed doesn't move), so the member asks: it kept the time its header gave, and reads the
 /// feed from its beginning once the server's clock is past it, which shows the file as one no

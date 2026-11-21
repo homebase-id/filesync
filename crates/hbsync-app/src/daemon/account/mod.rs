@@ -195,6 +195,8 @@ pub(crate) enum Msg {
     Request(Request),
     /// From its notifications.
     Hint(Event),
+    /// From the notifications of what another identity shares with it.
+    ShareHint(Identity, Event),
     /// The machine woke up.
     Woke,
     /// Look again: it is to end, the daemon stops, its pause changed, or a runner is ending.
@@ -1784,6 +1786,45 @@ mod tests {
             started.wait_all("made again and synced", &|s, folders| {
                 both_synced(s, folders) && at.join(".hbsync").is_dir()
             })?;
+            Ok(())
+        };
+        let checked = checks();
+        started.stop(checked)?
+    }
+
+    /// What a sharer's server announces is taken as it is announced, by the share's own
+    /// notifications: the change is in the share's folder within seconds, not at the next
+    /// read on its timer (five minutes).
+    #[test]
+    fn a_sharers_notice_brings_its_change_in_at_once() -> Result<(), Box<dyn std::error::Error>> {
+        use hbsync_remote::contract::Shares;
+        use hbsync_remote::{ChangeRef, NodeMeta, Remote};
+
+        let home = tempfile::tempdir()?;
+        let tom_server = FakeServer::new(ServerConfig::default());
+        let (_, folder, _, start) = shared_with(home.path(), &tom_server)?;
+        let started = start();
+        let tom: Identity = "tom.example".into();
+        let at = folder.join("Shared").join("tom.example");
+        let checks = || -> Result<(), Box<dyn std::error::Error>> {
+            started.wait_all("both sync", &both_synced)?;
+            let owner = FakeRemote::new(tom_server.clone());
+            let plans = owner.create(
+                &NodeMeta {
+                    node: hbsync_types::NodeId::new(),
+                    parent: hbsync_types::NodeId::ROOT,
+                    kind: hbsync_types::NodeKind::Folder,
+                    content: hbsync_types::schema::NodeContent::folder("Plans"),
+                    removed: false,
+                },
+                None,
+            )?;
+            owner.share(plans.at().file_id)?;
+            let notice = ChangeRef::of(&owner.header(plans.at().file_id)?);
+            let said = Event::Changed(Some(notice));
+            started.account.tell(Msg::ShareHint(tom.clone(), said));
+            wait_until(|| at.join("Plans").is_dir().then_some(()))
+                .ok_or("the change announced didn't come in")?;
             Ok(())
         };
         let checked = checks();

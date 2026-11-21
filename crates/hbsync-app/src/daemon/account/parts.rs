@@ -89,6 +89,11 @@ pub struct Share {
     pub db: PathBuf,
     /// What brings it the drive's changes: read on a timer until they are announced.
     pub notifications: Notifications,
+    /// The sharer's notifications ([`hbsync_homebase::drive::shared::PeerRemote::notifier`]),
+    /// whose events the account hands to `notifications`; `None`: none were started (they
+    /// couldn't be, or the share is only opened to end), and the drive is read on a timer.
+    /// Stops when the share is dropped.
+    pub notifier: Option<Notifier>,
 }
 
 impl Share {
@@ -100,6 +105,7 @@ impl Share {
             notifications: Notifications::new(Puller::spawn(Arc::clone(&drive)), Instant::now()),
             drive,
             db,
+            notifier: None,
         }
     }
 }

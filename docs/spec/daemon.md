@@ -698,8 +698,30 @@ included (service managers restart it then).
   own, pause and Sync now reach it, and Recently deleted is the account's drive's alone. A
   share's runner that can't start is tried again after a pause (5 s, doubling to 5
   minutes), and one whose DB can't be used backs off, the account's folders syncing on
-  (its DB isn't set aside for it yet). Its drive is read on a timer (5 minutes) and at Sync
-  now, until its changes are announced, and only while a runner syncs it.
+  (its DB isn't set aside for it yet).
+
+  A share has its sharer's notifications (`PeerRemote::notifier`: a socket to their
+  server, with the token the files are read with; API notes, "Their notification socket"),
+  taken as the account's own are ("No poll", above): a change is in the share's folder a
+  second or two after it was made, and nothing is read on a timer while the socket is
+  connected. Two things differ:
+  - Their server announces nothing when a share's end passes, nor that a week is over
+    (sync semantics §13: both are read for from the feed's beginning). So a connected
+    share is read once more when the time kept for that is over, by this computer's clock
+    as the last read left it (`Drive::reread_at`); where that read leaves the time as it
+    was (it failed), again 5 minutes later.
+  - A refusal there is of the token their server gave, never of this login: nothing of
+    the account's is held back, and the share is read on its timer all the same, as a
+    read is what asks for a new token (the socket never does). A connection their server
+    ends before subscribing it is made again once, a second later, and taken for refused
+    the second time running; then asked again after 5 minutes, doubling to an hour.
+  While not connected (not yet, a refusal, their server down, a proxy) the share is read
+  every 5 minutes, and at Sync now; only while a runner syncs it. A share no longer synced
+  ends its socket at once. It costs one socket per sharer, pinged every 30 s, with two
+  threads that block (the socket's, and one passing its events to the account), in place
+  of 288 reads a day. It needs odin-core #2132 (a token subscribes more than once an hour).
+  Not done: a token replaced by a read isn't told to the socket, which then connects at its
+  next try (within its refused pause: some minutes of reading on the timer meanwhile).
 
   A share's folder is watched by the main folder's watcher, which is recursive and has its
   events anyway: the share's runner holds no watcher of its own, and takes what lies in its

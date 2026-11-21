@@ -142,7 +142,8 @@ impl Account {
             let mut parts =
                 AccountParts::open(&self.identity, Arc::clone(&remote), db, tx.clone())?;
             // Whose shares it syncs is what the identity's share markers say.
-            let sharers = ByMarkers::new(&self.identity, Arc::clone(&remote), paths);
+            let to_account = self.requests.clone();
+            let sharers = ByMarkers::new(&self.identity, Arc::clone(&remote), paths, to_account);
             parts.sharers = Some(Box::new(sharers));
             Ok(parts)
         })
@@ -425,11 +426,24 @@ impl Account {
                         shown.status.hints = hints;
                         changed = true;
                     }
+                    // A share's own: what its sharer's server announces, or that it
+                    // doesn't for now. One no longer synced has none to take it.
+                    Msg::ShareHint(sharer, event) => {
+                        if let Some(s) = shares.iter_mut().find(|s| s.share.sharer == sharer) {
+                            s.share.notifications.event(event, Instant::now(), paused);
+                        }
+                    }
                     Msg::Woke => {
                         markers.hurry(Instant::now());
                         if let Some(n) = &notifier {
                             n.reconnect();
                             notifications.reconnecting();
+                        }
+                        for share in &mut shares {
+                            if let Some(n) = &share.share.notifier {
+                                n.reconnect();
+                                share.share.notifications.reconnecting();
+                            }
                         }
                         let _ = lock(&self.shown).send(&self.identity, &Command::Woke);
                     }
@@ -631,7 +645,12 @@ impl Account {
                 let (moved, next, gone) =
                     self.run_shares(paths, &mut shares, shares_at.as_ref(), now);
                 (changed, shares_next) = (changed | moved, next);
-                to_end.extend(gone);
+                // (No longer synced: its sharer's notifications end now, not when its copy
+                // has gone.)
+                to_end.extend(gone.into_iter().map(|mut share| {
+                    share.share.notifier = None;
+                    share
+                }));
             }
             // A copy taken off (or not): said, and the markers read again (one turned on
             // meanwhile is opened now; one that was stopped is found again by its records).

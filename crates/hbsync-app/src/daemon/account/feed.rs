@@ -23,6 +23,13 @@ pub const UNANNOUNCED_READ: Duration = Duration::from_secs(300);
 /// (again) pulls at once, as changes made meanwhile weren't announced; while not connected,
 /// the drive is read every [`UNANNOUNCED_READ`]. Nothing is pulled while paused. A pull wakes
 /// the folders its changes concern.
+///
+/// What another identity shares has notifications of its own, from their server, and is
+/// taken the same way, with two differences. Their refusal is of the token their server
+/// gave, not of this login: the drive is read on its timer all the same, as the read is
+/// what gets a new token. And while connected it is read once more when the time kept for
+/// reading it from its beginning is over ([`Drive::reread_at`]: a share's end, the week),
+/// which their server doesn't announce.
 #[derive(Debug)]
 pub struct Notifications {
     puller: Puller,
@@ -36,7 +43,8 @@ pub struct Notifications {
     connected: Option<u64>,
     /// Connected while paused: the read that follows connecting waits for the resume.
     connect_read: bool,
-    /// While not connected: the next read of the drive.
+    /// While not connected: the next read of the drive. Connected: no read for what isn't
+    /// announced before it ([`Notifications::next_unannounced`]).
     next_read: Instant,
     /// How often the drive was read for what wasn't announced (as it connected, on the
     /// timer): what else isn't announced then is read at those times too
@@ -133,7 +141,11 @@ impl Notifications {
             Event::Refused(why) => {
                 tracing::warn!("notifications refused ({why}); asking again later");
                 // The identity refused the credentials: the folders and the puller don't ask.
-                self.puller.drive.login_refused(&why);
+                // Another identity's server refused its token: the reads go on, as one of
+                // them is what asks for a new token (never the notifications).
+                if !self.puller.drive.shared() {
+                    self.puller.drive.login_refused(&why);
+                }
                 self.disconnected(now);
                 Some(Hints::Refused(why))
             }
@@ -187,7 +199,7 @@ impl Notifications {
         if self.announced.due(now) {
             self.take();
         }
-        if self.reads_on_a_timer() && now >= self.next_read {
+        if self.next_unannounced().is_some_and(|at| now >= at) {
             self.next_read = now + UNANNOUNCED_READ;
             // (Not counted while the identity refuses the login: the read asks nothing.)
             self.unannounced += u64::from(self.puller.drive.denied().is_none());
@@ -195,10 +207,19 @@ impl Notifications {
         }
     }
 
-    /// Whether the drive is read every [`UNANNOUNCED_READ`]: while not connected. (Refused, a
-    /// read asks nothing: [`Drive::deny`].)
-    fn reads_on_a_timer(&self) -> bool {
-        self.connected.is_none()
+    /// When the drive is next read for what isn't announced: every [`UNANNOUNCED_READ`]
+    /// while not connected (refused, a read asks nothing: [`Drive::deny`]); connected, only
+    /// what another identity shares, when its time to be read from its beginning is over
+    /// ([`Drive::reread_at`]), and where a read left that time as it was (it failed, or this
+    /// computer's clock ran ahead of theirs) no sooner than an [`UNANNOUNCED_READ`] after it.
+    fn next_unannounced(&self) -> Option<Instant> {
+        match self.connected {
+            None => Some(self.next_read),
+            Some(_) => {
+                let due = self.puller.drive.reread_at()?;
+                Some(due.max(self.next_read))
+            }
+        }
     }
 
     /// When [`Notifications::tick`] has something to do (`paused`: never), `now` being now.
@@ -206,11 +227,10 @@ impl Notifications {
         if paused {
             return None;
         }
-        let unannounced = self.reads_on_a_timer().then_some(self.next_read);
         [
             self.connect_read.then_some(now),
             self.announced.deadline(),
-            unannounced,
+            self.next_unannounced(),
         ]
         .into_iter()
         .flatten()
@@ -594,24 +614,143 @@ mod tests {
     type Set = (Notifications, Puller, Arc<Drive>, ChangeRef);
 
     fn notifications(home: &Path) -> Result<Set, Box<dyn std::error::Error>> {
-        use hbsync_remote::{NodeMeta, Remote};
+        use hbsync_remote::Remote;
         let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
         let drive = Drive::open(&home.join("state.db"), "a.example", remote.clone())?;
-        let made = remote.create(
-            &NodeMeta {
-                node: hbsync_types::NodeId::new(),
-                parent: hbsync_types::NodeId::ROOT,
-                kind: hbsync_types::NodeKind::Folder,
-                content: hbsync_types::schema::NodeContent::folder("Docs"),
-                removed: false,
-            },
-            None,
-        )?;
+        let made = remote.create(&docs(), None)?;
         drive.pull(None)?;
         let on_drive = ChangeRef::of(&remote.header(made.at().file_id)?);
         let puller = Puller::spawn(Arc::clone(&drive));
         let n = Notifications::new(puller.clone(), Instant::now());
         Ok((n, puller, drive, on_drive))
+    }
+
+    /// A folder `Docs` at the top.
+    fn docs() -> hbsync_remote::NodeMeta {
+        hbsync_remote::NodeMeta {
+            node: hbsync_types::NodeId::new(),
+            parent: hbsync_types::NodeId::ROOT,
+            kind: hbsync_types::NodeKind::Folder,
+            content: hbsync_types::schema::NodeContent::folder("Docs"),
+            removed: false,
+        }
+    }
+
+    /// The notifications of what another identity shares, their puller, the member's drive,
+    /// its remote, and the sharer's server.
+    type Shared = (
+        Notifications,
+        Puller,
+        Arc<Drive>,
+        Arc<FakeRemote>,
+        Arc<std::sync::Mutex<FakeServer>>,
+    );
+
+    /// Notifications of what another identity shares: a folder of theirs, shared for `ends`
+    /// by their server's clock, pulled into the member's mirror.
+    fn shared_notifications(
+        home: &Path,
+        ends: Duration,
+    ) -> Result<Shared, Box<dyn std::error::Error>> {
+        use hbsync_remote::Remote;
+        let server = FakeServer::new(ServerConfig::default());
+        let owner = FakeRemote::new(server.clone());
+        let made = owner.create(&docs(), None)?;
+        let until = lock(&server).now() + ends.as_millis() as i64;
+        owner.share_until(made.at().file_id, until)?;
+        let member = Arc::new(FakeRemote::member(server.clone()));
+        let drive = Drive::open(&home.join("state.db"), "b.example", member.clone())?;
+        drive.pull(None)?;
+        let puller = Puller::spawn(Arc::clone(&drive));
+        let n = Notifications::new(puller.clone(), Instant::now());
+        Ok((n, puller, drive, member, server))
+    }
+
+    /// A sharer's server refusing its token is not this login refused: the share's drive is
+    /// read on its timer all the same (a read is what gets a new token). The identity's own
+    /// refusal holds its drive back, as before.
+    #[test]
+    fn a_sharers_refusal_leaves_the_reads_going() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let hour = Duration::from_secs(3600);
+        let (mut n, puller, drive, ..) = shared_notifications(home.path(), hour)?;
+        let t0 = Instant::now();
+        n.event(Event::Connected, t0, false);
+        wait_for("the read as it connected", || puller.rounds() == 1)?;
+        n.event(Event::Refused("closed".into()), t0, false);
+        assert!(!drive.is_denied(), "their token's refusal: asked on");
+        assert_eq!(n.deadline(t0, false), Some(t0 + UNANNOUNCED_READ));
+        n.tick(t0 + UNANNOUNCED_READ, false);
+        wait_for("the read on the timer", || puller.rounds() == 2)?;
+
+        let own = tempfile::tempdir()?;
+        let (mut n, _, drive, _) = notifications(own.path())?;
+        n.event(Event::Refused("403".into()), t0, false);
+        assert!(drive.is_denied(), "this login's refusal");
+        Ok(())
+    }
+
+    /// Connected, what another identity shares isn't read on a timer, but once: when the
+    /// time kept for reading it from its beginning is over (here its share's end), which
+    /// their server doesn't announce. An identity's own drive has no such time.
+    #[test]
+    fn a_connected_share_is_read_when_its_time_is_over() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let hour = Duration::from_secs(3600);
+        let (mut n, puller, drive, _, server) = shared_notifications(home.path(), hour)?;
+        let t0 = Instant::now();
+        n.event(Event::Connected, t0, false);
+        wait_for("the read as it connected", || puller.rounds() == 1)?;
+        let due = drive.reread_at().ok_or("no time kept")?;
+        assert!(due > t0 + hour - Duration::from_secs(10), "its end");
+        assert_eq!(n.deadline(t0, false), Some(due), "nothing before it");
+        n.tick(due - Duration::from_secs(1), false);
+        assert_eq!(n.deadline(t0, false), Some(due), "not read before it");
+
+        // Over, by their clock too: read, from its beginning, and the week is kept.
+        lock(&server).advance(hour.as_millis() as i64 + 120_000);
+        n.tick(due, false);
+        wait_for("the read at its time", || puller.rounds() == 2)?;
+        let week = Duration::from_secs(6 * 24 * 3600);
+        wait_for("the time moved on", || {
+            drive.reread_at().is_some_and(|at| at > due + week)
+        })?;
+        assert_eq!(n.deadline(due, false), drive.reread_at());
+
+        let own = tempfile::tempdir()?;
+        let (mut n, puller, ..) = notifications(own.path())?;
+        n.event(Event::Connected, t0, false);
+        wait_for("the read as it connected", || puller.rounds() == 1)?;
+        assert_eq!(
+            n.deadline(t0, false),
+            None,
+            "an own drive: nothing to wait for"
+        );
+        Ok(())
+    }
+
+    /// A read at its time that fails leaves the time as it was: asked again an
+    /// [`UNANNOUNCED_READ`] later, not at every turn.
+    #[test]
+    fn a_due_read_that_fails_is_asked_again_later() -> Result<(), Box<dyn std::error::Error>> {
+        let home = tempfile::tempdir()?;
+        let minute = Duration::from_secs(60);
+        let (mut n, puller, drive, member, _) = shared_notifications(home.path(), minute)?;
+        let t0 = Instant::now();
+        n.event(Event::Connected, t0, false);
+        wait_for("the read as it connected", || puller.rounds() == 1)?;
+        let due = drive.reread_at().ok_or("no time kept")?;
+        // (Past the five minutes after its start, before which nothing is read.)
+        let late = due.max(t0 + UNANNOUNCED_READ);
+        member.faults().fail_next = usize::MAX;
+        n.tick(late, false);
+        wait_for("the read at its time", || puller.rounds() == 2)?;
+        assert_eq!(drive.reread_at(), Some(due), "as it was");
+        assert_eq!(n.deadline(late, false), Some(late + UNANNOUNCED_READ));
+        n.tick(late + Duration::from_secs(1), false);
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(puller.rounds(), 2, "not asked again at once");
+        Ok(())
     }
 
     fn wait_for(what: &str, done: impl Fn() -> bool) -> Result<(), Box<dyn std::error::Error>> {

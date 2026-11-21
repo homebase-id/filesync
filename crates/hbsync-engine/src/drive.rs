@@ -62,6 +62,9 @@ pub struct Drive {
     reread: Mutex<Option<feed::Reread>>,
     /// Until when what another identity shares is put off ([`Drive::put_off`]).
     put_off: Mutex<Option<Instant>>,
+    /// When another identity's drive is to be read from its beginning next
+    /// ([`Drive::reread_at`]), as the last pull left it.
+    reread_at: Mutex<Option<Instant>>,
 }
 
 /// Wakes a folder's engine ([`Drive::subscribe_with`]).
@@ -228,6 +231,7 @@ impl Drive {
             server_time: AtomicI64::new(0),
             reread: Mutex::default(),
             put_off: Mutex::default(),
+            reread_at: Mutex::default(),
         }))
     }
 
@@ -323,6 +327,34 @@ impl Drive {
         if let Some(after) = after.filter(|_| self.shared()) {
             *lock(&self.put_off) = Some(Instant::now() + after);
         }
+    }
+
+    /// When another identity's drive is to be read next though nothing is announced, by this
+    /// computer's clock: the time kept for reading its feed from its beginning (a share's
+    /// end, the week: [`hbsync_state::ReadTx::reread_due`], sync semantics §13), which is by
+    /// their server's clock, as far from now as it was from that clock at the last pull.
+    /// Nothing announces it: whoever reads the drive only when its changes are announced
+    /// reads it then too. `None` on an identity's own drive, and before the first pull.
+    ///
+    /// The time is never early by more than the two clocks drift apart meanwhile (the pull
+    /// then finds it not due, and leaves a new one), and late by no more than the pull
+    /// took.
+    pub fn reread_at(&self) -> Option<Instant> {
+        *lock(&self.reread_at)
+    }
+
+    /// Keeps [`Drive::reread_at`] after a pull, `now` being their server's clock at its last
+    /// page: one read of the account's DB, for another identity's drive only.
+    fn note_reread_at(&self, now: i64) {
+        if !self.shared() {
+            return;
+        }
+        let due = self.account().read(|s| s.reread_due());
+        let Ok(due) = due else {
+            return; // as it was: the next pull says
+        };
+        let left = |due: i64| Duration::from_millis(due.saturating_sub(now).max(0) as u64);
+        *lock(&self.reread_at) = due.map(|due| Instant::now() + left(due));
     }
 
     /// Whether what another identity shares is put off for now: its sharer, or a connection,
@@ -461,6 +493,7 @@ impl Drive {
                 *answered = covers;
                 if let Some(now) = report.server_time {
                     self.server_time.store(now, Ordering::SeqCst);
+                    self.note_reread_at(now);
                 }
             }
             Err(e) => {
