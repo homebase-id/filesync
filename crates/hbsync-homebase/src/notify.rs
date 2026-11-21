@@ -21,8 +21,9 @@
 //! - `wss://{sharer}/api/v2/peer/notify/ws-token`, upgraded by anyone: the token it made for
 //!   this identity's connection ([`crate::peer::PeerToken`], the one the files are read with)
 //!   goes in the first frame, in the clear beside the subscription sealed with its secret:
-//!   `{clientAuthToken64, sharedSecretEncryptedOptions}`; a token it doesn't take is answered
-//!   by an unsealed `authenticationError`;
+//!   `{clientAuthToken64, sharedSecretEncryptedOptions}`; a token it doesn't take gets the
+//!   connection closed without a word (tried live: the unsealed `authenticationError` it
+//!   means to send first doesn't arrive);
 //! - every later frame is as on the identity's own socket;
 //! - `excludeOwnWrites` is refused there (a member writes nothing as a device), and an event
 //!   comes only for a file shared with the member: one whose share was withdrawn or ended as
@@ -64,8 +65,9 @@ pub enum Event {
     Markers,
     /// The connection broke; it is retried with backoff.
     Lost(String),
-    /// The identity refused the subscription (credentials revoked, no access to the drive):
-    /// asked again later, as for a broken connection but not before [`REFUSED_PAUSE`].
+    /// The identity refused the subscription (credentials revoked, no access to the drive;
+    /// another identity's server: it doesn't take the token): asked again later, as for a
+    /// broken connection but not before [`REFUSED_PAUSE`].
     Refused(String),
 }
 
