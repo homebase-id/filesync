@@ -207,24 +207,35 @@ fn a_shares_files_are_read_only_on_this_device() -> R {
         !is_read_only(&b.root.join("dir")),
         "a folder stays writable"
     );
+    // Recorded as they stay: nothing looks changed at the next sync.
+    assert!(b.engine.sync_once("2026-10-08")?.is_idle());
+    // A plain save is refused (but to the system's own user, whom no bit holds back).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if fs::metadata(&b.root)?.uid() != 0 {
+            assert!(fs::write(b.root.join("doc.txt"), "mine").is_err());
+        }
+    }
 
-    // A new version, a tag (where the volume keeps them) and a removal by the sharer.
+    // A new version, a tag (where the volume keeps them), a rename that changes only a
+    // letter's case, and a removal by the sharer.
     a.write("doc.txt", "two")?;
+    fs::rename(a.root.join("dir/in.txt"), a.root.join("dir/In.txt"))?;
     let work = Tags::new([Tag::new("Work", 0)]);
-    let tagged = tags::CAN_TAG && tags::write(&a.root.join("dir/in.txt"), &work)?.is_some();
+    let tagged = tags::CAN_TAG && tags::write(&a.root.join("dir/In.txt"), &work)?.is_some();
     fs::remove_file(a.root.join("bye.txt"))?;
     a.sync()?;
     b.sync()?;
     assert_eq!(b.read_text("doc.txt")?, "two");
     assert!(is_read_only(&b.root.join("doc.txt")), "read-only again");
     if tagged {
-        assert_eq!(tags::read(&b.root.join("dir/in.txt")), Some(work));
-        assert!(
-            is_read_only(&b.root.join("dir/in.txt")),
-            "as before the tag"
-        );
+        assert_eq!(tags::read(&b.root.join("dir/In.txt")), Some(work));
     }
+    assert!(is_read_only(&b.root.join("dir/In.txt")), "as before");
     assert!(!b.root.join("bye.txt").exists());
+    assert_eq!(b.tree_text(""), a.tree_text(""));
+    assert!(b.engine.sync_once("2026-10-08")?.is_idle());
 
     // A copy made here keeps the file's bits, and moves out: the user's own there, a
     // folder of copies with what is in it.

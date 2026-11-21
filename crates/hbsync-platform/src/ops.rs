@@ -358,18 +358,23 @@ pub fn is_read_only(path: &Path) -> bool {
 }
 
 /// Makes what is at `path` writable for its user ([`set_read_only`]): a file, or every file
-/// in a folder (links not followed). Best effort: what can't be read or changed stays as it
-/// is. For what leaves a read-only folder as the user's own.
+/// in a folder (links not followed, so nothing outside it). Best effort: what can't be read
+/// or changed stays as it is. For what leaves a read-only folder as the user's own.
 pub fn make_writable(path: &Path) {
-    let Ok(meta) = fs::symlink_metadata(path) else {
-        return;
-    };
-    if !meta.is_dir() {
+    if !fs::symlink_metadata(path).is_ok_and(|meta| meta.is_dir()) {
         let _ = set_read_only(path, false);
         return;
     }
-    for entry in fs::read_dir(path).into_iter().flatten().flatten() {
-        make_writable(&entry.path());
+    // (Its folders one by one, not one call inside the other: however deep it is.)
+    let mut folders = vec![path.to_path_buf()];
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(&folder).into_iter().flatten().flatten() {
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => folders.push(entry.path()),
+                Ok(kind) if kind.is_file() => drop(set_read_only(&entry.path(), false)),
+                _ => {}
+            }
+        }
     }
 }
 
@@ -544,6 +549,12 @@ mod tests {
         let dir = tempfile::tempdir()?;
         let file = dir.path().join("a.txt");
         fs::write(&file, "a")?;
+        // (Whatever the process's umask makes of a new file.)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&file, fs::Permissions::from_mode(0o644))?;
+        }
         assert!(!is_read_only(&file));
         set_read_only(&file, true)?;
         set_read_only(&file, true)?;

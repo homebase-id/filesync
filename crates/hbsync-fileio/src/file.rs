@@ -314,10 +314,15 @@ impl CompletedFile {
             return Err(FileIoError::TargetChanged);
         }
         // (After the check: it changes what the fingerprint is made of.)
-        if self.read_only && cfg!(windows) {
-            let _ = ops::set_read_only(target, false);
+        let unlocked =
+            self.read_only && cfg!(windows) && ops::set_read_only(target, false).unwrap_or(false);
+        if let Err(e) = ops::replace(&self.path, target) {
+            // Not replaced (open in a program, say): as it was, not left writable.
+            if unlocked {
+                let _ = ops::set_read_only(target, true);
+            }
+            return Err(e.into());
         }
-        ops::replace(&self.path, target)?;
         placed(target, created_ms, self.read_only)
     }
 

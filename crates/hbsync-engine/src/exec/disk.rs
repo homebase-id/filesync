@@ -185,7 +185,8 @@ impl<'a> Disk<'a> {
     /// folder's, §13) takes no tags as it is: made writable for the write, and read-only
     /// again.
     pub(super) fn write_tags_in_place(&self, path: &Path, tags: &Tags) -> TagsLeft {
-        let unlocked = tags::CAN_TAG
+        // (Where the volume keeps tags at all: no write otherwise.)
+        let unlocked = self.tags_kept()
             && self.folder.read_only.is_some()
             && ops::set_read_only(path, false).unwrap_or(false);
         let left = self.write_tags(path, tags);
@@ -293,9 +294,19 @@ impl<'a> Disk<'a> {
     /// changed ([`StateDb::changed`]).
     pub(super) fn unlink(&self, at: &Path, what: Unlink) -> io::Result<()> {
         // (Windows refuses to delete a read-only file, as a read-only folder's are placed.)
-        if cfg!(windows) && self.folder.read_only.is_some() && matches!(what, Unlink::File) {
-            let _ = ops::set_read_only(at, false);
+        let unlocked = cfg!(windows)
+            && self.folder.read_only.is_some()
+            && matches!(what, Unlink::File)
+            && ops::set_read_only(at, false).unwrap_or(false);
+        let removed = self.unlinked(at, what);
+        // Not removed (open in a program, say): as it was, not left writable.
+        if removed.is_err() && unlocked {
+            let _ = ops::set_read_only(at, true);
         }
+        removed
+    }
+
+    fn unlinked(&self, at: &Path, what: Unlink) -> io::Result<()> {
         match what {
             Unlink::File => fs::remove_file(at),
             Unlink::Folder => fs::remove_dir(at),
