@@ -209,8 +209,9 @@ impl Notifications {
 
     /// When the drive is next read for what isn't announced: every [`UNANNOUNCED_READ`]
     /// while not connected (refused, a read asks nothing: [`Drive::deny`]); connected, only
-    /// what another identity shares, when its time to be read from its beginning is over
-    /// ([`Drive::reread_at`]), and never before `next_read`: so a read that left that time
+    /// when the drive says so ([`Drive::reread_at`]: what another identity shares, when its
+    /// time to be read from its beginning is over; any drive, while such a read is left
+    /// open), and never before `next_read`: so a read that left that time
     /// as it was (it failed) is asked again an [`UNANNOUNCED_READ`] later, not at every
     /// turn. (`next_read` may also lie ahead from before it connected; the read as it
     /// connected has looked at the time by then.)
@@ -751,6 +752,55 @@ mod tests {
         n.tick(on, false);
         wait_for("the read after it", || puller.rounds() == 3)?;
         assert!(!held(&mut db)?, "not there twice: gone");
+        Ok(())
+    }
+
+    /// An identity's own drive is read on too while a read from its beginning is left open:
+    /// back after long, a file deleted for good meanwhile is said "not there" once at the
+    /// read as it connects, and goes at the read five minutes on, which nothing else would
+    /// make while the drive's changes are announced.
+    #[test]
+    fn an_own_drive_is_read_on_while_a_read_from_its_beginning_is_open()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use hbsync_remote::Remote;
+        let home = tempfile::tempdir()?;
+        let server = FakeServer::new(ServerConfig::default());
+        let remote = Arc::new(FakeRemote::new(server.clone()));
+        let drive = Drive::open(&home.path().join("state.db"), "a.example", remote.clone())?;
+        let docs = hbsync_remote::contract::folder("Docs", hbsync_types::NodeId::ROOT);
+        let made = remote.create(&docs, None)?.at();
+        drive.pull(None)?;
+        let puller = Puller::spawn(Arc::clone(&drive));
+        let t0 = Instant::now();
+        let mut n = Notifications::new(puller.clone(), t0);
+        // Away for long; deleted for good meanwhile, which no feed says.
+        lock(&server).hard_delete(made.file_id, made.version)?;
+        lock(&server).advance(40 * 24 * 3_600_000);
+        n.event(Event::Connected, t0, false);
+        wait_for("the read as it connected", || puller.rounds() == 1)?;
+        let mut db = hbsync_state::StateDb::open_account(&home.path().join("state.db"))?;
+        let held = |db: &mut hbsync_state::StateDb| {
+            db.read(|s| s.mirror_by_file(made.file_id))
+                .map(|row| row.is_some())
+        };
+        assert!(held(&mut db)?, "not there once: kept");
+        let soon = drive
+            .reread_at()
+            .is_some_and(|at| at < t0 + UNANNOUNCED_READ);
+        assert!(soon, "read on");
+        let on = t0 + UNANNOUNCED_READ;
+        assert_eq!(n.deadline(t0, false), Some(on));
+
+        assert_eq!(hbsync_engine::testkit::a_minute_on(&mut db)?, 1);
+        n.tick(on, false);
+        wait_for("the read after it", || puller.rounds() == 2)?;
+        assert!(!held(&mut db)?, "not there twice: gone");
+        assert_eq!(drive.reread_at(), None, "nothing left to ask");
+        assert_eq!(
+            n.deadline(on, false),
+            None,
+            "read when announced, as before"
+        );
         Ok(())
     }
 

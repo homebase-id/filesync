@@ -378,7 +378,11 @@ included (service managers restart it then).
   drive is read from the feed's cursor, so what wasn't announced (the socket was down, a
   notification got lost) arrives at the next (re)connect, when the account pulls as at start
   (which wakes only the folders it concerns), or with the next change announced that the
-  account doesn't know. While the
+  account doesn't know. One read more is made while connected: after a read of the feed from
+  its beginning (this computer back after long) that is left open, the drive is read on,
+  5 minutes later each time, until the files the feed no longer shows are all answered
+  (sync semantics §8b: one said "not there" goes at the second saying, a minute to an hour
+  on; where the asking gets nowhere the pause doubles, up to about a week). While the
   socket isn't connected (not yet, not any more, or never: a proxy blocking it, a refusal,
   its thread not starting), the account reads the drive every 5 min instead. Nothing is
   pulled while paused; the account's pulls run on a thread of their own. A dead socket is

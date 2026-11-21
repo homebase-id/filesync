@@ -904,7 +904,13 @@ here (or put up anew, if edited). That takes proof (`hbsync-engine/src/gone.rs`)
   `a_restore_said_not_there_once_hands_back_what_stayed`); a put back (§7) that fails is run once
   more a minute on; emptying Recently deleted leaves it listed until emptied again a minute on;
   and what the purge finds so is asked again a minute on, a header read each (a delete for good
-  this device missed: it leaves nothing in the feed). A new row of the file (the feed, a write's answer) or a header that says
+  this device missed: it leaves nothing in the feed). What a read of the feed from its
+  beginning finds so (a device back after long; a share's end or week, §13) is asked again
+  by the next pull, and the drive says when that pull is to be while such a read is left
+  open (`Drive::reread_at`): a minute on, which the daemon takes five minutes on, as
+  nothing else reads a drive whose changes are announced (filesync #454: before, a file
+  deleted for good while this device was away stayed until two pulls happened to fall a
+  minute to an hour apart; engine `a_device_away_longer_than_the_trace_reads_the_feed_again`). A new row of the file (the feed, a write's answer) or a header that says
   it is there clears the suspicion. One wrong 404 for a moment (a server's hiccup) then never
   deletes a live file here, nor hides it for 30 days. Costs, per file deleted for good without
   a trace that this device finds by a request: a header read more, a minute's delay, and the
