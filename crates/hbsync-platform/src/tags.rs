@@ -89,12 +89,14 @@ impl Tags {
         self.0.iter().map(|t| t.name.len() + 16).sum::<usize>() <= MAX_BYTES
     }
 
-    /// The tags both have, as in `self`.
-    pub fn intersection(&self, other: &Tags) -> Tags {
+    /// The tags here that `other` holds too, by name, as here: what stays agreed of a base's
+    /// tags once the drive holds the node as another file, with `other`
+    /// (sync-semantics §11, a node made again).
+    pub fn held_in(&self, other: &Tags) -> Tags {
         Tags(
             self.0
                 .iter()
-                .filter(|t| other.get(&t.name) == Some(t))
+                .filter(|t| other.get(&t.name).is_some())
                 .cloned()
                 .collect(),
         )
@@ -516,10 +518,6 @@ mod tests {
         // Whoever wrote them: names in NFC, and a colour Finder doesn't have is none.
         let odd = tags(&[("e\u{301}", 9)]);
         assert_eq!(odd, tags(&[("\u{e9}", 0)]));
-        assert_eq!(
-            t.intersection(&tags(&[("a", 0), ("b", 2)])),
-            tags(&[("a", 0)])
-        );
     }
 
     #[test]
@@ -532,6 +530,36 @@ mod tests {
             // Both added, both kept, both dropped; a colour they differ on and a tag only one
             // side added keep the base's (none for `mine`).
             tags(&[("added", 4), ("kept", 1), ("recoloured", 3)])
+        );
+    }
+
+    /// A node made again as another file (§11): of the base's tags, those the new file has
+    /// stay agreed, by name, as the base has them. Merged from there, a tag only the item
+    /// holds is its add, and one removed here stays removed.
+    #[test]
+    fn what_a_file_made_again_lacks_is_agreed_no_more() {
+        let base = tags(&[
+            ("kept", 1),
+            ("lacking", 2),
+            ("recoloured", 3),
+            ("removed", 0),
+        ]);
+        let local = tags(&[("kept", 1), ("lacking", 2), ("recoloured", 3)]);
+        let made_again = tags(&[("kept", 1), ("recoloured", 7), ("removed", 0), ("new", 0)]);
+        let agreed = base.held_in(&made_again);
+        assert_eq!(
+            agreed,
+            tags(&[("kept", 1), ("recoloured", 3), ("removed", 0)])
+        );
+        assert_eq!(
+            Tags::merge(&agreed, &local, &made_again),
+            tags(&[("kept", 1), ("lacking", 2), ("new", 0), ("recoloured", 7)])
+        );
+        // Read against the base as it was, what the new file lacks was its removal.
+        assert!(
+            Tags::merge(&base, &local, &made_again)
+                .get("lacking")
+                .is_none()
         );
     }
 

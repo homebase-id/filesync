@@ -22,7 +22,7 @@ use hbsync_types::{
 use crate::Sim;
 use crate::action::{Action, JUNK, JUNK_FOLDER, LAUNCHERS, NAMES, TAGS};
 use crate::model::client::Client;
-use crate::model::server::{Server, ServerNode};
+use crate::model::server::{Server, ServerNode, time};
 use crate::oracle::Seen;
 use crate::tagbook::Limit;
 
@@ -493,8 +493,11 @@ impl Sim {
                         if book {
                             let synced = self.clients[c].base_tag(node, name).is_some();
                             let now = synced.then(|| self.server.now());
-                            let in_flight = self.writes_tag(c, node, name);
-                            self.ledger.tags.remove(c, node, name, now, in_flight);
+                            let limit = match self.writes_tag(c, node, name) {
+                                true => Some(Limit::OwnTagWriteInFlight),
+                                false => self.held_at_earlier_file(c, node, name),
+                            };
+                            self.ledger.tags.remove(c, node, name, now, limit);
                         }
                     }
                     (Action::Tag { .. }, None) => {
@@ -1162,6 +1165,63 @@ impl Sim {
             && self.ledger.tags.recoloured_in_flight(c, node, name) == seen
     }
 
+    /// The known limit a removal of tag `name` from `node` on client `c` meets where the tag is
+    /// another client's to send up once it reads the drive's file, the node made again since
+    /// ([`Limit::BaseAtEarlierFile`]): its base was agreed with an earlier file and holds the
+    /// tag, as its item does; or its plan still writes the tag from an earlier file (its base
+    /// without it yet, or none: a folder still to be made here). A plan made from the drive's
+    /// own file is none of it: its write settles against the version it acted on, and the
+    /// removal comes down.
+    fn held_at_earlier_file(&self, c: usize, node: NodeId, name: &str) -> Option<Limit> {
+        let server = &self.server;
+        let drive = server.live.get(&node).or(server.removed.get(&node))?;
+        let file = drive.remote.file_id;
+        let made = file.0.as_u128() as i64;
+        let holds = |s: Option<&NodeState>| s.is_some_and(|s| s.tags.get(name).is_some());
+        let writes = |n: &NodeId, tags: &Tags| *n == node && tags.get(name).is_some();
+        (self.clients.iter().enumerate())
+            .any(|(d, client)| {
+                let agreed = client.extra.get(&node).and_then(|e| e.version);
+                let held = agreed.is_some_and(|version| time(version) < made)
+                    && client.base_tag(node, name).is_some()
+                    && holds(client.local.get(node));
+                let planned = client.plan.iter().any(|(op, _)| match op {
+                    Op::LocalMkdir {
+                        node: n,
+                        tags,
+                        drive,
+                        ..
+                    }
+                    | Op::LocalDownload {
+                        node: n,
+                        tags,
+                        drive,
+                        ..
+                    }
+                    | Op::LocalTags {
+                        node: n,
+                        tags,
+                        drive,
+                    } => writes(n, tags) && drive.as_deref().is_some_and(|v| v.at.file_id != file),
+                    Op::RemoteTags {
+                        node: n,
+                        tags,
+                        file_id,
+                        ..
+                    }
+                    | Op::RemoteUpdate {
+                        node: n,
+                        tags,
+                        file_id,
+                        ..
+                    } => writes(n, tags) && *file_id != file,
+                    _ => false,
+                });
+                d != c && (held || planned)
+            })
+            .then_some(Limit::BaseAtEarlierFile)
+    }
+
     /// Whether a removal of tag `name` from `node` is under way that client `c`'s add may lose
     /// to: on another client, not sent up yet (its base has the tag, its item doesn't, or a
     /// plan of its still sends the removal), or on the drive while `c`'s base still has it;
@@ -1199,13 +1259,9 @@ impl Sim {
                 .or(server.removed.get(&node))
                 .map(|n| &n.state),
         );
-        // The add restores what the base holds: nothing to send (`Limit::AddBackToBase`),
-        // unless its own removal is still to land (`Limit::OwnRemovalInFlight`).
-        let own = match (synced, planned(client)) {
-            (true, true) => Some(Limit::OwnRemovalInFlight),
-            (true, false) => Some(Limit::AddBackToBase),
-            _ => None,
-        };
+        // The add restores what the base holds while its own removal is still to land
+        // (`Limit::OwnRemovalInFlight`).
+        let own = (synced && planned(client)).then_some(Limit::OwnRemovalInFlight);
         (pending || (synced && stale), own)
     }
 

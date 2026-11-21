@@ -1740,6 +1740,132 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
     Ok(())
 }
 
+/// A node the drive holds as another file than a folder's base of it was agreed with (made
+/// again): the tags that file lacks leave the base, in every folder that has one of the node;
+/// its place, version and file stay. The file the base was agreed with changes nothing.
+#[test]
+fn a_node_made_again_leaves_the_base_only_the_tags_its_new_file_has() -> R {
+    let dir = tempfile::tempdir().map_err(|e| StateError::Corrupt(e.to_string()))?;
+    let db_path = dir.path().join("state.db");
+    let mut main = StateDb::open(&db_path)?;
+    let docs = main.write(|s| {
+        s.account()
+            .add_folder(NodeId::new(), FolderKind::Role, "/home/a/Documents", "m2")
+    })?;
+    let mut docs_db = StateDb::open_folder(&db_path, docs)?;
+    let (red, work) = (Tag::new("Red", 6), Tag::new("Work", 0));
+    let mut row = base(NodeState::folder(NodeId::ROOT, "Shared"));
+    row.state.tags = Tags::new([red.clone(), work.clone()]);
+    let untagged = base(NodeState::folder(NodeId::ROOT, "Plain"));
+    for db in [&mut main, &mut docs_db] {
+        db.write(|s| {
+            s.folder().put_base(&row)?;
+            s.folder().put_base(&untagged)
+        })?;
+    }
+    // The drive's row of `node` as file `file_id`, with `tags`.
+    let drive = |node: NodeId, file_id: RemoteFileId, tags: &Tags| {
+        let mut content = hbsync_types::schema::NodeContent::folder("Shared");
+        content.set_tags(tags);
+        let at = RemoteRef {
+            file_id,
+            ..remote()
+        };
+        hbsync_state::MirrorRow::from_content(
+            at,
+            node,
+            NodeId::ROOT,
+            NodeKind::Folder,
+            &content,
+            None,
+        )
+    };
+    let (again, none) = (RemoteFileId(Uuid::new_v4()), Tags::default());
+    // Its own file, with fewer tags (the drive's removal): the base stays.
+    main.write(|s| {
+        s.account()
+            .made_again(&drive(row.node, row.remote.file_id, &none))
+    })?;
+    assert_eq!(main.read(|s| s.get_base(row.node))?, Some(row.clone()));
+    // Another file, with one of the two, in another colour, and one more.
+    let held = Tags::new([Tag::new("Red", 2), Tag::new("New", 0)]);
+    main.write(|s| {
+        s.account().made_again(&drive(row.node, again, &held))?;
+        s.account().made_again(&drive(untagged.node, again, &held))
+    })?;
+    let mut narrowed = row.clone();
+    narrowed.state.tags = Tags::new([red]);
+    for db in [&mut main, &mut docs_db] {
+        assert_eq!(db.read(|s| s.get_base(row.node))?, Some(narrowed.clone()));
+        assert_eq!(
+            db.read(|s| s.get_base(untagged.node))?,
+            Some(untagged.clone())
+        );
+    }
+    // A file deleted for good is no file of the node (a row of it fetched before).
+    let gone = RemoteFileId(Uuid::new_v4());
+    main.write(|s| {
+        s.account().forget_file(gone, None)?;
+        s.account().made_again(&drive(row.node, gone, &none))
+    })?;
+    assert_eq!(main.read(|s| s.get_base(row.node))?, Some(narrowed.clone()));
+    // With none of them, made by this device's own write (its answer): none agreed.
+    let made = hbsync_state::Answer::live(None, drive(row.node, again, &none));
+    main.write(|s| s.account().answered(&made))?;
+    narrowed.state.tags = Tags::default();
+    assert_eq!(docs_db.read(|s| s.get_base(row.node))?, Some(narrowed));
+    Ok(())
+}
+
+/// A base written while the picture holds its node as another file than the base was agreed
+/// with (made again since: a write settles against the version it acted on) takes only the
+/// tags that file has, live or in Recently deleted; agreed with the picture's file, or the
+/// picture without the node, it takes its own.
+#[test]
+fn a_base_written_against_another_file_than_the_pictures_takes_only_its_tags() -> R {
+    let mut db = StateDb::open_in_memory()?;
+    let (red, work) = (Tag::new("Red", 6), Tag::new("Work", 0));
+    let mut row = base(NodeState::folder(NodeId::ROOT, "Shared"));
+    row.state.tags = Tags::new([red.clone(), work.clone()]);
+    let drive = |file_id: RemoteFileId, tags: &Tags| {
+        let mut content = hbsync_types::schema::NodeContent::folder("Shared");
+        content.set_tags(tags);
+        let at = RemoteRef {
+            file_id,
+            ..remote()
+        };
+        let kind = NodeKind::Folder;
+        hbsync_state::MirrorRow::from_content(at, row.node, NodeId::ROOT, kind, &content, None)
+    };
+    let written = |db: &mut StateDb| -> Result<Tags, StateError> {
+        db.write(|s| s.folder().put_base(&row))?;
+        Ok(db
+            .read(|s| s.get_base(row.node))?
+            .expect("a base")
+            .state
+            .tags)
+    };
+    // The picture without the node, then with the file the base was agreed with.
+    assert_eq!(written(&mut db)?, row.state.tags);
+    let only_red = Tags::new([Tag::new("Red", 2)]);
+    db.write(|s| s.account().put_live(&drive(row.remote.file_id, &only_red)))?;
+    assert_eq!(written(&mut db)?, row.state.tags);
+    // Made again as another file, with Red only (in another colour): Red as the base has it.
+    let again = drive(RemoteFileId(Uuid::new_v4()), &only_red);
+    db.write(|s| s.account().put_live(&again))?;
+    assert_eq!(written(&mut db)?, Tags::new([red.clone()]));
+    // That file in Recently deleted: the same.
+    db.write(|s| {
+        s.account().move_to_removed(&hbsync_state::RemovedRow {
+            row: again.clone(),
+            removed_at: Some(5),
+        })
+    })?;
+    assert!(db.read(|s| s.get_mirror(row.node))?.is_none());
+    assert_eq!(written(&mut db)?, Tags::new([red]));
+    Ok(())
+}
+
 /// Two folders of one account in one DB: each has its own rows of the same node, its own
 /// names and settings; the drive's mirror is shared. Forgetting a folder takes its rows along,
 /// and the ids nothing else holds go too.

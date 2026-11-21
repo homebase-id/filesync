@@ -338,6 +338,14 @@ impl Sim {
         self.release_filtered(c);
         self.hear_not_theres(c);
         let remote = self.drive_seen(c);
+        // The pull before the plan: the files it brings that the client hadn't read (§11).
+        let server = &self.server;
+        let on_drive: Vec<NodeId> = (server.live.keys().chain(server.removed.keys()))
+            .copied()
+            .collect();
+        for node in on_drive {
+            self.made_again(c, node);
+        }
         // Left to be hashed on send: a new file, till its first upload's commit. One that
         // isn't free to send so is read first (the engine reads it and plans again).
         let client = &mut self.clients[c];
@@ -939,6 +947,10 @@ impl Sim {
             return false;
         };
         let node = op.node();
+        // What a pull brought since the plan, where the run reads the drive as it is.
+        if self.clients[c].pulls {
+            self.made_again(c, node);
+        }
         // Every remote write that lands stays in the folder's part of the drive (§12): what it
         // writes, and where to (judged before it runs; one refused on its version wrote nothing).
         let breach = self.breaches(c, &op);
@@ -2441,6 +2453,44 @@ impl Sim {
         Tags::merge_onto(&base.unwrap_or_default(), ours, drive, client.os)
     }
 
+    /// Client `c` reads the drive's file of `node`, live or in Recently deleted, for the first
+    /// time: where that is another file than its base was agreed with (the node deleted for
+    /// good and made again), the tags the new file lacks are agreed no more, as the engine's
+    /// picture takes a file new to it (`AccountTx::made_again`, sync semantics §11). Once a
+    /// file, base or none: a tag removed from it later is the drive's removal.
+    fn made_again(&mut self, c: usize, node: NodeId) {
+        let server = &self.server;
+        let Some(drive) = server.live.get(&node).or(server.removed.get(&node)) else {
+            return;
+        };
+        let (file, client) = (drive.remote.file_id, &mut self.clients[c]);
+        if !client.gone.contains(&file) && client.read_files.insert(file) {
+            self.agreed_with_drive(c, node);
+        }
+    }
+
+    /// Client `c`'s base of `node` holds only the tags the drive's file of it has, live or in
+    /// Recently deleted, where it was agreed with another: as [`Sim::made_again`] leaves it,
+    /// and as the engine writes a base while its picture holds another file (`put_base`: a
+    /// write that settled against the version it acted on). Every id is the server's clock
+    /// ([`time`]): a base agreed before the drive's file was made was agreed with another.
+    fn agreed_with_drive(&mut self, c: usize, node: NodeId) {
+        let server = &self.server;
+        let Some(drive) = server.live.get(&node).or(server.removed.get(&node)) else {
+            return;
+        };
+        let client = &mut self.clients[c];
+        let agreed = client.extra.get(&node).and_then(|e| e.version);
+        let made = drive.remote.file_id.0.as_u128() as i64;
+        if agreed.is_none_or(|version| time(version) >= made) {
+            return;
+        }
+        if let Some(b) = client.base.get(node).cloned() {
+            let tags = b.tags.held_in(&drive.state.tags);
+            client.base.insert(node, NodeState { tags, ..b });
+        }
+    }
+
     /// Moves parked nodes back where they came from, when that name is free again.
     fn unpark(&mut self, c: usize) {
         let client = &mut self.clients[c];
@@ -2532,6 +2582,30 @@ impl Sim {
         tags: TagWrite<'_>,
         ours: Option<VersionTag>,
     ) -> Option<VersionTag> {
+        // It reads the drive as it is now: as a pull brought it.
+        self.made_again(c, node);
+        let mut wrote = false;
+        let at = self.settle_as_read(c, node, against, same_bytes, tags, ours, &mut wrote);
+        // A base it wrote, the same or not, agreed with another file than the drive's (§11).
+        if wrote {
+            self.agreed_with_drive(c, node);
+        }
+        at
+    }
+
+    /// [`Sim::settle_against`], on the drive as the client has read it; `wrote`: it wrote the
+    /// client's base of `node`.
+    #[allow(clippy::too_many_arguments)]
+    fn settle_as_read(
+        &mut self,
+        c: usize,
+        node: NodeId,
+        against: Against<'_>,
+        same_bytes: bool,
+        tags: TagWrite<'_>,
+        ours: Option<VersionTag>,
+        wrote: &mut bool,
+    ) -> Option<VersionTag> {
         let server = self.server_state(c, node);
         let remote_ref = self.server.live.get(&node).map(|n| n.remote);
         let live = remote_ref.map(|r| r.version);
@@ -2607,6 +2681,7 @@ impl Sim {
             // None here yet (wanted, §5): the base follows the drive, as the executor's.
             (None, _) if keeps_absence => {
                 let (r, version) = server.zip(live)?;
+                *wrote = true;
                 client.base.insert(node, r);
                 if let Some(e) = client.extra.get_mut(&node) {
                     e.version = Some(version);
@@ -2618,6 +2693,7 @@ impl Sim {
                 if let (Some(b), Some(d)) = (client.base.get(node).cloned(), drive) {
                     let prior = prior_tags(state.unwrap_or_default(), &b.tags, &d.state.tags);
                     let tags = tags.settle(prior, &l.tags, &d.state.tags);
+                    *wrote = true;
                     client.base.insert(node, NodeState { tags, ..b });
                 }
                 None
@@ -2647,6 +2723,7 @@ impl Sim {
                         e.version = Some(version);
                         e.content_state = placed;
                     }
+                    *wrote = true;
                     client.base.insert(node, b);
                     return Some(version);
                 }

@@ -110,6 +110,61 @@ fn tags_sync_between_folders() -> R {
     Ok(())
 }
 
+/// A tagged folder is deleted for good on the drive (another app's hard delete: no trace in the
+/// feed) and made again there, as another file of the same node, by a device that never saw
+/// its tag (§11, #439). What the new file lacks is no removal: the tag stays on the folder here
+/// and goes up. A second folder made again with one of its two tags keeps both. (Read against
+/// the base agreed with the old file, the new file's lack of the tag was the drive's removal,
+/// and took the tag off the folder.)
+#[test]
+fn a_tag_stays_where_its_folder_is_made_again_without_it() -> R {
+    use hbsync_types::NodeKind;
+    use hbsync_types::schema::NodeContent;
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("Docs/report.txt", "quarterly")?;
+    a.write("Mail/in.txt", "hello")?;
+    if !tags::CAN_TAG || tags::write(&a.root.join("Docs"), &Tags::default())?.is_none() {
+        eprintln!("no tags here; skipped");
+        return Ok(());
+    }
+    let both = Tags::new([Tag::new("Todo", 0), Tag::new("Work", 0)]);
+    tags::write(&a.root.join("Docs"), &Tags::new([Tag::new("Work", 0)]))?;
+    tags::write(&a.root.join("Mail"), &both)?;
+    a.sync()?;
+    assert_eq!(drive_tags(&server, "Docs"), ["Work:0"]);
+    assert_eq!(drive_tags(&server, "Mail"), ["Todo:0", "Work:0"]);
+
+    // Made again: Docs with no tag, Mail with one of its two.
+    for (name, tags) in [
+        ("Docs", Tags::default()),
+        ("Mail", Tags::new([Tag::new("Todo", 0)])),
+    ] {
+        let was = common::header_named(&server, name);
+        let mut content = NodeContent::folder(name);
+        content.set_tags(&tags);
+        let meta = NodeMeta {
+            node: was.node().ok_or("a node")?,
+            parent: was.parent,
+            kind: NodeKind::Folder,
+            content,
+            removed: false,
+        };
+        let mut s = server.lock().map_err(|_| "poisoned")?;
+        s.hard_delete(was.file_id, was.version)?;
+        s.create(&meta, None)?;
+    }
+    let report = a.sync()?;
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(names(&a, "Docs"), ["Work"]);
+    assert_eq!(names(&a, "Mail"), ["Todo", "Work"]);
+    assert_eq!(drive_tags(&server, "Docs"), ["Work:0"]);
+    assert_eq!(drive_tags(&server, "Mail"), ["Todo:0", "Work:0"]);
+    assert_eq!(a.read_text("Docs/report.txt")?, "quarterly");
+    assert!(a.engine.sync_once("2026-10-08")?.is_idle());
+    Ok(())
+}
+
 /// A conflict copy keeps the node's base for the run's remote writes (§5): this device's removal
 /// of a tag, made with its edit, reaches the drive's version that won the edits (the remote
 /// write merges its tags against the base). The conflict's download comes in the same run.

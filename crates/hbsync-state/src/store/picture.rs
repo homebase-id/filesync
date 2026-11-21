@@ -244,6 +244,12 @@ impl AccountTx<'_> {
         if answered == Answered::Superseded || echo {
             return Ok(answered);
         }
+        // A file this write made: where a base of the node (this folder's, another's) was
+        // agreed with an earlier one, as the feed's row of it would be taken
+        // ([`AccountTx::made_again`]; by then the picture has the file).
+        if held.is_none() {
+            self.made_again(row)?;
+        }
         match &answer.left {
             Left::Live(row) => self.put_live(row)?,
             Left::Removed(removed) => self.move_to_removed(removed)?,

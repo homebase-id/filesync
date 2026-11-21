@@ -12,7 +12,7 @@ use hbsync_types::{NodeId, Tags};
 /// A tag add: the client, the node, the tag's name.
 pub(crate) type Add = (usize, NodeId, String);
 
-/// A known limit of the engine's tag sync (sync semantics §11): three lose an add, two a
+/// A known limit of the engine's tag sync (sync semantics §11): two lose an add, three a
 /// removal (the tag comes back), one of those a colour too. Named, so each case stays visible
 /// (the user's call, 2026-10-21: not now). Each excuses only its own case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -33,16 +33,19 @@ pub(crate) enum Limit {
     /// seed f9ca4128; for a colour, seed 5317e937). A colour given after such a write landed
     /// over one, before a plan settles it, is lost the same way (seed 328c6cf9).
     OwnTagWriteInFlight,
-    /// A client adds back a tag its base holds (after removing it here): the item is as the
-    /// base has it, so nothing goes up, and where the drive dropped the tag meanwhile (another
-    /// device's delete, the node made again without it) the drive's state comes down over the
-    /// add (the revert-to-base family; seed 353c4a5d).
-    AddBackToBase,
     /// A client's remote write carrying its add landed, but another device changed the node
     /// before the answer was recorded ([`crate::Action::Meanwhile`]): its base never recorded
     /// the add as on the drive, so the add goes up again, over another client's later removal
     /// (the in-flight family; seed bf84d30f).
     AnswerSuperseded,
+    /// A tag removed from a node made again (another file of it, after a delete for good)
+    /// while it was another client's to send up: its base was still agreed with the earlier
+    /// file and held the tag, as its item does, or its plan still wrote the tag from that file
+    /// (its base without it yet, or none). What the new file lacks is agreed there no more, so
+    /// that client's tag reads as its add, and comes back. A removal made on the new file can't
+    /// be told from the new file never having had the tag (sync semantics §11, a node made
+    /// again).
+    BaseAtEarlierFile,
 }
 
 /// A user's recolour of a tag ([`TagBook::recolour`]): when, with the known limit it met
@@ -83,9 +86,10 @@ pub(crate) struct TagBook {
     /// wasn't on the drive yet (a merge keeps either side's add; a removal made after the add
     /// was sent up goes up after it, and wins).
     cleared: BTreeMap<Add, i64>,
-    /// Of `cleared`, the removals made while the remover's own plan still wrote the tag
-    /// ([`Limit::OwnTagWriteInFlight`]).
-    cleared_in_flight: BTreeSet<Add>,
+    /// Of `cleared`, the removals that met a known limit: made while the remover's own plan
+    /// still wrote the tag ([`Limit::OwnTagWriteInFlight`]), or while another client's base
+    /// was agreed with an earlier file of the node ([`Limit::BaseAtEarlierFile`]).
+    cleared_limit: BTreeMap<Add, Limit>,
     /// Tags a client had added to an item it forked off as a conflict copy: the merge may give
     /// them to the original too, as that client's add.
     forked: BTreeSet<Add>,
@@ -155,23 +159,24 @@ impl TagBook {
 
     /// The user of client `c` removed tag `name` from `node`; `synced`: the server's time,
     /// where the client's base had it.
-    /// `in_flight`: the client's own plan still writes the tag ([`Limit::OwnTagWriteInFlight`]).
+    /// `limit`: the known limit it met ([`Limit::OwnTagWriteInFlight`],
+    /// [`Limit::BaseAtEarlierFile`]).
     pub(crate) fn remove(
         &mut self,
         c: usize,
         node: NodeId,
         name: &str,
         synced: Option<i64>,
-        in_flight: bool,
+        limit: Option<Limit>,
     ) {
         let at = self.next();
         let add = (c, node, name.to_owned());
         self.removed.insert(add.clone(), at);
         if let Some(now) = synced {
             self.cleared.insert(add.clone(), now);
-            match in_flight {
-                true => self.cleared_in_flight.insert(add),
-                false => self.cleared_in_flight.remove(&add),
+            match limit {
+                Some(limit) => self.cleared_limit.insert(add, limit),
+                None => self.cleared_limit.remove(&add),
             };
         }
     }
@@ -316,8 +321,8 @@ impl TagBook {
         rekey_mine(&mut self.recoloured, c, node, into);
         for add in mine(&self.cleared, c, node) {
             // The item's removal is the new id's now: the old node no longer has it.
-            if self.cleared_in_flight.remove(&add) {
-                self.cleared_in_flight.insert((c, new, add.2.clone()));
+            if let Some(limit) = self.cleared_limit.remove(&add) {
+                self.cleared_limit.insert((c, new, add.2.clone()), limit);
             }
             move_key(&mut self.cleared, &add, (c, new, add.2.clone()));
         }
@@ -473,9 +478,8 @@ impl TagBook {
                 && !refused.contains(node)
                 && s.tags.get(name).is_some()
             {
-                if self.cleared_in_flight.contains(cleared) {
-                    let limit = (Limit::OwnTagWriteInFlight, cleared.clone());
-                    self.excused.borrow_mut().push(limit);
+                if let Some(limit) = self.cleared_limit.get(cleared) {
+                    self.excused.borrow_mut().push((*limit, cleared.clone()));
                     continue;
                 }
                 // Another client's add, its landing unrecorded, went up again.
@@ -629,12 +633,31 @@ mod tests {
         let node = NodeId(hbsync_types::Uuid::from_u128(1));
         let mut book = TagBook::default();
         book.add(0, node, "Work", false, None);
-        book.remove(0, node, "Work", Some(1), false);
+        book.remove(0, node, "Work", Some(1), None);
         book.add(1, node, "Work", false, None);
         assert!(check(&book, &drive(node, &[])).is_err(), "c1's add lost");
         assert!(check(&book, &drive(node, &["Work"])).is_ok());
-        book.remove(0, node, "Work", None, false);
+        book.remove(0, node, "Work", None, None);
         assert!(check(&book, &drive(node, &[])).is_ok(), "removed after");
+    }
+
+    /// A removal that comes back is a loss, but for one made while another client's base was
+    /// agreed with an earlier file of the node: the known limit, told.
+    #[test]
+    fn a_removal_from_a_node_made_again_may_come_back() {
+        let node = NodeId(hbsync_types::Uuid::from_u128(1));
+        let mut book = TagBook::default();
+        book.remove(0, node, "Work", Some(1), None);
+        assert!(check(&book, &drive(node, &["Work"])).is_err(), "came back");
+        book.remove(0, node, "Work", Some(1), Some(Limit::BaseAtEarlierFile));
+        assert!(check(&book, &drive(node, &["Work"])).is_ok());
+        let limit = (Limit::BaseAtEarlierFile, (0, node, "Work".to_owned()));
+        assert_eq!(book.excused(), [limit]);
+        assert!(check(&book, &drive(node, &[])).is_ok());
+        assert!(
+            book.excused().is_empty(),
+            "stayed removed: nothing to excuse"
+        );
     }
 
     /// An add made while a removal was under way it hadn't seen may lose to it.
@@ -642,7 +665,7 @@ mod tests {
     fn an_add_racing_a_removal_may_lose() {
         let node = NodeId(hbsync_types::Uuid::from_u128(1));
         let mut book = TagBook::default();
-        book.remove(1, node, "Work", Some(1), false);
+        book.remove(1, node, "Work", Some(1), None);
         book.add(0, node, "Work", true, None);
         assert!(check(&book, &drive(node, &[])).is_ok());
     }
@@ -655,7 +678,7 @@ mod tests {
         let mut book = TagBook::default();
         book.add(0, node, "Red", false, None);
         book.detach((0, node, "Red".into())); // a download refused it: not sent
-        book.remove(0, node, "Red", Some(5), false);
+        book.remove(0, node, "Red", Some(5), None);
         assert!(
             check(&book, &drive(node, &["Red"])).is_err(),
             "c0's removal came back"
@@ -687,7 +710,7 @@ mod tests {
         assert!(check(&book, &drive_tagged(6)).is_err(), "lost");
         assert!(check(&book, &drive_tagged(7)).is_ok());
         // (Synced nowhere, so the removal itself isn't owed: only its order counts here.)
-        book.remove(1, NODE, "Red", None, false);
+        book.remove(1, NODE, "Red", None, None);
         assert!(check(&book, &drive_tagged(6)).is_ok(), "removed since");
         let mut book = TagBook::default();
         book.recolour(0, NODE, "Red", 7, Some(6), false);
