@@ -13,6 +13,23 @@
 //! - with `excludeOwnWrites` (odin-core #1971) the socket isn't told of writes made with its
 //!   own token: this client records each of its writes from the write's answer, its server
 //!   time included (`daemon.md`, the sync loop).
+//!
+//! Another identity's server tells a member of what it shares the same way, on a socket of
+//! its own ([`Notifier::spawn_shared`]; verified in odin-core
+//! `V2PeerNotificationSocketController`, `PeerAppNotificationHandler`,
+//! `EstablishConnectionOptions`):
+//! - `wss://{sharer}/api/v2/peer/notify/ws-token`, upgraded by anyone: the token it made for
+//!   this identity's connection ([`crate::peer::PeerToken`], the one the files are read with)
+//!   goes in the first frame, in the clear beside the subscription sealed with its secret:
+//!   `{clientAuthToken64, sharedSecretEncryptedOptions}`; a token it doesn't take gets the
+//!   connection closed without a word (tried live: the unsealed `authenticationError` it
+//!   means to send first doesn't arrive), which a second time running is read as the
+//!   refusal (`Ended::Unanswered`);
+//! - every later frame is as on the identity's own socket;
+//! - `excludeOwnWrites` is refused there (a member writes nothing as a device), and an event
+//!   comes only for a file shared with the member: one whose share was withdrawn or ended as
+//!   `fileDeleted` with the file as it now reads to them (`homebase-api-notes.md`, "Shared
+//!   with you").
 
 use std::borrow::Cow;
 use std::io;
@@ -49,8 +66,9 @@ pub enum Event {
     Markers,
     /// The connection broke; it is retried with backoff.
     Lost(String),
-    /// The identity refused the subscription (credentials revoked, no access to the drive):
-    /// asked again later, as for a broken connection but not before [`REFUSED_PAUSE`].
+    /// The identity refused the subscription (credentials revoked, no access to the drive;
+    /// another identity's server: it doesn't take the token): asked again later, as for a
+    /// broken connection but not before [`REFUSED_PAUSE`].
     Refused(String),
 }
 
@@ -113,7 +131,24 @@ impl Notifier {
     /// `client`'s own token aren't announced (`excludeOwnWrites`). An error: its thread
     /// couldn't start (then never connected: the caller reads the drive on a timer).
     pub fn spawn(client: Client, drive: TargetDrive, events: Sender<Event>) -> io::Result<Self> {
-        Self::subscribe(client, Subscription { drive, own: false }, events)
+        Self::subscribe(
+            move || client.clone(),
+            Subscription { drive, own: false },
+            events,
+        )
+    }
+
+    /// As [`Notifier::spawn`], for what another identity shares: connects to their server as
+    /// the client `theirs` gives ([`Client::for_peer`]) and subscribes to `drive`, theirs.
+    /// `theirs` is asked at every connect: the token their server takes may have been
+    /// replaced since the last. [`Event::Refused`]: their server doesn't take the token
+    /// (it said so, or ended two connections running before subscribing them).
+    pub fn spawn_shared(
+        theirs: impl Fn() -> Client + Send + 'static,
+        drive: TargetDrive,
+        events: Sender<Event>,
+    ) -> io::Result<Self> {
+        Self::subscribe(theirs, Subscription { drive, own: false }, events)
     }
 
     /// [`Notifier::spawn`], hearing this client's `own` writes or not (measurements).
@@ -125,11 +160,12 @@ impl Notifier {
         events: Sender<Event>,
     ) -> io::Result<Self> {
         let own = own == OwnWrites::Heard;
-        Self::subscribe(client, Subscription { drive, own }, events)
+        Self::subscribe(move || client.clone(), Subscription { drive, own }, events)
     }
 
+    /// `client`: who each connection speaks as, asked as it is made.
     fn subscribe(
-        client: Client,
+        client: impl Fn() -> Client + Send + 'static,
         subscription: Subscription,
         events: Sender<Event>,
     ) -> io::Result<Self> {
@@ -138,7 +174,12 @@ impl Notifier {
         let (told, counts) = (control.clone(), received.clone());
         std::thread::Builder::new()
             .name("hbsync-notify".into())
-            .spawn(move || run(&client, subscription, &events, &told, &counts))?;
+            .spawn(move || {
+                let connection = |connected: &mut bool| {
+                    session(&client(), subscription, &events, &told, &counts, connected)
+                };
+                run(connection, &events, &told)
+            })?;
         Ok(Notifier { control, received })
     }
 
@@ -234,48 +275,58 @@ struct Subscription {
 }
 
 impl Subscription {
-    /// The `establishConnectionRequest`'s data.
-    fn request(&self) -> serde_json::Value {
+    /// The `establishConnectionRequest`'s data, to `client`'s server. Another identity's
+    /// offers no leaving out of own writes: a member makes none there.
+    fn request(&self, client: &Client) -> serde_json::Value {
         json!({
             "drives": [{
                 "alias": self.drive.alias.simple().to_string(),
                 "type": self.drive.drive_type.simple().to_string(),
             }],
             "resultShape": "minimal",
-            "excludeOwnWrites": !self.own,
+            "excludeOwnWrites": !self.own && !client.peer(),
         })
     }
 }
 
+/// Makes one `connection` after another ([`session`]) until stopped, telling `events` how
+/// each ended: a lost one is made again soon, a refused one later.
 fn run(
-    client: &Client,
-    subscription: Subscription,
+    mut connection: impl FnMut(&mut bool) -> Result<(), Ended>,
     events: &Sender<Event>,
     control: &Control,
-    received: &Received,
 ) {
     const FIRST: Duration = Duration::from_secs(1);
     let mut backoff = FIRST;
     let mut refused_wait = REFUSED_PAUSE;
+    // The last connection was ended before it was subscribed ([`Ended::Unanswered`]).
+    let mut unanswered = false;
     while !control.stopping() {
-        let (mut connected, mut refused) = (false, false);
-        let result = session(
-            client,
-            subscription,
-            events,
-            control,
-            received,
-            &mut connected,
-            &mut refused,
-        );
+        let mut connected = false;
+        let result = connection(&mut connected);
         control.release();
         if connected {
             backoff = FIRST;
             refused_wait = REFUSED_PAUSE;
+            unanswered = false;
         }
-        let Err(why) = result else {
+        let Err(ended) = result else {
             return; // stopped, or nobody listens any more
         };
+        // Ended unsubscribed once, their server may have stumbled: made again soon. Twice
+        // running, it doesn't take the token.
+        let ended = match ended {
+            Ended::Unanswered(why) if std::mem::replace(&mut unanswered, true) => {
+                Ended::Refused(why)
+            }
+            Ended::Unanswered(why) => Ended::Lost(why),
+            ended => ended,
+        };
+        // A refusal is told whatever was asked of the notifier meanwhile.
+        let refused = matches!(ended, Ended::Refused(_));
+        if let Ended::Refused(why) = &ended {
+            let _ = events.send(Event::Refused(why.clone()));
+        }
         if control.stopping() {
             return;
         }
@@ -283,7 +334,9 @@ fn run(
             backoff = FIRST;
             continue;
         }
-        if !refused && events.send(Event::Lost(why)).is_err() {
+        if let Ended::Lost(why) = ended
+            && events.send(Event::Lost(why)).is_err()
+        {
             return;
         }
         // Jitter of ±20%, so clients of one identity don't reconnect in lockstep; after a
@@ -307,7 +360,8 @@ fn run(
 
 type Socket = WebSocket<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>;
 
-/// One connection, until it breaks or is `refused` (`Err`) or the notifier stops (`Ok`).
+/// One connection, until it ends (`Err`: how) or the notifier stops (`Ok`); `connected`:
+/// the server subscribed it.
 fn session(
     client: &Client,
     subscription: Subscription,
@@ -315,30 +369,52 @@ fn session(
     control: &Control,
     received: &Received,
     connected: &mut bool,
-    refused: &mut bool,
-) -> Result<(), String> {
-    let mut socket = match connect(client, control) {
-        Ok(socket) => socket,
-        Err(Unopened::Lost(why)) => return Err(why),
-        // The upgrade answered 401 or 403: the identity refused the credentials.
-        Err(Unopened::Refused(why)) => {
-            let _ = events.send(Event::Refused(why.clone()));
-            *refused = true;
-            return Err(why);
-        }
-    };
-    send(
+) -> Result<(), Ended> {
+    // (Refused: the upgrade answered 401 or 403.)
+    let mut socket = connect(client, control)?;
+    converse(
         &mut socket,
         client,
-        "establishConnectionRequest",
-        &subscription.request().to_string(),
-    )?;
+        subscription,
+        events,
+        control,
+        received,
+        connected,
+    )
+}
+
+/// A connection's stream, whose reads can be given a timeout.
+trait Timed {
+    fn wait_at_most(&self, wait: Duration) -> io::Result<()>;
+}
+
+impl Timed for rustls::StreamOwned<rustls::ClientConnection, TcpStream> {
+    fn wait_at_most(&self, wait: Duration) -> io::Result<()> {
+        self.get_ref().set_read_timeout(Some(wait))
+    }
+}
+
+/// What is said on an open connection: subscribes, then hears the server until the
+/// connection ends (`Err`: how) or the notifier stops (`Ok`).
+fn converse<S: io::Read + io::Write + Timed>(
+    socket: &mut WebSocket<S>,
+    client: &Client,
+    subscription: Subscription,
+    events: &Sender<Event>,
+    control: &Control,
+    received: &Received,
+    connected: &mut bool,
+) -> Result<(), Ended> {
+    let first = opening(client, &subscription.request(client).to_string())?;
+    socket
+        .send(Message::text(first))
+        .map_err(|e| format!("sending establishConnectionRequest: {e}"))?;
     let opened = Instant::now();
     let (mut last_frame, mut last_ping) = (Instant::now(), Instant::now());
     // Told to stop or reconnect: the socket is shut down, or about to be.
     let told = || match control.stopping() {
         true => Ok(()),
-        false => Err("reconnecting on request".to_owned()),
+        false => Err(Ended::Lost("reconnecting on request".to_owned())),
     };
     loop {
         if control.told() {
@@ -350,8 +426,7 @@ fn session(
         let wait = next_check(Instant::now(), opened, *connected, last_frame, last_ping);
         socket
             .get_ref()
-            .get_ref()
-            .set_read_timeout(Some(wait))
+            .wait_at_most(wait)
             .map_err(|e| e.to_string())?;
         match socket.read() {
             Ok(Message::Text(text)) => {
@@ -372,9 +447,7 @@ fn session(
                     Notification::Markers => Event::Markers,
                     Notification::Refused(why) => {
                         let _ = socket.close(None);
-                        let _ = events.send(Event::Refused(why.clone()));
-                        *refused = true;
-                        return Err(why);
+                        return Err(Ended::Refused(why));
                     }
                     _ => continue,
                 };
@@ -383,7 +456,8 @@ fn session(
                 }
             }
             Ok(Message::Close(frame)) => {
-                return Err(format!("closed by the server: {frame:?}"));
+                let why = format!("closed by the server: {frame:?}");
+                return Err(Ended::broken(client, *connected, why));
             }
             Ok(_) => last_frame = Instant::now(),
             Err(tungstenite::Error::Io(e))
@@ -392,16 +466,17 @@ fn session(
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) => {}
             Err(_) if control.told() => return told(),
-            Err(e) => return Err(e.to_string()),
+            // (A close that didn't arrive whole, a reset, is the server's ending it too.)
+            Err(e) => return Err(Ended::broken(client, *connected, e.to_string())),
         }
         if !*connected && opened.elapsed() > HANDSHAKE {
-            return Err("no handshake from the server".into());
+            return Err("no handshake from the server".to_owned().into());
         }
         if last_frame.elapsed() > SILENCE {
-            return Err("the connection went silent".into());
+            return Err("the connection went silent".to_owned().into());
         }
         if last_ping.elapsed() > PING_EVERY {
-            send(&mut socket, client, "ping", "ping")?;
+            send(socket, client, "ping", "ping")?;
             last_ping = Instant::now();
         }
     }
@@ -423,21 +498,39 @@ fn next_check(
     at.saturating_duration_since(now).clamp(MIN_WAIT, MAX_WAIT)
 }
 
-/// Why no connection was opened.
-enum Unopened {
+/// How a connection ended, or why none was opened.
+#[derive(Debug)]
+enum Ended {
     /// Not reached, or it broke: tried again soon.
     Lost(String),
-    /// The identity refused the credentials at the upgrade (401, 403).
+    /// The server refused it: the credentials at the upgrade (401, 403), or what it said who
+    /// it is. Asked again later.
     Refused(String),
+    /// Another identity's server ended it before subscribing it, without a word. That is
+    /// what it does with a token it doesn't take (tried live: the `authenticationError` it
+    /// means to send first doesn't arrive; `homebase-api-notes.md`, "Shared with you"), but
+    /// also when it stumbles (a notification of its own sent while the connection says who
+    /// it is closes it too): lost the first time, refused the second running.
+    Unanswered(String),
 }
 
-impl From<String> for Unopened {
-    fn from(why: String) -> Self {
-        Unopened::Lost(why)
+impl Ended {
+    /// `client`'s connection ended because `why`, `connected` or not yet.
+    fn broken(client: &Client, connected: bool, why: String) -> Ended {
+        match client.peer() && !connected {
+            true => Ended::Unanswered(why),
+            false => Ended::Lost(why),
+        }
     }
 }
 
-fn connect(client: &Client, control: &Control) -> Result<Socket, Unopened> {
+impl From<String> for Ended {
+    fn from(why: String) -> Self {
+        Ended::Lost(why)
+    }
+}
+
+fn connect(client: &Client, control: &Control) -> Result<Socket, Ended> {
     let host = client.identity();
     // Every address in turn, as the HTTP client does (an IPv6 address may be unreachable).
     let mut failure = format!("{host} has no address");
@@ -456,7 +549,7 @@ fn connect(client: &Client, control: &Control) -> Result<Socket, Unopened> {
     }
     let tcp = connected.ok_or(failure)?;
     if !control.hold(&tcp) {
-        return Err(Unopened::Lost("told before connecting".into()));
+        return Err(Ended::Lost("told before connecting".into()));
     }
     tcp.set_read_timeout(Some(Duration::from_secs(30)))
         .map_err(|e| e.to_string())?;
@@ -465,6 +558,25 @@ fn connect(client: &Client, control: &Control) -> Result<Socket, Unopened> {
     let tls = rustls::ClientConnection::new(TLS.clone()?, name).map_err(|e| e.to_string())?;
     let stream = rustls::StreamOwned::new(tls, tcp);
 
+    let (socket, _) = tungstenite::client(upgrade(client)?, stream).map_err(|e| match e {
+        tungstenite::HandshakeError::Failure(e) => unopened(host, &e),
+        tungstenite::HandshakeError::Interrupted(_) => {
+            Ended::Lost("handshake timed out".to_owned())
+        }
+    })?;
+    Ok(socket)
+}
+
+/// The request that upgrades a connection to `client`'s server to the notification socket:
+/// the identity's own with the token as a subprotocol, another identity's with nothing of it
+/// (it goes in the first frame: [`opening`]).
+fn upgrade(client: &Client) -> Result<tungstenite::handshake::client::Request, String> {
+    let host = client.identity();
+    if client.peer() {
+        return format!("wss://{host}/api/v2/peer/notify/ws-token")
+            .into_client_request()
+            .map_err(|e| e.to_string());
+    }
     let mut request = format!("wss://{host}/api/v2/notify/ws-token")
         .into_client_request()
         .map_err(|e| e.to_string())?;
@@ -480,30 +592,24 @@ fn connect(client: &Client, control: &Control) -> Result<Socket, Unopened> {
     request
         .headers_mut()
         .insert("Sec-WebSocket-Protocol", protocols);
-    let (socket, _) = tungstenite::client(request, stream).map_err(|e| match e {
-        tungstenite::HandshakeError::Failure(e) => unopened(host, &e),
-        tungstenite::HandshakeError::Interrupted(_) => {
-            Unopened::Lost("handshake timed out".to_owned())
-        }
-    })?;
-    Ok(socket)
+    Ok(request)
 }
 
 /// Why the upgrade to `host` failed with `e`: refused for the credentials (401, 403) only in the
 /// identity's own answer; a hotel's or a proxy's, as any other failure, is a connection lost.
-fn unopened(host: &str, e: &tungstenite::Error) -> Unopened {
+fn unopened(host: &str, e: &tungstenite::Error) -> Ended {
     match e {
         tungstenite::Error::Http(answer) => {
             let status = answer.status().as_u16();
             if !has_odin_header(answer.headers()) {
-                Unopened::Lost(not_from_identity(host, status))
+                Ended::Lost(not_from_identity(host, status))
             } else if refuses(status) {
-                Unopened::Refused(format!("{host}: HTTP {status}"))
+                Ended::Refused(format!("{host}: HTTP {status}"))
             } else {
-                Unopened::Lost(e.to_string())
+                Ended::Lost(e.to_string())
             }
         }
-        _ => Unopened::Lost(e.to_string()),
+        _ => Ended::Lost(e.to_string()),
     }
 }
 
@@ -522,10 +628,33 @@ static TLS: LazyLock<Result<Arc<rustls::ClientConfig>, String>> = LazyLock::new(
     ))
 });
 
-fn send(socket: &mut Socket, client: &Client, command: &str, data: &str) -> Result<(), String> {
+/// `command` with `data`, sealed with `client`'s secret: a client frame.
+fn sealed(client: &Client, command: &str, data: &str) -> Result<Envelope, String> {
     let plain = json!({ "command": command, "data": data }).to_string();
-    let sealed = Envelope::seal(client.key(), plain.as_bytes()).map_err(|e| e.to_string())?;
-    let text = serde_json::to_string(&sealed).map_err(|e| e.to_string())?;
+    Envelope::seal(client.key(), plain.as_bytes()).map_err(|e| e.to_string())
+}
+
+/// A connection's first frame, which subscribes as `request` says: the sealed command, and
+/// to another identity's server the token beside it (its upgrade carried none: [`upgrade`]).
+fn opening(client: &Client, request: &str) -> Result<String, String> {
+    let subscription = sealed(client, "establishConnectionRequest", request)?;
+    let frame = match client.peer() {
+        true => serde_json::to_string(&json!({
+            "clientAuthToken64": client.token(),
+            "sharedSecretEncryptedOptions": subscription,
+        })),
+        false => serde_json::to_string(&subscription),
+    };
+    frame.map_err(|e| e.to_string())
+}
+
+fn send<S: io::Read + io::Write>(
+    socket: &mut WebSocket<S>,
+    client: &Client,
+    command: &str,
+    data: &str,
+) -> Result<(), String> {
+    let text = serde_json::to_string(&sealed(client, command, data)?).map_err(|e| e.to_string())?;
     socket
         .send(Message::text(text))
         .map_err(|e| format!("sending {command}: {e}"))
@@ -783,11 +912,9 @@ mod tests {
     /// wants to hear them.
     #[test]
     fn the_subscription_leaves_out_own_writes() {
-        let drive = TargetDrive {
-            alias: uuid::Uuid::from_u128(1),
-            drive_type: uuid::Uuid::from_u128(2),
-        };
-        let request = |own| Subscription { drive, own }.request();
+        let drive = drive();
+        let client = client_of("tom.example");
+        let request = |own| Subscription { drive, own }.request(&client);
         let excluded = request(false);
         assert_eq!(excluded["excludeOwnWrites"], true);
         assert_eq!(excluded["resultShape"], "minimal");
@@ -796,6 +923,342 @@ mod tests {
             "00000000000000000000000000000001"
         );
         assert_eq!(request(true)["excludeOwnWrites"], false);
+        // Another identity's server offers no leaving out: never asked for there.
+        let theirs = Subscription { drive, own: false }.request(&peer_of("pippin.example"));
+        assert_eq!(theirs["excludeOwnWrites"], false);
+    }
+
+    fn drive() -> TargetDrive {
+        TargetDrive {
+            alias: uuid::Uuid::from_u128(1),
+            drive_type: uuid::Uuid::from_u128(2),
+        }
+    }
+
+    fn client_of(identity: &str) -> Client {
+        Client::new(&crate::Credentials {
+            identity: identity.into(),
+            client_auth_token: "dG9rZW4/Pz8+".into(),
+            shared_secret: "AAAAAAAAAAAAAAAAAAAAAA==".into(),
+            zk_app_key: None,
+        })
+        .expect("a client")
+    }
+
+    fn peer_of(identity: &str) -> Client {
+        let token = crate::peer::PeerToken {
+            token: "dGhlaXIgdG9rZW4/Pg==".into(),
+            shared_secret: "AQEBAQEBAQEBAQEBAQEBAQ==".into(),
+        };
+        Client::for_peer(identity, &token).expect("a client")
+    }
+
+    /// The identity's own socket is upgraded with the token as a subprotocol; another
+    /// identity's by its peer route with no token at all (its first frame carries it).
+    #[test]
+    fn a_sharers_socket_is_upgraded_without_the_token() -> Result<(), String> {
+        let own = upgrade(&client_of("tom.example"))?;
+        assert_eq!(
+            own.uri().to_string(),
+            "wss://tom.example/api/v2/notify/ws-token"
+        );
+        let protocols = own.headers()["Sec-WebSocket-Protocol"]
+            .to_str()
+            .unwrap_or("");
+        // base64url of the token's bytes, no padding.
+        assert_eq!(protocols, "odin.notify.v1, odin.bearer.dG9rZW4_Pz8-");
+
+        let theirs = upgrade(&peer_of("pippin.example"))?;
+        assert_eq!(
+            theirs.uri().to_string(),
+            "wss://pippin.example/api/v2/peer/notify/ws-token"
+        );
+        assert!(!theirs.headers().contains_key("Sec-WebSocket-Protocol"));
+        assert!(!format!("{theirs:?}").contains("dGhlaXIgdG9rZW4"));
+        Ok(())
+    }
+
+    /// The first frame: the identity's own server gets the subscription sealed; another
+    /// identity's the token in the clear beside it, and the subscription sealed with that
+    /// token's secret, asking for every write (their server offers nothing else).
+    #[test]
+    fn a_sharers_socket_opens_with_the_token_beside_the_subscription()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let drive = drive();
+        let opened = |client: &Client, sealed: &serde_json::Value| {
+            let envelope: Envelope = serde_json::from_value(sealed.clone())?;
+            let command: serde_json::Value = serde_json::from_slice(&envelope.open(client.key())?)?;
+            assert_eq!(command["command"], "establishConnectionRequest");
+            let data = command["data"].as_str().ok_or("data isn't a string")?;
+            Ok::<serde_json::Value, Box<dyn std::error::Error>>(serde_json::from_str(data)?)
+        };
+
+        let own = client_of("tom.example");
+        let subscription = Subscription { drive, own: false };
+        let request = subscription.request(&own).to_string();
+        let frame: serde_json::Value = serde_json::from_str(&opening(&own, &request)?)?;
+        assert!(frame.get("clientAuthToken64").is_none(), "{frame}");
+        assert_eq!(opened(&own, &frame)?["excludeOwnWrites"], true);
+
+        let theirs = peer_of("pippin.example");
+        let request = subscription.request(&theirs).to_string();
+        let frame: serde_json::Value = serde_json::from_str(&opening(&theirs, &request)?)?;
+        assert_eq!(frame["clientAuthToken64"], "dGhlaXIgdG9rZW4/Pg==");
+        let options = opened(&theirs, &frame["sharedSecretEncryptedOptions"])?;
+        assert_eq!(options["excludeOwnWrites"], false);
+        assert_eq!(options["resultShape"], "minimal");
+        assert_eq!(
+            options["drives"][0]["alias"],
+            "00000000000000000000000000000001"
+        );
+        // Sealed with their token's secret, not readable without it.
+        let sealed: Envelope =
+            serde_json::from_value(frame["sharedSecretEncryptedOptions"].clone())?;
+        assert!(
+            sealed
+                .open(own.key())
+                .ok()
+                .and_then(|plain| serde_json::from_slice::<serde_json::Value>(&plain).ok())
+                .is_none()
+        );
+        Ok(())
+    }
+
+    impl Timed for TcpStream {
+        fn wait_at_most(&self, wait: Duration) -> io::Result<()> {
+            self.set_read_timeout(Some(wait))
+        }
+    }
+
+    /// A server frame in the clear.
+    fn frame(body: serde_json::Value) -> Message {
+        Message::text(json!({"isEncrypted": false, "payload": body.to_string()}).to_string())
+    }
+
+    /// What a connection comes to as `client`, against a server on this machine that reads
+    /// its first frame, sends `answers` and closes (`None`: hangs up without a close): that
+    /// first frame, how the connection ended, whether it was subscribed, and what it told.
+    #[allow(clippy::type_complexity)]
+    fn conversed(
+        client: &Client,
+        answers: Option<Vec<Message>>,
+    ) -> Result<(serde_json::Value, Result<(), Ended>, bool, Vec<Event>), Box<dyn std::error::Error>>
+    {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
+        let addr = listener.local_addr()?;
+        let server = std::thread::spawn(move || -> Result<String, String> {
+            let (tcp, _) = listener.accept().map_err(|e| e.to_string())?;
+            let mut socket = tungstenite::accept(tcp).map_err(|e| e.to_string())?;
+            let first = socket.read().map_err(|e| e.to_string())?;
+            let Some(answers) = answers else {
+                return first
+                    .into_text()
+                    .map(|t| t.to_string())
+                    .map_err(|e| e.to_string());
+            };
+            for answer in answers {
+                socket.send(answer).map_err(|e| e.to_string())?;
+            }
+            socket.close(None).map_err(|e| e.to_string())?;
+            // Until the client has answered the close.
+            while socket.read().is_ok() {}
+            first
+                .into_text()
+                .map(|t| t.to_string())
+                .map_err(|e| e.to_string())
+        });
+        let tcp = TcpStream::connect(addr)?;
+        let (mut socket, _) =
+            tungstenite::client(format!("ws://{addr}/"), tcp).map_err(|e| e.to_string())?;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let drive = drive();
+        let subscription = Subscription { drive, own: false };
+        let mut connected = false;
+        let ended = converse(
+            &mut socket,
+            client,
+            subscription,
+            &tx,
+            &Control::default(),
+            &Received::default(),
+            &mut connected,
+        );
+        // Hung up: the server's last read ends.
+        drop(socket);
+        drop(tx);
+        let first = server.join().map_err(|_| "the server panicked")??;
+        Ok((
+            serde_json::from_str(&first)?,
+            ended,
+            connected,
+            rx.iter().collect(),
+        ))
+    }
+
+    /// Another identity's server closing a connection before it subscribed it, with or
+    /// without frames the client doesn't read before, is told apart from a connection lost
+    /// (the notifier refuses the second running); what it says of the token in the clear is
+    /// a refusal at once. The identity's own server closing is a connection lost, as before.
+    #[test]
+    fn a_sharers_server_closing_before_it_subscribes_is_told_apart()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (first, ended, connected, told) =
+            conversed(&peer_of("pippin.example"), Some(Vec::new()))?;
+        assert_eq!(first["clientAuthToken64"], "dGhlaXIgdG9rZW4/Pg==");
+        assert!(matches!(ended, Err(Ended::Unanswered(_))), "{ended:?}");
+        assert!(!connected && told.is_empty(), "{told:?}");
+
+        // Hung up on, without a close.
+        let (_, ended, _, _) = conversed(&peer_of("pippin.example"), None)?;
+        assert!(matches!(ended, Err(Ended::Unanswered(_))), "{ended:?}");
+        let (_, ended, _, _) = conversed(&client_of("tom.example"), None)?;
+        // (Seen at once, not as the handshake's deadline passing.)
+        assert!(
+            matches!(&ended, Err(Ended::Lost(why)) if !why.contains("no handshake")),
+            "{ended:?}"
+        );
+
+        // (As when the drive is no longer the member's to read: errors, then the close.)
+        let errors = vec![frame(json!({"notificationType": "error", "data": "no"}))];
+        let (_, ended, connected, _) = conversed(&peer_of("pippin.example"), Some(errors))?;
+        assert!(matches!(ended, Err(Ended::Unanswered(_))), "{ended:?}");
+        assert!(!connected);
+
+        let refusal = vec![frame(
+            json!({"notificationType": "authenticationError", "data": "Invalid Token"}),
+        )];
+        let (_, ended, connected, _) = conversed(&peer_of("pippin.example"), Some(refusal))?;
+        assert!(matches!(ended, Err(Ended::Refused(_))), "{ended:?}");
+        assert!(!connected);
+
+        let (first, ended, connected, told) =
+            conversed(&client_of("tom.example"), Some(Vec::new()))?;
+        assert!(first.get("clientAuthToken64").is_none(), "{first}");
+        assert!(matches!(ended, Err(Ended::Lost(_))), "{ended:?}");
+        assert!(!connected && told.is_empty(), "{told:?}");
+        Ok(())
+    }
+
+    /// What the notifier tells, and how many connections it makes, while they end as `ends`
+    /// say in turn (the last for all after it): until it told `events` (ten seconds at
+    /// most) and `linger` longer.
+    fn ran(
+        ends: &[fn(&mut bool) -> Ended],
+        events: usize,
+        linger: Duration,
+    ) -> (Vec<Event>, usize) {
+        let control = Control::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let made = std::sync::atomic::AtomicUsize::new(0);
+        let mut told = Vec::new();
+        std::thread::scope(|scope| {
+            let (made, control) = (&made, &control);
+            scope.spawn(move || {
+                let connection = |connected: &mut bool| {
+                    let nth = made.fetch_add(1, Ordering::SeqCst);
+                    Err(ends[nth.min(ends.len() - 1)](connected))
+                };
+                run(connection, &tx, control)
+            });
+            let until = Instant::now() + Duration::from_secs(10);
+            while told.len() < events
+                && let Ok(event) = rx.recv_timeout(until.saturating_duration_since(Instant::now()))
+            {
+                told.push(event);
+            }
+            std::thread::sleep(linger);
+            control.tell(&control.stop);
+        });
+        told.extend(rx.iter());
+        (told, made.load(Ordering::SeqCst))
+    }
+
+    const SOON: Duration = Duration::from_millis(1500);
+
+    /// A connection refused is told and not made again soon.
+    #[test]
+    fn a_refused_connection_is_not_made_again_soon() {
+        let (told, made) = ran(&[|_| Ended::Refused("no".into())], 1, SOON);
+        assert_eq!(told, [Event::Refused("no".into())]);
+        assert_eq!(made, 1);
+    }
+
+    /// A connection lost is told and made again within seconds.
+    #[test]
+    fn a_lost_connection_is_made_again_soon() {
+        let (told, made) = ran(&[|_| Ended::Lost("gone".into())], 2, Duration::ZERO);
+        assert!(made >= 2, "{made}");
+        assert!(told.len() >= 2 && told.iter().all(|e| *e == Event::Lost("gone".into())));
+    }
+
+    /// A connection another identity's server ended unsubscribed is made again soon, as one
+    /// lost; ended so a second time running, it is refused, and not made again soon.
+    #[test]
+    fn a_connection_ended_unsubscribed_twice_running_is_refused() {
+        let (told, made) = ran(&[|_| Ended::Unanswered("closed".into())], 2, SOON);
+        assert_eq!(
+            told,
+            [
+                Event::Lost("closed".into()),
+                Event::Refused("closed".into())
+            ]
+        );
+        assert_eq!(made, 2);
+    }
+
+    /// One that was subscribed in between starts the count again.
+    #[test]
+    fn a_connection_subscribed_in_between_starts_the_count_again() {
+        let ends: [fn(&mut bool) -> Ended; 3] = [
+            |_| Ended::Unanswered("closed".into()),
+            |connected| {
+                *connected = true;
+                Ended::Lost("gone".into())
+            },
+            |_| Ended::Unanswered("closed".into()),
+        ];
+        let (told, _) = ran(&ends, 3, Duration::ZERO);
+        assert_eq!(
+            told[..3],
+            [
+                Event::Lost("closed".into()),
+                Event::Lost("gone".into()),
+                Event::Lost("closed".into())
+            ]
+        );
+    }
+
+    /// Their server subscribes the connection and tells of a file as the identity's own
+    /// does; closing after that is a connection lost, not a refusal.
+    #[test]
+    fn a_sharers_server_subscribes_and_tells() -> Result<(), Box<dyn std::error::Error>> {
+        let file = json!({"fileRef": {"fileId": uuid::Uuid::new_v4(),
+            "versionTag": uuid::Uuid::new_v4(), "fileState": "active", "updated": 1,
+            "fileType": 7101}});
+        let answers = vec![
+            frame(json!({"notificationType": "deviceHandshakeSuccess"})),
+            frame(json!({"notificationType": "fileModified", "data": file.to_string()})),
+        ];
+        let (_, ended, connected, told) = conversed(&peer_of("pippin.example"), Some(answers))?;
+        assert!(matches!(ended, Err(Ended::Lost(_))), "{ended:?}");
+        assert!(connected);
+        assert!(
+            matches!(told[..], [Event::Connected, Event::Changed(Some(_))]),
+            "{told:?}"
+        );
+        Ok(())
+    }
+
+    /// A token their server doesn't take is answered in the clear (it has no secret to seal
+    /// with): a refusal.
+    #[test]
+    fn a_token_refused_in_the_clear_is_a_refusal() {
+        let frame = json!({"isEncrypted": false, "payload":
+            json!({"notificationType": "authenticationError", "data": "Invalid Token"}).to_string()});
+        assert_eq!(
+            notification(&peer_of("pippin.example"), &frame.to_string()),
+            Notification::Refused("refused: Invalid Token".into())
+        );
     }
 
     /// An event of another app's file on the drive (a type not a sync node's) is no change of
@@ -823,7 +1286,7 @@ mod tests {
     /// a login); any other failure is a connection lost, a hotel's or a proxy's 401 or 403 too.
     #[test]
     fn a_refused_upgrade_is_a_refusal() -> Result<(), Box<dyn std::error::Error>> {
-        let answer = |status: u16, odin: bool| -> Result<Unopened, Box<dyn std::error::Error>> {
+        let answer = |status: u16, odin: bool| -> Result<Ended, Box<dyn std::error::Error>> {
             let mut response = tungstenite::http::Response::builder().status(status);
             if odin {
                 response = response.header("X-Odin-Version", "1.0");
@@ -831,14 +1294,14 @@ mod tests {
             let e = tungstenite::Error::Http(Box::new(response.body(None)?));
             Ok(unopened("frodo.dotyou.cloud", &e))
         };
-        assert!(matches!(answer(401, true)?, Unopened::Refused(_)));
-        assert!(matches!(answer(403, true)?, Unopened::Refused(_)));
-        assert!(matches!(answer(502, true)?, Unopened::Lost(_)));
+        assert!(matches!(answer(401, true)?, Ended::Refused(_)));
+        assert!(matches!(answer(403, true)?, Ended::Refused(_)));
+        assert!(matches!(answer(502, true)?, Ended::Lost(_)));
         assert!(
-            matches!(answer(403, false)?, Unopened::Lost(why) if why.contains("not from the identity"))
+            matches!(answer(403, false)?, Ended::Lost(why) if why.contains("not from the identity"))
         );
         let closed = unopened("frodo.dotyou.cloud", &tungstenite::Error::ConnectionClosed);
-        assert!(matches!(closed, Unopened::Lost(_)));
+        assert!(matches!(closed, Ended::Lost(_)));
         Ok(())
     }
 

@@ -244,6 +244,11 @@ impl Client {
         &self.identity
     }
 
+    /// A client of another identity's server ([`Client::for_peer`]).
+    pub(crate) fn peer(&self) -> bool {
+        self.peer
+    }
+
     /// Which login it speaks for ([`Credentials::login_id`]).
     pub fn login_id(&self) -> &str {
         &self.login
