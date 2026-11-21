@@ -1132,7 +1132,10 @@ Linux (rfd's, without GTK) needs `zenity`, which KDE doesn't install.
   icon under its new name, and what is left by the path it left is forgotten once it isn't
   the folder of shares there (its note; on Linux the GIO metadata, which is kept by the path
   and would show on whatever folder comes there next, as the drive's own folder of that name
-  where the folder of shares gave way to it). Unlinking takes it off with the main folder's.
+  where the folder of shares gave way to it). Best effort (**[inferred]**, GNOME not at hand
+  to check): GIO is thought to clear nothing while no folder is at the path, so a folder of
+  shares renamed by the user leaves its icon for a folder made under the old name later,
+  in GNOME's Files only. Unlinking takes it off with the main folder's.
 - **Explorer's navigation pane (Windows):** at every start the tray registers the folder as a
   Cloud Files sync root named "Homebase" (`HomebaseFilesync!<user SID>!<identity>~<hash of the
   folder>`), at the top of the pane as OneDrive's and Dropbox's are. Only the registration, no

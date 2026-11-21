@@ -340,6 +340,8 @@ mod os {
 
     /// Forgets the icon given to the folder that was at `path`: GIO keeps it by the path,
     /// and a folder renamed (not through GIO) leaves it there for whatever comes next.
+    /// Best effort: GIO is thought to refuse while nothing is at the path (not checked: no
+    /// machine with GVfs metadata was at hand), and a folder made there later shows the icon.
     pub(super) fn forget_icon(path: &Path) {
         let _ = Command::new("gio")
             .args(["set", "-d"])
