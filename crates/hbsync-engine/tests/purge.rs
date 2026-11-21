@@ -162,15 +162,25 @@ fn a_device_away_longer_than_the_trace_reads_the_feed_again() -> common::Res<()>
     server.lock().map_err(|_| "poisoned")?.advance(LATER);
     assert_eq!(a.engine.drive().purge(0, deleted::Going::UNWATCHED)?, 1);
 
+    assert_eq!(b.engine.drive().reread_at(), None, "nothing to read for");
     b.sync()?;
     assert_eq!(
         b.read_text("d/x.txt")?,
         "x",
         "not there once: kept (sync semantics §8b)"
     );
+    // Said a second time a minute to an hour on, it goes: the drive asks to be read then,
+    // as nothing else would while its changes are announced.
+    let on = b.engine.drive().reread_at().ok_or("no read asked for")?;
+    let left = on.saturating_duration_since(std::time::Instant::now());
+    assert!(
+        (50..=62).contains(&left.as_secs()),
+        "{left:?}, not about a minute"
+    );
     assert_eq!(b.a_minute_on()?, 1);
     b.sync()?;
     assert!(b.read_text("d/x.txt").is_err(), "x went from b");
+    assert_eq!(b.engine.drive().reread_at(), None, "nothing left to ask");
     assert_eq!(b.read_text("y.txt")?, "y");
     assert_eq!(live(&server), ["d", "y.txt"], "nothing came back");
 
