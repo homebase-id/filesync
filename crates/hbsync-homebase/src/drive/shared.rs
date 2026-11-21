@@ -9,7 +9,6 @@ use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::ops::Range;
 use std::path::Path;
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
@@ -30,7 +29,7 @@ use super::{
     file_route, holding, payload_key, plain_size, query_batch, raw_header, refs_page, remote_error,
 };
 use crate::app::SYNC_DRIVE;
-use crate::notify::{Event, Notifier};
+use crate::notify::{Events, Notifier};
 use crate::peer::{self, PeerToken};
 use crate::{Client, HomebaseError};
 
@@ -177,7 +176,7 @@ impl PeerRemote {
     /// drive's is ([`Notifier::spawn_shared`]). Each connection is made with the token held
     /// then: one their server refuses is replaced by the next read ([`PeerRemote::renewed`]),
     /// never by the connection, which waits and asks again.
-    pub fn notifier(self: &Arc<Self>, events: Sender<Event>) -> std::io::Result<Notifier> {
+    pub fn notifier(self: &Arc<Self>, events: impl Into<Events>) -> std::io::Result<Notifier> {
         let drive = TargetDrive {
             alias: self.sharer.drive_alias,
             drive_type: SYNC_DRIVE.drive_type,

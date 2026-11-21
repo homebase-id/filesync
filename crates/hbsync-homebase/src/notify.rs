@@ -72,6 +72,35 @@ pub enum Event {
     Refused(String),
 }
 
+/// Where a notifier's events go: a channel ([`From`]), or a function ([`Events::to`]) called
+/// on the notifier's thread, so they reach a channel of another type without a thread in
+/// between.
+pub struct Events(Box<dyn Fn(Event) -> bool + Send>);
+
+impl Events {
+    /// Each event is given to `take`; false: nobody listens any more, and the notifier ends.
+    pub fn to(take: impl Fn(Event) -> bool + Send + 'static) -> Events {
+        Events(Box::new(take))
+    }
+
+    /// Whether anybody still listens.
+    fn send(&self, event: Event) -> bool {
+        (self.0)(event)
+    }
+}
+
+impl std::fmt::Debug for Events {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Events(..)")
+    }
+}
+
+impl From<Sender<Event>> for Events {
+    fn from(events: Sender<Event>) -> Events {
+        Events::to(move |event| events.send(event).is_ok())
+    }
+}
+
 /// The shortest read timeout (a zero one would mean none).
 const MIN_WAIT: Duration = Duration::from_millis(10);
 /// The longest read timeout. Windows doesn't say whether shutting a socket down ends a read
@@ -130,7 +159,11 @@ impl Notifier {
     /// events go to `events` until it is closed or the notifier dropped. Writes made with
     /// `client`'s own token aren't announced (`excludeOwnWrites`). An error: its thread
     /// couldn't start (then never connected: the caller reads the drive on a timer).
-    pub fn spawn(client: Client, drive: TargetDrive, events: Sender<Event>) -> io::Result<Self> {
+    pub fn spawn(
+        client: Client,
+        drive: TargetDrive,
+        events: impl Into<Events>,
+    ) -> io::Result<Self> {
         Self::subscribe(
             move || client.clone(),
             Subscription { drive, own: false },
@@ -146,7 +179,7 @@ impl Notifier {
     pub fn spawn_shared(
         theirs: impl Fn() -> Client + Send + 'static,
         drive: TargetDrive,
-        events: Sender<Event>,
+        events: impl Into<Events>,
     ) -> io::Result<Self> {
         Self::subscribe(theirs, Subscription { drive, own: false }, events)
     }
@@ -157,7 +190,7 @@ impl Notifier {
         client: Client,
         drive: TargetDrive,
         own: OwnWrites,
-        events: Sender<Event>,
+        events: impl Into<Events>,
     ) -> io::Result<Self> {
         let own = own == OwnWrites::Heard;
         Self::subscribe(move || client.clone(), Subscription { drive, own }, events)
@@ -167,11 +200,12 @@ impl Notifier {
     fn subscribe(
         client: impl Fn() -> Client + Send + 'static,
         subscription: Subscription,
-        events: Sender<Event>,
+        events: impl Into<Events>,
     ) -> io::Result<Self> {
         let control = Arc::new(Control::default());
         let received = Arc::new(Received::default());
         let (told, counts) = (control.clone(), received.clone());
+        let events = events.into();
         std::thread::Builder::new()
             .name("hbsync-notify".into())
             .spawn(move || {
@@ -293,7 +327,7 @@ impl Subscription {
 /// each ended: a lost one is made again soon, a refused one later.
 fn run(
     mut connection: impl FnMut(&mut bool) -> Result<(), Ended>,
-    events: &Sender<Event>,
+    events: &Events,
     control: &Control,
 ) {
     const FIRST: Duration = Duration::from_secs(1);
@@ -324,8 +358,10 @@ fn run(
         };
         // A refusal is told whatever was asked of the notifier meanwhile.
         let refused = matches!(ended, Ended::Refused(_));
-        if let Ended::Refused(why) = &ended {
-            let _ = events.send(Event::Refused(why.clone()));
+        if let Ended::Refused(why) = &ended
+            && !events.send(Event::Refused(why.clone()))
+        {
+            return;
         }
         if control.stopping() {
             return;
@@ -335,7 +371,7 @@ fn run(
             continue;
         }
         if let Ended::Lost(why) = ended
-            && events.send(Event::Lost(why)).is_err()
+            && !events.send(Event::Lost(why))
         {
             return;
         }
@@ -365,7 +401,7 @@ type Socket = WebSocket<rustls::StreamOwned<rustls::ClientConnection, TcpStream>
 fn session(
     client: &Client,
     subscription: Subscription,
-    events: &Sender<Event>,
+    events: &Events,
     control: &Control,
     received: &Received,
     connected: &mut bool,
@@ -400,7 +436,7 @@ fn converse<S: io::Read + io::Write + Timed>(
     socket: &mut WebSocket<S>,
     client: &Client,
     subscription: Subscription,
-    events: &Sender<Event>,
+    events: &Events,
     control: &Control,
     received: &Received,
     connected: &mut bool,
@@ -451,7 +487,7 @@ fn converse<S: io::Read + io::Write + Timed>(
                     }
                     _ => continue,
                 };
-                if events.send(event).is_err() {
+                if !events.send(event) {
                     return Ok(());
                 }
             }
@@ -1071,6 +1107,7 @@ mod tests {
         let (mut socket, _) =
             tungstenite::client(format!("ws://{addr}/"), tcp).map_err(|e| e.to_string())?;
         let (tx, rx) = std::sync::mpsc::channel();
+        let tx = Events::from(tx);
         let drive = drive();
         let subscription = Subscription { drive, own: false };
         let mut connected = false;
@@ -1149,6 +1186,7 @@ mod tests {
     ) -> (Vec<Event>, usize) {
         let control = Control::default();
         let (tx, rx) = std::sync::mpsc::channel();
+        let tx = Events::from(tx);
         let made = std::sync::atomic::AtomicUsize::new(0);
         let mut told = Vec::new();
         std::thread::scope(|scope| {

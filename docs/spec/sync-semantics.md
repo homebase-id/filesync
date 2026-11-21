@@ -1647,9 +1647,10 @@ rules hold too:
   from its beginning, headers and all (a share of 10,000 files: 20 requests, about 25 MB);
   an end taken back since (the share given a later one, or withdrawn) costs one that finds
   nothing; files that each end in another minute cost one each, at most one a pull. The file stays until the
-  share is next read after its end: every 5 min while the daemon runs. A puller that no
-  longer reads on a timer (the peer socket, W4) must wake at the time kept
-  (`ReadTx::reread_due`, by the server's clock: `FeedReport::server_time` gives the offset).
+  share is next read after its end: every 5 min while the daemon reads it on a timer, and
+  at the time kept while its sharer's notifications are connected (`Drive::reread_at`:
+  `ReadTx::reread_due` is by the server's clock, so each pull says how far off it is, and
+  the daemon reads then by this computer's clock; daemon.md, the account).
   A notice of a live file on another identity's drive is read from the feed, also where the
   store knows the version (`feed::announced`): a share given another end keeps the file's
   version, and a notice says no end, so only the header the feed brings tells it. That
@@ -1694,9 +1695,11 @@ rules hold too:
   more is read or written). The period is the trade: at 29 days (as for a
   device away) it would cost a quarter, and a file deleted for good would stay up to 29
   days on a device that is always on. With each file's end in the mirror (filesync #445)
-  this read could go by the refs, at about a quarter of the bytes. A puller that no longer
-  reads on a timer (the peer socket, W4) wakes for the week as for an end: the one time
-  kept.
+  this read could go by the refs, at about a quarter of the bytes. While the sharer's
+  notifications are connected nothing reads on a timer, and the daemon reads for the week
+  as for an end, at the one time kept (`Drive::reread_at`; it costs one read of that stored
+  time after each pull of another identity's drive), and reads on 5 minutes later while
+  that read is left open, which is what gives a file its second "not there".
   Engine tests `what_the_sharer_deleted_for_good_leaves_a_week_on`,
   `an_own_drive_is_not_read_whole_again_a_week_on`, and the randomized
   `randomized_shares_deleted_for_good_show_what_is_shared` (items deleted for good behind

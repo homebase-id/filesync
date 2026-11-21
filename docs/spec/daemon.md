@@ -541,8 +541,15 @@ included (service managers restart it then).
   that what changes here moves out to, outside the folder and on its volume, and tells each
   move in a note ("report.txt: moved to …, as this folder is read-only (what changes here
   isn't synced)"). Its files are read-only on disk as they are placed (sync semantics §13,
-  "Read-only on disk"), so most saves there don't happen at all. Held deletes there are only confirmed or left held: a put back is told as
-  not possible, and nothing is asked of the drive. A runner says whose drive it syncs when
+  "Read-only on disk"), so most saves there don't happen at all. Held deletes there are
+  only confirmed or left held: a put back is refused
+  as it is asked ("This folder is read-only: what it holds back can't be put back on
+  Homebase, only deleted here or left held"), and nothing is asked of the drive. They are
+  said as the sharer's doing ("Everything here was removed by tom.example, or is no longer
+  shared with you: 80 items. Delete removes them from this computer too. They can't be put
+  back: only tom.example can change what they share with you. To keep any of them, copy
+  them to another folder first."), with **Delete** alone on the tray's page, and
+  `hbsync put-back` saying so and asking nothing. A runner says whose drive it syncs when
   another identity's, and only then: one that doesn't isn't started (a share never passes
   for the account's own folder; `hbsync status` shows a share with `->`, and it is never
   the folder shown first).
@@ -699,8 +706,39 @@ included (service managers restart it then).
   own, pause and Sync now reach it, and Recently deleted is the account's drive's alone. A
   share's runner that can't start is tried again after a pause (5 s, doubling to 5
   minutes), and one whose DB can't be used backs off, the account's folders syncing on
-  (its DB isn't set aside for it yet). Its drive is read on a timer (5 minutes) and at Sync
-  now, until its changes are announced, and only while a runner syncs it.
+  (its DB isn't set aside for it yet).
+
+  A share has its sharer's notifications (`PeerRemote::notifier`: a socket to their
+  server, with the token the files are read with; API notes, "Their notification socket"),
+  taken as the account's own are ("No poll", above): a change is in the share's folder a
+  second or two after it was made, and nothing is read on a timer while the socket is
+  connected. Two things differ:
+  - Their server announces nothing when a share's end passes, nor that a week is over
+    (sync semantics §13: both are read for from the feed's beginning). So a connected
+    share is read once more when the time kept for that is over, by this computer's clock
+    as the last read left it (`Drive::reread_at`); where that read leaves the time as it
+    was (it failed), again 5 minutes later. Such a read may be left open: the files the
+    feed no longer shows are asked about a hundred a read, and one said "not there" goes
+    only when that is said a second time, a minute to an hour later (sync semantics §8b).
+    So the share is read on, 5 minutes later each time, until nothing is left open:
+    without that, a file the sharer deleted for good would never leave this device. Where
+    the asking gets nowhere (its first file can't be answered for now: a broken
+    connection, a key not there yet), the pause doubles each time, up to about a week, so
+    one such file doesn't bring the read every 5 minutes back for good.
+  - A refusal there is of the token their server gave, never of this login: nothing of
+    the account's is held back, and the share is read on its timer all the same, as a
+    read is what asks for a new token (the socket never does). A connection their server
+    ends before subscribing it is made again once, a second later, and taken for refused
+    the second time running; then asked again after 5 minutes, doubling to an hour.
+  While not connected (not yet, a refusal, their server down, a proxy) the share is read
+  every 5 minutes, and at Sync now; only while a runner syncs it. The socket is started
+  as the account takes the share in, so that its first event finds someone to take it. A
+  share no longer synced
+  ends its socket as its copy starts to be taken off this device (one turned on again
+  while it waited its turn goes on listening). It costs one socket per sharer, pinged
+  every 30 s, on a thread that blocks, in place of 288 reads a day. It needs odin-core #2132 (a token subscribes more than once an hour).
+  Not done: a token replaced by a read isn't told to the socket, which then connects at its
+  next try (within its refused pause: some minutes of reading on the timer meanwhile).
 
   A share's folder is watched by the main folder's watcher, which is recursive and has its
   events anyway: the share's runner holds no watcher of its own, and takes what lies in its
@@ -1040,12 +1078,12 @@ Linux (rfd's, without GTK) needs `zenity`, which KDE doesn't install.
   date, cyan syncing, grey paused or offline or not set up, magenta when something needs the
   user (a failure, held deletes, a refused login). On macOS the cloud in one colour; a problem
   shows the tile with its magenta dot. The files: `crates/hbsync-tray/assets/README.md`.
-- **Menu:** version, identity, a status line (with progress while syncing, the first sync after
+- **Menu:** version, identity, a status line (of the folder that most needs the user; of what another identity shares, with its sharer's name before it, unless it waits and says for whom itself; with progress while syncing, the first sync after
   starting included), how far emptying Recently deleted (or the daily purge) has got while it
   runs ("Emptying Recently deleted: 3,000 of 22,367"), Open Homebase folder, Browse files online (chat's web app on the
   identity, opened on its Filesync mini-app: `https://<identity>/apps/chat/#filesync`),
   Recently synced (the last 10; clicking one shows it
-  in the file manager), Problems (the main folder's notes and its account's, newest first), a line when shares are off (their folder gone or not made; setting one up again is the command line's, `hbsync shared-folder`), Review N deletions…, Recently deleted…, Set up this computer…, Log
+  in the file manager), Problems (the main folder's notes, its account's and those of what others share with it, newest first: what moved out of a read-only folder is among them), a line when shares are off (their folder gone or not made; setting one up again is the command line's, `hbsync shared-folder`), Review N deletions…, Recently deleted…, Set up this computer…, Log
   in again… (refused), Pause syncing (1 h, 8 h, 24 h, until resumed) or Resume, Sync now, Start
   at login, Open logs, Log out, Quit (keep syncing in the background, or stop syncing too).
   Syncing stopped: Start syncing, Open Homebase folder, Start at login, Open logs, Quit.

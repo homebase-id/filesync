@@ -6,12 +6,14 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::ops::Range;
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 use hbsync_engine::Drive;
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::drive::markers::{Sharer, is_domain};
 use hbsync_homebase::drive::shared::PeerRemote;
+use hbsync_homebase::notify::{Events, Notifier};
 use hbsync_remote::{
     Answers, ChangesPage, Deletes, ForGood, Holds, NodeMeta, RefsPage, Refusal, Remote,
     RemoteError, RemoteHeader, Upload,
@@ -19,6 +21,7 @@ use hbsync_remote::{
 use hbsync_types::{Doomed, NodeId, RemoteFileId, Target, Written};
 use uuid::Uuid;
 
+use super::Msg;
 use super::parts::{Share, Sharers, Synced};
 use crate::runner::RunnerError;
 use crate::{Identity, Paths};
@@ -37,17 +40,46 @@ pub(crate) struct ByMarkers {
     paths: Paths,
     /// The drive each sharer's files are on, as the markers last named it.
     drives: Mutex<HashMap<Identity, Uuid>>,
+    /// Where each share's notifications go: the account ([`Msg::ShareHint`]).
+    to_account: Sender<Msg>,
 }
 
 impl ByMarkers {
-    pub(crate) fn new(me: &Identity, own: Arc<HomebaseRemote>, paths: &Paths) -> ByMarkers {
+    /// `to_account`: the account's own channel, which each share's notifications are sent
+    /// on.
+    pub(crate) fn new(
+        me: &Identity,
+        own: Arc<HomebaseRemote>,
+        paths: &Paths,
+        to_account: Sender<Msg>,
+    ) -> ByMarkers {
         ByMarkers {
             me: me.clone(),
             own,
             paths: paths.clone(),
             drives: Mutex::default(),
+            to_account,
         }
     }
+}
+
+/// `sharer`'s notifications, read on `peer` (their server), their events sent to the account
+/// (`to_account`) under the sharer's name. `None` where their thread couldn't start (told):
+/// the share is read on a timer.
+fn listen(sharer: &Identity, peer: &Arc<PeerRemote>, to_account: Sender<Msg>) -> Option<Notifier> {
+    let from = sharer.clone();
+    let hints = Events::to(move |event| {
+        let hint = Msg::ShareHint(from.clone(), event);
+        to_account.send(hint).is_ok()
+    });
+    peer.notifier(hints)
+        .inspect_err(|e| {
+            tracing::error!(
+                "can't start {sharer}'s notifications ({e}); reading what they share now \
+                 and then"
+            )
+        })
+        .ok()
 }
 
 /// Whose shares `me`'s account has records of on this device: a state DB in a folder named
@@ -154,13 +186,16 @@ impl Sharers for ByMarkers {
         let token = self.paths.shared_token(&self.me, sharer);
         let peer = PeerRemote::open(Arc::clone(&self.own), named, &token)
             .map_err(hbsync_engine::EngineError::Remote)?;
+        let peer = Arc::new(peer);
         let login = peer.login_id();
-        let drive = Drive::open(&db, &self.me, Arc::new(peer))?;
+        let drive = Drive::open(&db, &self.me, peer.clone())?;
         // The files' tokens are sealed under the token's secret: another token's don't open.
         if drive.tokens_sealed_by(&login)? {
             tracing::info!("a new token for {sharer}'s server: the files' tokens are read again");
         }
-        Ok(Share::new(sharer, drive, db))
+        let (from, to_account) = (sharer.clone(), self.to_account.clone());
+        let start = move || listen(&from, &peer, to_account);
+        Ok(Share::new(sharer, drive, db).hearing(start))
     }
 }
 

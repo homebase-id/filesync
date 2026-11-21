@@ -71,8 +71,8 @@ impl Daemon {
         s.accounts.iter().find(|a| a.identity == *identity)
     }
 
-    /// What others share with `identity` that waits ([`State::Waiting`]).
-    pub fn waiting_shares<'a>(
+    /// What others share with `identity`, each sharer's a folder of its own.
+    pub fn shares<'a>(
         &'a self,
         identity: &'a hbsync_app::Identity,
     ) -> impl Iterator<Item = &'a FolderStatus> {
@@ -80,9 +80,15 @@ impl Daemon {
             Daemon::Running(s) => &s.folders[..],
             _ => &[],
         };
-        (folders.iter()).filter(move |f| {
-            f.identity == *identity && f.sharer.is_some() && f.state == State::Waiting
-        })
+        (folders.iter()).filter(move |f| f.identity == *identity && f.sharer.is_some())
+    }
+
+    /// What others share with `identity` that waits ([`State::Waiting`]).
+    pub fn waiting_shares<'a>(
+        &'a self,
+        identity: &'a hbsync_app::Identity,
+    ) -> impl Iterator<Item = &'a FolderStatus> {
+        self.shares(identity).filter(|f| f.state == State::Waiting)
     }
 
     /// The status of the folder that most needs the user (the main folder among equals): what
@@ -211,7 +217,15 @@ pub(crate) fn status_line(view: &View) -> String {
         Daemon::Starting(Some(why)) => cut(&format!("Can't start: {why}")),
         Daemon::Stopped => "Syncing stopped".into(),
         Daemon::Running(_) => match view.daemon.most_urgent() {
-            Some(s) => cut(&words::status_line(s, view.now)),
+            Some(s) => {
+                let line = words::status_line(s, view.now);
+                // Of what another identity shares: said, as the line is the main folder's
+                // otherwise. (One that waits says for whom itself.)
+                cut(&match &s.sharer {
+                    Some(sharer) if s.state != State::Waiting => format!("{sharer}: {line}"),
+                    _ => line,
+                })
+            }
             None => "Nothing to sync".into(),
         },
     }
@@ -272,9 +286,11 @@ pub(crate) fn menu(view: &View) -> Vec<Item> {
             "Browse files online".into(),
         ));
         items.push(recently_synced(view.recent, view.now));
-        // The main folder's, and its account's own (Recently deleted's, the drive's).
+        // The main folder's, its account's own (Recently deleted's, the drive's), and those
+        // of what others share with it (what was moved out of a read-only folder).
         let account = view.daemon.account(&s.identity).map(|a| &a.recent[..]);
-        let notes = [&s.recent[..], account.unwrap_or_default()];
+        let mut notes = vec![&s.recent[..], account.unwrap_or_default()];
+        notes.extend(view.daemon.shares(&s.identity).map(|f| &f.recent[..]));
         let problems = problems(&notes, view.now);
         if !problems.is_empty() {
             let count: usize = notes.iter().map(|n| n.len()).sum();
@@ -477,6 +493,16 @@ mod tests {
         }))
     }
 
+    /// What the daemon tells with the main folder idle and `share`, what another identity
+    /// shares with it.
+    fn with_share(share: FolderStatus) -> Box<DaemonStatus> {
+        let Daemon::Running(mut both) = running(status(State::Idle)) else {
+            unreachable!("running");
+        };
+        both.folders.push(share);
+        both
+    }
+
     fn view<'a>(daemon: &'a Daemon, recent: &'a [RecentItem]) -> View<'a> {
         View {
             daemon,
@@ -500,6 +526,32 @@ mod tests {
         out
     }
 
+    /// What a share's folder says is said as the share's: the status line names its sharer
+    /// where it is the share's, and its notes (what moved out of the read-only folder) are
+    /// among the menu's problems.
+    #[test]
+    fn a_shares_status_names_its_sharer_and_its_notes_are_listed() {
+        let mut share = status(State::Failing);
+        share.sharer = Some("tom.example".into());
+        share.path = "/home/anna/Homebase/Shared/tom.example".into();
+        share.error = Some("its folder is gone".into());
+        share.recent = vec![Note {
+            at: NOW - 60,
+            text: "a.txt: moved to /home/anna/Homebase, as this folder is read-only".into(),
+        }];
+        let d = Daemon::Running(with_share(share));
+        let v = view(&d, &[]);
+        assert_eq!(status_line(&v), "tom.example: Problem: its folder is gone");
+        let listed = menu(&v).iter().any(|item| match item {
+            Item::Submenu(label, notes) => {
+                label == "Problems (1)"
+                    && matches!(&notes[..], [Item::Label(note)] if note.starts_with("a.txt: moved to"))
+            }
+            _ => false,
+        });
+        assert!(listed, "{:?}", menu(&v));
+    }
+
     /// A share that waits for its sharer changes neither the icon nor the status line (this
     /// computer's own files are what they say of), and is named in the menu; one that wants
     /// the owner's approval asks for attention. Neither offers to log in again.
@@ -511,10 +563,7 @@ mod tests {
             share.path = "/home/anna/Homebase/Shared/tom.example".into();
             share.error = Some(why.into());
             share.needs_approval = needs_approval;
-            let Daemon::Running(mut both) = running(status(State::Idle)) else {
-                panic!("running");
-            };
-            both.folders.push(share);
+            let mut both = with_share(share);
             // (As the daemon tells it: the account says the app wants the approval.)
             let mut account = hbsync_app::protocol::AccountStatus::new(&"anna.example.com".into());
             account.needs_approval = needs_approval;
