@@ -20,7 +20,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use hbsync_app::lock::{InstanceLock, LockError};
-use hbsync_app::protocol::{DaemonControl, Pause, RecentItem};
+use hbsync_app::protocol::{DaemonControl, Pause, RecentItem, SharesFolder};
 use hbsync_app::{APP_NAME, Paths, autostart, control, shell, words};
 use hbsync_app::{FolderStatus, State};
 use tray_icon::menu::{
@@ -157,6 +157,8 @@ struct App {
     told_denied: HashMap<PathBuf, bool>,
     /// The folder given its icon and shortcut ([`shell`]) by this run.
     decorated: Option<PathBuf>,
+    /// Its folder of shares given its icon by this run.
+    decorated_shares: Option<PathBuf>,
     /// A stop found at the watcher's first look is told; not after restarting into an update
     /// ([`hbsync_app::install::RESTARTED`]).
     tell_stopped: bool,
@@ -213,6 +215,7 @@ impl App {
             notified: HashMap::new(),
             told_denied: HashMap::new(),
             decorated: None,
+            decorated_shares: None,
             tell_stopped: !hbsync_app::install::restarted(),
         })
     }
@@ -267,6 +270,23 @@ impl App {
                         shell::decorate(&paths, &folder, &identity, icons::FOLDER)
                     });
                     self.decorated = Some(s.path.clone());
+                }
+                // Its folder of shares, while it is there: an icon of its own.
+                if let Some(s) = daemon.status()
+                    && s.is_main()
+                    && let Some(SharesFolder::At { name }) = &s.shares
+                    && self.decorated_shares.as_ref() != Some(&s.path.join(name))
+                {
+                    let (paths, folder, identity, name) = (
+                        self.paths.clone(),
+                        s.path.clone(),
+                        s.identity.clone(),
+                        name.clone(),
+                    );
+                    self.decorated_shares = Some(folder.join(&name));
+                    std::thread::spawn(move || {
+                        shell::decorate_shares(&paths, &folder, &identity, &name, icons::SHARES)
+                    });
                 }
                 self.pages.set_status(daemon.held_or_main().cloned());
                 self.updated = updated;
@@ -368,6 +388,7 @@ impl App {
             Action::LogOut => {
                 // Unlinking takes the folder's icon and shortcut off too.
                 self.decorated = None;
+                self.decorated_shares = None;
                 let (paths, send) = (self.paths.clone(), self.send.clone());
                 std::thread::spawn(move || {
                     let done = control::log_out(&paths).and_then(|_| control::unlink(&paths));

@@ -2,21 +2,34 @@
 //! (Windows: Explorer's navigation pane, `sync_root.rs`; Linux: GTK bookmarks and KDE places;
 //! Finder's sidebar has no public interface). The shortcut is made once per folder (a note in
 //! the state folder for each), so one the user removed stays removed; the icon again when a version
-//! brings another. Undone when the folder is unlinked. All best effort: a file manager that
-//! doesn't take it is no failure.
+//! brings another. Its folder of shares (what other identities share, sync semantics §13) has
+//! an icon of its own, and no shortcut: it is in the main folder. Undone when the folder is
+//! unlinked. All best effort: a file manager that doesn't take it is no failure.
 
 use std::path::{Path, PathBuf};
 
 use crate::{Identity, Paths};
 
-/// The Filesync icon, as each OS wants it.
+/// A folder's icon, as each OS wants it.
 #[derive(Debug, Clone, Copy)]
 pub struct Icons<'a> {
+    /// What its file in the state folder is named by (`<name>-<hash>.png`): each icon its
+    /// own, as a new one of a name takes the place of the old.
+    pub name: &'a str,
     /// A PNG (Linux, macOS).
     pub png: &'a [u8],
     /// An ICO (Windows).
     pub ico: &'a [u8],
 }
+
+/// The file in a folder that carries its icon on this OS (built-in junk: never synced).
+const ICON_FILE: &str = if cfg!(windows) {
+    "desktop.ini"
+} else if cfg!(target_os = "macos") {
+    "Icon\r"
+} else {
+    ".directory"
+};
 
 /// The note that `folder` is decorated, holding the hash of the icon it got (empty when that
 /// failed): `folder-decorated-<hash of the folder's path>`.
@@ -39,42 +52,53 @@ fn icon_bytes(icons: Icons<'_>) -> &[u8] {
     if cfg!(windows) { icons.ico } else { icons.png }
 }
 
-/// The icon as a file in the state folder, named after its content: another icon gets another
-/// name, so file managers that cache icons by path show it. Written whole or not at all; ours
-/// with other names go (one Explorer still holds stays, until a later start).
-#[cfg(not(target_os = "macos"))]
-fn icon_file(paths: &Paths, bytes: &[u8], ext: &str) -> std::io::Result<PathBuf> {
-    let name = format!(
-        "homebase-{:016x}.{ext}",
-        hbsync_platform::fnv::fnv1a64(bytes)
-    );
+/// The icon `kind` ([`Icons::name`]) as a file in the state folder, named after its content:
+/// another icon gets another name, so file managers that cache icons by path show it. Written
+/// whole or not at all; that kind's with other names go (one Explorer still holds stays, until
+/// a later start).
+#[cfg(any(not(target_os = "macos"), test))]
+fn icon_file(paths: &Paths, kind: &str, bytes: &[u8], ext: &str) -> std::io::Result<PathBuf> {
+    let name = format!("{kind}-{:016x}.{ext}", hbsync_platform::fnv::fnv1a64(bytes));
     let path = paths.state.join(&name);
     if !path.exists() {
         hbsync_fileio::write_atomic(&path, bytes)?;
     }
+    // (By the whole pattern: another kind's name may begin with this one's.)
+    let of_kind = |other: &str| {
+        other
+            .strip_prefix(kind)
+            .and_then(|rest| rest.strip_prefix('-'))
+            .and_then(|rest| rest.strip_suffix(ext))
+            .and_then(|rest| rest.strip_suffix('.'))
+            .is_some_and(|hash| hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()))
+    };
     for entry in std::fs::read_dir(&paths.state)?.flatten() {
         let other = entry.file_name();
         let other = other.to_string_lossy();
-        if other != name && other.starts_with("homebase") && other.ends_with(&format!(".{ext}")) {
+        if other != name && of_kind(&other) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
     Ok(path)
 }
 
-/// Gives `folder` (synced with `identity`) its icon and shortcut, unless it already has them.
-pub fn decorate(paths: &Paths, folder: &Path, identity: &Identity, icons: Icons<'_>) {
-    // Not for a folder no longer set up (a late call that lost the race with Log out), nor
-    // for one that isn't the main folder (a role folder or the Desktop is the user's own).
-    let configured = crate::Config::load(&paths.config_file())
+/// Whether `folder` is set up as the main folder synced with `identity`.
+fn is_main(paths: &Paths, folder: &Path, identity: &Identity) -> bool {
+    crate::Config::load(&paths.config_file())
         .ok()
         .flatten()
         .is_some_and(|c| {
             c.roots
                 .iter()
                 .any(|r| r.folder == folder && r.identity == *identity && r.is_main())
-        });
-    if !configured {
+        })
+}
+
+/// Gives `folder` (synced with `identity`) its icon and shortcut, unless it already has them.
+pub fn decorate(paths: &Paths, folder: &Path, identity: &Identity, icons: Icons<'_>) {
+    // Not for a folder no longer set up (a late call that lost the race with Log out), nor
+    // for one that isn't the main folder (a role folder or the Desktop is the user's own).
+    if !is_main(paths, folder, identity) {
         return;
     }
     let done = note(paths, folder);
@@ -104,12 +128,61 @@ pub fn decorate(paths: &Paths, folder: &Path, identity: &Identity, icons: Icons<
     }
 }
 
-/// Takes the icon and shortcut off `folder` (synced with `identity`) again (unlinking it).
+/// Gives the folder of shares `name` at the top of `main` (the main folder synced with
+/// `identity`) its icon, unless it has it: the icon alone, as its place is in the main
+/// folder, which has the shortcut. Not a link of that name: the icon would go where it leads.
+pub fn decorate_shares(
+    paths: &Paths,
+    main: &Path,
+    identity: &Identity,
+    name: &str,
+    icons: Icons<'_>,
+) {
+    let folder = main.join(name);
+    let there = std::fs::symlink_metadata(&folder).is_ok_and(|meta| meta.is_dir());
+    if !there || !is_main(paths, main, identity) {
+        return;
+    }
+    let done = note(paths, &folder);
+    let key = format!("{:016x}", hbsync_platform::fnv::fnv1a64(icon_bytes(icons)));
+    let note = std::fs::read_to_string(&done).ok();
+    if !shares_icon_due(note.as_deref(), &key, folder.join(ICON_FILE).exists()) {
+        return;
+    }
+    tracing::info!("giving {} its icon", folder.display());
+    let set = os::icon(paths, &folder, icons);
+    if let Err(e) = &set {
+        tracing::info!("the icon of the folder of shares: {e}");
+    }
+    // One that failed is tried again at the next start (the note keeps no key).
+    let key = if set.is_ok() { key.as_str() } else { "" };
+    if let Err(e) = std::fs::write(&done, format!("{key}\n")) {
+        tracing::warn!("{}: {e}", done.display());
+    }
+}
+
+/// Whether the folder of shares is to get the icon hashed to `key`, its note saying `note`
+/// and the file that carries a folder's icon being in it or not (`has_file`). The note
+/// outlives a folder the user removed: one made again in its place has no icon, its file
+/// having gone with the folder.
+fn shares_icon_due(note: Option<&str>, key: &str, has_file: bool) -> bool {
+    to_do(note, key).1 || !has_file
+}
+
+/// Takes the icon and shortcut off `folder` (synced with `identity`) again (unlinking it), and
+/// the icon off its folder of shares.
 pub fn undecorate(paths: &Paths, folder: &Path, identity: &Identity) {
     #[cfg(windows)]
     os::unregister(folder, identity);
     #[cfg(not(windows))]
     let _ = identity;
+    for shares in hbsync_local::shares::folders(folder).unwrap_or_default() {
+        let shares = folder.join(shares);
+        if let Err(e) = os::icon_off(paths, &shares) {
+            tracing::info!("removing the icon of the folder of shares: {e}");
+        }
+        let _ = std::fs::remove_file(note(paths, &shares));
+    }
     if let Err(e) = os::undecorate(paths, folder) {
         tracing::info!("removing the folder's icon or shortcut: {e}");
     }
@@ -223,7 +296,7 @@ mod os {
     }
 
     pub(super) fn icon(paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
-        let icon = icon_file(paths, icons.png, "png")?;
+        let icon = icon_file(paths, icons.name, icons.png, "png")?;
         // GNOME's Files and others: GIO metadata (outside the folder).
         let _ = Command::new("gio")
             .args(["set", "-t", "string"])
@@ -255,7 +328,8 @@ mod os {
         }
     }
 
-    pub(super) fn undecorate(paths: &Paths, folder: &Path) -> std::io::Result<()> {
+    /// Takes the icon off `folder`: what [`icon`] set.
+    pub(super) fn icon_off(paths: &Paths, folder: &Path) -> std::io::Result<()> {
         let _ = Command::new("gio")
             .args(["set", "-d"])
             .arg(folder)
@@ -265,6 +339,11 @@ mod os {
         if std::fs::read_to_string(&directory).is_ok_and(|t| our_dolphin(paths, &t)) {
             std::fs::remove_file(&directory)?;
         }
+        Ok(())
+    }
+
+    pub(super) fn undecorate(paths: &Paths, folder: &Path) -> std::io::Result<()> {
+        icon_off(paths, folder)?;
         let uri = file_uri(folder);
         if let Some(config) = xdg_dir("XDG_CONFIG_HOME", ".config") {
             edit(&config.join("gtk-3.0/bookmarks"), false, |t| {
@@ -315,8 +394,13 @@ mod os {
     /// Finder's sidebar has no public interface.
     pub(super) fn shortcut(_folder: &Path) {}
 
-    pub(super) fn undecorate(_paths: &Paths, folder: &Path) -> std::io::Result<()> {
+    /// Takes the icon off `folder`: what [`icon`] set.
+    pub(super) fn icon_off(_paths: &Paths, folder: &Path) -> std::io::Result<()> {
         set_icon(folder, None)
+    }
+
+    pub(super) fn undecorate(paths: &Paths, folder: &Path) -> std::io::Result<()> {
+        icon_off(paths, folder)
     }
 }
 
@@ -428,7 +512,7 @@ mod os {
     }
 
     pub(super) fn icon(paths: &Paths, folder: &Path, icons: Icons<'_>) -> std::io::Result<()> {
-        let icon = icon_file(paths, icons.ico, "ico")?;
+        let icon = icon_file(paths, icons.name, icons.ico, "ico")?;
         let ini = folder.join("desktop.ini");
         match std::fs::read_to_string(&ini) {
             Ok(text) if !text.contains(OURS) => {}
@@ -447,7 +531,8 @@ mod os {
         Ok(())
     }
 
-    pub(super) fn undecorate(_paths: &Paths, folder: &Path) -> std::io::Result<()> {
+    /// Takes the icon off `folder`: what [`icon`] set.
+    pub(super) fn icon_off(_paths: &Paths, folder: &Path) -> std::io::Result<()> {
         let ini = folder.join("desktop.ini");
         let ours = std::fs::read_to_string(&ini).is_ok_and(|t| t.contains(OURS));
         if ours {
@@ -455,6 +540,11 @@ mod os {
             std::fs::remove_file(&ini)?;
             attributes(folder, FILE_ATTRIBUTE_READONLY, false)?;
         }
+        Ok(())
+    }
+
+    pub(super) fn undecorate(paths: &Paths, folder: &Path) -> std::io::Result<()> {
+        icon_off(paths, folder)?;
         quick_access(folder, false);
         Ok(())
     }
@@ -480,6 +570,79 @@ mod tests {
         // Another version's icons, or an icon that failed: the icon again.
         assert_eq!(to_do(Some("k0\n"), "k1"), (false, true));
         assert_eq!(to_do(Some("\n"), "k1"), (false, true));
+    }
+
+    /// Each kind of icon has a file of its own in the state folder: a new one takes the
+    /// place of its kind's old one, and leaves the other kind's.
+    #[test]
+    fn each_kind_of_icon_keeps_its_file() -> std::io::Result<()> {
+        let home = tempfile::tempdir()?;
+        let paths = Paths::under(home.path());
+        std::fs::create_dir_all(&paths.state)?;
+        let main = icon_file(&paths, "homebase", b"main", "png")?;
+        let shares = icon_file(&paths, "homebase-shares", b"shares", "png")?;
+        assert_ne!(main, shares);
+        assert!(main.exists() && shares.exists());
+        // A new version's main icon: the old one goes, the folder of shares' stays; and so
+        // the other way round. Another format's stays too.
+        let ico = icon_file(&paths, "homebase", b"main", "ico")?;
+        let newer = icon_file(&paths, "homebase", b"main 2", "png")?;
+        assert!(!main.exists() && newer.exists() && shares.exists() && ico.exists());
+        let newer_shares = icon_file(&paths, "homebase-shares", b"shares 2", "png")?;
+        assert!(!shares.exists() && newer_shares.exists() && newer.exists());
+        Ok(())
+    }
+
+    /// The folder of shares gets its icon once, again when a version brings another, and
+    /// again when the folder was made anew (the note says done; the icon's file isn't there).
+    #[test]
+    fn the_folder_of_shares_gets_its_icon_when_it_has_none() {
+        assert!(shares_icon_due(None, "k1", false));
+        assert!(!shares_icon_due(Some("k1\n"), "k1", true));
+        assert!(shares_icon_due(Some("k0\n"), "k1", true));
+        assert!(shares_icon_due(Some("\n"), "k1", true), "it failed: again");
+        assert!(shares_icon_due(Some("k1\n"), "k1", false), "made anew");
+    }
+
+    /// Only the folder of shares of a main folder that is set up gets an icon, and never
+    /// what a link of its name leads to.
+    #[test]
+    fn nothing_else_gets_the_icon_of_the_folder_of_shares() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let home = tempfile::tempdir()?;
+        let paths = Paths::under(home.path());
+        std::fs::create_dir_all(&paths.state)?;
+        let (me, main) = (
+            Identity::from("anna.example.com"),
+            home.path().join("Homebase"),
+        );
+        let icons = Icons {
+            name: "shares",
+            png: b"png",
+            ico: b"ico",
+        };
+        let untouched = |folder: &Path| {
+            let empty = std::fs::read_dir(folder).is_ok_and(|mut inside| inside.next().is_none());
+            empty && !note(&paths, &main.join("Shared")).exists()
+        };
+        // Not set up (logged out meanwhile).
+        std::fs::create_dir_all(main.join("Shared"))?;
+        decorate_shares(&paths, &main, &me, "Shared", icons);
+        assert!(untouched(&main.join("Shared")));
+        // Set up, and `Shared` a link to a folder elsewhere.
+        #[cfg(unix)]
+        {
+            crate::Config::update(&paths.config_file(), |config| {
+                config.roots.push(crate::config::Root::main(&me, &main));
+            })?;
+            let elsewhere = home.path().join("elsewhere");
+            std::fs::create_dir(&elsewhere)?;
+            std::fs::remove_dir(main.join("Shared"))?;
+            std::os::unix::fs::symlink(&elsewhere, main.join("Shared"))?;
+            decorate_shares(&paths, &main, &me, "Shared", icons);
+            assert!(untouched(&elsewhere));
+        }
+        Ok(())
     }
 
     #[test]
