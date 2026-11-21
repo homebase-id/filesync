@@ -309,10 +309,30 @@ pub fn last_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
+/// Why a read-only folder's held deletes can't be put back (what another identity shares:
+/// putting back would write to their drive), and what can be done with them.
+pub const NO_PUT_BACK: &str = "This folder is read-only: what it holds back can't be put back \
+                               on Homebase, only deleted here or left held";
+
 /// What the held deletes `held` are and what each answer does, a paragraph for each way:
 /// `delete` and `put_back` name the answers as the user gives them (the tray's buttons, the
-/// CLI's commands).
-pub fn held_deletes(held: &HeldDeletes, delete: &str, put_back: &str) -> Vec<String> {
+/// CLI's commands). `sharer`: whose share the folder is of, where it is one's: read-only, so
+/// its deletes are only ever its sharer's, and there is no putting back.
+pub fn held_deletes(
+    held: &HeldDeletes,
+    sharer: Option<&crate::Identity>,
+    delete: &str,
+    put_back: &str,
+) -> Vec<String> {
+    if let Some(sharer) = sharer {
+        return vec![format!(
+            "Everything here was removed by {sharer}, or is no longer shared with you: {}. \
+             {delete} removes them from this computer too. They can't be put back: only \
+             {sharer} can change what they share with you. To keep any of them, copy them to \
+             another folder first.",
+            items(held.total())
+        )];
+    }
     let mut out = Vec::new();
     if held.here > 0 {
         let were = if held.here == 1 { "was" } else { "were" };
@@ -532,7 +552,7 @@ mod tests {
             examples: Vec::new(),
             token: "t".into(),
         };
-        let cli = held_deletes(&held, "`hbsync confirm-deletes`", "`hbsync put-back`");
+        let cli = held_deletes(&held, None, "`hbsync confirm-deletes`", "`hbsync put-back`");
         assert_eq!(cli.len(), 1);
         assert!(cli[0].starts_with("812 items in Homebase were deleted on this computer"));
         assert!(cli[0].contains(" `hbsync confirm-deletes` removes them from Homebase"));
@@ -542,7 +562,7 @@ mod tests {
             remotely: 1200,
             ..held
         };
-        let tray = held_deletes(&elsewhere, "Delete", "Put them back");
+        let tray = held_deletes(&elsewhere, None, "Delete", "Put them back");
         assert_eq!(
             tray,
             [
@@ -551,13 +571,25 @@ mod tests {
               device."
             ]
         );
+        // What another identity shares: no putting back, and the sharer is who removed it.
+        let tom = crate::Identity::from("tom.example");
+        let shared = held_deletes(&elsewhere, Some(&tom), "Delete", "Put them back");
+        assert_eq!(
+            shared,
+            [
+                "Everything here was removed by tom.example, or is no longer shared with you: \
+              1,200 items. Delete removes them from this computer too. They can't be put \
+              back: only tom.example can change what they share with you. To keep any of \
+              them, copy them to another folder first."
+            ]
+        );
         let unfinished = HeldDeletes {
             here: 0,
             remotely: 3,
             unfinished: 1,
             ..elsewhere.clone()
         };
-        let both = held_deletes(&unfinished, "Delete", "Put them back");
+        let both = held_deletes(&unfinished, None, "Delete", "Put them back");
         assert_eq!(
             both,
             [

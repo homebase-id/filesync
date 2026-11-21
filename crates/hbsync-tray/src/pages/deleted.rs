@@ -1,9 +1,48 @@
 //! Reviewing held deletes, and Recently deleted: its items, restoring and emptying them.
 
-use hbsync_app::protocol::{DeletedAccount, DeletedList};
+use hbsync_app::protocol::{DeletedAccount, DeletedList, FolderStatus, HeldDeletes};
 use hbsync_app::{HeldAnswer, State};
 
 use super::*;
+
+/// The page to review `held`, the deletes held in `status`'s folder, its answers posted to
+/// `url`. What another identity shares is read-only: deleted here or left held, with no
+/// button to put it back.
+fn held_page(status: &FolderStatus, held: &HeldDeletes, url: &str) -> String {
+    let sharer = status.sharer.as_ref();
+    let what: String = words::held_deletes(held, sharer, "Delete", "Put them back")
+        .iter()
+        .map(|line| format!("<p>{}</p>", escape(line)))
+        .collect();
+    let examples: String = held
+        .examples
+        .iter()
+        .map(|p| format!("<li><code>{}</code></li>", escape(p)))
+        .collect();
+    let more = if held.more_than_shown() {
+        "<li>…</li>"
+    } else {
+        ""
+    };
+    let put_back = match sharer {
+        Some(_) => "",
+        None => " <button name=answer value=put_back>Put them back</button>",
+    };
+    format!(
+        "<h1>{} deletions to review</h1>\
+         <p>{APP_NAME} holds back deletions this large until you answer. In \
+         <code>{folder}</code>:</p>{what}\
+         <ul>{examples}{more}</ul>\
+         <form method=post action=\"{url}\">\
+         <input type=hidden name=token value=\"{token}\">\
+         <button name=answer value=delete>Delete</button>{put_back}</form>\
+         <p class=small>Not sure? Leave this page. Nothing changes, here or on Homebase, \
+         until you answer. {APP_NAME} reminds you until you do.</p>",
+        held.total(),
+        folder = escape(&status.path.display().to_string()),
+        token = escape(&held.token),
+    )
+}
 
 /// At most this many items of Recently deleted on its page.
 const MAX_DELETED: usize = 1000;
@@ -14,39 +53,10 @@ impl Server {
         let Some(status) = &s.status else {
             return format!("<h1>Deletions</h1><p>{APP_NAME} isn't running.</p>");
         };
-        let Some(held) = &status.held_deletes else {
-            return "<h1>Deletions</h1><p>No deletions to review.</p>".into();
-        };
-        let what: String = words::held_deletes(held, "Delete", "Put them back")
-            .iter()
-            .map(|line| format!("<p>{}</p>", escape(line)))
-            .collect();
-        let examples: String = held
-            .examples
-            .iter()
-            .map(|p| format!("<li><code>{}</code></li>", escape(p)))
-            .collect();
-        let more = if held.more_than_shown() {
-            "<li>…</li>"
-        } else {
-            ""
-        };
-        format!(
-            "<h1>{} deletions to review</h1>\
-             <p>{APP_NAME} holds back deletions this large until you answer. In \
-             <code>{folder}</code>:</p>{what}\
-             <ul>{examples}{more}</ul>\
-             <form method=post action=\"{url}\">\
-             <input type=hidden name=token value=\"{token}\">\
-             <button name=answer value=delete>Delete</button> \
-             <button name=answer value=put_back>Put them back</button></form>\
-             <p class=small>Not sure? Leave this page. Nothing changes, here or on Homebase, \
-             until you answer. {APP_NAME} reminds you until you do.</p>",
-            held.total(),
-            folder = escape(&status.path.display().to_string()),
-            url = self.pages.url("deletions"),
-            token = escape(&held.token),
-        )
+        match &status.held_deletes {
+            Some(held) => held_page(status, held, &self.pages.url("deletions")),
+            None => "<h1>Deletions</h1><p>No deletions to review.</p>".into(),
+        }
     }
 
     /// Recently deleted, as the user deleted it: each item (a folder with what was in it),
@@ -273,6 +283,27 @@ fn listed_from_field(field: &str) -> Vec<DeletedAccount> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The page offers to put held deletes back, but not in what another identity shares:
+    /// there they are deleted here or left held, and the page says whose they are.
+    #[test]
+    fn a_shares_held_deletes_arent_offered_back() {
+        let held = HeldDeletes {
+            here: 0,
+            remotely: 80,
+            unfinished: 0,
+            examples: vec!["a.txt".into()],
+            token: "t".into(),
+        };
+        let folder = std::path::Path::new("/home/anna/Homebase");
+        let mut status = FolderStatus::new(&"anna.example.com".into(), folder);
+        let own = held_page(&status, &held, "/deletions");
+        assert!(own.contains("value=put_back") && own.contains("value=delete"));
+        status.sharer = Some("tom.example".into());
+        let theirs = held_page(&status, &held, "/deletions");
+        assert!(!theirs.contains("put_back") && theirs.contains("value=delete"));
+        assert!(theirs.contains("removed by tom.example"), "{theirs}");
+    }
 
     /// Empty is offered only when emptying takes something; else the page says why not.
     #[test]

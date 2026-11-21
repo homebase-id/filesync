@@ -54,6 +54,18 @@ impl Device {
         Self::start_on(FakeRemote::new(server.clone()), name, tweak)
     }
 
+    /// A device of the member `sharer.example` shares what is on `server` with: its folder
+    /// read-only, what changes there moved out to `moved out` beside it.
+    fn share_of(
+        server: &Arc<Mutex<FakeServer>>,
+        name: &str,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        Device::start_on(FakeRemote::member(server.clone()), name, |cfg| {
+            cfg.sharer = Some("sharer.example".into());
+            cfg.read_only = Some(cfg.folder.with_file_name("moved out"));
+        })
+    }
+
     /// [`Device::start_with`], its drive read through `remote`.
     fn start_on(
         remote: FakeRemote,
@@ -2223,10 +2235,7 @@ fn a_share_waits_where_its_login_isnt_what_is_refused() -> R {
     a.wait_idle()?;
     let report = header_named(&server, "report.txt").map(|h| h.at());
     a.remote.share(report.ok_or("report.txt is up")?.file_id)?;
-    let b = Device::start_on(FakeRemote::member(server.clone()), "b", |cfg| {
-        cfg.sharer = Some("sharer.example".into());
-        cfg.read_only = Some(cfg.folder.with_file_name("moved out"));
-    })?;
+    let b = Device::share_of(&server, "b")?;
     wait_until("b has what is shared", || b.has("report.txt"))?;
     b.wait_idle()?;
     let waits = || -> R {
@@ -2308,6 +2317,71 @@ fn a_share_waits_where_its_login_isnt_what_is_refused() -> R {
     Ok(())
 }
 
+/// What another identity shares, all of it no longer shared at once, is held here as a wipe
+/// is anywhere. It can be deleted here or left held; putting it back would write to their
+/// drive, and is refused as it is asked (sync semantics §13), the deletes held on.
+#[test]
+fn a_shares_held_deletes_are_never_put_back() -> R {
+    use hbsync_remote::contract::Shares;
+    let server = server();
+    let a = Device::start(&server, "a")?;
+    let names: Vec<String> = (0..60).map(|i| format!("f{i:02}.txt")).collect();
+    for (i, name) in names.iter().enumerate() {
+        a.write(name, &i.to_string())?;
+    }
+    wait_until("all 60 are up", || live_names(&server).len() == 60)?;
+    a.wait_idle()?;
+    let ids: Vec<_> = (names.iter())
+        .filter_map(|name| header_named(&server, name))
+        .map(|h| h.file_id)
+        .collect();
+    for id in &ids {
+        a.remote.share(*id)?;
+    }
+    let b = Device::share_of(&server, "b")?;
+    wait_until("b has what is shared", || b.has("f59.txt"))?;
+    b.wait_idle()?;
+
+    for id in &ids {
+        a.remote.withdraw(*id)?;
+    }
+    b.handle.send(Command::SyncNow);
+    wait_until("their going is held", || {
+        b.status().held_deletes.is_some_and(|h| h.remotely == 60)
+    })?;
+    let held = b.status().held_deletes.ok_or("held")?;
+    assert_eq!(
+        (held.here, held.unfinished),
+        (0, 0),
+        "only ever the sharer's"
+    );
+    let refused = b.handle.answer(HeldAnswer::PutBack, &held.token);
+    assert!(
+        refused.as_ref().is_err_and(|why| why.contains("read-only")),
+        "{refused:?}"
+    );
+    // (An answer to what was held before is told that, whatever it asks.)
+    let stale = b.handle.answer(HeldAnswer::PutBack, "another");
+    assert!(
+        stale
+            .as_ref()
+            .is_err_and(|why| why.contains("changed since")),
+        "{stale:?}"
+    );
+    assert_eq!(b.status().held_deletes, Some(held.clone()), "held on");
+    assert!(b.has("f07.txt"));
+
+    b.handle.answer(HeldAnswer::Delete, &held.token)?;
+    wait_until("they are gone here", || !b.has("f07.txt"))?;
+    wait_until("nothing is held", || b.status().held_deletes.is_none())?;
+    assert_eq!(
+        live_names(&server).len(),
+        60,
+        "nothing of theirs was touched"
+    );
+    Ok(())
+}
+
 /// A runner of what another identity shares with the account (sync semantics §13): the
 /// sharer's drive as a member reads it, in a read-only folder. What is shared comes down and
 /// nothing else, the folder shows whose share it is and isn't the account's main folder, and
@@ -2327,10 +2401,7 @@ fn a_runner_of_another_identitys_share_is_read_only_and_says_whose() -> R {
     let shared = report().ok_or("report.txt is up")?;
     a.remote.share(shared.file_id)?;
 
-    let b = Device::start_on(FakeRemote::member(server.clone()), "b", |cfg| {
-        cfg.sharer = Some("sharer.example".into());
-        cfg.read_only = Some(cfg.folder.with_file_name("moved out"));
-    })?;
+    let b = Device::share_of(&server, "b")?;
     let out = b.root.with_file_name("moved out");
     wait_until("b has what is shared", || b.has("report.txt"))?;
     b.wait_idle()?;
