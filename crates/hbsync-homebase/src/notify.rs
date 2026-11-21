@@ -1112,7 +1112,11 @@ mod tests {
         let (_, ended, _, _) = conversed(&peer_of("pippin.example"), None)?;
         assert!(matches!(ended, Err(Ended::Unanswered(_))), "{ended:?}");
         let (_, ended, _, _) = conversed(&client_of("tom.example"), None)?;
-        assert!(matches!(ended, Err(Ended::Lost(_))), "{ended:?}");
+        // (Seen at once, not as the handshake's deadline passing.)
+        assert!(
+            matches!(&ended, Err(Ended::Lost(why)) if !why.contains("no handshake")),
+            "{ended:?}"
+        );
 
         // (As when the drive is no longer the member's to read: errors, then the close.)
         let errors = vec![frame(json!({"notificationType": "error", "data": "no"}))];

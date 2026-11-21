@@ -648,6 +648,9 @@ server answers the rest, to a token their server made for this identity's connec
   socket without a context), and so does an error while it looks the token up. So the
   client makes a connection ended before its subscription again once, soon, and reads a
   second one running as the refusal: asked again as for a refused login, not at once.
+  odin-core PR #2149 (open) sends the `authenticationError` before the close, and closes
+  with 1008 and the reason "Invalid Token": the client reads that frame as the refusal at
+  once, as it does today where the frame arrives.
   Every notification of
   their server that isn't a drive's goes to every peer socket (**[verified]**
   `PeerAppNotificationDispatcher.WsPublishAsync`; none came in 70 idle seconds): unread here.
