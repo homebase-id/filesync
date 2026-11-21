@@ -164,7 +164,13 @@ impl<'a> Disk<'a> {
         if to.symlink_metadata().is_ok() {
             return Ok(Err(io::ErrorKind::AlreadyExists.into()));
         }
-        rename_ordered(db, &self.abs(from), to)
+        let moved = rename_ordered(db, &self.abs(from), to)?;
+        // Out of the read-only folder it is the user's own: writable again, where it was
+        // placed read-only (best effort; a folder's files stay as they are).
+        if moved.is_ok() {
+            let _ = ops::set_read_only(to, false);
+        }
+        Ok(moved)
     }
 
     // ---- what is written on items: tags, creation times ----
@@ -178,10 +184,19 @@ impl<'a> Disk<'a> {
     /// Writes `tags` on the item at `path` ([`tags::write_on`]), noting whether the volume
     /// keeps tags, and says what that left ([`TagsLeft`]).
     pub(super) fn write_tags(&self, path: &Path, tags: &Tags) -> TagsLeft {
+        // A file placed read-only (a read-only folder's, §13) takes no tags as it is: made
+        // writable for the write, and read-only again.
+        let locked = tags::CAN_TAG && self.folder.read_only.is_some() && ops::is_read_only(path);
+        if locked {
+            let _ = ops::set_read_only(path, false);
+        }
         let written = match self.fails(FailPoint::TagWrite) {
             true => Err(io::Error::other("its tag write failed (a test)")),
             false => tags::write_on(path, tags),
         };
+        if locked {
+            let _ = ops::set_read_only(path, true);
+        }
         match written {
             Ok(tags::Written::Unsupported) => {
                 let _ = self.folder.tags_kept.set(false);
@@ -272,6 +287,10 @@ impl<'a> Disk<'a> {
     /// Unlinks what is at `at`, as `what` says it is. The caller notes the folder it was in as
     /// changed ([`StateDb::changed`]).
     pub(super) fn unlink(&self, at: &Path, what: Unlink) -> io::Result<()> {
+        // (Windows refuses to delete a read-only file, as a read-only folder's are placed.)
+        if cfg!(windows) && self.folder.read_only.is_some() && matches!(what, Unlink::File) {
+            let _ = ops::set_read_only(at, false);
+        }
         match what {
             Unlink::File => fs::remove_file(at),
             Unlink::Folder => fs::remove_dir(at),

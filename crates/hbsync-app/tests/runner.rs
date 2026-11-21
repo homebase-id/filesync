@@ -204,10 +204,15 @@ impl Device {
         self.notifications(now).event(Event::Connected, now, false);
     }
 
+    /// Writes the file, as a user who means to: one placed read-only (a share's) is made
+    /// writable first.
     fn write(&self, rel: &str, data: &str) -> std::io::Result<()> {
         let path = self.root.join(rel);
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)?;
+        }
+        if hbsync_platform::ops::is_read_only(&path) {
+            hbsync_platform::ops::set_read_only(&path, false)?;
         }
         std::fs::write(path, data)
     }

@@ -179,6 +179,63 @@ fn a_notice_of_a_shared_file_reads_the_feed_for_its_end() -> R {
     Ok(())
 }
 
+/// What another identity shares is placed read-only on this device: its files, so that a
+/// save over one doesn't happen by accident (it would only move out); not its folders, which
+/// the client works in. The client's own work goes on over them: a new version replaces one,
+/// read-only again, tags are written on one, and one the sharer removes goes. What is the
+/// user's own is writable: a copy made here once it has moved out, and an identity's own
+/// folder.
+#[test]
+fn a_shares_files_are_read_only_on_this_device() -> R {
+    use hbsync_platform::ops::is_read_only;
+    use hbsync_platform::tags::{self, Tag, Tags};
+
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("doc.txt", "one")?;
+    a.write("dir/in.txt", "in")?;
+    a.write("bye.txt", "bye")?;
+    a.sync()?;
+    share_all(&a, &server)?;
+    let (mut b, out) = Client::member(&server, "b")?;
+    b.sync()?;
+    for file in ["doc.txt", "dir/in.txt", "bye.txt"] {
+        assert!(is_read_only(&b.root.join(file)), "{file}");
+        assert!(!is_read_only(&a.root.join(file)), "the owner's own {file}");
+    }
+    assert!(
+        !is_read_only(&b.root.join("dir")),
+        "a folder stays writable"
+    );
+
+    // A new version, a tag (where the volume keeps them) and a removal by the sharer.
+    a.write("doc.txt", "two")?;
+    let work = Tags::new([Tag::new("Work", 0)]);
+    let tagged = tags::CAN_TAG && tags::write(&a.root.join("dir/in.txt"), &work)?.is_some();
+    fs::remove_file(a.root.join("bye.txt"))?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.read_text("doc.txt")?, "two");
+    assert!(is_read_only(&b.root.join("doc.txt")), "read-only again");
+    if tagged {
+        assert_eq!(tags::read(&b.root.join("dir/in.txt")), Some(work));
+        assert!(
+            is_read_only(&b.root.join("dir/in.txt")),
+            "as before the tag"
+        );
+    }
+    assert!(!b.root.join("bye.txt").exists());
+
+    // A copy made here keeps the file's bits, and moves out: the user's own there.
+    fs::copy(b.root.join("doc.txt"), b.root.join("copy.txt"))?;
+    b.sync()?;
+    let copy = out.path().join("copy.txt");
+    assert_eq!(fs::read_to_string(&copy)?, "two");
+    assert!(!is_read_only(&copy), "moved out: writable");
+    assert_eq!(b.tree_text(""), a.tree_text(""));
+    Ok(())
+}
+
 /// A share given until a time ends as the time passes. The drive writes nothing then (its
 /// feed doesn't move), so the member asks: it kept the time its header gave, and reads the
 /// feed from its beginning once the server's clock is past it, which shows the file as one no

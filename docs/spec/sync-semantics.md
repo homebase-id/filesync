@@ -1517,8 +1517,21 @@ whatever changed here, and the plan holds no operation on the drive:
   it on the drive comes down.
   The cost: each save of a file there is a move out and a download of the drive's version
   (a file kept open with autosave, one per save), and a hundred moved out under one name
-  leave the next where it is, told, till one goes. Files there set read-only on disk (the
-  app's, later) keep most saves from happening at all.
+  leave the next where it is, told, till one goes.
+- **Read-only on disk.** A file the client puts in place there is made read-only for its
+  user (Unix: its write bits cleared; Windows: the read-only attribute; `ops::set_read_only`),
+  which keeps most saves from happening at all: a program opens it read-only, or says it
+  can't save. It is a hint, not a lock: the folders stay writable (the client works in
+  them, and an item put there moves out as before), so a user who means to can still save
+  over a file, replace or delete it, and what they do is handled as above. The client's own
+  work goes on over such files: a new version replaces one and is read-only again, tags are
+  written with the file made writable for the write, and on Windows, which refuses to
+  replace or delete a read-only file, it is made writable just before either. What moves
+  out is the user's own, and writable: a copy made there keeps the file's bits until then.
+  Only what is placed from now on: a file there from before stays as it is until its next
+  version. The cost: one more change of a file's attributes as it is placed (and two around
+  a tag write), nothing on an identity's own folders (engine test
+  `a_shares_files_are_read_only_on_this_device`).
 - **A name-clash loser that changed here** still moves out (only its syncing waits).
 - **Undone.** A move or rename here goes back to the drive's place; a delete here comes back
   (downloaded again); tags here become the drive's. Nothing of these moves out: the drive holds

@@ -313,6 +313,48 @@ pub fn set_executable(path: &Path, executable: bool) -> io::Result<()> {
     }
 }
 
+/// Makes the file at `path` read-only for its user, or writable again: on Unix every write
+/// bit cleared, or the owner's set; on Windows the read-only attribute. It keeps programs
+/// from saving over the file by accident, not a user who means to (the folder it is in stays
+/// writable, so it can still be renamed, replaced and deleted on Unix; Windows refuses to
+/// replace or delete it while the attribute is set). Nothing is written where it is so
+/// already, and nothing but a regular file is touched (a link's target least of all).
+pub fn set_read_only(path: &Path, read_only: bool) -> io::Result<()> {
+    let meta = fs::symlink_metadata(path)?;
+    if !meta.is_file() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = meta.permissions().mode();
+        let new_mode = if read_only {
+            mode & !0o222
+        } else {
+            mode | 0o200
+        };
+        if new_mode != mode {
+            fs::set_permissions(path, fs::Permissions::from_mode(new_mode))?;
+        }
+        Ok(())
+    }
+    #[cfg(windows)]
+    {
+        imp::set_read_only(path, read_only)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (path, read_only);
+        Ok(())
+    }
+}
+
+/// Whether the file at `path` is read-only as [`set_read_only`] makes it (a link not
+/// followed); `false` where it can't be read.
+pub fn is_read_only(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok_and(|meta| meta.permissions().readonly())
+}
+
 /// Hides `path` from the file manager: sets the hidden attribute on Windows, where a leading
 /// dot hides nothing. No-op elsewhere (the dot does it).
 pub fn set_hidden(path: &Path) -> io::Result<()> {
@@ -398,8 +440,8 @@ mod imp {
     use super::*;
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        FILE_ATTRIBUTE_HIDDEN, GetFileAttributesW, INVALID_FILE_ATTRIBUTES, MOVEFILE_WRITE_THROUGH,
-        MoveFileExW, SetFileAttributesW,
+        FILE_ATTRIBUTE_HIDDEN, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_READONLY, GetFileAttributesW,
+        INVALID_FILE_ATTRIBUTES, MOVEFILE_WRITE_THROUGH, MoveFileExW, SetFileAttributesW,
     };
 
     fn wide(path: &Path) -> Vec<u16> {
@@ -423,17 +465,32 @@ mod imp {
     }
 
     pub(super) fn set_hidden(path: &Path) -> io::Result<()> {
+        set_attribute(path, FILE_ATTRIBUTE_HIDDEN, true)
+    }
+
+    pub(super) fn set_read_only(path: &Path, read_only: bool) -> io::Result<()> {
+        set_attribute(path, FILE_ATTRIBUTE_READONLY, read_only)
+    }
+
+    /// Sets (`on`) or clears the attribute `flag` of `path`, written only where it isn't so.
+    fn set_attribute(path: &Path, flag: u32, on: bool) -> io::Result<()> {
         let w = wide(path);
         // SAFETY: a NUL-terminated wide string.
         let now = unsafe { GetFileAttributesW(w.as_ptr()) };
         if now == INVALID_FILE_ATTRIBUTES {
             return Err(io::Error::last_os_error());
         }
-        if now & FILE_ATTRIBUTE_HIDDEN != 0 {
+        let new = match on {
+            true => now | flag,
+            false => now & !flag,
+        };
+        if new == now {
             return Ok(());
         }
+        // (No attribute at all is said as "normal".)
+        let new = if new == 0 { FILE_ATTRIBUTE_NORMAL } else { new };
         // SAFETY: a NUL-terminated wide string.
-        if unsafe { SetFileAttributesW(w.as_ptr(), now | FILE_ATTRIBUTE_HIDDEN) } == 0 {
+        if unsafe { SetFileAttributesW(w.as_ptr(), new) } == 0 {
             return Err(io::Error::last_os_error());
         }
         Ok(())
@@ -456,6 +513,47 @@ fn check_then_rename(from: &Path, to: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file made read-only reads so, keeps its other bits, and is writable again when
+    /// asked; made writable, it is replaced and removed as any file. A folder is left as it
+    /// is.
+    #[test]
+    fn a_file_is_made_read_only_and_writable_again() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("a.txt");
+        fs::write(&file, "a")?;
+        assert!(!is_read_only(&file));
+        set_read_only(&file, true)?;
+        set_read_only(&file, true)?;
+        assert!(is_read_only(&file));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            set_executable(&file, true)?;
+            let mode = fs::metadata(&file)?.permissions().mode();
+            assert_eq!(mode & 0o777, 0o555, "read and execute, no write");
+            set_read_only(&file, false)?;
+            let mode = fs::metadata(&file)?.permissions().mode();
+            assert_eq!(
+                mode & 0o777,
+                0o755,
+                "the owner's write bit alone comes back"
+            );
+        }
+        set_read_only(&file, false)?;
+        assert!(!is_read_only(&file));
+        let new = dir.path().join("b.tmp");
+        fs::write(&new, "b")?;
+        replace(&new, &file)?;
+        assert_eq!(fs::read_to_string(&file)?, "b");
+        fs::remove_file(&file)?;
+
+        let folder = dir.path().join("d");
+        fs::create_dir(&folder)?;
+        set_read_only(&folder, true)?;
+        fs::write(folder.join("in.txt"), "still writable")?;
+        Ok(())
+    }
 
     #[test]
     fn set_hidden_hides_a_folder_and_can_repeat() -> io::Result<()> {
