@@ -36,6 +36,7 @@ fn share_for(a: &Client, server: &Server, name: &str, ms: i64) -> R {
 
 /// A minute of the server's clock, which a share's end is asked by.
 const MINUTE: i64 = 60_000;
+const DAY: i64 = 24 * 60 * MINUTE;
 
 /// The server's clock moves on by `ms`.
 fn later(server: &Server, ms: i64) -> R {
@@ -53,6 +54,11 @@ fn share_all(a: &Client, server: &Server) -> R {
         a.remote.share(file_id)?;
     }
     Ok(())
+}
+
+/// By when `c` reads its drive's feed from its beginning next, by the server's clock.
+fn reread_due(c: &mut Client) -> Result<i64, Box<dyn std::error::Error>> {
+    Ok((c.engine.db().read(|s| s.reread_due())?).ok_or("no time kept")?)
 }
 
 /// Nothing was moved out of the member's folder.
@@ -276,6 +282,106 @@ fn a_file_that_doesnt_read_any_more_still_ends_with_its_share() -> R {
     later(&server, 25 * MINUTE)?;
     b.sync()?;
     assert_eq!(b.tree_text(""), Vec::<String>::new());
+    Ok(())
+}
+
+/// What the sharer deleted for good leaves the member's folder within a week. The drive
+/// tells a member nothing of such a file (no row in its feed, no notice), so the member reads
+/// the feed from its beginning a week after it last did and asks about each file it has that
+/// the feed no longer shows: not there, said twice a minute apart (§8b), and it goes. Before
+/// the week nothing is asked, and after the re-read the feed is read as before.
+#[test]
+fn what_the_sharer_deleted_for_good_leaves_a_week_on() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("gone.txt", "gone")?;
+    a.write("stay.txt", "stay")?;
+    a.write("dir/in.txt", "in")?;
+    a.sync()?;
+    share_all(&a, &server)?;
+    server.lock().map_err(|_| "poisoned")?.tick();
+    let (mut b, out) = Client::member(&server, "b")?;
+    b.sync()?;
+    let all = [
+        "dir/",
+        "dir/in.txt = in",
+        "gone.txt = gone",
+        "stay.txt = stay",
+    ];
+    assert_eq!(b.tree_text(""), all);
+    let first = reread_due(&mut b)?;
+
+    // Another app deletes a file for good, and a folder with what is in it (as the sharer's
+    // purge does): nothing in the feed says so.
+    for name in ["gone.txt", "in.txt", "dir"] {
+        let h = common::header_named(&server, name);
+        (server.lock().map_err(|_| "poisoned")?).hard_delete(h.file_id, h.version)?;
+    }
+    later(&server, 6 * DAY)?;
+    let asked = b.remote.faults().requests;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), all, "not a week yet");
+    assert_eq!(reread_due(&mut b)?, first);
+    assert_eq!(b.remote.faults().requests, asked + 1, "the feed's end only");
+
+    later(&server, DAY + MINUTE)?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), all, "not there once: kept");
+    // (A time is kept as the whole minute it is over by: a tick of the server's clock
+    // between the two reads would make it the next.)
+    let a_week_on = 7 * DAY + MINUTE..=7 * DAY + 2 * MINUTE;
+    let second = reread_due(&mut b)?;
+    assert!(
+        a_week_on.contains(&(second - first)),
+        "read whole: again a week on"
+    );
+    assert_eq!(b.a_minute_on()?, 3);
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["stay.txt = stay"]);
+    nothing_moved_out(&out)?;
+
+    // Read as before from then on, until the next week is over.
+    let asked = b.remote.faults().requests;
+    b.sync()?;
+    assert_eq!(b.remote.faults().requests, asked + 1);
+    later(&server, 7 * DAY - MINUTE)?;
+    b.sync()?;
+    assert_eq!(reread_due(&mut b)?, second);
+    later(&server, 2 * MINUTE)?;
+    b.sync()?;
+    let third = reread_due(&mut b)?;
+    assert!(a_week_on.contains(&(third - second)));
+    assert_eq!(b.tree_text(""), ["stay.txt = stay"]);
+
+    // A store that keeps no such time (one from before) reads it whole once.
+    (b.engine.db()).write(|s| {
+        s.account()
+            .delete_account_kv(hbsync_state::keys::REREAD_DUE)
+    })?;
+    let asked = b.remote.faults().requests;
+    b.sync()?;
+    assert_eq!(reread_due(&mut b)?, third);
+    assert_eq!(b.remote.faults().requests, asked + 2, "from the beginning");
+    b.sync()?;
+    assert_eq!(b.remote.faults().requests, asked + 3, "once");
+    Ok(())
+}
+
+/// An identity's own drive is never read whole again for a week gone by: it hears of every
+/// delete for good (its notices; the feed's trace of the removal before it).
+#[test]
+fn an_own_drive_is_not_read_whole_again_a_week_on() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("x.txt", "x")?;
+    a.sync()?;
+    let due = |a: &mut Client| a.engine.db().read(|s| s.reread_due());
+    assert_eq!(due(&mut a)?, None, "no time is kept for it");
+    later(&server, 8 * DAY)?;
+    let asked = a.remote.faults().requests;
+    a.sync()?;
+    assert_eq!(a.remote.faults().requests, asked + 1, "the feed's end only");
+    assert_eq!(due(&mut a)?, None);
     Ok(())
 }
 

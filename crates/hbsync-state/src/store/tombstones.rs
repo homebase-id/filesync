@@ -98,13 +98,13 @@ impl AccountTx<'_> {
     }
 
     /// Starts reading the whole feed again, from its beginning: the cursor goes (and when
-    /// the first share read ends, [`ReadTx::share_end`]), and
+    /// that is next due, [`ReadTx::reread_due`]), and
     /// [`keys::REREADING`] says so until [`AccountTx::end_reread`] (a re-read a crash cut short
     /// starts over).
     pub fn start_reread(&self) -> Result<()> {
         self.delete_account_kv(crate::keys::REMOTE_CURSOR)?;
-        // (Read anew with it: [`AccountTx::note_share_end`].)
-        self.delete_account_kv(crate::keys::SHARE_END)?;
+        // (Told anew by what it reads: [`AccountTx::reread_by`].)
+        self.delete_account_kv(crate::keys::REREAD_DUE)?;
         self.set_account_kv(crate::keys::REREADING, "1")
     }
 
@@ -112,32 +112,31 @@ impl AccountTx<'_> {
         self.delete_account_kv(crate::keys::REREADING)
     }
 
-    /// A file another identity shares is shared until `end` (Unix ms, the server's clock):
-    /// the earliest such time is kept, as the whole minute it ends by (files shared together
-    /// end together), since the server says nothing when it passes ([`ReadTx::share_end`]:
-    /// the feed asks then). Kept until the feed is next read from its beginning
-    /// ([`AccountTx::start_reread`]), which reads every shared file's header and so every
-    /// end anew: one taken back since (the share given a later end, or withdrawn) costs
-    /// that one read, which finds nothing.
-    pub fn note_share_end(&self, end: i64) -> Result<()> {
-        let minutes = end
-            .saturating_add(SHARE_END_MS - 1)
-            .div_euclid(SHARE_END_MS);
-        let minute = minutes.saturating_mul(SHARE_END_MS);
-        if self.share_end()?.is_some_and(|kept| kept <= minute) {
+    /// Another identity's drive is to be read from its beginning by `at` (Unix ms, the
+    /// server's clock), as the server says nothing when that time passes: a file it shares is
+    /// shared until then, or its feed was last read so a week before
+    /// ([`ReadTx::reread_due`]: the feed asks then). The earliest such time is kept, as the
+    /// whole minute it is over by (files shared together end together), until the feed is
+    /// next read from its beginning ([`AccountTx::start_reread`]), which reads every shared
+    /// file's header and so every end anew: one taken back since (the share given a later
+    /// end, or withdrawn) costs that one read, which finds nothing.
+    pub fn reread_by(&self, at: i64) -> Result<()> {
+        let minutes = at.saturating_add(DUE_MS - 1).div_euclid(DUE_MS);
+        let minute = minutes.saturating_mul(DUE_MS);
+        if self.reread_due()?.is_some_and(|kept| kept <= minute) {
             return Ok(());
         }
-        self.set_account_kv(crate::keys::SHARE_END, &minute.to_string())
+        self.set_account_kv(crate::keys::REREAD_DUE, &minute.to_string())
     }
 }
 
-/// The minute a share's end is kept by ([`AccountTx::note_share_end`]).
-const SHARE_END_MS: i64 = 60_000;
+/// The minute a time to read the feed again by is kept as ([`AccountTx::reread_by`]).
+const DUE_MS: i64 = 60_000;
 
 impl ReadTx<'_> {
-    /// When the first of the shares read ends ([`AccountTx::note_share_end`]), if any does.
-    pub fn share_end(&self) -> Result<Option<i64>> {
-        let kept = self.account_kv(crate::keys::SHARE_END)?;
-        Ok(kept.and_then(|end| end.parse().ok()))
+    /// By when the feed is to be read from its beginning ([`AccountTx::reread_by`]), if a
+    /// time was told.
+    pub fn reread_due(&self) -> Result<Option<i64>> {
+        self.account_kv_as(crate::keys::REREAD_DUE)
     }
 }

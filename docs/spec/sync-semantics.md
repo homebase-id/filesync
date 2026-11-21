@@ -64,7 +64,8 @@ Launchers that an earlier version put in place executable stay so.
   alone doesn't, nor a move to where the item already is.
 - **Local**: what the local file system holds now, after identity matching (section 3).
 - **Remote**: the client's mirror of the drive, fed by the change cursor; after 29 days away
-  it reads the whole feed again (node schema, "The purge", 4.).
+  it reads the whole feed again (node schema, "The purge", 4.), and another identity's
+  drive a week after it last did (§13, "Deleted for good by the sharer").
 
 They live in the account's state DB (`daemon.md`, Files): the mirror once per account, base and
 local per sync root. Base, local and the dirty set of a root change only with that root.
@@ -1604,7 +1605,7 @@ rules hold too:
   the cursor says so, and a read of the file is refused from then on. The member asks. A
   shared file's header says until when it is shared (`RemoteHeader::expires`: the latest
   end of the shares it is read through, none where one has no end), and the store keeps the
-  earliest of the ends read (`AccountTx::note_share_end`, as the whole minute it ends by).
+  earliest of the ends read (`AccountTx::reread_by`, as the whole minute it ends by).
   Once the server's clock, as a feed page gives it, is past that, the feed is read from its
   beginning (a re-read, §8b), where the drive shows the file as no longer shared; it then
   leaves this device as a share withdrawn does (removed here; moved out where it changed
@@ -1634,8 +1635,8 @@ rules hold too:
   an end taken back since (the share given a later one, or withdrawn) costs one that finds
   nothing; files that each end in another minute cost one each, at most one a pull. The file stays until the
   share is next read after its end: every 5 min while the daemon runs. A puller that no
-  longer reads on a timer (the peer socket, W4) must wake at the end kept
-  (`ReadTx::share_end`, by the server's clock: `FeedReport::server_time` gives the offset).
+  longer reads on a timer (the peer socket, W4) must wake at the time kept
+  (`ReadTx::reread_due`, by the server's clock: `FeedReport::server_time` gives the offset).
   Engine tests `a_share_that_reached_its_end_takes_the_file_off_this_device`,
   `an_end_given_to_a_share_later_is_learned`,
   `an_end_made_earlier_is_learned_by_the_read_another_end_starts`,
@@ -1645,6 +1646,42 @@ rules hold too:
   (shares given until a time, the time passing). The simulator's member has no feed (it
   reads the model's shared files directly): to it an end is the withdrawal its properties
   cover.
+- **Deleted for good by the sharer.** The drive tells a member nothing of a file deleted
+  for good: its rows go with it, so no row of the member's feed and no notice names it (API
+  notes, "Shared with you"). The member asks. It reads the feed from its beginning a week
+  after it last did (`SHARED_REREAD_MS`), which is a re-read as any (§8b): each file the store has that the feed no longer shows is asked
+  for by its header, a hundred a pull, and is gone once the identity says "not there" a
+  second time, a minute to an hour on. It then leaves this device as any file the sharer
+  deleted does (removed here; moved out where it changed here). Until then the member
+  keeps it: for up to a week and two syncs (more where over a hundred went). Every item of the sharer's Recently deleted
+  ends that way (their purge deletes it for good after 30 days): its row stays in this
+  device's Recently deleted until that re-read, and a file here whose folder is such a row
+  stays hidden in it till then.
+  The week is one more time by which the feed is read from its beginning, kept as a
+  share's end is (above): the first page of every read from the beginning, a first read
+  or any re-read, notes a week after its server time, and the store keeps the earliest of
+  that and the ends read (`AccountTx::reread_by`, `ReadTx::reread_due`). So one time and
+  one rule serve both: it starts at a pull's first page only, whether or not an earlier
+  re-read is still open (one that old starts over), and a read from the beginning for an
+  end starts the week over. A share's store that keeps no time though it has a cursor
+  (one from before) reads so once. An identity's own drive keeps no such time: its
+  devices hear of every delete for good (the notice; the feed's trace of the removal
+  before the purge, node schema, "The purge").
+  What it costs: one read of the share's feed from its beginning a week, headers and all
+  (a share of 10,000 files: 20 requests, about 25 MB; of 1,000 files: 2 requests, 2.5 MB),
+  the page read first that week, which is given up, and two header reads for each file
+  found gone. An idle read costs what it did (no value
+  more is read or written). The period is the trade: at 29 days (as for a
+  device away) it would cost a quarter, and a file deleted for good would stay up to 29
+  days on a device that is always on. With each file's end in the mirror (filesync #445)
+  this read could go by the refs, at about a quarter of the bytes. A puller that no longer
+  reads on a timer (the peer socket, W4) wakes for the week as for an end: the one time
+  kept.
+  Engine tests `what_the_sharer_deleted_for_good_leaves_a_week_on`,
+  `an_own_drive_is_not_read_whole_again_a_week_on`, and the randomized
+  `randomized_shares_deleted_for_good_show_what_is_shared` (items deleted for good behind
+  everyone's back, the member syncing a week on). The simulator's member has no feed (it
+  reads the model's shared files directly): to it a file deleted for good is gone at once.
 - **A share that isn't synced here any more** (it ended, or the member's own marker turned
   it off) has its copy taken off this device as a withdrawal takes a file off it, all of it
   at once (`Engine::end_share`): every file leaves the picture, as one whose share was
@@ -1683,14 +1720,11 @@ rules hold too:
   reads its drive, and a DB that read an identity's own drive is refused for a share (and the
   other way): read by the other's rules, a withdrawal would be a delete, and an orphan an
   item at the top.
-- **Known limits.** A hard delete on the sharer's drive is told to no member (API notes,
-  "Shared with you"): only a whole re-read of the feed finds it, which a device does after
-  about 29 days away, so a device that stays connected keeps such a file. Every item of the
-  sharer's Recently deleted ends that way (their purge deletes it for good after 30 days): its
-  row stays in this device's Recently deleted until that re-read, and a file here whose
-  folder is such a row stays hidden in it. A file shared
+- **Known limits.** A file the sharer deleted for good stays here for up to a week
+  ("Deleted for good by the sharer"). A file shared
   without its folder stays here while that folder is in the sharer's Recently deleted (the
-  picture never had the folder to take it along). A copy parked for a download that took its
+  picture never had the folder to take it along), and up to a week after their purge
+  deleted both for good. A copy parked for a download that took its
   name (§8), its own delete planned, whose file is shared again before the delete ran (the
   share given back while the download ran, or a crash between) waits under its parked name,
   hidden, while the name is taken: the file on the name keeps it and follows the drive.

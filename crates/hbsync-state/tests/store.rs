@@ -1091,16 +1091,17 @@ mod mirror {
         Ok(())
     }
 
-    /// The earliest end of the shares read is kept, as the whole minute it ends by, until the
-    /// feed is read from its beginning (which reads every end anew).
+    /// The earliest time to read the feed from its beginning by (a share's end, a week on) is
+    /// kept, as the whole minute it is over by, until the feed is read so (which tells every
+    /// such time anew).
     #[test]
-    fn the_first_end_of_the_shares_read_is_kept_until_a_reread() -> R {
+    fn the_first_time_to_read_the_feed_again_by_is_kept_until_a_reread() -> R {
         const MINUTE: i64 = 60_000;
         let mut db = StateDb::open_in_memory()?;
-        assert_eq!(db.read(|s| s.share_end())?, None);
+        assert_eq!(db.read(|s| s.reread_due())?, None);
         let mut note = |end: i64| -> Result<Option<i64>, StateError> {
-            db.write(|s| s.account().note_share_end(end))?;
-            db.read(|s| s.share_end())
+            db.write(|s| s.account().reread_by(end))?;
+            db.read(|s| s.reread_due())
         };
         // Up to the whole minute; one on the minute is that minute.
         assert_eq!(note(5 * MINUTE + 1)?, Some(6 * MINUTE));
@@ -1110,7 +1111,7 @@ mod mirror {
         assert_eq!(note(2 * MINUTE + 1)?, Some(2 * MINUTE));
         // A re-read learns them anew.
         db.write(|s| s.account().start_reread())?;
-        assert_eq!(db.read(|s| s.share_end())?, None);
+        assert_eq!(db.read(|s| s.reread_due())?, None);
         Ok(())
     }
 
