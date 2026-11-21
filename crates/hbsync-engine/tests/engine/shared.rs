@@ -198,6 +198,11 @@ fn a_shares_files_are_read_only_on_this_device() -> R {
     a.sync()?;
     share_all(&a, &server)?;
     let (mut b, out) = Client::member(&server, "b")?;
+    // Recorded as they stay: the first look at them since finds nothing changed, and reads
+    // no file again.
+    b.engine.sync_once("2026-10-08")?;
+    let scan = b.engine.scan_local()?;
+    assert_eq!((scan.modified, scan.hashed), (0, 0));
     b.sync()?;
     for file in ["doc.txt", "dir/in.txt", "bye.txt"] {
         assert!(is_read_only(&b.root.join(file)), "{file}");
@@ -207,8 +212,6 @@ fn a_shares_files_are_read_only_on_this_device() -> R {
         !is_read_only(&b.root.join("dir")),
         "a folder stays writable"
     );
-    // Recorded as they stay: nothing looks changed at the next sync.
-    assert!(b.engine.sync_once("2026-10-08")?.is_idle());
     // A plain save is refused (but to the system's own user, whom no bit holds back).
     #[cfg(unix)]
     {
@@ -226,6 +229,9 @@ fn a_shares_files_are_read_only_on_this_device() -> R {
     let tagged = tags::CAN_TAG && tags::write(&a.root.join("dir/In.txt"), &work)?.is_some();
     fs::remove_file(a.root.join("bye.txt"))?;
     a.sync()?;
+    b.engine.sync_once("2026-10-08")?;
+    let scan = b.engine.scan_local()?;
+    assert_eq!((scan.modified, scan.hashed), (0, 0), "after these too");
     b.sync()?;
     assert_eq!(b.read_text("doc.txt")?, "two");
     assert!(is_read_only(&b.root.join("doc.txt")), "read-only again");
@@ -235,7 +241,6 @@ fn a_shares_files_are_read_only_on_this_device() -> R {
     assert!(is_read_only(&b.root.join("dir/In.txt")), "as before");
     assert!(!b.root.join("bye.txt").exists());
     assert_eq!(b.tree_text(""), a.tree_text(""));
-    assert!(b.engine.sync_once("2026-10-08")?.is_idle());
 
     // A copy made here keeps the file's bits, and moves out: the user's own there, a
     // folder of copies with what is in it.
