@@ -1798,7 +1798,7 @@ mod tests {
     #[test]
     fn a_sharers_notice_brings_its_change_in_at_once() -> Result<(), Box<dyn std::error::Error>> {
         use hbsync_remote::contract::Shares;
-        use hbsync_remote::{ChangeRef, NodeMeta, Remote};
+        use hbsync_remote::{ChangeRef, Remote};
 
         let home = tempfile::tempdir()?;
         let tom_server = FakeServer::new(ServerConfig::default());
@@ -1809,16 +1809,8 @@ mod tests {
         let checks = || -> Result<(), Box<dyn std::error::Error>> {
             started.wait_all("both sync", &both_synced)?;
             let owner = FakeRemote::new(tom_server.clone());
-            let plans = owner.create(
-                &NodeMeta {
-                    node: hbsync_types::NodeId::new(),
-                    parent: hbsync_types::NodeId::ROOT,
-                    kind: hbsync_types::NodeKind::Folder,
-                    content: hbsync_types::schema::NodeContent::folder("Plans"),
-                    removed: false,
-                },
-                None,
-            )?;
+            let plans = hbsync_remote::contract::folder("Plans", hbsync_types::NodeId::ROOT);
+            let plans = owner.create(&plans, None)?;
             owner.share(plans.at().file_id)?;
             let notice = ChangeRef::of(&owner.header(plans.at().file_id)?);
             let said = Event::Changed(Some(notice));

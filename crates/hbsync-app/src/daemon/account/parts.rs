@@ -3,12 +3,11 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use hbsync_engine::Drive;
 use hbsync_homebase::drive::HomebaseRemote;
-use hbsync_homebase::notify::{Event, Notifier};
+use hbsync_homebase::notify::{Events, Notifier};
 use hbsync_remote::Remote;
 
 use super::feed::{Notifications, Puller};
@@ -117,7 +116,7 @@ impl AccountParts {
         identity: &str,
         remote: Arc<HomebaseRemote>,
         db: &Path,
-        events: Sender<Event>,
+        events: impl Into<Events>,
     ) -> Result<Self, RunnerError> {
         let drive = Self::open_drive(identity, Arc::clone(&remote), db)?;
         let notifier = Notifier::spawn(remote.client().clone(), remote.drive(), events);

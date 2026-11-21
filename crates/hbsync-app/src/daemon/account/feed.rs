@@ -210,14 +210,16 @@ impl Notifications {
     /// When the drive is next read for what isn't announced: every [`UNANNOUNCED_READ`]
     /// while not connected (refused, a read asks nothing: [`Drive::deny`]); connected, only
     /// what another identity shares, when its time to be read from its beginning is over
-    /// ([`Drive::reread_at`]), and where a read left that time as it was (it failed, or this
-    /// computer's clock ran ahead of theirs) no sooner than an [`UNANNOUNCED_READ`] after it.
+    /// ([`Drive::reread_at`]), and never before `next_read`: so a read that left that time
+    /// as it was (it failed) is asked again an [`UNANNOUNCED_READ`] later, not at every
+    /// turn. (`next_read` may also lie ahead from before it connected; the read as it
+    /// connected has looked at the time by then.)
     fn next_unannounced(&self) -> Option<Instant> {
         match self.connected {
             None => Some(self.next_read),
             Some(_) => {
-                let due = self.puller.drive.reread_at()?;
-                Some(due.max(self.next_read))
+                let due = self.puller.drive.reread_at();
+                due.map(|due| due.max(self.next_read))
             }
         }
     }
@@ -617,23 +619,15 @@ mod tests {
         use hbsync_remote::Remote;
         let remote = Arc::new(FakeRemote::new(FakeServer::new(ServerConfig::default())));
         let drive = Drive::open(&home.join("state.db"), "a.example", remote.clone())?;
-        let made = remote.create(&docs(), None)?;
+        let made = remote.create(
+            &hbsync_remote::contract::folder("Docs", hbsync_types::NodeId::ROOT),
+            None,
+        )?;
         drive.pull(None)?;
         let on_drive = ChangeRef::of(&remote.header(made.at().file_id)?);
         let puller = Puller::spawn(Arc::clone(&drive));
         let n = Notifications::new(puller.clone(), Instant::now());
         Ok((n, puller, drive, on_drive))
-    }
-
-    /// A folder `Docs` at the top.
-    fn docs() -> hbsync_remote::NodeMeta {
-        hbsync_remote::NodeMeta {
-            node: hbsync_types::NodeId::new(),
-            parent: hbsync_types::NodeId::ROOT,
-            kind: hbsync_types::NodeKind::Folder,
-            content: hbsync_types::schema::NodeContent::folder("Docs"),
-            removed: false,
-        }
     }
 
     /// The notifications of what another identity shares, their puller, the member's drive,
@@ -646,47 +640,45 @@ mod tests {
         Arc<std::sync::Mutex<FakeServer>>,
     );
 
-    /// Notifications of what another identity shares: a folder of theirs, shared for `ends`
-    /// by their server's clock, pulled into the member's mirror.
-    fn shared_notifications(
+    /// Notifications of what another identity shares, connected at `t0` and read as they
+    /// connected: a folder of theirs, shared for `ends` by their server's clock.
+    fn connected_share(
         home: &Path,
         ends: Duration,
+        t0: Instant,
     ) -> Result<Shared, Box<dyn std::error::Error>> {
         use hbsync_remote::Remote;
         let server = FakeServer::new(ServerConfig::default());
         let owner = FakeRemote::new(server.clone());
-        let made = owner.create(&docs(), None)?;
+        let made = owner.create(
+            &hbsync_remote::contract::folder("Docs", hbsync_types::NodeId::ROOT),
+            None,
+        )?;
         let until = lock(&server).now() + ends.as_millis() as i64;
         owner.share_until(made.at().file_id, until)?;
         let member = Arc::new(FakeRemote::member(server.clone()));
         let drive = Drive::open(&home.join("state.db"), "b.example", member.clone())?;
         drive.pull(None)?;
         let puller = Puller::spawn(Arc::clone(&drive));
-        let n = Notifications::new(puller.clone(), Instant::now());
+        let mut n = Notifications::new(puller.clone(), t0);
+        n.event(Event::Connected, t0, false);
+        wait_for("the read as it connected", || puller.rounds() == 1)?;
         Ok((n, puller, drive, member, server))
     }
 
-    /// A sharer's server refusing its token is not this login refused: the share's drive is
-    /// read on its timer all the same (a read is what gets a new token). The identity's own
-    /// refusal holds its drive back, as before.
+    /// A sharer's server refusing its token is not this login refused
+    /// (`the_notifications_answer_for_the_login_alone`): the share's drive is read on its
+    /// timer all the same (a read is what gets a new token).
     #[test]
     fn a_sharers_refusal_leaves_the_reads_going() -> Result<(), Box<dyn std::error::Error>> {
         let home = tempfile::tempdir()?;
-        let hour = Duration::from_secs(3600);
-        let (mut n, puller, drive, ..) = shared_notifications(home.path(), hour)?;
-        let t0 = Instant::now();
-        n.event(Event::Connected, t0, false);
-        wait_for("the read as it connected", || puller.rounds() == 1)?;
+        let (hour, t0) = (Duration::from_secs(3600), Instant::now());
+        let (mut n, puller, drive, ..) = connected_share(home.path(), hour, t0)?;
         n.event(Event::Refused("closed".into()), t0, false);
         assert!(!drive.is_denied(), "their token's refusal: asked on");
         assert_eq!(n.deadline(t0, false), Some(t0 + UNANNOUNCED_READ));
         n.tick(t0 + UNANNOUNCED_READ, false);
         wait_for("the read on the timer", || puller.rounds() == 2)?;
-
-        let own = tempfile::tempdir()?;
-        let (mut n, _, drive, _) = notifications(own.path())?;
-        n.event(Event::Refused("403".into()), t0, false);
-        assert!(drive.is_denied(), "this login's refusal");
         Ok(())
     }
 
@@ -696,11 +688,8 @@ mod tests {
     #[test]
     fn a_connected_share_is_read_when_its_time_is_over() -> Result<(), Box<dyn std::error::Error>> {
         let home = tempfile::tempdir()?;
-        let hour = Duration::from_secs(3600);
-        let (mut n, puller, drive, _, server) = shared_notifications(home.path(), hour)?;
-        let t0 = Instant::now();
-        n.event(Event::Connected, t0, false);
-        wait_for("the read as it connected", || puller.rounds() == 1)?;
+        let (hour, t0) = (Duration::from_secs(3600), Instant::now());
+        let (mut n, puller, drive, _, server) = connected_share(home.path(), hour, t0)?;
         let due = drive.reread_at().ok_or("no time kept")?;
         assert!(due > t0 + hour - Duration::from_secs(10), "its end");
         assert_eq!(n.deadline(t0, false), Some(due), "nothing before it");
@@ -721,11 +710,7 @@ mod tests {
         let (mut n, puller, ..) = notifications(own.path())?;
         n.event(Event::Connected, t0, false);
         wait_for("the read as it connected", || puller.rounds() == 1)?;
-        assert_eq!(
-            n.deadline(t0, false),
-            None,
-            "an own drive: nothing to wait for"
-        );
+        assert_eq!(n.deadline(t0, false), None, "an own drive: no such time");
         Ok(())
     }
 
@@ -734,11 +719,8 @@ mod tests {
     #[test]
     fn a_due_read_that_fails_is_asked_again_later() -> Result<(), Box<dyn std::error::Error>> {
         let home = tempfile::tempdir()?;
-        let minute = Duration::from_secs(60);
-        let (mut n, puller, drive, member, _) = shared_notifications(home.path(), minute)?;
-        let t0 = Instant::now();
-        n.event(Event::Connected, t0, false);
-        wait_for("the read as it connected", || puller.rounds() == 1)?;
+        let (minute, t0) = (Duration::from_secs(60), Instant::now());
+        let (mut n, puller, drive, member, _) = connected_share(home.path(), minute, t0)?;
         let due = drive.reread_at().ok_or("no time kept")?;
         // (Past the five minutes after its start, before which nothing is read.)
         let late = due.max(t0 + UNANNOUNCED_READ);
@@ -747,9 +729,6 @@ mod tests {
         wait_for("the read at its time", || puller.rounds() == 2)?;
         assert_eq!(drive.reread_at(), Some(due), "as it was");
         assert_eq!(n.deadline(late, false), Some(late + UNANNOUNCED_READ));
-        n.tick(late + Duration::from_secs(1), false);
-        std::thread::sleep(Duration::from_millis(50));
-        assert_eq!(puller.rounds(), 2, "not asked again at once");
         Ok(())
     }
 

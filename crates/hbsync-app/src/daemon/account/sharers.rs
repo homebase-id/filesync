@@ -6,14 +6,14 @@ use std::collections::hash_map::Entry;
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::ops::Range;
-use std::sync::mpsc::{Sender, channel};
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 use hbsync_engine::Drive;
 use hbsync_homebase::drive::HomebaseRemote;
 use hbsync_homebase::drive::markers::{Sharer, is_domain};
 use hbsync_homebase::drive::shared::PeerRemote;
-use hbsync_homebase::notify::Notifier;
+use hbsync_homebase::notify::{Events, Notifier};
 use hbsync_remote::{
     Answers, ChangesPage, Deletes, ForGood, Holds, NodeMeta, RefsPage, Refusal, Remote,
     RemoteError, RemoteHeader, Upload,
@@ -63,26 +63,15 @@ impl ByMarkers {
     }
 
     /// `sharer`'s notifications, read on `peer` (their server), their events sent to the
-    /// account under the sharer's name by a thread of their own, which ends with them.
-    /// `None` where a thread couldn't start (told): the share is read on a timer.
+    /// account under the sharer's name. `None` where their thread couldn't start (told): the
+    /// share is read on a timer.
     fn listen(&self, sharer: &Identity, peer: &Arc<PeerRemote>) -> Option<Notifier> {
-        let (tx, events) = channel();
         let (to_account, from) = (self.to_account.clone(), sharer.clone());
-        let forward = move || {
-            for event in events {
-                if to_account
-                    .send(Msg::ShareHint(from.clone(), event))
-                    .is_err()
-                {
-                    return;
-                }
-            }
-        };
-        let started = std::thread::Builder::new()
-            .name("hbsync-hints".into())
-            .spawn(forward)
-            .and_then(|_| peer.notifier(tx));
-        started
+        let hints = Events::to(move |event| {
+            let hint = Msg::ShareHint(from.clone(), event);
+            to_account.send(hint).is_ok()
+        });
+        peer.notifier(hints)
             .inspect_err(|e| {
                 tracing::error!(
                     "can't start {sharer}'s notifications ({e}); reading what they share now \

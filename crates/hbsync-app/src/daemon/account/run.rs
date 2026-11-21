@@ -5,12 +5,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, channel};
+use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use hbsync_engine::Drive;
 use hbsync_homebase::drive::HomebaseRemote;
-use hbsync_homebase::notify::Event;
+use hbsync_homebase::notify::{Event, Events};
 use hbsync_homebase::{Client, HomebaseError};
 use hbsync_remote::ErrorClass;
 use hbsync_state::Unusable;
@@ -124,23 +124,11 @@ impl Account {
         let Some(remote) = self.connect(&client, stop, requests, &mut msgs) else {
             return Ok(());
         };
-        // The notifications' events reach this thread's channel through a thread of their own,
-        // which ends with them.
-        let (tx, events) = channel();
-        let to_account = self.requests.clone();
-        std::thread::Builder::new()
-            .name("hbsync-hints".into())
-            .spawn(move || {
-                for event in events {
-                    if to_account.send(Msg::Hint(event)).is_err() {
-                        return;
-                    }
-                }
-            })
-            .map_err(DaemonError::Ipc)?;
         self.sync(paths, config, requests, stop, &mut msgs, |db| {
-            let mut parts =
-                AccountParts::open(&self.identity, Arc::clone(&remote), db, tx.clone())?;
+            // The notifications' events go to this thread's channel, from their own thread.
+            let to_account = self.requests.clone();
+            let hints = Events::to(move |event| to_account.send(Msg::Hint(event)).is_ok());
+            let mut parts = AccountParts::open(&self.identity, Arc::clone(&remote), db, hints)?;
             // Whose shares it syncs is what the identity's share markers say.
             let to_account = self.requests.clone();
             let sharers = ByMarkers::new(&self.identity, Arc::clone(&remote), paths, to_account);
