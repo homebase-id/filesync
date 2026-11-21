@@ -23,7 +23,8 @@
 //!   goes in the first frame, in the clear beside the subscription sealed with its secret:
 //!   `{clientAuthToken64, sharedSecretEncryptedOptions}`; a token it doesn't take gets the
 //!   connection closed without a word (tried live: the unsealed `authenticationError` it
-//!   means to send first doesn't arrive);
+//!   means to send first doesn't arrive), which a second time running is read as the
+//!   refusal (`Ended::Unanswered`);
 //! - every later frame is as on the identity's own socket;
 //! - `excludeOwnWrites` is refused there (a member writes nothing as a device), and an event
 //!   comes only for a file shared with the member: one whose share was withdrawn or ended as
@@ -140,7 +141,8 @@ impl Notifier {
     /// As [`Notifier::spawn`], for what another identity shares: connects to their server as
     /// the client `theirs` gives ([`Client::for_peer`]) and subscribes to `drive`, theirs.
     /// `theirs` is asked at every connect: the token their server takes may have been
-    /// replaced since the last. [`Event::Refused`]: their server doesn't take the token.
+    /// replaced since the last. [`Event::Refused`]: their server doesn't take the token
+    /// (it said so, or ended two connections running before subscribing them).
     pub fn spawn_shared(
         theirs: impl Fn() -> Client + Send + 'static,
         drive: TargetDrive,
@@ -297,6 +299,8 @@ fn run(
     const FIRST: Duration = Duration::from_secs(1);
     let mut backoff = FIRST;
     let mut refused_wait = REFUSED_PAUSE;
+    // The last connection was ended before it was subscribed ([`Ended::Unanswered`]).
+    let mut unanswered = false;
     while !control.stopping() {
         let mut connected = false;
         let result = connection(&mut connected);
@@ -304,9 +308,19 @@ fn run(
         if connected {
             backoff = FIRST;
             refused_wait = REFUSED_PAUSE;
+            unanswered = false;
         }
         let Err(ended) = result else {
             return; // stopped, or nobody listens any more
+        };
+        // Ended unsubscribed once, their server may have stumbled: made again soon. Twice
+        // running, it doesn't take the token.
+        let ended = match ended {
+            Ended::Unanswered(why) if std::mem::replace(&mut unanswered, true) => {
+                Ended::Refused(why)
+            }
+            Ended::Unanswered(why) => Ended::Lost(why),
+            ended => ended,
         };
         // A refusal is told whatever was asked of the notifier meanwhile.
         let refused = matches!(ended, Ended::Refused(_));
@@ -394,7 +408,7 @@ fn converse<S: io::Read + io::Write + Timed>(
     let first = opening(client, &subscription.request(client).to_string())?;
     socket
         .send(Message::text(first))
-        .map_err(|e| format!("subscribing: {e}"))?;
+        .map_err(|e| format!("sending establishConnectionRequest: {e}"))?;
     let opened = Instant::now();
     let (mut last_frame, mut last_ping) = (Instant::now(), Instant::now());
     // Told to stop or reconnect: the socket is shut down, or about to be.
@@ -443,13 +457,7 @@ fn converse<S: io::Read + io::Write + Timed>(
             }
             Ok(Message::Close(frame)) => {
                 let why = format!("closed by the server: {frame:?}");
-                // Another identity's server closes a connection whose token it doesn't take
-                // without a word (verified live: `homebase-api-notes.md`, "Shared with you";
-                // the `authenticationError` it means to send first doesn't arrive).
-                return Err(match client.peer() && !*connected {
-                    true => Ended::Refused(why),
-                    false => Ended::Lost(why),
-                });
+                return Err(Ended::broken(client, *connected, why));
             }
             Ok(_) => last_frame = Instant::now(),
             Err(tungstenite::Error::Io(e))
@@ -458,7 +466,8 @@ fn converse<S: io::Read + io::Write + Timed>(
                     io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                 ) => {}
             Err(_) if control.told() => return told(),
-            Err(e) => return Err(e.to_string().into()),
+            // (A close that didn't arrive whole, a reset, is the server's ending it too.)
+            Err(e) => return Err(Ended::broken(client, *connected, e.to_string())),
         }
         if !*connected && opened.elapsed() > HANDSHAKE {
             return Err("no handshake from the server".to_owned().into());
@@ -497,6 +506,22 @@ enum Ended {
     /// The server refused it: the credentials at the upgrade (401, 403), or what it said who
     /// it is. Asked again later.
     Refused(String),
+    /// Another identity's server ended it before subscribing it, without a word. That is
+    /// what it does with a token it doesn't take (tried live: the `authenticationError` it
+    /// means to send first doesn't arrive; `homebase-api-notes.md`, "Shared with you"), but
+    /// also when it stumbles (a notification of its own sent while the connection says who
+    /// it is closes it too): lost the first time, refused the second running.
+    Unanswered(String),
+}
+
+impl Ended {
+    /// `client`'s connection ended because `why`, `connected` or not yet.
+    fn broken(client: &Client, connected: bool, why: String) -> Ended {
+        match client.peer() && !connected {
+            true => Ended::Unanswered(why),
+            false => Ended::Lost(why),
+        }
+    }
 }
 
 impl From<String> for Ended {
@@ -1011,12 +1036,12 @@ mod tests {
     }
 
     /// What a connection comes to as `client`, against a server on this machine that reads
-    /// its first frame, sends `answers` and closes: that first frame, how the connection
-    /// ended, whether it was subscribed, and what it told.
+    /// its first frame, sends `answers` and closes (`None`: hangs up without a close): that
+    /// first frame, how the connection ended, whether it was subscribed, and what it told.
     #[allow(clippy::type_complexity)]
     fn conversed(
         client: &Client,
-        answers: Vec<Message>,
+        answers: Option<Vec<Message>>,
     ) -> Result<(serde_json::Value, Result<(), Ended>, bool, Vec<Event>), Box<dyn std::error::Error>>
     {
         let listener = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -1025,6 +1050,12 @@ mod tests {
             let (tcp, _) = listener.accept().map_err(|e| e.to_string())?;
             let mut socket = tungstenite::accept(tcp).map_err(|e| e.to_string())?;
             let first = socket.read().map_err(|e| e.to_string())?;
+            let Some(answers) = answers else {
+                return first
+                    .into_text()
+                    .map(|t| t.to_string())
+                    .map_err(|e| e.to_string());
+            };
             for answer in answers {
                 socket.send(answer).map_err(|e| e.to_string())?;
             }
@@ -1064,57 +1095,133 @@ mod tests {
         ))
     }
 
-    /// Another identity's server closes a connection whose token it doesn't take without a
-    /// word: a refusal, asked again later, not a connection lost and tried again at once. The
-    /// identity's own server closing is a connection lost, as before.
+    /// Another identity's server closing a connection before it subscribed it, with or
+    /// without frames the client doesn't read before, is told apart from a connection lost
+    /// (the notifier refuses the second running); what it says of the token in the clear is
+    /// a refusal at once. The identity's own server closing is a connection lost, as before.
     #[test]
-    fn a_sharers_server_closing_before_it_subscribes_refuses()
+    fn a_sharers_server_closing_before_it_subscribes_is_told_apart()
     -> Result<(), Box<dyn std::error::Error>> {
-        let (first, ended, connected, told) = conversed(&peer_of("pippin.example"), Vec::new())?;
+        let (first, ended, connected, told) =
+            conversed(&peer_of("pippin.example"), Some(Vec::new()))?;
         assert_eq!(first["clientAuthToken64"], "dGhlaXIgdG9rZW4/Pg==");
-        assert!(matches!(ended, Err(Ended::Refused(_))), "{ended:?}");
+        assert!(matches!(ended, Err(Ended::Unanswered(_))), "{ended:?}");
         assert!(!connected && told.is_empty(), "{told:?}");
 
-        let (first, ended, connected, told) = conversed(&client_of("tom.example"), Vec::new())?;
+        // Hung up on, without a close.
+        let (_, ended, _, _) = conversed(&peer_of("pippin.example"), None)?;
+        assert!(matches!(ended, Err(Ended::Unanswered(_))), "{ended:?}");
+        let (_, ended, _, _) = conversed(&client_of("tom.example"), None)?;
+        assert!(matches!(ended, Err(Ended::Lost(_))), "{ended:?}");
+
+        // (As when the drive is no longer the member's to read: errors, then the close.)
+        let errors = vec![frame(json!({"notificationType": "error", "data": "no"}))];
+        let (_, ended, connected, _) = conversed(&peer_of("pippin.example"), Some(errors))?;
+        assert!(matches!(ended, Err(Ended::Unanswered(_))), "{ended:?}");
+        assert!(!connected);
+
+        let refusal = vec![frame(
+            json!({"notificationType": "authenticationError", "data": "Invalid Token"}),
+        )];
+        let (_, ended, connected, _) = conversed(&peer_of("pippin.example"), Some(refusal))?;
+        assert!(matches!(ended, Err(Ended::Refused(_))), "{ended:?}");
+        assert!(!connected);
+
+        let (first, ended, connected, told) =
+            conversed(&client_of("tom.example"), Some(Vec::new()))?;
         assert!(first.get("clientAuthToken64").is_none(), "{first}");
         assert!(matches!(ended, Err(Ended::Lost(_))), "{ended:?}");
         assert!(!connected && told.is_empty(), "{told:?}");
         Ok(())
     }
 
-    /// What the notifier tells, and how many connections it makes, in `time`, each ending
-    /// as `ended` says.
-    fn ran(ended: fn() -> Ended, time: Duration) -> (Vec<Event>, usize) {
+    /// What the notifier tells, and how many connections it makes, while they end as `ends`
+    /// say in turn (the last for all after it): until it told `events` (ten seconds at
+    /// most) and `linger` longer.
+    fn ran(
+        ends: &[fn(&mut bool) -> Ended],
+        events: usize,
+        linger: Duration,
+    ) -> (Vec<Event>, usize) {
         let control = Control::default();
         let (tx, rx) = std::sync::mpsc::channel();
         let made = std::sync::atomic::AtomicUsize::new(0);
+        let mut told = Vec::new();
         std::thread::scope(|scope| {
-            let (made, tx, control) = (&made, &tx, &control);
+            let (made, control) = (&made, &control);
             scope.spawn(move || {
-                let connection = |_: &mut bool| {
-                    made.fetch_add(1, Ordering::SeqCst);
-                    Err(ended())
+                let connection = |connected: &mut bool| {
+                    let nth = made.fetch_add(1, Ordering::SeqCst);
+                    Err(ends[nth.min(ends.len() - 1)](connected))
                 };
-                run(connection, tx, control)
+                run(connection, &tx, control)
             });
-            std::thread::sleep(time);
+            let until = Instant::now() + Duration::from_secs(10);
+            while told.len() < events
+                && let Ok(event) = rx.recv_timeout(until.saturating_duration_since(Instant::now()))
+            {
+                told.push(event);
+            }
+            std::thread::sleep(linger);
             control.tell(&control.stop);
         });
-        drop(tx);
-        (rx.iter().collect(), made.load(Ordering::SeqCst))
+        told.extend(rx.iter());
+        (told, made.load(Ordering::SeqCst))
     }
 
-    /// A connection lost is told and made again within seconds; one refused is told and not
-    /// made again soon.
+    const SOON: Duration = Duration::from_millis(1500);
+
+    /// A connection refused is told and not made again soon.
     #[test]
-    fn a_refused_connection_is_told_and_not_made_again_soon() {
-        let (told, made) = ran(|| Ended::Refused("no".into()), Duration::from_secs(2));
+    fn a_refused_connection_is_not_made_again_soon() {
+        let (told, made) = ran(&[|_| Ended::Refused("no".into())], 1, SOON);
         assert_eq!(told, [Event::Refused("no".into())]);
         assert_eq!(made, 1);
+    }
 
-        let (told, made) = ran(|| Ended::Lost("gone".into()), Duration::from_secs(2));
+    /// A connection lost is told and made again within seconds.
+    #[test]
+    fn a_lost_connection_is_made_again_soon() {
+        let (told, made) = ran(&[|_| Ended::Lost("gone".into())], 2, Duration::ZERO);
         assert!(made >= 2, "{made}");
-        assert!(!told.is_empty() && told.iter().all(|e| *e == Event::Lost("gone".into())));
+        assert!(told.len() >= 2 && told.iter().all(|e| *e == Event::Lost("gone".into())));
+    }
+
+    /// A connection another identity's server ended unsubscribed is made again soon, as one
+    /// lost; ended so a second time running, it is refused, and not made again soon.
+    #[test]
+    fn a_connection_ended_unsubscribed_twice_running_is_refused() {
+        let (told, made) = ran(&[|_| Ended::Unanswered("closed".into())], 2, SOON);
+        assert_eq!(
+            told,
+            [
+                Event::Lost("closed".into()),
+                Event::Refused("closed".into())
+            ]
+        );
+        assert_eq!(made, 2);
+    }
+
+    /// One that was subscribed in between starts the count again.
+    #[test]
+    fn a_connection_subscribed_in_between_starts_the_count_again() {
+        let ends: [fn(&mut bool) -> Ended; 3] = [
+            |_| Ended::Unanswered("closed".into()),
+            |connected| {
+                *connected = true;
+                Ended::Lost("gone".into())
+            },
+            |_| Ended::Unanswered("closed".into()),
+        ];
+        let (told, _) = ran(&ends, 3, Duration::ZERO);
+        assert_eq!(
+            told[..3],
+            [
+                Event::Lost("closed".into()),
+                Event::Lost("gone".into()),
+                Event::Lost("closed".into())
+            ]
+        );
     }
 
     /// Their server subscribes the connection and tells of a file as the identity's own
@@ -1128,7 +1235,7 @@ mod tests {
             frame(json!({"notificationType": "deviceHandshakeSuccess"})),
             frame(json!({"notificationType": "fileModified", "data": file.to_string()})),
         ];
-        let (_, ended, connected, told) = conversed(&peer_of("pippin.example"), answers)?;
+        let (_, ended, connected, told) = conversed(&peer_of("pippin.example"), Some(answers))?;
         assert!(matches!(ended, Err(Ended::Lost(_))), "{ended:?}");
         assert!(connected);
         assert!(

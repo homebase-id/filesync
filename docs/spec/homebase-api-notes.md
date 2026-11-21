@@ -642,8 +642,13 @@ server answers the rest, to a token their server made for this identity's connec
   handshake and that event together); a change to a file not shared with it brought nothing.
   A token their server doesn't take gets no `authenticationError`: the server means to send
   one unsealed, but closes the socket first (a normal close, no frame before it; **[tried]**
-  with a token it never made). The client reads a close before the subscription as the
-  refusal it is, and asks again as for a refused login, not at once. Every notification of
+  with a token it never made). Their server ends a connection the same way when it stumbles:
+  a notification of its own sent while a connection still says who it is closes that
+  connection (**[verified]** `PeerAppNotificationDispatcher.SendMessageAsync` removes a
+  socket without a context), and so does an error while it looks the token up. So the
+  client makes a connection ended before its subscription again once, soon, and reads a
+  second one running as the refusal: asked again as for a refused login, not at once.
+  Every notification of
   their server that isn't a drive's goes to every peer socket (**[verified]**
   `PeerAppNotificationDispatcher.WsPublishAsync`; none came in 70 idle seconds): unread here.
   A reconnect with the same token subscribes at once, and so does a second socket beside
