@@ -419,9 +419,13 @@ impl Account {
                     // on (it may be on again before its turn comes); one gone has none to
                     // take it.
                     Msg::ShareHint(sharer, event) => {
-                        let mut all = shares.iter_mut().chain(to_end.iter_mut());
-                        if let Some(s) = all.find(|s| s.share.sharer == sharer) {
-                            s.share.notifications.event(event, Instant::now(), paused);
+                        let theirs = |s: &&mut Sharing| s.share.sharer == sharer;
+                        let now = Instant::now();
+                        if let Some(s) = shares.iter_mut().find(theirs) {
+                            s.share.notifications.event(event, now, paused);
+                        } else if let Some(s) = to_end.iter_mut().find(theirs) {
+                            // (As paused: nothing is read for a copy about to go.)
+                            s.share.notifications.event(event, now, true);
                         }
                     }
                     Msg::Woke => {

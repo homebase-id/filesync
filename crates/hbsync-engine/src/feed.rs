@@ -72,6 +72,24 @@ pub struct FeedReport {
     pub skipped: Vec<Skipped>,
     /// The server's clock at the last page read, Unix ms.
     pub server_time: Option<i64>,
+    /// How a read from the beginning stands after the pull.
+    pub rereading: Rereading,
+}
+
+/// How a read of the feed from its beginning ([`Reread`]) stands after a pull: what it found
+/// missing is asked about a hundred a pull, and a file said "not there" goes only when that
+/// is said again a minute to an hour later, so it takes pulls to end.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum Rereading {
+    /// None is open.
+    #[default]
+    No,
+    /// Open, and its asking got somewhere (a file answered, or said "not there" a first
+    /// time): the next pull gets further.
+    Asking,
+    /// Open, and its asking stopped at the first file (it can't be answered for now): the
+    /// next pull may get no further.
+    Stuck,
 }
 
 impl std::ops::AddAssign for FeedReport {
@@ -81,6 +99,7 @@ impl std::ops::AddAssign for FeedReport {
         self.deleted += other.deleted;
         self.skipped.extend(other.skipped);
         self.server_time = self.server_time.max(other.server_time);
+        self.rereading = other.rereading;
     }
 }
 
@@ -118,9 +137,15 @@ pub fn pull<G: DerefMut<Target = StateDb>>(
     // A re-read open: what is left of it asked about (once nothing is, it ends).
     if let Some(asking) = reread.as_ref().map(Reread::to_ask) {
         let asked = ask(remote, &asking);
+        let somewhere = !(asked.answered.is_empty() && asked.not_there.is_empty());
         let (gone, mut skipped) = record_answers(&db, reread, asked, report.server_time)?;
         report.deleted += gone;
         report.skipped.append(&mut skipped);
+        report.rereading = match (reread.is_some(), somewhere) {
+            (false, _) => Rereading::No,
+            (true, true) => Rereading::Asking,
+            (true, false) => Rereading::Stuck,
+        };
     }
     Ok(report)
 }

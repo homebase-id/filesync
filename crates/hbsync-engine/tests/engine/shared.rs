@@ -179,6 +179,55 @@ fn a_notice_of_a_shared_file_reads_the_feed_for_its_end() -> R {
     Ok(())
 }
 
+/// `b`'s drive is to be read next `ms` from now ([`hbsync_engine::Drive::reread_at`]), give
+/// or take the minute a time is kept to and the test's own time.
+fn in_about(b: &Client, ms: i64) {
+    use std::time::{Duration, Instant};
+    let left = b
+        .engine
+        .drive()
+        .reread_at()
+        .map(|at| at.saturating_duration_since(Instant::now()));
+    let (least, most) = ((ms - 10_000) as u64, (ms + MINUTE + 1_000) as u64);
+    let fits = left.is_some_and(|left| {
+        (Duration::from_millis(least)..=Duration::from_millis(most)).contains(&left)
+    });
+    assert!(fits, "{left:?}, not about {ms} ms");
+}
+
+/// A file that can't be asked about for now (its header's read breaks) holds a read from the
+/// beginning open. The drive is read on for it, but twice as long after each time: one stuck
+/// file doesn't have it read every five minutes for good. Once the file answers, the asking
+/// goes on as for any other.
+#[test]
+fn a_file_that_cant_be_asked_about_is_asked_less_and_less_often() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("gone.txt", "gone")?;
+    a.sync()?;
+    share(&a, &server, "gone.txt")?;
+    let (mut b, _out) = Client::member(&server, "b")?;
+    b.sync()?;
+    let h = common::header_named(&server, "gone.txt");
+    (server.lock().map_err(|_| "poisoned")?).hard_delete(h.file_id, h.version)?;
+    later(&server, 7 * DAY + 2 * MINUTE)?;
+
+    b.remote.faults().failing_headers = true;
+    for minutes in [5, 10, 20] {
+        b.sync()?;
+        in_about(&b, minutes * MINUTE);
+    }
+    b.remote.faults().failing_headers = false;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["gone.txt = gone"], "not there once: kept");
+    in_about(&b, MINUTE);
+    b.a_minute_on()?;
+    b.sync()?;
+    assert!(b.tree_text("").is_empty(), "{:?}", b.tree_text(""));
+    in_about(&b, 7 * DAY);
+    Ok(())
+}
+
 /// When another identity's drive is read from its beginning next (a share's end, the week)
 /// is by their server's clock, and nothing announces it: the drive says when that is by this
 /// computer's clock, as each pull leaves it. A read from the beginning left open (a file
@@ -186,8 +235,6 @@ fn a_notice_of_a_shared_file_reads_the_feed_for_its_end() -> R {
 /// the file off: without that read, nothing would. An identity's own drive has no such time.
 #[test]
 fn a_shares_drive_says_when_it_is_next_read_from_its_beginning() -> R {
-    use std::time::{Duration, Instant};
-
     let server = server();
     let mut a = Client::new(&server, "a")?;
     a.write("top.txt", "top")?;
@@ -197,19 +244,6 @@ fn a_shares_drive_says_when_it_is_next_read_from_its_beginning() -> R {
     share(&a, &server, "gone.txt")?;
     let (mut b, _out) = Client::member(&server, "b")?;
     assert_eq!(b.engine.drive().reread_at(), None, "not read yet");
-    // `ms` from now, give or take the minute a time is kept to and the test's own time.
-    let in_about = |b: &Client, ms: i64| {
-        let left = b
-            .engine
-            .drive()
-            .reread_at()
-            .map(|at| at.saturating_duration_since(Instant::now()));
-        let (least, most) = ((ms - 10_000) as u64, (ms + MINUTE + 1_000) as u64);
-        let fits = left.is_some_and(|left| {
-            (Duration::from_millis(least)..=Duration::from_millis(most)).contains(&left)
-        });
-        assert!(fits, "{left:?}, not about {ms} ms");
-    };
     b.sync()?;
     in_about(&b, 7 * DAY);
 

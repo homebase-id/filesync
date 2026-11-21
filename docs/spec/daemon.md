@@ -713,7 +713,10 @@ included (service managers restart it then).
     feed no longer shows are asked about a hundred a read, and one said "not there" goes
     only when that is said a second time, a minute to an hour later (sync semantics §8b).
     So the share is read on, 5 minutes later each time, until nothing is left open:
-    without that, a file the sharer deleted for good would never leave this device.
+    without that, a file the sharer deleted for good would never leave this device. Where
+    the asking gets nowhere (its first file can't be answered for now: a broken
+    connection, a key not there yet), the pause doubles each time, up to about a week, so
+    one such file doesn't bring the read every 5 minutes back for good.
   - A refusal there is of the token their server gave, never of this login: nothing of
     the account's is held back, and the share is read on its timer all the same, as a
     read is what asks for a new token (the socket never does). A connection their server
