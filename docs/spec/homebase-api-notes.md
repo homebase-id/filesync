@@ -640,17 +640,17 @@ server answers the rest, to a token their server made for this identity's connec
   connect; a change to a file shared with the member came 40 ms after the write, as a
   minimal `fileRef` with the new version, the parent and `versionUpdated` (1,719 B for the
   handshake and that event together); a change to a file not shared with it brought nothing.
-  A token their server doesn't take gets no `authenticationError`: the server means to send
-  one unsealed, but closes the socket first (a normal close, no frame before it; **[tried]**
-  with a token it never made). Their server ends a connection the same way when it stumbles:
-  a notification of its own sent while a connection still says who it is closes that
-  connection (**[verified]** `PeerAppNotificationDispatcher.SendMessageAsync` removes a
-  socket without a context), and so does an error while it looks the token up. So the
-  client makes a connection ended before its subscription again once, soon, and reads a
-  second one running as the refusal: asked again as for a refused login, not at once.
-  odin-core PR #2149 (open) sends the `authenticationError` before the close, and closes
-  with 1008 and the reason "Invalid Token": the client reads that frame as the refusal at
-  once, as it does today where the frame arrives.
+  A token their server doesn't take gets an unsealed `authenticationError` ("Invalid Token"),
+  then a 1008 (PolicyViolation) close: the client reads the frame as the refusal at once
+  (**[tried]** 2026-11-22 on frodo at odin-core 3ace44b69, with a token it never made: refused
+  on the first connection, 6 s after the probe began; before odin-core PR #2149, merged
+  2026-11-21 as b8946173b, the server closed the socket first, with no frame). Their server
+  still ends a connection without a word when it stumbles: a notification of its own sent
+  while a connection still says who it is closes that connection (**[verified]**
+  `PeerAppNotificationDispatcher.SendMessageAsync` removes a socket without a context), and
+  so does an error while it looks the token up. So the client makes a connection ended
+  before its subscription again once, soon, and reads a second one running as the refusal:
+  asked again as for a refused login, not at once.
   Every notification of
   their server that isn't a drive's goes to every peer socket (**[verified]**
   `PeerAppNotificationDispatcher.WsPublishAsync`; none came in 70 idle seconds): unread here.
