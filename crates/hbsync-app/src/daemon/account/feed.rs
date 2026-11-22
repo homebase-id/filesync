@@ -14,7 +14,8 @@ use crate::protocol::Hints;
 use crate::sync::lock;
 
 /// While the notifications aren't connected (not yet, not any more, or never: a proxy, a
-/// refusal), the drive is read this often; never while they are.
+/// refusal), the drive is read this often. While they are, only when the drive itself says
+/// so ([`Drive::reread_at`]), and from one such read to the next no more often than this.
 pub const UNANNOUNCED_READ: Duration = Duration::from_secs(300);
 
 /// What the identity's notifications do to its drive: changes announced are taken once the
@@ -24,12 +25,16 @@ pub const UNANNOUNCED_READ: Duration = Duration::from_secs(300);
 /// the drive is read every [`UNANNOUNCED_READ`]. Nothing is pulled while paused. A pull wakes
 /// the folders its changes concern.
 ///
+/// Connected, a drive is read once more when it says so ([`Drive::reread_at`]): while a read
+/// of the feed from its beginning is left open (this device back after long; what it asks
+/// about takes a second answer some minutes on), and, what another identity shares, when
+/// its time for such a read is over (a share's end, the week), which their server doesn't
+/// announce.
+///
 /// What another identity shares has notifications of its own, from their server, and is
-/// taken the same way, with two differences. Their refusal is of the token their server
+/// taken the same way, with one difference. Their refusal is of the token their server
 /// gave, not of this login: the drive is read on its timer all the same, as the read is
-/// what gets a new token. And while connected it is read once more when the time kept for
-/// reading it from its beginning is over ([`Drive::reread_at`]: a share's end, the week),
-/// which their server doesn't announce.
+/// what gets a new token.
 #[derive(Debug)]
 pub struct Notifications {
     puller: Puller,
@@ -47,7 +52,7 @@ pub struct Notifications {
     /// announced before it ([`Notifications::next_unannounced`]).
     next_read: Instant,
     /// How often the drive was read for what wasn't announced (as it connected, on the
-    /// timer): what else isn't announced then is read at those times too
+    /// timer while not connected): what else isn't announced then is read at those times too
     /// ([`Notifications::unannounced_reads`]).
     unannounced: u64,
     /// The drive's refusals ([`Drive::refusals`]) when the notifications' try to connect began,
@@ -187,8 +192,9 @@ impl Notifications {
             .send(std::mem::take(&mut self.changes), read, self.connected);
     }
 
-    /// Pulls what was announced once it has quieted, and the drive every [`UNANNOUNCED_READ`]
-    /// while not connected; nothing while `paused` (a resume syncs every folder anyway).
+    /// Pulls what was announced once it has quieted, and the drive when it is next due
+    /// unannounced ([`Notifications::next_unannounced`]); nothing while `paused` (a resume
+    /// syncs every folder anyway).
     pub fn tick(&mut self, now: Instant, paused: bool) {
         if paused {
             return;
@@ -201,18 +207,20 @@ impl Notifications {
         }
         if self.next_unannounced().is_some_and(|at| now >= at) {
             self.next_read = now + UNANNOUNCED_READ;
-            // (Not counted while the identity refuses the login: the read asks nothing.)
-            self.unannounced += u64::from(self.puller.drive.denied().is_none());
+            // Counted where what else isn't announced is to be read with it: not connected.
+            // (Connected, that is announced: this read is the drive's own, for itself. Nor
+            // while the identity refuses the login: the read asks nothing.)
+            let counts = self.connected.is_none() && self.puller.drive.denied().is_none();
+            self.unannounced += u64::from(counts);
             self.puller.ask();
         }
     }
 
     /// When the drive is next read for what isn't announced: every [`UNANNOUNCED_READ`]
     /// while not connected (refused, a read asks nothing: [`Drive::deny`]); connected, only
-    /// what another identity shares, when its time to be read from its beginning is over
-    /// ([`Drive::reread_at`]), and never before `next_read`: so a read that left that time
-    /// as it was (it failed) is asked again an [`UNANNOUNCED_READ`] later, not at every
-    /// turn. (`next_read` may also lie ahead from before it connected; the read as it
+    /// when the drive says so ([`Drive::reread_at`]), and never before `next_read`: so a
+    /// read that left the drive's time as it was (it failed) is asked again an
+    /// [`UNANNOUNCED_READ`] later, not at every turn. (`next_read` may also lie ahead from before it connected; the read as it
     /// connected has looked at the time by then.)
     fn next_unannounced(&self) -> Option<Instant> {
         match self.connected {
@@ -751,6 +759,58 @@ mod tests {
         n.tick(on, false);
         wait_for("the read after it", || puller.rounds() == 3)?;
         assert!(!held(&mut db)?, "not there twice: gone");
+        Ok(())
+    }
+
+    /// An identity's own drive is read on too while a read from its beginning is left open:
+    /// back after long, a file deleted for good meanwhile is said "not there" once at the
+    /// read as it connects, and goes at the read five minutes on, which nothing else would
+    /// make while the drive's changes are announced.
+    #[test]
+    fn an_own_drive_is_read_on_while_a_read_from_its_beginning_is_open()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use hbsync_remote::Remote;
+        let home = tempfile::tempdir()?;
+        let server = FakeServer::new(ServerConfig::default());
+        let remote = Arc::new(FakeRemote::new(server.clone()));
+        let drive = Drive::open(&home.path().join("state.db"), "a.example", remote.clone())?;
+        let docs = hbsync_remote::contract::folder("Docs", hbsync_types::NodeId::ROOT);
+        let made = remote.create(&docs, None)?.at();
+        drive.pull(None)?;
+        let puller = Puller::spawn(Arc::clone(&drive));
+        let t0 = Instant::now();
+        let mut n = Notifications::new(puller.clone(), t0);
+        // Away for long; deleted for good meanwhile, which no feed says.
+        lock(&server).hard_delete(made.file_id, made.version)?;
+        lock(&server).advance(40 * 24 * 3_600_000);
+        n.event(Event::Connected, t0, false);
+        wait_for("the read as it connected", || puller.rounds() == 1)?;
+        let mut db = hbsync_state::StateDb::open_account(&home.path().join("state.db"))?;
+        let held = |db: &mut hbsync_state::StateDb| {
+            db.read(|s| s.mirror_by_file(made.file_id))
+                .map(|row| row.is_some())
+        };
+        assert!(held(&mut db)?, "not there once: kept");
+        let soon = drive
+            .reread_at()
+            .is_some_and(|at| at < t0 + UNANNOUNCED_READ);
+        assert!(soon, "read on");
+        let on = t0 + UNANNOUNCED_READ;
+        assert_eq!(n.deadline(t0, false), Some(on));
+
+        assert_eq!(hbsync_engine::testkit::a_minute_on(&mut db)?, 1);
+        n.tick(on, false);
+        wait_for("the read after it", || puller.rounds() == 2)?;
+        assert!(!held(&mut db)?, "not there twice: gone");
+        assert_eq!(drive.reread_at(), None, "nothing left to ask");
+        assert_eq!(
+            n.deadline(on, false),
+            None,
+            "read when announced, as before"
+        );
+        // The read on was the drive's own: nothing else is read with it (the share markers
+        // are, with a read for what isn't announced; connected, their changes are).
+        assert_eq!(n.unannounced_reads(), 1, "the read as it connected alone");
         Ok(())
     }
 

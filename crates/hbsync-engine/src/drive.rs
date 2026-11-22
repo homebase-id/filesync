@@ -69,8 +69,8 @@ pub struct Drive {
     reread: Mutex<Option<feed::Reread>>,
     /// Until when what another identity shares is put off ([`Drive::put_off`]).
     put_off: Mutex<Option<Instant>>,
-    /// When another identity's drive is to be read from its beginning next
-    /// ([`Drive::reread_at`]), as the last pull left it.
+    /// When the drive is to be read next though nothing is announced ([`Drive::reread_at`]),
+    /// as the last pull left it.
     reread_at: Mutex<Option<Instant>>,
     /// How many pulls running left a read from the beginning stuck ([`Rereading::Stuck`]).
     stuck_asks: AtomicU32,
@@ -339,22 +339,25 @@ impl Drive {
         }
     }
 
-    /// When another identity's drive is to be read next though nothing is announced, by this
-    /// computer's clock, as the last pull left it. Nothing announces these; whoever reads
-    /// the drive only when its changes are announced reads it then too:
-    /// - the time kept for reading its feed from its beginning (a share's end, the week:
-    ///   [`hbsync_state::ReadTx::reread_due`], sync semantics §13), which is by their
-    ///   server's clock: as far from now as it was from that clock at the pull;
-    /// - sooner, after a pull that left such a read open ([`Rereading`]): it asks about the
-    ///   files the feed no longer shows a hundred a pull, and takes one for gone only when
-    ///   told "not there" a second time, a minute to an hour after the first
-    ///   ([`gone::judge`]). Without a pull in that hour the file would never go. So
-    ///   [`gone::ASK_AGAIN`] after a pull whose asking got somewhere; and where it stopped
+    /// When the drive is to be read next though nothing is announced, by this computer's
+    /// clock, as the last pull left it. Nothing announces these; whoever reads the drive only
+    /// when its changes are announced reads it then too:
+    /// - another identity's drive, at the time kept for reading its feed from its beginning
+    ///   (a share's end, the week: [`hbsync_state::ReadTx::reread_due`], sync semantics §13),
+    ///   which is by their server's clock: as far from now as it was from that clock at the
+    ///   pull;
+    /// - any drive, after a pull that left a read from the beginning open ([`Rereading`]:
+    ///   another identity's as above, an identity's own after this device was away for
+    ///   long): it asks about the files the feed no longer shows a hundred a pull, and takes
+    ///   one for gone only when told "not there" a second time, a minute to an hour after
+    ///   the first ([`gone::judge`]). Without a pull in that hour the file would never go.
+    ///   So [`gone::ASK_AGAIN`] after a pull whose asking got somewhere; and where it stopped
     ///   at a file that can't be answered for now, [`STUCK_ASK`] later, twice as long each
     ///   time it stops so again (up to about a week): one such file doesn't have the drive
     ///   read every few minutes for good.
     ///
-    /// `None` on an identity's own drive, and before the first pull.
+    /// `None` where neither is: an identity's own drive but for such a read, and before the
+    /// first pull.
     ///
     /// The time may come early or late by what the two clocks drift apart meanwhile, and
     /// late by a suspend and by what the pull took. Early, the pull finds nothing due and
@@ -364,13 +367,11 @@ impl Drive {
         *lock(&self.reread_at)
     }
 
-    /// Keeps [`Drive::reread_at`] after a pull, `now` being their server's clock at its last
-    /// page and `rereading` how it left a read from the beginning: one read of the
-    /// account's DB, for another identity's drive only.
+    /// Keeps [`Drive::reread_at`] after a pull, `now` being the server's clock at its last
+    /// page and `rereading` how it left a read from the beginning. Another identity's drive
+    /// has a time kept for the next such read: one read of the account's DB, for that drive
+    /// only.
     fn note_reread_at(&self, now: i64, rereading: Rereading) {
-        if !self.shared() {
-            return;
-        }
         let on = match rereading {
             Rereading::No => None,
             Rereading::Asking => Some(gone::ASK_AGAIN),
@@ -383,15 +384,16 @@ impl Drive {
             self.stuck_asks.store(0, Ordering::SeqCst);
         }
         let left = |due: i64| Duration::from_millis(due.saturating_sub(now).max(0) as u64);
-        let due = match self.account().read(|s| s.reread_due()) {
-            Ok(due) => due.map(left),
-            // Not known: asked again soon, as nothing else would.
-            Err(_) => Some(gone::ASK_AGAIN),
+        let due = if !self.shared() {
+            None // an identity's own drive keeps no time
+        } else {
+            match self.account().read(|s| s.reread_due()) {
+                Ok(due) => due.map(left),
+                // Not known: asked again soon, as nothing else would.
+                Err(_) => Some(gone::ASK_AGAIN),
+            }
         };
-        let wait = match (due, on) {
-            (Some(due), Some(on)) => Some(due.min(on)),
-            (due, on) => due.or(on),
-        };
+        let wait = [due, on].into_iter().flatten().min();
         *lock(&self.reread_at) = wait.map(|wait| Instant::now() + wait);
     }
 
