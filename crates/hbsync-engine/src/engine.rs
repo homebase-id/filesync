@@ -749,6 +749,8 @@ impl Engine {
             });
             match to {
                 Some(Ok(to)) => {
+                    // (The user's own there: writable, whatever bits it kept.)
+                    hbsync_platform::ops::make_writable(&to);
                     tracing::info!("{}: moved out, to {}", rel.display(), to.display());
                     moved.push((rel.to_string_lossy().into_owned(), to));
                 }

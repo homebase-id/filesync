@@ -183,6 +183,7 @@ impl PartialFile {
             hash: actual,
             size: self.written,
             synced: flush,
+            read_only: false,
         })
     }
 }
@@ -220,6 +221,8 @@ pub struct CompletedFile {
     /// Its bytes are durable: only then may it be put in place (a rename that a power cut
     /// keeps, of a file whose bytes it lost, would show garbage under the name).
     synced: bool,
+    /// Made read-only as it is put in place ([`CompletedFile::read_only`]).
+    read_only: bool,
 }
 
 /// Makes the bytes of `files` durable together ([`ops::sync_files`]: a few flushes of the
@@ -270,6 +273,17 @@ impl CompletedFile {
         Ok(())
     }
 
+    /// The file, to be read-only once in place where `read_only` ([`ops::set_read_only`]): what the user isn't
+    /// to change by accident (another identity's file, whose changes here aren't synced).
+    /// Set at the target, not here: one kept for a retry is opened again to be checked. Best
+    /// effort: a file system that won't take it fails nothing. A file placed so before is
+    /// replaced all the same (Windows refuses to replace a read-only file: it is made
+    /// writable first).
+    pub fn read_only(mut self, read_only: bool) -> Self {
+        self.read_only = read_only;
+        self
+    }
+
     /// Moves the file to `target`, which must not exist, with creation time `created_ms`.
     /// Returns the metadata at the target. On failure the file stays in the temp folder (see
     /// [`CompletedFile::keep_for_retry`]).
@@ -280,7 +294,7 @@ impl CompletedFile {
     ) -> Result<LocalMeta, FileIoError> {
         self.durable()?;
         ops::rename_noreplace(&self.path, target)?;
-        placed(target, created_ms)
+        placed(target, created_ms, self.read_only)
     }
 
     /// Atomically replaces `target`, but only if it still has the `expected` fingerprint (the
@@ -299,8 +313,17 @@ impl CompletedFile {
         if current.fingerprint() != *expected {
             return Err(FileIoError::TargetChanged);
         }
-        ops::replace(&self.path, target)?;
-        placed(target, created_ms)
+        // (After the check: it changes what the fingerprint is made of.)
+        let unlocked =
+            self.read_only && cfg!(windows) && ops::set_read_only(target, false).unwrap_or(false);
+        if let Err(e) = ops::replace(&self.path, target) {
+            // Not replaced (open in a program, say): as it was, not left writable.
+            if unlocked {
+                let _ = ops::set_read_only(target, true);
+            }
+            return Err(e.into());
+        }
+        placed(target, created_ms, self.read_only)
     }
 
     /// Leaves the verified file in the temp folder: reopening its [`PartialFile`] finds it
@@ -312,10 +335,18 @@ impl CompletedFile {
 /// "tunneling" gives a name removed and made again within seconds the old file's), its folder
 /// flushed, its metadata read. It is in place whatever fails here
 /// ([`FileIoError::PlacedUnread`]).
-fn placed(target: &Path, created_ms: Option<i64>) -> Result<LocalMeta, FileIoError> {
+fn placed(
+    target: &Path,
+    created_ms: Option<i64>,
+    read_only: bool,
+) -> Result<LocalMeta, FileIoError> {
     // Only shown, never synced on: a file system that won't take it fails nothing.
     if let Some(t) = created_ms {
         let _ = ops::set_created(target, t);
+    }
+    // Before it is read: what the engine records is the file as it stays.
+    if read_only {
+        let _ = ops::set_read_only(target, true);
     }
     hbsync_platform::stat(target).map_err(FileIoError::PlacedUnread)
 }

@@ -545,6 +545,9 @@ impl Executor<'_> {
         // write failed and that can't be read, none, as a temp file made here holds (one an
         // earlier try left holds what it wrote then: claiming less only sends that up).
         let tags = self.disk.on_item_after(left, Tags::default());
+        // In a read-only folder (§13) a file is placed read-only: a save over it, which
+        // would only move out, is kept from happening by accident.
+        let done = done.read_only(self.folder.read_only.is_some());
         // The old version a download replaces from another folder: aside till the commit.
         let mut old_aside = None;
         let placed = match &mut current {

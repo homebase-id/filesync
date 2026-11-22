@@ -164,7 +164,13 @@ impl<'a> Disk<'a> {
         if to.symlink_metadata().is_ok() {
             return Ok(Err(io::ErrorKind::AlreadyExists.into()));
         }
-        rename_ordered(db, &self.abs(from), to)
+        let moved = rename_ordered(db, &self.abs(from), to)?;
+        // Out of the read-only folder it is the user's own: writable again, where it (or a
+        // file in it) kept the bits of one placed read-only (a copy made there does).
+        if moved.is_ok() {
+            ops::make_writable(to);
+        }
+        Ok(moved)
     }
 
     // ---- what is written on items: tags, creation times ----
@@ -173,6 +179,21 @@ impl<'a> Disk<'a> {
     /// write found it doesn't).
     pub(super) fn tags_kept(&self) -> bool {
         tags::CAN_TAG && self.folder.tags_kept.get() != Some(&false)
+    }
+
+    /// [`Disk::write_tags`] on an item in its place. A file placed read-only (a read-only
+    /// folder's, §13) takes no tags as it is: made writable for the write, and read-only
+    /// again.
+    pub(super) fn write_tags_in_place(&self, path: &Path, tags: &Tags) -> TagsLeft {
+        // (Where the volume keeps tags at all: no write otherwise.)
+        let unlocked = self.tags_kept()
+            && self.folder.read_only.is_some()
+            && ops::set_read_only(path, false).unwrap_or(false);
+        let left = self.write_tags(path, tags);
+        if unlocked {
+            let _ = ops::set_read_only(path, true);
+        }
+        left
     }
 
     /// Writes `tags` on the item at `path` ([`tags::write_on`]), noting whether the volume
@@ -272,6 +293,20 @@ impl<'a> Disk<'a> {
     /// Unlinks what is at `at`, as `what` says it is. The caller notes the folder it was in as
     /// changed ([`StateDb::changed`]).
     pub(super) fn unlink(&self, at: &Path, what: Unlink) -> io::Result<()> {
+        // (Windows refuses to delete a read-only file, as a read-only folder's are placed.)
+        let unlocked = cfg!(windows)
+            && self.folder.read_only.is_some()
+            && matches!(what, Unlink::File)
+            && ops::set_read_only(at, false).unwrap_or(false);
+        let removed = self.unlinked(at, what);
+        // Not removed (open in a program, say): as it was, not left writable.
+        if removed.is_err() && unlocked {
+            let _ = ops::set_read_only(at, true);
+        }
+        removed
+    }
+
+    fn unlinked(&self, at: &Path, what: Unlink) -> io::Result<()> {
         match what {
             Unlink::File => fs::remove_file(at),
             Unlink::Folder => fs::remove_dir(at),

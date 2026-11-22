@@ -179,6 +179,84 @@ fn a_notice_of_a_shared_file_reads_the_feed_for_its_end() -> R {
     Ok(())
 }
 
+/// What another identity shares is placed read-only on this device: its files, so that a
+/// save over one doesn't happen by accident (it would only move out); not its folders, which
+/// the client works in. The client's own work goes on over them: a new version replaces one,
+/// read-only again, tags are written on one, and one the sharer removes goes. What is the
+/// user's own is writable: a copy made here once it has moved out, and an identity's own
+/// folder.
+#[test]
+fn a_shares_files_are_read_only_on_this_device() -> R {
+    use hbsync_platform::ops::is_read_only;
+    use hbsync_platform::tags::{self, Tag, Tags};
+
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("doc.txt", "one")?;
+    a.write("dir/in.txt", "in")?;
+    a.write("bye.txt", "bye")?;
+    a.sync()?;
+    share_all(&a, &server)?;
+    let (mut b, out) = Client::member(&server, "b")?;
+    // Recorded as they stay: the first look at them since finds nothing changed, and reads
+    // no file again.
+    b.engine.sync_once("2026-10-08")?;
+    let scan = b.engine.scan_local()?;
+    assert_eq!((scan.modified, scan.hashed), (0, 0));
+    b.sync()?;
+    for file in ["doc.txt", "dir/in.txt", "bye.txt"] {
+        assert!(is_read_only(&b.root.join(file)), "{file}");
+        assert!(!is_read_only(&a.root.join(file)), "the owner's own {file}");
+    }
+    assert!(
+        !is_read_only(&b.root.join("dir")),
+        "a folder stays writable"
+    );
+    // A plain save is refused (but to the system's own user, whom no bit holds back).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if fs::metadata(&b.root)?.uid() != 0 {
+            assert!(fs::write(b.root.join("doc.txt"), "mine").is_err());
+        }
+    }
+
+    // A new version, a tag (where the volume keeps them), a rename that changes only a
+    // letter's case, and a removal by the sharer.
+    a.write("doc.txt", "two")?;
+    fs::rename(a.root.join("dir/in.txt"), a.root.join("dir/In.txt"))?;
+    let work = Tags::new([Tag::new("Work", 0)]);
+    let tagged = tags::CAN_TAG && tags::write(&a.root.join("dir/In.txt"), &work)?.is_some();
+    fs::remove_file(a.root.join("bye.txt"))?;
+    a.sync()?;
+    b.engine.sync_once("2026-10-08")?;
+    let scan = b.engine.scan_local()?;
+    assert_eq!((scan.modified, scan.hashed), (0, 0), "after these too");
+    b.sync()?;
+    assert_eq!(b.read_text("doc.txt")?, "two");
+    assert!(is_read_only(&b.root.join("doc.txt")), "read-only again");
+    if tagged {
+        assert_eq!(tags::read(&b.root.join("dir/In.txt")), Some(work));
+    }
+    assert!(is_read_only(&b.root.join("dir/In.txt")), "as before");
+    assert!(!b.root.join("bye.txt").exists());
+    assert_eq!(b.tree_text(""), a.tree_text(""));
+
+    // A copy made here keeps the file's bits, and moves out: the user's own there, a
+    // folder of copies with what is in it.
+    fs::copy(b.root.join("doc.txt"), b.root.join("copy.txt"))?;
+    fs::create_dir(b.root.join("copies"))?;
+    fs::copy(b.root.join("doc.txt"), b.root.join("copies/doc.txt"))?;
+    b.sync()?;
+    for copy in ["copy.txt", "copies/doc.txt"] {
+        let copy = out.path().join(copy);
+        assert_eq!(fs::read_to_string(&copy)?, "two");
+        assert!(!is_read_only(&copy), "moved out: writable");
+    }
+    assert_eq!(b.tree_text(""), a.tree_text(""));
+    Ok(())
+}
+
 /// `b`'s drive is to be read next `ms` from now ([`hbsync_engine::Drive::reread_at`]), give
 /// or take the minute a time is kept to and the test's own time.
 fn in_about(b: &Client, ms: i64) {

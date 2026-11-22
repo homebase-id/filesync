@@ -166,11 +166,14 @@ impl<R: Remote + Clone + 'static> TestClient<R> {
         Ok(total)
     }
 
+    /// Writes the file, as a user who means to: one placed read-only (a read-only folder's
+    /// are, sync semantics §13) is made writable first, as saving over it takes.
     pub fn write(&self, rel: &str, data: impl AsRef<[u8]>) -> io::Result<()> {
         let path = self.root.join(rel);
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
+        let _ = hbsync_platform::ops::set_read_only(&path, false);
         fs::write(path, data)
     }
 

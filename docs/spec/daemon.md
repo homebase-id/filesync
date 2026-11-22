@@ -540,7 +540,9 @@ included (service managers restart it then).
   is one, its status naming that identity as its `sharer`): the runner is given the folder
   that what changes here moves out to, outside the folder and on its volume, and tells each
   move in a note ("report.txt: moved to …, as this folder is read-only (what changes here
-  isn't synced)"). Held deletes there are only confirmed or left held: a put back is refused
+  isn't synced)"). Its files are read-only on disk as they are placed (sync semantics §13,
+  "Read-only on disk"), so most saves there don't happen at all. Held deletes there are
+  only confirmed or left held: a put back is refused
   as it is asked ("This folder is read-only: what it holds back can't be put back on
   Homebase, only deleted here or left held"), and nothing is asked of the drive. They are
   said as the sharer's doing ("Everything here was removed by tom.example, or is no longer

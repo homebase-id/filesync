@@ -1038,6 +1038,8 @@ mod tests {
             // from then on), and the sharer's comes again. (Seen at once: the share's folder
             // is watched, by the main folder's watcher (filesync #414); Sync now walks
             // nothing, and a folder without a watcher is walked once a minute.)
+            // (Placed read-only: saved over as a user who means to does.)
+            hbsync_platform::ops::set_read_only(&at.join("notes.txt"), false)?;
             std::fs::write(at.join("notes.txt"), "changed here")?;
             let _ = started.account.sync_now();
             let moved_out = || {
