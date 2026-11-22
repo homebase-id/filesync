@@ -8,8 +8,16 @@ use crate::model::Look;
 pub(crate) const APP_256: &[u8] = include_bytes!("../assets/app-icon-256.png");
 /// The synced folder's icon: the open cloud (Linux, macOS), the tile (Windows).
 pub(crate) const FOLDER: hbsync_app::shell::Icons<'static> = hbsync_app::shell::Icons {
+    name: "homebase",
     png: include_bytes!("../assets/folder-256.png"),
     ico: include_bytes!("../assets/homebase.ico"),
+};
+/// The icon of the folder of shares in it (what other identities share): the same, with a
+/// second dot.
+pub(crate) const SHARES: hbsync_app::shell::Icons<'static> = hbsync_app::shell::Icons {
+    name: "shares",
+    png: include_bytes!("../assets/shares-256.png"),
+    ico: include_bytes!("../assets/shares.ico"),
 };
 
 /// An image as RGBA rows.

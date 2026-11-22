@@ -13,8 +13,10 @@ are the ones the app uses.
 | `tray-problem-36.png` | the problem tile with a margin (`tray-problem.svg` with `viewBox="-14 -14 128 128"`), as high as the menu bar's other icons | the macOS menu bar when something needs the user |
 | `folder.svg`, `folder-256.png` | the open cloud, no tile | the synced folder's icon on Linux (Dolphin, GNOME) and macOS |
 | `folder-windows.svg`, `homebase.ico` | the tile with a white dot, 16 to 256 px | the synced folder on Windows: `desktop.ini` and Explorer's navigation pane |
+| `shares.svg`, `shares-256.png` | the open cloud with a second, smaller dot in the cloud's other colour: another identity's beside yours | the folder of shares in the synced folder (what others share with you), on Linux and macOS |
+| `shares-windows.svg`, `shares.ico` | the tile with a second, fainter dot, 16 to 256 px | the folder of shares on Windows: `desktop.ini` |
 
-The PNGs were rendered from the SVGs with resvg 0.48 (`resvg::render` scaled to the size). The
-ICO is `folder-windows.svg` at 256 px, made with Pillow: 16, 24, 32, 48, 64 and 128 px as
-bitmaps, 256 px as PNG, as Windows' own icons are. Render them again when an SVG changes; the
+The PNGs were rendered from the SVGs with resvg 0.48 (`resvg::render` scaled to the size). An
+ICO is its `-windows.svg` at 256 px, made with Pillow: 16, 24, 32, 48, 64 and 128 px (scaled
+down with Lanczos) as 32-bit bitmaps without a mask, 256 px as PNG, as Windows' own icons are. Render them again when an SVG changes; the
 app gives the folder a new icon file then, named after its content.
