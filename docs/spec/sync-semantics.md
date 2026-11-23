@@ -306,7 +306,8 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
      holds nothing of is left as it is, the business of the devices that sync that place, which
      bring the folder back with it. Taken for an orphan, it was moved into Recovered files on
      the drive, and the folder stayed deleted for the others. One the device holds (an item
-     here, below) goes as before. Where no device syncs that place, such a node stays inside its removed folder,
+     here, below) goes as before. Where no device that writes syncs that place (a member of a
+     share, §13, may have the node at its top, and repairs nothing), such a node stays inside its removed folder,
      ignored everywhere and never deleted: the purge deletes removed nodes only, so it keeps
      the folder, restorable, while it holds a live node.
    - Nor is a folder made again (rule 3's "re-created") at a place the device filters since
