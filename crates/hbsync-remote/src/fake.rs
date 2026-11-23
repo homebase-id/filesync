@@ -625,6 +625,15 @@ impl FakeServer {
             .ok_or_else(|| RemoteError::read_only("the owner"))
     }
 
+    /// The member's share of the folder `parent`, where it may add to it: a folder of the
+    /// drive it may change ([`FakeServer::editable`]). What it adds is shared as that.
+    fn addable(&self, parent: NodeId) -> Result<Share> {
+        let folder = self.file_id_of(parent).ok_or_else(|| {
+            RemoteError::Fatal("nothing can be added there: not a folder shared with you".into())
+        })?;
+        self.editable(folder)
+    }
+
     /// `file_id`'s header as `view` reads it ([`FakeServer::access`]), refused first if it is
     /// unreadable (a test's).
     fn header_as(&self, file_id: RemoteFileId, view: View) -> Result<RemoteHeader> {
@@ -1157,7 +1166,8 @@ impl FakeRemote {
     }
 
     /// Another client on this one's registration (a copied credentials file): faults of its
-    /// own, the same token.
+    /// own, the same token, and the same writes on their way (they are held on the member's
+    /// server, whichever of its clients wrote them).
     pub fn sharing_token(&self) -> Self {
         FakeRemote {
             server: Arc::clone(&self.server),
@@ -1165,7 +1175,7 @@ impl FakeRemote {
             client: self.client,
             view: self.view,
             writes: self.writes,
-            outbox: Arc::default(),
+            outbox: Arc::clone(&self.outbox),
         }
     }
 
@@ -1275,14 +1285,7 @@ impl FakeRemote {
         let mut server = self.server();
         let shared_as = match self.view {
             View::Owner => None,
-            View::Member => {
-                let folder = server.file_id_of(node.parent).ok_or_else(|| {
-                    RemoteError::Fatal(
-                        "nothing can be added there: not a folder shared with you".into(),
-                    )
-                })?;
-                Some(server.editable(folder)?)
-            }
+            View::Member => Some(server.addable(node.parent)?),
         };
         let written = replay(received, |upload| {
             server.create_by(Some(self.client), node, upload)
@@ -1524,6 +1527,11 @@ impl Remote for FakeRemote {
         self.writable()?;
         self.gate()?;
         self.gate_name(&node.content.name)?;
+        // The member is refused before anything is sent, as the Homebase adapter reads the
+        // folder's shares first.
+        if self.is_member() {
+            self.server().addable(node.parent)?;
+        }
         // Receive the bytes before taking the server lock, as a real server handles several
         // uploads at once; only the commit is serialized.
         let received = self.receive(payload)?;
@@ -1549,7 +1557,12 @@ impl Remote for FakeRemote {
         // On Homebase another file's token would write content no one can read. The member
         // has none: the file's key reaches it through its share.
         match &target.token {
-            Some(t) if self.is_member() || *t != token_of(file_id) => {
+            Some(_) if self.is_member() => {
+                return Err(RemoteError::Fatal(format!(
+                    "update of {file_id:?} with a token: a member has none"
+                )));
+            }
+            Some(t) if *t != token_of(file_id) => {
                 return Err(RemoteError::Fatal(format!(
                     "update of {file_id:?} with another file's token"
                 )));
@@ -1562,6 +1575,11 @@ impl Remote for FakeRemote {
         self.gate_name(&meta.content.name)?;
         if self.faults().not_found_writes {
             return Err(RemoteError::NotFound);
+        }
+        // The member is refused before anything is sent, as the Homebase adapter reads the
+        // file's shares first.
+        if self.is_member() {
+            self.server().editable(file_id)?;
         }
         let received = self.receive(payload)?;
         if let Some(queued) = self.held_back(|| [meta.node]) {

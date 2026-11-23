@@ -61,6 +61,64 @@ fn a_member_writes_only_where_it_is_one_that_writes() -> R {
     Ok(())
 }
 
+/// A member is refused before its upload is read, as the Homebase adapter refuses before it
+/// sends: a new file where nothing may be added, a change to a file shared for reading alone,
+/// and a change that comes with a token (a member has none).
+#[test]
+fn a_member_is_refused_before_its_upload_is_read() -> R {
+    let (sharer, scratch) = sharing_a_folder_to_edit()?;
+    let theirs = file("to read", scratch.node, b"1");
+    let at = create_file(&sharer, &theirs, b"1")?;
+    sharer.share(at.at().file_id)?;
+    let member = FakeRemote::member(sharer.server_handle()).writing();
+    let refused = |answer: Result<Written, RemoteError>| {
+        assert!(matches!(answer, Err(RemoteError::Fatal(_))), "{answer:?}");
+    };
+    refused(create_file(
+        &member,
+        &file("at the top", NodeId::ROOT, b"2"),
+        b"2",
+    ));
+    let target = Target {
+        at: at.at(),
+        token: None,
+    };
+    let edited = with(&theirs, NodeContent::file("to read", 2, 2, false));
+    let mut bytes = std::io::Cursor::new(&b"22"[..]);
+    refused(member.update(&target, &edited, Some(upload(&mut bytes))));
+    assert_eq!(member.faults().uploads, 0, "an upload was read");
+    // With the owner's token: refused, though the file is shared for editing.
+    sharer.share_to_edit(at.at().file_id)?;
+    refused(member.update(&at.target, &edited, None));
+    assert_eq!(sharer.header(at.at().file_id)?.version, at.at().version);
+    Ok(())
+}
+
+/// A member's writes on their way are held on its server, not by one of its computers:
+/// another client of the member waits for a node's earlier write too, and can have it
+/// delivered.
+#[test]
+fn a_members_writes_on_their_way_are_its_servers() -> R {
+    let (sharer, scratch) = sharing_a_folder_to_edit()?;
+    let one = FakeRemote::member(sharer.server_handle()).writing();
+    let other = one.sharing_token();
+    let new = file("mine", scratch.node, b"1");
+    one.faults().on_their_way = true;
+    assert!(matches!(
+        create_file(&one, &new, b"1"),
+        Err(RemoteError::Waiting { .. })
+    ));
+    assert!(matches!(
+        create_file(&other, &new, b"1"),
+        Err(RemoteError::Waiting { .. })
+    ));
+    let delivered = other.deliver();
+    assert!(matches!(delivered.as_slice(), [Ok(_)]), "{delivered:?}");
+    assert!(one.deliver().is_empty());
+    assert_eq!(sharer.server().live_names(), ["mine", "shared"]);
+    Ok(())
+}
+
 /// A member's writes held on their way answer that they wait, write nothing, and hold back
 /// the next write of their node; delivered, each is written in order, and one that names a
 /// version the file no longer has is given up.
