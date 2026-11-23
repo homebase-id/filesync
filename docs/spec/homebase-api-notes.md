@@ -733,9 +733,11 @@ it for editing. Built, and not turned on: a share is still read-only in the prod
   `90f5e74a-b7f9-efda-0ac2-98373a32ad8c`), sends it on from its outbox, and removes the staged
   copy once sent. The bytes pass through it: twice the network of an own upload.
 - **The permission.** The app must hold `UseTransitWrite` (210): without it a send answers
-  `403 "Sending, updating or deleting files on a peer requires UseTransitWrite"`
-  (**[verified]** live). **A send refused so leaves its staged copy behind** (odin-core #2155,
-  fix in PR #2159, not merged: the copy is committed before the permission is asked), and that copy, carrying
+  `403 "Sending, updating or deleting files on a peer requires UseTransitWrite"`, its
+  `errorCode` `noErrorCode` (**[verified]** live; so does a peer read route's 403 for want of
+  `UseTransitRead`, "Does not have permission": a 403 "with no code" comes with that code). **A send refused so leaves its staged copy behind** (odin-core #2155:
+  the copy was committed before the permission was asked; fixed by PR #2159, **[verified]**
+  live at efc317ad4: the 403 leaves nothing behind), and that copy, carrying
   the node's `uniqueId`, makes every later change of the node answer
   `400 existingFileWithUniqueId` on this identity's own server. So the client asks the
   security context first, and sends only where it holds 210 (while it doesn't, the context

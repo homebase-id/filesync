@@ -21,8 +21,8 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use super::super::{
-    Sending, check_size, codeless_forbidden, files_route, finish, not_connected, not_connected_to,
-    parts, remote_error, wire,
+    Sending, check_size, files_route, finish, not_connected, not_connected_to, parts, remote_error,
+    wire,
 };
 use super::PeerRemote;
 use crate::app::{APP_SLUG, SYNC_DRIVE};
@@ -155,6 +155,17 @@ fn added(theirs: &wire::FileHeader, sent: Sent, content: Option<ContentHash>) ->
         true => Ok(written_as(theirs, content)),
         false => Err(RemoteError::AlreadyExists),
     }
+}
+
+/// This identity's own server's refusal of a send for want of the permission: a 403 that
+/// names no error, which the server writes as the code `noErrorCode` (**[verified]** live,
+/// odin-core efc317ad4: "Forbidden: Sending, updating or deleting files on a peer requires
+/// UseTransitWrite"), or as none.
+fn may_not_send(e: &HomebaseError) -> bool {
+    let HomebaseError::Api { error, .. } = e else {
+        return false;
+    };
+    error.status == 403 && (error.code.is_none() || error.is("noErrorCode"))
 }
 
 /// Their file `header` as written from here.
@@ -700,7 +711,7 @@ impl PeerRemote {
             _ if not_connected(&e) => not_connected_to(self.owner(), "changed"),
             // The permission was taken away since it was last read: not asked for again at
             // once, as each send refused for it leaves its staged copy behind.
-            _ if codeless_forbidden(&e) => {
+            _ if may_not_send(&e) => {
                 self.own.may_not_send();
                 RemoteError::Fatal(MAY_NOT_SEND.into())
             }
@@ -989,6 +1000,43 @@ mod tests {
         assert!(sam.writes.is_sealed(file) && locked(&sam.writes.point).is_some());
         sam.other_key_header(file, true);
         assert!(!sam.writes.is_sealed(file) && locked(&sam.writes.point).is_none());
+        Ok(())
+    }
+
+    /// This identity's server's refusal of a send for want of the permission, as the dev
+    /// server sent it (a 403 with the code `noErrorCode`) or without a code, is taken as that:
+    /// the permission counts as not held from then on, and the write says why. Another 403,
+    /// or another answer without a code, is not that.
+    #[test]
+    fn a_send_refused_for_the_permission_is_remembered() -> std::result::Result<(), HomebaseError> {
+        use crate::drive::tests::api;
+        let sam = sam()?;
+        for refused in [api(403, Some("noErrorCode")), api(403, None)] {
+            assert!(may_not_send(&refused), "{refused:?}");
+            sam.own.drive_key.lock().sends = true;
+            match sam.send_error(refused) {
+                RemoteError::Fatal(why) => assert_eq!(why, MAY_NOT_SEND),
+                other => panic!("{other:?}"),
+            }
+            assert!(!sam.own.drive_key.lock().sends);
+        }
+        for other in [
+            api(403, Some("notReviewedByOwner")),
+            api(400, Some("noErrorCode")),
+            api(401, None),
+        ] {
+            assert!(!may_not_send(&other), "{other:?}");
+        }
+        // An earlier send of the node staged still, and not connected: waited for.
+        for waited in [
+            api(400, Some("existingFileWithUniqueId")),
+            api(400, Some("notAConnectedIdentity")),
+        ] {
+            assert!(matches!(
+                sam.send_error(waited),
+                RemoteError::Waiting { .. }
+            ));
+        }
         Ok(())
     }
 
