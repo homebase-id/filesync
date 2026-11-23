@@ -313,9 +313,10 @@ impl CompletedFile {
         if current.fingerprint() != *expected {
             return Err(FileIoError::TargetChanged);
         }
-        // (After the check: it changes what the fingerprint is made of.)
-        let unlocked =
-            self.read_only && cfg!(windows) && ops::set_read_only(target, false).unwrap_or(false);
+        // Windows refuses to replace a read-only file: one placed so in a read-only folder,
+        // or the user's own anywhere (a copy of such a file keeps the attribute). (After the
+        // check: it changes what the fingerprint is made of. One look at the attributes.)
+        let unlocked = cfg!(windows) && ops::set_read_only(target, false).unwrap_or(false);
         if let Err(e) = ops::replace(&self.path, target) {
             // Not replaced (open in a program, say): as it was, not left writable.
             if unlocked {
