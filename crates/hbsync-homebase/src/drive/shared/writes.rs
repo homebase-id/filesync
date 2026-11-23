@@ -163,11 +163,43 @@ fn written_as(header: &wire::FileHeader, content: Option<ContentHash>) -> Writte
     written(RemoteFileId(header.file_id), version, None, content)
 }
 
-/// This identity's server's answer to a write for another's drive: queued.
+/// This identity's server's answer to a write for another's drive.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct Queued {
     new_version_tag: Uuid,
+    /// What became of the send for each recipient: `enqueued`, or `enqueuedFailed` (odin-core
+    /// `TransferStatus`), which the answer is a 200 for all the same.
+    #[serde(default)]
+    recipient_status: HashMap<String, String>,
+}
+
+impl Queued {
+    /// The send to `owner` of the file with `global_transit_id`, where their server queued
+    /// it. One it didn't queue has no word to wait for: asked again later, said so. (It
+    /// leaves its staged copy behind all the same, odin-core #2158: the next send of the
+    /// node then answers that one is on its way, until that is mended.)
+    fn sent(self, owner: &str, global_transit_id: Uuid) -> Result<Sent> {
+        let status = self
+            .recipient_status
+            .iter()
+            .find(|(recipient, _)| recipient.eq_ignore_ascii_case(owner));
+        match status {
+            Some((_, status)) if !status.eq_ignore_ascii_case("enqueued") => {
+                Err(RemoteError::Waiting {
+                    why: format!(
+                        "your Homebase cloud couldn't send a change of yours on to {owner} \
+                         ({status})"
+                    ),
+                    retry_after: ASK_AGAIN,
+                })
+            }
+            _ => Ok(Sent {
+                global_transit_id,
+                version: self.new_version_tag,
+            }),
+        }
+    }
 }
 
 /// `GET .../send-status`: whether the send still waits in this identity's outbox. Not pending
@@ -347,10 +379,7 @@ impl PeerRemote {
                 .upload(UploadMethod::Patch, &path, form)
                 .map_err(|e| self.send_error(e))?;
             let content = sending.as_ref().map(|s| finish(&s.plain).0);
-            let sent = Sent {
-                global_transit_id,
-                version: queued.new_version_tag,
-            };
+            let sent = queued.sent(self.owner(), global_transit_id)?;
             let seen = std::cell::Cell::new(None);
             let theirs = || {
                 let now = self.their_header(file_id)?.file_metadata.version_tag;
@@ -469,10 +498,7 @@ impl PeerRemote {
             .upload(UploadMethod::Post, &staged, form)
             .map_err(|e| self.send_error(e))?;
         let content = sending.as_ref().map(|s| finish(&s.plain).0);
-        let sent = Sent {
-            global_transit_id,
-            version: queued.new_version_tag,
-        };
+        let sent = queued.sent(self.owner(), global_transit_id)?;
         // Sealed to their drive until a device of theirs locks its key with the drive's.
         self.writes.set_sealed(global_transit_id, true);
         let theirs = match self.became(sent, || self.their_node(meta.node)) {
@@ -821,6 +847,48 @@ mod tests {
         assert!(sam.heard(SENT).is_some_and(|told| told.delivered()));
         sam.writes.ended(a.node);
         assert!(earlier(&a, false, over).is_none());
+        Ok(())
+    }
+
+    /// This identity's server's answer to a send, as the dev server gave it: queued for the
+    /// owner is a send to wait for; not queued is none, and says what the server said. An
+    /// answer that names no recipient is taken as queued.
+    #[test]
+    fn a_send_is_one_only_where_it_was_queued() -> std::result::Result<(), serde_json::Error> {
+        let answer = |status: serde_json::Value| -> std::result::Result<Queued, serde_json::Error> {
+            serde_json::from_value(serde_json::json!({
+                "driveId": Uuid::nil(), "fileId": Uuid::nil(),
+                "globalTransitId": SENT.global_transit_id,
+                "newVersionTag": SENT.version,
+                "payloads": [], "recipientStatus": status,
+                "updated": null, "versionUpdated": null,
+            }))
+        };
+        let owner = "pippin.dotyou.cloud";
+        for queued in [
+            serde_json::json!({ "pippin.dotyou.cloud": "enqueued" }),
+            serde_json::json!({ "Pippin.DotYou.Cloud": "Enqueued" }),
+            serde_json::json!({}),
+        ] {
+            let sent = answer(queued)?
+                .sent(owner, SENT.global_transit_id)
+                .expect("queued");
+            assert_eq!(
+                (sent.global_transit_id, sent.version),
+                (SENT.global_transit_id, SENT.version)
+            );
+        }
+        let failed = answer(serde_json::json!({ "pippin.dotyou.cloud": "enqueuedFailed" }))?;
+        match failed.sent(owner, SENT.global_transit_id) {
+            Err(RemoteError::Waiting { why, retry_after }) => {
+                assert!(
+                    why.contains(owner) && why.contains("enqueuedFailed"),
+                    "{why}"
+                );
+                assert_eq!(retry_after, ASK_AGAIN);
+            }
+            other => panic!("{other:?}"),
+        }
         Ok(())
     }
 

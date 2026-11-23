@@ -734,8 +734,8 @@ it for editing. Built, and not turned on: a share is still read-only in the prod
   copy once sent. The bytes pass through it: twice the network of an own upload.
 - **The permission.** The app must hold `UseTransitWrite` (210): without it a send answers
   `403 "Sending, updating or deleting files on a peer requires UseTransitWrite"`
-  (**[verified]** live). **A send refused so leaves its staged copy behind** (odin-core bug,
-  reported: the copy is committed before the permission is asked), and that copy, carrying
+  (**[verified]** live). **A send refused so leaves its staged copy behind** (odin-core #2155,
+  fix in PR #2159, not merged: the copy is committed before the permission is asked), and that copy, carrying
   the node's `uniqueId`, makes every later change of the node answer
   `400 existingFileWithUniqueId` on this identity's own server. So the client asks the
   security context first, and sends only where it holds 210 (while it doesn't, the context
@@ -756,7 +756,10 @@ it for editing. Built, and not turned on: a share is still read-only in the prod
   header again (as every update) with `allowDistribution: true` (refused otherwise,
   **[verified]** `FileSystemUpdateWriterBase`), the ACL `connected`, and `versionTag` the
   version of THEIR file that is changed. The deferred payload hash works here as on an own
-  upload. Answer: `{globalTransitId, newVersionTag, recipientStatus: {owner: "enqueued"}}`:
+  upload. Answer: `{globalTransitId, newVersionTag, recipientStatus: {owner: "enqueued"}}`
+  (a send that couldn't be queued answers 200 too, with `enqueuedFailed`, and leaves its
+  staged copy behind, odin-core #2158: the client waits for no word then, and asks again in a
+  minute):
   `newVersionTag` is the version their file will have, known before it lands
   (**[verified]** live). A header alone (a rename, a move, `archivalStatus` 2 for their
   Recently deleted and 0 back) keeps the bytes. There is no batch for a member: several
