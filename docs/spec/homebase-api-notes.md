@@ -807,12 +807,18 @@ it for editing. Built, and not turned on: a share is still read-only in the prod
   while the file is as it was sent (the same header and bytes): one its owner changed in
   between is answered "already there" for the engine to read, as taking the owner's version
   for the member's bytes would count the owner's change as synced. No request more: their
-  file is read for its id either way.
+  file is read for its id either way. One case where the word's version isn't the write's:
+  a send their server took, whose answer was lost, is sent again by the outbox and found
+  landed already, and the word then names the version a move to or from their Recently
+  deleted gave the file since (**[verified]** odin-core efc317ad4, `PeerFileWriter`'s
+  already-landed answer, `DriveStorageServiceBase.CarrySendersWrite`; not seen live). The
+  client takes a told version that is their file's now only where the file is in their
+  Recently deleted or not as it was sent, and compares the file otherwise.
 - **What became of it** is told on this login's own notification socket: `notificationType:
   "peerSendResult"`, `data` `{recipient, driveId, globalTransitId, sentVersionTag, isUpdate,
   isDelete, status, willRetry, versionTag}`. `sentVersionTag` is the send's `newVersionTag`;
-  `status` is odin-core's `LatestTransferStatus`: `delivered` (`versionTag` their file's
-  version now: the one sent for a change, another for a new file),
+  `status` is odin-core's `LatestTransferStatus`: `delivered` (`versionTag` the version the
+  write gave their file: the one sent for a change, another for a new file),
   `recipientIdentityReturnedVersionTagMismatch` (their file changed since: nothing written),
   `recipientIdentityReturnedInvalidKeyHeader` (the key header, above; also one sealed to a
   key their drive no longer has, or an IV not rotated), `recipientIdentityReturnedAccessDenied`,

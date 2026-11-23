@@ -24,7 +24,10 @@ pub(crate) struct SendResult {
     /// The server tries again by itself: not the last word.
     #[serde(default)]
     pub will_retry: bool,
-    /// The version their file has now, once delivered.
+    /// The version this write gave their file, once delivered (odin-core's
+    /// `PeerTransferResponse.VersionTag`): a new file's is told here alone. Told again of a
+    /// send that had landed before, it is the version a move to or from their Recently
+    /// deleted gave the file since.
     #[serde(default)]
     pub version_tag: Option<Uuid>,
 }
