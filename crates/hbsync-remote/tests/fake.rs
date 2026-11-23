@@ -317,6 +317,55 @@ fn an_earlier_writes_word_doesnt_answer_a_later_one() -> R {
     Ok(())
 }
 
+/// A new file that landed and that its owner deleted since is not answered as written: the
+/// member finds no node of theirs, and sends it again.
+#[test]
+fn a_new_file_deleted_since_it_landed_is_sent_again() -> R {
+    let (sharer, scratch) = sharing_a_folder_to_edit()?;
+    let member = FakeRemote::member(sharer.server_handle()).writing();
+    let new = file("mine", scratch.node, b"1");
+    member.faults().on_their_way = true;
+    waits(create_file(&member, &new, b"1"));
+    member.faults().on_their_way = false;
+    let landed = member.deliver().remove(0)?;
+    sharer
+        .delete_for_good(&contract::doomed(&[landed.at()]))?
+        .single()?;
+    let again = create_file(&member, &new, b"1")?;
+    assert_ne!(again.at().file_id, landed.at().file_id);
+    assert_eq!(sharer.header(again.at().file_id)?.at(), again.at());
+    Ok(())
+}
+
+/// A word is its send's alone: a new file another client of the member sent again, which
+/// the owner's server didn't take (the first one's is there), is not answered with the
+/// first one's word.
+#[test]
+fn a_new_files_word_is_its_sends_alone() -> R {
+    let (sharer, scratch) = sharing_a_folder_to_edit()?;
+    let first = FakeRemote::member(sharer.server_handle()).writing();
+    let new = file("mine", scratch.node, b"1");
+    first.faults().on_their_way = true;
+    waits(create_file(&first, &new, b"1"));
+    assert_eq!(first.deliver().len(), 1);
+    // Started again before it asked: the same file is sent once more.
+    let second = first.sharing_token();
+    second.faults().on_their_way = true;
+    waits(create_file(&second, &new, b"1"));
+    second.faults().on_their_way = false;
+    let delivered = second.deliver();
+    assert!(
+        matches!(delivered.as_slice(), [Err(RemoteError::AlreadyExists)]),
+        "{delivered:?}"
+    );
+    let answer = create_file(&second, &new, b"1");
+    assert!(
+        matches!(answer, Err(RemoteError::AlreadyExists)),
+        "{answer:?}"
+    );
+    Ok(())
+}
+
 /// A file deleted by its owner is told as deleted, whatever became of a write to it: one
 /// still on its way, or one that landed before the delete.
 #[test]

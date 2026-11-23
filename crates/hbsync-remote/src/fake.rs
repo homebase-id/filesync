@@ -1107,7 +1107,17 @@ pub struct FakeRemote {
     /// What this client asked in the writes it had no answer to, by node, and whether with
     /// bytes: what the Homebase adapter remembers of a send on its way (`Writes::earlier`),
     /// gone with a restart ([`FakeRemote::sharing_token`] starts without).
-    sent: Arc<Mutex<HashMap<NodeId, (Ask, bool)>>>,
+    sent: Arc<Mutex<HashMap<NodeId, Sent>>>,
+}
+
+/// A write this client sent and had no answer to: what it asked, whether with bytes, and
+/// which send it was (a send's word is that send's alone, as a global transit id tells the
+/// Homebase adapter whose a new file is).
+#[derive(Debug)]
+struct Sent {
+    ask: Ask,
+    bytes: bool,
+    send: u64,
 }
 
 /// What a writing member asks, without the bytes: by this a write is the same one again.
@@ -1139,17 +1149,20 @@ struct Held {
 /// The member's server's side of its writes on their way.
 #[derive(Debug, Default)]
 struct Outbox {
-    /// The writes held ([`Faults::on_their_way`]), in the order they were sent.
-    held: Vec<Held>,
-    /// The last write of a node the owner's server took, and what it was written as: the
+    /// The writes held ([`Faults::on_their_way`]), each with its send's number, in the order
+    /// they were sent.
+    held: Vec<(u64, Held)>,
+    /// The last send of a node the owner's server took, and what it was written as: the
     /// word a member's socket hears of a send, until the client that sent it asks.
-    landed: HashMap<NodeId, (Ask, Written)>,
+    landed: HashMap<NodeId, (u64, Written)>,
+    /// How many writes were held so far: the next send's number.
+    sends: u64,
 }
 
 impl Outbox {
     /// Whether a write of `node` is held on its way.
     fn holds(&self, node: NodeId) -> bool {
-        self.held.iter().any(|held| held.ask.node() == node)
+        self.held.iter().any(|(_, held)| held.ask.node() == node)
     }
 }
 
@@ -1287,7 +1300,7 @@ impl FakeRemote {
         self.outbox.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    fn sent(&self) -> MutexGuard<'_, HashMap<NodeId, (Ask, bool)>> {
+    fn sent(&self) -> MutexGuard<'_, HashMap<NodeId, Sent>> {
         self.sent.lock().unwrap_or_else(|p| p.into_inner())
     }
 
@@ -1305,14 +1318,12 @@ impl FakeRemote {
     ) -> Option<Result<Written>> {
         let node = ask.node();
         let mut sent = self.sent();
-        let this = |(sent, had): &(Ask, bool)| sent == ask && *had == bytes;
-        if !sent.get(&node).is_some_and(this) {
-            return None;
-        }
+        let this = |sent: &&Sent| sent.ask == *ask && sent.bytes == bytes;
+        let send = sent.get(&node).filter(this)?.send;
         if outbox
             .landed
             .get(&node)
-            .is_some_and(|(landed, _)| landed == ask)
+            .is_some_and(|(landed, _)| *landed == send)
         {
             sent.remove(&node);
             return outbox.landed.remove(&node).map(|(_, written)| Ok(written));
@@ -1357,9 +1368,16 @@ impl FakeRemote {
     fn send(&self, held: Held) -> Result<Written> {
         let node = held.ask.node();
         if self.faults().on_their_way {
-            self.sent()
-                .insert(node, (held.ask.clone(), held.bytes.is_some()));
-            self.outbox().held.push(held);
+            let mut outbox = self.outbox();
+            let send = outbox.sends;
+            outbox.sends += 1;
+            let sent = Sent {
+                ask: held.ask.clone(),
+                bytes: held.bytes.is_some(),
+                send,
+            };
+            self.sent().insert(node, sent);
+            outbox.held.push((send, held));
             return Err(on_its_way());
         }
         self.sent().remove(&node);
@@ -1406,11 +1424,11 @@ impl FakeRemote {
         let mut outbox = self.outbox();
         let held = std::mem::take(&mut outbox.held);
         let mut server = self.server();
-        let take = |held: Held| {
-            let ask = held.ask.clone();
+        let take = |(send, held): (u64, Held)| {
+            let node = held.ask.node();
             let answer = self.taken(&mut server, held);
             if let Ok(written) = &answer {
-                outbox.landed.insert(ask.node(), (ask, written.clone()));
+                outbox.landed.insert(node, (send, written.clone()));
             }
             answer
         };
@@ -1426,6 +1444,11 @@ impl FakeRemote {
         let ask = Ask::Create(node.clone());
         let shared_as = {
             let mut outbox = self.outbox();
+            // One that landed and is gone since (its owner deleted it): the adapter finds
+            // no node of theirs, and sends it again.
+            if self.server().file_id_of(node.node).is_none() {
+                outbox.landed.remove(&node.node);
+            }
             if let Some(answer) = self.again(&mut outbox, &ask, payload.is_some(), true) {
                 return answer;
             }
@@ -1796,7 +1819,8 @@ impl Remote for FakeRemote {
     /// One request: a refusal of all writes, or an answer lost (after the server wrote the
     /// rest), is the request's. A write failure injected for a name
     /// ([`Faults::fail_writes_named`]) fails that file alone, unwritten: a lever of the fake's
-    /// (Homebase answers a file only with a client error) to hold one file back.
+    /// (Homebase answers a file only with a client error) to hold one file back. The
+    /// member's go one at a time, and such a failure stops the rest of them.
     fn set_removed(&self, files: &[Target], removed: bool) -> Result<Answers<Written>> {
         self.writable()?;
         self.gate()?;
