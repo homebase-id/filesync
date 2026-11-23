@@ -91,8 +91,12 @@ pub fn rows_after<P: FeedPage>(
 
 /// A sharer's share rows for the member a shared bench reads as ([`Bench::shared`]).
 pub trait Shares: Sync {
-    /// Shares `file_id` with the member, or shares it again; its version stays.
+    /// Shares `file_id` with the member for reading, or shares it again; its version stays.
     fn share(&self, file_id: RemoteFileId) -> Result<(), RemoteError>;
+
+    /// Shares `file_id` with the member for editing (or shares it again so): it may change
+    /// the file, and add to it where it is a folder.
+    fn share_to_edit(&self, file_id: RemoteFileId) -> Result<(), RemoteError>;
 
     /// Withdraws the member's share of `file_id`; its version stays.
     fn withdraw(&self, file_id: RemoteFileId) -> Result<(), RemoteError>;
@@ -109,6 +113,9 @@ impl<T: Remote + Shares + ?Sized> Sharer for T {}
 struct Shared<'a> {
     member: &'a dyn Remote,
     shares: &'a dyn Shares,
+    /// What the bench creates is shared for editing, and the member writes
+    /// ([`Bench::editing`]).
+    editing: bool,
 }
 
 /// A remote under test and the scratch folder the scenarios work in.
@@ -152,6 +159,9 @@ pub enum Reach {
     OwnerOnly,
     /// A shared bench only ([`Bench::shared`]): what sharing does.
     SharedOnly,
+    /// A bench whose member writes only ([`Bench::editing`]): what it may change of what is
+    /// shared with it for editing.
+    EditingOnly,
 }
 
 pub const SCENARIOS: &[(&str, Reach, Scenario)] = &[
@@ -245,6 +255,31 @@ pub const SCENARIOS: &[(&str, Reach, Scenario)] = &[
         Reach::SharedOnly,
         a_member_holds_only_what_is_shared,
     ),
+    (
+        "a_member_changes_what_it_may_edit",
+        Reach::EditingOnly,
+        a_member_changes_what_it_may_edit,
+    ),
+    (
+        "a_member_adds_to_a_folder_it_may_edit",
+        Reach::EditingOnly,
+        a_member_adds_to_a_folder_it_may_edit,
+    ),
+    (
+        "a_member_removes_and_puts_back",
+        Reach::EditingOnly,
+        a_member_removes_and_puts_back,
+    ),
+    (
+        "a_member_deletes_nothing",
+        Reach::EditingOnly,
+        a_member_deletes_nothing,
+    ),
+    (
+        "what_is_shared_to_read_is_not_changed",
+        Reach::EditingOnly,
+        what_is_shared_to_read_is_not_changed,
+    ),
 ];
 
 impl<'a> Bench<'a> {
@@ -261,8 +296,34 @@ impl<'a> Bench<'a> {
         name: &str,
         settle: Duration,
     ) -> Result<Self, RemoteError> {
-        let shares = sharer;
-        Bench::of(sharer, Some(Shared { member, shares }), name, settle)
+        Bench::shared_as(sharer, member, false, name, settle)
+    }
+
+    /// A bench where `sharer` writes and shares for editing, and `member` writes to what is
+    /// shared with it: the [`Reach::EditingOnly`] scenarios. The scratch folder is shared for
+    /// editing.
+    pub fn editing(
+        sharer: &'a dyn Sharer,
+        member: &'a dyn Remote,
+        name: &str,
+        settle: Duration,
+    ) -> Result<Self, RemoteError> {
+        Bench::shared_as(sharer, member, true, name, settle)
+    }
+
+    fn shared_as(
+        sharer: &'a dyn Sharer,
+        member: &'a dyn Remote,
+        editing: bool,
+        name: &str,
+        settle: Duration,
+    ) -> Result<Self, RemoteError> {
+        let shared = Shared {
+            member,
+            shares: sharer,
+            editing,
+        };
+        Bench::of(sharer, Some(shared), name, settle)
     }
 
     fn of(
@@ -303,13 +364,14 @@ impl<'a> Bench<'a> {
     /// Runs every scenario that reaches this bench ([`Reach`]); returns the names and errors of
     /// the ones that failed.
     pub fn run_all(&self) -> Vec<(&'static str, String)> {
-        let skipped = match self.shared {
-            Some(_) => Reach::OwnerOnly,
-            None => Reach::SharedOnly,
+        let reached = |reach: Reach| match self.shared {
+            None => matches!(reach, Reach::Both | Reach::OwnerOnly),
+            Some(shared) if shared.editing => reach == Reach::EditingOnly,
+            Some(_) => matches!(reach, Reach::Both | Reach::SharedOnly),
         };
         SCENARIOS
             .iter()
-            .filter(|(_, reach, _)| *reach != skipped)
+            .filter(|(_, reach, _)| reached(*reach))
             .filter_map(|(name, _, run)| run(self).err().map(|e| (*name, e.to_string())))
             .collect()
     }
@@ -384,9 +446,11 @@ impl<'a> Bench<'a> {
         Ok(self.keep(written.target))
     }
 
-    /// Shares `file_id` with the member, on a shared bench.
+    /// Shares `file_id` with the member, on a shared bench: for editing where the member
+    /// writes ([`Bench::editing`]).
     fn share(&self, file_id: RemoteFileId) -> Result<(), RemoteError> {
         match self.shared {
+            Some(s) if s.editing => s.shares.share_to_edit(file_id),
             Some(s) => s.shares.share(file_id),
             None => Ok(()),
         }
@@ -459,15 +523,20 @@ impl<'a> Bench<'a> {
         file_id: RemoteFileId,
         range: Option<std::ops::Range<u64>>,
     ) -> Result<Vec<u8>, RemoteError> {
-        let mut out = Vec::new();
-        let n = self.reader().read(file_id, range, &mut out)?;
-        if n != out.len() as u64 {
-            return Err(RemoteError::Fatal(format!(
-                "read returned {n} but wrote {} bytes",
-                out.len()
-            )));
+        read_all(self.reader(), file_id, range)
+    }
+
+    /// A create by the member, remembered for cleanup: made wrongly, it is still cleaned up.
+    fn member_create(
+        &self,
+        meta: &NodeMeta,
+        data: Option<&[u8]>,
+    ) -> Result<hbsync_types::Written, RemoteError> {
+        let made = with_upload(data, |upload| self.reader().create(meta, upload));
+        if let Ok(written) = &made {
+            self.track(written.at().file_id);
         }
-        Ok(out)
+        made
     }
 
     /// The feed's end: a cursor after every change so far.
@@ -1459,12 +1528,7 @@ fn the_member_writes_nothing(b: &Bench) -> Outcome {
     let cursor = b.cursor_now()?;
     let target = Target { at: w, token: None };
     let new = file("mine", b.scratch, b"2");
-    let made = with_upload(Some(b"2"), |upload| b.reader().create(&new, upload));
-    // Made wrongly, it is still cleaned up.
-    if let Ok(w) = &made {
-        b.track(w.at().file_id);
-    }
-    ensure_err!(made, RemoteError::Fatal(_));
+    ensure_err!(b.member_create(&new, Some(b"2")), RemoteError::Fatal(_));
     ensure_err!(
         b.reader().update(
             &target,
@@ -1518,5 +1582,218 @@ fn a_member_holds_only_what_is_shared(b: &Bench) -> Outcome {
     shares(b)?.share(private.file_id)?;
     shares(b)?.share(w.file_id)?;
     holding(&folders, "both shared")?;
+    Ok(())
+}
+
+/// `range` of `file_id`'s bytes (all of them without one) as `reader` reads them.
+fn read_all(
+    reader: &dyn Remote,
+    file_id: RemoteFileId,
+    range: Option<std::ops::Range<u64>>,
+) -> Result<Vec<u8>, RemoteError> {
+    let mut out = Vec::new();
+    let n = reader.read(file_id, range, &mut out)?;
+    if n != out.len() as u64 {
+        return Err(RemoteError::Fatal(format!(
+            "read returned {n} but wrote {} bytes",
+            out.len()
+        )));
+    }
+    Ok(out)
+}
+
+/// A member changes a file shared with it for editing: its bytes and its header, and its
+/// header alone (the bytes stay). The owner and the member read what it wrote, at the version
+/// its write answered, which carries no token. A write at the version before is refused.
+fn a_member_changes_what_it_may_edit(b: &Bench) -> Outcome {
+    let (f, w) = b.file("theirs", b"1")?;
+    let member = b.reader();
+    let target = Target { at: w, token: None };
+    let edited = with(&f, NodeContent::file("theirs", 2, 2, false));
+    let written = with_upload(Some(b"22"), |upload| {
+        member.update(&target, &edited, upload)
+    })?;
+    ensure!(
+        written.target.token.is_none(),
+        "a member's write came with a token"
+    );
+    let at = written.at();
+    ensure!(
+        at.file_id == w.file_id && at.version != w.version,
+        "written at {at:?}, the file was {w:?}"
+    );
+    for (who, reader) in [("the owner", b.remote), ("the member", member)] {
+        let header = reader.header(w.file_id)?;
+        ensure!(header.version == at.version, "{who} reads {header:?}");
+        ensure!(
+            matches!(&header.body, RemoteBody::Live { content, .. } if *content == edited.content),
+            "{who} reads {header:?}"
+        );
+        ensure!(
+            read_all(reader, w.file_id, None)? == b"22",
+            "{who} reads other bytes"
+        );
+    }
+    ensure_err!(
+        member.update(&target, &edited, None),
+        RemoteError::VersionMismatch
+    );
+    // Its header alone: a rename. The bytes stay.
+    let renamed = with(&f, NodeContent::file("renamed", 2, 2, false));
+    let target = Target { at, token: None };
+    let again = member.update(&target, &renamed, None)?.at();
+    let header = b.remote.header(w.file_id)?;
+    ensure!(
+        header.version == again.version
+            && matches!(&header.body, RemoteBody::Live { content, .. } if content.name == "renamed"),
+        "the owner reads {header:?}"
+    );
+    ensure!(
+        read_all(b.remote, w.file_id, None)? == b"22",
+        "the bytes changed"
+    );
+    Ok(())
+}
+
+/// A member adds a file, a folder, and a file in the folder it added, to a folder shared with
+/// it for editing: each is the owner's to read and shared with the member as the folder is.
+/// One added again is there already. Nothing is added outside what is shared.
+fn a_member_adds_to_a_folder_it_may_edit(b: &Bench) -> Outcome {
+    let member = b.reader();
+    let add = |meta: &NodeMeta, data: Option<&[u8]>| b.member_create(meta, data);
+    let new = file("mine", b.scratch, b"2");
+    let made = add(&new, Some(b"2"))?;
+    ensure!(
+        made.target.token.is_none(),
+        "a member's write came with a token"
+    );
+    let dir = folder("my folder", b.scratch);
+    let made_dir = add(&dir, None)?;
+    let inner = file("inner", dir.node, b"3");
+    let made_inner = add(&inner, Some(b"3"))?;
+    for (meta, written, data) in [
+        (&new, &made, Some(&b"2"[..])),
+        (&dir, &made_dir, None),
+        (&inner, &made_inner, Some(&b"3"[..])),
+    ] {
+        let at = written.at();
+        for (who, reader) in [("the owner", b.remote), ("the member", member)] {
+            let header = reader.header(at.file_id)?;
+            ensure!(
+                header.version == at.version && header.parent == meta.parent,
+                "{who} reads {header:?}"
+            );
+            ensure!(
+                matches!(&header.body, RemoteBody::Live { node, .. } if *node == meta.node),
+                "{who} reads {header:?}"
+            );
+            if let Some(data) = data {
+                ensure!(
+                    read_all(reader, at.file_id, None)? == data,
+                    "{who} reads other bytes"
+                );
+            }
+        }
+    }
+    ensure_err!(add(&new, Some(b"2")), RemoteError::AlreadyExists);
+    ensure_err!(
+        add(&folder("at the top", NodeId::ROOT), None),
+        RemoteError::Fatal(_)
+    );
+    Ok(())
+}
+
+/// A member moves a file shared with it for editing to Recently deleted, and back: the owner
+/// reads it removed, then not. One already so is left as it is, its version too; one written
+/// since is refused.
+fn a_member_removes_and_puts_back(b: &Bench) -> Outcome {
+    let (_, w) = b.file("theirs", b"1")?;
+    let member = b.reader();
+    let target = |at: RemoteRef| Target { at, token: None };
+    let removed = member.set_removed(&[target(w)], true)?.single()?;
+    ensure!(
+        removed.target.token.is_none(),
+        "a member's write came with a token"
+    );
+    let at = removed.at();
+    ensure!(at.version != w.version, "removed at the version before");
+    for (who, reader) in [("the owner", b.remote), ("the member", member)] {
+        let header = reader.header(w.file_id)?;
+        ensure!(
+            header.removed && header.version == at.version,
+            "{who} reads {header:?}"
+        );
+    }
+    ensure!(
+        read_all(b.remote, w.file_id, None)? == b"1",
+        "the bytes changed"
+    );
+    let again = member.set_removed(&[target(at)], true)?.single()?;
+    ensure!(again.at().version == at.version, "removed twice");
+    ensure_err!(
+        member.set_removed(&[target(w)], false)?.single(),
+        RemoteError::VersionMismatch
+    );
+    let back = member.set_removed(&[target(at)], false)?.single()?.at();
+    let header = b.remote.header(w.file_id)?;
+    ensure!(
+        !header.removed && header.version == back.version,
+        "the owner reads {header:?}"
+    );
+    Ok(())
+}
+
+/// A member that writes still deletes nothing of the owner's, a tombstone or for good.
+fn a_member_deletes_nothing(b: &Bench) -> Outcome {
+    let (_, w) = b.file("theirs", b"1")?;
+    let member = b.reader();
+    ensure_err!(member.delete(&doomed(&[w])), RemoteError::Fatal(_));
+    ensure_err!(member.delete_for_good(&doomed(&[w])), RemoteError::Fatal(_));
+    let header = b.remote.header(w.file_id)?;
+    ensure!(
+        header.version == w.version && !header.is_deleted(),
+        "the owner reads {header:?}"
+    );
+    Ok(())
+}
+
+/// What is shared with the member for reading alone it doesn't change, though it writes
+/// elsewhere: a file's change and removal refuse, and nothing is added to such a folder.
+fn what_is_shared_to_read_is_not_changed(b: &Bench) -> Outcome {
+    let shares = shares(b)?;
+    let (f, w) = b.file("to read", b"1")?;
+    let (dir, d) = b.folder("to read too")?;
+    shares.share(w.file_id)?;
+    shares.share(d.file_id)?;
+    let member = b.reader();
+    let target = Target { at: w, token: None };
+    ensure_err!(
+        member.update(
+            &target,
+            &with(&f, NodeContent::file("x", 1, 1, false)),
+            None
+        ),
+        RemoteError::Fatal(_)
+    );
+    ensure_err!(
+        member
+            .set_removed(std::slice::from_ref(&target), true)?
+            .single(),
+        RemoteError::Fatal(_)
+    );
+    let new = file("mine", dir.node, b"2");
+    ensure_err!(b.member_create(&new, Some(b"2")), RemoteError::Fatal(_));
+    let header = b.remote.header(w.file_id)?;
+    ensure!(
+        header.version == w.version && !header.removed,
+        "the owner reads {header:?}"
+    );
+    // Shared for editing again, it is changed.
+    shares.share_to_edit(w.file_id)?;
+    member.update(
+        &target,
+        &with(&f, NodeContent::file("x", 1, 1, false)),
+        None,
+    )?;
     Ok(())
 }
