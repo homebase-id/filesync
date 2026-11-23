@@ -51,6 +51,7 @@ use crate::client::{Client, has_odin_header, not_from_identity, refuses};
 use crate::crypto::{Envelope, random};
 use crate::drive::TargetDrive;
 use crate::drive::wire::FileRef;
+use crate::sends::SendResult;
 
 /// What the notifier tells the sync loop.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -481,6 +482,11 @@ fn converse<S: io::Read + io::Write + Timed>(
                     }
                     Notification::Changed(change) => Event::Changed(change),
                     Notification::Markers => Event::Markers,
+                    // For the write that waits for it, not for the feed.
+                    Notification::Sent(result) => {
+                        client.sends().told(result);
+                        continue;
+                    }
                     Notification::Refused(why) => {
                         let _ = socket.close(None);
                         return Err(Ended::Refused(why));
@@ -701,6 +707,8 @@ enum Notification {
     Handshake,
     Changed(Option<ChangeRef>),
     Markers,
+    /// What became of something this login sent to another identity's drive.
+    Sent(SendResult),
     Refused(String),
     Other,
 }
@@ -770,6 +778,10 @@ fn classify(body: &[u8]) -> Notification {
             Some(Named::Other) => Notification::Other,
             _ => Notification::Changed(data.and_then(|d| change(d, kind("fileDeleted")))),
         }
+    } else if kind("peerSendResult") {
+        // One that doesn't read is no word: the write that waits looks itself.
+        data.and_then(|d| serde_json::from_str(&d).ok())
+            .map_or(Notification::Other, Notification::Sent)
     } else if kind("authenticationError") {
         Notification::Refused(format!("refused: {}", data.as_deref().unwrap_or("")))
     } else {
@@ -1354,6 +1366,42 @@ mod tests {
             n(json!({"notificationType": "authenticationError", "data": "no"})),
             Notification::Refused(_)
         ));
+    }
+
+    /// What became of a send to another identity's drive is told as that; one that doesn't
+    /// read is told as nothing (the write waiting for it looks itself).
+    #[test]
+    fn a_send_result_is_told_as_one() {
+        use uuid::Uuid;
+        let n = |body: serde_json::Value| classify(body.to_string().as_bytes());
+        let data = json!({
+            "recipient": "pippin.dotyou.cloud",
+            "globalTransitId": Uuid::from_u128(1),
+            "sentVersionTag": Uuid::from_u128(2),
+            "isUpdate": true,
+            "status": "delivered",
+            "willRetry": false,
+            "versionTag": Uuid::from_u128(2),
+        });
+        let told = n(json!({"notificationType": "peerSendResult", "data": data.to_string()}));
+        let Notification::Sent(result) = told else {
+            panic!("{told:?}");
+        };
+        assert!(result.delivered());
+        assert_eq!(result.global_transit_id, Uuid::from_u128(1));
+        for unread in [
+            json!("junk"),
+            json!({"status": "delivered"}).to_string().into(),
+        ] {
+            assert_eq!(
+                n(json!({"notificationType": "peerSendResult", "data": unread})),
+                Notification::Other
+            );
+        }
+        assert_eq!(
+            n(json!({"notificationType": "peerSendResult"})),
+            Notification::Other
+        );
     }
 
     /// A frame whose `data` isn't the string expected still counts by its type: a file event

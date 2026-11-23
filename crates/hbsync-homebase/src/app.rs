@@ -189,6 +189,13 @@ pub(crate) fn circle_request(drive: TargetDrive) -> serde_json::Value {
 /// `encryption.md`, "What it doesn't do").
 pub(crate) const USE_TRANSIT_READ: u32 = 305;
 
+/// odin-core's `UseTransitWrite` (210, **[verified]** `PermissionKeys`; live: without it a send
+/// answers 403 "Sending, updating or deleting files on a peer requires UseTransitWrite"): to
+/// send to other identities' drives through this one's server, which a change to what they
+/// share with this identity is. Not asked for yet ([`PERMISSION_KEYS`]): a share is written to
+/// only where the app holds it.
+pub(crate) const USE_TRANSIT_WRITE: u32 = 210;
+
 /// The keys the app asks for as the owner app reads them (`p`, odin-js
 /// `permissionParamToPermissionSet`: numbers joined by commas): [`USE_TRANSIT_READ`].
 const PERMISSION_KEYS: &str = "305";
