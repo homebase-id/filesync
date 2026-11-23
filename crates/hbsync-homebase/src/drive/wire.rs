@@ -88,6 +88,38 @@ pub struct ShareRow {
     /// `UnixTimeUtcConverter`; `TableDriveAclIndex.IsLive`).
     #[serde(default, deserialize_with = "lenient")]
     pub expires_at: Option<i64>,
+    /// What the share gives its circle on the file ([`permissions`]): nothing where it
+    /// doesn't read.
+    #[serde(default, deserialize_with = "permissions")]
+    pub permissions: u32,
+}
+
+/// A share row's `permissions` as odin-core's `DrivePermission` flags ([`crate::app`]'s
+/// `READ`, `WRITE`, `REACT`, `COMMENT`): the server names them (`"read"`,
+/// `"read, write"`, `"readWrite"` for all four; **[verified]** live, odin-core 3ace44b69, and
+/// `DrivePermission.cs`), and a number is taken as it is. A name this client doesn't know
+/// gives nothing.
+fn permissions<'de, D>(d: D) -> Result<u32, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use crate::app::{COMMENT, REACT, READ, WRITE};
+    Ok(match Value::deserialize(d)? {
+        Value::Number(n) => n.as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(0),
+        Value::String(names) => names
+            .split(',')
+            .map(|name| match name.trim().to_ascii_lowercase().as_str() {
+                "read" => READ,
+                "write" => WRITE,
+                "react" => REACT,
+                "comment" => COMMENT,
+                "writereactionsandcomments" => REACT | COMMENT,
+                "readwrite" | "all" => READ | WRITE | REACT | COMMENT,
+                _ => 0,
+            })
+            .fold(0, |all, one| all | one),
+        _ => 0,
+    })
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -611,6 +643,13 @@ impl FileHeader {
         share_ends(self.shares.as_deref())
     }
 
+    /// Whether a share gives this identity `Write` on the file.
+    pub(crate) fn shared_for_writing(&self) -> bool {
+        let rows = self.shares.iter().flatten();
+        rows.into_iter()
+            .any(|row| row.permissions & crate::app::WRITE != 0)
+    }
+
     /// The circle a shared file's key header is locked for: the one its first share names.
     pub(crate) fn share_circle(&self) -> Option<Uuid> {
         self.shares.as_ref()?.first()?.circle_id
@@ -780,20 +819,133 @@ pub(crate) fn metadata(
     transfer_iv: &[u8; 16],
     key: &KeyHeader,
 ) -> Vec<u8> {
-    let shared_secret = keys.shared;
+    let key_header = match keys.drive {
+        Some(drive_key) => key.lock(drive_key),
+        None => key.seal(keys.shared, transfer_iv),
+    };
+    let plain = descriptor(meta, version, key, key_header, Reach::Owner);
+    aes_cbc_encrypt(keys.shared, transfer_iv, plain.to_string().as_bytes())
+}
+
+/// Who a written file is for, as its header says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// The drive's owner alone: every write of the owner's own computers (a share lifts it,
+    /// on the server).
+    Owner,
+    /// As a file that is shared: what someone it is shared with sends back with a change
+    /// (`connected`; **[verified]** chat-kmp `FilesyncMemberWrites.replace`).
+    Shared,
+}
+
+/// The identity's transient temp drive (its alias and its type): where its server stages
+/// what it sends on to another identity's drive (**[verified]** odin-core
+/// `SystemDriveConstants.TransientTempDrive`).
+pub(crate) const TRANSIENT_DRIVE: Uuid = Uuid::from_u128(0x90f5e74a_b7f9_efda_0ac2_98373a32ad8c);
+
+/// The `instructions` part of a change to a file another identity (`owner`) shares with this
+/// one, sent through this identity's own server (`locale: "peer"`: nothing is stored here).
+pub(crate) fn member_update_instructions(
+    transfer_iv: &[u8; 16],
+    payload: Option<&PayloadDescriptor>,
+    owner: &str,
+) -> Value {
+    let mut instructions = instructions(transfer_iv, payload, true);
+    instructions["locale"] = json!("peer");
+    instructions["recipients"] = json!([owner]);
+    instructions
+}
+
+/// The `metadata` part of that change: the header as [`metadata`] sends it, but for a file
+/// that is shared, to be sent on (`allowDistribution`), with `key_header` as this identity
+/// may send it ([`KeyHeader::kept`], [`KeyHeader::sealed_to`]). Sealed with this identity's
+/// own shared secret: its own server opens it.
+pub(crate) fn member_update(
+    meta: &NodeMeta,
+    version: VersionTag,
+    shared_secret: &Key,
+    transfer_iv: &[u8; 16],
+    key: &KeyHeader,
+    key_header: Value,
+) -> Vec<u8> {
+    let plain = descriptor(meta, Some(version), key, key_header, Reach::Shared);
+    aes_cbc_encrypt(shared_secret, transfer_iv, plain.to_string().as_bytes())
+}
+
+/// The `instructions` part of a new file for `owner`'s `drive`, added to a folder they share
+/// with this identity: staged on this identity's transient temp drive and sent on, not kept
+/// here (**[verified]** live, odin-core 3ace44b69; chat-kmp `FilesyncMemberWrites.add`).
+pub(crate) fn deposit_instructions(
+    transfer_iv: &[u8; 16],
+    payload: Option<&PayloadDescriptor>,
+    owner: &str,
+    drive: &super::TargetDrive,
+) -> Value {
+    let mut instructions = instructions(transfer_iv, payload, false);
+    instructions["storageOptions"] =
+        json!({ "drive": { "alias": TRANSIENT_DRIVE, "type": TRANSIENT_DRIVE } });
+    instructions["transitOptions"] = json!({
+        "recipients": [owner],
+        "isTransient": true,
+        "remoteTargetDrive": { "alias": drive.alias, "type": drive.drive_type },
+    });
+    instructions
+}
+
+/// One share of a new file, as its adder sends it along: as `row` shares the folder it goes
+/// into (the same circle, permissions and end), with the file's key `locked` under that
+/// circle's key ([`CircleKey::lock_file_key`]). The file has no id yet.
+pub(crate) fn share_of_new(row: &ShareRow, circle: Uuid, locked: &[u8]) -> Value {
+    json!({
+        "fileId": Uuid::nil(),
+        "circleId": circle,
+        "permissions": row.permissions,
+        "expiresAt": row.expires_at,
+        "lockedFileKey": STANDARD.encode(locked),
+    })
+}
+
+/// The `metadata` part of that new file: its header, the key sealed to the owner's drive
+/// (`key_header`: [`KeyHeader::sealed_to`]), the global transit id picked for it and its
+/// `shares` ([`share_of_new`]). Owner-only as sent: its shares lift it there.
+pub(crate) fn deposit(
+    meta: &NodeMeta,
+    shared_secret: &Key,
+    transfer_iv: &[u8; 16],
+    key: &KeyHeader,
+    key_header: Value,
+    global_transit_id: Uuid,
+    shares: Vec<Value>,
+) -> Vec<u8> {
+    let mut plain = descriptor(meta, None, key, key_header, Reach::Owner);
+    plain["fileMetadata"]["allowDistribution"] = json!(true);
+    plain["shares"] = json!(shares);
+    plain["globalTransitId"] = json!(global_transit_id);
+    aes_cbc_encrypt(shared_secret, transfer_iv, plain.to_string().as_bytes())
+}
+
+/// A header as an upload sends it, before it is sealed: `key_header` as its writer locks the
+/// file `key`, the content under that key.
+fn descriptor(
+    meta: &NodeMeta,
+    version: Option<VersionTag>,
+    key: &KeyHeader,
+    key_header: Value,
+    reach: Reach,
+) -> Value {
     let file_type = match meta.kind {
         NodeKind::Folder => FILE_TYPE_FOLDER,
         NodeKind::File => FILE_TYPE_FILE,
     };
-    let plain = json!({
-        "encryptedKeyHeader": match keys.drive {
-            Some(drive_key) => key.lock(drive_key),
-            None => key.seal(shared_secret, transfer_iv),
-        },
+    let shared = reach == Reach::Shared;
+    json!({
+        "encryptedKeyHeader": key_header,
         "fileMetadata": {
             "isEncrypted": true,
-            "allowDistribution": false,
-            "accessControlList": { "requiredSecurityGroup": "owner" },
+            "allowDistribution": shared,
+            "accessControlList": {
+                "requiredSecurityGroup": if shared { "connected" } else { "owner" },
+            },
             "appData": {
                 "uniqueId": meta.node.0,
                 "groupId": meta.parent.0,
@@ -805,8 +957,7 @@ pub(crate) fn metadata(
             },
             "versionTag": version.map(|v| v.0),
         },
-    });
-    aes_cbc_encrypt(shared_secret, transfer_iv, plain.to_string().as_bytes())
+    })
 }
 
 #[cfg(test)]
@@ -994,7 +1145,7 @@ mod tests {
                 header.file_metadata.global_transit_id = Some(v::id(v::GTID));
                 header.shares = Some(vec![ShareRow {
                     circle_id: Some(v::id(v::CIRCLE)),
-                    expires_at: None,
+                    ..ShareRow::default()
                 }]);
                 header.shared_secret_encrypted_key_header = Some(serde_json::from_value(json!({
                     "encryptionVersion": 1, "type": kind,
@@ -1041,10 +1192,12 @@ mod tests {
             ShareRow {
                 circle_id: Some(elsewhere),
                 expires_at: Some(2_000),
+                ..ShareRow::default()
             },
             ShareRow {
                 circle_id: Some(v::id(v::CIRCLE)),
                 expires_at: Some(5_000),
+                ..ShareRow::default()
             },
         ]);
         assert_eq!(other.share_circle(), Some(elsewhere));
@@ -1375,6 +1528,159 @@ mod tests {
         assert_eq!(cursor_time(cursor), Some(1_792_134_971_335));
         assert_eq!(cursor_time("not json"), None);
         assert_eq!(cursor_time(r#"{"paging":null}"#), None);
+    }
+
+    /// What someone a file is shared with sends for a change to it: through their own server
+    /// to its owner (`locale: "peer"`), the header sealed with their own shared secret, for a
+    /// shared file that is sent on, naming the version it changes, the key header as given.
+    #[test]
+    fn a_members_change_as_it_is_sent() -> R {
+        let kh = KeyHeader::random()?;
+        let transfer_iv = sealed::strong()?;
+        let p = PayloadDescriptor {
+            algorithm: HashAlgorithm::Blake3,
+            iv: sealed::strong()?,
+        };
+        let sent = member_update_instructions(&transfer_iv, Some(&p), "pippin.dotyou.cloud");
+        assert_eq!(sent["locale"], "peer");
+        assert_eq!(sent["recipients"], json!(["pippin.dotyou.cloud"]));
+        assert_eq!(
+            sent["manifest"]["payloadDescriptors"][0]["payloadUpdateOperationType"],
+            "appendOrOverwrite"
+        );
+        let header_only = member_update_instructions(&transfer_iv, None, "pippin.dotyou.cloud");
+        assert_eq!(header_only["manifest"]["payloadDescriptors"], json!([]));
+
+        let meta = NodeMeta {
+            node: NodeId::new(),
+            parent: NodeId::new(),
+            kind: NodeKind::File,
+            content: NodeContent::file("Notes.txt", 1, 1, false),
+            removed: true,
+        };
+        let version = VersionTag(Uuid::new_v4());
+        let sealed = member_update(&meta, version, &SS, &transfer_iv, &kh, kh.kept());
+        let plain: Value = serde_json::from_slice(&aes_cbc_decrypt(&SS, &transfer_iv, &sealed)?)?;
+        assert_eq!(plain["encryptedKeyHeader"], kh.kept());
+        let file = &plain["fileMetadata"];
+        assert_eq!(file["allowDistribution"], true);
+        assert_eq!(
+            file["accessControlList"]["requiredSecurityGroup"],
+            "connected"
+        );
+        assert_eq!(file["versionTag"], json!(version.0));
+        assert_eq!(file["appData"]["uniqueId"], json!(meta.node.0));
+        assert_eq!(file["appData"]["groupId"], json!(meta.parent.0));
+        assert_eq!(file["appData"]["archivalStatus"], ARCHIVAL_REMOVED);
+        let content = file["appData"]["content"].as_str().ok_or("content")?;
+        assert_eq!(kh.open_text(content)?, meta.content.to_json());
+        assert!(plain.get("shares").is_none() && plain.get("globalTransitId").is_none());
+        Ok(())
+    }
+
+    /// What someone adding a file to a folder shared with them sends: staged on their own
+    /// transient drive and sent on to the owner's, with the global transit id picked for it
+    /// and its shares, no version, owner-only as sent.
+    #[test]
+    fn a_members_new_file_as_it_is_sent() -> R {
+        let kh = KeyHeader::random()?;
+        let transfer_iv = sealed::strong()?;
+        let drive = crate::drive::TargetDrive {
+            alias: Uuid::new_v4(),
+            drive_type: Uuid::new_v4(),
+        };
+        let sent = deposit_instructions(&transfer_iv, None, "pippin.dotyou.cloud", &drive);
+        assert!(sent.get("locale").is_none());
+        let staged = &sent["storageOptions"]["drive"];
+        assert_eq!(staged["alias"], "90f5e74a-b7f9-efda-0ac2-98373a32ad8c");
+        assert_eq!(staged["type"], staged["alias"]);
+        let transit = &sent["transitOptions"];
+        assert_eq!(transit["recipients"], json!(["pippin.dotyou.cloud"]));
+        assert_eq!(transit["isTransient"], true);
+        assert_eq!(transit["remoteTargetDrive"]["alias"], json!(drive.alias));
+        assert_eq!(
+            transit["remoteTargetDrive"]["type"],
+            json!(drive.drive_type)
+        );
+
+        let row: ShareRow = serde_json::from_value(json!({
+            "circleId": Uuid::new_v4(), "permissions": "readWrite", "expiresAt": 5_000,
+        }))?;
+        let circle = row.circle_id.ok_or("circle")?;
+        let share = share_of_new(&row, circle, b"locked");
+        assert_eq!(share["fileId"], json!(Uuid::nil()));
+        assert_eq!(share["circleId"], json!(circle));
+        assert_eq!(
+            (share["permissions"].as_u64(), share["expiresAt"].as_i64()),
+            (Some(15), Some(5_000))
+        );
+        assert_eq!(share["lockedFileKey"], STANDARD.encode(b"locked"));
+
+        let meta = NodeMeta {
+            node: NodeId::new(),
+            parent: NodeId::new(),
+            kind: NodeKind::Folder,
+            content: NodeContent::folder("From tom"),
+            removed: false,
+        };
+        let gtid = Uuid::new_v4();
+        let key_header = json!({ "type": "sealed" });
+        let sealed = deposit(
+            &meta,
+            &SS,
+            &transfer_iv,
+            &kh,
+            key_header.clone(),
+            gtid,
+            vec![share.clone()],
+        );
+        let plain: Value = serde_json::from_slice(&aes_cbc_decrypt(&SS, &transfer_iv, &sealed)?)?;
+        assert_eq!(plain["encryptedKeyHeader"], key_header);
+        assert_eq!(plain["globalTransitId"], json!(gtid));
+        assert_eq!(plain["shares"], json!([share]));
+        let file = &plain["fileMetadata"];
+        assert_eq!(file["allowDistribution"], true);
+        assert_eq!(file["accessControlList"]["requiredSecurityGroup"], "owner");
+        assert_eq!(file["versionTag"], Value::Null);
+        assert_eq!(file["appData"]["fileType"], FILE_TYPE_FOLDER);
+        Ok(())
+    }
+
+    /// A share row's permissions read from the names the server sends (and a number), and
+    /// say whether the file is shared for writing; what doesn't read gives nothing.
+    #[test]
+    fn a_share_rows_permissions_are_read_by_name() -> R {
+        let row = |permissions: Value| -> ShareRow {
+            serde_json::from_value(
+                json!({ "circleId": Uuid::new_v4(), "permissions": permissions }),
+            )
+            .unwrap_or_default()
+        };
+        for (sent, flags) in [
+            (json!("read"), 1),
+            (json!("read, write"), 3),
+            (json!("Read,Comment"), 9),
+            (json!("readWrite"), 15),
+            (json!("all"), 15),
+            (json!("writeReactionsAndComments"), 12),
+            (json!("read, somethingNew"), 1),
+            (json!(7), 7),
+            (json!("none"), 0),
+            (json!(null), 0),
+            (json!(["read"]), 0),
+            (json!(-1), 0),
+        ] {
+            assert_eq!(row(sent.clone()).permissions, flags, "{sent}");
+            // A row that says nothing else still names its circle.
+            assert!(row(sent).circle_id.is_some());
+        }
+        let mut header = fixture("file-node.json");
+        assert!(!header.shared_for_writing());
+        header.shares = Some(vec![row(json!("read")), row(json!("read, react"))]);
+        assert!(!header.shared_for_writing());
+        header.shares = Some(vec![row(json!("read")), row(json!("readWrite"))]);
+        assert!(header.shared_for_writing());
+        Ok(())
     }
 
     #[test]

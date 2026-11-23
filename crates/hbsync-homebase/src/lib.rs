@@ -15,6 +15,7 @@ mod multipart;
 pub mod notify;
 pub mod peer;
 mod problem;
+mod sends;
 pub mod youauth;
 
 pub use client::Client;

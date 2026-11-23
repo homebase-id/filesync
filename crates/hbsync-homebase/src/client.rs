@@ -23,6 +23,7 @@ use crate::crypto::{Envelope, Key};
 use crate::multipart::Multipart;
 use crate::peer::PeerToken;
 use crate::problem::{ApiError, Sender};
+use crate::sends::Sends;
 use crate::youauth::{Credentials, key16, login_of};
 
 /// The largest JSON answer read (a page of the change feed is far below it).
@@ -178,6 +179,9 @@ pub struct Client {
     /// How often the notifications connected again ([`Client::connected`]), shared by its
     /// clones.
     connects: Arc<AtomicU64>,
+    /// What this identity's server told of its sends to others ([`Sends`]), shared by its
+    /// clones: the notifications tell, a write waits.
+    sends: Arc<Sends>,
 }
 
 impl std::fmt::Debug for Client {
@@ -206,6 +210,7 @@ impl Client {
             connections: Arc::new(connections(REUSED_WITHIN)),
             peer: false,
             connects: Arc::default(),
+            sends: Arc::default(),
         })
     }
 
@@ -223,6 +228,7 @@ impl Client {
             connections: Arc::new(connections(REUSED_WITHIN)),
             peer: true,
             connects: Arc::default(),
+            sends: Arc::default(),
         })
     }
 
@@ -269,6 +275,11 @@ impl Client {
     /// How often the notifications connected again.
     pub(crate) fn connects(&self) -> u64 {
         self.connects.load(Ordering::SeqCst)
+    }
+
+    /// What this identity's server told of its sends to others.
+    pub(crate) fn sends(&self) -> &Sends {
+        &self.sends
     }
 
     /// The app's zero-knowledge key: it opens the drive's key on a private drive.
