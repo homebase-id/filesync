@@ -119,28 +119,41 @@ fn a_members_writes_on_their_way_are_its_servers() -> R {
     Ok(())
 }
 
-/// A member's writes held on their way answer that they wait, write nothing, and hold back
-/// the next write of their node; delivered, each is written in order, and one that names a
-/// version the file no longer has is given up.
-#[test]
-fn a_members_write_on_its_way_lands_when_it_is_delivered() -> R {
+/// The answer of a write still on its way.
+fn waits<T: std::fmt::Debug>(answer: Result<T, RemoteError>) {
+    assert!(
+        matches!(answer, Err(RemoteError::Waiting { .. })),
+        "{answer:?}"
+    );
+}
+
+/// A sharer with a folder and a file "theirs" in it, both shared for editing, and a member
+/// that writes.
+fn a_file_to_edit() -> Result<(FakeRemote, FakeRemote, NodeMeta, NodeMeta, Target), RemoteError> {
     let (sharer, scratch) = sharing_a_folder_to_edit()?;
     let theirs = file("theirs", scratch.node, b"1");
     let at = create_file(&sharer, &theirs, b"1")?.at();
     sharer.share_to_edit(at.file_id)?;
     let member = FakeRemote::member(sharer.server_handle()).writing();
-    let waits = |answer: Result<Written, RemoteError>| {
-        assert!(
-            matches!(answer, Err(RemoteError::Waiting { .. })),
-            "{answer:?}"
-        );
-    };
+    Ok((sharer, member, scratch, theirs, Target { at, token: None }))
+}
 
+/// A member's writes held on their way answer that they wait and write nothing. While one
+/// of a node is on its way, that write asked again, or another of the node, waits too and is
+/// not sent a second time. Delivered, each is written; the write asked again is then
+/// answered as written (once: the client that sent it had no answer to it yet), without a
+/// token or a time, as the Homebase adapter answers a member's write.
+#[test]
+fn a_members_write_on_its_way_lands_when_it_is_delivered() -> R {
+    let (sharer, member, scratch, theirs, target) = a_file_to_edit()?;
+    let at = target.at;
     member.faults().on_their_way = true;
-    let target = Target { at, token: None };
-    let renamed = with(&theirs, NodeContent::file("renamed", 1, 1, false));
+    let renamed = renamed(&theirs);
     waits(member.update(&target, &renamed, None));
     let new = file("mine", scratch.node, b"2");
+    waits(create_file(&member, &new, b"2"));
+    // The same again, and another write of the node: they wait, and nothing more is sent.
+    waits(member.update(&target, &renamed, None));
     waits(create_file(&member, &new, b"2"));
     let stopped = member.set_removed(std::slice::from_ref(&target), true)?;
     assert!(stopped.answers.is_empty());
@@ -154,22 +167,24 @@ fn a_members_write_on_its_way_lands_when_it_is_delivered() -> R {
     waits(member.update(&target, &renamed, None));
     waits(member.create(&new, None));
 
-    // Delivered: the rename and the new file land; the removal named the version before the
-    // rename, and is given up.
+    // Delivered: the rename and the new file, each once.
     let delivered = member.deliver();
-    assert_eq!(delivered.len(), 3);
     assert!(
-        delivered[0].is_ok() && delivered[1].is_ok(),
-        "{delivered:?}"
-    );
-    assert!(
-        matches!(delivered[2], Err(RemoteError::VersionMismatch)),
+        matches!(delivered.as_slice(), [Ok(_), Ok(_)]),
         "{delivered:?}"
     );
     assert_eq!(sharer.server().live_names(), ["mine", "renamed", "shared"]);
     assert!(!sharer.header(at.file_id)?.removed);
-    // Asked again, as the engine asks: the rename names a version that is gone, the new file
-    // is there already.
+
+    // Asked again, as the engine asks: written, at the version each landed as.
+    let again = member.update(&target, &renamed, None)?;
+    assert_eq!(again.at(), sharer.header(at.file_id)?.at());
+    assert_eq!((again.target.token, again.changed_at), (None, None));
+    let added = create_file(&member, &new, b"2")?;
+    let theirs_now: Vec<_> = sharer.server().live().map(|h| h.at()).collect();
+    assert!(theirs_now.contains(&added.at()), "{added:?}");
+    assert_eq!((added.target.token, added.changed_at), (None, None));
+    // And once more, the answer had: the file is at another version, the new one is there.
     assert!(matches!(
         member.update(&target, &renamed, None),
         Err(RemoteError::VersionMismatch)
@@ -179,6 +194,170 @@ fn a_members_write_on_its_way_lands_when_it_is_delivered() -> R {
         Err(RemoteError::AlreadyExists)
     ));
     assert!(member.deliver().is_empty());
+    Ok(())
+}
+
+/// A write that landed is answered as written only to the client that sent it. Started
+/// again (its memory of the send gone), the client meets what landed as someone else's.
+#[test]
+fn a_write_that_landed_is_anothers_to_a_client_started_again() -> R {
+    let (_sharer, member, scratch, theirs, target) = a_file_to_edit()?;
+    member.faults().on_their_way = true;
+    waits(member.update(&target, &renamed(&theirs), None));
+    let new = file("mine", scratch.node, b"2");
+    waits(create_file(&member, &new, b"2"));
+    let restarted = member.sharing_token();
+    assert_eq!(member.deliver().len(), 2);
+    assert!(matches!(
+        restarted.update(&target, &renamed(&theirs), None),
+        Err(RemoteError::VersionMismatch)
+    ));
+    assert!(matches!(
+        create_file(&restarted, &new, b"2"),
+        Err(RemoteError::AlreadyExists)
+    ));
+    Ok(())
+}
+
+/// A write that landed answers only that very write: another write of the node, by the
+/// client that sent the first, is answered as the file is now.
+#[test]
+fn a_write_that_landed_answers_only_that_write() -> R {
+    let (sharer, member, _, theirs, target) = a_file_to_edit()?;
+    member.faults().on_their_way = true;
+    waits(member.update(&target, &renamed(&theirs), None));
+    member.faults().on_their_way = false;
+    assert_eq!(member.deliver().len(), 1);
+    let other = with(&theirs, NodeContent::file("other", 1, 1, false));
+    assert!(matches!(
+        member.update(&target, &other, None),
+        Err(RemoteError::VersionMismatch)
+    ));
+    assert_eq!(sharer.server().live_names(), ["renamed", "shared"]);
+    Ok(())
+}
+
+/// A send the owner's server didn't take (their file changed while it was on its way) has
+/// no answer to give: asked again, the write is answered as the file is now.
+#[test]
+fn a_write_not_taken_is_answered_as_the_file_is_now() -> R {
+    let (sharer, member, _, theirs, target) = a_file_to_edit()?;
+    member.faults().on_their_way = true;
+    waits(member.update(&target, &renamed(&theirs), None));
+    let owners = Target {
+        at: target.at,
+        token: sharer.header(target.at.file_id)?.token,
+    };
+    let theirs_now = with(&theirs, NodeContent::file("the owner's", 1, 1, false));
+    sharer.update(&owners, &theirs_now, None)?;
+    member.faults().on_their_way = false;
+    let delivered = member.deliver();
+    assert!(
+        matches!(delivered.as_slice(), [Err(RemoteError::VersionMismatch)]),
+        "{delivered:?}"
+    );
+    assert!(matches!(
+        member.update(&target, &renamed(&theirs), None),
+        Err(RemoteError::VersionMismatch)
+    ));
+    assert_eq!(sharer.server().live_names(), ["shared", "the owner's"]);
+    Ok(())
+}
+
+/// `meta`'s file, renamed.
+fn renamed(meta: &NodeMeta) -> NodeMeta {
+    with(meta, NodeContent::file("renamed", 1, 1, false))
+}
+
+/// Of several removals by a member, each file has its own answer, and the first still on
+/// its way stops the rest, which are not sent: delivered, only that one is removed.
+#[test]
+fn a_members_removals_stop_at_the_one_on_its_way() -> R {
+    let (sharer, scratch) = sharing_a_folder_to_edit()?;
+    let member = FakeRemote::member(sharer.server_handle()).writing();
+    let mut made = Vec::new();
+    for name in ["a", "b", "c", "to read"] {
+        let meta = file(name, scratch.node, b"1");
+        let at = create_file(&sharer, &meta, b"1")?.at();
+        match name {
+            "to read" => sharer.share(at.file_id)?,
+            _ => sharer.share_to_edit(at.file_id)?,
+        }
+        made.push((meta, Target { at, token: None }));
+    }
+    let targets =
+        |names: &[usize]| -> Vec<Target> { names.iter().map(|i| made[*i].1.clone()).collect() };
+    let removed = |i: usize| sharer.header(made[i].1.at.file_id).map(|h| h.removed);
+
+    // Their file is looked at in the Homebase adapter's order. One as it is already is left
+    // so, shared for editing or not; one at another version by now is told so before it is
+    // told read-only.
+    let as_it_is = member.set_removed(&targets(&[3]), false)?.single()?;
+    assert_eq!(as_it_is.at(), made[3].1.at);
+    let stale = Target {
+        at: hbsync_types::RemoteRef {
+            version: made[0].1.at.version,
+            ..made[3].1.at
+        },
+        token: None,
+    };
+    assert!(matches!(
+        member.update(&stale, &made[3].0, None),
+        Err(RemoteError::VersionMismatch)
+    ));
+
+    // Held on their way: the first is sent, the rest are not.
+    member.faults().on_their_way = true;
+    let stopped = member.set_removed(&targets(&[0, 1, 2]), true)?;
+    assert!(stopped.answers.is_empty(), "{stopped:?}");
+    assert!(matches!(stopped.stopped, Some(RemoteError::Waiting { .. })));
+    member.faults().on_their_way = false;
+    assert_eq!(member.deliver().len(), 1);
+    assert_eq!(
+        (removed(0)?, removed(1)?, removed(2)?),
+        (true, false, false)
+    );
+
+    // One file's own answer doesn't stop the rest: one shared for reading alone is refused,
+    // the next is removed. One on its way stops them: the file before it is written, the
+    // one after isn't.
+    member.faults().on_their_way = true;
+    waits(member.update(&made[2].1, &renamed(&made[2].0), None));
+    member.faults().on_their_way = false;
+    let mixed = member.set_removed(&targets(&[3, 1, 2, 0]), true)?;
+    assert!(matches!(mixed.stopped, Some(RemoteError::Waiting { .. })));
+    assert!(
+        matches!(
+            mixed.answers.as_slice(),
+            [Err(RemoteError::Fatal(_)), Ok(_)]
+        ),
+        "{mixed:?}"
+    );
+    assert_eq!(
+        (removed(3)?, removed(1)?, removed(2)?),
+        (false, true, false)
+    );
+    Ok(())
+}
+
+/// A member hears its own writes, whatever it asks of its subscription (a socket to another
+/// identity's server leaves none out), and a file it adds is one write to those who listen:
+/// it comes with its share.
+#[test]
+fn a_member_hears_its_own_writes_and_a_new_file_is_one() -> R {
+    let (sharer, scratch) = sharing_a_folder_to_edit()?;
+    let member = FakeRemote::member(sharer.server_handle()).writing();
+    let (members, owners) = (member.subscribe(true), sharer.subscribe(false));
+    let made = create_file(&member, &file("mine", scratch.node, b"1"), b"1")?;
+    for (who, heard) in [("the member", members), ("the owner", owners)] {
+        let heard: Vec<_> = heard.try_iter().collect();
+        assert_eq!(heard.len(), 1, "{who} heard {heard:?}");
+        assert_eq!(
+            (heard[0].file_id, heard[0].version),
+            (made.at().file_id, made.at().version),
+            "{who}"
+        );
+    }
     Ok(())
 }
 
