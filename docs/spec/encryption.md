@@ -11,9 +11,11 @@ about the server: `homebase-api-notes.md`, "Encrypted files".
 - **The shared secret.** When you approved this computer in the browser, it and your Homebase
   agreed on a secret only the two of them know. The client already wraps every request and
   answer with it.
-- **The drive key.** Your Homebase has a key of its own for the sync drive, locked away under
-  your owner key. The Filesync app may unlock it because you granted it read access to the
-  drive.
+- **The drive key.** The sync drive has a key of its own. It is made in your browser when
+  the drive is made, and the server never sees it (a private drive, below: every new sync
+  drive is one). Each device you approve gets it locked to a key of that device's own. (A
+  drive from before private drives: your Homebase keeps the drive key, locked away under your
+  owner key, and unlocks it for the Filesync app because you granted it access to the drive.)
 - **A file key and an IV, new for every file.** For each file it creates, the client makes up a
   random 16-byte key and a random 16-byte starting value (the IV). Nobody else ever chooses
   them.
@@ -26,13 +28,15 @@ about the server: `homebase-api-notes.md`, "Encrypted files".
    JSON). Folders get a key of their own too, so folder names are hidden as well.
 3. It hashes the plain file. That hash is also encrypted with the file key and goes along with
    the file.
-4. It sends the file key to Homebase locked with the shared secret, so nothing in between can
-   read it. Homebase unlocks it and locks it again with the drive key, and stores it that way
-   next to the file. The encrypted bytes are stored exactly as sent.
+4. It locks the file key with the drive key and sends it that way. Homebase stores it next
+   to the file as it came: it can't open it. The encrypted bytes are stored exactly as sent.
+   (A drive from before private drives: the file key goes locked with the shared secret, so
+   nothing in between can read it; Homebase unlocks it and locks it again with the drive key.)
 
 **Reading a file**
-- Homebase sends the encrypted bytes, plus the file key locked with this computer's shared
-  secret. The client unlocks the key and decrypts.
+- Homebase sends the encrypted bytes, and the file key as it holds it: locked with the drive
+  key (a drive from before private drives: locked with this computer's shared secret). The
+  client unlocks the key and decrypts.
 - CBC can't tell when bytes were changed, so the client hashes what it decrypted and compares
   that with the encrypted hash that came along. A file that doesn't match is refused and
   fetched again.
@@ -42,17 +46,26 @@ about the server: `homebase-api-notes.md`, "Encrypted files".
 **What it protects, honestly**
 - What lies on the server's disk and in its backups is encrypted: file contents, names, sizes
   and times.
-- It is zero-knowledge at rest: the server doesn't hold the key to the drive key. Only the
-  owner and the apps and devices they approved do. The server unlocks a key in
-  memory only for the request that needs it, from one of them. That is how the web
-  and mobile Homebase apps work today **[verified]** (odin-js `SecurityHelpers.encryptKeyHeader`,
-  chat-kmp `PayloadBundleEncryptionService`, odin-core `FileSystemStreamWriterBase`), and
-  they can read the same files: the format is odin-js's byte for byte (the golden
-  vectors below) **[verified]**, and chat-kmp's code uses the same layout **[verified in its
-  code, not run]**. Neither app shows the sync drive yet.
-- Once the owner makes the drive private (zero knowledge, below), the server holds no key that
-  opens it at all, even in memory: only the owner's browser and the devices that hold the app's
-  zero-knowledge key do.
+- A sync drive is private (zero knowledge, below) from the start: the server holds no key
+  that opens it at all, on its disk, in its backups or in its memory. Only the owner's
+  browser and the devices that hold the app's zero-knowledge key do.
+- What the server still sees of it: how many items there are, each one's size as encrypted
+  (its real size to within a block), the folder each is in (its id, the header's `groupId`:
+  node schema), and when each was written.
+- What it doesn't cover: the owner console is a web app the identity's own server hands to
+  the browser, and the browser is where the drive's key is made and where a device is
+  approved. A server that is taken over could hand out a changed console that keeps the
+  key **[inferred]**. This client takes no code from the server.
+- A drive from before private drives is zero-knowledge at rest only, until the owner makes it
+  private in the owner console: the server doesn't hold the key to the drive key (only the
+  owner and the apps and devices they approved do), and unlocks a key in memory only for
+  the request that needs it, from one of them. That is how the web and mobile Homebase
+  apps work on other drives **[verified]** (odin-js `SecurityHelpers.encryptKeyHeader`,
+  chat-kmp `PayloadBundleEncryptionService`, odin-core `FileSystemStreamWriterBase`).
+- Other Homebase apps can read the same files: the format is odin-js's byte for byte (the
+  golden vectors below) **[verified]**, and chat-kmp's code uses the same layout **[verified
+  in its code, not run]**. chat-kmp's Filesync mini-app lists and opens the drive's files
+  (`file-browser.md`).
 
 ## The format
 
