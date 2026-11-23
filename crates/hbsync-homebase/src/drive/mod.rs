@@ -259,6 +259,23 @@ fn security_context(client: &Client) -> Result<serde_json::Value, HomebaseError>
     client.get("/api/v2/auth/context", &[])
 }
 
+/// The keys one header opens with ([`HomebaseRemote::held`]).
+struct Held {
+    drive: Option<Key>,
+    write_only: Option<WriteOnlyKey>,
+}
+
+impl Held {
+    fn keys<'a>(&'a self, client: &'a Client) -> Keys<'a> {
+        Keys {
+            shared: client.key(),
+            drive: self.drive.as_ref(),
+            circle: None,
+            write_only: self.write_only.as_ref(),
+        }
+    }
+}
+
 struct DriveKey(Mutex<KeyState>);
 
 impl DriveKey {
@@ -287,8 +304,9 @@ fn unlock_drive_key(client: &Client, locked: &str) -> Result<Key, HomebaseError>
 
 /// The drive's write-only key `locked` with its `key` in the app's grant, opened as chat-kmp's
 /// `ZkKeyStore` does: none where it doesn't open (locked with another key, or not a key), said
-/// at each try, which comes only when something shared is read. Then nothing shared opens here,
-/// and the drive's own folders sync on.
+/// at each try, which comes only when something shared, or a file sealed to the drive, is read.
+/// Then nothing shared opens here, nor what others added to this drive, and the drive's own
+/// folders sync on.
 fn open_write_only(key: &Key, locked: &str) -> Option<WriteOnlyKey> {
     zk_unlock(key, locked)
         .and_then(|der| WriteOnlyKey::from_pkcs8(&der))
@@ -535,14 +553,36 @@ impl HomebaseRemote {
         take(&state).map_err(remote_error)
     }
 
-    /// `header` as a [`RemoteHeader`], opened with the drive's key when a live node's is locked
-    /// with it (a tombstone's or another app's file's isn't opened).
+    /// `header` as a [`RemoteHeader`], opened with the keys it needs ([`Self::held`]).
     fn to_remote(
         &self,
         header: wire::FileHeader,
     ) -> Result<std::result::Result<RemoteHeader, String>> {
-        let drive = self.drive_key(header.needs_drive_key())?;
-        Ok(wire::to_remote(header, self.keys(drive.as_ref())))
+        let held = self.held(&header)?;
+        Ok(wire::to_remote(header, held.keys(&self.client)))
+    }
+
+    /// The keys `header` opens with, besides the shared secret: the drive's when a live node's
+    /// is locked with it, and the drive's write-only key when a live node's is sealed to that
+    /// (a file someone added to a folder shared with them). A tombstone's or another app's
+    /// file's isn't opened. The write-only key is opened each time (AES-GCM and a key parse):
+    /// only a sealed file costs it. One that doesn't open leaves the file unread, said.
+    fn held(&self, header: &wire::FileHeader) -> Result<Held> {
+        if !header.needs_write_only_key() {
+            let drive = self.drive_key(header.needs_drive_key())?;
+            return Ok(Held {
+                drive,
+                write_only: None,
+            });
+        }
+        // Sealed files are only on a private drive: its key state is read as for a file
+        // locked with the drive's key.
+        let locked = self.key_state(true, KeyState::write_only)?;
+        let write_only = locked.and_then(|(key, locked)| open_write_only(&key, &locked));
+        Ok(Held {
+            drive: None,
+            write_only,
+        })
     }
 
     fn keys<'a>(&'a self, drive: Option<&'a Key>) -> Keys<'a> {
@@ -550,6 +590,7 @@ impl HomebaseRemote {
             shared: self.client.key(),
             drive,
             circle: None,
+            write_only: None,
         }
     }
 
@@ -858,10 +899,8 @@ impl HomebaseRemote {
             Some(key) => key,
             None => {
                 let header = self.current(target.at)?;
-                let drive = self.drive_key(header.needs_drive_key())?;
-                header
-                    .key(self.keys(drive.as_ref()))
-                    .map_err(remote_error)?
+                let held = self.held(&header)?;
+                header.key(held.keys(&self.client)).map_err(remote_error)?
             }
         };
         key.with_new_iv().map_err(remote_error)
@@ -870,8 +909,8 @@ impl HomebaseRemote {
     /// A private drive's payload key ([`payload_key`]), from its header, read first.
     fn payload_key(&self, file_id: RemoteFileId) -> Result<KeyHeader> {
         let header = self.raw_header(file_id)?;
-        let drive = self.drive_key(header.needs_drive_key())?;
-        payload_key(&header, self.keys(drive.as_ref()))
+        let held = self.held(&header)?;
+        payload_key(&header, held.keys(&self.client))
     }
 }
 
@@ -2266,6 +2305,76 @@ mod tests {
             read(state(None, Some(&locked))),
             Err(HomebaseError::NoDriveKey)
         ));
+    }
+
+    /// A file someone added to a folder shared with them is read on the owner's computer with
+    /// the drive's write-only key, opened from the grant with the drive's key; where the grant
+    /// has no copy, or one that doesn't open, the file is left unread and says why, and a
+    /// private drive without its key refuses this computer, as for any file.
+    #[test]
+    fn a_file_a_member_added_is_read_with_the_grants_write_only_key()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        use aes_gcm::aead::Aead;
+        use aes_gcm::{Aes128Gcm, KeyInit};
+        use base64::Engine;
+        use base64::engine::general_purpose::STANDARD;
+        use share_keys::tests as v;
+        let drive: Key = [9; 16];
+        let iv = [4u8; 12];
+        let sealed = Aes128Gcm::new((&drive).into())
+            .encrypt((&iv).into(), &v::bytes(v::WRITE_ONLY_PKCS8)[..])
+            .expect("sealed");
+        let locked = STANDARD.encode([&iv[..], &sealed].concat());
+        let state = |key: Option<Key>, write_only: Option<&str>| KeyState {
+            private: true,
+            key,
+            write_only: write_only.map(str::to_owned),
+            ..KeyState::default()
+        };
+        // A folder, as stored: its name under the file key and the header IV.
+        let kh = KeyHeader {
+            iv: v::bytes(v::HEADER_IV).try_into().map_err(|_| "an IV")?,
+            key: v::bytes(v::FILE_KEY).try_into().map_err(|_| "a key")?,
+        };
+        let header: wire::FileHeader = serde_json::from_value(json!({
+            "fileId": Uuid::from_u128(7),
+            "fileState": "active",
+            "sharedSecretEncryptedKeyHeader": {
+                "encryptionVersion": 1, "type": "sealed",
+                "iv": v::HEADER_IV, "encryptedAesKey": v::SEALED_KEY_HEADER,
+            },
+            "fileMetadata": {
+                "isEncrypted": true,
+                "versionTag": Uuid::from_u128(8),
+                "appData": {
+                    "uniqueId": Uuid::from_u128(9),
+                    "groupId": NodeId::ROOT.0,
+                    "fileType": hbsync_types::schema::FILE_TYPE_FOLDER,
+                    "content": kh.seal_text(r#"{"v":1,"name":"From a member"}"#),
+                },
+            },
+        }))?;
+
+        let remote = unreachable_remote(state(Some(drive), Some(&locked)))?;
+        let read = remote.to_remote(header.clone())??;
+        match &read.body {
+            RemoteBody::Live { content, .. } => assert_eq!(content.name, "From a member"),
+            other => panic!("{other:?}"),
+        }
+        assert!(read.token.is_some());
+
+        for no_key in [
+            state(Some(drive), None),
+            state(Some([1; 16]), Some(&locked)),
+        ] {
+            let remote = unreachable_remote(no_key)?;
+            let why = remote.to_remote(header.clone())?.expect_err("opened");
+            assert!(why.contains("write-only key"), "{why}");
+        }
+        let remote = unreachable_remote(state(None, Some(&locked)))?;
+        let refused = remote.to_remote(header).expect_err("read");
+        assert_eq!(refused.refusal(), Some(Refusal::NoKey), "{refused}");
+        Ok(())
     }
 
     /// A file over the limit is refused before any request, a create or an update: here the

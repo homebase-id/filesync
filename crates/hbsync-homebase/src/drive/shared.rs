@@ -318,6 +318,7 @@ impl PeerRemote {
             shared: client.key(),
             drive: None,
             circle,
+            write_only: None,
         }
     }
 
