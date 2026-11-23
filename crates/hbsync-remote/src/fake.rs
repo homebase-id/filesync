@@ -26,7 +26,12 @@
 //! [`FakeRemote::member`] is a client of the member the drive's owner shares files with,
 //! reading them as the Homebase adapter reads another identity's share (`PeerRemote`;
 //! homebase-api-notes, "Shared with you"): only the files shared with it, a share withdrawn as
-//! a tombstone without a version, read-only.
+//! a tombstone without a version, read-only. One that writes ([`FakeRemote::writing`]) changes
+//! what is shared with it for editing ([`FakeRemote::share_to_edit`]) as that adapter does: a
+//! file's header and bytes, a new file or folder in a folder (shared as the folder is), a move
+//! to Recently deleted and back; it deletes nothing. Its writes can be held on their way
+//! ([`Faults::on_their_way`], [`FakeRemote::deliver`]): the answer the adapter gives when no
+//! word of a send comes in time.
 
 use std::cell::OnceCell;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -126,11 +131,13 @@ pub struct FakeServer {
 
 /// A share row of the member's: live or withdrawn, and where it has an end, until when by
 /// the server's clock ([`FakeRemote::share_until`]). Nothing is written as that passes: from
-/// then on the member sees the row as one withdrawn ([`seen_by`]).
+/// then on the member sees the row as one withdrawn ([`seen_by`]). One that `edits` gives the
+/// member `Write` on the file too ([`FakeRemote::share_to_edit`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Share {
     live: bool,
     until: Option<i64>,
+    edits: bool,
 }
 
 /// Whose view of the drive a client has: its owner's, or the member's ([`FakeRemote::member`]).
@@ -605,6 +612,19 @@ impl FakeServer {
         }
     }
 
+    /// The member's share of `file_id`, where it may change the file: it reads it
+    /// ([`FakeServer::access`]) through a share that gives it `Write`. One shared for reading
+    /// alone is read-only to it (**[verified]** odin-core
+    /// `DriveStorageServiceBase.AssertMemberMayWriteAsync`: a live share row with `Write` on
+    /// the file; the Homebase adapter refuses before it sends, `PeerRemote::change`).
+    fn editable(&self, file_id: RemoteFileId) -> Result<Share> {
+        self.access(file_id, View::Member)?;
+        let share = self.shares.get(&file_id).copied();
+        share
+            .filter(|share| share.edits)
+            .ok_or_else(|| RemoteError::read_only("the owner"))
+    }
+
     /// `file_id`'s header as `view` reads it ([`FakeServer::access`]), refused first if it is
     /// unreadable (a test's).
     fn header_as(&self, file_id: RemoteFileId, view: View) -> Result<RemoteHeader> {
@@ -991,6 +1011,12 @@ pub struct Faults {
     pub waiting: Option<(String, Duration)>,
     /// Every request is put off with [`RemoteError::Later`] for this long: a busy server.
     pub later: Option<Duration>,
+    /// A writing member's creates, updates and removals are held on their way to the
+    /// owner's drive: each answers [`RemoteError::Waiting`], as the Homebase adapter does
+    /// when no word of a send comes in time, and is written only when
+    /// [`FakeRemote::deliver`] is called (or never). While one of a node is held, another of
+    /// that node waits too.
+    pub on_their_way: bool,
     /// Creates, updates, deletes and share changes are refused with [`RemoteError::Denied`]
     /// (the app lost write access to the drive); reads still work.
     pub deny_writes: bool,
@@ -1046,6 +1072,41 @@ pub struct FakeRemote {
     client: ClientId,
     /// Whose client it is: the owner's, or the member's ([`FakeRemote::member`]).
     view: View,
+    /// The member's, whether it writes to what is shared with it for editing
+    /// ([`FakeRemote::writing`]).
+    writes: bool,
+    /// The member's writes still on their way to the owner's drive
+    /// ([`Faults::on_their_way`]), in the order they were written.
+    outbox: Arc<Mutex<Vec<Held>>>,
+}
+
+/// A write of the member's, held on its way ([`Faults::on_their_way`]).
+#[derive(Debug)]
+enum Held {
+    Create(NodeMeta, Received),
+    Update(Target, NodeMeta, Received),
+    Remove(NodeId, Target, bool),
+}
+
+impl Held {
+    fn node(&self) -> NodeId {
+        match self {
+            Held::Create(meta, _) | Held::Update(_, meta, _) => meta.node,
+            Held::Remove(node, ..) => *node,
+        }
+    }
+}
+
+/// An upload's bytes as the fake took them in, with their hash.
+type Received = Option<(hbsync_types::ContentHash, Vec<u8>)>;
+
+/// The answer to a write of the member's that is still on its way to the owner's drive, as
+/// the Homebase adapter gives it (`PeerRemote`: asked again in a minute).
+fn on_its_way() -> RemoteError {
+    RemoteError::Waiting {
+        why: "waiting for the owner's server to take a change of yours".into(),
+        retry_after: Duration::from_secs(60),
+    }
 }
 
 impl FakeRemote {
@@ -1060,6 +1121,8 @@ impl FakeRemote {
             faults: Arc::default(),
             client,
             view: View::Owner,
+            writes: false,
+            outbox: Arc::default(),
         }
     }
 
@@ -1067,12 +1130,22 @@ impl FakeRemote {
     /// adapter reads another identity's share: the feed, headers and payloads of what is shared
     /// with it, a share withdrawn as a tombstone without a version
     /// ([`RemoteHeader::is_unshared`]). Every write refuses before it is a request, as
-    /// `PeerRemote`'s do.
+    /// `PeerRemote`'s do, unless it is one that writes ([`FakeRemote::writing`]).
     pub fn member(server: Arc<Mutex<FakeServer>>) -> Self {
         FakeRemote {
             view: View::Member,
             ..FakeRemote::new(server)
         }
+    }
+
+    /// The member, writing to what is shared with it for editing
+    /// ([`FakeRemote::share_to_edit`]) as the Homebase adapter does (`PeerRemote::writing`): a
+    /// change to a file, a new file or folder in a folder (shared as that folder is), a move
+    /// to Recently deleted and back. What is shared with it for reading alone refuses, and it
+    /// deletes nothing. Its writes carry no token, as its reads don't.
+    pub fn writing(mut self) -> Self {
+        self.writes = true;
+        self
     }
 
     /// Another client on this one's registration (a copied credentials file): faults of its
@@ -1083,6 +1156,8 @@ impl FakeRemote {
             faults: Arc::default(),
             client: self.client,
             view: self.view,
+            writes: self.writes,
+            outbox: Arc::default(),
         }
     }
 
@@ -1117,12 +1192,115 @@ impl FakeRemote {
         self.server.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Refuses a write of the member's: what is shared with it is read-only.
+    /// Refuses a write of a member that doesn't write ([`FakeRemote::writing`]): what is
+    /// shared with it is read-only.
     fn writable(&self) -> Result<()> {
+        match self.view == View::Owner || self.writes {
+            true => Ok(()),
+            false => Err(RemoteError::read_only("the owner")),
+        }
+    }
+
+    /// Refuses what only the drive's owner does, whoever the member is: a delete, a share.
+    fn owners(&self) -> Result<()> {
         match self.view {
             View::Owner => Ok(()),
             View::Member => Err(RemoteError::read_only("the owner")),
         }
+    }
+
+    fn is_member(&self) -> bool {
+        self.view == View::Member
+    }
+
+    /// A member's write as it is answered: without a token, as nothing of the owner's has
+    /// one for it.
+    fn answer(&self, mut written: Written) -> Written {
+        if self.is_member() {
+            written.target.token = None;
+        }
+        written
+    }
+
+    fn outbox(&self) -> MutexGuard<'_, Vec<Held>> {
+        self.outbox.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Whether a write of the member's is held back: every one while
+    /// [`Faults::on_their_way`], and one of `node` while an earlier one of it is on its way
+    /// (one write of a node at a time, as on Homebase).
+    fn holds(&self, node: NodeId) -> bool {
+        self.is_member()
+            && (self.faults().on_their_way || self.outbox().iter().any(|h| h.node() == node))
+    }
+
+    /// The owner's server takes the member's writes held back ([`Faults::on_their_way`]), in
+    /// the order they were written: what became of each. One refused there (the file written
+    /// since, say) is given up, as Homebase's outbox gives it up.
+    pub fn deliver(&self) -> Vec<Result<Written>> {
+        let held = std::mem::take(&mut *self.outbox());
+        held.into_iter()
+            .map(|held| match held {
+                Held::Create(meta, bytes) => self.create_now(&meta, bytes),
+                Held::Update(target, meta, bytes) => self.update_now(&target, &meta, bytes),
+                Held::Remove(_, target, removed) => {
+                    self.set_removed_now(&mut self.server(), &target, removed)
+                }
+            })
+            .collect()
+    }
+
+    /// The create itself, the bytes received: the member's in a folder it may edit, the new
+    /// file shared as that folder is (**[verified]** live: a member's new file carries its
+    /// folder's share rows).
+    fn create_now(&self, node: &NodeMeta, received: Received) -> Result<Written> {
+        let mut server = self.server();
+        let shared_as = match self.view {
+            View::Owner => None,
+            View::Member => {
+                let folder = server.file_id_of(node.parent).ok_or_else(|| {
+                    RemoteError::Fatal(
+                        "nothing can be added there: not a folder shared with you".into(),
+                    )
+                })?;
+                Some(server.editable(folder)?)
+            }
+        };
+        let written = replay(received, |upload| {
+            server.create_by(Some(self.client), node, upload)
+        })?;
+        if let Some(share) = shared_as {
+            server.set_share(self.client, written.at().file_id, share)?;
+        }
+        Ok(self.answer(written))
+    }
+
+    /// The update itself, the bytes received: the member's only of a file it may edit.
+    fn update_now(&self, target: &Target, meta: &NodeMeta, received: Received) -> Result<Written> {
+        let mut server = self.server();
+        let file_id = target.at.file_id;
+        if self.is_member() {
+            server.editable(file_id)?;
+        }
+        let written = replay(received, |upload| {
+            server.update_by(Some(self.client), file_id, target.at.version, meta, upload)
+        })?;
+        Ok(self.answer(written))
+    }
+
+    /// One file's move to Recently deleted or back: the member's only of a file it may edit.
+    fn set_removed_now(
+        &self,
+        server: &mut FakeServer,
+        target: &Target,
+        removed: bool,
+    ) -> Result<Written> {
+        let RemoteRef { file_id, version } = target.at;
+        if self.is_member() {
+            server.editable(file_id)?;
+        }
+        let written = server.set_removed_by(Some(self.client), file_id, version, removed)?;
+        Ok(self.answer(written))
     }
 
     /// Runs the per-request fault logic. Returns an error if this request should fail.
@@ -1337,9 +1515,13 @@ impl Remote for FakeRemote {
         // Receive the bytes before taking the server lock, as a real server handles several
         // uploads at once; only the commit is serialized.
         let received = self.receive(payload)?;
-        let written = replay(received, |upload| {
-            self.server().create_by(Some(self.client), node, upload)
-        })?;
+        if self.holds(node.node) {
+            if self.faults().on_their_way {
+                self.outbox().push(Held::Create(node.clone(), received));
+            }
+            return Err(on_its_way());
+        }
+        let written = self.create_now(node, received)?;
         self.answered(&node.content.name)?;
         Ok(written)
     }
@@ -1352,14 +1534,16 @@ impl Remote for FakeRemote {
     ) -> Result<Written> {
         self.writable()?;
         let file_id = target.at.file_id;
-        // On Homebase another file's token would write content no one can read.
+        // On Homebase another file's token would write content no one can read. The member
+        // has none: the file's key reaches it through its share.
         match &target.token {
-            Some(t) if *t != token_of(file_id) => {
+            Some(t) if self.is_member() || *t != token_of(file_id) => {
                 return Err(RemoteError::Fatal(format!(
                     "update of {file_id:?} with another file's token"
                 )));
             }
             Some(_) => {}
+            None if self.is_member() => {}
             None => self.faults().updates_without_token += 1,
         }
         self.gate()?;
@@ -1368,10 +1552,14 @@ impl Remote for FakeRemote {
             return Err(RemoteError::NotFound);
         }
         let received = self.receive(payload)?;
-        let written = replay(received, |upload| {
-            self.server()
-                .update_by(Some(self.client), file_id, target.at.version, meta, upload)
-        })?;
+        if self.holds(meta.node) {
+            if self.faults().on_their_way {
+                self.outbox()
+                    .push(Held::Update(target.clone(), meta.clone(), received));
+            }
+            return Err(on_its_way());
+        }
+        let written = self.update_now(target, meta, received)?;
         self.answered(&meta.content.name)?;
         Ok(written)
     }
@@ -1381,7 +1569,7 @@ impl Remote for FakeRemote {
     /// write failure injected for a name ([`Faults::fail_writes_named`]) fails that file
     /// alone, undeleted.
     fn delete(&self, files: &[Doomed]) -> Result<Deletes> {
-        self.writable()?;
+        self.owners()?;
         Answers::in_batches(files, BATCH_FILES, |batch| self.delete_batch(batch))
     }
 
@@ -1390,7 +1578,7 @@ impl Remote for FakeRemote {
     /// first (**[verified]** odin-core
     /// `V2DriveBatchFileWriteOperationsController.HardDeleteBatch`: `AssertCanWriteToDrive`).
     fn delete_for_good(&self, files: &[Doomed]) -> Result<ForGood> {
-        self.writable()?;
+        self.owners()?;
         Answers::in_batches(files, BATCH_FILES, |batch| {
             self.gate()?;
             batch_of(batch.iter().map(|f| f.at().file_id))?;
@@ -1433,6 +1621,30 @@ impl Remote for FakeRemote {
                 files.iter().map(|_| Err(RemoteError::NotFound)).collect(),
             ));
         }
+        // The member's, held on their way: the first one held stops the rest, as the
+        // Homebase adapter stops at an answer that isn't one file's own.
+        if self.is_member() {
+            let nodes: Vec<Option<NodeId>> = {
+                let server = self.server();
+                let node = |t: &Target| match server.header(t.at.file_id).map(|h| h.body) {
+                    Ok(RemoteBody::Live { node, .. }) => Some(node),
+                    _ => None,
+                };
+                files.iter().map(node).collect()
+            };
+            if nodes.iter().flatten().any(|node| self.holds(*node)) {
+                if self.faults().on_their_way {
+                    let held = files.iter().zip(&nodes).filter_map(|(target, node)| {
+                        Some(Held::Remove((*node)?, target.clone(), removed))
+                    });
+                    self.outbox().extend(held);
+                }
+                return Ok(Answers {
+                    answers: Vec::new(),
+                    stopped: Some(on_its_way()),
+                });
+            }
+        }
         let failing = self.faults().fail_writes_named.clone();
         let answers = {
             let mut server = self.server();
@@ -1441,12 +1653,7 @@ impl Remote for FakeRemote {
                 .zip(&names)
                 .map(|(t, name)| match failing.is_some() && *name == failing {
                     true => Err(RemoteError::Transient("injected write failure".into())),
-                    false => server.set_removed_by(
-                        Some(self.client),
-                        t.at.file_id,
-                        t.at.version,
-                        removed,
-                    ),
+                    false => self.set_removed_now(&mut server, t, removed),
                 })
                 .collect()
         };
@@ -1500,11 +1707,15 @@ impl Remote for FakeRemote {
 /// The sharer's share rows for the member, through its own client.
 impl crate::contract::Shares for FakeRemote {
     fn share(&self, file_id: RemoteFileId) -> Result<()> {
-        self.set_share(file_id, true, None)
+        self.set_share(file_id, true, None, false)
+    }
+
+    fn share_to_edit(&self, file_id: RemoteFileId) -> Result<()> {
+        self.set_share(file_id, true, None, true)
     }
 
     fn withdraw(&self, file_id: RemoteFileId) -> Result<()> {
-        self.set_share(file_id, false, None)
+        self.set_share(file_id, false, None, false)
     }
 }
 
@@ -1517,15 +1728,21 @@ impl FakeRemote {
         if until <= self.server().now() {
             return Err(RemoteError::Fatal("A share expires in the future".into()));
         }
-        self.set_share(file_id, true, Some(until))
+        self.set_share(file_id, true, Some(until), false)
     }
 
     /// Shares `file_id` (`live`) or withdraws its share, refused by the faults on every write
     /// first, as Homebase checks the caller may write to the drive before it looks at the file
     /// (**[verified]** odin-core `DriveShareService.WriteSharesAsync`, `WithdrawShareAsync`:
     /// `AssertCallerMayWrite`).
-    fn set_share(&self, file_id: RemoteFileId, live: bool, until: Option<i64>) -> Result<()> {
-        self.writable()?;
+    fn set_share(
+        &self,
+        file_id: RemoteFileId,
+        live: bool,
+        until: Option<i64>,
+        edits: bool,
+    ) -> Result<()> {
+        self.owners()?;
         self.gate()?;
         let name = self
             .server()
@@ -1533,7 +1750,7 @@ impl FakeRemote {
             .unwrap_or_default()
             .to_owned();
         self.gate_name(&name)?;
-        let share = Share { live, until };
+        let share = Share { live, until, edits };
         self.server().set_share(self.client, file_id, share)
     }
 }
@@ -1735,7 +1952,11 @@ mod tests {
             (modified, place == modified.map(|t| (t, row)))
         };
         let version_at = |s: &FakeServer| s.files[&file_id].header.changed_at;
-        let share = |live| Share { live, until: None };
+        let share = |live| Share {
+            live,
+            until: None,
+            edits: false,
+        };
         let mut time = s.clock_ms;
         assert_eq!(created.changed_at, Some(time));
         assert_eq!(at(&s), (Some(time), true));

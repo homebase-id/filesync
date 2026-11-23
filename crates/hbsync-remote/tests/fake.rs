@@ -29,6 +29,114 @@ fn the_contract_holds() -> R {
     Ok(())
 }
 
+/// A member writing to what the sharer shares with it for editing passes the contract's
+/// scenarios of that, and leaves nothing behind.
+#[test]
+fn the_editing_contract_holds() -> R {
+    let sharer = remote();
+    let member = FakeRemote::member(sharer.server_handle()).writing();
+    let bench = Bench::editing(&sharer, &member, "contract", Duration::ZERO)?;
+    let failed = bench.run_all();
+    assert!(failed.is_empty(), "{failed:#?}");
+    bench.cleanup()?;
+    let server = sharer.server();
+    let live: Vec<_> = server.live().map(|h| h.file_id).collect();
+    assert!(live.is_empty(), "cleanup left {live:?}");
+    let shared: Vec<_> = server.shared().collect();
+    assert!(shared.is_empty(), "cleanup left share rows of {shared:?}");
+    Ok(())
+}
+
+/// A member that doesn't write is refused every write, of what is shared for editing too.
+#[test]
+fn a_member_writes_only_where_it_is_one_that_writes() -> R {
+    use hbsync_remote::contract::{Shares, file, upload};
+    let sharer = remote();
+    let scratch = hbsync_remote::contract::folder("shared", NodeId::ROOT);
+    let dir = sharer.create(&scratch, None)?.at();
+    sharer.share_to_edit(dir.file_id)?;
+    let reading = FakeRemote::member(sharer.server_handle());
+    let new = file("mine", scratch.node, b"1");
+    let refused = reading.create(&new, Some(upload(&mut std::io::Cursor::new(&b"1"[..]))));
+    assert!(matches!(refused, Err(RemoteError::Fatal(_))), "{refused:?}");
+    let writing = reading.clone().writing();
+    let made = writing.create(&new, Some(upload(&mut std::io::Cursor::new(&b"1"[..]))))?;
+    assert!(made.target.token.is_none());
+    // The member hears of what it added, as the owner does.
+    assert!(sharer.server().shared_live(made.at().file_id));
+    Ok(())
+}
+
+/// A member's writes held on their way answer that they wait, write nothing, and hold back
+/// the next write of their node; delivered, each is written in order, and one that names a
+/// version the file no longer has is given up.
+#[test]
+fn a_members_write_on_its_way_lands_when_it_is_delivered() -> R {
+    use hbsync_remote::contract::{Shares, file, upload, with};
+    use hbsync_types::schema::NodeContent;
+    let sharer = remote();
+    let scratch = hbsync_remote::contract::folder("shared", NodeId::ROOT);
+    let dir = sharer.create(&scratch, None)?.at();
+    sharer.share_to_edit(dir.file_id)?;
+    let theirs = file("theirs", scratch.node, b"1");
+    let at = sharer
+        .create(&theirs, Some(upload(&mut std::io::Cursor::new(&b"1"[..]))))?
+        .at();
+    sharer.share_to_edit(at.file_id)?;
+    let member = FakeRemote::member(sharer.server_handle()).writing();
+    let waits = |answer: Result<hbsync_types::Written, RemoteError>| {
+        assert!(
+            matches!(answer, Err(RemoteError::Waiting { .. })),
+            "{answer:?}"
+        );
+    };
+
+    member.faults().on_their_way = true;
+    let target = Target { at, token: None };
+    let renamed = with(&theirs, NodeContent::file("renamed", 1, 1, false));
+    waits(member.update(&target, &renamed, None));
+    let new = file("mine", scratch.node, b"2");
+    waits(member.create(&new, Some(upload(&mut std::io::Cursor::new(&b"2"[..])))));
+    let stopped = member.set_removed(std::slice::from_ref(&target), true)?;
+    assert!(stopped.answers.is_empty());
+    assert!(matches!(stopped.stopped, Some(RemoteError::Waiting { .. })));
+    // Nothing is written yet.
+    assert_eq!(sharer.header(at.file_id)?.version, at.version);
+    assert_eq!(sharer.server().live_names(), ["shared", "theirs"]);
+
+    // Their server reachable again: a node with a write on its way still waits.
+    member.faults().on_their_way = false;
+    waits(member.update(&target, &renamed, None));
+    waits(member.create(&new, None));
+
+    // Delivered: the rename and the new file land; the removal named the version before the
+    // rename, and is given up.
+    let delivered = member.deliver();
+    assert_eq!(delivered.len(), 3);
+    assert!(
+        delivered[0].is_ok() && delivered[1].is_ok(),
+        "{delivered:?}"
+    );
+    assert!(
+        matches!(delivered[2], Err(RemoteError::VersionMismatch)),
+        "{delivered:?}"
+    );
+    assert_eq!(sharer.server().live_names(), ["mine", "renamed", "shared"]);
+    assert!(!sharer.header(at.file_id)?.removed);
+    // Asked again, as the engine asks: the rename names a version that is gone, the new file
+    // is there already.
+    assert!(matches!(
+        member.update(&target, &renamed, None),
+        Err(RemoteError::VersionMismatch)
+    ));
+    assert!(matches!(
+        member.create(&new, Some(upload(&mut std::io::Cursor::new(&b"2"[..])))),
+        Err(RemoteError::AlreadyExists)
+    ));
+    assert!(member.deliver().is_empty());
+    Ok(())
+}
+
 /// A member reading what the sharer shares passes the read-only subset.
 #[test]
 fn the_shared_contract_holds() -> R {

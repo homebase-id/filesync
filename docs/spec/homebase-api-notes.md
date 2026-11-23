@@ -697,7 +697,9 @@ server answers the rest, to a token their server made for this identity's connec
   file's withdrawal raises it too, at the tombstone's unchanged time (PR #2141,
   `PublishChangedAsync`: **[verified]** at aa560aea9).
   `FakeRemote::member` (`hbsync-remote`) models this member's view, and the contract's
-  read-only subset (`Bench::shared`) checks the fake now. Live it needs a sharer that writes
+  read-only subset (`Bench::shared`) checks the fake now (a member that writes,
+  `FakeRemote::writing`, passes its editing subset, `Bench::editing`: what it changes of what
+  is shared with it for editing, and that it deletes nothing). Live it needs a sharer that writes
   share rows, which this client doesn't do yet (the chat app shares): until it does, the
   live check is the daemon syncing what the chat app shared (**[verified]** 2026-11-20 on
   the dev server: a folder with a subfolder and 20 files, a member's token kept and reused). Refusals: 401 the token (unknown,

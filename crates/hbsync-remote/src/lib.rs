@@ -6,7 +6,8 @@
 //!
 //! Implementations: `fake::FakeServer` / `fake::FakeRemote` (in memory, Homebase semantics;
 //! feature `testkit`, with the `contract` every remote passes; `FakeRemote::member` reads what
-//! the fake's owner shares, the contract's read-only subset) and the Homebase drive
+//! the fake's owner shares, the contract's read-only subset, and one that is `writing` changes
+//! what is shared for editing, the contract's editing subset) and the Homebase drive
 //! (`hbsync-homebase`).
 
 use std::collections::HashSet;
