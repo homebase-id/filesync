@@ -147,3 +147,49 @@ fn a_restored_folder_comes_back_whole_in_a_read_only_folder() -> R {
     );
     Ok(())
 }
+
+/// A file its user made read-only in their own folder (a copy of a shared file keeps its
+/// bits, #459) follows the drive as any file: another device's tag lands on it, read-only
+/// as before; a new version replaces it; a delete removes it.
+#[test]
+fn a_read_only_file_of_ones_own_follows_the_drive() -> R {
+    use hbsync_platform::ops::{is_read_only, set_read_only};
+    use hbsync_platform::tags::{self, Tag, Tags};
+
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    let mut b = Client::new(&server, "b")?;
+    a.write("doc.txt", "one")?;
+    a.write("bye.txt", "bye")?;
+    a.sync()?;
+    b.sync()?;
+    for file in ["doc.txt", "bye.txt"] {
+        set_read_only(&b.root.join(file), true)?;
+    }
+    // The bit is this device's: nothing goes up for it.
+    b.sync()?;
+    assert_eq!(b.tree_text(""), a.tree_text(""));
+
+    // A tag from the other device (where the volume keeps them), then a delete.
+    let work = Tags::new([Tag::new("Work", 0)]);
+    let tagged = tags::CAN_TAG && tags::write(&a.root.join("doc.txt"), &work)?.is_some();
+    fs::remove_file(a.root.join("bye.txt"))?;
+    a.sync()?;
+    b.sync()?;
+    if tagged {
+        assert_eq!(tags::read(&b.root.join("doc.txt")), Some(work));
+    }
+    assert!(is_read_only(&b.root.join("doc.txt")), "as the user had it");
+    assert!(!b.root.join("bye.txt").exists());
+
+    // A new version: the bit was the old file's.
+    a.write("doc.txt", "two")?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.read_text("doc.txt")?, "two");
+    assert!(!is_read_only(&b.root.join("doc.txt")));
+    assert_eq!(b.tree_text(""), a.tree_text(""));
+    a.sync()?;
+    assert_eq!(b.tree_text(""), a.tree_text(""));
+    Ok(())
+}

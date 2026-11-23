@@ -181,17 +181,15 @@ impl<'a> Disk<'a> {
         tags::CAN_TAG && self.folder.tags_kept.get() != Some(&false)
     }
 
-    /// [`Disk::write_tags`] on an item in its place. A file placed read-only (a read-only
-    /// folder's, §13) takes no tags as it is: made writable for the write, and read-only
-    /// again.
+    /// [`Disk::write_tags`] on an item in its place. A read-only file (one placed so in a
+    /// read-only folder, §13, or the user's own anywhere: a copy of such a file keeps its
+    /// bits) takes no tags as it is: made writable for the write, then as it was.
     pub(super) fn write_tags_in_place(&self, path: &Path, tags: &Tags) -> TagsLeft {
-        // (Where the volume keeps tags at all: no write otherwise.)
-        let unlocked = self.tags_kept()
-            && self.folder.read_only.is_some()
-            && ops::set_read_only(path, false).unwrap_or(false);
+        // (Where the volume keeps tags at all: no write otherwise. One look at the file.)
+        let unlocked = self.tags_kept().then(|| ops::unlock(path)).flatten();
         let left = self.write_tags(path, tags);
-        if unlocked {
-            let _ = ops::set_read_only(path, true);
+        if let Some(was) = unlocked {
+            ops::relock(path, was);
         }
         left
     }
@@ -293,15 +291,15 @@ impl<'a> Disk<'a> {
     /// Unlinks what is at `at`, as `what` says it is. The caller notes the folder it was in as
     /// changed ([`StateDb::changed`]).
     pub(super) fn unlink(&self, at: &Path, what: Unlink) -> io::Result<()> {
-        // (Windows refuses to delete a read-only file, as a read-only folder's are placed.)
-        let unlocked = cfg!(windows)
-            && self.folder.read_only.is_some()
-            && matches!(what, Unlink::File)
-            && ops::set_read_only(at, false).unwrap_or(false);
+        // (Windows refuses to delete a read-only file, in any folder. One look at the
+        // attributes.)
+        let unlocked = (cfg!(windows) && matches!(what, Unlink::File))
+            .then(|| ops::unlock(at))
+            .flatten();
         let removed = self.unlinked(at, what);
         // Not removed (open in a program, say): as it was, not left writable.
-        if removed.is_err() && unlocked {
-            let _ = ops::set_read_only(at, true);
+        if let (Err(_), Some(was)) = (&removed, unlocked) {
+            ops::relock(at, was);
         }
         removed
     }

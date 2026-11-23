@@ -276,9 +276,7 @@ impl CompletedFile {
     /// The file, to be read-only once in place where `read_only` ([`ops::set_read_only`]): what the user isn't
     /// to change by accident (another identity's file, whose changes here aren't synced).
     /// Set at the target, not here: one kept for a retry is opened again to be checked. Best
-    /// effort: a file system that won't take it fails nothing. A file placed so before is
-    /// replaced all the same (Windows refuses to replace a read-only file: it is made
-    /// writable first).
+    /// effort: a file system that won't take it fails nothing.
     pub fn read_only(mut self, read_only: bool) -> Self {
         self.read_only = read_only;
         self
@@ -313,13 +311,13 @@ impl CompletedFile {
         if current.fingerprint() != *expected {
             return Err(FileIoError::TargetChanged);
         }
-        // (After the check: it changes what the fingerprint is made of.)
-        let unlocked =
-            self.read_only && cfg!(windows) && ops::set_read_only(target, false).unwrap_or(false);
+        // Windows refuses to replace a read-only file, in any folder. (After the check: it
+        // changes what the fingerprint is made of. One look at the attributes.)
+        let unlocked = cfg!(windows).then(|| ops::unlock(target)).flatten();
         if let Err(e) = ops::replace(&self.path, target) {
             // Not replaced (open in a program, say): as it was, not left writable.
-            if unlocked {
-                let _ = ops::set_read_only(target, true);
+            if let Some(was) = unlocked {
+                ops::relock(target, was);
             }
             return Err(e.into());
         }

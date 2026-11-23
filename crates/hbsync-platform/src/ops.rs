@@ -350,6 +350,52 @@ pub fn set_read_only(path: &Path, read_only: bool) -> io::Result<bool> {
     }
 }
 
+/// What [`unlock`] changed of a file, for [`relock`].
+#[derive(Debug)]
+pub struct Unlocked {
+    #[cfg(unix)]
+    mode: u32,
+}
+
+/// Makes the file at `path` writable for its user where it isn't, for a write of the
+/// client's own (its tags; on Windows its replacement or removal): what [`relock`] takes to
+/// put it back exactly as it was. `None` where nothing was changed: it is writable, isn't a
+/// regular file, or can't be changed.
+pub fn unlock(path: &Path) -> Option<Unlocked> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let meta = fs::symlink_metadata(path).ok()?;
+        let mode = meta.permissions().mode() & 0o7777;
+        if !meta.is_file() || mode & 0o200 != 0 {
+            return None;
+        }
+        fs::set_permissions(path, fs::Permissions::from_mode(mode | 0o200)).ok()?;
+        Some(Unlocked { mode })
+    }
+    #[cfg(not(unix))]
+    {
+        set_read_only(path, false)
+            .unwrap_or(false)
+            .then_some(Unlocked {})
+    }
+}
+
+/// Puts the file at `path` back as [`unlock`] found it (on Unix its mode as it was, whatever
+/// others may do with it; on Windows read-only). Best effort.
+pub fn relock(path: &Path, was: Unlocked) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(was.mode));
+    }
+    #[cfg(not(unix))]
+    {
+        let Unlocked {} = was;
+        let _ = set_read_only(path, true);
+    }
+}
+
 /// Whether the file at `path` is read-only as [`set_read_only`] makes it (a link not
 /// followed); `false` where it can't be read. (For tests and tools: the client itself asks
 /// [`set_read_only`], which says whether it changed anything.)
@@ -540,6 +586,31 @@ fn check_then_rename(from: &Path, to: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file made writable for the client's own write goes back exactly as it was: its
+    /// user's write bit only, whatever others may do with it; one that is writable, and a
+    /// folder, are left alone.
+    #[cfg(unix)]
+    #[test]
+    fn a_file_unlocked_for_a_write_goes_back_as_it_was() -> io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir()?;
+        let file = dir.path().join("a.txt");
+        fs::write(&file, "a")?;
+        let mode = |path: &Path| fs::metadata(path).map(|m| m.permissions().mode() & 0o7777);
+        for was in [0o444, 0o464, 0o466, 0o440, 0o400, 0o555] {
+            fs::set_permissions(&file, fs::Permissions::from_mode(was))?;
+            let unlocked = unlock(&file).expect("read-only: unlocked");
+            assert_eq!(mode(&file)?, was | 0o200, "{was:o}");
+            relock(&file, unlocked);
+            assert_eq!(mode(&file)?, was, "{was:o}");
+        }
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644))?;
+        assert!(unlock(&file).is_none(), "writable");
+        assert!(unlock(dir.path()).is_none(), "a folder");
+        assert_eq!(mode(&file)?, 0o644);
+        Ok(())
+    }
 
     /// A file made read-only reads so, keeps its other bits, and is writable again when
     /// asked; made writable, it is replaced and removed as any file. A folder is left as it
