@@ -140,16 +140,24 @@ Good to know:
   is, while the file is read. The hash goes along with each file and is checked on the way
   back: a file that doesn't match is refused and downloaded again. The hash also tells real
   edits from touched timestamps, so unchanged files are never uploaded twice.
-- **Zero-knowledge encrypted at rest.** Each file gets its own random AES key before it leaves
-  your computer, and names, sizes and times are encrypted too. What lies on your Homebase's
-  disk and in its backups is ciphertext. The server doesn't hold the key: only you and the
-  devices you approved do. It unlocks a file's key for a moment, in memory, only while
-  serving a request from one of them. It uses
-  Homebase's own format, so your other Homebase apps can open the files. The cipher handles
-  about 1 GB/s encrypting and 2.8 GB/s decrypting, more than any internet link. Dropbox, by
-  default, encrypts files once they reach its servers, with keys Dropbox holds. With Homebase Drive,
-  the files are encrypted before they leave your computer, and the keys stay with your own
-  Homebase, not with a company. More: [docs/spec/encryption.md](docs/spec/encryption.md).
+- **End-to-end encrypted, zero knowledge.** Each file gets its own random AES key before it
+  leaves your computer, and names, sizes and times are encrypted too. The key to your drive
+  is made in your browser and never reaches the server: not its disk, not its backups, not
+  its memory. Only you and the devices you approved hold it, each device its own copy locked
+  to that device. So your Homebase stores and serves your files without being able to open
+  one.[^key] A break-in there finds ciphertext, and no key to open it. What the server
+  still sees is the outline: how many items there are, about how big each is, which folder
+  (an id, not a name) each is in, and when it changes. Your other Homebase apps are shut
+  out by the same cryptography, not by a rule: an app can read the files only if you grant
+  it read access to the drive, and then that app holds, on your device, what it takes to
+  decrypt them. The cipher handles about 1 GB/s encrypting and 2.8 GB/s decrypting, more
+  than any internet link. Dropbox, by default, encrypts files once they reach its servers,
+  with keys Dropbox holds. Let's be honest about what that is worth: it protects a disk
+  that is stolen, and little else. "Encrypted" there doesn't mean Dropbox can't read your
+  files: it holds the keys, so it can, and so can whoever gets into its systems. With
+  Homebase Drive, the files are encrypted before they leave your computer, and the keys
+  stay with you and your devices, not with a company, and not with the server either.
+  More: [docs/spec/encryption.md](docs/spec/encryption.md).
 
   Privacy, from each vendor's own terms (October 2026):
 
@@ -210,9 +218,11 @@ The [Homebase.id License](LICENSE): the GNU Affero General Public License v3
     [help](https://help.dropbox.com/files-folders/sort-preview/dropbox-vault)) and Google's
     client-side encryption (Workspace Enterprise Plus and Education,
     [help](https://support.google.com/a/answer/10745596)).
-[^key]: Your Homebase unlocks a file's key in memory only while serving a request from one of
-    your devices; at rest, the server and its backups hold ciphertext only
-    ([docs/spec/encryption.md](docs/spec/encryption.md)).
+[^key]: A sync drive is made private (zero knowledge) from the start, from Homebase v0.1.974
+    on. One made before that is zero knowledge at rest only (your Homebase unlocks a file's
+    key in memory while it serves a request from one of your devices) until you make it
+    private in the owner console, which takes a moment and encrypts nothing again
+    ([docs/spec/encryption.md](docs/spec/encryption.md), "A private drive").
 [^dropbox]: [Dropbox Terms](https://www.dropbox.com/terms): "Dropbox accesses, stores, and scans
     Your Stuff"; "We reserve the right to delete or disable content alleged to be infringing".
 [^google]: [Google Terms](https://policies.google.com/terms): "automated systems and algorithms
