@@ -267,7 +267,12 @@ impl KeyState {
 /// install from before it asked for it lacks until the owner approves: [`app::update_url`]):
 /// one read of the login's security context.
 pub fn reads_shared(client: &Client) -> Result<bool, HomebaseError> {
-    Ok(holds_key(&security_context(client)?, app::USE_TRANSIT_READ))
+    holds(client, app::USE_TRANSIT_READ)
+}
+
+/// Whether the app holds permission `key` now: one read of the login's security context.
+fn holds(client: &Client, key: u32) -> Result<bool, HomebaseError> {
+    Ok(holds_key(&security_context(client)?, key))
 }
 
 /// The login's security context: its grants and permissions.
@@ -707,13 +712,7 @@ impl HomebaseRemote {
             Ok(answer) => Ok(answer),
             // Not connected to them (any more): this identity's own answer, before theirs is
             // asked. Theirs to mend or the owner's, and nothing a retry in minutes changes.
-            Err(e) if not_connected(&e) => Err(RemoteError::Waiting {
-                why: format!(
-                    "not connected to {sharer}: what they share with you can't be read \
-                     until you are"
-                ),
-                retry_after: NOT_CONNECTED_WAIT,
-            }),
+            Err(e) if not_connected(&e) => Err(not_connected_to(sharer, "read")),
             Err(e) if codeless_forbidden(&e) && permitted => match self.reads_shared_now()? {
                 false => Err(not_permitted()),
                 true => Err(remote_error(e)),
@@ -729,22 +728,23 @@ impl HomebaseRemote {
     /// permission update closes no socket). Kept for [`Self::circle_key`]'s next look; an
     /// answer overtaken by another read costs that look one more read, no more.
     fn reads_shared_now(&self) -> Result<bool> {
-        let reads = reads_shared(&self.client).map_err(remote_error)?;
-        self.drive_key.lock().reads_shared = reads;
-        Ok(reads)
+        self.holds_now(app::USE_TRANSIT_READ, |state| &mut state.reads_shared)
+    }
+
+    /// Whether the app holds permission `key`, the security context read again now for it
+    /// alone (one request, nothing held meanwhile), and what it says kept in `flag`.
+    fn holds_now(&self, key: u32, flag: fn(&mut KeyState) -> &mut bool) -> Result<bool> {
+        let held = holds(&self.client, key).map_err(remote_error)?;
+        *flag(&mut self.drive_key.lock()) = held;
+        Ok(held)
     }
 
     /// Whether the app may send to other identities' drives ([`app::USE_TRANSIT_WRITE`]), as
     /// the security context said when last read; where it said no, read again now (one
     /// request: the owner may have given the permission since), and kept.
     pub(crate) fn may_send(&self) -> Result<bool> {
-        if self.key_state(false, |s| Ok(s.sends))? {
-            return Ok(true);
-        }
-        let context = security_context(&self.client).map_err(remote_error)?;
-        let sends = holds_key(&context, app::USE_TRANSIT_WRITE);
-        self.drive_key.lock().sends = sends;
-        Ok(sends)
+        Ok(self.key_state(false, |s| Ok(s.sends))?
+            || self.holds_now(app::USE_TRANSIT_WRITE, |state| &mut state.sends)?)
     }
 
     /// What this identity's own markers say: whose shares its computers sync, and which of its
@@ -1197,6 +1197,17 @@ impl Remote for HomebaseRemote {
 /// `notAConnectedIdentity`, odin-core `CircleNetworkService`, **[verified]** live 2026-11-19).
 fn not_connected(e: &HomebaseError) -> bool {
     matches!(e, HomebaseError::Api { error, .. } if error.is("notAConnectedIdentity"))
+}
+
+/// What isn't `done` (read, changed) to what `sharer` shares while this identity isn't
+/// connected to them: asked again after [`NOT_CONNECTED_WAIT`].
+fn not_connected_to(sharer: &str, done: &str) -> RemoteError {
+    RemoteError::Waiting {
+        why: format!(
+            "not connected to {sharer}: what they share with you can't be {done} until you are"
+        ),
+        retry_after: NOT_CONNECTED_WAIT,
+    }
 }
 
 /// A 403 without a code: on a peer route, the other identity's refusal, or this app's want of
@@ -2302,15 +2313,11 @@ mod tests {
 
     /// The vectors' write-only key as a grant carries it: locked with `drive`'s key.
     fn locked_write_only(drive: &Key) -> String {
-        use aes_gcm::aead::Aead;
-        use aes_gcm::{Aes128Gcm, KeyInit};
         use base64::Engine;
         use base64::engine::general_purpose::STANDARD;
         let pkcs8 = share_keys::tests::bytes(share_keys::tests::WRITE_ONLY_PKCS8);
         let iv = [4u8; 12];
-        let sealed = Aes128Gcm::new(drive.into())
-            .encrypt((&iv).into(), &pkcs8[..])
-            .expect("sealed");
+        let sealed = crate::crypto::gcm_seal(drive, &iv, &pkcs8, &[]).expect("sealed");
         STANDARD.encode([&iv[..], &sealed].concat())
     }
 

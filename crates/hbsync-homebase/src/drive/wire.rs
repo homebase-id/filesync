@@ -104,18 +104,22 @@ where
     D: serde::Deserializer<'de>,
 {
     use crate::app::{COMMENT, REACT, READ, WRITE};
+    const NAMED: [(&str, u32); 7] = [
+        ("read", READ),
+        ("write", WRITE),
+        ("react", REACT),
+        ("comment", COMMENT),
+        ("writeReactionsAndComments", REACT | COMMENT),
+        ("readWrite", READ | WRITE | REACT | COMMENT),
+        ("all", READ | WRITE | REACT | COMMENT),
+    ];
     Ok(match Value::deserialize(d)? {
         Value::Number(n) => n.as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(0),
         Value::String(names) => names
             .split(',')
-            .map(|name| match name.trim().to_ascii_lowercase().as_str() {
-                "read" => READ,
-                "write" => WRITE,
-                "react" => REACT,
-                "comment" => COMMENT,
-                "writereactionsandcomments" => REACT | COMMENT,
-                "readwrite" | "all" => READ | WRITE | REACT | COMMENT,
-                _ => 0,
+            .filter_map(|name| {
+                let named = |(known, _): &&(&str, u32)| known.eq_ignore_ascii_case(name.trim());
+                NAMED.iter().find(named).map(|(_, flags)| *flags)
             })
             .fold(0, |all, one| all | one),
         _ => 0,
@@ -645,9 +649,8 @@ impl FileHeader {
 
     /// Whether a share gives this identity `Write` on the file.
     pub(crate) fn shared_for_writing(&self) -> bool {
-        let rows = self.shares.iter().flatten();
-        rows.into_iter()
-            .any(|row| row.permissions & crate::app::WRITE != 0)
+        let mut rows = self.shares.iter().flatten();
+        rows.any(|row| row.permissions & crate::app::WRITE != 0)
     }
 
     /// The circle a shared file's key header is locked for: the one its first share names.
@@ -823,19 +826,10 @@ pub(crate) fn metadata(
         Some(drive_key) => key.lock(drive_key),
         None => key.seal(keys.shared, transfer_iv),
     };
-    let plain = descriptor(meta, version, key, key_header, Reach::Owner);
+    // Owner-only, and not sent on: every write of the owner's own computers (a share lifts
+    // the group, on the server).
+    let plain = descriptor(meta, version, key, key_header, "owner", false);
     aes_cbc_encrypt(keys.shared, transfer_iv, plain.to_string().as_bytes())
-}
-
-/// Who a written file is for, as its header says it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Reach {
-    /// The drive's owner alone: every write of the owner's own computers (a share lifts it,
-    /// on the server).
-    Owner,
-    /// As a file that is shared: what someone it is shared with sends back with a change
-    /// (`connected`; **[verified]** chat-kmp `FilesyncMemberWrites.replace`).
-    Shared,
 }
 
 /// The identity's transient temp drive (its alias and its type): where its server stages
@@ -868,7 +862,8 @@ pub(crate) fn member_update(
     key: &KeyHeader,
     key_header: Value,
 ) -> Vec<u8> {
-    let plain = descriptor(meta, Some(version), key, key_header, Reach::Shared);
+    // As a file that is shared (**[verified]** chat-kmp `FilesyncMemberWrites.replace`).
+    let plain = descriptor(meta, Some(version), key, key_header, "connected", true);
     aes_cbc_encrypt(shared_secret, transfer_iv, plain.to_string().as_bytes())
 }
 
@@ -917,35 +912,33 @@ pub(crate) fn deposit(
     global_transit_id: Uuid,
     shares: Vec<Value>,
 ) -> Vec<u8> {
-    let mut plain = descriptor(meta, None, key, key_header, Reach::Owner);
-    plain["fileMetadata"]["allowDistribution"] = json!(true);
+    let mut plain = descriptor(meta, None, key, key_header, "owner", true);
     plain["shares"] = json!(shares);
     plain["globalTransitId"] = json!(global_transit_id);
     aes_cbc_encrypt(shared_secret, transfer_iv, plain.to_string().as_bytes())
 }
 
 /// A header as an upload sends it, before it is sealed: `key_header` as its writer locks the
-/// file `key`, the content under that key.
+/// file `key`, the content under that key; who may read the file (`group`: its ACL's security
+/// group), and whether the server may send it on to another identity (`sent_on`).
 fn descriptor(
     meta: &NodeMeta,
     version: Option<VersionTag>,
     key: &KeyHeader,
     key_header: Value,
-    reach: Reach,
+    group: &str,
+    sent_on: bool,
 ) -> Value {
     let file_type = match meta.kind {
         NodeKind::Folder => FILE_TYPE_FOLDER,
         NodeKind::File => FILE_TYPE_FILE,
     };
-    let shared = reach == Reach::Shared;
     json!({
         "encryptedKeyHeader": key_header,
         "fileMetadata": {
             "isEncrypted": true,
-            "allowDistribution": shared,
-            "accessControlList": {
-                "requiredSecurityGroup": if shared { "connected" } else { "owner" },
-            },
+            "allowDistribution": sent_on,
+            "accessControlList": { "requiredSecurityGroup": group },
             "appData": {
                 "uniqueId": meta.node.0,
                 "groupId": meta.parent.0,

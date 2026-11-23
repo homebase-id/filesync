@@ -54,8 +54,9 @@ impl Jwk {
         if self.kty != "EC" || self.crv != "P-384" {
             return Err(bad("not a P-384 key"));
         }
-        let mut point = [0u8; POINT_LEN];
-        point[0] = 0x04;
+        // Uncompressed SEC1: 0x04 | x | y.
+        let mut sec1 = [0u8; 1 + 2 * COORDINATE_LEN];
+        sec1[0] = 0x04;
         for (at, coordinate) in [(1, &self.x), (1 + COORDINATE_LEN, &self.y)] {
             let bytes = URL_SAFE_NO_PAD
                 .decode(coordinate.trim_end_matches('='))
@@ -63,62 +64,37 @@ impl Jwk {
             let pad = COORDINATE_LEN
                 .checked_sub(bytes.len())
                 .ok_or_else(|| bad("coordinate too long"))?;
-            point[at + pad..at + COORDINATE_LEN].copy_from_slice(&bytes);
+            sec1[at + pad..at + COORDINATE_LEN].copy_from_slice(&bytes);
         }
-        Ok(Point(point))
+        PublicKey::from_sec1_bytes(&sec1)
+            .map(Point)
+            .map_err(|_| bad("not on the curve"))
     }
 }
 
 /// A P-384 coordinate's length.
 const COORDINATE_LEN: usize = 48;
-/// An uncompressed point's length.
-const POINT_LEN: usize = 1 + 2 * COORDINATE_LEN;
 
-/// A P-384 public key as its uncompressed point (SEC1: `0x04 ‖ x ‖ y`).
-#[derive(Clone, PartialEq, Eq)]
-pub(crate) struct Point([u8; POINT_LEN]);
-
-impl std::fmt::Debug for Point {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Point({:08x})", self.key_id())
-    }
-}
+/// A P-384 public key someone else gave: what a key is agreed with, or a value sealed to
+/// ([`seal`]).
+#[derive(Debug, Clone)]
+pub(crate) struct Point(PublicKey);
 
 impl Point {
-    /// The point of a key given as a JWK (`{kty, crv, x, y}`, JSON), as a drive's write-only
-    /// public key comes.
+    /// The key given as a JWK (`{kty, crv, x, y}`, JSON), as a drive's write-only public key
+    /// comes.
     pub(crate) fn from_jwk(json: &str) -> Result<Self, HomebaseError> {
         let jwk: Jwk = serde_json::from_str(json)
             .map_err(|_| HomebaseError::Crypto("peer public key: not a JWK".into()))?;
-        let point = jwk.point()?;
-        point.key()?;
-        Ok(point)
+        jwk.point()
     }
 
-    /// The key itself: the point must be on the curve.
-    fn key(&self) -> Result<PublicKey, HomebaseError> {
-        PublicKey::from_sec1_bytes(&self.0)
-            .map_err(|_| HomebaseError::Crypto("peer public key: not on the curve".into()))
-    }
-
-    fn of(secret: &SecretKey) -> Point {
-        let public = secret.public_key().to_sec1_point(false);
-        let mut point = [0u8; POINT_LEN];
-        point[0] = 0x04;
-        for (at, coordinate) in [(1, public.x()), (1 + COORDINATE_LEN, public.y())] {
-            if let Some(bytes) = coordinate {
-                point[at..at + COORDINATE_LEN].copy_from_slice(bytes.as_slice());
-            }
-        }
-        Point(point)
-    }
-
-    /// A sealed value's key id ([`seal`]): the IEEE CRC-32 of the point it is sealed to
-    /// (**[verified]** odin-core `ZkSeal.KeyId`).
+    /// A sealed value's key id ([`seal`]): the IEEE CRC-32 of the uncompressed point it is
+    /// sealed to (**[verified]** odin-core `ZkSeal.KeyId`).
     fn key_id(&self) -> u32 {
         let mut crc = !0u32;
-        for byte in self.0 {
-            crc ^= u32::from(byte);
+        for byte in self.0.to_sec1_point(false).as_bytes() {
+            crc ^= u32::from(*byte);
             for _ in 0..8 {
                 crc = if crc & 1 == 1 {
                     (crc >> 1) ^ 0xEDB8_8320
@@ -174,7 +150,7 @@ impl Exchange {
             .decode(peer_jwk_base64url.trim_end_matches('='))
             .map_err(|_| bad("not base64url"))?;
         let jwk: Jwk = serde_json::from_slice(&json).map_err(|_| bad("not a JWK"))?;
-        agree(&self.secret, &jwk.point()?.key()?, Some(salt), b"")
+        agree(&self.secret, &jwk.point()?.0, Some(salt), b"")
     }
 
     /// A value sealed to this key (`ZkSeal` v1, [`unseal`]).
@@ -250,11 +226,11 @@ fn unseal(
 /// time (**[verified]** odin-core `ZkSeal.Seal`, chat-kmp `ZkSeal.seal`).
 pub(crate) fn seal(point: &Point, data: &[u8]) -> Result<Vec<u8>, HomebaseError> {
     let throwaway = new_secret()?;
-    let key = agree(&throwaway, &point.key()?, None, SEAL_INFO)?;
+    let key = agree(&throwaway, &point.0, None, SEAL_INFO)?;
     let iv = random::<12>()?;
     let mut sealed = vec![SEAL_V1];
     sealed.extend(point.key_id().to_be_bytes());
-    sealed.extend(Point::of(&throwaway).0);
+    sealed.extend(throwaway.public_key().to_sec1_point(false).as_bytes());
     sealed.extend(iv);
     sealed.extend(gcm_seal(&key, &iv, data, &[])?);
     Ok(sealed)

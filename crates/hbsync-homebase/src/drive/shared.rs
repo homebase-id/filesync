@@ -192,12 +192,22 @@ impl PeerRemote {
     /// then: one their server refuses is replaced by the next read ([`PeerRemote::renewed`]),
     /// never by the connection, which waits and asks again.
     pub fn notifier(self: &Arc<Self>, events: impl Into<Events>) -> std::io::Result<Notifier> {
-        let drive = TargetDrive {
+        let remote = Arc::clone(self);
+        let theirs = move || (*remote.client()).clone();
+        Notifier::spawn_shared(theirs, self.their_drive(), events)
+    }
+
+    /// Their Filesync drive.
+    fn their_drive(&self) -> TargetDrive {
+        TargetDrive {
             alias: self.sharer.drive_alias,
             drive_type: SYNC_DRIVE.drive_type,
-        };
-        let remote = Arc::clone(self);
-        Notifier::spawn_shared(move || (*remote.client()).clone(), drive, events)
+        }
+    }
+
+    /// Their file `file_id`'s header as their server sends it: one request.
+    fn their_header(&self, file_id: RemoteFileId) -> Result<FileHeader> {
+        self.with_token(|client| self.raw_header(client, file_id))
     }
 
     /// Their server, with the token held now.

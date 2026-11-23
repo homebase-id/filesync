@@ -148,11 +148,7 @@ impl KeyHeader {
 
     /// `iv || key`, AES-CBC under `shared_secret` with `wrap_iv`, as an upload sends it.
     pub(crate) fn seal(&self, shared_secret: &Key, wrap_iv: &[u8; 16]) -> Value {
-        let mut plain = [0u8; 32];
-        plain[..16].copy_from_slice(&self.iv);
-        plain[16..].copy_from_slice(&self.key);
-        let sealed = aes_cbc_encrypt(shared_secret, wrap_iv, &plain);
-        plain.zeroize();
+        let sealed = aes_cbc_encrypt(shared_secret, wrap_iv, &self.combine()[..]);
         json!({
             "encryptionVersion": 1,
             "type": "aes",
@@ -188,14 +184,11 @@ impl KeyHeader {
     /// owner's devices): `ZkSeal` version 1 of `iv ‖ key`, the header's `iv` the same one
     /// (**[verified]** live, odin-core 3ace44b69; chat-kmp `sealKeyHeader`).
     pub(crate) fn sealed_to(&self, drive: &Point) -> Result<Value, HomebaseError> {
-        let mut plain = Zeroizing::new([0u8; 32]);
-        plain[..16].copy_from_slice(&self.iv);
-        plain[16..].copy_from_slice(&self.key);
         Ok(json!({
             "encryptionVersion": 1,
             "type": "sealed",
             "iv": STANDARD.encode(self.iv),
-            "encryptedAesKey": STANDARD.encode(seal(drive, &plain[..])?),
+            "encryptedAesKey": STANDARD.encode(seal(drive, &self.combine()[..])?),
         }))
     }
 
@@ -204,12 +197,12 @@ impl KeyHeader {
     /// `DriveFileUtility.CreateClientFileHeader`, the stored `EncryptedKeyHeader.Iv` being the
     /// key header's, `DriveStorageServiceBase.EncryptKeyHeader`).
     pub(crate) fn token(&self, shared_secret: &Key) -> FileToken {
-        let mut plain = [0u8; 32];
-        plain[..16].copy_from_slice(&self.iv);
-        plain[16..].copy_from_slice(&self.key);
         let mut bytes = self.iv.to_vec();
-        bytes.extend(aes_cbc_encrypt(shared_secret, &self.iv, &plain));
-        plain.zeroize();
+        bytes.extend(aes_cbc_encrypt(
+            shared_secret,
+            &self.iv,
+            &self.combine()[..],
+        ));
         FileToken(bytes.into())
     }
 
@@ -271,6 +264,15 @@ impl KeyHeader {
             ));
         }
         Ok(opened)
+    }
+
+    /// The key header as `iv ‖ key`: what is sealed or locked of it ([`KeyHeader::combined`]
+    /// reads it back).
+    fn combine(&self) -> Zeroizing<[u8; 32]> {
+        let mut plain = Zeroizing::new([0u8; 32]);
+        plain[..16].copy_from_slice(&self.iv);
+        plain[16..].copy_from_slice(&self.key);
+        plain
     }
 
     /// `iv ‖ key` as a key header.
