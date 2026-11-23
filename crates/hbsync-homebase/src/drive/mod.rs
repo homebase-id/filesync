@@ -576,7 +576,8 @@ impl HomebaseRemote {
     /// is locked with it, and the drive's write-only key when a live node's is sealed to that
     /// (a file someone added to a folder shared with them). A tombstone's or another app's
     /// file's isn't opened. A write-only key that isn't there, or doesn't open, leaves the file
-    /// unread, said.
+    /// unread, said: on a drive not known to be private too, which a sealed file doesn't make
+    /// one (a file locked with the drive's key does: that one only a private drive has).
     fn held(&self, header: &wire::FileHeader) -> Result<Held> {
         if !header.needs_write_only_key() {
             let drive = self.drive_key(header.needs_drive_key())?;
@@ -585,9 +586,7 @@ impl HomebaseRemote {
                 write_only: None,
             });
         }
-        // Sealed files are only on a private drive: its key state is read as for a file
-        // locked with the drive's key.
-        let write_only = self.key_state(true, KeyState::write_only)?;
+        let write_only = self.key_state(false, KeyState::write_only)?;
         Ok(Held {
             drive: None,
             write_only,
@@ -2375,8 +2374,20 @@ mod tests {
             assert!(why.contains("write-only key"), "{why}");
         }
         let remote = unreachable_remote(state(None, Some(&locked)))?;
-        let refused = remote.to_remote(header).expect_err("read");
+        let refused = remote.to_remote(header.clone()).expect_err("read");
         assert_eq!(refused.refusal(), Some(Refusal::NoKey), "{refused}");
+
+        // On a drive not known to be private the file is left unread, and no more: the drive
+        // isn't taken for private (which would refuse this computer), nor asked about (the
+        // identity can't be reached here).
+        let shared = KeyState {
+            private: false,
+            ..state(None, Some(&locked))
+        };
+        let remote = unreachable_remote(shared)?;
+        let why = remote.to_remote(header)?.expect_err("opened");
+        assert!(why.contains("write-only key"), "{why}");
+        assert!(!remote.drive_key.lock().private);
         Ok(())
     }
 

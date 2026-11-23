@@ -196,8 +196,10 @@ payload IV to the download would save it (a follow-up). What changes for this cl
   secret like any other. Its next write of the file (a rename, say) sends the key locked with
   the drive's key, as every write here does; the server takes it, and the file is a `zkDrive`
   one from then on (**[verified]** live). Where the write-only key isn't there or doesn't
-  open, the file is left unread, said, and the rest syncs on. Cost: per read of such a header,
-  one AES-GCM unlock and parse of the write-only key and one P-384 key agreement.
+  open, the file is left unread, said, and the rest syncs on; so too on a drive this computer
+  doesn't know to be private, which such a file doesn't make one. Cost: one P-384 key
+  agreement per read of such a header (0.8 ms measured); the write-only key itself is opened
+  once for each reading of the drive's key state.
 - **A private drive whose key isn't locked for the app yet** (the grant says `isZeroKnowledge`
   with no `zkAppKeyEncryptedStorageKey`: a grant the owner's browser hasn't seen) is the same as a login without the key: log in again, and the consent page fills it in.
 - **Without the key** (a login from before this client asked for it): the server leaves the
