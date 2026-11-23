@@ -62,10 +62,14 @@ about the server: `homebase-api-notes.md`, "Encrypted files".
   the request that needs it, from one of them. That is how the web and mobile Homebase
   apps work on other drives **[verified]** (odin-js `SecurityHelpers.encryptKeyHeader`,
   chat-kmp `PayloadBundleEncryptionService`, odin-core `FileSystemStreamWriterBase`).
-- Other Homebase apps can read the same files: the format is odin-js's byte for byte (the
-  golden vectors below) **[verified]**, and chat-kmp's code uses the same layout **[verified
-  in its code, not run]**. chat-kmp's Filesync mini-app lists and opens the drive's files
-  (`file-browser.md`).
+- Another Homebase app can read the files only if the owner grants it read access to the
+  drive, and what keeps it out otherwise is the cryptography, not a rule the server
+  applies: the drive's key is locked for each granted app's own zero-knowledge key
+  (`zkAppKeyEncryptedStorageKey`, below), which that app holds on the device. An app without
+  the grant holds nothing that opens a file. One with it reads the same format: odin-js's
+  byte for byte (the golden vectors below) **[verified]**, and chat-kmp's code uses the same
+  layout **[verified in its code, not run]**; chat-kmp's Filesync mini-app lists and opens
+  the drive's files (`file-browser.md`).
 
 ## The format
 

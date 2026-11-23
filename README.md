@@ -145,12 +145,16 @@ Good to know:
   is made in your browser and never reaches the server: not its disk, not its backups, not
   its memory. Only you and the devices you approved hold it, each device its own copy locked
   to that device. So your Homebase stores and serves your files without being able to open
-  one.[^key] What it still sees is the outline: how many items there are, about how big
-  each is, which folder (an id, not a name) each is in, and when it changes. It uses
-  Homebase's own format, so your other Homebase apps can open the files once you approve
-  them. The cipher handles about 1 GB/s encrypting and 2.8 GB/s decrypting, more than any
-  internet link. Dropbox, by default, encrypts files once they reach its servers, with keys
-  Dropbox holds. With Homebase Drive, the files are encrypted before they leave your
+  one.[^key] A break-in there finds ciphertext, and no key to open it. What the server
+  still sees is the outline: how many items there are, about how big each is, which folder
+  (an id, not a name) each is in, and when it changes. Your other Homebase apps are shut
+  out by the same cryptography, not by a rule: an app can read the files only if you grant
+  it read access to the drive, and then that app holds, on your device, what it takes to
+  decrypt them. The cipher handles about 1 GB/s encrypting and 2.8 GB/s decrypting, more
+  than any internet link. Dropbox, by default, encrypts files once they reach its servers,
+  with keys Dropbox holds. Let's be honest about what that is worth: it protects a disk
+  that is stolen, and little else. Whoever gets into Dropbox's systems has your files, and
+  so does Dropbox. With Homebase Drive, the files are encrypted before they leave your
   computer, and the keys stay with you and your devices, not with a company, and not with
   the server either. More: [docs/spec/encryption.md](docs/spec/encryption.md).
 
