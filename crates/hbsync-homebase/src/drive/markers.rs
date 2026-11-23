@@ -173,6 +173,7 @@ impl Markers {
             shared,
             drive: drive.as_ref(),
             circle: None,
+            write_only: None,
         };
         let unique_id = header.file_metadata.app_data.unique_id;
         match sharer_of(&header, keys, &self.owner) {

@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use crate::HomebaseError;
-use crate::crypto::{Key, aes_cbc_encrypt};
+use crate::crypto::{Key, WriteOnlyKey, aes_cbc_encrypt};
 use crate::drive::sealed::{KeyHeader, SealedKeyHeader, checked_sealed_len, iv16, sealed_len};
 use crate::drive::share_keys::CircleKey;
 
@@ -34,6 +34,9 @@ pub(crate) struct Keys<'a> {
     pub shared: &'a Key,
     pub drive: Option<&'a Key>,
     pub circle: Option<&'a CircleKey>,
+    /// The drive's write-only key, held only to open a file sealed to it
+    /// ([`SealedKeyHeader::sealed_to_drive`]).
+    pub write_only: Option<&'a WriteOnlyKey>,
 }
 
 /// A file header as query-batch and the header routes return it (the fields the client
@@ -511,11 +514,14 @@ pub(crate) fn to_remote(header: FileHeader, keys: Keys<'_>) -> Result<RemoteHead
                 payload,
             };
             // The key opened: the header it came in is the file's token, one under the shared
-            // secret, as every token is (one locked with the drive's key is sealed so here).
+            // secret, as every token is (one locked with the drive's key, or sealed to its
+            // write-only key, is sealed so here).
             let token = match header.shared_secret_encrypted_key_header.as_ref() {
                 // Another identity's file: nothing is written to it from here.
                 Some(sealed) if sealed.locked_for_share() => None,
-                _ if header.locked_with_drive_key() => Some(key.token(keys.shared)),
+                Some(sealed) if sealed.locked_with_drive_key() || sealed.sealed_to_drive() => {
+                    Some(key.token(keys.shared))
+                }
                 sealed => sealed.and_then(SealedKeyHeader::to_token),
             };
             (parent, body, token)
@@ -563,6 +569,14 @@ impl FileHeader {
             .shared_secret_encrypted_key_header
             .as_ref()
             .ok_or_else(|| HomebaseError::Crypto("no key header".into()))?;
+        if sealed.sealed_to_drive() {
+            let key = keys.write_only.ok_or_else(|| {
+                HomebaseError::Crypto(
+                    "sealed to the drive's write-only key, which isn't here".into(),
+                )
+            })?;
+            return KeyHeader::open_sealed(sealed, key);
+        }
         if sealed.locked_for_share() {
             // The circle is bound into the locked key: another circle's doesn't open it.
             let key = keys.circle.ok_or_else(|| {
@@ -587,11 +601,7 @@ impl FileHeader {
     /// A live node's, shared with this identity: [`to_remote`] opens it with the key of its
     /// [`FileHeader::share_circle`].
     pub(crate) fn needs_circle_key(&self) -> bool {
-        self.live_node()
-            && self
-                .shared_secret_encrypted_key_header
-                .as_ref()
-                .is_some_and(SealedKeyHeader::locked_for_share)
+        self.live_with(SealedKeyHeader::locked_for_share)
     }
 
     /// When a member stops reading the file ([`RemoteHeader::expires`]): the latest end of
@@ -620,7 +630,21 @@ impl FileHeader {
 
     /// A live node's, locked with the drive's key: [`to_remote`] opens it with that.
     pub(crate) fn needs_drive_key(&self) -> bool {
-        self.live_node() && self.locked_with_drive_key()
+        self.live_with(SealedKeyHeader::locked_with_drive_key)
+    }
+
+    /// A live node's, sealed to the drive's write-only key: [`to_remote`] opens it with that.
+    pub(crate) fn needs_write_only_key(&self) -> bool {
+        self.live_with(SealedKeyHeader::sealed_to_drive)
+    }
+
+    /// A live node's, whose key header is of the `kind` asked.
+    fn live_with(&self, kind: fn(&SealedKeyHeader) -> bool) -> bool {
+        self.live_node()
+            && self
+                .shared_secret_encrypted_key_header
+                .as_ref()
+                .is_some_and(kind)
     }
 }
 
@@ -797,6 +821,7 @@ mod tests {
         shared: &SS,
         drive: None,
         circle: None,
+        write_only: None,
     };
 
     fn fixture_value(name: &str) -> Value {
@@ -874,6 +899,7 @@ mod tests {
             shared: &SS,
             drive: Some(&drive_key),
             circle: None,
+            write_only: None,
         };
         let file = to_remote(header.clone(), private)?;
         let token = file.token.as_ref().ok_or("token")?;
@@ -885,6 +911,7 @@ mod tests {
             shared: &SS,
             drive: Some(&[8; 16]),
             circle: None,
+            write_only: None,
         };
         assert!(to_remote(header, wrong).is_err());
 
@@ -901,6 +928,47 @@ mod tests {
         let key: SealedKeyHeader = serde_json::from_value(plain["encryptedKeyHeader"].clone())?;
         assert!(key.locked_with_drive_key());
         assert_eq!(KeyHeader::open(&key, &drive_key)?, kh);
+        Ok(())
+    }
+
+    /// A file someone added to a folder shared with them, as the owner's own computer reads it:
+    /// its key header is sealed to the drive's write-only key (odin-core's vector), which opens
+    /// it; its token is under the shared secret, as any file's, so the next write of it here
+    /// names its key. Without that key it doesn't open, and says why. A tombstone with such a
+    /// key header needs no key.
+    #[test]
+    fn a_file_a_member_added_opens_with_the_drives_write_only_key() -> R {
+        use crate::crypto::WriteOnlyKey;
+        use crate::drive::share_keys::tests as v;
+        let write_only = WriteOnlyKey::from_pkcs8(&v::bytes(v::WRITE_ONLY_PKCS8))?;
+        let (kh, sent) = v::sealed_key_header();
+        let mut header = as_stored_with(fixture("file-node.json"), &kh)?;
+        header.shared_secret_encrypted_key_header = Some(serde_json::from_value(sent)?);
+        assert!(header.needs_write_only_key() && !header.needs_drive_key());
+        let keys = Keys {
+            write_only: Some(&write_only),
+            ..SHARED
+        };
+        assert_eq!(header.key(keys)?, kh);
+        let file = to_remote(header.clone(), keys)?;
+        let plain = to_remote(as_stored_with(fixture("file-node.json"), &kh)?, SHARED)?;
+        assert_eq!(file.body, plain.body);
+        let token = file.token.as_ref().ok_or("token")?;
+        let sealed = SealedKeyHeader::from_token(token).ok_or("not a token")?;
+        assert_eq!(KeyHeader::open(&sealed, &SS)?, kh);
+
+        let why = to_remote(header.clone(), SHARED).err().ok_or("opened")?;
+        assert!(why.contains("write-only key"), "{why}");
+        // The drive's key doesn't open it.
+        let with_drive = Keys {
+            drive: Some(&[9; 16]),
+            ..SHARED
+        };
+        assert!(to_remote(header.clone(), with_drive).is_err());
+
+        header.file_state = "deleted".into();
+        assert!(!header.needs_write_only_key());
+        assert_eq!(to_remote(header, SHARED)?.body, RemoteBody::Deleted);
         Ok(())
     }
 
@@ -938,6 +1006,7 @@ mod tests {
             shared: &SS,
             drive: None,
             circle: Some(&circle),
+            write_only: None,
         };
         for header in [
             shared(v::LOCKED, json!("share"))?,
@@ -1192,6 +1261,7 @@ mod tests {
                     shared: &[4; 16],
                     drive: None,
                     circle: None,
+                    write_only: None,
                 }
             )
             .is_err()

@@ -107,6 +107,10 @@ pub(crate) mod tests {
     pub(crate) const LOCKED_BY_GTID: &str =
         "A1BRUlNUVVZXWFlaWyNALFXaUVoKLLDbDk0g5bID6/ZsXceCKma5R4GJLiTG";
     const SEALED: &str = "AhRSmXQE7NVFE2N+zrbujRavkL1z/E4GHalzavkps48544kxb1C5vlxaQZbfnbT2N+RRSjZob4zGxLf4jftVPwAgZq3c692FaLeGasq2pZGKZ1iIyxpJ7Fbilv77slwQlOIeKC7Rag3IKHq3cJUyfbDKapD3G1IWdxUh0JkipMakO1Wy1Um0cvyaU9IBa5FBFpM=";
+    /// odin-core `ClientLockedKeyHeaderVectorTests`: the key header of [`HEADER_IV`] and
+    /// [`FILE_KEY`], sealed to the write-only key below.
+    pub(crate) const SEALED_KEY_HEADER: &str = "ARRSmXQEgEhVDqJf8V4wR/vfRnjuBiMDCgpqQ0EvwP8Sbhg/htjK6DPN0tPu9kf4VKIvY0JpI7ekZehCr+RJr6buacGObBkW+4KXwPFn4aNzze/w+3mTcGuj+8oKsvICcbFc5rPogLwn6Oz/OQuWmSn3xtY70ljeN7b6eV3wkBqmS0sKbr1o/iBvA+hgSlg/4KiDGsTq2pxlrCRLPvr2Vxjk";
+    pub(crate) const HEADER_IV: &str = "EBESExQVFhcYGRobHB0eHw==";
     /// The write-only key of the vectors' member drive (PKCS#8).
     pub(crate) const WRITE_ONLY_PKCS8: &str = "MIG2AgEAMBAGByqGSM49AgEGBSuBBAAiBIGeMIGbAgEBBDCZAel29rv0BgBwa7LGp4+tmSi5g4LlRzkW9/ZLQNgeVdrB44imUOGeaKmn1eiPZsShZANiAATKPHfd0ojszgjchR06XVN2p/iaosbJedgQGD86jcH39CM7EjWiXa6wVTW3cWGdDXwWQYx4NHDg8lIWULARJhvn02W1/eoTtDkhdpQrY6KmVbxpY/ehNZlDlhlh3MntF40=";
 
@@ -116,6 +120,20 @@ pub(crate) mod tests {
 
     pub(crate) fn id(s: &str) -> Uuid {
         s.parse().expect("uuid")
+    }
+
+    /// odin-core's key header sealed to the vectors' write-only key
+    /// ([`SEALED_KEY_HEADER`]): what it opens to, and how a server sends it.
+    pub(crate) fn sealed_key_header() -> (crate::drive::sealed::KeyHeader, serde_json::Value) {
+        let opened = crate::drive::sealed::KeyHeader {
+            iv: bytes(HEADER_IV).try_into().expect("an IV"),
+            key: bytes(FILE_KEY).try_into().expect("a key"),
+        };
+        let sent = serde_json::json!({
+            "encryptionVersion": 1, "type": "sealed",
+            "iv": HEADER_IV, "encryptedAesKey": SEALED_KEY_HEADER,
+        });
+        (opened, sent)
     }
 
     /// The vectors' sealed circle key, opened with `key` for `member`.

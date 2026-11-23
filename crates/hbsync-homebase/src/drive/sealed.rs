@@ -14,10 +14,12 @@ use cbc::cipher::{Array, BlockModeDecrypt, BlockModeEncrypt, KeyIvInit};
 use hbsync_types::{ContentHash, FileToken, HashAlgorithm};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::HomebaseError;
-use crate::crypto::{Envelope, Key, aes_cbc_decrypt, aes_cbc_encrypt, random};
+use crate::crypto::{
+    Envelope, Key, SEAL_V1, WriteOnlyKey, aes_cbc_decrypt, aes_cbc_encrypt, random,
+};
 use crate::drive::share_keys::CircleKey;
 
 const BLOCK: usize = 16;
@@ -86,6 +88,14 @@ impl SealedKeyHeader {
     /// Locked with the drive's key, not the shared secret.
     pub(crate) fn locked_with_drive_key(&self) -> bool {
         self.kind == "zkDrive" || self.kind == 13
+    }
+
+    /// Sealed to the drive's write-only key, which only the owner's devices open: a file
+    /// someone added to a folder shared with them, until a device of the owner's locks its key
+    /// with the drive's (**[verified]** live, odin-core 3ace44b69; chat-kmp
+    /// `EncryptionType.Sealed`).
+    pub(crate) fn sealed_to_drive(&self) -> bool {
+        self.kind == "sealed" || self.kind == 12
     }
 
     /// A file another identity shares with this one, as their server sends it to a member: the
@@ -196,13 +206,46 @@ impl KeyHeader {
         sealed: &SealedKeyHeader,
         shared_secret: &Key,
     ) -> Result<Self, HomebaseError> {
-        let mut plain = Envelope {
-            iv: sealed.iv.clone(),
-            data: sealed.encrypted_aes_key.clone(),
+        let plain = Zeroizing::new(
+            Envelope {
+                iv: sealed.iv.clone(),
+                data: sealed.encrypted_aes_key.clone(),
+            }
+            .open(shared_secret)?,
+        );
+        Self::combined(&plain)
+    }
+
+    /// Opens a key header sealed to the drive's write-only key
+    /// ([`SealedKeyHeader::sealed_to_drive`]) with that key: `ZkSeal` version 1 of the header IV,
+    /// then the file key (**[verified]** odin-core's vector, `ClientLockedKeyHeaderVectorTests`;
+    /// chat-kmp `openSealed`).
+    ///
+    /// The IV sealed must be the header's own, which the server can't check: the people the
+    /// file is shared with read it with the header's (**[verified]** odin-core
+    /// `DriveFileUtility.CreateClientFileHeader`, `EncryptedKeyHeader.ForShare`), so whoever
+    /// added the file could show its owner another name than them by sealing another. One
+    /// that differs doesn't open, as it doesn't for chat-kmp's and the server's transform
+    /// (`zkDriveFormOf`, `TransformedKeyHeader`).
+    pub(crate) fn open_sealed(
+        sealed: &SealedKeyHeader,
+        write_only: &WriteOnlyKey,
+    ) -> Result<Self, HomebaseError> {
+        let bytes = STANDARD
+            .decode(&sealed.encrypted_aes_key)
+            .map_err(|_| crypto("a sealed key header isn't base64"))?;
+        let opened = Self::combined(&write_only.unseal(&bytes, SEAL_V1, &[])?)?;
+        if iv16(&sealed.iv) != Some(opened.iv) {
+            return Err(crypto(
+                "a sealed key header's IV isn't the one sealed in it",
+            ));
         }
-        .open(shared_secret)?;
+        Ok(opened)
+    }
+
+    /// `iv ‖ key` as a key header.
+    fn combined(plain: &[u8]) -> Result<Self, HomebaseError> {
         if plain.len() != 32 {
-            plain.zeroize();
             return Err(crypto(format!("a key header of {} bytes", plain.len())));
         }
         let mut header = KeyHeader {
@@ -211,7 +254,6 @@ impl KeyHeader {
         };
         header.iv.copy_from_slice(&plain[..16]);
         header.key.copy_from_slice(&plain[16..]);
-        plain.zeroize();
         Ok(header)
     }
 
@@ -554,6 +596,50 @@ mod tests {
         assert!(numbered.locked_with_drive_key());
         let aes: SealedKeyHeader = serde_json::from_value(json!({ "type": "aes" }))?;
         assert!(!aes.locked_with_drive_key());
+        Ok(())
+    }
+
+    /// odin-core's vector of a key header sealed to a drive's write-only key
+    /// (`ClientLockedKeyHeaderVectorTests`): it opens with that key's private half to the IV
+    /// and the file key, by name or number; not a damaged one, nor one of another version, nor
+    /// one whose own IV isn't the one sealed in it.
+    #[test]
+    fn a_sealed_key_header_opens_with_the_write_only_key_as_odin_core_does()
+    -> Result<(), HomebaseError> {
+        use crate::drive::share_keys::tests as v;
+        let write_only = WriteOnlyKey::from_pkcs8(&v::bytes(v::WRITE_ONLY_PKCS8))?;
+        let (kh, sent) = v::sealed_key_header();
+        let header = |kind: Value, sealed: &str| -> SealedKeyHeader {
+            let mut sent = sent.clone();
+            sent["type"] = kind;
+            sent["encryptedAesKey"] = json!(sealed);
+            serde_json::from_value(sent).expect("a key header")
+        };
+        for kind in [json!("sealed"), json!(12)] {
+            let sealed = header(kind, v::SEALED_KEY_HEADER);
+            assert!(sealed.sealed_to_drive());
+            assert!(!sealed.locked_with_drive_key() && !sealed.locked_for_share());
+            assert_eq!(KeyHeader::open_sealed(&sealed, &write_only)?, kh);
+        }
+        for kind in [json!("aes"), json!("zkDrive"), json!("share"), json!(null)] {
+            assert!(!header(kind, v::SEALED_KEY_HEADER).sealed_to_drive());
+        }
+        let mut bytes = v::bytes(v::SEALED_KEY_HEADER);
+        let last = bytes.len() - 1;
+        bytes[last] ^= 1;
+        let damaged = header(json!("sealed"), &STANDARD.encode(&bytes));
+        assert!(KeyHeader::open_sealed(&damaged, &write_only).is_err());
+        bytes[last] ^= 1;
+        bytes[0] = 2;
+        let other_version = header(json!("sealed"), &STANDARD.encode(&bytes));
+        assert!(KeyHeader::open_sealed(&other_version, &write_only).is_err());
+        assert!(KeyHeader::open_sealed(&header(json!("sealed"), "junk!"), &write_only).is_err());
+        let mut other_iv = header(json!("sealed"), v::SEALED_KEY_HEADER);
+        other_iv.iv = STANDARD.encode([7u8; 16]);
+        let why = KeyHeader::open_sealed(&other_iv, &write_only).expect_err("opened");
+        assert!(why.to_string().contains("IV"), "{why}");
+        other_iv.iv = String::new();
+        assert!(KeyHeader::open_sealed(&other_iv, &write_only).is_err());
         Ok(())
     }
 

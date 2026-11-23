@@ -461,6 +461,10 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-11-23: a node someone added to a folder shared with them (chat-kmp's Filesync does, as
+  a member with Edit) reaches the owner's drive with its key header sealed to the drive's
+  write-only key (`sealed`; encryption spec, "A private drive"), the member as its
+  `senderOdinId`: computers now read it (they left it out before). Nothing new on a node.
 - 2026-11-19: a sync marker counts only on a private drive (Sync markers, Trust): on a
   collaborative one computers turn nobody's sync on, and leave what they sync as it is.
   Nothing new in a marker; an app writes them as before.
