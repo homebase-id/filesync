@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use hbsync_remote::{Answers, NodeMeta, RemoteBody, RemoteError, Result, Upload};
+use hbsync_remote::{Answers, ErrorClass, NodeMeta, RemoteBody, RemoteError, Result, Upload};
 use hbsync_types::{ContentHash, NodeId, RemoteFileId, RemoteRef, Target, VersionTag, Written};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -104,6 +104,15 @@ fn written(
     }
 }
 
+/// Whether `e`, the answer to one file of several, isn't that file's own: it is tried again
+/// later, or lifted by someone, for all of them alike.
+fn stops(e: &RemoteError) -> bool {
+    matches!(
+        e.class(),
+        ErrorClass::Transient | ErrorClass::RateLimited | ErrorClass::Denied | ErrorClass::Full
+    )
+}
+
 /// Their file `header` as written from here.
 fn written_as(header: &wire::FileHeader, content: Option<ContentHash>) -> Written {
     let version = VersionTag(header.file_metadata.version_tag);
@@ -186,6 +195,9 @@ impl PeerRemote {
     /// Their files `files` moved to their Recently deleted, or back
     /// ([`hbsync_remote::Remote::set_removed`]): each a change of its header alone, one after
     /// another (a header read, a send and its word for each: there is no batch for a member).
+    /// An answer that isn't one file's own (their server or this one not reached, not
+    /// connected, a send still on its way) stops it there: the files left would each meet
+    /// the same, after their own wait.
     pub(super) fn set_theirs_removed(
         &self,
         files: &[Target],
@@ -212,7 +224,19 @@ impl PeerRemote {
             };
             self.change(&header, target.at.version, &meta, None)
         };
-        Ok(Answers::all(files.iter().map(one).collect()))
+        let mut answers = Vec::with_capacity(files.len());
+        for target in files {
+            match one(target) {
+                Err(e) if stops(&e) => {
+                    return Ok(Answers {
+                        answers,
+                        stopped: Some(e),
+                    });
+                }
+                answer => answers.push(answer),
+            }
+        }
+        Ok(Answers::all(answers))
     }
 
     /// Sends `meta` (and `payload`) as their file `header`'s next version, if it is still at
@@ -746,6 +770,28 @@ mod tests {
         assert!(sam.writes.is_sealed(file) && locked(&sam.writes.point).is_some());
         sam.other_key_header(file, true);
         assert!(!sam.writes.is_sealed(file) && locked(&sam.writes.point).is_none());
+        Ok(())
+    }
+
+    /// Of the answers to several files, the ones that aren't a file's own stop the rest.
+    #[test]
+    fn what_isnt_one_files_own_stops_the_rest() -> std::result::Result<(), HomebaseError> {
+        let sam = sam()?;
+        for stopping in [
+            sam.on_its_way(),
+            not_connected_to("sam.invalid", "changed"),
+            RemoteError::Transient("no route".into()),
+        ] {
+            assert!(stops(&stopping), "{stopping}");
+        }
+        for its_own in [
+            RemoteError::VersionMismatch,
+            RemoteError::Deleted,
+            RemoteError::NotFound,
+            sam.read_only(),
+        ] {
+            assert!(!stops(&its_own), "{its_own}");
+        }
         Ok(())
     }
 

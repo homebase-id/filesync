@@ -70,6 +70,10 @@ const NO_WRITE_ONLY_KEY: &str =
 /// connection they haven't reviewed) before it is asked about again.
 const SHARER_WAIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
+/// How long the app's want of the permission to send to other identities is taken as read,
+/// before the security context is asked again ([`HomebaseRemote::may_send`]).
+const SENDS_READ_AGAIN: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// How long a share waits before it asks again where this identity isn't connected to its
 /// sharer: connecting is done by people, in their Homebase.
 const NOT_CONNECTED_WAIT: std::time::Duration = std::time::Duration::from_secs(3600);
@@ -190,6 +194,8 @@ struct KeyState {
     /// The app holds `UseTransitWrite` ([`app::USE_TRANSIT_WRITE`]): it may send to other
     /// identities' drives, as a change to what they share with this one is.
     sends: bool,
+    /// When the security context was last read for that.
+    sends_read: Option<std::time::Instant>,
 }
 
 impl KeyState {
@@ -231,6 +237,7 @@ impl KeyState {
             opened: OnceLock::new(),
             reads_shared: holds_key(&context, app::USE_TRANSIT_READ),
             sends: holds_key(&context, app::USE_TRANSIT_WRITE),
+            sends_read: Some(std::time::Instant::now()),
         })
     }
 
@@ -740,11 +747,17 @@ impl HomebaseRemote {
     }
 
     /// Whether the app may send to other identities' drives ([`app::USE_TRANSIT_WRITE`]), as
-    /// the security context said when last read; where it said no, read again now (one
-    /// request: the owner may have given the permission since), and kept.
+    /// the security context said when last read; where it said no, read again (one request:
+    /// the owner may have given the permission since) at most once in [`SENDS_READ_AGAIN`],
+    /// and kept: every write refused for want of it asks.
     pub(crate) fn may_send(&self) -> Result<bool> {
-        Ok(self.key_state(false, |s| Ok(s.sends))?
-            || self.holds_now(app::USE_TRANSIT_WRITE, |state| &mut state.sends)?)
+        let (sends, read) = self.key_state(false, |s| Ok((s.sends, s.sends_read)))?;
+        if sends || read.is_some_and(|at| at.elapsed() < SENDS_READ_AGAIN) {
+            return Ok(sends);
+        }
+        let sends = self.holds_now(app::USE_TRANSIT_WRITE, |state| &mut state.sends)?;
+        self.drive_key.lock().sends_read = Some(std::time::Instant::now());
+        Ok(sends)
     }
 
     /// What this identity's own markers say: whose shares its computers sync, and which of its
@@ -2426,6 +2439,23 @@ mod tests {
         let why = remote.to_remote(header)?.expect_err("opened");
         assert!(why.contains("write-only key"), "{why}");
         assert!(!remote.drive_key.lock().private);
+        Ok(())
+    }
+
+    /// The app's want of the permission to send, read a moment ago, is not asked about again
+    /// at once (the identity can't be reached here); holding it is never asked about.
+    #[test]
+    fn the_permission_to_send_is_not_asked_for_at_every_write() -> Result<(), HomebaseError> {
+        let state = |sends, sends_read| KeyState {
+            sends,
+            sends_read,
+            ..KeyState::default()
+        };
+        let just_read = Some(std::time::Instant::now());
+        let remote = unreachable_remote(state(false, just_read))?;
+        assert_eq!(remote.may_send().ok(), Some(false));
+        let remote = unreachable_remote(state(true, None))?;
+        assert_eq!(remote.may_send().ok(), Some(true));
         Ok(())
     }
 
