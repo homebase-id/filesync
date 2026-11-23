@@ -183,6 +183,12 @@ fn name_free(root: &Path, dir: &Path, name: &str) -> bool {
 /// are fixed (`0..`), the same every run; the rest are new every run, from a random base printed
 /// once (`MILESTONE_SEED_BASE` replays a run: a failure names its seed).
 fn seeds() -> Vec<u64> {
+    seeds_with(true)
+}
+
+/// [`seeds`], or without `random`, the second half fixed too (`0..MILESTONE_SEEDS`, the same
+/// every run) unless `MILESTONE_SEED_BASE` is set: a replay runs the same seeds as [`seeds`].
+fn seeds_with(random: bool) -> Vec<u64> {
     let n: u64 = std::env::var("MILESTONE_SEEDS")
         .ok()
         .and_then(|s| s.parse().ok())
@@ -191,7 +197,11 @@ fn seeds() -> Vec<u64> {
     let base: Option<u64> = std::env::var("MILESTONE_SEED_BASE")
         .ok()
         .and_then(|s| s.parse().ok());
-    let base = base.unwrap_or_else(random_base);
+    let base = match base {
+        Some(base) => base,
+        None if random => random_base(),
+        None => fixed,
+    };
     eprintln!(
         "milestone: {fixed} fixed seeds, {} from base {base}",
         n - fixed
