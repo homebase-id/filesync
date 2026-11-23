@@ -111,9 +111,12 @@ impl Exchange {
         let bytes = STANDARD
             .decode(sealed_b64)
             .map_err(|_| HomebaseError::Protocol("sealed value: not base64".into()))?;
-        unseal(&self.secret, &bytes, 1, &[])
+        unseal(&self.secret, &bytes, SEAL_V1, &[])
     }
 }
+
+/// `ZkSeal` version 1: a value sealed with no AAD ([`unseal`]).
+pub(crate) const SEAL_V1: u8 = 1;
 
 /// A drive's write-only private key (P-384): what is sealed to the drive opens with it, such as
 /// a circle's key a sharer sealed to it.

@@ -17,16 +17,15 @@ use serde_json::{Value, json};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::HomebaseError;
-use crate::crypto::{Envelope, Key, WriteOnlyKey, aes_cbc_decrypt, aes_cbc_encrypt, random};
+use crate::crypto::{
+    Envelope, Key, SEAL_V1, WriteOnlyKey, aes_cbc_decrypt, aes_cbc_encrypt, random,
+};
 use crate::drive::share_keys::CircleKey;
 
 const BLOCK: usize = 16;
 
 /// A sealed key header as bytes: the wrap IV (16), then the encrypted IV and key (48).
 const SEALED_LEN: usize = 64;
-
-/// The `ZkSeal` version of a key header sealed to a drive's write-only key.
-const SEAL_VERSION: u8 = 1;
 
 /// Streams are encrypted and decrypted this many bytes at a time.
 const CHUNK: usize = 64 * 1024;
@@ -228,7 +227,7 @@ impl KeyHeader {
         let bytes = STANDARD
             .decode(&sealed.encrypted_aes_key)
             .map_err(|_| crypto("a sealed key header isn't base64"))?;
-        Self::combined(&write_only.unseal(&bytes, SEAL_VERSION, &[])?)
+        Self::combined(&write_only.unseal(&bytes, SEAL_V1, &[])?)
     }
 
     /// `iv ‖ key` as a key header.
@@ -595,16 +594,12 @@ mod tests {
     -> Result<(), HomebaseError> {
         use crate::drive::share_keys::tests as v;
         let write_only = WriteOnlyKey::from_pkcs8(&v::bytes(v::WRITE_ONLY_PKCS8))?;
-        let kh = KeyHeader {
-            iv: std::array::from_fn(|i| 0x10 + i as u8),
-            key: std::array::from_fn(|i| 0x20 + i as u8),
-        };
+        let (kh, sent) = v::sealed_key_header();
         let header = |kind: Value, sealed: &str| -> SealedKeyHeader {
-            serde_json::from_value(json!({
-                "encryptionVersion": 1, "type": kind,
-                "iv": v::HEADER_IV, "encryptedAesKey": sealed,
-            }))
-            .expect("a key header")
+            let mut sent = sent.clone();
+            sent["type"] = kind;
+            sent["encryptedAesKey"] = json!(sealed);
+            serde_json::from_value(sent).expect("a key header")
         };
         for kind in [json!("sealed"), json!(12)] {
             let sealed = header(kind, v::SEALED_KEY_HEADER);

@@ -122,6 +122,20 @@ pub(crate) mod tests {
         s.parse().expect("uuid")
     }
 
+    /// odin-core's key header sealed to the vectors' write-only key
+    /// ([`SEALED_KEY_HEADER`]): what it opens to, and how a server sends it.
+    pub(crate) fn sealed_key_header() -> (crate::drive::sealed::KeyHeader, serde_json::Value) {
+        let opened = crate::drive::sealed::KeyHeader {
+            iv: bytes(HEADER_IV).try_into().expect("an IV"),
+            key: bytes(FILE_KEY).try_into().expect("a key"),
+        };
+        let sent = serde_json::json!({
+            "encryptionVersion": 1, "type": "sealed",
+            "iv": HEADER_IV, "encryptedAesKey": SEALED_KEY_HEADER,
+        });
+        (opened, sent)
+    }
+
     /// The vectors' sealed circle key, opened with `key` for `member`.
     pub(crate) fn unseal_with(
         key: &WriteOnlyKey,

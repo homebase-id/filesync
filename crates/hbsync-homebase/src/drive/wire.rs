@@ -601,11 +601,7 @@ impl FileHeader {
     /// A live node's, shared with this identity: [`to_remote`] opens it with the key of its
     /// [`FileHeader::share_circle`].
     pub(crate) fn needs_circle_key(&self) -> bool {
-        self.live_node()
-            && self
-                .shared_secret_encrypted_key_header
-                .as_ref()
-                .is_some_and(SealedKeyHeader::locked_for_share)
+        self.live_with(SealedKeyHeader::locked_for_share)
     }
 
     /// When a member stops reading the file ([`RemoteHeader::expires`]): the latest end of
@@ -634,16 +630,21 @@ impl FileHeader {
 
     /// A live node's, locked with the drive's key: [`to_remote`] opens it with that.
     pub(crate) fn needs_drive_key(&self) -> bool {
-        self.live_node() && self.locked_with_drive_key()
+        self.live_with(SealedKeyHeader::locked_with_drive_key)
     }
 
     /// A live node's, sealed to the drive's write-only key: [`to_remote`] opens it with that.
     pub(crate) fn needs_write_only_key(&self) -> bool {
+        self.live_with(SealedKeyHeader::sealed_to_drive)
+    }
+
+    /// A live node's, whose key header is of the `kind` asked.
+    fn live_with(&self, kind: fn(&SealedKeyHeader) -> bool) -> bool {
         self.live_node()
             && self
                 .shared_secret_encrypted_key_header
                 .as_ref()
-                .is_some_and(SealedKeyHeader::sealed_to_drive)
+                .is_some_and(kind)
     }
 }
 
@@ -940,15 +941,9 @@ mod tests {
         use crate::crypto::WriteOnlyKey;
         use crate::drive::share_keys::tests as v;
         let write_only = WriteOnlyKey::from_pkcs8(&v::bytes(v::WRITE_ONLY_PKCS8))?;
-        let kh = KeyHeader {
-            iv: v::bytes(v::HEADER_IV).try_into().map_err(|_| "an IV")?,
-            key: v::bytes(v::FILE_KEY).try_into().map_err(|_| "a key")?,
-        };
+        let (kh, sent) = v::sealed_key_header();
         let mut header = as_stored_with(fixture("file-node.json"), &kh)?;
-        header.shared_secret_encrypted_key_header = Some(serde_json::from_value(json!({
-            "encryptionVersion": 1, "type": "sealed",
-            "iv": v::HEADER_IV, "encryptedAesKey": v::SEALED_KEY_HEADER,
-        }))?);
+        header.shared_secret_encrypted_key_header = Some(serde_json::from_value(sent)?);
         assert!(header.needs_write_only_key() && !header.needs_drive_key());
         let keys = Keys {
             write_only: Some(&write_only),
