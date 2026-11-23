@@ -799,6 +799,15 @@ it for editing. Built, and not turned on: a share is still read-only in the prod
   request). All **[verified]** live; the circles of the folder the member isn't in get their
   rows from a device of the owner's (**[verified]** chat-kmp `FilesyncShareUpkeep`; this
   client's owner side doesn't do that).
+- **The version a new file lands as** is made by their server (**[verified]** odin-core
+  efc317ad4, `PeerFileWriter`: `CreateVersionTag`; live: never the send's `newVersionTag`),
+  and told in one place only, the socket's word of the delivery (`versionTag`, below;
+  **[verified]** live: the version their file then has). The client answers the write at that
+  version. Without the word it reads their file, and takes its version as the write's only
+  while the file is as it was sent (the same header and bytes): one its owner changed in
+  between is answered "already there" for the engine to read, as taking the owner's version
+  for the member's bytes would count the owner's change as synced. No request more: their
+  file is read for its id either way.
 - **What became of it** is told on this login's own notification socket: `notificationType:
   "peerSendResult"`, `data` `{recipient, driveId, globalTransitId, sentVersionTag, isUpdate,
   isDelete, status, willRetry, versionTag}`. `sentVersionTag` is the send's `newVersionTag`;
