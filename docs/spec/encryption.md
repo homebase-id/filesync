@@ -246,6 +246,19 @@ odin-core's `SelectiveShareKeyVectorTests` **[verified]**):
   `DriveFileUtility.CreateClientFileHeader`, `CallerShares.LiveRowsOf`; `drive/shared.rs`).
   A payload comes without a key header; its IV is the payload descriptor's, as on a private
   drive.
+- **As a member writes it** (built, not turned on: homebase-api-notes, "Writing to what
+  others share"). A change keeps the file's key under a new header IV: the member sends
+  `{type: "share", iv: newHeaderIv, encryptedAesKey: ""}`, and the owner's server keeps the
+  key as it holds it. A new file gets a new key, sealed to the owner's drive (`type:
+  "sealed"`: `ZkSeal` version 1 of `iv ‖ key`, to the drive's write-only public key, asked of
+  the owner's server), and a share row per row of its folder, with the key locked under
+  that circle's key in format 3 (the member picks the global transit id it is bound to).
+  A change to a file still sealed so is sealed again. `ZkSeal` version 1: `0x01 ‖` the IEEE
+  CRC-32 of the recipient's point, big-endian `‖` a throwaway P-384 point (97) `‖` IV (12) `‖`
+  AES-128-GCM ciphertext and tag, under HKDF-SHA256 of the ECDH secret with no salt and the
+  info `homebase-zk-seal` (**[verified]** against odin-core's vectors: the lock byte for
+  byte with its nonce, the seal's key id, and both opened again; `crypto.rs`,
+  `share_keys.rs`, `sealed.rs`).
 - Every id in an AAD is a Guid's .NET byte order (the first three fields little-endian); a
   drive's id is its alias.
 
