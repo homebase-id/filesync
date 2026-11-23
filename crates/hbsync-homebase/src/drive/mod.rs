@@ -738,6 +738,13 @@ impl HomebaseRemote {
         self.holds_now(app::USE_TRANSIT_READ, |state| &mut state.reads_shared)
     }
 
+    /// A send was refused for want of the permission to send: not held, as of now.
+    pub(crate) fn may_not_send(&self) {
+        let mut state = self.drive_key.lock();
+        state.sends = false;
+        state.sends_read = Some(std::time::Instant::now());
+    }
+
     /// Whether the app holds permission `key`, the security context read again now for it
     /// alone (one request, nothing held meanwhile), and what it says kept in `flag`.
     fn holds_now(&self, key: u32, flag: fn(&mut KeyState) -> &mut bool) -> Result<bool> {
@@ -2456,6 +2463,9 @@ mod tests {
         assert_eq!(remote.may_send().ok(), Some(false));
         let remote = unreachable_remote(state(true, None))?;
         assert_eq!(remote.may_send().ok(), Some(true));
+        // A send refused for want of it: not held from then on, and not asked about at once.
+        remote.may_not_send();
+        assert_eq!(remote.may_send().ok(), Some(false));
         Ok(())
     }
 

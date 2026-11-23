@@ -812,6 +812,12 @@ it for editing. Built, and not turned on: a share is still read-only in the prod
   retried. Measured live, the whole write with the socket connected: 20 to 40 ms for a
   header, 60 to 120 ms with bytes or for a new file; without a socket, the first wait and one
   read more.
+- **A new file that is there already.** A node found on their drive where a new one was
+  sent is that send's only by its `globalTransitId`. With another's, an earlier send of the
+  node landed (one from before a restart, or one this run stopped waiting for), and their
+  server refuses the later one (**[verified]** odin-core `PeerFileWriter`: a file sent
+  again with shares is an `ArgumentError`, told as `recipientIdentityReturnedBadRequest`):
+  the client says `AlreadyExists`, and the engine reads what is there, its bytes too.
 - **One write of a node at a time.** The staged copy carries the node's `uniqueId`, unique
   on the transient drive too: a second write of the node while the first is still in the
   outbox answers `400 existingFileWithUniqueId` (**[verified]** live for a stray copy;
