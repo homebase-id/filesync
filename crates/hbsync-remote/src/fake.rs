@@ -47,9 +47,9 @@ use hbsync_types::{
 };
 
 use crate::{
-    Answers, BATCH_FILES, ChangeRef, ChangesPage, Deletes, ForGood, Holds, NodeMeta, PayloadInfo,
-    Planned, RefsPage, Refusal, Remote, RemoteBody, RemoteError, RemoteHeader, Result, Skipped,
-    Upload,
+    Answers, BATCH_FILES, ChangeRef, ChangesPage, Deletes, ErrorClass, ForGood, Holds, NodeMeta,
+    PayloadInfo, Planned, RefsPage, Refusal, Remote, RemoteBody, RemoteError, RemoteHeader, Result,
+    Skipped, Upload,
 };
 
 #[derive(Debug, Clone)]
@@ -640,15 +640,6 @@ impl FakeServer {
         }
     }
 
-    /// Whether the member may change the file at `at`, asked in the Homebase adapter's order
-    /// (`PeerRemote::change`): deleted, at another version by now, shared for reading alone.
-    fn may_change(&self, at: RemoteRef) -> Result<()> {
-        if self.to_change(at.file_id)?.1.version != at.version {
-            return Err(RemoteError::VersionMismatch);
-        }
-        self.editable(at.file_id).map(drop)
-    }
-
     /// The member's share of the folder `parent`, where it may add to it: a folder of the
     /// drive it may change ([`FakeServer::editable`]). What it adds is shared as that.
     fn addable(&self, parent: NodeId) -> Result<Share> {
@@ -1048,8 +1039,9 @@ pub struct Faults {
     /// owner's drive: each answers [`RemoteError::Waiting`], as the Homebase adapter does
     /// when no word of a send comes in time, and is written only when
     /// [`FakeRemote::deliver`] is called (or never). While one of a node is held, another of
-    /// that node waits too, and is not sent. Of several removals the first one held stops
-    /// the rest, which aren't sent either.
+    /// that node waits too, and is not sent (their file as it was: one changed since answers
+    /// that first). Of several removals the first one held stops the rest, which aren't
+    /// sent either.
     pub on_their_way: bool,
     /// Creates, updates, deletes and share changes are refused with [`RemoteError::Denied`]
     /// (the app lost write access to the drive); reads still work.
@@ -1149,9 +1141,25 @@ struct Held {
 struct Outbox {
     /// The writes held ([`Faults::on_their_way`]), in the order they were sent.
     held: Vec<Held>,
-    /// What the last write delivered of a node was written as, where the owner's server took
-    /// it: the word a member's socket hears of a send, until a write of the node asks.
-    landed: HashMap<NodeId, Written>,
+    /// The last write of a node the owner's server took, and what it was written as: the
+    /// word a member's socket hears of a send, until the client that sent it asks.
+    landed: HashMap<NodeId, (Ask, Written)>,
+}
+
+impl Outbox {
+    /// Whether a write of `node` is held on its way.
+    fn holds(&self, node: NodeId) -> bool {
+        self.held.iter().any(|held| held.ask.node() == node)
+    }
+}
+
+/// Whether `e`, the answer to one of several removals of the member's, isn't that file's
+/// own, and stops the rest: as the Homebase adapter's `stops`.
+fn stops(e: &RemoteError) -> bool {
+    matches!(
+        e.class(),
+        ErrorClass::Transient | ErrorClass::RateLimited | ErrorClass::Denied | ErrorClass::Full
+    )
 }
 
 /// An upload's bytes as the fake took them in, with their hash.
@@ -1283,41 +1291,78 @@ impl FakeRemote {
         self.sent.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// What an earlier write of `ask`'s node means for it, as the Homebase adapter finds it
-    /// before it sends (`PeerRemote::change`, `add_to_theirs`):
-    /// - one held on its way still: this one waits, and isn't sent (the same write again is
-    ///   still on its way; another is refused by the member's own server while the first is
-    ///   staged there);
-    /// - this very write, which this client sent and had no answer to, landed since: its
-    ///   answer;
-    /// - nothing: `None`, and the write goes on.
-    ///
-    /// A client that doesn't remember the write (another one, or this one started again)
-    /// gets no such answer: it meets what landed as someone else's.
-    fn earlier(&self, ask: &Ask, bytes: bool) -> Option<Result<Written>> {
+    /// This very write (`ask`, with `bytes` or without), where this client sent it before and
+    /// had no answer to it, as the Homebase adapter knows one (`Writes::earlier`): landed
+    /// since, its answer; still on its way, their file `unchanged` since, it waits; else it
+    /// is forgotten, and `None` as for a write never sent. Another write of the node leaves
+    /// what is remembered alone.
+    fn again(
+        &self,
+        outbox: &mut Outbox,
+        ask: &Ask,
+        bytes: bool,
+        unchanged: bool,
+    ) -> Option<Result<Written>> {
         let node = ask.node();
-        let mut outbox = self.outbox();
-        if outbox.held.iter().any(|held| held.ask.node() == node) {
+        let mut sent = self.sent();
+        let this = |(sent, had): &(Ask, bool)| sent == ask && *had == bytes;
+        if !sent.get(&node).is_some_and(this) {
+            return None;
+        }
+        if outbox
+            .landed
+            .get(&node)
+            .is_some_and(|(landed, _)| landed == ask)
+        {
+            sent.remove(&node);
+            return outbox.landed.remove(&node).map(|(_, written)| Ok(written));
+        }
+        if unchanged && outbox.holds(node) {
             return Some(Err(on_its_way()));
         }
-        let landed = outbox.landed.remove(&node);
-        let (sent, had) = self.sent().remove(&node)?;
-        landed.filter(|_| sent == *ask && had == bytes).map(Ok)
+        sent.remove(&node);
+        None
+    }
+
+    /// What stands before a change of the member's to their file at `at` (`ask`: an update
+    /// or a removal), asked in the Homebase adapter's order (`PeerRemote::change`):
+    /// 1. their file is read: one not shared with it is refused, a tombstone is deleted;
+    /// 2. this very write sent before ([`FakeRemote::again`]): its answer where it landed
+    ///    (`Some`), or it waits;
+    /// 3. their file is at another version by now;
+    /// 4. it is shared for reading alone;
+    /// 5. another write of the node is on its way still: the member's own server refuses a
+    ///    second one while the first is staged there, so this one waits, unsent.
+    ///
+    /// `None`: it is sent.
+    fn before(&self, ask: &Ask, at: RemoteRef, bytes: bool) -> Result<Option<Written>> {
+        let version = self.server().to_change(at.file_id)?.1.version;
+        let mut outbox = self.outbox();
+        if let Some(answer) = self.again(&mut outbox, ask, bytes, version == at.version) {
+            return answer.map(Some);
+        }
+        if version != at.version {
+            return Err(RemoteError::VersionMismatch);
+        }
+        self.server().editable(at.file_id)?;
+        match outbox.holds(ask.node()) {
+            true => Err(on_its_way()),
+            false => Ok(None),
+        }
     }
 
     /// Sends a write of the member's: held on its way where they are
     /// ([`Faults::on_their_way`]), and remembered as sent; else the owner's server takes it
-    /// at once.
+    /// at once (and what this client remembered of an earlier send of the node is gone).
     fn send(&self, held: Held) -> Result<Written> {
+        let node = held.ask.node();
         if self.faults().on_their_way {
-            let node = held.ask.node();
-            let mut outbox = self.outbox();
-            outbox.landed.remove(&node);
             self.sent()
                 .insert(node, (held.ask.clone(), held.bytes.is_some()));
-            outbox.held.push(held);
+            self.outbox().held.push(held);
             return Err(on_its_way());
         }
+        self.sent().remove(&node);
         self.taken(&mut self.server(), held)
     }
 
@@ -1358,31 +1403,38 @@ impl FakeRemote {
     /// the order they were sent: what became of each. One refused there (the file written
     /// since, say) is given up, as Homebase's outbox gives it up.
     pub fn deliver(&self) -> Vec<Result<Written>> {
-        let held = std::mem::take(&mut self.outbox().held);
-        let taken: Vec<(NodeId, Result<Written>)> = {
-            let mut server = self.server();
-            let take = |held: Held| (held.ask.node(), self.taken(&mut server, held));
-            held.into_iter().map(take).collect()
-        };
         let mut outbox = self.outbox();
-        // (One not taken has no earlier word to clear: sending it cleared the node's.)
-        for (node, answer) in &taken {
-            if let Ok(written) = answer {
-                outbox.landed.insert(*node, written.clone());
+        let held = std::mem::take(&mut outbox.held);
+        let mut server = self.server();
+        let take = |held: Held| {
+            let ask = held.ask.clone();
+            let answer = self.taken(&mut server, held);
+            if let Ok(written) = &answer {
+                outbox.landed.insert(ask.node(), (ask, written.clone()));
             }
-        }
-        taken.into_iter().map(|(_, answer)| answer).collect()
+            answer
+        };
+        held.into_iter().map(take).collect()
     }
 
-    /// A new file or folder of the member's ([`Remote::create`]).
+    /// A new file or folder of the member's ([`Remote::create`]), asked in the Homebase
+    /// adapter's order (`PeerRemote::add_to_theirs`): this very write sent before
+    /// ([`FakeRemote::again`]); the folder, which must be shared with it for editing (the
+    /// new file is shared as the folder is then); another write of the node on its way
+    /// still, for which this one waits, unsent. Refused, nothing of the upload is read.
     fn add(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Written> {
         let ask = Ask::Create(node.clone());
-        if let Some(answer) = self.earlier(&ask, payload.is_some()) {
-            return answer;
-        }
-        // Refused before anything is sent, as the Homebase adapter reads the folder's shares
-        // first: the new file is shared as the folder is then.
-        let shared_as = Some(self.server().addable(node.parent)?);
+        let shared_as = {
+            let mut outbox = self.outbox();
+            if let Some(answer) = self.again(&mut outbox, &ask, payload.is_some(), true) {
+                return answer;
+            }
+            let shared_as = self.server().addable(node.parent)?;
+            if outbox.holds(node.node) {
+                return Err(on_its_way());
+            }
+            Some(shared_as)
+        };
         let bytes = self.receive(payload)?;
         self.send(Held {
             ask,
@@ -1391,7 +1443,8 @@ impl FakeRemote {
         })
     }
 
-    /// A change of the member's to a file ([`Remote::update`]).
+    /// A change of the member's to a file ([`Remote::update`]): refused
+    /// ([`FakeRemote::before`]), nothing of the upload is read.
     fn change(
         &self,
         at: RemoteRef,
@@ -1399,11 +1452,9 @@ impl FakeRemote {
         payload: Option<Upload<'_>>,
     ) -> Result<Written> {
         let ask = Ask::Update(at, meta.clone());
-        if let Some(answer) = self.earlier(&ask, payload.is_some()) {
-            return answer;
+        if let Some(written) = self.before(&ask, at, payload.is_some())? {
+            return Ok(written);
         }
-        // Refused before anything is sent, as the Homebase adapter reads their file first.
-        self.server().may_change(at)?;
         let bytes = self.receive(payload)?;
         self.send(Held {
             ask,
@@ -1429,10 +1480,9 @@ impl FakeRemote {
             node
         };
         let ask = Ask::Remove(node, at, removed);
-        if let Some(answer) = self.earlier(&ask, false) {
-            return answer;
+        if let Some(written) = self.before(&ask, at, false)? {
+            return Ok(written);
         }
-        self.server().may_change(at)?;
         self.send(Held {
             ask,
             bytes: None,
@@ -1768,8 +1818,8 @@ impl Remote for FakeRemote {
         let failing = self.faults().fail_writes_named.clone();
         let fails = |name: &Option<String>| failing.is_some() && *name == failing;
         let injected = || Err(RemoteError::Transient("injected write failure".into()));
-        // The member's go one at a time, and one still on its way stops the rest, unsent: as
-        // the Homebase adapter stops at an answer that isn't one file's own.
+        // The member's go one at a time, and an answer that isn't one file's own (one still
+        // on its way, a failure) stops the rest, unsent: as the Homebase adapter does.
         if self.is_member() {
             let mut answers = Vec::with_capacity(files.len());
             for (target, name) in files.iter().zip(&names) {
@@ -1777,11 +1827,13 @@ impl Remote for FakeRemote {
                     true => injected(),
                     false => self.remove(target.at, removed),
                 };
-                if let Err(RemoteError::Waiting { .. }) = answer {
-                    let stopped = answer.err();
-                    return Ok(Answers { answers, stopped });
+                match answer {
+                    Err(e) if stops(&e) => {
+                        let stopped = Some(e);
+                        return Ok(Answers { answers, stopped });
+                    }
+                    answer => answers.push(answer),
                 }
-                answers.push(answer);
             }
             for name in names.iter().flatten() {
                 self.answered(name)?;

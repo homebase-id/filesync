@@ -234,6 +234,9 @@ fn a_write_that_landed_answers_only_that_write() -> R {
         Err(RemoteError::VersionMismatch)
     ));
     assert_eq!(sharer.server().live_names(), ["renamed", "shared"]);
+    // The other write took nothing from the first: asked again, that one is answered.
+    let again = member.update(&target, &renamed(&theirs), None)?;
+    assert_eq!(again.at(), sharer.header(target.at.file_id)?.at());
     Ok(())
 }
 
@@ -249,8 +252,19 @@ fn a_write_not_taken_is_answered_as_the_file_is_now() -> R {
         token: sharer.header(target.at.file_id)?.token,
     };
     let theirs_now = with(&theirs, NodeContent::file("the owner's", 1, 1, false));
-    sharer.update(&owners, &theirs_now, None)?;
+    let now = sharer.update(&owners, &theirs_now, None)?.at();
     member.faults().on_their_way = false;
+    // Their file changed: that is told before "still on its way", as the adapter reads their
+    // file first. Another change, to the file as it is now, waits for the one staged still.
+    assert!(matches!(
+        member.update(&target, &renamed(&theirs), None),
+        Err(RemoteError::VersionMismatch)
+    ));
+    let at_theirs = Target {
+        at: now,
+        token: None,
+    };
+    waits(member.update(&at_theirs, &renamed(&theirs), None));
     let delivered = member.deliver();
     assert!(
         matches!(delivered.as_slice(), [Err(RemoteError::VersionMismatch)]),
@@ -261,6 +275,106 @@ fn a_write_not_taken_is_answered_as_the_file_is_now() -> R {
         Err(RemoteError::VersionMismatch)
     ));
     assert_eq!(sharer.server().live_names(), ["shared", "the owner's"]);
+    // Nothing on its way now: the change to the file as it is goes.
+    member.update(&at_theirs, &renamed(&theirs), None)?;
+    assert_eq!(sharer.server().live_names(), ["renamed", "shared"]);
+    Ok(())
+}
+
+/// The word of a write that landed answers that write only: a later write of the node that
+/// wasn't taken is not answered with the earlier one's.
+#[test]
+fn an_earlier_writes_word_doesnt_answer_a_later_one() -> R {
+    let (sharer, member, _, theirs, target) = a_file_to_edit()?;
+    member.faults().on_their_way = true;
+    waits(member.update(&target, &renamed(&theirs), None));
+    assert_eq!(member.deliver().len(), 1);
+    // The first landed, and its answer was never asked for. A second one, to the file as it
+    // is now, is on its way when the owner changes the file: it isn't taken.
+    let now = sharer.header(target.at.file_id)?;
+    let at_theirs = Target {
+        at: now.at(),
+        token: None,
+    };
+    let second = with(&theirs, NodeContent::file("second", 1, 1, false));
+    waits(member.update(&at_theirs, &second, None));
+    let owners = Target {
+        at: now.at(),
+        token: now.token,
+    };
+    let theirs_now = with(&theirs, NodeContent::file("the owner's", 1, 1, false));
+    sharer.update(&owners, &theirs_now, None)?;
+    let delivered = member.deliver();
+    assert!(
+        matches!(delivered.as_slice(), [Err(RemoteError::VersionMismatch)]),
+        "{delivered:?}"
+    );
+    let answer = member.update(&at_theirs, &second, None);
+    assert!(
+        matches!(answer, Err(RemoteError::VersionMismatch)),
+        "{answer:?}"
+    );
+    Ok(())
+}
+
+/// A file deleted by its owner is told as deleted, whatever became of a write to it: one
+/// still on its way, or one that landed before the delete.
+#[test]
+fn a_deleted_file_is_told_before_what_became_of_a_write() -> R {
+    for landed in [false, true] {
+        let (sharer, member, _, theirs, target) = a_file_to_edit()?;
+        member.faults().on_their_way = true;
+        waits(member.update(&target, &renamed(&theirs), None));
+        if landed {
+            assert_eq!(member.deliver().len(), 1);
+        }
+        let at = sharer.header(target.at.file_id)?.at();
+        sharer.delete(&contract::doomed(&[at]))?.single()?;
+        let answer = member.update(&target, &renamed(&theirs), None);
+        assert!(matches!(answer, Err(RemoteError::Deleted)), "{answer:?}");
+    }
+    Ok(())
+}
+
+/// Of several removals by a member, one whose file changed while an earlier write to it is
+/// on its way has its own answer, and the rest go on; a failure that isn't one file's own
+/// stops them.
+#[test]
+fn a_members_removals_go_on_past_a_files_own_answer_only() -> R {
+    let (sharer, member, scratch, theirs, target) = a_file_to_edit()?;
+    let other = file("other", scratch.node, b"1");
+    let other_at = create_file(&sharer, &other, b"1")?.at();
+    sharer.share_to_edit(other_at.file_id)?;
+    let others = Target {
+        at: other_at,
+        token: None,
+    };
+    member.faults().on_their_way = true;
+    waits(member.update(&target, &renamed(&theirs), None));
+    member.faults().on_their_way = false;
+    let owners = Target {
+        at: target.at,
+        token: sharer.header(target.at.file_id)?.token,
+    };
+    let theirs_now = with(&theirs, NodeContent::file("the owner's", 1, 1, false));
+    sharer.update(&owners, &theirs_now, None)?;
+    let both = member.set_removed(&[target.clone(), others], true)?;
+    assert!(both.stopped.is_none(), "{both:?}");
+    let [Err(RemoteError::VersionMismatch), Ok(removed)] = both.answers.as_slice() else {
+        panic!("{both:?}");
+    };
+
+    // A failure injected for the first file is not that file's own: the second isn't sent.
+    assert_eq!(member.deliver().len(), 1);
+    let now = Target {
+        at: sharer.header(target.at.file_id)?.at(),
+        token: None,
+    };
+    member.faults().fail_writes_named = Some("the owner's".into());
+    let stopped = member.set_removed(&[now, removed.target.clone()], false)?;
+    assert!(stopped.answers.is_empty(), "{stopped:?}");
+    assert!(matches!(stopped.stopped, Some(RemoteError::Transient(_))));
+    assert!(sharer.header(other_at.file_id)?.removed);
     Ok(())
 }
 
