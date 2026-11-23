@@ -427,8 +427,6 @@ impl Sim {
         let mut kept_here: BTreeSet<u64> = BTreeSet::new();
         // Items the drive refuses as they are (with the name it refuses), with what is in them.
         let mut refused_here: BTreeSet<NodeId> = BTreeSet::new();
-        // What some client syncs: a node in a file no client syncs is left there by all.
-        let mut synced_somewhere: BTreeSet<NodeId> = BTreeSet::new();
         // Orphans some client leaves, its place there one it doesn't sync (§6.3, §10).
         let mut left_somewhere: BTreeSet<NodeId> = BTreeSet::new();
         // What some client may write to the drive syncs: a read-only one (§13) repairs nothing.
@@ -470,7 +468,6 @@ impl Sim {
                 }
                 None => self.expected(c, &self.server, &drive, &taken),
             };
-            synced_somewhere.extend(synced.ids());
             if !client.read_only {
                 written_somewhere.extend(synced.ids());
             }
@@ -592,11 +589,12 @@ impl Sim {
             .into_iter()
             .filter(|v| !matches!(v, Violation::DuplicateName { .. }))
             .filter(|v| !matches!(v, Violation::Orphan { node, .. } if refused_here.contains(node)))
-            // One left by a client whose place there it doesn't sync, and synced by none, stays
-            // (§6.3, §10).
+            // One left by a client whose place there it doesn't sync, and synced by no client
+            // that writes, stays (§6.3, §10): a member may have it at its top, where it is
+            // shared with it, and repairs nothing (§13).
             .filter(|v| {
                 !matches!(v, Violation::Orphan { node, .. }
-                    if left_somewhere.contains(node) && !synced_somewhere.contains(node))
+                    if left_somewhere.contains(node) && !written_somewhere.contains(node))
             })
             // What is in a folder no client reads waits for it, in Recently deleted too.
             .filter(|v| {
