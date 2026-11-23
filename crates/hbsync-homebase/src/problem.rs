@@ -139,7 +139,8 @@ fn code_name(code: serde_json::Value) -> Option<String> {
             Ok(n) => number_name(n),
             Err(_) => s,
         },
-        serde_json::Value::Number(n) => number_name(n.as_u64()? as u32),
+        // (One that isn't a code's number is none: not another code's, cut short.)
+        serde_json::Value::Number(n) => number_name(u32::try_from(n.as_u64()?).ok()?),
         _ => return None,
     };
     Some(name).filter(|name| !name.eq_ignore_ascii_case(NO_ERROR_CODE))
@@ -182,7 +183,13 @@ mod tests {
             refused.to_string(),
             "HTTP 403: Forbidden: Does not have permission"
         );
-        for none in [r#""NoErrorCode""#, "0", r#""0""#, "null"] {
+        for none in [
+            r#""NoErrorCode""#,
+            "0",
+            r#""0""#,
+            "4294967296",
+            "4294971456",
+        ] {
             let body = format!(r#"{{"errorCode":{none}}}"#);
             assert_eq!(ApiError::parse(403, body.as_bytes()).code, None, "{none}");
         }

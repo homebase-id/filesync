@@ -582,8 +582,8 @@ server answers the rest, to a token their server made for this identity's connec
   their 400, 400 `argumentError`; a server too old for the route, 400
   `remoteServerReturnedNotFound`; anything else, 400 `remoteServerReturnedInternalServerError`.
 - **Whose a refusal is.** Without the permission they need, the peer routes answer 403 with no code
-  too (`errorCode: noErrorCode`, title "Forbidden: Does not have permission"; **[verified]**
-  live), like a sharer's. Before asking for a circle's key, the client refuses a drive without a
+  too (`errorCode: noErrorCode`; the token route's title is "Forbidden: Does not have
+  permission", **[verified]** live), like a sharer's. Before asking for a circle's key, the client refuses a drive without a
   write-only key that opens (`Refusal::NoKey`, without asking the sharer), then looks whether the
   app holds `UseTransitRead` as the security context last said, and reads it again when it didn't;
   after a codeless 403 (the permission held as last read) it reads it again (`reads_shared_now`, the
