@@ -738,8 +738,8 @@ it for editing. Built, and not turned on: a share is still read-only in the prod
   reported: the copy is committed before the permission is asked), and that copy, carrying
   the node's `uniqueId`, makes every later change of the node answer
   `400 existingFileWithUniqueId` on this identity's own server. So the client asks the
-  security context first, and sends only where it holds 210. The app doesn't ask for it at
-  registration yet.
+  security context first, and sends only where it holds 210 (while it doesn't, the context
+  is read again at most once a minute). The app doesn't ask for it at registration yet.
 - **Whether it may.** Their server asks drive `Write` and, for a file there already, a live
   share row with `Write` on it (**[verified]** odin-core
   `DriveStorageServiceBase.AssertMemberMayWriteAsync`, `DriveAclAuthorizationService
@@ -759,7 +759,10 @@ it for editing. Built, and not turned on: a share is still read-only in the prod
   upload. Answer: `{globalTransitId, newVersionTag, recipientStatus: {owner: "enqueued"}}`:
   `newVersionTag` is the version their file will have, known before it lands
   (**[verified]** live). A header alone (a rename, a move, `archivalStatus` 2 for their
-  Recently deleted and 0 back) keeps the bytes.
+  Recently deleted and 0 back) keeps the bytes. There is no batch for a member: several
+  files moved to their Recently deleted go one after another, and an answer that isn't one
+  file's own (a server not reached, not connected, a send still on its way) stops the rest,
+  which would each meet the same after their own wait.
 - **Its key header.** The file keeps its key. Where their server holds that key locked with
   the drive's (`zkDrive`), the member sends the new header IV alone: `{type: "share", iv,
   encryptedAesKey: ""}`. Where it holds it sealed to the drive still (a file a member added,
