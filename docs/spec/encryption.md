@@ -197,7 +197,11 @@ payload IV to the download would save it (a follow-up). What changes for this cl
   the drive's key, as every write here does; the server takes it, and the file is a `zkDrive`
   one from then on (**[verified]** live). Where the write-only key isn't there or doesn't
   open, the file is left unread, said, and the rest syncs on; so too on a drive this computer
-  doesn't know to be private, which such a file doesn't make one. Cost: one P-384 key
+  doesn't know to be private, which such a file doesn't make one. A sealed key header whose
+  own IV isn't the one sealed in it doesn't open either: the people the file is shared with
+  read it with the header's, so its name here could differ from theirs. A version left
+  unread is not read again until the file changes (sync semantics §8a, as any version this
+  client can't read): one a computer met before it could open such files, too. Cost: one P-384 key
   agreement per read of such a header (0.8 ms measured); the write-only key itself is opened
   once for each reading of the drive's key state.
 - **A private drive whose key isn't locked for the app yet** (the grant says `isZeroKnowledge`

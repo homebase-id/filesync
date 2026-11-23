@@ -714,8 +714,13 @@ server answers the rest, to a token their server made for this identity's connec
   then on; the member's share row keeps opening it (the file key stays). Until then a member's
   edit must come sealed too (`recipientIdentityReturnedInvalidKeyHeader` otherwise). chat-kmp
   also sends the re-locked key header alone, at the version read
-  (`POST /drives/{driveId}/files/transform-key-headers`, **[inferred]** from its
-  `SealedKeyHeaders` and odin-core's `ClientLockedKeyHeaderVectorTests`): this client doesn't.
+  (`POST /drives/{driveId}/files/transform-key-headers`: the sealed key header is replaced
+  by the `zkDrive` one sent, with the same IV, and nothing else changes, "not the version
+  tag, not modified, and no file-changed event"; **[verified]** odin-core
+  `V2DriveBatchFileWriteOperationsController.TransformKeyHeaders`, chat-kmp
+  `SealedKeyHeaders`, `DriveFileOperationsProvider`): this client doesn't. The sealed IV must
+  be the header's own (the server can't check it; a member reads with the header's,
+  `EncryptedKeyHeader.ForShare`): this client leaves a file whose two differ unread.
 
 ## Conventions
 - camelCase JSON, enums as camelCase strings, bytes as standard base64, times as Unix ms.

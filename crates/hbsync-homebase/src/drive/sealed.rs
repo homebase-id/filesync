@@ -220,6 +220,13 @@ impl KeyHeader {
     /// ([`SealedKeyHeader::sealed_to_drive`]) with that key: `ZkSeal` version 1 of the header IV,
     /// then the file key (**[verified]** odin-core's vector, `ClientLockedKeyHeaderVectorTests`;
     /// chat-kmp `openSealed`).
+    ///
+    /// The IV sealed must be the header's own, which the server can't check: the people the
+    /// file is shared with read it with the header's (**[verified]** odin-core
+    /// `DriveFileUtility.CreateClientFileHeader`, `EncryptedKeyHeader.ForShare`), so whoever
+    /// added the file could show its owner another name than them by sealing another. One
+    /// that differs doesn't open, as it doesn't for chat-kmp's and the server's transform
+    /// (`zkDriveFormOf`, `TransformedKeyHeader`).
     pub(crate) fn open_sealed(
         sealed: &SealedKeyHeader,
         write_only: &WriteOnlyKey,
@@ -227,7 +234,13 @@ impl KeyHeader {
         let bytes = STANDARD
             .decode(&sealed.encrypted_aes_key)
             .map_err(|_| crypto("a sealed key header isn't base64"))?;
-        Self::combined(&write_only.unseal(&bytes, SEAL_V1, &[])?)
+        let opened = Self::combined(&write_only.unseal(&bytes, SEAL_V1, &[])?)?;
+        if iv16(&sealed.iv) != Some(opened.iv) {
+            return Err(crypto(
+                "a sealed key header's IV isn't the one sealed in it",
+            ));
+        }
+        Ok(opened)
     }
 
     /// `iv ‖ key` as a key header.
@@ -588,7 +601,8 @@ mod tests {
 
     /// odin-core's vector of a key header sealed to a drive's write-only key
     /// (`ClientLockedKeyHeaderVectorTests`): it opens with that key's private half to the IV
-    /// and the file key, by name or number; not a damaged one, nor one of another version.
+    /// and the file key, by name or number; not a damaged one, nor one of another version, nor
+    /// one whose own IV isn't the one sealed in it.
     #[test]
     fn a_sealed_key_header_opens_with_the_write_only_key_as_odin_core_does()
     -> Result<(), HomebaseError> {
@@ -620,6 +634,12 @@ mod tests {
         let other_version = header(json!("sealed"), &STANDARD.encode(&bytes));
         assert!(KeyHeader::open_sealed(&other_version, &write_only).is_err());
         assert!(KeyHeader::open_sealed(&header(json!("sealed"), "junk!"), &write_only).is_err());
+        let mut other_iv = header(json!("sealed"), v::SEALED_KEY_HEADER);
+        other_iv.iv = STANDARD.encode([7u8; 16]);
+        let why = KeyHeader::open_sealed(&other_iv, &write_only).expect_err("opened");
+        assert!(why.to_string().contains("IV"), "{why}");
+        other_iv.iv = String::new();
+        assert!(KeyHeader::open_sealed(&other_iv, &write_only).is_err());
         Ok(())
     }
 
