@@ -2266,6 +2266,12 @@ mod tests {
     #[test]
     fn only_a_codeless_403_may_be_the_permission() {
         assert!(codeless_forbidden(&api(403, None)));
+        // As the server sends it (seen live): its "no code" is a code on the wire.
+        let sent = br#"{"title":"Forbidden: Does not have permission","status":403,"errorCode":"noErrorCode"}"#;
+        assert!(codeless_forbidden(&HomebaseError::Api {
+            what: "/api/v2/peer/notify/token".into(),
+            error: ApiError::parse(403, sent),
+        }));
         assert!(!codeless_forbidden(&api(403, Some("notReviewedByOwner"))));
         assert!(!codeless_forbidden(&api(401, None)));
         assert!(!codeless_forbidden(&HomebaseError::Network("cut".into())));

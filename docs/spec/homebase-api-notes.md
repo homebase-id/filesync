@@ -420,7 +420,10 @@ comment (**[verified]** `UploadConcurrencyLimit`). App callers get `serverMetada
 ## Errors
 **[verified]** `ExceptionHandlingMiddleware.cs`: plaintext `application/problem+json` (never
 enveloped) `{title, status, correlationId, errorCode}`. `errorCode` is the camelCase enum name
-(`versionTagMismatch`); accept numbers too. `OdinClientException` → 400,
+(`versionTagMismatch`); accept numbers too. An error that names none carries `noErrorCode`
+(0, the enum's default: every `OdinSecurityException` that sets none), which the client reads
+as no code (**[verified]** live, odin-core efc317ad4: the 403 of a peer route whose permission
+the app lacks). `OdinClientException` → 400,
 `OdinSecurityException` → 403, a bad or missing token → 401 with an empty body. A `NotFound()`
 on an enveloped route comes back as 404 with an encrypted body (`X-SSE: 1`): check the status first.
 
@@ -579,7 +582,8 @@ server answers the rest, to a token their server made for this identity's connec
   their 400, 400 `argumentError`; a server too old for the route, 400
   `remoteServerReturnedNotFound`; anything else, 400 `remoteServerReturnedInternalServerError`.
 - **Whose a refusal is.** Without the permission they need, the peer routes answer 403 with no code
-  too, like a sharer's. Before asking for a circle's key, the client refuses a drive without a
+  too (`errorCode: noErrorCode`; the token route's title is "Forbidden: Does not have
+  permission", **[verified]** live), like a sharer's. Before asking for a circle's key, the client refuses a drive without a
   write-only key that opens (`Refusal::NoKey`, without asking the sharer), then looks whether the
   app holds `UseTransitRead` as the security context last said, and reads it again when it didn't;
   after a codeless 403 (the permission held as last read) it reads it again (`reads_shared_now`, the
