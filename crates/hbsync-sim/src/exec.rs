@@ -2747,21 +2747,20 @@ impl Sim {
 
 /// Whether folder `folder` of `client`, and every folder above it, is on the disk where the
 /// client's rows have it (its plan's, with what its run did since): the path the executor
-/// places an item by leads to it.
+/// places an item by leads to it. One without a row yet, or not on the disk, is left to the
+/// operation's own look (it waits for its folder, as the executor's: a retry).
 fn where_its_rows_have_it(client: &Client, folder: NodeId) -> bool {
     let place = |tree: &Tree, n: NodeId| tree.get(n).map(|s| (s.parent, s.name.clone()));
     let mut at = folder;
-    // (A cycle among the rows can't be: bounded all the same.)
+    // (A cycle among the items can't be: bounded all the same.)
     for _ in 0..=client.local.len() {
-        if at.is_root() || at == client.coords.top {
-            return true;
-        }
         match (place(&client.local, at), place(&client.planned_local, at)) {
             (Some(here), Some(row)) if here == row => at = here.0,
-            _ => return false,
+            (Some(_), Some(_)) => return false,
+            _ => return true,
         }
     }
-    false
+    true
 }
 
 /// Item `node` of `client` (`state`) at its place: a parked one under its original name, in the
