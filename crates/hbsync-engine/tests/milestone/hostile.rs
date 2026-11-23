@@ -335,10 +335,7 @@ fn hostile(server: &Arc<Mutex<FakeServer>>, rng: &mut Rng, did: &mut Hostile) ->
 /// ([`Hostile::excused`]), the exceptions the rules make.
 #[test]
 fn randomized_hostile_writer() -> R {
-    // TODO(#271): the fixed seeds only, for now. #195's random base finds the odd seed where
-    // the writer's disturbances combine so that the excuses here miss some (a node tampered,
-    // then a user's file moved over it), or a loss: once triaged, this switches to `seeds()`.
-    let dids = each_seed(seeds_with(false), hostile_seed)?;
+    let dids = each_seed(seeds(), hostile_seed)?;
     let n = dids.len();
     let writes: u64 = dids.iter().map(|did| did.writes).sum();
     let disturbed = dids
