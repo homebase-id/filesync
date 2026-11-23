@@ -420,7 +420,10 @@ comment (**[verified]** `UploadConcurrencyLimit`). App callers get `serverMetada
 ## Errors
 **[verified]** `ExceptionHandlingMiddleware.cs`: plaintext `application/problem+json` (never
 enveloped) `{title, status, correlationId, errorCode}`. `errorCode` is the camelCase enum name
-(`versionTagMismatch`); accept numbers too. `OdinClientException` → 400,
+(`versionTagMismatch`); accept numbers too. An error that names none carries `noErrorCode`
+(0, the enum's default: every `OdinSecurityException` that sets none), which the client reads
+as no code (**[verified]** live, odin-core efc317ad4: the 403 of a peer route whose permission
+the app lacks). `OdinClientException` → 400,
 `OdinSecurityException` → 403, a bad or missing token → 401 with an empty body. A `NotFound()`
 on an enveloped route comes back as 404 with an encrypted body (`X-SSE: 1`): check the status first.
 
@@ -579,7 +582,8 @@ server answers the rest, to a token their server made for this identity's connec
   their 400, 400 `argumentError`; a server too old for the route, 400
   `remoteServerReturnedNotFound`; anything else, 400 `remoteServerReturnedInternalServerError`.
 - **Whose a refusal is.** Without the permission they need, the peer routes answer 403 with no code
-  too, like a sharer's. Before asking for a circle's key, the client refuses a drive without a
+  too (`errorCode: noErrorCode`; the token route's title is "Forbidden: Does not have
+  permission", **[verified]** live), like a sharer's. Before asking for a circle's key, the client refuses a drive without a
   write-only key that opens (`Refusal::NoKey`, without asking the sharer), then looks whether the
   app holds `UseTransitRead` as the security context last said, and reads it again when it didn't;
   after a codeless 403 (the permission held as last read) it reads it again (`reads_shared_now`, the
@@ -723,6 +727,117 @@ server answers the rest, to a token their server made for this identity's connec
   `SealedKeyHeaders`, `DriveFileOperationsProvider`): this client doesn't. The sealed IV must
   be the header's own (the server can't check it; a member reads with the header's,
   `EncryptedKeyHeader.ForShare`): this client leaves a file whose two differ unread.
+
+## Writing to what others share
+What a change to another identity's share uses (`drive/shared/writes.rs`), where they shared
+it for editing. Built, and not turned on: a share is still read-only in the product
+(`PeerRemote::writing`). **[verified]** live means seen on the dev server (odin-core
+3ace44b69, 2026-11-23), a member writing to a share made with "Edit" in the Homebase app.
+- **Only through this identity's own server.** Their server takes no write from a member
+  directly (**[verified]**: no such route; its peer token reads). This identity's server
+  stages the write on its transient temp drive (alias and type
+  `90f5e74a-b7f9-efda-0ac2-98373a32ad8c`), sends it on from its outbox, and removes the staged
+  copy once sent. The bytes pass through it: twice the network of an own upload.
+- **The permission.** The app must hold `UseTransitWrite` (210): without it a send answers
+  `403 "Sending, updating or deleting files on a peer requires UseTransitWrite"`, its
+  `errorCode` `noErrorCode` (**[verified]** live; so does a peer read route's 403 for want of
+  `UseTransitRead`, "Does not have permission": a 403 "with no code" comes with that code). **A send refused so leaves its staged copy behind** (odin-core #2155:
+  the copy was committed before the permission was asked; fixed by PR #2159, **[verified]**
+  live at efc317ad4: the 403 leaves nothing behind), and that copy, carrying
+  the node's `uniqueId`, makes every later change of the node answer
+  `400 existingFileWithUniqueId` on this identity's own server. So the client asks the
+  security context first, and sends only where it holds 210 (while it doesn't, the context
+  is read again at most once a minute). The app doesn't ask for it at registration yet.
+- **Whether it may.** Their server asks drive `Write` and, for a file there already, a live
+  share row with `Write` on it (**[verified]** odin-core
+  `DriveStorageServiceBase.AssertMemberMayWriteAsync`, `DriveAclAuthorizationService
+  .CallerMayAsync`). "Edit" in the Homebase app gives both: the row, and membership of the
+  app's "Filesync editors" circle (slug `filesync-edit`), which grants drive `Write`
+  (**[verified]** chat-kmp `FilesyncSharing.share`, and live). A row's `permissions` come as
+  odin-core's flag names (`"read"`, `"read, write"`, `"readWrite"` = read, write, react and
+  comment): the client reads them, and refuses a write to a file no row gives `Write` on
+  before sending.
+- **A change to a file** (its header, with or without new bytes): `PATCH
+  /api/v2/peer/{owner}/drives/{driveAlias}/files/by-gtid/{globalTransitId}`, the multipart
+  form of an own update with `locale: "peer"` and `recipients: [owner]` in `instructions`.
+  The `metadata` part is sealed with this login's shared secret, and its header is the whole
+  header again (as every update) with `allowDistribution: true` (refused otherwise,
+  **[verified]** `FileSystemUpdateWriterBase`), the ACL `connected`, and `versionTag` the
+  version of THEIR file that is changed. The deferred payload hash works here as on an own
+  upload. Answer: `{globalTransitId, newVersionTag, recipientStatus: {owner: "enqueued"}}`
+  (a send that couldn't be queued answers 200 too, with `enqueuedFailed`, and leaves its
+  staged copy behind, odin-core #2158: the client waits for no word then, and asks again in a
+  minute):
+  `newVersionTag` is the version their file will have, known before it lands
+  (**[verified]** live). A header alone (a rename, a move, `archivalStatus` 2 for their
+  Recently deleted and 0 back) keeps the bytes. There is no batch for a member: several
+  files moved to their Recently deleted go one after another, and an answer that isn't one
+  file's own (a server not reached, not connected, a send still on its way) stops the rest,
+  which would each meet the same after their own wait.
+- **Its key header.** The file keeps its key. Where their server holds that key locked with
+  the drive's (`zkDrive`), the member sends the new header IV alone: `{type: "share", iv,
+  encryptedAesKey: ""}`. Where it holds it sealed to the drive still (a file a member added,
+  not yet taken in by a device of the owner's), that is refused, and the member sends it
+  sealed again: `{type: "sealed", iv, encryptedAesKey: ZkSeal v1 of iv ‖ key}`. A sealed one
+  over a `zkDrive` one is refused in turn, unless the file is the sender's own and nobody
+  else changed it since (**[verified]** odin-core `ZkDriveFiles.KeepFileKey`,
+  `AssertMayReplace`, and live both ways). A member can't see which it is (its own view of
+  the key header is always `share`): the client sends kept first, sealed for a file it added
+  itself in this run, and the other way after a refusal. A header alone goes twice by
+  itself; a change with bytes fails once (the bytes are read once) and is sent the other way
+  when the engine tries again.
+- **A new file or folder**: `POST /api/v2/drives/{transient drive}/files` on this identity's
+  own server, with `storageOptions.drive` the transient drive and `transitOptions:
+  {recipients: [owner], isTransient: true, remoteTargetDrive: {alias, type}}`. Its descriptor
+  carries the key header sealed to their drive's write-only key, a `globalTransitId` picked
+  by the member, and `shares`: one `{fileId: nil, circleId, permissions, expiresAt,
+  lockedFileKey}` per share row of the folder it goes into (the same circle, permissions
+  and end), the file's key locked under that circle's key and bound to the global transit id
+  (format 3; encryption spec). Without a share the file would be its owner's alone. Their
+  drive's key: `GET /api/v2/peer/{owner}/apps/filesync/drives/filesync/public-key` →
+  `{publicKeyJwk, publicKeyCrc32, callerMayWrite, isZeroKnowledge, sharingModel}`, asked
+  once per share and run. The new file's id on their drive isn't in any answer: the client
+  reads it by `GET /drives/{alias}/files/by-uid/{uniqueId}/header` on their server (one
+  request). All **[verified]** live; the circles of the folder the member isn't in get their
+  rows from a device of the owner's (**[verified]** chat-kmp `FilesyncShareUpkeep`; this
+  client's owner side doesn't do that).
+- **What became of it** is told on this login's own notification socket: `notificationType:
+  "peerSendResult"`, `data` `{recipient, driveId, globalTransitId, sentVersionTag, isUpdate,
+  isDelete, status, willRetry, versionTag}`. `sentVersionTag` is the send's `newVersionTag`;
+  `status` is odin-core's `LatestTransferStatus`: `delivered` (`versionTag` their file's
+  version now: the one sent for a change, another for a new file),
+  `recipientIdentityReturnedVersionTagMismatch` (their file changed since: nothing written),
+  `recipientIdentityReturnedInvalidKeyHeader` (the key header, above; also one sealed to a
+  key their drive no longer has, or an IV not rotated), `recipientIdentityReturnedAccessDenied`,
+  `recipientIdentityReturnedBadRequest`; with `willRetry: true` the outbox tries again by
+  itself (their server not answering, out of storage). **[verified]** live for the first
+  three, the rest in `OutboxWorkerBase`. `GET …/by-gtid/{gtid}/send-status?sentVersionTag=`
+  says only whether it still waits in the outbox (`{pending, sending, attempts,
+  nextAttempt}`): the same after a delivery and after a refusal (**[verified]** live).
+- **How the client waits.** A write waits for its word on the socket (`sends.rs`: the
+  notifications of the own drive feed it, a write takes the one for its global transit id
+  and sent version). Where none comes in 0.3 s it reads their file itself (their version is
+  the one sent: landed), again after 1, 3, 7 and 15 s; then it asks the outbox: still
+  pending is `RemoteError::Waiting` (asked again in a minute, and not sent twice in one run:
+  the write is remembered by node and by what it wrote), not pending and not landed is
+  retried. Measured live, the whole write with the socket connected: 20 to 40 ms for a
+  header, 60 to 120 ms with bytes or for a new file; without a socket, the first wait and one
+  read more.
+- **A new file that is there already.** A node found on their drive where a new one was
+  sent is that send's only by its `globalTransitId`. With another's, an earlier send of the
+  node landed (one from before a restart, or one this run stopped waiting for), and their
+  server refuses the later one (**[verified]** odin-core `PeerFileWriter`: a file sent
+  again with shares is an `ArgumentError`, told as `recipientIdentityReturnedBadRequest`):
+  the client says `AlreadyExists`, and the engine reads what is there, its bytes too.
+- **One write of a node at a time.** The staged copy carries the node's `uniqueId`, unique
+  on the transient drive too: a second write of the node while the first is still in the
+  outbox answers `400 existingFileWithUniqueId` (**[verified]** live for a stray copy;
+  **[inferred]** for one still on its way), taken as "still on its way".
+- **Not used:** a member's delete. `POST …/files/senddeleterequest` (with
+  `expectedVersionTag`, odin-core PR #2140) writes a tombstone; this client moves a member's
+  delete to the owner's Recently deleted instead (`archivalStatus` 2, above), and deletes
+  nothing there. (The V2 route takes its JSON body plain, not sealed with the shared secret:
+  **[verified]** live, a sealed one reads as empty.)
 
 ## Conventions
 - camelCase JSON, enums as camelCase strings, bytes as standard base64, times as Unix ms.

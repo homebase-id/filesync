@@ -70,6 +70,10 @@ const NO_WRITE_ONLY_KEY: &str =
 /// connection they haven't reviewed) before it is asked about again.
 const SHARER_WAIT: std::time::Duration = std::time::Duration::from_secs(15 * 60);
 
+/// How long the app's want of the permission to send to other identities is taken as read,
+/// before the security context is asked again ([`HomebaseRemote::may_send`]).
+const SENDS_READ_AGAIN: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// How long a share waits before it asks again where this identity isn't connected to its
 /// sharer: connecting is done by people, in their Homebase.
 const NOT_CONNECTED_WAIT: std::time::Duration = std::time::Duration::from_secs(3600);
@@ -187,6 +191,11 @@ struct KeyState {
     /// The app holds `UseTransitRead` ([`app::USE_TRANSIT_READ`]): it may read what others
     /// share with this identity.
     reads_shared: bool,
+    /// The app holds `UseTransitWrite` ([`app::USE_TRANSIT_WRITE`]): it may send to other
+    /// identities' drives, as a change to what they share with this one is.
+    sends: bool,
+    /// When the security context was last read for that.
+    sends_read: Option<std::time::Instant>,
 }
 
 impl KeyState {
@@ -227,6 +236,8 @@ impl KeyState {
             write_only: grant.and_then(|g| g.write_only).map(str::to_owned),
             opened: OnceLock::new(),
             reads_shared: holds_key(&context, app::USE_TRANSIT_READ),
+            sends: holds_key(&context, app::USE_TRANSIT_WRITE),
+            sends_read: Some(std::time::Instant::now()),
         })
     }
 
@@ -263,7 +274,12 @@ impl KeyState {
 /// install from before it asked for it lacks until the owner approves: [`app::update_url`]):
 /// one read of the login's security context.
 pub fn reads_shared(client: &Client) -> Result<bool, HomebaseError> {
-    Ok(holds_key(&security_context(client)?, app::USE_TRANSIT_READ))
+    holds(client, app::USE_TRANSIT_READ)
+}
+
+/// Whether the app holds permission `key` now: one read of the login's security context.
+fn holds(client: &Client, key: u32) -> Result<bool, HomebaseError> {
+    Ok(holds_key(&security_context(client)?, key))
 }
 
 /// The login's security context: its grants and permissions.
@@ -703,13 +719,7 @@ impl HomebaseRemote {
             Ok(answer) => Ok(answer),
             // Not connected to them (any more): this identity's own answer, before theirs is
             // asked. Theirs to mend or the owner's, and nothing a retry in minutes changes.
-            Err(e) if not_connected(&e) => Err(RemoteError::Waiting {
-                why: format!(
-                    "not connected to {sharer}: what they share with you can't be read \
-                     until you are"
-                ),
-                retry_after: NOT_CONNECTED_WAIT,
-            }),
+            Err(e) if not_connected(&e) => Err(not_connected_to(sharer, "read")),
             Err(e) if codeless_forbidden(&e) && permitted => match self.reads_shared_now()? {
                 false => Err(not_permitted()),
                 true => Err(remote_error(e)),
@@ -725,9 +735,36 @@ impl HomebaseRemote {
     /// permission update closes no socket). Kept for [`Self::circle_key`]'s next look; an
     /// answer overtaken by another read costs that look one more read, no more.
     fn reads_shared_now(&self) -> Result<bool> {
-        let reads = reads_shared(&self.client).map_err(remote_error)?;
-        self.drive_key.lock().reads_shared = reads;
-        Ok(reads)
+        self.holds_now(app::USE_TRANSIT_READ, |state| &mut state.reads_shared)
+    }
+
+    /// A send was refused for want of the permission to send: not held, as of now.
+    pub(crate) fn may_not_send(&self) {
+        let mut state = self.drive_key.lock();
+        state.sends = false;
+        state.sends_read = Some(std::time::Instant::now());
+    }
+
+    /// Whether the app holds permission `key`, the security context read again now for it
+    /// alone (one request, nothing held meanwhile), and what it says kept in `flag`.
+    fn holds_now(&self, key: u32, flag: fn(&mut KeyState) -> &mut bool) -> Result<bool> {
+        let held = holds(&self.client, key).map_err(remote_error)?;
+        *flag(&mut self.drive_key.lock()) = held;
+        Ok(held)
+    }
+
+    /// Whether the app may send to other identities' drives ([`app::USE_TRANSIT_WRITE`]), as
+    /// the security context said when last read; where it said no, read again (one request:
+    /// the owner may have given the permission since) at most once in [`SENDS_READ_AGAIN`],
+    /// and kept: every write refused for want of it asks.
+    pub(crate) fn may_send(&self) -> Result<bool> {
+        let (sends, read) = self.key_state(false, |s| Ok((s.sends, s.sends_read)))?;
+        if sends || read.is_some_and(|at| at.elapsed() < SENDS_READ_AGAIN) {
+            return Ok(sends);
+        }
+        let sends = self.holds_now(app::USE_TRANSIT_WRITE, |state| &mut state.sends)?;
+        self.drive_key.lock().sends_read = Some(std::time::Instant::now());
+        Ok(sends)
     }
 
     /// What this identity's own markers say: whose shares its computers sync, and which of its
@@ -779,30 +816,7 @@ impl HomebaseRemote {
             Some(t) => self.update_key(t, look_first)?,
         };
         let transfer_iv = sealed::strong().map_err(remote_error)?;
-        // The payload as sent: read once, hashed, encrypted under a new payload IV, hashed
-        // again and paced. Its hashes follow it (odin-core #1935): the descriptor says only the
-        // algorithm.
-        let mut sending = match payload {
-            None => None,
-            Some(p) => {
-                let iv = sealed::strong().map_err(remote_error)?;
-                let (plain, sent) = (tally(p.hash.algorithm()), tally(p.hash.algorithm()));
-                let reader = Paced {
-                    inner: tap(Encrypting::new(tap(p.reader, &plain), &key.key, &iv), &sent),
-                    pace: p.pace,
-                };
-                Some(Sending {
-                    descriptor: wire::PayloadDescriptor {
-                        algorithm: p.hash.algorithm(),
-                        iv,
-                    },
-                    reader,
-                    planned: (p.hash, p.size),
-                    plain,
-                    sent,
-                })
-            }
-        };
+        let mut sending = Sending::of(payload, &key)?;
         let version = at.map(|t| t.version);
         let instructions = wire::instructions(
             &transfer_iv,
@@ -811,31 +825,7 @@ impl HomebaseRemote {
         );
         let drive = self.drive_key(false)?;
         let metadata = wire::metadata(meta, version, self.keys(drive.as_ref()), &transfer_iv, &key);
-        let mut parts = vec![
-            Part::bytes(
-                "instructions",
-                "application/json",
-                instructions.to_string().into_bytes(),
-            ),
-            Part::bytes("metadata", wire::CONTENT_TYPE, metadata),
-        ];
-        if let Some(s) = &mut sending {
-            let hash_part = s.hash_part(&key);
-            parts.push(Part::reader(
-                "payload",
-                PAYLOAD_KEY,
-                wire::CONTENT_TYPE,
-                &mut s.reader,
-                sealed_len(s.planned.1),
-            ));
-            parts.push(Part::later(
-                "payloadHash",
-                PAYLOAD_KEY,
-                "application/json",
-                wire::PAYLOAD_HASH_LEN as u64,
-                hash_part,
-            ));
-        }
+        let parts = parts(&instructions, metadata, sending.as_mut(), &key);
         let (method, path) = match at {
             None => (UploadMethod::Post, self.files()),
             Some(at) => (UploadMethod::Patch, self.file(at.file_id)),
@@ -931,6 +921,31 @@ struct Sending<'a> {
 }
 
 impl<'a> Sending<'a> {
+    /// `payload` as it is sent: read once, hashed, encrypted with the file `key` under a new
+    /// payload IV, hashed again and paced. Its hashes follow it (odin-core #1935): the
+    /// descriptor says only the algorithm.
+    fn of(payload: Option<Upload<'a>>, key: &KeyHeader) -> Result<Option<Self>> {
+        let Some(p) = payload else {
+            return Ok(None);
+        };
+        let iv = sealed::strong().map_err(remote_error)?;
+        let (plain, sent) = (tally(p.hash.algorithm()), tally(p.hash.algorithm()));
+        let reader = Paced {
+            inner: tap(Encrypting::new(tap(p.reader, &plain), &key.key, &iv), &sent),
+            pace: p.pace,
+        };
+        Ok(Some(Sending {
+            descriptor: wire::PayloadDescriptor {
+                algorithm: p.hash.algorithm(),
+                iv,
+            },
+            reader,
+            planned: (p.hash, p.size),
+            plain,
+            sent,
+        }))
+    }
+
     /// Makes the `payloadHash` part once the payload is sent. The server can't tell from
     /// ciphertext that the file changed since it was hashed: if the plaintext isn't what was
     /// planned (hashed on send: if its source changed while it was read), values no bytes hash
@@ -953,6 +968,42 @@ impl<'a> Sending<'a> {
             wire::payload_hash(key, &iv, &content, &finish(&sent).0)
         }
     }
+}
+
+/// The parts of a write's multipart form: its `instructions`, its `metadata` (the header,
+/// sealed) and, with a payload, the bytes and then their hashes, made once the bytes went.
+fn parts<'p>(
+    instructions: &serde_json::Value,
+    metadata: Vec<u8>,
+    sending: Option<&'p mut Sending<'_>>,
+    key: &'p KeyHeader,
+) -> Vec<Part<'p>> {
+    let mut parts = vec![
+        Part::bytes(
+            "instructions",
+            "application/json",
+            instructions.to_string().into_bytes(),
+        ),
+        Part::bytes("metadata", wire::CONTENT_TYPE, metadata),
+    ];
+    if let Some(s) = sending {
+        let hash_part = s.hash_part(key);
+        parts.push(Part::reader(
+            "payload",
+            PAYLOAD_KEY,
+            wire::CONTENT_TYPE,
+            &mut s.reader,
+            sealed_len(s.planned.1),
+        ));
+        parts.push(Part::later(
+            "payloadHash",
+            PAYLOAD_KEY,
+            "application/json",
+            wire::PAYLOAD_HASH_LEN as u64,
+            hash_part,
+        ));
+    }
+    parts
 }
 
 /// Refuses a file of `size` bytes larger than [`MAX_FILE`]: [`RemoteError::Fatal`], so the
@@ -1166,6 +1217,17 @@ impl Remote for HomebaseRemote {
 /// `notAConnectedIdentity`, odin-core `CircleNetworkService`, **[verified]** live 2026-11-19).
 fn not_connected(e: &HomebaseError) -> bool {
     matches!(e, HomebaseError::Api { error, .. } if error.is("notAConnectedIdentity"))
+}
+
+/// What isn't `done` (read, changed) to what `sharer` shares while this identity isn't
+/// connected to them: asked again after [`NOT_CONNECTED_WAIT`].
+fn not_connected_to(sharer: &str, done: &str) -> RemoteError {
+    RemoteError::Waiting {
+        why: format!(
+            "not connected to {sharer}: what they share with you can't be {done} until you are"
+        ),
+        retry_after: NOT_CONNECTED_WAIT,
+    }
 }
 
 /// A 403 without a code: on a peer route, the other identity's refusal, or this app's want of
@@ -2204,6 +2266,12 @@ mod tests {
     #[test]
     fn only_a_codeless_403_may_be_the_permission() {
         assert!(codeless_forbidden(&api(403, None)));
+        // As the server sends it (seen live): its "no code" is a code on the wire.
+        let sent = br#"{"title":"Forbidden: Does not have permission","status":403,"errorCode":"noErrorCode"}"#;
+        assert!(codeless_forbidden(&HomebaseError::Api {
+            what: "/api/v2/peer/notify/token".into(),
+            error: ApiError::parse(403, sent),
+        }));
         assert!(!codeless_forbidden(&api(403, Some("notReviewedByOwner"))));
         assert!(!codeless_forbidden(&api(401, None)));
         assert!(!codeless_forbidden(&HomebaseError::Network("cut".into())));
@@ -2271,15 +2339,11 @@ mod tests {
 
     /// The vectors' write-only key as a grant carries it: locked with `drive`'s key.
     fn locked_write_only(drive: &Key) -> String {
-        use aes_gcm::aead::Aead;
-        use aes_gcm::{Aes128Gcm, KeyInit};
         use base64::Engine;
         use base64::engine::general_purpose::STANDARD;
         let pkcs8 = share_keys::tests::bytes(share_keys::tests::WRITE_ONLY_PKCS8);
         let iv = [4u8; 12];
-        let sealed = Aes128Gcm::new(drive.into())
-            .encrypt((&iv).into(), &pkcs8[..])
-            .expect("sealed");
+        let sealed = crate::crypto::gcm_seal(drive, &iv, &pkcs8, &[]).expect("sealed");
         STANDARD.encode([&iv[..], &sealed].concat())
     }
 
@@ -2388,6 +2452,26 @@ mod tests {
         let why = remote.to_remote(header)?.expect_err("opened");
         assert!(why.contains("write-only key"), "{why}");
         assert!(!remote.drive_key.lock().private);
+        Ok(())
+    }
+
+    /// The app's want of the permission to send, read a moment ago, is not asked about again
+    /// at once (the identity can't be reached here); holding it is never asked about.
+    #[test]
+    fn the_permission_to_send_is_not_asked_for_at_every_write() -> Result<(), HomebaseError> {
+        let state = |sends, sends_read| KeyState {
+            sends,
+            sends_read,
+            ..KeyState::default()
+        };
+        let just_read = Some(std::time::Instant::now());
+        let remote = unreachable_remote(state(false, just_read))?;
+        assert_eq!(remote.may_send().ok(), Some(false));
+        let remote = unreachable_remote(state(true, None))?;
+        assert_eq!(remote.may_send().ok(), Some(true));
+        // A send refused for want of it: not held from then on, and not asked about at once.
+        remote.may_not_send();
+        assert_eq!(remote.may_send().ok(), Some(false));
         Ok(())
     }
 

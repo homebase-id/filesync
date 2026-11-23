@@ -18,7 +18,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::HomebaseError;
 use crate::crypto::{
-    Envelope, Key, SEAL_V1, WriteOnlyKey, aes_cbc_decrypt, aes_cbc_encrypt, random,
+    Envelope, Key, Point, SEAL_V1, WriteOnlyKey, aes_cbc_decrypt, aes_cbc_encrypt, random, seal,
 };
 use crate::drive::share_keys::CircleKey;
 
@@ -148,11 +148,7 @@ impl KeyHeader {
 
     /// `iv || key`, AES-CBC under `shared_secret` with `wrap_iv`, as an upload sends it.
     pub(crate) fn seal(&self, shared_secret: &Key, wrap_iv: &[u8; 16]) -> Value {
-        let mut plain = [0u8; 32];
-        plain[..16].copy_from_slice(&self.iv);
-        plain[16..].copy_from_slice(&self.key);
-        let sealed = aes_cbc_encrypt(shared_secret, wrap_iv, &plain);
-        plain.zeroize();
+        let sealed = aes_cbc_encrypt(shared_secret, wrap_iv, &self.combine()[..]);
         json!({
             "encryptionVersion": 1,
             "type": "aes",
@@ -169,17 +165,44 @@ impl KeyHeader {
         locked
     }
 
+    /// As someone a file is shared with sends it with a change to the file: the new header IV
+    /// alone (type `share`). The file keeps its key, which they hold from their share row and
+    /// the drive's owner keeps locked with the drive's key (**[verified]** live, odin-core
+    /// 3ace44b69; chat-kmp `keepFileKeyHeader`). The owner's server refuses it for a file
+    /// still sealed to the drive ([`KeyHeader::sealed_to`] then).
+    pub(crate) fn kept(&self) -> Value {
+        json!({
+            "encryptionVersion": 1,
+            "type": "share",
+            "iv": STANDARD.encode(self.iv),
+            "encryptedAesKey": "",
+        })
+    }
+
+    /// Sealed to a drive's write-only public key `drive`, as someone adding a file to a folder
+    /// shared with them sends it (type `sealed`: [`KeyHeader::open_sealed`] opens it on the
+    /// owner's devices): `ZkSeal` version 1 of `iv ‖ key`, the header's `iv` the same one
+    /// (**[verified]** live, odin-core 3ace44b69; chat-kmp `sealKeyHeader`).
+    pub(crate) fn sealed_to(&self, drive: &Point) -> Result<Value, HomebaseError> {
+        Ok(json!({
+            "encryptionVersion": 1,
+            "type": "sealed",
+            "iv": STANDARD.encode(self.iv),
+            "encryptedAesKey": STANDARD.encode(seal(drive, &self.combine()[..])?),
+        }))
+    }
+
     /// The token the server will give for this key header once written: it seals it under
     /// `shared_secret` with the header's own IV as the wrap IV (**[verified]** odin-core
     /// `DriveFileUtility.CreateClientFileHeader`, the stored `EncryptedKeyHeader.Iv` being the
     /// key header's, `DriveStorageServiceBase.EncryptKeyHeader`).
     pub(crate) fn token(&self, shared_secret: &Key) -> FileToken {
-        let mut plain = [0u8; 32];
-        plain[..16].copy_from_slice(&self.iv);
-        plain[16..].copy_from_slice(&self.key);
         let mut bytes = self.iv.to_vec();
-        bytes.extend(aes_cbc_encrypt(shared_secret, &self.iv, &plain));
-        plain.zeroize();
+        bytes.extend(aes_cbc_encrypt(
+            shared_secret,
+            &self.iv,
+            &self.combine()[..],
+        ));
         FileToken(bytes.into())
     }
 
@@ -241,6 +264,15 @@ impl KeyHeader {
             ));
         }
         Ok(opened)
+    }
+
+    /// The key header as `iv ‖ key`: what is sealed or locked of it ([`KeyHeader::combined`]
+    /// reads it back).
+    fn combine(&self) -> Zeroizing<[u8; 32]> {
+        let mut plain = Zeroizing::new([0u8; 32]);
+        plain[..16].copy_from_slice(&self.iv);
+        plain[16..].copy_from_slice(&self.key);
+        plain
     }
 
     /// `iv ‖ key` as a key header.
@@ -640,6 +672,39 @@ mod tests {
         assert!(why.to_string().contains("IV"), "{why}");
         other_iv.iv = String::new();
         assert!(KeyHeader::open_sealed(&other_iv, &write_only).is_err());
+        Ok(())
+    }
+
+    /// What someone a folder is shared with sends: a new file's key header sealed to the
+    /// drive, which the drive's write-only key opens to the same key header (the key id as in
+    /// odin-core's vector); and a change's, the new IV alone.
+    #[test]
+    fn a_member_seals_a_new_files_key_header_and_keeps_a_changed_ones() -> Result<(), HomebaseError>
+    {
+        use crate::drive::share_keys::tests as v;
+        let write_only = WriteOnlyKey::from_pkcs8(&v::bytes(v::WRITE_ONLY_PKCS8))?;
+        let drive = Point::from_jwk(v::WRITE_ONLY_JWK)?;
+        let kh = KeyHeader::random()?;
+        let sent = kh.sealed_to(&drive)?;
+        assert_eq!(sent["iv"], STANDARD.encode(kh.iv));
+        let sealed: SealedKeyHeader = serde_json::from_value(sent.clone())?;
+        assert!(sealed.sealed_to_drive());
+        assert_eq!(KeyHeader::open_sealed(&sealed, &write_only)?, kh);
+        // Sealed to that key: the key id odin-core's vector for it carries.
+        let bytes = v::bytes(sent["encryptedAesKey"].as_str().unwrap_or_default());
+        assert_eq!(bytes[..5], v::bytes(v::SEALED_KEY_HEADER)[..5]);
+        // A new throwaway key each time.
+        assert_ne!(
+            kh.sealed_to(&drive)?["encryptedAesKey"],
+            sent["encryptedAesKey"]
+        );
+
+        let kept: SealedKeyHeader = serde_json::from_value(kh.kept())?;
+        assert!(kept.locked_for_share());
+        assert_eq!(
+            (kept.iv, kept.encrypted_aes_key),
+            (STANDARD.encode(kh.iv), String::new())
+        );
         Ok(())
     }
 

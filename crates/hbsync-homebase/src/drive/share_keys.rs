@@ -6,7 +6,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::HomebaseError;
-use crate::crypto::{Key, WriteOnlyKey, gcm_open, key_of};
+use crate::crypto::{Key, WriteOnlyKey, gcm_open, gcm_seal, key_of, random};
 
 /// The `ZkSeal` version of a sealed circle key.
 const SEALED_VERSION: u8 = 2;
@@ -79,12 +79,47 @@ impl CircleKey {
             }
             _ => return Err(bad("of an unknown format")),
         };
+        let opened = gcm_open(&self.key, &locked[1..13], &locked[13..], &self.aad(id))?;
+        key_of(&opened, "a file's key")
+    }
+
+    /// What a file's locked key is bound to: `drive ‖ id ‖ circle`, each a Guid's .NET bytes.
+    fn aad(&self, id: Uuid) -> [u8; 48] {
         let mut aad = [0u8; 48];
         for (at, id) in [self.drive, id, self.circle].iter().enumerate() {
             aad[at * 16..][..16].copy_from_slice(&id.to_bytes_le());
         }
-        let opened = gcm_open(&self.key, &locked[1..13], &locked[13..], &aad)?;
-        key_of(&opened, "a file's key")
+        aad
+    }
+
+    /// The key of a file this identity adds to what the circle shares, locked under the
+    /// circle's key for the file's share row (`lockedFileKey`): bound to the global transit
+    /// id picked for it (format 3), as the file has no id yet ([`CircleKey::file_key`] opens
+    /// it; **[verified]** odin-core `SelectiveShareKeyVectorTests`, chat-kmp
+    /// `ShareKeys.lockFileKeyByGlobalTransitId`).
+    pub(crate) fn lock_file_key(
+        &self,
+        file_key: &Key,
+        global_transit_id: Uuid,
+    ) -> Result<Vec<u8>, HomebaseError> {
+        self.lock_with(file_key, global_transit_id, &random::<12>()?)
+    }
+
+    fn lock_with(
+        &self,
+        file_key: &Key,
+        global_transit_id: Uuid,
+        nonce: &[u8; 12],
+    ) -> Result<Vec<u8>, HomebaseError> {
+        let mut locked = vec![BY_GLOBAL_TRANSIT_ID];
+        locked.extend(nonce);
+        locked.extend(gcm_seal(
+            &self.key,
+            nonce,
+            file_key,
+            &self.aad(global_transit_id),
+        )?);
+        Ok(locked)
     }
 }
 
@@ -111,6 +146,8 @@ pub(crate) mod tests {
     /// [`FILE_KEY`], sealed to the write-only key below.
     pub(crate) const SEALED_KEY_HEADER: &str = "ARRSmXQEgEhVDqJf8V4wR/vfRnjuBiMDCgpqQ0EvwP8Sbhg/htjK6DPN0tPu9kf4VKIvY0JpI7ekZehCr+RJr6buacGObBkW+4KXwPFn4aNzze/w+3mTcGuj+8oKsvICcbFc5rPogLwn6Oz/OQuWmSn3xtY70ljeN7b6eV3wkBqmS0sKbr1o/iBvA+hgSlg/4KiDGsTq2pxlrCRLPvr2Vxjk";
     pub(crate) const HEADER_IV: &str = "EBESExQVFhcYGRobHB0eHw==";
+    /// The public half of the write-only key below, as a drive answers it.
+    pub(crate) const WRITE_ONLY_JWK: &str = r#"{"kty":"EC","crv":"P-384","x":"yjx33dKI7M4I3IUdOl1Tdqf4mqLGyXnYEBg_Oo3B9_QjOxI1ol2usFU1t3FhnQ18","y":"FkGMeDRw4PJSFlCwESYb59Nltf3qE7Q5IXaUK2OiplW8aWP3oTWZQ5YZYdzJ7ReN"}"#;
     /// The write-only key of the vectors' member drive (PKCS#8).
     pub(crate) const WRITE_ONLY_PKCS8: &str = "MIG2AgEAMBAGByqGSM49AgEGBSuBBAAiBIGeMIGbAgEBBDCZAel29rv0BgBwa7LGp4+tmSi5g4LlRzkW9/ZLQNgeVdrB44imUOGeaKmn1eiPZsShZANiAATKPHfd0ojszgjchR06XVN2p/iaosbJedgQGD86jcH39CM7EjWiXa6wVTW3cWGdDXwWQYx4NHDg8lIWULARJhvn02W1/eoTtDkhdpQrY6KmVbxpY/ehNZlDlhlh3MntF40=";
 
@@ -142,6 +179,28 @@ pub(crate) mod tests {
         member: &str,
     ) -> Result<CircleKey, HomebaseError> {
         CircleKey::unseal(&bytes(SEALED), key, id(CIRCLE), id(DRIVE), member)
+    }
+
+    /// A new file's key locks as odin-core's vector does (its nonce given), and opens again
+    /// only for the global transit id, circle and drive it was locked for.
+    #[test]
+    fn a_new_files_key_locks_as_odin_core_does() -> Result<(), HomebaseError> {
+        let write_only = WriteOnlyKey::from_pkcs8(&bytes(WRITE_ONLY_PKCS8))?;
+        let circle = unseal_with(&write_only, MEMBER)?;
+        let file_key: Key = bytes(FILE_KEY).try_into().expect("a key");
+        let vector = bytes(LOCKED_BY_GTID);
+        let nonce: [u8; 12] = vector[1..13].try_into().expect("a nonce");
+        assert_eq!(circle.lock_with(&file_key, id(GTID), &nonce)?, vector);
+
+        let locked = circle.lock_file_key(&file_key, id(GTID))?;
+        assert_ne!(locked, vector, "a new nonce each time");
+        assert_eq!(
+            circle.file_key(&locked, Uuid::nil(), Some(id(GTID)))?,
+            file_key
+        );
+        assert!(circle.file_key(&locked, id(GTID), Some(id(FILE))).is_err());
+        assert!(circle.file_key(&locked, id(GTID), None).is_err());
+        Ok(())
     }
 
     #[test]

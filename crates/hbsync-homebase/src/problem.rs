@@ -19,7 +19,8 @@ use serde::Deserialize;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApiError {
     pub status: u16,
-    /// The `errorCode` as its camelCase name (numbers of known codes are translated).
+    /// The `errorCode` as its camelCase name (numbers of known codes are translated); none
+    /// where the answer names none, or the server's own "none" ([`NO_ERROR_CODE`]).
     pub code: Option<String>,
     pub title: String,
     /// The identity itself answered ([`ApiError::read`]), not something in front of it.
@@ -42,8 +43,15 @@ pub struct Sender {
     pub retry_after: Option<std::time::Duration>,
 }
 
+/// odin-core's `OdinClientErrorCode.NoErrorCode` (0): what an error that names none carries
+/// on the wire, as every `OdinSecurityException` that sets no code does (**[verified]**
+/// odin-core `OdinSecurityException.ErrorCode`'s default; live: the 403 of a route whose
+/// permission the app lacks). No code, here.
+const NO_ERROR_CODE: &str = "noErrorCode";
+
 /// The `OdinClientErrorCode`s the client acts on (`OdinClientErrorCode.cs`).
 const KNOWN_CODES: &[(u32, &str)] = &[
+    (0, NO_ERROR_CODE),
     (4002, "cannotUpdateNonActiveFile"),
     (4105, "existingFileWithUniqueId"),
     (4106, "fileNotFound"),
@@ -126,14 +134,16 @@ impl std::fmt::Display for ApiError {
 }
 
 fn code_name(code: serde_json::Value) -> Option<String> {
-    match code {
-        serde_json::Value::String(s) => Some(match s.parse::<u32>() {
+    let name = match code {
+        serde_json::Value::String(s) => match s.parse::<u32>() {
             Ok(n) => number_name(n),
             Err(_) => s,
-        }),
-        serde_json::Value::Number(n) => n.as_u64().map(|n| number_name(n as u32)),
-        _ => None,
-    }
+        },
+        // (One that isn't a code's number is none: not another code's, cut short.)
+        serde_json::Value::Number(n) => number_name(u32::try_from(n.as_u64()?).ok()?),
+        _ => return None,
+    };
+    Some(name).filter(|name| !name.eq_ignore_ascii_case(NO_ERROR_CODE))
 }
 
 fn number_name(n: u32) -> String {
@@ -162,6 +172,27 @@ mod tests {
         assert!(as_string.is("payloadHashRequired"));
         let unknown = ApiError::parse(400, br#"{"errorCode":9999}"#);
         assert_eq!(unknown.code.as_deref(), Some("9999"));
+
+        // The server's "no code" is none: by name, in any case, and by number.
+        let refused = ApiError::parse(
+            403,
+            br#"{"type":"https://tools.ietf.org/html/rfc7231","title":"Forbidden: Does not have permission","status":403,"correlationId":"x","errorCode":"noErrorCode"}"#,
+        );
+        assert_eq!(refused.code, None);
+        assert_eq!(
+            refused.to_string(),
+            "HTTP 403: Forbidden: Does not have permission"
+        );
+        for none in [
+            r#""NoErrorCode""#,
+            "0",
+            r#""0""#,
+            "4294967296",
+            "4294971456",
+        ] {
+            let body = format!(r#"{{"errorCode":{none}}}"#);
+            assert_eq!(ApiError::parse(403, body.as_bytes()).code, None, "{none}");
+        }
 
         let text = ApiError::parse(502, b"<html>Bad Gateway</html>");
         assert_eq!(

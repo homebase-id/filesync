@@ -75,6 +75,11 @@ pub struct PeerRemote {
     circles: Mutex<HashMap<Uuid, Arc<CircleKey>>>,
     /// `None`: a refused token stays refused ([`PeerRemote::new`]).
     renewal: Option<Renewal>,
+    /// Whether this identity writes to what they share ([`PeerRemote::writing`]): where it
+    /// doesn't, every write refuses before a request.
+    writing: bool,
+    /// What its writes keep between them.
+    writes: writes::Writes,
 }
 
 /// `sharer`'s server with a new token asked for through `own`
@@ -131,6 +136,8 @@ impl PeerRemote {
             sharer,
             circles: Mutex::default(),
             renewal: None,
+            writing: false,
+            writes: writes::Writes::default(),
         }
     }
 
@@ -165,6 +172,14 @@ impl PeerRemote {
         Ok(remote)
     }
 
+    /// The same share, written to as well: a change to a file of theirs, a new one in a
+    /// folder of theirs, a move to their Recently deleted or back, each where they share it
+    /// for editing (`drive/shared/writes.rs`). Nothing is deleted there from here.
+    pub fn writing(mut self) -> PeerRemote {
+        self.writing = true;
+        self
+    }
+
     /// Which token it reads with, saying nothing of it (a fingerprint, as
     /// [`crate::Credentials::login_id`]): what it sealed (the files' tokens) opens only under
     /// the same one.
@@ -177,12 +192,22 @@ impl PeerRemote {
     /// then: one their server refuses is replaced by the next read ([`PeerRemote::renewed`]),
     /// never by the connection, which waits and asks again.
     pub fn notifier(self: &Arc<Self>, events: impl Into<Events>) -> std::io::Result<Notifier> {
-        let drive = TargetDrive {
+        let remote = Arc::clone(self);
+        let theirs = move || (*remote.client()).clone();
+        Notifier::spawn_shared(theirs, self.their_drive(), events)
+    }
+
+    /// Their Filesync drive.
+    fn their_drive(&self) -> TargetDrive {
+        TargetDrive {
             alias: self.sharer.drive_alias,
             drive_type: SYNC_DRIVE.drive_type,
-        };
-        let remote = Arc::clone(self);
-        Notifier::spawn_shared(move || (*remote.client()).clone(), drive, events)
+        }
+    }
+
+    /// Their file `file_id`'s header as their server sends it: one request.
+    fn their_header(&self, file_id: RemoteFileId) -> Result<FileHeader> {
+        self.with_token(|client| self.raw_header(client, file_id))
     }
 
     /// Their server, with the token held now.
@@ -375,6 +400,8 @@ impl PeerRemote {
     }
 }
 
+mod writes;
+
 impl Remote for PeerRemote {
     fn changes(&self, cursor: Option<&str>, limit: usize) -> Result<ChangesPage> {
         self.with_token(|client| {
@@ -415,12 +442,23 @@ impl Remote for PeerRemote {
         true
     }
 
-    fn create(&self, _: &NodeMeta, _: Option<Upload<'_>>) -> Result<Written> {
-        Err(self.read_only())
+    fn create(&self, node: &NodeMeta, payload: Option<Upload<'_>>) -> Result<Written> {
+        match self.writing {
+            true => self.add_to_theirs(node, payload),
+            false => Err(self.read_only()),
+        }
     }
 
-    fn update(&self, _: &Target, _: &NodeMeta, _: Option<Upload<'_>>) -> Result<Written> {
-        Err(self.read_only())
+    fn update(
+        &self,
+        target: &Target,
+        meta: &NodeMeta,
+        payload: Option<Upload<'_>>,
+    ) -> Result<Written> {
+        match self.writing {
+            true => self.change_theirs(target, meta, payload),
+            false => Err(self.read_only()),
+        }
     }
 
     fn delete(&self, _: &[Doomed]) -> Result<Deletes> {
@@ -431,8 +469,11 @@ impl Remote for PeerRemote {
         Err(self.read_only())
     }
 
-    fn set_removed(&self, _: &[Target], _: bool) -> Result<Answers<Written>> {
-        Err(self.read_only())
+    fn set_removed(&self, files: &[Target], removed: bool) -> Result<Answers<Written>> {
+        match self.writing {
+            true => self.set_theirs_removed(files, removed),
+            false => Err(self.read_only()),
+        }
     }
 
     /// Plaintext `range` of the payload. Their server sends a shared file's payload without its
@@ -458,7 +499,7 @@ mod tests {
 
     use crate::drive::tests::{api, unreachable_remote};
 
-    fn sam() -> Result<PeerRemote, HomebaseError> {
+    pub(super) fn sam() -> Result<PeerRemote, HomebaseError> {
         let token: PeerToken = serde_json::from_value(serde_json::json!({
             "authenticationToken64": "dG9rZW4=", "sharedSecret": "AAAAAAAAAAAAAAAAAAAAAA==",
         }))?;
