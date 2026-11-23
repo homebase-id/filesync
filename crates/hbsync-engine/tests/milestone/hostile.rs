@@ -50,6 +50,12 @@ struct Hostile {
     /// apart with it, and excused as it is.
     disturbed_at: Vec<String>,
     disturbed: Vec<hbsync_types::NodeId>,
+    /// Where each device held what it disturbed, whenever looked: its own place of it, which
+    /// may be one the item left on the drive (a move a device can't follow while it can't
+    /// read the drive's version: the download is refused, §8a). What another device has at
+    /// such a place waits there for the item to leave ("what goes to the local place the
+    /// refused item doesn't leave"), so it is held apart too, on every device.
+    held_at: Vec<String>,
     /// The bytes of files it wrote over with others (a folder made a file again, a file's
     /// tampered): gone from the drive, as any writer's edit replaces what was there.
     overwritten: HashSet<Vec<u8>>,
@@ -356,6 +362,18 @@ fn a_filtered_name_in_a_cycle_stays_on_the_drive() -> R {
     hostile_seed(829).map(|_| ())
 }
 
+/// Seed 5540 (the deep run of 2026-11-22, filesync #461), and two random ones of #271, kept:
+/// a user's file moved on one device, the writer's bytes over it that match no descriptor,
+/// then a new file under the name it left. The other device can't read the drive's version,
+/// so its download is refused and its own copy stays where it was (§8a, Refused); the new
+/// file waits for that place, on that device only. The test held apart what a device has
+/// where the drive had the disturbed item, or where that device holds it, not what another
+/// device has where this one holds it.
+#[test]
+fn regression_hostile_a_new_file_waits_for_the_place_a_refused_download_holds() -> R {
+    each_seed([5540, 2847562043, 9182736974], hostile_seed).map(drop)
+}
+
 /// One seed of [`randomized_hostile_writer`]: what the writer did.
 fn hostile_seed(seed: u64) -> Res<Hostile> {
     let server = server();
@@ -382,8 +400,9 @@ fn hostile_seed(seed: u64) -> Res<Hostile> {
             .into()),
         }
     };
-    // What a user holds where the writer disturbed something is held apart with it.
-    let held_apart = |c: &mut Client, did: &mut Hostile| {
+    // What a user holds where the writer disturbed something is held apart with it: where the
+    // drive had it, and where any device holds it.
+    let held_apart = |a: &mut Client, b: &mut Client, did: &mut Hostile| {
         // What is in them on the drive now (a user may have moved something in), each where
         // the device holds it, as well as where the drive had them.
         let parents: Vec<(hbsync_types::NodeId, hbsync_types::NodeId)> = server
@@ -408,24 +427,31 @@ fn hostile_seed(seed: u64) -> Res<Hostile> {
             }
             i += 1;
         }
-        let here: Vec<String> = inside
-            .iter()
-            .filter_map(|n| c.engine.path_of(*n).ok().flatten())
-            .collect();
-        for (path, bytes) in c.entries("") {
-            // As the client's entries show a path (a backslash in a name as a slash).
-            let under = |d: &String| {
-                let d = d.replace('\\', "/");
-                !d.is_empty() && (path == d || path.starts_with(&format!("{d}/")))
-            };
-            if did.disturbed_at.iter().chain(&here).any(under) {
-                did.excused.insert(bytes);
+        for c in [&mut *a, &mut *b] {
+            for here in inside
+                .iter()
+                .filter_map(|n| c.engine.path_of(*n).ok().flatten())
+            {
+                if !did.held_at.contains(&here) {
+                    did.held_at.push(here);
+                }
+            }
+        }
+        for c in [a, b] {
+            for (path, bytes) in c.entries("") {
+                // As the client's entries show a path (a backslash in a name as a slash).
+                let under = |d: &String| {
+                    let d = d.replace('\\', "/");
+                    !d.is_empty() && (path == d || path.starts_with(&format!("{d}/")))
+                };
+                if did.disturbed_at.iter().chain(&did.held_at).any(under) {
+                    did.excused.insert(bytes);
+                }
             }
         }
     };
     for _ in 0..30 {
-        held_apart(&mut a, &mut did);
-        held_apart(&mut b, &mut did);
+        held_apart(&mut a, &mut b, &mut did);
         match rng.below(5) {
             0 => act(&a.root, &mut rng, &mut ledger).map_err(|e| format!("a: {e}"))?,
             1 => act(&b.root, &mut rng, &mut ledger).map_err(|e| format!("b: {e}"))?,
@@ -440,14 +466,12 @@ fn hostile_seed(seed: u64) -> Res<Hostile> {
             }
         }
     }
-    held_apart(&mut a, &mut did);
-    held_apart(&mut b, &mut did);
+    held_apart(&mut a, &mut b, &mut did);
     match did.replans {
         true => settle_still(&mut a, &mut b, &server),
         false => settle_all(&mut a, &mut b),
     }?;
-    held_apart(&mut a, &mut did);
-    held_apart(&mut b, &mut did);
+    held_apart(&mut a, &mut b, &mut did);
     for c in [&a, &b] {
         untampered(c, &did)?;
     }
