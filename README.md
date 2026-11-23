@@ -153,10 +153,11 @@ Good to know:
   decrypt them. The cipher handles about 1 GB/s encrypting and 2.8 GB/s decrypting, more
   than any internet link. Dropbox, by default, encrypts files once they reach its servers,
   with keys Dropbox holds. Let's be honest about what that is worth: it protects a disk
-  that is stolen, and little else. Whoever gets into Dropbox's systems has your files, and
-  so does Dropbox. With Homebase Drive, the files are encrypted before they leave your
-  computer, and the keys stay with you and your devices, not with a company, and not with
-  the server either. More: [docs/spec/encryption.md](docs/spec/encryption.md).
+  that is stolen, and little else. "Encrypted" there doesn't mean Dropbox can't read your
+  files: it holds the keys, so it can, and so can whoever gets into its systems. With
+  Homebase Drive, the files are encrypted before they leave your computer, and the keys
+  stay with you and your devices, not with a company, and not with the server either.
+  More: [docs/spec/encryption.md](docs/spec/encryption.md).
 
   Privacy, from each vendor's own terms (October 2026):
 
