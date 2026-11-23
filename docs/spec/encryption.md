@@ -83,6 +83,7 @@ The format is checked against odin-js byte for byte: `fixtures/encryption-odin-j
 | Sent key header (`encryptedKeyHeader`) | `{encryptionVersion: 1, type: "aes", iv: transferIv, encryptedAesKey: CBC(sharedSecret, transferIv, iv ‖ key)}` |
 | Received key header (`sharedSecretEncryptedKeyHeader`) | the same shape; opened with the shared secret |
 | On a private drive (`type: "zkDrive"`, sent and received) | `{encryptionVersion: 1, type: "zkDrive", iv: headerIv, encryptedAesKey: CBC(driveKey, headerIv, iv ‖ key)}`: under the drive's key, with the header's own IV as the wrap IV (odin-core's vector, `sealed.rs`) |
+| A file someone added to a folder shared with them (`type: "sealed"`, received on the owner's drive) | `{encryptionVersion: 1, type: "sealed", iv: headerIv, encryptedAesKey: ZkSeal v1 of iv ‖ key}`: sealed to the drive's write-only key (odin-core's vector, `sealed.rs`) |
 | `SharedSecretEncryptedHeader64` (payload responses) | base64 of IV (16) ‖ encrypted `iv ‖ key` (48) ‖ version (4, little-endian); its `iv` is the payload's |
 | `fileMetadata.isEncrypted` | `true` |
 | `appData.content` | `CBC(key, headerIv, node JSON)` |
@@ -186,6 +187,17 @@ payload IV to the download would save it (a follow-up). What changes for this cl
   read; it gives the size too).
 - **Writes.** The key header is locked with the drive's key and sent as `zkDrive`; the server
   refuses any other on a private drive.
+- **A file someone else added.** Someone a folder is shared with for editing can add files to
+  it, and never holds the drive's key: their file arrives with its key header sealed to the
+  drive's write-only key (`sealed`, 12: `ZkSeal` version 1 of the header IV, then the file
+  key; **[verified]** odin-core `ClientLockedKeyHeaderVectorTests`, chat-kmp `openSealed`, and
+  live on the dev server, 2026-11-23). This computer opens it with that key's private half,
+  from the app's grant ("Files shared with you"), and gives the file a token under the shared
+  secret like any other. Its next write of the file (a rename, say) sends the key locked with
+  the drive's key, as every write here does; the server takes it, and the file is a `zkDrive`
+  one from then on (**[verified]** live). Where the write-only key isn't there or doesn't
+  open, the file is left unread, said, and the rest syncs on. Cost: per read of such a header,
+  one AES-GCM unlock and parse of the write-only key and one P-384 key agreement.
 - **A private drive whose key isn't locked for the app yet** (the grant says `isZeroKnowledge`
   with no `zkAppKeyEncryptedStorageKey`: a grant the owner's browser hasn't seen) is the same as a login without the key: log in again, and the consent page fills it in.
 - **Without the key** (a login from before this client asked for it): the server leaves the
@@ -210,7 +222,8 @@ odin-core's `SelectiveShareKeyVectorTests` **[verified]**):
   **[verified]**); a private drive's grant carries the private half (PKCS#8) locked with the
   drive's key (`zkStorageKeyEncryptedWriteOnlyPrivateKey`, AES-128-GCM as
   `zkAppKeyEncryptedStorageKey`, **[verified]** odin-core `RedactedDriveGrant`, chat-kmp
-  `ZkKeyStore`), opened only while reading what is shared. Sharers seal only to a private drive
+  `ZkKeyStore`), opened only while reading what is shared, or a file sealed to the drive
+  ("A private drive", "A file someone else added"). Sharers seal only to a private drive
   (chat-kmp's `FilesyncSharing`, **[verified]**). A private drive without the key (or whose copy
   doesn't open) opens nothing shared here, and its own folders sync on.
 - **A circle's key.** The sharer seals their circle's 16-byte key to the member's drive

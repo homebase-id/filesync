@@ -704,6 +704,18 @@ server answers the rest, to a token their server made for this identity's connec
   the connection gone, their keys invalid), 403 a file not (or no longer) shared, 404 none
   there. A share-key answer not sealed yet or not reviewed waits (`RemoteError::Waiting`, asked
   again in 15 minutes); reads never write: every write refuses before a request.
+- **What a member adds, on the owner's drive** **[verified]** live (dev server, odin-core
+  3ace44b69, 2026-11-23: a file added as a member through the member's own server, read with
+  the owner's Filesync login): the file is an ordinary row of the owner's feed, its
+  `senderOdinId` the member, its ACL `connected`, its `sharedSecretEncryptedKeyHeader` of
+  type `sealed` (12): `iv` the header IV, `encryptedAesKey` a `ZkSeal` version 1 value of
+  `iv ‖ key`, sealed to the drive's write-only key (encryption spec, "A private drive"). An
+  owner's update of it with a `zkDrive` key header is taken, and the header is `zkDrive` from
+  then on; the member's share row keeps opening it (the file key stays). Until then a member's
+  edit must come sealed too (`recipientIdentityReturnedInvalidKeyHeader` otherwise). chat-kmp
+  also sends the re-locked key header alone, at the version read
+  (`POST /drives/{driveId}/files/transform-key-headers`, **[inferred]** from its
+  `SealedKeyHeaders` and odin-core's `ClientLockedKeyHeaderVectorTests`): this client doesn't.
 
 ## Conventions
 - camelCase JSON, enums as camelCase strings, bytes as standard base64, times as Unix ms.
