@@ -2,7 +2,7 @@ use hbsync_fileio::{HashAlgorithm, hash_bytes};
 use hbsync_remote::fake::{FakeRemote, FakeServer, ServerConfig};
 use std::time::Duration;
 
-use hbsync_remote::contract::{self, Bench, Shares, file, folder, upload};
+use hbsync_remote::contract::{self, Bench, Shares, file, folder, upload, with};
 use hbsync_remote::{ChangeRef, NodeMeta, Remote, RemoteError, RemoteHeader, Upload, feed_end};
 use hbsync_types::schema::NodeContent;
 use hbsync_types::{NodeId, NodeKind, Target, Written};
@@ -33,34 +33,28 @@ fn the_contract_holds() -> R {
 /// scenarios of that, and leaves nothing behind.
 #[test]
 fn the_editing_contract_holds() -> R {
+    shared_contract_holds(true)
+}
+
+/// A sharer with a folder named "shared" at the top of its drive, shared for editing.
+fn sharing_a_folder_to_edit() -> Result<(FakeRemote, NodeMeta), RemoteError> {
     let sharer = remote();
-    let member = FakeRemote::member(sharer.server_handle()).writing();
-    let bench = Bench::editing(&sharer, &member, "contract", Duration::ZERO)?;
-    let failed = bench.run_all();
-    assert!(failed.is_empty(), "{failed:#?}");
-    bench.cleanup()?;
-    let server = sharer.server();
-    let live: Vec<_> = server.live().map(|h| h.file_id).collect();
-    assert!(live.is_empty(), "cleanup left {live:?}");
-    let shared: Vec<_> = server.shared().collect();
-    assert!(shared.is_empty(), "cleanup left share rows of {shared:?}");
-    Ok(())
+    let scratch = folder("shared", NodeId::ROOT);
+    let dir = sharer.create(&scratch, None)?.at();
+    sharer.share_to_edit(dir.file_id)?;
+    Ok((sharer, scratch))
 }
 
 /// A member that doesn't write is refused every write, of what is shared for editing too.
 #[test]
 fn a_member_writes_only_where_it_is_one_that_writes() -> R {
-    use hbsync_remote::contract::{Shares, file, upload};
-    let sharer = remote();
-    let scratch = hbsync_remote::contract::folder("shared", NodeId::ROOT);
-    let dir = sharer.create(&scratch, None)?.at();
-    sharer.share_to_edit(dir.file_id)?;
+    let (sharer, scratch) = sharing_a_folder_to_edit()?;
     let reading = FakeRemote::member(sharer.server_handle());
     let new = file("mine", scratch.node, b"1");
-    let refused = reading.create(&new, Some(upload(&mut std::io::Cursor::new(&b"1"[..]))));
+    let refused = create_file(&reading, &new, b"1");
     assert!(matches!(refused, Err(RemoteError::Fatal(_))), "{refused:?}");
     let writing = reading.clone().writing();
-    let made = writing.create(&new, Some(upload(&mut std::io::Cursor::new(&b"1"[..]))))?;
+    let made = create_file(&writing, &new, b"1")?;
     assert!(made.target.token.is_none());
     // The member hears of what it added, as the owner does.
     assert!(sharer.server().shared_live(made.at().file_id));
@@ -72,19 +66,12 @@ fn a_member_writes_only_where_it_is_one_that_writes() -> R {
 /// version the file no longer has is given up.
 #[test]
 fn a_members_write_on_its_way_lands_when_it_is_delivered() -> R {
-    use hbsync_remote::contract::{Shares, file, upload, with};
-    use hbsync_types::schema::NodeContent;
-    let sharer = remote();
-    let scratch = hbsync_remote::contract::folder("shared", NodeId::ROOT);
-    let dir = sharer.create(&scratch, None)?.at();
-    sharer.share_to_edit(dir.file_id)?;
+    let (sharer, scratch) = sharing_a_folder_to_edit()?;
     let theirs = file("theirs", scratch.node, b"1");
-    let at = sharer
-        .create(&theirs, Some(upload(&mut std::io::Cursor::new(&b"1"[..]))))?
-        .at();
+    let at = create_file(&sharer, &theirs, b"1")?.at();
     sharer.share_to_edit(at.file_id)?;
     let member = FakeRemote::member(sharer.server_handle()).writing();
-    let waits = |answer: Result<hbsync_types::Written, RemoteError>| {
+    let waits = |answer: Result<Written, RemoteError>| {
         assert!(
             matches!(answer, Err(RemoteError::Waiting { .. })),
             "{answer:?}"
@@ -96,7 +83,7 @@ fn a_members_write_on_its_way_lands_when_it_is_delivered() -> R {
     let renamed = with(&theirs, NodeContent::file("renamed", 1, 1, false));
     waits(member.update(&target, &renamed, None));
     let new = file("mine", scratch.node, b"2");
-    waits(member.create(&new, Some(upload(&mut std::io::Cursor::new(&b"2"[..])))));
+    waits(create_file(&member, &new, b"2"));
     let stopped = member.set_removed(std::slice::from_ref(&target), true)?;
     assert!(stopped.answers.is_empty());
     assert!(matches!(stopped.stopped, Some(RemoteError::Waiting { .. })));
@@ -130,7 +117,7 @@ fn a_members_write_on_its_way_lands_when_it_is_delivered() -> R {
         Err(RemoteError::VersionMismatch)
     ));
     assert!(matches!(
-        member.create(&new, Some(upload(&mut std::io::Cursor::new(&b"2"[..])))),
+        create_file(&member, &new, b"2"),
         Err(RemoteError::AlreadyExists)
     ));
     assert!(member.deliver().is_empty());
@@ -140,11 +127,21 @@ fn a_members_write_on_its_way_lands_when_it_is_delivered() -> R {
 /// A member reading what the sharer shares passes the read-only subset.
 #[test]
 fn the_shared_contract_holds() -> R {
+    shared_contract_holds(false)
+}
+
+/// The contract of a member, one that writes (`writing`) or only reads, against the fake,
+/// and nothing of it left afterwards.
+fn shared_contract_holds(writing: bool) -> R {
     let sharer = remote();
     let member = FakeRemote::member(sharer.server_handle());
+    let member = if writing { member.writing() } else { member };
     // The sharer's own feed end: the bench's start is the member's cursor.
     let sharers_start = feed_end(&sharer, None)?;
-    let bench = Bench::shared(&sharer, &member, "contract", Duration::ZERO)?;
+    let bench = match writing {
+        true => Bench::editing(&sharer, &member, "contract", Duration::ZERO)?,
+        false => Bench::shared(&sharer, &member, "contract", Duration::ZERO)?,
+    };
     let failed = bench.run_all();
     assert!(failed.is_empty(), "{failed:#?}");
     bench.cleanup()?;

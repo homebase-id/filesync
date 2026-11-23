@@ -296,12 +296,7 @@ impl<'a> Bench<'a> {
         name: &str,
         settle: Duration,
     ) -> Result<Self, RemoteError> {
-        let shared = Shared {
-            member,
-            shares: sharer,
-            editing: false,
-        };
-        Bench::of(sharer, Some(shared), name, settle)
+        Bench::shared_as(sharer, member, false, name, settle)
     }
 
     /// A bench where `sharer` writes and shares for editing, and `member` writes to what is
@@ -313,10 +308,20 @@ impl<'a> Bench<'a> {
         name: &str,
         settle: Duration,
     ) -> Result<Self, RemoteError> {
+        Bench::shared_as(sharer, member, true, name, settle)
+    }
+
+    fn shared_as(
+        sharer: &'a dyn Sharer,
+        member: &'a dyn Remote,
+        editing: bool,
+        name: &str,
+        settle: Duration,
+    ) -> Result<Self, RemoteError> {
         let shared = Shared {
             member,
             shares: sharer,
-            editing: true,
+            editing,
         };
         Bench::of(sharer, Some(shared), name, settle)
     }
@@ -359,12 +364,10 @@ impl<'a> Bench<'a> {
     /// Runs every scenario that reaches this bench ([`Reach`]); returns the names and errors of
     /// the ones that failed.
     pub fn run_all(&self) -> Vec<(&'static str, String)> {
-        let reached = |reach: Reach| match (self.shared, reach) {
-            (None, reach) => matches!(reach, Reach::Both | Reach::OwnerOnly),
-            (Some(shared), Reach::EditingOnly) => shared.editing,
-            (Some(shared), reach) => {
-                !shared.editing && matches!(reach, Reach::Both | Reach::SharedOnly)
-            }
+        let reached = |reach: Reach| match self.shared {
+            None => matches!(reach, Reach::Both | Reach::OwnerOnly),
+            Some(shared) if shared.editing => reach == Reach::EditingOnly,
+            Some(_) => matches!(reach, Reach::Both | Reach::SharedOnly),
         };
         SCENARIOS
             .iter()
@@ -520,15 +523,20 @@ impl<'a> Bench<'a> {
         file_id: RemoteFileId,
         range: Option<std::ops::Range<u64>>,
     ) -> Result<Vec<u8>, RemoteError> {
-        let mut out = Vec::new();
-        let n = self.reader().read(file_id, range, &mut out)?;
-        if n != out.len() as u64 {
-            return Err(RemoteError::Fatal(format!(
-                "read returned {n} but wrote {} bytes",
-                out.len()
-            )));
+        read_all(self.reader(), file_id, range)
+    }
+
+    /// A create by the member, remembered for cleanup: made wrongly, it is still cleaned up.
+    fn member_create(
+        &self,
+        meta: &NodeMeta,
+        data: Option<&[u8]>,
+    ) -> Result<hbsync_types::Written, RemoteError> {
+        let made = with_upload(data, |upload| self.reader().create(meta, upload));
+        if let Ok(written) = &made {
+            self.track(written.at().file_id);
         }
-        Ok(out)
+        made
     }
 
     /// The feed's end: a cursor after every change so far.
@@ -1520,12 +1528,7 @@ fn the_member_writes_nothing(b: &Bench) -> Outcome {
     let cursor = b.cursor_now()?;
     let target = Target { at: w, token: None };
     let new = file("mine", b.scratch, b"2");
-    let made = with_upload(Some(b"2"), |upload| b.reader().create(&new, upload));
-    // Made wrongly, it is still cleaned up.
-    if let Ok(w) = &made {
-        b.track(w.at().file_id);
-    }
-    ensure_err!(made, RemoteError::Fatal(_));
+    ensure_err!(b.member_create(&new, Some(b"2")), RemoteError::Fatal(_));
     ensure_err!(
         b.reader().update(
             &target,
@@ -1582,10 +1585,20 @@ fn a_member_holds_only_what_is_shared(b: &Bench) -> Outcome {
     Ok(())
 }
 
-/// The bytes of `file_id` as `reader` reads them.
-fn bytes_of(reader: &dyn Remote, file_id: RemoteFileId) -> Result<Vec<u8>, RemoteError> {
+/// `range` of `file_id`'s bytes (all of them without one) as `reader` reads them.
+fn read_all(
+    reader: &dyn Remote,
+    file_id: RemoteFileId,
+    range: Option<std::ops::Range<u64>>,
+) -> Result<Vec<u8>, RemoteError> {
     let mut out = Vec::new();
-    reader.read(file_id, None, &mut out)?;
+    let n = reader.read(file_id, range, &mut out)?;
+    if n != out.len() as u64 {
+        return Err(RemoteError::Fatal(format!(
+            "read returned {n} but wrote {} bytes",
+            out.len()
+        )));
+    }
     Ok(out)
 }
 
@@ -1617,7 +1630,7 @@ fn a_member_changes_what_it_may_edit(b: &Bench) -> Outcome {
             "{who} reads {header:?}"
         );
         ensure!(
-            bytes_of(reader, w.file_id)? == b"22",
+            read_all(reader, w.file_id, None)? == b"22",
             "{who} reads other bytes"
         );
     }
@@ -1635,7 +1648,10 @@ fn a_member_changes_what_it_may_edit(b: &Bench) -> Outcome {
             && matches!(&header.body, RemoteBody::Live { content, .. } if content.name == "renamed"),
         "the owner reads {header:?}"
     );
-    ensure!(bytes_of(b.remote, w.file_id)? == b"22", "the bytes changed");
+    ensure!(
+        read_all(b.remote, w.file_id, None)? == b"22",
+        "the bytes changed"
+    );
     Ok(())
 }
 
@@ -1644,14 +1660,7 @@ fn a_member_changes_what_it_may_edit(b: &Bench) -> Outcome {
 /// One added again is there already. Nothing is added outside what is shared.
 fn a_member_adds_to_a_folder_it_may_edit(b: &Bench) -> Outcome {
     let member = b.reader();
-    let add = |meta: &NodeMeta, data: Option<&[u8]>| {
-        let made = with_upload(data, |upload| member.create(meta, upload));
-        // Made wrongly, it is still cleaned up.
-        if let Ok(written) = &made {
-            b.track(written.at().file_id);
-        }
-        made
-    };
+    let add = |meta: &NodeMeta, data: Option<&[u8]>| b.member_create(meta, data);
     let new = file("mine", b.scratch, b"2");
     let made = add(&new, Some(b"2"))?;
     ensure!(
@@ -1680,7 +1689,7 @@ fn a_member_adds_to_a_folder_it_may_edit(b: &Bench) -> Outcome {
             );
             if let Some(data) = data {
                 ensure!(
-                    bytes_of(reader, at.file_id)? == data,
+                    read_all(reader, at.file_id, None)? == data,
                     "{who} reads other bytes"
                 );
             }
@@ -1715,7 +1724,10 @@ fn a_member_removes_and_puts_back(b: &Bench) -> Outcome {
             "{who} reads {header:?}"
         );
     }
-    ensure!(bytes_of(b.remote, w.file_id)? == b"1", "the bytes changed");
+    ensure!(
+        read_all(b.remote, w.file_id, None)? == b"1",
+        "the bytes changed"
+    );
     let again = member.set_removed(&[target(at)], true)?.single()?;
     ensure!(again.at().version == at.version, "removed twice");
     ensure_err!(
@@ -1770,11 +1782,7 @@ fn what_is_shared_to_read_is_not_changed(b: &Bench) -> Outcome {
         RemoteError::Fatal(_)
     );
     let new = file("mine", dir.node, b"2");
-    let made = with_upload(Some(b"2"), |upload| member.create(&new, upload));
-    if let Ok(written) = &made {
-        b.track(written.at().file_id);
-    }
-    ensure_err!(made, RemoteError::Fatal(_));
+    ensure_err!(b.member_create(&new, Some(b"2")), RemoteError::Fatal(_));
     let header = b.remote.header(w.file_id)?;
     ensure!(
         header.version == w.version && !header.removed,

@@ -689,6 +689,14 @@ impl FakeServer {
     }
 
     /// The name of file `file_id`, unless it is a tombstone or missing.
+    /// The node of `file_id`, if it is live.
+    fn live_node(&self, file_id: RemoteFileId) -> Option<NodeId> {
+        match &self.files.get(&file_id)?.header.body {
+            RemoteBody::Live { node, .. } => Some(*node),
+            RemoteBody::Deleted => None,
+        }
+    }
+
     fn live_name(&self, file_id: RemoteFileId) -> Option<&str> {
         match &self.files.get(&file_id)?.header.body {
             RemoteBody::Live { content, .. } => Some(&content.name),
@@ -1195,17 +1203,17 @@ impl FakeRemote {
     /// Refuses a write of a member that doesn't write ([`FakeRemote::writing`]): what is
     /// shared with it is read-only.
     fn writable(&self) -> Result<()> {
-        match self.view == View::Owner || self.writes {
+        match self.writes {
             true => Ok(()),
-            false => Err(RemoteError::read_only("the owner")),
+            false => self.owners(),
         }
     }
 
     /// Refuses what only the drive's owner does, whoever the member is: a delete, a share.
     fn owners(&self) -> Result<()> {
-        match self.view {
-            View::Owner => Ok(()),
-            View::Member => Err(RemoteError::read_only("the owner")),
+        match self.is_member() {
+            true => Err(RemoteError::read_only("the owner")),
+            false => Ok(()),
         }
     }
 
@@ -1226,12 +1234,22 @@ impl FakeRemote {
         self.outbox.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Whether a write of the member's is held back: every one while
-    /// [`Faults::on_their_way`], and one of `node` while an earlier one of it is on its way
-    /// (one write of a node at a time, as on Homebase).
-    fn holds(&self, node: NodeId) -> bool {
-        self.is_member()
-            && (self.faults().on_their_way || self.outbox().iter().any(|h| h.node() == node))
+    /// Whether a write of the member's to `nodes` is held back, and if it is, whether it
+    /// goes into the outbox (`Some(true)`): every one while [`Faults::on_their_way`]. One of
+    /// a node with an earlier write on its way waits without going in (one write of a node
+    /// at a time, as on Homebase). `nodes` are asked for only where something is held.
+    fn held_back<I: IntoIterator<Item = NodeId>>(&self, nodes: impl FnOnce() -> I) -> Option<bool> {
+        if !self.is_member() {
+            return None;
+        }
+        let queued = self.faults().on_their_way;
+        let outbox = self.outbox();
+        let waits = queued
+            || (!outbox.is_empty()
+                && nodes()
+                    .into_iter()
+                    .any(|node| outbox.iter().any(|held| held.node() == node)));
+        waits.then_some(queued)
     }
 
     /// The owner's server takes the member's writes held back ([`Faults::on_their_way`]), in
@@ -1393,10 +1411,7 @@ impl FakeRemote {
     }
 
     /// Reads an upload stream outside the server lock, applying an injected connection cut.
-    fn receive(
-        &self,
-        payload: Option<Upload<'_>>,
-    ) -> Result<Option<(hbsync_types::ContentHash, Vec<u8>)>> {
+    fn receive(&self, payload: Option<Upload<'_>>) -> Result<Received> {
         let Some(upload) = payload else {
             return Ok(None);
         };
@@ -1444,10 +1459,7 @@ fn written(at: RemoteRef, changed_at: i64, content: Option<hbsync_types::Content
 }
 
 /// Hands bytes taken in by [`FakeRemote::receive`] on to the server as an upload.
-fn replay<T>(
-    received: Option<(hbsync_types::ContentHash, Vec<u8>)>,
-    send: impl FnOnce(Option<Upload<'_>>) -> T,
-) -> T {
+fn replay<T>(received: Received, send: impl FnOnce(Option<Upload<'_>>) -> T) -> T {
     let Some((hash, bytes)) = received else {
         return send(None);
     };
@@ -1515,8 +1527,8 @@ impl Remote for FakeRemote {
         // Receive the bytes before taking the server lock, as a real server handles several
         // uploads at once; only the commit is serialized.
         let received = self.receive(payload)?;
-        if self.holds(node.node) {
-            if self.faults().on_their_way {
+        if let Some(queued) = self.held_back(|| [node.node]) {
+            if queued {
                 self.outbox().push(Held::Create(node.clone(), received));
             }
             return Err(on_its_way());
@@ -1552,8 +1564,8 @@ impl Remote for FakeRemote {
             return Err(RemoteError::NotFound);
         }
         let received = self.receive(payload)?;
-        if self.holds(meta.node) {
-            if self.faults().on_their_way {
+        if let Some(queued) = self.held_back(|| [meta.node]) {
+            if queued {
                 self.outbox()
                     .push(Held::Update(target.clone(), meta.clone(), received));
             }
@@ -1623,27 +1635,23 @@ impl Remote for FakeRemote {
         }
         // The member's, held on their way: the first one held stops the rest, as the
         // Homebase adapter stops at an answer that isn't one file's own.
-        if self.is_member() {
-            let nodes: Vec<Option<NodeId>> = {
-                let server = self.server();
-                let node = |t: &Target| match server.header(t.at.file_id).map(|h| h.body) {
-                    Ok(RemoteBody::Live { node, .. }) => Some(node),
-                    _ => None,
-                };
-                files.iter().map(node).collect()
-            };
-            if nodes.iter().flatten().any(|node| self.holds(*node)) {
-                if self.faults().on_their_way {
-                    let held = files.iter().zip(&nodes).filter_map(|(target, node)| {
-                        Some(Held::Remove((*node)?, target.clone(), removed))
-                    });
-                    self.outbox().extend(held);
-                }
-                return Ok(Answers {
-                    answers: Vec::new(),
-                    stopped: Some(on_its_way()),
-                });
+        let nodes = || -> Vec<(NodeId, &Target)> {
+            let server = self.server();
+            let live = files.iter();
+            live.filter_map(|t| Some((server.live_node(t.at.file_id)?, t)))
+                .collect()
+        };
+        if let Some(queued) = self.held_back(|| nodes().into_iter().map(|(node, _)| node)) {
+            if queued {
+                let held = nodes()
+                    .into_iter()
+                    .map(|(node, target)| Held::Remove(node, target.clone(), removed));
+                self.outbox().extend(held);
             }
+            return Ok(Answers {
+                answers: Vec::new(),
+                stopped: Some(on_its_way()),
+            });
         }
         let failing = self.faults().fail_writes_named.clone();
         let answers = {
