@@ -1540,12 +1540,15 @@ whatever changed here, and the plan holds no operation on the drive:
   a tag write) (engine test `a_shares_files_are_read_only_on_this_device`).
   A read-only file anywhere is treated the same way, the user's own too (a copy of a shared
   file keeps its bits in Explorer, Finder and `cp`; filesync #459): what another device did
-  to the file goes through. Its tags are written with it made writable for the write and
-  read-only again; on Windows it is made writable before a new version replaces it or a
-  delete removes it (and read-only again where that fails). A new version put in place is
-  writable in an identity's own folder: the bit was the old file's. The cost there: one look
-  at the file per tag write, and on Windows per replace and delete (engine test
-  `a_read_only_file_of_ones_own_follows_the_drive`).
+  to the file goes through. Its tags are written with it made writable for the write, then
+  put back exactly as it was (its mode, whatever others may do with the file:
+  `ops::unlock`, `ops::relock`); on Windows it is made writable before a new version
+  replaces it or a delete removes it (and read-only again where that fails). A new version
+  put in place is writable in an identity's own folder: the bit was the old file's. The cost
+  there: one look at the file per tag write, and on Windows per replace and delete; and on
+  Windows, where a replace fails on a read-only file (open in a program), the attribute's
+  change moves the file's change time, so the retry reads the file again first (engine
+  test `a_read_only_file_of_ones_own_follows_the_drive`).
 - **A name-clash loser that changed here** still moves out (only its syncing waits).
 - **Undone.** A move or rename here goes back to the drive's place; a delete here comes back
   (downloaded again); tags here become the drive's. Nothing of these moves out: the drive holds
