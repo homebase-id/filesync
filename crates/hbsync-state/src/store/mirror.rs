@@ -349,6 +349,7 @@ pub fn put_desktops(db: &std::path::Path, desktops: &[(NodeId, &str)]) -> Result
         content_extra: None,
         token: None,
         changed_at: Some(5),
+        writable: false,
     };
     crate::StateDb::open_account(db)?.write(|s| {
         let a = s.account();
@@ -372,6 +373,7 @@ fn outside_row() -> MirrorRow {
         content_extra: None,
         token: None,
         changed_at: None,
+        writable: false,
     }
 }
 
@@ -400,11 +402,13 @@ impl AccountTx<'_> {
         let f = row.file.as_ref();
         self.prep(
             "INSERT INTO remote (id, file_id, version_tag, parent, kind, name, \
-                 hash, size, mtime_ms, executable, content_extra, token, changed_at, name_key) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14) \
+                 hash, size, mtime_ms, executable, content_extra, token, changed_at, name_key, \
+                 writable) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15) \
                  ON CONFLICT (id) DO UPDATE SET file_id = ?2, version_tag = ?3, parent = ?4, \
                  kind = ?5, name = ?6, hash = ?7, size = ?8, mtime_ms = ?9, executable = ?10, \
-                 content_extra = ?11, token = ?12, changed_at = ?13, name_key = ?14",
+                 content_extra = ?11, token = ?12, changed_at = ?13, name_key = ?14, \
+                 writable = ?15",
         )?
         .execute(params![
             id,
@@ -421,7 +425,30 @@ impl AccountTx<'_> {
             row.token.as_ref().map(|t| &t.0[..]),
             row.changed_at,
             sibling_hash(&row.name),
+            row.writable,
         ])?;
+        self.fan_out(row.node, row.parent)
+    }
+
+    /// Keeps whether this identity may change file `file_id` (`writable`), where the mirror
+    /// has the file and said otherwise: its node is marked dirty where that concerns
+    /// (`fan_out`), as what may be done with it changed though its version didn't (the
+    /// sharer changed its share from reading to editing, or back).
+    pub fn set_writable(&self, file_id: RemoteFileId, writable: bool) -> Result<()> {
+        let changed = self
+            .prep("UPDATE remote SET writable = ?2 WHERE file_id = ?1 AND writable IS NOT ?2")?
+            .execute(params![file_id.0.as_bytes(), writable])?;
+        if changed == 0 {
+            return Ok(());
+        }
+        let Some(row) = self.one(
+            &format!("{MIRROR_SELECT} WHERE m.file_id = ?1"),
+            file_id.0.as_bytes(),
+            mirror_row,
+        )?
+        else {
+            return Ok(());
+        };
         self.fan_out(row.node, row.parent)
     }
 

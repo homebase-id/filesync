@@ -762,6 +762,7 @@ mod tests {
             content_extra: None,
             token: None,
             changed_at: Some(5),
+            writable: false,
         };
         let folder = NodeId::new();
         StateDb::open_account(&db)?.write(|s| {

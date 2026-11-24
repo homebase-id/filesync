@@ -719,6 +719,7 @@ mod tests {
             content_extra: None,
             token: None,
             changed_at: Some(5),
+            writable: false,
         };
         StateDb::open_account(&db)?.write(|s| s.account().put_live(&file))?;
         let mut reader = AccountReader::open(&db, "a.example")?.ok_or("no DB")?;

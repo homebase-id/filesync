@@ -150,6 +150,89 @@ fn a_share_given_again_brings_the_file_back() -> R {
     Ok(())
 }
 
+/// Whether what is shared may be changed from here is told per item, and kept: a share
+/// given for editing says so of its item alone, the others stay for reading. A share changed
+/// from one to the other keeps the item's version; the member's next read of the feed takes
+/// it all the same, and has the item planned again. Nothing on this device changes yet for
+/// it: the folder syncs read-only as before.
+#[test]
+fn a_share_changed_to_editing_is_kept_and_its_item_planned_again() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("to-edit.txt", "one")?;
+    a.write("to-read.txt", "two")?;
+    a.write("edited-from-the-start.txt", "three")?;
+    a.sync()?;
+    share(&a, &server, "to-edit.txt")?;
+    share(&a, &server, "to-read.txt")?;
+    a.remote
+        .share_to_edit(common::header_named(&server, "edited-from-the-start.txt").file_id)?;
+    let (mut b, out) = Client::member(&server, "b")?;
+    b.sync()?;
+    let file = |name: &str| common::header_named(&server, name);
+    let kept = |b: &mut Client, name: &str| -> Result<bool, Box<dyn std::error::Error>> {
+        let row = b
+            .engine
+            .db()
+            .read(|s| s.mirror_by_file(file(name).file_id))?;
+        Ok(row.ok_or("no row")?.writable)
+    };
+    assert_eq!(
+        (kept(&mut b, "to-edit.txt")?, kept(&mut b, "to-read.txt")?),
+        (false, false)
+    );
+    // One shared for editing when it is first read says so with its row, and with the row
+    // of its next version.
+    assert!(kept(&mut b, "edited-from-the-start.txt")?);
+    a.write("edited-from-the-start.txt", "three, changed")?;
+    a.sync()?;
+    b.sync()?;
+    assert!(kept(&mut b, "edited-from-the-start.txt")?);
+
+    let before = file("to-edit.txt");
+    a.remote.share_to_edit(before.file_id)?;
+    server.lock().map_err(|_| "poisoned")?.tick();
+    assert_eq!(
+        file("to-edit.txt").version,
+        before.version,
+        "a share keeps the version"
+    );
+    let planned = |b: &mut Client, name: &str| -> Result<bool, Box<dyn std::error::Error>> {
+        let node = file(name).node().ok_or("a node")?;
+        Ok(b.engine.db().read(|s| s.is_dirty(node))?)
+    };
+    b.engine.drive().pull(None)?;
+    assert_eq!(
+        (kept(&mut b, "to-edit.txt")?, kept(&mut b, "to-read.txt")?),
+        (true, false)
+    );
+    assert_eq!(
+        (
+            planned(&mut b, "to-edit.txt")?,
+            planned(&mut b, "to-read.txt")?
+        ),
+        (true, false)
+    );
+    b.sync()?;
+    assert_eq!(
+        b.tree_text(""),
+        [
+            "edited-from-the-start.txt = three, changed",
+            "to-edit.txt = one",
+            "to-read.txt = two"
+        ]
+    );
+    nothing_moved_out(&out)?;
+
+    // Back to reading: kept again, planned again.
+    a.remote.share(before.file_id)?;
+    server.lock().map_err(|_| "poisoned")?.tick();
+    b.engine.drive().pull(None)?;
+    assert!(!kept(&mut b, "to-edit.txt")?);
+    assert!(planned(&mut b, "to-edit.txt")?);
+    Ok(())
+}
+
 /// A share given another end keeps the file's version, and a notice of the file says no end.
 /// So on another identity's drive a notice of a live file is read from the feed, though the
 /// store knows the version: the header there gives the new end

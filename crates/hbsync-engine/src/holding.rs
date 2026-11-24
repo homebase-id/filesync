@@ -560,6 +560,7 @@ mod tests {
                 content_extra: None,
                 token: None,
                 changed_at: None,
+                writable: false,
             },
             removed_at,
         }

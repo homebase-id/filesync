@@ -251,10 +251,39 @@ impl AccountTx<'_> {
             self.made_again(row)?;
         }
         match &answer.left {
+            // (On another identity's drive only: an identity's own has no such rows.)
+            Left::Live(row) if self.shared()? && self.stays_writable(row)? => {
+                let row = MirrorRow {
+                    writable: true,
+                    ..row.clone()
+                };
+                self.put_live(&row)?
+            }
             Left::Live(row) => self.put_live(row)?,
             Left::Removed(removed) => self.move_to_removed(removed)?,
         }
         Ok(answered)
+    }
+
+    /// Whether the file this device wrote as `row` is one this identity may change, which a
+    /// write's answer doesn't say: as the mirror has the file where it has it (a change of
+    /// it), else as it has the folder it is in (a file this device made is shared as its
+    /// folder is; one put back from Recently deleted, whose row there keeps no such thing,
+    /// likewise). The feed's row of it says for sure, a moment later.
+    fn stays_writable(&self, row: &MirrorRow) -> Result<bool> {
+        let Some(row) = self.on_drive(row)? else {
+            return Ok(false);
+        };
+        let kept: Option<bool> = self
+            .prep(
+                "SELECT COALESCE((SELECT writable FROM remote WHERE file_id = ?1), \
+                 (SELECT m.writable FROM remote m JOIN nodes n ON n.id = m.id WHERE n.uuid = ?2))",
+            )?
+            .query_row(
+                params![row.file_id.0.as_bytes(), row.parent.0.as_bytes()],
+                |r| r.get(0),
+            )?;
+        Ok(kept.unwrap_or(false))
     }
 
     /// A tombstone the feed brought (`put_tombstone`, if it says when it was written):

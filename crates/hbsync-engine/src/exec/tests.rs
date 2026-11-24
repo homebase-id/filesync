@@ -142,6 +142,7 @@ impl Harness {
                 content_extra: Default::default(),
                 token: None,
                 changed_at: None,
+                writable: false,
             })
         })?;
         Ok(())

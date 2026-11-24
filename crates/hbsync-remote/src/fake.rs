@@ -152,9 +152,9 @@ enum View {
 enum Seen {
     /// The owner: as it is.
     Owner,
-    /// The member, shared: as it is, without the file's token, and with when its share ends
-    /// (if it does).
-    Shared(Option<i64>),
+    /// The member, shared: as it is, without the file's token, with when its share ends (if
+    /// it does) and whether it is shared for editing.
+    Shared(Option<i64>, bool),
     /// The member, a share withdrawn: a tombstone without a version.
     Unshared,
 }
@@ -386,6 +386,7 @@ impl FakeServer {
             changed_at: None,
             token: Some(token_of(file_id)),
             expires: None,
+            writable: false,
         };
         self.files.insert(
             file_id,
@@ -795,7 +796,7 @@ impl FakeServer {
                     node: header.node(),
                     parent: Some(header.parent),
                     expires: match how {
-                        Seen::Shared(until) => until,
+                        Seen::Shared(until, _) => until,
                         _ => None,
                     },
                     why: format!("{file_id:?}: unreadable (test)"),
@@ -908,6 +909,7 @@ impl FakeServer {
             changed_at: None,
             token: None,
             expires: None,
+            writable: false,
         };
         let file_id = match over {
             Some(file_id) => {
@@ -1992,7 +1994,7 @@ fn seen_by(
         View::Owner => Some(Seen::Owner),
         View::Member => shares.get(&file_id).map(|share| {
             match share.live && share.until.is_none_or(|until| until > now) {
-                true => Seen::Shared(share.until),
+                true => Seen::Shared(share.until, share.edits),
                 false => Seen::Unshared,
             }
         }),
@@ -2000,16 +2002,19 @@ fn seen_by(
 }
 
 /// `header` of a file last changed at `modified`, as it is seen `how` ([`seen_by`]): the member
-/// sees no file's token, and a share withdrawn as a tombstone without a version, `groupId`,
+/// sees no file's token, whether its share lets it change the file
+/// ([`RemoteHeader::writable`]; a tombstone never), and a share withdrawn as a tombstone without a version, `groupId`,
 /// tags or key (the root its parent, as the Homebase adapter reads a tombstone without a
 /// `groupId`), at the file's last change (the withdrawal: it has no version, so no time of
 /// one).
 fn seen(header: RemoteHeader, modified: Option<i64>, how: Seen) -> RemoteHeader {
     match how {
         Seen::Owner => header,
-        Seen::Shared(expires) => RemoteHeader {
+        Seen::Shared(expires, edits) => RemoteHeader {
             token: None,
             expires,
+            // (A tombstone is nobody's to change.)
+            writable: edits && !header.is_deleted(),
             ..header
         },
         Seen::Unshared => RemoteHeader {
@@ -2029,7 +2034,7 @@ fn seen(header: RemoteHeader, modified: Option<i64>, how: Seen) -> RemoteHeader 
 fn seen_ref(header: &RemoteHeader, modified: Option<i64>, how: Seen) -> ChangeRef {
     let as_is = ChangeRef::of(header);
     match how {
-        Seen::Owner | Seen::Shared(_) => as_is,
+        Seen::Owner | Seen::Shared(..) => as_is,
         Seen::Unshared => ChangeRef {
             version: VersionTag(Uuid::nil()),
             deleted: true,
@@ -2125,6 +2130,7 @@ mod tests {
             changed_at: Some(1_000),
             token: None,
             expires: None,
+            writable: false,
         };
         let live = RemoteHeader {
             body: RemoteBody::Live {
@@ -2136,7 +2142,7 @@ mod tests {
             ..header.clone()
         };
         for h in [header, live] {
-            for how in [Seen::Owner, Seen::Shared(None), Seen::Unshared] {
+            for how in [Seen::Owner, Seen::Shared(None, false), Seen::Unshared] {
                 assert_eq!(
                     seen_ref(&h, Some(2_000), how),
                     ChangeRef::of(&seen(h.clone(), Some(2_000), how)),

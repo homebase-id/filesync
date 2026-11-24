@@ -1684,6 +1684,27 @@ rules hold too:
   (shares given until a time, the time passing). The simulator's member has no feed (it
   reads the model's shared files directly): to it an end is the withdrawal its properties
   cover.
+- **What may be changed is told per item.** A share is given for reading or for editing,
+  item by item: one folder can hold both, and a file can be shared for editing in a folder
+  shared for reading. A shared item's header says which (`RemoteHeader::writable`: a share
+  it is read through gives `Write`), and the store keeps it with the item's row
+  (`MirrorRow::writable`). A share changed from one to the other keeps the item's version
+  and moves its place in the feed, as a share given does: the member's next read takes
+  it, and plans the item again (`AccountTx::set_writable`). This device's own write's
+  answer doesn't say: a change keeps what the store has of the file, and a file it made
+  takes its folder's (it is shared as its folder is), until the feed's row says for sure.
+  Nothing reads it yet: a folder synced from another identity's drive is read-only (above),
+  whatever its items say. A share's state DB from before it was kept reads its feed from
+  its beginning once (a re-read, §8b), each row taking what its header says.
+  The cost: nothing on an identity's own drive (no statement more; its headers say "no");
+  on another identity's, one small write per row whose share changed without its version,
+  one look per own write there, and that one re-read after the upgrade (a share of 10,000
+  files: 20 requests, about 25 MB, as any re-read). Engine test
+  `a_share_changed_to_editing_is_kept_and_its_item_planned_again`; store tests
+  `what_may_be_changed_is_kept_and_a_change_of_it_is_planned`,
+  `a_writes_answer_keeps_what_may_be_changed`; the contract's editing scenarios read the
+  header's word. The simulator's member has no feed and writes nothing yet: nothing to
+  model until a folder writes to what is shared (its rows say "no").
 - **Deleted for good by the sharer.** The drive tells a member nothing of a file deleted
   for good: its rows go with it, so no row of the member's feed and no notice names it (API
   notes, "Shared with you"). The member asks. It reads the feed from its beginning a week

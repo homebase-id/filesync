@@ -1550,10 +1550,9 @@ fn the_member_writes_nothing(b: &Bench) -> Outcome {
         b.changes_to(&cursor, &[w.file_id])?.is_empty(),
         "the file changed"
     );
-    ensure!(
-        b.reader().header(w.file_id)?.version == w.version,
-        "the file changed"
-    );
+    let header = b.reader().header(w.file_id)?;
+    ensure!(header.version == w.version, "the file changed");
+    ensure!(!header.writable, "said to be the member's to change");
     Ok(())
 }
 
@@ -1608,6 +1607,11 @@ fn read_all(
 fn a_member_changes_what_it_may_edit(b: &Bench) -> Outcome {
     let (f, w) = b.file("theirs", b"1")?;
     let member = b.reader();
+    // Its header says so to the member (nothing asks it of the owner's own).
+    ensure!(
+        member.header(w.file_id)?.writable && !b.remote.header(w.file_id)?.writable,
+        "shared for editing, and not said so to the member alone"
+    );
     let target = Target { at: w, token: None };
     let edited = with(&f, NodeContent::file("theirs", 2, 2, false));
     let written = with_upload(Some(b"22"), |upload| {
@@ -1677,6 +1681,10 @@ fn a_member_adds_to_a_folder_it_may_edit(b: &Bench) -> Outcome {
         (&inner, &made_inner, Some(&b"3"[..])),
     ] {
         let at = written.at();
+        ensure!(
+            member.header(at.file_id)?.writable,
+            "what the member added isn't its to change"
+        );
         for (who, reader) in [("the owner", b.remote), ("the member", member)] {
             let header = reader.header(at.file_id)?;
             ensure!(
@@ -1788,8 +1796,19 @@ fn what_is_shared_to_read_is_not_changed(b: &Bench) -> Outcome {
         header.version == w.version && !header.removed,
         "the owner reads {header:?}"
     );
-    // Shared for editing again, it is changed.
+    // Shared for editing again, it is changed: the feed tells the member so, of the same
+    // version.
+    ensure!(
+        !member.header(w.file_id)?.writable,
+        "said to be the member's to change"
+    );
+    let cursor = b.cursor_now()?;
     shares.share_to_edit(w.file_id)?;
+    let told = b.changes_to(&cursor, &[w.file_id])?;
+    ensure!(
+        matches!(told.as_slice(), [row] if row.writable && row.version == w.version),
+        "a share turned to editing reads {told:?}"
+    );
     member.update(
         &target,
         &with(&f, NodeContent::file("x", 1, 1, false)),

@@ -374,6 +374,13 @@ included (service managers restart it then).
   whole rows, the rest slim (about 0.5 KB a file on the wire, as measured for minimal rows:
   API notes, "Change feed"), a read per row, and a write only for a row whose time was
   another.
+- **One whole re-read of each share after the upgrade** that keeps whether a shared item
+  may be changed (the state DB's migration 29, a share's DB only: an identity's own drive
+  isn't read again for it): what the store holds was read before the headers' word was
+  kept, and each row read again takes it (sync semantics §13, "What may be changed is told
+  per item"). Once per share's state DB, in whole pages as a share is always read (a share
+  of 10,000 files: 20 requests, about 25 MB), and a write only for a row shared for
+  editing.
 - **No poll:** nothing syncs on a timer while the notification socket is connected. The
   drive is read from the feed's cursor, so what wasn't announced (the socket was down, a
   notification got lost) arrives at the next (re)connect, when the account pulls as at start
