@@ -273,8 +273,38 @@ impl Sim {
         });
         for file in files {
             match withdraw {
-                true => self.server.shared.remove(&file),
+                // (A share given again is for reading, until it is turned to editing.)
+                true => self.server.shared.remove(&file) | self.server.editable.remove(&file),
                 false => self.server.shared.insert(file),
+            };
+        }
+    }
+
+    /// [`Action::Editable`].
+    fn editable(&mut self, pick: usize, below: bool) {
+        let (server, nodes) = (&self.server, self.shareable());
+        let (lead, picked) = match nodes.get(pick % (nodes.len() + 1)) {
+            Some(&top) if below => (top, server.with_all_in(top)),
+            Some(&node) => (node, vec![node]),
+            None => match nodes.first() {
+                Some(&first) if below => (first, nodes),
+                _ => return,
+            },
+        };
+        let file = |n: &NodeId| server.node(*n).map(|(n, _)| n.remote.file_id);
+        let shared = |f: &hbsync_types::RemoteFileId| server.shared.contains(f);
+        let files: Vec<_> = picked.iter().filter_map(file).filter(shared).collect();
+        // As the picked one is: to editing where it is for reading, back where it is for
+        // editing.
+        let back = file(&lead).is_some_and(|f| server.editable.contains(&f));
+        self.note(|_| match back {
+            true => format!("the owner turns the share of {picked:?} back to reading"),
+            false => format!("the owner turns the share of {picked:?} to editing"),
+        });
+        for file in files {
+            match back {
+                true => self.server.editable.remove(&file),
+                false => self.server.editable.insert(file),
             };
         }
     }
@@ -517,6 +547,9 @@ impl Sim {
             }
             Action::Restore { node } => self.restore(node),
             Action::Phone { op, pick } => self.phone(op, pick),
+            // (Not on a member that writes: another device's change in the middle of its
+            // step would be made on the drive as it reads it, and taken for its own.)
+            Action::Meanwhile { .. } if self.clients[c].writes => {}
             Action::Meanwhile { op } => self.clients[c].meanwhile = Some(op),
             // (Not on a member: its steps read the drive as shared with it, `Sim::as_member`,
             // which another device's change in the middle of one isn't made on.)
@@ -544,6 +577,7 @@ impl Sim {
                 }
             }
             Action::Share { pick, below } => self.share(pick, below),
+            Action::Editable { pick, below } => self.editable(pick, below),
             Action::DeleteStopped { pick, done } => self.delete_stopped(pick, done),
             Action::DeleteOutright { pick } => self.delete_outright(pick),
             Action::IntoFile { pick, file } => self.move_into_file(pick, file),

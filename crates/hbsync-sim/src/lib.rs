@@ -357,10 +357,21 @@ impl Sim {
         self
     }
 
+    /// Client `c` is a member ([`Sim::with_member`]) that writes to what is shared with it for
+    /// editing ([`Action::Editable`]): its change of such an item, where the item is, reaches
+    /// the drive (an edit, a rename in its folder, tags). The rest of its folder is read-only.
+    pub fn with_writing_member(mut self, c: usize) -> Self {
+        self = self.with_member(c);
+        self.clients[c].writes = true;
+        self
+    }
+
     /// `f` with the drive as member `c` reads it (`Server::as_shared`) in the drive's place:
     /// its sync's plans and steps read nothing else. `None` (and `f` not run) for a client
     /// that isn't one, or inside such a call already. What `f` wrote to the drive is a breach
-    /// ([`Sim::check`]), and is dropped.
+    /// ([`Sim::check`]), and is dropped; but of a member that writes
+    /// ([`Sim::with_writing_member`]), what it may write, which the drive takes
+    /// (`Server::take_from_member`).
     pub(crate) fn as_member<T>(&mut self, c: usize, f: impl FnOnce(&mut Self) -> T) -> Option<T> {
         if !self.clients[c].member || self.whole.is_some() {
             return None;
@@ -370,10 +381,18 @@ impl Sim {
         self.whole = Some(std::mem::replace(&mut self.server, seen));
         let done = f(self);
         let wrote = self.server.changed_since(&before);
-        self.server = self.whole.take().expect("set above");
+        let seen = std::mem::replace(&mut self.server, self.whole.take().expect("set above"));
         let name = &self.clients[c].name;
-        self.ledger
-            .read_only_wrote(|| wrote.then(|| format!("{name}, a member, changed the drive")));
+        match self.clients[c].writes {
+            true => {
+                let breach = self.server.take_from_member(&before, &seen);
+                self.ledger
+                    .read_only_wrote(|| breach.map(|what| format!("{name}, a member: {what}")));
+            }
+            false => self
+                .ledger
+                .read_only_wrote(|| wrote.then(|| format!("{name}, a member, changed the drive"))),
+        }
         Some(done)
     }
 

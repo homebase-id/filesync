@@ -129,6 +129,16 @@ pub(crate) fn sharing_action() -> impl Strategy<Value = Action> + Clone {
     ]
 }
 
+/// [`sharing_action`], the owner also turning shares to editing and back
+/// ([`Action::Editable`], sync semantics §13: what may be changed is told per item) as often
+/// as it shares.
+pub(crate) fn editing_action() -> impl Strategy<Value = Action> + Clone {
+    prop_oneof![
+        4 => sharing_action(),
+        1 => (0usize..16, any::<bool>()).prop_map(|(pick, below)| Action::Editable { pick, below }),
+    ]
+}
+
 pub(crate) fn event(clients: usize) -> impl Strategy<Value = Event> {
     events_of(clients, action())
 }
@@ -367,6 +377,16 @@ pub(crate) const READ_ONLY_SETUPS: &[Setup] = &[
 pub(crate) const MEMBER_SETUPS: &[Setup] = &[
     (|sim| sim.with_member(2), None),
     (|sim| sim.with_member(2).with_split_downloads(), None),
+];
+
+/// A writing member's setups (sync semantics §13, what may be changed), for the engine's
+/// path: kept apart from [`MEMBER_SETUPS`], whose saved seeds pick by index.
+pub(crate) const WRITING_MEMBER_SETUPS: &[Setup] = &[
+    (|sim| sim.with_writing_member(2), None),
+    (
+        |sim| sim.with_writing_member(2).with_split_downloads(),
+        None,
+    ),
 ];
 
 /// Setups with a folder at one device's top that holds what other identities share (sync

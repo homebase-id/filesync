@@ -428,6 +428,14 @@ impl Sim {
             })
             .map(|(id, n)| (*id, n.remote))
             .collect();
+        // What a member that writes may change (the engine's view: the mirror's `writable`).
+        if client.writes {
+            let editable = &self.server.editable;
+            let may = |(_, at): &(&NodeId, &RemoteRef)| editable.contains(&at.file_id);
+            input.writable = (input.remote_refs.iter().filter(may))
+                .map(|(node, _)| *node)
+                .collect();
+        }
         // The folders in Recently deleted that live nodes are in, and the removed ones above
         // them, and the server's time of each live node's version, as the engine's view has them.
         let removed_refs;
@@ -622,6 +630,21 @@ impl Sim {
             client.local.contains(id) || client.base.contains(id) || self.server.ever.contains(&id)
         };
         let plan = reconcile_with_known(&input, &opts, masking, known);
+        // A member that writes plans only a change of a node it may change, where the drive
+        // has it: never a node made, removed or moved to another folder (§13).
+        if client.writes {
+            let overstep = (plan.ops.iter().chain(&plan.held)).find(|op| match op {
+                Op::RemoteUpdate { node, parent, .. } => {
+                    !input.writable.contains(node)
+                        || input.remote.get(*node).is_none_or(|r| r.parent != *parent)
+                }
+                Op::RemoteTags { node, .. } => !input.writable.contains(node),
+                op => op.writes_remote(),
+            });
+            let name = &client.name;
+            self.ledger
+                .read_only_wrote(|| overstep.map(|op| format!("{name} planned {op:?}")));
+        }
         // A file outside the page whose removal from the drive the plan makes or holds (what a
         // folder's delete here took along, planned with it) is the plan's own, not another
         // page's.
@@ -935,6 +958,20 @@ impl Sim {
         hbsync_engine::reconcile::taken_along(&input, &HashSet::new())
     }
 
+    /// Whether a member's `op` changes a file it may change, where the drive has it (the
+    /// engine's `Executor::may_change`).
+    fn may_change(&self, op: &Op) -> bool {
+        let to = match op {
+            Op::RemoteUpdate { parent, .. } => Some(*parent),
+            Op::RemoteTags { .. } => None,
+            _ => return false,
+        };
+        (self.server.live.get(&op.node())).is_some_and(|on_drive| {
+            self.server.editable.contains(&on_drive.remote.file_id)
+                && to.is_none_or(|to| to == on_drive.state.parent)
+        })
+    }
+
     /// Executes the next planned operation. Returns `false` if the plan is empty.
     pub(crate) fn step(&mut self, c: usize) -> bool {
         if !self.clients[c].added {
@@ -973,12 +1010,17 @@ impl Sim {
             Some(_) => self.server.node(node).map(|(n, r)| (n.clone(), r)),
             None => None,
         };
-        if self.clients[c].read_only && op.writes_remote() {
+        if self.clients[c].read_only && !self.clients[c].writes && op.writes_remote() {
             let name = &self.clients[c].name;
             self.ledger
                 .read_only_wrote(|| Some(format!("{name} {op:?}")));
         }
-        let outcome = self.execute(c, &op);
+        // A member that writes: as the executor's last guard, by what the drive says as the
+        // write runs (a share turned back to reading since the plan stops it here).
+        let outcome = match self.clients[c].writes && op.writes_remote() && !self.may_change(&op) {
+            true => Outcome::Skip,
+            false => self.execute(c, &op),
+        };
         // What it read before its write, as the executor's (a pull landing before its commit
         // changes nothing of it).
         let (mut placed_from, read) = self.take_read();

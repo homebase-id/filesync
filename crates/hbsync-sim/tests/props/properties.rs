@@ -184,6 +184,45 @@ proptest! {
         run_with(3, None, setup, &events)?;
     }
 
+    /// A member that writes to what is shared with it for editing (sync semantics §13, "What
+    /// may be changed is told per item") writes only what it may: a change of such an item
+    /// where the drive has it (an edit, a rename in its folder, tags), by what the drive says
+    /// as the write runs. It never makes, removes or moves a node there, whatever its user
+    /// does in the folder, and whatever the owner's two computers do, share, withdraw and
+    /// turn to editing and back meanwhile. All converge: the member has what is shared with
+    /// it, its changes of what it may change are the drive's, and it loses nothing of its
+    /// own (what it may not send moved out).
+    #[test]
+    fn a_writing_member_writes_only_what_it_may_and_converges(
+        events in proptest::collection::vec(events_of(3, editing_action()), 0..120)
+    ) {
+        run_with(3, None, |sim| sim.with_writing_member(2), &events)?;
+    }
+
+    /// [`a_writing_member_writes_only_what_it_may_and_converges`], the member planning in
+    /// pages of 1 to 4, its downloads fetched and placed in two steps, every client dying
+    /// now and then, while the owner's folders are deleted, stopped half way and deleted
+    /// outright.
+    #[test]
+    fn a_writing_member_in_pages_that_crash_writes_only_what_it_may(
+        size in 1usize..5,
+        events in proptest::collection::vec(
+            with_crashes(3, events_of(3, prop_oneof![
+                2 => editing_action(),
+                1 => stopped_delete_action(),
+                1 => orphaning_action(),
+            ])),
+            0..120,
+        ),
+    ) {
+        let setup = |sim: Sim| {
+            sim.with_writing_member(2)
+                .with_small_pages(size)
+                .with_split_downloads()
+        };
+        run_with(3, None, setup, &events)?;
+    }
+
     /// A device's folder that holds what other identities share (§10) is its own: nothing in
     /// it is synced and its name is held against the drive's, whatever the others make of that
     /// name, while its marker goes and comes back (`ToggleIgnore`: a plain folder meanwhile,
@@ -463,6 +502,21 @@ proptest! {
         ]), 0..80),
     ) {
         run_narrow_in(MEMBER_SETUPS, setup, 3, &events)?;
+    }
+
+    /// [`a_member_plans_as_the_sim_on_the_engines_path`] with a member that writes (§13): its
+    /// store's rows say what it may change, and the engine's view plans from them as the
+    /// simulator does.
+    #[test]
+    fn a_writing_member_plans_as_the_sim_on_the_engines_path(
+        setup in 0..WRITING_MEMBER_SETUPS.len(),
+        events in proptest::collection::vec(events_of(3, prop_oneof![
+            3 => editing_action(),
+            1 => stopped_delete_action(),
+            1 => orphaning_action(),
+        ]), 0..80),
+    ) {
+        run_narrow_in(WRITING_MEMBER_SETUPS, setup, 3, &events)?;
     }
 
     /// [`the_engines_planning_path_plans_as_the_sim`] with a read-only folder (§13).
