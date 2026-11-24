@@ -3630,6 +3630,80 @@ fn a_file_that_waits_for_a_folder_it_cant_read_keeps_the_folders_it_is_in_here()
     }
 }
 
+/// Only the folders the plan doesn't keep are left as they are: `a`, above them, is renamed
+/// there, and is renamed here with all in it. A folder that waits itself (moved there into
+/// the one this device can't read) keeps the folders it is in here for the file edited in
+/// it. Two that wait in one folder keep it as one does. And a file that waits with no more
+/// than a rename here keeps nothing: it goes with its folder (the drive has it; the name it
+/// was given here goes with it).
+#[test]
+fn what_waits_keeps_the_folders_the_plan_doesnt() {
+    let [a, b, d, f, g, h, q] = ids(7)[..] else {
+        unreachable!()
+    };
+    let world = || {
+        let mut w = World::default();
+        w.synced(a, folder(ROOT, "a"))
+            .synced(b, folder(a, "b"))
+            .synced(d, folder(b, "d"))
+            .synced(f, file(d, "f.txt", "x"))
+            .synced(h, file(b, "h.txt", "h"))
+            .synced(g, file(b, "g.txt", "g"));
+        w.input.unreadable.insert(q);
+        w
+    };
+    let ops = |w: &World| {
+        let plan = w.plan();
+        assert!(!plan.writes_drive(), "{:?}", plan.ops);
+        sorted_ops(&plan)
+    };
+
+    // `a` renamed there; `b` and `d` deleted there, `f` moved into `q` and edited here.
+    let mut w = world();
+    w.remote(a, Some(folder(ROOT, "a2")))
+        .remote(b, None)
+        .remote(d, None)
+        .remote(g, None)
+        .remote(h, None)
+        .remote(f, Some(file(q, "f.txt", "x")))
+        .local(f, Some(file(d, "f.txt", "mine")));
+    let mut want = vec![("LocalDelete", g), ("LocalDelete", h), ("LocalMove", a)];
+    want.sort();
+    assert_eq!(ops(&w), want);
+
+    // The folder `d` waits (moved into `q`), the file edited in it with it; `b` deleted there.
+    let mut w = world();
+    w.remote(b, None)
+        .remote(g, None)
+        .remote(h, None)
+        .remote(d, Some(folder(q, "d")))
+        .local(f, Some(file(d, "f.txt", "mine")));
+    let mut want = vec![("LocalDelete", g), ("LocalDelete", h)];
+    want.sort();
+    assert_eq!(ops(&w), want);
+
+    // Two files that wait, both edited here, in `b`, deleted there with `d` and `g`.
+    let mut w = world();
+    w.remote(b, None)
+        .remote(d, None)
+        .remote(g, None)
+        .remote(f, Some(file(q, "f.txt", "x")))
+        .remote(h, Some(file(q, "h.txt", "h")))
+        .local(f, Some(file(d, "f.txt", "mine")))
+        .local(h, Some(file(b, "h.txt", "mine too")));
+    assert_eq!(ops(&w), [("LocalDelete", g)]);
+
+    // Renamed here, no more: it goes with its folder.
+    let mut w = world();
+    w.remote(b, None)
+        .remote(d, None)
+        .remote(g, None)
+        .remote(h, None)
+        .remote(f, Some(file(q, "f.txt", "x")))
+        .local(f, Some(file(d, "renamed.txt", "x")));
+    assert_eq!(ops(&w), [("LocalDelete", b)]);
+}
+
 /// The same where the drive's picture isn't whole yet (the file's folder there not read so
 /// far): it waits, and the folder it is in here stays.
 #[test]
