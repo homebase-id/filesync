@@ -424,9 +424,13 @@ enveloped) `{title, status, correlationId, errorCode}`. `errorCode` is the camel
 (0, the enum's default: every `OdinSecurityException` that sets none), which the client reads
 as no code (**[verified]** live, odin-core efc317ad4). A 403 for want of a permission key
 says so: `errorCode: "missingPermissionKey"` (1006) with `permissionKeys`, the keys any one of
-which would have done (`[305]` on the token route, `[210]` on a send, `[210, 305]` on a peer
-route addressed by slug; odin-core PR #2164, **[verified]** live at b79aefa99 for the token
-route and, through the client, a send). A 403 for a missing drive grant has no code still.
+which would have done (`[305]` on the token route, `[210]` on a send and on the drive's
+public key, `[210, 305]` where a drive addressed by slug is resolved and the app holds
+neither; odin-core PR #2164, **[verified]** live at b79aefa99 for the token route and, through
+the client, a send; the rest in `PermissionContext`). It comes on this identity's own routes
+too (a new file for another identity is uploaded to one), where a 403 is otherwise this
+login's: the client takes one with this code as the app's want of the key, never as the
+login refused. A 403 for a missing drive grant has no code still.
 `OdinClientException` → 400,
 `OdinSecurityException` → 403, a bad or missing token → 401 with an empty body. A `NotFound()`
 on an enveloped route comes back as 404 with an encrypted body (`X-SSE: 1`): check the status first.
@@ -590,7 +594,8 @@ server answers the rest, to a token their server made for this identity's connec
   permission", **[verified]** live). That is always this app's: another identity's own such
   refusal reaches this one as a plain refusal (**[verified]** odin-core b79aefa99: a peer's
   403 is thrown anew as "Remote server returned 403", with no code:
-  `PeerAppNotificationService`, `PeerDriveQueryService`; the code itself in
+  `PeerAppNotificationService`, `PeerDriveQueryService`, and `PeerCircleShareKeyService`
+  for a circle's key (it keeps `notReviewedByOwner` alone); the code itself in
   `PermissionContext.MissingPermissionKey`). Before asking
   for a circle's key, the client refuses a drive without a write-only key that opens
   (`Refusal::NoKey`, without asking the sharer). It never looks up first whether the app

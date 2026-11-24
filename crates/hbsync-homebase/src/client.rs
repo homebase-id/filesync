@@ -599,7 +599,8 @@ fn sealed(headers: &ureq::http::HeaderMap) -> bool {
 /// Whose a refusal (401, 403) is ([`Client::whose`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Whose {
-    /// This login's: [`HomebaseError::Denied`].
+    /// This login's: [`HomebaseError::Denied`] (but for the app's want of a permission key,
+    /// which keeps its code: [`checked`]).
     Mine,
     /// A 403 another identity's, a 401 this login's.
     TheirsIfForbidden,
@@ -652,8 +653,12 @@ fn checked(
         .read_to_vec()
         .unwrap_or_default();
     let error = ApiError::read(status, &body, sender);
+    // The app's want of a permission key is no refusal of this login, on any route (a new
+    // file for another identity is uploaded to one of this identity's own): logging in again
+    // lifts nothing, an approval does. It keeps its code for whoever asked.
+    let lacks_key = error.is("missingPermissionKey");
     Err(match status {
-        s if whose.refuses_me(s) => HomebaseError::Denied(format!("{what}: {error}")),
+        s if whose.refuses_me(s) && !lacks_key => HomebaseError::Denied(format!("{what}: {error}")),
         _ => HomebaseError::Api {
             what: what.to_owned(),
             error,
@@ -932,6 +937,35 @@ mod tests {
 
     /// A body that stops coming ends the read after the idle time, though the call has no
     /// overall timeout.
+    /// A 403 that says the app lacks a permission key is not this login's refusal, on this
+    /// identity's own routes either: it keeps its code. Another 403 there is the login's.
+    #[test]
+    fn a_missing_permission_key_is_not_the_logins_refusal() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let refused = |head: &'static [u8]| -> Result<HomebaseError, Box<dyn std::error::Error>> {
+            let (url, server) = answer_once(head)?;
+            let call = connections(REUSED_WITHIN).call();
+            let answer = super::checked(call.post(&url).send_empty(), "upload", Whose::Mine);
+            server.join().map_err(|_| "server panicked")??;
+            Ok(answer.err().ok_or("answered")?)
+        };
+        let lacking: &[u8] = b"HTTP/1.1 403 Forbidden\r\nx-odin-version: test\r\ncontent-type: application/json\r\n\
+              content-length: 72\r\n\r\n{\"status\":403,\"errorCode\":\"missingPermissionKey\",\"permissionKeys\":[210]}";
+        match refused(lacking)? {
+            HomebaseError::Api { error, .. } => {
+                assert!(error.is("missingPermissionKey"), "{error}");
+                assert_eq!(error.status, 403);
+            }
+            other => panic!("{other:?}"),
+        }
+        let other: &[u8] =
+            b"HTTP/1.1 403 Forbidden\r\nx-odin-version: test\r\ncontent-type: application/json\r\n\
+              content-length: 40\r\n\r\n{\"status\":403,\"errorCode\":\"noErrorCode\"}";
+        let answer = refused(other)?;
+        assert!(matches!(answer, HomebaseError::Denied(_)), "{answer:?}");
+        Ok(())
+    }
+
     #[test]
     fn a_stalled_body_times_out() -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
