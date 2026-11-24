@@ -521,15 +521,15 @@ impl Reconciler<'_> {
         // What waits and changed here keeps the folders it is in here: one gone there would be
         // deleted here with it, change and all (it is out of the plan, so nothing sends the
         // change or keeps the folder alive for it, as an edit in the plan does). Left as they
-        // are, up to the first the plan keeps: not deleted here, not made again there, each
-        // holding its name, planned again with what waits. An identity's own drive only:
-        // read-only, a change here moves out.
+        // are, up to the first the plan keeps (one that waits itself among them, put back
+        // where it is here): not deleted here, not made again there, each holding its name,
+        // planned again with what waits. An identity's own drive only: read-only, a change
+        // here moves out (`emit`). (In any order: each walk ends at a folder kept before it.)
         if !self.masking.read_only {
-            let mut changed: Vec<NodeId> = (withdrawn.iter().copied())
-                .filter(|&n| self.loses_here(n))
-                .collect();
-            changed.sort();
-            for node in changed {
+            for &node in &withdrawn {
+                if !self.loses_here(node) {
+                    continue;
+                }
                 let above: Vec<NodeId> = (self.input.local.ancestors_iter(node))
                     .take_while(|a| !self.merged.contains(*a))
                     .collect();
