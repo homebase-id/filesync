@@ -50,14 +50,10 @@ impl<'a> Reconciler<'a> {
             .filter(|_| !self.taken.contains(&node))
     }
 
-    /// Whether `node` follows the drive, one way (§13, [`Masking::one_way`]). In a read-only
-    /// folder, whatever the node says, so does one a repair gave its place (`mended`), and
-    /// one this device leaves out (masked, §10): an ignore rule here removes nothing from
-    /// another identity's drive.
+    /// Whether `node` follows the drive, one way (§13, [`Masking::one_way`]): also, whatever
+    /// the node says, one a repair gave its place in a read-only folder (`mended`).
     pub(super) fn one_way(&self, node: NodeId) -> bool {
-        self.masking.one_way(self.input, node)
-            || (self.masking.read_only
-                && (self.mended.contains(&node) || self.masks.masked.contains(&node)))
+        self.masking.one_way(self.input, node) || self.mended.contains(&node)
     }
 }
 

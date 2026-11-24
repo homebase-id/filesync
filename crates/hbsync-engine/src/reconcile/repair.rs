@@ -673,7 +673,6 @@ impl Reconciler<'_> {
             return false;
         }
         for n in self.merged.subtree(node) {
-            self.mended.insert(n);
             // What changed here still moves out (its name aside): a folder deleted here takes
             // it along otherwise.
             if !self.evicted.contains(&n) {
