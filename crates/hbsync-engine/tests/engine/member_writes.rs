@@ -244,3 +244,93 @@ fn a_refusal_the_share_doesnt_tell_of_makes_the_item_read_only_here() -> R {
     assert_eq!(a.tree_text(""), ["to-edit.txt = one"]);
     Ok(())
 }
+
+/// What the member makes in a folder shared with it for editing is added to the sharer's
+/// drive, a new folder with what is in it, and the member may change it from then on (it is
+/// shared as the folder is). What it makes at the top of its folder moves out: the top is
+/// no folder of the sharer's drive.
+#[test]
+fn what_a_member_makes_in_a_folder_shared_for_editing_reaches_the_sharer() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("d/theirs.txt", "one")?;
+    a.sync()?;
+    share_to_edit(&a, &server, "d")?;
+    share_to_edit(&a, &server, "theirs.txt")?;
+    let (mut b, out) = writing_member(&server, "b")?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["d/", "d/theirs.txt = one"]);
+
+    b.write("d/mine.txt", "made by the member")?;
+    b.write("d/New/below.txt", "below")?;
+    b.write("at-the-top.txt", "not theirs")?;
+    b.sync()?;
+    a.sync()?;
+    let both = [
+        "d/",
+        "d/New/",
+        "d/New/below.txt = below",
+        "d/mine.txt = made by the member",
+        "d/theirs.txt = one",
+    ];
+    assert_eq!(a.tree_text(""), both);
+    assert_eq!(b.tree_text(""), both);
+    assert_eq!(
+        hbsync_engine::testkit::tree_text_of(out.path()),
+        ["at-the-top.txt = not theirs"]
+    );
+
+    // Its own now, to change: an edit of what it made goes up.
+    b.write("d/mine.txt", "edited")?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.read("d/mine.txt")?, b"edited");
+    // And the sharer's change of it comes down.
+    a.write("d/New/below.txt", "theirs now")?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.read("d/New/below.txt")?, b"theirs now");
+    Ok(())
+}
+
+/// A file edited by both in a folder shared for editing: the sharer's version keeps the
+/// file, and the member's becomes a conflict copy beside it, on both sides. A move between
+/// two folders shared for editing reaches the sharer.
+#[test]
+fn a_members_conflict_copy_and_move_reach_the_sharer() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("d/both.txt", "base")?;
+    a.write("d/moved.txt", "m")?;
+    a.write("e/keep.txt", "k")?;
+    a.sync()?;
+    for name in ["d", "e", "both.txt", "moved.txt", "keep.txt"] {
+        share_to_edit(&a, &server, name)?;
+    }
+    let (mut b, out) = writing_member(&server, "b")?;
+    b.sync()?;
+
+    a.write("d/both.txt", "theirs")?;
+    a.sync()?;
+    b.write("d/both.txt", "mine")?;
+    fs::rename(b.root.join("d/moved.txt"), b.root.join("e/moved.txt"))?;
+    b.sync()?;
+    a.sync()?;
+    nothing_moved_out(&out)?;
+    let theirs = a.tree_text("");
+    assert_eq!(theirs, b.tree_text(""));
+    assert!(
+        theirs.contains(&"d/both.txt = theirs".to_owned()),
+        "{theirs:?}"
+    );
+    assert!(theirs.contains(&"e/moved.txt = m".to_owned()), "{theirs:?}");
+    assert!(
+        !theirs.iter().any(|l| l.starts_with("d/moved.txt")),
+        "{theirs:?}"
+    );
+    let copies: Vec<&String> = (theirs.iter())
+        .filter(|l| l.starts_with("d/both") && l.ends_with("= mine"))
+        .collect();
+    assert_eq!(copies.len(), 1, "{theirs:?}");
+    Ok(())
+}
