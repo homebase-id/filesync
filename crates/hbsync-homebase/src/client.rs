@@ -935,8 +935,6 @@ mod tests {
         Ok(())
     }
 
-    /// A body that stops coming ends the read after the idle time, though the call has no
-    /// overall timeout.
     /// A 403 that says the app lacks a permission key is not this login's refusal, on this
     /// identity's own routes either: it keeps its code. Another 403 there is the login's.
     #[test]
@@ -966,6 +964,8 @@ mod tests {
         Ok(())
     }
 
+    /// A body that stops coming ends the read after the idle time, though the call has no
+    /// overall timeout.
     #[test]
     fn a_stalled_body_times_out() -> Result<(), Box<dyn std::error::Error>> {
         let listener = TcpListener::bind("127.0.0.1:0")?;
