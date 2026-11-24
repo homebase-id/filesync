@@ -537,12 +537,31 @@ impl Reconciler<'_> {
                     self.scope.remove(&folder);
                     self.origin.remove(&folder);
                     self.leave_as_is(folder);
+                    self.holds_waiting(folder);
                 }
+            }
+        }
+        // What waits is where it is here, on its name: taken here till the wait ends, or
+        // what the drive has under that name now (another made there since, one renamed to
+        // it) was planned onto it, refused by the disk at every sync (found by the
+        // simulator). Not what moves out, nor a parked item: neither is on its name on disk.
+        for &node in &withdrawn {
+            if !self.evicted.contains(&node) && !self.input.parked.contains(&node) {
+                self.holds_waiting(node);
             }
         }
         // Each group once, with all that waits in it: one page of its own, not one a node.
         for group in groups {
             self.wait_together(group);
+        }
+    }
+
+    /// `node` holds the name it has here while it waits for its folder there, or is kept for
+    /// what does ([`Reconciler::held_waiting`]).
+    fn holds_waiting(&mut self, node: NodeId) {
+        if let Some(here) = self.input.local.get(node) {
+            let names = self.held_waiting.entry(here.parent).or_default();
+            names.insert(name_key(&here.name));
         }
     }
 
@@ -899,8 +918,16 @@ impl Reconciler<'_> {
             // And names this device's held removals keep there (§7): the same.
             let masked = self.masks.names.get(&parent);
             let kept = self.kept.get(&parent);
+            // And names what waits for its folder there holds here: its to keep till the
+            // wait ends. Nothing is renamed there for one (the clash is this device's alone:
+            // the drive has what waits elsewhere): judged as a read-only folder's names are,
+            // what is on the name on disk keeping it and anything else left out here.
+            let waiting = self.held_waiting.get(&parent).cloned();
+            let held = |key: &str| waiting.as_ref().is_some_and(|w| w.contains(key));
             let taken = |key: &str| {
-                masked.is_some_and(|m| m.contains(key)) || kept.is_some_and(|k| k.contains(key))
+                masked.is_some_and(|m| m.contains(key))
+                    || kept.is_some_and(|k| k.contains(key))
+                    || held(key)
             };
             // Each name once, and again when a node left where it is for a name comes to it
             // (a chain of name waits in one folder, judged in one pass).
@@ -994,9 +1021,10 @@ impl Reconciler<'_> {
                 // held by them alone leaves every newcomer out (one ignored here may be on it).
                 // What moves out holds no name on disk: it goes first.
                 let at_name = |s: &NodeState| s.parent == parent && name_key(&s.name) == key;
+                let one_way = self.masking.read_only || held(&key);
                 // Nor does a parked item: its name is free on disk, or another item's.
                 let on_disk = |n: &NodeId| {
-                    self.masking.read_only
+                    one_way
                         && !self.evicted.contains(n)
                         && !self.input.parked.contains(n)
                         && self.input.local.get(*n).is_some_and(at_name)
@@ -1004,7 +1032,7 @@ impl Reconciler<'_> {
                 // (One that moves out holds the name where its drive version comes back to it.)
                 let here = |n: &NodeId| {
                     on_disk(n)
-                        || (self.masking.read_only
+                        || (one_way
                             && self.input.base.get(*n).is_some_and(at_name)
                             && (!self.evicted.contains(n)
                                 || self.remote_state(*n).is_some_and(at_name)))
@@ -1017,7 +1045,7 @@ impl Reconciler<'_> {
                 // is renamed here (what is added there under a numbered name was renamed
                 // before, `keep_off_taken_names`, and is judged with the names the view holds
                 // above: `may_clash_unseen`).
-                uncovered |= part && !self.masking.read_only;
+                uncovered |= part && !one_way;
                 // The lowest id keeps the name, except that a deferred node (a file still
                 // being written) is never renamed: it wins, and is left alone if it loses;
                 // and an orphan moving in, or Recovered files or Desktops made beside a folder
@@ -1061,7 +1089,7 @@ impl Reconciler<'_> {
                         }
                         continue;
                     }
-                    if self.masking.read_only {
+                    if one_way {
                         // Once: held in another folder here, that one is judged again with it.
                         if !self.leave_out(loser) {
                             continue;

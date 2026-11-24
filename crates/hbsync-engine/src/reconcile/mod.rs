@@ -200,6 +200,11 @@ struct Reconciler<'a> {
     evicted: BTreeSet<NodeId>,
     /// What a read-only name clash left out (§13), each once.
     left: BTreeSet<NodeId>,
+    /// The names held here by what waits for its folder there ([`Reconciler::fix_orphans`]:
+    /// out of the plan, where it is here), and by the folders kept for it, by folder: taken
+    /// here till the wait ends. What would take one is left out here meanwhile, never
+    /// renamed there for it.
+    held_waiting: HashMap<NodeId, HashSet<String>>,
     /// The nodes this identity may change on another identity's drive that follow it in this
     /// plan all the same (§13, `one_way`): one gone there or here, or edited on both sides
     /// where no copy of it may be added (the merge's); one a repair gave its place (an orphan let go of, a cycle's move
@@ -278,6 +283,7 @@ impl<'a> Reconciler<'a> {
             forks: BTreeMap::new(),
             evicted: BTreeSet::new(),
             left: BTreeSet::new(),
+            held_waiting: HashMap::new(),
             follows: HashSet::new(),
             adds: HashSet::new(),
             removals: HashMap::new(),

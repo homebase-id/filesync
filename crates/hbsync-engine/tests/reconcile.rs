@@ -3721,6 +3721,89 @@ fn a_file_edited_here_that_waits_for_its_folder_there_keeps_its_folder_here() {
     assert!(plan.ops.is_empty(), "{:?}", plan.ops);
 }
 
+/// What waits for its folder there (moved into one this device can't read) is still here, on
+/// its name: taken till the wait ends. Another made there under that name, or one renamed to
+/// it, is left out here meanwhile and told so: not planned onto the name (the disk refused
+/// it at every sync), and not renamed there for it (the drive has no clash). On an identity's
+/// own drive and read-only alike. The folder that reads again, all of it is planned.
+#[test]
+fn what_waits_holds_its_name_and_a_newcomer_is_left_out() {
+    let [c, y, n, q] = ids(4)[..] else {
+        unreachable!()
+    };
+    for read in [false, true] {
+        let world = || {
+            let mut w = match read {
+                true => read_only(),
+                false => World::default(),
+            };
+            w.synced(c, file(ROOT, "c.txt", "x"))
+                .synced(y, file(ROOT, "y.txt", "y"));
+            w.remote(c, Some(file(q, "c.txt", "x")));
+            w
+        };
+        let left_out = |w: &World, node: NodeId| {
+            let plan = w.plan();
+            assert!(!plan.writes_drive(), "{read}: {:?}", plan.ops);
+            assert!(plan.ops.is_empty(), "{read}: {:?}", plan.ops);
+            assert!(
+                matches!(plan.conflicts[..], [Conflict::NameTaken { node: left }] if left == node),
+                "{read}: {:?}",
+                plan.conflicts
+            );
+            assert!(plan.deferred.contains(&node), "{read}: planned again");
+        };
+        // Another made there under the name.
+        let mut w = world();
+        w.input.unreadable.insert(q);
+        w.remote(n, Some(file(ROOT, "c.txt", "new")));
+        left_out(&w, n);
+        // One here renamed there to the name: it stays as it is here.
+        let mut w = world();
+        w.input.unreadable.insert(q);
+        w.remote(y, Some(file(ROOT, "C.TXT", "y")));
+        if hbsync_platform::name::name_key("C.TXT") == hbsync_platform::name::name_key("c.txt") {
+            left_out(&w, y);
+        }
+        let mut w = world();
+        w.input.unreadable.insert(q);
+        w.remote(y, Some(file(ROOT, "c.txt", "y")));
+        left_out(&w, y);
+        // The folder reads again: what waited moves into it, and the newcomer comes.
+        let mut w = world();
+        w.remote(q, Some(folder(ROOT, "q")))
+            .remote(n, Some(file(ROOT, "c.txt", "new")));
+        let mut want = vec![("LocalDownload", n), ("LocalMkdir", q), ("LocalMove", c)];
+        want.sort();
+        assert_eq!(sorted_ops(&w.plan()), want, "{read}");
+    }
+}
+
+/// A folder kept for what waits and changed in it holds its name the same way: a new folder
+/// of that name there is left out here, not renamed there.
+#[test]
+fn a_folder_kept_for_what_waits_holds_its_name() {
+    let [b, f, nb, q] = ids(4)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(b, folder(ROOT, "b"))
+        .synced(f, file(b, "f.txt", "x"));
+    w.remote(b, None)
+        .remote(f, Some(file(q, "f.txt", "x")))
+        .remote(nb, Some(folder(ROOT, "b")))
+        .local(f, Some(file(b, "f.txt", "mine")));
+    w.input.unreadable.insert(q);
+    let plan = w.plan();
+    assert!(!plan.writes_drive(), "{:?}", plan.ops);
+    assert!(plan.ops.is_empty(), "{:?}", plan.ops);
+    assert!(
+        matches!(plan.conflicts[..], [Conflict::NameTaken { node }] if node == nb),
+        "{:?}",
+        plan.conflicts
+    );
+}
+
 /// A read-only world: the drive decides (§13).
 fn read_only() -> World {
     World {
