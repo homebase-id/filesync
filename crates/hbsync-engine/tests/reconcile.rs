@@ -3992,6 +3992,35 @@ fn one_left_out_for_what_waits_makes_no_conflict_copy_meanwhile() {
     assert_eq!(plan.conflicts, [Conflict::NameTaken { node: y }]);
 }
 
+/// A conflict copy to be made in a folder that is left out, its original elsewhere in the
+/// plan (edited on both sides, and moved there out of that folder): the copy isn't made, the
+/// original waits as it is here, in the folder left out, and keeps the folder that one was
+/// put back in, which the drive deleted. (The original left the plan after the folders
+/// were kept: that folder went here, the edit with it.)
+#[test]
+fn an_original_whose_copy_is_left_out_with_its_folder_keeps_its_folders() {
+    let [w_, c, f, g, o, q] = ids(6)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(w_, folder(ROOT, "a"))
+        .synced(c, folder(ROOT, "c"))
+        .synced(f, folder(c, "f"))
+        .synced(g, folder(ROOT, "g"))
+        .synced(o, file(f, "o.txt", "o"));
+    w.remote(w_, Some(folder(q, "a")))
+        .remote(c, None)
+        .remote(f, Some(folder(ROOT, "a")))
+        .remote(o, Some(file(g, "o.txt", "theirs")))
+        .local(o, Some(file(f, "o.txt", "mine")));
+    w.input.unreadable.insert(q);
+    let plan = w.plan();
+    assert!(!plan.writes_drive(), "{:?}", plan.ops);
+    assert!(plan.ops.is_empty(), "{:?}", plan.ops);
+    assert!(plan.conflicts.contains(&Conflict::NameTaken { node: f }));
+    assert!(plan.conflicts.contains(&Conflict::CopyWaits { node: o }));
+}
+
 /// One synced under the name before, its item gone here, doesn't come back to a name what
 /// waits holds on disk now (a folder made here in its place, moved there into the folder
 /// this device can't read): it is left out, not downloaded onto the folder at every sync.

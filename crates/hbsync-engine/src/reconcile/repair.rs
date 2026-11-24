@@ -47,6 +47,11 @@ impl Reconciler<'_> {
         self.plan.conflicts.retain(|c| c.node() != node);
         self.plan.conflicts.push(Conflict::CopyWaits { node });
         self.defer(node);
+        // Out of the plan as it is here, edit and all: it keeps its folders
+        // ([`Reconciler::keep_for_what_is_out`]).
+        if !self.masking.read_only && self.input.local.contains(node) {
+            self.out_here.insert(node);
+        }
     }
 
     /// A repair puts `node` at `state` in the merged tree; ops follow for it.
@@ -787,6 +792,11 @@ impl Reconciler<'_> {
                         |c: &Conflict| matches!(c, Conflict::EditEdit { node, .. } if *node == n);
                     self.plan.conflicts.retain(|c| !copied(c));
                     self.drop_fork(n);
+                }
+                // A conflict copy left out with the folder it is to be made in, its original
+                // elsewhere (the drive moved that one out): the original waits with it.
+                if let Some(original) = self.forked_into(n) {
+                    self.fork_waits(original);
                 }
                 if self.input.local.contains(n) {
                     self.out_here.insert(n);
