@@ -303,6 +303,7 @@ fn build(
     let mut b = Builder {
         s,
         os: ctx.os,
+        writes: ctx.writes,
         input: Input::default(),
         base_done: HashSet::new(),
         mirror_done: HashSet::new(),
@@ -725,6 +726,8 @@ pub(crate) fn gone_on_drive(
 struct Builder<'s, 'c> {
     s: &'s ReadTx<'c>,
     os: Os,
+    /// Whether the folder writes to what is shared with it ([`FolderCtx::writes`]).
+    writes: bool,
     input: Input,
     base_done: HashSet<NodeId>,
     mirror_done: HashSet<NodeId>,
@@ -843,6 +846,9 @@ impl Builder<'_, '_> {
         self.input.remote_refs.insert(row.node, row.remote_ref());
         if let Some(at) = row.changed_at {
             self.input.changed_at.insert(row.node, at);
+        }
+        if self.writes && row.writable {
+            self.input.writable.insert(row.node);
         }
         if let Some(state) = row.state() {
             self.input.remote.insert(row.node, state);

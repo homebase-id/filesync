@@ -207,6 +207,7 @@ impl Sim {
             read_only: client
                 .read_only
                 .then(|| std::path::PathBuf::from("/sim-out")),
+            writes: false,
         }
     }
 

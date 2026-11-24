@@ -49,6 +49,14 @@ impl<'a> Reconciler<'a> {
             .get(node)
             .filter(|_| !self.taken.contains(&node))
     }
+
+    /// Whether `node` follows the drive, one way (§13): the folder is read-only, and the node
+    /// isn't one this identity may change on the drive ([`Input::writable`]), or is one a
+    /// repair gave its place (`mended`), whatever it says.
+    pub(super) fn one_way(&self, node: NodeId) -> bool {
+        self.masking.read_only
+            && (!self.input.writable.contains(&node) || self.mended.contains(&node))
+    }
 }
 
 impl Reconciler<'_> {
@@ -300,12 +308,13 @@ impl Reconciler<'_> {
         let (b, l) = (i.base.get(node), self.local_state(node));
         let masked = self.masks.masked.contains(&node);
         // Read-only (§13): what going back to the drive's would lose here moves out first.
-        let evict = self.masking.read_only && !masked && self.loses_here(node);
+        let one_way = self.one_way(node);
+        let evict = one_way && !masked && self.loses_here(node);
         let (target, origin): (Option<NodeState>, Origin) = match (lc, rc) {
             // Gone from what this device syncs; what must stay here was detached (§10).
             _ if masked => (None, Origin::Base),
             // Read-only (§13): the drive's, whatever changed here.
-            _ if self.masking.read_only => (r.cloned(), r.map_or(Origin::Base, |_| Origin::Remote)),
+            _ if one_way => (r.cloned(), r.map_or(Origin::Base, |_| Origin::Remote)),
             (Change::Absent | Change::Unchanged, Change::Absent | Change::Unchanged) => {
                 (r.or(l.as_ref()).or(b).cloned(), Origin::Base)
             }
@@ -355,7 +364,7 @@ impl Reconciler<'_> {
         // drive leaves the drive's. Read-only, the drive's (§13).
         if let (Some(t), Some(l), Some(r)) = (&mut target, &l, r)
             && !masked
-            && !self.masking.read_only
+            && !one_way
         {
             let none = Tags::default();
             let merged = Tags::merge(b.map_or(&none, |b| &b.tags), &l.tags, &r.tags);

@@ -48,10 +48,10 @@ impl Reconciler<'_> {
                 });
             }
 
-            // Remote side: none read-only (§13), where what the drive holds and the merged tree
+            // Remote side: none of a node that follows the drive (§13), where what the drive holds and the merged tree
             // doesn't (a removal there taken along, a node let go of) stays as it is.
             let mut remote_ops = false;
-            let remote_side = match self.masking.read_only {
+            let remote_side = match self.one_way(node) {
                 true => (None, None),
                 false => (target.as_ref(), remote),
             };

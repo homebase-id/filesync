@@ -1700,9 +1700,20 @@ rules hold too:
   another of the member's circles gives that right (**[verified]** odin-core
   `DriveShareService.AssertCircleFitsAsync`, `AssertMemberMayWriteAsync`). A write refused
   so is to count as read-only after all, where a folder writes.
-  Nothing reads it yet: a folder synced from another identity's drive is read-only (above),
-  whatever its items say. A share's state DB from before it was kept reads its feed from
-  its beginning once (a re-read, §8b), each row taking what its header says.
+  Read-only is asked item by item (the reconciler's `one_way`): an item the store says may be
+  changed syncs both ways, where the folder writes to what is shared with it
+  (`FolderCtx::writes`, the view's `Input::writable`); the executor asks the store again as
+  a write runs, so a share taken back since the plan stops it there. What mends the drive
+  (a clash of names, a cycle, an orphan) stays the owner's, whatever the items say, and an
+  item this device ignores (§10) follows the drive: an ignore rule here removes nothing
+  there. No folder writes yet (nothing turns it on), and none is to before these are
+  settled, which such an item still plans as on an identity's own drive: its delete here
+  and its removal with a folder removed there (both a removal from the drive), its move to
+  another folder, its rename onto a name another item of the drive holds (two of one name
+  there), its conflict copy (a new item: it moves out and never goes up), and its edit
+  where the drive's is gone. So a folder synced from another identity's drive is read-only
+  (above), whatever its items say. A share's state DB from before it was kept reads its
+  feed from its beginning once (a re-read, §8b), each row taking what its header says.
   The cost: next to nothing on an identity's own drive (its headers say "no"; a
   transaction in which this device makes a file or puts one back reads once whether the
   DB is a share's);

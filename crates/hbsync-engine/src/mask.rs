@@ -315,6 +315,7 @@ impl Masks {
                     dirty_elsewhere: HashSet::new(),
                     going: HashSet::new(),
                     going_above: HashSet::new(),
+                    writable: input.writable.clone(),
                 }
             }
         };
@@ -433,7 +434,8 @@ fn to_detach(
                             .get(&node)
                             .and_then(|e| e.local_hash)
                             .unwrap_or(b.hash);
-                        // Read-only (§13), a bit changed here is no change to keep.
+                        // Read-only (§13), a bit changed here is no change to keep (of a node
+                        // this identity may change on the drive too: masked, it isn't written).
                         base_bytes != l.hash || (!read_only && b.executable != l.executable)
                     }
                     // Not hashed yet: it may hold anything.
