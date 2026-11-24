@@ -320,6 +320,19 @@ proptest! {
         run_with(3, None, Sim::with_role_device, &events)?;
     }
 
+    /// A newer client moves synced nodes into folders no client reads, while the users edit,
+    /// delete and tag, and other devices delete folders, stop half way, restore and purge
+    /// ([`waiting_event`]): what waits for such a folder stays as it is where a device has
+    /// it, edited or not; edited, it keeps the folders it is in on that device, gone on the
+    /// drive (sync semantics §6.3). Everything else converges, without loss. (Not in a read-only folder:
+    /// an edit there that waits goes with its folder's delete, a known gap of the engine's.)
+    #[test]
+    fn what_waits_for_a_folder_no_client_reads_keeps_its_edit(
+        events in proptest::collection::vec(waiting_event(3), 0..120)
+    ) {
+        run_with(3, None, with_a_tree_and_a_newer_folder, &events)?;
+    }
+
     /// A download fetches, then puts in place and commits a step later: meanwhile the drive
     /// moves on or removes the node, the users work, the folder's other device syncs; and a
     /// client dies between a download put in place and its commit, recovering at its next

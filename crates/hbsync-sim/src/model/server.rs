@@ -39,6 +39,9 @@ pub(crate) struct Server {
     /// Nodes no client reads (a newer writer's), with what was put in each: they are on the
     /// drive, and what is in them stays there.
     pub(crate) unreadable: BTreeMap<NodeId, BTreeSet<NodeId>>,
+    /// Of what is in those, what a newer client moved in ([`crate::Action::IntoNewer`]), at
+    /// the version it moved it at.
+    pub(crate) moved_in: BTreeMap<NodeId, VersionTag>,
     /// The files the owner shares with the member ([`crate::Sim::with_member`]), by file id, as
     /// the server keeps them: a node made again as another file isn't shared.
     pub(crate) shared: BTreeSet<RemoteFileId>,
@@ -334,6 +337,7 @@ impl Server {
             next: self.next,
             ever: self.ever.clone(),
             unreadable: self.unreadable.clone(),
+            moved_in: self.moved_in.clone(),
             shared: self.shared.clone(),
             editable: self.editable.clone(),
         }
