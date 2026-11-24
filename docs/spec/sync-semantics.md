@@ -1747,7 +1747,9 @@ rules hold too:
     the version it synced at. Changed there since, it comes back: the edit wins over the
     delete, as on an identity's own drive (§6). So does one its owner removed and restored
     since (another version of the same bytes): a delete made before that doesn't undo the
-    restore, also where a crash left this device a base without its item.
+    restore, also where a crash left this device a base without its item. (Where this
+    device never took the new version, a delete made after it comes back once too; the
+    next one goes through.)
   - A folder's removal takes along what is in it, there too, also what this identity
     doesn't read of it (node schema, Recently deleted: all of it is in the owner's Recently
     deleted with the folder, and comes back with it). It is sent only where all the drive
@@ -1761,7 +1763,9 @@ rules hold too:
     read have removed what may be changed by then (each a delete of the user's, of an
     item that may be changed: the folder and the rest come back); and what the owner adds
     to or changes in the folder between this device's plan and its write goes along, as
-    between two devices of one identity.
+    between two devices of one identity (a share in it turned back to reading by then
+    stops the folder's removal: the executor's guard asks of all the store has in the
+    folder as the removal runs).
   - The mass-delete guard (§7) holds such removals as an own drive's: confirmed, they are
     sent. Putting them back is refused in such a folder for now (`Engine::put_back`): what
     is held is confirmed or stays held.
@@ -1771,7 +1775,7 @@ rules hold too:
     also where its share is turned to editing in between (found by the simulator: a base
     left read as a delete here, and the member removed the sharer's file).
   - The executor's last guard lets a removal through for a node the store says may be
-    changed, as it runs.
+    changed, as it runs; a folder's, where all the store has in it may be changed too.
 
   Engine tests `a_members_delete_goes_to_the_sharers_recently_deleted`,
   `a_members_delete_of_a_folder_it_may_not_empty_is_undone`,

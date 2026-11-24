@@ -370,8 +370,28 @@ impl<'a> Executor<'a> {
             };
             match op {
                 Op::RemoteUpdate { parent, .. } => changes(Some(*parent)),
-                // (A removal: to its owner's Recently deleted, where the node is.)
-                Op::RemoteTags { .. } | Op::RemoteDelete { .. } => changes(None),
+                Op::RemoteTags { .. } => changes(None),
+                // A removal: to its owner's Recently deleted, where the node is. A folder's
+                // takes along what is in it there: all the mirror has in it must be this
+                // identity's to change too, now (the share of one item in it turned back to
+                // reading since the plan stops the folder's removal here).
+                Op::RemoteDelete { node, .. } => {
+                    if !changes(None)? {
+                        return Ok(false);
+                    }
+                    let mut folders = vec![*node];
+                    while let Some(folder) = folders.pop() {
+                        for row in s.mirror_children(folder)? {
+                            if !row.writable {
+                                return Ok(false);
+                            }
+                            if row.kind == NodeKind::Folder {
+                                folders.push(row.node);
+                            }
+                        }
+                    }
+                    Ok(true)
+                }
                 Op::RemoteCreate { parent, .. } => adds_to(*parent),
                 _ => Ok(false),
             }

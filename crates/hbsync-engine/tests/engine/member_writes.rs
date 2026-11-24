@@ -398,7 +398,8 @@ fn a_members_delete_goes_to_the_sharers_recently_deleted() -> R {
 
 /// A file shared without its folder, at the member's top: deleted there, it goes to the
 /// sharer's Recently deleted from the folder the sharer has it in, and comes back into that
-/// folder when the sharer restores it.
+/// folder when the sharer restores it. (A removal names no folder: it is sent by the file's
+/// id and version alone.)
 #[test]
 fn a_members_delete_at_its_top_removes_the_file_where_the_sharer_has_it() -> R {
     let server = server();

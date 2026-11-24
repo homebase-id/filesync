@@ -5490,6 +5490,51 @@ fn a_read_only_folder_adds_and_moves_only_where_it_may() -> R {
         "{live:?}"
     );
 
+    // A folder's removal takes along what is in it: refused while the mirror has one item
+    // in it that may only be read (its share turned back since the plan), through the
+    // folders in it.
+    let (inner, read_below) = (NodeId::new(), NodeId::new());
+    h.db.write(|s| {
+        let a = s.account();
+        a.put_mirror(&MirrorRow {
+            parent: also_to_edit,
+            ..folder_row(inner, "inner", true)
+        })?;
+        a.put_mirror(&MirrorRow {
+            parent: inner,
+            ..folder_row(read_below, "to read", false)
+        })
+    })?;
+    let remove = |h: &mut Harness, node| -> Result<ExecReport, StateError> {
+        let at =
+            h.db.read(|s| s.get_mirror(node))?
+                .expect("row")
+                .remote_ref();
+        h.run(vec![Op::RemoteDelete {
+            node,
+            parent: NodeId::ROOT,
+            file_id: at.file_id,
+            expected: at.version,
+        }])
+    };
+    let report = remove(&mut h, also_to_edit)?;
+    assert!(
+        matches!(report.skipped[..], [(_, Skip::Unsyncable(_))]),
+        "{report:?}"
+    );
+    h.db.write(|s| {
+        let at = s.get_mirror(read_below)?.expect("row").file_id;
+        s.account().set_writable(at, true)
+    })?;
+    let report = remove(&mut h, also_to_edit)?;
+    assert!(
+        !report
+            .skipped
+            .iter()
+            .any(|(_, why)| matches!(why, Skip::Unsyncable(_))),
+        "{report:?}"
+    );
+
     // A move is asked of the mirror's rows alone: between the two folders it passes the
     // guard, into the folder it may only read it doesn't.
     let moves = |node, to| Op::RemoteUpdate {

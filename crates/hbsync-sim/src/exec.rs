@@ -1006,7 +1006,12 @@ impl Sim {
         };
         match op {
             Op::RemoteUpdate { parent, .. } => changes(Some(*parent)),
-            Op::RemoteTags { .. } | Op::RemoteDelete { .. } => changes(None),
+            Op::RemoteTags { .. } => changes(None),
+            // (A folder's removal: with all the member reads in it its to change, now.)
+            Op::RemoteDelete { node, .. } => {
+                let tree = self.server.tree();
+                changes(None) && (tree.subtree(*node).into_iter()).all(|n| editable(n).is_some())
+            }
             Op::RemoteCreate { parent, .. } => editable(*parent).is_some(),
             _ => false,
         }
