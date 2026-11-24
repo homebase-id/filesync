@@ -232,3 +232,83 @@ fn a_move_between_folders_shared_for_editing_reaches_the_drive() {
     assert_eq!(sim.local_paths(2), ["b", "c.txt", "d", "d/b"]);
     assert!(sim.moved_out(2).is_empty());
 }
+
+/// The member deletes a folder and the file in it, both its to change, and its folder's
+/// removal is sent; the owner withdraws the folder's share before the file's removal runs.
+/// The member reads the file at the top from then on, where the drive has it in the folder
+/// still: no move there, and the removal the member's user asked for stands (the oracle read
+/// the file's place from the member's view, and took the removal for one no one made).
+#[test]
+fn a_delete_stands_though_the_files_folder_is_no_longer_shared() {
+    let mut sim = crate::common::with_all_shared_to_edit(Sim::new(3));
+    let folder = sim.item(2, "a").expect("the folder");
+    let node = sim.pick(2, folder, false).expect("its pick");
+    sim.run(&[
+        act(2, Action::Delete { node }),
+        Event::Plan { client: 2 },
+        Event::Step { client: 2 },
+    ]);
+    assert_eq!(sim.planned(2), ["RemoteDelete"], "the file's removal waits");
+    let pick = sim.share_pick(folder).expect("on the drive");
+    sim.run(&[
+        act(0, Action::Share { pick, below: false }),
+        Event::Step { client: 2 },
+    ]);
+    settle(&mut sim);
+    assert!(sim.server_paths().iter().all(|p| !p.starts_with('a')));
+}
+
+/// The other way round: the member reads a file at the top (shared without its folder) and
+/// deletes it; the owner shares the folder before the removal runs. The member reads the
+/// file in the folder from then on, and the drive had it there all along: the removal stands
+/// (the oracle had recorded the delete at the place the member read the file, the top).
+#[test]
+fn a_delete_stands_though_the_files_folder_is_shared_since() {
+    let mut sim = owned(&["b/a"]);
+    assert_eq!(sim.local_paths(2), ["a"]);
+    let file = sim.item(2, "a").expect("the file");
+    let node = sim.pick(2, file, false).expect("its pick");
+    sim.run(&[act(2, Action::Delete { node }), Event::Plan { client: 2 }]);
+    assert_eq!(sim.planned(2), ["RemoteDelete"]);
+    share(&mut sim, "b");
+    sim.run(&[Event::Step { client: 2 }]);
+    settle(&mut sim);
+    assert_eq!(sim.server_paths(), ["a", "b"]);
+    assert_eq!(sim.local_paths(2), ["b"]);
+}
+
+/// The member makes a folder in a folder shared for editing and moves a file of that folder
+/// into it, in one sync: the new folder is added and the move goes up (the new folder is
+/// shared as the one it is in, as the move runs). The plan's check took the move for one to
+/// a folder the member may not add to: the new folder isn't on the drive as it plans.
+#[test]
+fn a_move_into_a_folder_just_made_in_one_shared_for_editing_reaches_the_drive() {
+    let mut sim = owned(&["b", "b/a"]);
+    let b = sim.item(2, "b").expect("b");
+    let parent = sim.pick(2, b, true).expect("b's pick");
+    sim.run(&[act(2, Action::CreateFolder { parent, name: 3 })]);
+    rename(&mut sim, "b/a", "b/c.txt", 0);
+    settle(&mut sim);
+    let all = ["a", "b", "b/c.txt", "b/c.txt/a"];
+    assert_eq!(sim.server_paths(), all);
+    assert_eq!(sim.local_paths(0), all);
+    assert_eq!(sim.local_paths(2), ["b", "b/c.txt", "b/c.txt/a"]);
+    assert!(sim.moved_out(2).is_empty());
+}
+
+/// The owner withdraws the share of the folder `b`; the file `a` in it stays shared for
+/// editing, so the member reads it at the top from then on, where the other `a` holds its
+/// name: it is left out, and stays in `b` here. The member edited it meanwhile. The edit
+/// doesn't go up, and `b`'s delete here doesn't take it: it moves out first. (It went with
+/// the folder: found by the simulator, the owner's folder shared for editing from the start.)
+#[test]
+fn an_edit_of_a_file_left_out_moves_out_before_its_folder_goes_here() {
+    let mut sim = owned(&["a", "b", "b/a"]);
+    assert_eq!(sim.local_paths(2), ["a", "b", "b/a"]);
+    share(&mut sim, "b");
+    edit(&mut sim, "b/a");
+    settle(&mut sim);
+    assert_eq!(sim.local_paths(2), ["a"]);
+    assert_eq!(sim.moved_out(2).len(), 1, "{:?}", sim.moved_out(2));
+    assert_eq!(sim.server_paths(), ["a", "b", "b/a"]);
+}

@@ -275,6 +275,26 @@ impl Reconciler<'_> {
             true => HashSet::new(),
             false => moving_out(moves.iter().chain(&content), &i.local),
         };
+        // A folder that writes to another identity's drive (§13): an edit here of a node it
+        // may change goes up, as what is new here in a folder it may add to, so nothing moved
+        // them out. Left out of the plan (its name taken here, or its folder's), such a one
+        // doesn't go up either, and a folder's delete here would take it along, edit and all
+        // (found by the simulator: a file's folder no longer shared, its name at the top
+        // taken). What a delete here would take that changed here moves out first, as any
+        // change here that isn't sent.
+        if self.masking.read_only && !i.writable.is_empty() {
+            let tops: Vec<NodeId> = (gone_here.iter().copied())
+                .filter(|&n| !self.masks.masked.contains(&n))
+                .filter(|&n| !below_another(&i.local, n, &gone_here, &moving))
+                .collect();
+            for top in tops {
+                for n in expects_here(&i.local, top, &moving).0 {
+                    if !gone_here.contains(&n) && self.loses_here(n) {
+                        evicting.insert(n);
+                    }
+                }
+            }
+        }
         // What moves out of the folder, only the topmost (it takes what is below it, but what
         // the plan moves out of it first), before the deletes here: a folder they delete
         // doesn't take it, nor what is below it (§13). Never held, so no `moves_out_of`.

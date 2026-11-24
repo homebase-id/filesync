@@ -3988,6 +3988,104 @@ fn read_only_what_is_new_in_a_folder_that_may_be_changed_is_added() {
     assert!(at(dir_in) < at(below), "{:?}", plan.ops);
 }
 
+/// A delete here takes no edit. `inner` may be changed and was edited here, in `dir`, whose
+/// share is withdrawn (gone from what this identity reads) while `inner`'s stays: the drive
+/// has it at the top now, where `top` holds its name, so it is left out and its edit doesn't
+/// go up. `dir`'s delete here doesn't take the edit: it moves out first. Not edited, or
+/// edited to the bytes the drive has, it goes with its folder (the drive has it).
+#[test]
+fn read_only_a_delete_here_takes_no_edit_of_what_was_left_out() {
+    for order in [[0, 1, 2], [2, 1, 0], [1, 2, 0]] {
+        let id = ids(3);
+        let [top, dir, inner] = order.map(|i| id[i]);
+        for (here, there, moves_out) in [("mine", "x", true), ("x", "x", false), ("y", "y", false)]
+        {
+            let mut w = read_only();
+            w.synced(top, file(ROOT, "a.txt", "t"))
+                .synced(dir, folder(ROOT, "d"))
+                .synced(inner, file(dir, "a.txt", "x"));
+            w.remote(dir, None)
+                .remote(inner, Some(file(ROOT, "a.txt", there)));
+            editing(&mut w);
+            w.local(inner, Some(file(dir, "a.txt", here)));
+            let plan = w.plan();
+            assert!(!plan.writes_drive(), "{order:?}: {:?}", plan.ops);
+            let mut want = vec![("LocalDelete", dir)];
+            if moves_out {
+                want.push(("LocalEvict", inner));
+            }
+            want.sort();
+            assert_eq!(sorted_ops(&plan), want, "{order:?} {here}");
+            let mut taken = (plan.ops.iter())
+                .find_map(|op| match op {
+                    Op::LocalDelete { subtree, .. } => Some(subtree.clone()),
+                    _ => None,
+                })
+                .expect("the folder goes here");
+            taken.sort();
+            let mut all = match moves_out {
+                true => vec![dir],
+                false => vec![dir, inner],
+            };
+            all.sort();
+            assert_eq!(taken, all, "{order:?} {here}: {:?}", plan.ops);
+        }
+    }
+}
+
+/// The same a level down: a folder `sub` of `dir` is the one left out (shared still, its name
+/// at the top taken), and holds the edited file, and one new here (it would be added there,
+/// `sub` its to add to, were `sub` planned). The two files alone move out; `sub` goes with
+/// `dir`. And the plan after it ran (the file's base forgotten as it moved out, `dir` and
+/// `sub` gone here): nothing to do, and no removal there of the file that moved out.
+#[test]
+fn read_only_a_delete_here_takes_no_edit_below_a_folder_left_out() {
+    let [top, dir, sub, inner, fresh] = ids(5)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(top, folder(ROOT, "s"))
+        .synced(dir, folder(ROOT, "d"))
+        .synced(sub, folder(dir, "s"))
+        .synced(inner, file(sub, "a.txt", "x"));
+    w.remote(dir, None).remote(sub, Some(folder(ROOT, "s")));
+    editing(&mut w);
+    w.local(inner, Some(file(sub, "a.txt", "mine")))
+        .local(fresh, Some(file(sub, "new.txt", "n")));
+    let plan = w.plan();
+    assert!(!plan.writes_drive(), "{:?}", plan.ops);
+    let mut want = vec![
+        ("LocalDelete", dir),
+        ("LocalEvict", fresh),
+        ("LocalEvict", inner),
+    ];
+    want.sort();
+    assert_eq!(sorted_ops(&plan), want);
+    let subtree = |op: &Op| match op {
+        Op::LocalDelete { subtree, .. } | Op::LocalEvict { subtree, .. } => subtree.clone(),
+        _ => Vec::new(),
+    };
+    let mut taken: Vec<Vec<NodeId>> = plan.ops.iter().map(subtree).collect();
+    taken.iter_mut().for_each(|t| t.sort());
+    taken.sort();
+    let mut all = vec![vec![fresh], vec![inner], {
+        let mut d = vec![dir, sub];
+        d.sort();
+        d
+    }];
+    all.sort();
+    assert_eq!(taken, all, "{:?}", plan.ops);
+
+    let mut after = read_only();
+    after
+        .synced(top, folder(ROOT, "s"))
+        .remote(sub, Some(folder(ROOT, "s")))
+        .remote(inner, Some(file(sub, "a.txt", "x")));
+    editing(&mut after);
+    let plan = after.plan();
+    assert!(plan.ops.is_empty(), "{:?}", plan.ops);
+}
+
 /// A file edited on both sides, in a folder this identity may add to: both are kept, as on
 /// its own drive. The drive's version keeps the file, and this device's becomes a copy
 /// beside it, added there.

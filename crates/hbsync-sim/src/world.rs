@@ -1146,8 +1146,24 @@ impl Sim {
     /// another folder, a filter rule): as they saw it, as the client's base has it.
     pub(crate) fn user_removed(&mut self, c: usize, node: NodeId) {
         if let Some(seen) = self.base_seen(c, node) {
+            // A member's base has the node where the member reads it (at the top, its folder
+            // not shared), and that place changes with the folder's share, without a move on
+            // the drive. Its base at the drive's version, it saw the drive's node as it is:
+            // recorded at its place there, which only a move changes.
+            let seen = self.members_base_on_drive(c, node).unwrap_or(seen);
             self.ledger.user_deleted(c, node, seen);
         }
+    }
+
+    /// `node` as the whole drive has it, where client `c` is a member and its base of the
+    /// node is at the drive's version (nothing written there since it synced: a share given
+    /// or withdrawn keeps the version).
+    fn members_base_on_drive(&self, c: usize, node: NodeId) -> Option<Seen> {
+        let client = &self.clients[c];
+        let there = (self.whole.as_ref().unwrap_or(&self.server).live).get(&node)?;
+        let synced = client.extra.get(&node)?.version == Some(there.remote.version);
+        let n = &there.state;
+        (client.member && synced).then(|| (n.parent, n.name.clone(), n.content.map(|c| c.hash)))
     }
 
     /// Client `c`'s base of `node`, as the drive would have it ([`Seen`]).
@@ -1161,6 +1177,15 @@ impl Sim {
             b.name.clone(),
             b.content.map(|c| c.hash),
         ))
+    }
+
+    /// Live `node` as the whole drive has it, where a member's view stands in for the drive
+    /// ([`Sim::as_member`]; else `None`). A member reads a file at the top once its folder's
+    /// share is withdrawn, where the drive still has it in the folder: no move made there,
+    /// and none to win over a delete of the member's user, who had it in the folder.
+    pub(crate) fn on_whole_drive(&self, node: NodeId) -> Option<Seen> {
+        let n = &self.whole.as_ref()?.live.get(&node)?.state;
+        Some((n.parent, n.name.clone(), n.content.map(|c| c.hash)))
     }
 
     /// Live `node` as the drive has it, but for its tags ([`Seen`]).
