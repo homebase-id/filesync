@@ -232,7 +232,7 @@ impl Masks {
             .filter_map(|m| input.remote.get(*m).map(|s| s.parent))
             .filter(|p| !p.is_root() && !masked.contains(p))
             .collect();
-        let detach = to_detach(input, &masked, &HashMap::new(), masking);
+        let detach = to_detach(input, &masked, &HashMap::new(), masking.read_only);
         // The scope's detached folders stay as they are (§12): not one outside it, nor one in a
         // folder outside it.
         let by_filter = (detach.iter().copied())
@@ -270,7 +270,7 @@ impl Masks {
         away: &HashMap<NodeId, NodeId>,
         first_detached: usize,
     ) -> Option<Masks> {
-        let detach = to_detach(input, &self.masked, away, masking);
+        let detach = to_detach(input, &self.masked, away, masking.read_only);
         let again = detach.iter().eq(self.detached.keys());
         (detach.len() < first_detached && !again)
             .then(|| self.with_view(input, detach, computer, taken))
@@ -419,7 +419,7 @@ fn to_detach(
     input: &Input,
     masked: &HashSet<NodeId>,
     away: &HashMap<NodeId, NodeId>,
-    masking: Masking<'_>,
+    read_only: bool,
 ) -> BTreeSet<NodeId> {
     let mut detach: BTreeSet<NodeId> = BTreeSet::new();
     for (node, local) in input.local.iter() {
@@ -434,9 +434,9 @@ fn to_detach(
                             .get(&node)
                             .and_then(|e| e.local_hash)
                             .unwrap_or(b.hash);
-                        // Read-only (§13), a bit changed here is no change to keep.
-                        base_bytes != l.hash
-                            || (!masking.one_way(input, node) && b.executable != l.executable)
+                        // Read-only (§13), a bit changed here is no change to keep (of a node
+                        // this identity may change on the drive too: masked, it isn't written).
+                        base_bytes != l.hash || (!read_only && b.executable != l.executable)
                     }
                     // Not hashed yet: it may hold anything.
                     _ => true,

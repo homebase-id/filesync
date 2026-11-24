@@ -471,6 +471,7 @@ impl Reconciler<'_> {
                     self.merged.remove(node);
                     self.scope.insert(node);
                     let_go.insert(node);
+                    self.mended.insert(node);
                     // Only what was synced here is deleted, as the drive had it: what changed
                     // here that the drive doesn't hold, or was never synced, moves out.
                     if self.input.local.contains(node)
@@ -551,6 +552,9 @@ impl Reconciler<'_> {
                     _ => state.parent = NodeId::ROOT,
                 }
                 self.retarget(victim, state);
+                if self.masking.read_only {
+                    self.mended.insert(victim);
+                }
                 self.plan.conflicts.push(Conflict::Cycle { node: victim });
                 // A cycle on the drive itself (another writer's): no mask judged what is in
                 // it, as none does what the drive doesn't connect to the top.
@@ -669,6 +673,7 @@ impl Reconciler<'_> {
             return false;
         }
         for n in self.merged.subtree(node) {
+            self.mended.insert(n);
             // What changed here still moves out (its name aside): a folder deleted here takes
             // it along otherwise.
             if !self.evicted.contains(&n) {

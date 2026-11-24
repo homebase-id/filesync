@@ -200,6 +200,11 @@ struct Reconciler<'a> {
     evicted: BTreeSet<NodeId>,
     /// What a read-only name clash left out (§13), each once.
     left: BTreeSet<NodeId>,
+    /// The nodes a repair gave their place in a read-only folder (§13: an orphan let go of,
+    /// a name clash's loser left out, a cycle's move undone): they follow the drive, also
+    /// the ones this identity may change there ([`Reconciler::one_way`]). The drive is its
+    /// owner's to mend: no repair here writes to it.
+    mended: HashSet<NodeId>,
     /// The folders here a name pass left one out in, held there (§13): judged again.
     rejudge: BTreeSet<NodeId>,
     /// Becomes `plan.deferred`.
@@ -263,6 +268,7 @@ impl<'a> Reconciler<'a> {
             forks: BTreeMap::new(),
             evicted: BTreeSet::new(),
             left: BTreeSet::new(),
+            mended: HashSet::new(),
             rejudge: BTreeSet::new(),
             deferred: BTreeSet::new(),
             adopted: HashSet::new(),

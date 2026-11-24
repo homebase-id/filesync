@@ -3814,6 +3814,56 @@ fn read_only_orphans_are_let_go_of() {
     assert_eq!(got, want);
 }
 
+/// What mends the drive is its owner's, also of nodes this identity may change there: an
+/// orphan is let go of (never removed there, never moved into Recovered files), a name
+/// clash's loser is left out (never renamed there), and a cycle there isn't undone there.
+#[test]
+fn read_only_no_repair_writes_the_drive_whatever_may_be_changed() {
+    // Orphans.
+    let [f, g, gone] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.input.remote_complete = true;
+    w.synced(f, file(ROOT, "a.txt", "a"))
+        .synced(g, file(ROOT, "g.txt", "g"))
+        .remote(f, Some(file(gone, "a.txt", "a")))
+        .remote(g, Some(file(gone, "g.txt", "g")))
+        .local(g, Some(file(ROOT, "g.txt", "mine")));
+    w.input.writable.extend([f, g]);
+    let plan = w.plan();
+    assert!(!plan.writes_drive(), "{:?}", plan.ops);
+    let mut got: Vec<(&str, NodeId)> = plan.ops.iter().map(|op| (op.kind(), op.node())).collect();
+    got.sort();
+    let mut want = vec![("LocalDelete", f), ("LocalEvict", g)];
+    want.sort();
+    assert_eq!(got, want);
+
+    // A clash of names.
+    let [old, new] = ids(2)[..] else {
+        unreachable!()
+    };
+    let (old, new) = (new, old);
+    let mut w = read_only();
+    w.synced(old, file(ROOT, "a.txt", "a"))
+        .remote(new, Some(file(ROOT, "A.TXT", "b")));
+    w.input.writable.extend([old, new]);
+    let plan = w.plan();
+    assert!(!plan.writes_drive(), "{:?}", plan.ops);
+    assert_eq!(plan.conflicts, [Conflict::NameTaken { node: new }]);
+
+    // A cycle on the drive (another writer's).
+    let [a, b] = ids(2)[..] else { unreachable!() };
+    let mut w = read_only();
+    w.synced(a, folder(ROOT, "a"))
+        .synced(b, folder(ROOT, "b"))
+        .remote(a, Some(folder(b, "a")))
+        .remote(b, Some(folder(a, "b")));
+    w.input.writable.extend([a, b]);
+    let plan = w.plan();
+    assert!(!plan.writes_drive(), "{:?}", plan.ops);
+}
+
 /// Two of the drive's items whose names clash here: the one held here keeps its name, the other
 /// isn't synced here (it can't be renamed on the drive), and says why.
 #[test]
@@ -3914,6 +3964,38 @@ fn executable(mut s: NodeState, x: bool) -> NodeState {
         c.executable = x;
     }
     s
+}
+
+/// The executable bit of a node that may be changed is as in a folder that syncs both ways:
+/// set here, it goes up; of the file beside it, which follows the drive, it stays as it is.
+/// A file this device ignores since it synced follows the drive whatever it says: an ignore
+/// rule here removes nothing from another identity's drive, and a bit set on such a file is
+/// no change to keep.
+#[test]
+fn read_only_an_executable_bit_of_a_node_that_may_be_changed_goes_up() {
+    let [mine, theirs, log, set_log] = ids(4)[..] else {
+        unreachable!()
+    };
+    let mut w = World {
+        filter: ignoring("*.log\n"),
+        ..read_only()
+    };
+    for (node, name, set) in [
+        (mine, "m.sh", true),
+        (theirs, "t.sh", true),
+        (log, "a.log", false),
+        (set_log, "b.log", true),
+    ] {
+        w.synced(node, file(ROOT, name, "x"))
+            .local(node, Some(executable(file(ROOT, name, "x"), set)));
+    }
+    w.input.writable.extend([mine, log, set_log]);
+    let plan = w.plan();
+    let mut got: Vec<(&str, NodeId)> = plan.ops.iter().map(|op| (op.kind(), op.node())).collect();
+    got.sort();
+    let mut want = vec![("Forget", log), ("Forget", set_log), ("RemoteUpdate", mine)];
+    want.sort();
+    assert_eq!(got, want);
 }
 
 /// An executable bit changed here stays as it is: nothing moves out, nothing comes down; the
