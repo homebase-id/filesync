@@ -143,3 +143,70 @@ fn a_rename_onto_a_taken_name_is_undone() {
     assert_eq!(sim.server_paths(), ["a", "b", "b/a", "c.txt"]);
     assert_eq!(sim.local_paths(2), ["a", "c.txt"]);
 }
+
+/// The member makes its file named by `name` in `folder` (`""`: the top).
+fn make(sim: &mut Sim, folder: &str, name: usize) {
+    let parent = match folder {
+        "" => top(sim, 2),
+        folder => {
+            let folder = sim.item(2, folder).expect("the folder");
+            sim.pick(2, folder, true).expect("the folder's pick")
+        }
+    };
+    sim.run(&[act(2, Action::CreateFile { parent, name })]);
+}
+
+/// What the member makes in a folder shared for editing is added to the drive, and is the
+/// member's to change from then on; what it makes at the top, or in a folder shared for
+/// reading, moves out.
+#[test]
+fn what_is_made_in_a_folder_shared_for_editing_reaches_the_drive() {
+    let mut sim = owned(&["b"]);
+    assert_eq!(sim.local_paths(2), ["b"]);
+    make(&mut sim, "b", 3);
+    make(&mut sim, "", 5);
+    settle(&mut sim);
+    assert_eq!(sim.server_paths(), ["a", "b", "b/a", "b/c.txt"]);
+    assert_eq!(sim.local_paths(0), ["a", "b", "b/a", "b/c.txt"]);
+    assert_eq!(sim.local_paths(2), ["b", "b/c.txt"]);
+    assert_eq!(sim.moved_out(2), ["d"]);
+    // Shared as its folder is: an edit of it goes up.
+    edit(&mut sim, "b/c.txt");
+    settle(&mut sim);
+    assert_eq!(sim.moved_out(2), ["d"]);
+    // The folder turned back to reading: what is made in it now moves out.
+    turn(&mut sim, "b");
+    make(&mut sim, "b", 5);
+    settle(&mut sim);
+    assert_eq!(sim.server_paths(), ["a", "b", "b/a", "b/c.txt"]);
+    assert_eq!(sim.moved_out(2), ["d", "d"]);
+}
+
+/// A file moves between two folders shared for editing; into a folder shared for reading,
+/// the move is undone.
+#[test]
+fn a_move_between_folders_shared_for_editing_reaches_the_drive() {
+    let mut sim = owned(&[]);
+    // Two more folders of the owner's: `d`, and one named `c.txt`.
+    for name in [5, 3] {
+        let parent = top(&sim, 0);
+        sim.run(&[act(0, Action::CreateFolder { parent, name })]);
+    }
+    settle(&mut sim);
+    for path in ["b", "b/a", "d"] {
+        share(&mut sim, path);
+        turn(&mut sim, path);
+    }
+    share(&mut sim, "c.txt");
+    settle(&mut sim);
+    assert_eq!(sim.local_paths(2), ["b", "b/a", "c.txt", "d"]);
+    rename(&mut sim, "b/a", "d", 1);
+    settle(&mut sim);
+    assert_eq!(sim.server_paths(), ["a", "b", "c.txt", "d", "d/b"]);
+    assert_eq!(sim.local_paths(2), ["b", "c.txt", "d", "d/b"]);
+    rename(&mut sim, "d/b", "c.txt", 1);
+    settle(&mut sim);
+    assert_eq!(sim.server_paths(), ["a", "b", "c.txt", "d", "d/b"]);
+    assert_eq!(sim.local_paths(2), ["b", "c.txt", "d", "d/b"]);
+    assert!(sim.moved_out(2).is_empty());
+}

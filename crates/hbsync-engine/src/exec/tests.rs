@@ -5343,6 +5343,116 @@ fn a_read_only_folder_writes_only_what_may_be_changed_and_only_if_it_writes() ->
     Ok(())
 }
 
+/// The executor's last guard, for what is added and moved (§13): a node is made only in a
+/// folder the mirror says this identity may change, and one it may change moves only
+/// between two such folders. Whatever planned it, nothing is made in a folder it may only
+/// read, and nothing moves into one.
+#[test]
+fn a_read_only_folder_adds_and_moves_only_where_it_may() -> R {
+    let mut h = Harness::new()?;
+    let _out = read_only(&mut h)?;
+    h.folder.writes = true;
+    // Another identity's drive: what this device makes there takes its folder's word.
+    h.db.write(|s| s.account().set_shared(true))?;
+    let folder_row = |node, name: &str, writable| MirrorRow {
+        file_id: hbsync_types::RemoteFileId(uuid::Uuid::new_v4()),
+        version: hbsync_types::VersionTag(uuid::Uuid::new_v4()),
+        node,
+        parent: NodeId::ROOT,
+        name: name.into(),
+        kind: NodeKind::Folder,
+        file: None,
+        content_extra: Default::default(),
+        token: None,
+        changed_at: None,
+        writable,
+    };
+    let (to_edit, also_to_edit, to_read) = (NodeId::new(), NodeId::new(), NodeId::new());
+    let (moved, at_moved) = h.seed("moved", b"A")?;
+    let (kept, at_kept) = h.seed("kept", b"B")?;
+    h.db.write(|s| {
+        let a = s.account();
+        a.put_mirror(&folder_row(to_edit, "edit", true))?;
+        a.put_mirror(&folder_row(also_to_edit, "edit too", true))?;
+        a.put_mirror(&folder_row(to_read, "read", false))?;
+        // Both files in the first folder, the member's to change.
+        for file in [at_moved.file_id, at_kept.file_id] {
+            let row = a.mirror_by_file(file)?.expect("seeded");
+            a.put_mirror(&MirrorRow {
+                parent: to_edit,
+                writable: true,
+                version: hbsync_types::VersionTag(uuid::Uuid::new_v4()),
+                ..row
+            })?;
+        }
+        Ok(())
+    })?;
+    for (path, node) in [("edit", to_edit), ("read", to_read)] {
+        h.local_folder(path, node)?;
+    }
+    let (made, not_made) = (NodeId::new(), NodeId::new());
+    h.local_folder("edit/new", made)?;
+    h.local_folder("read/new", not_made)?;
+    let make = |node, parent| Op::RemoteCreate {
+        node,
+        parent,
+        name: "new".into(),
+        kind: NodeKind::Folder,
+        tags: Tags::default(),
+    };
+    // (And a folder made in the folder made just before it, in the same run: asked of that
+    // one's row, which its create's answer wrote.)
+    let below = NodeId::new();
+    h.local_folder("edit/new/below", below)?;
+    let below_op = Op::RemoteCreate {
+        node: below,
+        parent: made,
+        name: "below".into(),
+        kind: NodeKind::Folder,
+        tags: Tags::default(),
+    };
+    let ops = vec![make(made, to_edit), below_op, make(not_made, to_read)];
+    let report = h.run(ops.clone())?;
+    let refused: Vec<&Op> = (report.skipped.iter())
+        .filter(|(_, why)| matches!(why, Skip::Unsyncable(_)))
+        .map(|(op, _)| op)
+        .collect();
+    assert_eq!(refused, [&ops[2]], "{report:?}");
+    let live = h.remote.server().live_names();
+    assert!(
+        live.contains(&"new".to_owned()) && live.contains(&"below".to_owned()),
+        "{live:?}"
+    );
+
+    // A move is asked of the mirror's rows alone: between the two folders it passes the
+    // guard, into the folder it may only read it doesn't.
+    let moves = |node, to| Op::RemoteUpdate {
+        node,
+        file_id: hbsync_types::RemoteFileId(uuid::Uuid::new_v4()),
+        expected: hbsync_types::VersionTag(uuid::Uuid::new_v4()),
+        parent: to,
+        name: "x".into(),
+        upload: false,
+        tags: Tags::default(),
+    };
+    let ops = vec![moves(moved, also_to_edit), moves(kept, to_read)];
+    let report = h.run(ops.clone())?;
+    let unsyncable: Vec<&Op> = (report.skipped.iter())
+        .filter(|(_, why)| matches!(why, Skip::Unsyncable(_)))
+        .map(|(op, _)| op)
+        .collect();
+    assert_eq!(unsyncable, [&ops[1]], "{report:?}");
+    // (The first went on to its write, which found another file there: stale, not refused.)
+    assert!(
+        report
+            .skipped
+            .iter()
+            .any(|(op, why)| *op == ops[0] && matches!(why, Skip::Stale(_))),
+        "{report:?}"
+    );
+    Ok(())
+}
+
 /// An item parked for what took its name gets a name of its own again before it moves out: one
 /// that can't go (its out folder refused) isn't left hidden under the parked name.
 #[test]

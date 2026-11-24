@@ -723,45 +723,86 @@ impl Reconciler<'_> {
         any
     }
 
-    /// On another identity's drive (§13) a rename here goes up only onto a name that is free:
-    /// one another node holds, on the drive or in the plan, or one this device leaves out
-    /// there or keeps (§10, §7), is the other's. The rename is undone (its item here gets the
-    /// drive's name back); what else changed here of the node still goes up. A clash of names
-    /// on the drive is its owner's to mend, so none is made there.
-    pub(super) fn undo_renames_onto_taken_names(&mut self) {
+    /// On another identity's drive (§13) a name is taken there only where it is free: one
+    /// another node holds, on the drive or in the plan, or one this device leaves out there
+    /// or keeps (§10, §7), is the other's. A rename or a move here onto one is undone (the
+    /// item here goes back to the drive's place and name; what else changed here of the
+    /// node still goes up); what this plan adds there (new here, a conflict copy) goes under
+    /// the first numbered name that is free, as a clash's loser does on an identity's own
+    /// drive. A clash of names on the drive is its owner's to mend, so none is made there.
+    pub(super) fn keep_off_taken_names(&mut self) {
         if !self.masking.read_only || self.input.writable.is_empty() {
             return;
         }
         let i = self.input;
-        let renamed: Vec<(NodeId, NodeState)> = (self.scope.iter())
-            .filter(|n| !self.one_way(**n))
-            .filter_map(|&n| {
-                let (to, r) = (self.merged.get(n)?, self.remote_state(n)?);
-                // (Its own name spelled otherwise is no other's.)
-                if to.name == r.name {
-                    return None;
-                }
-                let key = name_key(&to.name);
-                if key == name_key(&r.name) {
-                    return None;
-                }
+        let scope: Vec<NodeId> = self.scope.iter().copied().collect();
+        for n in scope {
+            // Only what takes a name there: a node whose place differs from the drive's, or
+            // one added.
+            let (r, added) = (self.remote_state(n), self.adds.contains(&n));
+            if self.one_way(n) || (r.is_none() && !added) {
+                continue;
+            }
+            let Some(to) = self
+                .merged
+                .get(n)
+                .filter(|to| r.is_none_or(|r| !to.same_place(r)))
+            else {
+                continue;
+            };
+            let to = to.clone();
+            let taken = |name: &str| {
+                let key = name_key(name);
                 let held =
                     |names: Option<&HashSet<String>>| names.is_some_and(|k| k.contains(&key));
-                let taken = self
-                    .merged
-                    .child_named(to.parent, &to.name, Some(n))
-                    .is_some()
-                    || i.remote.child_named(to.parent, &to.name, Some(n)).is_some()
+                self.merged.child_named(to.parent, name, Some(n)).is_some()
+                    || i.remote.child_named(to.parent, name, Some(n)).is_some()
                     || held(self.masks.names.get(&to.parent))
-                    || held(self.kept.get(&to.parent));
-                taken.then(|| {
-                    let name = r.name.clone();
-                    (n, NodeState { name, ..to.clone() })
-                })
-            })
-            .collect();
-        for (node, state) in renamed {
-            self.retarget(node, state);
+                    || held(self.kept.get(&to.parent))
+            };
+            match r {
+                Some(r) => {
+                    // (Its own name spelled otherwise, where it is, is no other's.)
+                    let its_own = to.parent == r.parent
+                        && (to.name == r.name || name_key(&to.name) == name_key(&r.name));
+                    if its_own || !taken(&to.name) {
+                        continue;
+                    }
+                    let back = NodeState {
+                        parent: r.parent,
+                        name: r.name.clone(),
+                        ..to
+                    };
+                    self.retarget(n, back);
+                }
+                // The first free one this device syncs, as `fix_names` picks one (§10: one
+                // it ignores would leave the drive at the next scan); else the first free
+                // one. (Judged on what the view holds of the folder: `fix_names`, next,
+                // asks for the whole folder where the new name may clash with what it
+                // doesn't hold, `may_clash_unseen`.)
+                None if taken(&to.name) => {
+                    let is_dir = to.kind == NodeKind::Folder;
+                    let dir: Option<Vec<String>> = (self.merged.path(to.parent))
+                        .map(|p| p.into_iter().map(str::to_owned).collect());
+                    let syncs = |c: &String| {
+                        dir.as_ref().is_none_or(|dir| {
+                            let names = dir.iter().map(String::as_str).chain([c.as_str()]);
+                            self.masking.filter.names(names, is_dir).is_sync()
+                        })
+                    };
+                    let free = |c: &String| !taken(c);
+                    let name = first_free_by(numbered_names(&to.name), free, syncs)
+                        .or_else(|| {
+                            (NUMBERED_TRIES + 1..)
+                                .map(|k| numbered_conflict_name(&to.name, k))
+                                .find(|c| free(c))
+                        })
+                        .unwrap_or_else(|| to.name.clone());
+                    self.retarget(n, NodeState { name, ..to });
+                    self.plan.conflicts.push(Conflict::NameClash { node: n });
+                }
+                None => {}
+            }
         }
     }
 
@@ -916,7 +957,9 @@ impl Reconciler<'_> {
                     continue;
                 }
                 // A rename needs every name of the folder ([`super::coverage`]); read-only, none
-                // is renamed.
+                // is renamed here (what is added there under a numbered name was renamed
+                // before, `keep_off_taken_names`, and is judged with the names the view holds
+                // above: `may_clash_unseen`).
                 uncovered |= part && !self.masking.read_only;
                 // The lowest id keeps the name, except that a deferred node (a file still
                 // being written) is never renamed: it wins, and is left alone if it loses;

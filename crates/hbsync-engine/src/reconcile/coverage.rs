@@ -8,7 +8,9 @@
 //! - a folder whose names [`Reconciler::fix_names`] judged without all its children in the input
 //!   ([`Reconciler::judged_in_part`]) where a name may clash with one not in it
 //!   ([`Reconciler::may_clash_unseen`]), or where it renamed one (a numbered name must be free
-//!   among all of them): `fix_names` adds it;
+//!   among all of them): `fix_names` adds it (so for the numbered name
+//!   [`Reconciler::keep_off_taken_names`] gave what is added to another identity's drive,
+//!   judged there next);
 //! - a folder with a masked child, or a file with a node in it ([`masked_and_in_files`]).
 
 use super::*;

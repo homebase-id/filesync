@@ -143,9 +143,12 @@ impl Sim {
             // A new file hashed on send: the drive wrote it, and the crash lost the answer (every
             // other such crash: before the write). The next plan finds its node on the drive:
             // read first, it settles as equal, sent once.
+            // (Not a write the executor's guard refuses, a member's where it may not add by
+            // what the drive says now: that one is never sent.)
             Some(ref op @ Op::RemoteCreate { node, .. })
                 if self.clients[c].send_hash.contains(&node)
-                    && self.faults.crashes.is_multiple_of(2) =>
+                    && self.faults.crashes.is_multiple_of(2)
+                    && (!self.clients[c].writes || self.may_change(op)) =>
             {
                 let sent = self.execute(c, op) == Outcome::Done;
                 self.note(|_| match sent {

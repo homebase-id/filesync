@@ -1702,21 +1702,48 @@ rules hold too:
   so is to count as read-only after all, where a folder writes.
   Read-only is asked item by item (the reconciler's `one_way`), where the folder writes to
   what is shared with it (`FolderCtx::writes`, the view's `Input::writable`). **An item
-  the store says may be changed is changed where it is**:
+  the store says may be changed is changed there**:
   - its edit (bytes, the executable bit), its tags and its rename in its folder go up;
   - gone there or here, it follows the drive: what is gone there (deleted, its share
     withdrawn, taken along by its folder's removal) isn't made again, and an edit of it here
     moves out; a delete here removes nothing there, and the item comes back;
-  - edited on both sides, the drive's wins and this device's moves out, as of any item of
-    the folder (a conflict copy would be a new item there; an executable bit changed here
-    alone is no edit to keep, as in any read-only folder);
-  - a move here to another folder is undone, whole (the item goes back to the drive's place
+  - edited on both sides, both are kept where its folder may be added to (below): the
+    drive's version keeps the file, and this device's becomes a conflict copy beside it,
+    added there, as on an identity's own drive (§6). Elsewhere (a file shared for editing
+    in a folder shared for reading, or at the top) the drive's wins and this device's
+    moves out, as of any item of the folder (an executable bit changed here alone is no
+    edit to keep, as in any read-only folder);
+  - a move here to another folder goes up between two folders that may be added to
+    (below), and is undone, whole, anywhere else (the item goes back to the drive's place
     and name); an edit made with it still goes up;
-  - a rename here onto a name another item holds, on the drive or in the plan, or one this
-    device leaves out there or keeps (§10, §7), is undone: no clash of names is made on the
-    owner's drive. (Onto the name of an item the member doesn't read, or one shared a moment
-    later, it can't know: that clash is the owner's devices' to mend, as any. Its own name
-    spelled otherwise goes up: what holds that name with it did before.)
+  - a rename or a move here onto a name another item holds, on the drive or in the plan, or
+    one this device leaves out there or keeps (§10, §7), is undone: no clash of names is
+    made on the owner's drive. (Onto the name of an item the member doesn't read, or one
+    shared a moment later, it can't know: that clash is the owner's devices' to mend, as
+    any. Its own name spelled otherwise goes up: what holds that name with it did before.)
+
+  **A folder the store says may be changed may be added to** (what is added to it is
+  shared as it is, so it is the member's to change from then on; **[verified]** the fake
+  sharer and the Homebase adapter share a new item with its folder's rows):
+  - what is new here in such a folder is added there, a new folder with what is in it: a
+    folder is made before what is in it, in the same run where its create is answered at
+    once (a write still on its way there, as Homebase's can be, leaves what is in it for
+    a later plan, once the feed brought the folder's row; meanwhile the guard's refusal
+    of it reads "the folder is read-only", which is the wrong word for it: to be put
+    right with writes on their way); new at the top (no folder of
+    the drive's) or in a folder shared for reading, it moves out, as before;
+  - what is added under a name another item holds there goes under the first free
+    numbered name, as a clash's loser does on an identity's own drive (§6.3);
+  - the executor's last guard makes a node only in a folder the store says may be
+    changed, as the write runs (one this run made there is one: it is asked after what
+    the write waits for ran), and moves one only between two such folders.
+
+  Engine tests `what_a_member_makes_in_a_folder_shared_for_editing_reaches_the_sharer`,
+  `a_members_conflict_copy_and_move_reach_the_sharer`,
+  `a_read_only_folder_adds_and_moves_only_where_it_may`; the simulator's member adds and
+  moves so too (`Server::take_from_member`), with scripted cases
+  `what_is_made_in_a_folder_shared_for_editing_reaches_the_drive` and
+  `a_move_between_folders_shared_for_editing_reaches_the_drive`.
 
   What it is in stays the drive's: the write sends the folder the drive has the item in,
   never this folder's top for an item shown there (`Executor::sent_folder`, one lookup of
@@ -1745,8 +1772,8 @@ rules hold too:
   Simulator: `a_writing_member_writes_only_what_it_may_and_converges`, the same in pages
   that crash, and on the engine's planning path; scripted cases in
   `regressions/writing_member.rs`. No folder writes yet (nothing turns it on), and none is
-  to before a member's new items, its moves between folders shared for editing, and its
-  deletes are settled (each has its own step).
+  to before a member's deletes are settled (a delete here still removes nothing there,
+  and the item comes back).
   So a folder synced from another identity's drive is read-only (above), whatever its items
   say. A share's state DB from before it was kept reads its
   feed from its beginning once (a re-read, §8b), each row taking what its header says.

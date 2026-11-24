@@ -42,10 +42,10 @@ pub struct Masking<'a> {
     /// (an edit, a new item) moves out first ([`Op::LocalEvict`]); an item filtered here since
     /// it synced stays on the drive, masked, as one never synced here. Asked node by node
     /// (the reconciler's `one_way`): a node this identity may change there
-    /// ([`Input::writable`]) is changed there where it is (its edit, its tags, its rename in
-    /// its folder), and follows the drive in the rest. What mends the drive (a clash of
-    /// names, a cycle, an orphan) never does in such a folder, whatever its nodes say: the
-    /// drive is its owner's to mend.
+    /// ([`Input::writable`]) is changed there (its edit, its tags, its rename), such a folder
+    /// is added to, and a node moves between two such folders; in the rest it follows the
+    /// drive. What mends the drive (a clash of names, a cycle, an orphan) never does in such
+    /// a folder, whatever its nodes say: the drive is its owner's to mend.
     pub read_only: bool,
 }
 
@@ -209,8 +209,9 @@ pub struct Input {
     /// [`Options::piece`], where only what its removal took along waits).
     pub going_above: HashSet<NodeId>,
     /// In a read-only folder (§13), the nodes of `remote` this identity may change on the
-    /// drive (the mirror's `writable`): changed there where they are, by what changed here
-    /// (the reconciler's `one_way`, and the nodes it has follow the drive all the same). Empty
+    /// drive (the mirror's `writable`): changed there by what changed here, and a folder of
+    /// them added to (the reconciler's `one_way` and `adds_to`, and the nodes it has follow
+    /// the drive all the same). Empty
     /// where the folder doesn't write to what is shared ([`crate::FolderCtx::writes`]), and
     /// on an identity's own drive, where it isn't asked.
     pub writable: HashSet<NodeId>,

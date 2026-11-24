@@ -630,28 +630,42 @@ impl Sim {
             client.local.contains(id) || client.base.contains(id) || self.server.ever.contains(&id)
         };
         let plan = reconcile_with_known(&input, &opts, masking, known);
-        // A member that writes plans only a change of a node it may change, where the drive
-        // has it: never a node made, removed or moved to another folder, nor a rename onto a
-        // name another node of the drive holds, as it reads it (§13).
+        // A member that writes plans only what it may (§13): a change of a node it may change,
+        // where the drive has it, or its move between two folders it may change; a node made
+        // in such a folder (or in one the plan makes there). Never a node removed, nothing at
+        // the top, and no name another node of the drive holds, as it reads it.
         if client.writes {
             // (Not onto its own name spelled otherwise: what holds that with it did before.)
             let taken = |node: NodeId, parent: NodeId, name: &str| {
                 let key = hbsync_platform::name::name_key;
-                input
-                    .remote
-                    .get(node)
-                    .is_some_and(|r| key(&r.name) != key(name))
-                    && input.remote.child_named(parent, name, Some(node)).is_some()
+                let its_own = (input.remote.get(node))
+                    .is_some_and(|r| r.parent == parent && key(&r.name) == key(name));
+                !its_own && input.remote.child_named(parent, name, Some(node)).is_some()
             };
+            let made: HashSet<NodeId> = (plan.ops.iter().chain(&plan.held))
+                .filter(|op| matches!(op, Op::RemoteCreate { .. }))
+                .map(Op::node)
+                .collect();
+            let adds_to = |folder: &NodeId| input.writable.contains(folder);
             let overstep = (plan.ops.iter().chain(&plan.held)).find(|op| match op {
                 Op::RemoteUpdate {
                     node, parent, name, ..
                 } => {
+                    let moves = |r: &NodeState| {
+                        r.parent != *parent && !(adds_to(parent) && adds_to(&r.parent))
+                    };
                     !input.writable.contains(node)
-                        || input.remote.get(*node).is_none_or(|r| r.parent != *parent)
+                        || input.remote.get(*node).is_none_or(moves)
                         || taken(*node, *parent, name)
                 }
                 Op::RemoteTags { node, .. } => !input.writable.contains(node),
+                Op::RemoteCreate {
+                    node, parent, name, ..
+                } => {
+                    input.remote.contains(*node)
+                        || !(adds_to(parent) || made.contains(parent))
+                        || taken(*node, *parent, name)
+                }
                 op => op.writes_remote(),
             });
             let name = &client.name;
@@ -971,18 +985,25 @@ impl Sim {
         hbsync_engine::reconcile::taken_along(&input, &HashSet::new())
     }
 
-    /// Whether a member's `op` changes a file it may change, where the drive has it (the
-    /// engine's `Executor::may_change`).
-    fn may_change(&self, op: &Op) -> bool {
-        let to = match op {
-            Op::RemoteUpdate { parent, .. } => Some(*parent),
-            Op::RemoteTags { .. } => None,
-            _ => return false,
+    /// Whether a member's `op` is a write it may make, by what the drive says now (the
+    /// engine's `Executor::may_change`): a change of a file it may change, where the drive
+    /// has it, or its move between two folders it may change; a node made in such a folder.
+    pub(crate) fn may_change(&self, op: &Op) -> bool {
+        let editable = |node: NodeId| self.server.editable_node(node);
+        let changes = |to: Option<NodeId>| {
+            editable(op.node()).is_some_and(|on_drive| match to {
+                Some(to) if to != on_drive.state.parent => {
+                    editable(to).is_some() && editable(on_drive.state.parent).is_some()
+                }
+                _ => true,
+            })
         };
-        (self.server.live.get(&op.node())).is_some_and(|on_drive| {
-            self.server.editable.contains(&on_drive.remote.file_id)
-                && to.is_none_or(|to| to == on_drive.state.parent)
-        })
+        match op {
+            Op::RemoteUpdate { parent, .. } => changes(Some(*parent)),
+            Op::RemoteTags { .. } => changes(None),
+            Op::RemoteCreate { parent, .. } => editable(*parent).is_some(),
+            _ => false,
+        }
     }
 
     /// Executes the next planned operation. Returns `false` if the plan is empty.

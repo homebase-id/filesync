@@ -270,13 +270,6 @@ impl<'a> Executor<'a> {
                 self.run_batch(&mut batch)?;
                 continue;
             };
-            // Read-only (§13): nothing goes to the drive, whatever planned it, but of a node
-            // this identity may change there.
-            if self.folder.read_only.is_some() && op.writes_remote() && !self.may_change(&op)? {
-                let never = Outcome::unsyncable("the folder is read-only: the drive isn't written");
-                self.handle(op, attempts, never, None)?;
-                continue;
-            }
             // Everything else runs on its own, in order: after the batch.
             let pooled = op.pooled();
             let target = if pooled { self.move_target(&op)? } else { None };
@@ -290,6 +283,14 @@ impl<'a> Executor<'a> {
                 // it: what the batch did may have moved the target's folders.
                 self.schedule.requeue(op, attempts);
                 self.run_batch(&mut batch)?;
+                continue;
+            }
+            // Read-only (§13): nothing goes to the drive, whatever planned it, but what this
+            // identity may write there. Asked once what the op waits for in the batch ran (a
+            // folder made there: what is made in it is asked of that folder's row).
+            if self.folder.read_only.is_some() && op.writes_remote() && !self.may_change(&op)? {
+                let never = Outcome::unsyncable("the folder is read-only: the drive isn't written");
+                self.handle(op, attempts, never, None)?;
                 continue;
             }
             // A folder temporarily inside its own destination waits for the move that takes
@@ -341,22 +342,38 @@ impl<'a> Executor<'a> {
         Ok(())
     }
 
-    /// Whether `op`, which writes the drive from a read-only folder (§13), changes a node this
-    /// identity may change there, where it is: the folder writes to what is shared with it
-    /// ([`FolderCtx::writes`]), and the mirror's row of the node says so, now (the plan
-    /// asked the view's: a share taken back since stops the write here). Never a node made
-    /// or removed there, nor one moved to another folder than the mirror has it in.
+    /// Whether `op`, which writes the drive from a read-only folder (§13), is a write this
+    /// identity may make there: the folder writes to what is shared with it
+    /// ([`FolderCtx::writes`]), and the mirror's rows say so, now (the plan asked the view's:
+    /// a share taken back since stops the write here). A change of a node it may change,
+    /// where the mirror has it, or its move between two folders it may add to; a node made
+    /// in a folder it may add to (one it may change: what is added is shared as that folder
+    /// is; a folder this run made there is one). Never a node removed, and nothing made at
+    /// or moved to or from the top.
     fn may_change(&mut self, op: &Op) -> Result<bool, StateError> {
         if !self.folder.writes {
             return Ok(false);
         }
-        let to = match op {
-            Op::RemoteUpdate { parent, .. } => Some(*parent),
-            Op::RemoteTags { .. } => None,
-            _ => return Ok(false),
-        };
-        let row = self.db.read(|s| s.get_mirror(op.node()))?;
-        Ok(row.is_some_and(|row| row.writable && to.is_none_or(|to| to == row.parent)))
+        self.db.read(|s| {
+            let adds_to = |folder: NodeId| -> Result<bool, StateError> {
+                Ok(s.get_mirror(folder)?.is_some_and(|row| row.writable))
+            };
+            let changes = |to: Option<NodeId>| -> Result<bool, StateError> {
+                let Some(row) = s.get_mirror(op.node())?.filter(|row| row.writable) else {
+                    return Ok(false);
+                };
+                match to {
+                    Some(to) if to != row.parent => Ok(adds_to(to)? && adds_to(row.parent)?),
+                    _ => Ok(true),
+                }
+            };
+            match op {
+                Op::RemoteUpdate { parent, .. } => changes(Some(*parent)),
+                Op::RemoteTags { .. } => changes(None),
+                Op::RemoteCreate { parent, .. } => adds_to(*parent),
+                _ => Ok(false),
+            }
+        })
     }
 
     /// Where `op` moves its node on the drive, if it moves it to another folder: that folder

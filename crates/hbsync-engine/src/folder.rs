@@ -39,10 +39,10 @@ pub struct FolderCtx {
     pub read_only: Option<PathBuf>,
     /// Whether a read-only folder writes to the drive what its items say this identity may
     /// change there (`MirrorRow::writable`; the rest of it stays one-way). Off, every item
-    /// is read-only, whatever it says. Such an item is changed where it is: its edit, its
-    /// tags and its rename in its folder go up (sync semantics §13, "What may be changed is
-    /// told per item"). Nothing turns it on yet, and nothing is to before a member's new
-    /// items, moves and deletes are settled.
+    /// is read-only, whatever it says. Such an item is changed where it is (its edit, its
+    /// tags, its rename), and such a folder is added to; an item moves between two such
+    /// folders (sync semantics §13, "What may be changed is told per item"). Nothing turns
+    /// it on yet, and nothing is to before a member's deletes are settled.
     pub writes: bool,
 }
 
