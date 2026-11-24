@@ -360,8 +360,8 @@ impl Sim {
     /// Client `c` is a member ([`Sim::with_member`]) that writes to what is shared with it for
     /// editing ([`Action::Editable`]): its change of such an item, where the item is, reaches
     /// the drive (an edit, a rename in its folder, tags), and so do what it makes in such a
-    /// folder and its move of such an item between two such folders. The rest of its folder
-    /// is read-only.
+    /// folder, its move of such an item between two such folders, and its delete of one (a
+    /// removal to Recently deleted). The rest of its folder is read-only.
     pub fn with_writing_member(mut self, c: usize) -> Self {
         self = self.with_member(c);
         self.clients[c].writes = true;
@@ -384,7 +384,13 @@ impl Sim {
         let done = f(self);
         let seen = std::mem::replace(&mut self.server, self.whole.take().expect("set above"));
         let breach = match self.clients[c].writes {
-            true => self.server.take_from_member(&before, &seen),
+            true => {
+                let (breach, folders) = self.server.take_from_member(&before, &seen);
+                for folder in folders {
+                    self.folder_took_along(folder);
+                }
+                breach
+            }
             false => (seen.changed_since(&before)).then(|| "it changed the drive".to_owned()),
         };
         let name = &self.clients[c].name;

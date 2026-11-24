@@ -464,8 +464,9 @@ impl Engine {
     /// The next sync does the rest; what a failure leaves is still held, and shown again.
     /// Costs a feed read, then one restore of them all: a request per wave and per thousand rows,
     /// and after it two reads per node restored ([`crate::held::after_restore`]). Returns how
-    /// many it put back. Refused in a read-only folder (§13), whose drive this device never
-    /// writes: what is held there is confirmed or stays held.
+    /// many it put back. Refused in a read-only folder (§13), where nothing is restored on the
+    /// drive (it is another identity's, or this folder only follows it): what is held there
+    /// is confirmed or stays held.
     pub fn put_back(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
         if self.cfg.folder.read_only.is_some() {
             return Err(EngineError::ReadOnly("nothing is put back on the drive"));

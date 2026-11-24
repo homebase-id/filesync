@@ -348,8 +348,9 @@ impl<'a> Executor<'a> {
     /// a share taken back since stops the write here). A change of a node it may change,
     /// where the mirror has it, or its move between two folders it may add to; a node made
     /// in a folder it may add to (one it may change: what is added is shared as that folder
-    /// is; a folder this run made there is one). Never a node removed, and nothing made at
-    /// or moved to or from the top.
+    /// is; a folder this run made there is one); a node it may change removed (to its
+    /// owner's Recently deleted). Nothing made at or moved to or from the top, and nothing
+    /// deleted for good.
     fn may_change(&mut self, op: &Op) -> Result<bool, StateError> {
         if !self.folder.writes {
             return Ok(false);
@@ -370,6 +371,33 @@ impl<'a> Executor<'a> {
             match op {
                 Op::RemoteUpdate { parent, .. } => changes(Some(*parent)),
                 Op::RemoteTags { .. } => changes(None),
+                // A removal: to its owner's Recently deleted, where the node is. A folder's
+                // takes along what is in it there: all the mirror has in it must be this
+                // identity's to change too, now (the share of one item in it turned back to
+                // reading since the plan stops the folder's removal here).
+                Op::RemoteDelete { node, .. } => {
+                    if !changes(None)? {
+                        return Ok(false);
+                    }
+                    // (Each folder once: the drive may hold a cycle of them, another
+                    // writer's, which a removal is never sent into.)
+                    let mut folders = vec![*node];
+                    let mut walked = HashSet::from([*node]);
+                    while let Some(folder) = folders.pop() {
+                        for row in s.mirror_children(folder)? {
+                            if !row.writable {
+                                return Ok(false);
+                            }
+                            if row.kind == NodeKind::Folder {
+                                if !walked.insert(row.node) {
+                                    return Ok(false);
+                                }
+                                folders.push(row.node);
+                            }
+                        }
+                    }
+                    Ok(true)
+                }
                 Op::RemoteCreate { parent, .. } => adds_to(*parent),
                 _ => Ok(false),
             }

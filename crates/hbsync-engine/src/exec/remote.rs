@@ -151,7 +151,9 @@ impl Executor<'_> {
         else {
             return Err(Outcome::Done); // already out of the tree
         };
-        let meta = mirror::meta(&mirror, true);
+        let mut meta = mirror::meta(&mirror, true);
+        // (On another identity's drive: the folder the drive has it in, `sent_folder`.)
+        meta.parent = self.sent_folder(&mirror, meta.parent)?;
         let hash = mirror.file.map(|f| f.hash);
         Ok(meta_job(
             meta,

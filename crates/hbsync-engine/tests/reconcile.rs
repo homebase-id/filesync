@@ -3676,24 +3676,28 @@ fn editing(w: &mut World) {
     w.input.writable.extend(all);
 }
 
-/// An item that may be changed, gone on one side, follows the drive: deleted here, it comes
-/// back (a delete here removes nothing there); gone there, it goes here, and an edit of it
-/// here moves out (it isn't made again there); taken along by its folder's removal there,
-/// it isn't removed there by this device.
+/// An item that may be changed, gone there, follows the drive: it goes here, and an edit of
+/// it here moves out (it isn't made again there); taken along by its folder's removal
+/// there, it isn't removed there by this device. Deleted here, it is removed there, to its
+/// owner's Recently deleted; but not where the drive's changed since it synced here: that
+/// one comes back.
 #[test]
-fn read_only_an_item_that_may_be_changed_gone_on_one_side_follows_the_drive() {
-    let [deleted, gone, edited_gone, d, along] = ids(5)[..] else {
+fn read_only_an_item_that_may_be_changed_gone_on_one_side() {
+    let [deleted, deleted_changed, gone, edited_gone, d, along] = ids(6)[..] else {
         unreachable!()
     };
     let mut w = read_only();
     w.input.remote_complete = true;
     w.synced(deleted, file(ROOT, "a.txt", "a"))
+        .synced(deleted_changed, file(ROOT, "c.txt", "c"))
         .synced(gone, file(ROOT, "g.txt", "g"))
         .synced(edited_gone, file(ROOT, "e.txt", "e"))
         .synced(d, folder(ROOT, "d"))
         .synced(along, file(d, "x.txt", "x"));
     editing(&mut w);
     w.local(deleted, None)
+        .local(deleted_changed, None)
+        .remote(deleted_changed, Some(file(ROOT, "c.txt", "theirs")))
         .remote(gone, None)
         .remote(edited_gone, None)
         .local(edited_gone, Some(file(ROOT, "e.txt", "mine")))
@@ -3707,15 +3711,95 @@ fn read_only_an_item_that_may_be_changed_gone_on_one_side_follows_the_drive() {
     );
     w.input.changed_at.insert(along, 10);
     let plan = w.plan();
-    assert!(!plan.writes_drive(), "{:?}", plan.ops);
     let mut want = vec![
         ("LocalDelete", d),
         ("LocalDelete", gone),
-        ("LocalDownload", deleted),
+        ("LocalDownload", deleted_changed),
         ("LocalEvict", edited_gone),
+        ("RemoteDelete", deleted),
     ];
     want.sort();
     assert_eq!(sorted_ops(&plan), want);
+
+    // The same bytes in the same place, at another version than it synced at (its owner
+    // removed and restored it since, say): no delete made before that removes it.
+    let mut w = read_only();
+    w.synced(deleted, file(ROOT, "a.txt", "a"));
+    editing(&mut w);
+    w.local(deleted, None);
+    let synced_at = VersionTag(Uuid::new_v4());
+    w.input
+        .base_extra
+        .get_mut(&deleted)
+        .expect("synced")
+        .version = Some(synced_at);
+    let plan = w.plan();
+    assert_eq!(sorted_ops(&plan), [("LocalDownload", deleted)]);
+    // At that version, it is removed.
+    w.input
+        .remote_refs
+        .get_mut(&deleted)
+        .expect("there")
+        .version = synced_at;
+    assert_eq!(sorted_ops(&w.plan()), [("RemoteDelete", deleted)]);
+}
+
+/// A folder deleted here is removed there with all that was in it only where all the drive
+/// has in it, as this device reads it, may be changed: with one item in it that may only be
+/// read, or one the drive changed or made since, the delete is undone, whole: the folder
+/// comes back with all that was in it, and nothing is removed there.
+#[test]
+fn read_only_a_folder_deleted_here_goes_whole_or_comes_back_whole() {
+    let build = |all_may_be_changed: bool, changed_there: bool| {
+        let [d, sub, f, g, new_there] = ids(5)[..] else {
+            unreachable!()
+        };
+        let mut w = read_only();
+        // (The mass-delete guard off: it would hold a delete of every synced file, §7.)
+        w.opts.guarding.settings.allow = true;
+        w.synced(d, folder(ROOT, "d"))
+            .synced(sub, folder(d, "sub"))
+            .synced(f, file(d, "f.txt", "f"))
+            .synced(g, file(sub, "g.txt", "g"));
+        editing(&mut w);
+        if !all_may_be_changed {
+            w.input.writable.remove(&g);
+        }
+        for n in [d, sub, f, g] {
+            w.local(n, None);
+        }
+        if changed_there {
+            w.remote(new_there, Some(file(sub, "new.txt", "n")));
+            w.input.writable.insert(new_there);
+        }
+        (w, [d, sub, f, g])
+    };
+    let (w, all) = build(true, false);
+    let plan = w.plan();
+    let mut want: Vec<(&str, NodeId)> = all.iter().map(|n| ("RemoteDelete", *n)).collect();
+    want.sort();
+    assert_eq!(sorted_ops(&plan), want);
+    // The folder before what is in it.
+    let at = |n: NodeId| plan.ops.iter().position(|op| op.node() == n);
+    assert!(
+        at(all[0]) < at(all[1]) && at(all[1]) < at(all[3]),
+        "{:?}",
+        plan.ops
+    );
+
+    for (all_may, changed) in [(false, false), (true, true)] {
+        let (w, all) = build(all_may, changed);
+        let plan = w.plan();
+        assert!(!plan.writes_drive(), "{:?}", plan.ops);
+        for n in all {
+            assert!(
+                plan.ops.iter().any(|op| op.node() == n
+                    && matches!(op, Op::LocalMkdir { .. } | Op::LocalDownload { .. })),
+                "{n:?} doesn't come back: {:?}",
+                plan.ops
+            );
+        }
+    }
 }
 
 /// A file that may be changed, edited on both sides: the drive's wins and this device's

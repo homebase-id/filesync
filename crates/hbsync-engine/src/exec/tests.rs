@@ -5208,6 +5208,38 @@ fn an_item_moves_out_of_a_read_only_folder_under_a_free_name() -> R {
     Ok(())
 }
 
+/// In a folder that writes to what is shared with it (§13), what moves out leaves no base:
+/// one left would read as a delete here, which such a folder sends to the drive where the
+/// node may be changed (its share turned to editing meanwhile). Without one the node is
+/// planned from the drive's alone: it comes back, and nothing is removed there.
+#[test]
+fn what_moves_out_of_a_folder_that_writes_leaves_no_base() -> R {
+    let mut h = Harness::new()?;
+    let _out = read_only(&mut h)?;
+    h.folder.writes = true;
+    let (a, at) = h.seed("a.txt", b"a")?;
+    h.local_file("a.txt", a, b"mine")?;
+    let state = NodeState::file(NodeId::ROOT, "a.txt", h.content(b"a"));
+    h.db.write(|s| s.folder().put_base(&BaseRow::new(a, state, at)))?;
+    let report = h.run(vec![Op::LocalEvict {
+        node: a,
+        subtree: vec![a],
+    }])?;
+    assert!(report.skipped.is_empty(), "{report:?}");
+    assert!(!h.at("a.txt")?.exists());
+    assert!(h.base(a)?.is_none(), "a base left: read as deleted here");
+    assert!(h.db.read(|s| s.is_dirty(a))?);
+    // Its share turned to editing now: planned, the drive's comes back; nothing is removed.
+    h.db.write(|s| s.account().set_writable(at.file_id, true))?;
+    let plan = plan_of(&mut h, &[a])?;
+    assert!(
+        matches!(plan.ops[..], [Op::LocalDownload { node, .. }] if node == a),
+        "{:?}",
+        plan.ops
+    );
+    Ok(())
+}
+
 /// A synced item in a folder about to move out that the plan didn't expect there (moved in
 /// since) makes it wait for the next plan: it stays, with all it holds.
 #[test]
@@ -5302,14 +5334,20 @@ fn a_read_only_folder_writes_only_what_may_be_changed_and_only_if_it_writes() ->
             rename(mine, at_mine, NodeId::ROOT, "mine 2"),
             rename(theirs, at_theirs, NodeId::ROOT, "theirs 2"),
             rename(taken_back, at_taken_back, NodeId::ROOT, "taken back 2"),
-            // Nor what the plan never makes of a node that may be changed: its move to
-            // another folder, its removal, a node made.
+            // Nor a move of a node that may be changed to the top's other items, the removal
+            // of one that may not, a node made at the top.
             rename(mine, at_mine, theirs, "mine 3"),
             Op::RemoteDelete {
-                node: mine,
+                node: theirs,
                 parent: NodeId::ROOT,
-                file_id: at_mine.file_id,
-                expected: at_mine.version,
+                file_id: at_theirs.file_id,
+                expected: at_theirs.version,
+            },
+            Op::RemoteDelete {
+                node: taken_back,
+                parent: NodeId::ROOT,
+                file_id: at_taken_back.file_id,
+                expected: at_taken_back.version,
             },
             Op::RemoteCreate {
                 node: NodeId::new(),
@@ -5333,10 +5371,38 @@ fn a_read_only_folder_writes_only_what_may_be_changed_and_only_if_it_writes() ->
             true => {
                 assert_eq!(refused, all[1..], "{report:?}");
                 assert_eq!(live, ["mine 2", "taken back", "theirs"]);
+                // A node that may be changed is removed: to Recently deleted, where it is.
+                let at =
+                    h.db.read(|s| s.get_mirror(mine))?
+                        .expect("row")
+                        .remote_ref();
+                let report = h.run(vec![Op::RemoteDelete {
+                    node: mine,
+                    parent: NodeId::ROOT,
+                    file_id: at.file_id,
+                    expected: at.version,
+                }])?;
+                assert!(report.skipped.is_empty(), "{report:?}");
+                let server = h.remote.server();
+                let removed: Vec<_> = server.removed().map(|r| r.file_id).collect();
+                assert_eq!(removed, [at.file_id]);
             }
             false => {
                 assert_eq!(refused, all, "{report:?}");
                 assert_eq!(live, ["mine", "taken back", "theirs"]);
+                // Nor a removal of the node the store says may be changed: this folder
+                // doesn't write.
+                let report = h.run(vec![Op::RemoteDelete {
+                    node: mine,
+                    parent: NodeId::ROOT,
+                    file_id: at_mine.file_id,
+                    expected: at_mine.version,
+                }])?;
+                assert!(
+                    matches!(report.skipped[..], [(_, Skip::Unsyncable(_))]),
+                    "{report:?}"
+                );
+                assert_eq!(h.remote.server().removed().count(), 0);
             }
         }
     }
@@ -5422,6 +5488,71 @@ fn a_read_only_folder_adds_and_moves_only_where_it_may() -> R {
     assert!(
         live.contains(&"new".to_owned()) && live.contains(&"below".to_owned()),
         "{live:?}"
+    );
+
+    // A folder's removal takes along what is in it: refused while the mirror has one item
+    // in it that may only be read (its share turned back since the plan), through the
+    // folders in it.
+    let (inner, read_below) = (NodeId::new(), NodeId::new());
+    h.db.write(|s| {
+        let a = s.account();
+        a.put_mirror(&MirrorRow {
+            parent: also_to_edit,
+            ..folder_row(inner, "inner", true)
+        })?;
+        a.put_mirror(&MirrorRow {
+            parent: inner,
+            ..folder_row(read_below, "to read", false)
+        })
+    })?;
+    let remove = |h: &mut Harness, node| -> Result<ExecReport, StateError> {
+        let at =
+            h.db.read(|s| s.get_mirror(node))?
+                .expect("row")
+                .remote_ref();
+        h.run(vec![Op::RemoteDelete {
+            node,
+            parent: NodeId::ROOT,
+            file_id: at.file_id,
+            expected: at.version,
+        }])
+    };
+    let report = remove(&mut h, also_to_edit)?;
+    assert!(
+        matches!(report.skipped[..], [(_, Skip::Unsyncable(_))]),
+        "{report:?}"
+    );
+    h.db.write(|s| {
+        let at = s.get_mirror(read_below)?.expect("row").file_id;
+        s.account().set_writable(at, true)
+    })?;
+    let report = remove(&mut h, also_to_edit)?;
+    assert!(
+        !report
+            .skipped
+            .iter()
+            .any(|(_, why)| matches!(why, Skip::Unsyncable(_))),
+        "{report:?}"
+    );
+
+    // A folder in a cycle on the drive (another writer's moves, read since the plan): its
+    // removal is refused, and the guard's walk ends.
+    let (round, and_round) = (NodeId::new(), NodeId::new());
+    h.db.write(|s| {
+        let a = s.account();
+        a.put_mirror(&MirrorRow {
+            parent: and_round,
+            ..folder_row(round, "round", true)
+        })?;
+        a.put_mirror(&MirrorRow {
+            parent: round,
+            ..folder_row(and_round, "and round", true)
+        })
+    })?;
+    let report = remove(&mut h, round)?;
+    assert!(
+        matches!(report.skipped[..], [(_, Skip::Unsyncable(_))]),
+        "{report:?}"
     );
 
     // A move is asked of the mirror's rows alone: between the two folders it passes the
