@@ -337,3 +337,100 @@ fn a_members_conflict_copy_and_move_reach_the_sharer() -> R {
     assert_eq!(copies.len(), 1, "{theirs:?}");
     Ok(())
 }
+
+/// The names of what the sharer's drive has in Recently deleted.
+fn removed_names(server: &Server) -> Vec<String> {
+    let server = server.lock().expect("server");
+    let mut names: Vec<String> = (server.removed())
+        .filter_map(|h| match &h.body {
+            hbsync_remote::RemoteBody::Live { content, .. } => Some(content.name.clone()),
+            hbsync_remote::RemoteBody::Deleted => None,
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+/// A member's delete of what it may change is a removal on the sharer's drive: the item
+/// goes to the sharer's Recently deleted (nothing is deleted for good), and off the
+/// sharer's devices. A folder goes with all that is in it.
+#[test]
+fn a_members_delete_goes_to_the_sharers_recently_deleted() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("d/one.txt", "1")?;
+    a.write("d/sub/two.txt", "2")?;
+    a.write("d/keep.txt", "k")?;
+    a.write("e/three.txt", "3")?;
+    a.sync()?;
+    for name in [
+        "d",
+        "sub",
+        "one.txt",
+        "two.txt",
+        "keep.txt",
+        "e",
+        "three.txt",
+    ] {
+        share_to_edit(&a, &server, name)?;
+    }
+    let (mut b, out) = writing_member(&server, "b")?;
+    b.sync()?;
+
+    fs::remove_file(b.root.join("d/one.txt"))?;
+    fs::remove_dir_all(b.root.join("d/sub"))?;
+    b.sync()?;
+    a.sync()?;
+    let left = ["d/", "d/keep.txt = k", "e/", "e/three.txt = 3"];
+    assert_eq!(a.tree_text(""), left);
+    assert_eq!(b.tree_text(""), left);
+    assert_eq!(removed_names(&server), ["one.txt", "sub", "two.txt"]);
+    nothing_moved_out(&out)?;
+
+    // The sharer restores one: it comes back to the member too.
+    let one = common::header_named(&server, "one.txt");
+    a.engine.drive().restore(&[one.node().ok_or("node")?])?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.read("d/one.txt")?, b"1");
+    Ok(())
+}
+
+/// A folder with an item the member may only read: its delete here is undone, whole. The
+/// folder comes back with all that was in it, and nothing is removed on the sharer's drive.
+#[test]
+fn a_members_delete_of_a_folder_it_may_not_empty_is_undone() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("d/mine-to-change.txt", "1")?;
+    a.write("d/to-read.txt", "2")?;
+    a.write("other.txt", "o")?;
+    a.sync()?;
+    for name in ["d", "mine-to-change.txt", "other.txt"] {
+        share_to_edit(&a, &server, name)?;
+    }
+    a.remote
+        .share(common::header_named(&server, "to-read.txt").file_id)?;
+    let (mut b, out) = writing_member(&server, "b")?;
+    b.sync()?;
+    let all = [
+        "d/",
+        "d/mine-to-change.txt = 1",
+        "d/to-read.txt = 2",
+        "other.txt = o",
+    ];
+    assert_eq!(b.tree_text(""), all);
+
+    fs::remove_dir_all(b.root.join("d"))?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), all);
+    a.sync()?;
+    assert_eq!(a.tree_text(""), all);
+    assert!(
+        removed_names(&server).is_empty(),
+        "{:?}",
+        removed_names(&server)
+    );
+    nothing_moved_out(&out)?;
+    Ok(())
+}
