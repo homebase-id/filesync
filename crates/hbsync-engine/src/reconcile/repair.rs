@@ -687,9 +687,10 @@ impl Reconciler<'_> {
             // Where it is here, it holds that name: nothing else is planned onto it. Put
             // back in another place than the plan had it (a file of the folder at the top
             // here, from when it was shared without the folder), it holds a name the folder
-            // it is in here wasn't judged with: that folder is judged again, or a newcomer
-            // of the name is downloaded onto it, refused by the disk at every sync. (`node`
-            // itself is the caller's, which knows the folder being judged.)
+            // it is in here may not have been judged with (the one being judged, or one
+            // judged before it): that folder is judged again, or a newcomer of the name is
+            // downloaded onto it, refused by the disk at every sync. (`node` itself is the
+            // caller's, which knows the folder being judged.)
             match self.input.local.get(n) {
                 Some(here) => {
                     let moved = self.merged.get(n).is_none_or(|was| !was.same_place(here));
