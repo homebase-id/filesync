@@ -207,6 +207,10 @@ struct Reconciler<'a> {
     /// clash's loser is left out of the plan; what this device leaves out, §10, isn't in the
     /// view's drive: neither is written.)
     follows: HashSet<NodeId>,
+    /// The nodes this plan adds to another identity's drive (§13): new here, in a folder this
+    /// identity may add to there (`adds_to`), and the conflict copies made in one. They are
+    /// planned as on an identity's own drive (`one_way`).
+    adds: HashSet<NodeId>,
     /// The folders here a name pass left one out in, held there (§13): judged again.
     rejudge: BTreeSet<NodeId>,
     /// Becomes `plan.deferred`.
@@ -271,6 +275,7 @@ impl<'a> Reconciler<'a> {
             evicted: BTreeSet::new(),
             left: BTreeSet::new(),
             follows: HashSet::new(),
+            adds: HashSet::new(),
             rejudge: BTreeSet::new(),
             deferred: BTreeSet::new(),
             adopted: HashSet::new(),
@@ -327,7 +332,7 @@ impl<'a> Reconciler<'a> {
         // A node left where it is for a name, or left out read-only (§13: where it is here,
         // maybe in a folder judged already), may hold the name another would take: again, till
         // none more waits or is left out (in each pass at least one node more does).
-        self.undo_renames_onto_taken_names();
+        self.keep_off_taken_names();
         let mut only = None;
         loop {
             let waited = self.waiters.len();
@@ -349,18 +354,22 @@ impl<'a> Reconciler<'a> {
         self.with_what_it_took_along();
         self.guard_mass_delete();
         // Read-only (§13): the drive is never written, but of a node this identity may change
-        // there (emit plans no other write), and that only changed where it is: never made,
-        // removed, or moved to another folder.
+        // there or adds there (emit plans no other write): changed where it is, or moved
+        // between folders it may add to; made in one; never removed.
         debug_assert!(
             !self.masking.read_only
                 || (self.plan.ops.iter().chain(&self.plan.held)).all(|op| match op {
                     Op::RemoteUpdate { node, parent, .. } => {
                         !self.one_way(*node)
-                            && self
-                                .remote_state(*node)
-                                .is_some_and(|r| r.parent == *parent)
+                            && self.remote_state(*node).is_some_and(|r| {
+                                r.parent == *parent
+                                    || (self.adds_to(*parent) && self.adds_to(r.parent))
+                            })
                     }
                     Op::RemoteTags { node, .. } => !self.one_way(*node),
+                    Op::RemoteCreate { node, parent, .. } => {
+                        self.adds.contains(node) && self.adds_to(*parent)
+                    }
                     op => !op.writes_remote(),
                 }),
             "a read-only plan writes the drive: {:?}",

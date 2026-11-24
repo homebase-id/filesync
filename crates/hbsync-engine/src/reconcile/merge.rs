@@ -51,11 +51,45 @@ impl<'a> Reconciler<'a> {
     }
 
     /// Whether `node` follows the drive, one way (§13): the folder is read-only, and the node
-    /// isn't one this identity may change on the drive ([`Input::writable`]), or is one that
-    /// follows it in this plan whatever it says (`follows`).
+    /// is neither one this identity may change on the drive ([`Input::writable`]) nor one
+    /// this plan adds there (`adds`), or is one that follows it in this plan whatever it
+    /// says (`follows`).
     pub(super) fn one_way(&self, node: NodeId) -> bool {
+        let i = self.input;
         self.masking.read_only
-            && (!self.input.writable.contains(&node) || self.follows.contains(&node))
+            && (!(i.writable.contains(&node) || self.adds.contains(&node))
+                || self.follows.contains(&node))
+    }
+
+    /// Whether this identity may add to `folder` on another identity's drive (§13): a folder
+    /// of the drive it may change (what is added to it is shared as it is), or a folder new
+    /// here that is itself added to one. Never the top: that is no folder of the drive's.
+    pub(super) fn adds_to(&self, folder: NodeId) -> bool {
+        let i = self.input;
+        let mut at = folder;
+        for _ in 0..hbsync_state::MAX_DEPTH {
+            if at.is_root() || !self.masking.read_only {
+                return false;
+            }
+            if i.remote.contains(at) {
+                return i.writable.contains(&at) && self.remote_state(at).is_some();
+            }
+            // New here: added with what it is in.
+            let Some(l) = i.local.get(at).filter(|_| !i.base.contains(at)) else {
+                return false;
+            };
+            at = l.parent;
+        }
+        false
+    }
+
+    /// Whether `node` is new here, in a folder this identity may add to on another
+    /// identity's drive (`adds_to`): it is added there.
+    fn added(&self, node: NodeId) -> bool {
+        let i = self.input;
+        !i.base.contains(node)
+            && !i.remote.contains(node)
+            && (i.local.get(node)).is_some_and(|l| self.adds_to(l.parent))
     }
 }
 
@@ -282,9 +316,14 @@ impl Reconciler<'_> {
             self.leave_as_is(node);
             return;
         }
+        // New here, where this identity may add to another identity's drive (§13): added
+        // there, as on its own drive.
+        if self.masking.read_only && self.added(node) {
+            self.adds.insert(node);
+        }
         // Read-only (§13), what is new here in a new folder here that waits moves out with it,
         // as one, once it can: it waits as it is too.
-        if self.masking.read_only && self.in_a_new_folder_that_waits(node) {
+        if self.one_way(node) && self.in_a_new_folder_that_waits(node) {
             self.leave_as_is(node);
             return;
         }
@@ -308,13 +347,15 @@ impl Reconciler<'_> {
         let (b, l) = (i.base.get(node), self.local_state(node));
         let masked = self.masks.masked.contains(&node);
         // A node this identity may change on another identity's drive (§13) is changed there
-        // where both have it and one side alone changed its bytes: its edit, its name and its
-        // tags go up. Gone there or here, it follows the drive (what is gone there isn't made
-        // again, and a delete here removes nothing there); edited on both sides, the drive's
-        // wins and this device's moves out (a copy of it would be a new item there).
+        // where both have it: its edit, its name and its tags go up. Gone there or here, it
+        // follows the drive (what is gone there isn't made again, and a delete here removes
+        // nothing there). Edited on both sides, both are kept where the folder it is in
+        // here may be added to (the copy is a new item there); else the drive's wins and
+        // this device's moves out. (One this plan adds is on neither side but here.)
         let mut one_way = self.one_way(node);
-        if self.masking.read_only && !one_way && !masked {
-            let changes = matches!((&l, r), (Some(l), Some(r)) if !edited_apart(l, r, lc, rc));
+        if self.masking.read_only && !one_way && !masked && !self.adds.contains(&node) {
+            let changes = matches!((&l, r), (Some(l), Some(r))
+                if !edited_apart(l, r, lc, rc) || self.adds_to(l.parent));
             if !changes {
                 self.follows.insert(node);
                 one_way = true;
@@ -372,11 +413,13 @@ impl Reconciler<'_> {
             }
             (target, _) => (target, origin),
         };
-        // On another identity's drive (§13) a node is renamed where it is, never moved to
-        // another folder: a move here is undone, whole.
+        // On another identity's drive (§13) a node moves only between folders this identity
+        // may add to (from one, it is taken out of what is shared as that folder is; into
+        // one, it is added to it): any other move here is undone, whole.
         if let (Some(t), Some(r)) = (&mut target, r)
             && self.masking.read_only
             && t.parent != r.parent
+            && !(self.adds_to(t.parent) && self.adds_to(r.parent))
         {
             t.parent = r.parent;
             t.name = r.name.clone();
@@ -454,8 +497,8 @@ impl Reconciler<'_> {
             let same_edit = same_edit(l, r);
             if l_edited && r_edited && !same_edit {
                 debug_assert!(
-                    !self.masking.read_only,
-                    "{node:?}: a copy in a read-only folder"
+                    !self.masking.read_only || self.adds_to(l.parent),
+                    "{node:?}: a copy where nothing may be added"
                 );
                 // Keep both: the remote version keeps the node, the local bytes become a copy.
                 let base_version = self.input.base_extra.get(&node).and_then(|e| e.version);
@@ -472,6 +515,10 @@ impl Reconciler<'_> {
                 self.merged.insert(copy, copy_state);
                 self.scope.insert(copy);
                 self.origin.insert(copy, Origin::Local);
+                // (On another identity's drive: added there, as what is new here.)
+                if self.masking.read_only {
+                    self.adds.insert(copy);
+                }
             } else if l_edited && !r_edited {
                 target.content = l.content;
                 origin = Origin::Local;

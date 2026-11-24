@@ -3855,6 +3855,153 @@ fn read_only_a_rename_in_case_only_goes_up_beside_another_of_the_name() {
     );
 }
 
+/// What is new here in a folder this identity may change on the drive is added there, a new
+/// folder with what is in it. What is new at the top, or in a folder it may only read, moves
+/// out as ever.
+#[test]
+fn read_only_what_is_new_in_a_folder_that_may_be_changed_is_added() {
+    let [to_edit, to_read, file_in, dir_in, below, at_top, in_read] = ids(7)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(to_edit, folder(ROOT, "edit"))
+        .synced(to_read, folder(ROOT, "read"));
+    w.input.writable.insert(to_edit);
+    w.local(file_in, Some(file(to_edit, "new.txt", "n")))
+        .local(dir_in, Some(folder(to_edit, "New")))
+        .local(below, Some(file(dir_in, "below.txt", "b")))
+        .local(at_top, Some(file(ROOT, "top.txt", "t")))
+        .local(in_read, Some(file(to_read, "r.txt", "r")));
+    let plan = w.plan();
+    let mut want = vec![
+        ("LocalEvict", at_top),
+        ("LocalEvict", in_read),
+        ("RemoteCreate", below),
+        ("RemoteCreate", dir_in),
+        ("RemoteCreate", file_in),
+    ];
+    want.sort();
+    assert_eq!(sorted_ops(&plan), want);
+    // The folder before what is in it.
+    let made: Vec<NodeId> = (plan.ops.iter().filter(|op| op.writes_remote()))
+        .map(Op::node)
+        .collect();
+    let at = |n: NodeId| made.iter().position(|m| *m == n);
+    assert!(at(dir_in) < at(below), "{:?}", plan.ops);
+}
+
+/// A file edited on both sides, in a folder this identity may add to: both are kept, as on
+/// its own drive. The drive's version keeps the file, and this device's becomes a copy
+/// beside it, added there.
+#[test]
+fn read_only_a_file_edited_on_both_sides_where_it_may_add_keeps_both() {
+    let [d, f] = ids(2)[..] else { unreachable!() };
+    let mut w = read_only();
+    w.synced(d, folder(ROOT, "d"))
+        .synced(f, file(d, "a.txt", "a"));
+    editing(&mut w);
+    w.local(f, Some(file(d, "a.txt", "mine")))
+        .remote(f, Some(file(d, "a.txt", "theirs")));
+    let plan = w.plan();
+    let [Conflict::EditEdit { node, copy }] = plan.conflicts[..] else {
+        panic!("{:?}", plan.conflicts);
+    };
+    assert_eq!(node, f);
+    let mut want = vec![
+        ("LocalDownload", f),
+        ("LocalFork", f),
+        ("RemoteCreate", copy),
+    ];
+    want.sort();
+    assert_eq!(sorted_ops(&plan), want);
+}
+
+/// An item that may be changed moves between two folders this identity may add to; a move
+/// out of one into a folder it may only read, or to the top, is undone.
+#[test]
+fn read_only_a_move_between_folders_that_may_be_changed_goes_up() {
+    let [from, to, to_read, moved, into_read, to_top] = ids(6)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(from, folder(ROOT, "from"))
+        .synced(to, folder(ROOT, "to"))
+        .synced(to_read, folder(ROOT, "read"))
+        .synced(moved, file(from, "m.txt", "m"))
+        .synced(into_read, file(from, "r.txt", "r"))
+        .synced(to_top, file(from, "t.txt", "t"));
+    editing(&mut w);
+    w.input.writable.remove(&to_read);
+    w.local(moved, Some(file(to, "m2.txt", "m")))
+        .local(into_read, Some(file(to_read, "r.txt", "r")))
+        .local(to_top, Some(file(ROOT, "t.txt", "t")));
+    let plan = w.plan();
+    let mut want = vec![
+        ("LocalMove", into_read),
+        ("LocalMove", to_top),
+        ("RemoteUpdate", moved),
+    ];
+    want.sort();
+    assert_eq!(sorted_ops(&plan), want);
+    let sent = plan.ops.iter().find(|op| op.writes_remote());
+    assert!(
+        matches!(sent, Some(Op::RemoteUpdate { parent, name, upload: false, .. })
+            if *parent == to && name == "m2.txt"),
+        "{sent:?}"
+    );
+}
+
+/// What is added to a folder of the drive under a name another item holds there goes under
+/// a numbered name: no two of one name are made on the owner's drive. A move onto a taken
+/// name is undone.
+#[test]
+fn read_only_what_is_added_onto_a_taken_name_gets_a_numbered_one() {
+    let [d, e, newcomer, added, moved] = ids(5)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(d, folder(ROOT, "d"))
+        .synced(e, folder(ROOT, "e"))
+        .synced(moved, file(e, "m.txt", "m"))
+        .remote(newcomer, Some(file(d, "b.txt", "theirs")));
+    editing(&mut w);
+    w.local(added, Some(file(d, "b.txt", "mine")))
+        .local(moved, Some(file(d, "B.TXT", "m")));
+    let plan = w.plan();
+    for op in &plan.ops {
+        match op {
+            Op::RemoteCreate {
+                node, parent, name, ..
+            } => {
+                assert_eq!((*node, *parent), (added, d), "{op:?}");
+                assert_ne!(name.to_lowercase(), "b.txt", "{op:?}");
+            }
+            op => assert!(!op.writes_remote(), "{op:?}"),
+        }
+    }
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, Op::RemoteCreate { .. })),
+        "{:?}",
+        plan.ops
+    );
+    assert!(
+        plan.ops
+            .iter()
+            .any(|op| matches!(op, Op::LocalMove { node, parent, name, .. }
+            if *node == moved && *parent == e && name == "m.txt")),
+        "{:?}",
+        plan.ops
+    );
+    assert!(
+        plan.conflicts
+            .contains(&Conflict::NameClash { node: added }),
+        "{:?}",
+        plan.conflicts
+    );
+}
+
 /// A new folder here moves out as one, with what is in it; a new file at the top too.
 #[test]
 fn read_only_new_items_move_out_whole() {
