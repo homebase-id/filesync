@@ -108,6 +108,30 @@ impl Sim {
         }
     }
 
+    /// For the oracle: the folder `node`, out of the drive's tree, took along what the drive
+    /// has in it now, through live folders. (Asked of the whole drive: a member's removal of
+    /// a folder takes along what it doesn't read of it too, which its own view doesn't
+    /// hold: `Sim::as_member` asks again once the drive took the removal.)
+    pub(crate) fn folder_took_along(&mut self, node: NodeId) {
+        let mut kids: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
+        for (child, c) in &self.server.live {
+            kids.entry(c.state.parent).or_default().push(*child);
+        }
+        let mut below = BTreeMap::new();
+        let mut folders = vec![node];
+        while let Some(f) = folders.pop() {
+            for child in kids.get(&f).into_iter().flatten() {
+                let c = &self.server.live[child];
+                below.insert(*child, c.remote.version);
+                // Through live folders: a file takes nothing along.
+                if c.state.kind == NodeKind::Folder {
+                    folders.push(*child);
+                }
+            }
+        }
+        self.ledger.folder_removed(node, below);
+    }
+
     /// Puts `node`, just taken out of the drive's tree as `n`, in Recently deleted: a write, at
     /// its time. For the oracle: what is in it then (its removal takes that
     /// along), and whether it goes `rightly`: a user deleted it (here, on a device, or in
@@ -116,24 +140,7 @@ impl Sim {
         // A folder's removal takes along what is in it. A file's takes nothing: what another app
         // moved into it (`Action::IntoFile`) is an orphan for Recovered files (§6.3).
         if rightly && n.state.kind == NodeKind::Folder {
-            // What is in it, through live folders (`node` is out of the tree already).
-            let mut kids: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
-            for (child, c) in &self.server.live {
-                kids.entry(c.state.parent).or_default().push(*child);
-            }
-            let mut below = BTreeMap::new();
-            let mut folders = vec![node];
-            while let Some(f) = folders.pop() {
-                for child in kids.get(&f).into_iter().flatten() {
-                    let c = &self.server.live[child];
-                    below.insert(*child, c.remote.version);
-                    // Through live folders: a file takes nothing along.
-                    if c.state.kind == NodeKind::Folder {
-                        folders.push(*child);
-                    }
-                }
-            }
-            self.ledger.folder_removed(node, below);
+            self.folder_took_along(node);
         }
         self.server.remove(node, n);
         let version = self.server.removed[&node].remote.version;

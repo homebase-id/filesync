@@ -94,9 +94,11 @@ impl<'a> Reconciler<'a> {
     /// drive, is sent there (§13): the node goes to its owner's Recently deleted. A folder's
     /// removal takes along what is in it, there too, so it is asked of the topmost folder
     /// deleted here that the node is in, once: sent only where all the drive has in that
-    /// folder, as this device reads it, may be changed by this identity and is as it synced
-    /// here (a change there, or a new item there, isn't removed unseen). Else the delete is
-    /// undone, whole: the folder comes back with all that was in it.
+    /// folder, as this plan reads it, may be changed by this identity and is as it synced
+    /// here: the same place and bytes, at the version the base was agreed at (a change
+    /// there, a new item there, or one its owner removed and restored since isn't removed
+    /// by a delete made before it). Else the delete is undone: the folder comes back with
+    /// what was in it.
     pub(super) fn removes(&mut self, node: NodeId) -> bool {
         let i = self.input;
         let gone_here = |n: NodeId| i.base.contains(n) && !i.local.contains(n);
@@ -107,10 +109,17 @@ impl<'a> Reconciler<'a> {
         if let Some(sent) = self.removals.get(&top) {
             return *sent;
         }
+        // (A base without its version, or a node without its ref: not known otherwise.)
+        let at_base = |n: NodeId| {
+            let base = i.base_extra.get(&n).and_then(|e| e.version);
+            let there = i.remote_refs.get(&n).map(|r| r.version);
+            base.zip(there).is_none_or(|(base, there)| base == there)
+        };
         let sent = i.remote.subtree(top).into_iter().all(|n| {
             i.writable.contains(&n)
                 && self.remote_state(n).is_some()
                 && !self.remote_change(n).is_change()
+                && at_base(n)
         });
         self.removals.insert(top, sent);
         sent

@@ -3720,6 +3720,28 @@ fn read_only_an_item_that_may_be_changed_gone_on_one_side() {
     ];
     want.sort();
     assert_eq!(sorted_ops(&plan), want);
+
+    // The same bytes in the same place, at another version than it synced at (its owner
+    // removed and restored it since, say): no delete made before that removes it.
+    let mut w = read_only();
+    w.synced(deleted, file(ROOT, "a.txt", "a"));
+    editing(&mut w);
+    w.local(deleted, None);
+    let synced_at = VersionTag(Uuid::new_v4());
+    w.input
+        .base_extra
+        .get_mut(&deleted)
+        .expect("synced")
+        .version = Some(synced_at);
+    let plan = w.plan();
+    assert_eq!(sorted_ops(&plan), [("LocalDownload", deleted)]);
+    // At that version, it is removed.
+    w.input
+        .remote_refs
+        .get_mut(&deleted)
+        .expect("there")
+        .version = synced_at;
+    assert_eq!(sorted_ops(&w.plan()), [("RemoteDelete", deleted)]);
 }
 
 /// A folder deleted here is removed there with all that was in it only where all the drive

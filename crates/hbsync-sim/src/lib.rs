@@ -384,7 +384,13 @@ impl Sim {
         let done = f(self);
         let seen = std::mem::replace(&mut self.server, self.whole.take().expect("set above"));
         let breach = match self.clients[c].writes {
-            true => self.server.take_from_member(&before, &seen),
+            true => {
+                let (breach, folders) = self.server.take_from_member(&before, &seen);
+                for folder in folders {
+                    self.folder_took_along(folder);
+                }
+                breach
+            }
             false => (seen.changed_since(&before)).then(|| "it changed the drive".to_owned()),
         };
         let name = &self.clients[c].name;

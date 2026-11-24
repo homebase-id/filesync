@@ -5343,6 +5343,12 @@ fn a_read_only_folder_writes_only_what_may_be_changed_and_only_if_it_writes() ->
                 file_id: at_theirs.file_id,
                 expected: at_theirs.version,
             },
+            Op::RemoteDelete {
+                node: taken_back,
+                parent: NodeId::ROOT,
+                file_id: at_taken_back.file_id,
+                expected: at_taken_back.version,
+            },
             Op::RemoteCreate {
                 node: NodeId::new(),
                 parent: NodeId::ROOT,
@@ -5384,6 +5390,19 @@ fn a_read_only_folder_writes_only_what_may_be_changed_and_only_if_it_writes() ->
             false => {
                 assert_eq!(refused, all, "{report:?}");
                 assert_eq!(live, ["mine", "taken back", "theirs"]);
+                // Nor a removal of the node the store says may be changed: this folder
+                // doesn't write.
+                let report = h.run(vec![Op::RemoteDelete {
+                    node: mine,
+                    parent: NodeId::ROOT,
+                    file_id: at_mine.file_id,
+                    expected: at_mine.version,
+                }])?;
+                assert!(
+                    matches!(report.skipped[..], [(_, Skip::Unsyncable(_))]),
+                    "{report:?}"
+                );
+                assert_eq!(h.remote.server().removed().count(), 0);
             }
         }
     }

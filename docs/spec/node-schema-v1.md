@@ -240,8 +240,13 @@ of this schema may define some of them.)
   it wasn't shared (or one in a version it can't read): it shows that node at the top of the
   share, and inside the folder once it reads the folder. Every client showing a share does
   the same (sync semantics §13).
-- A member writes nothing to the share, the purge included: the owner's Recently deleted and
-  the tombstones of their deletes are the owner's devices' to delete for good.
+- A member's client writes nothing to the share today. What is built for it, and not
+  switched on (sync semantics §13, "What may be changed is told per item"): it changes
+  what is shared with it for editing, adds to a folder shared so (the new node is shared
+  as its folder is), and its delete of such a node is a removal (`removed: true`), the
+  node in the owner's Recently deleted from then on. It never deletes for good, restores
+  nothing and purges nothing: the owner's Recently deleted and the tombstones of their
+  deletes are the owner's devices' to delete for good.
 - Tombstoned UniqueIds are free again (the duplicate check skips tombstones **[verified]**), so
   a deleted node can be re-created under the same node id; it gets a new `fileId`.
 - A node is one folder or one file for its life: a version that changes its `fileType` isn't
@@ -461,6 +466,9 @@ write nodes this client syncs. The file browser's own guide, built on these rule
   semantics §12); say so before deleting one. Show them at the top, by their own icons.
 
 ## Changes
+- 2026-11-24: what a member's computer is built to write to a share, not switched on yet
+  (Shares: it changes and adds what it may, and its delete is a removal the owner's
+  Recently deleted holds; never a delete for good). Nothing new on a node.
 - 2026-11-23: a node someone added to a folder shared with them (chat-kmp's Filesync does, as
   a member with Edit) reaches the owner's drive with its key header sealed to the drive's
   write-only key (`sealed`; encryption spec, "A private drive"), the member as its

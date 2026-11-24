@@ -1743,16 +1743,25 @@ rules hold too:
   goes to its owner's Recently deleted, where the owner restores it or the purge takes it
   in its time. A member deletes nothing for good, and restores and empties nothing there
   (above).
-  - A file is removed where the drive's is as it synced here. Changed there since, it
-    comes back: the edit wins over the delete, as on an identity's own drive (§6).
+  - A file is removed where the drive's is as it synced here: the same place and bytes, at
+    the version it synced at. Changed there since, it comes back: the edit wins over the
+    delete, as on an identity's own drive (§6). So does one its owner removed and restored
+    since (another version of the same bytes): a delete made before that doesn't undo the
+    restore, also where a crash left this device a base without its item.
   - A folder's removal takes along what is in it, there too, also what this identity
     doesn't read of it (node schema, Recently deleted: all of it is in the owner's Recently
     deleted with the folder, and comes back with it). It is sent only where all the drive
-    has in the folder, as this device reads it, may be changed by this identity and is as
-    it synced here. With one item in it that may only be read, or one changed or made
-    there since, the delete is undone, whole: the folder comes back with all that was in
-    it, and nothing is removed there (`Reconciler::removes`, asked once of the topmost
-    folder deleted here).
+    has in the folder, as this device reads it when it plans, may be changed by this
+    identity and is as it synced here. With one item in it that may only be read, or one
+    changed or made there since, the delete is undone: the folder comes back with what
+    was in it, and nothing is removed there (`Reconciler::removes`, asked once of the
+    topmost folder deleted here, in the plan that holds the folder and what was in it:
+    §6.5 plans a folder's delete as one). Two limits: a folder too big for one page is
+    planned in pieces, and the pieces before the one that holds an item that may only be
+    read have removed what may be changed by then (each a delete of the user's, of an
+    item that may be changed: the folder and the rest come back); and what the owner adds
+    to or changes in the folder between this device's plan and its write goes along, as
+    between two devices of one identity.
   - The mass-delete guard (§7) holds such removals as an own drive's: confirmed, they are
     sent. Putting them back is refused in such a folder for now (`Engine::put_back`): what
     is held is confirmed or stays held.

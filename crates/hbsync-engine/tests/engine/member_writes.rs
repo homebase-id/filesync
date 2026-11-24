@@ -396,6 +396,41 @@ fn a_members_delete_goes_to_the_sharers_recently_deleted() -> R {
     Ok(())
 }
 
+/// A file shared without its folder, at the member's top: deleted there, it goes to the
+/// sharer's Recently deleted from the folder the sharer has it in, and comes back into that
+/// folder when the sharer restores it.
+#[test]
+fn a_members_delete_at_its_top_removes_the_file_where_the_sharer_has_it() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("d/in.txt", "one")?;
+    a.write("d/other.txt", "two")?;
+    a.sync()?;
+    share_to_edit(&a, &server, "in.txt")?;
+    let (mut b, out) = writing_member(&server, "b")?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["in.txt = one"]);
+
+    fs::remove_file(b.root.join("in.txt"))?;
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.tree_text(""), ["d/", "d/other.txt = two"]);
+    assert_eq!(removed_names(&server), ["in.txt"]);
+    nothing_moved_out(&out)?;
+    let node = common::header_named(&server, "in.txt")
+        .node()
+        .ok_or("node")?;
+    a.engine.drive().restore(&[node])?;
+    a.sync()?;
+    assert_eq!(
+        a.tree_text(""),
+        ["d/", "d/in.txt = one", "d/other.txt = two"]
+    );
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["in.txt = one"]);
+    Ok(())
+}
+
 /// A folder with an item the member may only read: its delete here is undone, whole. The
 /// folder comes back with all that was in it, and nothing is removed on the sharer's drive.
 #[test]

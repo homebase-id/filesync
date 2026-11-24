@@ -95,11 +95,17 @@ impl Server {
 
     /// Puts `node` in Recently deleted: a write, at its time.
     pub(crate) fn remove(&mut self, node: NodeId, mut n: ServerNode) {
-        self.tags_at_removal.insert(node, n.state.tags.clone());
         n.remote.version = VersionTag(self.uuid());
-        self.removed_at.insert(node, time(n.remote.version));
+        self.put_removed(node, n);
+    }
+
+    /// `node` in Recently deleted as `n`, removed at its version's time.
+    fn put_removed(&mut self, node: NodeId, n: ServerNode) {
+        let at = time(n.remote.version);
+        self.tags_at_removal.insert(node, n.state.tags.clone());
+        self.removed_at.insert(node, at);
         self.removals
-            .insert(node, (n.state.parent, time(n.remote.version), n.state.kind));
+            .insert(node, (n.state.parent, at, n.state.kind));
         self.removed.insert(node, n);
     }
 
@@ -346,13 +352,21 @@ impl Server {
     ///   sends the drive's: never its own);
     /// - such a file's move between two folders it may change;
     /// - a node made in a folder it may change: shared as that folder is, for editing;
-    /// - a file it may change removed: to Recently deleted, where the drive has it.
+    /// - a file or folder it may change removed: to Recently deleted, where the drive has it;
+    ///   a folder only where all the member reads in it may be changed too.
     ///
     /// Anything else it did is a breach, named, and dropped: one made or moved elsewhere
     /// (the top is no folder of the drive's), a change or a removal of a file it may not
     /// change, anything else of Recently deleted. The drive's ids go on from the member's,
     /// so no version is given twice.
-    pub(crate) fn take_from_member(&mut self, before: &Snapshot, seen: &Server) -> Option<String> {
+    ///
+    /// Returns the breach, and the folders it removed (what each took along is the whole
+    /// drive's to say, not the member's view's).
+    pub(crate) fn take_from_member(
+        &mut self,
+        before: &Snapshot,
+        seen: &Server,
+    ) -> (Option<String>, Vec<NodeId>) {
         self.next = seen.next;
         let mut breach = None;
         let adds_to = |drive: &Server, folder: NodeId| drive.editable_node(folder).is_some();
@@ -376,16 +390,7 @@ impl Server {
                     remote: there.remote,
                 };
                 self.live.remove(id);
-                self.removed.insert(*id, gone);
-                if let Some(tags) = seen.tags_at_removal.get(id) {
-                    self.tags_at_removal.insert(*id, tags.clone());
-                }
-                if let Some(at) = seen.removed_at.get(id) {
-                    self.removed_at.insert(*id, *at);
-                }
-                if let Some((_, at, kind)) = seen.removals.get(id) {
-                    self.removals.insert(*id, (parent, *at, *kind));
-                }
+                self.put_removed(*id, gone);
                 removed_now.insert(*id);
                 continue;
             };
@@ -434,7 +439,31 @@ impl Server {
             self.shared.insert(made.remote.file_id);
             self.editable.insert(made.remote.file_id);
         }
-        breach
+        let folders: Vec<NodeId> = (removed_now.into_iter())
+            .filter(|id| (self.removed.get(id)).is_some_and(|r| r.state.kind == NodeKind::Folder))
+            .collect();
+        // A folder's removal takes along what is in it: of what the member reads there (live
+        // in its view still: taken along, or removed by its next writes), all must be the
+        // member's to change.
+        let in_one_removed = |mut at: NodeId| {
+            for _ in 0..64 {
+                if folders.contains(&at) {
+                    return true;
+                }
+                match seen.live.get(&at).or(seen.removed.get(&at)) {
+                    Some(n) if !n.state.parent.is_root() => at = n.state.parent,
+                    _ => return false,
+                }
+            }
+            false
+        };
+        let not_its = (seen.live.iter()).find(|(_, n)| {
+            in_one_removed(n.state.parent) && !self.editable.contains(&n.remote.file_id)
+        });
+        if let Some((id, _)) = not_its {
+            breach.get_or_insert_with(|| format!("it removed the folder {id:?} is in"));
+        }
+        (breach, folders)
     }
 
     /// What the drive holds, live and in Recently deleted: to tell whether it changed since.
