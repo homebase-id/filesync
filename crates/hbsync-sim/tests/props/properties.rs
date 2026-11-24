@@ -337,11 +337,13 @@ proptest! {
     /// files and folders ([`naming_waiting_event`]): what waits holds its name where it waits,
     /// and what the drive has under that name meanwhile is left out there, not renamed on the
     /// drive (sync semantics §8a).
-    /// Ignored till the engine leaves no item made here out: one parked for a folder that
-    /// came down at its name, which then waits, stays parked under its temporary name, never
-    /// renamed nor sent (seed 9c864e5c).
+    /// Ignored: the oracle doesn't follow an orphan on the drive (its folder deleted for good)
+    /// whose folder a client knows in a folder that waits: the engine waits it there (the
+    /// folder comes back for it, into one that waits; also where that client ignores the
+    /// orphan, or knows the folder from its base alone), the oracle wants it in Recovered
+    /// files (seed 948000c1).
     #[test]
-    #[ignore = "an item made here, parked for a name what waits then holds, stays parked"]
+    #[ignore = "the oracle doesn't follow an orphan whose known folder waits (seed 948000c1)"]
     fn what_waits_holds_its_name_while_a_user_makes_items(
         events in proptest::collection::vec(naming_waiting_event(3), 0..120)
     ) {
