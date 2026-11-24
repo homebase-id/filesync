@@ -26,6 +26,13 @@ use crate::model::server::{Server, ServerNode, time};
 use crate::oracle::Seen;
 use crate::tagbook::Limit;
 
+/// A node of the drive as a user sees it ([`Seen`]).
+///
+/// [`Seen`]: crate::oracle::Seen
+fn seen(n: &NodeState) -> Seen {
+    (n.parent, n.name.clone(), n.content.map(|c| c.hash))
+}
+
 impl Sim {
     /// The server as client `c`'s folder sees it ([`Coords`]).
     pub(crate) fn server_view(&self, c: usize) -> Tree {
@@ -1162,8 +1169,7 @@ impl Sim {
         let client = &self.clients[c];
         let there = (self.whole.as_ref().unwrap_or(&self.server).live).get(&node)?;
         let synced = client.extra.get(&node)?.version == Some(there.remote.version);
-        let n = &there.state;
-        (client.member && synced).then(|| (n.parent, n.name.clone(), n.content.map(|c| c.hash)))
+        (client.member && synced).then(|| seen(&there.state))
     }
 
     /// Client `c`'s base of `node`, as the drive would have it ([`Seen`]).
@@ -1184,16 +1190,14 @@ impl Sim {
     /// share is withdrawn, where the drive still has it in the folder: no move made there,
     /// and none to win over a delete of the member's user, who had it in the folder.
     pub(crate) fn on_whole_drive(&self, node: NodeId) -> Option<Seen> {
-        let n = &self.whole.as_ref()?.live.get(&node)?.state;
-        Some((n.parent, n.name.clone(), n.content.map(|c| c.hash)))
+        Some(seen(&self.whole.as_ref()?.live.get(&node)?.state))
     }
 
     /// Live `node` as the drive has it, but for its tags ([`Seen`]).
     ///
     /// [`Seen`]: crate::oracle::Seen
     pub(crate) fn on_drive(&self, node: NodeId) -> Option<Seen> {
-        let n = &self.server.live.get(&node)?.state;
-        Some((n.parent, n.name.clone(), n.content.map(|c| c.hash)))
+        Some(seen(&self.server.live.get(&node)?.state))
     }
 
     /// `node` left the drive (a delete won): it settles the tag removals made before it.

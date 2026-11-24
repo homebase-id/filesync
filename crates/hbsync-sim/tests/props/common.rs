@@ -199,10 +199,9 @@ pub(crate) fn with_all_shared_to_edit(sim: Sim) -> Sim {
     for path in &all {
         let node = sim.item(0, path).expect("on the owner's device");
         let pick = sim.share_pick(node).expect("on the drive");
-        let below = false;
         sim.run(&[
-            act(Action::Share { pick, below }),
-            act(Action::Editable { pick, below }),
+            act(Action::Share { pick, below: false }),
+            act(Action::Editable { pick, below: false }),
         ]);
     }
     assert!(sim.quiesce(10), "shared");

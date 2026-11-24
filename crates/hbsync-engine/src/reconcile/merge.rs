@@ -61,13 +61,19 @@ impl<'a> Reconciler<'a> {
                 || self.follows.contains(&node))
     }
 
+    /// Whether this folder writes to another identity's drive (§13): of what is shared with
+    /// it, it may change something there.
+    pub(super) fn writes_there(&self) -> bool {
+        self.masking.read_only && !self.input.writable.is_empty()
+    }
+
     /// Whether this identity may add to `folder` on another identity's drive (§13): a folder
     /// of the drive it may change (what is added to it is shared as it is), or a folder new
     /// here that is itself added to one. Never the top: that is no folder of the drive's.
     pub(super) fn adds_to(&self, folder: NodeId) -> bool {
         let i = self.input;
         // (Nothing asked where no folder writes to what is shared with it.)
-        if !self.masking.read_only || i.writable.is_empty() {
+        if !self.writes_there() {
             return false;
         }
         let mut at = folder;

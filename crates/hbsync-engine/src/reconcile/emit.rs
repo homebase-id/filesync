@@ -282,7 +282,7 @@ impl Reconciler<'_> {
         // (found by the simulator: a file's folder no longer shared, its name at the top
         // taken). What a delete here would take that changed here moves out first, as any
         // change here that isn't sent.
-        if self.masking.read_only && !i.writable.is_empty() {
+        if self.writes_there() {
             let tops: Vec<NodeId> = (gone_here.iter().copied())
                 .filter(|&n| !self.masks.masked.contains(&n))
                 .filter(|&n| !below_another(&i.local, n, &gone_here, &moving))
