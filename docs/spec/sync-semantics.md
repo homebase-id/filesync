@@ -417,7 +417,14 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    deletes the guard holds; simulator:
    `regression_a_swap_of_a_folder_and_the_one_in_it_planned_in_pages`). It is planned
    with the other node, as a page of its own; one that still waits there is planned again
-   with what it waits for, one larger page. A folder such a wait keeps (a node in it moves
+   with what it waits for, one larger page. What is in a node that waits so waits with it,
+   in the same group, and is planned in that one page too, however much of it is dirty (one
+   group a node that waits, not one a node below it: each group costs a page and a round;
+   what isn't dirty below it is not named in the group).
+   Left to its own page, it waited for its parent there again, and the parent's page left
+   it to its own, so the two were never planned together and its base stayed for good
+   (found by the simulator in pages of one: two files put into each other by another app,
+   one of them ignored here and the other deleted here). A folder such a wait keeps (a node in it moves
    out into such a place, or into a folder that waits for its own page), that the plan would
    delete, goes with that page too: what else
    the plan deletes in it waits with it, so the folder goes as one, as in one page. Only
@@ -1616,7 +1623,15 @@ rules hold too:
   again at every sync until its folder is shared, its name changes or the first one's share
   ends. One left out that was here already under an older name keeps that copy as it is
   meanwhile, and the older name stays taken here: a new item of that name waits for it in
-  turn. A loser inside a folder whose share is withdrawn leaves with the folder.
+  turn. So does what is in a folder left out: each item of it stays where it is here, and
+  holds its name there, also in another folder than the one judged (a file here at the top
+  since it was shared without its folder, the folder then left out for its name: a new item
+  of the file's name at the top waits). Judged without it, that folder gave the name to
+  the new item: fetched once and kept, then read and hashed again from the disk and
+  refused, name taken, at every sync (plan
+  `read_only_what_a_folder_left_out_holds_elsewhere_keeps_its_name`; simulator
+  `what_a_folder_left_out_holds_at_the_top_keeps_its_name_there`).
+  A loser inside a folder whose share is withdrawn leaves with the folder.
   Where none of them is here under the name and another item is (one synced here that the
   drive has in a folder now), and that folder is one of them, the folder takes the name: it
   is made, the item here moves into it, and the others wait. By the ids alone the name

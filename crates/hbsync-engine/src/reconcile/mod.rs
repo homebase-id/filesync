@@ -214,7 +214,8 @@ struct Reconciler<'a> {
     /// Whether the delete here of each topmost node deleted here is sent to another
     /// identity's drive (§13, `removes`): asked once for a folder and all that was in it.
     removals: HashMap<NodeId, bool>,
-    /// The folders here a name pass left one out in, held there (§13): judged again.
+    /// The folders here that hold what a name pass left out, or what is below it (§13): judged
+    /// again.
     rejudge: BTreeSet<NodeId>,
     /// Becomes `plan.deferred`.
     deferred: BTreeSet<NodeId>,

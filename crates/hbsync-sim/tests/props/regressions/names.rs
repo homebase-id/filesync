@@ -1553,3 +1553,44 @@ fn regression_an_edited_file_takes_the_name_of_the_folder_it_was_in() {
     assert_eq!(sim.check(), Ok(()));
     assert_eq!(sim.item(1, "b"), Some(file));
 }
+
+/// c0 uploads `A` and `d`, starts ignoring `d`, and deletes `A` here. Another app then puts
+/// `d` into the file `A` and `A` into the file `d`. In pages of one, `A` waited for `d`'s
+/// page, and `d`'s page left `A` to its own: never planned together, c0's base kept `A` for
+/// good ("base not settled"). Now what is in a node that waits for another page waits with
+/// it, in one page of their own (§6.5), and `A` is forgotten: it is in what c0 leaves out
+/// (seed e1c48903).
+#[test]
+fn regression_what_is_in_a_node_that_waits_for_another_page_is_planned_with_it() {
+    use hbsync_sim::{Action::*, Event::*};
+    let mut sim = Sim::new(2).with_small_pages(1);
+    let made = |parent, name| Act {
+        client: 0,
+        action: CreateFile { parent, name },
+    };
+    let into = |pick, file| Act {
+        client: 0,
+        action: IntoFile { pick, file },
+    };
+    sim.run(&[
+        made(12, 10),
+        made(3, 5),
+        made(4, 3),
+        Plan { client: 0 },
+        Step { client: 0 },
+        Plan { client: 0 },
+        Act {
+            client: 0,
+            action: ToggleIgnore,
+        },
+        Act {
+            client: 0,
+            action: Delete { node: 3 },
+        },
+        Step { client: 0 },
+        into(1, 4),
+        into(8, 11),
+    ]);
+    assert!(sim.quiesce(30), "no convergence");
+    sim.check().unwrap_or_else(|e| panic!("{e}"));
+}
