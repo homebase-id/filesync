@@ -723,14 +723,6 @@ impl HomebaseRemote {
         state.sends_read = Some(std::time::Instant::now());
     }
 
-    /// Whether the app holds permission `key`, the security context read again now for it
-    /// alone (one request, nothing held meanwhile), and what it says kept in `flag`.
-    fn holds_now(&self, key: u32, flag: fn(&mut KeyState) -> &mut bool) -> Result<bool> {
-        let held = holds(&self.client, key).map_err(remote_error)?;
-        *flag(&mut self.drive_key.lock()) = held;
-        Ok(held)
-    }
-
     /// Whether the app may send to other identities' drives ([`app::USE_TRANSIT_WRITE`]), as
     /// the security context said when last read; where it said no, read again (one request:
     /// the owner may have given the permission since) at most once in [`SENDS_READ_AGAIN`],
@@ -740,8 +732,11 @@ impl HomebaseRemote {
         if sends || read.is_some_and(|at| at.elapsed() < SENDS_READ_AGAIN) {
             return Ok(sends);
         }
-        let sends = self.holds_now(app::USE_TRANSIT_WRITE, |state| &mut state.sends)?;
-        self.drive_key.lock().sends_read = Some(std::time::Instant::now());
+        // (Nothing held while it is asked.)
+        let sends = holds(&self.client, app::USE_TRANSIT_WRITE).map_err(remote_error)?;
+        let mut state = self.drive_key.lock();
+        state.sends = sends;
+        state.sends_read = Some(std::time::Instant::now());
         Ok(sends)
     }
 

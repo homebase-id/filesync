@@ -284,8 +284,7 @@ enum Became<T> {
 
 impl PeerRemote {
     /// Refuses a write where the app may not send to other identities: before anything is
-    /// sent, as a send refused for it leaves its staged copy behind on this identity's server
-    /// (**[verified]** live, odin-core 3ace44b69).
+    /// sent, as a send refused for it has uploaded its bytes for nothing.
     fn may_send(&self) -> Result<()> {
         match self.own.may_send()? {
             true => Ok(()),
