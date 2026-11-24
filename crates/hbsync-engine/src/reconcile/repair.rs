@@ -336,6 +336,9 @@ impl Reconciler<'_> {
         queue.sort();
         // Nodes taken out below; their children follow them.
         let mut withdrawn: HashSet<NodeId> = HashSet::new();
+        // Of those, the ones that wait for a node another page plans, each with that node:
+        // what is in one waits for it too, and is planned with it (§6.5).
+        let mut for_a_page: HashMap<NodeId, NodeId> = HashMap::new();
         // Nodes left to the devices that sync where they would go; their children too.
         let mut left: HashSet<NodeId> = HashSet::new();
         // Nodes let go of (read-only, §13); their children too.
@@ -356,7 +359,19 @@ impl Reconciler<'_> {
                 Some(_) => self.recover_or_wait(node),
                 None if left.contains(&parent) => Parent::Leave,
                 None if let_go.contains(&parent) => Parent::LetGo,
-                None if withdrawn.contains(&parent) => Parent::Wait,
+                None if withdrawn.contains(&parent) => {
+                    // Its parent waits for a node another page plans: so does it, planned
+                    // with that node as a page of its own next. Left to its own page, that
+                    // page waited for the parent again, and the parent's left it to its page:
+                    // never planned together, its base stayed for good.
+                    if let Some(&other) = for_a_page.get(&parent) {
+                        if !self.elsewhere(node) {
+                            self.wait_together(vec![node, other]);
+                        }
+                        for_a_page.insert(node, other);
+                    }
+                    Parent::Wait
+                }
                 None => match self.known_state(parent) {
                     // Its folder comes back for it (§6.3), but not at a place this device
                     // filters since the folder synced here (§10), for a node it holds nothing
@@ -389,10 +404,16 @@ impl Reconciler<'_> {
                 Parent::Recover | Parent::Folder(_) if self.paged.contains(&node) => Parent::Wait,
                 Parent::Recover if self.elsewhere(node) => {
                     self.wait_together(vec![node]);
+                    for_a_page.insert(node, node);
                     Parent::Wait
                 }
                 Parent::Folder(_) if self.elsewhere(node) || self.elsewhere(parent) => {
                     self.wait_together(vec![node, parent]);
+                    let other = match self.elsewhere(parent) {
+                        true => parent,
+                        false => node,
+                    };
+                    for_a_page.insert(node, other);
                     Parent::Wait
                 }
                 // Read-only (§13): no folder made again, nothing moved into Recovered files, as
