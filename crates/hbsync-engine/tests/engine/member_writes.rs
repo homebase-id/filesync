@@ -108,7 +108,9 @@ fn a_file_at_the_members_top_stays_in_its_folder_on_the_sharers_drive() -> R {
     assert_eq!(b.tree_text(""), ["in.txt = one"]);
 
     b.write("in.txt", "edited")?;
-    b.sync()?;
+    let report = b.sync()?;
+    // The base is settled where the file is here, the top: nothing is planned again for it.
+    assert_eq!(report.ops_done, 1, "{report:?}");
     a.sync()?;
     assert_eq!(a.tree_text(""), ["d/", "d/in.txt = edited"]);
     assert_eq!(b.tree_text(""), ["in.txt = edited"]);
@@ -128,7 +130,7 @@ fn a_file_at_the_members_top_stays_in_its_folder_on_the_sharers_drive() -> R {
 /// The sharer turned the share back to reading, and the member hasn't read that yet: its
 /// store still says the file may be changed, so its edit is sent, and their server refuses
 /// it. The file counts as read-only from there on: the store says so, the sharer's file is
-/// as it was, and the edit moves out, kept.
+/// as it was, and the edit moves out at the next sync, kept.
 #[test]
 fn a_write_the_sharer_refuses_makes_the_item_read_only_here() -> R {
     let server = server();
@@ -145,14 +147,24 @@ fn a_write_the_sharer_refuses_makes_the_item_read_only_here() -> R {
     };
     assert!(may_change(&mut b)?);
 
-    // Back to reading; the member isn't told (no feed read: the drive counts as current).
+    // Back to reading; the member isn't told: its picture of the drive counts as current
+    // (the notifications run), so its next sync reads no feed first.
+    b.announced();
     a.remote.share(file)?;
     b.write("to-edit.txt", "the member's edit")?;
-    b.sync_unasked()?;
+    let report = b.sync_unasked()?;
+    let refused = |(_, why): &(_, hbsync_engine::exec::Skip)| matches!(why, hbsync_engine::exec::Skip::Stale(why) if why.contains("read-only"));
+    assert!(
+        report.skipped.iter().any(refused),
+        "no write was refused: {report:?}"
+    );
     assert!(
         !may_change(&mut b)?,
         "the store still says it may be changed"
     );
+    // Planned again at the next sync, as any write the drive refused for its state: the
+    // edit moves out, and the sharer's version comes back.
+    b.sync_unasked()?;
     assert_eq!(
         hbsync_engine::testkit::tree_text_of(out.path()),
         ["to-edit.txt = the member's edit"]

@@ -435,8 +435,9 @@ impl Executor<'_> {
             // read-only (§13): the share's rows said more than the sharer's server allows (its
             // circle lost the right since), or the share was turned back to reading and the
             // feed hasn't told yet. Read-only after all: the store says so from here on, and
-            // the node is planned again, what changed here moving out. (In a folder that
-            // doesn't write to what is shared, no such write is sent.)
+            // the node is planned again from the feed read now (the picture was behind), what
+            // changed here moving out. (In a folder that doesn't write to what is shared, no
+            // such write is sent.)
             (
                 _,
                 Job::Upload {
@@ -451,6 +452,7 @@ impl Executor<'_> {
             ) if self.folder.writes => {
                 self.db
                     .write(|s| s.account().set_writable(target.at.file_id, false))?;
+                self.report.news.behind = true;
                 Ok(Outcome::stale(why))
             }
             (_, _, JobResult::Failed(JobError::Remote(e))) => Ok(remote_outcome(e)),
