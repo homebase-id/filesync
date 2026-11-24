@@ -718,7 +718,6 @@ impl Reconciler<'_> {
         any
     }
 
-    /// Only the folders in `only`, where given.
     /// On another identity's drive (§13) a rename here goes up only onto a name that is free:
     /// one another node holds, on the drive or in the plan, or one this device leaves out
     /// there or keeps (§10, §7), is the other's. The rename is undone (its item here gets the
@@ -733,6 +732,10 @@ impl Reconciler<'_> {
             .filter(|n| !self.one_way(**n))
             .filter_map(|&n| {
                 let (to, r) = (self.merged.get(n)?, self.remote_state(n)?);
+                // (Its own name spelled otherwise is no other's.)
+                if to.name == r.name {
+                    return None;
+                }
                 let key = name_key(&to.name);
                 if key == name_key(&r.name) {
                     return None;
@@ -757,6 +760,7 @@ impl Reconciler<'_> {
         }
     }
 
+    /// Only the folders in `only`, where given.
     pub(super) fn fix_names(&mut self, only: Option<&BTreeSet<NodeId>>) {
         let parents: BTreeSet<NodeId> = self
             .scope

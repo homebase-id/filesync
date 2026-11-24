@@ -380,19 +380,14 @@ impl Sim {
         let before = seen.snapshot();
         self.whole = Some(std::mem::replace(&mut self.server, seen));
         let done = f(self);
-        let wrote = self.server.changed_since(&before);
         let seen = std::mem::replace(&mut self.server, self.whole.take().expect("set above"));
+        let breach = match self.clients[c].writes {
+            true => self.server.take_from_member(&before, &seen),
+            false => (seen.changed_since(&before)).then(|| "it changed the drive".to_owned()),
+        };
         let name = &self.clients[c].name;
-        match self.clients[c].writes {
-            true => {
-                let breach = self.server.take_from_member(&before, &seen);
-                self.ledger
-                    .read_only_wrote(|| breach.map(|what| format!("{name}, a member: {what}")));
-            }
-            false => self
-                .ledger
-                .read_only_wrote(|| wrote.then(|| format!("{name}, a member, changed the drive"))),
-        }
+        self.ledger
+            .read_only_wrote(|| breach.map(|what| format!("{name}, a member: {what}")));
         Some(done)
     }
 

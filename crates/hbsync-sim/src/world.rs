@@ -251,61 +251,77 @@ impl Sim {
         self.shareable().iter().position(|n| *n == node)
     }
 
-    /// [`Action::Share`].
-    fn share(&mut self, pick: usize, below: bool) {
+    /// What [`Action::Share`] and [`Action::Editable`] pick: a node of the drive, and with it
+    /// (`below`) what the drive has in it; a pick past the nodes is the whole drive (`below`).
+    /// Each with its file. None where the drive holds none, or the pick past them isn't
+    /// `below`.
+    fn picked_on_drive(
+        &self,
+        pick: usize,
+        below: bool,
+    ) -> Option<(
+        hbsync_types::RemoteFileId,
+        Vec<(NodeId, hbsync_types::RemoteFileId)>,
+    )> {
         let (server, nodes) = (&self.server, self.shareable());
-        // The pick, and with it what the drive has in it: in the whole drive, all.
         let (lead, picked) = match nodes.get(pick % (nodes.len() + 1)) {
             Some(&top) if below => (top, server.with_all_in(top)),
             Some(&node) => (node, vec![node]),
-            None => match nodes.first() {
-                Some(&first) if below => (first, nodes),
-                _ => return,
-            },
+            None => (*nodes.first().filter(|_| below)?, nodes),
         };
-        let file = |n: &NodeId| server.node(*n).map(|(n, _)| n.remote.file_id);
-        let files: Vec<_> = picked.iter().filter_map(file).collect();
+        let file = |n: NodeId| server.node(n).map(|(n, _)| n.remote.file_id);
+        let picked = (picked.into_iter())
+            .filter_map(|n| Some((n, file(n)?)))
+            .collect();
+        Some((file(lead)?, picked))
+    }
+
+    /// [`Action::Share`].
+    fn share(&mut self, pick: usize, below: bool) {
+        let Some((lead, picked)) = self.picked_on_drive(pick, below) else {
+            return;
+        };
         // As the picked one is: given where it isn't shared, withdrawn where it is.
-        let withdraw = file(&lead).is_some_and(|f| server.shared.contains(&f));
-        self.note(|_| match withdraw {
-            true => format!("the owner withdraws the share of {picked:?}"),
-            false => format!("the owner shares {picked:?}"),
-        });
-        for file in files {
+        let withdraw = self.server.shared.contains(&lead);
+        self.note(|_| {
+            let picked: Vec<NodeId> = picked.iter().map(|(n, _)| *n).collect();
             match withdraw {
+                true => format!("the owner withdraws the share of {picked:?}"),
+                false => format!("the owner shares {picked:?}"),
+            }
+        });
+        for (_, file) in picked {
+            if withdraw {
+                self.server.shared.remove(&file);
                 // (A share given again is for reading, until it is turned to editing.)
-                true => self.server.shared.remove(&file) | self.server.editable.remove(&file),
-                false => self.server.shared.insert(file),
-            };
+                self.server.editable.remove(&file);
+            } else {
+                self.server.shared.insert(file);
+            }
         }
     }
 
     /// [`Action::Editable`].
     fn editable(&mut self, pick: usize, below: bool) {
-        let (server, nodes) = (&self.server, self.shareable());
-        let (lead, picked) = match nodes.get(pick % (nodes.len() + 1)) {
-            Some(&top) if below => (top, server.with_all_in(top)),
-            Some(&node) => (node, vec![node]),
-            None => match nodes.first() {
-                Some(&first) if below => (first, nodes),
-                _ => return,
-            },
+        let Some((lead, picked)) = self.picked_on_drive(pick, below) else {
+            return;
         };
-        let file = |n: &NodeId| server.node(*n).map(|(n, _)| n.remote.file_id);
-        let shared = |f: &hbsync_types::RemoteFileId| server.shared.contains(f);
-        let files: Vec<_> = picked.iter().filter_map(file).filter(shared).collect();
         // As the picked one is: to editing where it is for reading, back where it is for
         // editing.
-        let back = file(&lead).is_some_and(|f| server.editable.contains(&f));
-        self.note(|_| match back {
-            true => format!("the owner turns the share of {picked:?} back to reading"),
-            false => format!("the owner turns the share of {picked:?} to editing"),
-        });
-        for file in files {
+        let back = self.server.editable.contains(&lead);
+        self.note(|_| {
+            let picked: Vec<NodeId> = picked.iter().map(|(n, _)| *n).collect();
             match back {
-                true => self.server.editable.remove(&file),
-                false => self.server.editable.insert(file),
-            };
+                true => format!("the owner turns the share of {picked:?} back to reading"),
+                false => format!("the owner turns the share of {picked:?} to editing"),
+            }
+        });
+        for (_, file) in picked {
+            if back {
+                self.server.editable.remove(&file);
+            } else if self.server.shared.contains(&file) {
+                self.server.editable.insert(file);
+            }
         }
     }
 

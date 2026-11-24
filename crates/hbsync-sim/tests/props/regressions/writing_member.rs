@@ -4,14 +4,7 @@
 
 use hbsync_sim::{Action, Event, Sim};
 
-use super::{act, settle, top};
-
-/// The owner shares `path`, as it has it, with the member (or withdraws its share).
-fn share(sim: &mut Sim, path: &str) {
-    let node = sim.item(0, path).expect("on the owner's device");
-    let pick = sim.share_pick(node).expect("on the drive");
-    sim.run(&[act(0, Action::Share { pick, below: false })]);
-}
+use super::{act, settle, share, top};
 
 /// The owner turns the share of `path` to editing (or back to reading).
 fn turn(sim: &mut Sim, path: &str) {
