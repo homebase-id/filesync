@@ -11,6 +11,7 @@ mod roles;
 mod shared_folder;
 mod state_folder;
 mod tags;
+mod writing_member;
 
 use hbsync_sim::{Action, Event, Sim};
 use hbsync_types::NodeId;

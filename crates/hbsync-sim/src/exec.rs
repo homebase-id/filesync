@@ -631,12 +631,20 @@ impl Sim {
         };
         let plan = reconcile_with_known(&input, &opts, masking, known);
         // A member that writes plans only a change of a node it may change, where the drive
-        // has it: never a node made, removed or moved to another folder (§13).
+        // has it: never a node made, removed or moved to another folder, nor a rename onto a
+        // name another node of the drive holds, as it reads it (§13).
         if client.writes {
+            let taken = |node: NodeId, parent: NodeId, name: &str| {
+                input.remote.get(node).is_some_and(|r| r.name != name)
+                    && input.remote.child_named(parent, name, Some(node)).is_some()
+            };
             let overstep = (plan.ops.iter().chain(&plan.held)).find(|op| match op {
-                Op::RemoteUpdate { node, parent, .. } => {
+                Op::RemoteUpdate {
+                    node, parent, name, ..
+                } => {
                     !input.writable.contains(node)
                         || input.remote.get(*node).is_none_or(|r| r.parent != *parent)
+                        || taken(*node, *parent, name)
                 }
                 Op::RemoteTags { node, .. } => !input.writable.contains(node),
                 op => op.writes_remote(),
