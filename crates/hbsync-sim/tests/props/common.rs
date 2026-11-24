@@ -95,14 +95,42 @@ pub(crate) fn orphaning_action() -> impl Strategy<Value = Action> + Clone {
 /// Events on `clients` clients: client 0's user edits; the users delete and tag, while a newer
 /// client moves synced nodes into folders no client reads ([`Action::IntoNewer`]: they wait
 /// for them, where a device has them, edited or not) and other devices delete folders, stop
-/// half way, restore and purge. Within the engine's two known gaps of what waits for such a
-/// folder: no user makes, moves or renames an item (what waits doesn't hold its name here, and
-/// what comes to that name is downloaded again at every sync, never landing), and one device
-/// edits (a file edited there and here, the drive's edit first, is forked into a copy whose
-/// upload is planned at every sync, its item never made).
+/// half way, restore and purge. One device edits: within the engine's known gap of what waits
+/// for such a folder (a file edited there and here, the drive's edit first, is forked into a
+/// copy whose upload is planned at every sync, its item never made).
 pub(crate) fn waiting_event(clients: usize) -> impl Strategy<Value = Event> {
+    let c = move || 0..clients;
+    prop_oneof![
+        3 => (c(), waiting_action()).prop_map(|(client, action)| Event::Act { client, action }),
+        2 => (0usize..16).prop_map(|file| Event::Act { client: 0, action: Action::Edit { file } }),
+        1 => c().prop_map(|client| Event::Plan { client }),
+        3 => c().prop_map(|client| Event::Step { client }),
+    ]
+}
+
+/// [`waiting_event`], client 0's user also making files and folders: what waits elsewhere
+/// holds its name, and what comes to it is left out there. Client 0 alone, and no moves or
+/// renames, within what the engine and the oracle don't handle yet around what waits: an
+/// item of a node deleted here that comes back, edited elsewhere, is planned onto the name a
+/// waiting item made here since holds; a folder renamed to an ignored name, with what waits in
+/// it on its base, is forgotten at every sync, never done; a tag added here to what was moved
+/// here, then waits, is never sent (the oracle calls it lost).
+pub(crate) fn naming_waiting_event(clients: usize) -> impl Strategy<Value = Event> {
     let i = || 0usize..16;
-    let actions = prop_oneof![
+    let names = prop_oneof![
+        2 => (i(), i()).prop_map(|(parent, name)| Action::CreateFile { parent, name }),
+        1 => (i(), i()).prop_map(|(parent, name)| Action::CreateFolder { parent, name }),
+    ];
+    prop_oneof![
+        3 => waiting_event(clients),
+        1 => names.prop_map(|action| Event::Act { client: 0, action }),
+    ]
+}
+
+/// What [`waiting_event`]'s users and other devices do.
+fn waiting_action() -> impl Strategy<Value = Action> + Clone {
+    let i = || 0usize..16;
+    prop_oneof![
         1 => i().prop_map(|node| Action::Delete { node }),
         1 => (i(), i()).prop_map(|(node, tag)| Action::Tag { node, tag }),
         2 => (i(), 0usize..4).prop_map(|(pick, folder)| Action::IntoNewer { pick, folder }),
@@ -110,13 +138,6 @@ pub(crate) fn waiting_event(clients: usize) -> impl Strategy<Value = Event> {
         1 => (i(), i()).prop_map(|(pick, done)| Action::DeleteStopped { pick, done }),
         1 => i().prop_map(|node| Action::Restore { node }),
         1 => Just(Action::Purge),
-    ];
-    let c = move || 0..clients;
-    prop_oneof![
-        3 => (c(), actions).prop_map(|(client, action)| Event::Act { client, action }),
-        2 => i().prop_map(|file| Event::Act { client: 0, action: Action::Edit { file } }),
-        1 => c().prop_map(|client| Event::Plan { client }),
-        3 => c().prop_map(|client| Event::Step { client }),
     ]
 }
 
