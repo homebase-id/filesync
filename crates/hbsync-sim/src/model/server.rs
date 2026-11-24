@@ -334,18 +334,25 @@ impl Server {
     }
 
     /// Takes what a member that writes changed on the drive as it read it (`seen`, which was
-    /// as `before` when its sync began: [`Server::as_shared`]) into the drive: a change of a
-    /// file it may change, where the file is. The drive keeps the folder it has the file in
-    /// (the member reads one whose folder isn't shared at the top, and sends the drive's:
-    /// never its own). Anything else it did is a breach, named, and dropped: a node made,
-    /// removed, moved to another folder, or a change of a file it may not change. The
-    /// drive's ids go on from the member's, so no version is given twice.
+    /// as `before` when its sync began: [`Server::as_shared`]) into the drive:
+    /// - a change of a file it may change, where the file is: the drive keeps the folder it
+    ///   has the file in (the member reads one whose folder isn't shared at the top, and
+    ///   sends the drive's: never its own);
+    /// - such a file's move between two folders it may change;
+    /// - a node made in a folder it may change: shared as that folder is, for editing.
+    ///
+    /// Anything else it did is a breach, named, and dropped: a node removed, one made or
+    /// moved elsewhere (the top is no folder of the drive's), a change of a file it may not
+    /// change. The drive's ids go on from the member's, so no version is given twice.
     pub(crate) fn take_from_member(&mut self, before: &Snapshot, seen: &Server) -> Option<String> {
         self.next = seen.next;
         let mut breach = None;
         if seen.removed != before.1 {
             breach = Some("it changed Recently deleted".to_owned());
         }
+        let adds_to = |drive: &Server, folder: NodeId| {
+            (drive.live.get(&folder)).is_some_and(|f| drive.editable.contains(&f.remote.file_id))
+        };
         for (id, was) in &before.0 {
             let Some(now) = seen.live.get(id) else {
                 breach.get_or_insert_with(|| format!("it removed {id:?}"));
@@ -355,22 +362,37 @@ impl Server {
                 continue;
             }
             let file = was.remote.file_id;
-            let in_place = now.remote.file_id == file && now.state.parent == was.state.parent;
+            let moved = now.state.parent != was.state.parent;
+            let may = now.remote.file_id == file
+                && self.editable.contains(&file)
+                && (!moved || (adds_to(self, was.state.parent) && adds_to(self, now.state.parent)));
             let mine = self.live.get_mut(id).filter(|m| m.remote.file_id == file);
-            let Some(mine) = mine.filter(|_| in_place && self.editable.contains(&file)) else {
+            let Some(mine) = mine.filter(|_| may) else {
                 breach.get_or_insert_with(|| format!("it changed {id:?}: {was:?} to {now:?}"));
                 continue;
             };
+            let parent = match moved {
+                true => now.state.parent,
+                false => mine.state.parent,
+            };
             *mine = ServerNode {
                 state: NodeState {
-                    parent: mine.state.parent,
+                    parent,
                     ..now.state.clone()
                 },
                 remote: now.remote,
             };
         }
-        if let Some(made) = seen.live.keys().find(|id| !before.0.contains_key(id)) {
-            breach.get_or_insert_with(|| format!("it made {made:?}"));
+        for (id, made) in (seen.live.iter()).filter(|(id, _)| !before.0.contains_key(id)) {
+            let new = !self.live.contains_key(id) && !self.removed.contains_key(id);
+            if !new || !adds_to(self, made.state.parent) {
+                breach.get_or_insert_with(|| format!("it made {id:?}: {made:?}"));
+                continue;
+            }
+            self.live.insert(*id, made.clone());
+            self.ever.insert(*id);
+            self.shared.insert(made.remote.file_id);
+            self.editable.insert(made.remote.file_id);
         }
         breach
     }
