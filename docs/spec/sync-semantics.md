@@ -1718,21 +1718,32 @@ rules hold too:
     later, it can't know: that clash is the owner's devices' to mend, as any. Its own name
     spelled otherwise goes up: what holds that name with it did before.)
 
-  What it is in stays the drive's: the write is to send the folder the drive has the item
-  in, never this folder's top for an item shown there (the simulator's member does:
-  `a_file_at_the_top_stays_in_its_folder_on_the_drive`; **the executor doesn't yet**, it
-  would send the top: its next step, with what it does when the sharer's server refuses a
-  write after all). The executor asks the store again as a write runs, and sends only such
-  a change (never a node made, removed or moved to another folder, whatever planned it), so
-  a share turned back to reading since the plan stops the write there, and the edit moves
-  out at the next plan. What mends the drive (a
+  What it is in stays the drive's: the write sends the folder the drive has the item in,
+  never this folder's top for an item shown there (`Executor::sent_folder`, one lookup of
+  the store's row per such write; the mirror keeps that folder from the write's answer, as
+  the feed's row has it; engine test
+  `a_file_at_the_members_top_stays_in_its_folder_on_the_sharers_drive`, the simulator's
+  `a_file_at_the_top_stays_in_its_folder_on_the_drive`). The executor asks the store again
+  as a write runs, and sends only such a change (never a node made, removed or moved to
+  another folder, whatever planned it), so a share turned back to reading since the plan
+  stops the write there, and the edit moves out at the next plan. **A write the sharer's
+  server refuses all the same** (`RemoteError::ReadOnly`: the share was turned back and
+  the feed hasn't told yet, or its circle lost the right, above) makes the item read-only
+  here: the store's row says so from there on, the feed is read before the next plan (the
+  picture was behind), and the edit moves out then, kept (engine test
+  `a_write_the_sharer_refuses_makes_the_item_read_only_here`). Where the share's rows
+  still say "edit" (the circle's case), a later row of the item says so again, and its
+  next edit here is sent and refused once more: one refused write per such edit, nothing
+  lost. A member's write is answered without the server's time of it; that needs no read
+  of its own: where the time matters (the item's folder removed there), the feed's row of
+  the write comes with the removal's, and has it. What mends the drive (a
   clash of names, a cycle, an orphan) stays the owner's, whatever the items say, and an item
   this device ignores (§10) follows the drive: an ignore rule here removes nothing there.
   Simulator: `a_writing_member_writes_only_what_it_may_and_converges`, the same in pages
   that crash, and on the engine's planning path; scripted cases in
   `regressions/writing_member.rs`. No folder writes yet (nothing turns it on), and none is
-  to before the executor sends the drive's folder, and a member's new items, its moves
-  between folders shared for editing, and its deletes are settled (each has its own step).
+  to before a member's new items, its moves between folders shared for editing, and its
+  deletes are settled (each has its own step).
   So a folder synced from another identity's drive is read-only (above), whatever its items
   say. A share's state DB from before it was kept reads its
   feed from its beginning once (a re-read, §8b), each row taking what its header says.
