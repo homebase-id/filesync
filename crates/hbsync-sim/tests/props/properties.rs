@@ -223,6 +223,27 @@ proptest! {
         run_with(3, None, setup, &events)?;
     }
 
+    /// [`a_writing_member_writes_only_what_it_may_and_converges`] with the mass-delete guard
+    /// on (a low limit, so it trips often; §7): the member's deletes of what it may change
+    /// are held as an own drive's and sent only once confirmed; put back, they are undone
+    /// here without a write to the drive (the items come down again), while a removal made
+    /// there, which only its owner restores, stays held till confirmed. Whatever the users
+    /// answer, the clients converge without loss.
+    #[test]
+    fn a_guarded_writing_member_confirms_or_puts_back_its_own_deletes(
+        events in proptest::collection::vec(
+            prop_oneof![
+                8 => events_of(3, editing_action()),
+                1 => (0usize..3).prop_map(|client| Event::Confirm { client }),
+                1 => (0usize..3).prop_map(|client| Event::PutBack { client }),
+            ],
+            0..120,
+        ),
+        min in 1usize..3,
+    ) {
+        run_with(3, Some(min), |sim| sim.with_writing_member(2), &events)?;
+    }
+
     /// A device's folder that holds what other identities share (§10) is its own: nothing in
     /// it is synced and its name is held against the drive's, whatever the others make of that
     /// name, while its marker goes and comes back (`ToggleIgnore`: a plain folder meanwhile,

@@ -464,15 +464,22 @@ impl Engine {
     /// The next sync does the rest; what a failure leaves is still held, and shown again.
     /// Costs a feed read, then one restore of them all: a request per wave and per thousand rows,
     /// and after it two reads per node restored ([`crate::held::after_restore`]). Returns how
-    /// many it put back. Refused in a read-only folder (§13), where nothing is restored on the
-    /// drive (it is another identity's, or this folder only follows it): what is held there
-    /// is confirmed or stays held.
+    /// many it put back.
+    ///
+    /// In a read-only folder (§13) nothing is restored on the drive (it is another
+    /// identity's, or this folder only follows it). One that writes there
+    /// ([`crate::FolderCtx::writes`]) holds its own deletes, which are removals there: those
+    /// are put back, each base forgotten so the item comes down again (no write to the
+    /// drive, after a feed read); a removal made there stays held, to be confirmed, and where
+    /// `nodes` are all such, that is the error. One that doesn't write holds only removals
+    /// made there: refused.
     pub fn put_back(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
-        if self.cfg.folder.read_only.is_some() {
+        let folder = &self.cfg.folder;
+        let read_only = folder.read_only.is_some();
+        if read_only && !folder.writes {
             return Err(EngineError::ReadOnly("nothing is put back on the drive"));
         }
-        self.held
-            .put_back(&mut self.db, &self.drive, nodes, &self.cfg.folder.scope)
+        (self.held).put_back(&mut self.db, &self.drive, nodes, &folder.scope, !read_only)
     }
 
     /// Waits up to `timeout` for the live changes `observer`'s watcher reports, and records

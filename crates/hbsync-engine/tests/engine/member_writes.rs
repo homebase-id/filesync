@@ -23,12 +23,22 @@ fn writing_member(
     server: &Server,
     name: &str,
 ) -> Result<(Client, tempfile::TempDir), Box<dyn std::error::Error>> {
+    writing_member_with(server, name, |_| ())
+}
+
+/// [`writing_member`], its configuration changed by `set`.
+fn writing_member_with(
+    server: &Server,
+    name: &str,
+    set: impl Fn(&mut hbsync_engine::EngineConfig) + 'static,
+) -> Result<(Client, tempfile::TempDir), Box<dyn std::error::Error>> {
     let out = tempfile::tempdir()?;
     let to = out.path().to_path_buf();
     let remote = FakeRemote::member(server.clone()).writing();
     let client = Client::on(remote, name, move |cfg| {
         cfg.folder.read_only = Some(to.clone());
         cfg.folder.writes = true;
+        set(cfg);
     })?;
     Ok((client, out))
 }
@@ -468,5 +478,114 @@ fn a_members_delete_of_a_folder_it_may_not_empty_is_undone() -> R {
         removed_names(&server)
     );
     nothing_moved_out(&out)?;
+    Ok(())
+}
+
+/// The owner `a`'s folder `Projects` of four files, and `keep.txt` beside it if `beside`,
+/// all shared with the member for editing, synced on both.
+fn projects_shared(
+    beside: bool,
+) -> Result<(Server, Client, Client, tempfile::TempDir), Box<dyn std::error::Error>> {
+    let server = server();
+    let mut a = Client::with_config(&server, "a", |cfg| cfg.guard.min = 2)?;
+    for i in 0..4 {
+        a.write(&format!("Projects/f{i}.txt"), format!("{i}"))?;
+    }
+    if beside {
+        a.write("keep.txt", "k")?;
+    }
+    a.sync()?;
+    let mut names = vec!["Projects", "f0.txt", "f1.txt", "f2.txt", "f3.txt"];
+    names.extend(beside.then_some("keep.txt"));
+    for name in names {
+        share_to_edit(&a, &server, name)?;
+    }
+    // (The guard's least count of files lowered to this small folder.)
+    let (mut b, out) = writing_member_with(&server, "b", |cfg| cfg.guard.min = 2)?;
+    b.sync()?;
+    Ok((server, a, b, out))
+}
+
+/// Every file of the sharer's drive at its version, live or in Recently deleted: the same
+/// before and after means nothing was written there.
+fn versions(server: &Server) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let server = server.lock().map_err(|_| "poisoned")?;
+    let mut all: Vec<String> = (server.live().chain(server.removed()))
+        .map(|h| format!("{:?} {:?}", h.file_id, h.version))
+        .collect();
+    all.sort();
+    Ok(all)
+}
+
+/// A member's delete of most of what it syncs is held by the guard (§7), as on its own
+/// drive, and nothing is removed on the sharer's. Put back, the items come down again: no
+/// write to the sharer's drive, nothing moved out, nothing held after.
+#[test]
+fn a_members_held_deletes_are_put_back_without_a_write() -> R {
+    let (server, mut a, mut b, out) = projects_shared(true)?;
+    fs::remove_dir_all(b.root.join("Projects"))?;
+    let report = b.sync()?;
+    assert_eq!(report.held.len(), 5, "{report:?}");
+    assert!(removed_names(&server).is_empty(), "nothing sent");
+    let before = versions(&server)?;
+
+    let held: Vec<NodeId> = report.held.iter().map(|op| op.node()).collect();
+    assert_eq!(b.engine.put_back(&held)?, 5);
+    let report = b.sync()?;
+    assert!(report.held.is_empty(), "{report:?}");
+    assert_eq!(b.read_text("Projects/f0.txt")?, "0");
+    assert_eq!(b.read_text("Projects/f3.txt")?, "3");
+    assert_eq!(
+        versions(&server)?,
+        before,
+        "a put back here writes nothing to the sharer's drive"
+    );
+    assert!(removed_names(&server).is_empty());
+    nothing_moved_out(&out)?;
+    // Nothing is left to send: the next sync is quiet, and the sharer has all of it.
+    let report = b.sync()?;
+    assert_eq!(report.ops_done, 0, "{report:?}");
+    a.sync()?;
+    assert_eq!(a.read_text("Projects/f0.txt")?, "0");
+    // Deleted again and confirmed, the removal goes: the put back left no hold behind.
+    fs::remove_dir_all(b.root.join("Projects"))?;
+    let report = b.sync()?;
+    assert_eq!(report.held.len(), 5, "{report:?}");
+    b.engine
+        .confirm_deletes(report.held.iter().map(|op| op.node()));
+    b.sync()?;
+    a.sync()?;
+    assert_eq!(a.tree_text(""), ["keep.txt = k"]);
+    Ok(())
+}
+
+/// The sharer's removal of all the member syncs is held on the member (§7). It is the
+/// sharer's to put back (a restore on their drive): refused here, and it stays held till
+/// confirmed.
+#[test]
+fn a_removal_the_sharer_made_is_not_put_back_by_a_member() -> R {
+    let (server, mut a, mut b, _out) = projects_shared(false)?;
+    fs::remove_dir_all(a.root.join("Projects"))?;
+    let report = a.sync()?;
+    a.engine
+        .confirm_deletes(report.held.iter().map(|op| op.node()));
+    a.sync()?;
+    assert_eq!(removed_names(&server).len(), 5);
+
+    let report = b.sync()?;
+    assert!(!report.held.is_empty(), "{report:?}");
+    assert_eq!(b.read_text("Projects/f0.txt")?, "0", "held: still here");
+    let held: Vec<NodeId> = report.held.iter().map(|op| op.node()).collect();
+    match b.engine.put_back(&held) {
+        Err(hbsync_engine::EngineError::ReadOnly(_)) => {}
+        other => return Err(format!("{other:?}").into()),
+    }
+    assert_eq!(removed_names(&server).len(), 5, "nothing restored there");
+    let report = b.sync()?;
+    assert!(!report.held.is_empty(), "still held: {report:?}");
+    b.engine
+        .confirm_deletes(report.held.iter().map(|op| op.node()));
+    b.sync()?;
+    assert!(b.tree_text("").is_empty(), "{:?}", b.tree_text(""));
     Ok(())
 }
