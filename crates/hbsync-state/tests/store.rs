@@ -279,6 +279,7 @@ fn held_deletes_leave_the_dirty_set_till_they_come_back() -> R {
         content_extra: None,
         token: None,
         changed_at: None,
+        writable: false,
     };
     db.write(|s| {
         s.account().put_live(&at(1))?;
@@ -326,6 +327,7 @@ fn a_clear_keeps_a_mark_a_change_moved_on() -> R {
         content_extra: None,
         token: None,
         changed_at: None,
+        writable: false,
     };
     db.write(|s| {
         s.account().put_live(&at(1))?;
@@ -364,6 +366,7 @@ fn a_runs_own_answer_leaves_a_mark_as_it_is() -> R {
         content_extra: None,
         token: None,
         changed_at: None,
+        writable: false,
     };
     let version = |v: u128| Some(VersionTag(Uuid::from_u128(v)));
     db.write(|s| s.account().put_live(&at(1)))?;
@@ -480,7 +483,7 @@ fn file_db_survives_reopen_and_rejects_newer_schema() -> R {
     }
     let mut db = StateDb::open(&db_path)?;
     assert_eq!(db.read(|s| s.get_base(folder.node))?, Some(folder));
-    assert_eq!(db.schema_version()?, 28);
+    assert_eq!(db.schema_version()?, 29);
     drop(db);
 
     let conn = rusqlite::Connection::open(&db_path)?;
@@ -542,6 +545,7 @@ fn a_gone_suspicion_is_kept_until_a_row_or_gone() -> Result<(), Box<dyn std::err
         content_extra: None,
         token: None,
         changed_at: None,
+        writable: false,
     };
     let f = row.file_id;
     let mut db = StateDb::open(&path)?;
@@ -729,6 +733,7 @@ mod mirror {
             content_extra: Some(r#"{"future":1}"#.into()),
             token: Some(FileToken(node.0.as_bytes().as_slice().into())),
             changed_at: None,
+            writable: false,
         }
     }
 
@@ -1239,6 +1244,99 @@ mod mirror {
         Ok(())
     }
 
+    /// Whether this identity may change a node of another identity's drive is kept as the
+    /// feed's row says. A change of it alone (the version kept: its share turned from reading
+    /// to editing, or back) is kept too, and marks the node to be planned again; told the
+    /// same again, nothing is written.
+    #[test]
+    fn what_may_be_changed_is_kept_and_a_change_of_it_is_planned() -> R {
+        let mut db = StateDb::open_in_memory()?;
+        db.write(|s| s.account().set_shared(true))?;
+        let file = row(NodeId::new(), NodeId::ROOT, "f", None);
+        let node = file.node;
+        db.write(|s| {
+            s.account().put_live(&file)?;
+            s.folder().clear_dirty(node)
+        })?;
+        let kept = |db: &mut StateDb| db.read(|s| Ok(s.get_mirror(node)?.map(|row| row.writable)));
+        assert_eq!(kept(&mut db)?, Some(false));
+        for (said, planned) in [(true, true), (true, false), (false, true), (false, false)] {
+            db.write(|s| s.account().set_writable(file.file_id, said))?;
+            assert_eq!(kept(&mut db)?, Some(said));
+            assert_eq!(db.read(|s| s.is_dirty(node))?, planned, "said {said}");
+            db.write(|s| s.folder().clear_dirty(node))?;
+        }
+        // Of a file the mirror doesn't have: nothing.
+        db.write(|s| s.account().set_writable(RemoteFileId(Uuid::new_v4()), true))?;
+        // A new version's row says for itself.
+        let next = MirrorRow {
+            version: VersionTag(Uuid::new_v4()),
+            writable: true,
+            ..file.clone()
+        };
+        db.write(|s| s.account().put_live(&next))?;
+        assert_eq!(db.read(|s| s.get_mirror(node))?, Some(next));
+        Ok(())
+    }
+
+    /// The answer to this device's own write doesn't say whether the node may be changed. On
+    /// another identity's drive a change keeps what the store has of the file, and a file
+    /// this device made takes its folder's (it is shared as the folder is), so neither reads
+    /// as read-only until the feed's row comes. A file shared for reading alone in a folder
+    /// shared for editing stays so; one made where the store has no folder is not. On an
+    /// identity's own drive no folder is asked (none says so there: the rows are made to,
+    /// here, to show it). What the answer's own row says counts for nothing (one made from
+    /// an older row says what that one did).
+    #[test]
+    fn a_writes_answer_keeps_what_may_be_changed() -> R {
+        use hbsync_state::Answer;
+        for shared in [true, false] {
+            let mut db = StateDb::open_in_memory()?;
+            if shared {
+                db.write(|s| s.account().set_shared(true))?;
+            }
+            let editable = |row: MirrorRow| MirrorRow {
+                writable: true,
+                ..row
+            };
+            let dir = editable(row(NodeId::new(), NodeId::ROOT, "dir", None));
+            let file = editable(row(NodeId::new(), dir.node, "f", None));
+            let to_read = row(NodeId::new(), dir.node, "g", None);
+            db.write(|s| {
+                [&dir, &file, &to_read]
+                    .into_iter()
+                    .try_for_each(|row| s.account().put_live(row))
+            })?;
+            // As a write's answer has a row: saying nothing of it.
+            let answer = |row: &MirrorRow, name: &str| MirrorRow {
+                version: VersionTag(Uuid::new_v4()),
+                name: name.into(),
+                writable: false,
+                ..row.clone()
+            };
+            let made = row(NodeId::new(), dir.node, "new", None);
+            let at_the_top = row(NodeId::new(), NodeId::new(), "nowhere", None);
+            db.write(|s| {
+                let a = s.account();
+                a.answered(&Answer::live(Some(file.version), answer(&file, "f2")))?;
+                let stale = editable(answer(&to_read, "g2"));
+                a.answered(&Answer::live(Some(to_read.version), stale))?;
+                a.answered(&Answer::live(None, made.clone()))?;
+                a.answered(&Answer::live(None, editable(at_the_top.clone())))?;
+                Ok(())
+            })?;
+            let kept = |db: &mut StateDb, node| {
+                db.read(|s| Ok(s.get_mirror(node)?.map(|row| (row.name, row.writable))))
+            };
+            assert_eq!(kept(&mut db, file.node)?, Some(("f2".into(), true)));
+            assert_eq!(kept(&mut db, to_read.node)?, Some(("g2".into(), false)));
+            assert_eq!(kept(&mut db, made.node)?, Some(("new".into(), shared)));
+            let top = db.read(|s| s.mirror_by_file(at_the_top.file_id))?;
+            assert_eq!(top.map(|row| row.writable), Some(false));
+        }
+        Ok(())
+    }
+
     /// A file id deleted for good never comes back: neither a page fetched before the delete
     /// nor a write committed after it puts its row in the mirror or Recently deleted.
     #[test]
@@ -1737,7 +1835,7 @@ fn a_new_db_opened_at_once_is_created_once() -> R {
             .into_iter()
             .try_for_each(|o| o.join().expect("no panic"))
     })?;
-    assert_eq!(StateDb::open(&path)?.schema_version()?, 28);
+    assert_eq!(StateDb::open(&path)?.schema_version()?, 29);
     Ok(())
 }
 
@@ -1975,6 +2073,7 @@ fn drive_changes_fan_out_to_the_folders_they_concern() -> R {
         content_extra: None,
         token: None,
         changed_at: None,
+        writable: false,
     };
     let dirty = |db: &mut StateDb, node| db.read(|s| s.is_dirty(node));
     // The role folders' tops, then a folder inside Documents: only docs is concerned.
@@ -2082,6 +2181,7 @@ fn a_role_folder_sees_its_top_as_the_root() -> R {
         content_extra: None,
         token: None,
         changed_at: None,
+        writable: false,
     };
     let (inside, elsewhere) = (NodeId::new(), NodeId::new());
     main.write(|s| {
@@ -2309,6 +2409,7 @@ fn an_answer_records_only_over_what_its_write_replaced() -> R {
         content_extra: None,
         token: None,
         changed_at: Some(v as i64),
+        writable: false,
     };
     let answer = |expected: Option<u128>, row: MirrorRow, removed| {
         let expected = expected.map(|v| VersionTag(Uuid::from_u128(v)));

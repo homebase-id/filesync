@@ -638,7 +638,20 @@ server answers the rest, to a token their server made for this identity's connec
   again after every change of the file while a row still names the member; sharing or
   withdrawing moves the file's `modified` and keeps its version, so a share given again brings
   the file back live at the version it had (**[verified]**
-  `TableDriveMainIndex.TouchKeepingVersionTagAsync`). That is the header's `updated` too
+  `TableDriveMainIndex.TouchKeepingVersionTagAsync`). So does a share's row written again
+  with other permissions (reading turned to editing, or back: **[verified]** odin-core
+  `MainIndexMeta.WriteSharesAsync`, which upserts the row and touches the file keeping its
+  version, and `DriveShareService`, which then announces the file; not tried live): the
+  member's feed brings the file again at the version it has, its rows as they are now, and
+  the client takes whether it may change it from them (`RemoteHeader::writable`). The rows
+  can say more than the server allows: a row is checked against its circle's grant on the
+  drive when it is written, not after, so a circle that has lost `Write` since leaves rows
+  with it, and the member's write is refused unless another of their circles grants it
+  (what a member may do on the drive is what all their circles grant together; the
+  sharer's server keeps a peer's rights for up to an hour, so a refusal can come that
+  much later: **[verified]** odin-core `docs/file-access.md`,
+  `DriveShareService.AssertCircleFitsAsync`,
+  `DriveStorageServiceBase.AssertMemberMayWriteAsync`). That is the header's `updated` too
   (**[verified]** `FileMetadata`: `Updated = record.modified`), so `updated` is when the file
   last changed in the feed, not when its version was written: a removed node's moves with a
   share change too. The client therefore reads no time from `updated` (but the "no longer

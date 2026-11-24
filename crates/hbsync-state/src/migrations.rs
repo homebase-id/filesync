@@ -131,7 +131,9 @@ const SCHEMA: &str = r#"
         changed_at    INTEGER,                        -- the server's time of the version; NULL for
                                                       -- this device's own write until the feed
                                                       -- brings it where it matters
-        name_key      INTEGER NOT NULL DEFAULT 0      -- sibling hash of name
+        name_key      INTEGER NOT NULL DEFAULT 0,     -- sibling hash of name
+        writable      INTEGER NOT NULL DEFAULT 0      -- another identity's drive: its share
+                                                      -- gives this one Write on the node
     );
     CREATE INDEX remote_parent ON remote(parent, name_key);
 
@@ -477,6 +479,13 @@ const MIGRATIONS: &[&str] = &[
     // first read after it (filesync #385). Each row read again takes the server's time where
     // it matters (`confirm_removed`, `refresh_time`).
     "INSERT OR REPLACE INTO kv (key, value) VALUES ('remote.rereading', '1');",
+    // 29: whether this identity may change a node of another identity's drive (its share
+    // gives `Write`), as the feed's headers say. What a share's DB holds was read before
+    // they were kept: its feed is read again, once (`keys::REREADING`), each row taking what
+    // its header says. An identity's own drive has no such rows, and isn't read again.
+    "ALTER TABLE remote ADD COLUMN writable INTEGER NOT NULL DEFAULT 0;
+    INSERT OR REPLACE INTO kv (key, value)
+        SELECT 'remote.rereading', '1' WHERE EXISTS (SELECT 1 FROM kv WHERE key = 'remote.shared');",
 ];
 
 /// The version this client makes and reads.
@@ -836,22 +845,56 @@ mod tests {
         Ok(())
     }
 
+    /// Whether the DB asks for its feed to be read from its beginning.
+    fn asked(conn: &Connection) -> Result<bool> {
+        Ok(conn
+            .prepare("SELECT 1 FROM kv WHERE key = 'remote.rereading'")?
+            .exists([])?)
+    }
+
     /// An upgrade asks for the whole feed to be read again, once (migration 28: a version's
     /// time is the server's `versionUpdated`, and a row read again takes it); a new DB has
     /// nothing to read again.
     #[test]
     fn an_upgrade_reads_the_feed_again_and_a_new_db_doesnt() -> Result<()> {
-        let asked = |conn: &Connection| -> Result<bool> {
-            Ok(conn
-                .prepare("SELECT 1 FROM kv WHERE key = 'remote.rereading'")?
-                .exists([])?)
-        };
         let mut new = Connection::open_in_memory()?;
         apply(&mut new)?;
         assert!(!asked(&new)?);
         for mut upgraded in [version_13()?, version_24()?] {
             apply(&mut upgraded)?;
             assert!(asked(&upgraded)?);
+        }
+        Ok(())
+    }
+
+    /// A DB of what another identity shares has its feed read again, once, by the upgrade
+    /// that keeps whether a node may be changed (migration 29): each row read again takes
+    /// what its header says. An identity's own drive isn't read again for it.
+    #[test]
+    fn a_shares_db_reads_its_feed_again_for_what_may_be_changed() -> Result<()> {
+        for shared in [true, false] {
+            // As of the version before: up to date, nothing asked.
+            let mut conn = Connection::open_in_memory()?;
+            apply(&mut conn)?;
+            conn.execute_batch(&format!(
+                "ALTER TABLE remote DROP COLUMN writable; PRAGMA user_version = {};",
+                VERSION - 1
+            ))?;
+            if shared {
+                conn.execute(
+                    "INSERT INTO kv (key, value) VALUES ('remote.shared', '1')",
+                    [],
+                )?;
+            }
+            assert!(!asked(&conn)?);
+            apply(&mut conn)?;
+            assert_eq!(user_version(&conn)?, VERSION);
+            assert_eq!(asked(&conn)?, shared);
+            let writable: i64 =
+                conn.query_row("SELECT COUNT(*) FROM remote WHERE writable = 1", [], |r| {
+                    r.get(0)
+                })?;
+            assert_eq!(writable, 0);
         }
         Ok(())
     }

@@ -1020,6 +1020,7 @@ mod tests {
             changed_at: Some(7),
             token: None,
             expires: Some(9),
+            writable: true,
         }
     }
 
@@ -1248,6 +1249,7 @@ mod tests {
             changed_at: Some(5),
             token: None,
             expires: None,
+            writable: false,
         };
         match removal(read(asked, true, None), asked, true) {
             Ok(Removal::AsItIs(written)) => {

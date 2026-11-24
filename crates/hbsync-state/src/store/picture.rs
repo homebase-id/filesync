@@ -225,8 +225,8 @@ impl AccountTx<'_> {
     pub fn answered(&self, answer: &Answer) -> Result<Answered> {
         let row = answer.row();
         let held = self.known_file(row.file_id)?;
-        let echo = held.is_some_and(|(v, _, removed)| {
-            v == row.version && removed == matches!(answer.left, Left::Removed(_))
+        let echo = held.is_some_and(|known| {
+            known.version == row.version && known.removed == matches!(answer.left, Left::Removed(_))
         });
         let answered = match held {
             // Deleted for good since.
@@ -239,7 +239,11 @@ impl AccountTx<'_> {
             {
                 Answered::Superseded
             }
-            _ => Answered::of(held.map(|(v, ..)| v), answer.expected, row.version),
+            _ => Answered::of(
+                held.map(|known| known.version),
+                answer.expected,
+                row.version,
+            ),
         };
         if answered == Answered::Superseded || echo {
             return Ok(answered);
@@ -251,10 +255,40 @@ impl AccountTx<'_> {
             self.made_again(row)?;
         }
         match &answer.left {
-            Left::Live(row) => self.put_live(row)?,
+            // Whatever the answer's row says of it (one made from an older row says what
+            // that one did).
+            Left::Live(row) => match self.stays_writable(row, held)? {
+                writable if writable == row.writable => self.put_live(row)?,
+                writable => self.put_live(&MirrorRow {
+                    writable,
+                    ..row.clone()
+                })?,
+            },
             Left::Removed(removed) => self.move_to_removed(removed)?,
         }
         Ok(answered)
+    }
+
+    /// Whether the file this device wrote as `row` is one this identity may change, which a
+    /// write's answer doesn't say: as the mirror `held` the file where it had it (a change of
+    /// it); else, on another identity's drive (an identity's own has no such rows: nothing
+    /// is asked), as it has the folder the file is in (a file this device made is shared as
+    /// its folder is; one put back from Recently deleted, whose row there keeps no such
+    /// thing, likewise). The feed's row of it says for sure, a moment later.
+    fn stays_writable(&self, row: &MirrorRow, held: Option<Known>) -> Result<bool> {
+        if let Some(known) = held.filter(|known| !known.removed) {
+            return Ok(known.writable);
+        }
+        if !self.shared()? {
+            return Ok(false);
+        }
+        let folder = self.coords()?.to_drive(row.parent);
+        let writable = self.one(
+            &format!("SELECT writable FROM remote WHERE id = {ID_OF}"),
+            folder.0.as_bytes(),
+            |r| Ok(r.get::<_, bool>(0)?),
+        )?;
+        Ok(writable.unwrap_or(false))
     }
 
     /// A tombstone the feed brought (`put_tombstone`, if it says when it was written):

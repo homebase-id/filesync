@@ -62,6 +62,7 @@ fn removed(node: NodeId, parent: NodeId, removed_at: i64) -> RemovedRow {
             content_extra: None,
             token: None,
             changed_at: None,
+            writable: false,
         },
         removed_at: Some(removed_at),
     }

@@ -460,6 +460,7 @@ mod tests {
                 content_extra: Default::default(),
                 token: None,
                 changed_at: None,
+                writable: false,
             })?;
         }
         s.folder().put_local(&LocalRow {

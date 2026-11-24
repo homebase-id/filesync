@@ -60,8 +60,8 @@ pub use reader::Reader;
 pub use store::put_desktops;
 pub use store::{
     AccountTx, Answer, Answered, BaseRow, DirtyCursor, FolderKind, FolderRow, FolderTx,
-    GoneSuspect, Left, LocalRow, MAX_DEPTH, Mark, MirrorFile, MirrorRow, Placing, PlannedBase,
-    ReadTx, Recorded, Refused, RemovedRow, Store,
+    GoneSuspect, Known, Left, LocalRow, MAX_DEPTH, Mark, MirrorFile, MirrorRow, Placing,
+    PlannedBase, ReadTx, Recorded, Refused, RemovedRow, Store,
 };
 
 #[derive(Debug, thiserror::Error)]

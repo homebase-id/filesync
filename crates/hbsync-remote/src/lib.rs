@@ -65,6 +65,13 @@ pub struct RemoteHeader {
     /// is refused from then on, and the feed read from its beginning shows it as a share
     /// withdrawn ([`RemoteHeader::is_unshared`]; homebase-api-notes, "Shared with you").
     pub expires: Option<i64>,
+    /// Whether this identity may change the node, on another identity's drive: a share it
+    /// reads it through gives it `Write` (the sharer chose "Edit"), which a folder's also
+    /// takes to add to it. Told per node: one share can hold both kinds. `false` on an
+    /// identity's own drive (nothing there asks), on a tombstone, and where no share says
+    /// so. A share changed from one to the other keeps the node's version, and moves its
+    /// place in the feed, as a share given or withdrawn does.
+    pub writable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]

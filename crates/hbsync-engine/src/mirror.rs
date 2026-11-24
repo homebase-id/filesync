@@ -43,14 +43,22 @@ pub fn apply(s: AccountTx<'_>, header: &RemoteHeader) -> Result<Applied, StateEr
     };
     // The store marks the nodes that changed dirty where that concerns.
     let known = s.known_file(row.file_id)?;
-    if known.is_some_and(|(v, _, removed)| v == row.version && removed == header.removed) {
+    if let Some(known) = known
+        && known.version == row.version
+        && known.removed == header.removed
+    {
+        // The version kept, and what may be done with the node changed (its sharer turned
+        // its share from reading to editing, or back): kept, and the node planned again.
+        if !header.removed && known.writable != header.writable {
+            s.set_writable(row.file_id, header.writable)?;
+        }
         return apply_known(s, &ChangeRef::of(header), header.token.as_ref());
     }
     // A node is one folder or one file for its life (node schema, Identity and tombstones).
     // Taken as a delete and a create, a change of kind would delete this device's copy on
     // another writer's mistake: left out, the drive keeps every byte, and the node is held as
     // this device had it (its writes fork; what is in it waits).
-    if let Some((_, had, _)) = known
+    if let Some(had) = known.map(|known| known.kind)
         && had != row.kind
     {
         s.put_unreadable(row.remote_ref(), Some(row.node), Some(row.parent))?;
@@ -110,7 +118,8 @@ fn misplaced(header: &RemoteHeader) -> Option<String> {
 /// ([`RemoteHeader::changed_at`]): where the store has that one, nothing is written; where it
 /// has another for these (a client from before `versionUpdated` took a share change's time for
 /// a version it first read then, filesync #385), it takes the server's. No change of the
-/// node, so nothing to reconcile.
+/// node, so nothing to reconcile (whether this identity may change it is the header's to
+/// say, which [`apply`] takes: a ref says nothing of it).
 pub(crate) fn apply_known(
     s: AccountTx<'_>,
     r: &ChangeRef,
@@ -152,6 +161,7 @@ fn mirror_row(header: &RemoteHeader) -> Option<MirrorRow> {
     let mut row = MirrorRow {
         token: header.token.clone(),
         changed_at: header.changed_at,
+        writable: header.writable,
         ..MirrorRow::from_content(at, *node, header.parent, header.kind, content, hash)
     };
     // A content without its size (another client's) has the payload's.
@@ -236,6 +246,7 @@ mod tests {
             changed_at: None,
             token: None,
             expires: None,
+            writable: false,
         };
         assert_eq!(db.write(|s| apply(s.account(), &header))?, Applied::Live);
         if let RemoteBody::Live { payload, .. } = &mut header.body {
@@ -276,6 +287,7 @@ mod tests {
             changed_at: Some(100),
             token: None,
             expires: None,
+            writable: false,
         };
         db.write(|s| apply(s.account(), &header))?;
         header.changed_at = Some(200);
@@ -315,6 +327,7 @@ mod tests {
             changed_at: None,
             token: None,
             expires: None,
+            writable: false,
         };
         let size = mirror_row(&header).and_then(|r| r.file).map(|f| f.size);
         assert_eq!(size, Some(3));
@@ -596,6 +609,7 @@ mod tests {
             changed_at: None,
             token: None,
             expires: None,
+            writable: false,
         }
     }
 }

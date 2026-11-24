@@ -801,6 +801,7 @@ mod tests {
             changed_at: Some(5),
             token: None,
             expires: None,
+            writable: false,
         }
     }
 

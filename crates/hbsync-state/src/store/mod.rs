@@ -43,6 +43,7 @@ pub use suspects::GoneSuspect;
 mod removed;
 mod tombstones;
 mod unreadable;
+pub use unreadable::Known;
 
 /// The agreed state of one node.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,6 +147,11 @@ pub struct MirrorRow {
     /// an answer nor the feed gave it ([`AccountTx::refresh_time`]); a removed node's is its
     /// removal time.
     pub changed_at: Option<i64>,
+    /// Whether this identity may change the node, on another identity's drive
+    /// (`RemoteHeader::writable`): as the feed's header said. A row of this device's own
+    /// write doesn't say: it keeps what the store has of its file, and a file it made takes
+    /// its folder's ([`AccountTx::answered`]). Not kept of a node in Recently deleted.
+    pub writable: bool,
 }
 
 /// A remote node in Recently deleted: its row as it was, and when it went there.
@@ -258,6 +264,7 @@ impl MirrorRow {
             content_extra: content.carried_json(kind),
             token: None,
             changed_at: None,
+            writable: false,
         }
     }
 
@@ -435,9 +442,10 @@ const BASE_SELECT: &str = "SELECT n.uuid, p.uuid, b.name, b.kind, b.hash, b.size
      JOIN nodes p ON p.id = b.parent";
 /// A removed row has no `changed_at` of its own: its removal is its last write.
 const REMOVED_SELECT: &str = "SELECT file_id, version_tag, node, parent, kind, name, hash, size, \
-     mtime_ms, executable, content_extra, token, NULL, removed_at, seq FROM removed";
+     mtime_ms, executable, content_extra, token, NULL, 0, removed_at, seq FROM removed";
 const MIRROR_SELECT: &str = "SELECT m.file_id, m.version_tag, n.uuid, p.uuid, m.kind, m.name, \
-     m.hash, m.size, m.mtime_ms, m.executable, m.content_extra, m.token, m.changed_at \
+     m.hash, m.size, m.mtime_ms, m.executable, m.content_extra, m.token, m.changed_at, \
+     m.writable \
      FROM remote m JOIN nodes n ON n.id = m.id JOIN nodes p ON p.id = m.parent";
 /// The columns [`RawLocal`] reads, from `local l JOIN nodes n`.
 const LOCAL_COLS: &str = "l.id, n.uuid, l.kind, l.size, l.mtime_ns, l.ctime_ns, l.volume, \
@@ -660,14 +668,14 @@ fn base_row(r: &Row<'_>) -> Result<BaseRow> {
 fn removed_row(r: &Row<'_>) -> Result<RemovedRow> {
     Ok(RemovedRow {
         row: mirror_row(r)?,
-        removed_at: r.get(13)?,
+        removed_at: r.get(14)?,
     })
 }
 
 fn recorded_row(r: &Row<'_>) -> Result<Recorded> {
     Ok(Recorded {
         removed: removed_row(r)?,
-        seq: r.get::<_, i64>(14)? as u64,
+        seq: r.get::<_, i64>(15)? as u64,
     })
 }
 
@@ -696,5 +704,6 @@ fn mirror_row(r: &Row<'_>) -> Result<MirrorRow> {
             .get::<_, Option<Vec<u8>>>(11)?
             .map(|b| FileToken(b.into())),
         changed_at: r.get(12)?,
+        writable: r.get(13)?,
     })
 }

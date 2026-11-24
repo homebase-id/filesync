@@ -6,6 +6,17 @@
 
 use super::*;
 
+/// The file this device knows ([`ReadTx::known_file`]): its version and kind, whether it is in
+/// Recently deleted, and, of a live one, whether this identity may change it
+/// ([`MirrorRow::writable`](super::MirrorRow::writable)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Known {
+    pub version: VersionTag,
+    pub kind: NodeKind,
+    pub removed: bool,
+    pub writable: bool,
+}
+
 impl ReadTx<'_> {
     /// The nodes of the rows this client can't read (their `uniqueId`, where it read).
     pub fn unreadable_nodes(&self) -> Result<std::collections::HashSet<NodeId>> {
@@ -54,22 +65,19 @@ impl ReadTx<'_> {
             .collect())
     }
 
-    /// The version this device knows of file `file_id`, its kind, and whether it is in Recently
-    /// deleted: one lookup by file id.
-    pub fn known_file(
-        &self,
-        file_id: RemoteFileId,
-    ) -> Result<Option<(VersionTag, NodeKind, bool)>> {
+    /// What this device knows of file `file_id` ([`Known`]): one lookup by file id.
+    pub fn known_file(&self, file_id: RemoteFileId) -> Result<Option<Known>> {
         self.one(
-            "SELECT version_tag, kind, 0 FROM remote WHERE file_id = ?1 \
-             UNION ALL SELECT version_tag, kind, 1 FROM removed WHERE file_id = ?1 LIMIT 1",
+            "SELECT version_tag, kind, 0, writable FROM remote WHERE file_id = ?1 \
+             UNION ALL SELECT version_tag, kind, 1, 0 FROM removed WHERE file_id = ?1 LIMIT 1",
             file_id.0.as_bytes(),
             |r| {
-                Ok((
-                    codec::version(&r.get::<_, Vec<u8>>(0)?)?,
-                    codec::kind_from(r.get(1)?)?,
-                    r.get(2)?,
-                ))
+                Ok(Known {
+                    version: codec::version(&r.get::<_, Vec<u8>>(0)?)?,
+                    kind: codec::kind_from(r.get(1)?)?,
+                    removed: r.get(2)?,
+                    writable: r.get(3)?,
+                })
             },
         )
     }
@@ -102,7 +110,7 @@ impl AccountTx<'_> {
             || self.is_unreadable_version(at)?
             || self
                 .known_file(at.file_id)?
-                .is_some_and(|(v, ..)| v == at.version)
+                .is_some_and(|known| known.version == at.version)
         {
             return Ok(());
         }

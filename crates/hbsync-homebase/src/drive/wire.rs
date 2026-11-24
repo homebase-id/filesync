@@ -564,6 +564,8 @@ pub(crate) fn to_remote(header: FileHeader, keys: Keys<'_>) -> Result<RemoteHead
         }
         other => return Err(format!("file {id}: file state {other:?}")),
     };
+    // (A tombstone is nobody's to change; an identity's own drive has no rows.)
+    let writable = header.shared_for_writing() && matches!(body, RemoteBody::Live { .. });
     Ok(RemoteHeader {
         file_id: RemoteFileId(id),
         version: VersionTag(meta.version_tag),
@@ -574,6 +576,7 @@ pub(crate) fn to_remote(header: FileHeader, keys: Keys<'_>) -> Result<RemoteHead
         changed_at: times.changed_at,
         token,
         expires,
+        writable,
     })
 }
 
@@ -1170,6 +1173,17 @@ mod tests {
                 row.expires_at = Some(1_700_000_000_000);
             }
             assert_eq!(to_remote(until, keys)?.expires, Some(1_700_000_000_000));
+            // Shared for reading: not this identity's to change. A share that gives `Write`
+            // makes it so, while the file is live: a tombstone is nobody's to change.
+            assert!(!file.writable);
+            let mut to_edit = header.clone();
+            for row in to_edit.shares.iter_mut().flatten() {
+                row.permissions = crate::app::WRITE | 1;
+            }
+            assert!(to_remote(to_edit.clone(), keys)?.writable);
+            to_edit.file_state = "deleted".into();
+            let gone = to_remote(to_edit, keys)?;
+            assert!(gone.is_deleted() && !gone.writable, "{gone:?}");
             let why = to_remote(header, SHARED)
                 .err()
                 .ok_or("opened without the key")?;
