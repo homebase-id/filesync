@@ -700,7 +700,7 @@ fn apply_ref(s: AccountTx<'_>, r: &ChangeRef) -> Result<Applied, StateError> {
     if s.is_unreadable_version(r.at())? {
         return Ok(Applied::Refused(format!("{:?}: doesn't read", r.file_id)));
     }
-    mirror::apply_known(s, r, None, None)
+    mirror::apply_known(s, r, None)
 }
 
 /// Retries transient errors a few times with exponential backoff (50, 100, 200 ms).

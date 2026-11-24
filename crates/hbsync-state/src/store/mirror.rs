@@ -435,21 +435,20 @@ impl AccountTx<'_> {
     /// (`fan_out`), as what may be done with it changed though its version didn't (the
     /// sharer changed its share from reading to editing, or back).
     pub fn set_writable(&self, file_id: RemoteFileId, writable: bool) -> Result<()> {
-        let changed = self
-            .prep("UPDATE remote SET writable = ?2 WHERE file_id = ?1 AND writable IS NOT ?2")?
-            .execute(params![file_id.0.as_bytes(), writable])?;
-        if changed == 0 {
-            return Ok(());
-        }
-        let Some(row) = self.one(
-            &format!("{MIRROR_SELECT} WHERE m.file_id = ?1"),
-            file_id.0.as_bytes(),
-            mirror_row,
-        )?
-        else {
+        let changed: Option<(Vec<u8>, Vec<u8>)> = self
+            .prep(
+                "UPDATE remote SET writable = ?2 WHERE file_id = ?1 AND writable IS NOT ?2 \
+                 RETURNING (SELECT uuid FROM nodes WHERE id = remote.id), \
+                 (SELECT uuid FROM nodes WHERE id = remote.parent)",
+            )?
+            .query_row(params![file_id.0.as_bytes(), writable], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .optional()?;
+        let Some((node, parent)) = changed else {
             return Ok(());
         };
-        self.fan_out(row.node, row.parent)
+        self.fan_out(codec::node(&node)?, codec::node(&parent)?)
     }
 
     /// Removes the mirror row of a deleted file, marks its node dirty where that concerns

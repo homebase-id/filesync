@@ -845,16 +845,18 @@ mod tests {
         Ok(())
     }
 
+    /// Whether the DB asks for its feed to be read from its beginning.
+    fn asked(conn: &Connection) -> Result<bool> {
+        Ok(conn
+            .prepare("SELECT 1 FROM kv WHERE key = 'remote.rereading'")?
+            .exists([])?)
+    }
+
     /// An upgrade asks for the whole feed to be read again, once (migration 28: a version's
     /// time is the server's `versionUpdated`, and a row read again takes it); a new DB has
     /// nothing to read again.
     #[test]
     fn an_upgrade_reads_the_feed_again_and_a_new_db_doesnt() -> Result<()> {
-        let asked = |conn: &Connection| -> Result<bool> {
-            Ok(conn
-                .prepare("SELECT 1 FROM kv WHERE key = 'remote.rereading'")?
-                .exists([])?)
-        };
         let mut new = Connection::open_in_memory()?;
         apply(&mut new)?;
         assert!(!asked(&new)?);
@@ -870,11 +872,6 @@ mod tests {
     /// what its header says. An identity's own drive isn't read again for it.
     #[test]
     fn a_shares_db_reads_its_feed_again_for_what_may_be_changed() -> Result<()> {
-        let asked = |conn: &Connection| -> Result<bool> {
-            Ok(conn
-                .prepare("SELECT 1 FROM kv WHERE key = 'remote.rereading'")?
-                .exists([])?)
-        };
         for shared in [true, false] {
             // As of the version before: up to date, nothing asked.
             let mut conn = Connection::open_in_memory()?;

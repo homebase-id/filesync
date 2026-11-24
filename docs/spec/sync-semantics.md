@@ -1698,7 +1698,8 @@ rules hold too:
   its beginning once (a re-read, §8b), each row taking what its header says.
   The cost: nothing on an identity's own drive (no statement more; its headers say "no");
   on another identity's, one small write per row whose share changed without its version,
-  one look per own write there, and that one re-read after the upgrade (a share of 10,000
+  one look at its folder's row per file this device makes there, and that one re-read
+  after the upgrade (a share of 10,000
   files: 20 requests, about 25 MB, as any re-read). Engine test
   `a_share_changed_to_editing_is_kept_and_its_item_planned_again`; store tests
   `what_may_be_changed_is_kept_and_a_change_of_it_is_planned`,

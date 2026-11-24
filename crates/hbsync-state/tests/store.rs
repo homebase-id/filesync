@@ -1284,7 +1284,8 @@ mod mirror {
     /// this device made takes its folder's (it is shared as the folder is), so neither reads
     /// as read-only until the feed's row comes. A file shared for reading alone in a folder
     /// shared for editing stays so; one made where the store has no folder is not. On an
-    /// identity's own drive nothing is asked or kept.
+    /// identity's own drive no folder is asked (none says so there: the rows are made to,
+    /// here, to show it).
     #[test]
     fn a_writes_answer_keeps_what_may_be_changed() -> R {
         use hbsync_state::Answer;
@@ -1325,7 +1326,7 @@ mod mirror {
             let kept = |db: &mut StateDb, node| {
                 db.read(|s| Ok(s.get_mirror(node)?.map(|row| (row.name, row.writable))))
             };
-            assert_eq!(kept(&mut db, file.node)?, Some(("f2".into(), shared)));
+            assert_eq!(kept(&mut db, file.node)?, Some(("f2".into(), true)));
             assert_eq!(kept(&mut db, to_read.node)?, Some(("g2".into(), false)));
             assert_eq!(kept(&mut db, made.node)?, Some(("new".into(), shared)));
             let top = db.read(|s| s.mirror_by_file(at_the_top.file_id))?;

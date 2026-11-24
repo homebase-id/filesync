@@ -43,6 +43,7 @@ pub use suspects::GoneSuspect;
 mod removed;
 mod tombstones;
 mod unreadable;
+pub use unreadable::Known;
 
 /// The agreed state of one node.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -165,11 +165,11 @@ fn a_share_changed_to_editing_is_kept_and_its_item_planned_again() -> R {
     a.sync()?;
     share(&a, &server, "to-edit.txt")?;
     share(&a, &server, "to-read.txt")?;
+    let file = |name: &str| common::header_named(&server, name);
     a.remote
-        .share_to_edit(common::header_named(&server, "edited-from-the-start.txt").file_id)?;
+        .share_to_edit(file("edited-from-the-start.txt").file_id)?;
     let (mut b, out) = Client::member(&server, "b")?;
     b.sync()?;
-    let file = |name: &str| common::header_named(&server, name);
     let kept = |b: &mut Client, name: &str| -> Result<bool, Box<dyn std::error::Error>> {
         let row = b
             .engine
