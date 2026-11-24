@@ -202,7 +202,7 @@ struct Reconciler<'a> {
     left: BTreeSet<NodeId>,
     /// The nodes this identity may change on another identity's drive that follow it in this
     /// plan all the same (§13, `one_way`): one gone there or here, or edited on both sides
-    /// (the merge's); one a repair gave its place (an orphan let go of, a cycle's move
+    /// where no copy of it may be added (the merge's); one a repair gave its place (an orphan let go of, a cycle's move
     /// undone: the drive is its owner's to mend, no repair here writes to it). (A name
     /// clash's loser is left out of the plan; what this device leaves out, §10, isn't in the
     /// view's drive: neither is written.)

@@ -333,6 +333,12 @@ impl Server {
         }
     }
 
+    /// The live node `node`, if its file is one the member may change ([`Server::editable`]):
+    /// a folder that is one may be added to.
+    pub(crate) fn editable_node(&self, node: NodeId) -> Option<&ServerNode> {
+        (self.live.get(&node)).filter(|n| self.editable.contains(&n.remote.file_id))
+    }
+
     /// Takes what a member that writes changed on the drive as it read it (`seen`, which was
     /// as `before` when its sync began: [`Server::as_shared`]) into the drive:
     /// - a change of a file it may change, where the file is: the drive keeps the folder it
@@ -350,9 +356,7 @@ impl Server {
         if seen.removed != before.1 {
             breach = Some("it changed Recently deleted".to_owned());
         }
-        let adds_to = |drive: &Server, folder: NodeId| {
-            (drive.live.get(&folder)).is_some_and(|f| drive.editable.contains(&f.remote.file_id))
-        };
+        let adds_to = |drive: &Server, folder: NodeId| drive.editable_node(folder).is_some();
         for (id, was) in &before.0 {
             let Some(now) = seen.live.get(id) else {
                 breach.get_or_insert_with(|| format!("it removed {id:?}"));

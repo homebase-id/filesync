@@ -988,11 +988,8 @@ impl Sim {
     /// Whether a member's `op` is a write it may make, by what the drive says now (the
     /// engine's `Executor::may_change`): a change of a file it may change, where the drive
     /// has it, or its move between two folders it may change; a node made in such a folder.
-    fn may_change(&self, op: &Op) -> bool {
-        let server = &self.server;
-        let editable = |node: NodeId| {
-            (server.live.get(&node)).filter(|n| server.editable.contains(&n.remote.file_id))
-        };
+    pub(crate) fn may_change(&self, op: &Op) -> bool {
+        let editable = |node: NodeId| self.server.editable_node(node);
         let changes = |to: Option<NodeId>| {
             editable(op.node()).is_some_and(|on_drive| match to {
                 Some(to) if to != on_drive.state.parent => {
