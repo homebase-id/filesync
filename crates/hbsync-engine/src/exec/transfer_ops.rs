@@ -438,20 +438,12 @@ impl Executor<'_> {
             // the node is planned again from the feed read now (the picture was behind), what
             // changed here moving out. (In a folder that doesn't write to what is shared, no
             // such write is sent.)
-            (
-                _,
-                Job::Upload {
-                    target: Some(target),
-                    ..
-                }
-                | Job::Meta {
-                    target: Some(target),
-                    ..
-                },
-                JobResult::Failed(JobError::Remote(RemoteError::ReadOnly(why))),
-            ) if self.folder.writes => {
+            (_, job, JobResult::Failed(JobError::Remote(RemoteError::ReadOnly(why))))
+                if self.folder.writes
+                    && let Some(file_id) = job.file_id() =>
+            {
                 self.db
-                    .write(|s| s.account().set_writable(target.at.file_id, false))?;
+                    .write(|s| s.account().set_writable(file_id, false))?;
                 self.report.news.behind = true;
                 Ok(Outcome::stale(why))
             }

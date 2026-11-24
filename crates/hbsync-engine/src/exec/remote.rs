@@ -75,13 +75,14 @@ impl Executor<'_> {
     /// (a folder that writes to what is shared with it: sync semantics §13) a node whose
     /// folder isn't shared is shown at the top, and a change of it where it is must send the
     /// folder the drive has it in: sent as the top's, the write would move the sharer's node
-    /// out of its folder. One lookup, in such a folder only.
+    /// out of its folder. One lookup, in such a folder, of a node at its top only (what is in
+    /// a folder here is in that folder on the drive).
     pub(super) fn sent_folder(
         &mut self,
         mirror: &MirrorRow,
         parent: NodeId,
     ) -> Result<NodeId, StateError> {
-        if !self.folder.writes || parent != mirror.parent {
+        if !self.folder.writes || parent != mirror.parent || !parent.is_root() {
             return Ok(parent);
         }
         let on_drive = self.db.read(|s| s.drive_folder(mirror.node))?;
