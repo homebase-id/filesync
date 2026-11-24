@@ -1725,7 +1725,9 @@ rules hold too:
   - not synced here for its name (left out: its folder no longer shared, its name at the
     top taken, above), its edit here doesn't go up either, and stays with it; but a delete
     here takes no edit: where its folder goes here, the edited file moves out first (what
-    a delete here would take that changed here does, whatever kept it from going up);
+    a delete here would take that changed here does, whatever kept it out of the plan, in
+    a folder that only reads too: a file edited here that waits for a folder there this
+    device can't read, say);
   - deleted here, it is removed there: it goes to its owner's Recently deleted (below);
   - edited on both sides, both are kept where its folder may be added to (below): the
     drive's version keeps the file, and this device's becomes a conflict copy beside it,

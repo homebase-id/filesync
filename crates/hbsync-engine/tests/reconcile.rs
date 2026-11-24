@@ -4094,6 +4094,39 @@ fn read_only_a_delete_here_takes_no_edit_below_a_folder_left_out() {
     assert!(plan.deferred.contains(&sub));
 }
 
+/// A file edited here whose folder on the drive this device can't read (a newer writer's,
+/// say) waits, out of the plan, its move out with it. Its folder here goes (its share
+/// withdrawn): the edit moves out first, whether the folder writes there or only reads.
+#[test]
+fn read_only_a_file_that_waits_for_a_folder_it_cant_read_moves_its_edit_out() {
+    let [b, f, q] = ids(3)[..] else {
+        unreachable!()
+    };
+    for writes in [false, true] {
+        let mut w = read_only();
+        w.synced(b, folder(ROOT, "b"))
+            .synced(f, file(b, "f.txt", "x"));
+        w.remote(b, None).remote(f, Some(file(q, "f.txt", "x")));
+        w.input.unreadable.insert(q);
+        if writes {
+            editing(&mut w);
+        }
+        w.local(f, Some(file(b, "f.txt", "mine")));
+        let plan = w.plan();
+        assert!(!plan.writes_drive(), "{writes}: {:?}", plan.ops);
+        let mut want = vec![("LocalDelete", b), ("LocalEvict", f)];
+        want.sort();
+        assert_eq!(sorted_ops(&plan), want, "{writes}: {:?}", plan.ops);
+        let taken = (plan.ops.iter())
+            .find_map(|op| match op {
+                Op::LocalDelete { subtree, .. } => Some(subtree.clone()),
+                _ => None,
+            })
+            .expect("the folder goes here");
+        assert_eq!(taken, [b], "{writes}: {:?}", plan.ops);
+    }
+}
+
 /// A file edited on both sides, in a folder this identity may add to: both are kept, as on
 /// its own drive. The drive's version keeps the file, and this device's becomes a copy
 /// beside it, added there.
