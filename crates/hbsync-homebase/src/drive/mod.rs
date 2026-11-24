@@ -188,9 +188,6 @@ struct KeyState {
     write_only: Option<String>,
     /// That key opened ([`KeyState::write_only`]), the first time it is asked for.
     opened: OnceLock<Option<Arc<WriteOnlyKey>>>,
-    /// The app holds `UseTransitRead` ([`app::USE_TRANSIT_READ`]): it may read what others
-    /// share with this identity.
-    reads_shared: bool,
     /// The app holds `UseTransitWrite` ([`app::USE_TRANSIT_WRITE`]): it may send to other
     /// identities' drives, as a change to what they share with this one is.
     sends: bool,
@@ -235,7 +232,6 @@ impl KeyState {
             unlisted,
             write_only: grant.and_then(|g| g.write_only).map(str::to_owned),
             opened: OnceLock::new(),
-            reads_shared: holds_key(&context, app::USE_TRANSIT_READ),
             sends: holds_key(&context, app::USE_TRANSIT_WRITE),
             sends_read: Some(std::time::Instant::now()),
         })
@@ -663,8 +659,7 @@ impl HomebaseRemote {
 
     /// The key of `sharer`'s `circle`, sealed to this identity's drive and opened with the
     /// drive's write-only key (its private half, locked with the drive's key in the app's grant):
-    /// one request to this identity's server (which asks theirs), and one more where the app
-    /// may lack the permission to ask ([`HomebaseRemote::reads_shared_now`]).
+    /// one request to this identity's server (which asks theirs).
     ///
     /// None sealed yet, or the connection not reviewed by them, is [`RemoteError::Waiting`]: they
     /// do it on their own time (a device of theirs seals it when next online). What only the
@@ -674,13 +669,12 @@ impl HomebaseRemote {
     /// A private drive without its key refuses this computer first, as [`Self::drive_key`]
     /// does.
     pub(crate) fn circle_key(&self, sharer: &markers::Sharer, circle: Uuid) -> Result<CircleKey> {
-        let (write_only, permitted) =
-            self.key_state(false, |s| Ok((s.write_only()?, s.reads_shared)))?;
+        let write_only = self.key_state(false, KeyState::write_only)?;
         let no_key = || RemoteError::Denied(NO_WRITE_ONLY_KEY.into(), Refusal::NoKey);
         // The write-only key first: without one that opens, the permission wouldn't help (and it
         // costs no request).
         let write_only = write_only.ok_or_else(no_key)?;
-        let answer = self.ask_peer(&sharer.odin_id, permitted, || {
+        let answer = self.ask_peer(&sharer.odin_id, || {
             SealedKey::ask(&self.client, &sharer.odin_id, circle)
         })?;
         let sealed = sealed_or_wait(answer, &sharer.odin_id)?;
@@ -691,51 +685,35 @@ impl HomebaseRemote {
 
     /// A new token for `sharer`'s server ([`PeerToken::new`]: a row there that stays, so one
     /// is kept, [`shared::PeerRemote::open`]): one request to this identity's server, which
-    /// asks theirs, and one more where the app may lack the permission to ask. The app's
-    /// want of it refuses ([`Refusal::Permission`], an approval), told from their refusal as
-    /// [`Self::circle_key`] tells it.
+    /// asks theirs. The app's want of the permission refuses ([`Refusal::Permission`], an
+    /// approval), told from their refusal as [`Self::circle_key`] tells it.
     pub(crate) fn peer_token(&self, sharer: &str) -> Result<PeerToken> {
-        let permitted = self.key_state(false, |s| Ok(s.reads_shared))?;
-        self.ask_peer(sharer, permitted, || PeerToken::new(&self.client, sharer))
+        self.ask_peer(sharer, || PeerToken::new(&self.client, sharer))
     }
 
-    /// What `ask` answers of `sharer`'s server through this one's, which the app
-    /// needs a permission for (`permitted`: whether it held it when the context was last
-    /// read). Without it the ask is refused ([`Refusal::Permission`]): the context read again
-    /// first (right after a reconnect, a second read of it: one request, rarely). A codeless
-    /// 403 is theirs, or the app's want of the permission (`Client::whose`): the context,
-    /// read again (unless just read for a permission lacking before), says which.
+    /// What `ask` answers of `sharer`'s server through this one's, which the app needs a
+    /// permission for. This identity's server says where the app lacks it
+    /// ([`lacks_permission`]): refused ([`Refusal::Permission`], an approval: an install from
+    /// before the app asked for it has to be given it by the owner, [`app::update_url`]).
+    /// Whether it holds it is never looked up first: the ask itself tells, also once the owner
+    /// has given it (which no reconnect says; **[inferred]**: odin-core's permission update
+    /// closes no socket). Any other 403 is theirs (`Client::whose`).
     fn ask_peer<T>(
         &self,
         sharer: &str,
-        permitted: bool,
         ask: impl FnOnce() -> std::result::Result<T, HomebaseError>,
     ) -> Result<T> {
-        let not_permitted = || RemoteError::Denied(NOT_PERMITTED.into(), Refusal::Permission);
-        if !permitted && !self.reads_shared_now()? {
-            return Err(not_permitted());
-        }
         match ask() {
             Ok(answer) => Ok(answer),
             // Not connected to them (any more): this identity's own answer, before theirs is
             // asked. Theirs to mend or the owner's, and nothing a retry in minutes changes.
             Err(e) if not_connected(&e) => Err(not_connected_to(sharer, "read")),
-            Err(e) if codeless_forbidden(&e) && permitted => match self.reads_shared_now()? {
-                false => Err(not_permitted()),
-                true => Err(remote_error(e)),
-            },
+            Err(e) if lacks_permission(&e) => Err(RemoteError::Denied(
+                NOT_PERMITTED.into(),
+                Refusal::Permission,
+            )),
             Err(e) => Err(remote_error(e)),
         }
-    }
-
-    /// Whether the app may read what others share with this identity (an install from before it
-    /// asked for that has to be given it by the owner, [`app::update_url`]), the security
-    /// context read again now for it alone (one request, nothing held meanwhile): the owner may
-    /// have given the permission since, which no reconnect tells (**[inferred]**: odin-core's
-    /// permission update closes no socket). Kept for [`Self::circle_key`]'s next look; an
-    /// answer overtaken by another read costs that look one more read, no more.
-    fn reads_shared_now(&self) -> Result<bool> {
-        self.holds_now(app::USE_TRANSIT_READ, |state| &mut state.reads_shared)
     }
 
     /// A send was refused for want of the permission to send: not held, as of now.
@@ -1230,10 +1208,14 @@ fn not_connected_to(sharer: &str, done: &str) -> RemoteError {
     }
 }
 
-/// A 403 without a code: on a peer route, the other identity's refusal, or this app's want of
-/// the permission to ask (`Client::whose`).
-fn codeless_forbidden(e: &HomebaseError) -> bool {
-    matches!(e, HomebaseError::Api { error, .. } if error.status == 403 && error.code.is_none())
+/// This identity's own server's refusal for want of a permission the app would need: a 403
+/// that says so by its code, `missingPermissionKey` (with `permissionKeys`, the keys any one
+/// of which would have done; odin-core PR #2164, **[verified]** live at b79aefa99). Another
+/// identity's own such refusal never comes as one: this server passes theirs on as a plain
+/// refusal. So it is always this app's.
+pub(crate) fn lacks_permission(e: &HomebaseError) -> bool {
+    matches!(e, HomebaseError::Api { error, .. }
+        if error.status == 403 && error.is("missingPermissionKey"))
 }
 
 /// The sealed circle key `sharer`'s server answered, or how long to wait for it
@@ -2241,12 +2223,9 @@ mod tests {
     /// hour, in words that name them: nothing a retry in minutes changes, and no failure.
     #[test]
     fn not_connected_to_the_sharer_waits_an_hour_and_says_so() -> Result<(), HomebaseError> {
-        let own = unreachable_remote(KeyState {
-            reads_shared: true,
-            ..KeyState::default()
-        })?;
+        let own = unreachable_remote(KeyState::default())?;
         let not_connected = || Err::<(), _>(api(400, Some("notAConnectedIdentity")));
-        match own.ask_peer("sam.example", true, not_connected) {
+        match own.ask_peer("sam.example", not_connected) {
             Err(RemoteError::Waiting { why, retry_after }) => {
                 assert!(why.starts_with("not connected to sam.example"), "{why}");
                 assert_eq!(retry_after, NOT_CONNECTED_WAIT);
@@ -2256,25 +2235,53 @@ mod tests {
         // Another 400 of theirs stays the failure it is.
         let other = || Err::<(), _>(api(400, Some("invalidGlobalTransitId")));
         assert!(matches!(
-            own.ask_peer("sam.example", true, other),
+            own.ask_peer("sam.example", other),
             Err(RemoteError::Fatal(_))
         ));
         Ok(())
     }
 
-    /// Only a 403 without a code may be for want of the permission to read shares.
+    /// This identity's server says by its code where the app lacks the permission to ask
+    /// another's (as it answers it, seen live): refused as that, an approval lifts it, and
+    /// nothing more is asked (the identity is unreachable here). A 403 without that code is
+    /// the other identity's refusal, as before.
     #[test]
-    fn only_a_codeless_403_may_be_the_permission() {
-        assert!(codeless_forbidden(&api(403, None)));
-        // As the server sends it (seen live): its "no code" is a code on the wire.
-        let sent = br#"{"title":"Forbidden: Does not have permission","status":403,"errorCode":"noErrorCode"}"#;
-        assert!(codeless_forbidden(&HomebaseError::Api {
+    fn the_apps_want_of_the_permission_is_told_by_its_code() -> Result<(), HomebaseError> {
+        let sent = |body: &[u8]| HomebaseError::Api {
             what: "/api/v2/peer/notify/token".into(),
-            error: ApiError::parse(403, sent),
-        }));
-        assert!(!codeless_forbidden(&api(403, Some("notReviewedByOwner"))));
-        assert!(!codeless_forbidden(&api(401, None)));
-        assert!(!codeless_forbidden(&HomebaseError::Network("cut".into())));
+            error: ApiError::parse(403, body),
+        };
+        let lacking = br#"{"title":"Forbidden: Does not have permission","status":403,"errorCode":"missingPermissionKey","permissionKeys":[305]}"#;
+        let by_number = br#"{"status":403,"errorCode":1006,"permissionKeys":[210,305]}"#;
+        let own = unreachable_remote(KeyState::default())?;
+        for body in [&lacking[..], &by_number[..]] {
+            assert!(lacks_permission(&sent(body)));
+            match own.ask_peer("sam.example", || Err::<(), _>(sent(body))) {
+                Err(RemoteError::Denied(why, Refusal::Permission)) => {
+                    assert_eq!(why, NOT_PERMITTED)
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        // Theirs: no code, the server's "no code", or another one. And the code on another
+        // status isn't it.
+        let codeless = br#"{"title":"Forbidden","status":403,"errorCode":"noErrorCode"}"#;
+        for theirs in [
+            api(403, None),
+            sent(codeless),
+            api(403, Some("notReviewedByOwner")),
+            api(400, Some("missingPermissionKey")),
+            api(401, None),
+            HomebaseError::Network("cut".into()),
+        ] {
+            assert!(!lacks_permission(&theirs), "{theirs:?}");
+        }
+        let refused = own.ask_peer("sam.example", || Err::<(), _>(api(403, None)));
+        assert!(
+            !matches!(refused, Err(RemoteError::Denied(_, Refusal::Permission))),
+            "{refused:?}"
+        );
+        Ok(())
     }
 
     /// A circle key not sealed yet, or a connection not reviewed, waits on the sharer: asked

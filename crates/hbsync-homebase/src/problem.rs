@@ -52,6 +52,7 @@ const NO_ERROR_CODE: &str = "noErrorCode";
 /// The `OdinClientErrorCode`s the client acts on (`OdinClientErrorCode.cs`).
 const KNOWN_CODES: &[(u32, &str)] = &[
     (0, NO_ERROR_CODE),
+    (1006, "missingPermissionKey"),
     (4002, "cannotUpdateNonActiveFile"),
     (4105, "existingFileWithUniqueId"),
     (4106, "fileNotFound"),

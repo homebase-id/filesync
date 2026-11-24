@@ -235,9 +235,9 @@ impl Client {
     /// Whose a refusal of `path` would be: another identity's on their server
     /// ([`Client::for_peer`]); on this one's peer routes (`/api/v2/peer/...`, which ask another),
     /// a 403 is theirs (not reviewed, not a member, no longer connected; odin-core
-    /// `PeerServiceBase`) as long as the app holds the permission they need, which a codeless
-    /// 403 can also mean (the caller reads the security context again after one:
-    /// `reads_shared_now`), a 401 this login's; elsewhere this login's.
+    /// `PeerServiceBase`) unless its code says the app lacks the permission the route needs
+    /// (`missingPermissionKey`: the caller looks, `drive::lacks_permission`), a 401 this
+    /// login's; elsewhere this login's.
     fn whose(&self, path: &str) -> Whose {
         match (self.peer, path.starts_with("/api/v2/peer/")) {
             (true, _) => Whose::Theirs,
