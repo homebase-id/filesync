@@ -40,9 +40,9 @@ pub struct FolderCtx {
     /// Whether a read-only folder writes to the drive what its items say this identity may
     /// change there (`MirrorRow::writable`; the rest of it stays one-way). Off, every item
     /// is read-only, whatever it says. Such an item is changed where it is (its edit, its
-    /// tags, its rename), and such a folder is added to; an item moves between two such
-    /// folders (sync semantics §13, "What may be changed is told per item"). Nothing turns
-    /// it on yet, and nothing is to before a member's deletes are settled.
+    /// tags, its rename) and removed by a delete here (to its owner's Recently deleted);
+    /// such a folder is added to, and an item moves between two such folders (sync
+    /// semantics §13, "What may be changed is told per item"). Nothing turns it on yet.
     pub writes: bool,
 }
 

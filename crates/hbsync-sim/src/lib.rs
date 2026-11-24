@@ -360,8 +360,8 @@ impl Sim {
     /// Client `c` is a member ([`Sim::with_member`]) that writes to what is shared with it for
     /// editing ([`Action::Editable`]): its change of such an item, where the item is, reaches
     /// the drive (an edit, a rename in its folder, tags), and so do what it makes in such a
-    /// folder and its move of such an item between two such folders. The rest of its folder
-    /// is read-only.
+    /// folder, its move of such an item between two such folders, and its delete of one (a
+    /// removal to Recently deleted). The rest of its folder is read-only.
     pub fn with_writing_member(mut self, c: usize) -> Self {
         self = self.with_member(c);
         self.clients[c].writes = true;
