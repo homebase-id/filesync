@@ -1692,15 +1692,22 @@ rules hold too:
   and moves its place in the feed, as a share given does: the member's next read takes
   it, and plans the item again (`AccountTx::set_writable`). This device's own write's
   answer doesn't say: a change keeps what the store has of the file, and a file it made
-  takes its folder's (it is shared as its folder is), until the feed's row says for sure.
+  takes its folder's (it is shared as its folder is; one it put back from Recently deleted
+  likewise), until the feed's row says for sure. The word is the share's, and the sharer's
+  server can still refuse: a share's row narrows what its circle may do on the drive and
+  never widens it, and that is checked when the share is written, so a circle that lost
+  its right to write since leaves rows that say "edit" (**[verified]** odin-core
+  `DriveShareService.AssertCircleFitsAsync`, `AssertMemberMayWriteAsync`). A write refused
+  so is to count as read-only after all, where a folder writes.
   Nothing reads it yet: a folder synced from another identity's drive is read-only (above),
   whatever its items say. A share's state DB from before it was kept reads its feed from
   its beginning once (a re-read, §8b), each row taking what its header says.
-  The cost: nothing on an identity's own drive (no statement more; its headers say "no");
+  The cost: next to nothing on an identity's own drive (its headers say "no"; a
+  transaction in which this device makes a file reads once whether the DB is a share's);
   on another identity's, one small write per row whose share changed without its version,
-  one look at its folder's row per file this device makes there, and that one re-read
-  after the upgrade (a share of 10,000
-  files: 20 requests, about 25 MB, as any re-read). Engine test
+  one look at its folder's row per file this device makes or puts back there, and that one
+  re-read after the upgrade (a share of 10,000 files: 20 requests, about 25 MB, as any
+  re-read). Engine test
   `a_share_changed_to_editing_is_kept_and_its_item_planned_again`; store tests
   `what_may_be_changed_is_kept_and_a_change_of_it_is_planned`,
   `a_writes_answer_keeps_what_may_be_changed`; the contract's editing scenarios read the

@@ -1285,7 +1285,8 @@ mod mirror {
     /// as read-only until the feed's row comes. A file shared for reading alone in a folder
     /// shared for editing stays so; one made where the store has no folder is not. On an
     /// identity's own drive no folder is asked (none says so there: the rows are made to,
-    /// here, to show it).
+    /// here, to show it). What the answer's own row says counts for nothing (one made from
+    /// an older row says what that one did).
     #[test]
     fn a_writes_answer_keeps_what_may_be_changed() -> R {
         use hbsync_state::Answer;
@@ -1318,9 +1319,10 @@ mod mirror {
             db.write(|s| {
                 let a = s.account();
                 a.answered(&Answer::live(Some(file.version), answer(&file, "f2")))?;
-                a.answered(&Answer::live(Some(to_read.version), answer(&to_read, "g2")))?;
+                let stale = editable(answer(&to_read, "g2"));
+                a.answered(&Answer::live(Some(to_read.version), stale))?;
                 a.answered(&Answer::live(None, made.clone()))?;
-                a.answered(&Answer::live(None, at_the_top.clone()))?;
+                a.answered(&Answer::live(None, editable(at_the_top.clone())))?;
                 Ok(())
             })?;
             let kept = |db: &mut StateDb, node| {

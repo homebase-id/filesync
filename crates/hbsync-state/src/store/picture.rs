@@ -255,14 +255,15 @@ impl AccountTx<'_> {
             self.made_again(row)?;
         }
         match &answer.left {
-            Left::Live(row) if self.stays_writable(row, held)? => {
-                let row = MirrorRow {
-                    writable: true,
+            // Whatever the answer's row says of it (one made from an older row says what
+            // that one did).
+            Left::Live(row) => match self.stays_writable(row, held)? {
+                writable if writable == row.writable => self.put_live(row)?,
+                writable => self.put_live(&MirrorRow {
+                    writable,
                     ..row.clone()
-                };
-                self.put_live(&row)?
-            }
-            Left::Live(row) => self.put_live(row)?,
+                })?,
+            },
             Left::Removed(removed) => self.move_to_removed(removed)?,
         }
         Ok(answered)

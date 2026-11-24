@@ -630,7 +630,12 @@ server answers the rest, to a token their server made for this identity's connec
   `MainIndexMeta.WriteSharesAsync`, which upserts the row and touches the file keeping its
   version, and `DriveShareService`, which then announces the file; not tried live): the
   member's feed brings the file again at the version it has, its rows as they are now, and
-  the client takes whether it may change it from them (`RemoteHeader::writable`). That is the header's `updated` too
+  the client takes whether it may change it from them (`RemoteHeader::writable`). The rows
+  can say more than the server allows: a row is checked against its circle's grant on the
+  drive when it is written, not after, so a circle that has lost `Write` since leaves rows
+  with it, and the member's write is refused (**[verified]** odin-core
+  `DriveShareService.AssertCircleFitsAsync`,
+  `DriveStorageServiceBase.AssertMemberMayWriteAsync`). That is the header's `updated` too
   (**[verified]** `FileMetadata`: `Updated = record.modified`), so `updated` is when the file
   last changed in the feed, not when its version was written: a removed node's moves with a
   share change too. The client therefore reads no time from `updated` (but the "no longer
