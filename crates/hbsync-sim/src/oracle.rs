@@ -79,6 +79,9 @@ pub(crate) struct Ledger {
     /// The first answer of a client's write the store recorded wrongly: left out alone, or
     /// over a newer state of its node a pull recorded meanwhile ([`crate::Action::Meanwhile`]).
     answer_undid: Option<String>,
+    /// The first write of a client's to a node that waits for a folder no client reads on the
+    /// drive ([`crate::Action::IntoNewer`]): out of every plan, nothing writes it.
+    wrote_waiting: Option<String>,
     /// The first write to the drive a read-only folder planned (sync semantics §13).
     read_only_wrote: Option<String>,
     /// The first plan the engine's own planning path made otherwise ([`Sim::with_narrow_check`]).
@@ -204,6 +207,12 @@ impl Ledger {
     /// (through live folders) each at its version: what its removal took along, as it happened.
     pub(crate) fn folder_removed(&mut self, folder: NodeId, below: BTreeMap<NodeId, VersionTag>) {
         self.took.insert(folder, below);
+    }
+
+    /// A client wrote a node that waited for a folder no client reads, if `what` names the
+    /// write.
+    pub(crate) fn wrote_waiting(&mut self, what: impl FnOnce() -> Option<String>) {
+        first(&mut self.wrote_waiting, what);
     }
 
     /// A client's write's answer was recorded wrongly, if `what` says how
@@ -380,6 +389,11 @@ impl Sim {
         if let Some(what) = &ledger.held_after_put_back {
             return Err(format!("after a put back: {what}"));
         }
+        if let Some(what) = &ledger.wrote_waiting {
+            return Err(format!(
+                "wrote what waits for a folder no client reads: {what}"
+            ));
+        }
         if let Some(what) = &ledger.answer_undid {
             return Err(format!("a write's answer was recorded wrongly: {what}"));
         }
@@ -496,39 +510,49 @@ impl Sim {
             }
             // What waits for a folder no client reads (moved into it by a newer client,
             // `Action::IntoNewer`, after it synced here) is out of every plan: where the client
-            // holds it, it stays as it is, its bytes kept here, and its base as it was.
-            stays_waiting.extend(&waiting);
+            // holds it, synced here (its real base has it), or put in place for a plan that
+            // didn't see it wait (the drive moved it meanwhile), it stays as it is, its bytes
+            // kept here, and its base as it was. One it never had otherwise has no place here
+            // to wait at (made or brought down for a plan that saw it wait).
             waits_on_drive.extend(&waiting);
             for &n in &waiting {
                 base.remove(n);
             }
-            let mut aside: BTreeSet<NodeId> = waiting
-                .iter()
-                .copied()
+            let mut aside: BTreeSet<NodeId> = (waiting.iter().copied())
                 .filter(|n| visible.contains(*n))
+                .filter(|n| {
+                    client.base.contains(*n)
+                        || client
+                            .placed_unwaiting
+                            .contains(&client.coords.to_drive(*n))
+                })
                 .collect();
-            // What else here waits with it, as the engine's plan has it: what has its folder
-            // among those, as the merge places it (the drive's where the drive moved it, else
-            // the one here: a move into it here, something made or changed here in it), up
-            // through folders gone there. Changed here, on an identity's own drive (read-only,
-            // a change moves out), it keeps the folders it is in here (§6.3): those the client
-            // isn't to have stay as they are, up to the first it is to have. Each on its own:
-            // what else is in them and is gone there, unchanged here, still goes; what the
-            // drive moved out of them converges.
+            // What else here waits with it, as the engine's plan has it: what the merge places
+            // in it (the drive's folder where the drive moved it, else the one here: a move
+            // into it here, something made or changed here in it), up through folders gone
+            // there. Changed here, on an identity's own drive (read-only, a change moves out),
+            // it keeps the folders it is in here (§6.3; `kept`): those the client isn't to
+            // have stay as they are, up to the first it is to have. Each on its own: what else
+            // is in them and is gone there, unchanged here, still goes; what the drive moved
+            // out of them converges; and what changed here beside it, in a folder kept so,
+            // isn't left: its folder is made again there for it, its change sent (the engine
+            // places it before it keeps folders), so it reaches only through such a folder.
             let changed = |k: NodeId| {
                 let (Some(here), had) = (client.local.get(k), client.base.get(k)) else {
                     return false;
                 };
                 let local_hash = client.extra.get(&k).and_then(|e| e.local_hash);
-                let there = self.server.live.get(&k).map(|s| &s.state);
-                changed_here(here, had, local_hash, there)
+                changed_here(here, had, local_hash, server.get(k))
             };
-            let reaches = |aside: &BTreeSet<NodeId>, mut at: NodeId| {
+            let mut kept: BTreeSet<NodeId> = BTreeSet::new();
+            let reaches = |aside: &BTreeSet<NodeId>, kept: &BTreeSet<NodeId>, mut at: NodeId| {
                 for _ in 0..=visible.len() {
-                    if aside.contains(&at) {
+                    if aside.contains(&at) && !kept.contains(&at) {
                         return true;
                     }
-                    let Some(here) = visible.get(at).filter(|_| !synced.contains(at)) else {
+                    let Some(here) =
+                        (visible.get(at)).filter(|_| !synced.contains(at) || kept.contains(&at))
+                    else {
                         return false;
                     };
                     at = here.parent;
@@ -536,19 +560,22 @@ impl Sim {
                 false
             };
             loop {
-                let before = aside.len();
+                let before = (aside.len(), kept.len());
                 let joins: Vec<NodeId> = (visible.iter())
-                    .filter(|(k, _)| !aside.contains(k))
+                    .filter(|(k, _)| !aside.contains(k) || kept.contains(k))
                     .filter(|(k, here)| match synced.get(*k) {
                         Some(t) if client.base.get(*k).is_some_and(|b| !b.same_place(t)) => {
-                            aside.contains(&t.parent)
+                            aside.contains(&t.parent) && !kept.contains(&t.parent)
                         }
-                        Some(_) => reaches(&aside, here.parent),
-                        None => changed(*k) && reaches(&aside, here.parent),
+                        Some(_) => reaches(&aside, &kept, here.parent),
+                        None => changed(*k) && reaches(&aside, &kept, here.parent),
                     })
                     .map(|(k, _)| k)
                     .collect();
-                aside.extend(joins);
+                for k in joins {
+                    aside.insert(k);
+                    kept.remove(&k);
+                }
                 if !client.read_only {
                     let keep: Vec<NodeId> = (aside.iter().copied())
                         .filter(|n| changed(*n))
@@ -557,14 +584,19 @@ impl Sim {
                                 .take_while(|a| !synced.contains(*a) || aside.contains(a))
                         })
                         .collect();
-                    aside.extend(keep);
+                    for folder in keep {
+                        if aside.insert(folder) {
+                            kept.insert(folder);
+                        }
+                    }
                 }
-                if aside.len() == before {
+                if (aside.len(), kept.len()) == before {
                     break;
                 }
             }
             for &n in &aside {
                 base.remove(n);
+                synced.remove(n);
                 let here = visible.remove(n);
                 if let Some(blob) = here
                     .and_then(|s| s.content)
@@ -573,7 +605,15 @@ impl Sim {
                     kept_here.insert(*blob);
                 }
             }
-            stays_waiting.extend(aside);
+            // No client writes a tag change on what waits, nor on a folder it keeps here (gone
+            // there); one synced that waits with it here is live on the drive, where another
+            // client's tag change of it stands.
+            stays_waiting.extend(&waiting);
+            stays_waiting.extend(
+                aside
+                    .into_iter()
+                    .filter(|n| !self.server.live.contains_key(n)),
+            );
             // Names that clash in what a member reads of the drive stay so (at its top, of
             // items whose folders aren't shared: no device of the drive's has them together,
             // and the member repairs nothing): the one here under the name keeps it (the one
@@ -739,22 +779,20 @@ impl Sim {
                 return Err(format!("{both:?} is in both folders of one computer"));
             }
         }
-        // What is in a folder no client reads stays in it while it is there. What a newer
-        // client moved in, at the version it moved it at: a later write may put it elsewhere,
-        // as any of a node a device holds (one there unsynced, sent up again once the node
-        // went for good: a new version).
-        let moved_since = |k: &NodeId, at: VersionTag| {
-            (self.server.moved_in.get(k)).is_some_and(|moved| *moved != at)
-        };
+        // What is in a folder no client reads stays in it while it is there; what a newer
+        // client moved in, while it stays on the drive as the file it was: no client writes
+        // what waits ([`Ledger::wrote_waiting`]), but once it left the drive it is a deleted
+        // node to every client (an edit here wins, restoring it where it is here, §4), or a
+        // node made again (one a device held unsynced, sent up once it went for good).
         for (folder, kids) in &self.server.unreadable {
             if !self.server.live.contains_key(folder) {
                 continue;
             }
             if let Some(kid) = kids.iter().find(|k| {
-                self.server
-                    .live
-                    .get(k)
-                    .is_some_and(|n| n.state.parent != *folder && !moved_since(k, n.remote.version))
+                self.server.live.get(k).is_some_and(|n| {
+                    n.state.parent != *folder
+                        && !self.server.left_since_moved_in(**k, n.remote.file_id)
+                })
             }) {
                 return Err(format!("{kid:?} left the folder no client reads"));
             }
@@ -1640,7 +1678,10 @@ fn set_aside(
 /// its base (`base`, with the hash its bytes had here then: `local_hash`), as the engine judges
 /// what going back to the drive would lose (`loses_here`): made here and not the drive's (a
 /// kind, or bytes), another kind than synced, or a file whose bytes changed here to other than
-/// the drive's. A move or tags here aren't. (A file not hashed yet is the drive's.)
+/// the drive's. A move or tags here aren't. `here` is the item's real content: the oracle
+/// judges once the clients settled, when every file has been hashed (a lock let go, a write
+/// done: [`Sim::quiesce`]), so the engine reads the same (one not hashed yet it takes as
+/// unchanged).
 fn changed_here(
     here: &NodeState,
     base: Option<&NodeState>,
@@ -1826,6 +1867,95 @@ mod tests {
             },
         )]);
         assert_eq!(sim.taken_along(), BTreeSet::from([c]));
+    }
+
+    /// A client's write to a node that waits for a folder no client reads (in a folder a newer
+    /// client moved into it) is reported: its move back to the top, an upload in place, a tag
+    /// write; one planned before the move lands unreported, as it would have just before.
+    #[test]
+    fn a_write_to_what_waits_is_reported() {
+        use hbsync_engine::reconcile::Op;
+        let ops = |sim: &Sim, file: NodeId| {
+            let n = &sim.server.live[&file];
+            let (file_id, expected) = (n.remote.file_id, n.remote.version);
+            let update = |parent: NodeId, upload: bool| Op::RemoteUpdate {
+                node: file,
+                file_id,
+                expected,
+                parent,
+                name: "c.txt".into(),
+                upload,
+                tags: Tags::default(),
+            };
+            [
+                update(NodeId::ROOT, false),
+                update(n.state.parent, true),
+                Op::RemoteTags {
+                    node: file,
+                    file_id,
+                    expected,
+                    tags: Tags::new(vec![Tag::new("Red", 6)]),
+                },
+            ]
+        };
+        for (i, planned_after) in [(0, true), (1, true), (2, true), (1, false)] {
+            let mut sim = Sim::new(2);
+            // Folder "LLL…txt" with "c.txt" in it; the newer folder "b" holds "a".
+            sim.run(&[act(0, Action::CreateFolder { parent: 0, name: 6 })]);
+            let folder = sim.local_paths(0).pop().expect("the folder");
+            let folder = sim.item(0, &folder).expect("the folder");
+            let parent = sim.pick(0, folder, true).expect("the folder");
+            sim.run(&[act(0, Action::CreateFile { parent, name: 3 })]);
+            assert!(sim.quiesce(10));
+            let file = sim.item_named(1, "c.txt").expect("c.txt");
+            sim.run(&[
+                act(0, Action::NewerFolder { name: 1 }),
+                act(1, Action::Edit { file: 0 }),
+            ]);
+            let (pick, into) = sim.newer_move_picks(folder, "b").expect("on the drive");
+            if !planned_after {
+                sim.plan(1);
+            }
+            sim.run(&[act(0, Action::IntoNewer { pick, folder: into })]);
+            if planned_after {
+                sim.plan(1);
+            }
+            let op = ops(&sim, file)[i].clone();
+            sim.clients[1].plan = [(op, 0)].into();
+            assert!(sim.step(1));
+            let wrong = sim.check().err().unwrap_or_default();
+            assert_eq!(
+                wrong.contains("wrote what waits for a folder no client reads"),
+                planned_after,
+                "{i}: {wrong}"
+            );
+        }
+    }
+
+    /// What waits for a folder no client reads stays where a client synced it, unjudged; one
+    /// a client holds that it never synced (made or brought down for a plan that saw it wait)
+    /// is judged as anything else: it diverges.
+    #[test]
+    fn what_waits_is_left_only_where_it_synced() {
+        for synced in [true, false] {
+            let mut sim = Sim::new(2);
+            sim.run(&[act(0, Action::CreateFile { parent: 0, name: 3 })]);
+            assert!(sim.quiesce(10));
+            let file = sim.item(1, "c.txt").expect("c.txt");
+            sim.run(&[act(0, Action::NewerFolder { name: 1 })]);
+            let (pick, folder) = sim.newer_move_picks(file, "b").expect("on the drive");
+            sim.run(&[act(0, Action::IntoNewer { pick, folder })]);
+            assert!(sim.quiesce(10));
+            // As if c1 had brought it down for a plan that saw it wait: no base, nor placed
+            // for one that didn't.
+            if !synced {
+                let client = &mut sim.clients[1];
+                client.base.remove(file);
+                client.extra.remove(&file);
+                client.placed_unwaiting.clear();
+            }
+            assert_eq!(sim.check().is_ok(), synced, "{synced}: {:?}", sim.check());
+        }
     }
 
     /// A node a client removes from the drive though no one deleted it (nor took it along) is

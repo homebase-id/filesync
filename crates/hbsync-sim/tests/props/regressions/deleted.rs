@@ -2758,8 +2758,9 @@ fn regression_a_file_deleted_here_by_a_folder_waiting_for_another_page_ends_as_w
 /// c0 edits `a/c.txt` and hasn't synced it yet when a newer client moves the file into a
 /// folder no client reads (`b`), and c1 deletes `a`, which reaches the drive. The file waits
 /// for `b` on c0, out of its plans: edited, it keeps `a` there as it is (sync semantics §6.3),
-/// and nothing of either is written to the drive; c1 has neither. Not edited, `a` goes on c0
-/// with the file in it (the drive has its bytes). Before, `a` went with the edit in it.
+/// and nothing of either is written to the drive (the file is at the version the move gave
+/// it); c1 has neither. Not edited, `a` goes on c0 with the file in it (the drive has its
+/// bytes). Before, `a` went with the edit in it.
 #[test]
 fn a_file_edited_here_that_waits_for_a_newer_folder_keeps_its_folder_here() {
     use super::{act, add_to, settle, top};
@@ -2781,11 +2782,9 @@ fn a_file_edited_here_that_waits_for_a_newer_folder_keeps_its_folder_here() {
         sim.run(&[act(1, NewerFolder { name: 1 })]);
         let (pick, folder) = sim.newer_move_picks(file, "b").expect("on the drive");
         let node = sim.pick(1, a, false).expect("on c1");
-        sim.run(&[
-            act(1, IntoNewer { pick, folder }),
-            act(1, Delete { node }),
-            Event::Plan { client: 1 },
-        ]);
+        sim.run(&[act(1, IntoNewer { pick, folder })]);
+        let moved = sim.drive_version(file);
+        sim.run(&[act(1, Delete { node }), Event::Plan { client: 1 }]);
         while !sim.planned(1).is_empty() {
             sim.run(&[Event::Step { client: 1 }]);
         }
@@ -2793,6 +2792,11 @@ fn a_file_edited_here_that_waits_for_a_newer_folder_keeps_its_folder_here() {
         settle(&mut sim);
         assert_eq!(sim.server_paths(), ["b", "b/a", "b/c.txt"], "{edited}");
         assert!(sim.is_removed(a), "{edited}: a isn't made again");
+        assert_eq!(
+            sim.drive_version(file),
+            moved,
+            "{edited}: nothing wrote the file"
+        );
         let kept: &[&str] = match edited {
             true => &["a", "a/c.txt"],
             false => &[],

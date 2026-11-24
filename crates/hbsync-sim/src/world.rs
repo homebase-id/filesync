@@ -275,9 +275,11 @@ impl Sim {
         if let Some(n) = self.server.live.get_mut(&node) {
             n.state.parent = into;
             n.remote.version = version;
+            self.server
+                .moved_in
+                .insert(node, (n.remote.file_id, version));
         }
         self.server.unreadable.entry(into).or_default().insert(node);
-        self.server.moved_in.insert(node, version);
     }
 
     /// [`Action::IntoFile`].

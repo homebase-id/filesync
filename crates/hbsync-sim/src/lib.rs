@@ -625,6 +625,11 @@ impl Sim {
         self.server.removed.contains_key(&node)
     }
 
+    /// For scripted tests: the version the drive has `node` at, live or in Recently deleted.
+    pub fn drive_version(&self, node: NodeId) -> Option<hbsync_types::VersionTag> {
+        self.server.node(node).map(|(n, _)| n.remote.version)
+    }
+
     /// With the guard on, the user looks at what client `c` holds and confirms it (a
     /// request). Whether something was held.
     fn confirm_held(&mut self, c: usize) -> bool {

@@ -904,6 +904,14 @@ impl Sim {
         self.faults.plans += 1;
         client.pulls = (self.faults.pulls).unwrap_or(self.faults.plans.is_multiple_of(2));
         client.planned_changed = std::mem::take(&mut input.changed_at).into_iter().collect();
+        let server = &self.server;
+        client.planned_waits = (server.live.keys().copied())
+            .filter(|n| server.waits_for_unreadable(*n))
+            .collect();
+        client.planned_waits_wide = (server.live.keys().chain(server.removed.keys()))
+            .copied()
+            .filter(|n| server.waits_through_removed(*n))
+            .collect();
         client.run_settled.clear();
         client.plan_saw = std::mem::take(&mut input.remote);
         for (folder, r) in input.removed {
@@ -1060,6 +1068,17 @@ impl Sim {
             self.ledger
                 .read_only_wrote(|| Some(format!("{name} {op:?}")));
         }
+        // Whether the node waited for a folder no client reads on the drive when the plan was
+        // made, and still does as the write runs (`Server::waits_for_unreadable`, as the
+        // client's folder sees the drive: a member reads such a node at its top). One moved
+        // there after the plan, under a folder moved there, keeps its version: a write planned
+        // before lands, as it would have just before.
+        let drive = self.clients[c].coords.to_drive(node);
+        let waited = matches!(
+            op,
+            Op::RemoteUpdate { .. } | Op::RemoteTags { .. } | Op::RemoteCreate { .. }
+        ) && self.clients[c].planned_waits.contains(&drive)
+            && self.server.waits_for_unreadable(drive);
         // A member that writes: as the executor's last guard, by what the drive says as the
         // write runs (a share turned back to reading since the plan stops it here).
         let outcome = match self.clients[c].writes && op.writes_remote() && !self.may_change(&op) {
@@ -1088,6 +1107,15 @@ impl Sim {
             let name = &self.clients[c].name;
             self.ledger
                 .wrote_outside_scope(|| breach.then(|| format!("{name} {op:?}")));
+            self.ledger
+                .wrote_waiting(|| (waited && !landed).then(|| format!("{name} {op:?}")));
+            if placement {
+                let client = &mut self.clients[c];
+                match client.planned_waits_wide.contains(&drive) {
+                    true => client.placed_unwaiting.remove(&drive),
+                    false => client.placed_unwaiting.insert(drive),
+                };
+            }
             let server = &self.server;
             self.ledger.dangling_write(|| {
                 let parent_unknown = server.live.get(&node).is_some_and(|n| {

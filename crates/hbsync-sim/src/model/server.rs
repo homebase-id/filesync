@@ -39,9 +39,9 @@ pub(crate) struct Server {
     /// Nodes no client reads (a newer writer's), with what was put in each: they are on the
     /// drive, and what is in them stays there.
     pub(crate) unreadable: BTreeMap<NodeId, BTreeSet<NodeId>>,
-    /// Of what is in those, what a newer client moved in ([`crate::Action::IntoNewer`]), at
-    /// the version it moved it at.
-    pub(crate) moved_in: BTreeMap<NodeId, VersionTag>,
+    /// Of what is in those, what a newer client moved in ([`crate::Action::IntoNewer`]), as
+    /// the file it was then, at the version the move gave it.
+    pub(crate) moved_in: BTreeMap<NodeId, (RemoteFileId, VersionTag)>,
     /// The files the owner shares with the member ([`crate::Sim::with_member`]), by file id, as
     /// the server keeps them: a node made again as another file isn't shared.
     pub(crate) shared: BTreeSet<RemoteFileId>,
@@ -73,6 +73,51 @@ impl Server {
         [&self.live, &self.removed]
             .iter()
             .any(|m| m.get(&node).is_some_and(|n| n.remote.file_id == file))
+    }
+
+    /// Whether live `node` waits for a folder no client reads that is live: is one, or is in
+    /// one, through live folders. (Through a folder in Recently deleted it doesn't, to a
+    /// client: that folder is deleted, and an edit in it wins, restoring it where the client
+    /// has it, §4.)
+    pub(crate) fn waits_for_unreadable(&self, node: NodeId) -> bool {
+        let mut at = node;
+        for _ in 0..=self.live.len() {
+            let Some(n) = self.live.get(&at) else {
+                return false;
+            };
+            if self.unreadable.contains_key(&at) {
+                return true;
+            }
+            at = n.state.parent;
+        }
+        false
+    }
+
+    /// Whether `node`, live or in Recently deleted, is or is in a folder no client reads that
+    /// is on the drive, through live folders and folders in Recently deleted: what the oracle
+    /// takes as waiting (`Sim::expected`).
+    pub(crate) fn waits_through_removed(&self, node: NodeId) -> bool {
+        let mut at = node;
+        for _ in 0..=self.live.len() + self.removed.len() {
+            let Some((n, _)) = self.node(at) else {
+                return false;
+            };
+            if self.unreadable.contains_key(&at) {
+                return true;
+            }
+            at = n.state.parent;
+        }
+        false
+    }
+
+    /// Whether `node`, moved into a folder no client reads ([`Server::moved_in`]), left the
+    /// drive since, as the file `file` is now: removed (to Recently deleted, whatever came of it
+    /// then), or made again as another file (once gone for good).
+    pub(crate) fn left_since_moved_in(&self, node: NodeId, file: RemoteFileId) -> bool {
+        self.moved_in.get(&node).is_some_and(|&(moved, at)| {
+            let removed = |&(_, when, _): &(NodeId, i64, NodeKind)| when > time(at);
+            moved != file || self.removals.get(&node).is_some_and(removed)
+        })
     }
 
     pub(crate) fn unreadable_on_drive(&self) -> impl Iterator<Item = (&NodeId, &BTreeSet<NodeId>)> {
