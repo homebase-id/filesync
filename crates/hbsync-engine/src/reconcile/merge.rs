@@ -79,8 +79,10 @@ impl<'a> Reconciler<'a> {
                 let folder = |r: &NodeState| r.kind == NodeKind::Folder;
                 return i.writable.contains(&at) && self.remote_state(at).is_some_and(folder);
             }
-            // New here: added with what it is in.
-            let Some(l) = i.local.get(at).filter(|_| !i.base.contains(at)) else {
+            // New here: added with what it is in. (Not one the drive has in Recently deleted,
+            // which isn't made again there: `added`.)
+            let new_here = !i.base.contains(at) && !i.removed.contains_key(&at);
+            let Some(l) = i.local.get(at).filter(|_| new_here) else {
                 return false;
             };
             at = l.parent;

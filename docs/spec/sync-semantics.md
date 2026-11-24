@@ -1728,7 +1728,9 @@ rules hold too:
   - what is new here in such a folder is added there, a new folder with what is in it: a
     folder is made before what is in it, in the same run where its create is answered at
     once (a write still on its way there, as Homebase's can be, leaves what is in it for
-    a later plan, once the feed brought the folder's row); new at the top (no folder of
+    a later plan, once the feed brought the folder's row; meanwhile the guard's refusal
+    of it reads "the folder is read-only", which is the wrong word for it: to be put
+    right with writes on their way); new at the top (no folder of
     the drive's) or in a folder shared for reading, it moves out, as before;
   - what is added under a name another item holds there goes under the first free
     numbered name, as a clash's loser does on an identity's own drive (§6.3);
