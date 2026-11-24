@@ -518,6 +518,28 @@ impl Reconciler<'_> {
                 }
             }
         }
+        // What waits and changed here keeps the folders it is in here: one gone there would be
+        // deleted here with it, change and all (it is out of the plan, so nothing sends the
+        // change or keeps the folder alive for it, as an edit in the plan does). Left as they
+        // are, up to the first the plan keeps: not deleted here, not made again there, each
+        // holding its name, planned again with what waits. An identity's own drive only:
+        // read-only, a change here moves out.
+        if !self.masking.read_only {
+            let mut changed: Vec<NodeId> = (withdrawn.iter().copied())
+                .filter(|&n| self.loses_here(n))
+                .collect();
+            changed.sort();
+            for node in changed {
+                let above: Vec<NodeId> = (self.input.local.ancestors_iter(node))
+                    .take_while(|a| !self.merged.contains(*a))
+                    .collect();
+                for folder in above {
+                    self.scope.remove(&folder);
+                    self.origin.remove(&folder);
+                    self.leave_as_is(folder);
+                }
+            }
+        }
         // Each group once, with all that waits in it: one page of its own, not one a node.
         for group in groups {
             self.wait_together(group);

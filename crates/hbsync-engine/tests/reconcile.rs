@@ -3591,6 +3591,62 @@ fn sorted_ops(plan: &hbsync_engine::Plan) -> Vec<(&'static str, NodeId)> {
     ops
 }
 
+/// A file edited here that waits for its folder there (the drive has it in a folder this
+/// device can't read: a newer writer's, say) is out of the plan, edit and all. The folder it
+/// is in here, deleted there, stays: its delete here would take the edit. It isn't made
+/// again there either, and what else is in it, gone there, goes item by item. Not edited, the
+/// file goes with its folder (the drive has it).
+#[test]
+fn a_file_that_waits_for_a_folder_it_cant_read_keeps_the_folders_it_is_in_here() {
+    let [b, c, f, g, q] = ids(5)[..] else {
+        unreachable!()
+    };
+    for edited in [true, false] {
+        let mut w = World::default();
+        w.synced(b, folder(ROOT, "b"))
+            .synced(c, folder(b, "c"))
+            .synced(f, file(c, "f.txt", "x"))
+            .synced(g, file(b, "g.txt", "g"));
+        w.remote(b, None)
+            .remote(c, None)
+            .remote(g, None)
+            .remote(f, Some(file(q, "f.txt", "x")));
+        w.input.unreadable.insert(q);
+        if edited {
+            w.local(f, Some(file(c, "f.txt", "mine")));
+        }
+        let plan = w.plan();
+        assert!(!plan.writes_drive(), "{edited}: {:?}", plan.ops);
+        let want = match edited {
+            true => vec![("LocalDelete", g)],
+            false => vec![("LocalDelete", b)],
+        };
+        assert_eq!(sorted_ops(&plan), want, "{edited}: {:?}", plan.ops);
+        if edited {
+            for kept in [b, c, f] {
+                assert!(plan.deferred.contains(&kept), "{kept:?} is planned again");
+            }
+        }
+    }
+}
+
+/// The same where the drive's picture isn't whole yet (the file's folder there not read so
+/// far): it waits, and the folder it is in here stays.
+#[test]
+fn a_file_edited_here_that_waits_for_its_folder_there_keeps_its_folder_here() {
+    let [b, f, q] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(b, folder(ROOT, "b"))
+        .synced(f, file(b, "f.txt", "x"));
+    w.remote(b, None).remote(f, Some(file(q, "f.txt", "x")));
+    w.input.remote_complete = false;
+    w.local(f, Some(file(b, "f.txt", "mine")));
+    let plan = w.plan();
+    assert!(plan.ops.is_empty(), "{:?}", plan.ops);
+}
+
 /// A read-only world: the drive decides (§13).
 fn read_only() -> World {
     World {
