@@ -4365,6 +4365,40 @@ fn read_only_the_folder_the_holder_of_a_name_moves_into_takes_it() {
     assert!(plan.deferred.contains(&newcomer));
 }
 
+/// A folder left out for its name keeps what is in it where it is here, and what that holds
+/// in ANOTHER folder here keeps its name there. `inner` synced at the top (shared without its
+/// folder); its folder `dir` comes, to a name `other` holds here, and is left out; a newcomer
+/// of `inner`'s name at the top is left out too. It was downloaded onto `inner`'s name before
+/// (the top was judged without `inner`, which the plan had in `dir`): refused by the disk,
+/// at every sync.
+#[test]
+fn read_only_what_a_folder_left_out_holds_elsewhere_keeps_its_name() {
+    for order in [[0, 1, 2, 3], [3, 2, 1, 0], [1, 3, 0, 2]] {
+        let id = ids(4);
+        let [newcomer, inner, dir, other] = order.map(|i| id[i]);
+        let mut w = read_only();
+        w.synced(other, folder(ROOT, "a"))
+            .synced(inner, file(ROOT, "c.txt", "x"))
+            .remote(inner, Some(file(dir, "c.txt", "x")))
+            .remote(dir, Some(folder(ROOT, "a")))
+            .remote(newcomer, Some(file(ROOT, "C.txt", "y")));
+        let plan = w.plan();
+        assert!(!plan.writes_drive());
+        assert!(plan.ops.is_empty(), "{order:?}: {:?}", plan.ops);
+        let mut left: Vec<NodeId> = plan.conflicts.iter().map(Conflict::node).collect();
+        left.sort();
+        let mut want = vec![dir, newcomer];
+        want.sort();
+        assert_eq!(left, want, "{order:?}: {:?}", plan.conflicts);
+        assert!(
+            (plan.conflicts.iter()).all(|c| matches!(c, Conflict::NameTaken { .. })),
+            "{:?}",
+            plan.conflicts
+        );
+        assert!(plan.deferred.contains(&newcomer), "{order:?}");
+    }
+}
+
 /// The item synced here keeps its name though this device renamed it meanwhile: the rename is
 /// undone, and the newcomer (the lower id) is the one left out.
 #[test]

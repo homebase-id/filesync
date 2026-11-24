@@ -4,7 +4,7 @@
 use hbsync_sim::{Action, Event, Sim};
 use hbsync_types::NodeId;
 
-use super::{act, settle, share};
+use super::{act, add_to, settle, share, top};
 
 /// The owner (client 0) shares what `pick` picks with the member, or withdraws its share:
 /// alone, or (`below`) with all the drive has in it.
@@ -415,4 +415,43 @@ fn a_share_that_ended_leaves_the_member_nothing_and_keeps_what_was_its_own() {
     assert!(sim.local_paths(2).is_empty(), "{:?}", sim.local_paths(2));
     assert_eq!(sim.moved_out(2).len(), 2, "{:?}", sim.moved_out(2));
     assert_eq!(sim.local_paths(0), ["a", "b", "b/a"]);
+}
+
+/// A folder left out at the member's top for its name (§13) keeps what is in it where it is
+/// here: a file of it at the top, from when it was shared without the folder, holds its name
+/// there, and a newcomer of that name at the top is left out too, not downloaded onto it
+/// (which the disk refuses, name taken, at every sync: "no convergence", seed b945107d).
+#[test]
+fn what_a_folder_left_out_holds_at_the_top_keeps_its_name_there() {
+    use Action::*;
+    let mut sim = Sim::new(3).with_member(2).with_narrow_check();
+    let t = top(&sim, 0);
+    sim.run(&[act(0, CreateFolder { parent: t, name: 0 })]);
+    let t = top(&sim, 0);
+    sim.run(&[act(0, CreateFolder { parent: t, name: 1 })]);
+    add_to(&mut sim, 0, "a", 3);
+    add_to(&mut sim, 0, "b", 3);
+    let b = sim.item(0, "b").expect("b");
+    let parent = sim.pick(0, b, true).expect("b's pick");
+    sim.run(&[act(0, CreateFolder { parent, name: 0 })]);
+    let t = top(&sim, 0);
+    sim.run(&[act(0, CreateFile { parent: t, name: 3 })]);
+    settle(&mut sim);
+    // The file alone: at the member's top.
+    let inner = sim.item(0, "a/c.txt").expect("a/c.txt");
+    share(&mut sim, "a/c.txt");
+    settle(&mut sim);
+    // Another folder `a`, at the member's top too (its own folder isn't shared).
+    share(&mut sim, "b/a");
+    settle(&mut sim);
+    assert_eq!(sim.local_paths(2), ["a", "c.txt"]);
+    // The file's folder `a`: its name is taken here, so it is left out, and the file stays.
+    share(&mut sim, "a");
+    settle(&mut sim);
+    assert_eq!(sim.item(2, "c.txt"), Some(inner));
+    // A file of the file's name at the drive's top: left out too.
+    share(&mut sim, "c.txt");
+    settle(&mut sim);
+    assert_eq!(sim.local_paths(2), ["a", "c.txt"]);
+    assert_eq!(sim.item(2, "c.txt"), Some(inner));
 }
