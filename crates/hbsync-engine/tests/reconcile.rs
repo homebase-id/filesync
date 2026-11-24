@@ -4084,6 +4084,14 @@ fn read_only_a_delete_here_takes_no_edit_below_a_folder_left_out() {
     editing(&mut after);
     let plan = after.plan();
     assert!(plan.ops.is_empty(), "{:?}", plan.ops);
+    // For its name still: `sub` is left out, told so, and planned again.
+    assert!(
+        matches!(plan.conflicts[..], [Conflict::NameTaken { .. }]),
+        "{:?}",
+        plan.conflicts
+    );
+    assert_eq!(plan.conflicts[0].node(), sub);
+    assert!(plan.deferred.contains(&sub));
 }
 
 /// A file edited on both sides, in a folder this identity may add to: both are kept, as on

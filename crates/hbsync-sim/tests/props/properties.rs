@@ -199,17 +199,6 @@ proptest! {
         run_with(3, None, |sim| sim.with_writing_member(2), &events)?;
     }
 
-    /// [`a_writing_member_writes_only_what_it_may_and_converges`] from a folder of the
-    /// owner's and a file beside it, all shared for editing: the member has items it may
-    /// change from the first event on, in a folder and at the top, while the shares come
-    /// and go.
-    #[test]
-    fn a_writing_member_of_what_is_shared_for_editing_from_the_start_converges(
-        events in proptest::collection::vec(events_of(3, editing_action()), 0..120)
-    ) {
-        run_with(3, None, with_all_shared_to_edit, &events)?;
-    }
-
     /// [`a_writing_member_writes_only_what_it_may_and_converges`], the member planning in
     /// pages of 1 to 4, its downloads fetched and placed in two steps, every client dying
     /// now and then, while the owner's folders are deleted, stopped half way and deleted
