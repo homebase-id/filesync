@@ -210,7 +210,7 @@ impl Executor<'_> {
         &mut self,
         node: NodeId,
         existing: Option<(hbsync_types::RemoteFileId, hbsync_types::VersionTag)>,
-        parent: NodeId,
+        mut parent: NodeId,
         name: &str,
         kind: NodeKind,
         tags: &Tags,
@@ -305,6 +305,7 @@ impl Executor<'_> {
                     return Err(Outcome::stale("gone remotely"));
                 };
                 content.unknown = mirror.carried_keys();
+                parent = self.sent_folder(mirror, parent)?;
                 let drive = mirror.tags();
                 tags = self.merged_with_drive(base.as_ref(), &tags, &drive);
                 had = Some(drive);
@@ -430,6 +431,22 @@ impl Executor<'_> {
                 _,
                 JobResult::Failed(JobError::File(e @ FileIoError::HashMismatch { .. })),
             ) => Ok(Outcome::Mismatch(e.to_string())),
+            // A change of a node the store says this identity may change, refused as
+            // read-only (§13): the share's rows said more than the sharer's server allows (its
+            // circle lost the right since), or the share was turned back to reading and the
+            // feed hasn't told yet. Read-only after all: the store says so from here on, and
+            // the node is planned again from the feed read now (the picture was behind), what
+            // changed here moving out. (In a folder that doesn't write to what is shared, no
+            // such write is sent.)
+            (_, job, JobResult::Failed(JobError::Remote(RemoteError::ReadOnly(why))))
+                if self.folder.writes
+                    && let Some(file_id) = job.file_id() =>
+            {
+                self.db
+                    .write(|s| s.account().set_writable(file_id, false))?;
+                self.report.news.behind = true;
+                Ok(Outcome::stale(why))
+            }
             (_, _, JobResult::Failed(JobError::Remote(e))) => Ok(remote_outcome(e)),
             // A file hashed on send that can't be read (locked, a bad sector): a file not
             // hashed yet from now on, which waits and is told as one (sync semantics §6.3).

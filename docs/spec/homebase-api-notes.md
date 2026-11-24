@@ -781,7 +781,10 @@ it for editing. Built, and not turned on: a share is still read-only in the prod
   (**[verified]** chat-kmp `FilesyncSharing.share`, and live). A row's `permissions` come as
   odin-core's flag names (`"read"`, `"read, write"`, `"readWrite"` = read, write, react and
   comment): the client reads them, and refuses a write to a file no row gives `Write` on
-  before sending.
+  before sending. That refusal, and their server's of a write that was sent
+  (`recipientIdentityReturnedAccessDenied`, below), are one error to the engine
+  (`RemoteError::ReadOnly`): the item counts as read-only on this device from there on
+  (sync semantics §13).
 - **A change to a file** (its header, with or without new bytes): `PATCH
   /api/v2/peer/{owner}/drives/{driveAlias}/files/by-gtid/{globalTransitId}`, the multipart
   form of an own update with `locale: "peer"` and `recipients: [owner]` in `instructions`.

@@ -30,8 +30,8 @@ impl ReadTx<'_> {
     /// identity's drive ([`ReadTx::shared`]) a node whose folder the picture doesn't have (not
     /// shared with this identity, or no more) is at the top (sync semantics §13): worked out
     /// as the row is read, one probe a row, so the row keeps the drive's folder and is in it
-    /// once that is shared. Only reads go through here: a write to such a drive (none yet,
-    /// its remote refuses them) must send the drive's own folder, never this one.
+    /// once that is shared. Only reads go through here: a write to such a drive sends the
+    /// drive's own folder ([`ReadTx::drive_folder`]), never this one.
     pub(super) fn seen(&self, mut row: MirrorRow) -> Result<Option<MirrorRow>> {
         if self.lacks(row.parent)? {
             row.parent = NodeId::ROOT;

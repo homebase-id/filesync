@@ -1528,23 +1528,23 @@ fn the_member_writes_nothing(b: &Bench) -> Outcome {
     let cursor = b.cursor_now()?;
     let target = Target { at: w, token: None };
     let new = file("mine", b.scratch, b"2");
-    ensure_err!(b.member_create(&new, Some(b"2")), RemoteError::Fatal(_));
+    ensure_err!(b.member_create(&new, Some(b"2")), RemoteError::ReadOnly(_));
     ensure_err!(
         b.reader().update(
             &target,
             &with(&f, NodeContent::file("x", 1, 1, false)),
             None
         ),
-        RemoteError::Fatal(_)
+        RemoteError::ReadOnly(_)
     );
-    ensure_err!(b.reader().delete(&doomed(&[w])), RemoteError::Fatal(_));
+    ensure_err!(b.reader().delete(&doomed(&[w])), RemoteError::ReadOnly(_));
     ensure_err!(
         b.reader().delete_for_good(&doomed(&[w])),
-        RemoteError::Fatal(_)
+        RemoteError::ReadOnly(_)
     );
     ensure_err!(
         b.reader().set_removed(std::slice::from_ref(&target), true),
-        RemoteError::Fatal(_)
+        RemoteError::ReadOnly(_)
     );
     ensure!(
         b.changes_to(&cursor, &[w.file_id])?.is_empty(),
@@ -1755,8 +1755,11 @@ fn a_member_removes_and_puts_back(b: &Bench) -> Outcome {
 fn a_member_deletes_nothing(b: &Bench) -> Outcome {
     let (_, w) = b.file("theirs", b"1")?;
     let member = b.reader();
-    ensure_err!(member.delete(&doomed(&[w])), RemoteError::Fatal(_));
-    ensure_err!(member.delete_for_good(&doomed(&[w])), RemoteError::Fatal(_));
+    ensure_err!(member.delete(&doomed(&[w])), RemoteError::ReadOnly(_));
+    ensure_err!(
+        member.delete_for_good(&doomed(&[w])),
+        RemoteError::ReadOnly(_)
+    );
     let header = b.remote.header(w.file_id)?;
     ensure!(
         header.version == w.version && !header.is_deleted(),
@@ -1781,16 +1784,16 @@ fn what_is_shared_to_read_is_not_changed(b: &Bench) -> Outcome {
             &with(&f, NodeContent::file("x", 1, 1, false)),
             None
         ),
-        RemoteError::Fatal(_)
+        RemoteError::ReadOnly(_)
     );
     ensure_err!(
         member
             .set_removed(std::slice::from_ref(&target), true)?
             .single(),
-        RemoteError::Fatal(_)
+        RemoteError::ReadOnly(_)
     );
     let new = file("mine", dir.node, b"2");
-    ensure_err!(b.member_create(&new, Some(b"2")), RemoteError::Fatal(_));
+    ensure_err!(b.member_create(&new, Some(b"2")), RemoteError::ReadOnly(_));
     let header = b.remote.header(w.file_id)?;
     ensure!(
         header.version == w.version && !header.removed,

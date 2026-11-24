@@ -568,7 +568,11 @@ impl PeerRemote {
             Ok(Became::NotTaken) => (None, None),
             // Their server refused it: where the node is there, an earlier send of it
             // landed (one from before a restart, or one this run stopped waiting for).
-            Err(e @ (RemoteError::Fatal(_) | RemoteError::VersionMismatch)) => {
+            Err(
+                e @ (RemoteError::Fatal(_)
+                | RemoteError::ReadOnly(_)
+                | RemoteError::VersionMismatch),
+            ) => {
                 return Err(match self.their_node(meta.node)? {
                     Some(_) => RemoteError::AlreadyExists,
                     None => e,
@@ -888,7 +892,7 @@ mod tests {
             Err(RemoteError::VersionMismatch)
         ));
         match told("recipientIdentityReturnedAccessDenied", None) {
-            Err(RemoteError::Fatal(why)) => assert!(why.contains("read-only"), "{why}"),
+            Err(RemoteError::ReadOnly(why)) => assert!(why.contains("read-only"), "{why}"),
             _ => panic!("taken"),
         }
         match told("recipientIdentityReturnedBadRequest", None) {
@@ -1372,7 +1376,7 @@ mod tests {
             sam.delete_for_good(&[]).map(drop),
         ] {
             match refused {
-                Err(RemoteError::Fatal(why)) => assert!(why.contains("read-only"), "{why}"),
+                Err(RemoteError::ReadOnly(why)) => assert!(why.contains("read-only"), "{why}"),
                 other => panic!("{other:?}"),
             }
         }

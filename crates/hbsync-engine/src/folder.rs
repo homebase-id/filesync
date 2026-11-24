@@ -41,9 +41,8 @@ pub struct FolderCtx {
     /// change there (`MirrorRow::writable`; the rest of it stays one-way). Off, every item
     /// is read-only, whatever it says. Such an item is changed where it is: its edit, its
     /// tags and its rename in its folder go up (sync semantics §13, "What may be changed is
-    /// told per item"). Nothing turns it on yet, and nothing is to before the executor sends
-    /// the folder the drive has such an item in (it would send this folder's top for one
-    /// shown there).
+    /// told per item"). Nothing turns it on yet, and nothing is to before a member's new
+    /// items, moves and deletes are settled.
     pub writes: bool,
 }
 

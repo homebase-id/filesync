@@ -52,7 +52,10 @@ fn a_member_writes_only_where_it_is_one_that_writes() -> R {
     let reading = FakeRemote::member(sharer.server_handle());
     let new = file("mine", scratch.node, b"1");
     let refused = create_file(&reading, &new, b"1");
-    assert!(matches!(refused, Err(RemoteError::Fatal(_))), "{refused:?}");
+    assert!(
+        matches!(refused, Err(RemoteError::ReadOnly(_))),
+        "{refused:?}"
+    );
     let writing = reading.clone().writing();
     let made = create_file(&writing, &new, b"1")?;
     assert!(made.target.token.is_none());
@@ -72,7 +75,11 @@ fn a_member_is_refused_before_its_upload_is_read() -> R {
     sharer.share(at.at().file_id)?;
     let member = FakeRemote::member(sharer.server_handle()).writing();
     let refused = |answer: Result<Written, RemoteError>| {
-        assert!(matches!(answer, Err(RemoteError::Fatal(_))), "{answer:?}");
+        let refused = matches!(
+            answer,
+            Err(RemoteError::Fatal(_) | RemoteError::ReadOnly(_))
+        );
+        assert!(refused, "{answer:?}");
     };
     refused(create_file(
         &member,
@@ -492,7 +499,7 @@ fn a_members_removals_stop_at_the_one_on_its_way() -> R {
     assert!(
         matches!(
             mixed.answers.as_slice(),
-            [Err(RemoteError::Fatal(_)), Ok(_)]
+            [Err(RemoteError::ReadOnly(_)), Ok(_)]
         ),
         "{mixed:?}"
     );

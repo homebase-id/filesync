@@ -68,6 +68,7 @@ mod crash;
 mod deleted;
 mod filters;
 mod guard;
+mod member_writes;
 mod outages;
 mod pages;
 mod read_only;

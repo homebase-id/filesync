@@ -107,6 +107,31 @@ impl ReadTx<'_> {
             .query_row([node.0.as_bytes()], |r| r.get(0))?)
     }
 
+    /// Whether what the mirror holds in `folder` (this folder's coordinates) is shown at the
+    /// top for want of it ([`ReadTx::seen`]): on another identity's drive, a folder the
+    /// picture doesn't have. A row of this device's write to such a node names the drive's
+    /// folder ([`ReadTx::drive_folder`]); the node is at the top here all the same.
+    pub fn shown_at_the_top(&self, folder: NodeId) -> Result<bool> {
+        self.lacks(self.coords()?.to_drive(folder))
+    }
+
+    /// The folder the drive has `node` in, in this folder's coordinates: on another
+    /// identity's drive also where the row itself ([`ReadTx::get_mirror`]) is at the top for
+    /// want of that folder ([`ReadTx::seen`]). What a write of the node sends (sync semantics
+    /// §13): the drive's folder, never this folder's top for a node shown there. `None`: the
+    /// mirror has no such node.
+    pub fn drive_folder(&self, node: NodeId) -> Result<Option<NodeId>> {
+        let folder = self.one(
+            &format!(
+                "SELECT p.uuid FROM remote m JOIN nodes p ON p.id = m.parent WHERE m.id = {ID_OF}"
+            ),
+            node.0.as_bytes(),
+            |r| codec::node(&r.get::<_, Vec<u8>>(0)?),
+        )?;
+        let coords = self.coords()?;
+        Ok(folder.map(|folder| coords.from_drive(folder)))
+    }
+
     /// Whether `folder` is one the picture of another identity's drive ([`ReadTx::shared`])
     /// doesn't have ([`ReadTx::has_node`]): what the mirror holds in it is at the top. Never
     /// the drive's root, and never on this identity's own drive (no probe there).
