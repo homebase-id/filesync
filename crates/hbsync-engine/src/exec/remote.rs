@@ -71,6 +71,23 @@ impl Executor<'_> {
         Ok(meta_job(meta, target, None, None, After::Created))
     }
 
+    /// The folder a write of `mirror`'s node, to `parent`, names. On another identity's drive
+    /// (a folder that writes to what is shared with it: sync semantics §13) a node whose
+    /// folder isn't shared is shown at the top, and a change of it where it is must send the
+    /// folder the drive has it in: sent as the top's, the write would move the sharer's node
+    /// out of its folder. One lookup, in such a folder only.
+    pub(super) fn sent_folder(
+        &mut self,
+        mirror: &MirrorRow,
+        parent: NodeId,
+    ) -> Result<NodeId, StateError> {
+        if !self.folder.writes || parent != mirror.parent {
+            return Ok(parent);
+        }
+        let on_drive = self.db.read(|s| s.drive_folder(mirror.node))?;
+        Ok(on_drive.unwrap_or(parent))
+    }
+
     /// A metadata-only update: move or rename (to `place`; `None` keeps it) and the tags,
     /// keeping the payload.
     pub(super) fn prepare_rename(
@@ -89,6 +106,7 @@ impl Executor<'_> {
             return Err(Outcome::stale("gone remotely"));
         };
         let (parent, name) = place.unwrap_or((mirror.parent, mirror.name.as_str()));
+        let parent = self.sent_folder(&mirror, parent)?;
         let mut content = mirror.content(name);
         let base = self.db.read(|s| s.get_base(node))?;
         let drive = mirror.tags();

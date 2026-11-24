@@ -210,7 +210,7 @@ impl Executor<'_> {
         &mut self,
         node: NodeId,
         existing: Option<(hbsync_types::RemoteFileId, hbsync_types::VersionTag)>,
-        parent: NodeId,
+        mut parent: NodeId,
         name: &str,
         kind: NodeKind,
         tags: &Tags,
@@ -305,6 +305,7 @@ impl Executor<'_> {
                     return Err(Outcome::stale("gone remotely"));
                 };
                 content.unknown = mirror.carried_keys();
+                parent = self.sent_folder(mirror, parent)?;
                 let drive = mirror.tags();
                 tags = self.merged_with_drive(base.as_ref(), &tags, &drive);
                 had = Some(drive);
