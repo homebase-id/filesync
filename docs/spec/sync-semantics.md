@@ -1700,19 +1700,39 @@ rules hold too:
   another of the member's circles gives that right (**[verified]** odin-core
   `DriveShareService.AssertCircleFitsAsync`, `AssertMemberMayWriteAsync`). A write refused
   so is to count as read-only after all, where a folder writes.
-  Read-only is asked item by item (the reconciler's `one_way`): an item the store says may be
-  changed syncs both ways, where the folder writes to what is shared with it
-  (`FolderCtx::writes`, the view's `Input::writable`); the executor asks the store again as
-  a write runs, so a share taken back since the plan stops it there. What mends the drive
-  (a clash of names, a cycle, an orphan) stays the owner's, whatever the items say, and an
-  item this device ignores (§10) follows the drive: an ignore rule here removes nothing
-  there. No folder writes yet (nothing turns it on), and none is to before these are
-  settled, which such an item still plans as on an identity's own drive: its delete here
-  and its removal with a folder removed there (both a removal from the drive), its move to
-  another folder, its rename onto a name another item of the drive holds (two of one name
-  there), its conflict copy (a new item: it moves out and never goes up), and its edit
-  where the drive's is gone. So a folder synced from another identity's drive is read-only
-  (above), whatever its items say. A share's state DB from before it was kept reads its
+  Read-only is asked item by item (the reconciler's `one_way`), where the folder writes to
+  what is shared with it (`FolderCtx::writes`, the view's `Input::writable`). **An item
+  the store says may be changed is changed where it is**:
+  - its edit (bytes, the executable bit), its tags and its rename in its folder go up;
+  - gone there or here, it follows the drive: what is gone there (deleted, its share
+    withdrawn, taken along by its folder's removal) isn't made again, and an edit of it here
+    moves out; a delete here removes nothing there, and the item comes back;
+  - edited on both sides, the drive's wins and this device's moves out, as of any item of
+    the folder (a conflict copy would be a new item there);
+  - a move here to another folder is undone, whole (the item goes back to the drive's place
+    and name); an edit made with it still goes up;
+  - a rename here onto a name another item holds, on the drive or in the plan, or one this
+    device leaves out there or keeps (§10, §7), is undone: no clash of names is made on the
+    owner's drive. (Onto the name of an item the member doesn't read, or one shared a moment
+    later, it can't know: that clash is the owner's devices' to mend, as any.)
+
+  What it is in stays the drive's: the write is to send the folder the drive has the item
+  in, never this folder's top for an item shown there (the simulator's member does:
+  `a_file_at_the_top_stays_in_its_folder_on_the_drive`; **the executor doesn't yet**, it
+  would send the top: its next step, with what it does when the sharer's server refuses a
+  write after all). The executor asks the store again as a write runs, and sends only such
+  a change (never a node made, removed or moved to another folder, whatever planned it), so
+  a share turned back to reading since the plan stops the write there, and the edit moves
+  out at the next plan. What mends the drive (a
+  clash of names, a cycle, an orphan) stays the owner's, whatever the items say, and an item
+  this device ignores (§10) follows the drive: an ignore rule here removes nothing there.
+  Simulator: `a_writing_member_writes_only_what_it_may_and_converges`, the same in pages
+  that crash, and on the engine's planning path; scripted cases in
+  `regressions/writing_member.rs`. No folder writes yet (nothing turns it on), and none is
+  to before the executor sends the drive's folder, and a member's new items, its moves
+  between folders shared for editing, and its deletes are settled (each has its own step).
+  So a folder synced from another identity's drive is read-only (above), whatever its items
+  say. A share's state DB from before it was kept reads its
   feed from its beginning once (a re-read, §8b), each row taking what its header says.
   The cost: next to nothing on an identity's own drive (its headers say "no"; a
   transaction in which this device makes a file or puts one back reads once whether the

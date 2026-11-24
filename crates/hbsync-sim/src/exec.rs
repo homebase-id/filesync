@@ -634,8 +634,13 @@ impl Sim {
         // has it: never a node made, removed or moved to another folder, nor a rename onto a
         // name another node of the drive holds, as it reads it (§13).
         if client.writes {
+            // (Not onto its own name spelled otherwise: what holds that with it did before.)
             let taken = |node: NodeId, parent: NodeId, name: &str| {
-                input.remote.get(node).is_some_and(|r| r.name != name)
+                let key = hbsync_platform::name::name_key;
+                input
+                    .remote
+                    .get(node)
+                    .is_some_and(|r| key(&r.name) != key(name))
                     && input.remote.child_named(parent, name, Some(node)).is_some()
             };
             let overstep = (plan.ops.iter().chain(&plan.held)).find(|op| match op {

@@ -3831,6 +3831,30 @@ fn read_only_a_rename_onto_a_taken_name_is_undone() {
     );
 }
 
+/// A rename here to its own name spelled otherwise (case) goes up, also where another item
+/// holds that name with it (two shared without their folders, both at the top; or a clash
+/// the drive has already): the rename makes none.
+#[test]
+fn read_only_a_rename_in_case_only_goes_up_beside_another_of_the_name() {
+    let [mine, other] = ids(2)[..] else {
+        unreachable!()
+    };
+    // (The lower id holds the name here: the other was left out.)
+    let (mine, other) = (mine.min(other), mine.max(other));
+    let mut w = read_only();
+    w.synced(mine, file(ROOT, "a", "1"))
+        .remote(other, Some(file(ROOT, "a", "2")));
+    editing(&mut w);
+    w.local(mine, Some(file(ROOT, "A", "1")));
+    let plan = w.plan();
+    let sent: Vec<&Op> = plan.ops.iter().filter(|op| op.writes_remote()).collect();
+    assert!(
+        matches!(sent[..], [Op::RemoteUpdate { node, name, upload: false, .. }] if *node == mine && name == "A"),
+        "{:?}",
+        plan.ops
+    );
+}
+
 /// A new folder here moves out as one, with what is in it; a new file at the top too.
 #[test]
 fn read_only_new_items_move_out_whole() {
