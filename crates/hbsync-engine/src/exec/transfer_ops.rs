@@ -431,6 +431,28 @@ impl Executor<'_> {
                 _,
                 JobResult::Failed(JobError::File(e @ FileIoError::HashMismatch { .. })),
             ) => Ok(Outcome::Mismatch(e.to_string())),
+            // A change of a node the store says this identity may change, refused as
+            // read-only (§13): the share's rows said more than the sharer's server allows (its
+            // circle lost the right since), or the share was turned back to reading and the
+            // feed hasn't told yet. Read-only after all: the store says so from here on, and
+            // the node is planned again, what changed here moving out. (In a folder that
+            // doesn't write to what is shared, no such write is sent.)
+            (
+                _,
+                Job::Upload {
+                    target: Some(target),
+                    ..
+                }
+                | Job::Meta {
+                    target: Some(target),
+                    ..
+                },
+                JobResult::Failed(JobError::Remote(RemoteError::ReadOnly(why))),
+            ) if self.folder.writes => {
+                self.db
+                    .write(|s| s.account().set_writable(target.at.file_id, false))?;
+                Ok(Outcome::stale(why))
+            }
             (_, _, JobResult::Failed(JobError::Remote(e))) => Ok(remote_outcome(e)),
             // A file hashed on send that can't be read (locked, a bad sector): a file not
             // hashed yet from now on, which waits and is told as one (sync semantics §6.3).

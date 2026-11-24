@@ -888,7 +888,7 @@ mod tests {
             Err(RemoteError::VersionMismatch)
         ));
         match told("recipientIdentityReturnedAccessDenied", None) {
-            Err(RemoteError::Fatal(why)) => assert!(why.contains("read-only"), "{why}"),
+            Err(RemoteError::ReadOnly(why)) => assert!(why.contains("read-only"), "{why}"),
             _ => panic!("taken"),
         }
         match told("recipientIdentityReturnedBadRequest", None) {
@@ -1372,7 +1372,7 @@ mod tests {
             sam.delete_for_good(&[]).map(drop),
         ] {
             match refused {
-                Err(RemoteError::Fatal(why)) => assert!(why.contains("read-only"), "{why}"),
+                Err(RemoteError::ReadOnly(why)) => assert!(why.contains("read-only"), "{why}"),
                 other => panic!("{other:?}"),
             }
         }

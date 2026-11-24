@@ -512,6 +512,12 @@ pub enum RemoteError {
         why: String,
         retry_after: Option<std::time::Duration>,
     },
+    /// A write to what another identity shares with this one, refused: read-only here, by
+    /// what the share says or by their server (whose word the share's rows can lag behind:
+    /// sync semantics §13). In words for the user. Retrying changes nothing: the item is to
+    /// count as read-only from here on.
+    #[error("fatal: {0}")]
+    ReadOnly(String),
     /// Anything that won't get better by retrying (auth, bad request).
     #[error("fatal: {0}")]
     Fatal(String),
@@ -633,7 +639,7 @@ impl<T> Answers<T> {
 impl RemoteError {
     /// The refusal of a write to what `sharer` shares with this identity: read-only here.
     pub fn read_only(sharer: impl std::fmt::Display) -> RemoteError {
-        RemoteError::Fatal(format!("what {sharer} shares with you is read-only here"))
+        RemoteError::ReadOnly(format!("what {sharer} shares with you is read-only here"))
     }
 
     /// What it means ([`ErrorClass`]).
@@ -652,9 +658,10 @@ impl RemoteError {
             | RemoteError::HashMismatch => ErrorClass::Stale,
             RemoteError::NotFound | RemoteError::Deleted => ErrorClass::Gone,
             // The drive won't take it as it is: retrying the same won't help.
-            RemoteError::Fatal(_) | RemoteError::InvalidHash | RemoteError::HashRequired => {
-                ErrorClass::Refused
-            }
+            RemoteError::Fatal(_)
+            | RemoteError::ReadOnly(_)
+            | RemoteError::InvalidHash
+            | RemoteError::HashRequired => ErrorClass::Refused,
             // The local source or sink failed.
             RemoteError::Io(e) => ErrorClass::of_io(e),
         }
@@ -718,6 +725,7 @@ impl RemoteError {
                 why: why.clone(),
                 retry_after: *retry_after,
             },
+            RemoteError::ReadOnly(why) => RemoteError::ReadOnly(why.clone()),
             RemoteError::Fatal(why) => RemoteError::Fatal(why.clone()),
         }
     }

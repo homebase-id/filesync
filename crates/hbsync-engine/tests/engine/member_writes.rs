@@ -124,3 +124,42 @@ fn a_file_at_the_members_top_stays_in_its_folder_on_the_sharers_drive() -> R {
     assert_eq!(report.ops_done, 0, "{report:?}");
     Ok(())
 }
+
+/// The sharer turned the share back to reading, and the member hasn't read that yet: its
+/// store still says the file may be changed, so its edit is sent, and their server refuses
+/// it. The file counts as read-only from there on: the store says so, the sharer's file is
+/// as it was, and the edit moves out, kept.
+#[test]
+fn a_write_the_sharer_refuses_makes_the_item_read_only_here() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("to-edit.txt", "one")?;
+    a.sync()?;
+    share_to_edit(&a, &server, "to-edit.txt")?;
+    let (mut b, out) = writing_member(&server, "b")?;
+    b.sync()?;
+    let file = common::header_named(&server, "to-edit.txt").file_id;
+    let may_change = |b: &mut Client| -> Result<bool, Box<dyn std::error::Error>> {
+        let row = b.engine.db().read(|s| s.mirror_by_file(file))?;
+        Ok(row.ok_or("no row")?.writable)
+    };
+    assert!(may_change(&mut b)?);
+
+    // Back to reading; the member isn't told (no feed read: the drive counts as current).
+    a.remote.share(file)?;
+    b.write("to-edit.txt", "the member's edit")?;
+    b.sync_unasked()?;
+    assert!(
+        !may_change(&mut b)?,
+        "the store still says it may be changed"
+    );
+    assert_eq!(
+        hbsync_engine::testkit::tree_text_of(out.path()),
+        ["to-edit.txt = the member's edit"]
+    );
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["to-edit.txt = one"]);
+    a.sync()?;
+    assert_eq!(a.tree_text(""), ["to-edit.txt = one"]);
+    Ok(())
+}

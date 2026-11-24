@@ -527,7 +527,7 @@ mod tests {
             removed: false,
         };
         let refused = |r: Result<()>| match r {
-            Err(RemoteError::Fatal(why)) => assert!(why.contains("read-only"), "{why}"),
+            Err(RemoteError::ReadOnly(why)) => assert!(why.contains("read-only"), "{why}"),
             other => panic!("{other:?}"),
         };
         refused(sam.create(&meta, None).map(drop));
