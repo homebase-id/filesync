@@ -107,14 +107,19 @@ fn a_move_and_a_delete_follow_the_drive() {
     assert_eq!(sim.local_paths(2), drive);
 }
 
-/// A share turned back to reading after the member planned its write: the write doesn't run,
-/// and the edit moves out.
+/// A share turned back to reading after the member planned its write: the write doesn't run
+/// (the plan's operations are stepped as planned, before any new plan), and the edit moves
+/// out at the next plan.
 #[test]
 fn a_share_turned_back_before_the_write_runs_stops_it() {
     let mut sim = owned(&["a"]);
     edit(&mut sim, "a");
     sim.run(&[Event::Plan { client: 2 }]);
+    assert_eq!(sim.planned(2), ["RemoteUpdate"]);
     turn(&mut sim, "a");
+    sim.run(&[Event::Step { client: 2 }]);
+    assert!(sim.planned(2).is_empty(), "{:?}", sim.planned(2));
+    // (A write that ran all the same is a breach, which `settle` checks.)
     settle(&mut sim);
     assert_eq!(sim.moved_out(2), ["a"]);
     assert_eq!(sim.local_paths(2), ["a"]);

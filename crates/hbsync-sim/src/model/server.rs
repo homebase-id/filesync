@@ -356,13 +356,11 @@ impl Server {
             }
             let file = was.remote.file_id;
             let in_place = now.remote.file_id == file && now.state.parent == was.state.parent;
-            let Some(mine) = self.live.get_mut(id).filter(|m| m.remote.file_id == file) else {
-                continue;
-            };
-            if !in_place || !self.editable.contains(&file) {
+            let mine = self.live.get_mut(id).filter(|m| m.remote.file_id == file);
+            let Some(mine) = mine.filter(|_| in_place && self.editable.contains(&file)) else {
                 breach.get_or_insert_with(|| format!("it changed {id:?}: {was:?} to {now:?}"));
                 continue;
-            }
+            };
             *mine = ServerNode {
                 state: NodeState {
                     parent: mine.state.parent,

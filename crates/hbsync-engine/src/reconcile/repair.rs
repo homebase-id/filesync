@@ -551,10 +551,15 @@ impl Reconciler<'_> {
                     }
                     _ => state.parent = NodeId::ROOT,
                 }
-                self.retarget(victim, state);
+                // Read-only (§13), it follows the drive from here on, its tags too: what the
+                // merge took of this device's (a node that may be changed) isn't sent.
                 if self.masking.read_only {
+                    if let Some(r) = self.remote_state(victim) {
+                        state.tags = r.tags.clone();
+                    }
                     self.follows.insert(victim);
                 }
+                self.retarget(victim, state);
                 self.plan.conflicts.push(Conflict::Cycle { node: victim });
                 // A cycle on the drive itself (another writer's): no mask judged what is in
                 // it, as none does what the drive doesn't connect to the top.

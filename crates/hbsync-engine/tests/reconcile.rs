@@ -4052,6 +4052,31 @@ fn read_only_no_repair_writes_the_drive_whatever_may_be_changed() {
     w.input.writable.extend([a, b]);
     let plan = w.plan();
     assert!(!plan.writes_drive(), "{:?}", plan.ops);
+
+    // The folder whose move the repair undoes here follows the drive in its tags too: one
+    // set here is undone, not left as if it were synced.
+    let red = |s: NodeState| NodeState {
+        tags: Tags::new(vec![Tag::new("Red", 0)]),
+        ..s
+    };
+    w.local(a, Some(red(folder(ROOT, "a"))))
+        .local(b, Some(red(folder(ROOT, "b"))));
+    let plan = w.plan();
+    let [Conflict::Cycle { node: victim }] = plan.conflicts[..] else {
+        panic!("{:?}", plan.conflicts);
+    };
+    let its: Vec<&str> = (sorted_ops(&plan).into_iter())
+        .filter(|(_, n)| *n == victim)
+        .map(|(kind, _)| kind)
+        .collect();
+    assert!(its.contains(&"LocalTags"), "{:?}", plan.ops);
+    assert!(
+        plan.ops
+            .iter()
+            .all(|op| !op.writes_remote() || op.node() != victim),
+        "{:?}",
+        plan.ops
+    );
 }
 
 /// Two of the drive's items whose names clash here: the one held here keeps its name, the other

@@ -1708,13 +1708,15 @@ rules hold too:
     withdrawn, taken along by its folder's removal) isn't made again, and an edit of it here
     moves out; a delete here removes nothing there, and the item comes back;
   - edited on both sides, the drive's wins and this device's moves out, as of any item of
-    the folder (a conflict copy would be a new item there);
+    the folder (a conflict copy would be a new item there; an executable bit changed here
+    alone is no edit to keep, as in any read-only folder);
   - a move here to another folder is undone, whole (the item goes back to the drive's place
     and name); an edit made with it still goes up;
   - a rename here onto a name another item holds, on the drive or in the plan, or one this
     device leaves out there or keeps (§10, §7), is undone: no clash of names is made on the
     owner's drive. (Onto the name of an item the member doesn't read, or one shared a moment
-    later, it can't know: that clash is the owner's devices' to mend, as any.)
+    later, it can't know: that clash is the owner's devices' to mend, as any. Its own name
+    spelled otherwise goes up: what holds that name with it did before.)
 
   What it is in stays the drive's: the write is to send the folder the drive has the item
   in, never this folder's top for an item shown there (the simulator's member does:
