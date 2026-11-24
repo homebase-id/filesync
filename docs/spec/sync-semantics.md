@@ -1711,9 +1711,10 @@ rules hold too:
   what is shared with it (`FolderCtx::writes`, the view's `Input::writable`). **An item
   the store says may be changed is changed there**:
   - its edit (bytes, the executable bit), its tags and its rename in its folder go up;
-  - gone there or here, it follows the drive: what is gone there (deleted, its share
-    withdrawn, taken along by its folder's removal) isn't made again, and an edit of it here
-    moves out; a delete here removes nothing there, and the item comes back;
+  - gone there, it follows the drive: what is gone there (deleted, its share withdrawn,
+    taken along by its folder's removal) isn't made again, and an edit of it here moves
+    out;
+  - deleted here, it is removed there: it goes to its owner's Recently deleted (below);
   - edited on both sides, both are kept where its folder may be added to (below): the
     drive's version keeps the file, and this device's becomes a conflict copy beside it,
     added there, as on an identity's own drive (§6). Elsewhere (a file shared for editing
@@ -1744,6 +1745,54 @@ rules hold too:
   - the executor's last guard makes a node only in a folder the store says may be
     changed, as the write runs (one this run made there is one: it is asked after what
     the write waits for ran), and moves one only between two such folders.
+
+  **A delete here of an item the store says may be changed is a removal there**: the item
+  goes to its owner's Recently deleted, where the owner restores it or the purge takes it
+  in its time. A member deletes nothing for good, and restores and empties nothing there
+  (above).
+  - A file is removed where the drive's is as it synced here: the same place and bytes, at
+    the version it synced at. Changed there since, it comes back: the edit wins over the
+    delete, as on an identity's own drive (§6). So does one its owner removed and restored
+    since (another version of the same bytes): a delete made before that doesn't undo the
+    restore, also where a crash left this device a base without its item. (Where this
+    device never took the new version, a delete made after it comes back once too; the
+    next one goes through.)
+  - A folder's removal takes along what is in it, there too, also what this identity
+    doesn't read of it (node schema, Recently deleted: all of it is in the owner's Recently
+    deleted with the folder, and comes back with it). It is sent only where all the drive
+    has in the folder, as this device reads it when it plans, may be changed by this
+    identity and is as it synced here. With one item in it that may only be read, or one
+    changed or made there since, the delete is undone: the folder comes back with what
+    was in it, and nothing is removed there (`Reconciler::removes`, asked once of the
+    topmost folder deleted here, in the plan that holds the folder and what was in it:
+    §6.5 plans a folder's delete as one). Two limits: a folder too big for one page is
+    planned in pieces, and the pieces before the one that holds an item that may only be
+    read have removed what may be changed by then (each a delete of the user's, of an
+    item that may be changed: the folder and the rest come back); and what the owner adds
+    to or changes in the folder between this device's plan and its write goes along, as
+    between two devices of one identity (a share in it turned back to reading by then
+    stops the folder's removal: the executor's guard asks of all the store has in the
+    folder as the removal runs). A third, which no client can see: an item this identity
+    reads at the top because its own folder isn't shared, where that folder is below the
+    removed one, goes along with it (this device doesn't know where the unshared folder
+    is).
+  - The mass-delete guard (§7) holds such removals as an own drive's: confirmed, they are
+    sent. Putting them back is refused in such a folder for now (`Engine::put_back`): what
+    is held is confirmed or stays held.
+  - What this device itself moved out of the folder (an edit of an item it may only read)
+    is no delete of the user's: in a folder that writes, the bases of what moves out go
+    before the item does, so the node is planned from the drive's alone and comes back,
+    also where its share is turned to editing in between (found by the simulator: a base
+    left read as a delete here, and the member removed the sharer's file).
+  - The executor's last guard lets a removal through for a node the store says may be
+    changed, as it runs; a folder's, where all the store has in it may be changed too.
+
+  Engine tests `a_members_delete_goes_to_the_sharers_recently_deleted`,
+  `a_members_delete_of_a_folder_it_may_not_empty_is_undone`,
+  `what_moves_out_of_a_folder_that_writes_leaves_no_base`; the simulator's scripted
+  `a_move_is_undone_and_a_delete_is_a_removal` and
+  `what_moved_out_is_not_a_delete_once_it_may_be_changed`, and its oracle for a removal
+  no user made.
 
   Engine tests `what_a_member_makes_in_a_folder_shared_for_editing_reaches_the_sharer`,
   `a_members_conflict_copy_and_move_reach_the_sharer`,
@@ -1778,9 +1827,9 @@ rules hold too:
   this device ignores (§10) follows the drive: an ignore rule here removes nothing there.
   Simulator: `a_writing_member_writes_only_what_it_may_and_converges`, the same in pages
   that crash, and on the engine's planning path; scripted cases in
-  `regressions/writing_member.rs`. No folder writes yet (nothing turns it on), and none is
-  to before a member's deletes are settled (a delete here still removes nothing there,
-  and the item comes back).
+  `regressions/writing_member.rs`. No folder writes yet (nothing turns it on): the daemon
+  turns it on with the permission to send to other identities, once a write still on its
+  way no longer stops the whole share (the next step).
   So a folder synced from another identity's drive is read-only (above), whatever its items
   say. A share's state DB from before it was kept reads its
   feed from its beginning once (a re-read, §8b), each row taking what its header says.

@@ -620,7 +620,9 @@ impl Executor<'_> {
     /// item there that it doesn't expect (moved in since) makes it wait for the next plan. Its
     /// rows go and the bases stay, so what was synced is planned again: the drive's version
     /// comes back. A crash after the rename leaves the rows of an item that isn't there: the
-    /// scan reads it as deleted here, which a read-only folder undoes the same way.
+    /// scan reads it as deleted here, which a read-only folder undoes the same way. (In a
+    /// folder that writes to what is shared with it, where a delete here isn't always
+    /// undone, the bases go first: below.)
     pub(super) fn evict(&mut self, node: NodeId, expected: &[NodeId]) -> Step {
         let Some(row) = self.db.read(|s| s.local_by_node(node))? else {
             return Ok(Outcome::stale("gone"));
@@ -667,6 +669,21 @@ impl Executor<'_> {
                 return self.left_here(&row, original.as_ref(), why);
             }
         }
+        // In a folder that writes to what is shared with it, a base left behind would read as
+        // a delete here, which is sent to the drive where the node may be changed (now, or
+        // once its share is turned to editing): the bases go, durably, before the item
+        // does. Without one the node is planned from the drive's alone, and comes back; a
+        // crash before the rename leaves the item here without a base, to move out again.
+        if self.folder.writes {
+            let based: Vec<NodeId> = (held.iter().filter(|(_, base)| *base))
+                .map(|(n, _)| *n)
+                .collect();
+            if !based.is_empty() {
+                self.disk.write_durable(self.db, |s| {
+                    based.iter().try_for_each(|n| s.forget_base(*n))
+                })?;
+            }
+        }
         let place = original.clone().unwrap_or_else(|| row.path.clone());
         let to = match self.move_out(&row, &place) {
             Ok(to) => to,
@@ -681,8 +698,8 @@ impl Executor<'_> {
         if let Some(sink) = &mut self.moved_out {
             sink.push((place.to_string(), to));
         }
-        // Its bases stay, and what was synced, or the drive holds, is planned again: the
-        // drive's version comes back.
+        // Its bases stay (in a folder that writes they went already, above), and what was
+        // synced, or the drive holds, is planned again: the drive's version comes back.
         let held: Vec<NodeId> = held.into_iter().map(|(n, _)| n).collect();
         self.finish(&[], |s| {
             gone_from_here(s, &row.path, node, Bases::Keep(&held))

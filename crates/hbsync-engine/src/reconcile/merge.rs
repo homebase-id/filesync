@@ -90,6 +90,41 @@ impl<'a> Reconciler<'a> {
         false
     }
 
+    /// Whether the delete here of `node`, one this identity may change on another identity's
+    /// drive, is sent there (§13): the node goes to its owner's Recently deleted. A folder's
+    /// removal takes along what is in it, there too, so it is asked of the topmost folder
+    /// deleted here that the node is in, once: sent only where all the drive has in that
+    /// folder, as this plan reads it, may be changed by this identity and is as it synced
+    /// here: the same place and bytes, at the version the base was agreed at (a change
+    /// there, a new item there, or one its owner removed and restored since isn't removed
+    /// by a delete made before it). Else the delete is undone: the folder comes back with
+    /// what was in it.
+    pub(super) fn removes(&mut self, node: NodeId) -> bool {
+        let i = self.input;
+        let gone_here = |n: NodeId| i.base.contains(n) && !i.local.contains(n);
+        let top = (i.remote.ancestors_iter(node))
+            .take_while(|a| gone_here(*a))
+            .last()
+            .unwrap_or(node);
+        if let Some(sent) = self.removals.get(&top) {
+            return *sent;
+        }
+        // (A base without its version, or a node without its ref: not known otherwise.)
+        let at_base = |n: NodeId| {
+            let base = i.base_extra.get(&n).and_then(|e| e.version);
+            let there = i.remote_refs.get(&n).map(|r| r.version);
+            base.zip(there).is_none_or(|(base, there)| base == there)
+        };
+        let sent = i.remote.subtree(top).into_iter().all(|n| {
+            i.writable.contains(&n)
+                && self.remote_state(n).is_some()
+                && !self.remote_change(n).is_change()
+                && at_base(n)
+        });
+        self.removals.insert(top, sent);
+        sent
+    }
+
     /// Whether `node` is new here, in a folder this identity may add to on another
     /// identity's drive (`adds_to`): it is added there. Not one the drive has in Recently
     /// deleted: that isn't made again there.
@@ -356,15 +391,19 @@ impl Reconciler<'_> {
         let (b, l) = (i.base.get(node), self.local_state(node));
         let masked = self.masks.masked.contains(&node);
         // A node this identity may change on another identity's drive (§13) is changed there
-        // where both have it: its edit, its name and its tags go up. Gone there or here, it
-        // follows the drive (what is gone there isn't made again, and a delete here removes
-        // nothing there). Edited on both sides, both are kept where the folder it is in
-        // here may be added to (the copy is a new item there); else the drive's wins and
-        // this device's moves out. (One this plan adds is on neither side but here.)
+        // where both have it: its edit, its name and its tags go up. Gone there, it follows
+        // the drive (what is gone there isn't made again). Deleted here, it is removed there
+        // where that may be (`removes`); else it comes back. Edited on both sides, both are
+        // kept where the folder it is in here may be added to (the copy is a new item
+        // there); else the drive's wins and this device's moves out. (One this plan adds is
+        // on neither side but here.)
         let mut one_way = self.one_way(node);
         if self.masking.read_only && !one_way && !masked && !self.adds.contains(&node) {
-            let changes = matches!((&l, r), (Some(l), Some(r))
-                if !edited_apart(l, r, lc, rc) || self.adds_to(l.parent));
+            let changes = match (&l, r) {
+                (Some(l), Some(r)) => !edited_apart(l, r, lc, rc) || self.adds_to(l.parent),
+                (None, Some(_)) => matches!(lc, Change::Deleted) && self.removes(node),
+                _ => false,
+            };
             if !changes {
                 self.follows.insert(node);
                 one_way = true;

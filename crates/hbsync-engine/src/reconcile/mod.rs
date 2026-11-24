@@ -211,6 +211,9 @@ struct Reconciler<'a> {
     /// identity may add to there (`adds_to`), and the conflict copies made in one. They are
     /// planned as on an identity's own drive (`one_way`).
     adds: HashSet<NodeId>,
+    /// Whether the delete here of each topmost node deleted here is sent to another
+    /// identity's drive (§13, `removes`): asked once for a folder and all that was in it.
+    removals: HashMap<NodeId, bool>,
     /// The folders here a name pass left one out in, held there (§13): judged again.
     rejudge: BTreeSet<NodeId>,
     /// Becomes `plan.deferred`.
@@ -276,6 +279,7 @@ impl<'a> Reconciler<'a> {
             left: BTreeSet::new(),
             follows: HashSet::new(),
             adds: HashSet::new(),
+            removals: HashMap::new(),
             rejudge: BTreeSet::new(),
             deferred: BTreeSet::new(),
             adopted: HashSet::new(),
@@ -355,7 +359,8 @@ impl<'a> Reconciler<'a> {
         self.guard_mass_delete();
         // Read-only (§13): the drive is never written, but of a node this identity may change
         // there or adds there (emit plans no other write): changed where it is, or moved
-        // between folders it may add to; made in one; never removed.
+        // between folders it may add to; made in one; removed (to its owner's Recently
+        // deleted) where it was deleted here.
         debug_assert!(
             !self.masking.read_only
                 || (self.plan.ops.iter().chain(&self.plan.held)).all(|op| match op {
@@ -369,6 +374,9 @@ impl<'a> Reconciler<'a> {
                     Op::RemoteTags { node, .. } => !self.one_way(*node),
                     Op::RemoteCreate { node, parent, .. } => {
                         self.adds.contains(node) && self.adds_to(*parent)
+                    }
+                    Op::RemoteDelete { node, .. } => {
+                        !self.one_way(*node) && !self.input.local.contains(*node)
                     }
                     op => !op.writes_remote(),
                 }),
