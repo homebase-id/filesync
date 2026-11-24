@@ -471,7 +471,7 @@ impl Reconciler<'_> {
                     self.merged.remove(node);
                     self.scope.insert(node);
                     let_go.insert(node);
-                    self.mended.insert(node);
+                    self.follows.insert(node);
                     // Only what was synced here is deleted, as the drive had it: what changed
                     // here that the drive doesn't hold, or was never synced, moves out.
                     if self.input.local.contains(node)
@@ -553,7 +553,7 @@ impl Reconciler<'_> {
                 }
                 self.retarget(victim, state);
                 if self.masking.read_only {
-                    self.mended.insert(victim);
+                    self.follows.insert(victim);
                 }
                 self.plan.conflicts.push(Conflict::Cycle { node: victim });
                 // A cycle on the drive itself (another writer's): no mask judged what is in
@@ -719,6 +719,44 @@ impl Reconciler<'_> {
     }
 
     /// Only the folders in `only`, where given.
+    /// On another identity's drive (§13) a rename here goes up only onto a name that is free:
+    /// one another node holds, on the drive or in the plan, or one this device leaves out
+    /// there or keeps (§10, §7), is the other's. The rename is undone (its item here gets the
+    /// drive's name back); what else changed here of the node still goes up. A clash of names
+    /// on the drive is its owner's to mend, so none is made there.
+    pub(super) fn undo_renames_onto_taken_names(&mut self) {
+        if !self.masking.read_only || self.input.writable.is_empty() {
+            return;
+        }
+        let i = self.input;
+        let renamed: Vec<(NodeId, NodeState)> = (self.scope.iter())
+            .filter(|n| !self.one_way(**n))
+            .filter_map(|&n| {
+                let (to, r) = (self.merged.get(n)?, self.remote_state(n)?);
+                let key = name_key(&to.name);
+                if key == name_key(&r.name) {
+                    return None;
+                }
+                let held =
+                    |names: Option<&HashSet<String>>| names.is_some_and(|k| k.contains(&key));
+                let taken = self
+                    .merged
+                    .child_named(to.parent, &to.name, Some(n))
+                    .is_some()
+                    || i.remote.child_named(to.parent, &to.name, Some(n)).is_some()
+                    || held(self.masks.names.get(&to.parent))
+                    || held(self.kept.get(&to.parent));
+                taken.then(|| {
+                    let name = r.name.clone();
+                    (n, NodeState { name, ..to.clone() })
+                })
+            })
+            .collect();
+        for (node, state) in renamed {
+            self.retarget(node, state);
+        }
+    }
+
     pub(super) fn fix_names(&mut self, only: Option<&BTreeSet<NodeId>>) {
         let parents: BTreeSet<NodeId> = self
             .scope
