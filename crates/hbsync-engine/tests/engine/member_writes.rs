@@ -109,8 +109,17 @@ fn a_file_at_the_members_top_stays_in_its_folder_on_the_sharers_drive() -> R {
 
     b.write("in.txt", "edited")?;
     let report = b.sync()?;
-    // The base is settled where the file is here, the top: nothing is planned again for it.
+    // The mirror keeps the drive's folder (the row is shown at the top all the same), and
+    // the base is settled where the file is here: nothing is planned again for it.
     assert_eq!(report.ops_done, 1, "{report:?}");
+    let node = common::header_named(&server, "in.txt")
+        .node()
+        .ok_or("node")?;
+    let base = b.engine.db().read(|s| s.get_base(node))?.ok_or("base")?;
+    assert_eq!(base.state.parent, NodeId::ROOT);
+    let row = b.engine.db().read(|s| s.get_mirror(node))?.ok_or("row")?;
+    assert_eq!(row.parent, NodeId::ROOT, "shown at the top");
+    assert!(!b.engine.db().read(|s| s.is_dirty(node))?);
     a.sync()?;
     assert_eq!(a.tree_text(""), ["d/", "d/in.txt = edited"]);
     assert_eq!(b.tree_text(""), ["in.txt = edited"]);

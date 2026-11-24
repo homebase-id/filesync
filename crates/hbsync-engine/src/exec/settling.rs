@@ -70,7 +70,7 @@ impl Executor<'_> {
     ///
     /// [`AccountTx::answered`]: hbsync_state::AccountTx::answered
     pub(super) fn finish_answered(&mut self, answers: &[(Settle<'_>, Answer)]) -> Step {
-        let (os, writes) = (self.folder.os, self.folder.writes);
+        let os = self.folder.os;
         let answers: Vec<(Settle<'_>, &Answer)> = answers
             .iter()
             .map(|(how, a)| (self.ours(*how), a))
@@ -84,15 +84,7 @@ impl Executor<'_> {
                 if newer || answer.live_row().is_none() {
                     s.folder().mark_dirty(how.node)?;
                 }
-                let mut row = answer.live_row().cloned();
-                // A node of another identity's drive written in a folder that isn't shared
-                // (`Executor::sent_folder`): the mirror keeps the drive's folder, and the
-                // base the place the node has here, the top.
-                if let Some(row) = row.as_mut().filter(|_| writes)
-                    && s.shown_at_the_top(row.parent)?
-                {
-                    row.parent = NodeId::ROOT;
-                }
+                let row = answer.live_row().cloned();
                 settled.push((how.node, settle_with(s.folder(), *how, row, os)?));
             }
             Ok((settled, superseded))
