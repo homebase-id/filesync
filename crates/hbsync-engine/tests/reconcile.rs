@@ -3882,6 +3882,20 @@ fn read_only_what_is_new_in_a_folder_that_may_be_changed_is_added() {
     ];
     want.sort();
     assert_eq!(sorted_ops(&plan), want);
+    // What the drive has in Recently deleted isn't new here: it isn't made again there.
+    let mut gone = read_only();
+    gone.synced(to_edit, folder(ROOT, "edit"));
+    gone.input.writable.insert(to_edit);
+    gone.local(file_in, Some(file(to_edit, "new.txt", "n")));
+    gone.input.removed.insert(
+        file_in,
+        hbsync_engine::reconcile::Removed {
+            at: 100,
+            state: file(to_edit, "new.txt", "old"),
+        },
+    );
+    assert!(!gone.plan().writes_drive(), "{:?}", gone.plan().ops);
+
     // The folder before what is in it.
     let made: Vec<NodeId> = (plan.ops.iter().filter(|op| op.writes_remote()))
         .map(Op::node)
