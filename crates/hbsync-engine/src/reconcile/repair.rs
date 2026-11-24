@@ -707,9 +707,21 @@ impl Reconciler<'_> {
                 self.scope.remove(&n);
                 self.origin.remove(&n);
             }
-            // Where it is here, it holds that name: nothing else is planned onto it.
+            // Where it is here, it holds that name: nothing else is planned onto it. Put
+            // back in another place than the plan had it (a file of the folder at the top
+            // here, from when it was shared without the folder), it holds a name the folder
+            // it is in here may not have been judged with (the one being judged, or one
+            // judged before it): that folder is judged again, or a newcomer of the name is
+            // downloaded onto it, refused by the disk at every sync. (`node` itself is the
+            // caller's, which knows the folder being judged.)
             match self.input.local.get(n) {
-                Some(here) => self.merged.insert(n, here.clone()),
+                Some(here) => {
+                    let moved = self.merged.get(n).is_none_or(|was| !was.same_place(here));
+                    if n != node && moved && !self.evicted.contains(&n) {
+                        self.rejudge.insert(here.parent);
+                    }
+                    self.merged.insert(n, here.clone())
+                }
                 None => self.merged.remove(n),
             };
             if self.input.dirty.contains(&n) && !self.evicted.contains(&n) {
