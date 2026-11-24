@@ -1617,10 +1617,11 @@ rules hold too:
   turn. So does what is in a folder left out: each item of it stays where it is here, and
   holds its name there, also in another folder than the one judged (a file here at the top
   since it was shared without its folder, the folder then left out for its name: a new item
-  of the file's name at the top waits). That folder was judged without it before, and the
-  new item was downloaded onto the taken name, which the disk refused at every sync, the
-  bytes fetched first (plan `read_only_what_a_folder_left_out_holds_elsewhere_keeps_its_name`;
-  simulator `what_a_folder_left_out_holds_at_the_top_keeps_its_name_there`).
+  of the file's name at the top waits). Judged without it, that folder gave the name to
+  the new item: fetched once and kept, then read and hashed again from the disk and
+  refused, name taken, at every sync (plan
+  `read_only_what_a_folder_left_out_holds_elsewhere_keeps_its_name`; simulator
+  `what_a_folder_left_out_holds_at_the_top_keeps_its_name_there`).
   A loser inside a folder whose share is withdrawn leaves with the folder.
   Where none of them is here under the name and another item is (one synced here that the
   drive has in a folder now), and that folder is one of them, the folder takes the name: it

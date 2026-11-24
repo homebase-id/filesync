@@ -4399,6 +4399,34 @@ fn read_only_what_a_folder_left_out_holds_elsewhere_keeps_its_name() {
     }
 }
 
+/// The same with the item held in a folder judged BEFORE the one the names meet in (folders
+/// are judged in the order of their ids; the top is last): `inner` is synced in `held_in`,
+/// the drive has it in `dir` now, which loses its name in `clash_in`, a later folder. The
+/// newcomer of `inner`'s name in `held_in` is left out, that folder judged again.
+#[test]
+fn read_only_what_a_folder_left_out_holds_in_a_folder_judged_before_keeps_its_name() {
+    let [held_in, newcomer, inner, dir, other, clash_in] = ids(6)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(held_in, folder(ROOT, "h"))
+        .synced(clash_in, folder(ROOT, "q"))
+        .synced(other, folder(clash_in, "a"))
+        .synced(inner, file(held_in, "c.txt", "x"))
+        .remote(inner, Some(file(dir, "c.txt", "x")))
+        .remote(dir, Some(folder(clash_in, "a")))
+        .remote(newcomer, Some(file(held_in, "c.txt", "y")));
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    assert!(plan.ops.is_empty(), "{:?}", plan.ops);
+    let mut left: Vec<NodeId> = plan.conflicts.iter().map(Conflict::node).collect();
+    left.sort();
+    let mut want = vec![dir, newcomer];
+    want.sort();
+    assert_eq!(left, want, "{:?}", plan.conflicts);
+    assert!(plan.deferred.contains(&newcomer));
+}
+
 /// The item synced here keeps its name though this device renamed it meanwhile: the rename is
 /// undone, and the newcomer (the lower id) is the one left out.
 #[test]
