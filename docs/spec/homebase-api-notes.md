@@ -646,7 +646,10 @@ server answers the rest, to a token their server made for this identity's connec
   the client takes whether it may change it from them (`RemoteHeader::writable`). The rows
   can say more than the server allows: a row is checked against its circle's grant on the
   drive when it is written, not after, so a circle that has lost `Write` since leaves rows
-  with it, and the member's write is refused (**[verified]** odin-core
+  with it, and the member's write is refused unless another of their circles grants it
+  (what a member may do on the drive is what all their circles grant together; the
+  sharer's server keeps a peer's rights for up to an hour, so a refusal can come that
+  much later: **[verified]** odin-core `docs/file-access.md`,
   `DriveShareService.AssertCircleFitsAsync`,
   `DriveStorageServiceBase.AssertMemberMayWriteAsync`). That is the header's `updated` too
   (**[verified]** `FileMetadata`: `Updated = record.modified`), so `updated` is when the file
