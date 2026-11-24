@@ -345,21 +345,48 @@ impl Server {
     ///   has the file in (the member reads one whose folder isn't shared at the top, and
     ///   sends the drive's: never its own);
     /// - such a file's move between two folders it may change;
-    /// - a node made in a folder it may change: shared as that folder is, for editing.
+    /// - a node made in a folder it may change: shared as that folder is, for editing;
+    /// - a file it may change removed: to Recently deleted, where the drive has it.
     ///
-    /// Anything else it did is a breach, named, and dropped: a node removed, one made or
-    /// moved elsewhere (the top is no folder of the drive's), a change of a file it may not
-    /// change. The drive's ids go on from the member's, so no version is given twice.
+    /// Anything else it did is a breach, named, and dropped: one made or moved elsewhere
+    /// (the top is no folder of the drive's), a change or a removal of a file it may not
+    /// change, anything else of Recently deleted. The drive's ids go on from the member's,
+    /// so no version is given twice.
     pub(crate) fn take_from_member(&mut self, before: &Snapshot, seen: &Server) -> Option<String> {
         self.next = seen.next;
         let mut breach = None;
-        if seen.removed != before.1 {
-            breach = Some("it changed Recently deleted".to_owned());
-        }
         let adds_to = |drive: &Server, folder: NodeId| drive.editable_node(folder).is_some();
+        let mut removed_now = BTreeSet::new();
         for (id, was) in &before.0 {
             let Some(now) = seen.live.get(id) else {
-                breach.get_or_insert_with(|| format!("it removed {id:?}"));
+                // Removed: of a file it may change, as the drive has it.
+                let file = was.remote.file_id;
+                let there = seen.removed.get(id).filter(|r| r.remote.file_id == file);
+                let mine = self.editable_node(*id).filter(|m| m.remote.file_id == file);
+                let (Some(there), Some(mine)) = (there, mine) else {
+                    breach.get_or_insert_with(|| format!("it removed {id:?}"));
+                    continue;
+                };
+                let parent = mine.state.parent;
+                let gone = ServerNode {
+                    state: NodeState {
+                        parent,
+                        ..there.state.clone()
+                    },
+                    remote: there.remote,
+                };
+                self.live.remove(id);
+                self.removed.insert(*id, gone);
+                if let Some(tags) = seen.tags_at_removal.get(id) {
+                    self.tags_at_removal.insert(*id, tags.clone());
+                }
+                if let Some(at) = seen.removed_at.get(id) {
+                    self.removed_at.insert(*id, *at);
+                }
+                if let Some((_, at, kind)) = seen.removals.get(id) {
+                    self.removals.insert(*id, (parent, *at, *kind));
+                }
+                removed_now.insert(*id);
                 continue;
             };
             if now == was {
@@ -386,6 +413,15 @@ impl Server {
                 },
                 remote: now.remote,
             };
+        }
+        // Nothing else of Recently deleted: none restored, emptied or changed.
+        let untouched = |(id, r): (&NodeId, &ServerNode)| {
+            removed_now.contains(id) || before.1.get(id) == Some(r)
+        };
+        if !seen.removed.iter().all(untouched)
+            || before.1.keys().any(|id| !seen.removed.contains_key(id))
+        {
+            breach.get_or_insert_with(|| "it changed Recently deleted".to_owned());
         }
         for (id, made) in (seen.live.iter()).filter(|(id, _)| !before.0.contains_key(id)) {
             let new = !self.live.contains_key(id) && !self.removed.contains_key(id);

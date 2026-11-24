@@ -632,8 +632,9 @@ impl Sim {
         let plan = reconcile_with_known(&input, &opts, masking, known);
         // A member that writes plans only what it may (§13): a change of a node it may change,
         // where the drive has it, or its move between two folders it may change; a node made
-        // in such a folder (or in one the plan makes there). Never a node removed, nothing at
-        // the top, and no name another node of the drive holds, as it reads it.
+        // in such a folder (or in one the plan makes there); a node it may change removed, a
+        // folder only with all it reads in it. Nothing at the top, and no name another node
+        // of the drive holds, as it reads it.
         if client.writes {
             // (Not onto its own name spelled otherwise: what holds that with it did before.)
             let taken = |node: NodeId, parent: NodeId, name: &str| {
@@ -659,6 +660,11 @@ impl Sim {
                         || taken(*node, *parent, name)
                 }
                 Op::RemoteTags { node, .. } => !input.writable.contains(node),
+                // A removal: of a node it may change, a folder with all it reads in it.
+                Op::RemoteDelete { node, .. } => {
+                    let may = |n: &NodeId| input.writable.contains(n);
+                    !input.remote.subtree(*node).iter().all(may)
+                }
                 Op::RemoteCreate {
                     node, parent, name, ..
                 } => {
@@ -1000,7 +1006,7 @@ impl Sim {
         };
         match op {
             Op::RemoteUpdate { parent, .. } => changes(Some(*parent)),
-            Op::RemoteTags { .. } => changes(None),
+            Op::RemoteTags { .. } | Op::RemoteDelete { .. } => changes(None),
             Op::RemoteCreate { parent, .. } => editable(*parent).is_some(),
             _ => false,
         }
@@ -1880,7 +1886,9 @@ impl Sim {
             Op::LocalDelete { node, subtree } => self.delete_here(c, node, &subtree),
             Op::LocalEvict { node, subtree } => {
                 // As the executor: the item as the plan saw it, with what is below it but for a
-                // synced item it doesn't expect; out with it, the bases stay.
+                // synced item it doesn't expect; out with it, the bases stay. (Of a member that
+                // writes, the bases go: one left would read as a delete here, which it sends
+                // where the node may be changed.)
                 let client = &mut self.clients[c];
                 if !client.local.contains(node) || !unchanged(client, node) {
                     return Skip;
@@ -1899,6 +1907,10 @@ impl Sim {
                         out.insert(n, state);
                     }
                     client.parked.remove(&n);
+                    if client.writes {
+                        client.base.remove(n);
+                        client.extra.remove(&n);
+                    }
                 }
                 client.moved_out.push(out);
                 Done

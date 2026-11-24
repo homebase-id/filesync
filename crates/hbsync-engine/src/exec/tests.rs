@@ -5208,6 +5208,38 @@ fn an_item_moves_out_of_a_read_only_folder_under_a_free_name() -> R {
     Ok(())
 }
 
+/// In a folder that writes to what is shared with it (§13), what moves out leaves no base:
+/// one left would read as a delete here, which such a folder sends to the drive where the
+/// node may be changed (its share turned to editing meanwhile). Without one the node is
+/// planned from the drive's alone: it comes back, and nothing is removed there.
+#[test]
+fn what_moves_out_of_a_folder_that_writes_leaves_no_base() -> R {
+    let mut h = Harness::new()?;
+    let _out = read_only(&mut h)?;
+    h.folder.writes = true;
+    let (a, at) = h.seed("a.txt", b"a")?;
+    h.local_file("a.txt", a, b"mine")?;
+    let state = NodeState::file(NodeId::ROOT, "a.txt", h.content(b"a"));
+    h.db.write(|s| s.folder().put_base(&BaseRow::new(a, state, at)))?;
+    let report = h.run(vec![Op::LocalEvict {
+        node: a,
+        subtree: vec![a],
+    }])?;
+    assert!(report.skipped.is_empty(), "{report:?}");
+    assert!(!h.at("a.txt")?.exists());
+    assert!(h.base(a)?.is_none(), "a base left: read as deleted here");
+    assert!(h.db.read(|s| s.is_dirty(a))?);
+    // Its share turned to editing now: planned, the drive's comes back; nothing is removed.
+    h.db.write(|s| s.account().set_writable(at.file_id, true))?;
+    let plan = plan_of(&mut h, &[a])?;
+    assert!(
+        matches!(plan.ops[..], [Op::LocalDownload { node, .. }] if node == a),
+        "{:?}",
+        plan.ops
+    );
+    Ok(())
+}
+
 /// A synced item in a folder about to move out that the plan didn't expect there (moved in
 /// since) makes it wait for the next plan: it stays, with all it holds.
 #[test]

@@ -87,10 +87,11 @@ fn a_file_at_the_top_stays_in_its_folder_on_the_drive() {
     assert!(sim.moved_out(2).is_empty());
 }
 
-/// A move to another folder is undone here, and a delete comes back: neither reaches the
-/// drive. An edit made with the move still does.
+/// A move to another folder is undone here: it doesn't reach the drive. An edit made with
+/// the move still does. A delete here does: the file goes to the drive's Recently deleted,
+/// and off the owner's devices.
 #[test]
-fn a_move_and_a_delete_follow_the_drive() {
+fn a_move_is_undone_and_a_delete_is_a_removal() {
     let mut sim = owned(&["a", "b", "b/a"]);
     let drive = sim.server_paths();
     edit(&mut sim, "a");
@@ -103,8 +104,29 @@ fn a_move_and_a_delete_follow_the_drive() {
     let node = sim.pick(2, node, false).expect("its pick");
     sim.run(&[act(2, Action::Delete { node })]);
     settle(&mut sim);
-    assert_eq!(sim.server_paths(), drive);
-    assert_eq!(sim.local_paths(2), drive);
+    assert_eq!(sim.server_paths(), ["a", "b"]);
+    assert_eq!(sim.local_paths(0), ["a", "b"]);
+    assert_eq!(sim.local_paths(2), ["a", "b"]);
+}
+
+/// A file the member may only read, edited here: the edit moves out, and the file is gone
+/// from the folder until the drive's version is back. Its share turned to editing in
+/// between, that is no delete of the member's: nothing is removed on the drive, and the
+/// file comes back.
+#[test]
+fn what_moved_out_is_not_a_delete_once_it_may_be_changed() {
+    let mut sim = owned(&[]);
+    share(&mut sim, "a");
+    settle(&mut sim);
+    edit(&mut sim, "a");
+    // The move out, and no more of the member's sync yet.
+    sim.run(&[Event::Plan { client: 2 }, Event::Step { client: 2 }]);
+    assert_eq!(sim.moved_out(2), ["a"]);
+    assert!(sim.local_paths(2).is_empty());
+    turn(&mut sim, "a");
+    settle(&mut sim);
+    assert_eq!(sim.server_paths(), ["a", "b", "b/a"]);
+    assert_eq!(sim.local_paths(2), ["a"]);
 }
 
 /// A share turned back to reading after the member planned its write: the write doesn't run
