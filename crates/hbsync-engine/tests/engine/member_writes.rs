@@ -124,15 +124,33 @@ fn a_file_at_the_members_top_stays_in_its_folder_on_the_sharers_drive() -> R {
     assert_eq!(a.tree_text(""), ["d/", "d/in.txt = edited"]);
     assert_eq!(b.tree_text(""), ["in.txt = edited"]);
 
+    // (As the daemon syncs a local change: the picture current, no feed read first.)
+    b.announced();
     fs::rename(b.root.join("in.txt"), b.root.join("renamed.txt"))?;
-    b.sync()?;
+    let report = b.sync_unasked()?;
+    // One operation: the base takes the new name with the write's answer (settled against
+    // the row as it is shown here, at the top), not by a plan of its own after it.
+    assert_eq!(report.ops_done, 1, "{report:?}");
     a.sync()?;
     assert_eq!(a.tree_text(""), ["d/", "d/renamed.txt = edited"]);
     assert_eq!(b.tree_text(""), ["renamed.txt = edited"]);
     nothing_moved_out(&out)?;
-    // Settled: another sync finds nothing to do.
+    // Settled: another sync finds nothing to do, and the base has the new name, so the
+    // sharer's next rename of it comes down (it isn't taken for one to undo).
     let report = b.sync()?;
     assert_eq!(report.ops_done, 0, "{report:?}");
+    let base = b.engine.db().read(|s| s.get_base(node))?.ok_or("base")?;
+    assert_eq!(
+        (base.state.parent, base.state.name.as_str()),
+        (NodeId::ROOT, "renamed.txt")
+    );
+    fs::rename(a.root.join("d/renamed.txt"), a.root.join("d/theirs.txt"))?;
+    a.sync()?;
+    b.sync()?;
+    assert_eq!(b.tree_text(""), ["theirs.txt = edited"]);
+    a.sync()?;
+    assert_eq!(a.tree_text(""), ["d/", "d/theirs.txt = edited"]);
+    nothing_moved_out(&out)?;
     Ok(())
 }
 
@@ -180,6 +198,48 @@ fn a_write_the_sharer_refuses_makes_the_item_read_only_here() -> R {
     );
     b.sync()?;
     assert_eq!(b.tree_text(""), ["to-edit.txt = one"]);
+    a.sync()?;
+    assert_eq!(a.tree_text(""), ["to-edit.txt = one"]);
+    Ok(())
+}
+
+/// The share still says "edit", and the sharer's server refuses the write all the same (its
+/// circle lost the right to write: the share's rows don't tell). No feed row says otherwise,
+/// so it is the refusal alone that makes the file read-only here: the store says so, and
+/// the edit moves out at the next sync, not sent again.
+#[test]
+fn a_refusal_the_share_doesnt_tell_of_makes_the_item_read_only_here() -> R {
+    let server = server();
+    let mut a = Client::new(&server, "a")?;
+    a.write("to-edit.txt", "one")?;
+    a.sync()?;
+    share_to_edit(&a, &server, "to-edit.txt")?;
+    let (mut b, out) = writing_member(&server, "b")?;
+    b.sync()?;
+    let file = common::header_named(&server, "to-edit.txt").file_id;
+    let may_change = |b: &mut Client| -> Result<bool, Box<dyn std::error::Error>> {
+        let row = b.engine.db().read(|s| s.mirror_by_file(file))?;
+        Ok(row.ok_or("no row")?.writable)
+    };
+    assert!(may_change(&mut b)?);
+
+    b.remote.faults().their_server_refuses = true;
+    b.write("to-edit.txt", "the member's edit")?;
+    b.sync()?;
+    assert!(
+        !may_change(&mut b)?,
+        "the store still says it may be changed"
+    );
+    b.sync()?;
+    assert_eq!(
+        hbsync_engine::testkit::tree_text_of(out.path()),
+        ["to-edit.txt = the member's edit"]
+    );
+    assert_eq!(b.tree_text(""), ["to-edit.txt = one"]);
+    assert!(!may_change(&mut b)?);
+    // Not sent again, also once their server would take it: the edit is out of the folder.
+    b.remote.faults().their_server_refuses = false;
+    b.sync()?;
     a.sync()?;
     assert_eq!(a.tree_text(""), ["to-edit.txt = one"]);
     Ok(())

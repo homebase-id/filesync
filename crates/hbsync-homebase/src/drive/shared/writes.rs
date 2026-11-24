@@ -568,7 +568,11 @@ impl PeerRemote {
             Ok(Became::NotTaken) => (None, None),
             // Their server refused it: where the node is there, an earlier send of it
             // landed (one from before a restart, or one this run stopped waiting for).
-            Err(e @ (RemoteError::Fatal(_) | RemoteError::VersionMismatch)) => {
+            Err(
+                e @ (RemoteError::Fatal(_)
+                | RemoteError::ReadOnly(_)
+                | RemoteError::VersionMismatch),
+            ) => {
                 return Err(match self.their_node(meta.node)? {
                     Some(_) => RemoteError::AlreadyExists,
                     None => e,

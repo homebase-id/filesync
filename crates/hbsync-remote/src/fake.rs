@@ -1045,6 +1045,11 @@ pub struct Faults {
     /// that first). Of several removals the first one held stops the rest, which aren't
     /// sent either.
     pub on_their_way: bool,
+    /// The owner's server refuses the member's change or removal of a file though its share
+    /// says "edit" ([`RemoteError::ReadOnly`]): its circle lost the right to write since the
+    /// share was written, which the share's rows don't tell (**[verified]** odin-core
+    /// `DriveShareService.AssertCircleFitsAsync`: checked when the share is written only).
+    pub their_server_refuses: bool,
     /// Creates, updates, deletes and share changes are refused with [`RemoteError::Denied`]
     /// (the app lost write access to the drive); reads still work.
     pub deny_writes: bool,
@@ -1386,6 +1391,15 @@ impl FakeRemote {
         self.taken(&mut self.server(), held)
     }
 
+    /// Refuses where the owner's server takes no change from the member
+    /// ([`Faults::their_server_refuses`]).
+    fn their_server_takes(&self) -> Result<()> {
+        match self.faults().their_server_refuses {
+            true => Err(RemoteError::read_only("the owner")),
+            false => Ok(()),
+        }
+    }
+
     /// The owner's server takes a write of the member's: a change or a removal only of a
     /// file shared with it for editing then (**[verified]** odin-core
     /// `DriveStorageServiceBase.AssertMemberMayWriteAsync`); a new file as it was sent, with
@@ -1399,12 +1413,14 @@ impl FakeRemote {
                 server.create_by(writer, &meta, upload, held.shared_as)
             })?,
             Ask::Update(at, meta) => {
+                self.their_server_takes()?;
                 server.editable(at.file_id)?;
                 replay(held.bytes, |upload| {
                     server.update_by(writer, at.file_id, at.version, &meta, upload)
                 })?
             }
             Ask::Remove(_, at, removed) => {
+                self.their_server_takes()?;
                 server.editable(at.file_id)?;
                 server.set_removed_by(writer, at.file_id, at.version, removed)?
             }
