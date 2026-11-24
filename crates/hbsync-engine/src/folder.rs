@@ -39,7 +39,9 @@ pub struct FolderCtx {
     pub read_only: Option<PathBuf>,
     /// Whether a read-only folder writes to the drive what its items say this identity may
     /// change there (`MirrorRow::writable`; the rest of it stays one-way). Off, every item
-    /// is read-only, whatever it says. Nothing turns it on yet.
+    /// is read-only, whatever it says. Nothing turns it on yet, and nothing is to before
+    /// what such an item may do is settled (sync semantics §13, "What may be changed is told
+    /// per item": deletes, moves, a rename onto a taken name, conflict copies).
     pub writes: bool,
 }
 
