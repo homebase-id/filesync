@@ -5535,6 +5535,26 @@ fn a_read_only_folder_adds_and_moves_only_where_it_may() -> R {
         "{report:?}"
     );
 
+    // A folder in a cycle on the drive (another writer's moves, read since the plan): its
+    // removal is refused, and the guard's walk ends.
+    let (round, and_round) = (NodeId::new(), NodeId::new());
+    h.db.write(|s| {
+        let a = s.account();
+        a.put_mirror(&MirrorRow {
+            parent: and_round,
+            ..folder_row(round, "round", true)
+        })?;
+        a.put_mirror(&MirrorRow {
+            parent: round,
+            ..folder_row(and_round, "and round", true)
+        })
+    })?;
+    let report = remove(&mut h, round)?;
+    assert!(
+        matches!(report.skipped[..], [(_, Skip::Unsyncable(_))]),
+        "{report:?}"
+    );
+
     // A move is asked of the mirror's rows alone: between the two folders it passes the
     // guard, into the folder it may only read it doesn't.
     let moves = |node, to| Op::RemoteUpdate {

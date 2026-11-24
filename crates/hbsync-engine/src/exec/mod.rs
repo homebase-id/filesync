@@ -379,13 +379,19 @@ impl<'a> Executor<'a> {
                     if !changes(None)? {
                         return Ok(false);
                     }
+                    // (Each folder once: the drive may hold a cycle of them, another
+                    // writer's, which a removal is never sent into.)
                     let mut folders = vec![*node];
+                    let mut walked = HashSet::from([*node]);
                     while let Some(folder) = folders.pop() {
                         for row in s.mirror_children(folder)? {
                             if !row.writable {
                                 return Ok(false);
                             }
                             if row.kind == NodeKind::Folder {
+                                if !walked.insert(row.node) {
+                                    return Ok(false);
+                                }
                                 folders.push(row.node);
                             }
                         }

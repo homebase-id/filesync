@@ -444,13 +444,14 @@ impl Server {
             .collect();
         // A folder's removal takes along what is in it: of what the member reads there (live
         // in its view still: taken along, or removed by its next writes), all must be the
-        // member's to change.
+        // member's to change. Through live folders, as the drive's rule: what is in a folder
+        // removed earlier is that removal's.
         let in_one_removed = |mut at: NodeId| {
             for _ in 0..64 {
                 if folders.contains(&at) {
                     return true;
                 }
-                match seen.live.get(&at).or(seen.removed.get(&at)) {
+                match seen.live.get(&at) {
                     Some(n) if !n.state.parent.is_root() => at = n.state.parent,
                     _ => return false,
                 }

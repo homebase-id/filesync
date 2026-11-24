@@ -1765,7 +1765,10 @@ rules hold too:
     to or changes in the folder between this device's plan and its write goes along, as
     between two devices of one identity (a share in it turned back to reading by then
     stops the folder's removal: the executor's guard asks of all the store has in the
-    folder as the removal runs).
+    folder as the removal runs). A third, which no client can see: an item this identity
+    reads at the top because its own folder isn't shared, where that folder is below the
+    removed one, goes along with it (this device doesn't know where the unshared folder
+    is).
   - The mass-delete guard (§7) holds such removals as an own drive's: confirmed, they are
     sent. Putting them back is refused in such a folder for now (`Engine::put_back`): what
     is held is confirmed or stays held.
