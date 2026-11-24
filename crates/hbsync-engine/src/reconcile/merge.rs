@@ -49,6 +49,11 @@ impl<'a> Reconciler<'a> {
             .get(node)
             .filter(|_| !self.taken.contains(&node))
     }
+
+    /// Whether `node` follows the drive, one way (§13, [`Masking::one_way`]).
+    pub(super) fn one_way(&self, node: NodeId) -> bool {
+        self.masking.one_way(self.input, node)
+    }
 }
 
 impl Reconciler<'_> {
@@ -276,7 +281,7 @@ impl Reconciler<'_> {
         }
         // Read-only (§13), what is new here in a new folder here that waits moves out with it,
         // as one, once it can: it waits as it is too.
-        if self.masking.read_only && self.in_a_new_folder_that_waits(node) {
+        if self.one_way(node) && self.in_a_new_folder_that_waits(node) {
             self.leave_as_is(node);
             return;
         }
@@ -300,12 +305,12 @@ impl Reconciler<'_> {
         let (b, l) = (i.base.get(node), self.local_state(node));
         let masked = self.masks.masked.contains(&node);
         // Read-only (§13): what going back to the drive's would lose here moves out first.
-        let evict = self.masking.read_only && !masked && self.loses_here(node);
+        let evict = self.one_way(node) && !masked && self.loses_here(node);
         let (target, origin): (Option<NodeState>, Origin) = match (lc, rc) {
             // Gone from what this device syncs; what must stay here was detached (§10).
             _ if masked => (None, Origin::Base),
             // Read-only (§13): the drive's, whatever changed here.
-            _ if self.masking.read_only => (r.cloned(), r.map_or(Origin::Base, |_| Origin::Remote)),
+            _ if self.one_way(node) => (r.cloned(), r.map_or(Origin::Base, |_| Origin::Remote)),
             (Change::Absent | Change::Unchanged, Change::Absent | Change::Unchanged) => {
                 (r.or(l.as_ref()).or(b).cloned(), Origin::Base)
             }
@@ -355,7 +360,7 @@ impl Reconciler<'_> {
         // drive leaves the drive's. Read-only, the drive's (§13).
         if let (Some(t), Some(l), Some(r)) = (&mut target, &l, r)
             && !masked
-            && !self.masking.read_only
+            && !self.one_way(node)
         {
             let none = Tags::default();
             let merged = Tags::merge(b.map_or(&none, |b| &b.tags), &l.tags, &r.tags);

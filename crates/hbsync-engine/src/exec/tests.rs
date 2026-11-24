@@ -5262,6 +5262,67 @@ fn a_read_only_folder_sends_nothing_to_the_drive() -> R {
     Ok(())
 }
 
+/// Read-only is asked node by node (§13). Where the folder writes to what is shared with it,
+/// the view says which nodes this identity may change on the drive, and the executor sends
+/// a write of one of them and of no other, by what the mirror says as it runs. Where the
+/// folder doesn't (as every folder, for now), neither: every node is read-only.
+#[test]
+fn a_read_only_folder_writes_only_what_may_be_changed_and_only_if_it_writes() -> R {
+    for writes in [false, true] {
+        let mut h = Harness::new()?;
+        let _out = read_only(&mut h)?;
+        h.folder.writes = writes;
+        let (mine, at_mine) = h.seed("mine", b"A")?;
+        let (theirs, at_theirs) = h.seed("theirs", b"B")?;
+        // Said at the plan, not as the op runs: the share was taken back in between.
+        let (taken_back, at_taken_back) = h.seed("taken back", b"C")?;
+        h.db.write(|s| {
+            s.account().set_writable(at_mine.file_id, true)?;
+            s.account().set_writable(at_taken_back.file_id, true)
+        })?;
+        let all = [mine, theirs, taken_back];
+        let input = h.db.read(|s| view::build_input(s, &all, &h.folder))?;
+        let said: HashSet<NodeId> = match writes {
+            true => [mine, taken_back].into(),
+            false => HashSet::new(),
+        };
+        assert_eq!(input.writable, said, "writes: {writes}");
+        h.db.write(|s| s.account().set_writable(at_taken_back.file_id, false))?;
+
+        let delete = |node, at: RemoteRef| Op::RemoteDelete {
+            node,
+            parent: NodeId::ROOT,
+            file_id: at.file_id,
+            expected: at.version,
+        };
+        let ops = vec![
+            delete(mine, at_mine),
+            delete(theirs, at_theirs),
+            delete(taken_back, at_taken_back),
+        ];
+        let report = h.run(ops.clone())?;
+        let refused: Vec<&Op> = report
+            .skipped
+            .iter()
+            .filter(|(_, why)| matches!(why, Skip::Unsyncable(_)))
+            .map(|(op, _)| op)
+            .collect();
+        let mut live = h.remote.server().live_names();
+        live.sort();
+        match writes {
+            true => {
+                assert_eq!(refused, [&ops[1], &ops[2]], "{report:?}");
+                assert_eq!(live, ["taken back", "theirs"]);
+            }
+            false => {
+                assert_eq!(refused, [&ops[0], &ops[1], &ops[2]], "{report:?}");
+                assert_eq!(live, ["mine", "taken back", "theirs"]);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// An item parked for what took its name gets a name of its own again before it moves out: one
 /// that can't go (its out folder refused) isn't left hidden under the parked name.
 #[test]

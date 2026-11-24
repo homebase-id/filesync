@@ -270,8 +270,9 @@ impl<'a> Executor<'a> {
                 self.run_batch(&mut batch)?;
                 continue;
             };
-            // Read-only (§13): nothing goes to the drive, whatever planned it.
-            if self.folder.read_only.is_some() && op.writes_remote() {
+            // Read-only (§13): nothing goes to the drive, whatever planned it, but of a node
+            // this identity may change there.
+            if self.folder.read_only.is_some() && op.writes_remote() && !self.may_change(&op)? {
                 let never = Outcome::unsyncable("the folder is read-only: the drive isn't written");
                 self.handle(op, attempts, never, None)?;
                 continue;
@@ -338,6 +339,18 @@ impl<'a> Executor<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Whether `op`, which writes the drive from a read-only folder (§13), writes a node this
+    /// identity may change there: the folder writes to what is shared with it
+    /// ([`FolderCtx::writes`]), and the mirror's row of the node says so, now (the plan
+    /// asked the view's: a share taken back since stops the write here).
+    fn may_change(&mut self, op: &Op) -> Result<bool, StateError> {
+        if !self.folder.writes {
+            return Ok(false);
+        }
+        let row = self.db.read(|s| s.get_mirror(op.node()))?;
+        Ok(row.is_some_and(|row| row.writable))
     }
 
     /// Where `op` moves its node on the drive, if it moves it to another folder: that folder

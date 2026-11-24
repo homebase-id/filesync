@@ -3613,6 +3613,56 @@ fn read_only_an_edit_here_moves_out() {
     assert!(plan.conflicts.is_empty());
 }
 
+/// Read-only is asked node by node: a file this identity may change on the drive syncs both
+/// ways, so its edit and its tag here go up and a rename there comes down; the file beside
+/// it follows the drive, its edit moving out. Nothing is written of any other node.
+#[test]
+fn read_only_a_node_that_may_be_changed_syncs_both_ways() {
+    let [mine, renamed, theirs] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    let mut tagged = file(ROOT, "r.txt", "r");
+    tagged.tags = Tags::new(vec![Tag::new("Red", 0)]);
+    w.synced(mine, file(ROOT, "a.txt", "a"))
+        .synced(renamed, file(ROOT, "r.txt", "r"))
+        .synced(theirs, file(ROOT, "g.txt", "g"))
+        .local(mine, Some(file(ROOT, "a.txt", "mine")))
+        .local(renamed, Some(tagged))
+        .remote(renamed, Some(file(ROOT, "r2.txt", "r")))
+        .local(theirs, Some(file(ROOT, "g.txt", "mine too")));
+    w.input.writable.extend([mine, renamed]);
+    let plan = w.plan();
+    let mut got: Vec<(&str, NodeId)> = kinds(&plan.ops)
+        .into_iter()
+        .zip(plan.ops.iter().map(Op::node))
+        .collect();
+    got.sort();
+    let mut want = vec![
+        ("evict", theirs),
+        ("move", renamed),
+        ("remote-tags", renamed),
+        ("upload", mine),
+    ];
+    want.sort();
+    assert_eq!(got, want);
+    assert!(plan.conflicts.is_empty());
+
+    // Not said of them, every one follows the drive.
+    w.input.writable.clear();
+    let plan = w.plan();
+    assert!(!plan.writes_drive());
+    assert_eq!(
+        plan.ops
+            .iter()
+            .filter(|op| matches!(op, Op::LocalEvict { .. }))
+            .count(),
+        2,
+        "{:?}",
+        plan.ops
+    );
+}
+
 /// A new folder here moves out as one, with what is in it; a new file at the top too.
 #[test]
 fn read_only_new_items_move_out_whole() {

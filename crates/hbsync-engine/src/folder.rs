@@ -37,6 +37,10 @@ pub struct FolderCtx {
     /// Read-only (sync semantics §13): the folder that what changed here moves out to, on the
     /// root's volume and outside it. `None`: the folder syncs both ways.
     pub read_only: Option<PathBuf>,
+    /// Whether a read-only folder writes to the drive what its items say this identity may
+    /// change there (`MirrorRow::writable`; the rest of it stays one-way). Off, every item
+    /// is read-only, whatever it says. Nothing turns it on yet.
+    pub writes: bool,
 }
 
 impl FolderCtx {
@@ -54,6 +58,7 @@ impl FolderCtx {
             mtime_proves_bytes: Arc::default(),
             family: Arc::default(),
             read_only: None,
+            writes: false,
         }
     }
 

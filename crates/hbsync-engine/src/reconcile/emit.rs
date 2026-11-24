@@ -51,7 +51,7 @@ impl Reconciler<'_> {
             // Remote side: none read-only (§13), where what the drive holds and the merged tree
             // doesn't (a removal there taken along, a node let go of) stays as it is.
             let mut remote_ops = false;
-            let remote_side = match self.masking.read_only {
+            let remote_side = match self.one_way(node) {
                 true => (None, None),
                 false => (target.as_ref(), remote),
             };
@@ -227,8 +227,8 @@ impl Reconciler<'_> {
                 };
                 // Read-only (§13), one the drive holds that the merge doesn't (let go of, or taken
                 // along by a removal there) isn't synced here any more, as a masked one.
-                let unsynced = self.masks.masked.contains(&node)
-                    || (self.masking.read_only && remote.is_some());
+                let unsynced =
+                    self.masks.masked.contains(&node) || (self.one_way(node) && remote.is_some());
                 if needs_settle && target.is_none() && unsynced {
                     // A detached node's base goes with the detach.
                     if !self.masks.detached.contains_key(&node) {
@@ -460,7 +460,7 @@ impl Reconciler<'_> {
             (self.input.base.get(node).and_then(|b| b.content))
                 .is_some_and(|bc| bc.executable == tc.executable)
         };
-        if lc.executable != tc.executable && !(self.masking.read_only && drives_unchanged()) {
+        if lc.executable != tc.executable && !(self.one_way(node) && drives_unchanged()) {
             return false;
         }
         self.same_bytes(node, l, t)

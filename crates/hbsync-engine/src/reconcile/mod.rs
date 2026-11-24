@@ -339,9 +339,11 @@ impl<'a> Reconciler<'a> {
         self.deletes_wait_with_their_folder();
         self.with_what_it_took_along();
         self.guard_mass_delete();
-        // Read-only (§13): the drive is never written (emit plans no write there).
+        // Read-only (§13): the drive is never written, but of a node this identity may change
+        // there (emit plans no other write).
         debug_assert!(
-            !(self.masking.read_only && self.plan.writes_drive()),
+            !(self.plan.ops.iter().chain(&self.plan.held))
+                .any(|op| op.writes_remote() && self.one_way(op.node())),
             "a read-only plan writes the drive: {:?}",
             self.plan.ops
         );

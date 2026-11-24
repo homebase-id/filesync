@@ -40,8 +40,19 @@ pub struct Masking<'a> {
     /// The folder is read-only (sync semantics §13): the drive decides, and nothing is
     /// written to it. What changed here goes back to the drive's, and what that would lose
     /// (an edit, a new item) moves out first ([`Op::LocalEvict`]); an item filtered here since
-    /// it synced stays on the drive, masked, as one never synced here.
+    /// it synced stays on the drive, masked, as one never synced here. Asked node by node
+    /// ([`Masking::one_way`]): a node this identity may change there ([`Input::writable`])
+    /// syncs both ways. What mends the drive (a clash of names, a cycle, an orphan) never
+    /// does in such a folder, whatever its nodes say: the drive is its owner's to mend.
     pub read_only: bool,
+}
+
+impl Masking<'_> {
+    /// Whether `node` follows the drive, one way (§13): the folder is read-only, and the
+    /// node isn't one this identity may change on the drive.
+    pub(crate) fn one_way(&self, input: &Input, node: NodeId) -> bool {
+        self.read_only && !input.writable.contains(&node)
+    }
 }
 
 /// Settings that affect decisions.
@@ -203,6 +214,11 @@ pub struct Input {
     /// folder's delete goes as one, never item by item (but in a piece of a page of its own:
     /// [`Options::piece`], where only what its removal took along waits).
     pub going_above: HashSet<NodeId>,
+    /// In a read-only folder (§13), the nodes of `remote` this identity may change on the
+    /// drive (the mirror's `writable`): they sync both ways ([`Masking::one_way`]). Empty
+    /// where the folder doesn't write to what is shared ([`crate::FolderCtx::writes`]), and
+    /// on an identity's own drive, where it isn't asked.
+    pub writable: HashSet<NodeId>,
 }
 
 /// The children of each folder that an [`Input`] holds, on every side, when it doesn't hold
