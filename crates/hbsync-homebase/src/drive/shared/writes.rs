@@ -16,6 +16,7 @@ use std::time::Duration;
 use hbsync_remote::{
     Answers, ErrorClass, NodeMeta, RemoteBody, RemoteError, RemoteHeader, Result, Upload,
 };
+use hbsync_types::schema::ARCHIVAL_REMOVED;
 use hbsync_types::{ContentHash, NodeId, RemoteFileId, RemoteRef, Target, VersionTag, Written};
 use serde::Deserialize;
 use uuid::Uuid;
@@ -146,15 +147,70 @@ fn stops(e: &RemoteError) -> bool {
     )
 }
 
-/// Their node `theirs`, found where a new one was `sent`: written, where it is that send's
-/// (by its global transit id). Another's is there already: an earlier send of the node that
-/// landed, whose bytes may be others than this one's ([`RemoteError::AlreadyExists`]: the
-/// engine reads it).
-fn added(theirs: &wire::FileHeader, sent: Sent, content: Option<ContentHash>) -> Result<Written> {
-    match theirs.file_metadata.global_transit_id == Some(sent.global_transit_id) {
-        true => Ok(written_as(theirs, content)),
-        false => Err(RemoteError::AlreadyExists),
+/// Their node `theirs`, found where a new one was `sent` (`meta`, with the bytes of
+/// `content`): whose it is, and at which version it is this write's.
+/// - Another send's (by its global transit id): there already, an earlier send of the node
+///   that landed, whose bytes may be others than this one's
+///   ([`RemoteError::AlreadyExists`]: the engine reads it).
+/// - This send's, and the socket told the version it `landed` as: written, at that version,
+///   whatever their file is at by now. (Unless that version is their file's now and the file
+///   is in their Recently deleted where it wasn't sent so, or the other way round: told again
+///   of a send that had landed before, their server names the version such a move gave the
+///   file since, **[verified]** odin-core efc317ad4 `PeerFileWriter`, `CarrySendersWrite`.
+///   That is no word of this write's version.)
+/// - This send's, with no word of it: a new file's version is of their server's making and
+///   in no answer of this identity's (**[verified]** odin-core efc317ad4, `PeerFileWriter`:
+///   `CreateVersionTag`), so the one their file has now is this write's only while the file
+///   is as it was sent (`read`: their file decoded, if it can be). One its owner changed
+///   since is there already, for the engine to read: said written at that version, the
+///   owner's change would count as synced, and never come down.
+fn added(
+    theirs: wire::FileHeader,
+    sent: Sent,
+    landed: Option<VersionTag>,
+    read: impl FnOnce(wire::FileHeader) -> Result<Option<RemoteHeader>>,
+    meta: &NodeMeta,
+    content: Option<ContentHash>,
+) -> Result<Written> {
+    if theirs.file_metadata.global_transit_id != Some(sent.global_transit_id) {
+        return Err(RemoteError::AlreadyExists);
     }
+    let file_id = RemoteFileId(theirs.file_id);
+    let stored = &theirs.file_metadata;
+    let moved = (stored.app_data.archival_status == ARCHIVAL_REMOVED) != meta.removed;
+    let landed = landed.filter(|told| !(moved && told.0 == stored.version_tag));
+    let version = match landed {
+        Some(version) => version,
+        None => match read(theirs)? {
+            Some(now) if as_sent(&now, meta, content) => now.version,
+            _ => return Err(RemoteError::AlreadyExists),
+        },
+    };
+    Ok(written(file_id, version, None, content))
+}
+
+/// Whether their file `now` is as it was sent: `meta`, with the bytes of `content`.
+fn as_sent(now: &RemoteHeader, meta: &NodeMeta, content: Option<ContentHash>) -> bool {
+    let RemoteBody::Live {
+        node,
+        content: theirs,
+        payload,
+    } = &now.body
+    else {
+        return false;
+    };
+    *node == meta.node
+        && now.parent == meta.parent
+        && now.kind == meta.kind
+        && now.removed == meta.removed
+        && *theirs == meta.content
+        && payload.map(|payload| payload.hash) == content
+}
+
+/// The version the socket told a send landed as, if it told one.
+fn landed(word: Option<&SendResult>) -> Option<VersionTag> {
+    let version = word.filter(|told| told.delivered())?.version_tag?;
+    Some(VersionTag(version))
 }
 
 /// This identity's own server's refusal of a send for want of the permission: a 403 that
@@ -166,12 +222,6 @@ fn may_not_send(e: &HomebaseError) -> bool {
         return false;
     };
     error.status == 403 && (error.code.is_none() || error.is("noErrorCode"))
-}
-
-/// Their file `header` as written from here.
-fn written_as(header: &wire::FileHeader, content: Option<ContentHash>) -> Written {
-    let version = VersionTag(header.file_metadata.version_tag);
-    written(RemoteFileId(header.file_id), version, None, content)
 }
 
 /// This identity's server's answer to a write for another's drive.
@@ -230,8 +280,9 @@ struct PublicKey {
 
 /// What became of a write sent.
 enum Became<T> {
-    /// The socket told that their server took it: their file's version now.
-    Told(VersionTag),
+    /// The socket told that their server took it, and with it (where the word has one) the
+    /// version their file got by it. A new file's is in that word alone.
+    Told(Option<VersionTag>),
     /// Their file, looked at, is what was sent.
     Seen(T),
     /// Still in this identity's outbox.
@@ -398,7 +449,14 @@ impl PeerRemote {
                 Ok(Some(VersionTag(now)).filter(|now| now.0 == sent.version))
             };
             match self.became(sent, theirs)? {
-                Became::Told(version) | Became::Seen(version) => {
+                // (A change lands as the version its answer gave: a word without one says
+                // no other.)
+                Became::Told(told) => {
+                    self.writes.ended(meta.node);
+                    let version = told.unwrap_or(VersionTag(sent.version));
+                    return Ok(written(file_id, version, None, content));
+                }
+                Became::Seen(version) => {
                     self.writes.ended(meta.node);
                     return Ok(written(file_id, version, None, content));
                 }
@@ -438,13 +496,15 @@ impl PeerRemote {
         // This very write, sent before. Its file's id is in no word: their file is read
         // either way, after the outbox is asked (it may land between the two).
         if let Some(earlier) = self.writes.earlier(meta, bytes, None) {
-            let pending = self.heard(earlier.sent).is_none() && self.pending(earlier.sent)?;
+            let word = self.heard(earlier.sent);
+            let pending = word.is_none() && self.pending(earlier.sent)?;
             match self.their_node(meta.node)? {
                 None if pending => return Err(self.on_its_way()),
                 None => self.writes.ended(meta.node),
                 Some(theirs) => {
-                    self.writes.ended(meta.node);
-                    return added(&theirs, earlier.sent, earlier.content);
+                    let landed = landed(word.as_ref());
+                    let sent = (earlier.content, bytes);
+                    return self.added(theirs, earlier.sent, landed, meta, sent);
                 }
             }
         }
@@ -512,12 +572,12 @@ impl PeerRemote {
         let sent = queued.sent(self.owner(), global_transit_id)?;
         // Sealed to their drive until a device of theirs locks its key with the drive's.
         self.writes.set_sealed(global_transit_id, true);
-        let theirs = match self.became(sent, || self.their_node(meta.node)) {
-            Ok(Became::Seen(theirs)) => Some(theirs),
+        let (theirs, landed) = match self.became(sent, || self.their_node(meta.node)) {
+            Ok(Became::Seen(theirs)) => (Some(theirs), None),
             // No word carries the new file's id.
-            Ok(Became::Told(_)) => self.their_node(meta.node)?,
+            Ok(Became::Told(landed)) => (self.their_node(meta.node)?, landed),
             Ok(Became::OnItsWay) => return Err(self.waits(sent, meta, None, content, bytes)),
-            Ok(Became::NotTaken) => None,
+            Ok(Became::NotTaken) => (None, None),
             // Their server refused it: where the node is there, an earlier send of it
             // landed (one from before a restart, or one this run stopped waiting for).
             Err(e @ (RemoteError::Fatal(_) | RemoteError::VersionMismatch)) => {
@@ -528,10 +588,10 @@ impl PeerRemote {
             }
             Err(e) => return Err(e),
         };
-        self.writes.ended(meta.node);
         match theirs {
-            Some(theirs) => added(&theirs, sent, content),
+            Some(theirs) => self.added(theirs, sent, landed, meta, (content, bytes)),
             None => {
+                self.writes.ended(meta.node);
                 self.other_key_header(global_transit_id, true);
                 Err(RemoteError::Transient(format!(
                     "{}'s server didn't take a new file: sent again",
@@ -539,6 +599,27 @@ impl PeerRemote {
                 )))
             }
         }
+    }
+
+    /// [`added`], their file read with the keys held now where it has to be. With its answer
+    /// the send is over; where their file couldn't be read now (a key to be asked for again),
+    /// it stays remembered, so the write asked again looks once more and isn't sent, bytes
+    /// and all, a second time.
+    fn added(
+        &self,
+        theirs: wire::FileHeader,
+        sent: Sent,
+        landed: Option<VersionTag>,
+        meta: &NodeMeta,
+        (content, bytes): (Option<ContentHash>, bool),
+    ) -> Result<Written> {
+        let read = |theirs| Ok(self.to_remote(&self.client(), theirs)?.ok());
+        let answer = added(theirs, sent, landed, read, meta, content);
+        match &answer {
+            Ok(_) | Err(RemoteError::AlreadyExists) => self.writes.ended(meta.node),
+            Err(_) => self.remembered(sent, meta, None, content, bytes),
+        }
+        answer
     }
 
     /// What became of `sent`: the socket's word, waited for; where none comes, `theirs` (their
@@ -585,8 +666,7 @@ impl PeerRemote {
     /// The socket's last word on a send, as what became of it; a refusal as the trait's error.
     fn told<T>(&self, told: &SendResult, sent: Sent) -> Result<Became<T>> {
         if told.delivered() {
-            let version = told.version_tag.unwrap_or(sent.version);
-            return Ok(Became::Told(VersionTag(version)));
+            return Ok(Became::Told(told.version_tag.map(VersionTag)));
         }
         tracing::debug!(
             "{}'s server didn't take a write of {}: {}",
@@ -639,6 +719,20 @@ impl PeerRemote {
         content: Option<ContentHash>,
         bytes: bool,
     ) -> RemoteError {
+        self.remembered(sent, meta, over, content, bytes);
+        self.on_its_way()
+    }
+
+    /// Remembers `sent` as a write whose end isn't known: asked again, it is looked for
+    /// before anything is sent.
+    fn remembered(
+        &self,
+        sent: Sent,
+        meta: &NodeMeta,
+        over: Option<VersionTag>,
+        content: Option<ContentHash>,
+        bytes: bool,
+    ) {
         let on_its_way = OnItsWay {
             sent,
             meta: meta.clone(),
@@ -647,7 +741,6 @@ impl PeerRemote {
             content,
         };
         locked(&self.writes.on_their_way).insert(meta.node, on_its_way);
-        self.on_its_way()
     }
 
     fn on_its_way(&self) -> RemoteError {
@@ -781,7 +874,7 @@ mod tests {
     }
 
     /// The socket's word on a send, as the write takes it: delivered is their file's version
-    /// (the one told, a new file's; else the one sent), a refused key header sends it the
+    /// where the word tells one (a new file's is told so alone), a refused key header sends it the
     /// other way, a file changed since is the trait's version mismatch, a share that no
     /// longer gives write is read-only, and anything else says what their server said.
     #[test]
@@ -789,14 +882,14 @@ mod tests {
         let sam = sam()?;
         let told = |status: &str, version| sam.told::<()>(&result(status, version), SENT);
         let landed = |status: &str, version| match told(status, version) {
-            Ok(Became::Told(version)) => version.0,
+            Ok(Became::Told(version)) => version.map(|version| version.0),
             _ => panic!("{status}"),
         };
         assert_eq!(
             landed("delivered", Some(Uuid::from_u128(9))),
-            Uuid::from_u128(9)
+            Some(Uuid::from_u128(9))
         );
-        assert_eq!(landed("Delivered", None), SENT.version);
+        assert_eq!(landed("Delivered", None), None);
         assert!(matches!(
             told("recipientIdentityReturnedInvalidKeyHeader", None),
             Ok(Became::NotTaken)
@@ -903,38 +996,247 @@ mod tests {
         Ok(())
     }
 
+    fn hash(bytes: &[u8]) -> ContentHash {
+        hbsync_fileio::hash_bytes(bytes, hbsync_types::HashAlgorithm::Blake3)
+    }
+
+    /// A new file as it is sent: named "mine", its bytes `x`.
+    fn sent_file() -> (NodeMeta, Option<ContentHash>) {
+        let meta = NodeMeta {
+            node: NodeId(Uuid::from_u128(22)),
+            parent: NodeId(Uuid::from_u128(23)),
+            kind: NodeKind::File,
+            content: NodeContent::file("mine", 5, 1, false),
+            removed: false,
+        };
+        (meta, Some(hash(b"x")))
+    }
+
+    /// Their file of `meta` as it is read: at `version`, named `name`, with `bytes`.
+    fn their_file(meta: &NodeMeta, version: u128, name: &str, bytes: &[u8]) -> RemoteHeader {
+        RemoteHeader {
+            file_id: RemoteFileId(Uuid::from_u128(20)),
+            version: VersionTag(Uuid::from_u128(version)),
+            parent: meta.parent,
+            kind: meta.kind,
+            body: RemoteBody::Live {
+                node: meta.node,
+                content: NodeContent::file(name, 5, 1, false),
+                payload: Some(hbsync_remote::PayloadInfo {
+                    hash: hash(bytes),
+                    bytes: 16,
+                }),
+            },
+            removed: false,
+            changed_at: Some(7),
+            token: None,
+            expires: Some(9),
+        }
+    }
+
+    /// Their file as their server answers it to a member: at version 21, with
+    /// `global_transit_id`, its key for a share to open (and no share row that names one).
+    fn their_header(global_transit_id: Option<Uuid>) -> wire::FileHeader {
+        serde_json::from_value(serde_json::json!({
+            "fileId": Uuid::from_u128(20), "fileState": "active",
+            "fileMetadata": {
+                "isEncrypted": true, "versionTag": Uuid::from_u128(21),
+                "globalTransitId": global_transit_id,
+                "appData": { "uniqueId": Uuid::from_u128(22), "groupId": Uuid::from_u128(23),
+                             "fileType": hbsync_types::schema::FILE_TYPE_FILE, "content": "" },
+            },
+            "sharedSecretEncryptedKeyHeader": {
+                "encryptionVersion": 1, "type": "share", "iv": "", "encryptedAesKey": "",
+            },
+        }))
+        .expect("a header")
+    }
+
     /// A node found on their drive where a new one was sent is that send's only by its global
     /// transit id: with another's, or none, it was there already (an earlier send's, with
-    /// bytes that may be others), which the engine is told as such.
+    /// bytes that may be others), which the engine is told as such. This send's is written
+    /// at the version the socket told it landed as, whatever their file is at by now; with no
+    /// word, at the version their file has, and only while that file is as it was sent: one
+    /// its owner changed since (or that can't be read) is there already too.
     #[test]
-    fn a_new_file_is_this_sends_by_its_global_transit_id() {
-        let theirs = |global_transit_id: Option<Uuid>| -> wire::FileHeader {
-            serde_json::from_value(serde_json::json!({
-                "fileId": Uuid::from_u128(20), "fileState": "active",
-                "fileMetadata": {
-                    "isEncrypted": true, "versionTag": Uuid::from_u128(21),
-                    "globalTransitId": global_transit_id,
-                    "appData": { "uniqueId": Uuid::from_u128(22), "groupId": Uuid::from_u128(23),
-                                 "fileType": hbsync_types::schema::FILE_TYPE_FILE, "content": "" },
-                },
-            }))
-            .expect("a header")
-        };
-        let content = Some(hbsync_fileio::hash_bytes(
-            b"x",
-            hbsync_types::HashAlgorithm::Blake3,
-        ));
-        let mine =
-            added(&theirs(Some(SENT.global_transit_id)), SENT, content).expect("this send's");
-        assert_eq!(mine.target.at.file_id, RemoteFileId(Uuid::from_u128(20)));
-        assert_eq!(mine.target.at.version, VersionTag(Uuid::from_u128(21)));
-        assert_eq!((mine.content, mine.target.token.is_none()), (content, true));
-        for others in [Some(Uuid::from_u128(99)), None] {
-            assert!(matches!(
-                added(&theirs(others), SENT, content),
-                Err(RemoteError::AlreadyExists)
-            ));
+    fn a_new_file_is_this_sends_at_the_version_it_landed_as() {
+        let theirs = their_header;
+        let (meta, content) = sent_file();
+        let mine = || theirs(Some(SENT.global_transit_id));
+        let unread = |_| -> Result<Option<RemoteHeader>> { panic!("their file was read") };
+        let at = |answer: Result<Written>| answer.map(|written| written.target.at.version.0);
+
+        // Told: at that version, their file not read, though it is at another by now.
+        let told = Some(VersionTag(Uuid::from_u128(40)));
+        let written = added(mine(), SENT, told, unread, &meta, content).expect("this send's");
+        assert_eq!(written.target.at.file_id, RemoteFileId(Uuid::from_u128(20)));
+        assert_eq!(written.target.at.version, VersionTag(Uuid::from_u128(40)));
+        assert_eq!(
+            (written.content, written.target.token, written.changed_at),
+            (content, None, None)
+        );
+
+        // No word: their file's version, while it is as it was sent.
+        let as_it_was = |_| Ok(Some(their_file(&meta, 21, "mine", b"x")));
+        let answer = at(added(mine(), SENT, None, as_it_was, &meta, content));
+        assert_eq!(answer.ok(), Some(Uuid::from_u128(21)));
+        // Changed by its owner since (other bytes, another name), or not to be read: there
+        // already, not written at the owner's version.
+        for theirs_now in [
+            Some(their_file(&meta, 41, "mine", b"theirs")),
+            Some(their_file(&meta, 41, "renamed", b"x")),
+            None,
+        ] {
+            let answer = added(mine(), SENT, None, |_| Ok(theirs_now), &meta, content);
+            assert!(
+                matches!(answer, Err(RemoteError::AlreadyExists)),
+                "{answer:?}"
+            );
         }
+        // Told the version their file has now, where the file is in their Recently deleted
+        // and wasn't sent so: a word told again after its owner moved it there, and not this
+        // write's version. Their file is read, and found changed.
+        let told_again = Some(VersionTag(Uuid::from_u128(21)));
+        let mut moved = mine();
+        moved.file_metadata.app_data.archival_status = ARCHIVAL_REMOVED;
+        let mut read_as = their_file(&meta, 21, "mine", b"x");
+        read_as.removed = true;
+        let answer = added(
+            moved,
+            SENT,
+            told_again,
+            |_| Ok(Some(read_as)),
+            &meta,
+            content,
+        );
+        assert!(
+            matches!(answer, Err(RemoteError::AlreadyExists)),
+            "{answer:?}"
+        );
+        // (Told their file's version now, the file as it was sent: that version, unread.)
+        let answer = at(added(mine(), SENT, told_again, unread, &meta, content));
+        assert_eq!(answer.ok(), Some(Uuid::from_u128(21)));
+
+        // A read that failed is the answer: asked again.
+        let failed = |_| Err(RemoteError::Transient("cut".into()));
+        let answer = added(mine(), SENT, None, failed, &meta, content);
+        assert!(
+            matches!(answer, Err(RemoteError::Transient(_))),
+            "{answer:?}"
+        );
+
+        // Another send's, or none's: there already, whatever was told, their file not read.
+        for others in [Some(Uuid::from_u128(99)), None] {
+            let answer = added(theirs(others), SENT, told, unread, &meta, content);
+            assert!(
+                matches!(answer, Err(RemoteError::AlreadyExists)),
+                "{answer:?}"
+            );
+        }
+    }
+
+    /// With the answer to a new file the send is over. Where their file couldn't be read
+    /// (here: its header names no circle whose key opens it), the send stays remembered: the
+    /// write asked again looks once more, and isn't sent a second time.
+    #[test]
+    fn a_new_files_send_is_over_with_its_answer() -> std::result::Result<(), HomebaseError> {
+        let sam = sam()?;
+        let (meta, content) = sent_file();
+        let remembers = || sam.writes.earlier(&meta, true, None).is_some();
+        let mine = || their_header(Some(SENT.global_transit_id));
+        // Their file not read: remembered, as the send it was.
+        let unread = sam.added(mine(), SENT, None, &meta, (content, true));
+        assert!(
+            matches!(unread, Err(RemoteError::Waiting { .. })),
+            "{unread:?}"
+        );
+        assert!(remembers());
+        let kept = sam.writes.earlier(&meta, true, None).expect("remembered");
+        assert_eq!(
+            (kept.sent.global_transit_id, kept.sent.version, kept.content),
+            (SENT.global_transit_id, SENT.version, content)
+        );
+        // Answered (told the version; another send's): over.
+        let told = Some(VersionTag(Uuid::from_u128(40)));
+        sam.added(mine(), SENT, told, &meta, (content, true))
+            .expect("written");
+        assert!(!remembers());
+        sam.remembered(SENT, &meta, None, content, true);
+        let others = sam.added(their_header(None), SENT, told, &meta, (content, true));
+        assert!(
+            matches!(others, Err(RemoteError::AlreadyExists)),
+            "{others:?}"
+        );
+        assert!(!remembers());
+        Ok(())
+    }
+
+    /// Their file is as it was sent by its node, folder, kind, header and bytes, and by
+    /// whether it is in their Recently deleted: any of them changed, it is not.
+    #[test]
+    fn a_file_is_as_it_was_sent_by_all_of_it() {
+        let (meta, sent) = sent_file();
+        let theirs = || their_file(&meta, 4, "mine", b"x");
+        assert!(as_sent(&theirs(), &meta, sent));
+        let other = |h: &mut RemoteHeader, node: u128, name: &str| {
+            let RemoteBody::Live { payload, .. } = h.body.clone() else {
+                panic!("{h:?}");
+            };
+            h.body = RemoteBody::Live {
+                node: NodeId(Uuid::from_u128(node)),
+                content: NodeContent::file(name, 5, 1, false),
+                payload,
+            };
+        };
+        let changed: [&dyn Fn(&mut RemoteHeader); 7] = [
+            &|h| other(h, 99, "mine"),
+            &|h| other(h, 22, "renamed"),
+            &|h| h.parent = NodeId(Uuid::from_u128(8)),
+            &|h| h.removed = true,
+            &|h| h.kind = NodeKind::Folder,
+            &|h| h.body = RemoteBody::Deleted,
+            &|h| {
+                if let RemoteBody::Live { payload, .. } = &mut h.body {
+                    *payload = None;
+                }
+            },
+        ];
+        for change in changed {
+            let mut now = theirs();
+            change(&mut now);
+            assert!(!as_sent(&now, &meta, sent), "{now:?}");
+        }
+        assert!(!as_sent(&theirs(), &meta, Some(hash(b"y"))));
+        assert!(!as_sent(&theirs(), &meta, None));
+        // A folder has no bytes on either side.
+        let folder = NodeMeta {
+            kind: NodeKind::Folder,
+            content: NodeContent::folder("ours"),
+            ..meta.clone()
+        };
+        let mut theirs_folder = theirs();
+        theirs_folder.kind = NodeKind::Folder;
+        theirs_folder.body = RemoteBody::Live {
+            node: folder.node,
+            content: folder.content.clone(),
+            payload: None,
+        };
+        assert!(as_sent(&theirs_folder, &folder, None));
+    }
+
+    /// The version a send landed as is the one the socket told of its delivery: a word of a
+    /// refusal, or one without a version, tells none.
+    #[test]
+    fn only_a_delivery_tells_the_version_landed_as() {
+        let version = Uuid::from_u128(40);
+        assert_eq!(
+            landed(Some(&result("delivered", Some(version)))),
+            Some(VersionTag(version))
+        );
+        assert_eq!(landed(Some(&result("delivered", None))), None);
+        let refused = result("recipientIdentityReturnedAccessDenied", Some(version));
+        assert_eq!(landed(Some(&refused)), None);
+        assert_eq!(landed(None), None);
     }
 
     /// Moving their file to their Recently deleted, or back: nothing is sent where it is so
