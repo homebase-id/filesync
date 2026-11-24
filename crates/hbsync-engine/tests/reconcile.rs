@@ -3584,6 +3584,13 @@ fn a_delete_in_a_held_folder_stays_held_whatever_moves() {
 
 // ---- §13 Read-only folders ----
 
+/// Each of `plan`'s ops by its kind and node, sorted.
+fn sorted_ops(plan: &hbsync_engine::Plan) -> Vec<(&'static str, NodeId)> {
+    let mut ops: Vec<_> = plan.ops.iter().map(|op| (op.kind(), op.node())).collect();
+    ops.sort();
+    ops
+}
+
 /// A read-only world: the drive decides (§13).
 fn read_only() -> World {
     World {
@@ -3652,15 +3659,15 @@ fn read_only_a_node_that_may_be_changed_syncs_both_ways() {
     w.input.writable.clear();
     let plan = w.plan();
     assert!(!plan.writes_drive());
-    assert_eq!(
-        plan.ops
-            .iter()
-            .filter(|op| matches!(op, Op::LocalEvict { .. }))
-            .count(),
-        2,
-        "{:?}",
-        plan.ops
-    );
+    // (The rename there comes down, and the tag set here is undone.)
+    let mut want = vec![
+        ("LocalEvict", mine),
+        ("LocalEvict", theirs),
+        ("LocalMove", renamed),
+        ("LocalTags", renamed),
+    ];
+    want.sort();
+    assert_eq!(sorted_ops(&plan), want);
 }
 
 /// A new folder here moves out as one, with what is in it; a new file at the top too.
@@ -3807,8 +3814,7 @@ fn read_only_orphans_are_let_go_of() {
     let plan = w.plan();
     assert!(!plan.writes_drive());
     assert!(plan.conflicts.is_empty());
-    let mut got: Vec<(&str, NodeId)> = plan.ops.iter().map(|op| (op.kind(), op.node())).collect();
-    got.sort();
+    let got = sorted_ops(&plan);
     let mut want = vec![("LocalDelete", f), ("LocalEvict", g)];
     want.sort();
     assert_eq!(got, want);
@@ -3833,8 +3839,7 @@ fn read_only_no_repair_writes_the_drive_whatever_may_be_changed() {
     w.input.writable.extend([f, g]);
     let plan = w.plan();
     assert!(!plan.writes_drive(), "{:?}", plan.ops);
-    let mut got: Vec<(&str, NodeId)> = plan.ops.iter().map(|op| (op.kind(), op.node())).collect();
-    got.sort();
+    let got = sorted_ops(&plan);
     let mut want = vec![("LocalDelete", f), ("LocalEvict", g)];
     want.sort();
     assert_eq!(got, want);
@@ -3991,8 +3996,7 @@ fn read_only_an_executable_bit_of_a_node_that_may_be_changed_goes_up() {
     }
     w.input.writable.extend([mine, log, set_log]);
     let plan = w.plan();
-    let mut got: Vec<(&str, NodeId)> = plan.ops.iter().map(|op| (op.kind(), op.node())).collect();
-    got.sort();
+    let got = sorted_ops(&plan);
     let mut want = vec![("Forget", log), ("Forget", set_log), ("RemoteUpdate", mine)];
     want.sort();
     assert_eq!(got, want);

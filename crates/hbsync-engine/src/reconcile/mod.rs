@@ -202,7 +202,7 @@ struct Reconciler<'a> {
     left: BTreeSet<NodeId>,
     /// The nodes a repair gave their place in a read-only folder (§13: an orphan let go of,
     /// a cycle's move undone): they follow the drive, also the ones this identity may change
-    /// there ([`Reconciler::one_way`]). The drive is its owner's to mend: no repair here
+    /// there (`one_way`). The drive is its owner's to mend: no repair here
     /// writes to it. (A name clash's loser is left out of the plan; what this device leaves
     /// out, §10, isn't in the view's drive: neither is written.)
     mended: HashSet<NodeId>,

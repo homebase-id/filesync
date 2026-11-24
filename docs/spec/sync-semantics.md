@@ -1700,7 +1700,7 @@ rules hold too:
   another of the member's circles gives that right (**[verified]** odin-core
   `DriveShareService.AssertCircleFitsAsync`, `AssertMemberMayWriteAsync`). A write refused
   so is to count as read-only after all, where a folder writes.
-  Read-only is asked item by item (`Masking::one_way`): an item the store says may be
+  Read-only is asked item by item (the reconciler's `one_way`): an item the store says may be
   changed syncs both ways, where the folder writes to what is shared with it
   (`FolderCtx::writes`, the view's `Input::writable`); the executor asks the store again as
   a write runs, so a share taken back since the plan stops it there. What mends the drive
