@@ -348,8 +348,9 @@ impl<'a> Executor<'a> {
     /// a share taken back since stops the write here). A change of a node it may change,
     /// where the mirror has it, or its move between two folders it may add to; a node made
     /// in a folder it may add to (one it may change: what is added is shared as that folder
-    /// is; a folder this run made there is one). Never a node removed, and nothing made at
-    /// or moved to or from the top.
+    /// is; a folder this run made there is one); a node it may change removed (to its
+    /// owner's Recently deleted). Nothing made at or moved to or from the top, and nothing
+    /// deleted for good.
     fn may_change(&mut self, op: &Op) -> Result<bool, StateError> {
         if !self.folder.writes {
             return Ok(false);
@@ -369,7 +370,8 @@ impl<'a> Executor<'a> {
             };
             match op {
                 Op::RemoteUpdate { parent, .. } => changes(Some(*parent)),
-                Op::RemoteTags { .. } => changes(None),
+                // (A removal: to its owner's Recently deleted, where the node is.)
+                Op::RemoteTags { .. } | Op::RemoteDelete { .. } => changes(None),
                 Op::RemoteCreate { parent, .. } => adds_to(*parent),
                 _ => Ok(false),
             }

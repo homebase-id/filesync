@@ -5302,14 +5302,14 @@ fn a_read_only_folder_writes_only_what_may_be_changed_and_only_if_it_writes() ->
             rename(mine, at_mine, NodeId::ROOT, "mine 2"),
             rename(theirs, at_theirs, NodeId::ROOT, "theirs 2"),
             rename(taken_back, at_taken_back, NodeId::ROOT, "taken back 2"),
-            // Nor what the plan never makes of a node that may be changed: its move to
-            // another folder, its removal, a node made.
+            // Nor a move of a node that may be changed to the top's other items, the removal
+            // of one that may not, a node made at the top.
             rename(mine, at_mine, theirs, "mine 3"),
             Op::RemoteDelete {
-                node: mine,
+                node: theirs,
                 parent: NodeId::ROOT,
-                file_id: at_mine.file_id,
-                expected: at_mine.version,
+                file_id: at_theirs.file_id,
+                expected: at_theirs.version,
             },
             Op::RemoteCreate {
                 node: NodeId::new(),
@@ -5333,6 +5333,21 @@ fn a_read_only_folder_writes_only_what_may_be_changed_and_only_if_it_writes() ->
             true => {
                 assert_eq!(refused, all[1..], "{report:?}");
                 assert_eq!(live, ["mine 2", "taken back", "theirs"]);
+                // A node that may be changed is removed: to Recently deleted, where it is.
+                let at =
+                    h.db.read(|s| s.get_mirror(mine))?
+                        .expect("row")
+                        .remote_ref();
+                let report = h.run(vec![Op::RemoteDelete {
+                    node: mine,
+                    parent: NodeId::ROOT,
+                    file_id: at.file_id,
+                    expected: at.version,
+                }])?;
+                assert!(report.skipped.is_empty(), "{report:?}");
+                let server = h.remote.server();
+                let removed: Vec<_> = server.removed().map(|r| r.file_id).collect();
+                assert_eq!(removed, [at.file_id]);
             }
             false => {
                 assert_eq!(refused, all, "{report:?}");
