@@ -3762,9 +3762,7 @@ fn what_waits_holds_its_name_and_a_newcomer_is_left_out() {
         let mut w = world();
         w.input.unreadable.insert(q);
         w.remote(y, Some(file(ROOT, "C.TXT", "y")));
-        if hbsync_platform::name::name_key("C.TXT") == hbsync_platform::name::name_key("c.txt") {
-            left_out(&w, y);
-        }
+        left_out(&w, y);
         let mut w = world();
         w.input.unreadable.insert(q);
         w.remote(y, Some(file(ROOT, "c.txt", "y")));
@@ -3777,6 +3775,170 @@ fn what_waits_holds_its_name_and_a_newcomer_is_left_out() {
         want.sort();
         assert_eq!(sorted_ops(&w.plan()), want, "{read}");
     }
+}
+
+/// What waits holds its name whatever changed here: edited here, read-only, it would move
+/// out, but out of the plan it stays on its name on disk, and a newcomer is left out all the
+/// same. A parked one isn't on its name on disk: the newcomer comes.
+#[test]
+fn what_waits_holds_its_name_edited_or_not_and_not_where_it_is_parked() {
+    let [c, n, q] = ids(3)[..] else {
+        unreachable!()
+    };
+    let world = |read: bool| {
+        let mut w = match read {
+            true => read_only(),
+            false => World::default(),
+        };
+        w.synced(c, file(ROOT, "c.txt", "x"));
+        w.remote(c, Some(file(q, "c.txt", "x")))
+            .remote(n, Some(file(ROOT, "c.txt", "new")));
+        w.input.unreadable.insert(q);
+        w
+    };
+    for read in [false, true] {
+        let mut w = world(read);
+        w.local(c, Some(file(ROOT, "c.txt", "mine")));
+        let plan = w.plan();
+        assert!(plan.ops.is_empty(), "{read}: {:?}", plan.ops);
+        assert!(
+            matches!(plan.conflicts[..], [Conflict::NameTaken { node }] if node == n),
+            "{read}: {:?}",
+            plan.conflicts
+        );
+    }
+    let mut w = world(false);
+    w.input.parked.insert(c);
+    assert_eq!(sorted_ops(&w.plan()), [("LocalDownload", n)]);
+}
+
+/// One left out for a name what waits holds is put back where it is here. Edited here, in a
+/// folder the drive deleted (it moved the file out of it, to that name), it keeps that
+/// folder: the folder's delete here would take the edit. Not edited, it goes with the folder
+/// (the drive has it), and is a newcomer of the name from then on.
+#[test]
+fn one_left_out_for_what_waits_keeps_the_folder_its_edit_is_in() {
+    let [c, p, y, q] = ids(4)[..] else {
+        unreachable!()
+    };
+    for edited in [true, false] {
+        let mut w = World::default();
+        w.synced(c, file(ROOT, "c.txt", "x"))
+            .synced(p, folder(ROOT, "p"))
+            .synced(y, file(p, "y.txt", "y"));
+        w.remote(c, Some(file(q, "c.txt", "x")))
+            .remote(p, None)
+            .remote(y, Some(file(ROOT, "c.txt", "y")));
+        w.input.unreadable.insert(q);
+        if edited {
+            w.local(y, Some(file(p, "y.txt", "mine")));
+        }
+        let plan = w.plan();
+        assert!(!plan.writes_drive(), "{edited}: {:?}", plan.ops);
+        let want = match edited {
+            true => vec![],
+            false => vec![("LocalDelete", p)],
+        };
+        assert_eq!(sorted_ops(&plan), want, "{edited}: {:?}", plan.ops);
+        assert!(
+            matches!(plan.conflicts[..], [Conflict::NameTaken { node }] if node == y),
+            "{edited}: {:?}",
+            plan.conflicts
+        );
+    }
+}
+
+/// One synced under the name before, its item gone here, doesn't come back to a name what
+/// waits holds on disk now (a folder made here in its place, moved there into the folder
+/// this device can't read): it is left out, not downloaded onto the folder at every sync.
+#[test]
+fn one_gone_here_doesnt_come_back_to_a_name_what_waits_holds() {
+    let [gone, held, q] = ids(3)[..] else {
+        unreachable!()
+    };
+    for read in [false, true] {
+        let mut w = match read {
+            true => read_only(),
+            false => World::default(),
+        };
+        w.synced(gone, file(ROOT, "c.txt", "x"))
+            .synced(held, folder(ROOT, "c.txt"));
+        w.local(gone, None)
+            .remote(gone, Some(file(ROOT, "c.txt", "edited there")))
+            .remote(held, Some(folder(q, "c.txt")));
+        w.input.unreadable.insert(q);
+        let plan = w.plan();
+        assert!(!plan.writes_drive(), "{read}: {:?}", plan.ops);
+        assert!(plan.ops.is_empty(), "{read}: {:?}", plan.ops);
+        // (On an identity's own drive its edit there won over the delete here; then the name.)
+        assert!(
+            plan.conflicts.contains(&Conflict::NameTaken { node: gone }),
+            "{read}: {:?}",
+            plan.conflicts
+        );
+    }
+}
+
+/// The same for a folder left out, with a file edited in it: the folder is put back where it
+/// is here, in a folder the drive deleted, and the edit below it keeps that one too.
+#[test]
+fn a_folder_left_out_for_what_waits_keeps_the_folder_it_is_in_for_an_edit_in_it() {
+    let [c, p, y, f, q] = ids(5)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(c, folder(ROOT, "c"))
+        .synced(p, folder(ROOT, "p"))
+        .synced(y, folder(p, "y"))
+        .synced(f, file(y, "f.txt", "x"));
+    w.remote(c, Some(folder(q, "c")))
+        .remote(p, None)
+        .remote(y, Some(folder(ROOT, "c")))
+        .local(f, Some(file(y, "f.txt", "mine")));
+    w.input.unreadable.insert(q);
+    let plan = w.plan();
+    assert!(!plan.writes_drive(), "{:?}", plan.ops);
+    assert!(plan.ops.is_empty(), "{:?}", plan.ops);
+    assert!(
+        matches!(plan.conflicts[..], [Conflict::NameTaken { node }] if node == y),
+        "{:?}",
+        plan.conflicts
+    );
+}
+
+/// What is only here under a name what waits holds (a new file, parked while the folder of
+/// that name was made, which then waits) is no newcomer of the drive's: it takes a numbered
+/// name and goes up under it, as any clash's loser. It isn't left out, hidden where it is
+/// parked.
+#[test]
+fn a_new_item_here_on_a_name_what_waits_holds_takes_a_numbered_name() {
+    let [b, new, q] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(b, folder(ROOT, "b"));
+    w.remote(b, Some(folder(q, "b")))
+        .local(new, Some(file(ROOT, "b", "n")));
+    w.input.unreadable.insert(q);
+    w.input.parked.insert(new);
+    let plan = w.plan();
+    let made = (plan.ops.iter()).find_map(|op| match op {
+        Op::RemoteCreate { node, name, .. } if *node == new => Some(name.clone()),
+        _ => None,
+    });
+    assert!(
+        made.as_deref().is_some_and(|name| name != "b"),
+        "{:?}",
+        plan.ops
+    );
+    assert!(
+        !plan
+            .conflicts
+            .iter()
+            .any(|c| matches!(c, Conflict::NameTaken { .. })),
+        "{:?}",
+        plan.conflicts
+    );
 }
 
 /// A folder kept for what waits and changed in it holds its name the same way: a new folder
