@@ -1579,7 +1579,9 @@ whatever changed here, and the plan holds no operation on the drive:
   forgotten.
 - The mass-delete guard (§7) judges the deletes here as everywhere (a removal elsewhere of
   every synced file is held); what it holds is confirmed or stays held: putting it back would
-  restore it on the drive, and is refused.
+  restore it on the drive, and is refused. (A folder that writes there also holds its own
+  deletes, and puts those back here without a write: below, "A delete here of an item the
+  store says may be changed".)
 - The folder things move out to is a full path outside the read-only one (else its scan would find them
   as new items there) and made where it is missing, on the folder's volume (a move out is one
   rename; a rename across devices, as into a bind mount of the same file system, tells it too):
@@ -1776,8 +1778,9 @@ rules hold too:
     too meanwhile is left to the drive). A removal made there that such a folder holds
     (every synced file, the items still here) is not this identity's to put back: that is
     a restore on the drive, which only its owner does. It stays held till confirmed, and a
-    put back of nothing else is refused, told so (`Engine::put_back`; a folder that
-    doesn't write holds only such removals, and refuses every put back, as above).
+    put back that undoes nothing and leaves one such is refused, told so
+    (`Engine::put_back`; a folder that doesn't write holds only such removals, and refuses
+    every put back, as above).
     Simulator: `a_guarded_writing_member_confirms_or_puts_back_its_own_deletes`.
   - What this device itself moved out of the folder (an edit of an item it may only read)
     is no delete of the user's: in a folder that writes, the bases of what moves out go
