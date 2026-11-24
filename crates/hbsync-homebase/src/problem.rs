@@ -45,13 +45,13 @@ pub struct Sender {
 
 /// odin-core's `OdinClientErrorCode.NoErrorCode` (0): what an error that names none carries
 /// on the wire, as every `OdinSecurityException` that sets no code does (**[verified]**
-/// odin-core `OdinSecurityException.ErrorCode`'s default; live: the 403 of a route whose
-/// permission the app lacks). No code, here.
+/// odin-core `OdinSecurityException.ErrorCode`'s default; live). No code, here.
 const NO_ERROR_CODE: &str = "noErrorCode";
 
 /// The `OdinClientErrorCode`s the client acts on (`OdinClientErrorCode.cs`).
 const KNOWN_CODES: &[(u32, &str)] = &[
     (0, NO_ERROR_CODE),
+    (1006, "missingPermissionKey"),
     (4002, "cannotUpdateNonActiveFile"),
     (4105, "existingFileWithUniqueId"),
     (4106, "fileNotFound"),

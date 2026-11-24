@@ -22,8 +22,8 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use super::super::{
-    Sending, check_size, files_route, finish, not_connected, not_connected_to, parts, remote_error,
-    wire,
+    Sending, check_size, files_route, finish, lacks_permission, not_connected, not_connected_to,
+    parts, remote_error, wire,
 };
 use super::PeerRemote;
 use crate::app::{APP_SLUG, SYNC_DRIVE};
@@ -213,17 +213,6 @@ fn landed(word: Option<&SendResult>) -> Option<VersionTag> {
     Some(VersionTag(version))
 }
 
-/// This identity's own server's refusal of a send for want of the permission: a 403 that
-/// names no error, which the server writes as the code `noErrorCode` (**[verified]** live,
-/// odin-core efc317ad4: "Forbidden: Sending, updating or deleting files on a peer requires
-/// UseTransitWrite"), or as none.
-fn may_not_send(e: &HomebaseError) -> bool {
-    let HomebaseError::Api { error, .. } = e else {
-        return false;
-    };
-    error.status == 403 && (error.code.is_none() || error.is("noErrorCode"))
-}
-
 /// This identity's server's answer to a write for another's drive.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -295,8 +284,7 @@ enum Became<T> {
 
 impl PeerRemote {
     /// Refuses a write where the app may not send to other identities: before anything is
-    /// sent, as a send refused for it leaves its staged copy behind on this identity's server
-    /// (**[verified]** live, odin-core 3ace44b69).
+    /// sent, as a send refused for it has uploaded its bytes for nothing.
     fn may_send(&self) -> Result<()> {
         match self.own.may_send()? {
             true => Ok(()),
@@ -802,9 +790,10 @@ impl PeerRemote {
                 self.on_its_way()
             }
             _ if not_connected(&e) => not_connected_to(self.owner(), "changed"),
-            // The permission was taken away since it was last read: not asked for again at
-            // once, as each send refused for it leaves its staged copy behind.
-            _ if may_not_send(&e) => {
+            // The permission was taken away since it was last read ("Sending, updating or
+            // deleting files on a peer requires UseTransitWrite"): not held, as of now, so
+            // the next write refuses before it sends anything.
+            _ if lacks_permission(&e) => {
                 self.own.may_not_send();
                 RemoteError::Fatal(MAY_NOT_SEND.into())
             }
@@ -1305,29 +1294,34 @@ mod tests {
         Ok(())
     }
 
-    /// This identity's server's refusal of a send for want of the permission, as the dev
-    /// server sent it (a 403 with the code `noErrorCode`) or without a code, is taken as that:
-    /// the permission counts as not held from then on, and the write says why. Another 403,
-    /// or another answer without a code, is not that.
+    /// This identity's server's refusal of a send for want of the permission (a 403 with the
+    /// code `missingPermissionKey`) is taken as that: the permission counts as not held from
+    /// then on, and the write says why. Another 403, or that code on another status, is not
+    /// that.
     #[test]
     fn a_send_refused_for_the_permission_is_remembered() -> std::result::Result<(), HomebaseError> {
         use crate::drive::tests::api;
         let sam = sam()?;
-        for refused in [api(403, Some("noErrorCode")), api(403, None)] {
-            assert!(may_not_send(&refused), "{refused:?}");
-            sam.own.drive_key.lock().sends = true;
-            match sam.send_error(refused) {
-                RemoteError::Fatal(why) => assert_eq!(why, MAY_NOT_SEND),
-                other => panic!("{other:?}"),
-            }
-            assert!(!sam.own.drive_key.lock().sends);
+        sam.own.drive_key.lock().sends = true;
+        match sam.send_error(api(403, Some("missingPermissionKey"))) {
+            RemoteError::Fatal(why) => assert_eq!(why, MAY_NOT_SEND),
+            other => panic!("{other:?}"),
         }
+        assert!(!sam.own.drive_key.lock().sends);
+        // Another refusal says what it is, and the permission counts as held still.
         for other in [
+            api(403, None),
             api(403, Some("notReviewedByOwner")),
-            api(400, Some("noErrorCode")),
+            api(400, Some("missingPermissionKey")),
             api(401, None),
         ] {
-            assert!(!may_not_send(&other), "{other:?}");
+            sam.own.drive_key.lock().sends = true;
+            let answer = sam.send_error(other);
+            assert!(
+                !matches!(&answer, RemoteError::Fatal(why) if why == MAY_NOT_SEND),
+                "{answer:?}"
+            );
+            assert!(sam.own.drive_key.lock().sends);
         }
         // An earlier send of the node staged still, and not connected: waited for.
         for waited in [

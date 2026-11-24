@@ -422,8 +422,16 @@ comment (**[verified]** `UploadConcurrencyLimit`). App callers get `serverMetada
 enveloped) `{title, status, correlationId, errorCode}`. `errorCode` is the camelCase enum name
 (`versionTagMismatch`); accept numbers too. An error that names none carries `noErrorCode`
 (0, the enum's default: every `OdinSecurityException` that sets none), which the client reads
-as no code (**[verified]** live, odin-core efc317ad4: the 403 of a peer route whose permission
-the app lacks). `OdinClientException` → 400,
+as no code (**[verified]** live, odin-core efc317ad4). A 403 for want of a permission key
+says so: `errorCode: "missingPermissionKey"` (1006) with `permissionKeys`, the keys any one of
+which would have done (`[305]` on the token route, `[210]` on a send and on the drive's
+public key, `[210, 305]` where a drive addressed by slug is resolved and the app holds
+neither; odin-core PR #2164, **[verified]** live at b79aefa99 for the token route and, through
+the client, a send; the rest in `PermissionContext`). It comes on this identity's own routes
+too (a new file for another identity is uploaded to one), where a 403 is otherwise this
+login's: the client takes one with this code as the app's want of the key, never as the
+login refused. A 403 for a missing drive grant has no code still.
+`OdinClientException` → 400,
 `OdinSecurityException` → 403, a bad or missing token → 401 with an empty body. A `NotFound()`
 on an enveloped route comes back as 404 with an encrypted body (`X-SSE: 1`): check the status first.
 
@@ -581,16 +589,21 @@ server answers the rest, to a token their server made for this identity's connec
   socket error, a timeout): 400 `remoteServerReturnedUnavailable` (read as a passing outage);
   their 400, 400 `argumentError`; a server too old for the route, 400
   `remoteServerReturnedNotFound`; anything else, 400 `remoteServerReturnedInternalServerError`.
-- **Whose a refusal is.** Without the permission they need, the peer routes answer 403 with no code
-  too (`errorCode: noErrorCode`; the token route's title is "Forbidden: Does not have
-  permission", **[verified]** live), like a sharer's. Before asking for a circle's key, the client refuses a drive without a
-  write-only key that opens (`Refusal::NoKey`, without asking the sharer), then looks whether the
-  app holds `UseTransitRead` as the security context last said, and reads it again when it didn't;
-  after a codeless 403 (the permission held as last read) it reads it again (`reads_shared_now`, the
-  context alone): the owner may have given the permission without any reconnect (**[inferred]**: the
-  permission update closes no socket). A 403 with the permission held is the sharer's
-  (**[verified]** odin-core `PeerServiceBase`; `Client::whose`). Lacking it, the share stops,
-  refused (`Refusal::Permission`) until the owner approves; a 401 there is this login's. On the
+- **Whose a refusal is.** Without the permission they need, the peer routes answer 403
+  `missingPermissionKey` (Errors; the token route's title is "Forbidden: Does not have
+  permission", **[verified]** live). That is always this app's: another identity's own such
+  refusal reaches this one as a plain refusal (**[verified]** odin-core b79aefa99: a peer's
+  403 is thrown anew as "Remote server returned 403", with no code:
+  `PeerAppNotificationService`, `PeerDriveQueryService`, and `PeerCircleShareKeyService`
+  for a circle's key (it keeps `notReviewedByOwner` alone); the code itself in
+  `PermissionContext.MissingPermissionKey`). Before asking
+  for a circle's key, the client refuses a drive without a write-only key that opens
+  (`Refusal::NoKey`, without asking the sharer). It never looks up first whether the app
+  holds `UseTransitRead`: the ask tells, also once the owner has given the permission
+  (which no reconnect says; **[inferred]**: the permission update closes no socket). A 403
+  without that code is the sharer's (**[verified]** odin-core `PeerServiceBase`;
+  `Client::whose`). Lacking the permission, the share stops, refused
+  (`Refusal::Permission`) until the owner approves; a 401 there is this login's. On the
   sharer's own server (`Client::for_peer`) a 401 refuses the token (`peer::refused`), a 403 a file
   or drive not shared with this identity.
 - **Reading on their server** **[verified]** (odin-core `PeerDirectReadAttribute`, #2127;
@@ -740,14 +753,13 @@ it for editing. Built, and not turned on: a share is still read-only in the prod
   copy once sent. The bytes pass through it: twice the network of an own upload.
 - **The permission.** The app must hold `UseTransitWrite` (210): without it a send answers
   `403 "Sending, updating or deleting files on a peer requires UseTransitWrite"`, its
-  `errorCode` `noErrorCode` (**[verified]** live; so does a peer read route's 403 for want of
-  `UseTransitRead`, "Does not have permission": a 403 "with no code" comes with that code). **A send refused so leaves its staged copy behind** (odin-core #2155:
-  the copy was committed before the permission was asked; fixed by PR #2159, **[verified]**
-  live at efc317ad4: the 403 leaves nothing behind), and that copy, carrying
-  the node's `uniqueId`, makes every later change of the node answer
-  `400 existingFileWithUniqueId` on this identity's own server. So the client asks the
-  security context first, and sends only where it holds 210 (while it doesn't, the context
-  is read again at most once a minute). The app doesn't ask for it at registration yet.
+  `errorCode` `missingPermissionKey` (Errors; **[verified]** live at b79aefa99, through the
+  client: told as the permission, their file as it was). It leaves nothing behind (the
+  permission is asked before anything is stored: odin-core #2155, PR #2159, **[verified]**
+  live). The client asks the security context first all the same, and sends only where it
+  holds 210 (while it doesn't, the context is read again at most once a minute): a send
+  refused has uploaded its bytes for nothing. The app doesn't ask for it at registration
+  yet.
 - **Whether it may.** Their server asks drive `Write` and, for a file there already, a live
   share row with `Write` on it (**[verified]** odin-core
   `DriveStorageServiceBase.AssertMemberMayWriteAsync`, `DriveAclAuthorizationService
