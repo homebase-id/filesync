@@ -363,9 +363,13 @@ impl Reconciler<'_> {
                 None if let_go.contains(&parent) => Parent::LetGo,
                 None if withdrawn.contains(&parent) => {
                     // Its parent waits for a node another page plans: so does it, in the
-                    // parent's group.
+                    // parent's group. (Named there where it is to be planned, in this page
+                    // or another: context that isn't dirty is only passed through, for what
+                    // is below it.)
                     if let Some(&group) = group_of.get(&parent) {
-                        groups[group].push(node);
+                        if self.input.dirty.contains(&node) || self.elsewhere(node) {
+                            groups[group].push(node);
+                        }
                         group_of.insert(node, group);
                     }
                     Parent::Wait
