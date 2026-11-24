@@ -737,12 +737,20 @@ impl Reconciler<'_> {
         let i = self.input;
         let scope: Vec<NodeId> = self.scope.iter().copied().collect();
         for n in scope {
-            if self.one_way(n) {
+            // Only what takes a name there: a node whose place differs from the drive's, or
+            // one added.
+            let (r, added) = (self.remote_state(n), self.adds.contains(&n));
+            if self.one_way(n) || (r.is_none() && !added) {
                 continue;
             }
-            let Some(to) = self.merged.get(n).cloned() else {
+            let Some(to) = self
+                .merged
+                .get(n)
+                .filter(|to| r.is_none_or(|r| !to.same_place(r)))
+            else {
                 continue;
             };
+            let to = to.clone();
             let taken = |name: &str| {
                 let key = name_key(name);
                 let held =
@@ -752,7 +760,7 @@ impl Reconciler<'_> {
                     || held(self.masks.names.get(&to.parent))
                     || held(self.kept.get(&to.parent))
             };
-            match self.remote_state(n) {
+            match r {
                 Some(r) => {
                     // (Its own name spelled otherwise, where it is, is no other's.)
                     let its_own = to.parent == r.parent
@@ -767,15 +775,29 @@ impl Reconciler<'_> {
                     };
                     self.retarget(n, back);
                 }
-                None if self.adds.contains(&n) && taken(&to.name) => {
-                    let free = numbered_names(&to.name).find(|c| !taken(c)).or_else(|| {
-                        (NUMBERED_TRIES + 1..)
-                            .map(|k| numbered_conflict_name(&to.name, k))
-                            .find(|c| !taken(c))
-                    });
-                    let Some(name) = free else {
-                        continue;
+                // The first free one this device syncs, as `fix_names` picks one (§10: one
+                // it ignores would leave the drive at the next scan); else the first free
+                // one. (Judged on what the view holds of the folder: `fix_names`, next,
+                // asks for the whole folder where the new name may clash with what it
+                // doesn't hold, `may_clash_unseen`.)
+                None if taken(&to.name) => {
+                    let is_dir = to.kind == NodeKind::Folder;
+                    let dir: Option<Vec<String>> = (self.merged.path(to.parent))
+                        .map(|p| p.into_iter().map(str::to_owned).collect());
+                    let syncs = |c: &String| {
+                        dir.as_ref().is_none_or(|dir| {
+                            let names = dir.iter().map(String::as_str).chain([c.as_str()]);
+                            self.masking.filter.names(names, is_dir).is_sync()
+                        })
                     };
+                    let free = |c: &String| !taken(c);
+                    let name = first_free_by(numbered_names(&to.name), free, syncs)
+                        .or_else(|| {
+                            (NUMBERED_TRIES + 1..)
+                                .map(|k| numbered_conflict_name(&to.name, k))
+                                .find(|c| free(c))
+                        })
+                        .unwrap_or_else(|| to.name.clone());
                     self.retarget(n, NodeState { name, ..to });
                     self.plan.conflicts.push(Conflict::NameClash { node: n });
                 }
@@ -935,7 +957,9 @@ impl Reconciler<'_> {
                     continue;
                 }
                 // A rename needs every name of the folder ([`super::coverage`]); read-only, none
-                // is renamed.
+                // is renamed here (what is added there under a numbered name was renamed
+                // before, `keep_off_taken_names`, and is judged with the names the view holds
+                // above: `may_clash_unseen`).
                 uncovered |= part && !self.masking.read_only;
                 // The lowest id keeps the name, except that a deferred node (a file still
                 // being written) is never renamed: it wins, and is left alone if it loses;

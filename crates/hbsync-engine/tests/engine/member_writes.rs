@@ -264,7 +264,10 @@ fn what_a_member_makes_in_a_folder_shared_for_editing_reaches_the_sharer() -> R 
     b.write("d/mine.txt", "made by the member")?;
     b.write("d/New/below.txt", "below")?;
     b.write("at-the-top.txt", "not theirs")?;
-    b.sync()?;
+    let report = b.sync()?;
+    // A file in a folder made in the same run goes up in it: none is refused for want of
+    // the folder's row.
+    assert!(report.skipped.is_empty(), "{:?}", report.skipped);
     a.sync()?;
     let both = [
         "d/",

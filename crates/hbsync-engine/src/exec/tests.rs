@@ -5352,6 +5352,8 @@ fn a_read_only_folder_adds_and_moves_only_where_it_may() -> R {
     let mut h = Harness::new()?;
     let _out = read_only(&mut h)?;
     h.folder.writes = true;
+    // Another identity's drive: what this device makes there takes its folder's word.
+    h.db.write(|s| s.account().set_shared(true))?;
     let folder_row = |node, name: &str, writable| MirrorRow {
         file_id: hbsync_types::RemoteFileId(uuid::Uuid::new_v4()),
         version: hbsync_types::VersionTag(uuid::Uuid::new_v4()),
@@ -5398,14 +5400,29 @@ fn a_read_only_folder_adds_and_moves_only_where_it_may() -> R {
         kind: NodeKind::Folder,
         tags: Tags::default(),
     };
-    let ops = vec![make(made, to_edit), make(not_made, to_read)];
+    // (And a folder made in the folder made just before it, in the same run: asked of that
+    // one's row, which its create's answer wrote.)
+    let below = NodeId::new();
+    h.local_folder("edit/new/below", below)?;
+    let below_op = Op::RemoteCreate {
+        node: below,
+        parent: made,
+        name: "below".into(),
+        kind: NodeKind::Folder,
+        tags: Tags::default(),
+    };
+    let ops = vec![make(made, to_edit), below_op, make(not_made, to_read)];
     let report = h.run(ops.clone())?;
     let refused: Vec<&Op> = (report.skipped.iter())
         .filter(|(_, why)| matches!(why, Skip::Unsyncable(_)))
         .map(|(op, _)| op)
         .collect();
-    assert_eq!(refused, [&ops[1]], "{report:?}");
-    assert!(h.remote.server().live_names().contains(&"new".to_owned()));
+    assert_eq!(refused, [&ops[2]], "{report:?}");
+    let live = h.remote.server().live_names();
+    assert!(
+        live.contains(&"new".to_owned()) && live.contains(&"below".to_owned()),
+        "{live:?}"
+    );
 
     // A move is asked of the mirror's rows alone: between the two folders it passes the
     // guard, into the folder it may only read it doesn't.

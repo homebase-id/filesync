@@ -1702,7 +1702,7 @@ rules hold too:
   so is to count as read-only after all, where a folder writes.
   Read-only is asked item by item (the reconciler's `one_way`), where the folder writes to
   what is shared with it (`FolderCtx::writes`, the view's `Input::writable`). **An item
-  the store says may be changed is changed where it is**:
+  the store says may be changed is changed there**:
   - its edit (bytes, the executable bit), its tags and its rename in its folder go up;
   - gone there or here, it follows the drive: what is gone there (deleted, its share
     withdrawn, taken along by its folder's removal) isn't made again, and an edit of it here
@@ -1725,14 +1725,16 @@ rules hold too:
   **A folder the store says may be changed may be added to** (what is added to it is
   shared as it is, so it is the member's to change from then on; **[verified]** the fake
   sharer and the Homebase adapter share a new item with its folder's rows):
-  - what is new here in such a folder is added there, a new folder with what is in it
-    (each in the folder made before it); new at the top (no folder of the drive's) or in
-    a folder shared for reading, it moves out, as before;
+  - what is new here in such a folder is added there, a new folder with what is in it: a
+    folder is made before what is in it, in the same run where its create is answered at
+    once (a write still on its way there, as Homebase's can be, leaves what is in it for
+    a later plan, once the feed brought the folder's row); new at the top (no folder of
+    the drive's) or in a folder shared for reading, it moves out, as before;
   - what is added under a name another item holds there goes under the first free
     numbered name, as a clash's loser does on an identity's own drive (§6.3);
   - the executor's last guard makes a node only in a folder the store says may be
-    changed, as the write runs (one this run made there is one), and moves one only
-    between two such folders.
+    changed, as the write runs (one this run made there is one: it is asked after what
+    the write waits for ran), and moves one only between two such folders.
 
   Engine tests `what_a_member_makes_in_a_folder_shared_for_editing_reaches_the_sharer`,
   `a_members_conflict_copy_and_move_reach_the_sharer`,

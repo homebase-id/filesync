@@ -270,13 +270,6 @@ impl<'a> Executor<'a> {
                 self.run_batch(&mut batch)?;
                 continue;
             };
-            // Read-only (§13): nothing goes to the drive, whatever planned it, but of a node
-            // this identity may change there.
-            if self.folder.read_only.is_some() && op.writes_remote() && !self.may_change(&op)? {
-                let never = Outcome::unsyncable("the folder is read-only: the drive isn't written");
-                self.handle(op, attempts, never, None)?;
-                continue;
-            }
             // Everything else runs on its own, in order: after the batch.
             let pooled = op.pooled();
             let target = if pooled { self.move_target(&op)? } else { None };
@@ -290,6 +283,14 @@ impl<'a> Executor<'a> {
                 // it: what the batch did may have moved the target's folders.
                 self.schedule.requeue(op, attempts);
                 self.run_batch(&mut batch)?;
+                continue;
+            }
+            // Read-only (§13): nothing goes to the drive, whatever planned it, but what this
+            // identity may write there. Asked once what the op waits for in the batch ran (a
+            // folder made there: what is made in it is asked of that folder's row).
+            if self.folder.read_only.is_some() && op.writes_remote() && !self.may_change(&op)? {
+                let never = Outcome::unsyncable("the folder is read-only: the drive isn't written");
+                self.handle(op, attempts, never, None)?;
                 continue;
             }
             // A folder temporarily inside its own destination waits for the move that takes

@@ -66,13 +66,18 @@ impl<'a> Reconciler<'a> {
     /// here that is itself added to one. Never the top: that is no folder of the drive's.
     pub(super) fn adds_to(&self, folder: NodeId) -> bool {
         let i = self.input;
+        // (Nothing asked where no folder writes to what is shared with it.)
+        if !self.masking.read_only || i.writable.is_empty() {
+            return false;
+        }
         let mut at = folder;
         for _ in 0..hbsync_state::MAX_DEPTH {
-            if at.is_root() || !self.masking.read_only {
+            if at.is_root() {
                 return false;
             }
             if i.remote.contains(at) {
-                return i.writable.contains(&at) && self.remote_state(at).is_some();
+                let folder = |r: &NodeState| r.kind == NodeKind::Folder;
+                return i.writable.contains(&at) && self.remote_state(at).is_some_and(folder);
             }
             // New here: added with what it is in.
             let Some(l) = i.local.get(at).filter(|_| !i.base.contains(at)) else {
@@ -84,11 +89,13 @@ impl<'a> Reconciler<'a> {
     }
 
     /// Whether `node` is new here, in a folder this identity may add to on another
-    /// identity's drive (`adds_to`): it is added there.
+    /// identity's drive (`adds_to`): it is added there. Not one the drive has in Recently
+    /// deleted: that isn't made again there.
     fn added(&self, node: NodeId) -> bool {
         let i = self.input;
         !i.base.contains(node)
             && !i.remote.contains(node)
+            && !i.removed.contains_key(&node)
             && (i.local.get(node)).is_some_and(|l| self.adds_to(l.parent))
     }
 }
