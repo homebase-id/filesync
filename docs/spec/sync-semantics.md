@@ -1732,9 +1732,12 @@ rules hold too:
   here: the store's row says so from there on, the feed is read before the next plan (the
   picture was behind), and the edit moves out then, kept (engine test
   `a_write_the_sharer_refuses_makes_the_item_read_only_here`). Where the share's rows
-  still say "edit" (the circle's case), a later row of the item says so again, and its
-  next edit here is sent and refused once more: one refused write per such edit, nothing
-  lost. A member's write is answered without the server's time of it; that needs no read
+  still say "edit" (the circle's case: engine test
+  `a_refusal_the_share_doesnt_tell_of_makes_the_item_read_only_here`), a later row of the
+  item says so again, and its next edit here is sent and refused once more: one refused
+  write per such edit, nothing lost. (All of this for a share's folder as it is today, the
+  whole of what is shared seen from its top: a share synced into a part of a folder would
+  show such an item elsewhere than at its top, and needs this looked at again.) A member's write is answered without the server's time of it; that needs no read
   of its own: where the time matters (the item's folder removed there), the feed's row of
   the write comes with the removal's, and has it. What mends the drive (a
   clash of names, a cycle, an orphan) stays the owner's, whatever the items say, and an item
