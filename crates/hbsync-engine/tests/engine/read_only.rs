@@ -3,14 +3,6 @@
 
 use super::*;
 
-/// The drive's live nodes, each at its version: what a read-only folder never changes.
-fn versions(server: &Arc<Mutex<hbsync_remote::fake::FakeServer>>) -> Vec<RemoteRef> {
-    let server = server.lock().expect("server");
-    let mut live: Vec<RemoteRef> = server.live().map(|h| h.at()).collect();
-    live.sort_by_key(|r| r.file_id);
-    live
-}
-
 /// `b` follows `a` read-only: its user's edit, new folder, rename and delete there are kept
 /// (moved out where they would be lost) or undone, in one sync, and the drive stays as `a`
 /// left it.
@@ -25,7 +17,7 @@ fn a_read_only_folder_keeps_what_changed_and_follows_the_drive() -> R {
     let (mut b, out) = Client::read_only(&server, "b")?;
     b.sync()?;
     assert_eq!(b.tree_text(""), a.tree_text(""));
-    let drive = versions(&server);
+    let drive = drive_versions(&server);
 
     b.write("Docs/report.txt", "mine")?;
     b.write("New/x.txt", "x")?;
@@ -36,7 +28,7 @@ fn a_read_only_folder_keeps_what_changed_and_follows_the_drive() -> R {
         report.failed.is_empty() && report.skipped.is_empty(),
         "{report:?}"
     );
-    assert_eq!(versions(&server), drive, "the drive is written to");
+    assert_eq!(drive_versions(&server), drive, "the drive is written to");
     assert_eq!(b.tree_text(""), a.tree_text(""));
     assert_eq!(b.read_text("Docs/report.txt")?, "quarterly");
     assert_eq!(fs::read_to_string(out.path().join("report.txt"))?, "mine");
@@ -69,7 +61,7 @@ fn a_crash_at_any_commit_while_moving_out_loses_nothing() -> R {
                 a.sync()?;
                 let (mut b, out) = Client::read_only(&server, "b")?;
                 b.sync()?;
-                let drive = versions(&server);
+                let drive = drive_versions(&server);
                 b.write("Docs/report.txt", "mine")?;
                 b.write("New/x.txt", "x")?;
                 b.write("top.txt", "edited")?;
@@ -77,7 +69,7 @@ fn a_crash_at_any_commit_while_moving_out_loses_nothing() -> R {
                     n == at && (now == Commit::Before) == before
                 })?;
                 b.sync()?;
-                assert_eq!(versions(&server), drive, "{case}");
+                assert_eq!(drive_versions(&server), drive, "{case}");
                 assert_eq!(b.tree_text(""), a.tree_text(""), "{case}");
                 assert_eq!(
                     hbsync_engine::testkit::tree_text_of(out.path()),

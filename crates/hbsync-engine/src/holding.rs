@@ -356,7 +356,7 @@ impl HeldDeletes {
     ///
     /// Without `restores` (another identity's drive, §13: only its owner restores there) only
     /// the deletes made here are undone ([`held::put_back_here`]), nothing written to the
-    /// drive; an error where every one of `nodes` is a removal made there.
+    /// drive; an error where it forgets nothing and one of `nodes` is a removal made there.
     pub(crate) fn put_back(
         &mut self,
         db: &mut StateDb,

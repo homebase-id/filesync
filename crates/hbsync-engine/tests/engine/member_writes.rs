@@ -506,17 +506,6 @@ fn projects_shared(
     Ok((server, a, b, out))
 }
 
-/// Every file of the sharer's drive at its version, live or in Recently deleted: the same
-/// before and after means nothing was written there.
-fn versions(server: &Server) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let server = server.lock().map_err(|_| "poisoned")?;
-    let mut all: Vec<String> = (server.live().chain(server.removed()))
-        .map(|h| format!("{:?} {:?}", h.file_id, h.version))
-        .collect();
-    all.sort();
-    Ok(all)
-}
-
 /// A member's delete of most of what it syncs is held by the guard (§7), as on its own
 /// drive, and nothing is removed on the sharer's. Put back, the items come down again: no
 /// write to the sharer's drive, nothing moved out, nothing held after.
@@ -527,7 +516,7 @@ fn a_members_held_deletes_are_put_back_without_a_write() -> R {
     let report = b.sync()?;
     assert_eq!(report.held.len(), 5, "{report:?}");
     assert!(removed_names(&server).is_empty(), "nothing sent");
-    let before = versions(&server)?;
+    let before = drive_versions(&server);
 
     let held: Vec<NodeId> = report.held.iter().map(|op| op.node()).collect();
     assert_eq!(b.engine.put_back(&held)?, 5);
@@ -536,7 +525,7 @@ fn a_members_held_deletes_are_put_back_without_a_write() -> R {
     assert_eq!(b.read_text("Projects/f0.txt")?, "0");
     assert_eq!(b.read_text("Projects/f3.txt")?, "3");
     assert_eq!(
-        versions(&server)?,
+        drive_versions(&server),
         before,
         "a put back here writes nothing to the sharer's drive"
     );

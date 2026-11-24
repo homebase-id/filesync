@@ -471,15 +471,16 @@ impl Engine {
     /// ([`crate::FolderCtx::writes`]) holds its own deletes, which are removals there: those
     /// are put back, each base forgotten so the item comes down again (no write to the
     /// drive, after a feed read); a removal made there stays held, to be confirmed, and where
-    /// `nodes` are all such, that is the error. One that doesn't write holds only removals
-    /// made there: refused.
+    /// it put nothing back and left one such, that is the error. One that doesn't write holds
+    /// only removals made there: refused.
     pub fn put_back(&mut self, nodes: &[NodeId]) -> Result<usize, EngineError> {
         let folder = &self.cfg.folder;
         let read_only = folder.read_only.is_some();
         if read_only && !folder.writes {
             return Err(EngineError::ReadOnly("nothing is put back on the drive"));
         }
-        (self.held).put_back(&mut self.db, &self.drive, nodes, &folder.scope, !read_only)
+        self.held
+            .put_back(&mut self.db, &self.drive, nodes, &folder.scope, !read_only)
     }
 
     /// Waits up to `timeout` for the live changes `observer`'s watcher reports, and records
