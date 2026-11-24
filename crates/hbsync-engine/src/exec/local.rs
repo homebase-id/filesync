@@ -698,8 +698,8 @@ impl Executor<'_> {
         if let Some(sink) = &mut self.moved_out {
             sink.push((place.to_string(), to));
         }
-        // Its bases stay, and what was synced, or the drive holds, is planned again: the
-        // drive's version comes back.
+        // Its bases stay (in a folder that writes they went already, above), and what was
+        // synced, or the drive holds, is planned again: the drive's version comes back.
         let held: Vec<NodeId> = held.into_iter().map(|(n, _)| n).collect();
         self.finish(&[], |s| {
             gone_from_here(s, &row.path, node, Bases::Keep(&held))
