@@ -510,22 +510,14 @@ impl Sim {
             }
             // What waits for a folder no client reads (moved into it by a newer client,
             // `Action::IntoNewer`, after it synced here) is out of every plan: where the client
-            // holds it, synced here (its real base has it), or put in place for a plan that
-            // didn't see it wait (the drive moved it meanwhile), it stays as it is, its bytes
-            // kept here, and its base as it was. One it never had otherwise has no place here
-            // to wait at (made or brought down for a plan that saw it wait).
+            // holds it, it stays as it is, its bytes kept here, and its base as it was. (One
+            // put in place here for a plan that saw it wait is the ledger's: `wrote_waiting`.)
             waits_on_drive.extend(&waiting);
             for &n in &waiting {
                 base.remove(n);
             }
             let mut aside: BTreeSet<NodeId> = (waiting.iter().copied())
                 .filter(|n| visible.contains(*n))
-                .filter(|n| {
-                    client.base.contains(*n)
-                        || client
-                            .placed_unwaiting
-                            .contains(&client.coords.to_drive(*n))
-                })
                 .collect();
             // What else here waits with it, as the engine's plan has it: what the merge places
             // in it (the drive's folder where the drive moved it, else the one here: a move
@@ -1870,12 +1862,13 @@ mod tests {
     }
 
     /// A client's write to a node that waits for a folder no client reads (in a folder a newer
-    /// client moved into it) is reported: its move back to the top, an upload in place, a tag
-    /// write; one planned before the move lands unreported, as it would have just before.
+    /// client moved into it, where the client has both as synced) is reported: its move back
+    /// to the top, an upload in place, a tag write, another node's move into that folder; one
+    /// planned before the move lands unreported, as it would have just before.
     #[test]
     fn a_write_to_what_waits_is_reported() {
         use hbsync_engine::reconcile::Op;
-        let ops = |sim: &Sim, file: NodeId| {
+        let ops = |sim: &Sim, file: NodeId, other: NodeId| {
             let n = &sim.server.live[&file];
             let (file_id, expected) = (n.remote.file_id, n.remote.version);
             let update = |parent: NodeId, upload: bool| Op::RemoteUpdate {
@@ -1887,6 +1880,7 @@ mod tests {
                 upload,
                 tags: Tags::default(),
             };
+            let o = sim.server.live[&other].remote;
             [
                 update(NodeId::ROOT, false),
                 update(n.state.parent, true),
@@ -1896,23 +1890,46 @@ mod tests {
                     expected,
                     tags: Tags::new(vec![Tag::new("Red", 6)]),
                 },
+                Op::RemoteUpdate {
+                    node: other,
+                    file_id: o.file_id,
+                    expected: o.version,
+                    parent: n.state.parent,
+                    name: "b".into(),
+                    upload: false,
+                    tags: Tags::default(),
+                },
             ]
         };
-        for (i, planned_after) in [(0, true), (1, true), (2, true), (1, false)] {
+        for (i, planned_after) in [(0, true), (1, true), (2, true), (3, true), (1, false)] {
             let mut sim = Sim::new(2);
-            // Folder "LLL…txt" with "c.txt" in it; the newer folder "b" holds "a".
+            // Folder "LLL…txt" with "c.txt" in it, and "b" at the top; the newer folder "a"
+            // holds "a".
             sim.run(&[act(0, Action::CreateFolder { parent: 0, name: 6 })]);
             let folder = sim.local_paths(0).pop().expect("the folder");
             let folder = sim.item(0, &folder).expect("the folder");
             let parent = sim.pick(0, folder, true).expect("the folder");
-            sim.run(&[act(0, Action::CreateFile { parent, name: 3 })]);
+            let top = sim.pick(0, NodeId::ROOT, true).expect("the top");
+            sim.run(&[
+                act(0, Action::CreateFile { parent, name: 3 }),
+                act(
+                    0,
+                    Action::CreateFile {
+                        parent: top,
+                        name: 1,
+                    },
+                ),
+            ]);
             assert!(sim.quiesce(10));
             let file = sim.item_named(1, "c.txt").expect("c.txt");
+            let other = sim
+                .item(1, "b")
+                .unwrap_or_else(|| panic!("{:?}", sim.local_paths(1)));
             sim.run(&[
-                act(0, Action::NewerFolder { name: 1 }),
+                act(0, Action::NewerFolder { name: 0 }),
                 act(1, Action::Edit { file: 0 }),
             ]);
-            let (pick, into) = sim.newer_move_picks(folder, "b").expect("on the drive");
+            let (pick, into) = sim.newer_move_picks(folder, "a").expect("on the drive");
             if !planned_after {
                 sim.plan(1);
             }
@@ -1920,7 +1937,7 @@ mod tests {
             if planned_after {
                 sim.plan(1);
             }
-            let op = ops(&sim, file)[i].clone();
+            let op = ops(&sim, file, other)[i].clone();
             sim.clients[1].plan = [(op, 0)].into();
             assert!(sim.step(1));
             let wrong = sim.check().err().unwrap_or_default();
@@ -1932,29 +1949,47 @@ mod tests {
         }
     }
 
-    /// What waits for a folder no client reads stays where a client synced it, unjudged; one
-    /// a client holds that it never synced (made or brought down for a plan that saw it wait)
-    /// is judged as anything else: it diverges.
+    /// A download of what waits for a folder no client reads, for a plan that saw it wait, is
+    /// reported; one planned before the move lands unreported, and the file waits there.
     #[test]
-    fn what_waits_is_left_only_where_it_synced() {
-        for synced in [true, false] {
+    fn a_download_of_what_waits_is_reported() {
+        for planned_after in [true, false] {
             let mut sim = Sim::new(2);
             sim.run(&[act(0, Action::CreateFile { parent: 0, name: 3 })]);
-            assert!(sim.quiesce(10));
-            let file = sim.item(1, "c.txt").expect("c.txt");
+            sim.run(&[Event::Plan { client: 0 }]);
+            while sim.step(0) {}
+            let file = sim.item(0, "c.txt").expect("c.txt");
+            sim.plan(1);
+            let download = sim.clients[1].plan.clone();
+            assert_eq!(download.len(), 1, "{download:?}");
             sim.run(&[act(0, Action::NewerFolder { name: 1 })]);
             let (pick, folder) = sim.newer_move_picks(file, "b").expect("on the drive");
             sim.run(&[act(0, Action::IntoNewer { pick, folder })]);
-            assert!(sim.quiesce(10));
-            // As if c1 had brought it down for a plan that saw it wait: no base, nor placed
-            // for one that didn't.
-            if !synced {
-                let client = &mut sim.clients[1];
-                client.base.remove(file);
-                client.extra.remove(&file);
-                client.placed_unwaiting.clear();
+            if planned_after {
+                // A plan that saw it wait, wrong: the download of the drive's version now.
+                sim.plan(1);
+                let now = &sim.server.live[&file];
+                let mut download = download;
+                if let Some((
+                    hbsync_engine::reconcile::Op::LocalDownload { drive: Some(d), .. },
+                    _,
+                )) = download.front_mut()
+                {
+                    (d.state, d.at) = (now.state.clone(), now.remote);
+                }
+                sim.clients[1].plan = download;
             }
-            assert_eq!(sim.check().is_ok(), synced, "{synced}: {:?}", sim.check());
+            while sim.step(1) {}
+            assert!(
+                sim.clients[1].local.contains(file),
+                "{planned_after}: placed"
+            );
+            let wrong = sim.check().err().unwrap_or_default();
+            assert_eq!(
+                wrong.contains("wrote what waits for a folder no client reads"),
+                planned_after,
+                "{planned_after}: {wrong}"
+            );
         }
     }
 

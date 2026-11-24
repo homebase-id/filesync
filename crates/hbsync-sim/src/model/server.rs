@@ -75,39 +75,27 @@ impl Server {
             .any(|m| m.get(&node).is_some_and(|n| n.remote.file_id == file))
     }
 
-    /// Whether live `node` waits for a folder no client reads that is live: is one, or is in
-    /// one, through live folders. (Through a folder in Recently deleted it doesn't, to a
+    /// The live folders between live `node` and the folder no client reads it is in (that
+    /// folder on the drive, live or in Recently deleted), `node` first: `None` where it isn't
+    /// in one through live folders. (Through a folder in Recently deleted it isn't, to a
     /// client: that folder is deleted, and an edit in it wins, restoring it where the client
     /// has it, §4.)
-    pub(crate) fn waits_for_unreadable(&self, node: NodeId) -> bool {
+    pub(crate) fn chain_to_unreadable(&self, node: NodeId) -> Option<Vec<NodeId>> {
+        let mut chain = Vec::new();
         let mut at = node;
         for _ in 0..=self.live.len() {
-            let Some(n) = self.live.get(&at) else {
-                return false;
-            };
-            if self.unreadable.contains_key(&at) {
-                return true;
+            if self.unreadable.contains_key(&at) && self.node(at).is_some() {
+                return Some(chain);
             }
-            at = n.state.parent;
+            chain.push(at);
+            at = self.live.get(&at)?.state.parent;
         }
-        false
+        None
     }
 
-    /// Whether `node`, live or in Recently deleted, is or is in a folder no client reads that
-    /// is on the drive, through live folders and folders in Recently deleted: what the oracle
-    /// takes as waiting (`Sim::expected`).
-    pub(crate) fn waits_through_removed(&self, node: NodeId) -> bool {
-        let mut at = node;
-        for _ in 0..=self.live.len() + self.removed.len() {
-            let Some((n, _)) = self.node(at) else {
-                return false;
-            };
-            if self.unreadable.contains_key(&at) {
-                return true;
-            }
-            at = n.state.parent;
-        }
-        false
+    /// Whether live `node` waits for a folder no client reads ([`Server::chain_to_unreadable`]).
+    pub(crate) fn waits_for_unreadable(&self, node: NodeId) -> bool {
+        self.live.contains_key(&node) && self.chain_to_unreadable(node).is_some()
     }
 
     /// Whether `node`, moved into a folder no client reads ([`Server::moved_in`]), left the

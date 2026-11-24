@@ -164,15 +164,12 @@ pub(crate) struct Client {
     pub(crate) planned_removed: BTreeMap<NodeId, SeenRemoved>,
     pub(crate) planned_changed: HashMap<NodeId, i64>,
     /// The drive's live nodes that waited for a folder no client reads when the pending plan
-    /// was made (drive ids): nothing it holds writes one ([`crate::Action::IntoNewer`]).
+    /// was made (drive ids, `Server::waits_for_unreadable`): nothing puts one in place here.
+    pub(crate) planned_drive_waits: BTreeSet<NodeId>,
+    /// Of those, the ones this client held, with every folder between it and that folder, just
+    /// where its base has them: their place in the merge is the drive's, so they wait, and
+    /// nothing writes one, nor anything into one ([`crate::Action::IntoNewer`]).
     pub(crate) planned_waits: BTreeSet<NodeId>,
-    /// Those, and what waited through folders in Recently deleted when the pending plan was
-    /// made (`Server::waits_through_removed`).
-    pub(crate) planned_waits_wide: BTreeSet<NodeId>,
-    /// What this client put in place (made or downloaded) for a plan that didn't see it wait:
-    /// one the drive moved into a folder no client reads meanwhile waits here, as one synced
-    /// does (drive ids).
-    pub(crate) placed_unwaiting: BTreeSet<NodeId>,
     /// Where the pending plan's operations settled each node's base (the executor's): a later
     /// one's compare and set takes the base there as the one its plan saw.
     pub(crate) run_settled: HashMap<NodeId, VersionTag>,
@@ -309,9 +306,8 @@ impl Client {
             planned_refs: BTreeMap::new(),
             planned_removed: BTreeMap::new(),
             planned_changed: HashMap::new(),
+            planned_drive_waits: BTreeSet::new(),
             planned_waits: BTreeSet::new(),
-            planned_waits_wide: BTreeSet::new(),
-            placed_unwaiting: BTreeSet::new(),
             run_settled: HashMap::new(),
             unhashed: HashSet::new(),
             writing: HashSet::new(),
