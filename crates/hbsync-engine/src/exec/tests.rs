@@ -5289,16 +5289,35 @@ fn a_read_only_folder_writes_only_what_may_be_changed_and_only_if_it_writes() ->
         assert_eq!(input.writable, said, "writes: {writes}");
         h.db.write(|s| s.account().set_writable(at_taken_back.file_id, false))?;
 
-        let delete = |node, at: RemoteRef| Op::RemoteDelete {
+        let rename = |node, at: RemoteRef, parent, name: &str| Op::RemoteUpdate {
             node,
-            parent: NodeId::ROOT,
             file_id: at.file_id,
             expected: at.version,
+            parent,
+            name: name.into(),
+            upload: false,
+            tags: Tags::default(),
         };
         let ops = vec![
-            delete(mine, at_mine),
-            delete(theirs, at_theirs),
-            delete(taken_back, at_taken_back),
+            rename(mine, at_mine, NodeId::ROOT, "mine 2"),
+            rename(theirs, at_theirs, NodeId::ROOT, "theirs 2"),
+            rename(taken_back, at_taken_back, NodeId::ROOT, "taken back 2"),
+            // Nor what the plan never makes of a node that may be changed: its move to
+            // another folder, its removal, a node made.
+            rename(mine, at_mine, theirs, "mine 3"),
+            Op::RemoteDelete {
+                node: mine,
+                parent: NodeId::ROOT,
+                file_id: at_mine.file_id,
+                expected: at_mine.version,
+            },
+            Op::RemoteCreate {
+                node: NodeId::new(),
+                parent: NodeId::ROOT,
+                name: "new".into(),
+                kind: NodeKind::Folder,
+                tags: Tags::default(),
+            },
         ];
         let report = h.run(ops.clone())?;
         let refused: Vec<&Op> = report
@@ -5309,13 +5328,14 @@ fn a_read_only_folder_writes_only_what_may_be_changed_and_only_if_it_writes() ->
             .collect();
         let mut live = h.remote.server().live_names();
         live.sort();
+        let all: Vec<&Op> = ops.iter().collect();
         match writes {
             true => {
-                assert_eq!(refused, [&ops[1], &ops[2]], "{report:?}");
-                assert_eq!(live, ["taken back", "theirs"]);
+                assert_eq!(refused, all[1..], "{report:?}");
+                assert_eq!(live, ["mine 2", "taken back", "theirs"]);
             }
             false => {
-                assert_eq!(refused, [&ops[0], &ops[1], &ops[2]], "{report:?}");
+                assert_eq!(refused, all, "{report:?}");
                 assert_eq!(live, ["mine", "taken back", "theirs"]);
             }
         }

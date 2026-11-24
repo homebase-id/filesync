@@ -4,19 +4,12 @@
 use hbsync_sim::{Action, Event, Sim};
 use hbsync_types::NodeId;
 
-use super::{act, settle};
+use super::{act, settle, share};
 
 /// The owner (client 0) shares what `pick` picks with the member, or withdraws its share:
 /// alone, or (`below`) with all the drive has in it.
 fn shares(pick: usize, below: bool) -> Event {
     act(0, Action::Share { pick, below })
-}
-
-/// The owner shares `path`, as it has it, with the member, or withdraws its share.
-fn share(sim: &mut Sim, path: &str) {
-    let node = sim.item(0, path).expect("on the owner's device");
-    let pick = sim.share_pick(node).expect("on the drive");
-    sim.run(&[shares(pick, false)]);
 }
 
 /// Client 0, the owner, has `a` and the folder `b` holding another `a`; client 2 is a member

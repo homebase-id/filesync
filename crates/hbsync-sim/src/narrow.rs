@@ -207,7 +207,7 @@ impl Sim {
             read_only: client
                 .read_only
                 .then(|| std::path::PathBuf::from("/sim-out")),
-            writes: false,
+            writes: client.writes,
         }
     }
 
@@ -279,6 +279,7 @@ impl Sim {
                     row.parent = on_drive.state.parent;
                 }
                 row.changed_at = input.changed_at.get(&node).copied();
+                row.writable = client.writes && self.server.editable.contains(&at.file_id);
                 s.account().put_live(&row)?;
             }
             // What the drive holds in a version no client reads.
@@ -364,6 +365,7 @@ fn input_differences(sim: &Input, engine: &Input) -> String {
             ("unreadable", sorted(i.unreadable.iter())),
             ("removed", sorted(i.removed.iter())),
             ("changed_at", sorted(i.changed_at.iter())),
+            ("writable", sorted(i.writable.iter())),
         ]
     };
     fields(sim)

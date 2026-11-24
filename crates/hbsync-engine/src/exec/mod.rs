@@ -341,16 +341,22 @@ impl<'a> Executor<'a> {
         Ok(())
     }
 
-    /// Whether `op`, which writes the drive from a read-only folder (§13), writes a node this
-    /// identity may change there: the folder writes to what is shared with it
+    /// Whether `op`, which writes the drive from a read-only folder (§13), changes a node this
+    /// identity may change there, where it is: the folder writes to what is shared with it
     /// ([`FolderCtx::writes`]), and the mirror's row of the node says so, now (the plan
-    /// asked the view's: a share taken back since stops the write here).
+    /// asked the view's: a share taken back since stops the write here). Never a node made
+    /// or removed there, nor one moved to another folder than the mirror has it in.
     fn may_change(&mut self, op: &Op) -> Result<bool, StateError> {
         if !self.folder.writes {
             return Ok(false);
         }
+        let to = match op {
+            Op::RemoteUpdate { parent, .. } => Some(*parent),
+            Op::RemoteTags { .. } => None,
+            _ => return Ok(false),
+        };
         let row = self.db.read(|s| s.get_mirror(op.node()))?;
-        Ok(row.is_some_and(|row| row.writable))
+        Ok(row.is_some_and(|row| row.writable && to.is_none_or(|to| to == row.parent)))
     }
 
     /// Where `op` moves its node on the drive, if it moves it to another folder: that folder

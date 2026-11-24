@@ -200,12 +200,13 @@ struct Reconciler<'a> {
     evicted: BTreeSet<NodeId>,
     /// What a read-only name clash left out (§13), each once.
     left: BTreeSet<NodeId>,
-    /// The nodes a repair gave their place in a read-only folder (§13: an orphan let go of,
-    /// a cycle's move undone): they follow the drive, also the ones this identity may change
-    /// there (`one_way`). The drive is its owner's to mend: no repair here
-    /// writes to it. (A name clash's loser is left out of the plan; what this device leaves
-    /// out, §10, isn't in the view's drive: neither is written.)
-    mended: HashSet<NodeId>,
+    /// The nodes this identity may change on another identity's drive that follow it in this
+    /// plan all the same (§13, `one_way`): one gone there or here, or edited on both sides
+    /// (the merge's); one a repair gave its place (an orphan let go of, a cycle's move
+    /// undone: the drive is its owner's to mend, no repair here writes to it). (A name
+    /// clash's loser is left out of the plan; what this device leaves out, §10, isn't in the
+    /// view's drive: neither is written.)
+    follows: HashSet<NodeId>,
     /// The folders here a name pass left one out in, held there (§13): judged again.
     rejudge: BTreeSet<NodeId>,
     /// Becomes `plan.deferred`.
@@ -269,7 +270,7 @@ impl<'a> Reconciler<'a> {
             forks: BTreeMap::new(),
             evicted: BTreeSet::new(),
             left: BTreeSet::new(),
-            mended: HashSet::new(),
+            follows: HashSet::new(),
             rejudge: BTreeSet::new(),
             deferred: BTreeSet::new(),
             adopted: HashSet::new(),
@@ -326,6 +327,7 @@ impl<'a> Reconciler<'a> {
         // A node left where it is for a name, or left out read-only (§13: where it is here,
         // maybe in a folder judged already), may hold the name another would take: again, till
         // none more waits or is left out (in each pass at least one node more does).
+        self.undo_renames_onto_taken_names();
         let mut only = None;
         loop {
             let waited = self.waiters.len();
@@ -347,10 +349,20 @@ impl<'a> Reconciler<'a> {
         self.with_what_it_took_along();
         self.guard_mass_delete();
         // Read-only (§13): the drive is never written, but of a node this identity may change
-        // there (emit plans no other write).
+        // there (emit plans no other write), and that only changed where it is: never made,
+        // removed, or moved to another folder.
         debug_assert!(
-            !(self.plan.ops.iter().chain(&self.plan.held))
-                .any(|op| op.writes_remote() && self.one_way(op.node())),
+            !self.masking.read_only
+                || (self.plan.ops.iter().chain(&self.plan.held)).all(|op| match op {
+                    Op::RemoteUpdate { node, parent, .. } => {
+                        !self.one_way(*node)
+                            && self
+                                .remote_state(*node)
+                                .is_some_and(|r| r.parent == *parent)
+                    }
+                    Op::RemoteTags { node, .. } => !self.one_way(*node),
+                    op => !op.writes_remote(),
+                }),
             "a read-only plan writes the drive: {:?}",
             self.plan.ops
         );

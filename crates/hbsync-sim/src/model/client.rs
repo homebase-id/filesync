@@ -225,6 +225,9 @@ pub(crate) struct Client {
     /// shares ([`crate::Sim::with_member`]): read-only, and of the drive as
     /// `Server::as_shared` has it.
     pub(crate) member: bool,
+    /// A member that writes to what is shared with it for editing
+    /// ([`crate::Sim::with_writing_member`]): the rest of its folder is read-only.
+    pub(crate) writes: bool,
     /// A member that doesn't sync what is shared any more ([`crate::Sim::end_share`]): it
     /// reads nothing of the drive, as if every share were withdrawn.
     pub(crate) ended: bool,
@@ -317,6 +320,7 @@ impl Client {
             desktop_named: None,
             read_only: false,
             member: false,
+            writes: false,
             ended: false,
             moved_out: Vec::new(),
         }

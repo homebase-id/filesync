@@ -11,6 +11,7 @@ mod roles;
 mod shared_folder;
 mod state_folder;
 mod tags;
+mod writing_member;
 
 use hbsync_sim::{Action, Event, Sim};
 use hbsync_types::NodeId;
@@ -22,6 +23,13 @@ fn act(client: usize, action: Action) -> Event {
 /// What an action's `parent` is to pick the top on client `c`.
 fn top(sim: &Sim, c: usize) -> usize {
     sim.pick(c, NodeId::ROOT, true).expect("the top")
+}
+
+/// The owner (client 0) shares `path`, as it has it, with the member, or withdraws its share.
+fn share(sim: &mut Sim, path: &str) {
+    let node = sim.item(0, path).expect("on the owner's device");
+    let pick = sim.share_pick(node).expect("on the drive");
+    sim.run(&[act(0, Action::Share { pick, below: false })]);
 }
 
 /// Client `c` makes the file named by `name` in its folder `folder`.

@@ -42,6 +42,9 @@ pub(crate) struct Server {
     /// The files the owner shares with the member ([`crate::Sim::with_member`]), by file id, as
     /// the server keeps them: a node made again as another file isn't shared.
     pub(crate) shared: BTreeSet<RemoteFileId>,
+    /// Of the shared files, those the member may change (shared for editing: sync semantics
+    /// §13, "What may be changed is told per item"; [`crate::Action::Editable`]).
+    pub(crate) editable: BTreeSet<RemoteFileId>,
 }
 
 /// How long an item stays in Recently deleted, and a delete for good leaves a trace in the feed
@@ -326,7 +329,50 @@ impl Server {
             ever: self.ever.clone(),
             unreadable: self.unreadable.clone(),
             shared: self.shared.clone(),
+            editable: self.editable.clone(),
         }
+    }
+
+    /// Takes what a member that writes changed on the drive as it read it (`seen`, which was
+    /// as `before` when its sync began: [`Server::as_shared`]) into the drive: a change of a
+    /// file it may change, where the file is. The drive keeps the folder it has the file in
+    /// (the member reads one whose folder isn't shared at the top, and sends the drive's:
+    /// never its own). Anything else it did is a breach, named, and dropped: a node made,
+    /// removed, moved to another folder, or a change of a file it may not change. The
+    /// drive's ids go on from the member's, so no version is given twice.
+    pub(crate) fn take_from_member(&mut self, before: &Snapshot, seen: &Server) -> Option<String> {
+        self.next = seen.next;
+        let mut breach = None;
+        if seen.removed != before.1 {
+            breach = Some("it changed Recently deleted".to_owned());
+        }
+        for (id, was) in &before.0 {
+            let Some(now) = seen.live.get(id) else {
+                breach.get_or_insert_with(|| format!("it removed {id:?}"));
+                continue;
+            };
+            if now == was {
+                continue;
+            }
+            let file = was.remote.file_id;
+            let in_place = now.remote.file_id == file && now.state.parent == was.state.parent;
+            let mine = self.live.get_mut(id).filter(|m| m.remote.file_id == file);
+            let Some(mine) = mine.filter(|_| in_place && self.editable.contains(&file)) else {
+                breach.get_or_insert_with(|| format!("it changed {id:?}: {was:?} to {now:?}"));
+                continue;
+            };
+            *mine = ServerNode {
+                state: NodeState {
+                    parent: mine.state.parent,
+                    ..now.state.clone()
+                },
+                remote: now.remote,
+            };
+        }
+        if let Some(made) = seen.live.keys().find(|id| !before.0.contains_key(id)) {
+            breach.get_or_insert_with(|| format!("it made {made:?}"));
+        }
+        breach
     }
 
     /// What the drive holds, live and in Recently deleted: to tell whether it changed since.

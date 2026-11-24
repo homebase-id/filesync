@@ -51,11 +51,11 @@ impl<'a> Reconciler<'a> {
     }
 
     /// Whether `node` follows the drive, one way (§13): the folder is read-only, and the node
-    /// isn't one this identity may change on the drive ([`Input::writable`]), or is one a
-    /// repair gave its place (`mended`), whatever it says.
+    /// isn't one this identity may change on the drive ([`Input::writable`]), or is one that
+    /// follows it in this plan whatever it says (`follows`).
     pub(super) fn one_way(&self, node: NodeId) -> bool {
         self.masking.read_only
-            && (!self.input.writable.contains(&node) || self.mended.contains(&node))
+            && (!self.input.writable.contains(&node) || self.follows.contains(&node))
     }
 }
 
@@ -307,8 +307,20 @@ impl Reconciler<'_> {
         let r = self.remote_state(node);
         let (b, l) = (i.base.get(node), self.local_state(node));
         let masked = self.masks.masked.contains(&node);
+        // A node this identity may change on another identity's drive (§13) is changed there
+        // where both have it and one side alone changed its bytes: its edit, its name and its
+        // tags go up. Gone there or here, it follows the drive (what is gone there isn't made
+        // again, and a delete here removes nothing there); edited on both sides, the drive's
+        // wins and this device's moves out (a copy of it would be a new item there).
+        let mut one_way = self.one_way(node);
+        if self.masking.read_only && !one_way && !masked {
+            let changes = matches!((&l, r), (Some(l), Some(r)) if !edited_apart(l, r, lc, rc));
+            if !changes {
+                self.follows.insert(node);
+                one_way = true;
+            }
+        }
         // Read-only (§13): what going back to the drive's would lose here moves out first.
-        let one_way = self.one_way(node);
         let evict = one_way && !masked && self.loses_here(node);
         let (target, origin): (Option<NodeState>, Origin) = match (lc, rc) {
             // Gone from what this device syncs; what must stay here was detached (§10).
@@ -360,6 +372,15 @@ impl Reconciler<'_> {
             }
             (target, _) => (target, origin),
         };
+        // On another identity's drive (§13) a node is renamed where it is, never moved to
+        // another folder: a move here is undone, whole.
+        if let (Some(t), Some(r)) = (&mut target, r)
+            && self.masking.read_only
+            && t.parent != r.parent
+        {
+            t.parent = r.parent;
+            t.name = r.name.clone();
+        }
         // Tags merge on their own, whatever else changed (§11); a merge too large for the
         // drive leaves the drive's. Read-only, the drive's (§13).
         if let (Some(t), Some(l), Some(r)) = (&mut target, &l, r)
@@ -432,6 +453,10 @@ impl Reconciler<'_> {
         if l.kind == NodeKind::File {
             let same_edit = same_edit(l, r);
             if l_edited && r_edited && !same_edit {
+                debug_assert!(
+                    !self.masking.read_only,
+                    "{node:?}: a copy in a read-only folder"
+                );
                 // Keep both: the remote version keeps the node, the local bytes become a copy.
                 let base_version = self.input.base_extra.get(&node).and_then(|e| e.version);
                 let copy = fork_id(node, l.content, base_version, &self.opts.computer);
@@ -456,6 +481,12 @@ impl Reconciler<'_> {
         }
         (Some(target), origin)
     }
+}
+
+/// Whether the file's bytes were changed on both sides, to other than the same: the conflict
+/// [`Reconciler::merge_both`] keeps both of.
+fn edited_apart(l: &NodeState, r: &NodeState, lc: Change, rc: Change) -> bool {
+    l.kind == NodeKind::File && content_changed(lc) && content_changed(rc) && !same_edit(l, r)
 }
 
 /// Whether both sides hold the same bytes, executable alike: an edit on both sides that isn't a

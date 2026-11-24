@@ -3670,6 +3670,191 @@ fn read_only_a_node_that_may_be_changed_syncs_both_ways() {
     assert_eq!(sorted_ops(&plan), want);
 }
 
+/// A world where every item of the drive may be changed by this identity (§13).
+fn editing(w: &mut World) {
+    let all: Vec<NodeId> = w.input.remote.iter().map(|(n, _)| n).collect();
+    w.input.writable.extend(all);
+}
+
+/// An item that may be changed, gone on one side, follows the drive: deleted here, it comes
+/// back (a delete here removes nothing there); gone there, it goes here, and an edit of it
+/// here moves out (it isn't made again there); taken along by its folder's removal there,
+/// it isn't removed there by this device.
+#[test]
+fn read_only_an_item_that_may_be_changed_gone_on_one_side_follows_the_drive() {
+    let [deleted, gone, edited_gone, d, along] = ids(5)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.input.remote_complete = true;
+    w.synced(deleted, file(ROOT, "a.txt", "a"))
+        .synced(gone, file(ROOT, "g.txt", "g"))
+        .synced(edited_gone, file(ROOT, "e.txt", "e"))
+        .synced(d, folder(ROOT, "d"))
+        .synced(along, file(d, "x.txt", "x"));
+    editing(&mut w);
+    w.local(deleted, None)
+        .remote(gone, None)
+        .remote(edited_gone, None)
+        .local(edited_gone, Some(file(ROOT, "e.txt", "mine")))
+        .remote(d, None);
+    w.input.removed.insert(
+        d,
+        hbsync_engine::reconcile::Removed {
+            at: 100,
+            state: folder(ROOT, "d"),
+        },
+    );
+    w.input.changed_at.insert(along, 10);
+    let plan = w.plan();
+    assert!(!plan.writes_drive(), "{:?}", plan.ops);
+    let mut want = vec![
+        ("LocalDelete", d),
+        ("LocalDelete", gone),
+        ("LocalDownload", deleted),
+        ("LocalEvict", edited_gone),
+    ];
+    want.sort();
+    assert_eq!(sorted_ops(&plan), want);
+}
+
+/// A file that may be changed, edited on both sides: the drive's wins and this device's
+/// moves out, as of any file of the folder. No copy is made (it would be a new item there).
+#[test]
+fn read_only_a_file_that_may_be_changed_edited_on_both_sides_moves_out() {
+    let [f] = ids(1)[..] else { unreachable!() };
+    let mut w = read_only();
+    w.synced(f, file(ROOT, "a.txt", "a"));
+    editing(&mut w);
+    w.local(f, Some(file(ROOT, "a.txt", "mine")))
+        .remote(f, Some(file(ROOT, "a.txt", "theirs")));
+    let plan = w.plan();
+    assert_eq!(sorted_ops(&plan), [("LocalEvict", f)]);
+    assert!(plan.conflicts.is_empty());
+    assert!(!plan.clean.contains(&f));
+}
+
+/// An item that may be changed is renamed where it is, never moved to another folder: a
+/// move here is undone, whole, and an edit made with it still goes up, under the drive's
+/// name in the drive's folder. A rename in its folder goes up.
+#[test]
+fn read_only_a_move_here_of_an_item_that_may_be_changed_is_undone() {
+    let [d, moved, moved_edited, renamed] = ids(4)[..] else {
+        unreachable!()
+    };
+    let mut w = read_only();
+    w.synced(d, folder(ROOT, "d"))
+        .synced(moved, file(ROOT, "m.txt", "m"))
+        .synced(moved_edited, file(ROOT, "e.txt", "e"))
+        .synced(renamed, file(d, "r.txt", "r"));
+    editing(&mut w);
+    w.local(moved, Some(file(d, "m2.txt", "m")))
+        .local(moved_edited, Some(file(d, "e.txt", "mine")))
+        .local(renamed, Some(file(d, "r2.txt", "r")));
+    let plan = w.plan();
+    let mut want = vec![
+        ("LocalMove", moved),
+        ("LocalMove", moved_edited),
+        ("RemoteUpdate", moved_edited),
+        ("RemoteUpdate", renamed),
+    ];
+    want.sort();
+    assert_eq!(sorted_ops(&plan), want);
+    for op in &plan.ops {
+        match op {
+            Op::RemoteUpdate {
+                node,
+                parent,
+                name,
+                upload,
+                ..
+            } if *node == moved_edited => {
+                assert_eq!((*parent, name.as_str(), *upload), (ROOT, "e.txt", true));
+            }
+            Op::RemoteUpdate {
+                node,
+                parent,
+                name,
+                upload,
+                ..
+            } if *node == renamed => {
+                assert_eq!((*parent, name.as_str(), *upload), (d, "r2.txt", false));
+            }
+            Op::LocalMove {
+                node, parent, name, ..
+            } if *node == moved => {
+                assert_eq!((*parent, name.as_str()), (ROOT, "m.txt"));
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A rename here of an item that may be changed, onto a name another item of the drive
+/// holds, isn't sent: two of one name there would be the owner's to mend. The rename is
+/// undone here, and an edit made with it goes up under the drive's name. So onto a name this
+/// device leaves out of the drive (§10).
+#[test]
+fn read_only_a_rename_onto_a_taken_name_is_undone() {
+    let [w1, w2, newcomer, w3, ignored] = ids(5)[..] else {
+        unreachable!()
+    };
+    let mut w = World {
+        filter: ignoring("*.log\n"),
+        ..read_only()
+    };
+    w.synced(w1, file(ROOT, "a.txt", "a"))
+        .synced(w2, file(ROOT, "c.txt", "c"))
+        .synced(w3, file(ROOT, "n.txt", "n"))
+        .remote(newcomer, Some(file(ROOT, "b.txt", "b")))
+        .remote(ignored, Some(file(ROOT, "x.log", "x")));
+    editing(&mut w);
+    w.local(w1, Some(file(ROOT, "b.txt", "a")))
+        .local(w2, Some(file(ROOT, "B.TXT", "mine")))
+        .local(w3, Some(file(ROOT, "x.log", "n")));
+    let plan = w.plan();
+    // Each rename undone here; the edit made with one goes up under the drive's name; the
+    // newcomer comes down onto its name once that is free here.
+    let mut want = vec![
+        ("LocalDownload", newcomer),
+        ("LocalMove", w1),
+        ("LocalMove", w2),
+        ("LocalMove", w3),
+        ("RemoteUpdate", w2),
+    ];
+    want.sort();
+    assert_eq!(sorted_ops(&plan), want, "{:?}", plan.conflicts);
+    let sent = plan.ops.iter().find(|op| op.writes_remote());
+    assert!(
+        matches!(sent, Some(Op::RemoteUpdate { name, upload: true, .. }) if name == "c.txt"),
+        "{sent:?}"
+    );
+}
+
+/// A rename here to its own name spelled otherwise (case) goes up, also where another item
+/// holds that name with it (two shared without their folders, both at the top; or a clash
+/// the drive has already): the rename makes none.
+#[test]
+fn read_only_a_rename_in_case_only_goes_up_beside_another_of_the_name() {
+    let [mine, other] = ids(2)[..] else {
+        unreachable!()
+    };
+    // (The lower id holds the name here: the other was left out.)
+    let (mine, other) = (mine.min(other), mine.max(other));
+    let mut w = read_only();
+    w.synced(mine, file(ROOT, "a", "1"))
+        .remote(other, Some(file(ROOT, "a", "2")));
+    editing(&mut w);
+    w.local(mine, Some(file(ROOT, "A", "1")));
+    let plan = w.plan();
+    let sent: Vec<&Op> = plan.ops.iter().filter(|op| op.writes_remote()).collect();
+    assert!(
+        matches!(sent[..], [Op::RemoteUpdate { node, name, upload: false, .. }] if *node == mine && name == "A"),
+        "{:?}",
+        plan.ops
+    );
+}
+
 /// A new folder here moves out as one, with what is in it; a new file at the top too.
 #[test]
 fn read_only_new_items_move_out_whole() {
@@ -3867,6 +4052,31 @@ fn read_only_no_repair_writes_the_drive_whatever_may_be_changed() {
     w.input.writable.extend([a, b]);
     let plan = w.plan();
     assert!(!plan.writes_drive(), "{:?}", plan.ops);
+
+    // The folder whose move the repair undoes here follows the drive in its tags too: one
+    // set here is undone, not left as if it were synced.
+    let red = |s: NodeState| NodeState {
+        tags: Tags::new(vec![Tag::new("Red", 0)]),
+        ..s
+    };
+    w.local(a, Some(red(folder(ROOT, "a"))))
+        .local(b, Some(red(folder(ROOT, "b"))));
+    let plan = w.plan();
+    let [Conflict::Cycle { node: victim }] = plan.conflicts[..] else {
+        panic!("{:?}", plan.conflicts);
+    };
+    let its: Vec<&str> = (sorted_ops(&plan).into_iter())
+        .filter(|(_, n)| *n == victim)
+        .map(|(kind, _)| kind)
+        .collect();
+    assert!(its.contains(&"LocalTags"), "{:?}", plan.ops);
+    assert!(
+        plan.ops
+            .iter()
+            .all(|op| !op.writes_remote() || op.node() != victim),
+        "{:?}",
+        plan.ops
+    );
 }
 
 /// Two of the drive's items whose names clash here: the one held here keeps its name, the other

@@ -113,6 +113,17 @@ pub enum Action {
         pick: usize,
         below: bool,
     },
+    /// The drive's owner turns a shared node's share to editing, or back to reading where it
+    /// is for editing ([`Sim::with_writing_member`]; sync semantics §13, "What may be changed
+    /// is told per item"): its file as it is (no new version); `below`: with all the drive has
+    /// in it now that is shared. Picked as [`Action::Share`] picks; nothing of a node that
+    /// isn't shared.
+    ///
+    /// [`Sim::with_writing_member`]: crate::Sim::with_writing_member
+    Editable {
+        pick: usize,
+        below: bool,
+    },
     /// A user lists Recently deleted ([`hbsync_engine::deleted::deletes`]): what it holds now,
     /// each node at its version, is what emptying it as listed may take.
     ListDeleted,
