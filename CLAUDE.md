@@ -35,7 +35,11 @@ it, what was written after its removal too (**[verified]** `along::by_removal`):
 the client to an identity before its server has it. What another identity shares is heard
 on a socket to their server, which needs odin-core v0.1.995 or newer there (PR #2132;
 **[verified]** live): a server without it subscribes a token once an hour only, and the
-share is read every 5 min meanwhile. Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
+share is read every 5 min meanwhile. That the app lacks the permission to read (or change) what
+others share is told by the server's `missingPermissionKey`, which needs odin-core with
+PR #2164 (on main at b79aefa99, not released yet): a server without it answers a 403 without a
+code, which this client takes for the sharer's refusal (wrong words, nothing lost): don't
+release the client to an identity before its server has it. Layer 6 has started with filters (`hbsync-local/src/filter.rs`,
 sync semantics §10): built-in junk, and per-device ignore rules in `.hbsync/ignore` (gitignore
 syntax, picked up a second after an edit, within a minute without a watcher); an ignored item
 is kept on its device only.
