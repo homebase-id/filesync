@@ -3848,6 +3848,150 @@ fn one_left_out_for_what_waits_keeps_the_folder_its_edit_is_in() {
     }
 }
 
+/// Whatever the order the repairs meet them in. `y`, edited here, waits (moved there into
+/// the folder this device can't read); the folder `x` it is in here is the plan's, moved
+/// there to a name what waits holds, out of `l`, which the drive deleted. `x` is left out
+/// for the name and put back in `l`: now `l` is the folder the edit is in, and stays. (The
+/// walk for `y` had ended at `x`, the plan's then: `l` went, with the edit.)
+#[test]
+fn what_waits_in_a_folder_left_out_later_keeps_the_folder_that_one_is_in() {
+    let [w_, l, x, y, q] = ids(5)[..] else {
+        unreachable!()
+    };
+    for order in [[0, 1, 2, 3], [3, 2, 1, 0], [2, 0, 3, 1]] {
+        let id = [w_, l, x, y];
+        let [w_, l, x, y] = order.map(|i| id[i]);
+        let mut w = World::default();
+        w.synced(w_, folder(ROOT, "a"))
+            .synced(l, folder(ROOT, "l"))
+            .synced(x, folder(l, "x"))
+            .synced(y, file(x, "y.txt", "y"));
+        w.remote(w_, Some(folder(q, "a")))
+            .remote(l, None)
+            .remote(x, Some(folder(ROOT, "a")))
+            .remote(y, Some(file(q, "y.txt", "y")))
+            .local(y, Some(file(x, "y.txt", "mine")));
+        w.input.unreadable.insert(q);
+        let plan = w.plan();
+        assert!(!plan.writes_drive(), "{order:?}: {:?}", plan.ops);
+        assert!(plan.ops.is_empty(), "{order:?}: {:?}", plan.ops);
+        assert!(
+            plan.conflicts.contains(&Conflict::NameTaken { node: x }),
+            "{order:?}: {:?}",
+            plan.conflicts
+        );
+    }
+}
+
+/// A folder kept for one left out holds its name in a folder judged already: a new folder of
+/// that name there is left out in turn, not made here onto the kept one. (`p` is kept while
+/// the top's names are judged, for `y`, left out there; the new `p` was judged before it.)
+#[test]
+fn a_folder_kept_for_one_left_out_holds_its_name_where_names_were_judged() {
+    let [c, p, y, g, q] = ids(5)[..] else {
+        unreachable!()
+    };
+    for order in [[0, 1, 2, 3], [3, 2, 1, 0], [1, 3, 0, 2]] {
+        let id = [c, p, y, g];
+        let [c, p, y, g] = order.map(|i| id[i]);
+        let mut w = World::default();
+        w.synced(c, file(ROOT, "c.txt", "x"))
+            .synced(p, folder(ROOT, "p"))
+            .synced(y, file(p, "y.txt", "y"));
+        w.remote(c, Some(file(q, "c.txt", "x")))
+            .remote(p, None)
+            .remote(y, Some(file(ROOT, "c.txt", "y")))
+            .remote(g, Some(folder(ROOT, "p")))
+            .local(y, Some(file(p, "y.txt", "mine")));
+        w.input.unreadable.insert(q);
+        let plan = w.plan();
+        assert!(!plan.writes_drive(), "{order:?}: {:?}", plan.ops);
+        assert!(plan.ops.is_empty(), "{order:?}: {:?}", plan.ops);
+        let mut left: Vec<NodeId> = (plan.conflicts.iter())
+            .filter(|c| matches!(c, Conflict::NameTaken { .. }))
+            .map(Conflict::node)
+            .collect();
+        left.sort();
+        let mut want = vec![y, g];
+        want.sort();
+        assert_eq!(left, want, "{order:?}: {:?}", plan.conflicts);
+    }
+}
+
+/// The folders kept end at the first the plan moves: that one takes what is in it along.
+/// `y` is left out for a name what waits holds and put back in `x`, which the drive renamed
+/// and which is deleted there no more than the folder it is in: `x` is renamed here, the
+/// edit in it.
+#[test]
+fn the_folders_kept_for_one_left_out_end_at_one_the_plan_moves() {
+    let [c, x, y, q] = ids(4)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(c, file(ROOT, "c.txt", "x"))
+        .synced(x, folder(ROOT, "x"))
+        .synced(y, file(x, "y.txt", "y"));
+    w.remote(c, Some(file(q, "c.txt", "x")))
+        .remote(x, Some(folder(ROOT, "x2")))
+        .remote(y, Some(file(ROOT, "c.txt", "y")))
+        .local(y, Some(file(x, "y.txt", "mine")));
+    w.input.unreadable.insert(q);
+    let plan = w.plan();
+    assert!(!plan.writes_drive(), "{:?}", plan.ops);
+    assert_eq!(sorted_ops(&plan), [("LocalMove", x)]);
+    assert!(plan.conflicts.contains(&Conflict::NameTaken { node: y }));
+
+    // Moved there into another folder, out of one the drive deleted: that one goes here
+    // once `x` has left it, the edit along with `x`.
+    let [c, l, x, y, z, q] = ids(6)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(c, file(ROOT, "c.txt", "x"))
+        .synced(z, folder(ROOT, "z"))
+        .synced(l, folder(ROOT, "l"))
+        .synced(x, folder(l, "x"))
+        .synced(y, file(x, "y.txt", "y"));
+    w.remote(c, Some(file(q, "c.txt", "x")))
+        .remote(l, None)
+        .remote(x, Some(folder(z, "x")))
+        .remote(y, Some(file(ROOT, "c.txt", "y")))
+        .local(y, Some(file(x, "y.txt", "mine")));
+    w.input.unreadable.insert(q);
+    let plan = w.plan();
+    assert!(!plan.writes_drive(), "{:?}", plan.ops);
+    let mut want = vec![("LocalDelete", l), ("LocalMove", x)];
+    want.sort();
+    assert_eq!(sorted_ops(&plan), want);
+    let taken = (plan.ops.iter())
+        .find_map(|op| match op {
+            Op::LocalDelete { subtree, .. } => Some(subtree.clone()),
+            _ => None,
+        })
+        .expect("the folder goes here");
+    assert_eq!(taken, [l], "{:?}", plan.ops);
+}
+
+/// Edited on both sides and moved there onto a name what waits holds: left out, its conflict
+/// copy isn't made, nor sent with no item here to send. Judged again once the name is free.
+#[test]
+fn one_left_out_for_what_waits_makes_no_conflict_copy_meanwhile() {
+    let [c, y, q] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(c, file(ROOT, "c.txt", "x"))
+        .synced(y, file(ROOT, "y.txt", "y"));
+    w.remote(c, Some(file(q, "c.txt", "x")))
+        .remote(y, Some(file(ROOT, "c.txt", "theirs")))
+        .local(y, Some(file(ROOT, "y.txt", "mine")));
+    w.input.unreadable.insert(q);
+    let plan = w.plan();
+    assert!(!plan.writes_drive(), "{:?}", plan.ops);
+    assert!(plan.ops.is_empty(), "{:?}", plan.ops);
+    assert_eq!(plan.conflicts, [Conflict::NameTaken { node: y }]);
+}
+
 /// One synced under the name before, its item gone here, doesn't come back to a name what
 /// waits holds on disk now (a folder made here in its place, moved there into the folder
 /// this device can't read): it is left out, not downloaded onto the folder at every sync.

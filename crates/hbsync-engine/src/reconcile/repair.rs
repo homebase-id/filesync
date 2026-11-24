@@ -520,27 +520,25 @@ impl Reconciler<'_> {
         }
         // What waits and changed here keeps the folders it is in here: one gone there would be
         // deleted here with it, change and all (it is out of the plan, so nothing sends the
-        // change or keeps the folder alive for it, as an edit in the plan does). Left as they
-        // are, up to the first the plan keeps (one that waits itself among them, put back
-        // where it is here): not deleted here, not made again there, each holding its name,
-        // planned again with what waits. An identity's own drive only: read-only, a change
-        // here moves out (`emit`). (In any order: each walk ends at a folder kept before it.)
+        // change or keeps the folder alive for it, as an edit in the plan does). An identity's
+        // own drive only: read-only, a change here moves out (`emit`). Here for the first
+        // names judged; again after them, with what they leave out
+        // ([`Reconciler::keep_for_what_is_out`]).
         if !self.masking.read_only {
-            for &node in &withdrawn {
-                if self.loses_here(node) {
-                    self.keep_folders_here(node, &HashSet::new());
-                }
-            }
+            let here = |n: &&NodeId| self.input.local.contains(**n);
+            self.out_here.extend(withdrawn.iter().filter(here));
+            self.keep_for_what_is_out();
         }
         // What waits is where it is here, on its name: taken here till the wait ends, or
         // what the drive has under that name now (another made there since, one renamed to
         // it) was planned onto it, refused by the disk at every sync (found by the
         // simulator). Whatever changed here: out of the plan, it doesn't move out either.
-        // Not a parked item: that isn't on its name on disk. Only in a folder whose names
-        // are judged (the plan's, or the top): what is below a folder that waits is in none.
+        // Not a parked item: that isn't on its name on disk. Nor what is below a folder that
+        // waits and isn't kept: no name is judged in that one.
         for &node in &withdrawn {
-            let judged = (self.input.local.get(node))
-                .is_some_and(|here| here.parent.is_root() || self.merged.contains(here.parent));
+            let judged = (self.input.local.get(node)).is_some_and(|here| {
+                !withdrawn.contains(&here.parent) || self.merged.contains(here.parent)
+            });
             if judged && !self.input.parked.contains(&node) {
                 self.holds_waiting(node);
             }
@@ -551,22 +549,45 @@ impl Reconciler<'_> {
         }
     }
 
-    /// The folders `node` is in here that the plan doesn't keep are left as they are: out of
+    /// What is here, out of the plan ([`Reconciler::out_here`]) and changed here keeps the
+    /// folders it is in here, on an identity's own drive: one the plan deletes here would
+    /// take the change along. After each judging of names, till none more is kept: what a
+    /// name leaves out is put back where it is here, and a folder kept holds its name
+    /// against what the plan had under it.
+    pub(super) fn keep_for_what_is_out(&mut self) {
+        if self.masking.read_only {
+            return;
+        }
+        let out: Vec<NodeId> = self.out_here.iter().copied().collect();
+        for node in out {
+            if self.loses_here(node) {
+                self.keep_folders_here(node);
+            }
+        }
+    }
+
+    /// The folders `node` is in here that the plan doesn't have are left as they are: out of
     /// the plan, in the merged tree where they are here, each holding its name
-    /// ([`Reconciler::held_waiting`]), up to the first the plan keeps. On through `back`,
-    /// nodes put back where they are here whose own folders may not be the plan's.
-    fn keep_folders_here(&mut self, node: NodeId, back: &HashSet<NodeId>) {
-        let above: Vec<NodeId> = self.input.local.ancestors_iter(node).collect();
-        for folder in above {
-            match self.merged.contains(folder) {
-                true if back.contains(&folder) => continue,
-                true => break,
-                false => {}
+    /// ([`Reconciler::held_waiting`]) in a folder judged again for it. Not deleted here, not
+    /// made again there, planned again with `node`. On up through those the plan has where
+    /// they are here (one put back there for a name may be in a folder the plan doesn't
+    /// have), to the first it moves: that one takes what is in it along.
+    fn keep_folders_here(&mut self, node: NodeId) {
+        let i = self.input;
+        for folder in i.local.ancestors_iter(node) {
+            let Some(here) = i.local.get(folder) else {
+                break;
+            };
+            match self.merged.get(folder) {
+                Some(to) if to.parent == here.parent => continue,
+                Some(_) => break,
+                None => {}
             }
             self.scope.remove(&folder);
             self.origin.remove(&folder);
             self.leave_as_is(folder);
             self.holds_waiting(folder);
+            self.rejudge.insert(here.parent);
         }
     }
 
@@ -755,8 +776,22 @@ impl Reconciler<'_> {
         if !self.left.insert(node) {
             return false;
         }
-        let mut back: HashSet<NodeId> = HashSet::new();
         for n in self.merged.subtree(node) {
+            // On an identity's own drive nothing moves out: its conflict copy isn't made
+            // while it is left out (edited on both sides: judged again once the name is
+            // free), and where it is put back here it may keep its folders
+            // ([`Reconciler::keep_for_what_is_out`]).
+            if !self.masking.read_only {
+                if self.forks.contains_key(&n) {
+                    let copied =
+                        |c: &Conflict| matches!(c, Conflict::EditEdit { node, .. } if *node == n);
+                    self.plan.conflicts.retain(|c| !copied(c));
+                    self.drop_fork(n);
+                }
+                if self.input.local.contains(n) {
+                    self.out_here.insert(n);
+                }
+            }
             // What changed here still moves out (its name aside): a folder deleted here takes
             // it along otherwise.
             if !self.evicted.contains(&n) {
@@ -776,26 +811,12 @@ impl Reconciler<'_> {
                     if n != node && moved && !self.evicted.contains(&n) {
                         self.rejudge.insert(here.parent);
                     }
-                    back.insert(n);
                     self.merged.insert(n, here.clone())
                 }
                 None => self.merged.remove(n),
             };
             if self.input.dirty.contains(&n) && !self.evicted.contains(&n) {
                 self.deferred.insert(n);
-            }
-        }
-        // On an identity's own drive nothing moves out: what is put back where it is here and
-        // changed here keeps the folders it is in here, as what waits does (`fix_orphans`).
-        // One the plan deletes here (the drive moved the node out of it, to the name it
-        // lost) would take the change along.
-        if !self.masking.read_only {
-            let mut changed: Vec<NodeId> = (back.iter().copied())
-                .filter(|n| self.loses_here(*n))
-                .collect();
-            changed.sort();
-            for n in changed {
-                self.keep_folders_here(n, &back);
             }
         }
         self.plan.conflicts.push(Conflict::NameTaken { node });

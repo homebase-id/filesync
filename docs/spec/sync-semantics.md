@@ -799,7 +799,12 @@ expected fingerprint is treated as done.
     again at every sync: not put onto the name (the disk would refuse it each time), and
     not renamed there, as a clash's loser is (§6.3), for the drive has no clash: the name
     is free there, and a device that can't read part of the drive changes nothing of it
-    for that. One here already under another name stays as it is here meanwhile.
+    for that. One here already under another name stays as it is here meanwhile, out of
+    the plan: changed here, it keeps the folders it is in here as what waits does (the
+    drive may have deleted the one it moved it out of), and no conflict copy of it is
+    made till the name is free. What is only here under such a name (a new item, set
+    aside while a folder of that name was made) is no newcomer of the drive's: it takes a
+    numbered name and goes up, as any clash's loser (§6.3).
   - A node whose newer version it can't read (unreadable) is kept as it had it: a local edit
     goes up as a new node (a conflict copy, under a free name); a rename, tags, a delete or a
     download of it is refused and not tried again while it is the same; the drive's version
