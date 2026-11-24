@@ -417,7 +417,14 @@ The merged tree is checked after the per-node merge. Fixes are expressed as extr
    deletes the guard holds; simulator:
    `regression_a_swap_of_a_folder_and_the_one_in_it_planned_in_pages`). It is planned
    with the other node, as a page of its own; one that still waits there is planned again
-   with what it waits for, one larger page. A folder such a wait keeps (a node in it moves
+   with what it waits for, one larger page. What is in a node that waits so waits with it,
+   in the same group, and is planned in that one page too, however much of it is dirty (one
+   group a node that waits, not one a node below it: each group costs a page and a round;
+   what isn't dirty below it is not named in the group).
+   Left to its own page, it waited for its parent there again, and the parent's page left
+   it to its own, so the two were never planned together and its base stayed for good
+   (found by the simulator in pages of one: two files put into each other by another app,
+   one of them ignored here and the other deleted here). A folder such a wait keeps (a node in it moves
    out into such a place, or into a folder that waits for its own page), that the plan would
    delete, goes with that page too: what else
    the plan deletes in it waits with it, so the folder goes as one, as in one page. Only

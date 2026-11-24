@@ -336,6 +336,11 @@ impl Reconciler<'_> {
         queue.sort();
         // Nodes taken out below; their children follow them.
         let mut withdrawn: HashSet<NodeId> = HashSet::new();
+        // Of those, the ones that wait for a node another page plans, in the groups they wait
+        // in: what is in one waits with it, in its group, so each group is planned as one
+        // page of its own (§6.5), whatever is below its nodes.
+        let mut groups: Vec<Vec<NodeId>> = Vec::new();
+        let mut group_of: HashMap<NodeId, usize> = HashMap::new();
         // Nodes left to the devices that sync where they would go; their children too.
         let mut left: HashSet<NodeId> = HashSet::new();
         // Nodes let go of (read-only, §13); their children too.
@@ -356,7 +361,19 @@ impl Reconciler<'_> {
                 Some(_) => self.recover_or_wait(node),
                 None if left.contains(&parent) => Parent::Leave,
                 None if let_go.contains(&parent) => Parent::LetGo,
-                None if withdrawn.contains(&parent) => Parent::Wait,
+                None if withdrawn.contains(&parent) => {
+                    // Its parent waits for a node another page plans: so does it, in the
+                    // parent's group. (Named there where it is to be planned, in this page
+                    // or another: context that isn't dirty is only passed through, for what
+                    // is below it.)
+                    if let Some(&group) = group_of.get(&parent) {
+                        if self.input.dirty.contains(&node) || self.elsewhere(node) {
+                            groups[group].push(node);
+                        }
+                        group_of.insert(node, group);
+                    }
+                    Parent::Wait
+                }
                 None => match self.known_state(parent) {
                     // Its folder comes back for it (§6.3), but not at a place this device
                     // filters since the folder synced here (§10), for a node it holds nothing
@@ -388,11 +405,13 @@ impl Reconciler<'_> {
                 // here (its folder may go with it there).
                 Parent::Recover | Parent::Folder(_) if self.paged.contains(&node) => Parent::Wait,
                 Parent::Recover if self.elsewhere(node) => {
-                    self.wait_together(vec![node]);
+                    group_of.insert(node, groups.len());
+                    groups.push(vec![node]);
                     Parent::Wait
                 }
                 Parent::Folder(_) if self.elsewhere(node) || self.elsewhere(parent) => {
-                    self.wait_together(vec![node, parent]);
+                    group_of.insert(node, groups.len());
+                    groups.push(vec![node, parent]);
                     Parent::Wait
                 }
                 // Read-only (§13): no folder made again, nothing moved into Recovered files, as
@@ -498,6 +517,10 @@ impl Reconciler<'_> {
                     }
                 }
             }
+        }
+        // Each group once, with all that waits in it: one page of its own, not one a node.
+        for group in groups {
+            self.wait_together(group);
         }
     }
 
