@@ -353,12 +353,17 @@ impl HeldDeletes {
     /// "Put them back" of `nodes` ([`held::put_back_plan`]), after a read of the feed: the
     /// bases to forget go, and the items to restore are restored together. Returns how many it
     /// put back. The held deletes are planned again at the next sync, whatever it did.
+    ///
+    /// Without `restores` (another identity's drive, §13: only its owner restores there) only
+    /// the deletes made here are undone ([`held::put_back_here`]), nothing written to the
+    /// drive; an error where it forgets nothing and one of `nodes` is a removal made there.
     pub(crate) fn put_back(
         &mut self,
         db: &mut StateDb,
         drive: &Drive,
         nodes: &[NodeId],
         scope: &Scope,
+        restores: bool,
     ) -> Result<usize, EngineError> {
         self.out.plan_again = true;
         drive.pull(None)?;
@@ -370,6 +375,16 @@ impl HeldDeletes {
                 Ok(())
             })
         };
+        if !restores {
+            let (bases, left) = db.read(|s| held::put_back_here(nodes, &StoreSides(s, scope)))?;
+            if bases.is_empty() && left > 0 {
+                return Err(EngineError::ReadOnly(
+                    "what was removed there is its owner's to put back",
+                ));
+            }
+            forget(db, &bases)?;
+            return Ok(bases.len());
+        }
         let plan = db.read(|s| held::put_back_plan(nodes, &StoreSides(s, scope)))?;
         forget(db, &plan.forget)?;
         if plan.items.is_empty() {
