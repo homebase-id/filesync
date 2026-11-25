@@ -1899,9 +1899,11 @@ rules hold too:
   - It is told: the sync's report counts the items whose change is on its way, or held
     with those (`SyncReport::on_their_way`), and the folder's status has the count. Where
     that is all that is left, the folder shows as up to date and says where the rest is
-    ("Up to date · 3 changes on their way to tom.example.com"); the tray's icon is the
-    quiet one, not the busy one. With other items waiting too, it says how many wait, as
-    ever.
+    ("Up to date · 3 changes on their way to tom.example.com", in `hbsync status`; the
+    tray's one line is the main folder's unless the share has more to say); the tray's
+    icon is the up-to-date one, not the busy one. With other items waiting too, it says
+    how many wait, as ever. Counted are those still to do at the sync's end: one that
+    landed and came back through the feed meanwhile counts no more.
   - Another write of the same item meanwhile (edited again) is another write: it waits
     behind the first (the member's server stages one write of an item at a time), and
     once the first has landed it meets that version: the second edit is then kept as an

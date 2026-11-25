@@ -157,9 +157,10 @@ impl OnTheirWay {
         }
     }
 
-    /// How many nodes have a write on its way, or held with those, so far in the sync.
-    pub(crate) fn count(&self) -> usize {
-        self.nodes.len()
+    /// The nodes with a write on its way, or held with those, so far in the sync. (One whose
+    /// write landed since stays among them: it isn't asked again in the sync either way.)
+    pub(crate) fn nodes(&self) -> &HashSet<NodeId> {
+        &self.nodes
     }
 
     /// Whether the sync's writes to another identity's drive are held ([`WAIT_HOLD`]).

@@ -789,10 +789,7 @@ impl Engine {
         // at most the sync in progress (sync semantics §8a).
         self.db.flush()?;
         self.on_their_way = crate::exec::OnTheirWay::default();
-        let synced = self.sync_pass(date, pulled).map(|mut report| {
-            report.on_their_way = self.on_their_way.count() as u64;
-            report
-        });
+        let synced = self.sync_pass(date, pulled);
         // Best effort: a failure here leaves what was done undone in no way, and the next
         // sync's opening flush reports it.
         let _ = self.db.flush();
@@ -896,6 +893,18 @@ impl Engine {
         // node it stopped at may have gone clean meanwhile; the page query doesn't need it).
         self.sweep_after = after;
         report.pending = self.db.read(|s| s.pending_count())?;
+        // Those of them whose change is on its way: still to do. (One that landed and came
+        // back through the feed in a later round of this sync is done, and counts no more.)
+        let on_their_way = self.on_their_way.nodes();
+        if !on_their_way.is_empty() {
+            report.on_their_way = self.db.read(|s| {
+                let mut still = 0;
+                for node in on_their_way {
+                    still += u64::from(s.is_dirty(*node)?);
+                }
+                Ok(still)
+            })?;
+        }
         report.unfinished = !swept
             || (report.pending > 0 && !(report.skipped.is_empty() && report.failed.is_empty()));
         if report.ops_done > 0 || report.feed.deleted > 0 {
