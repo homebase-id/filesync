@@ -944,7 +944,9 @@ with a capital):
   share, and to change what they share for editing; `p=210` alone for an install that reads
   already, which `hbsync approve` asks for though nothing waits: its shares are read-only
   until then), and says what was given in those words ("… may now change what others share
-  with you for editing on anna.example.com."). The page comes back to this computer as the page
+  with you for editing on anna.example.com."), or what a no leaves as it is ("… wasn't
+  given the permission to change what others share with you for editing. What others
+  share with you stays read-only."). The page comes back to this computer as the page
   that gives the drive back does (`--paste` and `--browser` as `hbsync login`; in the tray,
   the page that follows along, which can start over); given, Sync now tries what waited at
   once (a daemon that isn't running reads the permission as it starts). Where the app may

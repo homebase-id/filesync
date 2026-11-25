@@ -277,8 +277,8 @@ odin-core's `SelectiveShareKeyVectorTests` **[verified]**):
   what the identity's connections share with it. So does every app with a transit permission
   (chat-kmp's asks for 305, **[verified]** `PermissionTypes.kt`). With `UseTransitWrite`,
   which the app asks for to change what others share for editing, such a token can also
-  send through the identity's server: write to what the identity's circles let it write on
-  other identities' drives, and relay live to its connections (homebase-api-notes,
+  send through the identity's server: write to what other identities' circles let this
+  identity write on their drives, and relay live to its connections (homebase-api-notes,
   "Permission keys"). Logging the device out, or removing the app, ends it.
 
 ## Cost

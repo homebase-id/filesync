@@ -935,10 +935,25 @@ mod tests {
             ))
         );
         assert_eq!(
+            said(Approved::Given(Lacks::ALL)),
+            Ok(format!(
+                "{APP_NAME} may now read what others share with you, and change what they \
+                 share for editing on anna.example.com."
+            ))
+        );
+        assert_eq!(
             said(Approved::Declined(Lacks::ALL)),
             Err(format!(
-                "{APP_NAME} wasn't given the permission to read what others share with you, \
-                 and change what they share for editing."
+                "{APP_NAME} wasn't given the permissions to read what others share with you, \
+                 and change what they share for editing. What others share with you isn't \
+                 synced."
+            ))
+        );
+        assert_eq!(
+            said(Approved::Declined(only_sends)),
+            Err(format!(
+                "{APP_NAME} wasn't given the permission to change what others share with you \
+                 for editing. What others share with you stays read-only."
             ))
         );
     }

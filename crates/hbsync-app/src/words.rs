@@ -325,10 +325,19 @@ pub fn permitted(lacks: hbsync_homebase::app::Lacks) -> &'static str {
     }
 }
 
-/// The owner said no to the permissions `lacks` names ([`permitted`]).
+/// The owner said no to the permissions `lacks` names ([`permitted`]), and what that leaves
+/// as it is.
 pub fn not_permitted(lacks: hbsync_homebase::app::Lacks) -> String {
+    let permission = match lacks.reads && lacks.sends {
+        true => "permissions",
+        false => "permission",
+    };
+    let so = match lacks.reads {
+        true => "What others share with you isn't synced.",
+        false => "What others share with you stays read-only.",
+    };
     format!(
-        "{} wasn't given the permission to {}.",
+        "{} wasn't given the {permission} to {}. {so}",
         crate::APP_NAME,
         permitted(lacks)
     )

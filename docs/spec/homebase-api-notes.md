@@ -108,7 +108,7 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   (`AssertRegistrationMayGrantDrivesAsync` at install, where the owner console has made the
   drive, owned by the app, just before; `AssertAppMayGrantDrivesAsync` for `circles/create`,
   **[verified]**). The chat app's Drive asks for the drive and declares the circle the same
-  way (it asks for no permission key at install, this client for 305), and shares only at an
+  way (it asks for no permission key at install, this client for 305 and 210), and shares only at an
   access the circle grants. An install made by this client before 2026-11-20 holds Read and
   Write and has a circle with Read (or none, from before circles were declared: this
   client's `circles/create` at setup is refused then, as the app holds less than the circle
@@ -136,10 +136,11 @@ Use the unified **V2** API under `/api/v2`, as chat-kmp does **[verified]**
   yet). An install from before it asked for one lacks that one until the owner approves
   the update, which asks for the keys lacking alone (`p=210` for one that reads already). 210 is
   the server's one key for sending to other identities: with it an app may also send to
-  any drive of another identity that the owner's circles let it write to, and relay live
-  to peers, which sets up a call (**[verified]** odin-core `PermissionContext
-  .AssertHasPeerAccess`, `LiveRelayService`); the owner's consent page names the key as
-  the server does. Any transit key also gives the app the identity's connection key (ICR
+  any drive of another identity that their circles let this identity write to, read such
+  a drive's public key and what became of a send, and relay live to peers, which sets up
+  a call (**[verified]** odin-core `PermissionContext.AssertCanUsePeer(PeerAccess.Write)`,
+  `PeerDriveQueryService`, `LiveRelayService.AssertMayRelay`); the owner's consent page
+  names the key as the server does. Any transit key also gives the app the identity's connection key (ICR
   key) and ReadWrite on the transient temp drive (`AppRegistrationService.GrantInputsAsync`,
   `HasRequestedTransit`). Holding a key also lists the app's drive grants on a server up to
   v0.1.974 (#2047: the group's permission set is no longer null; **[inferred]** from code).

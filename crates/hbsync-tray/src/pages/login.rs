@@ -163,9 +163,10 @@ impl Server {
         })
     }
 
-    /// Asks the owner of the identity the tray prepared to let the app read what others
-    /// share with them ([`setup::approve`]: nothing is asked where it may already, and what
-    /// waited is tried). The browser goes to the identity's approval page, or the outcome.
+    /// Asks the owner of the identity the tray prepared for the permissions the app lacks,
+    /// to read what others share with them and to change what they share for editing
+    /// ([`setup::approve`]: nothing is asked where it may already, and what waited is
+    /// tried). The browser goes to the identity's approval page, or the outcome.
     pub(super) fn start_approval(&self) -> String {
         let identity = lock(&self.pages.shared).identity.clone();
         let paths = self.paths.clone();
@@ -262,8 +263,9 @@ impl Server {
 }
 
 impl Server {
-    /// The page that follows along while the owner is asked to let the app read what others
-    /// share with them ([`Server::start_approval`]), and its outcome.
+    /// The page that follows along while the owner is asked for the permissions the app
+    /// lacks (to read what others share with them, to change what they share for editing:
+    /// [`Server::start_approval`]), and its outcome.
     fn approval_page(&self, phase: &Phase) -> String {
         let again = self.pages.url("approve/again");
         match phase {
@@ -271,8 +273,8 @@ impl Server {
             Phase::Connecting => format!(
                 "<meta http-equiv=refresh content=2>\
                  <h1>Waiting for your approval…</h1><p>Approve on your Homebase, in the page \
-                 that opened: {APP_NAME} reading what others share with you. This page \
-                 follows along.</p>\
+                 that opened: what {APP_NAME} may do with what others share with you. This \
+                 page follows along.</p>\
                  <form method=post action=\"{again}\"><p class=small>The page closed? \
                  <button class=secondary>Start over</button></p></form>"
             ),
