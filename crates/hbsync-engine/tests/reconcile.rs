@@ -4263,6 +4263,28 @@ fn a_folder_brought_back_for_a_copy_that_isnt_made_goes_again() {
     );
 }
 
+/// Made here counts as changed, whatever the drive has of it. A file here with no base (it
+/// lost a name clash, went up under a numbered name, and the run ended before its rename
+/// here) waits: the drive has it, the same bytes, in the folder this device can't read. The
+/// folder it is in here, deleted there, stays: an item with no base isn't one this device
+/// unlinks (§7). (The drive holding its bytes, it went with the folder.)
+#[test]
+fn what_was_made_here_and_waits_keeps_its_folders_though_the_drive_has_its_bytes() {
+    let [b, y, q] = ids(3)[..] else {
+        unreachable!()
+    };
+    let mut w = World::default();
+    w.synced(b, folder(ROOT, "b"));
+    w.remote(b, None)
+        .remote(y, Some(file(q, "c (conflict 1).txt", "y")))
+        .local(y, Some(file(b, "c.txt", "y")));
+    w.input.unreadable.insert(q);
+    let plan = w.plan();
+    assert!(!plan.writes_drive(), "{:?}", plan.ops);
+    assert!(plan.ops.is_empty(), "{:?}", plan.ops);
+    assert!(plan.deferred.contains(&y), "planned again");
+}
+
 /// A read-only world: the drive decides (§13).
 fn read_only() -> World {
     World {

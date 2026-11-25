@@ -1727,3 +1727,42 @@ fn a_file_edited_on_both_sides_that_waits_makes_no_copy_meanwhile() {
     assert_eq!(sim.local_paths(1), ["c.txt"]);
     assert_ne!(sim.local_hash(1, f), sim.drive_hash(f), "its edit is in it");
 }
+
+/// A file made on one computer where another's is on the drive already goes up under a
+/// numbered name; the run ends before it is renamed here, so it has no base yet. A newer
+/// client moves it into a folder no client reads (it waits here), and the folder it is in
+/// here is deleted on the other computer. That folder stays here, the file in it: an item
+/// with no base isn't one a device unlinks. (The drive holding its bytes, it went with the
+/// folder's delete: found by the simulator, every client editing.)
+#[test]
+fn what_was_made_here_and_waits_keeps_its_folder() {
+    use super::{act, add_to, settle, top};
+    use Action::*;
+    let mut sim = Sim::new(2);
+    let parent = top(&sim, 0);
+    sim.run(&[act(0, CreateFolder { parent, name: 1 })]);
+    settle(&mut sim);
+    let b = sim.item(0, "b").expect("b");
+    add_to(&mut sim, 0, "b", 3);
+    sim.run(&[Event::Plan { client: 0 }]);
+    while !sim.planned(0).is_empty() {
+        sim.run(&[Event::Step { client: 0 }]);
+    }
+    add_to(&mut sim, 1, "b", 3);
+    sim.run(&[Event::Plan { client: 1 }, Event::Step { client: 1 }]);
+    let y = sim.item(1, "b/c.txt").expect("c1's own");
+    sim.run(&[act(1, NewerFolder { name: 0 })]);
+    let (pick, folder) = sim.newer_move_picks(y, "a").expect("on the drive");
+    let node = sim.pick(0, b, false).expect("on c0");
+    sim.run(&[
+        act(1, IntoNewer { pick, folder }),
+        act(0, Delete { node }),
+        Event::Plan { client: 0 },
+    ]);
+    while !sim.planned(0).is_empty() {
+        sim.run(&[Event::Step { client: 0 }]);
+    }
+    settle(&mut sim);
+    assert_eq!(sim.local_paths(1), ["b", "b/c.txt"]);
+    assert!(sim.local_paths(0).is_empty(), "{:?}", sim.local_paths(0));
+}

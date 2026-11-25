@@ -578,7 +578,10 @@ impl Reconciler<'_> {
         }
         let out: Vec<NodeId> = self.out_here.iter().copied().collect();
         for node in out {
-            if self.loses_here(node) {
+            // Made here counts as changed, whatever the drive has of it: an item with no
+            // base isn't one this device may unlink (§7), the bytes the same there or not
+            // (sent up under a numbered name, say, its rename here still to run).
+            if !self.input.base.contains(node) || self.loses_here(node) {
                 self.keep_folders_here(node);
             }
         }
